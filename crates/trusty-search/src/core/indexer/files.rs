@@ -52,6 +52,52 @@ impl CodeIndexer {
             .collect()
     }
 
+    /// Wait out a bounded rehydrate, then refuse when the in-memory map is not
+    /// a view of the durable corpus (#6043, #5917).
+    ///
+    /// Why: the map every in-memory reader below returns is a CACHE. Idle
+    /// eviction empties it, and `ensure_chunks_loaded` returns on a bounded
+    /// budget whether or not the detached rehydrate committed — so a reader
+    /// that skips this guard publishes an empty or partial map as the whole
+    /// corpus. `grep` answered `{matches: [], total: 0}` and `call_chain`
+    /// answered `404 entry point not found` for a symbol that exists.
+    /// What: retries `ensure_chunks_loaded` on the same
+    /// [`REHYDRATE_RACE_RETRIES`](crate::core::indexer::search::lanes::REHYDRATE_RACE_RETRIES)
+    /// budget the read lanes use (~27s at the defaults), so a large cold index
+    /// that is merely slow to rehydrate is served rather than refused. A
+    /// RECORDED read failure is reported first and by name — it will not clear
+    /// by waiting, and the caller needs the fault, not "still evicted".
+    /// Test: `enumerate_chunks_errors_when_rehydrate_did_not_commit`,
+    /// `enumerate_chunks_waits_out_a_rehydrate_that_outlasts_one_budget`,
+    /// `grep_over_an_unreadable_corpus_returns_503_naming_the_index`.
+    async fn ensure_corpus_view_is_current(&self) -> Result<()> {
+        let mut corpus_view_is_current = false;
+        for _ in 0..crate::core::indexer::search::lanes::REHYDRATE_RACE_RETRIES {
+            self.ensure_chunks_loaded().await;
+            if !self.chunks_evicted.load(Ordering::Relaxed) {
+                corpus_view_is_current = true;
+                break;
+            }
+        }
+        // #5917: a read that FAILED is not a read that is slow. Report the
+        // fault by name before falling back to the generic refusal below.
+        if let Some(err) = self.corpus_read_fault.error(&self.index_id) {
+            return Err(anyhow::Error::new(err));
+        }
+        if !corpus_view_is_current {
+            anyhow::bail!(
+                "index '{}': the in-memory chunk map was evicted and has not been \
+                 repopulated after {} bounded waits — the durable corpus read either \
+                 failed or is still in flight, so reading it now would report a \
+                 partial corpus as the whole one (see #6043, #5917). Retry once the \
+                 rehydrate commits.",
+                self.index_id,
+                crate::core::indexer::search::lanes::REHYDRATE_RACE_RETRIES,
+            );
+        }
+        Ok(())
+    }
+
     /// Snapshot every `RawChunk` in the corpus (issue #76).
     ///
     /// Why: the `get_call_chain` tool needs the full source body and doc
@@ -60,11 +106,18 @@ impl CodeIndexer {
     /// keeps the read lock window tiny and lets the caller process chunks
     /// without holding any indexer lock.
     /// What: clones every `RawChunk` while briefly holding the read lock.
-    /// Test: covered by `service::call_chain::tests`.
-    pub async fn raw_chunks_snapshot(&self) -> Vec<RawChunk> {
-        self.ensure_chunks_loaded().await;
+    ///
+    /// Errors when the in-memory map is not a view of the corpus — #5917 made
+    /// this fallible because `grep` and `call_chain` are its only production
+    /// callers, and both reported an unreadable corpus as an answer: an empty
+    /// match set, and a real symbol declared nonexistent.
+    /// Test: covered by `service::call_chain::tests`;
+    /// `grep_over_an_unreadable_corpus_returns_503_naming_the_index` and
+    /// `call_chain_over_an_unreadable_corpus_is_503_not_404` cover the refusal.
+    pub async fn raw_chunks_snapshot(&self) -> Result<Vec<RawChunk>> {
+        self.ensure_corpus_view_is_current().await?;
         let chunks = self.chunks.read().await;
-        chunks.values().cloned().collect()
+        Ok(chunks.values().cloned().collect())
     }
 
     /// Paginated snapshot of chunks in a stable order (file path, then
@@ -104,32 +157,9 @@ impl CodeIndexer {
         // `total` across that gap published `total: 0` for an index holding
         // 50,929 chunks and let trusty-analyze score an empty corpus.
         //
-        // Retry on the same budget as the read lanes rather than refusing after
-        // one wait: #3683 measured a healthy 315K-chunk corpus taking 27-40s to
-        // rehydrate, so a single 9s wait would turn every large cold index into
-        // an error. Each iteration rejoins the SAME in-flight detached task (it
-        // is deduplicated, not re-triggered), so this waits roughly
-        // `REHYDRATE_RACE_RETRIES * rehydrate_wait_budget()` — ~27s at the
-        // defaults, matching `search::lanes::{bm25_search, grep_fallback_search}`.
-        let mut corpus_view_is_current = false;
-        for _ in 0..crate::core::indexer::search::lanes::REHYDRATE_RACE_RETRIES {
-            self.ensure_chunks_loaded().await;
-            if !self.chunks_evicted.load(Ordering::Relaxed) {
-                corpus_view_is_current = true;
-                break;
-            }
-        }
-        if !corpus_view_is_current {
-            anyhow::bail!(
-                "index '{}': the in-memory chunk map was evicted and has not been \
-                 repopulated after {} bounded waits — the durable corpus read either \
-                 failed or is still in flight, so enumerating it now would report a \
-                 partial corpus as the whole one (see #6043, #5917). Retry once the \
-                 rehydrate commits.",
-                self.index_id,
-                crate::core::indexer::search::lanes::REHYDRATE_RACE_RETRIES,
-            );
-        }
+        // The wait, the retry budget, and the refusal are shared with
+        // `raw_chunks_snapshot` — see [`Self::ensure_corpus_view_is_current`].
+        self.ensure_corpus_view_is_current().await?;
         let chunks = self.chunks.read().await;
         let total = chunks.len();
         if limit == 0 || offset >= total {

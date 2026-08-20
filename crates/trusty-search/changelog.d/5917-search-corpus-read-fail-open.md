@@ -12,6 +12,16 @@ Fixed
   index and the search refuses with `503 index_corpus_unavailable`, naming the
   index and the underlying fault. The record clears on the next successful read,
   so a transient failure does not wedge the index. Refs #5917.
+- The sibling surfaces that read the same corpus refuse it too, instead of
+  answering. `POST /indexes/{id}/grep` and `POST /grep` derive their file set
+  from the chunk corpus, so an unreadable one answered
+  `{"matches": [], "total": 0}` — "this literal is nowhere in your code" for a
+  corpus that was never scanned. `GET /indexes/{id}/call_chain` resolves its
+  entry point against the same snapshot and answered
+  `404 entry point not found` for a symbol that exists. All three now return the
+  same `503 index_corpus_unavailable`. The global `POST /search` fan-out still
+  answers `200` so one broken index cannot fail the sweep, but now reports the
+  index it dropped as `corpus_read_failed_indexes_skipped`. Refs #5917.
 - The two producers of `index_corpus_unavailable` carry one field set: the
   open-failure body (#4087) gained `retryable` beside its `transient`, and the
   read-failure body (#6043) gained `failure_kind: "read_failed"` and `transient`

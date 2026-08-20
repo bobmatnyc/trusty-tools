@@ -294,20 +294,27 @@ pub(super) async fn get_index_chunks_handler(
 /// (a read failure is logged at debug — the file may have been deleted since it
 /// was indexed). Greps the real on-disk bytes, so no embedding is required and
 /// line numbers are exact. Stops once `out.len()` reaches `max_results`.
+///
+/// Errors when the index's corpus cannot be read (#5917): the file set comes
+/// from the chunk corpus, so an unreadable one greps nothing and reports
+/// `{matches: [], total: 0}` — "this literal is nowhere in your code" for a
+/// corpus that was never scanned.
 /// Test: `grep::tests` covers the matcher; `grep_endpoint_*` server integration
-/// tests cover the file-walking + glob + root-confinement behaviour.
+/// tests cover the file-walking + glob + root-confinement behaviour;
+/// `grep_over_an_unreadable_corpus_returns_503_naming_the_index` covers the
+/// refusal.
 async fn grep_one_index(
     handle: &IndexHandle,
     compiled: &crate::service::grep::CompiledGrep,
     out: &mut Vec<crate::service::grep::GrepMatch>,
     max_results: usize,
-) {
+) -> anyhow::Result<()> {
     if out.len() >= max_results {
-        return;
+        return Ok(());
     }
     let chunks = {
         let indexer = handle.indexer.read().await;
-        indexer.raw_chunks_snapshot().await
+        indexer.raw_chunks_snapshot().await?
     };
     // One file produces many chunks; dedupe to a sorted, distinct file set so
     // each file is read and scanned exactly once in a deterministic order.
@@ -317,7 +324,7 @@ async fn grep_one_index(
 
     for rel in files {
         if out.len() >= max_results {
-            return;
+            return Ok(());
         }
         // Glob filter (cheap) before defense-in-depth root confinement.
         if !compiled.path_matches(&rel) {
@@ -344,6 +351,32 @@ async fn grep_one_index(
             }
         }
     }
+    Ok(())
+}
+
+/// Render a grep or call-chain corpus-read failure through the shared 503
+/// (#5917), falling back to `500` for any other error.
+///
+/// Why: both grep handlers and `call_chain_handler` need the identical mapping,
+/// and the fallback must not be a second bespoke body.
+/// Test: `grep_over_an_unreadable_corpus_returns_503_naming_the_index`,
+/// `global_grep_over_an_unreadable_corpus_returns_503`,
+/// `call_chain_over_an_unreadable_corpus_is_503_not_404`.
+fn corpus_backed_read_error(
+    index_id: &str,
+    err: &anyhow::Error,
+) -> (StatusCode, Json<serde_json::Value>) {
+    tracing::warn!("index '{index_id}': corpus-backed read failed: {err:#}");
+    super::degraded::corpus_read_failure_from(err).unwrap_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "corpus_read_failed",
+                "index_id": index_id,
+                "message": format!("{err:#}"),
+            })),
+        )
+    })
 }
 
 /// `POST /indexes/:id/grep` — grep-parity regex search over one index's files.
@@ -393,7 +426,11 @@ pub(super) async fn grep_handler(
 
     let started = std::time::Instant::now();
     let mut matches = Vec::new();
-    grep_one_index(&handle, &compiled, &mut matches, req.max_results).await;
+    // #5917: an unreadable corpus greps no files at all. Reporting that as
+    // zero matches tells the caller its literal is nowhere in the code.
+    grep_one_index(&handle, &compiled, &mut matches, req.max_results)
+        .await
+        .map_err(|e| corpus_backed_read_error(&index_id.0, &e))?;
     let truncated = matches.len() >= req.max_results;
     tracing::info!(
         index_id = %index_id,
@@ -455,7 +492,12 @@ pub(super) async fn global_grep_handler(
             break;
         }
         if let Some(handle) = state.registry.get(&id) {
-            grep_one_index(&handle, &compiled, &mut matches, req.max_results).await;
+            // #5917: one unreadable corpus makes the whole fan-out incomplete,
+            // and a global grep has no per-index field to say so. Refuse rather
+            // than return the other indexes' matches as the complete answer.
+            grep_one_index(&handle, &compiled, &mut matches, req.max_results)
+                .await
+                .map_err(|e| corpus_backed_read_error(&id.0, &e))?;
         }
     }
     let truncated = matches.len() >= req.max_results;
@@ -545,7 +587,13 @@ pub(super) async fn call_chain_handler(
     let (graph, chunks) = {
         let indexer = handle.indexer.read().await;
         let graph = indexer.snapshot_symbol_graph().await;
-        let chunks = indexer.raw_chunks_snapshot().await;
+        // #5917: the entry point is resolved against this snapshot, so an
+        // unreadable corpus rendered as `404 entry point not found` — a real
+        // symbol reported nonexistent, which reads as an answer about the code.
+        let chunks = indexer
+            .raw_chunks_snapshot()
+            .await
+            .map_err(|e| corpus_backed_read_error(&index_id.0, &e))?;
         (graph, chunks)
     };
 

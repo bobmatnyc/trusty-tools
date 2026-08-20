@@ -181,8 +181,11 @@ pub(super) async fn global_search_handler(
             "indexes_searched": Vec::<String>::new(),
             "total_indexes": 0_usize,
             "cold_indexes_skipped": cold_indexes_skipped,
-            // #4087: no index was searched at all, so none could be corpus-failed.
+            // #4087 / #5917: no index was searched at all, so none could be
+            // corpus-failed or corpus-unreadable. Both keys are present on
+            // every response so a caller never has to treat absent as zero.
             "corpus_failed_indexes_skipped": 0_usize,
+            "corpus_read_failed_indexes_skipped": 0_usize,
             "latency_ms": 0_u64,
             "intent": format!("{:?}", QueryClassifier::classify(&req.query)),
         })));
@@ -307,10 +310,18 @@ pub(super) async fn global_search_handler(
     // Reported alongside `cold_indexes_skipped` so an incomplete fan-out is
     // always visible in the payload rather than only in the daemon log.
     let corpus_failed_indexes_skipped = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // #5917: the sibling counter for a corpus that OPENED and then failed a
+    // READ. That fault reached the generic error arm below, which warn-logged
+    // and dropped the index — so an index contributing nothing because its
+    // corpus is unreadable was indistinguishable, in the payload, from one that
+    // simply had no matches.
+    let corpus_read_failed_indexes_skipped =
+        std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let futures = active_ids.into_iter().map(|id| {
         let registry = registry.clone();
         let query = per_index_query.clone();
         let failed_counter = std::sync::Arc::clone(&corpus_failed_indexes_skipped);
+        let read_failed_counter = std::sync::Arc::clone(&corpus_read_failed_indexes_skipped);
         async move {
             let handle = registry.get(&id)?;
             if super::degraded::is_corpus_failed(&handle).await {
@@ -327,6 +338,21 @@ pub(super) async fn global_search_handler(
             match indexer.search(&query).await {
                 Ok(results) => Some((id, results)),
                 Err(e) => {
+                    // #5917: count the unreadable-corpus case separately so an
+                    // incomplete fan-out is visible in the payload, matching how
+                    // #4087's open-failure skip is reported one arm up.
+                    if e.downcast_ref::<crate::core::indexer::CorpusReadUnavailable>()
+                        .is_some()
+                    {
+                        read_failed_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        tracing::warn!(
+                            index_id = %id,
+                            "global search: index '{id}' contributed nothing — its durable \
+                             corpus could not be read ({e:#}); reported as \
+                             corpus_read_failed_indexes_skipped (issue #5917)"
+                        );
+                        return None;
+                    }
                     tracing::warn!("global search: index {} errored: {e}", id);
                     None
                 }
@@ -341,6 +367,8 @@ pub(super) async fn global_search_handler(
             .await;
     let corpus_failed_indexes_skipped =
         corpus_failed_indexes_skipped.load(std::sync::atomic::Ordering::Relaxed);
+    let corpus_read_failed_indexes_skipped =
+        corpus_read_failed_indexes_skipped.load(std::sync::atomic::Ordering::Relaxed);
     // `buffer_unordered` yields in completion order; sort by index id so the
     // fused output is deterministic regardless of which lanes finished first
     // (RRF is a per-lane rank sum, but stable lane ordering keeps score ties
@@ -431,6 +459,10 @@ pub(super) async fn global_search_handler(
         // failed to open — they can only contribute an empty lane, so folding
         // them in silently reported a complete fan-out over a missing corpus.
         "corpus_failed_indexes_skipped": corpus_failed_indexes_skipped,
+        // #5917: the sibling count for a corpus that opened and then failed a
+        // read. Non-zero means those indexes contributed no lane at all, so
+        // this result set is not the complete answer over the fan-out.
+        "corpus_read_failed_indexes_skipped": corpus_read_failed_indexes_skipped,
         "latency_ms": latency_ms,
         "intent": format!("{:?}", intent),
         "routing": routing_label,

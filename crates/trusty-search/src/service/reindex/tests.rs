@@ -438,6 +438,7 @@ async fn reindex_persists_chunks_end_to_end() {
         let raw_files: Vec<String> = idx
             .raw_chunks_snapshot()
             .await
+            .expect("corpus reads")
             .into_iter()
             .map(|c| c.file)
             .collect();
@@ -650,7 +651,13 @@ async fn reindex_marks_failed_on_zero_vectors_and_preserves_corpus() {
     // path), so the round-trip restore is exercised by the daemon-gated
     // integration tests; here we assert the weaker hermetic invariant that
     // the failed rebuild was not committed.
-    let live = handle.indexer.read().await.raw_chunks_snapshot().await;
+    let live = handle
+        .indexer
+        .read()
+        .await
+        .raw_chunks_snapshot()
+        .await
+        .expect("corpus reads");
     assert!(
         !live.iter().any(|c| c.file == "lib.rs"),
         "non-destructive: the failed rebuild must not promote lib.rs chunks; \

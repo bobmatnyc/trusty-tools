@@ -62,6 +62,11 @@ pub struct CorpusReadUnavailable {
 /// Test: `core::indexer::tests::corpus_fault`.
 #[derive(Debug, Default)]
 pub(crate) struct CorpusReadFault {
+    // `record` and `clear` are last-writer-wins against each other: a clear
+    // racing a just-recorded fault can mask it until the next failed read, and
+    // a slow-failing rehydrate can record after a search's tail check already
+    // passed. Both windows lose one query's refusal, never a wrong result.
+    // See #5917.
     last: Mutex<Option<String>>,
 }
 

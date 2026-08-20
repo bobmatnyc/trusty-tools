@@ -46,6 +46,7 @@
 use axum::http::StatusCode;
 use axum::Json;
 
+use crate::core::indexer::CorpusReadUnavailable;
 use crate::core::registry::{IndexHandle, IndexId, IndexStages, StageStatus};
 use crate::service::lazy_loader::ColdIndexStore;
 
@@ -138,6 +139,28 @@ pub(super) async fn corpus_failure_response(
 /// Test: `search_over_an_unreadable_corpus_returns_503_naming_the_index` in
 /// `service::server::tests_search`; the enumeration paths reach it via
 /// `service::server::files`.
+/// Render `err` as the shared 503 when — and only when — it is a durable-corpus
+/// read failure (#5917).
+///
+/// Why: `search`, `grep`, `call_chain`, and chunk enumeration all reach the
+/// same fault through different call stacks, and each one used to render it as
+/// something else: `500 internal search error`, `200 {matches: [], total: 0}`,
+/// and `404 entry point not found` for a symbol that exists. One downcast in
+/// one place is what keeps the four reporting it identically.
+/// What: `Some((503, body))` for a [`CorpusReadUnavailable`], `None` for any
+/// other error — the caller then applies its own default mapping.
+/// Test: `grep_over_an_unreadable_corpus_returns_503_naming_the_index`,
+/// `call_chain_over_an_unreadable_corpus_is_503_not_404`.
+pub(super) fn corpus_read_failure_from(
+    err: &anyhow::Error,
+) -> Option<(StatusCode, Json<serde_json::Value>)> {
+    let unavailable = err.downcast_ref::<CorpusReadUnavailable>()?;
+    Some(corpus_read_failure_response(
+        &unavailable.index_id,
+        &err.to_string(),
+    ))
+}
+
 pub(super) fn corpus_read_failure_response(
     index_id: &str,
     detail: &str,
