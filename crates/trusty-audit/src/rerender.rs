@@ -152,7 +152,8 @@ pub struct RenderedReport {
 pub enum ReviewSource {
     /// `--review-bin` named it.
     Explicit,
-    /// The engagement installed it, under the working directory's `tools/`.
+    /// The engagement installed it, under a working directory's `tools/` — the
+    /// one this run discovered, else the session's own.
     Engagement,
     /// Nothing named it — whatever `PATH` resolves is what ran.
     Path,
@@ -246,7 +247,9 @@ pub async fn rerender(
         .out
         .clone()
         .unwrap_or_else(|| source.join(DEFAULT_OUTPUT_DIR));
-    let (review, review_source) = resolve_review(work, options.review.as_deref());
+    // #6080: the renderer is resolved against the work dir this run DISCOVERED,
+    // not the one the session defaulted to before discovery ran.
+    let (review, review_source) = resolve_review(work, &source, options.review.as_deref());
     // #6080: asked once, up front, so the version this run will render at is
     // known before the first child rather than only after the last one. The
     // index reads the same answer rather than spawning a second `--version`.
@@ -489,6 +492,15 @@ fn unique_name(manifest: &Path, index: usize, taken: &mut HashSet<String>) -> St
 /// engagement re-renders with the binary that produced the reports, without
 /// having to say so.
 ///
+/// `discovered` is the directory [`resolve_source`] settled on, and passing it
+/// is what keeps the two resolutions from disagreeing. They did: this rung used
+/// to ask only `session`, the root the front end resolved BEFORE any discovery
+/// ran, so a zero-argument `render` beside an `engagement.toml` found its
+/// reports under `<config dir>/work` and then looked for the renderer under the
+/// tool's default work root — which on that machine held nothing. The
+/// engagement's own `tools/trusty-review` sat unused while a `PATH` copy two
+/// minor versions behind rendered the reports (#6080).
+///
 /// #6080: the `PATH` branch also reports itself, because no version check means
 /// a stale binary is not an error and the operator is the only gate left. The
 /// path is RESOLVED there rather than left as a bare name, through
@@ -496,17 +508,30 @@ fn unique_name(manifest: &Path, index: usize, taken: &mut HashSet<String>) -> St
 /// so the disclosure names the file that will actually run instead of the word
 /// the OS was asked to look up. An unresolvable name stays bare, which keeps
 /// [`AuditError::ReviewBinaryMissing`] naming what was looked for.
-/// What: the explicit path, else the copy under `tools/` when it is there, else
-/// whatever `PATH` resolves.
+/// What: the explicit path, else `tools/trusty-review` under the discovered
+/// directory and then under the session's own root, else whatever `PATH`
+/// resolves. The session root stays as a second candidate because a recipient
+/// standing in an unzipped package still has the engagement they installed, and
+/// its pinned copy beats an unrelated one off `PATH`. The two candidates are the
+/// same directory whenever discovery fell through to the session root, and
+/// deduplicating is not worth a stat that already answers `false`.
 /// Test: `super::rerender_tests::the_installed_copy_is_preferred_over_the_path`,
+/// `super::rerender_tests::the_discovered_work_dirs_tools_copy_renders`,
 /// `super::rerender_tests::a_path_resolved_renderer_reports_itself_as_unchosen`.
-fn resolve_review(work: &WorkDir, explicit: Option<&Path>) -> (PathBuf, ReviewSource) {
+fn resolve_review(
+    session: &WorkDir,
+    discovered: &Path,
+    explicit: Option<&Path>,
+) -> (PathBuf, ReviewSource) {
     if let Some(path) = explicit {
         return (path.to_path_buf(), ReviewSource::Explicit);
     }
-    let installed = RequiredTool::TrustyReview.path_in(work);
-    if installed.is_file() {
-        return (installed, ReviewSource::Engagement);
+    let discovered = WorkDir::new(discovered);
+    for candidate in [&discovered, session] {
+        let installed = RequiredTool::TrustyReview.path_in(candidate);
+        if installed.is_file() {
+            return (installed, ReviewSource::Engagement);
+        }
     }
     let name = RequiredTool::TrustyReview.binary_name();
     let resolved =
@@ -1403,15 +1428,76 @@ mod rerender_tests {
 
         let installed = RequiredTool::TrustyReview.path_in(&work);
         std::fs::write(&installed, "#!/bin/sh\nexit 0\n").expect("stub binary");
+        let nowhere = tmp.path().join("no-reports-here");
         assert_eq!(
-            resolve_review(&work, None),
+            resolve_review(&work, &nowhere, None),
             (installed, ReviewSource::Engagement)
         );
 
         let explicit = tmp.path().join("elsewhere/trusty-review");
         assert_eq!(
-            resolve_review(&work, Some(&explicit)),
+            resolve_review(&work, &nowhere, Some(&explicit)),
             (explicit, ReviewSource::Explicit)
+        );
+    }
+
+    /// 🔴 #6080's third failure, from the live dogfood run: `trusty-audit
+    /// render` with no arguments found the engagement's reports under
+    /// `<config dir>/work` and then rendered them with a `trusty-review` off
+    /// `PATH`, two minor versions behind, while the engagement's own
+    /// `work/tools/trusty-review` sat unused and the run printed the unchosen-
+    /// renderer NOTE.
+    ///
+    /// The cause was two resolutions that could disagree: `resolve_source`
+    /// discovered the work dir, and `resolve_review` asked the session's root,
+    /// which the front end had resolved before discovery ran. This drives the
+    /// live layout — config in the cwd, `work/` under it holding both the
+    /// reports and the pinned renderer, and a session root that is somewhere
+    /// else entirely — and asserts the discovered copy renders.
+    ///
+    /// It asserts the SOURCE and the PATH of the renderer rather than mutating
+    /// `PATH`, which is process-global and would race every other test in this
+    /// binary. Against `2efbfedbb` this resolved `ReviewSource::Path`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_discovered_work_dirs_tools_copy_renders() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let engagement = tmp.path().join("dogfood-audit");
+        let config = engagement_config_in(&engagement);
+        report_dir(&engagement.join("work").join("out"), "01-acme-api");
+        // The engagement's own pinned renderer, where `trusty-audit run` left it.
+        let engagement_work = WorkDir::new(engagement.join("work"));
+        engagement_work.create().expect("the engagement's work dir");
+        let pinned = stub_review(
+            &engagement_work.path(crate::workdir::Area::Tools),
+            &WRITES_A_REPORT.replace(
+                "#!/bin/sh\n",
+                "#!/bin/sh\ncase \"$1\" in --version) echo 'trusty-review 0.21.0'; exit 0;; esac\n",
+            ),
+        );
+        // The session's root is the tool default, which on the live machine
+        // held nothing — so nothing here may answer for the renderer.
+        let session = work_in(tmp.path());
+
+        let report = super::rerender(
+            &session,
+            &engagement,
+            &config,
+            &key(),
+            &[],
+            &RerenderOptions::default(),
+            &Progress::none(),
+        )
+        .await
+        .expect("the re-render runs");
+
+        assert_eq!(report.source, engagement.join("work"));
+        assert_eq!(report.review, pinned, "the engagement's copy must render");
+        assert_eq!(report.review_source, ReviewSource::Engagement);
+        assert_eq!(report.review_version.as_deref(), Some("0.21.0"));
+        assert!(
+            !crate::cli::render(&crate::session::Outcome::Rerendered(report)).contains("NOTE:"),
+            "a chosen renderer owes no unchosen-renderer disclosure"
         );
     }
 
@@ -1427,7 +1513,7 @@ mod rerender_tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let work = work_in(tmp.path());
 
-        let (resolved, source) = resolve_review(&work, None);
+        let (resolved, source) = resolve_review(&work, &tmp.path().join("no-reports-here"), None);
         assert_eq!(source, ReviewSource::Path);
         assert!(source.is_unchosen(), "a PATH lookup is nobody's choice");
         assert!(
