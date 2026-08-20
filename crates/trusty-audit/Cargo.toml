@@ -11,8 +11,6 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-# #5483: not published to crates.io. The delivery path is the signed/notarized client .app plus config and README, not `cargo install` by the recipient.
-publish = false
 
 [lib]
 name = "trusty_audit"
