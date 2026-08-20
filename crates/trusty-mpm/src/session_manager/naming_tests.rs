@@ -208,17 +208,26 @@ async fn manager_serial_reuses_decommissioned_gap() {
 /// vulnerable to the orphan-GC).
 /// What: seeds a live `tm-`-prefixed tmux session unknown to the store, runs
 /// reconcile, and asserts it appears in `external_adopted` as `Active`.
+///
+/// #6118: the pane resolves a working directory. Adoption now requires that —
+/// a pane whose cwd will not resolve is declined, covered by
+/// `reconcile_declines_to_adopt_a_pane_whose_cwd_cannot_be_resolved` — so this
+/// test uses [`PaneCwdTmux`] rather than the shared `FakeTmuxDriver`, whose
+/// `get_pane_cwd` is the trait default (`None`).
 /// Test: this function IS the test.
 #[tokio::test]
+#[serial_test::serial]
 async fn manager_reconcile_adopts_new_prefix_session() {
     let dir = TempDir::new().unwrap();
-    let fake = FakeTmuxDriver::new();
-    fake.seeded_names
-        .lock()
-        .unwrap()
-        .push("tm-trusty-tools-01".into());
+    let workspace = TempDir::new().unwrap();
+    // #3965: `#[serial]` + `$HOME` override — see `HomeGuard` above.
+    let _home = set_home(dir.path());
+    let fake = std::sync::Arc::new(PaneCwdTmux {
+        alive: vec!["tm-trusty-tools-01".into()],
+        pane_cwd: Some(workspace.path().to_path_buf()),
+    });
 
-    let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
+    let mgr = SessionManager::new(dir.path(), fake).await.unwrap();
 
     let report = mgr.reconcile_on_boot(false).await.expect("reconcile");
     assert!(
@@ -309,20 +318,26 @@ async fn reconcile_resolves_adopted_session_cwd_from_pane() {
     assert_eq!(adopted.task, "adopted session");
 }
 
-/// Why (#2158): an adopted session whose pane cwd cannot be resolved (the
-/// driver returns `None`, or resolves to a path that does not exist) must
-/// keep the `/unknown` sentinel AND carry a task string that clearly flags it
-/// as unmanaged — never an indistinguishable-from-normal "adopted session".
+/// #6118: a live pane whose cwd will not resolve is NOT adopted.
+///
+/// Why: #2158 adopted it as an `Active` record with a `/unknown` cwd and an
+/// `unmanaged` note in `task`, and that record could never be retired. The
+/// `tm ls` auto-prune keeps any record whose tmux name is live, and the
+/// orphan-GC keeps any pane a registry names — so the act of adopting the pane
+/// is what made the pane unreapable and the record permanent. 55 of the 103
+/// records in the reporting store were these. Declining hands the pane back to
+/// the orphan-GC, which already knows how to reap an idle one safely.
+/// What: one live pane, `get_pane_cwd` returning `None`; asserts no record was
+/// written, the name is reported in `adoption_declined`, and it is absent from
+/// `external_adopted`.
 /// Test: this function IS the test.
 #[tokio::test]
 #[serial_test::serial]
-async fn reconcile_flags_unresolvable_adopted_session_as_unmanaged() {
+async fn reconcile_declines_to_adopt_a_pane_whose_cwd_cannot_be_resolved() {
     let dir = TempDir::new().unwrap();
-    // #3965: `#[serial]` + `$HOME` override — see `HomeGuard` above. This
-    // particular case never reaches `validate_and_repair` today (an
-    // unresolved pane cwd short-circuits before `newly_resolved` is
-    // populated), but pin `$HOME` anyway so a future refactor of that
-    // short-circuit can't silently reopen the real-`$HOME` write.
+    // #3965: `#[serial]` + `$HOME` override — see `HomeGuard` above. A declined
+    // pane never reaches `validate_and_repair`, but pin `$HOME` anyway so a
+    // future refactor cannot silently reopen the real-`$HOME` write.
     let _home = set_home(dir.path());
     let fake = std::sync::Arc::new(PaneCwdTmux {
         alive: vec!["tm-unresolvable-01".into()],
@@ -330,19 +345,113 @@ async fn reconcile_flags_unresolvable_adopted_session_as_unmanaged() {
     });
 
     let mgr = SessionManager::new(dir.path(), fake).await.unwrap();
+    let report = mgr.reconcile_on_boot(false).await.expect("reconcile");
+
+    assert_eq!(
+        mgr.list().await.len(),
+        0,
+        "a pane with no resolvable cwd must leave no record behind"
+    );
+    assert!(
+        report
+            .adoption_declined
+            .contains(&"tm-unresolvable-01".to_string()),
+        "the declined pane must be named in the report; report: {report:?}"
+    );
+    assert!(
+        report.external_adopted.is_empty(),
+        "nothing was adopted; report: {report:?}"
+    );
+}
+
+/// #6118 + #6117 together: reconciling the same unresolvable pane over and over
+/// never accumulates records.
+///
+/// Why: this is the shape the reporting store was in — a pane re-encountered on
+/// every daemon boot, each pass free to write another row for it. The count
+/// after N passes must be the count after one.
+/// What: three reconcile passes over one unresolvable pane; asserts the store
+/// is still empty and every pass declined it.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn repeated_reconcile_of_one_unresolvable_pane_stays_at_zero_records() {
+    let dir = TempDir::new().unwrap();
+    let _home = set_home(dir.path());
+    let fake = std::sync::Arc::new(PaneCwdTmux {
+        alive: vec!["tm-ghosty-01".into()],
+        pane_cwd: None,
+    });
+
+    let mgr = SessionManager::new(dir.path(), fake).await.unwrap();
+    for pass in 1..=3 {
+        let report = mgr.reconcile_on_boot(false).await.expect("reconcile");
+        assert_eq!(
+            report.adoption_declined,
+            vec!["tm-ghosty-01".to_string()],
+            "pass {pass} must decline the pane; report: {report:?}"
+        );
+        assert_eq!(
+            mgr.list().await.len(),
+            0,
+            "pass {pass} must leave the store empty"
+        );
+    }
+}
+
+/// #6118 reclaim path: a declined pane is one the orphan-GC can reap.
+///
+/// Why: declining adoption is only a fix if something else can then retire the
+/// pane. The orphan-GC's criterion is "managed prefix, absent from BOTH
+/// registries, idle shell, no live child" — and adoption is what used to put
+/// the pane in the managed registry. This asserts the whole chain: after a
+/// reconcile pass that declined it, the pane's name is absent from
+/// `known_tmux_names` (what the GC's protected set is built from), and
+/// `classify_session` returns `ReapCandidate` for an idle `sh` pane.
+/// What: reconcile with an unresolvable pane, feed the resulting
+/// `known_tmux_names` into `TrackedNames::managed`, classify an idle pane.
+/// Test: this function IS the test.
+#[cfg(feature = "daemon")]
+#[tokio::test]
+#[serial_test::serial]
+async fn a_declined_pane_is_reapable_by_the_orphan_gc() {
+    use crate::daemon::orphan_gc::{
+        AlwaysIdleProbe, GcDecision, PaneInfo, TrackedNames, classify_session,
+    };
+
+    let dir = TempDir::new().unwrap();
+    let _home = set_home(dir.path());
+    let fake = std::sync::Arc::new(PaneCwdTmux {
+        alive: vec!["tm-leaked-01".into()],
+        pane_cwd: None,
+    });
+
+    let mgr = SessionManager::new(dir.path(), fake).await.unwrap();
     mgr.reconcile_on_boot(false).await.expect("reconcile");
 
-    let listed = mgr.list().await;
-    let adopted = listed
-        .iter()
-        .find(|r| r.tmux_name == "tm-unresolvable-01")
-        .expect("adopted record present");
-    assert_eq!(adopted.cwd, PathBuf::from("/unknown"));
-    assert!(adopted.workspace_path.is_none());
+    let managed = mgr.known_tmux_names().await.expect("known names");
     assert!(
-        adopted.task.contains("unmanaged"),
-        "task must clearly flag the record as unmanaged, got: {}",
-        adopted.task
+        !managed.contains("tm-leaked-01"),
+        "a declined pane must not be in the orphan-GC's protected set: {managed:?}"
+    );
+
+    let decision = classify_session(
+        &PaneInfo {
+            session_name: "tm-leaked-01".into(),
+            pane_current_command: "sh".into(),
+            pane_pid: None,
+            pane_id: None,
+        },
+        &TrackedNames {
+            managed,
+            ..Default::default()
+        },
+        &AlwaysIdleProbe,
+    );
+    assert_eq!(
+        decision,
+        GcDecision::ReapCandidate,
+        "an idle leaked pane the daemon declined to adopt must be reapable"
     );
 }
 
@@ -437,6 +546,115 @@ async fn reconcile_skips_external_adopt_when_workspace_already_tracked() {
         !listed.iter().any(|r| r.tmux_name == "tm-crossed-01"),
         "no record must carry the crossed tmux_name"
     );
+}
+
+// ── #6117: one adopted record per tmux pane, however often adoption runs ────
+
+/// The adopted id derives from the tmux name, so it is the same every time.
+///
+/// Why: this is the whole mechanism behind #6117. Two adopters that never saw
+/// each other's write must still land on one store key.
+/// Test: this function IS the test.
+#[test]
+fn adopted_id_is_stable_for_one_tmux_name() {
+    let a = super::record::ManagedSessionId::for_adopted_tmux_name("tm-stable-01");
+    let b = super::record::ManagedSessionId::for_adopted_tmux_name("tm-stable-01");
+    assert_eq!(a, b, "the same tmux name must derive the same id");
+}
+
+/// Two different panes still get two different ids.
+///
+/// Why: a name-derived id would be worthless if it collapsed distinct panes.
+/// Test: this function IS the test.
+#[test]
+fn adopted_id_differs_per_tmux_name() {
+    let a = super::record::ManagedSessionId::for_adopted_tmux_name("tm-one-01");
+    let b = super::record::ManagedSessionId::for_adopted_tmux_name("tm-two-01");
+    assert_ne!(a, b, "distinct tmux names must derive distinct ids");
+}
+
+/// #6117 regression: an adopter that never saw the first adopter's record
+/// targets the SAME store key.
+///
+/// Why: `reconcile_on_boot` builds its known-names set once, before the adopt
+/// loop, and a concurrent daemon holds its own copy. Both then see the pane as
+/// unknown, and the store is keyed by id — so a random id per adoption meant
+/// both writes survived. The reporting store carried 11 such pairs, several
+/// written 30-60 ms apart. A single-threaded test cannot stage that
+/// interleaving through the public API, so it asserts the property that makes
+/// the interleaving harmless: whichever adopter writes, and in whatever order,
+/// the record identity for one tmux name is the same one. Pre-fix the second
+/// adoption returns a fresh random id here, which is the assertion that fails.
+/// What: adopts `tm-raced-01`, removes the record so the next pass is as blind
+/// as a concurrent daemon's snapshot, adopts again, and compares ids.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn adopting_the_same_pane_twice_writes_one_record() {
+    let dir = TempDir::new().unwrap();
+    let workspace = TempDir::new().unwrap();
+    let _home = set_home(dir.path());
+    let fake = std::sync::Arc::new(PaneCwdTmux {
+        alive: vec!["tm-raced-01".into()],
+        pane_cwd: Some(workspace.path().to_path_buf()),
+    });
+
+    let mgr = SessionManager::new(dir.path(), fake).await.unwrap();
+    mgr.reconcile_on_boot(false).await.expect("first reconcile");
+    let first = mgr.list().await;
+    assert_eq!(first.len(), 1, "first adoption wrote one record");
+
+    // Blind the second pass exactly as a concurrent adopter's stale snapshot
+    // would: it does not know this pane is already tracked.
+    mgr.store
+        .write()
+        .await
+        .remove(&first[0].id)
+        .await
+        .expect("drop the record the second adopter never saw");
+
+    mgr.reconcile_on_boot(false)
+        .await
+        .expect("second reconcile");
+
+    let after = mgr.list().await;
+    assert_eq!(after.len(), 1, "one pane, one record: {after:?}");
+    assert_eq!(
+        after[0].id, first[0].id,
+        "re-adopting one tmux name must land on the same store key, so two \
+         concurrent adopters overwrite each other instead of both surviving"
+    );
+}
+
+/// Requirement 3 of the fix: nothing changes for a resolvable pane.
+///
+/// Why: the #6118 decline and the #6117 id change both sit in the adopt loop,
+/// so the ordinary path needs a guard that says it still behaves as before —
+/// one record, `Active`, real cwd and workspace, and stable across passes.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn repeated_reconcile_of_one_resolvable_pane_keeps_one_record() {
+    let dir = TempDir::new().unwrap();
+    let workspace = TempDir::new().unwrap();
+    let _home = set_home(dir.path());
+    let fake = std::sync::Arc::new(PaneCwdTmux {
+        alive: vec!["tm-steady-01".into()],
+        pane_cwd: Some(workspace.path().to_path_buf()),
+    });
+
+    let mgr = SessionManager::new(dir.path(), fake).await.unwrap();
+    for _ in 0..3 {
+        mgr.reconcile_on_boot(false).await.expect("reconcile");
+    }
+
+    let listed = mgr.list().await;
+    assert_eq!(listed.len(), 1, "three passes, one record: {listed:?}");
+    assert_eq!(listed[0].tmux_name, "tm-steady-01");
+    assert_eq!(listed[0].state, ManagedSessionState::Active);
+    assert_eq!(listed[0].cwd, workspace.path());
+    assert_eq!(listed[0].workspace_path.as_deref(), Some(workspace.path()));
+    assert_eq!(listed[0].task, "adopted session");
 }
 
 // ── #3692: create-path final safety net + suffixed-length cap ───────────────

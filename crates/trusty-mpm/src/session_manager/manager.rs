@@ -175,6 +175,13 @@ pub struct ReconcileReport {
     /// stale `pending_decision`/`proposed_default` were cleared this boot
     /// (#4400 backfill for rows tombstoned before the decommission-path fix).
     pub stale_decisions_cleared: Vec<String>,
+    /// Live managed tmux names reconciliation DECLINED to adopt because the
+    /// pane's working directory could not be resolved (#6118).
+    ///
+    /// Why: these panes are the ones the daemon deliberately leaves untracked,
+    /// so the boot log has to name them — otherwise a pane simply stops
+    /// appearing in `tm ls` with nothing said about where it went.
+    pub adoption_declined: Vec<String>,
 }
 
 /// Manages the lifecycle of daemon-owned tmux sessions.

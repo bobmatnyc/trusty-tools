@@ -40,6 +40,34 @@ impl ManagedSessionId {
         Self(Uuid::new_v4())
     }
 
+    /// Derive the id boot reconciliation adopts a live tmux pane under (#6117).
+    ///
+    /// Why: the external-adopt loop used to mint `new()` for every pane its
+    /// snapshot of the store did not name. That snapshot is taken once, before
+    /// the loop, and a second daemon (or a second pass racing the first) holds
+    /// its own — so two adopters of one pane each saw the name as unknown and
+    /// each wrote a record under a fresh random id. The store is keyed by id,
+    /// so both survived: 11 tmux names carried two records apiece in the
+    /// reporting store, several pairs written 30-60 ms apart. Deriving the id
+    /// from the tmux name instead makes the second write land on the SAME key
+    /// as the first, so the store collapses the pair to one record without any
+    /// cross-process locking. Re-adoption is then idempotent by construction,
+    /// not by whichever snapshot happened to be fresh.
+    /// What: UUIDv5 of `name` under a fixed namespace — same name, same id,
+    /// forever, on every machine. Random `new()` stays the constructor for
+    /// every path that mints a genuinely new session.
+    /// Test: `adopted_id_is_stable_for_one_tmux_name`,
+    /// `adopted_id_differs_per_tmux_name`,
+    /// `adopting_the_same_pane_twice_writes_one_record` in `naming_tests.rs`.
+    pub fn for_adopted_tmux_name(name: &str) -> Self {
+        /// Fixed UUIDv5 namespace for reconciliation-adopted tmux panes.
+        /// Never change it: the value IS the identity of every already-adopted
+        /// record, so a new namespace re-mints them all as duplicates.
+        const ADOPTED_PANE_NAMESPACE: Uuid =
+            Uuid::from_u128(0xe23a_84ff_432c_4007_a690_e7d4_43ba_2050);
+        Self(Uuid::new_v5(&ADOPTED_PANE_NAMESPACE, name.as_bytes()))
+    }
+
     /// Return the inner UUID value.
     ///
     /// Why: some callers (e.g. name derivation via `name_from_uuid`) need the
