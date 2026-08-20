@@ -22,10 +22,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use tracing::debug;
+// #6114: the workspace's one answer to "which provider does this model id name".
 #[cfg(not(feature = "bedrock"))]
 use tracing::info;
 #[cfg(feature = "bedrock")]
 use tracing::warn;
+use trusty_common::inference::{ProviderId, infer_provider_from_model_shape, shape_mismatch};
 
 use super::{
     ANTHROPIC_MODEL_PREFIX, AnthropicProvider, BEDROCK_MODEL_PREFIX, LlmProvider,
@@ -68,27 +70,99 @@ pub enum SmModelTier {
 /// prefix to pin a provider for that call, overriding the active `provider`
 /// (D5.3); a bare id routes to `default_provider`. This is the single source of
 /// truth for that rule.
-/// What: strips a known prefix (returning the matching kind + bare id) or
-/// returns `(default_provider, model)` unchanged for a bare id. Note: when
-/// `default_provider` is [`ProviderKind::Auto`], the *kind* stays `Auto` here —
-/// the credential-aware precedence chain is applied later by
-/// [`ProviderRegistry::build`].
+///
+/// Until #6114 a bare id took `default_provider` whatever it looked like, so a
+/// `us.anthropic.*` inference profile under `provider = "openrouter"` — or an
+/// OpenRouter slug under an `auto` chain that picked Anthropic — went upstream
+/// as a model that provider has never heard of. An unambiguous id shape now
+/// names its own provider, and a pair that cannot be reconciled is an error.
+///
+/// What: strips a known prefix (returning the matching kind + bare id), else
+/// infers the kind from the id's shape via
+/// [`trusty_common::inference::infer_provider_from_model_shape`], else returns
+/// `(default_provider, model)`. Whichever route is taken, the pair is checked
+/// for a shape conflict first. Note: when `default_provider` is
+/// [`ProviderKind::Auto`] AND the shape is ambiguous, the *kind* stays `Auto`
+/// here — the credential-aware precedence chain is applied later by
+/// [`ProviderRegistry::build`]. An unambiguous shape outranks that chain, which
+/// is the point: credentials decide which provider is REACHABLE, never which
+/// model the operator asked for.
+///
+/// # Errors
+///
+/// [`SmLlmError::Validation`], naming both the requested id and the provider
+/// that would execute it, when the two disagree.
+///
 /// Test: `route_anthropic_prefix`, `route_bedrock_prefix`,
-/// `route_openrouter_prefix`, `route_bare_uses_default`.
+/// `route_openrouter_prefix`, `route_bare_uses_default`,
+/// `route_bare_openrouter_slug_beats_the_default`,
+/// `route_bare_bedrock_profile_beats_the_default`,
+/// `route_prefix_contradicting_the_shape_is_an_error`.
 pub fn resolve_provider_and_model(
     model: &str,
     default_provider: ProviderKind,
-) -> (ProviderKind, String) {
+) -> Result<(ProviderKind, String), SmLlmError> {
     if let Some(bare) = model.strip_prefix(ANTHROPIC_MODEL_PREFIX) {
-        return (ProviderKind::Anthropic, bare.to_string());
+        return reconcile(ProviderKind::Anthropic, bare, model);
     }
     if let Some(bare) = model.strip_prefix(BEDROCK_MODEL_PREFIX) {
-        return (ProviderKind::Bedrock, bare.to_string());
+        return reconcile(ProviderKind::Bedrock, bare, model);
     }
     if let Some(bare) = model.strip_prefix(OPENROUTER_MODEL_PREFIX) {
-        return (ProviderKind::OpenRouter, bare.to_string());
+        return reconcile(ProviderKind::OpenRouter, bare, model);
     }
-    (default_provider, model.to_string())
+    // #6114: no routing prefix — an unambiguous id shape names its own provider
+    // before `default_provider` (or the `auto` precedence chain) gets it.
+    if let Some(inferred) = infer_provider_from_model_shape(model) {
+        return match ProviderKind::from_provider_id(inferred) {
+            Some(kind) => Ok((kind, model.to_string())),
+            // The shape names a provider the SM has no client for. Saying so is
+            // the whole point — the alternative is running it somewhere else.
+            None => Err(shape_error(model, inferred, default_provider)),
+        };
+    }
+    reconcile(default_provider, model, model)
+}
+
+/// Refuse a `(kind, model)` pair whose id names a different provider.
+///
+/// Why: #6114 — the id and the provider that will execute it must agree, and
+/// when they do not the only safe outcome is a loud stop rather than a call to
+/// the wrong backend.
+/// What: `Ok((kind, bare))` when the shape agrees, is ambiguous, or `kind` is
+/// [`ProviderKind::Auto`] (nothing to contradict yet — the chain runs later, and
+/// it only ever reaches here on an ambiguous id). Otherwise a
+/// [`SmLlmError::Validation`] naming `requested` and both providers.
+/// Test: `route_prefix_contradicting_the_shape_is_an_error`.
+fn reconcile(
+    kind: ProviderKind,
+    bare: &str,
+    requested: &str,
+) -> Result<(ProviderKind, String), SmLlmError> {
+    if let Some(id) = kind.provider_id()
+        && let Some(inferred) = shape_mismatch(id, bare)
+    {
+        return Err(shape_error(requested, inferred, kind));
+    }
+    Ok((kind, bare.to_string()))
+}
+
+/// The one wording for "this id and this provider do not agree".
+///
+/// Why: the message is the deliverable of #6114 — it must name the id AND the
+/// provider that would have run it, so an operator can see what was substituted
+/// instead of discovering it in a bill.
+/// What: a [`SmLlmError::Validation`] carrying all three facts.
+/// Test: `route_prefix_contradicting_the_shape_is_an_error`.
+fn shape_error(requested: &str, inferred: ProviderId, kind: ProviderKind) -> SmLlmError {
+    SmLlmError::Validation(format!(
+        "model id {requested:?} names the {inferred} provider by its shape, but this call would \
+         run on {kind}. Refusing to substitute a different model than the one requested. \
+         Either set [session_manager.inference].provider to {inferred}, or pin one explicitly \
+         with a routing prefix (\"anthropic/…\", \"bedrock/…\", \"openrouter/…\").",
+        inferred = inferred.as_str(),
+        kind = kind.name()
+    ))
 }
 
 // ─── Per-task tier selection (DOC-14 §5.4) ──────────────────────────────────────
@@ -365,7 +439,7 @@ impl ProviderRegistry {
     ) -> Result<(ProviderKind, String), SmLlmError> {
         let default_provider = ProviderKind::parse(&cfg.provider)?;
         let tier_model = resolve_tier_model(cfg, tier)?;
-        let (routed_kind, bare_model) = resolve_provider_and_model(&tier_model, default_provider);
+        let (routed_kind, bare_model) = resolve_provider_and_model(&tier_model, default_provider)?;
 
         let effective_kind = match routed_kind {
             ProviderKind::Auto => self.auto_precedence()?,

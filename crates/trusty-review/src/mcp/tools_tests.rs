@@ -367,64 +367,33 @@ async fn review_health_degraded_but_serving_search_stays_ok() {
     );
 }
 
-// ── reviewer_model override fallback surfacing (#1357 item 2) ───────────────────
+// ── reviewer_model override: no silent substitution (#6114) ────────────────────
 
-/// #1357: when an override provider build failed, `wrap_result` surfaces the
-/// fallback reason in BOTH the envelope and the serialised payload text.
+/// #6114: no envelope can announce that the review ran on a substitute model,
+/// because no review runs on one.
 ///
-/// Why: an MCP caller silently getting the wrong backend is the hazard #1357
-/// targets; the fallback must be DETECTABLE both programmatically (envelope) and
-/// by the LLM reading `content[0].text`.
-/// What: wraps a `ReviewResult` with `Some(reason)`; asserts the envelope-level
-/// `reviewer_model_fallback` field is present AND that the same key appears in the
-/// parsed payload JSON.
-/// Test: this test itself.
+/// Why: #1357 item 2 made the silent-wrong-backend case DETECTABLE by adding a
+/// `reviewer_model_fallback` field. #6114 removes the case instead —
+/// `deps_from_state` errors rather than reviewing a diff with a model the caller
+/// did not ask for — so the field must be gone from both the envelope and the
+/// payload the LLM reads. A field that can never be set is a promise the surface
+/// cannot keep.
+/// What: wraps a plain `ReviewResult` and asserts the key is absent from both.
+/// Test: this test itself; the refusal it depends on is
+/// `deps_from_state_build_failure_is_an_error` (tools_dispatch_tests.rs).
 #[test]
-fn wrap_result_surfaces_reviewer_model_fallback() {
-    let result = ReviewResult::new("acme", "backend", 7, "Add X", "https://example/pr/7");
-    let reason = "failed to build provider for reviewer_model override 'openrouter/x' \
-                  (key empty); fell back to the startup 'bedrock' provider";
-    let envelope = wrap_result(&result, Some(reason));
-
-    // Envelope-level metadata field for programmatic callers.
-    assert_eq!(
-        envelope["reviewer_model_fallback"], reason,
-        "envelope must carry reviewer_model_fallback for detection"
-    );
-    assert_eq!(
-        envelope["isError"], false,
-        "fallback is non-breaking, not an error"
-    );
-
-    // The same marker is spliced into the payload the LLM reads.
-    let text = envelope["content"][0]["text"].as_str().expect("text field");
-    let payload: Value = serde_json::from_str(text).expect("valid JSON payload");
-    assert_eq!(
-        payload["reviewer_model_fallback"], reason,
-        "payload JSON must also carry the fallback so the LLM sees it"
-    );
-}
-
-/// #1357: the happy path (no fallback) leaves the envelope clean — no extra field.
-///
-/// Why: only the failure path should advertise a fallback; a clean run must not
-/// emit a spurious marker that callers would misread as a degraded backend.
-/// What: wraps a `ReviewResult` with `None`; asserts the `reviewer_model_fallback`
-/// key is absent from both envelope and payload.
-/// Test: this test itself.
-#[test]
-fn wrap_result_no_fallback_omits_field() {
+fn wrap_result_never_carries_a_reviewer_model_fallback() {
     let result = ReviewResult::new("acme", "backend", 8, "Add Y", "https://example/pr/8");
-    let envelope = wrap_result(&result, None);
+    let envelope = wrap_result(&result);
     assert!(
         envelope.get("reviewer_model_fallback").is_none(),
-        "no fallback → envelope must NOT carry the marker"
+        "the envelope must not carry a substitution marker (#6114)"
     );
     let text = envelope["content"][0]["text"].as_str().expect("text field");
     let payload: Value = serde_json::from_str(text).expect("valid JSON payload");
     assert!(
         payload.get("reviewer_model_fallback").is_none(),
-        "no fallback → payload must NOT carry the marker"
+        "the payload must not carry a substitution marker (#6114)"
     );
 }
 
@@ -451,7 +420,7 @@ fn wrap_result_infra_unavailable_sets_error_and_sentinel() {
     result.verdict = Verdict::Unknown;
     result.error = Some("trusty-search unreachable at http://x — start it".to_string());
 
-    let envelope = wrap_result(&result, None);
+    let envelope = wrap_result(&result);
 
     assert_eq!(
         envelope["isError"], true,
@@ -481,7 +450,7 @@ fn wrap_result_policy_skip_without_infra_flag_stays_is_error_false() {
     // infra_unavailable intentionally left false (default) — simulates a
     // hypothetical future policy-driven skip.
 
-    let envelope = wrap_result(&result, None);
+    let envelope = wrap_result(&result);
 
     assert_eq!(
         envelope["isError"], false,
@@ -509,7 +478,7 @@ fn wrap_result_degraded_stays_is_error_false() {
     result.status = ReviewStatus::Degraded;
     result.verdict = Verdict::Approve;
 
-    let envelope = wrap_result(&result, None);
+    let envelope = wrap_result(&result);
 
     assert_eq!(
         envelope["isError"], false,
@@ -543,7 +512,7 @@ fn wrap_result_degraded_sets_sentinel_and_reason() {
             .to_string(),
     );
 
-    let envelope = wrap_result(&result, None);
+    let envelope = wrap_result(&result);
 
     assert_eq!(
         envelope["mcp_status"], "degraded_context",
@@ -561,7 +530,7 @@ fn wrap_result_degraded_sets_sentinel_and_reason() {
     // sentinel is a real signal and not noise attached to every response.
     let mut complete = ReviewResult::new("acme", "backend", 11, "Add Q", "https://example/pr/11");
     complete.verdict = Verdict::Approve;
-    let complete_envelope = wrap_result(&complete, None);
+    let complete_envelope = wrap_result(&complete);
     assert!(
         complete_envelope.get("mcp_status").is_none(),
         "a complete review must carry no status sentinel"

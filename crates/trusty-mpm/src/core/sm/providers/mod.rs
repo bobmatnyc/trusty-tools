@@ -124,6 +124,49 @@ impl ProviderKind {
             ProviderKind::OpenRouter => "openrouter",
         }
     }
+
+    /// The shared `trusty-common` identity for this kind, when it has one.
+    ///
+    /// Why: #6114's model-shape inference speaks [`ProviderId`], the workspace's
+    /// one provider identity. Bridging here keeps the mapping in a single place
+    /// instead of at each resolver call site.
+    /// What: `None` for [`ProviderKind::Auto`], which names no concrete provider
+    /// until the credential precedence chain has run.
+    /// Test: `provider_kind_bridges_to_the_shared_provider_id`.
+    ///
+    /// [`ProviderId`]: trusty_common::inference::ProviderId
+    pub fn provider_id(self) -> Option<trusty_common::inference::ProviderId> {
+        use trusty_common::inference::ProviderId;
+        match self {
+            ProviderKind::Auto => None,
+            ProviderKind::Anthropic => Some(ProviderId::Anthropic),
+            ProviderKind::Bedrock => Some(ProviderId::Bedrock),
+            ProviderKind::OpenRouter => Some(ProviderId::OpenRouter),
+        }
+    }
+
+    /// The kind for a shared [`ProviderId`], when the SM can build one.
+    ///
+    /// Why: the inverse of [`ProviderKind::provider_id`]. The shared identity
+    /// covers eight providers; the SM has clients for three, and a shape that
+    /// names one of the other five must be reported rather than coerced.
+    /// What: `None` for every `ProviderId` the SM has no client for.
+    /// Test: `provider_kind_bridges_to_the_shared_provider_id`.
+    ///
+    /// [`ProviderId`]: trusty_common::inference::ProviderId
+    pub fn from_provider_id(id: trusty_common::inference::ProviderId) -> Option<Self> {
+        use trusty_common::inference::ProviderId;
+        match id {
+            ProviderId::Anthropic => Some(ProviderKind::Anthropic),
+            ProviderId::Bedrock => Some(ProviderKind::Bedrock),
+            ProviderId::OpenRouter => Some(ProviderKind::OpenRouter),
+            ProviderId::Fireworks
+            | ProviderId::OpenAI
+            | ProviderId::Together
+            | ProviderId::AtlasCloud
+            | ProviderId::Local => None,
+        }
+    }
 }
 
 // ─── Chat / request / response shapes ──────────────────────────────────────────
@@ -263,6 +306,30 @@ mod tests {
             assert_eq!(ProviderKind::parse(kind.name()).unwrap(), kind);
         }
         assert_eq!(ProviderKind::Anthropic.name(), "anthropic");
+    }
+
+    /// #6114: the bridge to the shared `ProviderId` must round-trip every kind
+    /// the SM can actually build, and map `Auto` to nothing.
+    ///
+    /// Why: model-shape inference speaks `ProviderId`; a lossy bridge would let a
+    /// shape resolve to the wrong client, which is the substitution the ticket
+    /// removes.
+    /// What: asserts the round trip for the three concrete kinds, `None` for
+    /// `Auto`, and `None` for a `ProviderId` the SM has no client for.
+    /// Test: this is the test.
+    #[test]
+    fn provider_kind_bridges_to_the_shared_provider_id() {
+        use trusty_common::inference::ProviderId;
+        for kind in [
+            ProviderKind::Anthropic,
+            ProviderKind::Bedrock,
+            ProviderKind::OpenRouter,
+        ] {
+            let id = kind.provider_id().expect("a concrete kind has an id");
+            assert_eq!(ProviderKind::from_provider_id(id), Some(kind));
+        }
+        assert_eq!(ProviderKind::Auto.provider_id(), None);
+        assert_eq!(ProviderKind::from_provider_id(ProviderId::Fireworks), None);
     }
 
     /// Why: SM-1 review carry-forward — an unknown `provider` string must be a

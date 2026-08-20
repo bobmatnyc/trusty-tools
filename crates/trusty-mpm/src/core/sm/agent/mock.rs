@@ -289,7 +289,7 @@ fn resolved_call(
 ) -> Result<ResolvedCall, SmLlmError> {
     let tier_model = crate::core::sm::providers::resolve_tier_model(cfg, tier)?;
     let (_kind, bare) =
-        crate::core::sm::providers::resolve_provider_and_model(&tier_model, ProviderKind::Auto);
+        crate::core::sm::providers::resolve_provider_and_model(&tier_model, ProviderKind::Auto)?;
     Ok(ResolvedCall {
         provider: Arc::new(provider.clone()),
         model: bare,

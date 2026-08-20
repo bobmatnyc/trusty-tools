@@ -33,17 +33,22 @@ fn empty_cfg() -> SmInferenceConfig {
 
 // ── Prefix routing (D5.3) ──────────────────────────────────────────────────
 
+/// Route, treating an error as a test failure.
+fn routed(model: &str, default_provider: ProviderKind) -> (ProviderKind, String) {
+    resolve_provider_and_model(model, default_provider)
+        .unwrap_or_else(|e| panic!("{model:?} must route: {e}"))
+}
+
 #[test]
 fn route_anthropic_prefix() {
-    let (kind, model) =
-        resolve_provider_and_model("anthropic/claude-sonnet-4-6", ProviderKind::OpenRouter);
+    let (kind, model) = routed("anthropic/claude-sonnet-4-6", ProviderKind::OpenRouter);
     assert_eq!(kind, ProviderKind::Anthropic);
     assert_eq!(model, "claude-sonnet-4-6");
 }
 
 #[test]
 fn route_bedrock_prefix() {
-    let (kind, model) = resolve_provider_and_model(
+    let (kind, model) = routed(
         "bedrock/us.anthropic.claude-sonnet-4-6",
         ProviderKind::Anthropic,
     );
@@ -53,22 +58,106 @@ fn route_bedrock_prefix() {
 
 #[test]
 fn route_openrouter_prefix() {
-    let (kind, model) =
-        resolve_provider_and_model("openrouter/anthropic/claude-haiku", ProviderKind::Bedrock);
+    let (kind, model) = routed("openrouter/anthropic/claude-haiku", ProviderKind::Bedrock);
     assert_eq!(kind, ProviderKind::OpenRouter);
     assert_eq!(model, "anthropic/claude-haiku");
 }
 
 #[test]
 fn route_bare_uses_default() {
-    // Bare id keeps the supplied default provider verbatim.
-    let (kind, model) = resolve_provider_and_model("claude-sonnet-4-6", ProviderKind::OpenRouter);
+    // A bare id with no unambiguous shape keeps the supplied default provider.
+    let (kind, model) = routed("claude-sonnet-4-6", ProviderKind::OpenRouter);
     assert_eq!(kind, ProviderKind::OpenRouter);
     assert_eq!(model, "claude-sonnet-4-6");
 
-    // Bare id with Auto default stays Auto (precedence applied later).
-    let (kind, _) = resolve_provider_and_model("claude-haiku", ProviderKind::Auto);
+    // Same, with Auto default: stays Auto (precedence applied later).
+    let (kind, _) = routed("claude-haiku", ProviderKind::Auto);
     assert_eq!(kind, ProviderKind::Auto);
+}
+
+// ── Model-shape inference (#6114) ──────────────────────────────────────────
+
+/// #6114: an unprefixed OpenRouter slug names OpenRouter, whatever the default.
+///
+/// Why: the slug shape belongs to no other provider the SM builds, so handing it
+/// to the configured default sends an id upstream that the default has never
+/// heard of — or, under `auto`, to whichever provider happened to have a
+/// credential.
+/// What: asserts the routed kind is OpenRouter for a Bedrock default and for the
+/// `auto` chain, with the id passed through unchanged. The slugs here
+/// deliberately do NOT open with one of the SM's own routing prefixes: `anthropic/`
+/// is a prefix in this crate (it pins the first-party API), so shape inference
+/// never sees such an id — it only ever judges what is left after stripping.
+/// Test: this test itself.
+#[test]
+fn route_bare_openrouter_slug_beats_the_default() {
+    let (kind, model) = routed("google/gemini-3-pro", ProviderKind::Bedrock);
+    assert_eq!(kind, ProviderKind::OpenRouter);
+    assert_eq!(model, "google/gemini-3-pro");
+
+    let (kind, _) = routed("openai/gpt-5.4-mini-20260317", ProviderKind::Auto);
+    assert_eq!(
+        kind,
+        ProviderKind::OpenRouter,
+        "an unambiguous shape outranks the credential precedence chain (#6114)"
+    );
+}
+
+/// #6114: the mirror case — a Bedrock inference profile names Bedrock.
+#[test]
+fn route_bare_bedrock_profile_beats_the_default() {
+    let (kind, model) = routed("us.anthropic.claude-sonnet-4-6", ProviderKind::OpenRouter);
+    assert_eq!(kind, ProviderKind::Bedrock);
+    assert_eq!(model, "us.anthropic.claude-sonnet-4-6");
+}
+
+/// #6114: a prefix that contradicts the id's shape is an error naming both,
+/// never a silent call to the prefixed provider.
+#[test]
+fn route_prefix_contradicting_the_shape_is_an_error() {
+    let err = resolve_provider_and_model(
+        "bedrock/anthropic/claude-opus-4.8",
+        ProviderKind::OpenRouter,
+    )
+    .expect_err("a bedrock/ prefix on an OpenRouter slug must not route");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("anthropic/claude-opus-4.8"),
+        "the error must name the requested id: {msg}"
+    );
+    assert!(
+        msg.contains("bedrock") && msg.contains("openrouter"),
+        "the error must name both providers: {msg}"
+    );
+
+    // The Anthropic first-party provider cannot run a Bedrock profile id either.
+    resolve_provider_and_model(
+        "anthropic/us.anthropic.claude-sonnet-4-6",
+        ProviderKind::Auto,
+    )
+    .expect_err("a bedrock profile id must not be sent to api.anthropic.com");
+}
+
+/// #6114: a shape naming a provider the SM has no client for stops the call.
+///
+/// Why: the SM builds Anthropic, Bedrock, and OpenRouter. A Fireworks-native id
+/// belongs to none of them, and running it on whichever one the config named is
+/// the substitution this ticket removes.
+/// What: asserts the error names the id and the fireworks provider.
+/// Test: this test itself.
+#[test]
+fn route_shape_the_sm_cannot_build_is_an_error() {
+    let err = resolve_provider_and_model(
+        "accounts/fireworks/models/llama-v3p1-70b-instruct",
+        ProviderKind::OpenRouter,
+    )
+    .expect_err("a fireworks-native id must not run on OpenRouter");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("accounts/fireworks/models/llama-v3p1-70b-instruct")
+            && msg.contains("fireworks"),
+        "the error must name the id and the provider it belongs to: {msg}"
+    );
 }
 
 // ── Tier selection + alias fallback (§5.4) ─────────────────────────────────

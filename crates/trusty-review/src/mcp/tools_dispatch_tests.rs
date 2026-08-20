@@ -473,16 +473,13 @@ async fn deps_from_state_openrouter_override_switches_provider() {
     // state must build a fresh OpenRouter provider, NOT silently reuse the startup
     // (Bedrock) provider.
     let state = bedrock_startup_state();
-    let (deps, fallback) =
-        super::deps_from_state(&state, "openrouter/openai/gpt-5.4-mini-20260317").await;
+    let deps = super::deps_from_state(&state, "openrouter/openai/gpt-5.4-mini-20260317")
+        .await
+        .expect("a valid override must resolve and build");
     assert_eq!(
         deps.llm.name(),
         "openrouter",
         "an openrouter/ override must route to the OpenRouter backend (#1233)"
-    );
-    assert!(
-        fallback.is_none(),
-        "a successful override build must NOT report a fallback (#1357)"
     );
 }
 
@@ -491,66 +488,99 @@ async fn deps_from_state_fireworks_override_switches_provider() {
     // A `fireworks/...` reviewer_model override against a Bedrock-startup state
     // must build a fresh Fireworks provider (same #1233 contract as OpenRouter).
     let state = bedrock_startup_state();
-    let (deps, fallback) = super::deps_from_state(
+    let deps = super::deps_from_state(
         &state,
         "fireworks/accounts/fireworks/models/llama-v3p1-70b-instruct",
     )
-    .await;
+    .await
+    .expect("a valid override must resolve and build");
     assert_eq!(
         deps.llm.name(),
         "fireworks",
         "a fireworks/ override must route to the Fireworks backend"
     );
-    assert!(
-        fallback.is_none(),
-        "a successful override build must NOT report a fallback (#1357)"
-    );
 }
 
 #[tokio::test]
 async fn deps_from_state_no_override_reuses_startup_provider() {
-    // Control: a bare model id (no routing prefix) keeps the startup provider —
+    // Control: a bare id whose shape matches the startup provider keeps it —
     // the stub `ApproveLlm`, whose name() is NOT "openrouter".
     let state = bedrock_startup_state();
-    let (deps, fallback) = super::deps_from_state(&state, "us.anthropic.claude-sonnet-4-6").await;
+    let deps = super::deps_from_state(&state, "us.anthropic.claude-sonnet-4-6")
+        .await
+        .expect("a bedrock id on a bedrock-startup state must resolve");
     assert_ne!(
         deps.llm.name(),
         "openrouter",
-        "a bare model id must reuse the startup (Bedrock) provider, not switch"
-    );
-    assert!(
-        fallback.is_none(),
-        "the no-override path must NOT report a fallback (#1357)"
+        "a bare Bedrock id must reuse the startup (Bedrock) provider, not switch"
     );
 }
 
-/// #1357 item 2: when an override provider fails to build, `deps_from_state` must
-/// report a `Some(reason)` fallback so the MCP caller can detect the wrong-backend
-/// silent fallback.
+/// #6114: an override whose provider cannot be built fails the tool call.
 ///
-/// Why: previously the failed-override path only `warn!`d and silently reused the
-/// startup provider; an MCP caller had no way to know it got the wrong backend.
+/// Why: until #6114 this path `warn!`d, reused the startup provider, and reported
+/// a `reviewer_model_fallback` string — a review of the caller's diff by a model
+/// they did not ask for. Detectability was never the fix; not doing it is.
 /// What: an `openrouter/...` override against a Bedrock-startup state whose config
-/// has an EMPTY OpenRouter key makes `build_provider` fail the empty-key guard;
-/// the result must fall back to the startup provider AND carry a fallback reason.
+/// has an EMPTY OpenRouter key makes `build_provider` fail its empty-key guard.
+/// The result must be an error naming the requested model.
 /// Test: this test itself.
 #[tokio::test]
-async fn deps_from_state_build_failure_reports_fallback() {
+async fn deps_from_state_build_failure_is_an_error() {
     let mut state = bedrock_startup_state();
     // Empty the key so OpenRouterProvider::new() fails its empty-key guard.
     state.config.openrouter_api_key = String::new();
 
-    let (deps, fallback) =
-        super::deps_from_state(&state, "openrouter/openai/gpt-5.4-mini-20260317").await;
-    // Fell back to the startup (Bedrock) provider, not the requested OpenRouter one.
-    assert_ne!(
+    // `ReviewDeps` is not `Debug` (it holds trait objects), so `expect_err` is
+    // unavailable here — match instead.
+    let msg = match super::deps_from_state(&state, "openrouter/openai/gpt-5.4-mini-20260317").await
+    {
+        Ok(_) => panic!("a failed override build must not fall back to the startup model"),
+        Err(e) => format!("{e:?}"),
+    };
+    assert!(
+        msg.contains("openai/gpt-5.4-mini-20260317"),
+        "the error must name the requested model: {msg}"
+    );
+}
+
+/// #6114: an unprefixed OpenRouter slug against a Bedrock-startup state must not
+/// be reviewed by Bedrock's model — the exact #6093 pairing, at the MCP surface.
+///
+/// Why: `anthropic/claude-opus-4.8` carries no routing prefix, so it used to
+/// resolve to the startup (Bedrock) provider and be reviewed by whatever model
+/// that provider was holding.
+/// What: asserts the override routes to OpenRouter on its shape alone.
+/// Test: this test itself.
+#[tokio::test]
+async fn deps_from_state_routes_a_bare_openrouter_slug_to_openrouter() {
+    let state = bedrock_startup_state();
+    let deps = super::deps_from_state(&state, "anthropic/claude-opus-4.8")
+        .await
+        .expect("an OpenRouter slug must resolve to OpenRouter, whose key is set here");
+    assert_eq!(
         deps.llm.name(),
         "openrouter",
-        "a failed override build must fall back to the startup provider"
+        "an unprefixed OpenRouter slug must not be reviewed by the Bedrock startup provider"
     );
-    let reason = fallback.expect("a failed override build must report a fallback reason (#1357)");
+}
+
+/// #6114: a model the resolved provider cannot run stops before any review.
+///
+/// Why: the error must name both halves so an operator sees what disagreed,
+/// rather than reading a verdict produced by a model they never selected.
+/// What: pins a Bedrock inference-profile id to Fireworks by prefix.
+/// Test: this test itself.
+#[tokio::test]
+async fn deps_from_state_rejects_a_model_the_startup_provider_cannot_run() {
+    let state = bedrock_startup_state();
+    let msg = match super::deps_from_state(&state, "fireworks/us.anthropic.claude-sonnet-4-6").await
+    {
+        Ok(_) => panic!("a bedrock profile id must not be sent to Fireworks"),
+        Err(e) => format!("{e:?}"),
+    };
     assert!(
-        reason.contains("reviewer_model") && reason.contains("fell back"),
-        "fallback reason must be actionable: {reason}"
+        msg.contains("us.anthropic.claude-sonnet-4-6") && msg.contains("fireworks"),
+        "the error must name the id and the provider: {msg}"
     );
 }

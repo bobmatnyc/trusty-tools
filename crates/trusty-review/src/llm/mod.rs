@@ -251,24 +251,82 @@ pub fn strip_provider_prefix(model: &str) -> &str {
 /// model id string and an explicit provider hint.
 ///
 /// Why: `--reviewer-model bedrock/us.anthropic.claude-sonnet-4-6` must route to
-/// Bedrock regardless of the default provider; a bare `us.anthropic.*` id should
-/// use the default provider; `openrouter/openai/gpt-5.4-mini` must route to
-/// OpenRouter; `fireworks/accounts/fireworks/models/*` must route to Fireworks.
-/// This function is the single source of truth for that logic.
-/// What: strips known prefixes and returns `(Provider, bare_model_id)`.
-/// Precedence: explicit prefix in model id > `default_provider` argument.
-/// Test: `provider_factory_prefix_routing`.
-pub fn resolve_provider_and_model(model: &str, default_provider: &Provider) -> (Provider, String) {
+/// Bedrock regardless of the default provider; `openrouter/openai/gpt-5.4-mini`
+/// must route to OpenRouter; `fireworks/accounts/fireworks/models/*` must route
+/// to Fireworks. This function is the single source of truth for that logic.
+///
+/// Until #6114 an id with NO prefix was handed to `default_provider` whatever it
+/// looked like, so an OpenRouter slug against a Bedrock-default path resolved to
+/// Bedrock, which then rejected the id — and the run that eventually completed
+/// used Bedrock's own default model rather than the one asked for. An
+/// unambiguous shape now names its own provider, and a pair that cannot be
+/// reconciled is an error instead of a substitution.
+///
+/// What: strips a known prefix, else infers the provider from the id's shape via
+/// [`trusty_common::inference::infer_provider_from_model_shape`], else falls
+/// back to `default_provider`. Whichever route is taken, the resulting pair is
+/// checked for a shape conflict before it is returned. Precedence: explicit
+/// prefix > unambiguous id shape > `default_provider`.
+///
+/// # Errors
+///
+/// [`LlmError::Validation`], naming both the requested id and the provider that
+/// would execute it, when the two disagree.
+///
+/// Test: `provider_factory_prefix_routing`,
+/// `bare_openrouter_slug_routes_to_openrouter_not_the_default`,
+/// `bare_bedrock_profile_id_routes_to_bedrock_not_the_default`,
+/// `prefix_that_contradicts_the_id_shape_is_an_error`,
+/// `ambiguous_bare_id_still_uses_the_default_provider`.
+pub fn resolve_provider_and_model(
+    model: &str,
+    default_provider: &Provider,
+) -> Result<(Provider, String), LlmError> {
     if let Some(bare) = model.strip_prefix(BEDROCK_MODEL_PREFIX) {
-        return (Provider::Bedrock, bare.to_string());
+        return reconcile(Provider::Bedrock, bare, model);
     }
     if let Some(bare) = model.strip_prefix(OPENROUTER_MODEL_PREFIX) {
-        return (Provider::OpenRouter, bare.to_string());
+        return reconcile(Provider::OpenRouter, bare, model);
     }
     if let Some(bare) = model.strip_prefix(FIREWORKS_MODEL_PREFIX) {
-        return (Provider::Fireworks, bare.to_string());
+        return reconcile(Provider::Fireworks, bare, model);
     }
-    (default_provider.clone(), model.to_string())
+    // #6114: no routing prefix — let an unambiguous id shape name its provider
+    // before the configured default gets it.
+    if let Some(inferred) = trusty_common::inference::infer_provider_from_model_shape(model)
+        .and_then(Provider::from_provider_id)
+    {
+        return Ok((inferred, model.to_string()));
+    }
+    reconcile(default_provider.clone(), model, model)
+}
+
+/// Refuse a `(provider, model)` pair whose id names a different provider.
+///
+/// Why: #6114 — the id and the provider that will execute it must agree, and
+/// when they do not the only safe outcome is a loud stop. Silently running the
+/// provider's default model is the failure this exists to prevent.
+/// What: `Ok((provider, bare))` when the shape agrees or is ambiguous;
+/// [`LlmError::Validation`] naming `requested`, the inferred provider, and
+/// `provider` otherwise. `requested` is the operator's original string (prefix
+/// included) so the message quotes what they actually typed.
+/// Test: `prefix_that_contradicts_the_id_shape_is_an_error`,
+/// `every_contradicting_pair_is_refused`.
+fn reconcile(
+    provider: Provider,
+    bare: &str,
+    requested: &str,
+) -> Result<(Provider, String), LlmError> {
+    if let Some(inferred) = trusty_common::inference::shape_mismatch(provider.provider_id(), bare) {
+        return Err(LlmError::Validation(format!(
+            "model id {requested:?} names the {inferred} provider by its shape, but this call \
+             would run on {provider}. Refusing to substitute a different model than the one \
+             requested. Either set the provider to {inferred}, or pin one explicitly with a \
+             routing prefix (\"bedrock/…\", \"openrouter/…\", \"fireworks/…\").",
+            inferred = inferred.as_str()
+        )));
+    }
+    Ok((provider, bare.to_string()))
 }
 
 /// Build an `Arc<dyn LlmProvider>` from the resolved role config.
@@ -282,8 +340,9 @@ pub fn resolve_provider_and_model(model: &str, default_provider: &Provider) -> (
 /// What: resolves the effective provider via `resolve_provider_and_model`,
 /// constructs the appropriate concrete type, and returns it as a trait object.
 /// Returns `LlmError::AccessDenied` if OpenRouter or Fireworks is selected but
-/// its API key is empty.  Returns `LlmError::Validation` if Bedrock is
-/// selected but the model id is missing an inference-profile prefix.
+/// its API key is empty.  Returns `LlmError::Validation` if the model id and the
+/// resolved provider disagree (#6114), or if Bedrock is selected but the model
+/// id is missing an inference-profile prefix.
 /// Test: `provider_factory_builds_bedrock`, `provider_factory_builds_openrouter`,
 /// `provider_factory_prefix_routing`.
 pub async fn build_provider(
@@ -291,7 +350,7 @@ pub async fn build_provider(
     default_provider: &Provider,
     config: &ReviewConfig,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
-    let (provider, bare_model) = resolve_provider_and_model(model, default_provider);
+    let (provider, bare_model) = resolve_provider_and_model(model, default_provider)?;
     match provider {
         Provider::Bedrock => {
             let p = BedrockProvider::new(bare_model, None).await?;
@@ -450,10 +509,16 @@ mod tests {
 
     // ── Provider factory routing tests ────────────────────────────────────
 
+    /// Resolve, treating an error as a test failure.
+    fn resolved(model: &str, default_provider: &Provider) -> (Provider, String) {
+        resolve_provider_and_model(model, default_provider)
+            .unwrap_or_else(|e| panic!("{model:?} must resolve: {e}"))
+    }
+
     #[test]
     fn provider_factory_prefix_routing() {
         // bedrock/ prefix forces Bedrock.
-        let (prov, model) = resolve_provider_and_model(
+        let (prov, model) = resolved(
             "bedrock/us.anthropic.claude-sonnet-4-6",
             &Provider::OpenRouter,
         );
@@ -461,28 +526,21 @@ mod tests {
         assert_eq!(model, "us.anthropic.claude-sonnet-4-6");
 
         // openrouter/ prefix forces OpenRouter.
-        let (prov, model) = resolve_provider_and_model(
+        let (prov, model) = resolved(
             "openrouter/openai/gpt-5.4-mini-20260317",
             &Provider::Bedrock,
         );
         assert_eq!(prov, Provider::OpenRouter);
         assert_eq!(model, "openai/gpt-5.4-mini-20260317");
 
-        // Bare id uses the default provider.
-        let (prov, model) =
-            resolve_provider_and_model("us.anthropic.claude-sonnet-4-6", &Provider::Bedrock);
+        // Bare id whose shape matches the default keeps the default.
+        let (prov, model) = resolved("us.anthropic.claude-sonnet-4-6", &Provider::Bedrock);
         assert_eq!(prov, Provider::Bedrock);
         assert_eq!(model, "us.anthropic.claude-sonnet-4-6");
 
-        // Bare OpenRouter id with Bedrock default stays on Bedrock.
-        let (prov, model) =
-            resolve_provider_and_model("openai/gpt-5.4-mini-20260317", &Provider::Bedrock);
-        assert_eq!(prov, Provider::Bedrock);
-        assert_eq!(model, "openai/gpt-5.4-mini-20260317");
-
         // fireworks/ prefix forces Fireworks and strips only the routing
         // prefix (the provider-native accounts/fireworks/models/* id remains).
-        let (prov, model) = resolve_provider_and_model(
+        let (prov, model) = resolved(
             "fireworks/accounts/fireworks/models/llama-v3p1-70b-instruct",
             &Provider::Bedrock,
         );
@@ -490,10 +548,106 @@ mod tests {
         assert_eq!(model, "accounts/fireworks/models/llama-v3p1-70b-instruct");
     }
 
+    /// #6114 regression: the id from the #6093 mitigation run.
+    ///
+    /// Why: `anthropic/claude-opus-4.8` carries no routing prefix, so it used to
+    /// resolve to whatever the path's default provider was — Bedrock, which
+    /// rejected the id, after which the run that completed used Bedrock's own
+    /// default model. The slug shape names OpenRouter; nothing else does.
+    /// What: asserts the pair resolves to OpenRouter with the id unchanged.
+    /// Test: this test itself.
+    #[test]
+    fn bare_openrouter_slug_routes_to_openrouter_not_the_default() {
+        let (prov, model) = resolved("anthropic/claude-opus-4.8", &Provider::Bedrock);
+        assert_eq!(
+            prov,
+            Provider::OpenRouter,
+            "an unprefixed OpenRouter slug must not inherit the Bedrock default (#6114)"
+        );
+        assert_eq!(model, "anthropic/claude-opus-4.8");
+
+        let (prov, _) = resolved("openai/gpt-5.4-mini-20260317", &Provider::Bedrock);
+        assert_eq!(prov, Provider::OpenRouter);
+    }
+
+    /// #6114: the mirror case — a Bedrock inference profile under an OpenRouter
+    /// default resolves to Bedrock rather than being sent to OpenRouter.
+    #[test]
+    fn bare_bedrock_profile_id_routes_to_bedrock_not_the_default() {
+        let (prov, model) = resolved("us.anthropic.claude-sonnet-4-6", &Provider::OpenRouter);
+        assert_eq!(prov, Provider::Bedrock);
+        assert_eq!(model, "us.anthropic.claude-sonnet-4-6");
+
+        // The un-profiled dotted spelling is Bedrock's too. It fails the
+        // inference-profile check later, which is the right error to get.
+        let (prov, _) = resolved("anthropic.claude-sonnet-4-6", &Provider::OpenRouter);
+        assert_eq!(prov, Provider::Bedrock);
+    }
+
+    /// #6114: an explicit prefix that contradicts the id's shape is an error
+    /// naming both, never a silent run on the prefixed provider's default.
+    #[test]
+    fn prefix_that_contradicts_the_id_shape_is_an_error() {
+        let err =
+            resolve_provider_and_model("bedrock/anthropic/claude-opus-4.8", &Provider::OpenRouter)
+                .expect_err("a bedrock/ prefix on an OpenRouter slug must not resolve");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("anthropic/claude-opus-4.8"),
+            "the error must name the requested id: {msg}"
+        );
+        assert!(
+            msg.contains("bedrock") && msg.contains("openrouter"),
+            "the error must name both providers: {msg}"
+        );
+    }
+
+    /// #6114: the refusal is symmetric across all three backends, so no pairing
+    /// is left with a silent substitution.
+    #[test]
+    fn every_contradicting_pair_is_refused() {
+        // A Bedrock profile id pinned to Fireworks by prefix cannot run.
+        let err = resolve_provider_and_model(
+            "fireworks/us.anthropic.claude-sonnet-4-6",
+            &Provider::OpenRouter,
+        )
+        .expect_err("a bedrock profile id must not be sent to Fireworks");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("us.anthropic.claude-sonnet-4-6") && msg.contains("fireworks"),
+            "the error must name the id and the provider: {msg}"
+        );
+
+        // A fireworks-native id pinned to OpenRouter by prefix cannot run.
+        resolve_provider_and_model(
+            "openrouter/accounts/fireworks/models/llama-v3p1-70b-instruct",
+            &Provider::Bedrock,
+        )
+        .expect_err("a fireworks-native id must not be sent to OpenRouter");
+
+        // Unprefixed, that same id resolves to Fireworks on its shape alone.
+        let (prov, _) = resolved(
+            "accounts/fireworks/models/llama-v3p1-70b-instruct",
+            &Provider::OpenRouter,
+        );
+        assert_eq!(prov, Provider::Fireworks);
+    }
+
+    /// #6114: an id whose shape names no provider still uses the default —
+    /// inference narrows the fall-through, it does not remove it.
+    #[test]
+    fn ambiguous_bare_id_still_uses_the_default_provider() {
+        for default in [Provider::Bedrock, Provider::OpenRouter, Provider::Fireworks] {
+            let (prov, model) = resolved("claude-opus-4-5-20260101", &default);
+            assert_eq!(prov, default, "an ambiguous id must keep the default");
+            assert_eq!(model, "claude-opus-4-5-20260101");
+        }
+    }
+
     #[test]
     fn provider_factory_empty_bedrock_prefix_uses_bare_empty_string() {
         // Edge case: "bedrock/" with nothing after the slash.
-        let (prov, model) = resolve_provider_and_model("bedrock/", &Provider::OpenRouter);
+        let (prov, model) = resolved("bedrock/", &Provider::OpenRouter);
         assert_eq!(prov, Provider::Bedrock);
         assert_eq!(model, "");
     }
@@ -520,7 +674,7 @@ mod tests {
             ),
         ];
         for (candidate, (exp_prov, exp_model)) in candidates.iter().zip(expected.iter()) {
-            let (prov, model) = resolve_provider_and_model(candidate, &Provider::Bedrock);
+            let (prov, model) = resolved(candidate, &Provider::Bedrock);
             assert_eq!(prov, *exp_prov, "provider mismatch for {candidate}");
             assert_eq!(model, *exp_model, "model mismatch for {candidate}");
         }
