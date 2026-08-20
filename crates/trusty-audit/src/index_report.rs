@@ -67,6 +67,15 @@ pub enum Producer {
     Sweep,
     /// `trusty-audit render`, writing its `--out` directory (`crate::rerender`).
     Render,
+    /// `trusty-audit package`, writing `reports/index.md` INTO the return zip
+    /// (`crate::package`).
+    ///
+    /// Why its own variant rather than copying the sweep's `out/index.md` in:
+    /// the package is a different directory. It carries only the repositories
+    /// that produced a report, it carries no `logs/`, and its `extract/` sits
+    /// beside `reports/` rather than beside `out/`. A copied index would link
+    /// every failed repository's log into a file the archive does not contain.
+    Package,
 }
 
 /// One tool that produced these reports, and how its version was learned.
@@ -117,7 +126,23 @@ pub struct IndexEntry {
     /// It need not exist: a repository whose child never started has none, and
     /// the entry is then listed with its failure instead of with links.
     pub dir: PathBuf,
+    /// The files to link, in the order they should be read.
+    ///
+    /// Why: supplied by the producer rather than read out of [`Self::dir`] here,
+    /// because one producer's files are not on this filesystem at all — the
+    /// return package's index links zip MEMBERS (`crate::package`), which exist
+    /// only inside an archive being written. A `read_dir` in the renderer would
+    /// have made that index impossible to build without staging the zip on disk
+    /// first. [`files_in`] is what the two directory producers use.
+    ///
+    /// What: paths sharing a root with the directory the index is rendered
+    /// against, so [`render`] can express each one relative to it.
+    pub files: Vec<PathBuf>,
     /// The child's combined output, when this run kept one.
+    ///
+    /// `None` where no log travels with the reports — the return package carries
+    /// none, and a link into a file that is not in the archive is worse than no
+    /// link at all.
     pub log: Option<PathBuf>,
     /// Why this unit produced no report, or `None` when it produced one.
     pub failure: Option<String>,
@@ -218,10 +243,11 @@ pub fn write(report: &IndexReport, dir: &Path) -> Result<(), AuditError> {
 
 /// The index's Markdown, with every link relative to `dir`.
 ///
-/// What: reads `dir` to list each entry's files, so a link is only written for a
-/// file that is there — a report the child never wrote is named as missing
-/// rather than linked into a 404. The listing is sorted, so two runs over the
-/// same directory produce the same order.
+/// What: pure — every path it links comes from [`IndexEntry::files`], which the
+/// producer filled. That is what lets `crate::package` render an index over zip
+/// members that exist nowhere on disk, and it is why a link is only ever written
+/// for a file the producer confirmed. `dir` is the directory the index itself
+/// lands in, which every link is expressed relative to.
 /// Test: `super::index_tests`.
 pub fn render(report: &IndexReport, dir: &Path) -> String {
     let mut out = String::new();
@@ -317,15 +343,14 @@ fn reports(report: &IndexReport, dir: &Path, out: &mut String) {
         if let Some(reason) = &entry.failure {
             out.push_str(&format!("No report — {reason}\n\n"));
         }
-        let files = files_in(&entry.dir);
-        if files.is_empty() && entry.failure.is_none() {
+        if entry.files.is_empty() && entry.failure.is_none() {
             out.push_str(&format!(
                 "No files at `{}` — the run recorded this one as finished, so the \
                  directory has been emptied or moved since.\n\n",
                 relative(dir, &entry.dir)
             ));
         }
-        for file in &files {
+        for file in &entry.files {
             out.push_str(&format!("- {}\n", link(dir, file)));
         }
         // Only a log that is actually there — a link into a file the run never
@@ -359,6 +384,8 @@ impl Producer {
             (Producer::Sweep, _) => "repositories",
             (Producer::Render, 1) => "report",
             (Producer::Render, _) => "reports",
+            (Producer::Package, 1) => "repository",
+            (Producer::Package, _) => "repositories",
         }
     }
 
@@ -376,6 +403,12 @@ impl Producer {
                  re-render's own total. Each per-report figure includes the indexing and \
                  measurement of any checkout present on this machine, which runs before \
                  the child."
+            }
+            Producer::Package => {
+                "Wall clock the sweep measured around each repository's `tga audit` child. \
+                 The total is the SUM of those, not the sweep's own wall clock — packaging \
+                 is a separate step from collection and reads the sweep's record rather \
+                 than having timed it."
             }
         }
     }
@@ -421,6 +454,31 @@ impl Producer {
                     "the combined stdout and stderr of that report's `trusty-review report` child, with the credential removed",
                 ),
             ],
+            // Written relative to `reports/`, where this index sits, so the
+            // table and the links above it read in one frame.
+            Producer::Package => vec![
+                ("index.md", "this file"),
+                (
+                    "<NN>-<repo>/manifest.toml",
+                    "what `tga audit` collected for that repository — the interface `trusty-audit render` re-renders the report from",
+                ),
+                (
+                    "<NN>-<repo>/*.md",
+                    "the rendered report and its companion documents, such as the authorship analysis",
+                ),
+                (
+                    "../extract/<NN>-<repo>.db",
+                    "the `tga` extract database built from that repository's git history — metrics, never file contents",
+                ),
+                (
+                    "../README.md",
+                    "what this package covers, what it does not, and what to do with it",
+                ),
+                (
+                    "../package.toml",
+                    "the engagement's labels, the tool versions, and per-repository coverage in machine-readable form",
+                ),
+            ],
         }
     }
 
@@ -437,6 +495,12 @@ impl Producer {
                  unchanged — nothing was written into it. The executive summary and top \
                  risks are model-authored, so this render words them differently from the \
                  original over the same figures.\n"
+            }
+            Producer::Package => {
+                "A repository listed above with no report is not in this package — \
+                 `../README.md` and `../package.toml` name every target it does not \
+                 cover. No logs travel with the package; they stay on the machine that \
+                 ran the audit, where `out/index.md` links them.\n"
             }
         }
     }
@@ -455,9 +519,10 @@ impl IndexEntry {
 
 /// The files directly in `dir`, sorted, or an empty list when it cannot be read.
 ///
-/// Not recursive and never through a symlink: this is a reading aid, and a link
-/// out of the directory would point the reader at a file the run did not write.
-fn files_in(dir: &Path) -> Vec<PathBuf> {
+/// What the two directory producers fill [`IndexEntry::files`] with. Not
+/// recursive and never through a symlink: this is a reading aid, and a link out
+/// of the directory would point the reader at a file the run did not write.
+pub fn files_in(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -544,13 +609,20 @@ fn human(d: Duration) -> String {
 /// [`AuditError::WorkDir`] when `out/index.md` cannot be written. The tool
 /// record is read fail-open: a missing or unreadable one leaves every version
 /// stated as not recorded rather than failing a finished sweep.
-pub fn write_sweep(
-    work: &crate::workdir::WorkDir,
-    report: &crate::run::RunReport,
-    total: Duration,
-) -> Result<(), AuditError> {
+/// The pinned four and the versions this working directory installed them at.
+///
+/// Why: shared by the sweep's index and the return package's, which state the
+/// same fact from the same record — a second lookup would be a second place for
+/// "not recorded" to be worded differently.
+/// What: one row per [`crate::tools::RequiredTool`], in that type's own order,
+/// so a tool missing from the record is a stated row rather than an absent one.
+/// The record is read fail-open: an unreadable one yields four stated gaps, not
+/// a failed sweep.
+/// Test: `crate::run::run_tests::a_sweep_writes_an_index_beside_its_reports`,
+/// `crate::package::package_tests::the_package_carries_an_index_of_its_reports`.
+pub fn recorded_tools(work: &crate::workdir::WorkDir) -> Vec<ToolVersion> {
     let recorded = crate::tools::read_record(work).unwrap_or_default();
-    let tools = crate::tools::RequiredTool::ALL
+    crate::tools::RequiredTool::ALL
         .iter()
         .map(|tool| {
             let name = tool.crate_name();
@@ -564,12 +636,21 @@ pub fn write_sweep(
                 ),
             }
         })
-        .collect();
+        .collect()
+}
+
+pub fn write_sweep(
+    work: &crate::workdir::WorkDir,
+    report: &crate::run::RunReport,
+    total: Duration,
+) -> Result<(), AuditError> {
+    let tools = recorded_tools(work);
     let entries = report
         .repos
         .iter()
         .map(|run| IndexEntry {
             name: run.repo.name.clone(),
+            files: files_in(&run.output),
             dir: run.output.clone(),
             log: Some(run.log.clone()),
             failure: match &run.result {
@@ -624,6 +705,7 @@ pub fn write_render(
         .iter()
         .map(|rendered| IndexEntry {
             name: rendered.name.clone(),
+            files: files_in(&rendered.output),
             dir: rendered.output.clone(),
             log: Some(rendered.log.clone()),
             failure: match &rendered.result {
@@ -651,9 +733,12 @@ pub fn write_render(
 mod index_tests {
     use super::*;
 
+    /// An entry whose files are whatever is on disk under `dir`, which is how
+    /// both directory producers fill one.
     fn entry(name: &str, dir: PathBuf) -> IndexEntry {
         IndexEntry {
             name: name.to_owned(),
+            files: files_in(&dir),
             dir,
             log: None,
             failure: None,
