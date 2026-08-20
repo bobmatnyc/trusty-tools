@@ -65,7 +65,7 @@ async fn indexed_files(state: &Arc<SearchAppState>, id: &str) -> Vec<String> {
         .get(&IndexId::new(id.to_string()))
         .expect("index must be resident");
     let indexer = handle.indexer.read().await;
-    let (_total, chunks) = indexer.enumerate_chunks(0, 1_000).await;
+    let (_total, chunks) = indexer.enumerate_chunks(0, 1_000).await.unwrap();
     let mut files: Vec<String> = chunks.into_iter().map(|c| c.file).collect();
     files.sort();
     files.dedup();

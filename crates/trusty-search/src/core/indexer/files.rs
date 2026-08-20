@@ -8,7 +8,8 @@
 //! Test: covered by `test_remove_chunk_removes_from_results`,
 //! `test_entity_exact_match_*` in `indexer::tests`.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use std::sync::atomic::Ordering;
 
 use crate::core::chunker::RawChunk;
 use crate::core::entity::EntityType;
@@ -80,13 +81,40 @@ impl CodeIndexer {
     /// `(total_chunks, page)` so the caller can serialize the `total` field
     /// without a second pass.
     /// Test: `test_enumerate_chunks_paginates_stable_order` indexes a couple of
-    /// files, pages through them, and asserts no overlap and full coverage.
-    pub async fn enumerate_chunks(&self, offset: usize, limit: usize) -> (usize, Vec<CodeChunk>) {
+    /// files, pages through them, and asserts no overlap and full coverage;
+    /// `enumerate_chunks_errors_when_rehydrate_did_not_commit` covers the
+    /// #6043 refusal.
+    ///
+    /// Errors when the in-memory map is not a view of the corpus — see the
+    /// guard below.
+    pub async fn enumerate_chunks(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(usize, Vec<CodeChunk>)> {
         self.ensure_chunks_loaded().await;
+        // #6043: the map this page is sliced from is a CACHE, not the corpus.
+        // `ensure_chunks_loaded` waits on a bounded budget and returns whether
+        // or not the detached rehydrate committed, and the rehydrate task
+        // reports a redb read failure only to the log. `chunks_evicted` stays
+        // set on every path that did not commit, so reading it here is the one
+        // place the caller can tell "this index holds nothing" apart from
+        // "this map has not been filled". Reporting `chunks.len()` as `total`
+        // across that gap is what published `total: 0` for an index holding
+        // 50,929 chunks and let trusty-analyze score an empty corpus.
+        if self.chunks_evicted.load(Ordering::Relaxed) {
+            anyhow::bail!(
+                "index '{}': the in-memory chunk map was evicted and has not been \
+                 repopulated — the durable corpus read either failed or is still in \
+                 flight, so enumerating it now would report a partial corpus as the \
+                 whole one (see #6043, #5917). Retry once the rehydrate commits.",
+                self.index_id
+            );
+        }
         let chunks = self.chunks.read().await;
         let total = chunks.len();
         if limit == 0 || offset >= total {
-            return (total, Vec::new());
+            return Ok((total, Vec::new()));
         }
         let mut ordered: Vec<&RawChunk> = chunks.values().collect();
         ordered.sort_by(|a, b| {
@@ -101,7 +129,7 @@ impl CodeIndexer {
             .iter()
             .map(|raw| raw_to_code_chunk(raw, 0.0, "enumerate", None, &root))
             .collect();
-        (total, page)
+        Ok((total, page))
     }
 
     /// Cursor-paginate the chunk corpus in ascending `chunk_id` order, doing an
@@ -126,34 +154,55 @@ impl CodeIndexer {
     /// `after`. `next_cursor` is `Some(last_id)` when a full `limit`-sized page
     /// was returned (more rows may follow) and `None` once the page is short
     /// (end reached) — so a client loops until `next_cursor` is `None`.
-    /// Test: `test_enumerate_chunks_after_cursor_pages_via_redb` and
-    /// `test_enumerate_chunks_after_cursor_in_memory_fallback`.
+    /// Test: `test_enumerate_chunks_after_cursor_pages_via_redb`,
+    /// `test_enumerate_chunks_after_cursor_in_memory_fallback`, and
+    /// `cursor_page_read_failure_is_an_error_not_an_empty_page` (#6043).
+    ///
+    /// Errors when the durable corpus cannot be read — see the #6043 note on
+    /// the failure arms below.
     pub async fn enumerate_chunks_after(
         &self,
         after: Option<&str>,
         limit: usize,
-    ) -> (usize, Vec<CodeChunk>, Option<String>) {
+    ) -> Result<(usize, Vec<CodeChunk>, Option<String>)> {
         let root = self.root_path.clone();
         // Durable path: indexed seek over redb, no full-corpus materialization.
         if let Some(corpus) = self.corpus.clone() {
-            let total = corpus.chunk_count().unwrap_or(0);
+            // #6043: the count and the rows must fail together. Reading the
+            // count through `unwrap_or(0)` while the rows below returned an
+            // empty page produced the worst of both — `total: 50929` beside
+            // zero rows and `next_cursor: null`, which a paging client reads
+            // as "the corpus is exhausted", not as "the read failed".
+            let total = corpus
+                .chunk_count()
+                .with_context(|| format!("index '{}': chunk count read failed", self.index_id))?;
             if limit == 0 || total == 0 {
-                return (total, Vec::new(), None);
+                return Ok((total, Vec::new(), None));
             }
             let after_owned = after.map(str::to_string);
             let raws = tokio::task::spawn_blocking(move || {
                 corpus.chunks_after(after_owned.as_deref(), limit)
             })
             .await;
+            // #6043: both arms used to `warn` and return an empty page with
+            // `next_cursor: None`. That is indistinguishable from a clean end
+            // of corpus, so a caller walking the cursor stopped early and
+            // treated a failed read as a complete one. A redb corpus that has
+            // entered its "Previous I/O error occurred" state fails every
+            // range read for the process's lifetime, which is how an index
+            // holding 50,929 chunks exported zero of them at HTTP 200.
             let raws = match raws {
                 Ok(Ok(raws)) => raws,
                 Ok(Err(e)) => {
-                    tracing::warn!("index '{}': cursor page read failed ({e})", self.index_id);
-                    return (total, Vec::new(), None);
+                    return Err(e).with_context(|| {
+                        format!("index '{}': cursor page read failed", self.index_id)
+                    });
                 }
                 Err(e) => {
-                    tracing::warn!("index '{}': cursor page task panicked ({e})", self.index_id);
-                    return (total, Vec::new(), None);
+                    return Err(anyhow::Error::new(e).context(format!(
+                        "index '{}': cursor page task panicked",
+                        self.index_id
+                    )));
                 }
             };
             let next_cursor = if raws.len() == limit {
@@ -165,7 +214,7 @@ impl CodeIndexer {
                 .iter()
                 .map(|raw| raw_to_code_chunk(raw, 0.0, "enumerate", None, &root))
                 .collect();
-            return (total, page, next_cursor);
+            return Ok((total, page, next_cursor));
         }
 
         // In-memory fallback (no durable corpus): reproduce the redb path's
@@ -178,7 +227,7 @@ impl CodeIndexer {
         let chunks = self.chunks.read().await;
         let total = chunks.len();
         if limit == 0 || total == 0 {
-            return (total, Vec::new(), None);
+            return Ok((total, Vec::new(), None));
         }
         let mut ordered: Vec<&RawChunk> = chunks.values().collect();
         ordered.sort_by(|a, b| a.id.cmp(&b.id));
@@ -197,7 +246,7 @@ impl CodeIndexer {
             .iter()
             .map(|raw| raw_to_code_chunk(raw, 0.0, "enumerate", None, &root))
             .collect();
-        (total, page, next_cursor)
+        Ok((total, page, next_cursor))
     }
 
     /// Run an HNSW-only similarity search against a precomputed embedding,

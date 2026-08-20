@@ -812,7 +812,7 @@ async fn test_enumerate_chunks_paginates_stable_order() {
         .unwrap();
 
     // Full enumeration: sorted by (file, start_line).
-    let (total_all, all) = idx.enumerate_chunks(0, 100).await;
+    let (total_all, all) = idx.enumerate_chunks(0, 100).await.unwrap();
     assert_eq!(total_all, 4);
     let ids: Vec<_> = all.iter().map(|c| c.id.as_str()).collect();
     assert_eq!(
@@ -821,8 +821,8 @@ async fn test_enumerate_chunks_paginates_stable_order() {
     );
 
     // Page 1 (offset=0, limit=2) + Page 2 (offset=2, limit=2) cover all.
-    let (total_p1, page1) = idx.enumerate_chunks(0, 2).await;
-    let (total_p2, page2) = idx.enumerate_chunks(2, 2).await;
+    let (total_p1, page1) = idx.enumerate_chunks(0, 2).await.unwrap();
+    let (total_p2, page2) = idx.enumerate_chunks(2, 2).await.unwrap();
     assert_eq!(total_p1, 4);
     assert_eq!(total_p2, 4);
     assert_eq!(page1.len(), 2);
@@ -835,12 +835,12 @@ async fn test_enumerate_chunks_paginates_stable_order() {
     assert_eq!(combined, ids);
 
     // Offset past the end returns empty, but total is preserved.
-    let (total_end, end) = idx.enumerate_chunks(10, 5).await;
+    let (total_end, end) = idx.enumerate_chunks(10, 5).await.unwrap();
     assert_eq!(total_end, 4);
     assert!(end.is_empty());
 
     // limit=0 returns empty.
-    let (total_z, z) = idx.enumerate_chunks(0, 0).await;
+    let (total_z, z) = idx.enumerate_chunks(0, 0).await.unwrap();
     assert_eq!(total_z, 4);
     assert!(z.is_empty());
 }

@@ -619,7 +619,7 @@ async fn enumerate_chunks_returns_resolved_absolute_paths() {
         .await
         .unwrap();
 
-    let (total, page) = idx.enumerate_chunks(0, 100).await;
+    let (total, page) = idx.enumerate_chunks(0, 100).await.unwrap();
     assert!(total > 0, "expected at least one chunk");
     for chunk in &page {
         assert!(

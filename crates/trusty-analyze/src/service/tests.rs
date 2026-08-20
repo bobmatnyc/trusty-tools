@@ -622,7 +622,10 @@ async fn spawn_mixed_corpus_search() -> String {
             move |axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>| {
                 let body = body.clone();
                 async move {
-                    let first = q.get("offset").map(|o| o == "0").unwrap_or(true);
+                    let first = q
+                        .get("after")
+                        .map(|c: &String| c.is_empty())
+                        .unwrap_or(true);
                     axum::response::Json(if first {
                         body
                     } else {
@@ -821,7 +824,7 @@ async fn spawn_chunk_search_with_corpus() -> String {
         axum::routing::get(
             |q: axum::extract::Query<HashMap<String, String>>| async move {
                 let q = q.0;
-                if q.get("offset").map(String::as_str) != Some("0") {
+                if !q.get("after").map(String::as_str).unwrap_or("").is_empty() {
                     return axum::response::Json(serde_json::json!({ "chunks": [] }));
                 }
                 let bodies = [
