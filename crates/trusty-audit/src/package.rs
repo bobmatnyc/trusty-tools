@@ -7,8 +7,9 @@
 //! email. This module reduces them to one file and prints its path.
 //!
 //! What: [`assemble`] collects what a completed sweep produced, generates the
-//! two files that explain it, and writes a single zip. [`ReturnPackage`] is what
-//! a front end renders — the path, every member, and every repository left out.
+//! three files that explain it ([`generated`]), and writes a single zip.
+//! [`ReturnPackage`] is what a front end renders — the path, every member, and
+//! every repository left out.
 //!
 //! ## Unencrypted, deliberately
 //!
@@ -84,13 +85,10 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
-
 use crate::config::EngagementConfig;
 use crate::error::AuditError;
 use crate::run::github_issues::{self, GithubAccess};
 use crate::run::{RepoRun, RunReport};
-use crate::tools;
 use crate::workdir::{Area, WorkDir};
 
 // #5862: adding `AuditError::MissingExtractDatabase` pushed this file one line
@@ -99,6 +97,14 @@ use crate::workdir::{Area, WorkDir};
 // `Archive` and `start`, both of which a child module sees without any
 // visibility change — so it moved rather than anything else splitting.
 mod credential_scan;
+
+// #6080: the three members this crate generates rather than collects — the
+// README, `package.toml`, and the new `reports/index.md`. Split out when the
+// index pushed this file past the 500-SLOC production cap. This file decides
+// what goes into the archive; that one writes the files describing the result.
+mod generated;
+
+use generated::{Generated, exclusions, render_index, render_metadata, render_readme};
 
 /// Filename of the return package, when the recipient does not choose one.
 pub const PACKAGE_FILE_NAME: &str = "audit-return-package.zip";
@@ -111,6 +117,16 @@ pub const README_ENTRY: &str = "README.md";
 
 /// Directory inside the zip holding one subdirectory per audited repository.
 pub const REPORTS_PREFIX: &str = "reports";
+
+/// The generated member that explains what the reports are and links to them.
+///
+/// Why: inside `reports/` rather than at the package root, because that is where
+/// the sweep's own index sits relative to the report directories — `out/` maps
+/// to `reports/`, so `<stem>/report.md` and `../extract/<stem>.db` resolve
+/// identically in both layouts. At the root it would need a different frame from
+/// every other index this crate writes (#6080).
+/// Test: `super::package_tests::the_package_index_links_resolve_inside_the_zip`.
+pub const INDEX_ENTRY: &str = "reports/index.md";
 
 /// Directory inside the zip holding the tga extract databases (#5479).
 pub const EXTRACT_PREFIX: &str = "extract";
@@ -163,57 +179,6 @@ pub struct ReturnPackage {
     /// `unattempted` — a repository that never cloned reaches the sweep's
     /// records nowhere, so it can only arrive that way (#5824).
     pub excluded: Vec<String>,
-}
-
-/// The generated `package.toml`.
-///
-/// Why: #5478's config is what arrives; this is the metadata half of it that
-/// goes back. It is a SEPARATE type from [`EngagementConfig`] rather than a
-/// redacted copy, so there is no field for the credential to be carried in and
-/// no `skip_serializing` a later edit could remove.
-/// What: scalars first, then the two table arrays — TOML requires that order.
-/// `not_attempted` is a plain string array, so it sits with the scalars.
-#[derive(Debug, Serialize)]
-struct PackageMetadata {
-    generated_by: String,
-    client: Option<String>,
-    engagement: Option<String>,
-    instructions: String,
-    repositories_audited: usize,
-    repositories_excluded: usize,
-    /// Targets that never reached the sweep, so `repositories` cannot list them
-    /// and `repositories_excluded` cannot count them (#5824).
-    ///
-    /// A repository that failed to clone and a registered board are both here.
-    /// Kept separate from `repositories_excluded` rather than folded into it,
-    /// because a board is not a repository and counting one as an excluded
-    /// repository would overstate what the sweep was asked to do. Always
-    /// emitted, so an empty array is a positive claim of full coverage rather
-    /// than an absent key a reader has to interpret.
-    not_attempted: Vec<String>,
-    tools: Vec<ToolVersion>,
-    repositories: Vec<PackagedRepo>,
-}
-
-/// One tool of the pinned triple that produced the reports (#5495).
-///
-/// The recorded binary PATH is deliberately absent: it names a directory on the
-/// recipient's machine and says nothing about provenance the version does not.
-#[derive(Debug, Serialize)]
-struct ToolVersion {
-    name: String,
-    version: String,
-}
-
-/// One repository's coverage, as the package states it.
-#[derive(Debug, Serialize)]
-struct PackagedRepo {
-    name: String,
-    audited: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    gaps: Vec<String>,
 }
 
 /// Build the return package from what a completed sweep produced.
@@ -364,14 +329,19 @@ pub fn assemble(
     // #5824: the sweep's own failures, then the targets that never reached it.
     let mut excluded = exclusions(report);
     excluded.extend(unattempted.iter().cloned());
-    let metadata = render_metadata(work, config, report, &audited, unattempted)?;
-    let readme = render_readme(config, &audited, &excluded);
+    let generated = Generated {
+        metadata: render_metadata(work, config, report, &audited, unattempted)?,
+        readme: render_readme(config, &audited, &excluded),
+        // #6080: built from `collected`, so the index links the members that are
+        // actually going into this archive rather than the files the sweep left
+        // on disk. Before `fill_archive`, because it is one of the members.
+        index: render_index(work, report, &collected),
+    };
 
     write_archive(
         destination,
         config,
-        readme,
-        metadata,
+        generated,
         collected,
         excluded,
         github_token,
@@ -558,111 +528,6 @@ fn collect_extract(
     Ok(())
 }
 
-/// One line per repository the package does not cover.
-fn exclusions(report: &RunReport) -> Vec<String> {
-    report
-        .failures()
-        .map(|run| match &run.result {
-            crate::run::RepoResult::Failed { reason } => {
-                format!("{} is not in this package — {reason}", run.repo.name)
-            }
-            crate::run::RepoResult::Succeeded => unreachable!("failures() yields only failures"),
-        })
-        .collect()
-}
-
-fn render_metadata(
-    work: &WorkDir,
-    config: &EngagementConfig,
-    report: &RunReport,
-    audited: &[&RepoRun],
-    unattempted: &[String],
-) -> Result<String, AuditError> {
-    let tools = tools::read_record(work)?
-        .into_iter()
-        .map(|t| ToolVersion {
-            name: t.crate_name,
-            version: t.version,
-        })
-        .collect();
-    let repositories = report
-        .repos
-        .iter()
-        .map(|run| PackagedRepo {
-            name: run.repo.name.clone(),
-            audited: run.result.succeeded(),
-            reason: match &run.result {
-                crate::run::RepoResult::Failed { reason } => Some(reason.clone()),
-                crate::run::RepoResult::Succeeded => None,
-            },
-            gaps: run.gaps.clone(),
-        })
-        .collect();
-    let metadata = PackageMetadata {
-        generated_by: format!("trusty-audit {}", env!("CARGO_PKG_VERSION")),
-        client: config.client.clone(),
-        engagement: config.engagement.clone(),
-        instructions: config.instructions.clone(),
-        repositories_audited: audited.len(),
-        repositories_excluded: report.repos.len() - audited.len(),
-        not_attempted: unattempted.to_vec(),
-        tools,
-        repositories,
-    };
-    toml::to_string_pretty(&metadata).map_err(|e| AuditError::Package {
-        path: PathBuf::from(METADATA_ENTRY),
-        source: std::io::Error::other(e),
-    })
-}
-
-/// The page the recipient reads before sending the file.
-///
-/// The content claim is #5479's, worded as that issue requires: "no file
-/// content, diffs, patches, hunks, or blobs" — never "no code", because
-/// free-text columns carry whatever a human pasted into them.
-fn render_readme(config: &EngagementConfig, audited: &[&RepoRun], excluded: &[String]) -> String {
-    let mut out = String::from(
-        "# Audit return package\n\n\
-         This is the deliverable to send back. It is a plain zip with **no encryption \
-         and no password** — open it and read exactly what you are about to send.\n\n\
-         ## What is inside\n\n\
-         | Path | Contents |\n|---|---|\n\
-         | `README.md` | this file |\n\
-         | `package.toml` | which repositories were audited, at which tool versions |\n\
-         | `reports/<repo>/` | the rendered report and manifest for one repository |\n\
-         | `extract/<repo>.db` | the tga extract database those reports were computed from |\n\n\
-         ## What is not inside\n\n\
-         - **No credential.** The OpenRouter key in your engagement config never \
-         reaches this package; every file was scanned for it while the zip was written.\n\
-         - **No source code as such.** The extract database holds no file content, \
-         diffs, patches, hunks, or blobs. It does hold free-text fields — commit \
-         messages, pull-request and work-item titles, classification notes — so a \
-         snippet a person pasted into one of those is in it.\n\
-         - **No signature yet.** Content signing is separate work (#5481); until it \
-         lands nothing here proves the package was not altered after it was written.\n\n",
-    );
-    if let Some(client) = &config.client {
-        out.push_str(&format!("Engagement: {client}\n\n"));
-    }
-    out.push_str(&format!(
-        "## Coverage\n\n{} audited.\n",
-        count_repos(audited.len())
-    ));
-    if excluded.is_empty() {
-        out.push_str("\nEvery repository the sweep was asked to audit is in this package.\n");
-    } else {
-        out.push_str("\nNot in this package:\n\n");
-        for line in excluded {
-            out.push_str(&format!("- {line}\n"));
-        }
-    }
-    out
-}
-
-fn count_repos(n: usize) -> String {
-    format!("{n} {}", if n == 1 { "repository" } else { "repositories" })
-}
-
 /// Write the archive beside `destination`, then rename it into place.
 ///
 /// The temporary file is what makes the two refusals meaningful: a credential
@@ -671,8 +536,7 @@ fn count_repos(n: usize) -> String {
 fn write_archive(
     destination: &Path,
     config: &EngagementConfig,
-    readme: String,
-    metadata: String,
+    generated: Generated,
     collected: Vec<(String, PathBuf)>,
     excluded: Vec<String>,
     github_token: Option<&str>,
@@ -684,14 +548,7 @@ fn write_archive(
         })?;
     }
     let temporary = destination.with_extension("zip.part");
-    let result = fill_archive(
-        &temporary,
-        config,
-        readme,
-        metadata,
-        collected,
-        github_token,
-    );
+    let result = fill_archive(&temporary, config, generated, collected, github_token);
     let mut files = match result {
         Ok(files) => files,
         Err(e) => {
@@ -727,8 +584,7 @@ fn write_archive(
 fn fill_archive(
     temporary: &Path,
     config: &EngagementConfig,
-    readme: String,
-    metadata: String,
+    generated: Generated,
     collected: Vec<(String, PathBuf)>,
     github_token: Option<&str>,
 ) -> Result<Vec<PackagedFile>, AuditError> {
@@ -737,9 +593,13 @@ fn fill_archive(
         source,
     })?;
     let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(file));
-    let mut files = Vec::with_capacity(collected.len() + 2);
+    let mut files = Vec::with_capacity(collected.len() + 3);
 
-    for (entry, text) in [(README_ENTRY, readme), (METADATA_ENTRY, metadata)] {
+    for (entry, text) in [
+        (README_ENTRY, generated.readme),
+        (METADATA_ENTRY, generated.metadata),
+        (INDEX_ENTRY, generated.index),
+    ] {
         start(&mut zip, entry, text.len() as u64, temporary)?;
         zip.write_all(text.as_bytes())
             .map_err(|source| AuditError::Package {
@@ -874,7 +734,7 @@ trusty-review = "0.15.1"
 
     fn install_record(work: &WorkDir) {
         std::fs::write(
-            tools::record_path(work),
+            crate::tools::record_path(work),
             "[[tools]]\ncrate_name = \"tga\"\nversion = \"2.9.4\"\nbinary = \"/w/tools/tga\"\n",
         )
         .expect("write record");
@@ -925,6 +785,143 @@ trusty-review = "0.15.1"
         }
         assert!(package.total_bytes > 0);
         assert!(package.excluded.is_empty());
+    }
+
+    /// 🔴 #6080: the RECIPIENT is the primary audience for an
+    /// explain-the-contents page, and the zip is what they get. It carries one,
+    /// with the versions responsible and one section per repository.
+    ///
+    /// Against `cc48e943d` this fails on the first assertion: the index existed
+    /// only in the sweep's working directory, which never leaves the machine
+    /// that ran the audit.
+    #[test]
+    fn the_package_carries_an_index_of_its_reports() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let mut run = audited(&work, "00-acme-api", "acme-api");
+        run.duration_ms = Some(752_000);
+        let report = RunReport::of(vec![run]);
+        let destination = default_destination(&work);
+
+        let package =
+            assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+
+        assert!(
+            entries(&destination).contains(&INDEX_ENTRY.to_owned()),
+            "{:?}",
+            entries(&destination)
+        );
+        assert!(
+            package.files.iter().any(|f| f.entry == INDEX_ENTRY),
+            "the index must be reported as a member: {:?}",
+            package.files
+        );
+        let index = read_entry(&destination, INDEX_ENTRY);
+        assert!(index.contains("Reports: 1 of 1 repository"), "{index}");
+        assert!(
+            index.contains("| `tga` | 2.9.4 | recorded at install |"),
+            "{index}"
+        );
+        assert!(index.contains("### acme-api"), "{index}");
+        // The sweep's measurement travels with the package.
+        assert!(index.contains("| acme-api | 12m 32s |"), "{index}");
+        // And no log is offered, because the archive carries none.
+        assert!(!index.contains("- log:"), "{index}");
+    }
+
+    /// 🔴 Every link the packaged index writes must name a member that is
+    /// actually in the archive. `reports/index.md` is one directory deep, so a
+    /// report resolves as `<stem>/…` and the extract database as `../extract/…`
+    /// — and a frame error in either direction is a link the recipient cannot
+    /// follow.
+    #[test]
+    fn the_package_index_links_resolve_inside_the_zip() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
+        let destination = default_destination(&work);
+        assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+
+        let index = read_entry(&destination, INDEX_ENTRY);
+        let members = entries(&destination);
+        let targets = markdown_link_targets(&index);
+        assert!(!targets.is_empty(), "the index linked nothing: {index}");
+        for target in &targets {
+            let resolved = resolve_against(REPORTS_PREFIX, target);
+            assert!(
+                members.contains(&resolved),
+                "the index links `{target}`, which resolves to `{resolved}` — \
+                 not a member of the archive: {members:?}"
+            );
+        }
+        // The two frames that matter, named rather than only inferred.
+        assert!(
+            targets.contains(&"00-acme-api/report.md".to_owned()),
+            "{targets:?}"
+        );
+        assert!(
+            targets.contains(&"../extract/00-acme-api.db".to_owned()),
+            "{targets:?}"
+        );
+    }
+
+    /// Every `](…)` destination in `text`, ignoring the angle-bracket form,
+    /// which nothing in a packaged index produces (the stems are sanitized).
+    fn markdown_link_targets(text: &str) -> Vec<String> {
+        text.lines()
+            .filter(|line| line.starts_with("- ["))
+            .filter_map(|line| {
+                let start = line.find("](")? + 2;
+                let end = line[start..].find(')')? + start;
+                Some(line[start..end].to_owned())
+            })
+            .collect()
+    }
+
+    /// A zip entry path, resolving `../` against the directory `base`.
+    fn resolve_against(base: &str, target: &str) -> String {
+        let mut parts: Vec<&str> = base.split('/').collect();
+        for segment in target.split('/') {
+            match segment {
+                ".." => {
+                    parts.pop();
+                }
+                "." => {}
+                other => parts.push(other),
+            }
+        }
+        parts.join("/")
+    }
+
+    /// A repository the package does not cover is still NAMED in its index, with
+    /// the reason — the recipient should not have to diff the report directories
+    /// against the README to learn one is missing.
+    #[test]
+    fn the_package_index_names_the_repository_it_does_not_cover() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let report = RunReport::of(vec![
+            audited(&work, "00-acme-api", "acme-api"),
+            failed(&work, "01-acme-web", "acme-web"),
+        ]);
+        let destination = default_destination(&work);
+        assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+
+        let index = read_entry(&destination, INDEX_ENTRY);
+        assert!(index.contains("Reports: 1 of 2 repositories"), "{index}");
+        assert!(index.contains("### acme-web"), "{index}");
+        assert!(
+            index.contains("No report — `tga audit` exited with code 3"),
+            "{index}"
+        );
+        // It must not link a report directory the archive does not carry.
+        assert!(
+            !index.contains("01-acme-web/"),
+            "the index linked an excluded repository's files: {index}"
+        );
     }
 
     /// The transparency premise: a recipient can open it with no password, and
