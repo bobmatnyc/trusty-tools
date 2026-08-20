@@ -39,6 +39,13 @@ use std::time::{Duration, SystemTime};
 
 use tempfile::TempDir;
 
+/// RAII ownership of a real tmux session created by a test (#6116).
+///
+/// The same file backs the `tm` binary's copy of this module — see its own
+/// docs for why one source file serves both targets.
+#[path = "test_tmux_session.rs"]
+pub(crate) mod tmux_session;
+
 /// The loopback port every dead-daemon test points at (#4306, #4415).
 ///
 /// Why this specific port, rather than one the fixture binds for itself: the

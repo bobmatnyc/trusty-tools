@@ -388,23 +388,23 @@ mod tests {
         .unwrap();
 
         let session = format!("tmpm-disclaim-pid-{}", std::process::id());
-        let tmux = |args: &[&str]| Command::new("tmux").args(args).status();
-        let _ = tmux(&["kill-session", "-t", &session]);
-        tmux(&[
-            "new-session",
-            "-d",
-            "-s",
+        // #6116: RAII, so a panic anywhere below still tears the session down.
+        // The pre-emptive `kill-session` this replaces went with it: the name is
+        // process-unique, and a genuine duplicate is better surfaced as a failed
+        // `new-session` than silently killed — that kill used a bare `-t` target,
+        // which prefix-matches and can destroy an unrelated session.
+        let scratch = crate::test_support::tmux_session::ScratchTmuxSession::spawn(
+            "tmux",
             &session,
             &format!("sh {}", drv.display()),
-        ])
-        .unwrap();
+        );
 
         let pid = find_claude_pid_in_tmux(&session, 25, Duration::from_millis(200));
         // Verify the resolved pid IS the claude grandchild WHILE the session is
-        // still alive — kill-session below tears down the whole tree, so this
+        // still alive — dropping the guard tears down the whole tree, so this
         // check must precede cleanup.
         let named_claude = pid.map(process_name_is_claude);
-        let _ = tmux(&["kill-session", "-t", &session]);
+        drop(scratch);
 
         let pid = pid.expect("claude pid must resolve through the disclaim wrapper");
         assert_eq!(
