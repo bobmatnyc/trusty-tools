@@ -62,7 +62,6 @@
 //! Test: `super::run_tests`.
 
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 
 use serde::Serialize;
 
@@ -73,7 +72,7 @@ use crate::inference;
 use crate::manifest::AuditManifest;
 use crate::progress::{Operation, Progress, StageEvent, StageState, UnitOutcome};
 use crate::registry;
-use crate::relay::{Scrubber, tee_and_relay};
+use crate::relay::Scrubber;
 use crate::workdir::{Area, WorkDir};
 
 // #5823: the selection file crossed run.rs past the 500-SLOC production cap, and
@@ -126,11 +125,21 @@ pub(crate) mod approve;
 // and friends stay where every caller already names them.
 mod report;
 
+// #6080: the one child this file starts per repository — the argument vector,
+// the environment it hands over, the timeout and the output pumps. Split out
+// when the run index crossed the 500-SLOC production cap; `run.rs` decides
+// which repositories are audited, `child.rs` runs one.
+mod child;
+
 use approve::approve_for_indexing;
+use child::spawn_tga;
 use pins::{PinnedBinaries, pinned_binaries};
 use verify::verify_output;
 
+// Re-exported at its historical path: `crate::rerender`, `crate::distribute`,
+// `crate::session` and both `cli` submodules name it as `crate::run::…`.
 pub use checkpoint::{PROGRESS_FILE, Recollect, RunProgress, progress_path, read_progress};
+pub use child::ENV_INFERENCE_CREDENTIAL;
 pub use report::{RepoResult, RepoRun, RunOptions, RunReport, RunStatus};
 pub use selection::{SELECTION_FILE, SelectedRepo, load_selection, save_selection, selection_path};
 
@@ -350,6 +359,8 @@ async fn sweep_with_env<F>(
 where
     F: Fn(&str) -> Option<String>,
 {
+    // #6080: the sweep's own wall clock, for the index it writes at the end.
+    let sweep_started = std::time::Instant::now();
     work.create()?;
     let binaries = pinned_binaries(work, &config.tools)?;
     // Resolved once, before any child: a half-named selection is identical for
@@ -451,6 +462,11 @@ where
             github_issues::GithubCredentialRecord::of(&github_access),
         ),
     )?;
+    // #6080: written unconditionally, a one-repository sweep included, and after
+    // the checkpoint so the index describes a run that is on the record. A
+    // partial sweep still gets one — it is where the repositories with no report
+    // are named.
+    crate::index_report::write_sweep(work, &report, sweep_started.elapsed())?;
     Ok(report)
 }
 
@@ -567,6 +583,11 @@ async fn run_one(
     total: usize,
     scrubber: &Scrubber,
 ) -> Result<RepoRun, AuditError> {
+    // #6080: the run index states how long each repository took. Started before
+    // the checkout check rather than around the child alone, so the figure is
+    // the whole cost of this repository — approval, child, grounding — which is
+    // what a reader comparing it against the sweep's total expects.
+    let started = std::time::Instant::now();
     let stem = stem(index, &repo.name);
     let output = work.path(Area::Output).join(&stem);
     let log = work.path(Area::Logs).join(format!("{stem}.log"));
@@ -645,8 +666,14 @@ async fn run_one(
         log,
         gaps,
         resumed: false,
+        duration_ms: Some(millis(started.elapsed())),
         result,
     })
+}
+
+/// A measured span as whole milliseconds, saturating rather than wrapping.
+fn millis(elapsed: std::time::Duration) -> u64 {
+    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Everything that must be true before a child is worth starting.
@@ -741,229 +768,6 @@ fn absolute_checkout(work: &WorkDir, path: &Path) -> PathBuf {
 /// Test: `super::run_tests::a_hung_child_is_killed_and_recorded`, which uses
 /// `sweep_with_timeout` rather than waiting for this value.
 pub const PER_REPO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4 * 60 * 60);
-
-/// Spawn the pinned `tga audit` and turn its exit into a per-repo verdict.
-///
-/// The child inherits nothing it does not need: the four binaries are named by
-/// absolute path or by the variables tga and trusty-review read
-/// (`TRUSTY_SEARCH_BIN`, `TRUSTY_ANALYZE_BIN`, `TRUSTY_REVIEW_BIN`), so nothing
-/// on the operator's `PATH` can be reached instead. The credential goes in the
-/// environment and only there — see the module docs for what that costs.
-///
-/// Alongside the credential the child gets the provider and per-role model ids
-/// from [`crate::inference`]: naming the key never routed anything to
-/// OpenRouter on its own, because `trusty-review` defaults to Bedrock (#5671).
-///
-/// A child that outlives `budget` is killed and recorded as a failure, so one
-/// hung repository costs that repository rather than the whole run.
-///
-/// #5823: the child's streams are PIPED rather than pointed straight at the log
-/// file, and this function tees them — every byte still reaches the log, and the
-/// progress lines the child writes on stderr additionally reach `progress`. The
-/// log is unchanged as a record; what changed is that it is no longer the only
-/// place the output goes.
-///
-/// #5869: `scrubber` filters both streams on the way to the log, because the
-/// credential this function puts in the child's environment can come back out
-/// of it — a provider's 401 body, a `git` remote URL in a clone failure. See
-/// [`crate::relay`] for what that filtering can and cannot promise.
-#[allow(clippy::too_many_arguments)]
-async fn spawn_tga(
-    binaries: &PinnedBinaries,
-    config: &EngagementConfig,
-    inference: &[(&'static str, String)],
-    boards: &boards::Boards,
-    github_access: &github_issues::GithubAccess,
-    config_path: &Path,
-    output: &Path,
-    log: &Path,
-    cwd: &Path,
-    budget: std::time::Duration,
-    progress: &Progress,
-    target: &str,
-    scrubber: &Scrubber,
-) -> Result<RepoResult, AuditError> {
-    let file = std::fs::File::create(log).map_err(|source| AuditError::WorkDir {
-        path: log.to_path_buf(),
-        source,
-    })?;
-    let errors = file.try_clone().map_err(|source| AuditError::WorkDir {
-        path: log.to_path_buf(),
-        source,
-    })?;
-
-    let mut command = tokio::process::Command::new(&binaries.tga);
-    command
-        .arg("--config")
-        .arg(config_path)
-        .arg("audit")
-        .arg("--output")
-        .arg(output)
-        .current_dir(cwd)
-        .env(ENV_INFERENCE_CREDENTIAL, config.openrouter_key.expose())
-        // #5823: ask the child to write its per-stage events where this process
-        // can read them. A child too old to know the variable ignores it, and
-        // the sweep shows the coarse per-repository progress it derives itself.
-        .env(ENV_PROGRESS_RELAY, "1")
-        // #5670: `tga audit` starts trusty-search and indexes each repository
-        // through it. On a recipient's clean machine the pinned copy in
-        // `work/tools/` is the only one there is, so without this the guard falls
-        // through to a PATH lookup and refuses the run.
-        .env(ENV_SEARCH_BIN, &binaries.search)
-        .env(ENV_ANALYZE_BIN, &binaries.analyze)
-        .env(ENV_REVIEW_BIN, &binaries.review)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    // #5671: the credential alone never reached OpenRouter — trusty-review
-    // defaults to Bedrock, so the provider and the three role models must be
-    // named too. Resolved by `sweep_with_env`: either all four or none, never a
-    // subset that could pair one provider with another's model ids.
-    for (name, value) in inference {
-        command.env(name, value);
-    }
-    // #5857: the board credential the generated config only references. Exposed
-    // here rather than held on `Boards`, so it lives no longer than this
-    // `Command` — the same shape as the inference credential above.
-    for (name, value) in boards.env(&config.boards) {
-        command.env(name, value);
-    }
-    // #5980: the `gh`-derived credential the generated config's `github:`
-    // section only references, when one was read — see `github_issues`'s
-    // module docs for why a missing one does not stop the child from running.
-    if let Some((name, value)) = github_access.env() {
-        command.env(name, value);
-    }
-
-    let spawned = command.spawn();
-
-    let mut child = match spawned {
-        Ok(child) => child,
-        Err(source) => {
-            return Ok(RepoResult::Failed {
-                reason: format!("`tga audit` could not be started: {source}"),
-            });
-        }
-    };
-
-    // #5823: both streams are pumped concurrently with the wait. Reading them
-    // is not optional now that they are pipes — a child that fills a pipe
-    // buffer nobody drains blocks forever, which would turn every sizeable
-    // sweep into the four-hour timeout.
-    let mut pumps = Vec::with_capacity(2);
-    if let Some(stream) = child.stdout.take() {
-        pumps.push(tokio::spawn(tee_and_relay(
-            stream,
-            tokio::fs::File::from_std(file),
-            progress.clone(),
-            target.to_owned(),
-            scrubber.clone(),
-        )));
-    }
-    if let Some(stream) = child.stderr.take() {
-        pumps.push(tokio::spawn(tee_and_relay(
-            stream,
-            tokio::fs::File::from_std(errors),
-            progress.clone(),
-            target.to_owned(),
-            scrubber.clone(),
-        )));
-    }
-
-    let verdict = match tokio::time::timeout(budget, child.wait()).await {
-        Ok(Ok(status)) if status.success() => RepoResult::Succeeded,
-        Ok(Ok(status)) => RepoResult::Failed {
-            reason: format!(
-                "`tga audit` exited with {}; see {}",
-                status
-                    .code()
-                    .map_or_else(|| "a signal".to_string(), |c| format!("code {c}")),
-                log.display()
-            ),
-        },
-        Ok(Err(source)) => RepoResult::Failed {
-            reason: format!("`tga audit` could not be waited on: {source}"),
-        },
-        Err(_elapsed) => {
-            // Kill before returning: `kill_on_drop` would do it, but only once
-            // the handle drops, and the reason must name a child that is gone.
-            let killed = child.kill().await;
-            RepoResult::Failed {
-                reason: format!(
-                    "`tga audit` timed out after {}s and was killed{}; see {}",
-                    budget.as_secs(),
-                    match killed {
-                        Ok(()) => String::new(),
-                        Err(e) => format!(" (kill failed: {e})"),
-                    },
-                    log.display()
-                ),
-            }
-        }
-    };
-
-    // The child has exited or been killed, so both pipes are at EOF and the
-    // pumps end on their own. Awaiting them is what guarantees the log holds
-    // everything the child said before this function reports on it.
-    Ok(join_pumps(pumps, log, verdict).await)
-}
-
-/// Wait for the output pumps, downgrading a success whose log is incomplete.
-///
-/// Why: the log is the only record a failed sweep is diagnosed from, and this
-/// module's posture is that a run whose result cannot be recorded must not
-/// return as a success (#5655). A pump that failed means the log is missing
-/// bytes the child wrote, so a `Succeeded` verdict resting on it is downgraded
-/// rather than reported. A verdict that was already a failure keeps its own
-/// reason — the pump error is the less useful of the two.
-/// What: awaits each pump; on the first error, replaces a `Succeeded` verdict.
-/// A pump task that panicked is treated the same way.
-/// Test: `super::run_tests::a_childs_stage_events_reach_the_progress_sink`
-/// covers the whole-log obligation this protects.
-async fn join_pumps(
-    pumps: Vec<tokio::task::JoinHandle<std::io::Result<()>>>,
-    log: &Path,
-    verdict: RepoResult,
-) -> RepoResult {
-    let mut broken: Option<String> = None;
-    for pump in pumps {
-        let failure = match pump.await {
-            Ok(Ok(())) => None,
-            Ok(Err(e)) => Some(e.to_string()),
-            Err(e) => Some(e.to_string()),
-        };
-        broken = broken.or(failure);
-    }
-    match (broken, &verdict) {
-        (Some(reason), RepoResult::Succeeded) => RepoResult::Failed {
-            reason: format!(
-                "`tga audit` finished but its output could not be written to {}: {reason}",
-                log.display()
-            ),
-        },
-        _ => verdict,
-    }
-}
-
-/// The variable `tga audit` reads the inference credential from.
-pub const ENV_INFERENCE_CREDENTIAL: &str = "OPENROUTER_API_KEY";
-
-/// The variable that asks a child to relay its progress events (#5823).
-///
-/// Why: named through `trusty-progress` rather than spelled here, because the
-/// producer reads the same constant — a literal in this file would be a second
-/// copy of the contract, free to drift.
-const ENV_PROGRESS_RELAY: &str = trusty_progress::relay::ENV_RELAY;
-
-/// The variable `tga audit` reads its trusty-search binary from (#5670).
-const ENV_SEARCH_BIN: &str = "TRUSTY_SEARCH_BIN";
-
-/// The variable `trusty-review` reads its analyze binary from.
-const ENV_ANALYZE_BIN: &str = "TRUSTY_ANALYZE_BIN";
-
-/// The variable `tga audit` reads its report renderer from.
-const ENV_REVIEW_BIN: &str = "TRUSTY_REVIEW_BIN";
 
 #[cfg(test)]
 mod run_tests {
@@ -1083,6 +887,111 @@ trusty-review = "0.15.1"
 
     fn make_repo(work: &WorkDir, name: &str) {
         std::fs::create_dir_all(work.path(Area::Repos).join(name)).expect("mkdir repo");
+    }
+
+    /// The index a sweep leaves in `out/` (#6080).
+    fn index_of(work: &WorkDir) -> String {
+        std::fs::read_to_string(
+            work.path(Area::Output)
+                .join(crate::index_report::INDEX_FILE),
+        )
+        .expect("the sweep writes an index")
+    }
+
+    /// 🔴 #6080: a sweep writes an index beside its reports, and a run over ONE
+    /// repository gets one too — "there is only one" is a coverage fact the
+    /// index is the place to state, not a reason to skip it.
+    ///
+    /// Against `70c52f5b5` this fails on the very first line: `out/` held the
+    /// per-repository directories and nothing that said what they were, which
+    /// versions produced them, or when.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_sweep_writes_an_index_beside_its_reports() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, &writes_a_manifest(None));
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        let report = sweep(&work, &config(), &RunOptions::default(), &Progress::none())
+            .await
+            .expect("the sweep completes");
+        assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
+
+        let index = index_of(&work);
+        assert!(index.contains("Reports: 1 of 1 repository"), "{index}");
+        // The versions responsible, from the record this engagement installed.
+        assert!(index.contains("## Versions"), "{index}");
+        assert!(
+            index.contains("| `tga` | 2.9.4 | recorded at install |"),
+            "{index}"
+        );
+        assert!(index.contains("| `trusty-review` | 0.15.1 |"), "{index}");
+        // The manifest the child wrote is linked, relative to the index itself.
+        assert!(
+            index.contains("[00-acme-api/manifest.toml](00-acme-api/manifest.toml)"),
+            "{index}"
+        );
+        // And the directory explains itself.
+        assert!(index.contains("## What is in this directory"), "{index}");
+        assert!(index.contains("../extract/<NN>-<repo>.db"), "{index}");
+    }
+
+    /// #6080: the checkpoint records how long each repository took, so a resumed
+    /// sweep can report the run that did the work rather than the second it took
+    /// to verify the output.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_swept_repository_records_how_long_it_took() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        one_repo_ready(&work);
+
+        let first = sweep(&work, &config(), &RunOptions::default(), &Progress::none())
+            .await
+            .expect("the sweep completes");
+        let measured = first.repos[0].duration_ms.expect("a measured duration");
+
+        let second = sweep(&work, &config(), &RunOptions::default(), &Progress::none())
+            .await
+            .expect("the sweep completes");
+        assert!(second.repos[0].resumed, "{:?}", second.repos[0]);
+        assert_eq!(
+            second.repos[0].duration_ms,
+            Some(measured),
+            "a carried-over entry must keep the duration of the run that earned it"
+        );
+        assert!(
+            index_of(&work).contains("carried over from an earlier run"),
+            "the index must not report a resumed repository as work done now"
+        );
+    }
+
+    /// 🔴 A sweep in which a repository failed still writes an index, and that
+    /// index NAMES the repository with no report and why — a partial run's index
+    /// being silently one section shorter is the fail-open shape this file
+    /// exists to avoid.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_partial_sweep_indexes_the_repository_that_produced_no_report() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        two_repos_ready(&work, "acme-web");
+
+        let report = sweep(&work, &config(), &RunOptions::default(), &Progress::none())
+            .await
+            .expect("the sweep completes");
+        assert_eq!(report.status, RunStatus::Partial, "{report:?}");
+
+        let index = index_of(&work);
+        assert!(index.contains("Reports: 1 of 2 repositories"), "{index}");
+        assert!(index.contains("### acme-web"), "{index}");
+        assert!(index.contains("No report — `tga audit` exited"), "{index}");
+        assert!(
+            index.contains("[../logs/01-acme-web.log](../logs/01-acme-web.log)"),
+            "the failed repository's log must be linked: {index}"
+        );
     }
 
     /// The writer's own round trip: what [`save_selection`] leaves behind is
@@ -1352,6 +1261,7 @@ trusty-review = "0.15.1"
             log: "/l/a.log".into(),
             gaps: Vec::new(),
             resumed: false,
+            duration_ms: None,
             result: RepoResult::Succeeded,
         };
         let bad = RepoRun {

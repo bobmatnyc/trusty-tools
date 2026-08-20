@@ -123,7 +123,10 @@ impl Area {
             Area::Repos => "clones of your repositories — your source code",
             Area::Extract => "the tga extract database built from those clones",
             Area::State => "repo selection and run progress",
-            Area::Output => "the deliverable to return — report and manifest, never a key",
+            Area::Output => {
+                "the deliverable to return — report and manifest, never a key; \
+                 start at index.md"
+            }
             Area::Logs => "output from the tools this client runs",
         }
     }

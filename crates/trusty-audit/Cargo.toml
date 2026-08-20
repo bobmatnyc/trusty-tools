@@ -36,6 +36,11 @@ path = "src/main.rs"
 [dependencies]
 # Binary/CLI error handling (CLAUDE.md: anyhow for binaries, thiserror for libs).
 anyhow = { workspace = true }
+# #6080: the run index states when the run finished, in the reader's own local
+# time with its UTC offset. `chrono::Local` is the workspace's one answer for
+# that (`trusty-common` reaches for it for the same reason), and `std::time`
+# offers no calendar or timezone at all.
+chrono = { workspace = true }
 # #5825: expanding the `~` in the inbound package's default output directory
 # (`~/duetto/audit`) without shelling out. The workspace's existing home-dir
 # resolver — `trusty-common` reaches for the same crate in six places — so this
