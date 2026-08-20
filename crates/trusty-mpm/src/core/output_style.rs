@@ -32,6 +32,21 @@ use crate::core::config::MpmConfig;
 /// Test: `version_gate_*` in `output_style_tests.rs`.
 pub const NATIVE_OUTPUT_STYLE_MIN_VERSION: (u32, u32, u32) = (1, 0, 83);
 
+/// How long [`claude_supports_native_output_style`] waits for `claude
+/// --version` before giving up on it.
+///
+/// Why: the probe sits on the session-launch and prompt-composition paths, and
+/// a wedged `claude` binary used to hang them forever (#5969). `claude
+/// --version` answers in well under a second on a healthy host, so five
+/// seconds is generous for the answer and short enough that a wedged binary
+/// costs a launch five seconds rather than the whole session.
+/// What: the deadline handed to
+/// [`crate::core::spawn_disclaim::disclaimed_stdout_with_timeout`]; past it the
+/// probe child is killed and the probe fails safe to "no native support".
+/// Test: `spawn_disclaim::timeout`'s
+/// `disclaimed_stdout_with_timeout_kills_and_reaps_wedged_child`.
+pub const CLAUDE_VERSION_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// A failure resolving a requested output-style id.
 ///
 /// Why: an unknown style id is a user-facing error (a typo in config or the
@@ -195,16 +210,24 @@ pub fn version_supports_native(version: (u32, u32, u32)) -> bool {
 /// inject the style into the PM prompt instead of relying on the settings key.
 /// What: runs `claude --version`, parses the first semver triple, and compares
 /// it to [`NATIVE_OUTPUT_STYLE_MIN_VERSION`]. **Fails safe**: any error (binary
-/// missing, non-zero exit, unparseable output) is logged to stderr and treated
-/// as "does NOT support native" so the style is always applied via injection.
-/// All logging goes to stderr (the daemon/MCP stdout-clean rule).
+/// missing, non-zero exit, unparseable output, or a `claude` that never exits)
+/// is logged to stderr and treated as "does NOT support native" so the style is
+/// always applied via injection. All logging goes to stderr (the daemon/MCP
+/// stdout-clean rule).
 /// Test: pure logic is in [`version_supports_native`] /
 /// [`detect_native_support_from_output`]; this thin wrapper is side-effecting
-/// (spawns a process) and is covered by `detect_from_output_*`.
+/// (spawns a process) and is covered by `detect_from_output_*`. The bounded
+/// wait itself is covered by `spawn_disclaim::timeout`'s tests.
 pub fn claude_supports_native_output_style() -> bool {
     // Spawn through the disclaim helper so this direct child of the signed
     // daemon is its own TCC responsible process, not `trusty-mpm` (issue #2819).
-    match crate::core::spawn_disclaim::disclaimed_output("claude", &["--version".to_string()]) {
+    // #5969: bound the wait — an unbounded one hung every session launch and
+    // prompt-composition path when `claude --version` wedged.
+    match crate::core::spawn_disclaim::disclaimed_stdout_with_timeout(
+        "claude",
+        &["--version".to_string()],
+        CLAUDE_VERSION_PROBE_TIMEOUT,
+    ) {
         Ok(out) if out.status.success() => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             detect_native_support_from_output(&stdout)
