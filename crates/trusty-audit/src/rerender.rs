@@ -135,6 +135,36 @@ pub struct RenderedReport {
     pub result: RenderResult,
 }
 
+/// Where the `trusty-review` a re-render drove came from (#6080).
+///
+/// Why: two of these three are a choice somebody made, and the third is
+/// whatever the machine happened to have. A recipient who ran the engagement
+/// has its pinned copy under `tools/`; when the work dir does not resolve, the
+/// fall-through silently picked an unrelated `trusty-review` off `PATH` — two
+/// versions behind the engagement's pin in the live case — and nothing said so
+/// until the index's versions table, after the render had finished. The
+/// distinction exists so [`crate::cli::render`] can state it at the top of the
+/// run instead.
+/// What: the three branches of [`resolve_review`], in its resolution order.
+/// Test: `super::rerender_tests::the_installed_copy_is_preferred_over_the_path`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ReviewSource {
+    /// `--review-bin` named it.
+    Explicit,
+    /// The engagement installed it, under the working directory's `tools/`.
+    Engagement,
+    /// Nothing named it — whatever `PATH` resolves is what ran.
+    Path,
+}
+
+impl ReviewSource {
+    /// Whether this renderer was chosen by the machine rather than by anyone.
+    pub fn is_unchosen(self) -> bool {
+        matches!(self, ReviewSource::Path)
+    }
+}
+
 /// The result of one re-render.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -145,6 +175,10 @@ pub struct RerenderReport {
     pub output: PathBuf,
     /// The `trusty-review` this run drove.
     pub review: PathBuf,
+    /// How that renderer was chosen (#6080).
+    pub review_source: ReviewSource,
+    /// What `trusty-review --version` answered, or `None` when it would not.
+    pub review_version: Option<String>,
     /// One entry per manifest found, in discovery order.
     pub reports: Vec<RenderedReport>,
 }
@@ -188,21 +222,35 @@ impl RerenderReport {
 /// [`AuditError::ReviewBinaryMissing`] when the renderer cannot be started at
 /// all (it would fail identically for every manifest), and
 /// [`AuditError::WorkDir`] when the output directory or a log cannot be written.
+#[allow(clippy::too_many_arguments)]
 pub async fn rerender(
     work: &WorkDir,
     cwd: &Path,
+    config: &Path,
     key: &SecretKey,
     inference: &[(&'static str, String)],
     options: &RerenderOptions,
     progress: &Progress,
 ) -> Result<RerenderReport, AuditError> {
-    let source = resolve_source(options.from.clone(), cwd, work.root());
-    let manifests = discover(&source)?;
+    let choice = resolve_source(options.from.clone(), cwd, config, work.root());
+    // The refusal names every location this run considered, not just the last
+    // one it settled on — see [`AuditError::NothingToRerender`].
+    let Ok(manifests) = discover(&choice.source) else {
+        return Err(AuditError::NothingToRerender {
+            searched: choice.searched,
+            file: AuditManifest::FILE_NAME,
+        });
+    };
+    let source = choice.source;
     let output = options
         .out
         .clone()
         .unwrap_or_else(|| source.join(DEFAULT_OUTPUT_DIR));
-    let review = resolve_review(work, options.review.as_deref());
+    let (review, review_source) = resolve_review(work, options.review.as_deref());
+    // #6080: asked once, up front, so the version this run will render at is
+    // known before the first child rather than only after the last one. The
+    // index reads the same answer rather than spawning a second `--version`.
+    let review_version = crate::index_report::tool_version(&review);
     // #6081: this is the tga-free render path, and nothing on it started a
     // daemon or indexed anything — so `--analyze` fetched nothing and every
     // analyze-derived section rendered empty over a clean exit. Resolved once,
@@ -244,14 +292,41 @@ pub async fn rerender(
     // #6080: the index goes in the OUTPUT directory and nowhere else, which is
     // what keeps this module's postcondition — the source package is read, never
     // written — true of the index as much as of every report.
-    crate::index_report::write_render(&output, &review, &reports, started.elapsed())?;
+    crate::index_report::write_render(
+        &output,
+        &review,
+        review_version.as_deref(),
+        &reports,
+        started.elapsed(),
+    )?;
 
     Ok(RerenderReport {
         source,
         output,
         review,
+        review_source,
+        review_version,
         reports,
     })
+}
+
+/// The directory a re-render reads, and every directory it considered.
+///
+/// Why: the choice and the refusal need the same list. Settling on one location
+/// and reporting only that one is what made the #6080 failure unreadable —
+/// `no manifest.toml under /Users/masa/dogfood-audit` named a directory the
+/// operator was standing in and could see, and said nothing about the two other
+/// places the run had already looked.
+/// What: the directory that will be read, plus the ordered list that produced
+/// it. With `--from` the list is that one path, because nothing else was tried.
+/// Test: `super::rerender_tests::a_refusal_names_every_location_it_tried`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SourceChoice {
+    /// The directory this run will read.
+    pub source: PathBuf,
+    /// Every directory considered, in the order they were tried.
+    pub searched: Vec<PathBuf>,
 }
 
 /// The directory a re-render reads when `--from` was not given.
@@ -261,26 +336,64 @@ pub async fn rerender(
 /// that invocation to `~/.trusty-tools/trusty-audit/work`, which on a
 /// recipient's machine holds nothing, so the one command they were given
 /// refused while they were standing in the package it should have rendered.
-/// What: `explicit` wins; else `cwd` when a re-render there would find
-/// something; else `work_root` on the same test, which keeps the operator who
-/// still has the engagement on disk on the behaviour they had; else `cwd`, so a
-/// refusal names the directory they ran in rather than one they never chose.
-/// The test is [`discover`] itself, so the default and the search this run then
-/// performs cannot disagree.
+///
+/// The engagement-implied rung is the second half of that, and it is the one
+/// the live dogfood run hit: an engagement whose sweeps all ran with
+/// `--work-dir <config-dir>/work` has its reports neither in the directory the
+/// config sits in nor in the TOOL's default work root, so a zero-argument
+/// `render` from beside `engagement.toml` refused with the reports one
+/// directory down. Nothing in the config schema declares a work dir, and
+/// nothing needs to: `<config-dir>/work` is the layout the flow produces, so
+/// the convention is read rather than a field added — one that every existing
+/// `engagement.toml` in the field would be missing anyway. An engagement whose
+/// work dir is somewhere else still names it with `--from` or `--work-dir`.
+///
+/// What: `explicit` wins outright; otherwise the first of these that a
+/// re-render would find something in — `cwd`, then
+/// `<config's directory>/work` when `config` is a file that is really there,
+/// then `work_root`. None of them carrying a report leaves `cwd`, so a refusal
+/// leads with the directory the operator ran in rather than one they never
+/// chose. The test is [`discover`] itself, so the default and the search this
+/// run then performs cannot disagree.
 /// Test: `super::rerender_tests::an_unzipped_package_is_rendered_from_the_cwd`,
+/// `super::rerender_tests::a_config_directorys_own_work_dir_is_rendered`,
 /// `super::rerender_tests::a_cwd_with_no_reports_falls_back_to_the_work_dir`,
-/// `super::rerender_tests::an_explicit_source_beats_both_defaults`.
-pub fn resolve_source(explicit: Option<PathBuf>, cwd: &Path, work_root: &Path) -> PathBuf {
+/// `super::rerender_tests::an_explicit_source_beats_every_default`.
+pub fn resolve_source(
+    explicit: Option<PathBuf>,
+    cwd: &Path,
+    config: &Path,
+    work_root: &Path,
+) -> SourceChoice {
     if let Some(path) = explicit {
-        return path;
+        return SourceChoice {
+            searched: vec![path.clone()],
+            source: path,
+        };
     }
-    if carries_reports(cwd) {
-        return cwd.to_path_buf();
-    }
-    if carries_reports(work_root) {
-        return work_root.to_path_buf();
-    }
-    cwd.to_path_buf()
+    let mut searched = vec![cwd.to_path_buf()];
+    searched.extend(engagement_work_dir(config));
+    searched.push(work_root.to_path_buf());
+    searched.dedup();
+    let source = searched
+        .iter()
+        .find(|dir| carries_reports(dir))
+        .cloned()
+        .unwrap_or_else(|| cwd.to_path_buf());
+    SourceChoice { source, searched }
+}
+
+/// The work root the engagement config at `config` implies, when it is there.
+///
+/// `None` when no config is at that path: an absent config implies nothing, and
+/// adopting a bare `work/` beside an unrelated directory would render whatever
+/// happened to be sitting there. See [`resolve_source`] for why the convention
+/// is read rather than declared.
+fn engagement_work_dir(config: &Path) -> Option<PathBuf> {
+    config
+        .is_file()
+        .then(|| config.parent().unwrap_or(Path::new(".")))
+        .map(|dir| dir.join(crate::workdir::WORK_SUBDIR))
 }
 
 /// Whether a re-render pointed at `dir` would find a manifest to render.
@@ -329,8 +442,10 @@ fn discover(source: &Path) -> Result<Vec<PathBuf>, AuditError> {
         }
     }
     if found.is_empty() {
+        // This one directory is all THIS function looked in. A `--from`-less
+        // run tried more, and [`rerender`] replaces the list with what it tried.
         return Err(AuditError::NothingToRerender {
-            searched: source.to_path_buf(),
+            searched: vec![source.to_path_buf()],
             file: AuditManifest::FILE_NAME,
         });
     }
@@ -366,25 +481,37 @@ fn unique_name(manifest: &Path, index: usize, taken: &mut HashSet<String>) -> St
     unique
 }
 
-/// The `trusty-review` this run drives.
+/// The `trusty-review` this run drives, and which of the three sources gave it.
 ///
 /// Why: three sources, cheapest first, and no version check on any of them
 /// (#6080 owner ruling — the verb runs at whatever version the binary is). The
 /// working directory's copy comes before `PATH` so a recipient who ran the
 /// engagement re-renders with the binary that produced the reports, without
 /// having to say so.
+///
+/// #6080: the `PATH` branch also reports itself, because no version check means
+/// a stale binary is not an error and the operator is the only gate left. The
+/// path is RESOLVED there rather than left as a bare name, through
+/// `trusty_common::bin_resolve` — the workspace's one entry point for this —
+/// so the disclosure names the file that will actually run instead of the word
+/// the OS was asked to look up. An unresolvable name stays bare, which keeps
+/// [`AuditError::ReviewBinaryMissing`] naming what was looked for.
 /// What: the explicit path, else the copy under `tools/` when it is there, else
-/// the bare name for the OS to resolve on `PATH`.
-/// Test: `super::rerender_tests::the_installed_copy_is_preferred_over_the_path`.
-fn resolve_review(work: &WorkDir, explicit: Option<&Path>) -> PathBuf {
+/// whatever `PATH` resolves.
+/// Test: `super::rerender_tests::the_installed_copy_is_preferred_over_the_path`,
+/// `super::rerender_tests::a_path_resolved_renderer_reports_itself_as_unchosen`.
+fn resolve_review(work: &WorkDir, explicit: Option<&Path>) -> (PathBuf, ReviewSource) {
     if let Some(path) = explicit {
-        return path.to_path_buf();
+        return (path.to_path_buf(), ReviewSource::Explicit);
     }
     let installed = RequiredTool::TrustyReview.path_in(work);
     if installed.is_file() {
-        return installed;
+        return (installed, ReviewSource::Engagement);
     }
-    PathBuf::from(RequiredTool::TrustyReview.binary_name())
+    let name = RequiredTool::TrustyReview.binary_name();
+    let resolved =
+        trusty_common::bin_resolve::resolve_binary(name).unwrap_or_else(|| PathBuf::from(name));
+    (resolved, ReviewSource::Path)
 }
 
 /// Render one manifest, recording rather than propagating its failure.
@@ -681,15 +808,32 @@ mod rerender_tests {
     }
 
     /// One re-render, with the source and the cwd named separately (#6080).
+    ///
+    /// The config path names a file that is not there, so the engagement rung
+    /// of [`resolve_source`] is inert unless a test plants one — which
+    /// `run_from_config_dir` does.
     async fn run_in(
         from: Option<&Path>,
         cwd: &Path,
         review: &Path,
         work: &WorkDir,
     ) -> Result<RerenderReport, AuditError> {
+        let config = cwd.join(crate::config::EngagementConfig::FILE_NAME);
+        run_with_config(from, cwd, &config, review, work).await
+    }
+
+    /// [`run_in`] with the engagement config named separately (#6080).
+    async fn run_with_config(
+        from: Option<&Path>,
+        cwd: &Path,
+        config: &Path,
+        review: &Path,
+        work: &WorkDir,
+    ) -> Result<RerenderReport, AuditError> {
         super::rerender(
             work,
             cwd,
+            config,
             &key(),
             &[],
             &RerenderOptions {
@@ -820,21 +964,137 @@ mod rerender_tests {
         );
     }
 
-    /// 🔴 An explicit `--from` still decides, whatever either default holds.
+    /// 🔴 An explicit `--from` still decides, whatever any default holds.
     #[test]
-    fn an_explicit_source_beats_both_defaults() {
+    fn an_explicit_source_beats_every_default() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let named = tmp.path().join("named");
         let cwd = tmp.path().join("cwd");
         report_dir(&cwd.join("reports"), "01-acme-api");
         let work = work_in(tmp.path());
         report_dir(&work.root().join("out"), "01-acme-api");
+        let config = engagement_config_in(&cwd);
+        report_dir(&cwd.join("work").join("out"), "01-acme-api");
 
+        let choice = resolve_source(Some(named.clone()), &cwd, &config, work.root());
         assert_eq!(
-            resolve_source(Some(named.clone()), &cwd, work.root()),
-            named,
+            choice.source, named,
             "the flag must win over a cwd that would have rendered"
         );
+        assert_eq!(
+            choice.searched,
+            vec![named],
+            "with --from nothing else was tried, so nothing else may be listed"
+        );
+    }
+
+    /// An `engagement.toml` at `dir`, as the operator's own engagement leaves it.
+    fn engagement_config_in(dir: &Path) -> PathBuf {
+        std::fs::create_dir_all(dir).expect("mkdir");
+        let path = dir.join(crate::config::EngagementConfig::FILE_NAME);
+        // Contents are irrelevant: `resolve_source` asks only whether a config
+        // is there, because the engagement's work root is a layout convention
+        // and not a field. See `engagement_work_dir`.
+        std::fs::write(&path, "openrouter_key = \"sk-or-v1-x\"\n").expect("write config");
+        path
+    }
+
+    /// 🔴 #6080's second failure, from the live dogfood run: the engagement's
+    /// config is in the cwd, every sweep ran with `--work-dir <cwd>/work`, and
+    /// `trusty-audit render` with no arguments refused — the cwd itself carries
+    /// no report and the TOOL's default work root is empty on this machine, so
+    /// the reports one directory down were never looked for.
+    #[tokio::test]
+    async fn a_config_directorys_own_work_dir_is_rendered() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let engagement = tmp.path().join("dogfood-audit");
+        let config = engagement_config_in(&engagement);
+        report_dir(&engagement.join("work").join("out"), "01-acme-api");
+        // The tool's default work root holds a different report, so rendering
+        // the engagement's own proves the rung ORDER rather than that only one
+        // candidate existed.
+        let work = work_in(tmp.path());
+        report_dir(&work.root().join("out"), "99-stale");
+        let review = stub_review(tmp.path(), WRITES_A_REPORT);
+
+        let report = run_with_config(None, &engagement, &config, &review, &work)
+            .await
+            .expect("the re-render runs");
+
+        assert_eq!(report.source, engagement.join("work"));
+        assert_eq!(
+            report
+                .reports
+                .iter()
+                .map(|r| r.name.as_str())
+                .collect::<Vec<_>>(),
+            ["01-acme-api"]
+        );
+    }
+
+    /// The cwd still outranks the engagement's work dir: a recipient standing in
+    /// an unzipped package renders the package, config beside it or not.
+    #[test]
+    fn the_cwd_outranks_the_engagements_work_dir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().join("package");
+        report_dir(&cwd.join("reports"), "01-in-the-package");
+        let config = engagement_config_in(&cwd);
+        report_dir(&cwd.join("work").join("out"), "02-in-the-work-dir");
+        let work = work_in(tmp.path());
+
+        assert_eq!(resolve_source(None, &cwd, &config, work.root()).source, cwd);
+    }
+
+    /// A `work/` beside a directory holding NO config is not an engagement's
+    /// work dir — adopting it would render whatever happened to be sitting
+    /// there, which is why the rung asks for the config first.
+    #[test]
+    fn a_work_dir_with_no_config_beside_it_is_not_adopted() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().join("unrelated");
+        std::fs::create_dir_all(&cwd).expect("mkdir");
+        report_dir(&cwd.join("work").join("out"), "01-not-ours");
+        let work = work_in(tmp.path());
+        let absent = cwd.join(crate::config::EngagementConfig::FILE_NAME);
+
+        let choice = resolve_source(None, &cwd, &absent, work.root());
+        assert_eq!(choice.source, cwd, "nothing renders, so the cwd is kept");
+        assert_eq!(
+            choice.searched,
+            vec![cwd, work.root().to_path_buf()],
+            "an absent config implies no work dir, so none may be listed"
+        );
+    }
+
+    /// 🔴 A refusal names every directory the run tried, not only the one it
+    /// settled on. Naming just the cwd is what made the live failure unreadable:
+    /// the operator could see that directory, and the message said nothing about
+    /// the two others already ruled out.
+    #[tokio::test]
+    async fn a_refusal_names_every_location_it_tried() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let engagement = tmp.path().join("dogfood-audit");
+        let config = engagement_config_in(&engagement);
+        let work = work_in(tmp.path());
+        let review = stub_review(tmp.path(), WRITES_A_REPORT);
+
+        let refusal = run_with_config(None, &engagement, &config, &review, &work)
+            .await
+            .expect_err("nothing to render must refuse");
+
+        let message = refusal.to_string();
+        for expected in [
+            engagement.clone(),
+            engagement.join("work"),
+            work.root().to_path_buf(),
+        ] {
+            assert!(
+                message.contains(&expected.display().to_string()),
+                "{} is missing from the refusal: {message}",
+                expected.display()
+            );
+        }
     }
 
     /// 🔴 The source is READ, never written into: everything this produces goes
@@ -1140,18 +1400,74 @@ mod rerender_tests {
     fn the_installed_copy_is_preferred_over_the_path() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let work = work_in(tmp.path());
-        assert_eq!(
-            resolve_review(&work, None),
-            PathBuf::from(RequiredTool::TrustyReview.binary_name()),
-            "with nothing installed it falls back to PATH"
-        );
 
         let installed = RequiredTool::TrustyReview.path_in(&work);
         std::fs::write(&installed, "#!/bin/sh\nexit 0\n").expect("stub binary");
-        assert_eq!(resolve_review(&work, None), installed);
+        assert_eq!(
+            resolve_review(&work, None),
+            (installed, ReviewSource::Engagement)
+        );
 
         let explicit = tmp.path().join("elsewhere/trusty-review");
-        assert_eq!(resolve_review(&work, Some(&explicit)), explicit);
+        assert_eq!(
+            resolve_review(&work, Some(&explicit)),
+            (explicit, ReviewSource::Explicit)
+        );
+    }
+
+    /// 🔴 #6080: with nothing installed and no flag, the renderer is whatever
+    /// this machine happens to have — in the live run a `trusty-review` two
+    /// minor versions behind the engagement's own pin, chosen in silence. The
+    /// source is recorded so [`crate::cli::render`] can say so.
+    ///
+    /// This asserts the SOURCE, not the path: whether a `trusty-review` is on
+    /// this machine's `PATH` is a property of the machine running the test.
+    #[test]
+    fn a_path_resolved_renderer_reports_itself_as_unchosen() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+
+        let (resolved, source) = resolve_review(&work, None);
+        assert_eq!(source, ReviewSource::Path);
+        assert!(source.is_unchosen(), "a PATH lookup is nobody's choice");
+        assert!(
+            !resolved.starts_with(work.root()),
+            "nothing is installed, so the engagement's tools/ cannot have answered: {}",
+            resolved.display()
+        );
+        assert_eq!(
+            resolved.file_name().expect("a file name"),
+            RequiredTool::TrustyReview.binary_name(),
+            "whatever it resolved must still be the renderer: {}",
+            resolved.display()
+        );
+    }
+
+    /// The version the report carries is the one the binary answered, and the
+    /// index reads that same answer rather than spawning `--version` again.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_version_is_asked_for_once_and_reported() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let package = tmp.path().join("package");
+        report_dir(&package.join("reports"), "01-acme-api");
+        let review = stub_review(
+            tmp.path(),
+            &WRITES_A_REPORT.replace(
+                "#!/bin/sh\n",
+                "#!/bin/sh\ncase \"$1\" in --version) echo 'trusty-review 0.18.0'; exit 0;; esac\n",
+            ),
+        );
+
+        let report = run(&package, &review, &work_in(tmp.path())).await;
+
+        assert_eq!(report.review_version.as_deref(), Some("0.18.0"));
+        assert_eq!(
+            report.review_source,
+            ReviewSource::Explicit,
+            "the test harness names the renderer, so nothing was left to PATH"
+        );
+        assert!(index_of(&report).contains("| `trusty-review` | 0.18.0 |"));
     }
 
     /// Two layouts carrying the same stem must not overwrite each other's

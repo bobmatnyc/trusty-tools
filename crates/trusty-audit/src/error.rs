@@ -1076,16 +1076,21 @@ pub enum AuditError {
     /// wrong are the directory and the unzipping — and both look identical to a
     /// run that renders nothing and exits 0. "0 reports re-rendered" reads as a
     /// finished job, so an empty discovery refuses instead.
-    /// What: names the directory that was searched and the file that was looked
-    /// for, one level deep in it and in its `reports/` and `out/` children.
-    /// Test: `crate::rerender::rerender_tests::a_source_with_no_manifest_is_refused`.
+    /// What: names EVERY directory that was searched and the file that was
+    /// looked for, one level deep in each and in each one's `reports/` and
+    /// `out/` children. #6080: a `--from`-less run tries three locations in
+    /// turn, and naming only the last of them sent an operator whose reports
+    /// were in the second one hunting through the wrong directory.
+    /// Test: `crate::rerender::rerender_tests::a_source_with_no_manifest_is_refused`,
+    /// `crate::rerender::rerender_tests::a_refusal_names_every_location_it_tried`.
     #[error(
-        "no {file} under {searched} — point `--from` at the unzipped audit package (the one \
-         holding `reports/`), or at a working directory a sweep has run in"
+        "no {file} in any of: {} — point `--from` at the unzipped audit package (the one \
+         holding `reports/`), or at a working directory a sweep has run in",
+        searched_list(.searched)
     )]
     NothingToRerender {
-        /// The directory that was searched.
-        searched: PathBuf,
+        /// Every directory that was searched, in the order they were tried.
+        searched: Vec<PathBuf>,
         /// The file that was looked for.
         file: &'static str,
     },
@@ -1124,6 +1129,23 @@ pub enum AuditError {
         /// The issue that lands it.
         issue: u32,
     },
+}
+
+/// Every searched directory on one line, for [`AuditError::NothingToRerender`].
+///
+/// `Path` has no `Display` that survives a `join`, so the paths are rendered
+/// first. Empty is impossible — a re-render always tries at least the directory
+/// it was run in — but it renders as `nowhere` rather than as an empty string,
+/// which would leave the message reading `no manifest.toml in any of: —`.
+fn searched_list(searched: &[PathBuf]) -> String {
+    if searched.is_empty() {
+        return "nowhere".to_owned();
+    }
+    searched
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]
