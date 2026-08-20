@@ -185,6 +185,14 @@
 #     answer this check could not obtain is not a green one. A run whose target
 #     resolved but could not be read back is the same: unknown, not green.
 #
+#     A RERUN RECORDS ITS ANSWER ON THE ATTEMPT THAT PRODUCED IT (#6113). After
+#     `gh run rerun <id> --failed`, the jobs API's default-attempt view hands
+#     back a carried-over copy of every job that did not re-execute — success,
+#     no annotations. So this check walks back through earlier attempts when the
+#     latest one reports nothing, rather than calling a green gate unreadable
+#     and pushing the operator onto the override, which is what happened to
+#     trusty-audit 0.7.0 on run 32355453111.
+#
 #     DISPATCH IT WITH AN EXPLICIT SHA. The remedy this check prints is
 #
 #         gh workflow run pre-publish.yml --ref <branch> -f sha=$(git rev-parse HEAD)
@@ -1029,6 +1037,128 @@ GATE_REPO="bobmatnyc/trusty-tools"
 GATE_SCAN_DAYS=2
 GATE_SCAN_CAP=40
 
+# The display name of the job that resolves and reports the gated commit. It is
+# the `name:` in pre-publish.yml, because that is what the jobs API returns —
+# the YAML key `resolve-sha` never appears there.
+GATE_JOB_NAME="Resolve target commit"
+
+# How many earlier attempts the #6113 walk below will open. A run rerun more
+# than a handful of times does not happen, and an unbounded walk would let one
+# pathological run spend the whole API budget. Binding the cap yields
+# UNREADABLE, never a green.
+GATE_ATTEMPT_SCAN_CAP=5
+
+# ---------------------------------------------------------------------------
+# gate_api <path> — one authenticated read of the Actions API under
+# repos/${GATE_REPO}, printing the raw JSON body. Nonzero exit means the read
+# failed and callers route that to UNREADABLE.
+#
+# Split out from its callers so preflight-check8-selftest.sh can put captured
+# API bodies in its place. The attempt walk below is the part #6113 got wrong,
+# and a partially-rerun run is not something a test can conjure against the
+# live API on demand.
+# ---------------------------------------------------------------------------
+gate_api() {
+  gh api "repos/${GATE_REPO}/$1" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# gate_pick_job — stdin: a jobs-API body. Prints "<id>|<conclusion>|<attempt>"
+# for the first job named GATE_JOB_NAME.
+#
+# Exit 0 found, 1 this body has no such job, 3 the body could not be read as a
+# jobs list. Three exits because they are three different facts: no job means
+# the run never gated anything, an unreadable body means nothing is known, and
+# collapsing the second into the first would report an API error as evidence.
+# ---------------------------------------------------------------------------
+gate_pick_job() {
+  python3 -c '
+import json, sys
+name = sys.argv[1]
+try:
+    jobs = json.load(sys.stdin)["jobs"]
+    if not isinstance(jobs, list):
+        raise ValueError("jobs is not a list")
+except Exception:
+    sys.exit(3)
+for j in jobs:
+    if isinstance(j, dict) and j.get("name") == name:
+        print("%s|%s|%s" % (j.get("id") or "", j.get("conclusion") or "", j.get("run_attempt") or 1))
+        sys.exit(0)
+sys.exit(1)
+' "$GATE_JOB_NAME" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# gate_annotation_sha — stdin: a check-run annotations body. Prints the 40-hex
+# commit the "Pre-publish gate target" notice names.
+#
+# Exit 0 printed, 1 this body carries no such notice, 3 unreadable. Exit 1 is
+# the #6113 state: a job copy carried over by a partial rerun answers `[]`.
+# ---------------------------------------------------------------------------
+gate_annotation_sha() {
+  python3 -c '
+import json, re, sys
+try:
+    anns = json.load(sys.stdin)
+    if not isinstance(anns, list):
+        raise ValueError("annotations is not a list")
+except Exception:
+    sys.exit(3)
+for a in anns:
+    if isinstance(a, dict) and a.get("title") == "Pre-publish gate target":
+        m = re.match(r"^Verified commit ([0-9a-fA-F]{40})$", (a.get("message") or "").strip())
+        if m:
+            print(m.group(1))
+            sys.exit(0)
+sys.exit(1)
+' 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# gate_attempt_target <run-id> <attempt> — which commit did ONE attempt of this
+# run report gating? An empty <attempt> reads the run's default (latest)
+# attempt, which is the only view the jobs API serves without an attempt path.
+#
+# Prints "<verdict>|<attempt-number>". <verdict> carries gate_run_target's
+# vocabulary below; <attempt-number> is the `run_attempt` the jobs API reported
+# for that job, and is empty when nothing could be read.
+# ---------------------------------------------------------------------------
+gate_attempt_target() {
+  local run_id="$1" attempt="${2:-}" path body row job_id concl at sha prc=0
+
+  if [ -n "$attempt" ]; then
+    path="actions/runs/${run_id}/attempts/${attempt}/jobs?per_page=100"
+  else
+    path="actions/runs/${run_id}/jobs?per_page=100"
+  fi
+
+  body="$(gate_api "$path")" || { printf 'UNREADABLE|\n'; return 0; }
+
+  row="$(printf '%s' "$body" | gate_pick_job)" || prc=$?
+  case "$prc" in
+    0) : ;;
+    1) printf 'NOGATE|\n'; return 0 ;;
+    *) printf 'UNREADABLE|\n'; return 0 ;;
+  esac
+
+  IFS='|' read -r job_id concl at <<< "$row"
+
+  if [ "$concl" != "success" ] || [ -z "$job_id" ]; then
+    printf 'NOGATE|%s\n' "$at"
+    return 0
+  fi
+
+  body="$(gate_api "check-runs/${job_id}/annotations")" \
+    || { printf 'UNREADABLE|%s\n' "$at"; return 0; }
+
+  sha="$(printf '%s' "$body" | gate_annotation_sha)" \
+    || { printf 'UNREADABLE|%s\n' "$at"; return 0; }
+
+  if [ -z "$sha" ]; then printf 'UNREADABLE|%s\n' "$at"; return 0; fi
+  printf '%s|%s\n' "$sha" "$at"
+}
+
 # ---------------------------------------------------------------------------
 # gate_run_target <run-id> — which commit did this run ACTUALLY gate?
 #
@@ -1039,31 +1169,58 @@ GATE_SCAN_CAP=40
 #   UNREADABLE    resolve-sha SUCCEEDED but its target could not be read.
 #                 An answer that could not be obtained, which is not a green one.
 #
-# The job is matched by its display name ("Resolve target commit", the `name:`
-# in pre-publish.yml) because that is what the jobs API returns — the YAML key
-# `resolve-sha` never appears there.
+# IT READS EARLIER ATTEMPTS WHEN THE LATEST ONE ANSWERS NOTHING (#6113). After
+# `gh run rerun <id> --failed`, the jobs API's default-attempt view returns a
+# CARRIED-OVER COPY of every job that was not re-executed: a fresh job id,
+# `conclusion: success`, and zero annotations. Measured on run 32355453111,
+# publishing trusty-audit 0.7.0 — attempt-1 job 96383547325 carries
+# "Verified commit e0dfd8d7b…", and its attempt-2 copy 96395891848 carries
+# `[]`. The commit that run gated is recorded only on the earlier attempt, so
+# this asks that attempt rather than reporting a genuinely green gate as
+# unreadable and pushing the operator onto the override.
+#
+# THE WALK STILL FAILS CLOSED, in both of its own directions. Nothing found
+# across the scanned attempts stays UNREADABLE. Two attempts that name
+# DIFFERENT commits also come back UNREADABLE: attempts of one run share its
+# `sha` input and must resolve the same commit, so a disagreement means this is
+# reading something other than what it thinks, and an answer that cannot be
+# trusted is not a green one.
 # ---------------------------------------------------------------------------
 gate_run_target() {
-  local run_id="$1" job job_id concl msg
+  local run_id="$1" res verdict attempt seen a found="" conflict=0 scanned=0
 
-  job="$(gh api "repos/${GATE_REPO}/actions/runs/${run_id}/jobs?per_page=100" \
-    --jq '[.jobs[] | select(.name == "Resolve target commit")] | first // empty' 2>/dev/null)" \
-    || { printf 'UNREADABLE\n'; return 0; }
+  res="$(gate_attempt_target "$run_id" "")"
+  verdict="${res%%|*}"
+  attempt="${res#*|}"
 
-  if [ -z "$job" ]; then printf 'NOGATE\n'; return 0; fi
+  # A sha or NOGATE is this run's own answer, and the latest attempt is the one
+  # entitled to give it. Only the absence of an answer reaches the walk.
+  if [ "$verdict" != "UNREADABLE" ]; then printf '%s\n' "$verdict"; return 0; fi
 
-  concl="$(printf '%s' "$job" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("conclusion") or "")' 2>/dev/null || echo "")"
-  job_id="$(printf '%s' "$job" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id") or "")' 2>/dev/null || echo "")"
+  # No attempt number means the jobs list itself could not be read, so there is
+  # no earlier attempt to address.
+  case "$attempt" in
+    ''|*[!0-9]*) printf 'UNREADABLE\n'; return 0 ;;
+  esac
 
-  if [ "$concl" != "success" ] || [ -z "$job_id" ]; then printf 'NOGATE\n'; return 0; fi
+  a=$((attempt - 1))
+  while [ "$a" -ge 1 ] && [ "$scanned" -lt "$GATE_ATTEMPT_SCAN_CAP" ]; do
+    scanned=$((scanned + 1))
+    res="$(gate_attempt_target "$run_id" "$a")"
+    seen="${res%%|*}"
+    a=$((a - 1))
+    case "$seen" in
+      NOGATE|UNREADABLE) continue ;;
+    esac
+    if [ -z "$found" ]; then
+      found="$seen"
+    elif [ "$found" != "$seen" ]; then
+      conflict=1
+    fi
+  done
 
-  msg="$(gh api "repos/${GATE_REPO}/check-runs/${job_id}/annotations" \
-    --jq '[.[] | select(.title == "Pre-publish gate target") | .message] | first // empty' 2>/dev/null)" \
-    || { printf 'UNREADABLE\n'; return 0; }
-
-  msg="$(printf '%s' "$msg" | sed -n 's/^Verified commit \([0-9a-fA-F]\{40\}\)$/\1/p' | head -n1)"
-  if [ -z "$msg" ]; then printf 'UNREADABLE\n'; return 0; fi
-  printf '%s\n' "$msg"
+  if [ "$conflict" -ne 0 ] || [ -z "$found" ]; then printf 'UNREADABLE\n'; return 0; fi
+  printf '%s\n' "$found"
 }
 
 # ---------------------------------------------------------------------------
