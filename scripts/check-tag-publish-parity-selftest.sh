@@ -112,7 +112,9 @@ run_case() {
     fail_case "${label}: expected exit ${want_exit}, got ${rc}" "$out"
     return
   fi
-  if [ "$want_sub" != "-" ] && ! printf '%s' "$out" | grep -qF -- "$want_sub"; then
+  # Here-string, never `printf … | grep -q` — see case 11 for what that costs
+  # once the gate's output outgrows the pipe buffer.
+  if [ "$want_sub" != "-" ] && ! grep -qF -- "$want_sub" <<< "$out"; then
     fail_case "${label}: exit ${rc} but stderr never said '${want_sub}'" "$out"
     return
   fi
@@ -143,11 +145,11 @@ run_case "fast-forward drift" 1 "TAG-DRIFT" "$repo" trusty-example
 # The remedy has to name the fast-forward, or whoever hits this at 2am reads it
 # as a botched tag and re-tags the wrong commit.
 out="$(bash "$GATE" --repo "$repo" --no-fetch trusty-example 2>&1 || true)"
-if ! printf '%s' "$out" | grep -qF "ANCESTOR of HEAD"; then
+if ! grep -qF "ANCESTOR of HEAD" <<< "$out"; then
   fail_case "fast-forward diagnosis: the failure did not identify the fast-forward" "$out"
-elif ! printf '%s' "$out" | grep -qF "git tag -f"; then
+elif ! grep -qF "git tag -f" <<< "$out"; then
   fail_case "fast-forward diagnosis: no re-tag remedy given" "$out"
-elif ! printf '%s' "$out" | grep -qF "unrelated commit 2"; then
+elif ! grep -qF "unrelated commit 2" <<< "$out"; then
   fail_case "fast-forward diagnosis: the commits added since the tag were not listed" "$out"
 else
   pass_case "the fast-forward failure names the cause, lists the drift, and gives the re-tag remedy"
@@ -170,7 +172,7 @@ git -C "$repo" add -A
 git -C "$repo" commit --quiet -m "feat(other): divergent commit"
 run_case "divergent tag" 1 "TAG-DRIFT" "$repo" trusty-example
 out="$(bash "$GATE" --repo "$repo" --no-fetch trusty-example 2>&1 || true)"
-if printf '%s' "$out" | grep -qF "ANCESTOR of HEAD"; then
+if grep -qF "ANCESTOR of HEAD" <<< "$out"; then
   fail_case "divergent diagnosis: a divergent tag was reported as a fast-forward" "$out"
 else
   pass_case "a divergent tag is not misreported as a fast-forward"
@@ -241,7 +243,7 @@ cat > "${repo}/target/package/trusty-example-1.2.3/.cargo_vcs_info.json" <<JSON
 JSON
 run_case "published commit != tag commit" 1 "VCS-INFO-MISMATCH" "$repo" trusty-example --vcs-info auto
 out="$(bash "$GATE" --repo "$repo" --no-fetch trusty-example --vcs-info auto 2>&1 || true)"
-if ! printf '%s' "$out" | grep -qF "$published_sha"; then
+if ! grep -qF "$published_sha" <<< "$out"; then
   fail_case "vcs-info mismatch: the failure did not name the commit that actually shipped" "$out"
 else
   pass_case "the vcs-info mismatch names the commit that actually shipped"
@@ -289,9 +291,17 @@ else
   out="$(bash "$GATE" --repo "$REPO_ROOT" --no-fetch tga 2.17.0 2>&1)" || rc=$?
   if [ "$rc" -eq 0 ]; then
     fail_case "real-history: the gate passed ${REAL_TAG} (${REAL_TAG_SHA}) against HEAD (${REAL_HEAD})" "$out"
-  elif ! printf '%s' "$out" | grep -qF "TAG-DRIFT"; then
+  # Here-strings, NOT `printf … | grep -qF`. `grep -q` exits on the FIRST match
+  # and TAG-DRIFT is on the gate's third line, so printf is left writing into a
+  # closed pipe; past the pipe buffer it dies on SIGPIPE, `set -o pipefail`
+  # promotes that 141 to the pipeline's status, and the test reads "the needle
+  # was absent" from output that plainly contains it. The gate's output grows
+  # with every commit between tga-v2.17.0 and HEAD — it reached ~43 KB and the
+  # job started failing with `printf: write error: Broken pipe` beside a
+  # verbatim "FAIL: TAG-DRIFT" line.
+  elif ! grep -qF "TAG-DRIFT" <<< "$out"; then
     fail_case "real-history: exit ${rc} but not reported as TAG-DRIFT" "$out"
-  elif ! printf '%s' "$out" | grep -qF "$REAL_TAG_SHA"; then
+  elif ! grep -qF "$REAL_TAG_SHA" <<< "$out"; then
     fail_case "real-history: the failure did not name the tagged commit" "$out"
   else
     pass_case "real ${REAL_TAG} (${REAL_TAG_SHA}) vs real HEAD -> TAG-DRIFT"
