@@ -192,18 +192,23 @@ pub enum Verb {
     },
     /// Regenerate the reports from a finished audit package.
     ///
-    /// Point it at the directory you unzipped the audit into — the one holding
-    /// `reports/` — and it runs the report step again over every manifest in
-    /// there, writing a fresh copy beside it. It clones nothing, collects
+    /// Unzip the audit, change into the directory that came out of it, and run
+    /// `trusty-audit render` with nothing after it. It reads the
+    /// `engagement.toml` beside you for the OpenRouter key, runs the report step
+    /// again over every manifest under `reports/`, and writes the fresh copies
+    /// to `rerendered/` in that same directory. It clones nothing, collects
     /// nothing, and never writes into the package it read.
     ///
-    /// It needs an OpenRouter key in OPENROUTER_API_KEY: the report's executive
-    /// summary is written by a model, so a re-render calls one. The dimensions
-    /// that need the repositories themselves — the code scan and the analysis
-    /// pass — are named as gaps rather than silently left out, because an audit
-    /// package carries no checkouts.
+    /// Every flag below overrides one of those defaults; none is required.
+    ///
+    /// It needs an OpenRouter key: the report's executive summary is written by
+    /// a model, so a re-render calls one. OPENROUTER_API_KEY wins, and the
+    /// `openrouter_key` in the engagement config beside you is used when it is
+    /// not set. The dimensions that need the repositories themselves — the code
+    /// scan and the analysis pass — are named as gaps rather than silently left
+    /// out, because an audit package carries no checkouts.
     Render {
-        /// The unzipped audit package, or a working directory a sweep ran in.
+        /// The unzipped audit package (default: this directory, else the work dir).
         #[arg(long, value_name = "DIR")]
         from: Option<PathBuf>,
         /// Where to write the regenerated reports (default: <from>/rerendered).
@@ -317,8 +322,9 @@ impl Cli {
                 output_dir: out.clone(),
                 binary: binary.clone(),
             }),
-            // #6080: every knob defaults, so `taudit render --from <package>` is
-            // the whole invocation the recipient is given.
+            // #6080: every knob defaults — the source to the directory this was
+            // run in — so `taudit render` is the whole invocation the recipient
+            // is given.
             Some(Verb::Render {
                 from,
                 out,

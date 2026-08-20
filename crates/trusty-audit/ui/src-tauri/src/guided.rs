@@ -176,7 +176,11 @@ fn session() -> Result<Session, String> {
     let env_value = std::env::var(WORKDIR_ENV).ok();
     let home = dirs::home_dir();
     let work = WorkDir::resolve(None, env_value.as_deref(), home.as_deref(), &cwd);
-    Ok(Session::new(work).with_config_path(EngagementConfig::resolve_path(None, &cwd)))
+    // #6080: the same cwd the CLI hands across, so a re-render started from a
+    // window opened in an unzipped package renders that package too.
+    Ok(Session::new(work)
+        .with_config_path(EngagementConfig::resolve_path(None, &cwd))
+        .with_cwd(&cwd))
 }
 
 /// Run `Command::Guided` and hand the window its outcome.
