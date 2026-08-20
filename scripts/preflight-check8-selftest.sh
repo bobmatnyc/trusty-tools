@@ -78,6 +78,59 @@
 #                               check obtained, so the could-not-read override
 #                               must not reach it.
 #
+# THE SECOND HALF drives gate_run_target — the ATTRIBUTION, where gate_decide is
+#   the DECISION — over captured Actions-API bodies, with gate_api replaced by a
+#   fixture server. It exists for #6113: `gh run rerun <id> --failed` leaves the
+#   jobs API's default-attempt view holding a carried-over COPY of every job that
+#   did not re-execute — a fresh job id, `conclusion: success`, and `[]` where
+#   the annotation should be. CHECK 8 read that copy, found nothing, and called a
+#   genuinely green gate unreadable; trusty-audit 0.7.0 published on an
+#   owner-authorized PREFLIGHT_GATE_UNVERIFIED override because of it.
+#
+#     17. THE #6113 DEFECT      run 32355453111 verbatim: attempt-2 copy job
+#                               96395891848 answers `[]`, attempt-1 job
+#                               96383547325 carries "Verified commit e0dfd8d7b…".
+#                               gate_run_target must print that commit. Against
+#                               the pre-fix script this case prints UNREADABLE.
+#     18. …and it then passes   the recovered target, fed to gate_decide at that
+#                               HEAD, must [PASS] — the whole point is a publish
+#                               that no longer needs the override.
+#     19. latest attempt wins   when the latest attempt DOES answer, an earlier
+#                               attempt naming a different commit must not be
+#                               consulted. The walk is a fallback, not a vote.
+#     20. one attempt, no notice a run never rerun whose annotation is missing
+#                               stays UNREADABLE. There is no attempt 0, and the
+#                               pre-#6113 behaviour is unchanged here.
+#     21. failed resolve        latest attempt's resolve job did not succeed:
+#                               NOGATE, even with a green annotation on attempt
+#                               1. That run gated nothing on its current attempt,
+#                               and an earlier attempt cannot rescue it.
+#     22. job absent            no "Resolve target commit" job at all: NOGATE.
+#     23. unreadable jobs body  a body that is not a jobs list is UNREADABLE, not
+#                               NOGATE — an API error must never read as "this
+#                               run gated nothing".
+#     24. unreadable annotations a non-list annotations body on the latest
+#                               attempt routes to the walk, same as `[]`.
+#     25. attempts disagree     two earlier attempts naming DIFFERENT commits is
+#                               UNREADABLE. Attempts of one run share its `sha`
+#                               input, so a disagreement means the walk is
+#                               reading something other than what it thinks.
+#     26. the walk is bounded   GATE_ATTEMPT_SCAN_CAP attempts back and no
+#                               further; the answer beyond it stays UNREADABLE
+#                               rather than costing an unbounded API budget.
+#     27. unreachable API       the latest attempt's jobs read failing outright
+#                               is UNREADABLE, with no attempt number to walk
+#                               from. Unchanged by #6113.
+#     28. annotations fetch     the ANNOTATIONS read failing outright, on a run
+#         fails hard            with no earlier attempt: UNREADABLE. A different
+#                               branch from case 24 — that one is a body that
+#                               parsed to nothing, this one is gate_api itself
+#                               exiting nonzero — and the branch a review found
+#                               untested on PR #6115.
+#     29. …and on the walk      the same hard failure on the latest attempt of a
+#                               RERUN still walks back and recovers the commit
+#                               attempt 1 recorded.
+#
 # Usage: bash scripts/preflight-check8-selftest.sh
 # Exit: 0 when every case matches; 1 on the first mismatch, printing both sides.
 #
@@ -161,7 +214,7 @@ run_decide() {
     # Here-string, matching how check8_prepublish_gate feeds it in production —
     # a pipe would run gate_decide in a subshell and lose the GATE_NOT_VERIFIED
     # assignment the override arm depends on.
-    gate_decide "$HEAD_SHA" "$capped" 2>&1 >/dev/null <<< "$table"
+    gate_decide "${DECIDE_HEAD:-$HEAD_SHA}" "$capped" 2>&1 >/dev/null <<< "$table"
     printf '\nEXIT=%s' "$?"
   )"
   rc="$(printf '%s' "$out" | sed -n 's/^EXIT=//p' | tail -n1)"
@@ -288,6 +341,197 @@ assert_absent "15 red + override: no WARN" "[WARN]" "$(text_of "$raw")"
 raw="$(PREFLIGHT_GATE_UNVERIFIED="$REASON" run_decide "$(tbl "$OTHER_SHA" completed success https://gh/a)")"
 assert_eq "16 absent + override: still stops" "1" "$(status_of "$raw")"
 assert_absent "16 absent + override: no WARN" "[WARN]" "$(text_of "$raw")"
+
+# ===========================================================================
+# gate_run_target — the ATTRIBUTION half (#6113)
+# ===========================================================================
+# The three commits below are run 32355453111's, at full length: the release
+# that hit this, its two job ids, and the commit only attempt 1 records.
+RERUN_RUN=32355453111
+RERUN_SHA="e0dfd8d7b5db2383e62cbf949ed462b6dfc5ef19"
+RERUN_JOB_A2=96395891848   # the carried-over copy — success, `[]` annotations
+RERUN_JOB_A1=96383547325   # the job that actually ran, and reported the commit
+
+FIXTURE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/preflight-check8-fixtures.XXXXXX")"
+trap 'rm -rf "$FIXTURE_DIR"' EXIT
+
+# fixture_key <api-path> — the filename a path is stored under. Query strings
+# and slashes flatten; nothing else in these paths varies.
+fixture_key() { printf '%s' "$1" | tr '/?=&' '____'; }
+
+# fx <api-path> <json-body> — record what the API answers for one path. A path
+# with NO fixture is a FAILED read (gate_api exits nonzero), which is how an
+# attempt that does not exist, and an unreachable API, are both expressed.
+fx() { printf '%s' "$2" > "${FIXTURE_DIR}/$(fixture_key "$1")"; }
+fx_reset() { rm -f "${FIXTURE_DIR:?}"/*; }
+
+# fixture_api <path> — stands in for gate_api. Exit 22 (curl's HTTP-error code,
+# which `gh api` also returns) when the path was never recorded.
+fixture_api() {
+  local f
+  f="${FIXTURE_DIR}/$(fixture_key "$1")"
+  [ -f "$f" ] || return 22
+  cat "$f"
+}
+
+# jobs_body <job-id> <conclusion> <run-attempt> — a jobs-API body shaped like
+# the real one, including a second job so the name match is doing real work.
+jobs_body() {
+  printf '{"total_count":2,"jobs":[{"id":11,"name":"Rust tests (shard 1)","conclusion":"success","run_attempt":%s},{"id":%s,"name":"Resolve target commit","conclusion":"%s","run_attempt":%s}]}' \
+    "$3" "$1" "$2" "$3"
+}
+
+# ann_body [<sha>] — a check-run annotations body. With no sha it is `[]`, which
+# is verbatim what the carried-over copy answers.
+ann_body() {
+  if [ -z "${1:-}" ]; then printf '[]'; return; fi
+  printf '[{"path":".github","start_line":1,"end_line":1,"annotation_level":"notice","title":"Pre-publish gate target","message":"Verified commit %s"}]' "$1"
+}
+
+# jobs_path <run-id> [<attempt>] / ann_path <job-id> — the two paths CHECK 8
+# asks for, written once so a fixture and the code under test cannot disagree
+# about the shape.
+jobs_path() {
+  if [ -n "${2:-}" ]; then
+    printf 'actions/runs/%s/attempts/%s/jobs?per_page=100' "$1" "$2"
+  else
+    printf 'actions/runs/%s/jobs?per_page=100' "$1"
+  fi
+}
+ann_path() { printf 'check-runs/%s/annotations' "$1"; }
+
+# ---------------------------------------------------------------------------
+# run_target <run-id> — drive gate_run_target in a clean subshell with the
+# shipped functions extracted into it, over the fixtures recorded above.
+#
+# gate_api is DELIBERATELY NOT extracted: fixture_api takes its place, which is
+# the whole reason the shipped code has that one-line seam. Everything below it
+# — the attempt walk, the job match, the annotation parse — is the shipped code.
+# ---------------------------------------------------------------------------
+run_target() {
+  (
+    set +e
+    # GATE_REPO is deliberately NOT set: only gate_api reads it, and gate_api is
+    # the one function the fixture server replaces. Should a future extracted
+    # function reach for it, `set -u` aborts here loudly rather than letting this
+    # file test a path that quietly addressed the wrong repo.
+    #
+    # Read the constants from the script rather than restating them, so a rename
+    # of the resolve job or a change to the cap cannot leave this file testing a
+    # value the gate no longer uses.
+    eval "$(grep -E '^GATE_(JOB_NAME|ATTEMPT_SCAN_CAP)=' "$UNDER_TEST")"
+    eval "$(awk '/^gate_pick_job\(\) \{/,/^\}/' "$UNDER_TEST")"
+    eval "$(awk '/^gate_annotation_sha\(\) \{/,/^\}/' "$UNDER_TEST")"
+    eval "$(awk '/^gate_attempt_target\(\) \{/,/^\}/' "$UNDER_TEST")"
+    eval "$(awk '/^gate_run_target\(\) \{/,/^\}/' "$UNDER_TEST")"
+    gate_api() { fixture_api "$@"; }
+    gate_run_target "$1"
+  )
+}
+
+echo "gate_run_target — a partially-rerun run (#6113):"
+
+# --- 17. THE DEFECT: the answer lives on an earlier attempt -------------------
+# Verbatim run 32355453111. Pre-fix, gate_run_target read only the default
+# attempt's copy, got `[]`, and printed UNREADABLE — which routed a green gate
+# to the override arm.
+fx_reset
+fx "$(jobs_path "$RERUN_RUN")"      "$(jobs_body "$RERUN_JOB_A2" success 2)"
+fx "$(ann_path "$RERUN_JOB_A2")"    "$(ann_body)"
+fx "$(jobs_path "$RERUN_RUN" 1)"    "$(jobs_body "$RERUN_JOB_A1" success 1)"
+fx "$(ann_path "$RERUN_JOB_A1")"    "$(ann_body "$RERUN_SHA")"
+assert_eq "17 rerun carryover: reads attempt 1" "$RERUN_SHA" "$(run_target "$RERUN_RUN")"
+
+# --- 18. and the recovered target then earns a PASS --------------------------
+raw="$(DECIDE_HEAD="$RERUN_SHA" run_decide "$(tbl "$(run_target "$RERUN_RUN")" completed success https://gh/run/${RERUN_RUN})")"
+assert_eq "18 rerun carryover: publish permitted" "0" "$(status_of "$raw")"
+assert_contains "18 rerun carryover: label" "[PASS]" "$(text_of "$raw")"
+assert_absent "18 rerun carryover: no override needed" "[WARN]" "$(text_of "$raw")"
+
+# --- 19. the latest attempt's own answer is not put to a vote ----------------
+fx_reset
+fx "$(jobs_path "$RERUN_RUN")"      "$(jobs_body "$RERUN_JOB_A2" success 2)"
+fx "$(ann_path "$RERUN_JOB_A2")"    "$(ann_body "$RERUN_SHA")"
+fx "$(jobs_path "$RERUN_RUN" 1)"    "$(jobs_body "$RERUN_JOB_A1" success 1)"
+fx "$(ann_path "$RERUN_JOB_A1")"    "$(ann_body "$OTHER_SHA")"
+assert_eq "19 latest answers: earlier attempt ignored" "$RERUN_SHA" "$(run_target "$RERUN_RUN")"
+
+# --- 20. a run that was never rerun has no earlier attempt to ask ------------
+fx_reset
+fx "$(jobs_path "$RERUN_RUN")"      "$(jobs_body 7001 success 1)"
+fx "$(ann_path 7001)"               "$(ann_body)"
+assert_eq "20 single attempt, no notice: unreadable" "UNREADABLE" "$(run_target "$RERUN_RUN")"
+
+echo "gate_run_target — non-evidence and unreadable states:"
+
+# --- 21. a resolve job that did not succeed gated nothing --------------------
+fx_reset
+fx "$(jobs_path "$RERUN_RUN")"      "$(jobs_body "$RERUN_JOB_A2" failure 2)"
+fx "$(jobs_path "$RERUN_RUN" 1)"    "$(jobs_body "$RERUN_JOB_A1" success 1)"
+fx "$(ann_path "$RERUN_JOB_A1")"    "$(ann_body "$RERUN_SHA")"
+assert_eq "21 latest resolve failed: NOGATE not rescued" "NOGATE" "$(run_target "$RERUN_RUN")"
+
+# --- 22. no resolve job at all -----------------------------------------------
+fx_reset
+fx "$(jobs_path "$RERUN_RUN")" '{"total_count":1,"jobs":[{"id":11,"name":"Rust tests (shard 1)","conclusion":"success","run_attempt":1}]}'
+assert_eq "22 no resolve job: NOGATE" "NOGATE" "$(run_target "$RERUN_RUN")"
+
+# --- 23. an API error body is not a finding ----------------------------------
+fx_reset
+fx "$(jobs_path "$RERUN_RUN")" '{"message":"Not Found","status":"404"}'
+assert_eq "23 unreadable jobs body: not NOGATE" "UNREADABLE" "$(run_target "$RERUN_RUN")"
+
+# --- 24. an unreadable annotations body routes to the walk, same as [] -------
+fx_reset
+fx "$(jobs_path "$RERUN_RUN")"      "$(jobs_body "$RERUN_JOB_A2" success 2)"
+fx "$(ann_path "$RERUN_JOB_A2")"    '{"message":"Not Found"}'
+fx "$(jobs_path "$RERUN_RUN" 1)"    "$(jobs_body "$RERUN_JOB_A1" success 1)"
+fx "$(ann_path "$RERUN_JOB_A1")"    "$(ann_body "$RERUN_SHA")"
+assert_eq "24 unreadable annotations: walks back" "$RERUN_SHA" "$(run_target "$RERUN_RUN")"
+
+# --- 25. attempts that disagree are not an answer ----------------------------
+fx_reset
+fx "$(jobs_path "$RERUN_RUN")"      "$(jobs_body 7003 success 3)"
+fx "$(ann_path 7003)"               "$(ann_body)"
+fx "$(jobs_path "$RERUN_RUN" 2)"    "$(jobs_body 7002 success 2)"
+fx "$(ann_path 7002)"               "$(ann_body "$RERUN_SHA")"
+fx "$(jobs_path "$RERUN_RUN" 1)"    "$(jobs_body 7001 success 1)"
+fx "$(ann_path 7001)"               "$(ann_body "$OTHER_SHA")"
+assert_eq "25 attempts disagree: unreadable" "UNREADABLE" "$(run_target "$RERUN_RUN")"
+
+# --- 26. the walk stops at its cap, and stopping is not a green --------------
+# run_attempt 9 with the annotation only on attempt 1: the cap is reached first.
+fx_reset
+fx "$(jobs_path "$RERUN_RUN")" "$(jobs_body 7009 success 9)"
+fx "$(ann_path 7009)"          "$(ann_body)"
+for n in 8 7 6 5 4 3 2; do
+  fx "$(jobs_path "$RERUN_RUN" "$n")" "$(jobs_body "700${n}" success "$n")"
+  fx "$(ann_path "700${n}")"          "$(ann_body)"
+done
+fx "$(jobs_path "$RERUN_RUN" 1)" "$(jobs_body 7001 success 1)"
+fx "$(ann_path 7001)"            "$(ann_body "$RERUN_SHA")"
+assert_eq "26 beyond the attempt cap: unreadable" "UNREADABLE" "$(run_target "$RERUN_RUN")"
+
+# --- 27. the API not answering at all ----------------------------------------
+fx_reset
+assert_eq "27 unreachable API: unreadable" "UNREADABLE" "$(run_target "$RERUN_RUN")"
+
+# --- 28. the ANNOTATIONS read failing outright -------------------------------
+# The jobs list answers, the resolve job succeeded, and the annotations call
+# itself exits nonzero — a transient API failure, not a body that parsed to
+# nothing. Case 24's malformed body reaches UNREADABLE through the parser;
+# this reaches it through gate_api's own exit, which is the other branch.
+# Omitting the ann_path fixture is what makes the fetch fail hard.
+fx_reset
+fx "$(jobs_path "$RERUN_RUN")" "$(jobs_body 7001 success 1)"
+assert_eq "28 annotations fetch fails hard: unreadable" "UNREADABLE" "$(run_target "$RERUN_RUN")"
+
+# --- 29. the same failure on a rerun still walks back ------------------------
+fx_reset
+fx "$(jobs_path "$RERUN_RUN")"      "$(jobs_body "$RERUN_JOB_A2" success 2)"
+fx "$(jobs_path "$RERUN_RUN" 1)"    "$(jobs_body "$RERUN_JOB_A1" success 1)"
+fx "$(ann_path "$RERUN_JOB_A1")"    "$(ann_body "$RERUN_SHA")"
+assert_eq "29 annotations fetch fails hard on rerun: walks back" "$RERUN_SHA" "$(run_target "$RERUN_RUN")"
 
 echo
 if [ "$FAILURES" -eq 0 ]; then
