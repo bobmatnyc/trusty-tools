@@ -10,13 +10,14 @@
 //! What: [`mpm_hook_command`] resolves the absolute binary path (falling back to
 //! the bare name when resolution fails); [`mpm_hook_additions`] returns the hook
 //! triad JSON block; [`ensure_managed_hooks`] reads `<claude_config_dir>/settings.json`,
-//! deep-merges the triad idempotently, and writes back; [`remove_global_trusty_mpm_hooks`]
-//! strips MPM hook entries from all global settings files; [`write_project_hooks`]
-//! writes project-scoped hooks into a given settings file.
+//! deep-merges the triad idempotently, and writes back;
+//! [`remove_global_trusty_mpm_hooks_at`] strips MPM hook entries from the two
+//! global settings files; [`write_project_hooks`] writes project-scoped hooks
+//! into a given settings file.
 //! Test: `test_ensure_managed_hooks_writes_triad`,
 //! `test_ensure_managed_hooks_is_idempotent`,
 //! `test_hook_command_uses_absolute_path`,
-//! `test_remove_global_trusty_mpm_hooks_removes_only_mpm_entries`,
+//! `remove_global_hooks_at_strips_only_the_two_global_files`,
 //! `test_write_project_hooks_targets_project_dir`,
 //! `test_is_mpm_hook_command_recognises_tm_bin_name`,
 //! `test_write_project_hooks_replaces_stale_exe_path_group`,
@@ -331,7 +332,7 @@ fn is_mpm_hash_suffixed_artifact(path: &Path) -> bool {
 /// `"/opt/bin/trusty-mpm hook"`) OR the full prefix is recognised by
 /// [`is_mpm_hash_suffixed_artifact`] (hash-suffixed build artifacts under a
 /// `deps/` directory — `".../deps/trusty_mpm-<hash> hook"`).
-/// Test: `test_remove_global_trusty_mpm_hooks_removes_only_mpm_entries`,
+/// Test: `remove_global_hooks_at_strips_only_the_two_global_files`,
 /// `test_is_mpm_hook_command_recognises_tm_bin_name`,
 /// `test_is_mpm_hook_command_recognises_stale_hash_and_mvp_variants`,
 /// `test_is_mpm_hook_command_rejects_hash_suffixed_binary_outside_deps_dir`,
@@ -383,26 +384,67 @@ pub fn is_claude_mpm_hook_command(cmd: &str) -> bool {
     lower.contains("claude-mpm") || lower.contains("claude_mpm")
 }
 
-/// Strip trusty-mpm hook entries from every global Claude settings file.
+/// The two GLOBAL Claude settings files under `home`.
+///
+/// Why (#5875, #6070): Claude Code reads exactly `~/.claude/settings.json` and
+/// `~/.claude/settings.local.json` as the user's GLOBAL settings. Everything
+/// else a `$HOME` walk reaches is a PROJECT file that the project itself owns.
+/// Naming the two paths directly costs two `open()` calls; discovering them by
+/// recursive walk costs the whole home tree, and that walk is what
+/// [`remove_global_trusty_mpm_hooks`] used to pay on every `tm launch`.
+/// What: joins the two well-known file names under `<home>/.claude` without
+/// touching the filesystem — existence is decided by the caller's read.
+/// Test: `remove_global_hooks_at_strips_only_the_two_global_files`.
+fn global_settings_files(home: &Path) -> Vec<PathBuf> {
+    let claude = home.join(".claude");
+    vec![
+        claude.join("settings.json"),
+        claude.join("settings.local.json"),
+    ]
+}
+
+/// Strip trusty-mpm hook entries from the global Claude settings files.
 ///
 /// Why: after switching from global hooks to project-scoped hooks, any
 /// previously installed global hook triad must be cleaned up so it does not
 /// fire in unrelated projects. This mirrors the `remove_global_trusty_memory_hooks`
 /// pattern from trusty-memory — strip first, then write project-scoped hooks.
-/// What: discovers all `.claude/settings*.json` files under `$HOME` via
-/// [`trusty_common::claude_config::discover_claude_settings`], and for each file
-/// removes any hook group whose `command` field matches a trusty-mpm hook pattern
-/// (see [`is_mpm_hook_command`]). Writes back atomically only when something
-/// actually changed. Returns the count of files modified.
-/// Test: `test_remove_global_trusty_mpm_hooks_removes_only_mpm_entries`.
+/// What: resolves the home directory and delegates to
+/// [`remove_global_trusty_mpm_hooks_at`].
+/// Test: `remove_global_hooks_at_strips_only_the_two_global_files`,
+/// `remove_global_hooks_at_ignores_project_settings_below_home`.
 pub fn remove_global_trusty_mpm_hooks() -> anyhow::Result<usize> {
-    use trusty_common::claude_config::{
-        default_settings_max_depth, discover_claude_settings, write_json_atomic,
-    };
-
     let home =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
-    let files = discover_claude_settings(&home, default_settings_max_depth());
+    remove_global_trusty_mpm_hooks_at(&home)
+}
+
+/// [`remove_global_trusty_mpm_hooks`] against an explicit home directory.
+///
+/// Why (#5875): the no-argument form resolved the real `$HOME` and recursively
+/// walked it to depth 8, so `launch()` step 8 paid an O(entire home tree) scan
+/// on every session start. On a real developer machine one `opendir()` inside
+/// that walk blocked indefinitely, hanging `tm launch` — and every test that
+/// drives it, which is how the eight `guided_fallback_*` tests came to run
+/// forever (#6070). Issue #2940 already made this call for the WRITE side:
+/// `tm install` stopped walking `$HOME` and writes only the managed config dir,
+/// leaving the machine-wide sweep to the explicit, user-invoked `tm hooks
+/// clean`. This is the symmetric fix for the REMOVE side. Taking `home` as a
+/// parameter is also what makes the behaviour testable at all — every `Test:`
+/// line in this module previously named a test that did not exist, because the
+/// only entry point read a process-global.
+/// What: for each of [`global_settings_files`], removes every hook group whose
+/// `command` matches a trusty-mpm hook pattern (see [`is_mpm_hook_command`]) and
+/// writes the file back atomically only when something actually changed.
+/// Missing, empty, unparseable, and non-object files are skipped silently.
+/// Returns the count of files modified. PROJECT settings files under `home` are
+/// deliberately NOT touched — `tm hooks clean` owns that sweep.
+/// Test: `remove_global_hooks_at_strips_only_the_two_global_files`,
+/// `remove_global_hooks_at_ignores_project_settings_below_home`.
+pub fn remove_global_trusty_mpm_hooks_at(home: &Path) -> anyhow::Result<usize> {
+    use trusty_common::claude_config::write_json_atomic;
+
+    let files = global_settings_files(home);
 
     let mut changed = 0usize;
     for path in &files {
@@ -436,7 +478,7 @@ pub fn remove_global_trusty_mpm_hooks() -> anyhow::Result<usize> {
 /// (issue #2940's `tm hooks clean`), and tests.
 /// What: delegates to [`strip_mpm_hook_entries_for_events`] with `events =
 /// None`, which strips MPM-owned groups from every event key present.
-/// Test: `test_remove_global_trusty_mpm_hooks_removes_only_mpm_entries`.
+/// Test: `remove_global_hooks_at_strips_only_the_two_global_files`.
 pub fn strip_mpm_hook_entries(val: &mut serde_json::Value) -> bool {
     strip_mpm_hook_entries_for_events(val, None)
 }
@@ -454,7 +496,7 @@ pub fn strip_mpm_hook_entries(val: &mut serde_json::Value) -> bool {
 /// MPM group per event survives regardless of exe-path churn.
 /// What: delegates to [`strip_hook_entries_matching_for_events`] with
 /// [`is_mpm_hook_command`] as the predicate.
-/// Test: `test_remove_global_trusty_mpm_hooks_removes_only_mpm_entries`,
+/// Test: `remove_global_hooks_at_strips_only_the_two_global_files`,
 /// `test_write_project_hooks_replaces_stale_exe_path_group`,
 /// `test_strip_mpm_hook_entries_removes_only_tm_entry_from_mixed_group`.
 fn strip_mpm_hook_entries_for_events(
@@ -489,7 +531,7 @@ fn strip_mpm_hook_entries_for_events(
 /// event key emptied of all groups is removed. Groups with a non-array/absent
 /// `hooks` field (unrecognised shape) are always retained untouched. Returns
 /// `true` if anything was removed.
-/// Test: `test_remove_global_trusty_mpm_hooks_removes_only_mpm_entries`,
+/// Test: `remove_global_hooks_at_strips_only_the_two_global_files`,
 /// `test_write_project_hooks_replaces_stale_exe_path_group`,
 /// `test_strip_mpm_hook_entries_removes_only_tm_entry_from_mixed_group`.
 pub(crate) fn strip_hook_entries_matching_for_events(

@@ -847,3 +847,121 @@ fn test_write_project_hooks_replaces_stale_exe_path_group() {
         );
     }
 }
+
+/// Plant a settings file at `path` carrying one tm hook group and one foreign
+/// group under `PreToolUse`.
+///
+/// Why: both `remove_global_trusty_mpm_hooks_at` tests need the same shape — a
+/// file where a correct strip is visibly distinguishable both from a wholesale
+/// wipe and from no write at all.
+/// What: creates the parent directory and writes the two-group JSON.
+/// Test: used by `remove_global_hooks_at_strips_only_the_two_global_files` and
+/// `remove_global_hooks_at_ignores_project_settings_below_home`.
+fn plant_mixed_settings(path: &Path) {
+    std::fs::create_dir_all(path.parent().expect("settings path has a parent"))
+        .expect("settings parent dir creatable");
+    let json = serde_json::json!({
+        "hooks": {
+            "PreToolUse": [
+                { "hooks": [ { "type": "command", "command": "/opt/bin/trusty-mpm hook" } ] },
+                { "hooks": [ { "type": "command", "command": "/usr/bin/other-tool run" } ] }
+            ]
+        }
+    });
+    std::fs::write(
+        path,
+        serde_json::to_string_pretty(&json).expect("json serialises"),
+    )
+    .expect("settings file writable");
+}
+
+/// Every `PreToolUse` command still present in the settings file at `path`.
+fn pre_tool_use_commands(path: &Path) -> Vec<String> {
+    let text = std::fs::read_to_string(path).expect("settings file readable");
+    let val: serde_json::Value = serde_json::from_str(&text).expect("settings file parses");
+    val["hooks"]["PreToolUse"]
+        .as_array()
+        .expect("PreToolUse is an array")
+        .iter()
+        .filter_map(|g| g["hooks"][0]["command"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// Why (#5875, #6070): the removal path must strip tm's own hook groups from
+/// both global settings files and leave every foreign group in place.
+/// What: plants a mixed file at `<home>/.claude/settings.json` and another at
+/// `<home>/.claude/settings.local.json`, runs the strip against that home, and
+/// asserts two files changed and only the foreign command survives in each.
+#[test]
+fn remove_global_hooks_at_strips_only_the_two_global_files() {
+    let home = TempDir::new().expect("tempdir");
+    let global = home.path().join(".claude").join("settings.json");
+    let global_local = home.path().join(".claude").join("settings.local.json");
+    plant_mixed_settings(&global);
+    plant_mixed_settings(&global_local);
+
+    let changed = remove_global_trusty_mpm_hooks_at(home.path()).expect("strip succeeds");
+
+    assert_eq!(changed, 2, "both global settings files carried a tm group");
+    for path in [&global, &global_local] {
+        assert_eq!(
+            pre_tool_use_commands(path),
+            vec!["/usr/bin/other-tool run".to_string()],
+            "only the foreign group may survive in {}",
+            path.display()
+        );
+    }
+}
+
+/// Why (#5875): this is the regression test for the hang. Before the fix the
+/// removal path reached its targets by a depth-8 recursive walk of the whole
+/// home tree, so it rewrote every PROJECT settings file on the machine and paid
+/// an unbounded scan to find them — the `opendir()` that blocked `tm launch`,
+/// and with it the eight `guided_fallback_*` tests, forever. `tm hooks clean`
+/// owns the machine-wide sweep (#2940); this path must not.
+/// What: plants a project settings file three levels below `home` carrying the
+/// same tm hook group as the global file, strips, and asserts the project file
+/// is byte-identical afterwards while the global file was still cleaned.
+#[test]
+fn remove_global_hooks_at_ignores_project_settings_below_home() {
+    let home = TempDir::new().expect("tempdir");
+    let global = home.path().join(".claude").join("settings.json");
+    let project = home
+        .path()
+        .join("code")
+        .join("acme")
+        .join("widget")
+        .join(".claude")
+        .join("settings.json");
+    plant_mixed_settings(&global);
+    plant_mixed_settings(&project);
+    let project_before = std::fs::read_to_string(&project).expect("project settings readable");
+
+    let changed = remove_global_trusty_mpm_hooks_at(home.path()).expect("strip succeeds");
+
+    assert_eq!(changed, 1, "only the global settings file may be rewritten");
+    assert_eq!(
+        std::fs::read_to_string(&project).expect("project settings still readable"),
+        project_before,
+        "a project settings file below home must be left untouched: {}",
+        project.display()
+    );
+    assert_eq!(
+        pre_tool_use_commands(&global),
+        vec!["/usr/bin/other-tool run".to_string()],
+        "the global file must still have its tm group stripped"
+    );
+}
+
+/// Why (#5875): a home with no `.claude` directory is the common case on a
+/// machine that never carried legacy global hooks. `launch()` calls this on
+/// every session start, so it must be a silent no-op rather than an error.
+/// What: strips against an empty tempdir and asserts `Ok(0)`.
+#[test]
+fn remove_global_hooks_at_reports_zero_when_no_global_settings_exist() {
+    let home = TempDir::new().expect("tempdir");
+    assert_eq!(
+        remove_global_trusty_mpm_hooks_at(home.path()).expect("strip succeeds"),
+        0
+    );
+}

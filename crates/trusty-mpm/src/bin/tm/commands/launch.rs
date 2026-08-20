@@ -249,6 +249,8 @@ pub(crate) async fn launch(
 
     // 8. Write project-scoped MPM hooks into the managed clone (NOT the live checkout).
     //    Both steps are best-effort — a failure is logged but never fatal.
+    // #5875: this strips the two `~/.claude/settings*.json` files only. It used
+    // to walk the whole `$HOME` tree here, which blocked a launch indefinitely.
     if let Err(e) = crate::commands::install::remove_global_trusty_mpm_hooks() {
         eprintln!("warning: could not remove global MPM hooks: {e:#}");
     }

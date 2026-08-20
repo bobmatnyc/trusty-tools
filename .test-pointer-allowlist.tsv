@@ -445,7 +445,6 @@ crates/trusty-mpm/src/core/sm/goals/store.rs	note_appends_and_persists
 crates/trusty-mpm/src/core/sm/goals/store.rs	update_appends_note
 crates/trusty-mpm/src/core/sm/goals/store.rs	update_sets_state_and_evidence
 crates/trusty-mpm/src/core/sm/providers/resolve.rs	resolve_tests
-crates/trusty-mpm/src/core/standalone/hooks/mod.rs	test_remove_global_trusty_mpm_hooks_removes_only_mpm_entries
 crates/trusty-mpm/src/core/standalone/registry.rs	test_alias_validation
 crates/trusty-mpm/src/core/standalone/run.rs	test_check_credentials_with_env_var
 crates/trusty-mpm/src/core/trusty_tools_config.rs	config_dir_is_trusty_mpm
