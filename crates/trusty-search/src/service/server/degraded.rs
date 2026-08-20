@@ -11,6 +11,7 @@
 //! | State | Verdict | Retryable |
 //! |---|---|---|
 //! | durable corpus failed to open (#4087) | `503 index_corpus_unavailable` | per #4333 classification |
+//! | durable corpus failed to read (#6043, #5917) | `503 index_corpus_unavailable` | yes |
 //! | registered but not resident (#5061) | `503 index_not_resident` | yes — `search` reloads it |
 //! | restore permanently failed (#5061) | `503 index_restore_failed` | no — operator action |
 //! | not registered anywhere | `404 unknown index` | no |
@@ -23,7 +24,8 @@
 //! which is exactly how #5061's "status says 404, search says 503" asymmetry
 //! arose.
 //!
-//! What: [`corpus_failure_response`] renders the #4087 body; [`is_corpus_failed`]
+//! What: [`corpus_failure_response`] renders the #4087 body and
+//! [`corpus_read_failure_response`] the #6043/#5917 one; [`is_corpus_failed`]
 //! is the cheap predicate the global fan-out uses to exclude — and then COUNT —
 //! an unserviceable index; [`residency_miss_response`] renders the #5061
 //! not-resident / restore-failed / unknown triple; [`vector_lane_unavailable`]
@@ -103,6 +105,12 @@ pub(super) async fn corpus_failure_response(
             "index_id": index_id,
             "failure_kind": failure_kind,
             "transient": transient,
+            // #5917: `retryable` is the field the index-scoped contract says is
+            // present on EVERY body, and this producer omitted it while the
+            // read-failure producer below sent only it. Two bodies under one
+            // error code disagreeing about which field carries the split is
+            // what a relay (`mcp::tools::unavailable`) cannot paper over.
+            "retryable": transient,
             "message": format!(
                 "index '{index_id}' cannot be searched: its durable corpus failed to open, \
                  so every query would return an empty result set indistinguishable from \
@@ -110,6 +118,41 @@ pub(super) async fn corpus_failure_response(
             ),
         })),
     ))
+}
+
+/// Build the 503 for a request whose durable corpus READ failed (#6043, #5917).
+///
+/// Why: [`corpus_failure_response`] above covers a corpus that fails to OPEN,
+/// which quarantines the index at that point. A corpus that opens and then goes
+/// bad — redb's "Previous I/O error occurred" state, which fails every later
+/// read for the process's lifetime — passes that guard, and every reader used to
+/// absorb the failure into an empty answer: chunk enumeration exported zero of
+/// an index's 50,929 rows at HTTP 200 (#6043), and search returned `results: []`
+/// beside `bm25_lane_degraded: true` for an index holding 85,269 chunks
+/// (#5917). Reusing the error code keeps one name for "the durable corpus
+/// cannot answer", whichever stage broke; the field set is identical to the
+/// open-failure body above so a caller branches on the same keys either way.
+/// What: 503 with `retryable: true` and `failure_kind: "read_failed"` — a read
+/// that failed can succeed after a rehydrate commits, and redb's error state
+/// clears on daemon restart, so waiting is a real remedy rather than a lie.
+/// Test: `search_over_an_unreadable_corpus_returns_503_naming_the_index` in
+/// `service::server::tests_search`; the enumeration paths reach it via
+/// `service::server::files`.
+pub(super) fn corpus_read_failure_response(
+    index_id: &str,
+    detail: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({
+            "error": "index_corpus_unavailable",
+            "index_id": index_id,
+            "failure_kind": "read_failed",
+            "transient": true,
+            "retryable": true,
+            "message": detail,
+        })),
+    )
 }
 
 /// Resolve a hot-registry miss into the one verdict that describes it (#5061).

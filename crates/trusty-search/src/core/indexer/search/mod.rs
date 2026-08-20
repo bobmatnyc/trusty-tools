@@ -320,7 +320,7 @@ impl CodeIndexer {
                 branch_boost,
                 effective_mode,
             )
-            .await;
+            .await?;
 
         // 5) Materialise the top-k IDs into `CodeChunk`s.
         let mut dropped = SearchDrops::default();
@@ -335,7 +335,7 @@ impl CodeIndexer {
                 branch_set.as_ref(),
                 query,
             )
-            .await;
+            .await?;
         dropped.unresolved_corpus = unresolved;
 
         // 6) Mode-based hard file-type filter + archive downrank.
@@ -346,6 +346,16 @@ impl CodeIndexer {
             query.exclude_archived,
             &mut dropped,
         );
+        // #5917: every lane above answers from the in-memory view, which the
+        // rehydrate leaves EMPTY when the durable read fails. Without this the
+        // query returned `results: []` at HTTP 200 beside
+        // `bm25_lane_degraded: true` — and that flag means "still warming up",
+        // which is the one reading this state is not. The record is cleared by
+        // any successful durable read (`fetch_chunks_for_ids`, or a rehydrate
+        // that commits), so a query that DID read the corpus never lands here.
+        if let Some(err) = self.corpus_read_fault.error(&self.index_id) {
+            return Err(anyhow::Error::new(err));
+        }
         Ok((result, dropped))
     }
 
@@ -484,7 +494,7 @@ impl CodeIndexer {
         branch_files: Option<&HashSet<String>>,
         branch_boost: f32,
         effective_mode: super::SearchMode,
-    ) -> Vec<(String, f32)> {
+    ) -> Result<Vec<(String, f32)>> {
         let query_text = query.text.as_str();
         let demote_docs = matches!(intent, QueryIntent::Definition);
         // Issue #117: for Definition-intent queries, boost chunks that are the
@@ -496,7 +506,10 @@ impl CodeIndexer {
             Vec::new()
         };
         let candidate_ids: Vec<String> = candidates.iter().map(|(id, _)| id.clone()).collect();
-        let chunks = self.fetch_chunks_for_ids(&candidate_ids).await;
+        // #5917: a failed durable read propagates rather than yielding an empty
+        // map — every candidate would otherwise fail the path filter below and
+        // the query would report a total outage as "nothing matched".
+        let chunks = self.fetch_chunks_for_ids(&candidate_ids).await?;
 
         // Issue #3401: hard path/repo filter against the real file path,
         // applied strictly before the sort/return below (and therefore
@@ -576,7 +589,7 @@ impl CodeIndexer {
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.0.cmp(&b.0))
         });
-        adjusted
+        Ok(adjusted)
     }
 
     /// Issue #20: when intent is Definition or Unknown, inject the exact-name

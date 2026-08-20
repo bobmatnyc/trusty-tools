@@ -507,10 +507,27 @@ pub(super) async fn search_handler(
     // #2203: `search_with_drops`, not `search` — the tally is what lets a
     // caller tell "3 results because 3 matched" from "3 results because 7 were
     // dropped". Published as `meta.dropped` below.
-    let (mut results, mut dropped) = indexer.search_with_drops(&query).await.map_err(|_| {
+    let (mut results, mut dropped) = indexer.search_with_drops(&query).await.map_err(|e| {
+        // #5917: a durable-corpus read failure is not an internal error, and a
+        // body naming neither the index nor the fault is what let this state
+        // read as "no matches" for a whole daemon lifetime. Report it as the
+        // outage it is, under the same code the chunk endpoints already use.
+        if let Some(unavailable) = e.downcast_ref::<crate::core::indexer::CorpusReadUnavailable>() {
+            tracing::warn!(
+                index_id = %index_id,
+                detail = %unavailable.detail,
+                "search: the durable corpus could not be read"
+            );
+            return super::degraded::corpus_read_failure_response(&index_id.0, &e.to_string());
+        }
+        tracing::warn!(index_id = %index_id, error = %e, "search failed");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": "internal search error" })),
+            Json(serde_json::json!({
+                "error": "internal search error",
+                "index_id": index_id.0,
+                "message": format!("{e:#}"),
+            })),
         )
     })?;
     // Issue #64: defense-in-depth post-filter. Chunks are stored with `file`

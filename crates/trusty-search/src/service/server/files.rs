@@ -128,20 +128,15 @@ pub(super) async fn remove_file_handler(
     })))
 }
 
-/// Build the 503 for a chunk enumeration whose corpus read failed (#6043).
+/// Render a chunk enumeration's corpus-read failure through the shared builder
+/// (#6043; field shape unified by #5917).
 ///
-/// Why: #4087's `index_corpus_unavailable` covers a corpus that fails to OPEN
-/// and quarantines the index at that point. A corpus that opens and then goes
-/// bad — redb's "Previous I/O error occurred" state, which fails every
-/// subsequent range read for the process's lifetime — passes that guard, and
-/// both enumeration paths used to absorb the failure into an empty page. An
-/// index holding 50,929 chunks exported zero of them at HTTP 200, and
-/// trusty-analyze scored the empty corpus and reported
-/// `complexity_distribution total: 0`. Reusing the same error code keeps one
-/// name for "the durable corpus cannot answer", whichever stage broke.
-/// What: 503 with `retryable: true` — a rehydrate that has not committed does
-/// commit on a later access, and the redb error state clears on daemon
-/// restart, so waiting is a real remedy rather than a lie.
+/// Why: this file used to build the `index_corpus_unavailable` body itself,
+/// sending only `retryable` while `degraded::corpus_failure_response` sent only
+/// `failure_kind` + `transient` — two bodies under one error code that a caller
+/// could not branch on uniformly. One builder is the fix; this wrapper keeps
+/// the enumeration handlers' `warn` at the site that has the enumeration
+/// context.
 /// Test: the offset path's refusal reaches this builder via
 /// `core::indexer::tests_cursor::enumerate_chunks_errors_when_rehydrate_did_not_commit`.
 /// The cursor path's redb arm has no direct test — see
@@ -152,15 +147,7 @@ fn corpus_read_failure_response(
     err: &anyhow::Error,
 ) -> (StatusCode, Json<serde_json::Value>) {
     tracing::warn!("index '{index_id}': chunk enumeration failed: {err:#}");
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(serde_json::json!({
-            "error": "index_corpus_unavailable",
-            "index_id": index_id,
-            "retryable": true,
-            "message": format!("{err:#}"),
-        })),
-    )
+    super::degraded::corpus_read_failure_response(index_id, &format!("{err:#}"))
 }
 
 /// Query params for `GET /indexes/:id/chunks` (issue #54, #1325).

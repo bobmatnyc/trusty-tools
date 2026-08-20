@@ -88,46 +88,63 @@ impl CodeIndexer {
     /// steady-state RSS to <10 GB.
     /// What: when `self.corpus` is `Some`, runs `CorpusStore::get_chunks` on a
     /// blocking worker and returns the result keyed by id. When `self.corpus` is
-    /// `None`, falls back to cloning the requested entries from the in-memory
-    /// HashMap. Ids with no row are simply absent — the caller skips them with
-    /// a `trace`.
-    /// Test: covered by every `test_search_*` integration test.
+    /// `None` — a BM25-only or test indexer, which has no durable corpus to
+    /// fail — clones the requested entries from the in-memory HashMap. Ids with
+    /// no row are simply absent; the caller counts them as
+    /// `meta.dropped.unresolved_corpus`.
+    ///
+    /// Errors when a wired durable corpus fails the read (#5917) — see the
+    /// failure arms below.
+    /// Test: covered by every `test_search_*` integration test; the failure arm
+    /// by `search_over_an_unreadable_corpus_is_an_error_not_an_empty_result_set`
+    /// in `core::indexer::tests::corpus_fault`.
     pub(super) async fn fetch_chunks_for_ids(
         &self,
         ids: &[String],
-    ) -> std::collections::HashMap<String, crate::core::chunker::RawChunk> {
+    ) -> Result<std::collections::HashMap<String, crate::core::chunker::RawChunk>> {
         if ids.is_empty() {
-            return std::collections::HashMap::new();
+            return Ok(std::collections::HashMap::new());
         }
         if let Some(corpus) = self.corpus.clone() {
             let owned_ids = ids.to_vec();
-            let index_id = self.index_id.clone();
             let read = tokio::task::spawn_blocking(move || {
                 let refs: Vec<&str> = owned_ids.iter().map(String::as_str).collect();
                 corpus.get_chunks(&refs)
             })
             .await;
-            match read {
+            // #5917: both failure arms used to `warn` and fall through to the
+            // in-memory map — which is EMPTY after an idle eviction whose
+            // rehydrate hit the same failing corpus. Every ranked id then
+            // resolved to nothing and the query answered `results: []` at HTTP
+            // 200 for an index holding 85,269 chunks. A failed read is reported
+            // as a failed read; only an index with no durable corpus at all
+            // reaches the in-memory path below.
+            let detail = match read {
                 Ok(Ok(chunks)) => {
-                    return chunks.into_iter().map(|c| (c.id.clone(), c)).collect();
+                    // A clean read is proof the corpus answers again.
+                    self.corpus_read_fault.clear();
+                    return Ok(chunks.into_iter().map(|c| (c.id.clone(), c)).collect());
                 }
-                Ok(Err(e)) => tracing::warn!(
-                    "index '{index_id}': redb point-read failed ({e}) — \
-                     falling back to in-memory corpus for this query"
-                ),
-                Err(e) => tracing::warn!(
-                    "index '{index_id}': redb point-read task panicked ({e}) — \
-                     falling back to in-memory corpus for this query"
-                ),
-            }
+                Ok(Err(e)) => format!("redb point-read failed: {e:#}"),
+                Err(e) => format!("redb point-read task panicked: {e}"),
+            };
+            self.corpus_read_fault.record(detail.clone());
+            tracing::warn!("index '{}': {detail}", self.index_id);
+            return Err(anyhow::Error::new(
+                crate::core::indexer::CorpusReadUnavailable {
+                    index_id: self.index_id.clone(),
+                    detail,
+                },
+            ));
         }
-        // BM25-only / test indexer, or a redb read error: clone the requested
-        // entries out of the in-memory HashMap.
+        // BM25-only / test indexer: no durable corpus exists to have failed, so
+        // the in-memory map IS the corpus here.
         self.ensure_chunks_loaded().await;
         let chunks = self.chunks.read().await;
-        ids.iter()
+        Ok(ids
+            .iter()
             .filter_map(|id| chunks.get(id).map(|c| (id.clone(), c.clone())))
-            .collect()
+            .collect())
     }
 
     /// Retrieve a cached chunk embedding by `chunk_id`.

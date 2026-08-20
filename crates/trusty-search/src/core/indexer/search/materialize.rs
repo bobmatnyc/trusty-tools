@@ -28,6 +28,10 @@ impl CodeIndexer {
     /// the top-k `(id, score)` pairs picks a `match_reason` and emits a
     /// `CodeChunk` via `raw_to_code_chunk`. Returns the chunks alongside the
     /// number of ids that had no row — see the drop block below.
+    ///
+    /// Errors when the durable corpus read fails (#5917): every id would land
+    /// in the drop block, so the result set would be empty for a reason the
+    /// tally cannot express.
     /// Test: covered by every search integration test;
     /// `search_handler_meta_reports_rows_dropped_when_the_corpus_has_no_matching_row`
     /// in `service::server::tests_search` pins the count.
@@ -39,26 +43,23 @@ impl CodeIndexer {
         kg_ids: &HashSet<String>,
         branch_files: Option<&HashSet<String>>,
         query: &SearchQuery,
-    ) -> (Vec<CodeChunk>, usize) {
+    ) -> anyhow::Result<(Vec<CodeChunk>, usize)> {
         let in_hnsw: HashSet<&String> = hnsw_results.iter().map(|(id, _)| id).collect();
         let in_bm25: HashSet<&String> = bm25_results.iter().map(|(id, _)| id).collect();
 
         let top_k: Vec<(String, f32)> = all.into_iter().take(query.top_k).collect();
         let top_k_ids: Vec<String> = top_k.iter().map(|(id, _)| id.clone()).collect();
-        let chunks = self.fetch_chunks_for_ids(&top_k_ids).await;
+        let chunks = self.fetch_chunks_for_ids(&top_k_ids).await?;
         let mut out = Vec::with_capacity(top_k.len());
         let mut unresolved = 0_usize;
         for (id, score) in top_k {
             let Some(raw) = chunks.get(&id) else {
-                // The id ranked into the top-k but `fetch_chunks_for_ids`
-                // returned no row for it. Two causes reach here and this frame
-                // cannot tell them apart: the chunk was removed while the query
-                // ran, or the durable read failed one frame up
-                // (`lanes::fetch_chunks_for_ids` warns, then falls back to an
-                // in-memory map that is empty after idle eviction — in which
-                // case EVERY id lands here and the caller sees an empty result
-                // set for a healthy index). The old text asserted "likely
-                // race", which is exactly wrong in the second case.
+                // The id ranked into the top-k but the corpus held no row for
+                // it — the chunk was removed while the query ran. Since #5917
+                // a FAILED durable read no longer reaches here: it errors one
+                // frame up instead of falling back to an in-memory map that is
+                // empty after idle eviction, which used to land every id in
+                // this arm and answer with an empty result set.
                 unresolved += 1;
                 tracing::debug!(
                     index_id = %self.index_id,
@@ -99,12 +100,12 @@ impl CodeIndexer {
                 dropped = unresolved,
                 returned = out.len(),
                 "search: dropped {unresolved} of {} ranked result(s) — the corpus \
-                 returned no row for them. A non-zero count means the durable read \
-                 failed (see the preceding fetch_chunks_for_ids warning) or the \
-                 chunks were removed mid-query; it is never normal.",
+                 returned no row for them, so they were removed while the query \
+                 ran. It is never normal (a failed read errors instead since \
+                 #5917).",
                 unresolved + out.len(),
             );
         }
-        (out, unresolved)
+        Ok((out, unresolved))
     }
 }
