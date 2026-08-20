@@ -120,6 +120,7 @@ fn coverage_lines(repo: &RepoInvestigation) -> String {
         "- dimensions NOT investigated: {}\n",
         join_or_none(&c.dimensions_absent),
     ));
+    out.push_str(&discovery_lines(c));
     if c.rejected > 0 {
         out.push_str(&format!(
             "- investigation: {} finding(s) rejected (unverifiable evidence)\n",
@@ -131,6 +132,48 @@ fn coverage_lines(repo: &RepoInvestigation) -> String {
         "- verified evidence-backed findings: {verified}\n"
     ));
     out.push_str(&batch_lines(c));
+    out
+}
+
+/// Render how the examined set was discovered, and its per-dimension split
+/// (#6082).
+///
+/// Why: a coverage percentage says how much was read; it never says whether the
+/// files were CHOSEN for a reason. When the manifest carried search-derived
+/// evidence, each dimension names the query that found its files. When it did
+/// not — no index, a daemon that would not start, a hand-written manifest — the
+/// selection silently degrades to path names, and the degradation is stated
+/// here rather than left to be inferred from a thinner report. The cause of
+/// that degradation is stated separately, in Gaps & Caveats, by whoever wrote
+/// the manifest.
+/// What: one discovery line, then one line per covered dimension with its
+/// examined-file count and one example naming why that file was read. Renders
+/// nothing extra for a repository with no dimensions covered.
+/// Test: `render_tests::{coverage_section_names_the_discovery_source,
+/// coverage_section_names_the_heuristic_degradation}`.
+fn discovery_lines(c: &Coverage) -> String {
+    let mut out = if c.attributed_files > 0 {
+        format!(
+            "- evidence discovery: {} of {} examined file(s) came from manifest-declared evidence queries\n",
+            c.attributed_files, c.files_examined,
+        )
+    } else {
+        String::from(
+            "- evidence discovery: path-name heuristics only — the manifest declared no \
+             search-derived evidence for this repository (see Gaps & Caveats for why)\n",
+        )
+    };
+    for d in &c.per_dimension {
+        out.push_str(&format!(
+            "  - {}: {} file(s) examined{}\n",
+            d.dimension,
+            d.files_examined,
+            d.example
+                .as_deref()
+                .map(|e| format!(" — e.g. {e}"))
+                .unwrap_or_default(),
+        ));
+    }
     out
 }
 

@@ -1,0 +1,315 @@
+//! Unit tests for search-driven evidence discovery (#6082).
+//!
+//! Every test here drives [`StubSearch`], never a daemon: the properties that
+//! matter — which dimension a file is attributed to, and how many dimensions
+//! the ranking reaches — are only assertable when the hits are fixed.
+
+use std::collections::HashMap;
+
+use super::*;
+
+/// A search client answering from a table of `query substring → hits`.
+#[derive(Debug, Default)]
+struct StubSearch {
+    answers: HashMap<String, Vec<Hit>>,
+    fail: Option<String>,
+}
+
+impl StubSearch {
+    /// Every query whose text contains `needle` answers with `paths`.
+    fn answering(mut self, needle: &str, paths: &[(&str, f32)]) -> Self {
+        self.answers.insert(
+            needle.to_owned(),
+            paths
+                .iter()
+                .map(|(path, score)| Hit {
+                    path: (*path).to_owned(),
+                    score: *score,
+                    start_line: 1,
+                })
+                .collect(),
+        );
+        self
+    }
+
+    /// Every query fails with this reason.
+    fn failing(reason: &str) -> Self {
+        Self {
+            answers: HashMap::new(),
+            fail: Some(reason.to_owned()),
+        }
+    }
+}
+
+impl SearchClient for StubSearch {
+    async fn hits(&self, query: &str) -> Result<Vec<Hit>, String> {
+        if let Some(reason) = &self.fail {
+            return Err(reason.clone());
+        }
+        Ok(self
+            .answers
+            .iter()
+            .find(|(needle, _)| query.contains(needle.as_str()))
+            .map(|(_, hits)| hits.clone())
+            .unwrap_or_default())
+    }
+}
+
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all() // the HTTP client's timeout needs the timer driver
+        .build()
+        .expect("runtime")
+        .block_on(future)
+}
+
+/// The dimension names ARE the contract with trusty-review — a typo here shows
+/// up as a coverage section that attributes nothing.
+#[test]
+fn every_dimension_matches_the_reviews_spelling() {
+    // Mirrors `trusty_review::report::investigate::select::DIMENSIONS`.
+    let expected = [
+        "authentication & secrets",
+        "dependencies",
+        "state management",
+        "error handling",
+        "scalability",
+        "test coverage",
+    ];
+    assert_eq!(
+        DD_DIMENSIONS
+            .iter()
+            .map(|d| d.dimension)
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert!(
+        DD_DIMENSIONS.iter().all(|d| !d.queries.is_empty()),
+        "a dimension with no query can never be covered"
+    );
+}
+
+/// The point of the leg: a file arrives knowing which dimension it is evidence
+/// for, and why.
+#[test]
+fn discovery_attributes_each_file_to_its_dimension() {
+    let client = StubSearch::default()
+        .answering("credential handling", &[("src/auth.rs", 0.9)])
+        .answering("error swallowed", &[("src/err.rs", 0.7)]);
+    let discovery = block_on(discover(&client, None));
+
+    let auth = discovery
+        .dimensions
+        .iter()
+        .find(|d| d.dimension == "authentication & secrets")
+        .expect("the auth dimension found evidence");
+    assert_eq!(auth.files[0].path, "src/auth.rs");
+    assert!(
+        auth.files[0].reason.contains("credential handling"),
+        "the reason must name the query: {}",
+        auth.files[0].reason
+    );
+    assert!(
+        discovery
+            .dimensions
+            .iter()
+            .any(|d| d.dimension == "error handling"),
+        "error handling found evidence too"
+    );
+    assert!(discovery.failures.is_empty());
+}
+
+/// One query failing must not cost the dimensions that answered.
+#[test]
+fn a_failing_query_costs_only_its_own_evidence() {
+    let client = StubSearch::failing("trusty-search did not answer (connection refused)");
+    let discovery = block_on(discover(&client, None));
+    assert!(discovery.dimensions.is_empty());
+    assert!(
+        discovery.failures.len() >= DD_DIMENSIONS.len(),
+        "every query's failure is recorded: {:?}",
+        discovery.failures
+    );
+}
+
+/// The best-scoring query wins a file, and a file is never listed twice within
+/// one dimension.
+#[test]
+fn a_file_matched_twice_keeps_its_best_score() {
+    let client = StubSearch::default()
+        .answering("credential handling", &[("src/auth.rs", 0.4)])
+        .answering("authentication and authorization", &[("src/auth.rs", 0.95)]);
+    let discovery = block_on(discover(&client, None));
+    let auth = &discovery.dimensions[0];
+    assert_eq!(auth.files.len(), 1);
+    assert!(
+        auth.files[0].reason.contains("authentication and"),
+        "{}",
+        auth.files[0].reason
+    );
+}
+
+/// A brief's topics become queries under their own dimension.
+#[test]
+fn instruction_bullets_become_queries() {
+    let brief = "# Focus areas\n\n- Payment reconciliation correctness\n* Tenant data isolation\n\
+                 \n1. Vendor lock-in in the storage layer\nprose that is not a topic\n";
+    let queries = instruction_queries(Some(brief));
+    assert_eq!(
+        queries,
+        vec![
+            "Focus areas".to_string(),
+            "Payment reconciliation correctness".to_string(),
+            "Tenant data isolation".to_string(),
+            "Vendor lock-in in the storage layer".to_string(),
+        ]
+    );
+    assert!(instruction_queries(None).is_empty());
+}
+
+/// A brief's hits land under the analyst-focus dimension, not a DD one.
+#[test]
+fn the_analyst_brief_gets_its_own_dimension() {
+    let client = StubSearch::default().answering("Payment reconciliation", &[("src/pay.rs", 0.8)]);
+    let discovery = block_on(discover(
+        &client,
+        Some("- Payment reconciliation correctness\n"),
+    ));
+    let focus = discovery
+        .dimensions
+        .iter()
+        .find(|d| d.dimension == ANALYST_FOCUS)
+        .expect("the brief's topic produced evidence");
+    assert_eq!(focus.files[0].path, "src/pay.rs");
+}
+
+fn dimension(name: &str, paths: &[&str]) -> DimensionEvidence {
+    DimensionEvidence {
+        dimension: name.to_owned(),
+        files: paths
+            .iter()
+            .map(|path| FileEvidence {
+                path: (*path).to_owned(),
+                reason: format!("trusty-search hit for \"{name}\""),
+            })
+            .collect(),
+    }
+}
+
+/// The regression this issue exists for: ranking complexity first spends the
+/// whole budget on one dimension. Round-robin reaches every dimension inside
+/// the same number of files.
+#[test]
+fn blending_spreads_the_budget_across_dimensions() {
+    let hotspots: Vec<String> = (0..10).map(|i| format!("src/hot{i}.rs")).collect();
+    let dimensions = [
+        dimension("authentication & secrets", &["src/auth.rs", "src/token.rs"]),
+        dimension("error handling", &["src/err.rs"]),
+        dimension("state management", &["src/store.rs"]),
+        dimension("scalability", &["src/pool.rs"]),
+        dimension("test coverage", &["tests/api.rs"]),
+    ];
+
+    let blended = blend(&hotspots, &dimensions, 60);
+    let first_six: Vec<&str> = blended.iter().take(6).map(|p| p.path.as_str()).collect();
+    let covered: Vec<&str> = blended
+        .iter()
+        .take(6)
+        .filter_map(|p| p.dimension.as_deref())
+        .collect();
+
+    assert_eq!(first_six[0], "src/hot0.rs", "complexity still leads");
+    assert_eq!(
+        covered.len(),
+        5,
+        "the first six paths must reach all five dimensions: {first_six:?}"
+    );
+    // Complexity-only ranking, the pre-#6082 behaviour, reaches none of them.
+    let complexity_only = blend(&hotspots, &[], 60);
+    assert!(
+        complexity_only
+            .iter()
+            .all(|p| p.dimension.is_none() && p.reason.is_some()),
+        "a hotspot is attributed to no dimension, and still says why it is ranked"
+    );
+}
+
+/// A path both legs name is ranked once, keeping the first (best) reason.
+#[test]
+fn blending_keeps_the_first_reason_for_a_repeated_path() {
+    let hotspots = vec!["src/auth.rs".to_string()];
+    let dimensions = [dimension("authentication & secrets", &["src/auth.rs"])];
+    let blended = blend(&hotspots, &dimensions, 60);
+    assert_eq!(blended.len(), 1);
+    assert!(
+        blended[0]
+            .reason
+            .as_deref()
+            .expect("a reason")
+            .contains("complexity hotspot"),
+        "{blended:?}"
+    );
+}
+
+/// The cap bounds the manifest, and never truncates to nothing.
+#[test]
+fn the_ranking_is_capped() {
+    let hotspots: Vec<String> = (0..80).map(|i| format!("src/hot{i}.rs")).collect();
+    assert_eq!(
+        blend(&hotspots, &[], MAX_PRIORITY_PATHS).len(),
+        MAX_PRIORITY_PATHS
+    );
+    assert!(blend(&[], &[], MAX_PRIORITY_PATHS).is_empty());
+}
+
+/// The daemon's own response shape parses, and chunk paths come back
+/// repo-relative whichever field carries them.
+#[test]
+fn the_daemons_search_envelope_parses_to_relative_paths() {
+    let body = r#"{
+        "results": [
+            {"id":"a:1:9","file":"/w/repos/acme-api/src/pay.rs","path":"src/pay.rs",
+             "start_line":12,"end_line":40,"content":"fn f(){}","score":0.81,
+             "match_reason":"hybrid"},
+            {"id":"b:1:9","file":"/w/repos/acme-api/src/auth.rs","start_line":3,
+             "end_line":9,"content":"fn g(){}","score":0.62,"match_reason":"bm25"},
+            {"id":"c:1:9","file":"","start_line":1,"end_line":2,"content":"",
+             "score":0.1,"match_reason":"bm25"}
+        ],
+        "intent": "Semantic"
+    }"#;
+    let envelope: SearchEnvelope = serde_json::from_str(body).expect("parses");
+    let hits = envelope.into_hits("/w/repos/acme-api");
+    assert_eq!(
+        hits.iter().map(|h| h.path.as_str()).collect::<Vec<_>>(),
+        vec!["src/pay.rs", "src/auth.rs"],
+        "a portable path is used as-is; an absolute one is made relative; an empty one is dropped"
+    );
+    assert_eq!(hits[0].start_line, 12);
+}
+
+/// The endpoint names the index the repository was indexed under.
+#[test]
+fn the_query_url_names_the_index() {
+    let client = HttpSearch::new(
+        "http://127.0.0.1:7878/",
+        "acme-api",
+        std::path::Path::new("/w/repos/acme-api"),
+    )
+    .expect("a client is built");
+    assert_eq!(client.url, "http://127.0.0.1:7878/indexes/acme-api/search");
+}
+
+/// A daemon that is not listening is a reason, never a panic.
+#[test]
+fn a_dead_daemon_is_a_reason_not_a_panic() {
+    // Port 1 is never a trusty-search daemon.
+    let client = HttpSearch::new(
+        "http://127.0.0.1:1",
+        "acme-api",
+        std::path::Path::new("/w/repos/acme-api"),
+    )
+    .expect("a client is built");
+    let err = block_on(client.hits("credential handling")).expect_err("must fail");
+    assert!(err.contains("trusty-search did not answer"), "{err}");
+}

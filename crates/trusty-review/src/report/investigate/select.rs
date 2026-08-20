@@ -85,8 +85,31 @@ pub struct SelectedFile {
     pub content: String,
     /// True when the content was truncated to the per-file cap.
     pub truncated: bool,
-    /// The DD dimensions this file matched by path/name heuristics.
+    /// The DD dimensions this file matched by path/name heuristics, plus the
+    /// one the manifest declared it as evidence for (#6082).
     pub dimensions: Vec<String>,
+    /// The manifest's one-line reason this file was ranked (#6082) — the query
+    /// or measurement that found it. `None` for a path-heuristic selection.
+    pub selected_by: Option<String>,
+}
+
+/// One dimension's share of the examined set (#6082).
+///
+/// Why: the coverage section states which dimensions were reached; a reader
+/// weighing the findings also needs to know how many files each got and on what
+/// basis, because "covered by one file a path name matched" and "covered by six
+/// files a search query found" are not the same claim.
+/// What: the dimension, how many examined files carry it, and one example file
+/// with the reason it was read.
+/// Test: `select_tests::per_dimension_coverage_names_why_a_file_was_read`.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DimensionCoverage {
+    /// The DD dimension.
+    pub dimension: String,
+    /// Examined files carrying it.
+    pub files_examined: usize,
+    /// One example: `path (reason it was read)`.
+    pub example: Option<String>,
 }
 
 /// The deterministic outcome of file selection, including coverage data.
@@ -111,6 +134,12 @@ pub struct Selection {
     pub dimensions_covered: Vec<String>,
     /// DD dimensions no selected file reached.
     pub dimensions_absent: Vec<String>,
+    /// Per-dimension coverage of the examined set (#6082).
+    pub per_dimension: Vec<DimensionCoverage>,
+    /// Examined files the manifest itself named, with a reason (#6082). Zero
+    /// means the ranking was path names and complexity alone — which is what
+    /// the coverage section must SAY rather than imply.
+    pub attributed_files: usize,
 }
 
 impl Selection {
@@ -384,23 +413,83 @@ fn flagged_keys(metrics: Option<&AnalyzeMetrics>) -> Vec<String> {
     keys
 }
 
-/// The manifest priorities as `(normalised path, weight)`, highest weight first.
-fn priority_keys(priorities: &[InspectionPriority]) -> Vec<(String, u32)> {
+/// One manifest priority, normalised for matching against the tracked list.
+///
+/// Why: #6082 gave a priority two more things to say — which dimension it is
+/// evidence for, and which query found it — and both must survive the match, so
+/// the normalised form carries them rather than only the weight.
+/// Test: `select_tests::a_declared_dimension_counts_as_covered`.
+struct Declared {
+    key: String,
+    weight: u32,
+    dimension: Option<String>,
+    reason: Option<String>,
+}
+
+/// The manifest priorities, normalised for matching.
+fn declarations(priorities: &[InspectionPriority]) -> Vec<Declared> {
     priorities
         .iter()
         .filter(|p| !p.path.is_empty())
-        .map(|p| (path_key(&p.path), p.weight))
+        .map(|p| Declared {
+            key: path_key(&p.path),
+            weight: p.weight,
+            dimension: p.dimension.clone(),
+            reason: p.reason.clone(),
+        })
         .collect()
 }
 
-/// The highest manifest-declared weight naming `path`, or 0 when none does.
-fn priority_weight(path: &str, priorities: &[(String, u32)]) -> u32 {
-    priorities
+/// The highest-weight declaration naming `path`, when the manifest names it.
+fn declaration_for<'a>(path: &str, declared: &'a [Declared]) -> Option<&'a Declared> {
+    declared
         .iter()
-        .filter(|(key, _)| names_same_file(path, key))
-        .map(|(_, w)| *w)
-        .max()
-        .unwrap_or(0)
+        .filter(|d| names_same_file(path, &d.key))
+        .max_by_key(|d| d.weight)
+}
+
+/// One tracked file, scored and attributed, before the budget is applied.
+struct Candidate {
+    weight: u32,
+    score: u32,
+    path: String,
+    dimensions: Vec<String>,
+    reason: Option<String>,
+}
+
+/// Score one tracked file and fold in what the manifest declared about it.
+///
+/// #6082: a declared dimension is what the file is evidence FOR, and it counts
+/// toward coverage even when no path heuristic would have recognised it.
+fn candidate(
+    rel: &Path,
+    keywords: &[String],
+    flagged: &[String],
+    declared: &[Declared],
+) -> Candidate {
+    let path = rel.to_string_lossy().replace('\\', "/");
+    let key = path.to_ascii_lowercase();
+    let mut dimensions = dimensions_for(&path);
+    let is_flagged = flagged.iter().any(|f| names_same_file(&key, f));
+    let score = score(&path, keywords, &dimensions, is_flagged);
+
+    let declaration = declaration_for(&key, declared);
+    let mut reason = None;
+    if let Some(d) = declaration {
+        if let Some(dim) = &d.dimension
+            && !dimensions.contains(dim)
+        {
+            dimensions.push(dim.clone());
+        }
+        reason.clone_from(&d.reason);
+    }
+    Candidate {
+        weight: declaration.map_or(0, |d| d.weight),
+        score,
+        path,
+        dimensions,
+        reason,
+    }
 }
 
 /// Rank the repository's files and greedily fill the budget, capturing content
@@ -438,31 +527,25 @@ pub fn select_files(
     let total_files = files.len();
     // #6078: both external rankings are normalised once, not per candidate.
     let flagged = flagged_keys(signals.metrics);
-    let priorities = priority_keys(signals.priorities);
+    let declared = declarations(signals.priorities);
 
     // Score every candidate (skip obvious noise the scanner already excludes is
     // handled upstream; here we rank whatever the tracked list contains).
-    let mut ranked: Vec<(u32, u32, String, Vec<String>)> = files
+    let mut ranked: Vec<Candidate> = files
         .iter()
-        .map(|rel| {
-            let path = rel.to_string_lossy().replace('\\', "/");
-            let key = path.to_ascii_lowercase();
-            let dims = dimensions_for(&path);
-            let is_flagged = flagged.iter().any(|f| names_same_file(&key, f));
-            let s = score(&path, &keywords, &dims, is_flagged);
-            (priority_weight(&key, &priorities), s, path, dims)
-        })
+        .map(|rel| candidate(rel, &keywords, &flagged, &declared))
         .collect();
     // Deterministic: declared priority desc, then score desc, then path asc.
     ranked.sort_by(|a, b| {
-        b.0.cmp(&a.0)
-            .then_with(|| b.1.cmp(&a.1))
-            .then_with(|| a.2.cmp(&b.2))
+        b.weight
+            .cmp(&a.weight)
+            .then_with(|| b.score.cmp(&a.score))
+            .then_with(|| a.path.cmp(&b.path))
     });
 
     let mut selected: Vec<SelectedFile> = Vec::new();
     let mut bytes_sent = 0usize;
-    for (_, _, path, dims) in &ranked {
+    for c in &ranked {
         if selected.len() >= budget.max_files {
             break;
         }
@@ -470,21 +553,24 @@ pub fn select_files(
         if remaining == 0 {
             break;
         }
-        let Some((content, truncated)) = read_capped(&root.join(path), remaining) else {
+        let Some((content, truncated)) = read_capped(&root.join(&c.path), remaining) else {
             continue; // unreadable / binary / empty — no budget consumed
         };
         bytes_sent += content.len();
         selected.push(SelectedFile {
-            path: path.clone(),
+            path: c.path.clone(),
             content,
             truncated,
-            dimensions: dims.clone(),
+            dimensions: c.dimensions.clone(),
+            selected_by: c.reason.clone(),
         });
     }
 
     let (dimensions_covered, dimensions_absent) = coverage_split(&selected, files);
     let skipped = total_files.saturating_sub(selected.len());
     Selection {
+        per_dimension: per_dimension(&selected, &dimensions_covered),
+        attributed_files: selected.iter().filter(|f| f.selected_by.is_some()).count(),
         files: selected,
         total_files,
         skipped,
@@ -492,6 +578,42 @@ pub fn select_files(
         dimensions_covered,
         dimensions_absent,
     }
+}
+
+/// Per-dimension coverage: how many examined files each covered dimension got,
+/// and why the first of them was read (#6082).
+///
+/// Why: "dimensions covered: error handling, dependencies" says a dimension was
+/// reached without saying how thinly, or on what basis. A reader weighing a DD
+/// finding needs both, and the reason is the part no path-name ranking could
+/// ever have supplied.
+/// What: one row per covered dimension, in the canonical order, counting the
+/// examined files that carry it. `example` names the first such file and its
+/// selection reason — the manifest's when it declared one, the path-name
+/// heuristic otherwise. "test coverage" can be covered by an unexamined test
+/// directory, so a row with zero files and no example is a real state.
+/// Test: `select_tests::per_dimension_coverage_names_why_a_file_was_read`.
+fn per_dimension(selected: &[SelectedFile], covered: &[String]) -> Vec<DimensionCoverage> {
+    covered
+        .iter()
+        .map(|dimension| {
+            let hits: Vec<&SelectedFile> = selected
+                .iter()
+                .filter(|f| f.dimensions.iter().any(|d| d == dimension))
+                .collect();
+            DimensionCoverage {
+                dimension: dimension.clone(),
+                files_examined: hits.len(),
+                example: hits.first().map(|f| {
+                    let why = f
+                        .selected_by
+                        .clone()
+                        .unwrap_or_else(|| "path-name heuristic".to_string());
+                    format!("{} ({why})", f.path)
+                }),
+            }
+        })
+        .collect()
 }
 
 /// Read a file as UTF-8, truncating to `min(MAX_FILE_BYTES, remaining)` on a char

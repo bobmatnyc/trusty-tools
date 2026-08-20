@@ -252,6 +252,45 @@ fn parse_inspect_priority_shapes() {
         "an explicit weight wins over the position"
     );
     assert_eq!(p[2].path, "src/queue.rs");
+    assert!(
+        p.iter()
+            .all(|e| e.dimension.is_none() && e.reason.is_none()),
+        "attribution is optional and absent here"
+    );
+}
+
+/// Why: #6082's discovery leg writes WHY it ranked a file — which dimension it
+/// is evidence for, and which query found it — and the coverage section renders
+/// both. A reader that dropped them would silently discard the attribution.
+/// What: the attributed table shape parses, alongside the bare and weighted
+/// ones, and keeps its positional weight when no explicit one is declared.
+/// Test: this test itself.
+#[test]
+fn parse_inspect_priority_attribution() {
+    let toml = r#"
+        [report]
+        title = "Acme DD"
+
+        [[repositories]]
+        name = "Website"
+        path = "/tmp/acme-web"
+        inspect_priority = [
+            { path = "src/session.rs", dimension = "authentication & secrets", reason = "trusty-search hit for \"credential handling\" (score 0.88, line 18)" },
+            "src/queue.rs",
+        ]
+    "#;
+    let m = parse(toml).expect("parse ok");
+    let p = &m.repositories[0].inspect_priority;
+    assert_eq!(p[0].path, "src/session.rs");
+    assert_eq!(p[0].weight, 1000, "the position still sets the weight");
+    assert_eq!(p[0].dimension.as_deref(), Some("authentication & secrets"));
+    assert!(
+        p[0].reason
+            .as_deref()
+            .expect("a reason")
+            .contains("credential handling"),
+    );
+    assert!(p[1].dimension.is_none(), "a bare path carries none");
 }
 
 /// Why: the declared order IS the ranking, so an unweighted list must come out

@@ -37,6 +37,8 @@ fn priorities(paths: &[&str]) -> Vec<InspectionPriority> {
         .map(|(i, p)| InspectionPriority {
             path: (*p).to_string(),
             weight: 1000 - i as u32,
+            dimension: None,
+            reason: None,
         })
         .collect()
 }
@@ -440,4 +442,136 @@ fn unmatched_priority_is_inert() {
         },
     );
     assert_eq!(order(&sel), BASELINE_ORDER);
+}
+
+// ─── #6082: search-driven evidence discovery ─────────────────────────────────
+
+/// One attributed priority, the shape trusty-audit's discovery leg writes.
+fn evidence(path: &str, dimension: &str, reason: &str) -> Vec<InspectionPriority> {
+    vec![InspectionPriority {
+        path: path.to_string(),
+        weight: 1000,
+        dimension: Some(dimension.to_string()),
+        reason: Some(reason.to_string()),
+    }]
+}
+
+/// Why: the whole point of #6082 — a dimension no path name could reveal is
+/// covered because the index said this file is evidence for it.
+/// What: the fixture reaches scalability through no heuristic; declaring the
+/// README as scalability evidence makes the dimension covered.
+/// Test: this test itself.
+#[test]
+fn a_declared_dimension_counts_as_covered() {
+    let tmp = fixture();
+    let files = list_tracked_files(tmp.path());
+    let baseline = select_files(
+        tmp.path(),
+        &files,
+        None,
+        Budget::default(),
+        RiskSignals::default(),
+    );
+    assert!(
+        baseline
+            .dimensions_absent
+            .contains(&"scalability".to_string()),
+        "the fixture reaches scalability by no path heuristic: {:?}",
+        baseline.dimensions_absent
+    );
+
+    let prio = evidence(
+        "README.md",
+        "scalability",
+        "trusty-search hit for \"query inside a loop\" (score 0.71, line 3)",
+    );
+    let sel = select_files(
+        tmp.path(),
+        &files,
+        None,
+        Budget::default(),
+        RiskSignals {
+            priorities: &prio,
+            ..Default::default()
+        },
+    );
+    assert!(
+        sel.dimensions_covered.contains(&"scalability".to_string()),
+        "{:?}",
+        sel.dimensions_covered
+    );
+    assert_eq!(sel.attributed_files, 1);
+}
+
+/// Why: coverage must say WHY a file was read, per dimension — the basis a DD
+/// reader weighs the findings against.
+/// What: the declared reason rides through to the per-dimension record; a file
+/// the heuristics chose says so instead.
+/// Test: this test itself.
+#[test]
+fn per_dimension_coverage_names_why_a_file_was_read() {
+    let tmp = fixture();
+    let files = list_tracked_files(tmp.path());
+    let prio = evidence(
+        "README.md",
+        "scalability",
+        "trusty-search hit for \"connection pool\" (score 0.64, line 1)",
+    );
+    let sel = select_files(
+        tmp.path(),
+        &files,
+        None,
+        Budget::default(),
+        RiskSignals {
+            priorities: &prio,
+            ..Default::default()
+        },
+    );
+
+    let scaling = sel
+        .per_dimension
+        .iter()
+        .find(|d| d.dimension == "scalability")
+        .expect("scalability is covered");
+    assert_eq!(scaling.files_examined, 1);
+    let example = scaling.example.as_deref().expect("an example");
+    assert!(example.starts_with("README.md"), "{example}");
+    assert!(example.contains("connection pool"), "{example}");
+
+    let auth = sel
+        .per_dimension
+        .iter()
+        .find(|d| d.dimension == "authentication & secrets")
+        .expect("auth is covered by the heuristics");
+    assert!(
+        auth.example
+            .as_deref()
+            .expect("an example")
+            .contains("path-name heuristic"),
+        "{:?}",
+        auth.example
+    );
+}
+
+/// Why: a manifest with no attribution — hand-written, or written by a run
+/// whose search daemon was down — must select exactly as it did before #6082.
+/// What: no signals at all leaves the ranking and the attributed count alone.
+/// Test: this test itself.
+#[test]
+fn an_unattributed_manifest_selects_exactly_as_before() {
+    let tmp = fixture();
+    let files = list_tracked_files(tmp.path());
+    let sel = select_files(
+        tmp.path(),
+        &files,
+        None,
+        Budget::default(),
+        RiskSignals::default(),
+    );
+    assert_eq!(order(&sel), BASELINE_ORDER);
+    assert_eq!(sel.attributed_files, 0);
+    assert!(
+        sel.files.iter().all(|f| f.selected_by.is_none()),
+        "nothing claims a reason it does not have"
+    );
 }

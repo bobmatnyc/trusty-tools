@@ -26,16 +26,115 @@
 
 use std::path::Path;
 
-use toml_edit::{Array, DocumentMut, Item, Table, Value};
+use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value};
 
-/// Record `priorities` and `gaps` in the manifest at `path`.
+/// One ranked path, and what put it there (#6082).
+///
+/// Why: a ranking that only says WHICH files to read cannot tell the report why
+/// any of them was read, and "why" is the whole difference between a coverage
+/// section that states a percentage and one a due-diligence reader can weigh.
+/// The two optional fields are what trusty-review renders per dimension.
+/// What: `path` is repo-relative; `dimension` is a DD dimension spelled as
+/// trusty-review spells it (absent for a signal that belongs to no single
+/// dimension, such as a complexity hotspot); `reason` is one line naming the
+/// query or measurement that selected it.
+/// Test: `priority_tests::a_dimension_and_reason_are_written_as_a_table`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct Priority {
+    /// Repo-relative path to inspect.
+    pub path: String,
+    /// The DD dimension this file is evidence for, when it is evidence for one.
+    pub dimension: Option<String>,
+    /// One line naming the query or measurement that selected it.
+    pub reason: Option<String>,
+}
+
+impl Priority {
+    /// A ranked path with no attribution — the shape #6081 wrote.
+    #[must_use]
+    pub fn bare(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            dimension: None,
+            reason: None,
+        }
+    }
+}
+
+/// The investigation budget the audit asks for, in files and content bytes.
+///
+/// Why: trusty-review's own defaults (40 files / 400 KiB) read about 1% of a
+/// workspace-sized repository, which the owner ruled too shallow for a DD
+/// report (#6082). The budget is a manifest key, so raising it is one more
+/// thing written to the interface rather than a flag the operator must learn —
+/// `trusty-audit audit` still takes no new step.
+/// What: written to `[report]` only when the manifest does not already declare
+/// it, so an operator's explicit choice always wins.
+/// Test: `priority_tests::{the_budget_is_recorded_once,
+/// a_declared_budget_is_left_alone}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Budget {
+    /// Files the investigation pass may read.
+    pub max_files: usize,
+    /// Total content bytes it may send.
+    pub max_bytes: usize,
+}
+
+/// Files the audit asks the investigation pass to read per repository.
+pub const DEFAULT_MAX_FILES: usize = 120;
+
+/// Content bytes the audit asks it to send per repository.
+pub const DEFAULT_MAX_BYTES: usize = 1_200 * 1024;
+
+/// Environment override for [`DEFAULT_MAX_FILES`].
+pub const ENV_MAX_FILES: &str = "TRUSTY_AUDIT_INVESTIGATE_MAX_FILES";
+
+/// Environment override for [`DEFAULT_MAX_BYTES`].
+pub const ENV_MAX_BYTES: &str = "TRUSTY_AUDIT_INVESTIGATE_MAX_BYTES";
+
+impl Budget {
+    /// The budget this machine asks for, defaults unless overridden.
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self::resolved(
+            std::env::var(ENV_MAX_FILES).ok().as_deref(),
+            std::env::var(ENV_MAX_BYTES).ok().as_deref(),
+        )
+    }
+
+    /// [`Budget::from_env`]'s rule, as a pure function.
+    ///
+    /// Why: reading the two variables is all `from_env` does, so the RULE —
+    /// an unparseable or zero override falls back rather than disabling the
+    /// investigation — is testable without `std::env::set_var`, which is
+    /// `unsafe` in edition 2024 and unsound under the parallel harness.
+    /// What: a positive integer wins; anything else takes the default.
+    /// Test: `priority_tests::an_unusable_override_falls_back_to_the_default`.
+    #[must_use]
+    pub fn resolved(files: Option<&str>, bytes: Option<&str>) -> Self {
+        Self {
+            max_files: positive(files).unwrap_or(DEFAULT_MAX_FILES),
+            max_bytes: positive(bytes).unwrap_or(DEFAULT_MAX_BYTES),
+        }
+    }
+}
+
+/// A declared override, when it parses as a positive count.
+fn positive(value: Option<&str>) -> Option<usize> {
+    value?.trim().parse::<usize>().ok().filter(|n| *n > 0)
+}
+
+/// Record `priorities`, `budget` and `gaps` in the manifest at `path`.
 ///
 /// Why gaps are written even when the ranking is not: a degraded leg is the one
 /// thing that MUST reach the report. The two are independent — `[report].gaps`
 /// belongs to the run, `inspect_priority` to one repository — so a gap is
 /// recorded whether or not the repository entry can be found.
 /// What: appends each gap to `[report].gaps`, skipping duplicates so a resumed
-/// sweep does not restate them, and replaces the matched repository's
+/// sweep does not restate them, fills the investigation budget keys when the
+/// manifest declares none, and replaces the matched repository's
 /// `inspect_priority` with the ranking. Nothing is written when there is nothing
 /// to record.
 ///
@@ -54,7 +153,8 @@ use toml_edit::{Array, DocumentMut, Item, Table, Value};
 pub fn write_into(
     path: &Path,
     checkout: &Path,
-    priorities: &[String],
+    priorities: &[Priority],
+    budget: Option<Budget>,
     gaps: &[String],
 ) -> Result<(), String> {
     if priorities.is_empty() && gaps.is_empty() {
@@ -69,10 +169,35 @@ pub fn write_into(
     record_gaps(&mut doc, gaps)?;
     if !priorities.is_empty() {
         record_priorities(&mut doc, checkout, priorities)?;
+        if let Some(budget) = budget {
+            record_budget(&mut doc, budget)?;
+        }
     }
 
     std::fs::write(path, doc.to_string())
         .map_err(|e| format!("{} could not be written ({e})", path.display()))
+}
+
+/// Fill `[report]`'s investigation budget keys, leaving declared ones alone.
+fn record_budget(doc: &mut DocumentMut, budget: Budget) -> Result<(), String> {
+    let report = doc
+        .entry("report")
+        .or_insert_with(|| Item::Table(Table::new()));
+    let table = report
+        .as_table_like_mut()
+        .ok_or_else(|| "the manifest's `report` is not a table".to_string())?;
+    for (key, value) in [
+        ("investigate_max_files", budget.max_files),
+        ("investigate_max_bytes", budget.max_bytes),
+    ] {
+        if table.get(key).is_none() {
+            table.insert(
+                key,
+                Item::Value(Value::from(i64::try_from(value).unwrap_or(i64::MAX))),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Append each gap to `[report].gaps`, creating the key when it is absent.
@@ -104,7 +229,7 @@ fn record_gaps(doc: &mut DocumentMut, gaps: &[String]) -> Result<(), String> {
 fn record_priorities(
     doc: &mut DocumentMut,
     checkout: &Path,
-    priorities: &[String],
+    priorities: &[Priority],
 ) -> Result<(), String> {
     let repositories = doc
         .get_mut("repositories")
@@ -146,22 +271,40 @@ fn names_checkout(entry: &Table, checkout: &Path) -> bool {
     }
 }
 
-/// The ranking as a multi-line TOML array of bare paths.
+/// The ranking as a multi-line TOML array.
 ///
-/// Bare strings rather than `{ path, weight }` tables on purpose: trusty-review
-/// derives each entry's weight from its DECLARED POSITION (#6078's
-/// `PRIORITY_BASE_WEIGHT` rule), so a rank expressed as order needs no agreement
-/// about a numeric scale that lives in another crate and can move.
-fn ranked(priorities: &[String]) -> Array {
+/// No `weight` key on purpose: trusty-review derives each entry's weight from
+/// its DECLARED POSITION (#6078's `PRIORITY_BASE_WEIGHT` rule), so a rank
+/// expressed as order needs no agreement about a numeric scale that lives in
+/// another crate and can move. An entry with no attribution stays a bare string
+/// — the #6081 shape, and still what trusty-review reads for a hand-written
+/// manifest.
+fn ranked(priorities: &[Priority]) -> Array {
     let mut array = Array::new();
-    for path in priorities {
-        let mut value = Value::from(path.as_str());
+    for priority in priorities {
+        let mut value = entry(priority);
         value.decor_mut().set_prefix("\n    ");
         array.push_formatted(value);
     }
     array.set_trailing("\n");
     array.set_trailing_comma(true);
     array
+}
+
+/// One priority as TOML: a bare path, or a table when it carries attribution.
+fn entry(priority: &Priority) -> Value {
+    if priority.dimension.is_none() && priority.reason.is_none() {
+        return Value::from(priority.path.as_str());
+    }
+    let mut table = InlineTable::new();
+    table.insert("path", Value::from(priority.path.as_str()));
+    if let Some(dimension) = &priority.dimension {
+        table.insert("dimension", Value::from(dimension.as_str()));
+    }
+    if let Some(reason) = &priority.reason {
+        table.insert("reason", Value::from(reason.as_str()));
+    }
+    Value::InlineTable(table)
 }
 
 #[cfg(test)]
@@ -183,13 +326,127 @@ path = "/w/repos/acme-web"
 "#;
 
     fn written(text: &str, checkout: &str, priorities: &[&str], gaps: &[&str]) -> String {
+        let priorities: Vec<Priority> = priorities.iter().map(|s| Priority::bare(*s)).collect();
+        recorded(text, checkout, &priorities, None, gaps)
+    }
+
+    fn recorded(
+        text: &str,
+        checkout: &str,
+        priorities: &[Priority],
+        budget: Option<Budget>,
+        gaps: &[&str],
+    ) -> String {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("manifest.toml");
         std::fs::write(&path, text).expect("write");
-        let priorities: Vec<String> = priorities.iter().map(|s| (*s).to_owned()).collect();
         let gaps: Vec<String> = gaps.iter().map(|s| (*s).to_owned()).collect();
-        write_into(&path, Path::new(checkout), &priorities, &gaps).expect("records");
+        write_into(&path, Path::new(checkout), priorities, budget, &gaps).expect("records");
         std::fs::read_to_string(&path).expect("read back")
+    }
+
+    fn attributed(path: &str, dimension: &str, reason: &str) -> Priority {
+        Priority {
+            path: path.to_owned(),
+            dimension: Some(dimension.to_owned()),
+            reason: Some(reason.to_owned()),
+        }
+    }
+
+    /// #6082: an attributed entry becomes a table carrying its dimension and the
+    /// query that found it — the "why this file" the coverage section renders.
+    #[test]
+    fn a_dimension_and_reason_are_written_as_a_table() {
+        let out = recorded(
+            SAMPLE,
+            "/w/repos/acme-api",
+            &[attributed(
+                "src/auth.rs",
+                "authentication & secrets",
+                "trusty-search hit for \"credential handling\" (score 0.82, line 40)",
+            )],
+            None,
+            &[],
+        );
+        let parsed: toml::Value = toml::from_str(&out).expect("still valid TOML");
+        let first = &parsed["repositories"].as_array().expect("array")[0]["inspect_priority"]
+            .as_array()
+            .expect("declared")[0];
+        assert_eq!(first["path"].as_str(), Some("src/auth.rs"));
+        assert_eq!(
+            first["dimension"].as_str(),
+            Some("authentication & secrets")
+        );
+        assert!(
+            first["reason"]
+                .as_str()
+                .expect("reason")
+                .contains("credential handling"),
+            "{out}"
+        );
+    }
+
+    /// An override that cannot be used must not turn the investigation off.
+    #[test]
+    fn an_unusable_override_falls_back_to_the_default() {
+        assert_eq!(
+            Budget::resolved(Some("0"), Some("not a number")),
+            Budget {
+                max_files: DEFAULT_MAX_FILES,
+                max_bytes: DEFAULT_MAX_BYTES,
+            }
+        );
+        assert_eq!(Budget::resolved(Some(" 12 "), None).max_files, 12);
+    }
+
+    /// #6082: the budget the audit asks for is recorded once, and only when the
+    /// manifest is silent about it.
+    #[test]
+    fn the_budget_is_recorded_once() {
+        let out = recorded(
+            SAMPLE,
+            "/w/repos/acme-api",
+            &[Priority::bare("src/pay.rs")],
+            Some(Budget {
+                max_files: 120,
+                max_bytes: 1_200_000,
+            }),
+            &[],
+        );
+        let parsed: toml::Value = toml::from_str(&out).expect("valid TOML");
+        assert_eq!(
+            parsed["report"]["investigate_max_files"].as_integer(),
+            Some(120)
+        );
+        assert_eq!(
+            parsed["report"]["investigate_max_bytes"].as_integer(),
+            Some(1_200_000)
+        );
+    }
+
+    /// An operator who declared a budget keeps it — the audit fills, never
+    /// overrides.
+    #[test]
+    fn a_declared_budget_is_left_alone() {
+        let declared = SAMPLE.replace(
+            "title = \"Acme — Technical Due Diligence\"",
+            "title = \"Acme\"\ninvestigate_max_files = 7",
+        );
+        let out = recorded(
+            &declared,
+            "/w/repos/acme-api",
+            &[Priority::bare("src/pay.rs")],
+            Some(Budget {
+                max_files: 120,
+                max_bytes: 1_200_000,
+            }),
+            &[],
+        );
+        let parsed: toml::Value = toml::from_str(&out).expect("valid TOML");
+        assert_eq!(
+            parsed["report"]["investigate_max_files"].as_integer(),
+            Some(7)
+        );
     }
 
     /// The whole point: the ranking lands on the right repository, in order, and
@@ -247,6 +504,7 @@ path = "/w/repos/acme-web"
             &path,
             Path::new("/w/repos/acme-api"),
             &[],
+            None,
             &["acme-api: no daemon".to_owned()],
         )
         .expect("records");
@@ -287,7 +545,7 @@ path = "/w/repos/acme-web"
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("manifest.toml");
         std::fs::write(&path, SAMPLE).expect("write");
-        write_into(&path, Path::new("/w/repos/acme-api"), &[], &[]).expect("no-op");
+        write_into(&path, Path::new("/w/repos/acme-api"), &[], None, &[]).expect("no-op");
         assert_eq!(std::fs::read_to_string(&path).expect("read back"), SAMPLE);
     }
 
@@ -302,7 +560,8 @@ path = "/w/repos/acme-web"
         let err = write_into(
             &path,
             Path::new("/w/repos/nowhere"),
-            &["src/a.rs".to_owned()],
+            &[Priority::bare("src/a.rs")],
+            None,
             &[],
         )
         .expect_err("an unattributable ranking must be refused");
@@ -314,7 +573,8 @@ path = "/w/repos/acme-web"
         let err = write_into(
             Path::new("/nonexistent/manifest.toml"),
             Path::new("/w/a"),
-            &["src/a.rs".to_owned()],
+            &[Priority::bare("src/a.rs")],
+            None,
             &[],
         )
         .expect_err("an absent manifest must degrade");
@@ -326,8 +586,14 @@ path = "/w/repos/acme-web"
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("manifest.toml");
         std::fs::write(&path, "this is not toml = = =").expect("write");
-        let err = write_into(&path, Path::new("/w/a"), &[], &["a: no daemon".to_owned()])
-            .expect_err("a malformed manifest must degrade");
+        let err = write_into(
+            &path,
+            Path::new("/w/a"),
+            &[],
+            None,
+            &["a: no daemon".to_owned()],
+        )
+        .expect_err("a malformed manifest must degrade");
         assert!(err.contains("not readable as TOML"), "{err}");
     }
 }

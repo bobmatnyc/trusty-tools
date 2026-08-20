@@ -9,6 +9,7 @@
 
 use super::*;
 use crate::report::investigate::deps::{Dependency, DependencyInventory};
+use crate::report::investigate::select::DimensionCoverage;
 use crate::report::investigate::verify::VerifiedFinding;
 use crate::report::investigate::{BatchNote, Budget};
 use crate::report::metrics::Severity;
@@ -55,6 +56,8 @@ fn repo(
             bytes_sent: 40000,
             dimensions_covered: vec!["authentication & secrets".to_string()],
             dimensions_absent: vec!["scalability".to_string()],
+            per_dimension: vec![],
+            attributed_files: 0,
             rejected: 2,
             budget: Budget::default(),
             batches_total: 1,
@@ -105,6 +108,63 @@ fn coverage_section_states_examined_and_rejected() {
     assert!(out.contains("NOT investigated: scalability"));
     assert!(out.contains("2 finding(s) rejected (unverifiable evidence)"));
     assert!(out.contains("verified evidence-backed findings: 1"));
+}
+
+/// One repository whose coverage carries #6082's discovery record.
+fn discovered(attributed: usize, per_dimension: Vec<DimensionCoverage>) -> Investigation {
+    let mut r = repo(
+        InvestigationStatus::Available,
+        vec![finding()],
+        DependencyInventory::default(),
+    );
+    r.coverage.attributed_files = attributed;
+    r.coverage.per_dimension = per_dimension;
+    Investigation { repos: vec![r] }
+}
+
+/// Why: #6082 — the coverage section must say what the examined set was chosen
+/// BY, per dimension, or a reader cannot tell a searched repository from a
+/// guessed one.
+/// What: the discovery line counts the manifest-declared files, and each
+/// dimension line names one example with the query that found it.
+/// Test: this test itself.
+#[test]
+fn coverage_section_names_the_discovery_source() {
+    let out = coverage_section(&discovered(
+        9,
+        vec![DimensionCoverage {
+            dimension: "error handling".to_string(),
+            files_examined: 4,
+            example: Some(
+                "src/err.rs (trusty-search hit for \"error swallowed\" (score 0.77, line 12))"
+                    .to_string(),
+            ),
+        }],
+    ));
+    assert!(
+        out.contains("evidence discovery: 9 of 12 examined file(s) came from manifest-declared evidence queries"),
+        "{out}"
+    );
+    assert!(
+        out.contains("- error handling: 4 file(s) examined — e.g. src/err.rs (trusty-search hit"),
+        "{out}"
+    );
+}
+
+/// Why: the fail-open rule — a run whose search index was unavailable degrades
+/// to path names, and the coverage section must NAME that rather than render
+/// identically to a searched run.
+/// What: zero attributed files renders the degradation and points at Gaps &
+/// Caveats for the cause.
+/// Test: this test itself.
+#[test]
+fn coverage_section_names_the_heuristic_degradation() {
+    let out = coverage_section(&discovered(0, Vec::new()));
+    assert!(
+        out.contains("evidence discovery: path-name heuristics only"),
+        "{out}"
+    );
+    assert!(out.contains("see Gaps & Caveats for why"), "{out}");
 }
 
 /// Why: a skipped repo must name why in the coverage section (no silent gap).

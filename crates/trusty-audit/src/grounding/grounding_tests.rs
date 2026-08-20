@@ -26,6 +26,16 @@ use super::*;
 /// the reachable-but-broken daemon, which is a different failure from an
 /// unreachable one and gets its own test.
 async fn stub_daemon(hotspots: Option<&'static str>) -> String {
+    stub_daemon_with(hotspots, None).await
+}
+
+/// [`stub_daemon`], plus an answer for #6082's `/indexes/{id}/search` queries.
+///
+/// Why a second constructor rather than a parameter on the first: the discovery
+/// leg asks a dozen-plus queries per repository, and most tests here drive a
+/// DIFFERENT leg to failure — they want the search leg to answer quietly,
+/// without restating that at every call site.
+async fn stub_daemon_with(hotspots: Option<&'static str>, search: Option<&'static str>) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind an ephemeral port");
@@ -47,6 +57,11 @@ async fn stub_daemon(hotspots: Option<&'static str>) -> String {
                 match hotspots {
                     Some(json) => body(200, "application/json", json),
                     None => body(500, "text/plain", "index is not loaded"),
+                }
+            } else if request.contains("/search") {
+                match search {
+                    Some(json) => body(200, "application/json", json),
+                    None => body(404, "text/plain", "no such index"),
                 }
             } else {
                 body(404, "text/plain", "no")
@@ -141,6 +156,16 @@ const HOTSPOTS: &str = r#"{"index_id":"acme-api","top_n":60,"hotspots":[
 
 const EMPTY_HOTSPOTS: &str = r#"{"index_id":"acme-api","top_n":60,"hotspots":[]}"#;
 
+/// What #6082's `/indexes/{id}/search` answers with. The stub cannot vary its
+/// answer per query, so every dimension finds the same two files — enough to
+/// assert attribution and that the leg survives a dead trusty-analyze.
+const SEARCH_HITS: &str = r#"{"results":[
+    {"id":"a","file":"CHECKOUT/src/login.rs","path":"src/login.rs","start_line":18,
+     "end_line":40,"content":"","score":0.88,"match_reason":"hybrid"},
+    {"id":"b","file":"CHECKOUT/src/session.rs","path":"src/session.rs","start_line":4,
+     "end_line":20,"content":"","score":0.51,"match_reason":"bm25"}
+],"intent":"Semantic"}"#;
+
 /// A manifest shaped like the one `tga audit` leaves in `out/<stem>/`.
 fn manifest_naming(dir: &Path, checkout: &Path) -> PathBuf {
     let path = dir.join("manifest.toml");
@@ -168,7 +193,7 @@ async fn a_checkout_with_no_basename_never_reaches_a_daemon() {
         PathBuf::from("/nonexistent/trusty-analyze"),
         dead,
     );
-    let out = ground(&t, Path::new("/"), "acme-api").await;
+    let out = ground(&t, Path::new("/"), "acme-api", None).await;
     assert!(out.index_id.is_none());
     assert!(out.priorities.is_empty());
     assert_eq!(out.gaps.len(), 1, "{:?}", out.gaps);
@@ -191,7 +216,7 @@ async fn a_search_daemon_that_will_not_start_is_a_named_gap() {
         PathBuf::from("/nonexistent/trusty-analyze"),
         dead,
     );
-    let out = ground(&t, Path::new("/w/repos/acme-api"), "acme-api").await;
+    let out = ground(&t, Path::new("/w/repos/acme-api"), "acme-api", None).await;
     assert!(out.priorities.is_empty());
     assert_eq!(out.gaps.len(), 1, "{:?}", out.gaps);
     assert!(out.gaps[0].contains("acme-api"), "{:?}", out.gaps);
@@ -236,7 +261,7 @@ async fn an_unindexable_checkout_is_a_named_gap() {
         PathBuf::from("/nonexistent/trusty-analyze"),
         dead_url().await,
     );
-    let out = ground(&t, Path::new("/w/repos/acme-api"), "acme-api").await;
+    let out = ground(&t, Path::new("/w/repos/acme-api"), "acme-api", None).await;
     assert!(out.priorities.is_empty());
     assert_eq!(out.index_id.as_deref(), Some("acme-api"));
     assert_eq!(out.gaps.len(), 1, "{:?}", out.gaps);
@@ -246,21 +271,34 @@ async fn an_unindexable_checkout_is_a_named_gap() {
 
 /// The second daemon. It is reached only once the index exists, and its loss is
 /// stated as itself rather than as an empty hotspot list.
+///
+/// #6082 also makes this the proof that the two ranking legs are independent:
+/// trusty-analyze is unreachable, and the search-derived evidence still ranks.
 #[cfg(unix)]
 #[tokio::test]
 async fn an_analyze_daemon_that_will_not_start_is_a_named_gap() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let t = tools(
         approving_search(tmp.path()),
-        stub_daemon(None).await,
+        stub_daemon_with(None, Some(SEARCH_HITS)).await,
         PathBuf::from("/nonexistent/trusty-analyze"),
         dead_url().await,
     );
-    let out = ground(&t, Path::new("/w/repos/acme-api"), "acme-api").await;
-    assert!(out.priorities.is_empty());
+    let out = ground(&t, Path::new("/w/repos/acme-api"), "acme-api", None).await;
     assert_eq!(out.gaps.len(), 1, "{:?}", out.gaps);
     assert!(out.gaps[0].contains("acme-api"), "{:?}", out.gaps);
     assert!(out.gaps[0].contains("trusty-analyze"), "{:?}", out.gaps);
+    assert!(
+        !out.priorities.is_empty(),
+        "search-derived evidence must survive a dead trusty-analyze"
+    );
+    assert!(
+        out.priorities
+            .iter()
+            .all(|p| p.dimension.is_some() && p.reason.is_some()),
+        "every ranked path names its dimension and its query: {:?}",
+        out.priorities
+    );
 }
 
 /// Reachable but broken: the daemon answers `/health` and then 500s the query.
@@ -271,15 +309,18 @@ async fn an_unreachable_hotspots_endpoint_is_a_named_gap() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let t = tools(
         approving_search(tmp.path()),
-        stub_daemon(None).await,
+        stub_daemon_with(None, Some(SEARCH_HITS)).await,
         PathBuf::from("/nonexistent/trusty-analyze"),
         stub_daemon(None).await,
     );
-    let out = ground(&t, Path::new("/w/repos/acme-api"), "acme-api").await;
-    assert!(out.priorities.is_empty());
+    let out = ground(&t, Path::new("/w/repos/acme-api"), "acme-api", None).await;
     assert_eq!(out.gaps.len(), 1, "{:?}", out.gaps);
     assert!(out.gaps[0].contains("500"), "{:?}", out.gaps);
-    assert!(out.gaps[0].contains("path name alone"), "{:?}", out.gaps);
+    assert!(
+        out.gaps[0].contains("search-derived evidence only"),
+        "{:?}",
+        out.gaps
+    );
 }
 
 /// Measured, and nothing was complex. Distinct from "could not measure", and it
@@ -291,18 +332,68 @@ async fn an_empty_hotspot_list_is_a_named_gap() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let t = tools(
         approving_search(tmp.path()),
-        stub_daemon(None).await,
+        stub_daemon_with(None, Some(SEARCH_HITS)).await,
         PathBuf::from("/nonexistent/trusty-analyze"),
         stub_daemon(Some(EMPTY_HOTSPOTS)).await,
     );
-    let out = ground(&t, Path::new("/w/repos/acme-api"), "acme-api").await;
-    assert!(out.priorities.is_empty());
+    let out = ground(&t, Path::new("/w/repos/acme-api"), "acme-api", None).await;
     assert_eq!(out.gaps.len(), 1, "{:?}", out.gaps);
     assert!(
         out.gaps[0].contains("no complexity hotspot"),
         "{:?}",
         out.gaps
     );
+}
+
+/// #6082: the index answers, and matches nothing. That is not the same as a
+/// dead daemon and it is not a clean bill of health — with no complexity
+/// measurement either, the run says so twice and ranks nothing.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_search_that_answers_nothing_is_a_named_gap() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let t = tools(
+        approving_search(tmp.path()),
+        stub_daemon_with(None, Some(r#"{"results":[]}"#)).await,
+        PathBuf::from("/nonexistent/trusty-analyze"),
+        stub_daemon(Some(EMPTY_HOTSPOTS)).await,
+    );
+    let out = ground(&t, Path::new("/w/repos/acme-api"), "acme-api", None).await;
+    assert!(out.priorities.is_empty());
+    assert!(
+        out.gaps
+            .iter()
+            .any(|g| g.contains("matched no evidence for any due-diligence dimension")),
+        "{:?}",
+        out.gaps
+    );
+    assert!(
+        out.gaps.iter().any(|g| g.contains("path name alone")),
+        "the degradation to the pre-#6082 behaviour is named: {:?}",
+        out.gaps
+    );
+}
+
+/// A search leg that errors on every query names the failure once, with a
+/// count — not once per query.
+#[cfg(unix)]
+#[tokio::test]
+async fn failing_evidence_queries_are_named_once_with_their_count() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let t = tools(
+        approving_search(tmp.path()),
+        stub_daemon(None).await, // answers /health, 404s every query
+        PathBuf::from("/nonexistent/trusty-analyze"),
+        stub_daemon(Some(EMPTY_HOTSPOTS)).await,
+    );
+    let out = ground(&t, Path::new("/w/repos/acme-api"), "acme-api", None).await;
+    let failures: Vec<&String> = out
+        .gaps
+        .iter()
+        .filter(|g| g.contains("evidence queries failed"))
+        .collect();
+    assert_eq!(failures.len(), 1, "{:?}", out.gaps);
+    assert!(failures[0].contains("404"), "{failures:?}");
 }
 
 /// A daemon that binds its port and never becomes healthy gets the full
@@ -317,7 +408,7 @@ async fn a_daemon_that_binds_but_never_answers_is_a_named_gap() {
         PathBuf::from("/nonexistent/trusty-analyze"),
         dead_url().await,
     );
-    let out = ground(&t, Path::new("/w/repos/acme-api"), "acme-api").await;
+    let out = ground(&t, Path::new("/w/repos/acme-api"), "acme-api", None).await;
     assert!(out.priorities.is_empty());
     assert_eq!(out.gaps.len(), 1, "{:?}", out.gaps);
     assert!(
@@ -329,11 +420,12 @@ async fn a_daemon_that_binds_but_never_answers_is_a_named_gap() {
 
 // ─── The happy path, end to end ──────────────────────────────────────────────
 
-/// Every leg succeeds: the ranking reaches the manifest, in complexity order,
-/// with one entry per file, and no gap is stated.
+/// Every leg succeeds: the ranking reaches the manifest, complexity first, with
+/// the search-derived evidence interleaved and each entry naming why it is
+/// there. No gap is stated.
 #[cfg(unix)]
 #[tokio::test]
-async fn hotspots_become_ranked_inspect_priority_in_the_manifest() {
+async fn hotspots_and_search_hits_become_ranked_inspect_priority_in_the_manifest() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let checkout = tmp.path().join("repos").join("acme-api");
     std::fs::create_dir_all(&checkout).expect("mkdir checkout");
@@ -346,7 +438,7 @@ async fn hotspots_become_ranked_inspect_priority_in_the_manifest() {
 
     let t = tools(
         approving_search(tmp.path()),
-        stub_daemon(None).await,
+        stub_daemon_with(None, Some(SEARCH_HITS)).await,
         PathBuf::from("/nonexistent/trusty-analyze"),
         stub_daemon(Some(payload)).await,
     );
@@ -358,10 +450,71 @@ async fn hotspots_become_ranked_inspect_priority_in_the_manifest() {
     let declared = parsed["repositories"].as_array().expect("array")[0]["inspect_priority"]
         .as_array()
         .expect("a ranking was declared")
+        .clone();
+
+    let paths: Vec<&str> = declared
         .iter()
-        .map(|v| v.as_str().expect("string"))
-        .collect::<Vec<_>>();
-    assert_eq!(declared, vec!["src/pay.rs", "src/auth.rs"], "{written}");
+        .map(|v| match v {
+            toml::Value::String(path) => path.as_str(),
+            table => table["path"].as_str().expect("a path"),
+        })
+        .collect();
+    assert_eq!(paths[0], "src/pay.rs", "complexity still leads: {written}");
+    assert!(
+        paths.contains(&"src/login.rs"),
+        "the search-derived evidence is ranked too: {written}"
+    );
+
+    let attributed = declared
+        .iter()
+        .find(|v| v.get("dimension").is_some())
+        .expect("at least one entry names its dimension");
+    assert_eq!(
+        attributed["dimension"].as_str(),
+        Some("authentication & secrets"),
+        "{written}"
+    );
+    assert!(
+        attributed["reason"]
+            .as_str()
+            .expect("a reason")
+            .contains("trusty-search hit for"),
+        "{written}"
+    );
+    // #6082: the audit's investigation budget rides on the same interface.
+    assert_eq!(
+        parsed["report"]["investigate_max_files"].as_integer(),
+        Some(priority::DEFAULT_MAX_FILES as i64),
+        "{written}"
+    );
+}
+
+/// #6082: the brief the manifest declares becomes queries of its own — and a
+/// manifest with no brief is the ordinary case, not a failure.
+#[test]
+fn the_brief_a_manifest_declares_is_read() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let checkout = tmp.path().join("repos").join("acme-api");
+    let manifest = manifest_naming(tmp.path(), &checkout);
+    assert!(instructions_from(&manifest).is_none(), "no brief declared");
+
+    std::fs::write(tmp.path().join("brief.md"), "- Payment reconciliation\n").expect("brief");
+    let text = std::fs::read_to_string(&manifest).expect("read");
+    std::fs::write(
+        &manifest,
+        text.replace(
+            "title = \"Acme\"",
+            "title = \"Acme\"\ninstructions = \"brief.md\"",
+        ),
+    )
+    .expect("declare the brief");
+
+    let brief = instructions_from(&manifest).expect("the brief is read");
+    assert!(brief.contains("Payment reconciliation"), "{brief}");
+    assert_eq!(
+        evidence::instruction_queries(Some(&brief)),
+        vec!["Payment reconciliation".to_string()]
+    );
 }
 
 /// A gap produced by an earlier leg reaches the manifest too, so the RENDERED
@@ -415,7 +568,7 @@ async fn a_manifest_that_cannot_be_written_is_a_named_gap() {
 
     let t = tools(
         approving_search(tmp.path()),
-        stub_daemon(None).await,
+        stub_daemon_with(None, Some(SEARCH_HITS)).await,
         PathBuf::from("/nonexistent/trusty-analyze"),
         stub_daemon(Some(payload)).await,
     );

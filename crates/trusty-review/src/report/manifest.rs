@@ -177,6 +177,13 @@ pub struct InspectionPriority {
     pub path: String,
     /// Relative ordering weight among the priorities; higher goes first.
     pub weight: u32,
+    /// The DD dimension this file is evidence FOR, when the writer knows
+    /// (#6082). It counts toward the dimension coverage the report states, so a
+    /// dimension no path heuristic could ever recognise is still covered.
+    pub dimension: Option<String>,
+    /// One line naming the query or measurement that selected it (#6082),
+    /// rendered in the Investigation Coverage section.
+    pub reason: Option<String>,
 }
 
 /// One validated repository entry mapping to a single per-application block.
@@ -303,13 +310,21 @@ struct RawRepositoryEntry {
 enum RawInspectionPriority {
     /// A bare repo-relative path; its weight comes from its declared position.
     Path(String),
-    /// A path with an optional explicit weight overriding the positional one.
+    /// A path with an optional explicit weight overriding the positional one,
+    /// and the optional #6082 attribution: which dimension it is evidence for
+    /// and which query or measurement found it.
     Weighted {
         /// Repo-relative path to inspect first.
         path: String,
         /// Explicit ordering weight; absent falls back to the position.
         #[serde(default)]
         weight: Option<u32>,
+        /// The DD dimension this file is evidence for (#6082).
+        #[serde(default)]
+        dimension: Option<String>,
+        /// One line naming what selected it (#6082).
+        #[serde(default)]
+        reason: Option<String>,
     },
 }
 
@@ -326,10 +341,19 @@ impl RawInspectionPriority {
             RawInspectionPriority::Path(path) => InspectionPriority {
                 path,
                 weight: positional,
+                dimension: None,
+                reason: None,
             },
-            RawInspectionPriority::Weighted { path, weight } => InspectionPriority {
+            RawInspectionPriority::Weighted {
+                path,
+                weight,
+                dimension,
+                reason,
+            } => InspectionPriority {
                 path,
                 weight: weight.unwrap_or(positional),
+                dimension,
+                reason,
             },
         }
     }

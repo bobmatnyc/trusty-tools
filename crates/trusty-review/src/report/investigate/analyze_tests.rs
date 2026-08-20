@@ -19,6 +19,7 @@ fn file(path: &str, content: &str) -> SelectedFile {
         content: content.to_string(),
         truncated: false,
         dimensions: vec!["authentication & secrets".to_string()],
+        selected_by: None,
     }
 }
 
