@@ -512,13 +512,16 @@ pub(super) async fn search_handler(
         // body naming neither the index nor the fault is what let this state
         // read as "no matches" for a whole daemon lifetime. Report it as the
         // outage it is, under the same code the chunk endpoints already use.
-        if let Some(unavailable) = e.downcast_ref::<crate::core::indexer::CorpusReadUnavailable>() {
+        // The downcast matters here and not in the grep/call_chain wrapper:
+        // `search_with_drops` also fails for reasons that have nothing to do
+        // with the corpus (an embed call, the vector store), and those stay 500.
+        if let Some(resp) = super::degraded::corpus_read_failure_from(&e) {
             tracing::warn!(
                 index_id = %index_id,
-                detail = %unavailable.detail,
+                error = %e,
                 "search: the durable corpus could not be read"
             );
-            return super::degraded::corpus_read_failure_response(&index_id.0, &e.to_string());
+            return resp;
         }
         tracing::warn!(index_id = %index_id, error = %e, "search failed");
         (

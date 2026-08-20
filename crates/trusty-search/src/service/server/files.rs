@@ -354,11 +354,17 @@ async fn grep_one_index(
     Ok(())
 }
 
-/// Render a grep or call-chain corpus-read failure through the shared 503
-/// (#5917), falling back to `500` for any other error.
+/// Render a grep or call-chain corpus-read failure as the shared 503 (#5917).
 ///
 /// Why: both grep handlers and `call_chain_handler` need the identical mapping,
-/// and the fallback must not be a second bespoke body.
+/// and BOTH sub-cases belong under one shape. `ensure_corpus_view_is_current`
+/// raises a typed `CorpusReadUnavailable` for a read that FAILED and an untyped
+/// bail for a rehydrate still in flight past the retry budget — but a caller
+/// cannot act on that distinction any differently, and the MCP layer classifies
+/// only a 503, so answering the untyped arm with a bespoke 500 would reach an
+/// MCP caller as an unstructured transport error. The sibling `/chunks` wrapper
+/// already treats both as `index_corpus_unavailable`; this matches it, so all
+/// four corpus-backed surfaces agree on both sub-cases.
 /// Test: `grep_over_an_unreadable_corpus_returns_503_naming_the_index`,
 /// `global_grep_over_an_unreadable_corpus_returns_503`,
 /// `call_chain_over_an_unreadable_corpus_is_503_not_404`.
@@ -367,16 +373,7 @@ fn corpus_backed_read_error(
     err: &anyhow::Error,
 ) -> (StatusCode, Json<serde_json::Value>) {
     tracing::warn!("index '{index_id}': corpus-backed read failed: {err:#}");
-    super::degraded::corpus_read_failure_from(err).unwrap_or_else(|| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "error": "corpus_read_failed",
-                "index_id": index_id,
-                "message": format!("{err:#}"),
-            })),
-        )
-    })
+    super::degraded::corpus_read_failure_response(index_id, &format!("{err:#}"))
 }
 
 /// `POST /indexes/:id/grep` — grep-parity regex search over one index's files.
