@@ -408,7 +408,43 @@ Override via:
 Provider prefix convention:
 - `bedrock/<id>` — AWS Bedrock Converse API (no API key needed, uses AWS credential chain)
 - `openrouter/<id>` — OpenRouter (requires `OPENROUTER_API_KEY`)
-- Bare id — uses the configured default provider
+- Bare id — the id's own shape decides when it belongs to exactly one
+  provider's catalogue; otherwise the configured default provider
+
+A prefix that contradicts the id's shape resolves rather than failing (#6135):
+the same model in the pinned provider's own dialect wins where one is verified
+(`bedrock/anthropic/claude-sonnet-4.6` runs `us.anthropic.claude-sonnet-4-6` on
+Bedrock), and otherwise the call routes to the provider whose catalogue the id
+belongs to. Every adjustment is logged and, for `report`, printed on the page as
+`requested → ran`.
+
+### `report --manifest`: the manifest decides (#6135)
+
+A report manifest may declare the run's inference identity:
+
+```toml
+[inference]
+provider   = "openrouter"
+reviewer   = "anthropic/claude-opus-4.8"
+verifier   = "anthropic/claude-haiku-4.5"
+summarizer = "anthropic/claude-haiku-4.5"
+```
+
+Precedence for `report` is **CLI flag > manifest `[inference]` > env var >
+config file > built-in default**, per field. `trusty-audit` writes this section
+into every manifest it grounds, so a delivered package re-renders on the
+provider that produced it instead of inheriting the host's
+`~/.config/trusty-review/config.toml` — the failure this replaced was a
+June-dated local `provider = "bedrock"` hijacking an OpenRouter engagement.
+
+The manifest carries identity, **never a credential**: the key stays in the
+environment (`OPENROUTER_API_KEY`). A render whose declared provider has no
+credential stops before any repository is walked, and the message names the
+provider — no other provider is substituted for the one selected.
+
+The rendered report's Report Metadata table and its JSON twin both state which
+models ran, per role, with `requested → ran` wherever the resolver adjusted an
+id.
 
 ## Per-project config & review templates
 

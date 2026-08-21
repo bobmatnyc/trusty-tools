@@ -486,6 +486,36 @@ what it does **not** carry: it is written once, after the sweep completes, and
 records the *configured* repository set — not per-repo or per-phase completion.
 Run progress is a separate record this crate will own (#5494).
 
+## Writing the inference identity into the manifest (#6135)
+
+After each repository's child finishes, the sweep writes what it selected into
+that repository's manifest:
+
+```toml
+[inference]
+provider   = "openrouter"
+reviewer   = "anthropic/claude-opus-4.8"
+verifier   = "anthropic/claude-haiku-4.5"
+summarizer = "anthropic/claude-haiku-4.5"
+```
+
+`trusty-review report --manifest` resolves provider and models from this section
+**ahead of** the host's `~/.config/trusty-review/config.toml` — precedence is
+CLI flag > manifest > environment > local config > default. That is what makes
+`trusty-audit render` on a recipient's machine reproduce the provider the
+engagement ran on rather than whatever that machine happens to be pinned to.
+
+The same values still go to the child as `TRUSTY_REVIEW_*` environment
+variables. The manifest is authoritative when present; the variables remain for
+a renderer too old to read the section.
+
+The section carries **identity, never a credential** — the same boundary as
+Credentials above. The key travels in the environment and nowhere else, and a
+render whose declared provider has no credential stops with the provider named.
+
+`index.md` states the same selection for the whole directory, beside the tool
+versions, and every report states its own on the page and in its JSON twin.
+
 ## Development
 
 ```bash

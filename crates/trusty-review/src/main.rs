@@ -225,15 +225,32 @@ fn main() -> Result<()> {
 }
 
 async fn async_main(cli: Cli) -> Result<()> {
-    let config = ReviewConfig::from_env_and_file(cli.config.as_deref(), None);
+    let Cli {
+        config: config_path,
+        command,
+    } = cli;
 
-    match cli.command {
+    // #6135: `report` builds its own config, because the manifest it is given is
+    // itself a config layer — it declares the provider and models of the run
+    // that produced it, and those must be resolved before the rest of the chain.
+    #[cfg(feature = "report")]
+    let command = match command {
+        Commands::Report(args) => {
+            return cli_report::cmd_report(config_path.as_deref(), args).await;
+        }
+        other => other,
+    };
+
+    let config = ReviewConfig::from_env_and_file(config_path.as_deref(), None);
+
+    match command {
         Commands::Run(args) => cmd_run(config, args).await,
         Commands::Compare(args) => cmd_compare(config, args).await,
         #[cfg(feature = "http-server")]
         Commands::Serve(args) => cmd_serve(config, args).await,
+        // `report` is dispatched above, before the config is built.
         #[cfg(feature = "report")]
-        Commands::Report(args) => cli_report::cmd_report(config, args).await,
+        Commands::Report(_) => unreachable!("report dispatched before the config is built"),
         Commands::Calibrate(args) => cmd_calibrate(config, args).await,
         Commands::WebhookListen => trusty_review::webhook_listener::run(config).await,
         Commands::Config(cmd) => cmd.run().await,

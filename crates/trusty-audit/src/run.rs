@@ -367,7 +367,10 @@ where
     let binaries = pinned_binaries(work, &config.tools)?;
     // Resolved once, before any child: a half-named selection is identical for
     // every repository, so failing per-repo would just repeat one misconfiguration.
-    let inference = inference::inference_env(config, operator)?;
+    // #6135: both halves at once — the pairs the child inherits, and the
+    // identity the manifest records. See `inference::Inference`.
+    let inference =
+        inference::resolve(!config.openrouter_key.is_empty(), &config.models, operator)?;
     // #5857: ONE resolution per invocation. `crate::chain` resolved the boards
     // an hour ago to state its gaps and hands that result down, so the coverage
     // the report claims and the sections the child gets cannot diverge over a
@@ -468,7 +471,12 @@ where
     // the checkpoint so the index describes a run that is on the record. A
     // partial sweep still gets one — it is where the repositories with no report
     // are named.
-    crate::index_report::write_sweep(work, &report, sweep_started.elapsed())?;
+    crate::index_report::write_sweep(
+        work,
+        &report,
+        inference.selection.as_ref(),
+        sweep_started.elapsed(),
+    )?;
     Ok(report)
 }
 
@@ -575,7 +583,7 @@ async fn run_one(
     work: &WorkDir,
     config: &EngagementConfig,
     binaries: &PinnedBinaries,
-    inference: &[(&'static str, String)],
+    inference: &inference::Inference,
     boards: &boards::Boards,
     github_access: &github_issues::GithubAccess,
     index: usize,
@@ -612,7 +620,7 @@ async fn run_one(
             match spawn_tga(
                 binaries,
                 config,
-                inference,
+                &inference.env,
                 boards,
                 github_access,
                 &config_path,
@@ -653,6 +661,22 @@ async fn run_one(
     if manifest.is_file() {
         let tools = grounding::Tools::pinned(binaries.search.clone(), binaries.analyze.clone());
         gaps.extend(grounding::ground_manifest(&manifest, &tools, &checkout, &repo.name).await);
+        // #6135: the provider and models this run used, written into the file
+        // that ships. Without it a re-render on another machine resolves its own
+        // provider from that machine's config — which is how a June-dated local
+        // `provider = "bedrock"` hijacked an OpenRouter engagement's render.
+        // After grounding, so the two writers of this file serialise; fail-open
+        // for the same reason grounding is, because a manifest without the
+        // section renders exactly as it did before the key existed.
+        if let Some(selection) = &inference.selection
+            && let Err(cause) = inference::write_into_manifest(&manifest, selection)
+        {
+            gaps.push(format!(
+                "{}: {cause} — a re-render of this report resolves its own inference provider \
+                 instead of reproducing this run's",
+                repo.name
+            ));
+        }
     }
     progress.unit_finished(
         Operation::Sweep,

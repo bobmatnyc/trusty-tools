@@ -325,3 +325,85 @@ fn inspect_priority_weights_follow_declared_rank() {
         "absent key must leave selection byte-identical to a pre-#6078 manifest"
     );
 }
+
+/// Why: #6135 — the manifest is the durable carrier of a run's inference
+/// identity, so the section has to parse into the four values the resolver
+/// consumes.
+/// What: a full `[inference]` table, read back field by field.
+/// Test: this test itself.
+#[test]
+fn parse_inference_section() {
+    let toml = r#"
+        [report]
+        title = "Acme"
+
+        [inference]
+        provider = "openrouter"
+        reviewer = "anthropic/claude-opus-4.8"
+        verifier = "anthropic/claude-haiku-4.5"
+        summarizer = "anthropic/claude-haiku-4.5"
+
+        [[repositories]]
+        name = "API"
+        path = "/tmp/acme-api"
+    "#;
+    let m = parse(toml).expect("parse ok");
+    let inference = m.inference.expect("the section is declared");
+    assert_eq!(inference.provider.as_deref(), Some("openrouter"));
+    assert_eq!(
+        inference.reviewer.as_deref(),
+        Some("anthropic/claude-opus-4.8")
+    );
+    assert_eq!(
+        inference.verifier.as_deref(),
+        Some("anthropic/claude-haiku-4.5")
+    );
+    assert_eq!(
+        inference.summarizer.as_deref(),
+        Some("anthropic/claude-haiku-4.5")
+    );
+    assert!(!inference.is_empty());
+}
+
+/// Why: back-compat is the whole reason the key is optional — every manifest
+/// written before #6135 must load unchanged and resolve through the layers it
+/// always did.
+/// What: a manifest with no section, and one with an empty table, both read as
+/// absent.
+/// Test: this test itself.
+#[test]
+fn an_absent_inference_section_is_none() {
+    let without =
+        parse("[report]\ntitle = \"T\"\n\n[[repositories]]\nname = \"A\"\npath = \"/x\"\n")
+            .expect("parses");
+    assert!(without.inference.is_none());
+
+    let empty = parse(
+        "[report]\ntitle = \"T\"\n\n[inference]\n\n[[repositories]]\nname = \"A\"\npath = \"/x\"\n",
+    )
+    .expect("parses");
+    assert!(
+        empty.inference.is_none(),
+        "a section that declares nothing must not become four unset overrides"
+    );
+}
+
+/// Why: the section reaches the resolver as a `RoleManifest`, and a field
+/// mis-mapped there would silently select the wrong model for a role.
+/// What: converts a partially-declared section and checks every field lands.
+/// Test: this test itself.
+#[test]
+fn the_section_becomes_a_resolution_layer() {
+    let toml = "[report]\ntitle = \"T\"\n\n[inference]\nprovider = \"openrouter\"\n\
+                reviewer = \"anthropic/claude-opus-4.8\"\n\n\
+                [[repositories]]\nname = \"A\"\npath = \"/x\"\n";
+    let m = parse(toml).expect("parses");
+    let layer = m.inference.expect("declared").as_role_layer();
+    assert_eq!(layer.provider.as_deref(), Some("openrouter"));
+    assert_eq!(
+        layer.reviewer_model.as_deref(),
+        Some("anthropic/claude-opus-4.8")
+    );
+    assert_eq!(layer.verifier_model, None);
+    assert_eq!(layer.summarizer_model, None);
+}

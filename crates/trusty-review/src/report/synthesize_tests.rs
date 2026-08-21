@@ -160,6 +160,7 @@ fn fixture_model(findings: Vec<MetricFinding>) -> ReportModel {
         analyst: Some("bobmatnyc".to_string()),
         client: None,
         vendor_methodology: crate::report::model::vendor_methodology(),
+        inference: None,
         instructions: None,
         instructions_source: None,
         report_date: "2026-07-10".to_string(),

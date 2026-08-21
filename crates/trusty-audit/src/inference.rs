@@ -195,8 +195,85 @@ pub fn selection_env<F>(
 where
     F: Fn(&str) -> Option<String>,
 {
+    Ok(resolve(key_present, models, operator)?.env)
+}
+
+/// A run's inference identity: the provider and the three role model ids.
+///
+/// Why: #6135 — the identity must be written into the manifest, and the env
+/// pairs alone cannot carry it. They are EMPTY in the arm where the operator
+/// named all four, which is exactly the arm where the manifest most needs to
+/// record what was used. Owner ruling 2026-08-21: "In audit mode, trusty review
+/// should use the same provider as audit to make it portable. From the
+/// manifest."
+/// What: four values, always all four, whichever layer they came from.
+/// `source` names that layer so the index can state it.
+/// Test: `super::inference_tests::the_manifest_carries_what_the_env_carries`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Selection {
+    /// Provider id — `openrouter` unless the engagement pinned another.
+    pub provider: String,
+    /// Reviewer role model id.
+    pub reviewer: String,
+    /// Verifier role model id.
+    pub verifier: String,
+    /// Summarizer role model id.
+    pub summarizer: String,
+    /// Which layer resolved it: the operator's environment, the engagement
+    /// config's `[models]` table, or the built-in defaults.
+    pub source: &'static str,
+}
+
+impl Selection {
+    /// The four values in `[inference]` key order.
+    #[must_use]
+    pub fn rows(&self) -> [(&'static str, &str); 4] {
+        [
+            ("provider", self.provider.as_str()),
+            ("reviewer", self.reviewer.as_str()),
+            ("verifier", self.verifier.as_str()),
+            ("summarizer", self.summarizer.as_str()),
+        ]
+    }
+}
+
+/// What one run selected, and what it must hand to a child.
+///
+/// Why: the two are not the same value. `env` is empty when the operator's
+/// environment already names all four — the child inherits it intact — while
+/// `selection` is what that environment resolved TO, which is what the manifest
+/// records. Returning both from one call keeps them from being resolved twice
+/// and disagreeing.
+/// What: `selection` is `None` only when there is no credential, in which case
+/// nothing is selected and nothing is injected.
+/// Test: `super::inference_tests::the_manifest_carries_what_the_env_carries`.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct Inference {
+    /// The `TRUSTY_REVIEW_*` pairs to set on a child — all four, or none.
+    pub env: Vec<(&'static str, String)>,
+    /// The identity this run renders with, when it has one.
+    pub selection: Option<Selection>,
+}
+
+/// Resolve both halves of a run's inference identity.
+///
+/// # Errors
+///
+/// Exactly [`inference_env`]'s.
+///
+/// Test: `super::inference_tests::the_manifest_carries_what_the_env_carries`.
+pub fn resolve<F>(
+    key_present: bool,
+    models: &ModelPins,
+    operator: F,
+) -> Result<Inference, AuditError>
+where
+    F: Fn(&str) -> Option<String>,
+{
     if !key_present {
-        return Ok(Vec::new());
+        return Ok(Inference::default());
     }
 
     let from_operator = SELECTION.map(&operator);
@@ -210,8 +287,19 @@ where
         SELECTION,
         "operator environment",
     )? {
-        // The operator named the whole selection; the child inherits it intact.
-        return Ok(Vec::new());
+        // The operator named the whole selection; the child inherits it intact,
+        // and the manifest records what that selection actually is (#6135).
+        let named = |i: usize| from_operator[i].clone().unwrap_or_default();
+        return Ok(Inference {
+            env: Vec::new(),
+            selection: Some(Selection {
+                provider: named(0),
+                reviewer: named(1),
+                verifier: named(2),
+                summarizer: named(3),
+                source: "the operator's environment",
+            }),
+        });
     }
 
     let pins: &ModelPins = models;
@@ -234,19 +322,75 @@ where
         DEFAULT_VERIFIER_MODEL,
         DEFAULT_SUMMARIZER_MODEL,
     ];
-    Ok(SELECTION
+    let values: Vec<String> = from_config
         .into_iter()
-        .zip(from_config)
         .zip(defaults)
-        .map(|((name, pinned), fallback)| {
-            let value = if use_config {
-                pinned.unwrap_or(fallback)
+        .map(|(pinned, fallback)| {
+            if use_config {
+                pinned.unwrap_or(fallback).to_owned()
             } else {
-                fallback
-            };
-            (name, value.to_owned())
+                fallback.to_owned()
+            }
         })
-        .collect())
+        .collect();
+    let env: Vec<(&'static str, String)> =
+        SELECTION.into_iter().zip(values.iter().cloned()).collect();
+    Ok(Inference {
+        selection: Some(Selection {
+            provider: values[0].clone(),
+            reviewer: values[1].clone(),
+            verifier: values[2].clone(),
+            summarizer: values[3].clone(),
+            source: if use_config {
+                "the engagement config's [models] table"
+            } else {
+                "this tool's built-in defaults"
+            },
+        }),
+        env,
+    })
+}
+
+/// Record `selection` in the manifest at `path` as its `[inference]` table.
+///
+/// Why: the manifest is what ships. `trusty-review` resolves provider and models
+/// from it ahead of the host's own `~/.config/trusty-review/config.toml`, so
+/// writing it here is what makes a delivered package re-render on the provider
+/// that produced it rather than on whatever the recipient's machine is pinned to
+/// (#6135, and #6080's portable re-render is the use case).
+/// What: an `[inference]` table with the four identity keys, replacing any
+/// previous one. NEVER a credential — a key stays in the environment, because
+/// this file is handed to the client.
+///
+/// The write is the same read-parse-write shape
+/// [`crate::grounding::priority::write_into`] uses on the same file, and runs
+/// after it for that reason: `toml_edit` preserves what it did not touch, so the
+/// two writers cannot erase each other.
+///
+/// # Errors
+///
+/// One line, safe to show the recipient, when the manifest cannot be read,
+/// parsed, or written back. The caller turns it into a gap of its own — a
+/// manifest without the section still renders, it just resolves its provider
+/// from the environment as it did before this key existed.
+///
+/// Test: `super::inference_tests::{the_section_lands_in_the_manifest,
+/// a_second_write_replaces_the_first}`.
+pub fn write_into_manifest(path: &std::path::Path, selection: &Selection) -> Result<(), String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("{} could not be read ({e})", path.display()))?;
+    let mut doc: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|e| format!("{} is not readable as TOML ({e})", path.display()))?;
+
+    let mut table = toml_edit::Table::new();
+    for (key, value) in selection.rows() {
+        table.insert(key, toml_edit::value(value));
+    }
+    doc.insert("inference", toml_edit::Item::Table(table));
+
+    std::fs::write(path, doc.to_string())
+        .map_err(|e| format!("{} could not be written ({e})", path.display()))
 }
 
 #[cfg(test)]
@@ -498,6 +642,113 @@ trusty-review = "0.15.1"
 
     /// No credential, no provider selection — pointing the reviewer at
     /// OpenRouter with nothing to authenticate with just moves the failure.
+    /// Why: #6135 — the manifest is only a portable carrier if it says exactly
+    /// what the environment says. A drift between the two would render one
+    /// report on one provider and its re-render on another.
+    /// What: resolves both halves and asserts the four `[inference]` values are
+    /// the four `TRUSTY_REVIEW_*` values, in the same pairing.
+    /// Test: this test itself.
+    #[test]
+    fn the_manifest_carries_what_the_env_carries() {
+        let inference = resolve(true, &ModelPins::default(), nothing_set).expect("resolves");
+        let env: HashMap<&'static str, String> = inference.env.iter().cloned().collect();
+        let selection = inference.selection.expect("a key selects something");
+
+        assert_eq!(env.get(ENV_PROVIDER), Some(&selection.provider));
+        assert_eq!(env.get(ENV_REVIEWER_MODEL), Some(&selection.reviewer));
+        assert_eq!(env.get(ENV_VERIFIER_MODEL), Some(&selection.verifier));
+        assert_eq!(env.get(ENV_SUMMARIZER_MODEL), Some(&selection.summarizer));
+        assert_eq!(selection.provider, PROVIDER_OPENROUTER);
+    }
+
+    /// Why: the arm where the operator named all four emits NO variables, and
+    /// that is exactly the arm where the manifest is the only record of what ran.
+    /// What: an operator environment naming all four, resolved.
+    /// Test: this test itself.
+    #[test]
+    fn an_inherited_selection_is_still_recorded() {
+        let inference = resolve(true, &ModelPins::default(), |name| {
+            Some(match name {
+                ENV_PROVIDER => "bedrock".to_owned(),
+                _ => "us.anthropic.claude-sonnet-4-6".to_owned(),
+            })
+        })
+        .expect("a whole operator selection resolves");
+
+        assert!(inference.env.is_empty(), "the child inherits it untouched");
+        let selection = inference
+            .selection
+            .expect("but the manifest still records it");
+        assert_eq!(selection.provider, "bedrock");
+        assert_eq!(selection.reviewer, "us.anthropic.claude-sonnet-4-6");
+    }
+
+    /// Why: the section is what makes a delivered package render on the provider
+    /// that produced it, so it has to actually land in the file — and land once,
+    /// however many times a resumed sweep writes it.
+    /// What: writes into a manifest twice and reads the result back as TOML.
+    /// Test: this test itself.
+    #[test]
+    fn the_section_lands_in_the_manifest() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("manifest.toml");
+        std::fs::write(
+            &path,
+            "[report]\ntitle = \"Acme\"\n\n[[repositories]]\nname = \"api\"\npath = \"/r\"\n",
+        )
+        .expect("write");
+
+        let selection = resolve(true, &ModelPins::default(), nothing_set)
+            .expect("resolves")
+            .selection
+            .expect("selects");
+        write_into_manifest(&path, &selection).expect("the section is written");
+        write_into_manifest(&path, &selection).expect("a resumed sweep writes it again");
+
+        let text = std::fs::read_to_string(&path).expect("read back");
+        let doc: toml::Value = toml::from_str(&text).expect("still parses as TOML");
+        let section = doc.get("inference").expect("the section is there");
+        assert_eq!(
+            section.get("provider").and_then(toml::Value::as_str),
+            Some(PROVIDER_OPENROUTER)
+        );
+        assert_eq!(
+            section.get("reviewer").and_then(toml::Value::as_str),
+            Some(DEFAULT_REVIEWER_MODEL)
+        );
+        assert_eq!(
+            text.matches("[inference]").count(),
+            1,
+            "a second write replaces the section rather than appending one: {text}"
+        );
+        assert_eq!(
+            doc.get("report")
+                .and_then(|r| r.get("title"))
+                .and_then(toml::Value::as_str),
+            Some("Acme"),
+            "everything the other writer put here survives"
+        );
+        assert!(
+            !text.contains("key") && !text.contains("sk-or"),
+            "a credential must never reach a file the client receives: {text}"
+        );
+    }
+
+    /// Why: a manifest that cannot be written is a degraded render, never a
+    /// failed sweep — the caller turns this into a named gap.
+    /// What: writes into a path that does not exist.
+    /// Test: this test itself.
+    #[test]
+    fn a_manifest_that_cannot_be_written_says_so() {
+        let selection = resolve(true, &ModelPins::default(), nothing_set)
+            .expect("resolves")
+            .selection
+            .expect("selects");
+        let cause = write_into_manifest(Path::new("/nonexistent/manifest.toml"), &selection)
+            .expect_err("an absent manifest cannot be written");
+        assert!(cause.contains("could not be read"), "{cause}");
+    }
+
     #[test]
     fn a_blank_key_selects_nothing() {
         let text = CONFIG.replace("sk-or-v1-not-a-real-key", "   ");
