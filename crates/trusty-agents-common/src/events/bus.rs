@@ -14,7 +14,8 @@
 //!       monotonic `SEQ` counter, `bus`/`subscribe`/`publish`/`emit` helpers,
 //!       the `__OMPM_EVENT__` stderr relay prefix, and a `Lag` notice with
 //!       `recv_with_lag` so a lagged subscriber is told how many events it
-//!       skipped and can resume instead of tearing down its stream.
+//!       skipped and can resume instead of tearing down its stream. A closed
+//!       channel ends that stream with the terminal `BusClosed` error.
 //! Test: `super::tests` covers serde round-trips of each payload arm, seq
 //!       monotonicity, lagged handling against a constructible test bus, and
 //!       the emit-line formatting helper.
@@ -147,6 +148,23 @@ pub struct Lag {
     pub skipped: u64,
 }
 
+/// The channel behind a subscriber is closed: every sender is gone and the
+/// buffer is drained.
+///
+/// Why: `recv_with_lag` used to report this as `Err(())`, which names nothing
+///      at the call site and cannot carry a message into a log or an
+///      `anyhow` chain. A named unit error carries the same single fact and
+///      keeps the public signature off `clippy::result_unit_err`.
+/// What: Returned as the outer `Err` arm of `recv_with_lag`. Unlike `Lag`, it
+///       is terminal — calling again will not resume the stream, because the
+///       process-global `EVENT_BUS` sender only disappears when the whole bus
+///       does (in practice this is only reachable on a locally constructed
+///       channel, as in the tests).
+/// Test: `super::tests::recv_with_lag_reports_closed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("event channel closed: all senders dropped and the buffer is drained")]
+pub struct BusClosed;
+
 /// Process-global event bus, initialised on first access.
 ///
 /// Why: Emit-from-anywhere telemetry without threading a sender through every
@@ -278,14 +296,15 @@ pub fn format_event_line(event: &HarnessEvent) -> Option<String> {
 ///      every call site. This helper does that translation once.
 /// What: On a successful receive returns `Ok(Ok(event))`; on lag returns
 ///       `Ok(Err(Lag { skipped }))` (the stream is still alive — call again to
-///       resume); on a closed channel returns `Err(())`.
-/// Test: `super::tests::lagged_receiver_yields_lag_then_resumes`.
+///       resume); on a closed channel returns `Err(BusClosed)`.
+/// Test: `super::tests::lagged_receiver_yields_lag_then_resumes`,
+///       `super::tests::recv_with_lag_reports_closed`.
 pub async fn recv_with_lag(
     rx: &mut broadcast::Receiver<HarnessEvent>,
-) -> Result<Result<HarnessEvent, Lag>, ()> {
+) -> Result<Result<HarnessEvent, Lag>, BusClosed> {
     match rx.recv().await {
         Ok(event) => Ok(Ok(event)),
         Err(broadcast::error::RecvError::Lagged(n)) => Ok(Err(Lag { skipped: n })),
-        Err(broadcast::error::RecvError::Closed) => Err(()),
+        Err(broadcast::error::RecvError::Closed) => Err(BusClosed),
     }
 }

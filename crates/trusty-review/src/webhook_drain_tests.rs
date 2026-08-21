@@ -8,7 +8,6 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use base64::Engine as _;
 use trusty_common::webhook_relay::{
     DeliveryProcessor, Disposition, DrainPolicy, Inbox, Provenance, RelayDelivery, drain_once,
     held_count, is_processed, quarantined_count,

@@ -21,7 +21,7 @@ mod filter;
 mod lifecycle;
 
 pub use bus::{
-    CHANNEL_CAPACITY, EVENT_LINE_PREFIX, HarnessEvent, HarnessPayload, Lag, bus, emit,
+    BusClosed, CHANNEL_CAPACITY, EVENT_LINE_PREFIX, HarnessEvent, HarnessPayload, Lag, bus, emit,
     format_event_line, publish, recv_with_lag, subscribe,
 };
 pub use filter::Filter;
@@ -285,7 +285,12 @@ mod tests {
     async fn recv_with_lag_reports_closed() {
         let (tx, mut rx) = broadcast::channel::<HarnessEvent>(2);
         drop(tx);
-        assert!(recv_with_lag(&mut rx).await.is_err());
+        let err = recv_with_lag(&mut rx).await.unwrap_err();
+        assert_eq!(err, BusClosed);
+        assert_eq!(
+            err.to_string(),
+            "event channel closed: all senders dropped and the buffer is drained"
+        );
     }
 
     // ---- Filter matrix ----
