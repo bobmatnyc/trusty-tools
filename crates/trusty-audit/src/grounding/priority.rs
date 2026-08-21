@@ -96,6 +96,34 @@ pub const ENV_MAX_FILES: &str = "TRUSTY_AUDIT_INVESTIGATE_MAX_FILES";
 pub const ENV_MAX_BYTES: &str = "TRUSTY_AUDIT_INVESTIGATE_MAX_BYTES";
 
 impl Budget {
+    /// The budget THIS manifest runs under: what it declares, else the machine's.
+    ///
+    /// Why: the effective budget has two possible sources — a key an operator
+    /// already wrote into `[report]`, which [`write_into`] leaves alone, and
+    /// [`Budget::from_env`]. The evidence caps scale with the budget (#6082), so
+    /// reading it anywhere but here would let the caps and the manifest disagree
+    /// on a manifest that declares one: the caps would size for 120 while
+    /// trusty-review read 300. One resolver, one value, both consumers.
+    /// What: a positive `[report].investigate_max_files` /
+    /// `investigate_max_bytes` wins per key; an unreadable manifest, a missing
+    /// key, and an unusable value all fall back to [`Budget::from_env`].
+    /// Test: `priority_tests::a_declared_budget_is_the_effective_budget`.
+    #[must_use]
+    pub fn for_manifest(manifest: &Path) -> Self {
+        let declared = std::fs::read_to_string(manifest)
+            .ok()
+            .and_then(|text| text.parse::<toml::Value>().ok());
+        let key = |name: &str| -> Option<usize> {
+            let value = declared.as_ref()?.get("report")?.get(name)?.as_integer()?;
+            usize::try_from(value).ok().filter(|n| *n > 0)
+        };
+        let machine = Self::from_env();
+        Self {
+            max_files: key("investigate_max_files").unwrap_or(machine.max_files),
+            max_bytes: key("investigate_max_bytes").unwrap_or(machine.max_bytes),
+        }
+    }
+
     /// The budget this machine asks for, defaults unless overridden.
     #[must_use]
     pub fn from_env() -> Self {
@@ -465,6 +493,47 @@ path = "/w/repos/acme-web"
                 "the undeclared key still gets the audit's default: {out}"
             );
         }
+    }
+
+    /// #6082: the caps and the manifest read ONE budget. A manifest declaring a
+    /// raised `investigate_max_files` is what trusty-review will actually read,
+    /// so it is what the evidence caps must size for — resolving the budget from
+    /// the environment here would size a 60-path ranking for a 300-file pass.
+    #[test]
+    fn a_declared_budget_is_the_effective_budget() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("manifest.toml");
+        let declared = SAMPLE.replace(
+            "title = \"Acme — Technical Due Diligence\"",
+            "title = \"Acme\"\ninvestigate_max_files = 300",
+        );
+        std::fs::write(&path, &declared).expect("write");
+        let budget = Budget::for_manifest(&path);
+        assert_eq!(budget.max_files, 300, "the declared key wins");
+        assert_eq!(
+            budget.max_bytes,
+            Budget::from_env().max_bytes,
+            "the undeclared key falls back"
+        );
+        assert_eq!(
+            crate::grounding::evidence::Caps::for_budget(budget.max_files).priority_paths,
+            300,
+            "the caps size for what the manifest declares"
+        );
+
+        // Silent manifest, absent manifest, and unusable value all fall back.
+        std::fs::write(&path, SAMPLE).expect("write");
+        assert_eq!(Budget::for_manifest(&path), Budget::from_env());
+        std::fs::write(
+            &path,
+            SAMPLE.replace("[report]", "[report]\ninvestigate_max_files = 0"),
+        )
+        .expect("write");
+        assert_eq!(Budget::for_manifest(&path), Budget::from_env());
+        assert_eq!(
+            Budget::for_manifest(&tmp.path().join("absent.toml")),
+            Budget::from_env()
+        );
     }
 
     /// The whole point: the ranking lands on the right repository, in order, and

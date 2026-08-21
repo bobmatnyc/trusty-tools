@@ -37,18 +37,82 @@ use serde::Deserialize;
 
 use super::priority::Priority;
 
-/// Chunk hits requested per query.
-const TOP_K: usize = 12;
+/// Chunk hits requested per query at [`MIN_FILES_PER_DIMENSION`].
+const MIN_TOP_K: usize = 12;
 
-/// Files one dimension may contribute to the ranking.
-const FILES_PER_DIMENSION: usize = 8;
+/// Chunk hits one query may request, at most.
+///
+/// Why: the request size is what a raised budget costs the daemon, and the
+/// daemon ranks a whole corpus per query. 64 covers a 300-file budget without
+/// clamping and stops an operator's four-digit budget from asking for a top-N
+/// the collapse-to-files step would throw away.
+const MAX_TOP_K: usize = 64;
 
-/// Ranked paths written to the manifest, across every source.
+/// Files one dimension may contribute at the smallest budget.
+const MIN_FILES_PER_DIMENSION: usize = 8;
+
+/// Ranked paths written to the manifest at the smallest budget.
 ///
 /// Why: the ranking is an ORDER for the investigation budget to walk, not a
-/// second budget — trusty-review still caps files and bytes. This bound only
-/// keeps the manifest a readable document.
-pub const MAX_PRIORITY_PATHS: usize = 60;
+/// second budget — trusty-review still caps files and bytes. This floor keeps a
+/// small or unset budget behaving exactly as it did before [`Caps`] existed.
+pub const MIN_PRIORITY_PATHS: usize = 60;
+
+/// The caps one discovery pass runs under, all derived from one budget.
+///
+/// Why: the priority list is what carries ATTRIBUTION — the dimension and the
+/// reason a file was read. `TRUSTY_AUDIT_INVESTIGATE_MAX_FILES` raises how many
+/// files trusty-review reads, but a fixed 60-path list left everything past the
+/// 60th selected by path name and complexity alone, so the knob only moved half
+/// the sample (#6082). Deriving every cap from that one budget is what makes it
+/// whole: `inspect_priority` is a dominant sort key in trusty-review's
+/// selection, so a list the size of the budget means the budget spends itself on
+/// attributed files.
+///
+/// What: `priority_paths` tracks the budget with [`MIN_PRIORITY_PATHS`] as a
+/// floor; `files_per_dimension` is that total split across the seven dimensions
+/// that can fill it (the six in [`DD_DIMENSIONS`] plus [`ANALYST_FOCUS`]),
+/// floored at [`MIN_FILES_PER_DIMENSION`]; `top_k` keeps the chunks-per-wanted-
+/// file ratio the fixed pair had, so a raised per-dimension cap is not starved
+/// by a request that still asks for twelve chunks.
+///
+/// Test: `super::evidence_tests::{a_raised_budget_raises_both_caps,
+/// the_default_budget_keeps_the_floor_semantics}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Caps {
+    /// Ranked paths written to the manifest, across every source.
+    pub priority_paths: usize,
+    /// Files one dimension may contribute to the ranking.
+    pub files_per_dimension: usize,
+    /// Chunk hits requested per query.
+    pub top_k: usize,
+}
+
+impl Caps {
+    /// The caps a `max_files` investigation budget earns.
+    #[must_use]
+    pub fn for_budget(max_files: usize) -> Self {
+        let priority_paths = max_files.max(MIN_PRIORITY_PATHS);
+        let fillers = DD_DIMENSIONS.len() + 1;
+        let files_per_dimension = (priority_paths / fillers).max(MIN_FILES_PER_DIMENSION);
+        let top_k = (files_per_dimension * MIN_TOP_K)
+            .div_ceil(MIN_FILES_PER_DIMENSION)
+            .min(MAX_TOP_K);
+        Self {
+            priority_paths,
+            files_per_dimension,
+            top_k,
+        }
+    }
+}
+
+impl Default for Caps {
+    /// The floor: what every budget at or under [`MIN_PRIORITY_PATHS`] gets.
+    fn default() -> Self {
+        Self::for_budget(0)
+    }
+}
 
 /// Wall-clock budget for one search query.
 const REQUEST_BUDGET: Duration = Duration::from_secs(20);
@@ -177,13 +241,19 @@ pub struct FileEvidence {
 /// Why: a trait rather than a bare function so the ranking is testable without
 /// a daemon — the unit tests drive a stub that answers from a table, which is
 /// the only way to assert dimension breadth deterministically.
-/// What: `hits` answers one query against one index; an `Err` is a reason
-/// string, never a panic, because every caller here is fail-open.
+/// What: `hits` answers one query against one index, asking for `top_k` chunks;
+/// an `Err` is a reason string, never a panic, because every caller here is
+/// fail-open. The request size is a PARAMETER rather than a constant so it
+/// scales with [`Caps`] — a per-dimension cap of 17 files starves on a top-12.
 /// Test: `super::evidence_tests` drives `StubSearch`; [`HttpSearch`] is the
 /// production implementation.
 pub trait SearchClient {
     /// Run one query, returning its chunk hits (possibly none).
-    fn hits(&self, query: &str) -> impl Future<Output = Result<Vec<Hit>, String>> + Send;
+    fn hits(
+        &self,
+        query: &str,
+        top_k: usize,
+    ) -> impl Future<Output = Result<Vec<Hit>, String>> + Send;
 }
 
 /// The trusty-search daemon, over its loopback HTTP surface.
@@ -220,12 +290,12 @@ impl HttpSearch {
 }
 
 impl SearchClient for HttpSearch {
-    async fn hits(&self, query: &str) -> Result<Vec<Hit>, String> {
+    async fn hits(&self, query: &str, top_k: usize) -> Result<Vec<Hit>, String> {
         let url = &self.url;
         let response = self
             .client
             .post(url)
-            .json(&serde_json::json!({ "text": query, "top_k": TOP_K, "compact": true }))
+            .json(&serde_json::json!({ "text": query, "top_k": top_k, "compact": true }))
             .send()
             .await
             .map_err(|e| format!("trusty-search did not answer {url} ({e})"))?;
@@ -353,16 +423,20 @@ fn numbered(line: &str) -> Option<&str> {
 /// file arrives already attributed to the dimension it is evidence FOR — which
 /// is what lets the report say why a file was read rather than only that it was.
 /// What: queries in table order, then the instruction-derived ones under
-/// [`ANALYST_FOCUS`]; per dimension the hits merge by best score and cap at
-/// [`FILES_PER_DIMENSION`]. A failing query contributes a line to
-/// [`Discovery::failures`] and nothing else.
+/// [`ANALYST_FOCUS`]; each query asks for `caps.top_k` chunks, and per dimension
+/// the hits merge by best score and cap at `caps.files_per_dimension`. A failing
+/// query contributes a line to [`Discovery::failures`] and nothing else.
 ///
 /// # Postconditions
 /// Never panics. `dimensions` holds only dimensions with at least one file.
 ///
 /// Test: `super::evidence_tests::{discovery_attributes_each_file_to_its_dimension,
-/// a_failing_query_costs_only_its_own_evidence}`.
-pub async fn discover<C: SearchClient>(client: &C, instructions: Option<&str>) -> Discovery {
+/// a_failing_query_costs_only_its_own_evidence, a_raised_budget_raises_both_caps}`.
+pub async fn discover<C: SearchClient>(
+    client: &C,
+    instructions: Option<&str>,
+    caps: Caps,
+) -> Discovery {
     let mut discovery = Discovery::default();
     let instruction_queries = instruction_queries(instructions);
     let focus: Vec<&str> = instruction_queries.iter().map(String::as_str).collect();
@@ -374,13 +448,13 @@ pub async fn discover<C: SearchClient>(client: &C, instructions: Option<&str>) -
     for (dimension, queries) in sets {
         let mut scored: Vec<(f32, FileEvidence)> = Vec::new();
         for query in queries {
-            match client.hits(query).await {
+            match client.hits(query, caps.top_k).await {
                 Ok(hits) => merge(&mut scored, &hits, query),
                 Err(cause) => discovery.failures.push(cause),
             }
         }
         scored.sort_by(|a, b| b.0.total_cmp(&a.0));
-        scored.truncate(FILES_PER_DIMENSION);
+        scored.truncate(caps.files_per_dimension);
         if !scored.is_empty() {
             discovery.dimensions.push(DimensionEvidence {
                 dimension: dimension.to_owned(),

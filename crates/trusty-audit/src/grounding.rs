@@ -190,6 +190,11 @@ impl Grounding {
 /// ranking and the `--analyze` enrichment, not the evidence discovery.
 /// [`evidence::blend`] interleaves whichever of the two produced anything.
 ///
+/// `budget` sizes the discovery pass as well as the investigation: every cap
+/// here is [`evidence::Caps::for_budget`] of the same `max_files` the manifest
+/// declares, so raising the budget raises the ATTRIBUTED share of the sample
+/// rather than only its total (#6082).
+///
 /// # Postconditions
 /// Never panics and never returns an error: every failure is a line in
 /// [`Grounding::gaps`], one line, safe to show the recipient, naming `display`.
@@ -202,7 +207,9 @@ pub async fn ground(
     checkout: &Path,
     display: &str,
     instructions: Option<&str>,
+    budget: priority::Budget,
 ) -> Grounding {
+    let caps = evidence::Caps::for_budget(budget.max_files);
     let Some(index_id) = index::index_id_for(checkout) else {
         return Grounding::gap(format!(
             "{display}: {} has no final path component, so no trusty-search index id could be \
@@ -235,7 +242,7 @@ pub async fn ground(
     // evidence is, so a selected file arrives already attributed to what it is
     // evidence FOR.
     let discovery = match evidence::HttpSearch::new(&tools.search_url, &index_id, checkout) {
-        Ok(client) => evidence::discover(&client, instructions).await,
+        Ok(client) => evidence::discover(&client, instructions, caps).await,
         Err(cause) => evidence::Discovery {
             dimensions: Vec::new(),
             failures: vec![cause],
@@ -244,11 +251,7 @@ pub async fn ground(
     let mut gaps = discovery_gaps(&discovery, display);
 
     let hotspots = complexity(tools, &index_id, checkout, display, &mut gaps).await;
-    let priorities = evidence::blend(
-        &hotspots,
-        &discovery.dimensions,
-        evidence::MAX_PRIORITY_PATHS,
-    );
+    let priorities = evidence::blend(&hotspots, &discovery.dimensions, caps.priority_paths);
     if priorities.is_empty() {
         gaps.push(format!(
             "{display}: neither the search index nor trusty-analyze named a file to inspect, so \
@@ -332,7 +335,10 @@ fn discovery_gaps(discovery: &evidence::Discovery, display: &str) -> Vec<String>
 /// What: the gaps [`ground`] produced, plus one more when the manifest itself
 /// could not be updated. A write failure is a gap rather than an error for the
 /// same reason every other leg is: it costs this repository's ranking, not the
-/// sweep.
+/// sweep. The budget is resolved ONCE, by
+/// [`priority::Budget::for_manifest`], and the same value both sizes the
+/// evidence caps and reaches `[report]` — so a manifest that already declares
+/// one gets a ranking sized for what trusty-review will actually read (#6082).
 /// Test: `super::grounding_tests::{hotspots_become_ranked_inspect_priority_in_the_manifest,
 /// a_manifest_that_cannot_be_written_is_a_named_gap}`.
 pub async fn ground_manifest(
@@ -342,12 +348,13 @@ pub async fn ground_manifest(
     display: &str,
 ) -> Vec<String> {
     let instructions = instructions_from(manifest);
-    let mut grounding = ground(tools, checkout, display, instructions.as_deref()).await;
+    let budget = priority::Budget::for_manifest(manifest);
+    let mut grounding = ground(tools, checkout, display, instructions.as_deref(), budget).await;
     if let Err(cause) = priority::write_into(
         manifest,
         checkout,
         &grounding.priorities,
-        Some(priority::Budget::from_env()),
+        Some(budget),
         &grounding.gaps,
     ) {
         grounding.gaps.push(format!(

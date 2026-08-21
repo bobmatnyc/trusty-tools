@@ -617,6 +617,10 @@ async fn ground_present_checkouts(
     read: &AuditManifest,
 ) -> Vec<String> {
     let base = manifest.parent().unwrap_or(Path::new("."));
+    // #6082: the budget this package was produced under, which the sweep wrote
+    // into `[report]`. It sizes the evidence caps even though the ranking is
+    // discarded, so the queries this pass runs match the ones that produced it.
+    let budget = grounding::priority::Budget::for_manifest(manifest);
     let mut gaps = Vec::new();
     for repo in &read.repositories {
         let path = if repo.path.is_absolute() {
@@ -630,7 +634,11 @@ async fn ground_present_checkouts(
         // #6082: no brief here on purpose — the ranking this produces is
         // discarded (the manifest already carries the sweep's), so deriving
         // extra queries from the brief would spend a request set for nothing.
-        gaps.extend(grounding::ground(tools, &path, &repo.name, None).await.gaps);
+        gaps.extend(
+            grounding::ground(tools, &path, &repo.name, None, budget)
+                .await
+                .gaps,
+        );
     }
     gaps
 }

@@ -42,7 +42,7 @@ impl StubSearch {
 }
 
 impl SearchClient for StubSearch {
-    async fn hits(&self, query: &str) -> Result<Vec<Hit>, String> {
+    async fn hits(&self, query: &str, top_k: usize) -> Result<Vec<Hit>, String> {
         if let Some(reason) = &self.fail {
             return Err(reason.clone());
         }
@@ -50,9 +50,15 @@ impl SearchClient for StubSearch {
             .answers
             .iter()
             .find(|(needle, _)| query.contains(needle.as_str()))
-            .map(|(_, hits)| hits.clone())
+            .map(|(_, hits)| hits.iter().take(top_k).cloned().collect())
             .unwrap_or_default())
     }
+}
+
+/// Every pre-#6082 test asked the floor caps; keeping that spelling short is
+/// what makes the two scaling tests below read as the deviation they are.
+fn floor() -> Caps {
+    Caps::default()
 }
 
 fn block_on<F: std::future::Future>(future: F) -> F::Output {
@@ -96,7 +102,7 @@ fn discovery_attributes_each_file_to_its_dimension() {
     let client = StubSearch::default()
         .answering("credential handling", &[("src/auth.rs", 0.9)])
         .answering("error swallowed", &[("src/err.rs", 0.7)]);
-    let discovery = block_on(discover(&client, None));
+    let discovery = block_on(discover(&client, None, floor()));
 
     let auth = discovery
         .dimensions
@@ -123,7 +129,7 @@ fn discovery_attributes_each_file_to_its_dimension() {
 #[test]
 fn a_failing_query_costs_only_its_own_evidence() {
     let client = StubSearch::failing("trusty-search did not answer (connection refused)");
-    let discovery = block_on(discover(&client, None));
+    let discovery = block_on(discover(&client, None, floor()));
     assert!(discovery.dimensions.is_empty());
     assert!(
         discovery.failures.len() >= DD_DIMENSIONS.len(),
@@ -139,7 +145,7 @@ fn a_file_matched_twice_keeps_its_best_score() {
     let client = StubSearch::default()
         .answering("credential handling", &[("src/auth.rs", 0.4)])
         .answering("authentication and authorization", &[("src/auth.rs", 0.95)]);
-    let discovery = block_on(discover(&client, None));
+    let discovery = block_on(discover(&client, None, floor()));
     let auth = &discovery.dimensions[0];
     assert_eq!(auth.files.len(), 1);
     assert!(
@@ -174,6 +180,7 @@ fn the_analyst_brief_gets_its_own_dimension() {
     let discovery = block_on(discover(
         &client,
         Some("- Payment reconciliation correctness\n"),
+        floor(),
     ));
     let focus = discovery
         .dimensions
@@ -286,10 +293,102 @@ fn a_hotspot_no_query_found_carries_no_dimension() {
 fn the_ranking_is_capped() {
     let hotspots: Vec<String> = (0..80).map(|i| format!("src/hot{i}.rs")).collect();
     assert_eq!(
-        blend(&hotspots, &[], MAX_PRIORITY_PATHS).len(),
-        MAX_PRIORITY_PATHS
+        blend(&hotspots, &[], MIN_PRIORITY_PATHS).len(),
+        MIN_PRIORITY_PATHS
     );
-    assert!(blend(&[], &[], MAX_PRIORITY_PATHS).is_empty());
+    assert!(blend(&[], &[], MIN_PRIORITY_PATHS).is_empty());
+}
+
+/// More distinct files than any cap under test, best score first.
+fn plentiful(stem: &str) -> Vec<(String, f32)> {
+    (0u8..80)
+        .map(|i| (format!("src/{stem}{i}.rs"), 0.9 - f32::from(i) / 1000.0))
+        .collect()
+}
+
+/// [`StubSearch::answering`]'s borrowed shape.
+fn borrow(paths: &[(String, f32)]) -> Vec<(&str, f32)> {
+    paths.iter().map(|(p, s)| (p.as_str(), *s)).collect()
+}
+
+/// #6082: the defect this change exists for. `TRUSTY_AUDIT_INVESTIGATE_MAX_FILES`
+/// raised how many files trusty-review read while the priority list stayed 60
+/// and each dimension stayed 8, so everything past the 60th file reached the
+/// investigation with no dimension and no reason — the knob moved half the
+/// sample. Both caps now track the budget.
+#[test]
+fn a_raised_budget_raises_both_caps() {
+    let caps = Caps::for_budget(300);
+    assert_eq!(caps.priority_paths, 300, "the list tracks the budget");
+    assert!(
+        caps.files_per_dimension > MIN_FILES_PER_DIMENSION,
+        "{caps:?}"
+    );
+    assert!(
+        caps.files_per_dimension * (DD_DIMENSIONS.len() + 1) <= caps.priority_paths,
+        "seven dimensions must fit inside the total: {caps:?}"
+    );
+    assert!(
+        caps.top_k > MIN_TOP_K && caps.top_k <= MAX_TOP_K,
+        "a raised per-dimension cap must not be starved by a top-12: {caps:?}"
+    );
+
+    // The whole per-dimension cap is reachable end to end, not just declared:
+    // the stub truncates to `top_k`, so a request size that did not scale would
+    // starve the dimension here rather than merely under-serve it in production.
+    let auth = plentiful("auth");
+    let err = plentiful("err");
+    let client = StubSearch::default()
+        .answering("credential handling", &borrow(&auth))
+        .answering("error swallowed", &borrow(&err));
+    let discovery = block_on(discover(&client, None, caps));
+    assert_eq!(discovery.dimensions.len(), 2, "{discovery:?}");
+    assert!(
+        discovery
+            .dimensions
+            .iter()
+            .all(|d| d.files.len() == caps.files_per_dimension),
+        "each dimension fills its raised cap: {:?}",
+        discovery
+            .dimensions
+            .iter()
+            .map(|d| d.files.len())
+            .collect::<Vec<_>>()
+    );
+
+    let blended = blend(&[], &discovery.dimensions, caps.priority_paths);
+    assert!(
+        blended.len() > MIN_PRIORITY_PATHS,
+        "the ranking grows past the old fixed 60: {}",
+        blended.len()
+    );
+    assert!(
+        blended.iter().all(|p| p.dimension.is_some()),
+        "every search-derived entry stays attributed"
+    );
+}
+
+/// A budget at or under the old fixed list keeps the old numbers exactly, so a
+/// small or unset budget behaves as it did before the caps scaled.
+#[test]
+fn the_default_budget_keeps_the_floor_semantics() {
+    for budget in [0, 1, 40, MIN_PRIORITY_PATHS] {
+        assert_eq!(
+            Caps::for_budget(budget),
+            Caps::default(),
+            "budget {budget} must sit on the floor"
+        );
+    }
+    let floor = Caps::default();
+    assert_eq!(floor.priority_paths, MIN_PRIORITY_PATHS);
+    assert_eq!(floor.files_per_dimension, MIN_FILES_PER_DIMENSION);
+    assert_eq!(floor.top_k, MIN_TOP_K);
+
+    // The audit's own default budget is above the floor and still bounded.
+    let default = Caps::for_budget(crate::grounding::priority::DEFAULT_MAX_FILES);
+    assert_eq!(default.priority_paths, 120);
+    assert_eq!(default.files_per_dimension, 17);
+    assert_eq!(default.top_k, 26);
 }
 
 /// The daemon's own response shape parses, and chunk paths come back
@@ -340,6 +439,6 @@ fn a_dead_daemon_is_a_reason_not_a_panic() {
         std::path::Path::new("/w/repos/acme-api"),
     )
     .expect("a client is built");
-    let err = block_on(client.hits("credential handling")).expect_err("must fail");
+    let err = block_on(client.hits("credential handling", MIN_TOP_K)).expect_err("must fail");
     assert!(err.contains("trusty-search did not answer"), "{err}");
 }
