@@ -38,7 +38,9 @@ use crate::report::synthesize::{FindingProse, Synthesis};
 
 pub use batch::BatchStatus;
 pub use deps::{Dependency, DependencyInventory};
-pub use select::{Budget, DimensionCoverage, RiskSignals, Selection};
+pub use select::{
+    Budget, DimensionCoverage, RiskSignals, SCALABILITY_DIMENSION, SECURITY_DIMENSION, Selection,
+};
 pub use verify::VerifiedFinding;
 
 // ─── Result types ─────────────────────────────────────────────────────────────

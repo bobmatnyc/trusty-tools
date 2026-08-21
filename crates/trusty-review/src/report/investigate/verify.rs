@@ -134,14 +134,14 @@ pub fn verify_findings(raw: Vec<RawFinding>, selection: &Selection) -> VerifyOut
 
         // Evidence must mechanically match the file content.
         let quote = f.evidence_quote.trim();
-        match find_evidence_line(&sel.content, quote) {
-            Some(line) => out.verified.push(VerifiedFinding {
+        match find_evidence_match(&sel.content, quote) {
+            Some(m) => out.verified.push(VerifiedFinding {
                 title: title.to_string(),
                 severity,
                 dimension: f.dimension.trim().to_string(),
                 file: sel.path.clone(),
-                line: Some(line),
-                evidence_quote: quote.to_string(),
+                line: Some(m.line),
+                evidence_quote: complete_trailing_line(&sel.content, &m),
                 description: f.description.trim().to_string(),
                 business_impact: f.business_impact.trim().to_string(),
                 remediation: f.remediation.trim().to_string(),
@@ -173,6 +173,29 @@ pub fn verify_findings(raw: Vec<RawFinding>, selection: &Selection) -> VerifyOut
 /// whitespace) quote never matches.
 /// Test: `verify_tests::{accepts_and_corrects_line, matches_whitespace_insensitively}`.
 pub fn find_evidence_line(content: &str, quote: &str) -> Option<u64> {
+    find_evidence_match(content, quote).map(|m| m.line)
+}
+
+/// Where an evidence quote was found in a file.
+///
+/// Why: [`complete_trailing_line`] needs the match's byte span, not only its
+/// line, and returning both from one scan keeps the two in step.
+/// What: `line` is 1-based; `start`/`end` are byte offsets into the content,
+/// `end` exclusive and pointing just past the last matched non-whitespace char.
+pub struct EvidenceMatch {
+    /// 1-based line of the match start.
+    pub line: u64,
+    /// Byte offset of the match start.
+    pub start: usize,
+    /// Byte offset just past the last matched character.
+    pub end: usize,
+}
+
+/// The same whitespace-insensitive search as [`find_evidence_line`], returning
+/// the match's full span.
+///
+/// Test: `verify_tests::{accepts_and_corrects_line, matches_whitespace_insensitively}`.
+pub fn find_evidence_match(content: &str, quote: &str) -> Option<EvidenceMatch> {
     let needle: Vec<char> = quote.chars().filter(|c| !c.is_whitespace()).collect();
     if needle.is_empty() {
         return None;
@@ -186,6 +209,7 @@ pub fn find_evidence_line(content: &str, quote: &str) -> Option<u64> {
         }
         let mut hi = start_idx;
         let mut ni = 0usize;
+        let mut last = start_idx;
         while hi < hay.len() && ni < needle.len() {
             let c = hay[hi].1;
             if c.is_whitespace() {
@@ -193,6 +217,7 @@ pub fn find_evidence_line(content: &str, quote: &str) -> Option<u64> {
                 continue;
             }
             if c == needle[ni] {
+                last = hi;
                 hi += 1;
                 ni += 1;
             } else {
@@ -200,12 +225,52 @@ pub fn find_evidence_line(content: &str, quote: &str) -> Option<u64> {
             }
         }
         if ni == needle.len() {
-            let byte_off = hay[start_idx].0;
-            let line = content[..byte_off].bytes().filter(|&b| b == b'\n').count() as u64 + 1;
-            return Some(line);
+            let start = hay[start_idx].0;
+            let line = content[..start].bytes().filter(|&b| b == b'\n').count() as u64 + 1;
+            return Some(EvidenceMatch {
+                line,
+                start,
+                end: hay[last].0 + hay[last].1.len_utf8(),
+            });
         }
     }
     None
+}
+
+/// How far past the match end the quote may be extended to finish a line.
+///
+/// A generous sentence's worth. It bounds the damage a minified or generated
+/// single-line file could do — extending across 10k characters of one line
+/// would be a different defect, not a fix.
+const MAX_LINE_COMPLETION: usize = 240;
+
+/// Return the quote as the file's own bytes, extended to the end of the line
+/// the match ends on.
+///
+/// Why: #6137 — a quote that stops mid-line drops whatever the rest of that
+/// line says, and what it drops is systematically the part that qualifies the
+/// finding. One report quoted an installer's security note through "…download
+/// and review the script manually before running it." and cut the very next
+/// clause, on the SAME line: "All downloaded binaries are SHA-256 verified."
+/// The finding read as unmitigated remote code execution because the
+/// mitigation was outside the quote. The model chooses where to stop; the
+/// report does not have to honour a stop that lands mid-sentence.
+/// What: slices `content` from the match start to the end of the line the
+/// match ends on, so the returned quote is verbatim file text rather than the
+/// model's paraphrase of whitespace. Extension is skipped when the remainder
+/// of the line exceeds [`MAX_LINE_COMPLETION`] bytes, and when the match
+/// already ends at a line break.
+/// Test: `verify_tests::{quote_is_completed_to_the_end_of_its_line,
+/// quote_is_not_extended_across_a_very_long_line}`.
+fn complete_trailing_line(content: &str, m: &EvidenceMatch) -> String {
+    let rest = &content[m.end..];
+    let line_end = rest.find('\n').unwrap_or(rest.len());
+    let end = if line_end <= MAX_LINE_COMPLETION {
+        m.end + line_end
+    } else {
+        m.end
+    };
+    content[m.start..end].trim_end().to_string()
 }
 
 #[cfg(test)]

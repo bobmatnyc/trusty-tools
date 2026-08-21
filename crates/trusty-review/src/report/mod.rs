@@ -16,6 +16,7 @@
 pub mod analyze_adapter;
 // #6041: per-endpoint paths, request budgets, and partial-fetch vocabulary.
 pub mod analyze_endpoints;
+pub mod analyze_scope;
 // #5453/#6004: the tga-authored authorship artifact, receiving half.
 pub mod authorship;
 pub mod benchmark;
@@ -23,6 +24,7 @@ pub mod benchmark;
 pub mod contents_links;
 pub mod error;
 pub mod exec_summary;
+pub mod figures;
 pub mod fill;
 pub mod git_info;
 pub mod instructions;

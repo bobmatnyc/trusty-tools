@@ -168,6 +168,21 @@ pub const DIMENSIONS: &[&str] = &[
     "test coverage",
 ];
 
+/// The one dimension of [`DIMENSIONS`] whose findings are security findings.
+///
+/// Why (#6137): the Security Posture section counted every non-maintainability
+/// finding, so error-handling and test-coverage findings were reported as
+/// security violations. Naming the dimension here — rather than spelling the
+/// string a second time in the reporter — is what keeps the two from drifting
+/// if the checklist is ever reworded.
+/// Test: `reporter_codesec_tests::security_rows_count_only_the_security_dimension`.
+pub const SECURITY_DIMENSION: &str = DIMENSIONS[0];
+
+/// The one dimension of [`DIMENSIONS`] the Performance & Scalability section
+/// cross-references (#6137) — that section has no data source of its own, but
+/// §5 does carry these findings and must be pointed at.
+pub const SCALABILITY_DIMENSION: &str = DIMENSIONS[4];
+
 /// The DD dimensions a file matches by path/name heuristics (excluding tests,
 /// which are presence-only and handled separately).
 ///

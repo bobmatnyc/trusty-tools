@@ -151,3 +151,43 @@ fn rejects_empty_title() {
     assert!(out.verified.is_empty());
     assert_eq!(out.rejected, 1);
 }
+
+/// #6137: the live defect. An installer's security note was quoted through
+/// "…before running it." and the very next clause, on the SAME line, was cut:
+/// "All downloaded binaries are SHA-256 verified." The finding then read as
+/// unmitigated remote code execution.
+#[test]
+fn quote_is_completed_to_the_end_of_its_line() {
+    let content = "# require a higher assurance level, download and review the script manually\n\
+                   # before running it. All downloaded binaries are SHA-256 verified.\n\
+                   set -e\n";
+    let sel = selection("install.sh", content);
+    let r = raw("amber", "install.sh", "# before running it.", None);
+    let out = verify_findings(vec![r], &sel);
+
+    assert_eq!(out.rejected, 0);
+    assert!(
+        out.verified[0]
+            .evidence_quote
+            .contains("All downloaded binaries are SHA-256 verified."),
+        "the mitigation on the same line must survive: {:?}",
+        out.verified[0].evidence_quote
+    );
+    assert!(
+        !out.verified[0].evidence_quote.contains("set -e"),
+        "completion stops at the line end, never runs on"
+    );
+}
+
+/// The extension is bounded: a minified or generated single line must not drag
+/// its whole content into the quote.
+#[test]
+fn quote_is_not_extended_across_a_very_long_line() {
+    let tail = "x".repeat(400);
+    let content = format!("let a = 1; {tail}\n");
+    let sel = selection("a.js", &content);
+    let r = raw("amber", "a.js", "let a = 1;", None);
+    let out = verify_findings(vec![r], &sel);
+
+    assert_eq!(out.verified[0].evidence_quote, "let a = 1;");
+}

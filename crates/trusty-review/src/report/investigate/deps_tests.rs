@@ -162,3 +162,39 @@ fn multi_ecosystem_inventory() {
     assert_eq!(inv.deps[0].ecosystem, "cargo");
     assert_eq!(inv.deps[1].ecosystem, "npm");
 }
+
+/// #6137: a cargo WORKSPACE root declares its shared dependencies under
+/// `[workspace.dependencies]` only. Reading `[dependencies]` alone reported
+/// zero for a 134-dependency workspace, which the section then stated as a
+/// clean result.
+#[test]
+fn workspace_dependencies_are_inventoried() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.dependencies]\n\
+         serde = \"1\"\ntokio = { version = \"1.40\", features = [\"full\"] }\n",
+    );
+    let inv = build_inventory(tmp.path());
+    assert_eq!(inv.total, 2, "inv: {:?}", inv.deps);
+    assert!(inv.deps.iter().any(|d| d.name == "serde"));
+    assert!(
+        inv.deps
+            .iter()
+            .any(|d| d.name == "tokio" && d.spec == "1.40")
+    );
+}
+
+/// #6137: "the manifests declare nothing" and "no manifest was examined" must
+/// be distinguishable at the render layer, so the probe records what it read.
+#[test]
+fn records_the_manifests_it_examined() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    assert!(build_inventory(tmp.path()).manifests_examined.is_empty());
+
+    write(tmp.path(), "Cargo.toml", "[workspace]\nmembers = []\n");
+    let inv = build_inventory(tmp.path());
+    assert_eq!(inv.total, 0, "an empty workspace declares nothing");
+    assert_eq!(inv.manifests_examined, vec!["Cargo.toml".to_string()]);
+}

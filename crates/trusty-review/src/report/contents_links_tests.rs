@@ -9,8 +9,8 @@ fn links_every_top_level_heading() {
     let out = inject(&doc);
     assert!(!out.contains(SENTINEL));
     assert!(out.contains("[1. Report Metadata](#1-report-metadata)"));
-    assert!(out.contains("[3. Code Quality & Architecture](#3-code-quality-architecture)"));
-    assert!(out.contains("[9. Gaps & Caveats](#9-gaps-caveats)"));
+    assert!(out.contains("[3. Code Quality & Architecture](#3-code-quality--architecture)"));
+    assert!(out.contains("[9. Gaps & Caveats](#9-gaps--caveats)"));
     // Never a self-link to the section the list lives inside.
     assert!(!out.contains("[2. Executive Summary]"));
 }
@@ -65,10 +65,39 @@ fn fenced_evidence_hash_line_is_not_mistaken_for_a_heading() {
     );
     let out = inject(&doc);
     assert!(!out.contains(SENTINEL));
-    assert!(out.contains("[3. Code Quality & Architecture](#3-code-quality-architecture)"));
-    assert!(out.contains("[9. Gaps & Caveats](#9-gaps-caveats)"));
+    assert!(out.contains("[3. Code Quality & Architecture](#3-code-quality--architecture)"));
+    assert!(out.contains("[9. Gaps & Caveats](#9-gaps--caveats)"));
     // The fenced quote's own text survives untouched, but it must never be
     // linked as a heading (no bullet, no anchor).
     assert!(!out.contains("[Not A Real Section]"));
     assert!(!out.contains("(#not-a-real-section)"));
+}
+
+/// #6137: GitHub DELETES punctuation and then maps spaces to dashes, so a
+/// heading with an `&` anchors with TWO dashes. `manifest::slugify` collapsed
+/// the whole run to one, and four of a real report's twelve jump-list links
+/// pointed at anchors that did not exist.
+#[test]
+fn anchor_matches_github_for_ampersand_headings() {
+    assert_eq!(
+        github_anchor("Code Quality & Architecture"),
+        "code-quality--architecture"
+    );
+    assert_eq!(
+        github_anchor("Performance & Scalability"),
+        "performance--scalability"
+    );
+    assert_eq!(
+        github_anchor("8. Ticketing & Delivery Traceability"),
+        "8-ticketing--delivery-traceability"
+    );
+}
+
+/// A numbered heading's period is deleted, not turned into a dash — the same
+/// answer `slugify` gave, and it must stay that way.
+#[test]
+fn anchor_matches_github_for_numbered_headings() {
+    assert_eq!(github_anchor("1. Report Metadata"), "1-report-metadata");
+    assert_eq!(github_anchor("Key Facts"), "key-facts");
+    assert_eq!(github_anchor("Security Posture"), "security-posture");
 }

@@ -15,90 +15,170 @@
 //! Test: `reporter_codesec_tests.rs`.
 
 use super::fill::Scope;
+use super::investigate::SECURITY_DIMENSION;
 use super::metrics::{AnalyzeMetrics, Severity};
-use super::model::ReportModel;
+use super::model::{ReportModel, RepositoryReport};
 use super::provenance::{Provenance, tag};
+use super::reporter_facts::{repo_languages, repo_loc};
 
 /// `MetricFinding.category` value `analyze_adapter::refactor_finding` always
 /// writes — refactor/code-smell findings are maintainability by construction,
 /// so this is the seam between "code quality" and "security posture" below.
 const MAINTAINABILITY_CATEGORY: &str = "maintainability";
 
+/// How many languages the Code Quality row names.
+const CQ_LANGUAGE_COUNT: usize = 3;
+
+/// The Security Posture text when the security dimension recorded no GREEN
+/// finding — an explicit statement, never a blank cell.
+const NO_CLEAN_SIGNALS: &str = "No clean security signals were recorded: the investigation raised no GREEN finding in \
+     this dimension. That is an absence of positive evidence, not a negative result.";
+
 /// Push one `code_quality_row` per repository carrying metrics.
 ///
 /// Why: re-projects complexity distribution, tech-stack/LoC, and the
 /// maintainability-finding count into a dedicated section (#6004) rather than
 /// requiring a reader to cross-reference §3/§4/§5.
-/// What: `cq_loc`/`cq_tech`/`cq_complexity` restate per-app profile data;
-/// `cq_maintainability_count` counts non-GREEN `maintainability`-category
-/// findings — a real zero is a stated fact (tagged, not omitted), never a gap.
-/// A repository with no metrics at all is skipped (its row would be 100%
-/// honesty markers, which the omit-empty pass would drop anyway).
-/// Test: `reporter_codesec_tests::code_quality_rows_reproject_metrics`.
+/// What: `cq_loc`/`cq_tech` take the SAME source precedence Key Facts and the
+/// §4 Profile table use ([`repo_loc`]/[`repo_languages`] — declared metrics
+/// when they carry a positive figure, else the built-in `RepoScan`), so the two
+/// sections cannot disagree about one repository's size. #6137: reading
+/// `metrics.loc.total`/`metrics.primary_languages` alone printed "not stated in
+/// source data" for both cells of a run whose `--analyze` fetch left `loc`
+/// empty by design (the adapter leaves it to the scanner) while §4.1 rendered
+/// 1,553,771 lines from the scan two sections earlier. `cq_complexity` and
+/// `cq_maintainability_count` have no scan equivalent and stay metrics-only; a
+/// real zero maintainability count is a stated fact (tagged, not omitted),
+/// never a gap. A repository carrying no data at all in any of the four cells
+/// is skipped (its row would be 100% honesty markers, which the omit-empty pass
+/// would drop anyway).
+/// Test: `reporter_codesec_tests::{code_quality_rows_reproject_metrics,
+/// code_quality_loc_and_tech_fall_back_to_the_scan}`.
 pub fn push_code_quality_rows(root: &mut Scope, model: &ReportModel) {
     for repo in &model.repositories {
-        let Some(m) = &repo.metrics else { continue };
+        let loc = repo_loc(repo);
+        let langs = top_languages(repo);
+        let complexity = repo.metrics.as_ref().and_then(bucket_summary);
+        let maintainability = repo.metrics.as_ref().map(maintainability_count);
+        if loc == 0 && langs.is_empty() && complexity.is_none() && maintainability.is_none() {
+            continue;
+        }
         let mut row = Scope::new();
         row.set("cq_app_name", repo.name.clone());
-        if m.loc.total > 0 {
-            row.set("cq_loc", tag(m.loc.total.to_string(), Provenance::Measured));
+        if loc > 0 {
+            row.set("cq_loc", tag(loc.to_string(), Provenance::Measured));
         }
-        let langs = m.primary_languages(3);
         if !langs.is_empty() {
             row.set("cq_tech", tag(langs.join(", "), Provenance::Measured));
         }
-        if let Some(summary) = bucket_summary(m) {
+        if let Some(summary) = complexity {
             row.set("cq_complexity", tag(summary, Provenance::Measured));
         }
-        let maint = m
-            .findings
-            .iter()
-            .filter(|f| f.severity != Severity::Green && f.category == MAINTAINABILITY_CATEGORY)
-            .count();
-        row.set(
-            "cq_maintainability_count",
-            tag(maint.to_string(), Provenance::Measured),
-        );
+        if let Some(count) = maintainability {
+            row.set(
+                "cq_maintainability_count",
+                tag(count.to_string(), Provenance::Measured),
+            );
+        }
         root.push_block("code_quality_row", row);
     }
 }
 
-/// Push one `security_violations_table` row per (application, tool/domain)
-/// with at least one RED/AMBER finding whose category is NOT maintainability.
+/// The top [`CQ_LANGUAGE_COUNT`] languages by LoC for one repository, from
+/// whichever source [`repo_languages`] selected.
+fn top_languages(repo: &RepositoryReport) -> Vec<String> {
+    let mut langs: Vec<&super::metrics::LanguageLoc> = repo_languages(repo).iter().collect();
+    langs.sort_by_key(|l| std::cmp::Reverse(l.loc));
+    langs
+        .into_iter()
+        .take(CQ_LANGUAGE_COUNT)
+        .map(|l| l.language.clone())
+        .collect()
+}
+
+/// Count one repository's non-GREEN maintainability findings.
+fn maintainability_count(m: &AnalyzeMetrics) -> usize {
+    m.findings
+        .iter()
+        .filter(|f| f.severity != Severity::Green && f.category == MAINTAINABILITY_CATEGORY)
+        .count()
+}
+
+/// Push one `security_violations_table` row per application carrying a RED or
+/// AMBER finding in the SECURITY dimension, and state that dimension's clean
+/// signals.
 ///
 /// Why (#6004): promotes §6.1 out of Risk Registers into its own top-level
-/// Security Posture section — the block name and column shape are unchanged
-/// (`app_name`/`violation_domain`/`violation_count`) so this is a straight
-/// re-projection of the RED/AMBER findings §5 already lists, grouped by the
-/// producing tool. This is the first reporter code that actually fills that
-/// block; before #6004 it was unfilled template scaffolding.
-/// What: excludes GREEN (no-green-analysis rule) and `maintainability`
-/// (Code Quality's finding class, not a lint/security domain).
-/// Test: `reporter_codesec_tests::security_rows_group_by_domain_excluding_maintainability`.
+/// Security Posture section. #6137 narrows what it counts: the table used to
+/// group EVERY non-maintainability finding by category, so a run whose
+/// investigation covers six due-diligence dimensions printed error-handling,
+/// state-management, scalability, test-coverage and dependency findings under a
+/// "Security Posture" heading labelled "Total violations" — 90 of one report's
+/// 110 rows were not security findings at all. Only
+/// [`SECURITY_DIMENSION`] findings are security findings. The GREEN findings in
+/// that same dimension are the clean signals a reader weighs the count against,
+/// and dropping them (the no-green-analysis rule bans ELABORATION, not
+/// acknowledgement) left the section reading as unmitigated risk.
+/// What: counts non-GREEN [`SECURITY_DIMENSION`] findings per repository,
+/// pushing one row (`app_name`/`violation_domain`/`violation_count`, the block's
+/// unchanged column shape) per repository with at least one; sets
+/// `security_clean_signals` from that dimension's GREEN finding titles, or
+/// [`NO_CLEAN_SIGNALS`] when it recorded none.
+/// Test: `reporter_codesec_tests::{security_rows_count_only_the_security_dimension,
+/// security_section_credits_clean_signals,
+/// security_section_states_when_no_clean_signal_exists}`.
 pub fn push_security_violation_rows(root: &mut Scope, model: &ReportModel) {
+    let mut clean: Vec<&str> = Vec::new();
+    let mut assessed = false;
     for repo in &model.repositories {
         let Some(m) = &repo.metrics else { continue };
-        let mut counts: Vec<(String, u64)> = Vec::new();
-        for f in &m.findings {
-            if f.severity == Severity::Green || f.category == MAINTAINABILITY_CATEGORY {
-                continue;
-            }
-            match counts.iter_mut().find(|(c, _)| *c == f.category) {
-                Some(entry) => entry.1 += 1,
-                None => counts.push((f.category.clone(), 1)),
+        assessed = true;
+        let mut count = 0u64;
+        for f in m
+            .findings
+            .iter()
+            .filter(|f| f.category == SECURITY_DIMENSION)
+        {
+            if f.severity == Severity::Green {
+                clean.push(&f.title);
+            } else {
+                count += 1;
             }
         }
-        for (domain, count) in counts {
-            let mut row = Scope::new();
-            row.set("app_name", repo.name.clone());
-            row.set("violation_domain", tag(domain, Provenance::Measured));
-            row.set(
-                "violation_count",
-                tag(count.to_string(), Provenance::Measured),
-            );
-            root.push_block("security_violations_table", row);
+        if count == 0 {
+            continue;
         }
+        let mut row = Scope::new();
+        row.set("app_name", repo.name.clone());
+        row.set(
+            "violation_domain",
+            tag(SECURITY_DIMENSION, Provenance::Measured),
+        );
+        row.set(
+            "violation_count",
+            tag(count.to_string(), Provenance::Measured),
+        );
+        root.push_block("security_violations_table", row);
     }
+    // A run that assessed nothing states nothing: the scalar is left unset, so
+    // the honesty rule collapses the line and Gaps & Caveats names the section.
+    // Claiming "no clean signal was recorded" for a run with no findings at all
+    // would be the same false-clean claim this section exists to avoid.
+    if !assessed {
+        return;
+    }
+    let signals = if clean.is_empty() {
+        tag(NO_CLEAN_SIGNALS, Provenance::NotStated)
+    } else {
+        tag(
+            format!(
+                "Clean signals found in this dimension: {}.",
+                clean.join("; ")
+            ),
+            Provenance::Measured,
+        )
+    };
+    root.set("security_clean_signals", signals);
 }
 
 /// A compact "label: count (pct%)" complexity summary for one repository's

@@ -281,8 +281,11 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
 /// names; everything it does not set falls through to the honesty marker.
 /// What: sets report-level scalars (codename, dates, analyst, applications list,
 /// source provenance) and pushes one `per_application` child scope per repo.
+///
+/// `pub(super)` since #6137: `figures::printed_figures` walks the same scope to
+/// tell the numeric guardrail which figures the report actually prints.
 /// Test: `reporter_tests.rs::render_contains_expected`.
-fn build_scope(model: &ReportModel) -> Scope {
+pub(super) fn build_scope(model: &ReportModel) -> Scope {
     let mut root = Scope::new();
 
     // Report metadata (report-level scalars).  Identity/title fields are left
@@ -426,7 +429,7 @@ fn build_scope(model: &ReportModel) -> Scope {
     // FIXED text (DOC-67 §3: no performance data source exists at all).
     push_code_quality_rows(&mut root, model);
     push_security_violation_rows(&mut root, model);
-    fill_performance_note(&mut root);
+    fill_performance_note(&mut root, model);
     // #5453/#6004: key-man risk rows render IN this section, never scattered
     // across Top Risks — the deterministic half of Authorship & Key-Person
     // Risk. A repository whose artifact failed to load contributes no row;
@@ -529,31 +532,37 @@ fn inject_synthesis_summary(root: &mut Scope, syn: &super::synthesize::Synthesis
     }
 }
 
-/// Fill the root GREEN-topic bullets (`{{green_topic_N}}`, N = 1..=3) from
-/// metrics.
+/// Fill the GREEN-topic bullets — one `green_topic` block repetition per GREEN
+/// finding.
 ///
-/// Why: the bundled templates model GREEN findings as three fixed report-level
-/// bullet placeholders (not a repeatable block); per the no-green-analysis rule
-/// they carry ONLY the finding title — no evidence, root cause, or remediation
-/// — and, unlike RED/AMBER, are never synthesized (M2 excludes greens
-/// structurally, so this fill is independent of synthesis availability).
-/// What: collects every `Severity::Green` finding across all repositories, in
-/// manifest order, and fills up to the first three titles; any remaining slot
-/// (or all three, when there are no green findings) falls through to the
-/// honesty marker.
+/// Why: per the no-green-analysis rule a GREEN topic carries ONLY the finding
+/// title — no evidence, root cause, or remediation — and, unlike RED/AMBER, is
+/// never synthesized (M2 excludes greens structurally, so this fill is
+/// independent of synthesis availability). #6137 made the bullets a repeatable
+/// block: the templates carried exactly three fixed `{{green_topic_N}}` slots,
+/// so a run with 21 GREEN findings silently dropped 18 of them — constant-time
+/// token comparison and atomic redb batch upserts among them. The
+/// no-elaboration rule is about DEPTH per topic, not about how many topics a
+/// reader is allowed to see, and this is the same fixed-slot defect #2373 fixed
+/// for the top-risk rows.
+/// What: pushes one `green_topic` scope (a single `green_topic` scalar, the
+/// finding title) per `Severity::Green` finding across all repositories, in
+/// manifest order. With no green findings no block is pushed and the section
+/// collapses via omit-empty.
 /// Test: `reporter_tests.rs::{reporter_fills_green_topics,
+/// reporter_renders_every_green_topic,
 /// reporter_leaves_findings_honesty_marked_without_metrics}`.
 fn push_green_topics(root: &mut Scope, model: &ReportModel) {
-    let greens: Vec<&str> = model
+    let greens = model
         .repositories
         .iter()
         .filter_map(|r| r.metrics.as_ref())
         .flat_map(|m| m.findings.iter())
-        .filter(|f| f.severity == Severity::Green)
-        .map(|f| f.title.as_str())
-        .collect();
-    for (i, title) in greens.iter().take(3).enumerate() {
-        root.set(format!("green_topic_{}", i + 1), (*title).to_string());
+        .filter(|f| f.severity == Severity::Green);
+    for finding in greens {
+        let mut row = Scope::new();
+        row.set("green_topic", finding.title.clone());
+        root.push_block("green_topic", row);
     }
 }
 

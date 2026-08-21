@@ -201,6 +201,7 @@ report against others normalized through this same template.
 
 <!-- BEGIN amber_finding -->
 {{finding_index}}. **{{finding_title}}** — {{finding_description}}
+- **Component:** {{finding_component}}
 - **Remediation:** {{finding_remediation}}
 {{finding_evidence_block}}
 <!-- END amber_finding -->
@@ -211,10 +212,9 @@ report against others normalized through this same template.
 <!-- Per the no-green-analysis rule: one line per topic, nothing else.
      Do not add root cause, evidence, or remediation for green items. -->
 
-- {{green_topic_1}}
-- {{green_topic_2}}
-- {{green_topic_3}}
-<!-- one bullet per positive topic -->
+<!-- BEGIN green_topic -->
+- {{green_topic}}
+<!-- END green_topic -->
 
 ## Code Quality & Architecture
 
@@ -232,19 +232,22 @@ report against others normalized through this same template.
 
 ## Security Posture
 
-*This table counts findings from general-purpose lint tools (clippy, ruff,
-biome, rubocop, PMD, and similar per language) that happened to be graded
-`error` or `critical`. It is not a SAST scan, not a dependency/CVE scan, and
-not a secrets scan. Treat it as a proxy for code-hygiene risk, not as
-evidence the codebase has been screened for exploitable vulnerabilities.*
+*This table counts the RED and AMBER findings the repo-evidence investigation
+raised in its "authentication & secrets" dimension — an LLM reading the
+selected source files, with every finding's evidence quote mechanically
+verified against the file it cites. Its scope is code hygiene around
+credentials, tokens, and authentication paths in the files that were read. It
+is not a SAST scan, not a dependency/CVE scan, and not a secrets scan of the
+whole tree; the share of files read is stated under Investigation Coverage.
+Read a low count as a small sample, not as a clean bill of health.*
 
 {{security_summary_paragraph}}
 
-<!-- BEGIN security_violations_table -->
-| Application | Domain | Total violations |
-|---|---|---|
-| {{app_name}} | {{violation_domain}} | {{violation_count}} |
-<!-- END security_violations_table -->
+| Application | Dimension | RED/AMBER findings |
+|---|---|---|<!-- BEGIN security_violations_table -->
+| {{app_name}} | {{violation_domain}} | {{violation_count}} |<!-- END security_violations_table -->
+
+{{security_clean_signals}}
 
 ## Performance & Scalability
 

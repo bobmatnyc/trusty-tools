@@ -103,15 +103,20 @@ fn no_metrics_yields_no_code_quality_rows() {
     assert_eq!(rendered, "");
 }
 
-/// Security rows group by domain and exclude maintainability + GREEN.
+/// #6137: only the security dimension's RED/AMBER findings count. The table
+/// used to group EVERY non-maintainability finding by category, so
+/// error-handling and test-coverage findings were reported as security
+/// violations.
 #[test]
-fn security_rows_group_by_domain_excluding_maintainability() {
+fn security_rows_count_only_the_security_dimension() {
     let metrics = AnalyzeMetrics {
         findings: vec![
-            finding("clippy", Severity::Red),
-            finding("clippy", Severity::Amber),
+            finding(SECURITY_DIMENSION, Severity::Red),
+            finding(SECURITY_DIMENSION, Severity::Amber),
+            finding("error handling", Severity::Amber),
+            finding("test coverage", Severity::Amber),
             finding(MAINTAINABILITY_CATEGORY, Severity::Amber),
-            finding("ruff", Severity::Green),
+            finding(SECURITY_DIMENSION, Severity::Green),
         ],
         ..Default::default()
     };
@@ -121,8 +126,92 @@ fn security_rows_group_by_domain_excluding_maintainability() {
 
     let template = "<!-- BEGIN security_violations_table -->{{app_name}}|{{violation_domain}}|{{violation_count}}\n<!-- END security_violations_table -->";
     let rendered = crate::report::fill::render(template, &root);
-    assert!(rendered.contains("app|clippy"));
-    assert!(rendered.contains("|2 "), "rendered: {rendered}");
-    assert!(!rendered.contains("maintainability"));
-    assert!(!rendered.contains("ruff"));
+    assert!(rendered.contains("app|authentication & secrets"));
+    assert!(
+        rendered.contains("|2 "),
+        "only the two non-GREEN security findings count: {rendered}"
+    );
+    assert!(!rendered.contains("error handling"), "{rendered}");
+    assert!(!rendered.contains("test coverage"), "{rendered}");
+    assert!(!rendered.contains("maintainability"), "{rendered}");
+}
+
+/// #6137: GREEN findings in the security dimension are credited by title. The
+/// no-green-analysis rule bans elaboration, not acknowledgement.
+#[test]
+fn security_section_credits_clean_signals() {
+    let mut green = finding(SECURITY_DIMENSION, Severity::Green);
+    green.title = "Constant-time bearer token comparison".to_string();
+    let metrics = AnalyzeMetrics {
+        findings: vec![finding(SECURITY_DIMENSION, Severity::Amber), green],
+        ..Default::default()
+    };
+    let model = model_with(vec![repo(Some(metrics))]);
+    let mut root = Scope::new();
+    push_security_violation_rows(&mut root, &model);
+
+    let rendered = crate::report::fill::render("{{security_clean_signals}}", &root);
+    assert!(
+        rendered.contains("Constant-time bearer token comparison"),
+        "rendered: {rendered}"
+    );
+}
+
+/// #6137: no GREEN security finding is stated as an absence of evidence, never
+/// left blank or dropped to the honesty marker.
+#[test]
+fn security_section_states_when_no_clean_signal_exists() {
+    let metrics = AnalyzeMetrics {
+        findings: vec![finding(SECURITY_DIMENSION, Severity::Amber)],
+        ..Default::default()
+    };
+    let model = model_with(vec![repo(Some(metrics))]);
+    let mut root = Scope::new();
+    push_security_violation_rows(&mut root, &model);
+
+    let rendered = crate::report::fill::render("{{security_clean_signals}}", &root);
+    assert!(
+        rendered.contains("No clean security signals were recorded"),
+        "rendered: {rendered}"
+    );
+}
+
+/// #6137: the live defect. `--analyze` leaves `loc`/`counts` empty by design
+/// (the scanner owns them), so reading metrics alone printed "not stated in
+/// source data" for LoC and tech while §4.1 rendered the scan's figures two
+/// sections above.
+#[test]
+fn code_quality_loc_and_tech_fall_back_to_the_scan() {
+    let metrics = AnalyzeMetrics {
+        findings: vec![finding(MAINTAINABILITY_CATEGORY, Severity::Amber)],
+        ..Default::default()
+    };
+    let mut r = repo(Some(metrics));
+    r.scan = Some(crate::report::scan::RepoScan {
+        total_loc: 1_553_771,
+        file_count: 6664,
+        by_language: vec![
+            LanguageLoc {
+                language: "Rust".to_string(),
+                loc: 1_408_871,
+            },
+            LanguageLoc {
+                language: "HTML".to_string(),
+                loc: 33_376,
+            },
+        ],
+        frameworks: Vec::new(),
+    });
+    let model = model_with(vec![r]);
+    let mut root = Scope::new();
+    push_code_quality_rows(&mut root, &model);
+
+    let template = "<!-- BEGIN code_quality_row -->{{cq_app_name}}|{{cq_loc}}|{{cq_tech}}<!-- END code_quality_row -->";
+    let rendered = crate::report::fill::render(template, &root);
+    assert!(rendered.contains("1553771"), "rendered: {rendered}");
+    assert!(rendered.contains("Rust, HTML"), "rendered: {rendered}");
+    assert!(
+        !rendered.contains(crate::report::fill::HONESTY_MARKER),
+        "rendered: {rendered}"
+    );
 }

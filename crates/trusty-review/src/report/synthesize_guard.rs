@@ -11,8 +11,11 @@
 //! What: [`allowed_numbers`] builds the canonical set of numbers the source model
 //! actually contains (walking the serialized model); [`verify_prose`] checks that
 //! every number token in a candidate string is in that set, tolerating formatting
-//! variants (thousands separators, `$`, `%`, trailing-zero decimals) and
-//! conventional roundings of a measured value (#6030 — see [`rounded_forms`]).
+//! variants (thousands separators, `$`, `%`, trailing-zero decimals),
+//! conventional roundings of a measured value (#6030 — see [`rounded_forms`]),
+//! and scaled-unit restatements of a large integer (#6137 — see
+//! [`scaled_forms`]).  [`allowed_numbers_with`] additionally admits the figures
+//! the report computes at render time and prints in its own sections.
 //! Test: `synthesize_tests.rs` covers extraction, canonicalisation, the
 //! formatting-variant equivalences, the rounding equivalences, and the reject
 //! path.
@@ -104,8 +107,8 @@ fn join_parts(int_part: &str, frac: &str) -> String {
 /// What: for a key with a fraction, emits both the truncation and the
 /// round-half-up form at every precision coarser than the key's own — `85.19`
 /// yields `85.1`, `85.2`, and `85`.  Carries propagate (`9.99` yields `10`).  An
-/// integer key yields nothing: this widens decimal precision only, so a measured
-/// 8234 never admits "8,000".
+/// integer key yields nothing here — scaled-unit restatements of a large integer
+/// are [`scaled_forms`]' job, not this function's.
 /// Test: `allowed_numbers_admits_rounded_forms`, `verify_prose_accepts_rounding`.
 fn rounded_forms(canonical: &str) -> Vec<String> {
     let Some(dot) = canonical.find('.') else {
@@ -126,6 +129,67 @@ fn rounded_forms(canonical: &str) -> Vec<String> {
     out
 }
 
+/// The magnitudes at which a large integer is conventionally restated.
+///
+/// Thousand, million, billion, trillion — the decimal-point shift each implies.
+const SCALE_EXPONENTS: [usize; 4] = [3, 6, 9, 12];
+
+/// How many significant digits a scaled restatement must keep to be admitted.
+///
+/// Why: one significant digit is not a restatement, it is a different number.
+/// Measured 1,553,771 admits `1.55` and `1.6` million; it must not admit a bare
+/// `2`, which reads as a count in prose and would let a fabricated small integer
+/// through.
+const MIN_SCALED_SIGNIFICANT_DIGITS: usize = 2;
+
+/// Every scaled-unit restatement of a large integer key.
+///
+/// Why: #6137 — [`rounded_forms`] widens decimal precision only, so an integer
+/// key admitted nothing coarser than itself. A narrative that writes a measured
+/// 1,553,771 lines as "1.55 million lines" is restating the source figure, and
+/// rejecting it vetoed five LLM-written fields of one report (the executive
+/// summary, the code-quality, security and authorship paragraphs, and a
+/// top-risk row). The guardrail compares canonical STRINGS and the prose
+/// tokeniser never sees the unit word, so the only way `1.55` can verify is for
+/// the allowed set to carry it.
+/// What: for each magnitude in [`SCALE_EXPONENTS`] at which the value is still
+/// at least 1, shifts the decimal point and emits that scaled value plus every
+/// [`rounded_forms`] spelling of it — 1553771 yields `1.553771`, `1.55`, `1.6`,
+/// `1553.771`, `1554`, and the rest. Forms below
+/// [`MIN_SCALED_SIGNIFICANT_DIGITS`] are dropped. A key that is not a plain
+/// integer of at least four digits yields nothing.
+/// Test: `allowed_numbers_admits_scaled_unit_forms`,
+/// `verify_prose_accepts_a_million_scale_restatement`,
+/// `verify_prose_still_rejects_a_fabricated_figure`.
+fn scaled_forms(canonical: &str) -> Vec<String> {
+    if canonical.len() < 4 || !canonical.bytes().all(|b| b.is_ascii_digit()) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for exp in SCALE_EXPONENTS {
+        if canonical.len() <= exp {
+            break;
+        }
+        let (int_part, frac) = canonical.split_at(canonical.len() - exp);
+        let scaled = canonicalize(&format!("{int_part}.{frac}"));
+        for form in rounded_forms(&scaled).into_iter().chain([scaled]) {
+            if significant_digits(&form) >= MIN_SCALED_SIGNIFICANT_DIGITS {
+                out.push(form);
+            }
+        }
+    }
+    out
+}
+
+/// Count a canonical key's significant digits — every digit after the leading
+/// zeros, decimal point ignored (`0.5` → 1, `1.55` → 3, `1553` → 4).
+fn significant_digits(key: &str) -> usize {
+    key.chars()
+        .filter(char::is_ascii_digit)
+        .skip_while(|c| *c == '0')
+        .count()
+}
+
 /// Build the set of numbers the deterministic source model legitimately contains.
 ///
 /// Why: the guardrail's ground truth is "what figures does the report's own data
@@ -134,11 +198,37 @@ fn rounded_forms(canonical: &str) -> Vec<String> {
 /// from, with no hand-maintained field list to drift.
 /// What: walks the serialized [`Value`], adding canonical keys for every JSON
 /// number node and every number token found inside every string node, plus each
-/// key's conventional roundings ([`rounded_forms`], #6030).
+/// key's conventional roundings ([`rounded_forms`], #6030) and scaled-unit
+/// restatements ([`scaled_forms`], #6137).
 /// Test: `allowed_numbers_covers_metrics`, `allowed_numbers_admits_rounded_forms`.
 pub fn allowed_numbers(model: &Value) -> HashSet<String> {
+    allowed_numbers_with(model, &[])
+}
+
+/// The same set, widened by the figures the report itself prints.
+///
+/// Why: #6137 — some figures a section renders are computed at RENDER time and
+/// exist nowhere in the serialized model: the investigation coverage
+/// percentage (`73 of 6664 tracked (1.1% coverage…)`) and the authorship
+/// trajectory average (`avg 7213.5 commit(s)/mo`) are both derived from counts
+/// the model does carry. The synthesis prompt quotes the coverage percentage
+/// verbatim, so the model was being asked to cite a figure the guardrail would
+/// then reject — which is what dropped the security and authorship paragraphs
+/// of one report. A figure the report prints in its own deterministic sections
+/// is in-model by definition.
+/// What: [`allowed_numbers`], plus every number token found in `printed` (the
+/// deterministic report text, from
+/// [`figures::printed_figures`](super::figures::printed_figures)), each widened
+/// the same way.
+/// Test: `allowed_numbers_admits_a_printed_derived_figure`.
+pub fn allowed_numbers_with(model: &Value, printed: &[String]) -> HashSet<String> {
     let mut set = HashSet::new();
     collect(model, &mut set);
+    for text in printed {
+        for key in numbers_in(text) {
+            insert_key(&mut set, key);
+        }
+    }
     set
 }
 
@@ -153,9 +243,11 @@ fn collect(value: &Value, set: &mut HashSet<String>) {
     }
 }
 
-/// Add a canonical key and every coarser rounding of it to the allowed set.
+/// Add a canonical key, every coarser rounding of it, and every scaled-unit
+/// restatement of it to the allowed set.
 fn insert_key(set: &mut HashSet<String>, key: String) {
     set.extend(rounded_forms(&key));
+    set.extend(scaled_forms(&key));
     set.insert(key);
 }
 

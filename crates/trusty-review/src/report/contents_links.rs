@@ -21,7 +21,34 @@
 //! Test: `contents_links_tests.rs`.
 
 use super::fill::Scope;
-use super::manifest::slugify;
+
+/// Slug one heading exactly the way GitHub's markdown renderer anchors it.
+///
+/// Why: #6137 — this module used `manifest::slugify`, which collapses every
+/// non-alphanumeric RUN to a single dash. GitHub does something different: it
+/// DELETES punctuation and then maps each remaining space to a dash, so
+/// "Code Quality & Architecture" anchors as `code-quality--architecture` (two
+/// dashes, from the spaces either side of the deleted `&`) where slugify
+/// produced `code-quality-architecture`. Four of one report's twelve
+/// jump-list links pointed at anchors that did not exist. `slugify` is still
+/// right for what it is for — the report's output FILENAME — so this is a
+/// second function, not a change to that one.
+/// What: lowercases, keeps alphanumerics, `-` and `_`, maps ` ` to `-`, and
+/// drops everything else.
+/// Test: `contents_links_tests::{anchor_matches_github_for_ampersand_headings,
+/// anchor_matches_github_for_numbered_headings}`.
+fn github_anchor(heading: &str) -> String {
+    heading
+        .trim()
+        .to_lowercase()
+        .chars()
+        .filter_map(|c| match c {
+            ' ' => Some('-'),
+            c if c.is_alphanumeric() || c == '-' || c == '_' => Some(c),
+            _ => None,
+        })
+        .collect()
+}
 
 /// The scalar name the template carries the jump-list placeholder under.
 pub const PLACEHOLDER_FIELD: &str = "report_contents_block";
@@ -56,9 +83,9 @@ pub fn set_contents_placeholder(root: &mut Scope) {
 /// every heading that ends up in the document is a candidate.
 /// What: scans line-by-line for `## ` (level-2 only — deeper headings are
 /// per-application/per-finding detail, not top-level sections) in document
-/// order, skips [`SELF_HEADING_NEEDLE`], slugs each via [`slugify`] (the same
-/// algorithm GitHub's own renderer produces for a heading of this shape:
-/// lowercase, punctuation collapsed to `-`), de-duplicates a slug collision
+/// order, skips [`SELF_HEADING_NEEDLE`], anchors each via [`github_anchor`]
+/// (which reproduces GitHub's own rule — lowercase, punctuation DELETED,
+/// spaces mapped to `-`), de-duplicates a slug collision
 /// with a numeric suffix, and replaces [`SENTINEL`] with one bullet per
 /// heading found. No sentinel in `rendered` (a custom template that never
 /// included the placeholder) leaves the text unchanged. Zero other headings
@@ -97,10 +124,10 @@ pub fn inject(rendered: &str) -> String {
             continue;
         }
         let heading = text.trim();
-        let mut slug = slugify(heading);
+        let mut slug = github_anchor(heading);
         let mut n = 2;
         while seen_slugs.contains(&slug) {
-            slug = format!("{}-{n}", slugify(heading));
+            slug = format!("{}-{n}", github_anchor(heading));
             n += 1;
         }
         seen_slugs.push(slug.clone());
