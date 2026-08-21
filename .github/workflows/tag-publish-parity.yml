@@ -19,32 +19,28 @@
 # nothing if it cannot fail. The workflow name stays as it is — renaming it
 # would rename the required checks — and the jobs are separate so a red one
 # names which decision broke.
+#
+# These three jobs are required status checks, and a required context must
+# exist on every PR — a `paths:`-filtered trigger cannot produce one on a PR
+# that doesn't touch the listed paths, and a required context with no check
+# run leaves the PR permanently BLOCKED (see CLAUDE.md's CI section, "A
+# missing required job definition"). Worse, a `paths:` filter is scoped to
+# what changed, not to what could break the gate it protects: #6115 merged
+# with this workflow red because the diff under review never touched these
+# scripts, so the filter never ran the self-tests at all (#6120). Both
+# triggers run unconditionally so the checks are always present and always
+# actually run. The jobs themselves stay unchanged: three fast shell scripts,
+# ~10s apiece, so an unconditional run is cheap.
 name: Tag/publish parity
 
 on:
   push:
     branches: [main]
-    paths:
-      - "scripts/check-tag-publish-parity.sh"
-      - "scripts/check-tag-publish-parity-selftest.sh"
-      - "scripts/preflight-publish.sh"
-      - "scripts/preflight-check5-selftest.sh"
-      - "scripts/preflight-check8-selftest.sh"
-      - "scripts/test-data/preflight-check5/**"
-      - ".github/workflows/tag-publish-parity.yml"
   pull_request:
     # Explicit activity types, matching line-cap.yml: `edited` catches a
     # base-branch retarget, which the default set does not.
     types: [opened, synchronize, reopened, ready_for_review, edited]
     branches: [main]
-    paths:
-      - "scripts/check-tag-publish-parity.sh"
-      - "scripts/check-tag-publish-parity-selftest.sh"
-      - "scripts/preflight-publish.sh"
-      - "scripts/preflight-check5-selftest.sh"
-      - "scripts/preflight-check8-selftest.sh"
-      - "scripts/test-data/preflight-check5/**"
-      - ".github/workflows/tag-publish-parity.yml"
 
 concurrency:
   group: tag-publish-parity-${{ github.event_name == 'push' && github.sha || github.ref }}
