@@ -351,6 +351,9 @@ async fn materialize(
     progress: &Progress,
 ) -> Result<Option<CloneReport>, AuditError> {
     if repos.is_empty() {
+        // #5824's reuse arm skips `clone_all`, so the existing selection's
+        // GitHub-identity fields (#6130) are carried forward as they stand
+        // rather than re-resolved from each source's remote.
         return match run::load_selection(work) {
             Ok(_) => Ok(None),
             Err(AuditError::NoRepositoriesSelected { .. }) => Err(AuditError::NothingRegistered {

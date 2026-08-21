@@ -188,13 +188,22 @@ const GITHUB_HOST: &str = "github.com";
 /// `.git` comes off, as `git clone` itself strips it), and returns them only if
 /// [`crate::clone::split_name`] accepts the pair — so a slug from here is
 /// always one the rest of this crate can carry.
+///
+/// **The `:` after the host means two different things, and the SCHEME decides
+/// which.** In a URL (`ssh://…`, `https://…`) it introduces a PORT and the path
+/// starts at the following `/`; in scp syntax (`git@github.com:owner/repo`)
+/// there is no scheme and it introduces the path directly. Reading a port as a
+/// path segment gave `22/owner/repo` — three segments, no match, and a REAL
+/// GitHub remote declared absent. Deciding by scheme rather than by "does the
+/// segment look numeric" keeps an all-digit GitHub owner (`git@github.com:123/api`)
+/// parsing as an owner.
 /// Test: `super::local_repo_tests::a_github_remote_yields_its_owner_and_repo`,
 /// `super::local_repo_tests::a_non_github_remote_yields_nothing`.
 pub fn parse_github_slug(url: &str) -> Option<String> {
     let trimmed = url.trim();
-    let after_scheme = match trimmed.find("://") {
-        Some(idx) => &trimmed[idx + 3..],
-        None => trimmed,
+    let (after_scheme, has_scheme) = match trimmed.find("://") {
+        Some(idx) => (&trimmed[idx + 3..], true),
+        None => (trimmed, false),
     };
     // scp-syntax and URL userinfo both put credentials before the host, and
     // both put them ahead of the first `/` — so only an `@` there is userinfo,
@@ -209,7 +218,18 @@ pub fn parse_github_slug(url: &str) -> Option<String> {
     if !locator[..split].eq_ignore_ascii_case(GITHUB_HOST) {
         return None;
     }
-    let path = locator[split + 1..].trim_matches('/');
+    let rest = &locator[split + 1..];
+    let path = if has_scheme && locator.as_bytes()[split] == b':' {
+        // `<host>:<port>/<path>` — a port, and only digits may stand there.
+        let end = rest.find('/')?;
+        if rest[..end].is_empty() || !rest[..end].bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        &rest[end + 1..]
+    } else {
+        rest
+    };
+    let path = path.trim_matches('/');
     let path = path.strip_suffix(".git").unwrap_or(path);
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     let [owner, repo] = segments.as_slice() else {
@@ -226,14 +246,15 @@ pub fn parse_github_slug(url: &str) -> Option<String> {
 /// module's read-only invariant covers it — `git config --get` reads
 /// configuration and writes nothing, the same guarantee [`inspect`]'s
 /// `rev-parse` calls carry.
-/// What: `None` when git cannot be run, the path is not a repository, there is
-/// no `origin`, or its URL does not address [`GITHUB_HOST`]. Every one of those
-/// is the same answer to the caller — this audit has no GitHub identity for
-/// this checkout — and the caller turns it into a declared gap, never a
-/// failure.
+/// What: see [`classify_origin`] for the three outcomes and why the caller must
+/// keep them apart.
 /// Test: `super::local_repo_tests::a_checkout_with_a_github_origin_resolves_its_slug`,
 /// `super::local_repo_tests::a_checkout_with_no_remote_resolves_nothing`.
-pub async fn github_slug(path: &Path) -> Option<String> {
+///
+/// # Errors
+///
+/// The reason `git` itself could not be run, when the remote was never read.
+pub async fn github_slug(path: &Path) -> Result<Option<String>, String> {
     let argv: Vec<OsString> = vec![
         "-C".into(),
         path.as_os_str().to_os_string(),
@@ -241,11 +262,34 @@ pub async fn github_slug(path: &Path) -> Option<String> {
         "--get".into(),
         "remote.origin.url".into(),
     ];
-    let output = git(argv).output().await.ok()?;
+    classify_origin(git(argv).output().await)
+}
+
+/// Turn `git config --get remote.origin.url`'s outcome into the three states
+/// the caller has to tell apart.
+///
+/// Why (#6130 review): collapsing a spawn failure into the same `None` as "no
+/// origin configured" makes the report state confidently that the checkout
+/// "names no repository on github.com" — a condition nothing ever checked. A
+/// wrong sentence in the Gaps section is the same class of defect as the wrong
+/// slug this issue is about; the declaration has to be true.
+/// What: `Err` when `git` could not be run at all — the remote is UNREAD, and
+/// the caller must not declare anything about it. `Ok(None)` when git answered
+/// and the answer was no GitHub identity: a non-zero exit (no `origin` key, not
+/// a repository) or a URL that names another host. `Ok(Some)` is the slug.
+///
+/// Split from [`github_slug`] so the spawn-failure arm is provable without a
+/// process — the same already-resolved-`Result` seam
+/// `crate::run::github_issues::from_probe_result` uses (#5822).
+/// Test: `super::local_repo_tests::a_git_that_cannot_be_run_is_not_a_missing_remote`.
+fn classify_origin(
+    result: std::io::Result<std::process::Output>,
+) -> Result<Option<String>, String> {
+    let output = result.map_err(|e| format!("`git config --get remote.origin.url` failed: {e}"))?;
     if !output.status.success() {
-        return None;
+        return Ok(None);
     }
-    parse_github_slug(&String::from_utf8_lossy(&output.stdout))
+    Ok(parse_github_slug(&String::from_utf8_lossy(&output.stdout)))
 }
 
 /// Case-fold a derived name or destination path for a collision comparison.
@@ -604,6 +648,12 @@ pub(crate) mod local_repo_tests {
             "ssh://git@github.com/bobmatnyc/trusty-tools.git",
             "https://x-access-token:ghp_token@github.com/bobmatnyc/trusty-tools.git",
             "  https://GitHub.com/bobmatnyc/trusty-tools/  ",
+            // Port-qualified URL forms (#6130 review). Read as a path segment,
+            // the port makes three segments and a REAL GitHub remote is
+            // declared absent.
+            "ssh://git@github.com:22/bobmatnyc/trusty-tools.git",
+            "https://github.com:443/bobmatnyc/trusty-tools.git",
+            "ssh://github.com:2222/bobmatnyc/trusty-tools",
         ] {
             assert_eq!(
                 parse_github_slug(url).as_deref(),
@@ -615,6 +665,12 @@ pub(crate) mod local_repo_tests {
             parse_github_slug("git@github.com:Acme/Cool_App.git").as_deref(),
             Some("Acme/Cool_App"),
             "the API slug is verbatim; slugifying it names a different repository"
+        );
+        // The scheme, not the shape of the segment, is what makes a `:` a port
+        // — so an all-digit OWNER in scp syntax stays an owner.
+        assert_eq!(
+            parse_github_slug("git@github.com:123/api.git").as_deref(),
+            Some("123/api")
         );
     }
 
@@ -634,6 +690,10 @@ pub(crate) mod local_repo_tests {
             "https://github.com/bobmatnyc",
             "https://github.com/acme/group/api.git",
             "https://github.com/",
+            // A `:` after the host in URL form is a port and only digits may
+            // stand there; anything else is malformed, not a path.
+            "https://github.com:notaport/acme/api.git",
+            "https://github.com:/acme/api.git",
             "",
         ] {
             assert_eq!(parse_github_slug(url), None, "{url}");
@@ -658,7 +718,7 @@ pub(crate) mod local_repo_tests {
         );
 
         assert_eq!(
-            github_slug(&repo).await.as_deref(),
+            github_slug(&repo).await.expect("git ran").as_deref(),
             Some("bobmatnyc/trusty-tools")
         );
         // And the on-disk identity is untouched by it — the two answers stay
@@ -671,17 +731,66 @@ pub(crate) mod local_repo_tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let repo = tmp.path().join("apex");
         source_repo(&repo);
-        assert_eq!(github_slug(&repo).await, None, "no origin, no identity");
+        assert_eq!(
+            github_slug(&repo).await.expect("git ran"),
+            None,
+            "no origin, no identity"
+        );
 
         run_git(&repo, &["remote", "add", "origin", "/srv/mirrors/apex.git"]);
         assert_eq!(
-            github_slug(&repo).await,
+            github_slug(&repo).await.expect("git ran"),
             None,
             "a filesystem origin names no GitHub repository"
         );
 
         let absent = tmp.path().join("nowhere");
-        assert_eq!(github_slug(&absent).await, None, "not a repository at all");
+        assert_eq!(
+            github_slug(&absent).await.expect("git ran"),
+            None,
+            "not a repository at all"
+        );
+    }
+
+    /// 🔴 #6130 review: `git` failing to spawn proves NOTHING about the
+    /// checkout's remotes, so it must not collapse into the same `None` a
+    /// configured-but-absent origin produces — the report would then state
+    /// "names no repository on github.com" about a condition nothing checked.
+    ///
+    /// Driven through the already-resolved `Result` rather than a real process,
+    /// so the arm is provable offline and deterministically. Against the
+    /// pre-review code the signature is `Option<String>` and the two arms are
+    /// indistinguishable.
+    #[test]
+    fn a_git_that_cannot_be_run_is_not_a_missing_remote() {
+        let spawn_failed = classify_origin(Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "No such file or directory (os error 2)",
+        )))
+        .expect_err("a spawn failure must not read as `no origin`");
+        assert!(spawn_failed.contains("remote.origin.url"), "{spawn_failed}");
+        assert!(spawn_failed.contains("os error 2"), "{spawn_failed}");
+
+        // git ran and said the key is not set: that IS an absent identity.
+        let no_origin = classify_origin(Ok(exited(1, "")))
+            .expect("a non-zero exit is an answer, not a failure");
+        assert_eq!(no_origin, None);
+
+        let resolved =
+            classify_origin(Ok(exited(0, "git@github.com:bobmatnyc/trusty-tools.git\n")))
+                .expect("git ran");
+        assert_eq!(resolved.as_deref(), Some("bobmatnyc/trusty-tools"));
+    }
+
+    /// A synthetic `Output` with the given exit code and stdout.
+    fn exited(code: i32, stdout: &str) -> std::process::Output {
+        use std::os::unix::process::ExitStatusExt as _;
+        std::process::Output {
+            // `from_raw` takes a wait status; `code << 8` is a normal exit.
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        }
     }
 
     #[test]

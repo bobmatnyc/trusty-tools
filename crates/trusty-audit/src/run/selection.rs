@@ -91,6 +91,12 @@ pub enum GithubLeg<'a> {
 const LEGACY_LOCAL_ABSENCE: &str = "this repository was selected as a path on disk by an earlier \
 run, which recorded no GitHub identity for it";
 
+/// The field's value with surrounding whitespace removed, or `None` when
+/// nothing is left — see [`SelectedRepo::github_leg`] for why blank is absent.
+fn nonblank(field: Option<&str>) -> Option<&str> {
+    field.map(str::trim).filter(|value| !value.is_empty())
+}
+
 /// One repository the run was asked to audit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -127,12 +133,22 @@ impl SelectedRepo {
     /// left — an entry acquired under [`crate::local_repo::LOCAL_OWNER`] was a
     /// path on disk and gets [`LEGACY_LOCAL_ABSENCE`], while any other name IS
     /// the `owner/repo` it was cloned from.
-    /// Test: `super::run_tests::a_legacy_selection_still_resolves_both_shapes`.
+    ///
+    /// **A blank value is not a value**, in either field and whatever the
+    /// whitespace (#6130 review) — this is the same filter tga's
+    /// `GithubConfig::work_items_declared_absent` applies at the far end, and
+    /// both are needed. A hand-edited `selected-repos.toml` carrying
+    /// `github_absent = ""` would otherwise declare an absence that names
+    /// nothing, and tga's filter would then drop it back into the blind-warn
+    /// path this issue exists to close. A blank `github_slug` is worse still —
+    /// it would write `repo: ""` into the generated config.
+    /// Test: `super::run_tests::a_legacy_selection_still_resolves_both_shapes`,
+    /// `super::run_tests::a_blank_field_is_not_a_value`.
     pub fn github_leg(&self) -> GithubLeg<'_> {
-        if let Some(slug) = self.github_slug.as_deref() {
+        if let Some(slug) = nonblank(self.github_slug.as_deref()) {
             return GithubLeg::Present(slug);
         }
-        if let Some(reason) = self.github_absent.as_deref() {
+        if let Some(reason) = nonblank(self.github_absent.as_deref()) {
             return GithubLeg::Absent(reason);
         }
         if self.name.split('/').next() == Some(crate::local_repo::LOCAL_OWNER) {

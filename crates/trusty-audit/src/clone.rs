@@ -259,6 +259,13 @@ enum GithubIdentity {
 /// Runs against the SOURCE, so it covers a reused checkout too: `clone_all`
 /// skips acquisition when the destination already exists, and an identity
 /// resolved only inside [`acquire`] would be missing for exactly those entries.
+///
+/// **A remote that was never READ gets a different sentence from one that was
+/// read and named nothing** (#6130 review). `git` failing to spawn proves
+/// nothing about the checkout's remotes, so claiming it "names no repository on
+/// github.com" would put a fact in the report that nothing established. Both
+/// are still declared absences the run continues past — the leg genuinely was
+/// not attempted either way — but the reason says which happened.
 async fn resolve_github_identities(
     planned: &[(String, Source, PathBuf, PathBuf)],
 ) -> BTreeMap<String, GithubIdentity> {
@@ -267,11 +274,18 @@ async fn resolve_github_identities(
         let identity = match source {
             Source::Remote => GithubIdentity::Slug(name.clone()),
             Source::Local(path) => match local_repo::github_slug(path).await {
-                Some(slug) => GithubIdentity::Slug(slug),
-                None => GithubIdentity::None(format!(
+                Ok(Some(slug)) => GithubIdentity::Slug(slug),
+                Ok(None) => GithubIdentity::None(format!(
                     "`{name}` was audited from the checkout at {}, whose `origin` remote names no \
                      repository on github.com — its issues could not be located, so no GitHub \
                      work-item collection was attempted",
+                    path.display()
+                )),
+                Err(reason) => GithubIdentity::None(format!(
+                    "`{name}` was audited from the checkout at {}, whose `origin` remote could \
+                     not be read ({reason}) — its issues could not be located, so no GitHub \
+                     work-item collection was attempted. This says nothing about whether the \
+                     checkout has a GitHub remote.",
                     path.display()
                 )),
             },

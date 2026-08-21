@@ -1790,6 +1790,43 @@ trusty-review = "0.15.1"
         assert!(reason.contains("path on disk"), "{reason}");
     }
 
+    /// 🔴 #6130 review: a hand-edited `selected-repos.toml` carrying a blank
+    /// field must not declare anything. A blank `github_absent` would reach tga
+    /// as a reason naming nothing, whose own blank filter then drops the leg
+    /// back into the blind-warn path this issue closes; a blank `github_slug`
+    /// would write `repo: ""` into the generated config.
+    #[test]
+    fn a_blank_field_is_not_a_value() {
+        let blank = |slug: Option<&str>, absent: Option<&str>| SelectedRepo {
+            name: "local/apex".to_owned(),
+            path: PathBuf::from("repos/local/apex"),
+            github_slug: slug.map(str::to_owned),
+            github_absent: absent.map(str::to_owned),
+        };
+
+        let blank_absent = blank(None, Some("   "));
+        let GithubLeg::Absent(reason) = blank_absent.github_leg() else {
+            panic!("still absent — but with a reason that says something");
+        };
+        assert!(reason.contains("path on disk"), "{reason}");
+
+        let blank_slug = blank(Some(""), Some("the checkout names no GitHub remote"));
+        assert_eq!(
+            blank_slug.github_leg(),
+            GithubLeg::Absent("the checkout names no GitHub remote"),
+            "an empty slug must never reach tga as `repo: \"\"`"
+        );
+
+        // Whitespace around a real value is trimmed, not treated as content.
+        let padded = SelectedRepo {
+            name: "local/apex".to_owned(),
+            path: PathBuf::from("repos/local/apex"),
+            github_slug: Some("  acme/api  ".to_owned()),
+            github_absent: None,
+        };
+        assert_eq!(padded.github_leg(), GithubLeg::Present("acme/api"));
+    }
+
     /// The chain states its own board gaps, so a sweep handed a resolution says
     /// nothing about it — otherwise `taudit audit` prints each gap twice.
     ///
