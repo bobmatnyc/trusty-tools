@@ -327,6 +327,58 @@ fn a_graph_expanded_hit_says_the_graph_found_it() {
     );
 }
 
+/// The graded self-audit's auth dimension, reproduced: a call-graph test file
+/// at a noise score outranked the production middleware, which went unread. The
+/// floor drops the noise and the demotion tier keeps the test file behind the
+/// production file even when both are genuine hits.
+#[test]
+fn noise_and_test_files_never_lead_a_production_dimension() {
+    let client = StubSearch::default().answering(
+        "password hashing",
+        &[
+            ("crates/trusty-search/src/service/call_chain/tests.rs", 0.02),
+            ("crates/x/src/auth_tests.rs", 0.88),
+            ("crates/trusty-agents/src/api/server/auth.rs", 0.61),
+        ],
+    );
+    let auth = &block_on(discover(&client, None, floor())).dimensions[0];
+    assert_eq!(
+        auth.files
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "crates/trusty-agents/src/api/server/auth.rs",
+            "crates/x/src/auth_tests.rs",
+        ],
+        "the 0.02 hit is dropped and the 0.88 test file sorts behind the 0.61 production file"
+    );
+}
+
+/// Under "test coverage" a test file is the evidence, so the demotion must not
+/// reach it — the dimension would otherwise rank its own subject last.
+#[test]
+fn the_test_dimension_still_leads_with_test_files() {
+    let client = StubSearch::default().answering(
+        "test asserting the core behaviour",
+        &[
+            ("crates/x/src/lib.rs", 0.55),
+            ("crates/x/tests/api.rs", 0.80),
+        ],
+    );
+    let discovery = block_on(discover(&client, None, floor()));
+    let tests = discovery
+        .dimensions
+        .iter()
+        .find(|d| d.dimension == "test coverage")
+        .expect("the dimension found evidence");
+    assert_eq!(
+        tests.files[0].path, "crates/x/tests/api.rs",
+        "score order stands under the test dimension: {:?}",
+        tests.files
+    );
+}
+
 /// More distinct files than any cap under test, best score first.
 fn plentiful(stem: &str) -> Vec<(String, f32)> {
     (0u8..80)

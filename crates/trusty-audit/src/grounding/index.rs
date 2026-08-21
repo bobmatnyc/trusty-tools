@@ -56,6 +56,94 @@ pub fn index_id_for(path: &Path) -> Option<String> {
     path.file_name().map(|n| n.to_string_lossy().into_owned())
 }
 
+/// Wall-clock budget for the index-root probe.
+const ROOT_PROBE_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Refuse an index that is rooted at a DIFFERENT checkout than the audited one.
+///
+/// Why: the index id is the checkout BASENAME (see the module docs), so two
+/// checkouts of the same repository collide on one id. The graded self-audit of
+/// 2026-08-21 hit exactly that: the audited tree was the engagement's own
+/// clone, the daemon was already serving an index of the same name rooted at
+/// `~/Projects/trusty-tools` at a different branch and commit, and every
+/// complexity hotspot the report stamped "measured" was measured against code
+/// that was never audited. Nothing in the pipeline compared the two roots, so
+/// the wrong tree's measurements arrived indistinguishable from the right
+/// tree's. An id collision cannot be fixed by choosing a better id here — the
+/// id is a cross-process contract three crates derive independently — so the
+/// fix is to CHECK the root and degrade loudly.
+///
+/// What: reads `root_path` off `GET /indexes/{id}/status` and compares it to
+/// `checkout`, canonicalising both so a symlinked or `..`-laden path still
+/// matches. A daemon that will not answer, or a response with no `root_path`,
+/// is `Ok` — this guard exists to catch a WRONG root, and every other failure
+/// already has a gap of its own; failing closed here would turn one unreadable
+/// field into a repository with no code analysis at all.
+///
+/// # Errors
+///
+/// One line naming both roots when the served index is rooted elsewhere. The
+/// caller turns it into a gap and degrades the legs that read the index.
+///
+/// # Postconditions
+/// Never panics.
+///
+/// Test: `index_tests::{same_tree_resolves_before_it_compares,
+/// an_unreachable_daemon_is_not_a_refusal}`.
+pub async fn root_matches(base_url: &str, index_id: &str, checkout: &Path) -> Result<(), String> {
+    let url = format!(
+        "{}/indexes/{index_id}/status",
+        base_url.trim_end_matches('/')
+    );
+    let Ok(client) = trusty_common::http_client::loopback_client_builder()
+        .timeout(ROOT_PROBE_BUDGET)
+        .build()
+    else {
+        return Ok(());
+    };
+    let Ok(response) = client.get(&url).send().await else {
+        return Ok(());
+    };
+    if !response.status().is_success() {
+        return Ok(());
+    }
+    let Ok(body) = response.json::<serde_json::Value>().await else {
+        return Ok(());
+    };
+    let Some(served) = body.get("root_path").and_then(|v| v.as_str()) else {
+        return Ok(());
+    };
+    if same_tree(Path::new(served), checkout) {
+        return Ok(());
+    }
+    Err(format!(
+        "the trusty-search index '{index_id}' is rooted at {served}, not at {} — the index id is \
+         the checkout basename, so another checkout of the same repository is being served under \
+         it",
+        checkout.display()
+    ))
+}
+
+/// True when two paths name the same tree, symlinks and `..` resolved.
+///
+/// Falls back to a separator-normalised string compare when either path cannot
+/// be canonicalised, which is the case in tests and for a root the daemon holds
+/// but this machine cannot stat.
+fn same_tree(served: &Path, checkout: &Path) -> bool {
+    match (served.canonicalize(), checkout.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => {
+            let norm = |p: &Path| {
+                p.to_string_lossy()
+                    .replace('\\', "/")
+                    .trim_end_matches('/')
+                    .to_owned()
+            };
+            norm(served) == norm(checkout)
+        }
+    }
+}
+
 /// The membership probe's argument vector.
 ///
 /// `index-status <id>` asks the daemon for `/indexes/<id>/status` and exits
@@ -276,5 +364,45 @@ mod index_tests {
         assert_eq!(status, IndexStatus::Indexed);
         let seen = std::fs::read_to_string(&calls).expect("stub ran");
         assert!(seen.contains("index /w/repos/xsv --name xsv"), "{seen}");
+    }
+
+    /// The id is a basename, so two checkouts of one repository collide. The
+    /// comparison has to resolve symlinks and `..`, or a legitimate root reads
+    /// as a mismatch and the repository loses its code analysis for nothing.
+    #[test]
+    fn same_tree_resolves_before_it_compares() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let real = tmp.path().join("repos/acme-api");
+        std::fs::create_dir_all(&real).expect("tree");
+
+        assert!(same_tree(&real, &real));
+        assert!(
+            same_tree(&tmp.path().join("repos/../repos/acme-api"), &real),
+            "a `..`-laden path names the same tree"
+        );
+        assert!(
+            same_tree(
+                Path::new("/w/repos/acme-api/"),
+                Path::new("/w/repos/acme-api")
+            ),
+            "an unstattable pair falls back to a normalised string compare"
+        );
+        assert!(
+            !same_tree(
+                Path::new("/Users/masa/Projects/trusty-tools"),
+                Path::new("/w/repos/trusty-tools")
+            ),
+            "the collision the self-audit hit: same basename, different tree"
+        );
+    }
+
+    /// A daemon that will not answer is not a refusal — every other failure has
+    /// a gap of its own, and failing closed here would cost a repository its
+    /// whole code-analysis leg over one unreadable field.
+    #[tokio::test]
+    async fn an_unreachable_daemon_is_not_a_refusal() {
+        // Port 1 is never a trusty-search daemon.
+        let out = root_matches("http://127.0.0.1:1", "acme-api", Path::new("/w/a")).await;
+        assert!(out.is_ok(), "{out:?}");
     }
 }
