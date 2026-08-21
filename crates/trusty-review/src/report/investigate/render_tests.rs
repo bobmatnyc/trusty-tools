@@ -76,6 +76,7 @@ fn dependency_table_caps_and_overflows() {
     let inv = DependencyInventory {
         deps: vec![dep("serde", Some("1.0.203")), dep("tokio", None)],
         total: 5,
+        manifests_examined: vec!["Cargo.toml".to_string()],
     };
     let out = dependency_table(&inv);
     assert!(out.contains("| serde | cargo | 1.0 | 1.0.203 |"));
@@ -249,7 +250,7 @@ fn coverage_percentage_handles_empty_repo() {
 /// What: an all-empty inventory renders the "no dependencies" line.
 /// Test: this test itself.
 #[test]
-fn dependency_section_empty_note() {
+fn empty_inventory_with_no_manifest_is_a_named_gap() {
     let investigation = Investigation {
         repos: vec![repo(
             InvestigationStatus::Available,
@@ -258,7 +259,40 @@ fn dependency_section_empty_note() {
         )],
     };
     let out = dependency_section(&investigation);
-    assert!(out.contains("No manifest-declared dependencies"));
+    assert!(
+        out.contains("Dependency manifests not examined"),
+        "out: {out}"
+    );
+    assert!(
+        out.contains("unassessed, not as a dependency-free codebase"),
+        "out: {out}"
+    );
+    assert!(
+        !out.contains("No manifest-declared dependencies were found"),
+        "#6137: the false clean claim must be gone — out: {out}"
+    );
+}
+
+/// #6137: a manifest that WAS read and declares nothing is a different fact
+/// from a root where nothing was read, and the section names which manifest.
+#[test]
+fn empty_inventory_names_the_manifests_it_read() {
+    let investigation = Investigation {
+        repos: vec![repo(
+            InvestigationStatus::Available,
+            vec![],
+            DependencyInventory {
+                manifests_examined: vec!["Cargo.toml".to_string()],
+                ..Default::default()
+            },
+        )],
+    };
+    let out = dependency_section(&investigation);
+    assert!(out.contains("Cargo.toml"), "out: {out}");
+    assert!(
+        out.contains("no directly declared dependencies"),
+        "out: {out}"
+    );
 }
 
 /// Why: a truncated/failed batch must be NAMED — which files, which position,

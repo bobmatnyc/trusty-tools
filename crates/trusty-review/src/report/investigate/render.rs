@@ -32,13 +32,18 @@ pub fn report_sections(model: &ReportModel) -> String {
 }
 
 /// Render the measured "Dependency Inventory" section across all repos.
+///
+/// #6137: an empty inventory is a NAMED GAP, never an assertion of zero. "No
+/// manifest-declared dependencies were found" was printed for a workspace with
+/// 134 of them — a false clean claim on the one section an acquirer reads to
+/// learn what the system is built on. When no repository had a manifest read at
+/// all, the section says the manifests were not examined; when manifests WERE
+/// read and declared nothing, it names them and says so.
 fn dependency_section(inv: &Investigation) -> String {
     let any = inv.repos.iter().any(|r| !r.deps.is_empty());
     let mut out = String::from("\n\n## Dependency Inventory\n\n");
     if !any {
-        out.push_str(
-            "_No manifest-declared dependencies were found in the inspected repositories._\n",
-        );
+        out.push_str(&empty_inventory_line(inv));
         return out;
     }
     out.push_str(&format!(
@@ -53,6 +58,40 @@ fn dependency_section(inv: &Investigation) -> String {
         out.push('\n');
     }
     out
+}
+
+/// The line an empty Dependency Inventory renders instead of a clean claim.
+///
+/// Why/What: see [`dependency_section`]. Distinguishes "no manifest was
+/// examined" (a gap in the pass) from "the manifests read declare nothing" (a
+/// fact about those manifests), and names the manifests in the second case.
+/// Test: `render_tests::{empty_inventory_with_no_manifest_is_a_named_gap,
+/// empty_inventory_names_the_manifests_it_read}`.
+fn empty_inventory_line(inv: &Investigation) -> String {
+    let mut manifests: Vec<&str> = Vec::new();
+    for name in inv
+        .repos
+        .iter()
+        .flat_map(|r| r.deps.manifests_examined.iter())
+    {
+        if !manifests.contains(&name.as_str()) {
+            manifests.push(name);
+        }
+    }
+    if manifests.is_empty() {
+        return format!(
+            "_Dependency manifests not examined{MEASURED_TAG} — no supported manifest \
+             (package.json, Cargo.toml, pyproject.toml, go.mod) was read at any inspected \
+             repository root, so this report states nothing about what the system depends on. \
+             Read this section as unassessed, not as a dependency-free codebase._\n"
+        );
+    }
+    format!(
+        "_Examined{MEASURED_TAG} {} and found no directly declared dependencies. Transitive \
+         dependencies, per-member manifests below the checkout root, and vendored code are \
+         outside this section's scope and are not assessed._\n",
+        manifests.join(", ")
+    )
 }
 
 /// Render one repository's dependency table (capped, with an "and N more" line).

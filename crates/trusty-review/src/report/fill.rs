@@ -78,6 +78,27 @@ impl Scope {
     pub fn push_block(&mut self, name: impl Into<String>, scope: Scope) {
         self.blocks.entry(name.into()).or_default().push(scope);
     }
+
+    /// Call `f` once for every scalar value in this scope and, recursively, in
+    /// every block scope beneath it.
+    ///
+    /// Why: #6137 — the numeric guardrail needs the figures the deterministic
+    /// report actually prints, and a filled scope IS that set, ahead of any
+    /// template. Walking the scope rather than the rendered markdown keeps the
+    /// guardrail independent of which template a run uses.
+    /// What: visits this scope's scalars in key order, then each block's scopes
+    /// in push order. Block NAMES and scalar KEYS are not visited — only values.
+    /// Test: `fill_tests.rs::visit_scalars_reaches_nested_block_values`.
+    pub fn visit_scalars(&self, f: &mut impl FnMut(&str)) {
+        for value in self.scalars.values() {
+            f(value);
+        }
+        for scopes in self.blocks.values() {
+            for scope in scopes {
+                scope.visit_scalars(f);
+            }
+        }
+    }
 }
 
 /// Render a template against a root scope, honouring the honesty rule.

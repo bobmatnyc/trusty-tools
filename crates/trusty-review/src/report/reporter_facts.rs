@@ -121,7 +121,7 @@ pub fn fill_key_facts(root: &mut Scope, model: &ReportModel) {
 /// What: `0` when neither source carries a positive figure.
 /// Test: `reporter_facts_tests::{scan_only_model_fills_density_facts,
 /// metrics_win_over_scan_in_key_facts}`.
-fn repo_loc(repo: &RepositoryReport) -> u64 {
+pub(super) fn repo_loc(repo: &RepositoryReport) -> u64 {
     repo.metrics
         .as_ref()
         .map(|m| m.loc.total)
@@ -141,7 +141,7 @@ fn repo_files(repo: &RepositoryReport) -> u64 {
 }
 
 /// This repository's per-language LoC breakdown, with the same precedence.
-fn repo_languages(repo: &RepositoryReport) -> &[LanguageLoc] {
+pub(super) fn repo_languages(repo: &RepositoryReport) -> &[LanguageLoc] {
     match repo
         .metrics
         .as_ref()

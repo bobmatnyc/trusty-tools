@@ -171,3 +171,25 @@ fn strip_leading_comment_unterminated_is_untouched() {
     let template = "<!-- never closes\n# Title\n";
     assert_eq!(strip_leading_comment(template), template);
 }
+
+/// Why: #6137 — the numeric guardrail asks a filled scope which figures the
+/// report prints, and a figure inside a repeated block (a finding row, a
+/// per-application row) counts exactly as much as a root scalar.
+/// What: a nested block's scalar values are visited alongside the root's.
+/// Test: this test itself.
+#[test]
+fn visit_scalars_reaches_nested_block_values() {
+    let mut child = Scope::new();
+    child.set("inner", "1553771");
+    let mut row = Scope::new();
+    row.set("row_value", "42");
+    row.push_block("nested", child);
+    let mut root = Scope::new();
+    root.set("root_value", "7");
+    root.push_block("rows", row);
+
+    let mut seen: Vec<String> = Vec::new();
+    root.visit_scalars(&mut |v| seen.push(v.to_string()));
+    seen.sort();
+    assert_eq!(seen, vec!["1553771", "42", "7"]);
+}

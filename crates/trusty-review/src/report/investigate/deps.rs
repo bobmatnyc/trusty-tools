@@ -54,6 +54,16 @@ pub struct DependencyInventory {
     pub deps: Vec<Dependency>,
     /// Total dependencies discovered across all ecosystems (pre-cap).
     pub total: usize,
+    /// The manifest filenames actually read at the checkout root (#6137).
+    ///
+    /// Why: `total == 0` has two causes that read identically on the page —
+    /// "the manifests declare nothing" and "no manifest was examined" — and
+    /// the renderer used to state the first for both, printing "_No
+    /// manifest-declared dependencies were found_" for a workspace with 134 of
+    /// them. Recording what was read is what lets the section render a named
+    /// gap instead of a false clean claim.
+    /// Test: `deps_tests::records_the_manifests_it_examined`.
+    pub manifests_examined: Vec<String>,
 }
 
 impl DependencyInventory {
@@ -75,8 +85,10 @@ impl DependencyInventory {
 /// for a local checkout.
 /// What: collects direct dependencies from package.json, Cargo.toml, pyproject.toml,
 /// and go.mod, enriches each with a locked version from the matching lockfile when
-/// one parses, sorts by (ecosystem, name), and caps to [`MAX_ROWS`].
-/// Test: `deps_tests::multi_ecosystem_inventory`.
+/// one parses, sorts by (ecosystem, name), and caps to [`MAX_ROWS`]. Records which
+/// of those manifests existed in `manifests_examined` (#6137), so a zero total can
+/// be told apart from a root where nothing was read.
+/// Test: `deps_tests::{multi_ecosystem_inventory, records_the_manifests_it_examined}`.
 pub fn build_inventory(root: &Path) -> DependencyInventory {
     let mut all: Vec<Dependency> = Vec::new();
     all.extend(npm_deps(root));
@@ -91,8 +103,19 @@ pub fn build_inventory(root: &Path) -> DependencyInventory {
     });
     let total = all.len();
     all.truncate(MAX_ROWS);
-    DependencyInventory { deps: all, total }
+    DependencyInventory {
+        deps: all,
+        total,
+        manifests_examined: MANIFEST_FILENAMES
+            .iter()
+            .filter(|name| root.join(name).is_file())
+            .map(|name| (*name).to_string())
+            .collect(),
+    }
 }
+
+/// The root manifests [`build_inventory`] probes, in ecosystem order.
+const MANIFEST_FILENAMES: &[&str] = &["package.json", "Cargo.toml", "pyproject.toml", "go.mod"];
 
 /// Read a root manifest/lockfile as text, or `None` when absent/unreadable.
 fn read(root: &Path, name: &str) -> Option<String> {
@@ -164,7 +187,12 @@ fn npm_lock_versions(root: &Path) -> BTreeMap<String, String> {
 
 // ─── cargo ───────────────────────────────────────────────────────────────────
 
-/// Parse `Cargo.toml` `[dependencies]` and enrich with `Cargo.lock` versions.
+/// Parse `Cargo.toml` dependencies and enrich with `Cargo.lock` versions.
+///
+/// Reads `[dependencies]` and, since #6137, `[workspace.dependencies]`. A cargo
+/// WORKSPACE root declares its shared dependencies only in the latter table, so
+/// reading `[dependencies]` alone reported zero for a 134-dependency workspace
+/// and the section rendered that as a clean result.
 fn cargo_deps(root: &Path) -> Vec<Dependency> {
     let Some(text) = read(root, "Cargo.toml") else {
         return Vec::new();
@@ -173,10 +201,20 @@ fn cargo_deps(root: &Path) -> Vec<Dependency> {
         return Vec::new();
     };
     let locked = cargo_lock_versions(root);
-    let Some(deps) = value.get("dependencies").and_then(|v| v.as_table()) else {
-        return Vec::new();
-    };
-    deps.iter()
+    let mut tables: Vec<&toml::map::Map<String, toml::Value>> = Vec::new();
+    if let Some(t) = value.get("dependencies").and_then(|v| v.as_table()) {
+        tables.push(t);
+    }
+    if let Some(t) = value
+        .get("workspace")
+        .and_then(|w| w.get("dependencies"))
+        .and_then(|v| v.as_table())
+    {
+        tables.push(t);
+    }
+    tables
+        .into_iter()
+        .flatten()
         .map(|(name, spec)| {
             let spec_str = match spec {
                 toml::Value::String(s) => s.clone(),

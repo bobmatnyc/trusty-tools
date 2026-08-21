@@ -27,7 +27,7 @@ use tracing::{debug, warn};
 
 use crate::llm::LlmProvider;
 use crate::report::model::ReportModel;
-use crate::report::synthesize_guard::{allowed_numbers, verify_prose};
+use crate::report::synthesize_guard::{allowed_numbers_with, verify_prose};
 use crate::report::synthesize_prompt::{
     SYNTHESIS_DEFAULT_MAX_TOKENS, SYNTHESIS_TIER_LADDER, SynthesisTier, build_synthesis_prompt,
 };
@@ -322,7 +322,8 @@ impl Synthesizer {
     /// requests no elaboration prose at all.  #5454 still decides what happens
     /// when the ladder is spent: the failure propagates rather than degrading
     /// the report to deterministic-only.
-    /// What: builds the numeric allow-set from the deterministic model, then
+    /// What: builds the numeric allow-set from the deterministic model and the
+    /// figures that model's own report prints (#6137), then
     /// walks [`SYNTHESIS_TIER_LADDER`], calling the provider under a timeout at
     /// each rung; a `finish_reason` of `length`/`max_tokens` advances to the
     /// next rung, and exhausting the ladder is [`SynthesisError::Truncated`].
@@ -347,9 +348,12 @@ impl Synthesizer {
     /// synthesize_ladder_recovers_a_large_finding_set,
     /// synthesize_still_truncated_after_retry_is_a_hard_error}`.
     pub async fn synthesize(&self, model: &ReportModel) -> Result<Synthesis, SynthesisError> {
-        // Ground truth for the guardrail comes from the DETERMINISTIC model only.
+        // Ground truth for the guardrail comes from the DETERMINISTIC model
+        // only — plus, since #6137, the figures the deterministic report
+        // computes at render time and prints in its own sections.
+        let printed = crate::report::figures::printed_figures(model);
         let allowed = match serde_json::to_value(model) {
-            Ok(v) => allowed_numbers(&v),
+            Ok(v) => allowed_numbers_with(&v, &printed),
             Err(e) => {
                 warn!(error = %e, "synthesis: could not serialise model for guardrail");
                 return Err(SynthesisError::ModelNotSerialisable(e.to_string()));

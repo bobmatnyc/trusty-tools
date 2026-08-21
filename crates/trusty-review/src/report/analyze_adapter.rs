@@ -868,6 +868,8 @@ pub async fn enrich_with_analyze_gaps(
     // iteration order (DOC-67 §9's determinism requirement).
     let mut missing: std::collections::BTreeMap<AnalyzeGap, Vec<String>> = Default::default();
     let mut partial: std::collections::BTreeMap<AnalyzeCaveat, Vec<String>> = Default::default();
+    // #6137: one line per repository whose index described a different checkout.
+    let mut stale: Vec<String> = Vec::new();
 
     // #5323: daemon-authored text lands in an acquirer-facing artifact, so it
     // crosses the redaction boundary before it reaches the model. Resolved once
@@ -891,14 +893,19 @@ pub async fn enrich_with_analyze_gaps(
                 mut metrics,
                 caveats,
             } => {
-                eprintln!(
-                    "[trusty-review report] --analyze: populated metrics for '{}' from index '{index_id}'",
-                    repo.name
-                );
                 super::redact::scrub_metrics(&mut metrics, &secrets);
-                repo.metrics = Some(*metrics);
-                for caveat in caveats {
-                    partial.entry(caveat).or_default().push(repo.name.clone());
+                // #6137: an index addressed by directory basename can serve a
+                // DIFFERENT checkout of the same repository. Data describing
+                // another tree is stale-index evidence, never a measurement of
+                // this one.
+                match super::analyze_scope::accept(&repo.name, &index_id, path, *metrics) {
+                    Ok(m) => {
+                        repo.metrics = Some(m);
+                        for caveat in caveats {
+                            partial.entry(caveat).or_default().push(repo.name.clone());
+                        }
+                    }
+                    Err(gap) => stale.push(gap),
                 }
             }
             AnalyzeFetch::Missing(gap) => {
@@ -925,6 +932,7 @@ pub async fn enrich_with_analyze_gaps(
             .into_iter()
             .map(|(caveat, repos)| format!("{caveat} — affects: {}.", repos.join(", "))),
     );
+    lines.extend(stale);
     lines
 }
 

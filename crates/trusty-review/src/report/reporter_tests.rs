@@ -55,10 +55,12 @@ fn fixture_model_with_findings(dir: &Path) -> ReportModel {
       "loc": { "total": 5000, "by_language": [ { "language": "Rust", "loc": 5000 } ] },
       "counts": { "files": 20, "functions": 150 },
       "findings": [
-        { "title": "SQL injection", "severity": "red", "category": "security", "component": "db.rs" },
+        { "title": "SQL injection", "severity": "red", "category": "authentication & secrets", "component": "db.rs" },
         { "title": "Stale dependency", "severity": "amber", "category": "maintainability", "component": "deps.toml" },
-        { "title": "Strong test coverage", "severity": "green", "category": "quality", "component": "" },
-        { "title": "Clean module boundaries", "severity": "green", "category": "architecture", "component": "" }
+        { "title": "Strong test coverage", "severity": "green", "category": "test coverage", "component": "" },
+        { "title": "Clean module boundaries", "severity": "green", "category": "state management", "component": "" },
+        { "title": "Constant-time token comparison", "severity": "green", "category": "authentication & secrets", "component": "" },
+        { "title": "Atomic redb batch upserts", "severity": "green", "category": "state management", "component": "" }
       ]
     }"#;
     std::fs::write(dir.join("acme.json"), metrics).expect("write metrics");
@@ -164,17 +166,80 @@ fn code_quality_and_security_sections_populate_from_analyze_data() {
     // Code Quality: the fixture's LoC/language/maintainability-finding data.
     assert!(md.contains("Acme Web"));
     assert!(md.contains("5000"));
-    // Security Posture: the fixture's RED "security"-category finding,
-    // re-projected as a violation-domain row — not the maintainability one.
-    assert!(md.contains("security"));
+    // Security Posture (#6137): the fixture's RED "authentication & secrets"
+    // finding, and nothing from the other dimensions.
     let security_section = md
         .split("## Security Posture")
         .nth(1)
         .and_then(|s| s.split("## Performance").next())
         .expect("Security Posture section present");
     assert!(!security_section.contains("_No data available"));
+    assert!(
+        security_section.contains("authentication & secrets"),
+        "section: {security_section}"
+    );
+    assert!(
+        !security_section.contains("maintainability"),
+        "section: {security_section}"
+    );
+    assert!(
+        security_section.contains("Constant-time token comparison"),
+        "the dimension's clean signals are credited: {security_section}"
+    );
     // Performance stays the fixed gap text regardless of the data present.
     assert!(md.contains(crate::report::reporter_performance::PERFORMANCE_NOTE));
+}
+
+/// #6137: every GREEN finding renders as its own topic line. The templates
+/// carried exactly three fixed `{{green_topic_N}}` slots, so a run with 21
+/// GREEN findings silently dropped 18 of them.
+#[test]
+fn reporter_renders_every_green_topic() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let model = fixture_model_with_findings(tmp.path());
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    for title in [
+        "Strong test coverage",
+        "Clean module boundaries",
+        "Constant-time token comparison",
+        "Atomic redb batch upserts",
+    ] {
+        assert!(
+            md.contains(&format!("- {title}")),
+            "every GREEN topic renders, including beyond the old three-slot cap: {title}"
+        );
+    }
+}
+
+/// The GREEN section carries titles ONLY — the no-green-analysis rule bans
+/// elaboration, and making the bullets repeatable must not smuggle any in.
+#[test]
+fn reporter_fills_green_topics() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let model = fixture_model_with_findings(tmp.path());
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    let green_section = md
+        .split("### 5.3 GREEN")
+        .nth(1)
+        .and_then(|s| s.split("\n## ").next())
+        .expect("GREEN section present");
+    assert!(green_section.contains("- Strong test coverage"));
+    assert!(
+        !green_section.contains("Remediation"),
+        "no elaboration: {green_section}"
+    );
+    assert!(
+        !green_section.contains(HONESTY_MARKER),
+        "no unfilled slot survives: {green_section}"
+    );
 }
 
 /// (b) #6004: a model WITHOUT analyze data leaves both sections as honesty

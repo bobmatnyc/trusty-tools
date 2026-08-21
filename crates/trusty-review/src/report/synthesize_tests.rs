@@ -22,7 +22,9 @@ use crate::report::metrics::{
     AnalyzeMetrics, CountMetrics, LanguageLoc, LocMetrics, MetricFinding, Severity,
 };
 use crate::report::model::{ReportModel, RepositoryReport};
-use crate::report::synthesize_guard::{allowed_numbers, numbers_in, verify_prose};
+use crate::report::synthesize_guard::{
+    allowed_numbers, allowed_numbers_with, numbers_in, verify_prose,
+};
 use crate::report::synthesize_prompt::{
     SYNTHESIS_DEFAULT_MAX_TOKENS, SYNTHESIS_ESCALATED_MAX_TOKENS, SYNTHESIS_MIN_MAX_TOKENS,
     SynthesisTier, build_synthesis_prompt, schema_contract_statement, synthesis_schema,
@@ -309,6 +311,88 @@ fn verify_prose_accepts_rounding() {
     assert_eq!(
         verify_prose("The top author owns 85.3% of the code.", &allowed),
         Err("85.3".to_string())
+    );
+}
+
+/// Why: #6137 — `rounded_forms` widens decimal precision only, so an integer
+/// key admitted nothing coarser than itself and "1.55 million lines" for a
+/// measured 1,553,771 was read as a fabricated 1.55. That rejection vetoed five
+/// LLM-written fields of one report.
+/// What: the million- and thousand-scale restatements are admitted; a
+/// single-significant-digit form and a genuinely different figure are not.
+/// Test: this test itself.
+#[test]
+fn allowed_numbers_admits_scaled_unit_forms() {
+    let allowed = allowed_numbers(&serde_json::json!({ "total_loc": 1553771 }));
+    for form in ["1553771", "1.55", "1.6", "1.553771", "1553", "1554"] {
+        assert!(
+            allowed.contains(form),
+            "{form} is a scaled restatement of 1,553,771"
+        );
+    }
+    for absent in ["2", "1.7", "1.4", "9999"] {
+        assert!(
+            !allowed.contains(absent),
+            "{absent} is no scaled restatement of 1,553,771"
+        );
+    }
+}
+
+/// Why: #6137 regression — the exact live rejection. The report's Key Facts row
+/// states 1553771 lines and the model wrote "1.55 million lines"; the status
+/// note read `rejected (unverified figure) in executive summary: 1.55`.
+/// What: the million-scale prose verifies, and a fabricated figure of the same
+/// shape still does not.
+/// Test: this test itself.
+#[test]
+fn verify_prose_accepts_a_million_scale_restatement() {
+    let allowed = allowed_numbers(&serde_json::json!({ "total_loc": 1553771 }));
+    for prose in [
+        "The codebase is roughly 1.55 million lines.",
+        "The codebase is roughly 1.6 million lines.",
+        "1,553,771 lines across the workspace.",
+    ] {
+        assert!(
+            verify_prose(prose, &allowed).is_ok(),
+            "a scaled restatement must verify: {prose}"
+        );
+    }
+}
+
+/// Why: widening the allowed set must not open a hole — a figure that restates
+/// nothing measured is still the thing the guardrail exists to catch.
+/// What: a fabricated million-scale figure and a fabricated small integer are
+/// both rejected, with the offending token surfaced.
+/// Test: this test itself.
+#[test]
+fn verify_prose_still_rejects_a_fabricated_figure() {
+    let allowed = allowed_numbers(&serde_json::json!({ "total_loc": 1553771 }));
+    assert_eq!(
+        verify_prose("The codebase is roughly 2.4 million lines.", &allowed),
+        Err("2.4".to_string())
+    );
+    assert_eq!(
+        verify_prose("There are 42 services.", &allowed),
+        Err("42".to_string())
+    );
+}
+
+/// Why: #6137 — the investigation coverage percentage is computed at render
+/// time, printed in the report's own Investigation Coverage section, and quoted
+/// verbatim into the synthesis prompt. The model was being asked to cite a
+/// figure the guardrail then rejected.
+/// What: a figure supplied as printed report text is admitted; one that is
+/// neither in the model nor printed is not.
+/// Test: this test itself.
+#[test]
+fn allowed_numbers_admits_a_printed_derived_figure() {
+    let printed = vec!["- files examined: 73 of 6664 tracked (1.1% coverage)".to_string()];
+    let allowed = allowed_numbers_with(&serde_json::json!({ "files": 73 }), &printed);
+    assert!(allowed.contains("1.1"), "a printed figure is in-model");
+    assert!(verify_prose("Coverage was 1.1%.", &allowed).is_ok());
+    assert_eq!(
+        verify_prose("Coverage was 9.7%.", &allowed),
+        Err("9.7".to_string())
     );
 }
 

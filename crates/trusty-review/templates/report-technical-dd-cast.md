@@ -197,6 +197,7 @@ vs. All technologies (peer set size: {{all_tech_peer_set_size}}):
 
 <!-- BEGIN amber_finding -->
 {{finding_index}}. **{{finding_title}}** — {{finding_description}}
+- **Component:** {{finding_component}}
 - **Remediation:** {{finding_remediation}}
 {{finding_evidence_block}}
 <!-- END amber_finding -->
@@ -206,9 +207,9 @@ vs. All technologies (peer set size: {{all_tech_peer_set_size}}):
 
 <!-- Per the no-green-analysis rule: one line per topic, nothing else. -->
 
-- {{green_topic_1}}
-- {{green_topic_2}}
-- {{green_topic_3}}
+<!-- BEGIN green_topic -->
+- {{green_topic}}
+<!-- END green_topic -->
 
 ## 6. Risk Registers
 
