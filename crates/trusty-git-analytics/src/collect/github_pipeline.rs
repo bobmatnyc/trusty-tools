@@ -268,6 +268,7 @@ mod tests {
             review_fetch_concurrency: concurrency,
             ticket_regex: None,
             fetch_on_reference: false,
+            work_items_unavailable: None,
         }
     }
 

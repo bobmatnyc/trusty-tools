@@ -76,9 +76,10 @@ verbatim and carry whatever their authors wrote into them.";
 /// What: for each failure in execution order, a line naming the stage, a
 /// redacted excerpt of the reason, and the fact that the affected area is
 /// unassessed; then, for each unreachable remote, a line naming the repository,
-/// the remote, and that its figures may be behind the true remote state.
-/// Returns an empty vec when every stage succeeded and every remote was
-/// reached — a clean run adds no line.
+/// the remote, and that its figures may be behind the true remote state; then,
+/// for each leg the config declared absent (#6130), a line naming the leg and
+/// why it was never attempted. Returns an empty vec when every stage succeeded,
+/// every remote was reached, and every leg ran — a clean run adds no line.
 ///
 /// `secrets` are the credential values to remove from each stage message —
 /// [`crate::report::dd_manifest::configured_secrets`] derives the set the same
@@ -117,7 +118,21 @@ pub fn sweep_gap_lines<S: AsRef<str>>(stats: &AuditSweepStats, secrets: &[S]) ->
         )
     });
 
-    failed_stages.chain(stale).collect()
+    // #6130: a leg nobody attempted. Worded as a NOT-ATTEMPTED rather than a
+    // failure, because the two mean different things to a reader deciding
+    // whether to chase the missing data — and both end in the same instruction,
+    // that the affected sections are unassessed.
+    let declared = stats.declared_skips.iter().map(|skip| {
+        let reason = redacted_excerpt(&skip.reason, secrets);
+        format!(
+            "Collection leg `{}` was not attempted ({reason}) — the data it produces is not \
+             assessed in this report. Read the affected sections as unassessed, not as a \
+             clean result.",
+            skip.leg
+        )
+    });
+
+    failed_stages.chain(stale).chain(declared).collect()
 }
 
 /// One Gaps & Caveats line per distinct reason a repository could not be

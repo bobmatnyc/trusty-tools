@@ -93,6 +93,7 @@ impl fmt::Debug for GithubConfig {
             review_fetch_concurrency,
             ticket_regex,
             fetch_on_reference,
+            work_items_unavailable,
         } = self;
         f.debug_struct("GithubConfig")
             .field("token", &mask(token.as_ref()))
@@ -104,6 +105,7 @@ impl fmt::Debug for GithubConfig {
             .field("review_fetch_concurrency", review_fetch_concurrency)
             .field("ticket_regex", ticket_regex)
             .field("fetch_on_reference", fetch_on_reference)
+            .field("work_items_unavailable", work_items_unavailable)
             .finish()
     }
 }

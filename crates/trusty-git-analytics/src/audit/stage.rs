@@ -135,6 +135,29 @@ pub struct StaleFetch {
     pub error: String,
 }
 
+/// A collection leg the config declared absent before the sweep started
+/// (#6130).
+///
+/// Why: the third thing a [`StageStatus`] cannot express, beside
+/// [`StaleFetch`]. A leg that was never attempted leaves the stage
+/// `Succeeded` and its tables empty, which on the page is indistinguishable
+/// from a leg that ran and found nothing. Keeping the declaration as its own
+/// record is what holds the line #5620 draws: a RECORDED skip proceeds and is
+/// named, a BLIND one is a defect, and a leg that actually ran and failed
+/// still fails its stage closed.
+/// What: which leg, and the reason its declarer gave. The reason is redacted
+/// and excerpted later by [`super::sweep_gap_lines`] — it is text this process
+/// did not author, so it can carry a path or a credential.
+/// Test: `super::tests::a_declared_absent_leg_is_named_in_the_gap_lines`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DeclaredSkip {
+    /// The leg that was not attempted, e.g. `"GitHub work items"`.
+    pub leg: String,
+    /// Why, as the config declared it — unredacted and untruncated.
+    pub reason: String,
+}
+
 /// The ordered outcome of a full AUDIT sweep.
 ///
 /// Why: DOC-67 §9 requires that a repo or dimension missing because a stage
@@ -154,6 +177,10 @@ pub struct AuditSweepStats {
     /// not be fetched, in collection order (#5321). Empty when every configured
     /// remote was reached — a clean run adds no entry.
     pub stale_fetches: Vec<StaleFetch>,
+    /// Collection legs the config declared absent before the sweep ran, in
+    /// declaration order (#6130). Empty when every configured leg was
+    /// attempted.
+    pub declared_skips: Vec<DeclaredSkip>,
 }
 
 impl AuditSweepStats {
@@ -198,6 +225,24 @@ impl AuditSweepStats {
             "collected from stale local refs; data may be behind the remote"
         );
         self.stale_fetches.push(fetch);
+    }
+
+    /// Record that `skip`'s leg was declared absent and never attempted.
+    ///
+    /// Why: #6130 — the declaration is made in the config, before any stage
+    /// runs, so nothing downstream would otherwise know the difference between
+    /// a leg that was skipped on purpose and one that ran and found nothing.
+    /// What: warns with the reason, then appends. Logging here as well as
+    /// storing keeps the run log and the report's Gaps section saying the same
+    /// sentence, which is what lets an operator match them up.
+    /// Test: `super::tests::a_declared_absent_leg_is_named_in_the_gap_lines`.
+    pub fn record_declared_skip(&mut self, skip: DeclaredSkip) {
+        tracing::warn!(
+            leg = %skip.leg,
+            reason = %skip.reason,
+            "collection leg declared absent; its sections are unassessed"
+        );
+        self.declared_skips.push(skip);
     }
 
     /// Every stage that failed, in execution order.

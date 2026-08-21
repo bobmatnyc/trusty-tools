@@ -1784,6 +1784,8 @@ trusty-review = "0.0.0-never-published"
             repo: SelectedRepo {
                 name: "acme-api".to_owned(),
                 path: PathBuf::from("repos/acme-api"),
+                github_slug: None,
+                github_absent: None,
             },
             output: session.work_dir().path(Area::Output).join("00-acme-api"),
             log: session.work_dir().path(Area::Logs).join("00-acme-api.log"),
@@ -1838,6 +1840,8 @@ trusty-review = "0.0.0-never-published"
                     repo: SelectedRepo {
                         name: "acme-api".to_owned(),
                         path: PathBuf::from("repos/acme-api"),
+                        github_slug: None,
+                        github_absent: None,
                     },
                     output: session.work_dir().path(Area::Output).join("00-acme-api"),
                     log: session.work_dir().path(Area::Logs).join("00-acme-api.log"),
@@ -1892,6 +1896,8 @@ trusty-review = "0.0.0-never-published"
             repo: SelectedRepo {
                 name: "acme-api".to_owned(),
                 path: PathBuf::from("repos/acme-api"),
+                github_slug: None,
+                github_absent: None,
             },
             output: session.work_dir().path(Area::Output).join("00-acme-api"),
             log: session.work_dir().path(Area::Logs).join("00-acme-api.log"),
@@ -2596,6 +2602,8 @@ trusty-review = "0.15.1"
             &[run::SelectedRepo {
                 name: "acme/api".to_owned(),
                 path: PathBuf::from("repos/acme/api"),
+                github_slug: None,
+                github_absent: None,
             }],
         )
         .expect("writes");

@@ -1548,6 +1548,8 @@ trusty-review = "0.15.1"
             &[run::SelectedRepo {
                 name: "acme/api".to_owned(),
                 path: PathBuf::from("repos/acme/api"),
+                github_slug: None,
+                github_absent: None,
             }],
         )
         .expect("writes");

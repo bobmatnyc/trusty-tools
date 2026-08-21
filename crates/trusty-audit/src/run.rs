@@ -141,7 +141,9 @@ use verify::verify_output;
 pub use checkpoint::{PROGRESS_FILE, Recollect, RunProgress, progress_path, read_progress};
 pub use child::ENV_INFERENCE_CREDENTIAL;
 pub use report::{RepoResult, RepoRun, RunOptions, RunReport, RunStatus};
-pub use selection::{SELECTION_FILE, SelectedRepo, load_selection, save_selection, selection_path};
+pub use selection::{
+    GithubLeg, SELECTION_FILE, SelectedRepo, load_selection, save_selection, selection_path,
+};
 
 /// A filename-safe, collision-free stem for one repository's files.
 ///
@@ -602,7 +604,7 @@ async fn run_one(
         &checkout,
         boards,
         github_access,
-        &repo.name,
+        repo.github_leg(),
         &binaries.search,
     )? {
         Err(reason) => RepoResult::Failed { reason },
@@ -696,7 +698,7 @@ fn prepare(
     checkout: &Path,
     boards: &boards::Boards,
     github_access: &github_issues::GithubAccess,
-    name_with_owner: &str,
+    github_leg: selection::GithubLeg<'_>,
     search: &Path,
 ) -> Result<Result<PathBuf, String>, AuditError> {
     if !checkout.is_dir() {
@@ -721,8 +723,10 @@ fn prepare(
         jira: boards.jira.clone(),
         linear: boards.linear.clone(),
         // #5980: always written — see `github_issues`'s module docs for why
-        // this is never `None` the way `jira`/`linear` can be.
-        github: github_access.section(name_with_owner),
+        // this is never `None` the way `jira`/`linear` can be. #6130: what it
+        // NAMES is the repository's GitHub identity, which for a local-path
+        // target is not its on-disk `local/<name>` and may not exist at all.
+        github: github_access.section(github_leg),
     };
     // Infallible in practice — the document is owned strings and paths with no
     // map keys — but a serializer error must not be swallowed into a default.
@@ -804,6 +808,8 @@ trusty-review = "0.15.1"
             .map(|(name, path)| SelectedRepo {
                 name: (*name).to_owned(),
                 path: PathBuf::from(*path),
+                github_slug: None,
+                github_absent: None,
             })
             .collect();
         let text = toml::to_string_pretty(&Selection {
@@ -1004,10 +1010,14 @@ trusty-review = "0.15.1"
             SelectedRepo {
                 name: "acme/api".to_owned(),
                 path: PathBuf::from("repos/acme/api"),
+                github_slug: None,
+                github_absent: None,
             },
             SelectedRepo {
                 name: "acme/web".to_owned(),
                 path: PathBuf::from("repos/acme/web"),
+                github_slug: None,
+                github_absent: None,
             },
         ];
         save_selection(&work, &repos).expect("the selection writes");
@@ -1031,6 +1041,8 @@ trusty-review = "0.15.1"
         let entry = |n: usize| SelectedRepo {
             name: format!("acme/repo-{n}"),
             path: PathBuf::from(format!("repos/acme/repo-{n}")),
+            github_slug: None,
+            github_absent: None,
         };
 
         std::thread::scope(|scope| {
@@ -1256,6 +1268,8 @@ trusty-review = "0.15.1"
             repo: SelectedRepo {
                 name: "a".into(),
                 path: "a".into(),
+                github_slug: None,
+                github_absent: None,
             },
             output: "/o/a".into(),
             log: "/l/a.log".into(),
@@ -1694,6 +1708,123 @@ trusty-review = "0.15.1"
                 .expect("the generated tga config");
         assert!(generated.contains("- ENG"), "{generated}");
         assert!(!generated.contains(TEAM_ID), "{generated}");
+    }
+
+    /// 🔴 #6130's sweep half. A local-path target whose checkout named no
+    /// GitHub remote must reach tga with NO `github.repo` and with the
+    /// declaration in its place, and the sweep must still complete — the
+    /// self-audit's `collect` stage failed closed on 3152 404s and the audit
+    /// refused to package.
+    ///
+    /// Against the pre-fix code this fails at the second assertion: the section
+    /// carried `repo: local/apex`, the identity that does not exist.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_local_repo_with_no_github_remote_declares_the_leg_absent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, &writes_a_manifest(None));
+        make_repo(&work, "local/apex");
+        save_selection(
+            &work,
+            &[SelectedRepo {
+                name: "local/apex".to_owned(),
+                path: PathBuf::from("repos/local/apex"),
+                github_slug: None,
+                github_absent: Some(
+                    "`local/apex` was audited from the checkout at /srv/apex, whose `origin` \
+                     remote names no repository on github.com"
+                        .to_owned(),
+                ),
+            }],
+        )
+        .expect("write selection");
+
+        let report = sweep(&work, &config(), &RunOptions::default(), &Progress::none())
+            .await
+            .expect("the sweep completes");
+        assert_eq!(
+            report.status,
+            RunStatus::AllSucceeded,
+            "a declared-absent GitHub leg must not stop the run: {report:?}"
+        );
+
+        let generated =
+            std::fs::read_to_string(work.path(Area::State).join("tga-00-local-apex.yaml"))
+                .expect("the generated tga config");
+        assert!(
+            !generated.contains("repo: local/apex"),
+            "the synthetic owner must never reach tga's github section: {generated}"
+        );
+        assert!(
+            generated.contains("work_items_unavailable:"),
+            "the absence must be declared, not silent: {generated}"
+        );
+        assert!(
+            generated.contains("names no repository on github.com"),
+            "the declaration must carry the reason: {generated}"
+        );
+    }
+
+    /// A selection file written before #6130 carries neither field, so the only
+    /// evidence left of what a target was is its owner segment. Both arms are
+    /// pinned here because guessing wrong either way is a real defect: a
+    /// `local/` entry queried as a slug is the bug, and a real `owner/repo`
+    /// read as absent silently drops a leg that works.
+    #[test]
+    fn a_legacy_selection_still_resolves_both_shapes() {
+        let legacy = |name: &str| SelectedRepo {
+            name: name.to_owned(),
+            path: PathBuf::from("repos").join(name),
+            github_slug: None,
+            github_absent: None,
+        };
+        assert_eq!(
+            legacy("acme/api").github_leg(),
+            GithubLeg::Present("acme/api")
+        );
+        let local = legacy("local/apex");
+        let GithubLeg::Absent(reason) = local.github_leg() else {
+            panic!("a `local/` owner names no GitHub repository");
+        };
+        assert!(reason.contains("path on disk"), "{reason}");
+    }
+
+    /// 🔴 #6130 review: a hand-edited `selected-repos.toml` carrying a blank
+    /// field must not declare anything. A blank `github_absent` would reach tga
+    /// as a reason naming nothing, whose own blank filter then drops the leg
+    /// back into the blind-warn path this issue closes; a blank `github_slug`
+    /// would write `repo: ""` into the generated config.
+    #[test]
+    fn a_blank_field_is_not_a_value() {
+        let blank = |slug: Option<&str>, absent: Option<&str>| SelectedRepo {
+            name: "local/apex".to_owned(),
+            path: PathBuf::from("repos/local/apex"),
+            github_slug: slug.map(str::to_owned),
+            github_absent: absent.map(str::to_owned),
+        };
+
+        let blank_absent = blank(None, Some("   "));
+        let GithubLeg::Absent(reason) = blank_absent.github_leg() else {
+            panic!("still absent — but with a reason that says something");
+        };
+        assert!(reason.contains("path on disk"), "{reason}");
+
+        let blank_slug = blank(Some(""), Some("the checkout names no GitHub remote"));
+        assert_eq!(
+            blank_slug.github_leg(),
+            GithubLeg::Absent("the checkout names no GitHub remote"),
+            "an empty slug must never reach tga as `repo: \"\"`"
+        );
+
+        // Whitespace around a real value is trimmed, not treated as content.
+        let padded = SelectedRepo {
+            name: "local/apex".to_owned(),
+            path: PathBuf::from("repos/local/apex"),
+            github_slug: Some("  acme/api  ".to_owned()),
+            github_absent: None,
+        };
+        assert_eq!(padded.github_leg(), GithubLeg::Present("acme/api"));
     }
 
     /// The chain states its own board gaps, so a sweep handed a resolution says

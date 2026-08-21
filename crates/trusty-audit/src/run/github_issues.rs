@@ -59,6 +59,8 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::selection::GithubLeg;
+
 /// The variable the `gh`-derived token reaches the child under.
 pub const ENV_GITHUB_TOKEN: &str = "TRUSTY_AUDIT_GITHUB_TOKEN";
 
@@ -69,15 +71,29 @@ pub const ENV_GITHUB_TOKEN: &str = "TRUSTY_AUDIT_GITHUB_TOKEN";
 /// ask tga for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TgaGithub {
-    /// `owner/name` — the same identity the repository was registered and
-    /// cloned under.
-    pub repo: String,
+    /// The `owner/repo` whose issues tga should fetch.
+    ///
+    /// `None` when the repository has no GitHub identity at all (#6130) — a
+    /// local-path target whose checkout names no `github.com` remote. It used
+    /// to carry the on-disk name unconditionally, which for such a target is
+    /// `local/<name>`: tga then asked `api.github.com/repos/local/<name>` and
+    /// 404'd every lookup.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
     /// A `${VAR}` reference to the child's environment, never the token
     /// itself — see the module docs. `None` when no `gh` credential could be
     /// read; tga then runs unauthenticated rather than the section being
     /// omitted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+    /// Why tga cannot reach this repository's issues, when it cannot (#6130).
+    ///
+    /// Set exactly when [`Self::repo`] is `None`. tga reads it as a DECLARATION
+    /// that the work-item leg is absent: it builds no adapter, logs the reason,
+    /// and names it in the report's Gaps section — instead of the leg vanishing
+    /// behind a `warn!` and the issue-derived sections reading as clean.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work_items_unavailable: Option<String>,
 }
 
 /// What one sweep could read from `gh` for issue collection, resolved once.
@@ -145,22 +161,37 @@ impl GithubAccess {
         })
     }
 
-    /// This repository's `github:` section — always `Some`, per the module
+    /// This repository's `github:` section — always written, per the module
     /// docs: a repository target always contributes its issues, and a
     /// missing credential is not a reason to omit the attempt.
     ///
+    /// #6130 adds the one case where there is nothing to attempt. A
+    /// [`GithubLeg::Absent`] repository has no GitHub identity at all, so the
+    /// section carries the DECLARATION instead of a slug — the section is still
+    /// present, because that is what gives tga somewhere to hang the named gap.
+    ///
     /// # Postconditions
-    /// `repo` equals `name_with_owner` verbatim; `token` is `Some("${…}")`
-    /// (never the real value) exactly when this access resolved one.
+    /// Exactly one of `repo` and `work_items_unavailable` is `Some`. `token` is
+    /// `Some("${…}")` (never the real value) exactly when this access resolved
+    /// one AND the leg is present — an absent leg has nothing to authenticate.
     /// Test: `github_issues_tests::a_repo_with_a_token_gets_the_placeholder_never_the_value`,
-    /// `github_issues_tests::a_repo_with_no_token_still_gets_a_github_section`.
-    pub fn section(&self, name_with_owner: &str) -> TgaGithub {
-        TgaGithub {
-            repo: name_with_owner.to_owned(),
-            token: self
-                .token
-                .as_ref()
-                .map(|_| format!("${{{ENV_GITHUB_TOKEN}}}")),
+    /// `github_issues_tests::a_repo_with_no_token_still_gets_a_github_section`,
+    /// `github_issues_tests::an_absent_leg_declares_itself_instead_of_naming_a_repo`.
+    pub fn section(&self, leg: GithubLeg<'_>) -> TgaGithub {
+        match leg {
+            GithubLeg::Present(slug) => TgaGithub {
+                repo: Some(slug.to_owned()),
+                token: self
+                    .token
+                    .as_ref()
+                    .map(|_| format!("${{{ENV_GITHUB_TOKEN}}}")),
+                work_items_unavailable: None,
+            },
+            GithubLeg::Absent(reason) => TgaGithub {
+                repo: None,
+                token: None,
+                work_items_unavailable: Some(reason.to_owned()),
+            },
         }
     }
 
@@ -295,8 +326,8 @@ mod github_issues_tests {
         let access = GithubAccess {
             token: Some("ghp_real-token-do-not-write-me-down".to_owned()),
         };
-        let section = access.section("acme/api");
-        assert_eq!(section.repo, "acme/api");
+        let section = access.section(GithubLeg::Present("acme/api"));
+        assert_eq!(section.repo.as_deref(), Some("acme/api"));
         assert_eq!(
             section.token.as_deref(),
             Some("${TRUSTY_AUDIT_GITHUB_TOKEN}")
@@ -314,18 +345,40 @@ mod github_issues_tests {
     #[test]
     fn a_repo_with_no_token_still_gets_a_github_section() {
         let access = GithubAccess::default();
-        let section = access.section("acme/api");
-        assert_eq!(section.repo, "acme/api");
+        let section = access.section(GithubLeg::Present("acme/api"));
+        assert_eq!(section.repo.as_deref(), Some("acme/api"));
         assert_eq!(section.token, None);
         assert_eq!(access.env(), None);
     }
 
     #[test]
     fn the_generated_document_omits_the_token_key_entirely_when_absent() {
-        let section = GithubAccess::default().section("acme/api");
+        let section = GithubAccess::default().section(GithubLeg::Present("acme/api"));
         let yaml = serde_yaml::to_string(&section).expect("serializes");
         assert!(!yaml.contains("token"), "{yaml}");
         assert!(yaml.contains("acme/api"), "{yaml}");
+    }
+
+    /// 🔴 #6130: with no GitHub identity, the generated config must carry NO
+    /// `repo` key at all and must carry the declaration instead. Against the
+    /// pre-fix code `repo: local/trusty-tools` is written here, and tga then
+    /// 404s every work-item lookup and fails the `collect` stage closed.
+    #[test]
+    fn an_absent_leg_declares_itself_instead_of_naming_a_repo() {
+        let access = GithubAccess::with_token("ghp_real-token-do-not-write-me-down");
+        let section = access.section(GithubLeg::Absent("the checkout names no GitHub remote"));
+
+        assert_eq!(section.repo, None);
+        assert_eq!(
+            section.work_items_unavailable.as_deref(),
+            Some("the checkout names no GitHub remote")
+        );
+        assert_eq!(section.token, None, "an absent leg authenticates nothing");
+
+        let yaml = serde_yaml::to_string(&section).expect("serializes");
+        assert!(!yaml.contains("repo"), "{yaml}");
+        assert!(!yaml.contains("local/"), "{yaml}");
+        assert!(yaml.contains("work_items_unavailable"), "{yaml}");
     }
 
     /// A `gh` that cannot answer (not installed, not logged in) must not stop

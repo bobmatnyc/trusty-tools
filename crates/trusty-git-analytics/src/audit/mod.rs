@@ -62,5 +62,5 @@ pub use search_daemon::{
     ensure_search_daemon, ensure_search_daemon_with, SearchDaemonUnavailable, SearchGuard,
     SEARCH_STARTUP_TIMEOUT,
 };
-pub use stage::{AuditSweepStats, StageOutcome, StageStatus, StaleFetch, SweepStage};
+pub use stage::{AuditSweepStats, DeclaredSkip, StageOutcome, StageStatus, StaleFetch, SweepStage};
 pub use sweep::{run_full_sweep, SweepOptions};

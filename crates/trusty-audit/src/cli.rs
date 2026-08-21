@@ -990,6 +990,8 @@ mod cli_tests {
             repo: SelectedRepo {
                 name: "acme-api".to_owned(),
                 path: PathBuf::from("repos/acme-api"),
+                github_slug: None,
+                github_absent: None,
             },
             output: PathBuf::from("/work/out/00-acme-api"),
             log: PathBuf::from("/work/logs/00-acme-api.log"),
@@ -1043,6 +1045,8 @@ mod cli_tests {
             repo: SelectedRepo {
                 name: "acme-api".to_owned(),
                 path: PathBuf::from("repos/acme-api"),
+                github_slug: None,
+                github_absent: None,
             },
             output: PathBuf::from("/work/out/00-acme-api"),
             log: PathBuf::from("/work/logs/00-acme-api.log"),
@@ -1073,6 +1077,8 @@ mod cli_tests {
             repo: SelectedRepo {
                 name: name.to_owned(),
                 path: PathBuf::from(format!("repos/{name}")),
+                github_slug: None,
+                github_absent: None,
             },
             output: PathBuf::from(format!("/work/out/0{index}-{name}")),
             log: PathBuf::from(format!("/work/logs/0{index}-{name}.log")),
@@ -1227,6 +1233,8 @@ mod cli_tests {
                 repo: SelectedRepo {
                     name: "acme-api".to_owned(),
                     path: PathBuf::from("repos/acme-api"),
+                    github_slug: None,
+                    github_absent: None,
                 },
                 output: PathBuf::from("/work/out/00-acme-api"),
                 log: PathBuf::from("/work/logs/00-acme-api.log"),
