@@ -7,7 +7,6 @@
 //! paths, KG neighbour refine-query filtering and threshold boundary,
 //! and relative->absolute chunk-path resolution across roots.
 //! Test: this module.
-use super::super::*;
 use super::*;
 use crate::core::embed::MockEmbedder;
 use crate::core::store::UsearchStore;

@@ -8,7 +8,6 @@
 //! grep-lane merge, archive down-rank/exclusion, line-number
 //! preservation, and Code/Text/Data/All mode filters.
 //! Test: this module.
-use super::super::*;
 use super::*;
 
 // ---- Branch-aware search (issue #122) ----------------------------------

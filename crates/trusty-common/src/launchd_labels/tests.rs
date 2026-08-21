@@ -753,7 +753,7 @@ fn codesign_stripped(line: &str) -> String {
             // Skip separators between the marker and its value.
             let val_start = rest
                 .find(|c: char| !matches!(c, ' ' | '=' | '"' | '\'' | '\t'))
-                .map_or(rest.len(), |o| o);
+                .unwrap_or(rest.len());
             let tail = &rest[val_start..];
             let val_end = tail
                 .find(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_'))

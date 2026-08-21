@@ -8,7 +8,6 @@
 //! expansion, symbol-graph rebuild, entity exact match, virtual terms,
 //! embedding lookups, similarity, and batch indexing.
 //! Test: this module.
-use super::super::*;
 use super::*;
 use std::sync::atomic::Ordering;
 
