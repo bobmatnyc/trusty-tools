@@ -193,7 +193,14 @@ async fn a_checkout_with_no_basename_never_reaches_a_daemon() {
         PathBuf::from("/nonexistent/trusty-analyze"),
         dead,
     );
-    let out = ground(&t, Path::new("/"), "acme-api", None).await;
+    let out = ground(
+        &t,
+        Path::new("/"),
+        "acme-api",
+        None,
+        priority::Budget::from_env(),
+    )
+    .await;
     assert!(out.index_id.is_none());
     assert!(out.priorities.is_empty());
     assert_eq!(out.gaps.len(), 1, "{:?}", out.gaps);
@@ -216,7 +223,14 @@ async fn a_search_daemon_that_will_not_start_is_a_named_gap() {
         PathBuf::from("/nonexistent/trusty-analyze"),
         dead,
     );
-    let out = ground(&t, Path::new("/w/repos/acme-api"), "acme-api", None).await;
+    let out = ground(
+        &t,
+        Path::new("/w/repos/acme-api"),
+        "acme-api",
+        None,
+        priority::Budget::from_env(),
+    )
+    .await;
     assert!(out.priorities.is_empty());
     assert_eq!(out.gaps.len(), 1, "{:?}", out.gaps);
     assert!(out.gaps[0].contains("acme-api"), "{:?}", out.gaps);
@@ -261,7 +275,14 @@ async fn an_unindexable_checkout_is_a_named_gap() {
         PathBuf::from("/nonexistent/trusty-analyze"),
         dead_url().await,
     );
-    let out = ground(&t, Path::new("/w/repos/acme-api"), "acme-api", None).await;
+    let out = ground(
+        &t,
+        Path::new("/w/repos/acme-api"),
+        "acme-api",
+        None,
+        priority::Budget::from_env(),
+    )
+    .await;
     assert!(out.priorities.is_empty());
     assert_eq!(out.index_id.as_deref(), Some("acme-api"));
     assert_eq!(out.gaps.len(), 1, "{:?}", out.gaps);
@@ -284,7 +305,14 @@ async fn an_analyze_daemon_that_will_not_start_is_a_named_gap() {
         PathBuf::from("/nonexistent/trusty-analyze"),
         dead_url().await,
     );
-    let out = ground(&t, Path::new("/w/repos/acme-api"), "acme-api", None).await;
+    let out = ground(
+        &t,
+        Path::new("/w/repos/acme-api"),
+        "acme-api",
+        None,
+        priority::Budget::from_env(),
+    )
+    .await;
     assert_eq!(out.gaps.len(), 1, "{:?}", out.gaps);
     assert!(out.gaps[0].contains("acme-api"), "{:?}", out.gaps);
     assert!(out.gaps[0].contains("trusty-analyze"), "{:?}", out.gaps);
@@ -313,7 +341,14 @@ async fn an_unreachable_hotspots_endpoint_is_a_named_gap() {
         PathBuf::from("/nonexistent/trusty-analyze"),
         stub_daemon(None).await,
     );
-    let out = ground(&t, Path::new("/w/repos/acme-api"), "acme-api", None).await;
+    let out = ground(
+        &t,
+        Path::new("/w/repos/acme-api"),
+        "acme-api",
+        None,
+        priority::Budget::from_env(),
+    )
+    .await;
     assert_eq!(out.gaps.len(), 1, "{:?}", out.gaps);
     assert!(out.gaps[0].contains("500"), "{:?}", out.gaps);
     assert!(
@@ -336,7 +371,14 @@ async fn an_empty_hotspot_list_is_a_named_gap() {
         PathBuf::from("/nonexistent/trusty-analyze"),
         stub_daemon(Some(EMPTY_HOTSPOTS)).await,
     );
-    let out = ground(&t, Path::new("/w/repos/acme-api"), "acme-api", None).await;
+    let out = ground(
+        &t,
+        Path::new("/w/repos/acme-api"),
+        "acme-api",
+        None,
+        priority::Budget::from_env(),
+    )
+    .await;
     assert_eq!(out.gaps.len(), 1, "{:?}", out.gaps);
     assert!(
         out.gaps[0].contains("no complexity hotspot"),
@@ -358,7 +400,14 @@ async fn a_search_that_answers_nothing_is_a_named_gap() {
         PathBuf::from("/nonexistent/trusty-analyze"),
         stub_daemon(Some(EMPTY_HOTSPOTS)).await,
     );
-    let out = ground(&t, Path::new("/w/repos/acme-api"), "acme-api", None).await;
+    let out = ground(
+        &t,
+        Path::new("/w/repos/acme-api"),
+        "acme-api",
+        None,
+        priority::Budget::from_env(),
+    )
+    .await;
     assert!(out.priorities.is_empty());
     assert!(
         out.gaps
@@ -386,7 +435,14 @@ async fn failing_evidence_queries_are_named_once_with_their_count() {
         PathBuf::from("/nonexistent/trusty-analyze"),
         stub_daemon(Some(EMPTY_HOTSPOTS)).await,
     );
-    let out = ground(&t, Path::new("/w/repos/acme-api"), "acme-api", None).await;
+    let out = ground(
+        &t,
+        Path::new("/w/repos/acme-api"),
+        "acme-api",
+        None,
+        priority::Budget::from_env(),
+    )
+    .await;
     let failures: Vec<&String> = out
         .gaps
         .iter()
@@ -408,7 +464,14 @@ async fn a_daemon_that_binds_but_never_answers_is_a_named_gap() {
         PathBuf::from("/nonexistent/trusty-analyze"),
         dead_url().await,
     );
-    let out = ground(&t, Path::new("/w/repos/acme-api"), "acme-api", None).await;
+    let out = ground(
+        &t,
+        Path::new("/w/repos/acme-api"),
+        "acme-api",
+        None,
+        priority::Budget::from_env(),
+    )
+    .await;
     assert!(out.priorities.is_empty());
     assert_eq!(out.gaps.len(), 1, "{:?}", out.gaps);
     assert!(
