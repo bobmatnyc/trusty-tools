@@ -395,6 +395,67 @@ fn manifest_priority_outranks_heuristics() {
     assert_eq!(sel.files[1].path, "src/auth/login.rs");
 }
 
+/// #6082: the defect the owner ruled on — `inspect_priority` is a dominant sort
+/// key, not a filter, so a declared list shorter than the budget was topped up
+/// with path-name guesses that then counted toward the examined set exactly as
+/// search-found evidence did. Under `attributed_only` the remainder goes unread.
+#[test]
+fn attributed_only_declines_the_heuristic_top_up() {
+    let tmp = fixture();
+    let files = list_tracked_files(tmp.path());
+    let prio = priorities(&["README.md"]);
+    let sel = select_files(
+        tmp.path(),
+        &files,
+        Some("Focus on the login and authentication flow."),
+        Budget::default(),
+        RiskSignals {
+            priorities: &prio,
+            attributed_only: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        sel.files
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["README.md"],
+        "only the declared path is read"
+    );
+    assert!(sel.attributed_only, "the selection records the mode");
+    assert!(
+        files.len() > 1 && sel.files.len() < Budget::default().max_files,
+        "the fixture has spare files and budget, so the top-up was declined rather than unneeded"
+    );
+}
+
+/// The same inputs without the flag keep the pre-#6082 top-up, which is what a
+/// manifest written with no search index depends on.
+#[test]
+fn attributed_only_absent_keeps_the_top_up() {
+    let tmp = fixture();
+    let files = list_tracked_files(tmp.path());
+    let prio = priorities(&["README.md"]);
+    let sel = select_files(
+        tmp.path(),
+        &files,
+        Some("Focus on the login and authentication flow."),
+        Budget::default(),
+        RiskSignals {
+            priorities: &prio,
+            ..Default::default()
+        },
+    );
+    assert_eq!(sel.files[0].path, "README.md");
+    assert!(
+        sel.files.len() > 1,
+        "heuristic files still fill the budget: {:?}",
+        sel.files.iter().map(|f| &f.path).collect::<Vec<_>>()
+    );
+    assert!(!sel.attributed_only);
+}
+
 /// Why: the declared list is RANKED, and the budget must truncate it from the
 /// bottom — never scramble it — or an external ranker cannot predict what gets
 /// read.

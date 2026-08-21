@@ -184,6 +184,7 @@ pub fn write_into(
     checkout: &Path,
     priorities: &[Priority],
     budget: Option<Budget>,
+    attributed_only: bool,
     gaps: &[String],
 ) -> Result<(), String> {
     if priorities.is_empty() && gaps.is_empty() {
@@ -201,10 +202,39 @@ pub fn write_into(
         if let Some(budget) = budget {
             record_budget(&mut doc, budget)?;
         }
+        if attributed_only {
+            record_attributed_only(&mut doc)?;
+        }
     }
 
     std::fs::write(path, doc.to_string())
         .map_err(|e| format!("{} could not be written ({e})", path.display()))
+}
+
+/// Declare that the ranking IS the intended sample (#6082).
+///
+/// Why: `inspect_priority` is a dominant sort key in trusty-review, not a
+/// filter, so a list shorter than the file budget is topped up with path-name
+/// heuristics — unattributed files counted alongside evidence a query found.
+/// The owner's ruling (2026-08-20) is that the filter is search, the knowledge
+/// graph, and measured complexity; heuristics are the degradation path, not the
+/// remainder. Writing this key is what tells the reader that.
+/// What: sets `[report].attributed_only = true`, leaving a declared value alone
+/// exactly as [`record_budget`] does. Written ONLY when the search leg produced
+/// evidence — a ranking that is complexity-only, or a hand-written manifest, has
+/// no business suppressing the heuristics that are then all it has.
+/// Test: `priority_tests::attributed_only_is_declared_when_the_search_leg_worked`.
+fn record_attributed_only(doc: &mut DocumentMut) -> Result<(), String> {
+    let report = doc
+        .entry("report")
+        .or_insert_with(|| Item::Table(Table::new()));
+    let table = report
+        .as_table_like_mut()
+        .ok_or_else(|| "the manifest's `report` is not a table".to_string())?;
+    if table.get("attributed_only").is_none() {
+        table.insert("attributed_only", Item::Value(Value::from(true)));
+    }
+    Ok(())
 }
 
 /// Fill `[report]`'s investigation budget keys, leaving declared ones alone.
@@ -370,7 +400,7 @@ path = "/w/repos/acme-web"
         let path = tmp.path().join("manifest.toml");
         std::fs::write(&path, text).expect("write");
         let gaps: Vec<String> = gaps.iter().map(|s| (*s).to_owned()).collect();
-        write_into(&path, Path::new(checkout), priorities, budget, &gaps).expect("records");
+        write_into(&path, Path::new(checkout), priorities, budget, false, &gaps).expect("records");
         std::fs::read_to_string(&path).expect("read back")
     }
 
@@ -536,6 +566,36 @@ path = "/w/repos/acme-web"
         );
     }
 
+    /// #6082: the key that tells trusty-review the ranking IS the sample. It is
+    /// written only when the caller says the search leg worked, because a
+    /// complexity-only ranking suppressing the path-name heuristics would leave
+    /// the investigation with less than it had before.
+    #[test]
+    fn attributed_only_is_declared_when_the_search_leg_worked() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("manifest.toml");
+        let priorities = [Priority::bare("src/pay.rs")];
+        for (attributed, expected) in [(true, Some(true)), (false, None)] {
+            std::fs::write(&path, SAMPLE).expect("write");
+            write_into(
+                &path,
+                Path::new("/w/repos/acme-api"),
+                &priorities,
+                None,
+                attributed,
+                &[],
+            )
+            .expect("records");
+            let out = std::fs::read_to_string(&path).expect("read back");
+            let parsed: toml::Value = toml::from_str(&out).expect("valid TOML");
+            assert_eq!(
+                parsed["report"].get("attributed_only").map(|v| v.as_bool()),
+                expected.map(Some),
+                "attributed={attributed}: {out}"
+            );
+        }
+    }
+
     /// The whole point: the ranking lands on the right repository, in order, and
     /// the OTHER repository is left exactly as it was.
     #[test]
@@ -592,6 +652,7 @@ path = "/w/repos/acme-web"
             Path::new("/w/repos/acme-api"),
             &[],
             None,
+            false,
             &["acme-api: no daemon".to_owned()],
         )
         .expect("records");
@@ -632,7 +693,7 @@ path = "/w/repos/acme-web"
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("manifest.toml");
         std::fs::write(&path, SAMPLE).expect("write");
-        write_into(&path, Path::new("/w/repos/acme-api"), &[], None, &[]).expect("no-op");
+        write_into(&path, Path::new("/w/repos/acme-api"), &[], None, false, &[]).expect("no-op");
         assert_eq!(std::fs::read_to_string(&path).expect("read back"), SAMPLE);
     }
 
@@ -649,6 +710,7 @@ path = "/w/repos/acme-web"
             Path::new("/w/repos/nowhere"),
             &[Priority::bare("src/a.rs")],
             None,
+            false,
             &[],
         )
         .expect_err("an unattributable ranking must be refused");
@@ -662,6 +724,7 @@ path = "/w/repos/acme-web"
             Path::new("/w/a"),
             &[Priority::bare("src/a.rs")],
             None,
+            false,
             &[],
         )
         .expect_err("an absent manifest must degrade");
@@ -678,6 +741,7 @@ path = "/w/repos/acme-web"
             Path::new("/w/a"),
             &[],
             None,
+            false,
             &["a: no daemon".to_owned()],
         )
         .expect_err("a malformed manifest must degrade");

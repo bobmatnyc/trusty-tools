@@ -92,6 +92,24 @@ pub struct ReportSection {
     /// precedence; when neither is set the built-in default applies.
     #[serde(default)]
     pub investigate_max_bytes: Option<usize>,
+    /// Select ONLY files this manifest declared, never padding with path-name
+    /// heuristics (#6082, owner ruling 2026-08-20: "filtering using search and
+    /// the kg, not inspecting files").
+    ///
+    /// Why: `inspect_priority` is a dominant sort key, not a filter, so a
+    /// declared list shorter than the file budget is silently topped up with
+    /// heuristic-scored files. Those files carry no dimension and no reason, and
+    /// the coverage section counted them toward the examined set exactly as it
+    /// counted evidence a query found. The producer that DID reach a healthy
+    /// index sets this so the shortfall is stated instead of padded.
+    /// What: `true` restricts selection to declared paths; the unfilled budget is
+    /// reported rather than spent. Absent or `false` keeps the pre-#6082
+    /// top-up — which is what a manifest written without a search index wants,
+    /// and why the flag is opt-in rather than the default.
+    /// Test: `select_tests::{attributed_only_declines_the_heuristic_top_up,
+    /// attributed_only_absent_keeps_the_top_up}`.
+    #[serde(default)]
+    pub attributed_only: Option<bool>,
     /// Optional toggle for Mermaid chart rendering under dataset tables (#2366).
     ///
     /// Why: charts are on by default; a manifest may opt out with `mermaid =

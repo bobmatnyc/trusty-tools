@@ -206,6 +206,7 @@ fn full_selection(files: &[SelectedFile]) -> Selection {
         dimensions_absent: vec![],
         per_dimension: vec![],
         attributed_files: 0,
+        attributed_only: false,
     }
 }
 

@@ -26,6 +26,7 @@ fn selection(path: &str, content: &str) -> Selection {
         dimensions_absent: vec![],
         per_dimension: vec![],
         attributed_files: 0,
+        attributed_only: false,
     }
 }
 

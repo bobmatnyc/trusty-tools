@@ -248,7 +248,11 @@ pub async fn cmd_report(config: ReviewConfig, args: ReportArgs) -> Result<()> {
     // command the recovery path.
     eprintln!("[trusty-review report] Synthesis — calling LLM provider...");
     let budget = resolve_budget(&args, &manifest);
-    let synthesis = run_synthesis(&config, &mut model, budget, &args.out)
+    // #6082: manifest-only, with no CLI flag — the producer that reached a
+    // healthy search index is the only party that knows whether the declared
+    // list is the whole intended sample.
+    let attributed_only = manifest.report.attributed_only.unwrap_or(false);
+    let synthesis = run_synthesis(&config, &mut model, budget, attributed_only, &args.out)
         .await
         .with_context(|| {
             format!(
@@ -505,6 +509,7 @@ async fn run_synthesis(
     config: &ReviewConfig,
     model: &mut ReportModel,
     budget: Budget,
+    attributed_only: bool,
     out_dir: &Path,
 ) -> Result<Synthesis> {
     let role = &config.role_models.reviewer;
@@ -514,7 +519,18 @@ async fn run_synthesis(
 
     // Wave-3 investigation (local checkouts only): select → LLM → verify, then
     // inject verified findings so synthesis and the reporter render them.
-    if let Some(inv) = run_investigation(provider.clone(), &role.model, model, budget).await {
+    // #6082: only the manifest declares this — there is no CLI flag, because the
+    // producer that reached a healthy index is the only party that knows whether
+    // the declared list is the whole intended sample.
+    if let Some(inv) = run_investigation(
+        provider.clone(),
+        &role.model,
+        model,
+        budget,
+        attributed_only,
+    )
+    .await
+    {
         let verified: usize = inv.repos.iter().map(|r| r.findings.len()).sum();
         eprintln!(
             "[trusty-review report] Investigation: {verified} verified finding(s) across {} local repo(s)",

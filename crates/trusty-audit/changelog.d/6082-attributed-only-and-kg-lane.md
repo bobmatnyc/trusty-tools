@@ -1,0 +1,6 @@
+Added
+- The manifest declares `[report].attributed_only = true` when the search leg produced per-dimension evidence. trusty-review then reads only the declared ranking instead of topping the file budget up with path-name heuristics. On every degraded path — no index, a dead daemon, a complexity-only ranking — the key is not written and the existing gap line names why.
+
+Changed
+- A search hit that the knowledge graph reached, rather than the query text, now says so in its reason: `via knowledge-graph expansion`. trusty-search labels the lane itself (`match_reason: "hybrid+kg"`); the evidence leg now reads that label instead of discarding it, so the report can distinguish "this file mentions credentials" from "this file is one call hop from the credential handler".
+- The evidence queries pin `expand_graph: true` explicitly. It is already the daemon's default, so behaviour is unchanged — the pin keeps a future default flip from silently dropping relationship evidence from every audit.

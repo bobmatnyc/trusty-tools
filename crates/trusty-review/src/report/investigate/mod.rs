@@ -112,6 +112,8 @@ pub struct Coverage {
     pub per_dimension: Vec<select::DimensionCoverage>,
     /// Examined files the manifest named as evidence, with a reason (#6082).
     pub attributed_files: usize,
+    /// True when selection was restricted to manifest-declared paths (#6082).
+    pub attributed_only: bool,
     /// Findings rejected for unverifiable evidence (across all batches).
     pub rejected: usize,
     /// The file/byte budget in force for this run.
@@ -152,6 +154,7 @@ impl Coverage {
             dimensions_absent: sel.dimensions_absent.clone(),
             per_dimension: sel.per_dimension.clone(),
             attributed_files: sel.attributed_files,
+            attributed_only: sel.attributed_only,
             rejected,
             budget,
             batches_total: batches.len(),
@@ -227,6 +230,7 @@ pub async fn run_investigation(
     llm_model: &str,
     model: &ReportModel,
     budget: Budget,
+    attributed_only: bool,
 ) -> Option<Investigation> {
     let instructions = model.instructions.as_deref();
     let mut repos = Vec::new();
@@ -246,6 +250,9 @@ pub async fn run_investigation(
         let signals = select::RiskSignals {
             priorities: &repo.inspect_priority,
             metrics: repo.metrics.as_ref(),
+            // #6082: only meaningful when the manifest declared something —
+            // an empty priority list under this flag would examine nothing.
+            attributed_only: attributed_only && !repo.inspect_priority.is_empty(),
         };
         let selection = select::select_files(path, &files, instructions, budget, signals);
         if selection.is_empty() {
