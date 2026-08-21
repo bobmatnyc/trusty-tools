@@ -104,7 +104,7 @@ async fn investigation_renders_verified_and_rejects_unverifiable() {
     assert!(model.repositories[0].local_path.is_some());
 
     let provider: Arc<dyn LlmProvider> = Arc::new(MockLlm);
-    let inv = run_investigation(provider, "mock/model", &model, Budget::default())
+    let inv = run_investigation(provider, "mock/model", &model, Budget::default(), false)
         .await
         .expect("investigation ran (local repo present)");
 
@@ -265,7 +265,7 @@ async fn investigation_survives_one_truncated_batch_and_names_it() {
     let provider: Arc<dyn LlmProvider> = Arc::new(BatchTruncatingLlm {
         calls: AtomicUsize::new(0),
     });
-    let inv = run_investigation(provider, "mock/model", &model, Budget::default())
+    let inv = run_investigation(provider, "mock/model", &model, Budget::default(), false)
         .await
         .expect("investigation ran (local repo present)");
 
@@ -319,6 +319,6 @@ async fn investigation_returns_none_for_remote_only() {
     let model = ReportModel::build(&manifest, Path::new("m.toml"), "report-technical-dd", None)
         .expect("model");
     let provider: Arc<dyn LlmProvider> = Arc::new(MockLlm);
-    let inv = run_investigation(provider, "mock/model", &model, Budget::default()).await;
+    let inv = run_investigation(provider, "mock/model", &model, Budget::default(), false).await;
     assert!(inv.is_none(), "remote-only manifests are not investigated");
 }

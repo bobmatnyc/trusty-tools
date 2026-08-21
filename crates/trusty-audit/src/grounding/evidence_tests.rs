@@ -26,6 +26,7 @@ impl StubSearch {
                     path: (*path).to_owned(),
                     score: *score,
                     start_line: 1,
+                    match_reason: "hybrid".to_owned(),
                 })
                 .collect(),
         );
@@ -297,6 +298,33 @@ fn the_ranking_is_capped() {
         MIN_PRIORITY_PATHS
     );
     assert!(blend(&[], &[], MIN_PRIORITY_PATHS).is_empty());
+}
+
+/// #6082: trusty-search expands the top hits along the symbol graph by default,
+/// so relationship evidence was already entering the sample unlabelled — the
+/// report could not say a file was read because it CALLS the credential handler
+/// rather than because it mentions one. The daemon's own lane label now reaches
+/// the reason string.
+#[test]
+fn a_graph_expanded_hit_says_the_graph_found_it() {
+    let body = r#"{"results":[
+        {"file":"","path":"src/session.rs","start_line":9,"score":0.7,"match_reason":"hybrid+kg"},
+        {"file":"","path":"src/auth.rs","start_line":3,"score":0.9,"match_reason":"hybrid"}
+    ]}"#;
+    let envelope: SearchEnvelope = serde_json::from_str(body).expect("parses");
+    let hits = envelope.into_hits("/w/repos/acme-api");
+    assert!(hits[0].via_graph(), "hybrid+kg is a graph-expanded hit");
+    assert!(!hits[1].via_graph(), "a plain hybrid hit is not");
+
+    let graph = reason("credential handling", &hits[0]);
+    assert!(
+        graph.contains("via knowledge-graph expansion"),
+        "the reason must name the graph: {graph}"
+    );
+    assert!(
+        !reason("credential handling", &hits[1]).contains("knowledge-graph"),
+        "a text match must not claim the graph found it"
+    );
 }
 
 /// More distinct files than any cap under test, best score first.

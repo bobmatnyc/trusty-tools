@@ -140,6 +140,10 @@ pub struct Selection {
     /// means the ranking was path names and complexity alone — which is what
     /// the coverage section must SAY rather than imply.
     pub attributed_files: usize,
+    /// True when the manifest asked for declared paths only (#6082), so an
+    /// examined set smaller than the budget is a stated shortfall rather than
+    /// room the heuristics failed to fill.
+    pub attributed_only: bool,
 }
 
 impl Selection {
@@ -349,6 +353,9 @@ pub struct RiskSignals<'a> {
     pub priorities: &'a [InspectionPriority],
     /// Per-file findings from trusty-analyze; `None` when `--analyze` was off.
     pub metrics: Option<&'a AnalyzeMetrics>,
+    /// Select only `priorities`, never padding the budget with heuristic-scored
+    /// files (#6082). See `Manifest`'s `attributed_only` for the rationale.
+    pub attributed_only: bool,
 }
 
 /// Compute a file's relevance score against instruction keywords, DD dimensions,
@@ -512,6 +519,9 @@ fn candidate(
 /// priority is a SEPARATE, dominant sort key rather than another score term, so
 /// a declared path is inspected ahead of every heuristic-only file whatever its
 /// weight — the budget still bounds how many of them are actually read.
+/// `signals.attributed_only` turns that dominance into a FILTER (#6082): only
+/// declared paths are read, and a declared list shorter than the budget leaves
+/// the remainder unspent instead of padding it with path-name guesses.
 /// Test: `select_tests::{ranks_relevant_first, budget_caps_file_count,
 /// budget_caps_total_bytes, coverage_reports_dimensions,
 /// absent_signals_reproduce_baseline_order, manifest_priority_outranks_heuristics,
@@ -549,6 +559,12 @@ pub fn select_files(
         if selected.len() >= budget.max_files {
             break;
         }
+        // #6082: a weight of 0 means no manifest entry named this file, so it
+        // reached the ranking on its path name alone. Under `attributed_only`
+        // the remaining budget goes unspent rather than to a guess.
+        if signals.attributed_only && c.weight == 0 {
+            continue;
+        }
         let remaining = budget.max_bytes.saturating_sub(bytes_sent);
         if remaining == 0 {
             break;
@@ -571,6 +587,7 @@ pub fn select_files(
     Selection {
         per_dimension: per_dimension(&selected, &dimensions_covered),
         attributed_files: selected.iter().filter(|f| f.selected_by.is_some()).count(),
+        attributed_only: signals.attributed_only,
         files: selected,
         total_files,
         skipped,

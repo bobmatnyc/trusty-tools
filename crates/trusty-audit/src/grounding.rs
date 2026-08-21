@@ -164,6 +164,11 @@ pub struct Grounding {
     pub priorities: Vec<priority::Priority>,
     /// One line per leg that degraded, naming the repository and the cost.
     pub gaps: Vec<String>,
+    /// True when the search leg produced per-dimension evidence, so the ranking
+    /// IS the intended sample and trusty-review may decline its path-name
+    /// top-up (#6082). False on every degraded path, which is what keeps the
+    /// heuristics available exactly when they are all that is left.
+    pub attributed: bool,
 }
 
 impl Grounding {
@@ -173,6 +178,7 @@ impl Grounding {
             index_id: None,
             priorities: Vec::new(),
             gaps: vec![reason],
+            attributed: false,
         }
     }
 }
@@ -235,6 +241,7 @@ pub async fn ground(
                  factors are not assessed for it, and its investigation pass ranks files by path \
                  name alone"
             )],
+            attributed: false,
         };
     }
 
@@ -260,6 +267,10 @@ pub async fn ground(
     }
     Grounding {
         index_id: Some(index_id),
+        // #6082: the ranking may decline trusty-review's heuristic top-up only
+        // when the search leg actually answered — a complexity-only ranking has
+        // no business suppressing the heuristics that are then all it has.
+        attributed: !discovery.dimensions.is_empty() && !priorities.is_empty(),
         priorities,
         gaps,
     }
@@ -355,6 +366,7 @@ pub async fn ground_manifest(
         checkout,
         &grounding.priorities,
         Some(budget),
+        grounding.attributed,
         &grounding.gaps,
     ) {
         grounding.gaps.push(format!(

@@ -204,6 +204,28 @@ pub struct Hit {
     pub score: f32,
     /// First line of the chunk, for the reason string.
     pub start_line: usize,
+    /// Which lane found it, verbatim from the daemon (#6082): `hybrid`,
+    /// `hybrid+kg`, `bm25`, `vector`. The `+kg` forms are the ones the symbol
+    /// graph reached rather than the query text — see [`Hit::via_graph`].
+    pub match_reason: String,
+}
+
+impl Hit {
+    /// True when the knowledge graph, not the query text, put this file in reach.
+    ///
+    /// Why: trusty-search expands the top hits of every query 1–2 hops along
+    /// `callers_of` / `callees_of` (`expand_graph`, on by default), so relationship
+    /// evidence was ALREADY entering the sample — it just arrived indistinguishable
+    /// from a text match, and the report could not say a file was read because it
+    /// calls the credential handler rather than because it mentions one. The
+    /// daemon already labels the lane; this only reads the label.
+    /// What: matches the `+kg` suffix trusty-search writes on a graph-expanded
+    /// chunk's `match_reason`.
+    /// Test: `super::evidence_tests::a_graph_expanded_hit_says_the_graph_found_it`.
+    #[must_use]
+    pub fn via_graph(&self) -> bool {
+        self.match_reason.contains("kg")
+    }
 }
 
 /// What one repository's discovery pass found, per dimension.
@@ -295,7 +317,16 @@ impl SearchClient for HttpSearch {
         let response = self
             .client
             .post(url)
-            .json(&serde_json::json!({ "text": query, "top_k": top_k, "compact": true }))
+            // #6082: `expand_graph` already defaults true on the daemon, so this
+            // pins the behaviour the evidence leg DEPENDS on rather than
+            // inheriting it — a future default flip would otherwise silently
+            // drop relationship evidence from every audit.
+            .json(&serde_json::json!({
+                "text": query,
+                "top_k": top_k,
+                "compact": true,
+                "expand_graph": true,
+            }))
             .send()
             .await
             .map_err(|e| format!("trusty-search did not answer {url} ({e})"))?;
@@ -329,6 +360,8 @@ struct Chunk {
     score: f32,
     #[serde(default)]
     start_line: usize,
+    #[serde(default)]
+    match_reason: String,
 }
 
 impl SearchEnvelope {
@@ -342,6 +375,7 @@ impl SearchEnvelope {
                     path,
                     score: chunk.score,
                     start_line: chunk.start_line,
+                    match_reason: chunk.match_reason.clone(),
                 })
             })
             .collect()
@@ -494,9 +528,18 @@ fn merge(scored: &mut Vec<(f32, FileEvidence)>, hits: &[Hit], query: &str) {
 }
 
 /// The one-line reason a file is in the ranking.
+///
+/// #6082: a graph-expanded hit says so, because "this file is one call hop from
+/// the credential handler" and "this file mentions credentials" are different
+/// claims and the report renders this string verbatim.
 fn reason(query: &str, hit: &Hit) -> String {
+    let lane = if hit.via_graph() {
+        ", via knowledge-graph expansion"
+    } else {
+        ""
+    };
     format!(
-        "trusty-search hit for \"{query}\" (score {:.2}, line {})",
+        "trusty-search hit for \"{query}\" (score {:.2}, line {}{lane})",
         hit.score, hit.start_line
     )
 }

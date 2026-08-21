@@ -163,6 +163,20 @@ fn discovery_lines(c: &Coverage) -> String {
              search-derived evidence for this repository (see Gaps & Caveats for why)\n",
         )
     };
+    // #6082: under attributed-only selection an examined set smaller than the
+    // budget is a SHORTFALL of evidence, not spare capacity. Stating it is the
+    // whole point of declining the top-up — silence here would read as a full
+    // sample.
+    if c.attributed_only && c.files_examined < c.budget.max_files {
+        out.push_str(&format!(
+            "- attributed-only selection: {} of {} budgeted file(s) carried search or complexity \
+             evidence; the remaining {} were left unread rather than filled by path-name \
+             heuristics\n",
+            c.files_examined,
+            c.budget.max_files,
+            c.budget.max_files - c.files_examined,
+        ));
+    }
     for d in &c.per_dimension {
         out.push_str(&format!(
             "  - {}: {} file(s) examined{}\n",

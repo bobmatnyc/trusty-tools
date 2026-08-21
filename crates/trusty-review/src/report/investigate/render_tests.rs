@@ -58,6 +58,7 @@ fn repo(
             dimensions_absent: vec!["scalability".to_string()],
             per_dimension: vec![],
             attributed_files: 0,
+            attributed_only: false,
             rejected: 2,
             budget: Budget::default(),
             batches_total: 1,
@@ -120,6 +121,34 @@ fn discovered(attributed: usize, per_dimension: Vec<DimensionCoverage>) -> Inves
     r.coverage.attributed_files = attributed;
     r.coverage.per_dimension = per_dimension;
     Investigation { repos: vec![r] }
+}
+
+/// #6082: declining the heuristic top-up is only honest if the shortfall is
+/// SAID. Silence would render a half-filled budget exactly like a full sample.
+#[test]
+fn coverage_section_states_the_attributed_only_shortfall() {
+    let mut inv = discovered(3, Vec::new());
+    inv.repos[0].coverage.attributed_only = true;
+    inv.repos[0].coverage.files_examined = 3;
+    inv.repos[0].coverage.budget.max_files = 40;
+    let out = coverage_section(&inv);
+    assert!(
+        out.contains(
+            "attributed-only selection: 3 of 40 budgeted file(s) carried search or complexity \
+             evidence; the remaining 37 were left unread"
+        ),
+        "{out}"
+    );
+
+    // A budget the evidence filled has no shortfall to state.
+    let mut full = discovered(40, Vec::new());
+    full.repos[0].coverage.attributed_only = true;
+    full.repos[0].coverage.files_examined = 40;
+    full.repos[0].coverage.budget.max_files = 40;
+    assert!(
+        !coverage_section(&full).contains("attributed-only selection"),
+        "a filled budget states no shortfall"
+    );
 }
 
 /// Why: #6082 — the coverage section must say what the examined set was chosen
