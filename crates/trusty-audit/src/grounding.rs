@@ -58,6 +58,7 @@ pub mod evidence;
 pub mod hotspots;
 pub mod index;
 pub mod priority;
+pub mod quality;
 
 #[cfg(test)]
 mod grounding_tests;
@@ -245,6 +246,22 @@ pub async fn ground(
         };
     }
 
+    // #6082: an index id is a checkout basename, so a same-named checkout
+    // elsewhere on this machine is served under it. Both legs below read that
+    // index, so a wrong root poisons the evidence AND the measurements.
+    if let Err(cause) = index::root_matches(&tools.search_url, &index_id, checkout).await {
+        return Grounding {
+            index_id: Some(index_id),
+            priorities: Vec::new(),
+            gaps: vec![format!(
+                "{display}: complexity data unavailable: index root mismatch — {cause}. Its \
+                 evidence discovery and complexity hotspots are not assessed, and its \
+                 investigation pass ranks files by path name alone"
+            )],
+            attributed: false,
+        };
+    }
+
     // #6082: the discovery leg. It asks the index where each DD dimension's
     // evidence is, so a selected file arrives already attributed to what it is
     // evidence FOR.
@@ -255,6 +272,15 @@ pub async fn ground(
             failures: vec![cause],
         },
     };
+    let mut discovery = discovery;
+    // #6082: the dependencies dimension is enumerable, not semantic. Search
+    // returned three files that MENTION dependencies and no manifest, and the
+    // report then stated the repository declared none.
+    quality::lead_with_manifests(
+        &mut discovery.dimensions,
+        checkout,
+        caps.files_per_dimension,
+    );
     let mut gaps = discovery_gaps(&discovery, display);
 
     let hotspots = complexity(tools, &index_id, checkout, display, &mut gaps).await;

@@ -36,6 +36,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use super::priority::Priority;
+use super::quality;
 
 /// Chunk hits requested per query at [`MIN_FILES_PER_DIMENSION`].
 const MIN_TOP_K: usize = 12;
@@ -487,7 +488,14 @@ pub async fn discover<C: SearchClient>(
                 Err(cause) => discovery.failures.push(cause),
             }
         }
-        scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+        // #6082: production files first, then by score. A test file matches the
+        // query that looks for the thing it tests, so without this tier a
+        // call-graph test outranks the middleware it exercises.
+        scored.sort_by(|a, b| {
+            quality::demoted_for(dimension, &a.1.path)
+                .cmp(&quality::demoted_for(dimension, &b.1.path))
+                .then_with(|| b.0.total_cmp(&a.0))
+        });
         scored.truncate(caps.files_per_dimension);
         if !scored.is_empty() {
             discovery.dimensions.push(DimensionEvidence {
@@ -500,8 +508,12 @@ pub async fn discover<C: SearchClient>(
 }
 
 /// Merge one query's hits into a dimension's running best-per-file list.
+///
+/// #6082: a hit below [`quality::MIN_EVIDENCE_SCORE`] never enters the list. A
+/// hybrid search returns its top-N whether or not it found anything, so an
+/// empty-handed query returns filler rows rather than no rows.
 fn merge(scored: &mut Vec<(f32, FileEvidence)>, hits: &[Hit], query: &str) {
-    for hit in hits {
+    for hit in hits.iter().filter(|h| quality::is_evidence(h.score)) {
         if hit.path.is_empty() {
             continue;
         }
