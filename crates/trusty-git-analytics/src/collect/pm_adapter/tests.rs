@@ -46,6 +46,55 @@ fn build_adapters_returns_empty_for_default_config() {
     assert!(adapters.is_empty());
 }
 
+/// 🔴 #6130: a declared-absent GitHub leg builds no adapter, so nothing
+/// queries an identity that does not exist. Paired with
+/// `a_configured_slug_still_builds_the_adapter` below, this is the whole
+/// distinction: the declaration turns the leg off, and nothing else does.
+#[test]
+fn a_declared_absent_github_leg_builds_no_adapter() {
+    use crate::core::config::GithubConfig;
+    let cfg = Config {
+        github: Some(GithubConfig {
+            repo: None,
+            work_items_unavailable: Some("the checkout at /srv/apex names no GitHub remote".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert!(build_adapters(&cfg).is_empty());
+}
+
+/// The other side of that fork: a real slug still builds the adapter, so its
+/// fetch still runs and still fails closed when GitHub refuses it.
+#[test]
+fn a_configured_slug_still_builds_the_adapter() {
+    use crate::core::config::GithubConfig;
+    let cfg = Config {
+        github: Some(GithubConfig {
+            repo: Some("bobmatnyc/trusty-tools".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let adapters = build_adapters(&cfg);
+    assert_eq!(adapters.len(), 1);
+    assert_eq!(adapters[0].source(), PmSource::GitHub);
+}
+
+/// A blank reason declares nothing — an empty string names no gap, so treating
+/// it as a declaration would let a formatting slip silence the leg with a
+/// Gaps line that says why nothing.
+#[test]
+fn a_blank_reason_does_not_declare_the_leg_absent() {
+    use crate::core::config::GithubConfig;
+    let cfg = GithubConfig {
+        work_items_unavailable: Some("   ".into()),
+        ..Default::default()
+    };
+    assert_eq!(cfg.work_items_declared_absent(), None);
+    assert_eq!(GithubConfig::default().work_items_declared_absent(), None);
+}
+
 #[test]
 fn build_adapters_includes_ado_when_configured() {
     use crate::core::config::{AzureDevOpsConfig, PmConfig};

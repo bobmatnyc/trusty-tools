@@ -859,6 +859,50 @@ pm:
         );
     }
 
+    /// 🔴 #6130's hard line: the declared-skip path must NOT loosen this. A
+    /// REAL `owner/repo` whose every lookup 404s is the failure the issue's
+    /// run hit, and it still has to fail the stage closed — a repository that
+    /// exists but cannot be read is a fetch that failed, never a leg that was
+    /// declared absent. Only a config that says so up front skips.
+    #[tokio::test]
+    async fn a_real_slug_whose_fetch_fails_still_fails_the_stage_closed() {
+        use crate::collect::pm_adapter::GitHubAdapter;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Every request 404s — the repo-visibility probe included, which is
+        // what turns an invisible repository into an error rather than an
+        // authoritative "no such issue".
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let gh_cfg = GithubConfig {
+            repo: Some("bobmatnyc/trusty-tools".into()),
+            fetch_on_reference: true,
+            ..Default::default()
+        };
+        let client = crate::collect::github::GitHubClient::new(&gh_cfg)
+            .expect("client")
+            .with_api_base(server.uri());
+        let adapter = GitHubAdapter::new(client);
+
+        let mut db = Database::open_in_memory().expect("db");
+        let commits = vec![("sha1".to_string(), "fix: closes #42".to_string())];
+        let mut stats = CollectionStats::default();
+        run_one_adapter(&mut db, &adapter, &commits, &mut stats).await;
+
+        assert_eq!(
+            stats.stage_failures().len(),
+            1,
+            "a total fetch failure against a real slug must reach the exit code: {:?}",
+            stats.errors
+        );
+        assert_eq!(row_count(&db, "github"), 0);
+    }
+
     /// A commit corpus with no reference in this provider's syntax never
     /// reaches the network, so a broken credential is not reported.
     #[tokio::test]

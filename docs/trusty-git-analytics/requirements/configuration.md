@@ -185,6 +185,7 @@ commit API keys to the config file.
 | `fetch_pr_reviews` | bool | true | Fetch review summaries with PRs |
 | `open_pr_refresh_ttl_hours` | u32 | 1 | TTL for refreshing open PR snapshots |
 | `ticket_regex` | string | None | Override regex for detecting GitHub ticket refs (e.g. `#(\d+)`) in commit messages. Added in v1.0.6 (#75). |
+| `work_items_unavailable` | string | None | Declares the GitHub work-item leg ABSENT for this run and says why. Set it and no GitHub adapter is built, the reason is logged, and `tga audit` names it in the report's Gaps section as a leg that was not attempted. Leave it unset and nothing changes — a configured `repo` whose fetch fails still fails the `collect` stage. A reason, never a boolean: an empty string declares nothing. Added in #6130. |
 
 ### `bitbucket` — BitbucketConfig
 

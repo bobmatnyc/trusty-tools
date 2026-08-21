@@ -702,6 +702,8 @@ trusty-review = "0.15.1"
             repo: SelectedRepo {
                 name: name.to_owned(),
                 path: PathBuf::from(format!("repos/{name}")),
+                github_slug: None,
+                github_absent: None,
             },
             output,
             log: work.path(Area::Logs).join(format!("{stem}.log")),
@@ -721,6 +723,8 @@ trusty-review = "0.15.1"
                 repo: SelectedRepo {
                     name: name.to_owned(),
                     path: PathBuf::from(format!("repos/{name}")),
+                    github_slug: None,
+                    github_absent: None,
                 },
                 output: work.path(Area::Output).join(stem),
                 log: work.path(Area::Logs).join(format!("{stem}.log")),

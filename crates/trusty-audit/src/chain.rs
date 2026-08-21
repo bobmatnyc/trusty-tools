@@ -583,6 +583,8 @@ trusty-review = "0.15.1"
                 SelectedRepo {
                     name: (*name).to_owned(),
                     path: PathBuf::from(format!("repos/{name}")),
+                    github_slug: None,
+                    github_absent: None,
                 }
             })
             .collect();

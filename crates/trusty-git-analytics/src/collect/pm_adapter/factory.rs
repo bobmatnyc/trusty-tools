@@ -111,12 +111,23 @@ pub fn build_adapters(config: &Config) -> Vec<Box<dyn PmAdapter>> {
     }
 
     if let Some(cfg) = &config.github {
-        match crate::collect::github::GitHubClient::new(cfg) {
-            Ok(client) => out.push(Box::new(GitHubAdapter::with_ticket_regex(
-                client,
-                cfg.ticket_regex.as_deref(),
-            ))),
-            Err(e) => warn!(error = %e, "skipping GitHub adapter: invalid config"),
+        // #6130: a declared-absent leg is not a misconfiguration. Recorded at
+        // `warn` with its reason so the run log carries the same sentence
+        // `audit::sweep_gap_lines` puts in the report's Gaps section, and no
+        // client is built — there is no `owner/repo` to build one from.
+        if let Some(reason) = cfg.work_items_declared_absent() {
+            warn!(
+                reason,
+                "GitHub work-item collection declared absent for this run"
+            );
+        } else {
+            match crate::collect::github::GitHubClient::new(cfg) {
+                Ok(client) => out.push(Box::new(GitHubAdapter::with_ticket_regex(
+                    client,
+                    cfg.ticket_regex.as_deref(),
+                ))),
+                Err(e) => warn!(error = %e, "skipping GitHub adapter: invalid config"),
+            }
         }
     }
 

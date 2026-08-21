@@ -610,6 +610,116 @@ fn a_credential_in_a_fetch_error_never_reaches_the_gap_line() {
     );
 }
 
+/// 🔴 #6130's report obligation. A local-path audit whose checkout names no
+/// GitHub remote declares the work-item leg absent; the sweep must complete,
+/// its `collect` stage must still report `Succeeded` so the run can package,
+/// and the Gaps section must say the leg was never attempted and why.
+///
+/// Against the pre-fix code this fails at the last assertion: the declaration
+/// had nowhere to go, so a clean run produced no line and the issue-derived
+/// sections read as assessed.
+#[tokio::test]
+async fn a_declared_absent_leg_is_named_in_the_gap_lines() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo_path = dir.path().join("acme-service");
+    init_repo_with_dead_origin(
+        &repo_path,
+        "sshx://git@example.invalid/acme/acme-service.git",
+    );
+
+    let mut config = Config::default();
+    config.github = Some(crate::core::config::GithubConfig {
+        // No slug at all — the shape the fix produces for a checkout with no
+        // GitHub remote. Inventing `local/acme-service` here is what #6130 is.
+        repo: None,
+        work_items_unavailable: Some(
+            "the checkout at /srv/acme-service names no GitHub remote".to_string(),
+        ),
+        ..Default::default()
+    });
+    config
+        .repositories
+        .push(crate::core::config::RepositoryConfig {
+            name: Some("acme-service".to_string()),
+            path: repo_path,
+            branch: None,
+            since_date: None,
+            until_date: None,
+            org: None,
+            head_only: false,
+            fetch_timeout_secs: None,
+        });
+
+    let mut db = Database::open(&dir.path().join("tga.db")).expect("open db");
+    let options = SweepOptions {
+        output: Some(dir.path().join("out")),
+        weeks: Some(1),
+    };
+    let stats = run_full_sweep(&config, &mut db, &options, None)
+        .await
+        .expect("sweep");
+
+    let collect = stats
+        .outcomes
+        .iter()
+        .find(|o| o.stage == SweepStage::Collect)
+        .expect("collect stage ran");
+    assert_eq!(
+        collect.status,
+        StageStatus::Succeeded,
+        "a declared-absent leg must not fail the stage: {:?}",
+        collect.status
+    );
+
+    let lines = crate::audit::sweep_gap_lines(&stats, NO_SECRETS);
+    let declared = lines
+        .iter()
+        .find(|l| l.contains("GitHub work items"))
+        .unwrap_or_else(|| panic!("no Gaps line names the declared-absent leg: {lines:#?}"));
+    assert!(
+        declared.contains("was not attempted"),
+        "the line must say the leg never ran: {declared}"
+    );
+    assert!(
+        declared.contains("names no GitHub remote"),
+        "the line must carry the declared reason: {declared}"
+    );
+    assert!(
+        declared.contains("unassessed"),
+        "the line must mark the affected sections unassessed: {declared}"
+    );
+}
+
+/// A declared reason is text this process did not author — it is a config
+/// value, so it travels the same redaction path a stage message does. Also
+/// pins the ordering: failed stages, then stale repositories, then declared
+/// skips.
+#[test]
+fn a_credential_in_a_declared_reason_never_reaches_the_gap_line() {
+    let mut stats = AuditSweepStats::default();
+    stats.record(
+        SweepStage::Dora,
+        Instant::now(),
+        Err(anyhow::anyhow!("fact_deployments is empty")),
+    );
+    stats.record_declared_skip(crate::audit::DeclaredSkip {
+        leg: "GitHub work items".to_string(),
+        reason: "no remote at https://x-access-token:ghp_SECRETVALUE@github.com/acme/svc"
+            .to_string(),
+    });
+
+    let lines = crate::audit::sweep_gap_lines(&stats, &["ghp_SECRETVALUE"]);
+
+    assert_eq!(lines.len(), 2, "{lines:#?}");
+    assert!(lines[0].contains("`dora`"), "{}", lines[0]);
+    assert!(lines[1].contains("GitHub work items"), "{}", lines[1]);
+    assert!(
+        !lines[1].contains("ghp_SECRETVALUE"),
+        "the token survived into the report: {}",
+        lines[1]
+    );
+}
+
 #[test]
 fn sweep_gap_lines_are_empty_for_a_clean_run() {
     let mut stats = AuditSweepStats::default();

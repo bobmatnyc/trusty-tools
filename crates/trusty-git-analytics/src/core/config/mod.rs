@@ -1105,6 +1105,47 @@ pub struct GithubConfig {
     /// pull requests alone. Set this to `false` to opt out.
     #[serde(default = "default_true")]
     pub fetch_on_reference: bool,
+
+    /// Why this run cannot reach GitHub issues at all, stated by whoever wrote
+    /// the config (#6130).
+    ///
+    /// Why: a caller that knows up front there is no GitHub identity to query —
+    /// `trusty-audit` auditing a checkout whose only remote is a filesystem
+    /// path, say — had two ways to express that, and both were wrong. Leaving
+    /// [`Self::repo`] unset makes
+    /// [`build_adapters`](crate::collect::pm_adapter::build_adapters) drop the
+    /// adapter behind a `warn!` nobody reads, which is a BLIND gate: the
+    /// report's issue-derived sections then read as clean rather than as
+    /// unassessed. Inventing a slug is worse — `local/trusty-tools` 404'd 3152
+    /// of 3152 lookups, failed the `collect` stage closed, and stopped the
+    /// audit before it could package.
+    ///
+    /// What: a REASON, never a boolean, on the `PREFLIGHT_SEMVER_UNVERIFIED`
+    /// model (#5620). Set → the GitHub work-item leg is DECLARED ABSENT: no
+    /// adapter is built, the reason is logged, and
+    /// [`sweep_gap_lines`](crate::audit::sweep_gap_lines) names it in the
+    /// report's Gaps section. Unset → nothing changes, and a `repo` whose fetch
+    /// fails still fails the stage closed exactly as before.
+    /// Test: `crate::collect::pm_adapter::tests::a_declared_absent_github_leg_builds_no_adapter`,
+    /// `crate::audit::tests::a_declared_absent_leg_is_named_in_the_gap_lines`.
+    #[serde(default)]
+    pub work_items_unavailable: Option<String>,
+}
+
+impl GithubConfig {
+    /// The reason the GitHub work-item leg was declared absent, if it was.
+    ///
+    /// The single reader of [`Self::work_items_unavailable`], so "declared
+    /// absent" means one thing everywhere: a non-blank reason string. A blank
+    /// one declares nothing — an empty string names no gap, and treating it as
+    /// a declaration would let a formatting slip silence the leg.
+    /// Test: `crate::collect::pm_adapter::tests::a_blank_reason_does_not_declare_the_leg_absent`.
+    pub fn work_items_declared_absent(&self) -> Option<&str> {
+        self.work_items_unavailable
+            .as_deref()
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+    }
 }
 
 fn default_fetch_pr_reviews() -> bool {

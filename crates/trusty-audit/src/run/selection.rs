@@ -59,6 +59,38 @@ use crate::workdir::{self, Area, WorkDir};
 /// `AllSucceeded` is the same fail-open shape as a sweep over none.
 pub const SELECTION_FILE: &str = "selected-repos.toml";
 
+/// Whether this repository's GitHub issues can be reached, and if not, why.
+///
+/// Why (#6130): `SelectedRepo::name` is the on-disk identity, and for a
+/// local-path target that is `local/<name>` — an owner GitHub does not have.
+/// Handing it to tga as `github.repo` asked `api.github.com/repos/local/…` for
+/// every work item and 404'd all 3152 of them, which failed the `collect`
+/// stage closed and stopped the audit before it could package. The issue
+/// identity is therefore its own field, resolved from the source checkout's
+/// `origin` remote, and its ABSENCE is recorded rather than inferred.
+/// What: [`Present`](Self::Present) carries the `owner/repo` tga queries;
+/// [`Absent`](Self::Absent) carries the sentence the report's Gaps section
+/// prints. There is deliberately no "unknown" — see
+/// [`SelectedRepo::github_leg`] for how a selection file written before this
+/// field existed is resolved into one of the two.
+/// Test: `super::run_tests::a_local_repo_with_no_github_remote_declares_the_leg_absent`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GithubLeg<'a> {
+    /// GitHub issues for this repository live under this `owner/repo`.
+    Present(&'a str),
+    /// No GitHub identity — the leg is declared absent, for this reason.
+    Absent(&'a str),
+}
+
+/// What a pre-#6130 selection file's `local/<name>` entry resolves to.
+///
+/// A selection written before the slug was resolved carries neither field, and
+/// its `local/` owner is the only evidence left that the target was a path on
+/// disk. Reading that as a declared absence is the conservative half of the
+/// fork: the alternative is querying `local/<name>` again.
+const LEGACY_LOCAL_ABSENCE: &str = "this repository was selected as a path on disk by an earlier \
+run, which recorded no GitHub identity for it";
+
 /// One repository the run was asked to audit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -67,6 +99,48 @@ pub struct SelectedRepo {
     pub name: String,
     /// Checkout path. Relative paths anchor to the working-directory root.
     pub path: PathBuf,
+    /// The `owner/repo` this repository's GitHub issues live under (#6130).
+    ///
+    /// Set by `crate::clone` from the acquisition source: the request entry
+    /// itself for a remote, the source checkout's `origin` remote for a local
+    /// path. Read through [`Self::github_leg`], never directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_slug: Option<String>,
+    /// Why there is no [`Self::github_slug`], when there is none (#6130).
+    ///
+    /// Set exactly when the resolution ran and found no GitHub identity, so an
+    /// absence carries a sentence the report can print instead of a silence the
+    /// report cannot distinguish from a clean result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_absent: Option<String>,
+}
+
+impl SelectedRepo {
+    /// This repository's GitHub-issue identity, or the reason it has none.
+    ///
+    /// Why: [`Self::github_slug`] and [`Self::github_absent`] are the wire
+    /// format — two optional strings that must agree — and this is the single
+    /// place that turns them into the one answer callers act on, so the
+    /// agreement is enforced at the read rather than trusted at every write.
+    /// What: a set slug wins; a recorded reason is next; and a selection file
+    /// written before either field existed falls back on the only evidence it
+    /// left — an entry acquired under [`crate::local_repo::LOCAL_OWNER`] was a
+    /// path on disk and gets [`LEGACY_LOCAL_ABSENCE`], while any other name IS
+    /// the `owner/repo` it was cloned from.
+    /// Test: `super::run_tests::a_legacy_selection_still_resolves_both_shapes`.
+    pub fn github_leg(&self) -> GithubLeg<'_> {
+        if let Some(slug) = self.github_slug.as_deref() {
+            return GithubLeg::Present(slug);
+        }
+        if let Some(reason) = self.github_absent.as_deref() {
+            return GithubLeg::Absent(reason);
+        }
+        if self.name.split('/').next() == Some(crate::local_repo::LOCAL_OWNER) {
+            GithubLeg::Absent(LEGACY_LOCAL_ABSENCE)
+        } else {
+            GithubLeg::Present(&self.name)
+        }
+    }
 }
 
 /// The `state/selected-repos.toml` document.

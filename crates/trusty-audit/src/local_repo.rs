@@ -110,7 +110,9 @@ pub fn normalize(spec: &str) -> PathBuf {
 /// would name the repository after somewhere it cannot be fetched from, which
 /// is the whole reason this path exists; and for the mirror-of-a-dead-org case
 /// it would resurrect an owner that no longer resolves. The path is the identity
-/// the operator has.
+/// the operator has. That holds for the NAME; the repository's GitHub ISSUE
+/// identity is a different question, answered separately by
+/// [`github_slug`] (#6130).
 ///
 /// **On collision**, two paths whose basenames match derive one name and would
 /// share `repos/local/<name>` — the second finding the first's checkout and
@@ -154,6 +156,96 @@ pub fn derive_name(path: &Path) -> Result<String, AuditError> {
         ));
     }
     Ok(format!("{LOCAL_OWNER}/{name}"))
+}
+
+/// The GitHub host whose `owner/repo` the audit's issue collection can address.
+///
+/// Only `github.com`: tga's issue client is hard-wired to `api.github.com`, so a
+/// GitHub Enterprise remote names a repository this audit still cannot fetch —
+/// accepting it would trade a wrong slug for a slug that 404s, which is the
+/// same defect wearing a better hostname.
+const GITHUB_HOST: &str = "github.com";
+
+/// The `owner/repo` a remote URL addresses on [`GITHUB_HOST`], if it does.
+///
+/// Why (#6130): [`derive_name`] deliberately does not consult a remote, and
+/// that stays right — the on-disk identity is the operator's path. But its
+/// output is `local/<name>`, and `crate::run` also handed that string to tga as
+/// `github.repo`, so the self-audit asked `api.github.com/repos/local/trusty-tools`
+/// for 3152 work items and got 3152 404s. The repository's ISSUE identity and
+/// its on-disk identity are two different questions; this answers the second
+/// one only.
+///
+/// **Why not [`trusty_common::github_path::parse_github_path`].** That helper
+/// SLUGIFIES both segments for filesystem safety — lower-cased, `_` collapsed
+/// to `-` — which is correct for a directory name and wrong for an API path:
+/// `Acme/Cool_App` would be queried as `acme/cool-app`, a different repository
+/// or none. It also accepts any host, and this must not. A slug that addresses
+/// the wrong repository is the failure mode #6130 already is.
+///
+/// What: strips the scheme and any userinfo, requires the host to be exactly
+/// [`GITHUB_HOST`], takes the two path segments verbatim (only a trailing
+/// `.git` comes off, as `git clone` itself strips it), and returns them only if
+/// [`crate::clone::split_name`] accepts the pair — so a slug from here is
+/// always one the rest of this crate can carry.
+/// Test: `super::local_repo_tests::a_github_remote_yields_its_owner_and_repo`,
+/// `super::local_repo_tests::a_non_github_remote_yields_nothing`.
+pub fn parse_github_slug(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    let after_scheme = match trimmed.find("://") {
+        Some(idx) => &trimmed[idx + 3..],
+        None => trimmed,
+    };
+    // scp-syntax and URL userinfo both put credentials before the host, and
+    // both put them ahead of the first `/` — so only an `@` there is userinfo,
+    // never one inside a path segment.
+    let head_len = after_scheme.find('/').unwrap_or(after_scheme.len());
+    let locator = match after_scheme[..head_len].find('@') {
+        Some(idx) => &after_scheme[idx + 1..],
+        None => after_scheme,
+    };
+    // The host ends at the scp `:` or the first `/`, whichever comes first.
+    let split = locator.find([':', '/'])?;
+    if !locator[..split].eq_ignore_ascii_case(GITHUB_HOST) {
+        return None;
+    }
+    let path = locator[split + 1..].trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let [owner, repo] = segments.as_slice() else {
+        return None;
+    };
+    let slug = format!("{owner}/{repo}");
+    crate::clone::split_name(&slug).ok()?;
+    Some(slug)
+}
+
+/// The `owner/repo` this checkout's `origin` remote addresses on GitHub.
+///
+/// Why: the one I/O entry point for [`parse_github_slug`], kept here so the
+/// module's read-only invariant covers it — `git config --get` reads
+/// configuration and writes nothing, the same guarantee [`inspect`]'s
+/// `rev-parse` calls carry.
+/// What: `None` when git cannot be run, the path is not a repository, there is
+/// no `origin`, or its URL does not address [`GITHUB_HOST`]. Every one of those
+/// is the same answer to the caller — this audit has no GitHub identity for
+/// this checkout — and the caller turns it into a declared gap, never a
+/// failure.
+/// Test: `super::local_repo_tests::a_checkout_with_a_github_origin_resolves_its_slug`,
+/// `super::local_repo_tests::a_checkout_with_no_remote_resolves_nothing`.
+pub async fn github_slug(path: &Path) -> Option<String> {
+    let argv: Vec<OsString> = vec![
+        "-C".into(),
+        path.as_os_str().to_os_string(),
+        "config".into(),
+        "--get".into(),
+        "remote.origin.url".into(),
+    ];
+    let output = git(argv).output().await.ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_github_slug(&String::from_utf8_lossy(&output.stdout))
 }
 
 /// Case-fold a derived name or destination path for a collision comparison.
@@ -496,6 +588,100 @@ pub(crate) mod local_repo_tests {
         assert_eq!(case_fold("apex"), case_fold("APEX"));
         // Non-ASCII: no further folding is claimed or attempted.
         assert_ne!(case_fold("İstanbul"), case_fold("istanbul"));
+    }
+
+    /// 🔴 #6130: both remote spellings resolve to the SAME slug the GitHub API
+    /// takes, with case and punctuation preserved. Against
+    /// `trusty_common::github_path::parse_github_path` the last row fails —
+    /// that helper slugifies to `acme/cool-app`, a repository this one is not.
+    #[test]
+    fn a_github_remote_yields_its_owner_and_repo() {
+        for url in [
+            "git@github.com:bobmatnyc/trusty-tools.git",
+            "git@github.com:bobmatnyc/trusty-tools",
+            "https://github.com/bobmatnyc/trusty-tools.git",
+            "https://github.com/bobmatnyc/trusty-tools",
+            "ssh://git@github.com/bobmatnyc/trusty-tools.git",
+            "https://x-access-token:ghp_token@github.com/bobmatnyc/trusty-tools.git",
+            "  https://GitHub.com/bobmatnyc/trusty-tools/  ",
+        ] {
+            assert_eq!(
+                parse_github_slug(url).as_deref(),
+                Some("bobmatnyc/trusty-tools"),
+                "{url}"
+            );
+        }
+        assert_eq!(
+            parse_github_slug("git@github.com:Acme/Cool_App.git").as_deref(),
+            Some("Acme/Cool_App"),
+            "the API slug is verbatim; slugifying it names a different repository"
+        );
+    }
+
+    /// Everything that is not a `github.com` `owner/repo` answers "no identity"
+    /// — which the caller turns into a declared gap, never into a guess.
+    /// A GitHub Enterprise host is refused on purpose: tga's issue client only
+    /// speaks to `api.github.com`, so accepting it would trade a wrong slug for
+    /// one that 404s.
+    #[test]
+    fn a_non_github_remote_yields_nothing() {
+        for url in [
+            "git@gitlab.com:acme/api.git",
+            "https://bitbucket.org/acme/api.git",
+            "https://github.example.com/acme/api.git",
+            "https://github.com.evil.test/acme/api.git",
+            "/srv/mirrors/apex.git",
+            "https://github.com/bobmatnyc",
+            "https://github.com/acme/group/api.git",
+            "https://github.com/",
+            "",
+        ] {
+            assert_eq!(parse_github_slug(url), None, "{url}");
+        }
+    }
+
+    /// The I/O half, against a real checkout: an `origin` that names GitHub
+    /// resolves, and one that names nothing at all resolves to nothing.
+    #[tokio::test]
+    async fn a_checkout_with_a_github_origin_resolves_its_slug() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("trusty-tools");
+        source_repo(&repo);
+        run_git(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:bobmatnyc/trusty-tools.git",
+            ],
+        );
+
+        assert_eq!(
+            github_slug(&repo).await.as_deref(),
+            Some("bobmatnyc/trusty-tools")
+        );
+        // And the on-disk identity is untouched by it — the two answers stay
+        // independent.
+        assert_eq!(derive_name(&repo).expect("a name"), "local/trusty-tools");
+    }
+
+    #[tokio::test]
+    async fn a_checkout_with_no_remote_resolves_nothing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("apex");
+        source_repo(&repo);
+        assert_eq!(github_slug(&repo).await, None, "no origin, no identity");
+
+        run_git(&repo, &["remote", "add", "origin", "/srv/mirrors/apex.git"]);
+        assert_eq!(
+            github_slug(&repo).await,
+            None,
+            "a filesystem origin names no GitHub repository"
+        );
+
+        let absent = tmp.path().join("nowhere");
+        assert_eq!(github_slug(&absent).await, None, "not a repository at all");
     }
 
     #[test]

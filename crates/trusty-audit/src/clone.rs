@@ -52,6 +52,7 @@
 //! Test: `super::clone_tests`, `tests/cli_end_to_end.rs`, plus the `#[ignore]`d
 //! live clone there.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use trusty_common::gh::GhCommand;
@@ -223,6 +224,61 @@ enum Source {
     Remote,
     /// `git clone <path>`, reading the operator's checkout and never writing it.
     Local(PathBuf),
+}
+
+/// What one request entry's GitHub-issue identity resolved to (#6130).
+///
+/// Why: the identity has to be decided where the SOURCE is still in hand, and
+/// this is the only place it is — by the time `crate::run` reads the selection,
+/// a local target is indistinguishable from a remote one, which is the whole
+/// point of [`acquire`]. Resolving it here also keeps it fresh: a re-run reads
+/// the remote again rather than trusting a value the registry recorded at `add`
+/// time, possibly hours or a rename ago.
+/// What: the `owner/repo` tga should query, or the sentence explaining why
+/// there is none. Never "unknown" — every planned entry gets one or the other,
+/// so `crate::run` never has to guess.
+/// Test: `super::clone_tests::a_local_path_with_a_github_origin_records_the_real_slug`,
+/// `super::clone_tests::a_local_path_with_no_github_origin_records_why`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GithubIdentity {
+    /// GitHub issues for this entry live under this `owner/repo`.
+    Slug(String),
+    /// No GitHub identity, for this reason.
+    None(String),
+}
+
+/// Resolve every planned entry's GitHub-issue identity.
+///
+/// A REMOTE entry is its own slug — the request named `owner/repo` and `gh`
+/// cloned from it, so nothing needs reading. A LOCAL entry is whatever its
+/// source checkout's `origin` remote addresses on github.com, which is the read
+/// [`crate::local_repo::github_slug`] performs; a source that names no such
+/// repository — no remote at all, or a remote pointing somewhere else — gets
+/// the sentence the report prints instead of a slug the API would refuse.
+///
+/// Runs against the SOURCE, so it covers a reused checkout too: `clone_all`
+/// skips acquisition when the destination already exists, and an identity
+/// resolved only inside [`acquire`] would be missing for exactly those entries.
+async fn resolve_github_identities(
+    planned: &[(String, Source, PathBuf, PathBuf)],
+) -> BTreeMap<String, GithubIdentity> {
+    let mut out = BTreeMap::new();
+    for (name, source, _, _) in planned {
+        let identity = match source {
+            Source::Remote => GithubIdentity::Slug(name.clone()),
+            Source::Local(path) => match local_repo::github_slug(path).await {
+                Some(slug) => GithubIdentity::Slug(slug),
+                None => GithubIdentity::None(format!(
+                    "`{name}` was audited from the checkout at {}, whose `origin` remote names no \
+                     repository on github.com — its issues could not be located, so no GitHub \
+                     work-item collection was attempted",
+                    path.display()
+                )),
+            },
+        };
+        out.insert(name.clone(), identity);
+    }
+    out
 }
 
 /// Split one request entry into what it is audited as and where it comes from.
@@ -562,18 +618,34 @@ fn summarize(repos: Vec<ClonedRepo>) -> Result<CloneReport, AuditError> {
 /// Test: `super::clone_tests::a_completed_clone_is_recorded_as_the_selection`,
 /// `super::clone_tests::an_empty_request_leaves_an_existing_selection_alone`,
 /// and `tests/cli_end_to_end.rs`.
-fn record_selection(work: &WorkDir, report: &CloneReport) -> Result<(), AuditError> {
+fn record_selection(
+    work: &WorkDir,
+    report: &CloneReport,
+    github: &BTreeMap<String, GithubIdentity>,
+) -> Result<(), AuditError> {
     let selected: Vec<SelectedRepo> = report
         .repos
         .iter()
         .filter(|repo| repo.state.is_usable())
-        .map(|repo| SelectedRepo {
-            name: repo.name_with_owner.clone(),
-            path: repo
-                .path
-                .strip_prefix(work.root())
-                .unwrap_or(&repo.path)
-                .to_path_buf(),
+        .map(|repo| {
+            let (slug, absent) = match github.get(&repo.name_with_owner) {
+                Some(GithubIdentity::Slug(slug)) => (Some(slug.clone()), None),
+                Some(GithubIdentity::None(reason)) => (None, Some(reason.clone())),
+                // Unreachable in practice: every planned entry is resolved.
+                // Left as neither, which `SelectedRepo::github_leg` resolves
+                // from the name — the same answer a pre-#6130 file gets.
+                None => (None, None),
+            };
+            SelectedRepo {
+                name: repo.name_with_owner.clone(),
+                path: repo
+                    .path
+                    .strip_prefix(work.root())
+                    .unwrap_or(&repo.path)
+                    .to_path_buf(),
+                github_slug: slug,
+                github_absent: absent,
+            }
         })
         .collect();
     if selected.is_empty() {
@@ -637,6 +709,11 @@ pub async fn clone_all(
     // #6001: two entries sharing a destination is refused here rather than
     // silently reused as one another's checkout.
     refuse_collisions(&planned)?;
+
+    // #6130: decided here, where the source is still distinguishable, and
+    // before the loop so a reused checkout gets the same answer a freshly
+    // cloned one does.
+    let github = resolve_github_identities(&planned).await;
 
     // #5823: announced only once every name has validated, so a display never
     // opens on an acquisition that a typo is about to refuse.
@@ -711,7 +788,7 @@ pub async fn clone_all(
     let usable = out.iter().filter(|r| r.state.is_usable()).count();
     progress.operation_finished(Operation::CloneRepos, usable, total);
     let report = summarize(out)?;
-    record_selection(work, &report)?;
+    record_selection(work, &report, &github)?;
     Ok(report)
 }
 
@@ -1327,6 +1404,98 @@ mod clone_tests {
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].name, "local/apex");
         assert_eq!(selected[0].path, Path::new("repos/local/apex"));
+    }
+
+    /// 🔴 #6130's registration half: the on-disk identity stays `local/<name>`
+    /// and the ISSUE identity is the real slug the source's `origin` names. The
+    /// self-audit's own shape — a checkout of `bobmatnyc/trusty-tools` audited
+    /// by path.
+    ///
+    /// Against the pre-fix code `github_slug` does not exist and the sweep
+    /// hands `local/trusty-tools` to tga as `github.repo`, which is what 404'd
+    /// 3152 of 3152 work-item lookups.
+    #[tokio::test]
+    async fn a_local_path_with_a_github_origin_records_the_real_slug() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let src = tmp.path().join("trusty-tools");
+        source_repo(&src);
+        run_git(
+            &src,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:bobmatnyc/trusty-tools.git",
+            ],
+        );
+
+        clone_all(
+            &work,
+            &[src.display().to_string()],
+            &CloneOptions::default(),
+            &Progress::none(),
+        )
+        .await
+        .expect("a local checkout is a usable source");
+
+        let selected = run::load_selection(&work).expect("the sweep's input is there");
+        assert_eq!(
+            selected[0].name, "local/trusty-tools",
+            "the on-disk identity"
+        );
+        assert_eq!(
+            selected[0].github_leg(),
+            run::GithubLeg::Present("bobmatnyc/trusty-tools"),
+            "the issue identity is the remote's, not the directory's"
+        );
+    }
+
+    /// The other arm: no GitHub remote, so the leg is declared absent with a
+    /// sentence the report can print — never a slug the API would refuse.
+    #[tokio::test]
+    async fn a_local_path_with_no_github_origin_records_why() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let src = tmp.path().join("apex");
+        source_repo(&src);
+
+        clone_all(
+            &work,
+            &[src.display().to_string()],
+            &CloneOptions::default(),
+            &Progress::none(),
+        )
+        .await
+        .expect("a local checkout is a usable source");
+
+        let selected = run::load_selection(&work).expect("the sweep's input is there");
+        let run::GithubLeg::Absent(reason) = selected[0].github_leg() else {
+            panic!("a checkout with no remote has no GitHub identity");
+        };
+        assert!(reason.contains("local/apex"), "{reason}");
+        assert!(reason.contains("github.com"), "{reason}");
+        assert!(
+            reason.contains(&src.display().to_string()),
+            "the source the operator named must be in the sentence: {reason}"
+        );
+    }
+
+    /// A REMOTE entry's issue identity is the slug the request already named,
+    /// so the same field serves both shapes and `crate::run` needs no fork.
+    #[tokio::test]
+    async fn a_remote_entrys_issue_identity_is_its_own_name() {
+        let planned = vec![(
+            "acme/api".to_string(),
+            Source::Remote,
+            PathBuf::from("/w/repos/acme/api"),
+            PathBuf::from("/w/state/clone-staging/acme/api"),
+        )];
+        let resolved = resolve_github_identities(&planned).await;
+        assert_eq!(
+            resolved.get("acme/api"),
+            Some(&GithubIdentity::Slug("acme/api".to_string()))
+        );
     }
 
     /// 🔴 Two local paths with one basename derive one destination, and

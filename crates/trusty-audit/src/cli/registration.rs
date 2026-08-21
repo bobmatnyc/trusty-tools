@@ -1440,6 +1440,8 @@ trusty-review = "0.15.1"
             &[SelectedRepo {
                 name: "acme-oldrepo".to_owned(),
                 path: PathBuf::from("repos/acme-oldrepo"),
+                github_slug: None,
+                github_absent: None,
             }],
         )
         .expect("write the stale selection");

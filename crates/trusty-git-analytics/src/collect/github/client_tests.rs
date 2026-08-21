@@ -47,6 +47,7 @@ fn gh(repo: Option<&str>, org: Option<&str>) -> GithubConfig {
         review_fetch_concurrency: 1,
         ticket_regex: None,
         fetch_on_reference: false,
+        work_items_unavailable: None,
     }
 }
 

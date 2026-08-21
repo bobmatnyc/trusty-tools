@@ -26,7 +26,7 @@ use crate::core::config::Config;
 use crate::core::db::Database;
 use crate::core::progress::{ProgressBus, ProgressEvent, Stage};
 
-use super::stage::{AuditSweepStats, StaleFetch, SweepStage};
+use super::stage::{AuditSweepStats, DeclaredSkip, StaleFetch, SweepStage};
 
 /// How many stages [`run_full_sweep`] drives.
 ///
@@ -114,6 +114,10 @@ pub async fn run_full_sweep(
     }
 
     let mut stats = AuditSweepStats::default();
+    // #6130: read the declarations BEFORE the stage they describe, so a sweep
+    // that dies mid-collect still leaves the record of what it was never going
+    // to attempt.
+    record_declared_skips(&mut stats, config);
     // #5361: the collection pipeline wants an owned bus and an absent one is
     // the disabled bus, on which every emit is a no-op.
     let collect_bus = progress.cloned().unwrap_or_default();
@@ -193,6 +197,30 @@ pub async fn run_full_sweep(
 
     tracing::info!(summary = %stats.summary(), "audit sweep finished");
     Ok(stats)
+}
+
+/// Record every collection leg the config declared absent (#6130).
+///
+/// Why: the declaration lives in the config rather than in a stage result,
+/// because it is made before any stage runs — and a leg that never ran leaves
+/// its stage `Succeeded` with empty tables, which reads on the page exactly
+/// like a leg that ran and found nothing. This is the recorded-skip half of
+/// #5620's split; the blind half is what the declaration replaces.
+/// What: one [`DeclaredSkip`] per declaring section. Only GitHub work items
+/// today — the other providers have no declarer, so adding one is a matching
+/// arm here rather than a redesign.
+/// Test: `super::tests::a_declared_absent_leg_is_named_in_the_gap_lines`.
+fn record_declared_skips(stats: &mut AuditSweepStats, config: &Config) {
+    if let Some(reason) = config
+        .github
+        .as_ref()
+        .and_then(|gh| gh.work_items_declared_absent())
+    {
+        stats.record_declared_skip(DeclaredSkip {
+            leg: "GitHub work items".to_owned(),
+            reason: reason.to_owned(),
+        });
+    }
 }
 
 /// Keep every unreachable remote from collection, and hand back the bare result.
