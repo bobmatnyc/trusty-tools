@@ -15,7 +15,6 @@
 //! Test: this module
 //! (`SKIP_UI_BUILD=1 cargo test -p trusty-search -- embed_pool_routing`).
 
-use super::super::*;
 use super::*;
 use crate::service::embed_pool::EmbedPool;
 

@@ -7,7 +7,6 @@
 //! defaults, KG top-k survival, intent routing, and stable-order
 //! enumeration pagination.
 //! Test: this module.
-use super::super::*;
 use super::*;
 
 #[test]

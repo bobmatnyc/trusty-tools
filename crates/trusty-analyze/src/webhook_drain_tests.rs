@@ -7,7 +7,6 @@
 
 use std::collections::BTreeMap;
 
-use base64::Engine as _;
 use trusty_common::webhook_relay::{DeliveryProcessor, Disposition, Provenance, RelayDelivery};
 
 use super::*;

@@ -1,0 +1,18 @@
+# Workspace clippy configuration.
+#
+# large-error-threshold drives clippy::result_large_err. The default is 128
+# bytes, which is the value this workspace ran under until now. Clippy 1.98.0
+# started flagging 41 sites in this workspace that 1.97.1 passed, on code that
+# had not changed. Every one of them is an axum handler whose Err arm IS the
+# HTTP response it returns:
+#
+#   crates/trusty-code/src/serve/rest/*      (StatusCode, Json<Response>)   168 B
+#   crates/trusty-mpm/.../deliverable_link.rs axum::http::Response<Body>    128 B
+#   crates/trusty-mpm/.../executor/managed.rs CommandResult                 200 B
+#
+# The lint exists to catch a large value being moved on every fallible return.
+# For a handler that builds one response and hands it straight to axum, 200
+# bytes is noise, and boxing 41 handler signatures to satisfy the heuristic
+# would make the HTTP layer worse, not better. 256 leaves the guard in place
+# for an Err arm that is genuinely oversized.
+large-error-threshold = 256
