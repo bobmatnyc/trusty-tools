@@ -157,6 +157,7 @@ fn enriches_from_investigation() {
                 "Raw query concatenation observed in the handler.",
             )],
             deps: Default::default(),
+            traces: None,
             coverage: coverage(),
         }],
     };
@@ -256,6 +257,7 @@ fn elaboration_targets_exclude_verified_and_cap_at_10() {
                 .map(|i| verified_finding(&format!("verified-{i}"), "a.rs", 1, "d"))
                 .collect(),
             deps: Default::default(),
+            traces: None,
             coverage: coverage(),
         }],
     };
@@ -338,6 +340,7 @@ fn renders_elaboration_targets_or_none() {
             status: InvestigationStatus::Available,
             findings: vec![verified_finding("Only finding", "a.rs", 1, "d")],
             deps: Default::default(),
+            traces: None,
             coverage: coverage(),
         }],
     };

@@ -25,6 +25,9 @@ mod batch;
 pub mod deps;
 mod render;
 pub mod select;
+pub mod trace;
+pub mod trace_client;
+pub mod trace_symbol;
 pub mod verify;
 
 use std::sync::Arc;
@@ -41,6 +44,7 @@ pub use deps::{Dependency, DependencyInventory};
 pub use select::{
     Budget, DimensionCoverage, RiskSignals, SCALABILITY_DIMENSION, SECURITY_DIMENSION, Selection,
 };
+pub use trace::{FindingTrace, TraceAnchor, TraceLimits, TraceSet};
 pub use verify::VerifiedFinding;
 
 // ─── Result types ─────────────────────────────────────────────────────────────
@@ -196,6 +200,12 @@ impl Coverage {
 }
 
 /// One repository's complete investigation result.
+///
+/// Deliberately NOT `#[non_exhaustive]`, unlike the three report types #5762
+/// marked: this crate's own `trusty-review` binary is a separate compilation
+/// unit and builds one with a struct literal (`cli_report.rs`), which
+/// `#[non_exhaustive]` forbids. Adding a field here is a MINOR bump for a
+/// `0.y.z` crate — #6166 paid it for `traces`.
 #[derive(Debug, Clone, Serialize)]
 pub struct RepoInvestigation {
     /// Repository slug (matches the model's `RepositoryReport::slug`).
@@ -210,6 +220,12 @@ pub struct RepoInvestigation {
     pub deps: DependencyInventory,
     /// Coverage-honesty record.
     pub coverage: Coverage,
+    /// Symbol-graph anchors for the candidate findings (#6166).
+    ///
+    /// `None` when the trace pass did not run for this repository (no findings
+    /// to trace). A `Some` set always holds one record per candidate, including
+    /// the refused ones.
+    pub traces: Option<TraceSet>,
 }
 
 /// The aggregate investigation result recorded on the [`ReportModel`].
@@ -288,6 +304,7 @@ pub async fn run_investigation(
                 findings: Vec::new(),
                 coverage: Coverage::empty(&selection, budget),
                 deps,
+                traces: None,
             });
             continue;
         }
@@ -306,6 +323,7 @@ pub async fn run_investigation(
 
         let status = repo_status(&outcomes);
         let coverage = Coverage::build(&selection, rejected, budget, &outcomes, &findings);
+        let traces = trace_repo(path, &findings).await;
         repos.push(RepoInvestigation {
             slug: repo.slug.clone(),
             name: repo.name.clone(),
@@ -313,6 +331,7 @@ pub async fn run_investigation(
             findings,
             coverage,
             deps,
+            traces,
         });
     }
 
@@ -320,6 +339,27 @@ pub async fn run_investigation(
         return None;
     }
     Some(Investigation { repos })
+}
+
+/// Trace one repository's candidate findings against the live symbol graph
+/// (#6166).
+///
+/// Why: this is where the trace pass gets its live [`trace_client::TraceSource`]
+/// — `run_investigation`'s signature stays as it was, and the unit tests reach
+/// [`trace::assemble_traces`] directly with a stub instead.
+/// What: `None` when the repository produced no findings (nothing to anchor) or
+/// when the loopback HTTP client will not build, which the pass treats the same
+/// way an unreachable daemon would. Otherwise the full record set, refusals
+/// included.
+/// Test: `trace_tests.rs` covers `assemble_traces`; this wrapper is exercised by
+/// `tests/report_investigate.rs`, where no daemon runs and every candidate
+/// records the unreachable reason.
+async fn trace_repo(path: &std::path::Path, findings: &[VerifiedFinding]) -> Option<TraceSet> {
+    if findings.is_empty() {
+        return None;
+    }
+    let source = trace_client::HttpTraceSource::resolved()?;
+    Some(trace::assemble_traces(path, findings, &source, TraceLimits::default()).await)
 }
 
 /// Roll up per-batch outcomes into one repository-level [`InvestigationStatus`].

@@ -1001,6 +1001,7 @@ mod tests {
                     cost_effort: String::new(),
                 }],
                 deps: Default::default(),
+                traces: None,
                 coverage: Default::default(),
             }],
         }
