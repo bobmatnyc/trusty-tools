@@ -90,7 +90,7 @@ pub fn fill_key_facts(root: &mut Scope, model: &ReportModel) {
         // vanishing — the scan has no complexity equivalent to fall back to.
         None => root.set(
             "facts_complexity_summary",
-            tag(GAP_COMPLEXITY, Provenance::NotStated),
+            tag(complexity_gap(model), Provenance::NotStated),
         ),
     }
 
@@ -109,6 +109,31 @@ pub fn fill_key_facts(root: &mut Scope, model: &ReportModel) {
         "facts_work_estimate",
         tag(GAP_WORK_ESTIMATE, Provenance::NotStated),
     );
+}
+
+/// The complexity row's text, carrying the analyze lane's own remedy.
+///
+/// Why (#6080): this row wrote its own remedy — "re-run with `--analyze`" —
+/// for every missing-complexity case, including a run where the lane HAD run
+/// and its index was rejected as stale. Gaps & Caveats said to re-index under a
+/// distinct id, three sections away, and a reader following Key Facts would
+/// re-run the same command and get the same rejection. The remedy is the
+/// repository's, so it comes from the repository.
+/// What: the first repository carrying an `analyze_gap` supplies the remedy;
+/// with none — a run that never asked for `--analyze` — the row falls back to
+/// [`GAP_COMPLEXITY`].
+/// Test: `reporter_facts_tests::complexity_gap_carries_the_lane_remedy`.
+fn complexity_gap(model: &ReportModel) -> String {
+    match model
+        .repositories
+        .iter()
+        .find_map(|r| r.analyze_gap.as_deref())
+    {
+        Some(remedy) => {
+            format!("Not computed — the trusty-analyze lane contributed no data. {remedy}")
+        }
+        None => GAP_COMPLEXITY.to_string(),
+    }
 }
 
 /// This repository's total LoC — declared metrics first, else the repo scan.

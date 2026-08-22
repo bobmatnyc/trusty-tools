@@ -160,7 +160,7 @@ pub fn investigation_schema(max_findings: usize) -> ResponseSchema {
                             "evidence_quote": {
                                 "type": "string",
                                 "maxLength": EVIDENCE_QUOTE_MAX_CHARS,
-                                "description": "A VERBATIM snippet copied from the cited file, at most 200 characters. Must appear character-for-character (whitespace may differ). Empty for GREEN findings."
+                                "description": "A VERBATIM snippet copied from the cited file, at most 200 characters. Must appear character-for-character (whitespace may differ). Required for EVERY finding, GREEN included — it is what proves the cited file really shows what the title claims."
                             },
                             "description": {"type": "string", "description": "One concise sentence."},
                             "business_impact": {"type": "string", "description": "One concise sentence. Empty string if the code does not support one — never invent an impact to fill this field."},
@@ -176,10 +176,11 @@ pub fn investigation_schema(max_findings: usize) -> ResponseSchema {
 
 /// The investigation system prompt — the hard grounding rules.
 ///
-/// Why: the model must cite only provided files, quote evidence verbatim, invent
-/// no figures, keep GREEN findings to a bare title (the no-green-analysis rule),
-/// and keep every field short enough that a bounded batch cannot overflow the
-/// output ceiling; stating these in the system role governs every field.
+/// Why: the model must cite only provided files, quote evidence verbatim,
+/// invent no figures, keep a GREEN finding to a cited title (the
+/// no-green-analysis rule bans elaboration, not attribution — #6080), and keep
+/// every field short enough that a bounded batch cannot overflow the output
+/// ceiling; stating these in the system role governs every field.
 /// What: a static instruction block; the verbatim-quote rule is emphasised because
 /// the deterministic guardrail rejects any finding whose quote does not match.
 /// Test: covered transitively by the request-assembly tests.
@@ -188,15 +189,15 @@ fn system_prompt() -> &'static str {
 
 ## Absolute rules
 - Cite ONLY the files provided below. Never reference a file that is not in the provided set. You may be seeing only ONE BATCH of a larger repository — do not claim a file is "absent from the codebase" just because it is not in this batch.
-- For every RED or AMBER finding, `evidence_quote` MUST be a snippet copied VERBATIM from the cited file — character for character (only whitespace may differ), AND AT MOST 200 CHARACTERS. If you cannot quote real code that short, quote the most essential fragment rather than the whole block. Fabricated or paraphrased evidence will be rejected.
+- For EVERY finding — GREEN included — `evidence_quote` MUST be a snippet copied VERBATIM from the cited file — character for character (only whitespace may differ), AND AT MOST 200 CHARACTERS. If you cannot quote real code that short, quote the most essential fragment rather than the whole block. Fabricated or paraphrased evidence will be rejected, and so will a finding with no quote.
 - Never invent numbers, percentages, or metrics. State only what the code shows.
-- GREEN findings are a bare title only (a healthy topic). Use them sparingly. Every field is structurally required, so emit the rest as empty strings (and `line` as null) rather than inventing content for them.
+- A GREEN finding is a healthy topic: give it a title, a `file`, and an `evidence_quote`, and leave description, business_impact, remediation, and cost_effort as empty strings. Its title must NAME THE STRENGTH — never a weakness, a smell, or a risk. If the pattern you are about to describe is something an acquirer would want fixed, it is AMBER or RED, not GREEN. Use GREEN sparingly.
 - Set `severity` to `red` (critical), `amber` (material), or `green` (healthy topic).
-- Assign each finding a `dimension` from the checklist. Prefer depth over breadth: a few well-evidenced findings beat many shallow ones.
+- Assign each finding a `dimension` copied EXACTLY as the checklist spells it — do not reword it ("error management" for "error handling" splits one dimension into two).
 - Keep every prose field (description, business_impact, remediation) to ONE concise sentence. Verbosity risks the response being cut off, which discards every finding in this batch.
 
 ## Output
-Return the structured `findings` array, prioritising the highest-severity findings first (they must survive if the response is capped). Each RED/AMBER finding: title, severity, dimension, file, an approximate line, the verbatim evidence_quote (≤200 chars), a one-sentence description, business_impact, remediation, and cost_effort."#
+Return the structured `findings` array, prioritising the highest-severity findings first (they must survive if the response is capped). Each RED/AMBER finding: title, severity, dimension, file, an approximate line, the verbatim evidence_quote (≤200 chars), a one-sentence description, business_impact, remediation, and cost_effort. Each GREEN finding: title, severity, dimension, file, line, evidence_quote — and empty strings for the rest."#
 }
 
 /// Build the LLM request for ONE batch of a repository's investigation pass.

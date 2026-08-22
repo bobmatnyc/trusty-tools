@@ -20,6 +20,7 @@ fn file(path: &str, content: &str) -> SelectedFile {
         truncated: false,
         dimensions: vec!["authentication & secrets".to_string()],
         selected_by: None,
+        declared_for: None,
     }
 }
 

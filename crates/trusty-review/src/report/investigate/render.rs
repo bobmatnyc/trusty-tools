@@ -12,6 +12,7 @@
 //! Test: `render_tests.rs` covers the dependency table (cap + overflow), the
 //! coverage section (examined/total, dimensions, rejected), and the prompt summary.
 
+use crate::report::metrics::Severity;
 use crate::report::model::ReportModel;
 use crate::report::provenance::{INFERRED_TAG, MEASURED_TAG};
 
@@ -166,12 +167,33 @@ fn coverage_lines(repo: &RepoInvestigation) -> String {
             c.rejected
         ));
     }
-    let verified = repo.findings.iter().filter(|f| !f.file.is_empty()).count();
+    let (total, risk, clean) = finding_counts(repo);
     out.push_str(&format!(
-        "- verified evidence-backed findings: {verified}\n"
+        "- verified findings: {total} ({risk} RED/AMBER evidence-backed, {clean} clean signals)\n"
     ));
     out.push_str(&batch_lines(c));
     out
+}
+
+/// One repository's verified findings, split for reporting (#6080).
+///
+/// Why: the coverage section counted evidence-backed findings while the
+/// synthesis prompt counted all of them, so one report's executive summary said
+/// "102 verified findings" and its coverage section said "79 verified
+/// evidence-backed findings" about the same set. Both surfaces read this
+/// function now, so the two numbers cannot disagree again.
+/// What: `(total, risk, clean)` — every verified finding, the RED/AMBER ones
+/// carrying an evidence quote, and the GREEN clean signals.
+/// Test: `render_tests::{coverage_section_states_examined_and_rejected,
+/// coverage_prompt_summary_and_section_agree_on_counts}`.
+fn finding_counts(repo: &RepoInvestigation) -> (usize, usize, usize) {
+    let clean = repo
+        .findings
+        .iter()
+        .filter(|f| f.severity == Severity::Green)
+        .count();
+    let total = repo.findings.len();
+    (total, total - clean, clean)
 }
 
 /// Render how the examined set was discovered, and its per-dimension split
@@ -295,13 +317,15 @@ pub fn coverage_prompt_summary(inv: &Investigation) -> String {
         let c = &repo.coverage;
         match &repo.status {
             InvestigationStatus::Available => {
+                // #6080: the same three counts, with the same labels, the
+                // rendered coverage section states — see `finding_counts`.
+                let (total, risk, clean) = finding_counts(repo);
                 out.push_str(&format!(
-                    "- {}: examined {} of {} files ({}%); {} verified finding(s); {} rejected; not investigated: {}\n",
+                    "- {}: examined {} of {} files ({}%); {total} verified finding(s) ({risk} RED/AMBER evidence-backed, {clean} clean signals); {} rejected; not investigated: {}\n",
                     repo.name,
                     c.files_examined,
                     c.total_files,
                     coverage_pct(c.files_examined, c.total_files),
-                    repo.findings.len(),
                     c.rejected,
                     join_or_none(&c.dimensions_absent),
                 ));

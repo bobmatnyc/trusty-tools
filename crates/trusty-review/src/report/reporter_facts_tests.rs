@@ -21,6 +21,7 @@ fn repo_with(metrics: Option<AnalyzeMetrics>, scan: Option<RepoScan>) -> Reposit
         local_path: None,
         scan,
         metrics,
+        analyze_gap: None,
         authorship: None,
         inspect_priority: Vec::new(),
     }
@@ -232,4 +233,26 @@ fn complexity_buckets_merge_across_repositories() {
     fill_key_facts(&mut scope, &model);
     let rendered = crate::report::fill::render("{{facts_complexity_summary}}", &scope);
     assert_eq!(rendered, "low (1-5): 20 (100%) ⁽ᵐ⁾");
+}
+
+/// #6080: Key Facts must state the same remedy the gap bullet states.
+///
+/// Why: this row said "re-run with `--analyze`" for every missing-complexity
+/// case, including a run where the lane HAD run and its index was rejected as
+/// stale. §9 said to re-index under a distinct id, and a reader following Key
+/// Facts would re-run the same command and get the same rejection.
+/// What: the row renders the repository's own `analyze_gap` remedy.
+#[test]
+fn complexity_gap_carries_the_lane_remedy() {
+    let mut r = repo(None);
+    r.analyze_gap = Some(crate::report::analyze_scope::STALE_INDEX_REMEDY.to_string());
+    let model = model_with(vec![r]);
+    let mut scope = Scope::new();
+    fill_key_facts(&mut scope, &model);
+    let rendered = crate::report::fill::render("{{facts_complexity_summary}}", &scope);
+    assert!(
+        rendered.contains(crate::report::analyze_scope::STALE_INDEX_REMEDY),
+        "rendered: {rendered}"
+    );
+    assert!(!rendered.contains("re-run with"), "rendered: {rendered}");
 }

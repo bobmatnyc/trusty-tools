@@ -109,7 +109,7 @@ fn coverage_section_states_examined_and_rejected() {
     );
     assert!(out.contains("NOT investigated: scalability"));
     assert!(out.contains("2 finding(s) rejected (unverifiable evidence)"));
-    assert!(out.contains("verified evidence-backed findings: 1"));
+    assert!(out.contains("verified findings: 1 (1 RED/AMBER evidence-backed, 0 clean signals)"));
 }
 
 /// One repository whose coverage carries #6082's discovery record.
@@ -233,6 +233,35 @@ fn coverage_prompt_summary_lists_gaps() {
     );
     assert!(summary.contains("not investigated: scalability"));
     assert!(summary.contains("Synthesise the executive summary FROM those findings"));
+}
+
+/// #6080: one concept, one number, one label — on both surfaces.
+///
+/// Why: the coverage section counted evidence-backed findings while the
+/// synthesis prompt counted all of them, so one report's executive summary
+/// said "102 verified findings" and its coverage section said "79 verified
+/// evidence-backed findings" about the same set.
+/// What: with one RED and one GREEN, both surfaces state the same triple.
+#[test]
+fn coverage_prompt_summary_and_section_agree_on_counts() {
+    let mut green = finding();
+    green.severity = Severity::Green;
+    green.evidence_quote = String::new();
+    let investigation = Investigation {
+        repos: vec![repo(
+            InvestigationStatus::Available,
+            vec![finding(), green],
+            DependencyInventory::default(),
+        )],
+    };
+    let counts = "2 verified finding(s) (1 RED/AMBER evidence-backed, 1 clean signals)";
+    let summary = investigation.coverage_prompt_summary();
+    assert!(summary.contains(counts), "prompt summary: {summary}");
+    let section = coverage_section(&investigation);
+    assert!(
+        section.contains("verified findings: 2 (1 RED/AMBER evidence-backed, 1 clean signals)"),
+        "coverage section: {section}"
+    );
 }
 
 /// Why: a repository with nothing tracked would divide by zero; `0.0` is the

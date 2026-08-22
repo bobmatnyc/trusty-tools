@@ -177,6 +177,7 @@ fn fixture_model(findings: Vec<MetricFinding>) -> ReportModel {
             local_path: None,
             scan: None,
             metrics: Some(metrics),
+            analyze_gap: None,
             authorship: None,
             inspect_priority: Vec::new(),
         }],

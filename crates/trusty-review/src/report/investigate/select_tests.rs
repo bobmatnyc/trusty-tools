@@ -614,6 +614,55 @@ fn per_dimension_coverage_names_why_a_file_was_read() {
     );
 }
 
+/// #6080: the example must be the dimension's OWN top-ranked evidence hit.
+///
+/// Why: the example was the first hit in overall rank order, so a file the
+/// manifest declared for one dimension — and that a path heuristic also read
+/// as another — became the second dimension's example, carrying the first
+/// dimension's reason string. The line then explained an auth file with a
+/// state-management query.
+/// What: `src/auth/login.rs` is declared for state management and outranks the
+/// auth-declared `README.md`; the auth line still names README.md.
+/// Test: this test itself.
+#[test]
+fn per_dimension_example_prefers_the_declared_file() {
+    let tmp = fixture();
+    let files = list_tracked_files(tmp.path());
+    let prio = vec![
+        InspectionPriority {
+            path: "src/auth/login.rs".to_string(),
+            weight: 1000,
+            dimension: Some("state management".to_string()),
+            reason: Some("trusty-search hit for \"shared mutable state\"".to_string()),
+        },
+        InspectionPriority {
+            path: "README.md".to_string(),
+            weight: 999,
+            dimension: Some("authentication & secrets".to_string()),
+            reason: Some("trusty-search hit for \"credential handling\"".to_string()),
+        },
+    ];
+    let sel = select_files(
+        tmp.path(),
+        &files,
+        None,
+        Budget::default(),
+        RiskSignals {
+            priorities: &prio,
+            ..Default::default()
+        },
+    );
+
+    let auth = sel
+        .per_dimension
+        .iter()
+        .find(|d| d.dimension == "authentication & secrets")
+        .expect("auth is covered");
+    let example = auth.example.as_deref().expect("an example");
+    assert!(example.starts_with("README.md"), "{example}");
+    assert!(example.contains("credential handling"), "{example}");
+}
+
 /// Why: a manifest with no attribution — hand-written, or written by a run
 /// whose search daemon was down — must select exactly as it did before #6082.
 /// What: no signals at all leaves the ranking and the attributed count alone.

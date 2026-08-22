@@ -296,6 +296,22 @@ pub struct RepositoryReport {
     pub scan: Option<RepoScan>,
     /// Pre-produced trusty-analyze metrics for this repo, if a path was given.
     pub metrics: Option<AnalyzeMetrics>,
+    /// Why the trusty-analyze lane contributed nothing for this repository, as
+    /// the one-sentence remedy the Gaps & Caveats bullet states (#6080).
+    ///
+    /// Why: `metrics` being `Some` no longer means the analyze lane ran — the
+    /// investigation pass writes its own verified findings into the same
+    /// struct. Sections that report analyze-only figures read this field to
+    /// tell a real measurement from an artefact of that sharing: a run whose
+    /// index was rejected as stale printed `Maintainability findings | 0 ⁽ᵐ⁾`
+    /// while §9 said the lane was rejected. Carrying the REMEDY (rather than a
+    /// bare flag) is what keeps Key Facts from inventing its own — it used to
+    /// say "re-run with `--analyze`" where §9 correctly said to re-index.
+    /// `None` means the lane ran, or was never asked to.
+    /// Test: `reporter_codesec_tests::maintainability_cell_states_the_analyze_gap`,
+    /// `reporter_facts_tests::complexity_gap_carries_the_lane_remedy`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analyze_gap: Option<String>,
     /// tga's authorship/bus-factor/trajectory figures for this repo, if a path
     /// was given AND it loaded (#5453/#6004).
     ///
@@ -469,6 +485,7 @@ fn build_repository(
             local_path,
             scan,
             metrics,
+            analyze_gap: None,
             authorship,
             // #6078: the external selection ranking rides through to
             // `select_files` unchanged; this crate never recomputes it.

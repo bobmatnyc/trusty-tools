@@ -57,10 +57,11 @@ fn fixture_model_with_findings(dir: &Path) -> ReportModel {
       "findings": [
         { "title": "SQL injection", "severity": "red", "category": "authentication & secrets", "component": "db.rs" },
         { "title": "Stale dependency", "severity": "amber", "category": "maintainability", "component": "deps.toml" },
-        { "title": "Strong test coverage", "severity": "green", "category": "test coverage", "component": "" },
-        { "title": "Clean module boundaries", "severity": "green", "category": "state management", "component": "" },
-        { "title": "Constant-time token comparison", "severity": "green", "category": "authentication & secrets", "component": "" },
-        { "title": "Atomic redb batch upserts", "severity": "green", "category": "state management", "component": "" }
+        { "title": "Strong test coverage", "severity": "green", "category": "test coverage", "component": "tests/api.rs:12" },
+        { "title": "Clean module boundaries", "severity": "green", "category": "state management", "component": "src/lib.rs:3" },
+        { "title": "Constant-time token comparison", "severity": "green", "category": "authentication & secrets", "component": "auth.rs:44" },
+        { "title": "Raw SQL string interpolation for PR upsert", "severity": "green", "category": "authentication & secrets", "component": "" },
+        { "title": "Atomic redb batch upserts", "severity": "green", "category": "state management", "component": "store.rs:88" }
       ]
     }"#;
     std::fs::write(dir.join("acme.json"), metrics).expect("write metrics");
@@ -231,8 +232,15 @@ fn code_quality_and_security_sections_populate_from_analyze_data() {
         "section: {security_section}"
     );
     assert!(
-        security_section.contains("Constant-time token comparison"),
-        "the dimension's clean signals are credited: {security_section}"
+        security_section.contains("Constant-time token comparison (`auth.rs:44`)"),
+        "the dimension's clean signals are credited with their citation: {security_section}"
+    );
+    // #6080: the fixture's uncited GREEN describes a defect. It reached the
+    // green bucket, and the citation requirement is what keeps it out of the
+    // clean-signals list where a reader could not check it.
+    assert!(
+        !security_section.contains("Raw SQL string interpolation"),
+        "an uncited GREEN must not be credited as a clean signal: {security_section}"
     );
     // Performance stays the fixed gap text regardless of the data present.
     assert!(md.contains(crate::report::reporter_performance::PERFORMANCE_NOTE));
@@ -287,6 +295,38 @@ fn reporter_fills_green_topics() {
     assert!(
         !green_section.contains(HONESTY_MARKER),
         "no unfilled slot survives: {green_section}"
+    );
+}
+
+/// #6080: every GREEN bullet names the file it was read from.
+///
+/// Why: 0 of 23 GREEN topics in one report carried a file, a line, or a quote,
+/// and Security Posture then cited five of them as clean signals. A citation
+/// is not elaboration — it says where to look, which is what lets a reader
+/// check a claimed strength at all.
+/// What: a cited GREEN renders `title — \`file:line\``; an uncited one renders
+/// the bare title, and the citation stays a single line with no prose.
+#[test]
+fn green_topic_carries_its_citation() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let model = fixture_model_with_findings(tmp.path());
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    let green_section = md
+        .split("### 5.3 GREEN")
+        .nth(1)
+        .and_then(|s| s.split("\n## ").next())
+        .expect("GREEN section present");
+    assert!(
+        green_section.contains("- Constant-time token comparison — `auth.rs:44`"),
+        "green bullets carry their citation: {green_section}"
+    );
+    assert!(
+        green_section.contains("- Raw SQL string interpolation for PR upsert\n"),
+        "an uncited green renders bare: {green_section}"
     );
 }
 

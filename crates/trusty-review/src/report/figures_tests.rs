@@ -15,6 +15,7 @@ fn repo() -> RepositoryReport {
         local_path: None,
         scan: None,
         metrics: None,
+        analyze_gap: None,
         authorship: None,
         inspect_priority: Vec::new(),
     }
