@@ -439,6 +439,10 @@ pub(super) fn build_scope(model: &ReportModel) -> Scope {
     // LLM involvement in the rows themselves. Performance & Scalability is
     // FIXED text (DOC-67 §3: no performance data source exists at all).
     push_code_quality_rows(&mut root, model);
+    // #6147: the same section's deterministic architecture input — the crate
+    // graph trusty-audit measured. Absent for every repository that is not a
+    // Cargo workspace, and then it renders as nothing.
+    super::topology::push_crate_topology(&mut root, model);
     push_security_violation_rows(&mut root, model);
     fill_performance_note(&mut root, model);
     // #5453/#6004: key-man risk rows render IN this section, never scattered

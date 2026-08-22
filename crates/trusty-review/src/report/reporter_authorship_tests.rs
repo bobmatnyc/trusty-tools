@@ -17,6 +17,7 @@ fn repo(authorship: Option<AuthorshipSummary>) -> RepositoryReport {
         analyze_gap: None,
         authorship,
         inspect_priority: Vec::new(),
+        crate_topology: None,
     }
 }
 

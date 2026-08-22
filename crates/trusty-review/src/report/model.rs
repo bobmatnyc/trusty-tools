@@ -336,6 +336,18 @@ pub struct RepositoryReport {
     /// Test: `select_tests::manifest_priority_outranks_heuristics`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inspect_priority: Vec<super::manifest::InspectionPriority>,
+    /// The crate graph trusty-audit measured for this repository (#6147).
+    ///
+    /// Why: it has to reach both the reporter (which renders the deterministic
+    /// table) and the synthesis prompt (which states the same facts for the
+    /// architecture paragraph to comment on), so it travels on the model like
+    /// every other per-repository measurement. Serialising it keeps the JSON
+    /// twin an honest record of what the architecture section was built from.
+    /// `None` for any repository that is not a Cargo workspace, which renders
+    /// as nothing.
+    /// Test: `topology_tests::a_declared_topology_renders_rows`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crate_topology: Option<super::topology::CrateTopology>,
 }
 
 impl ReportModel {
@@ -490,6 +502,9 @@ fn build_repository(
             // #6078: the external selection ranking rides through to
             // `select_files` unchanged; this crate never recomputes it.
             inspect_priority: entry.inspect_priority.clone(),
+            // #6147: measured by trusty-audit from the checkout's own Cargo
+            // manifests; this crate renders it and never recomputes it.
+            crate_topology: entry.crate_topology.clone(),
         },
         authorship_gap,
     ))

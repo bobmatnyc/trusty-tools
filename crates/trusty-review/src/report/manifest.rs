@@ -369,6 +369,11 @@ pub struct RepositoryEntry {
     /// (#6078). Empty — the default — leaves selection byte-identical to a
     /// manifest without the key. See [`InspectionPriority`].
     pub inspect_priority: Vec<InspectionPriority>,
+    /// The crate graph trusty-audit measured from this repository's own Cargo
+    /// workspace (#6147). `None` for every repository that is not one, which
+    /// renders as nothing rather than as a gap — see
+    /// [`super::topology::CrateTopology`].
+    pub crate_topology: Option<super::topology::CrateTopology>,
 }
 
 /// The origin of a repository — a local checkout or a declared remote.
@@ -450,6 +455,9 @@ struct RawRepositoryEntry {
     /// #6078: `inspect_priority = ["src/a.rs", { path = "src/b.rs", weight = 900 }]`
     #[serde(default)]
     inspect_priority: Vec<RawInspectionPriority>,
+    /// #6147: `[repositories.crate_topology]`, written by trusty-audit.
+    #[serde(default)]
+    crate_topology: Option<super::topology::CrateTopology>,
 }
 
 /// The two spellings one `inspect_priority` entry may take in TOML (#6078).
@@ -607,6 +615,7 @@ fn validate(raw: RawManifest) -> std::result::Result<Manifest, ManifestError> {
             metrics: entry.metrics,
             authorship: entry.authorship,
             inspect_priority,
+            crate_topology: entry.crate_topology,
         });
     }
 

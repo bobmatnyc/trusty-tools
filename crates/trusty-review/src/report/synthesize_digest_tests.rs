@@ -44,6 +44,7 @@ fn repo(slug: &str, findings: Vec<MetricFinding>) -> RepositoryReport {
         analyze_gap: None,
         authorship: None,
         inspect_priority: Vec::new(),
+        crate_topology: None,
     }
 }
 

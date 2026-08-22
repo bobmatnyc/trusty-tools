@@ -102,12 +102,21 @@ pub fn default_instruction(id: &str) -> Option<&'static str> {
              list entirely; re-elaborating it wastes output budget and cannot improve \
              on already-verified prose.",
         ),
+        // #6147: the crate-topology block is the section's only deterministic
+        // architecture input. Before it existed the paragraph inferred a
+        // structure from complexity buckets and a language list, which is a
+        // guess; where a workspace states its own graph, comment on that graph.
         CODE_QUALITY_SUMMARY => Some(
             "Write ONE paragraph on code quality and architecture, grounded strictly in \
-             the complexity distribution, code-smell/refactor findings, and LoC/tech-stack \
-             data provided. Take the acquirer's skeptical side on maintainability risk \
-             while naming genuine strengths the data supports, evenhandedly. Never invent \
-             an architectural pattern or a metric not present in the data.",
+             the complexity distribution, code-smell/refactor findings, LoC/tech-stack \
+             and crate-topology data provided. Where a crate topology is given, comment on \
+             the structure it shows — how many crates, how coupled, whether a shared core \
+             carries the workspace or the members are independent, and any dependency cycle \
+             — and treat it as measured fact, never as something to re-derive. Where none is \
+             given, do not speculate about module structure at all. Take the acquirer's \
+             skeptical side on maintainability risk while naming genuine strengths the data \
+             supports, evenhandedly. Never invent an architectural pattern or a metric not \
+             present in the data.",
         ),
         SECURITY_SUMMARY => Some(
             // #6080: "lint-graded" described the findings as a linter's output.

@@ -24,6 +24,7 @@ fn repo_with(metrics: Option<AnalyzeMetrics>, scan: Option<RepoScan>) -> Reposit
         analyze_gap: None,
         authorship: None,
         inspect_priority: Vec::new(),
+        crate_topology: None,
     }
 }
 

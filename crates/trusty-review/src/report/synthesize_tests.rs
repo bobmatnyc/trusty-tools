@@ -180,6 +180,7 @@ fn fixture_model(findings: Vec<MetricFinding>) -> ReportModel {
             analyze_gap: None,
             authorship: None,
             inspect_priority: Vec::new(),
+            crate_topology: None,
         }],
         gaps: Vec::new(),
         synthesis: None,
@@ -2093,5 +2094,79 @@ fn narrative_only_tier_omits_findings_from_schema() {
     assert!(
         !digest.contains("every RED/AMBER finding already has verified"),
         "that line would be false here: {digest}"
+    );
+}
+
+/// Why (#6147): the architecture paragraph is only as good as what the prompt
+/// states. Before this the digest carried complexity buckets and a language
+/// list, so the model inferred a structure; now a Cargo workspace's own graph
+/// reaches it as measured fact.
+/// What: attaches a topology to the fixture model and asserts the digest names
+/// its member count, its shared core, and the section heading that marks the
+/// facts as measured.
+/// Test: this test itself.
+#[test]
+fn prompt_carries_the_crate_topology() {
+    use crate::report::topology::{CrateNode, CrateTopology};
+
+    let mut model = fixture_model(vec![]);
+    model.repositories[0].crate_topology = Some(CrateTopology {
+        members: 3,
+        edges: 3,
+        cycles: Vec::new(),
+        crates: vec![
+            CrateNode {
+                name: "acme-core".to_string(),
+                deps: Vec::new(),
+                inbound: 2,
+            },
+            CrateNode {
+                name: "acme-app".to_string(),
+                deps: vec!["acme-core".to_string()],
+                inbound: 0,
+            },
+        ],
+    });
+
+    let req = build_synthesis_prompt(
+        &model,
+        "stub/model",
+        SynthesisTier::Full,
+        SYNTHESIS_DEFAULT_MAX_TOKENS,
+    );
+    let digest = &req.messages[0].content;
+
+    assert!(
+        digest.contains("Crate topology (measured from cargo metadata"),
+        "the facts must be marked measured, not inferred: {digest}"
+    );
+    assert!(digest.contains("3 crates"), "{digest}");
+    assert!(
+        digest.contains("Most depended on: acme-core (2)"),
+        "{digest}"
+    );
+    assert!(
+        digest.contains("`acme-core`: depends on 0 internal crate(s); depended on by 2"),
+        "{digest}"
+    );
+}
+
+/// Why: a repository with no Cargo workspace must add no headed-but-empty
+/// section to the digest — an empty heading invites the model to fill it.
+/// What: asserts the fixture model, which declares no topology, carries none.
+/// Test: this test itself.
+#[test]
+fn prompt_omits_the_topology_block_when_there_is_none() {
+    let model = fixture_model(vec![]);
+    let req = build_synthesis_prompt(
+        &model,
+        "stub/model",
+        SynthesisTier::Full,
+        SYNTHESIS_DEFAULT_MAX_TOKENS,
+    );
+
+    assert!(
+        !req.messages[0].content.contains("Crate topology"),
+        "no topology, no heading"
     );
 }
