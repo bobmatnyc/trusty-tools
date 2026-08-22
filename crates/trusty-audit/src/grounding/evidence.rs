@@ -35,6 +35,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use super::hotspots::RankedFile;
 use super::priority::Priority;
 use super::quality;
 
@@ -570,9 +571,14 @@ fn reason(query: &str, hit: &Hit) -> String {
 /// as both reasons, because it is the dimension that decides whether the report
 /// can count that file as covering it.
 /// Test: `super::evidence_tests::{blending_spreads_the_budget_across_dimensions,
-/// a_hotspot_that_is_also_dimension_evidence_keeps_its_dimension}`.
+/// a_hotspot_that_is_also_dimension_evidence_keeps_its_dimension,
+/// a_blended_hotspot_carries_its_measured_function}`.
 #[must_use]
-pub fn blend(hotspots: &[String], dimensions: &[DimensionEvidence], cap: usize) -> Vec<Priority> {
+pub fn blend(
+    hotspots: &[RankedFile],
+    dimensions: &[DimensionEvidence],
+    cap: usize,
+) -> Vec<Priority> {
     let mut out: Vec<Priority> = Vec::new();
     let attributed = attributions(dimensions);
     let depth = dimensions
@@ -583,8 +589,8 @@ pub fn blend(hotspots: &[String], dimensions: &[DimensionEvidence], cap: usize) 
         .unwrap_or(0);
 
     for round in 0..depth {
-        if let Some(path) = hotspots.get(round) {
-            push(&mut out, hotspot(path, round, &attributed));
+        if let Some(ranked) = hotspots.get(round) {
+            push(&mut out, hotspot(ranked, round, &attributed));
         }
         for dimension in dimensions {
             let Some(file) = dimension.files.get(round) else {
@@ -596,6 +602,7 @@ pub fn blend(hotspots: &[String], dimensions: &[DimensionEvidence], cap: usize) 
                     path: file.path.clone(),
                     dimension: Some(dimension.dimension.clone()),
                     reason: Some(file.reason.clone()),
+                    hotspot: None,
                 },
             );
         }
@@ -642,18 +649,35 @@ fn attributions(dimensions: &[DimensionEvidence]) -> Vec<(String, String, String
 }
 
 /// One complexity hotspot, carrying the search attribution when it has one.
-fn hotspot(path: &str, round: usize, attributed: &[(String, String, String)]) -> Priority {
-    let measured = format!("trusty-analyze complexity hotspot (rank {})", round + 1);
+///
+/// #6145: the measured function rides along whatever the attribution says. The
+/// reason line names it too, so a reader of the manifest sees the same fact the
+/// machine-readable key carries.
+fn hotspot(ranked: &RankedFile, round: usize, attributed: &[(String, String, String)]) -> Priority {
+    let path = ranked.path.as_str();
+    let mut measured = format!("trusty-analyze complexity hotspot (rank {})", round + 1);
+    if let Some(function) = &ranked.hotspot {
+        let named = function
+            .function
+            .as_deref()
+            .map_or_else(String::new, |name| format!("fn {name}, "));
+        measured.push_str(&format!(
+            ": {named}lines {}-{}, cyclomatic {}",
+            function.start_line, function.end_line, function.cyclomatic
+        ));
+    }
     match attributed.iter().find(|(p, _, _)| p == path) {
         Some((_, dimension, found)) => Priority {
             path: path.to_owned(),
             dimension: Some(dimension.clone()),
             reason: Some(format!("{measured}; {found}")),
+            hotspot: ranked.hotspot.clone(),
         },
         None => Priority {
             path: path.to_owned(),
             dimension: None,
             reason: Some(measured),
+            hotspot: ranked.hotspot.clone(),
         },
     }
 }

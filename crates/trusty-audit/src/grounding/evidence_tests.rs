@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use super::super::priority::FunctionHotspot;
 use super::*;
 
 /// A search client answering from a table of `query substring → hits`.
@@ -204,12 +205,25 @@ fn dimension(name: &str, paths: &[&str]) -> DimensionEvidence {
     }
 }
 
+/// Ranked files with no function-level measurement — the shape a daemon that
+/// locates nothing produces, and what most of these cases care about.
+fn hot(paths: &[&str]) -> Vec<RankedFile> {
+    paths
+        .iter()
+        .map(|path| RankedFile {
+            path: (*path).to_owned(),
+            hotspot: None,
+        })
+        .collect()
+}
+
 /// The regression this issue exists for: ranking complexity first spends the
 /// whole budget on one dimension. Round-robin reaches every dimension inside
 /// the same number of files.
 #[test]
 fn blending_spreads_the_budget_across_dimensions() {
-    let hotspots: Vec<String> = (0..10).map(|i| format!("src/hot{i}.rs")).collect();
+    let owned: Vec<String> = (0..10).map(|i| format!("src/hot{i}.rs")).collect();
+    let hotspots = hot(&owned.iter().map(String::as_str).collect::<Vec<_>>());
     let dimensions = [
         dimension("authentication & secrets", &["src/auth.rs", "src/token.rs"]),
         dimension("error handling", &["src/err.rs"]),
@@ -253,7 +267,7 @@ fn blending_spreads_the_budget_across_dimensions() {
 /// trusty-review's own heuristics and hidden the defect.
 #[test]
 fn a_hotspot_that_is_also_dimension_evidence_keeps_its_dimension() {
-    let hotspots = vec!["src/session_manager.rs".to_string()];
+    let hotspots = hot(&["src/session_manager.rs"]);
     let dimensions = [dimension(
         "authentication & secrets",
         &["src/session_manager.rs"],
@@ -275,7 +289,7 @@ fn a_hotspot_that_is_also_dimension_evidence_keeps_its_dimension() {
 /// dimension for a file the index never named.
 #[test]
 fn a_hotspot_no_query_found_carries_no_dimension() {
-    let hotspots = vec!["src/parser.rs".to_string()];
+    let hotspots = hot(&["src/parser.rs"]);
     let dimensions = [dimension("error handling", &["src/err.rs"])];
     let blended = blend(&hotspots, &dimensions, 60);
     let parser = blended
@@ -292,12 +306,44 @@ fn a_hotspot_no_query_found_carries_no_dimension() {
 /// The cap bounds the manifest, and never truncates to nothing.
 #[test]
 fn the_ranking_is_capped() {
-    let hotspots: Vec<String> = (0..80).map(|i| format!("src/hot{i}.rs")).collect();
+    let owned: Vec<String> = (0..80).map(|i| format!("src/hot{i}.rs")).collect();
+    let hotspots = hot(&owned.iter().map(String::as_str).collect::<Vec<_>>());
     assert_eq!(
         blend(&hotspots, &[], MIN_PRIORITY_PATHS).len(),
         MIN_PRIORITY_PATHS
     );
     assert!(blend(&[], &[], MIN_PRIORITY_PATHS).is_empty());
+}
+
+/// #6145: the measured function survives the blend — both as the structured key
+/// trusty-review reads and in the reason line a human reads. Pre-fix `blend`
+/// took paths only, so there was nothing to survive.
+#[test]
+fn a_blended_hotspot_carries_its_measured_function() {
+    let measured = FunctionHotspot {
+        function: Some("settle_invoice".to_owned()),
+        start_line: 40,
+        end_line: 190,
+        cyclomatic: 31,
+    };
+    let hotspots = vec![RankedFile {
+        path: "src/pay.rs".to_owned(),
+        hotspot: Some(measured.clone()),
+    }];
+
+    // Unattributed, and attributed to a dimension: both keep the measurement.
+    for dimensions in [
+        Vec::new(),
+        vec![dimension("error handling", &["src/pay.rs"])],
+    ] {
+        let blended = blend(&hotspots, &dimensions, 60);
+        assert_eq!(blended[0].hotspot.as_ref(), Some(&measured), "{blended:?}");
+        let reason = blended[0].reason.as_deref().expect("a reason");
+        assert!(
+            reason.contains("fn settle_invoice, lines 40-190, cyclomatic 31"),
+            "{reason}"
+        );
+    }
 }
 
 /// #6082: trusty-search expands the top hits along the symbol graph by default,

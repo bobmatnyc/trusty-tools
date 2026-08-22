@@ -16,6 +16,12 @@
 //! FILES. Several chunks of one file collapse to the file's best rank, which is
 //! also what keeps one pathological file from filling the whole list.
 //!
+//! #6145: the collapse KEEPS the winning chunk rather than only its path. The
+//! chunks arrive already sorted descending, so the first chunk of a file is that
+//! file's hottest function, and carrying its name, line range and cyclomatic
+//! count is what lets trusty-review point the analysis at the function instead
+//! of the file (#6146).
+//!
 //! The client is [`trusty_common::http_client::loopback_client_builder`], not a
 //! bare `reqwest::Client::new()`: the target is a loopback daemon, and a client
 //! that honoured an exported `HTTP_PROXY` would send a recipient's index id to
@@ -27,6 +33,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use serde::Deserialize;
+
+use super::priority::FunctionHotspot;
 
 /// How many chunks to ask for.
 ///
@@ -59,12 +67,57 @@ struct HotspotEnvelope {
 }
 
 /// One ranked chunk. Every other field of the flattened `CodeChunk` is ignored.
+///
+/// #6145: `function_name`, `start_line` and `end_line` were already on the wire
+/// and discarded here. A daemon that omits any of them still parses — the
+/// function-level record is then simply not built.
 #[derive(Debug, Deserialize)]
 struct Hotspot {
     #[serde(default)]
     file: String,
     #[serde(default)]
     cyclomatic: u32,
+    #[serde(default)]
+    function_name: Option<String>,
+    #[serde(default)]
+    start_line: u32,
+    #[serde(default)]
+    end_line: u32,
+}
+
+impl Hotspot {
+    /// This chunk as a function-level record, when its line range is usable.
+    ///
+    /// Why the range and not the name decides: the range is what an instruction
+    /// to "read this function" needs, and trusty-analyze's chunker names a
+    /// function only for the languages whose parser it has. A named chunk with
+    /// no range would produce "prioritize fn X" with nothing to point at.
+    fn measured_function(&self) -> Option<FunctionHotspot> {
+        if self.start_line == 0 || self.end_line < self.start_line {
+            return None;
+        }
+        Some(FunctionHotspot {
+            function: self
+                .function_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(ToOwned::to_owned),
+            start_line: self.start_line,
+            end_line: self.end_line,
+            cyclomatic: self.cyclomatic,
+        })
+    }
+}
+
+/// One file of the ranking, with the worst function measured inside it (#6145).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RankedFile {
+    /// Repo-relative path (absolute when the chunk named a file outside it).
+    pub path: String,
+    /// The file's hottest measured function, when the chunk carried a range.
+    pub hotspot: Option<FunctionHotspot>,
 }
 
 /// The endpoint for one index, on one base address.
@@ -86,13 +139,16 @@ fn hotspots_url(base: &str, index_id: &str) -> String {
 /// trusty-review does accept an absolute one, but a manifest a human reads
 /// should not name the machine that produced it.
 /// What: descending order preserved (the endpoint already sorted), first
-/// occurrence wins, zero-complexity dropped, capped at [`MAX_PRIORITY_PATHS`].
-/// Test: `hotspot_tests::{ranking_collapses_chunks_to_files,
+/// occurrence wins — and since the sort is descending, that first occurrence IS
+/// the file's hottest function, which the entry keeps (#6145) — zero-complexity
+/// dropped, capped at [`MAX_PRIORITY_PATHS`].
+/// Test: `hotspot_tests::{ranking_collapses_chunks_to_files_keeping_the_best_rank,
+/// the_hottest_function_of_each_file_is_kept,
 /// zero_complexity_chunks_carry_no_ranking, the_ranking_is_capped}`.
-fn rank(hotspots: &[Hotspot], checkout: &Path) -> Vec<String> {
+fn rank(hotspots: &[Hotspot], checkout: &Path) -> Vec<RankedFile> {
     let root = checkout.to_string_lossy().replace('\\', "/");
     let root = root.trim_end_matches('/');
-    let mut out: Vec<String> = Vec::new();
+    let mut out: Vec<RankedFile> = Vec::new();
     for spot in hotspots {
         if spot.cyclomatic == 0 || spot.file.is_empty() {
             continue;
@@ -102,10 +158,13 @@ fn rank(hotspots: &[Hotspot], checkout: &Path) -> Vec<String> {
             .strip_prefix(root)
             .map_or(path.as_str(), |rest| rest.trim_start_matches('/'))
             .to_owned();
-        if relative.is_empty() || out.contains(&relative) {
+        if relative.is_empty() || out.iter().any(|ranked| ranked.path == relative) {
             continue;
         }
-        out.push(relative);
+        out.push(RankedFile {
+            path: relative,
+            hotspot: spot.measured_function(),
+        });
         if out.len() >= MAX_PRIORITY_PATHS {
             break;
         }
@@ -128,7 +187,7 @@ fn rank(hotspots: &[Hotspot], checkout: &Path) -> Vec<String> {
 /// Test: `super::grounding_tests::{an_unreachable_hotspots_endpoint_is_a_named_gap,
 /// an_empty_hotspot_list_is_a_named_gap,
 /// hotspots_become_ranked_inspect_priority_in_the_manifest}`.
-pub async fn fetch(base: &str, index_id: &str, checkout: &Path) -> Result<Vec<String>, String> {
+pub async fn fetch(base: &str, index_id: &str, checkout: &Path) -> Result<Vec<RankedFile>, String> {
     let url = hotspots_url(base, index_id);
     let client = trusty_common::http_client::loopback_client_builder()
         .timeout(REQUEST_BUDGET)
@@ -158,7 +217,26 @@ mod hotspot_tests {
         Hotspot {
             file: file.to_owned(),
             cyclomatic,
+            function_name: None,
+            start_line: 0,
+            end_line: 0,
         }
+    }
+
+    /// A chunk the daemon named and located, which is the ordinary case.
+    fn located(file: &str, cyclomatic: u32, function: &str, start: u32, end: u32) -> Hotspot {
+        Hotspot {
+            file: file.to_owned(),
+            cyclomatic,
+            function_name: Some(function.to_owned()),
+            start_line: start,
+            end_line: end,
+        }
+    }
+
+    /// The ranked paths alone, for the assertions that only care about order.
+    fn paths(ranked: &[RankedFile]) -> Vec<String> {
+        ranked.iter().map(|r| r.path.clone()).collect()
     }
 
     #[test]
@@ -188,10 +266,84 @@ mod hotspot_tests {
         let env: HotspotEnvelope = serde_json::from_str(body).expect("parses");
         assert_eq!(env.hotspots.len(), 1);
         assert_eq!(env.hotspots[0].cyclomatic, 31);
+        let ranked = rank(&env.hotspots, Path::new("/w/repos/acme-api"));
+        assert_eq!(paths(&ranked), vec!["src/pay.rs".to_string()]);
+        // #6145: the per-function fields the daemon already sent are kept.
+        let measured = ranked[0].hotspot.as_ref().expect("the chunk was located");
+        assert_eq!(measured.function.as_deref(), Some("f"));
+        assert_eq!((measured.start_line, measured.end_line), (1, 9));
+        assert_eq!(measured.cyclomatic, 31);
+    }
+
+    /// #6145: chunks arrive sorted descending, so the chunk that wins a file's
+    /// place in the ranking is that file's hottest function — and the entry
+    /// keeps it rather than only the path. Pre-fix this data reached the
+    /// manifest as two bare strings.
+    #[test]
+    fn the_hottest_function_of_each_file_is_kept() {
+        let spots = [
+            located("/w/repos/api/src/pay.rs", 31, "settle_invoice", 40, 190),
+            located("/w/repos/api/src/pay.rs", 22, "refund", 210, 260),
+            located("/w/repos/api/src/auth.rs", 18, "verify_token", 12, 60),
+        ];
+        let ranked = rank(&spots, Path::new("/w/repos/api"));
         assert_eq!(
-            rank(&env.hotspots, Path::new("/w/repos/acme-api")),
-            vec!["src/pay.rs".to_string()]
+            ranked
+                .iter()
+                .map(|r| {
+                    let h = r.hotspot.as_ref().expect("a measured function");
+                    (
+                        r.path.as_str(),
+                        h.function.as_deref(),
+                        h.start_line,
+                        h.end_line,
+                        h.cyclomatic,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                ("src/pay.rs", Some("settle_invoice"), 40, 190, 31),
+                ("src/auth.rs", Some("verify_token"), 12, 60, 18),
+            ],
+            "the losing chunk of pay.rs must not displace the winner: {ranked:?}"
         );
+    }
+
+    /// A daemon that ranks a chunk without locating it still ranks its file —
+    /// the file-level collapse is what the manifest needs, and the function
+    /// record is an addition to it, never a precondition.
+    #[test]
+    fn a_chunk_with_no_usable_range_still_ranks_its_file() {
+        let spots = [
+            spot("/w/repos/api/src/a.rs", 30),
+            Hotspot {
+                start_line: 90,
+                end_line: 12,
+                ..located("/w/repos/api/src/b.rs", 20, "reversed", 0, 0)
+            },
+        ];
+        let ranked = rank(&spots, Path::new("/w/repos/api"));
+        assert_eq!(
+            paths(&ranked),
+            vec!["src/a.rs".to_string(), "src/b.rs".to_string()]
+        );
+        assert!(
+            ranked.iter().all(|r| r.hotspot.is_none()),
+            "an absent or inverted range carries no function: {ranked:?}"
+        );
+    }
+
+    /// An empty `function_name` is the daemon saying it could not name the
+    /// chunk, not a function called "". The range still carries the analysis.
+    #[test]
+    fn an_unnamed_chunk_keeps_its_range() {
+        let spots = [located("/w/repos/api/src/a.rs", 30, "  ", 4, 44)];
+        let measured = rank(&spots, Path::new("/w/repos/api"))[0]
+            .hotspot
+            .clone()
+            .expect("a located chunk");
+        assert_eq!(measured.function, None);
+        assert_eq!((measured.start_line, measured.end_line), (4, 44));
     }
 
     /// An envelope with no `hotspots` key at all is an empty measurement, not a
@@ -210,7 +362,7 @@ mod hotspot_tests {
             spot("/w/repos/api/src/auth.rs", 18),
         ];
         assert_eq!(
-            rank(&spots, Path::new("/w/repos/api")),
+            paths(&rank(&spots, Path::new("/w/repos/api"))),
             vec!["src/pay.rs".to_string(), "src/auth.rs".to_string()]
         );
     }
@@ -242,7 +394,7 @@ mod hotspot_tests {
     fn a_path_outside_the_checkout_is_left_absolute() {
         let spots = [spot("/elsewhere/src/a.rs", 12)];
         assert_eq!(
-            rank(&spots, Path::new("/w/repos/api")),
+            paths(&rank(&spots, Path::new("/w/repos/api"))),
             vec!["/elsewhere/src/a.rs".to_string()]
         );
     }

@@ -147,11 +147,11 @@ fn tools(search: PathBuf, search_url: String, analyze: PathBuf, analyze_url: Str
 
 const HOTSPOTS: &str = r#"{"index_id":"acme-api","top_n":60,"hotspots":[
     {"id":"a","file":"CHECKOUT/src/pay.rs","start_line":1,"end_line":9,"content":"",
-     "cyclomatic":31,"cognitive":40},
+     "function_name":"settle_invoice","cyclomatic":31,"cognitive":40},
     {"id":"b","file":"CHECKOUT/src/pay.rs","start_line":20,"end_line":30,"content":"",
-     "cyclomatic":18,"cognitive":22},
+     "function_name":"refund","cyclomatic":18,"cognitive":22},
     {"id":"c","file":"CHECKOUT/src/auth.rs","start_line":1,"end_line":9,"content":"",
-     "cyclomatic":12,"cognitive":15}
+     "function_name":"verify","cyclomatic":12,"cognitive":15}
 ]}"#;
 
 const EMPTY_HOTSPOTS: &str = r#"{"index_id":"acme-api","top_n":60,"hotspots":[]}"#;
@@ -544,6 +544,26 @@ async fn hotspots_and_search_hits_become_ranked_inspect_priority_in_the_manifest
             .contains("trusty-search hit for"),
         "{written}"
     );
+    // #6145: the winning chunk's own name, range and cyclomatic count survive
+    // the collapse to files and reach the manifest trusty-review reads. The
+    // losing pay.rs chunk (`refund`, rank 2) must not be the one recorded.
+    let hotspot = &declared[0]["hotspot"];
+    assert_eq!(
+        hotspot["function"].as_str(),
+        Some("settle_invoice"),
+        "{written}"
+    );
+    assert_eq!(hotspot["start_line"].as_integer(), Some(1), "{written}");
+    assert_eq!(hotspot["end_line"].as_integer(), Some(9), "{written}");
+    assert_eq!(hotspot["cyclomatic"].as_integer(), Some(31), "{written}");
+    assert!(
+        declared
+            .iter()
+            .filter(|entry| entry.get("path").and_then(toml::Value::as_str) == Some("src/login.rs"))
+            .all(|entry| entry.get("hotspot").is_none()),
+        "a search-only entry carries no measurement: {written}"
+    );
+
     // #6082: the audit's investigation budget rides on the same interface.
     assert_eq!(
         parsed["report"]["investigate_max_files"].as_integer(),
