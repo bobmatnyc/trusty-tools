@@ -187,19 +187,19 @@ struct DiagnosticsEnvelope {
 
 /// One external-tool diagnostic (`ToolDiagnostic`).
 #[derive(Debug, Deserialize)]
-struct WireDiagnostic {
+pub(super) struct WireDiagnostic {
     #[serde(default)]
-    tool: String,
+    pub(super) tool: String,
     #[serde(default)]
-    file: String,
+    pub(super) file: String,
     /// `error` | `warning` | `info` | `hint` (lowercase).
     #[serde(default)]
-    severity: String,
+    pub(super) severity: String,
     #[serde(default)]
-    code: Option<String>,
+    pub(super) code: Option<String>,
     /// The linter's own message. Verbatim tool output, not synthesis.
     #[serde(default)]
-    message: String,
+    pub(super) message: String,
 }
 
 /// `GET /indexes/{id}/refactor-suggestions` envelope.
@@ -211,24 +211,24 @@ struct RefactorEnvelope {
 
 /// One refactoring suggestion (`RefactorSuggestion`).
 #[derive(Debug, Deserialize)]
-struct WireRefactor {
+pub(super) struct WireRefactor {
     #[serde(default)]
-    file: String,
+    pub(super) file: String,
     #[serde(default)]
-    function_name: Option<String>,
+    pub(super) function_name: Option<String>,
     /// snake_case refactor type, e.g. `extract_method`.
     #[serde(default)]
-    refactor_type: String,
+    pub(super) refactor_type: String,
     /// `low` | `medium` | `high` | `critical` (lowercase).
     #[serde(default)]
-    severity: String,
+    pub(super) severity: String,
     /// Why the rule fired, e.g. `cyclomatic complexity 31 (grade F)`.
     #[serde(default)]
-    rationale: String,
+    pub(super) rationale: String,
     /// The concrete action, e.g. `Extract the body of 'f' into 2-3 smaller
     /// functions`.
     #[serde(default)]
-    suggested_action: String,
+    pub(super) suggested_action: String,
 }
 
 // ─── Severity mapping (BINDING convention, epic #2445) ───────────────────────
@@ -242,7 +242,7 @@ struct WireRefactor {
 /// What (convention): `error → Red`, `warning → Amber`, everything else
 /// (`info`, `hint`, unknown) → `Green`.
 /// Test: `severity_map_diagnostics` in the tests module.
-fn map_diagnostic_severity(s: &str) -> Severity {
+pub(super) fn map_diagnostic_severity(s: &str) -> Severity {
     match s.trim().to_ascii_lowercase().as_str() {
         "error" | "critical" => Severity::Red,
         "warning" | "high" => Severity::Amber,
@@ -264,7 +264,7 @@ fn map_diagnostic_severity(s: &str) -> Severity {
 /// What (convention): `critical`/`high` → `Amber`; `medium`, `low`, and unknown
 /// → `Green` (dropped from the rendered bands).
 /// Test: `severity_map_refactors`, `refactor_never_reaches_red`.
-fn map_refactor_severity(s: &str) -> Severity {
+pub(super) fn map_refactor_severity(s: &str) -> Severity {
     match s.trim().to_ascii_lowercase().as_str() {
         "critical" | "error" | "high" | "warning" => Severity::Amber,
         _ => Severity::Green,
@@ -300,104 +300,7 @@ fn map_distribution(env: &DistributionEnvelope) -> ComplexityDistribution {
     }
 }
 
-// ─── Finding synthesis (prose-free, deterministic) ───────────────────────────
-
-/// Build a [`MetricFinding`] from a tool diagnostic, or `None` when it maps to
-/// the GREEN band (never rendered — omitted to keep the findings list
-/// actionable, per the report's no-green rule).
-///
-/// Why: RED/AMBER findings must be listed deterministically with no LLM prose;
-/// `title`/`category`/`component` are verbatim facts.
-/// What: `title` = the rule code when present, else a synthesised
-/// `"{tool} diagnostic"`; `category` = the producing tool (a stable provenance
-/// category, not the prose message); `component` = the file; `severity` via the
-/// diagnostic map; `description` = the linter's own message, verbatim (#5317 —
-/// dropping it left every rendered prose slot reading the honesty marker).
-/// Test: `diagnostic_finding_synthesises_title` and `..._drops_green`.
-fn diagnostic_finding(d: &WireDiagnostic) -> Option<MetricFinding> {
-    let severity = map_diagnostic_severity(&d.severity);
-    if severity == Severity::Green {
-        return None;
-    }
-    let title = d.code.clone().filter(|c| !c.is_empty()).unwrap_or_else(|| {
-        if d.tool.is_empty() {
-            "diagnostic".to_string()
-        } else {
-            format!("{} diagnostic", d.tool)
-        }
-    });
-    Some(MetricFinding {
-        title,
-        severity,
-        category: if d.tool.is_empty() {
-            "diagnostic".to_string()
-        } else {
-            d.tool.clone()
-        },
-        component: d.file.clone(),
-        description: d.message.clone(),
-        remediation: String::new(),
-    })
-}
-
-/// Build a [`MetricFinding`] from a refactor suggestion, or `None` when it maps
-/// to GREEN (omitted, as above).
-///
-/// Why: high/critical refactor suggestions are actionable maintainability
-/// findings that belong in the AMBER band even with no synthesis — never RED,
-/// see [`map_refactor_severity`].
-/// What: `title` = the humanised refactor type plus the function name when
-/// known (e.g. `"Extract method — parse_config"`); `category` =
-/// `"maintainability"` (refactors are maintainability by construction);
-/// `component` = the file; `severity` via the refactor map; `description` =
-/// the analyzer's `rationale` and `remediation` = its `suggested_action`, both
-/// verbatim (#5317 — dropping them is what made the entries contentless).
-/// Test: `refactor_finding_synthesises_title`,
-/// `refactor_finding_carries_rationale_and_action`.
-fn refactor_finding(r: &WireRefactor) -> Option<MetricFinding> {
-    let severity = map_refactor_severity(&r.severity);
-    if severity == Severity::Green {
-        return None;
-    }
-    let action = humanise_refactor_type(&r.refactor_type);
-    let title = match &r.function_name {
-        Some(f) if !f.is_empty() => format!("{action} — {f}"),
-        _ => action,
-    };
-    Some(MetricFinding {
-        title,
-        severity,
-        category: "maintainability".to_string(),
-        component: r.file.clone(),
-        description: r.rationale.clone(),
-        remediation: r.suggested_action.clone(),
-    })
-}
-
-/// Convert a snake_case refactor type into a readable title fragment.
-///
-/// Why: keeps synthesised titles legible without pulling in trusty-analyze's
-/// enum. What: `extract_method` → `"Extract method"`; unknown/empty →
-/// `"Refactor"`. Test: `refactor_finding_synthesises_title`.
-fn humanise_refactor_type(t: &str) -> String {
-    if t.is_empty() {
-        return "Refactor".to_string();
-    }
-    let mut words = t.split('_').filter(|w| !w.is_empty());
-    let mut out = String::new();
-    if let Some(first) = words.next() {
-        let mut chars = first.chars();
-        if let Some(c) = chars.next() {
-            out.push(c.to_ascii_uppercase());
-            out.push_str(chars.as_str());
-        }
-    }
-    for w in words {
-        out.push(' ');
-        out.push_str(w);
-    }
-    out
-}
+use super::analyze_findings::{diagnostic_finding, refactor_finding, relativize_components};
 
 // ─── Pure mapping ────────────────────────────────────────────────────────────
 
@@ -897,6 +800,9 @@ pub async fn enrich_with_analyze_gaps(
                 caveats,
             } => {
                 super::redact::scrub_metrics(&mut metrics, &secrets);
+                // #6082: the daemon reports absolute paths; the report cites
+                // repository-relative ones everywhere else.
+                relativize_components(&mut metrics, path);
                 // #6137: an index addressed by directory basename can serve a
                 // DIFFERENT checkout of the same repository. Data describing
                 // another tree is stale-index evidence, never a measurement of

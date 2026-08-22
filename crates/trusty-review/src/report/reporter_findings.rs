@@ -150,6 +150,78 @@ impl FindingRow {
     }
 }
 
+/// Is this row a restatement of itself rather than a finding? (#6082)
+///
+/// Why: three of one report's 157 findings were the model re-reporting findings
+/// it had already made. #156 "Extract method — hnsw_store" and #157 "Extract
+/// method — Jira backend" duplicated analyze findings #1 and #3, and #2
+/// duplicated the tickets-server one. All three share a shape the legitimate
+/// findings never have: the Evidence block quotes the finding's own LABEL —
+/// `crates/…/hnsw_store.rs (extract method)` — instead of a line of source, and
+/// the Component is a prose phrase (`trusty-common memory_core`) instead of a
+/// path. A real finding quotes code and cites a file; these quote themselves and
+/// cite a topic, which is what makes them mechanically identifiable.
+/// What: true when a quoted row's component names no file, when the quote NAMES
+/// its own file instead of quoting a line out of it, or when the quote and the
+/// title restate each other. All three compare on alphanumerics only, so
+/// punctuation, case and spacing cannot hide a restatement. A row with no
+/// evidence quote at all is NOT suppressed — that is an ordinary un-synthesized
+/// metrics row, which has never claimed to carry evidence.
+/// Test: `reporter_tests::{a_self_quoting_finding_is_suppressed,
+/// a_finding_with_a_non_path_component_is_suppressed,
+/// a_genuine_finding_survives_the_self_quote_filter,
+/// a_root_level_manifest_component_is_not_a_topic}`.
+fn is_self_restatement(row: &FindingRow) -> bool {
+    let Some(quote) = row.evidence_quote.as_deref() else {
+        return false;
+    };
+    let component = row.component.as_deref().unwrap_or_default();
+    if !names_a_file(component) {
+        return true;
+    }
+    let q = alphanumeric(quote);
+    if q.is_empty() {
+        return false;
+    }
+    // A finding's evidence is a line OUT OF the cited file. A quote that spells
+    // the file's own path is naming the finding, not evidencing it — #2 of the
+    // graded report quoted `crates/…/tickets/server.rs (extract method —
+    // dispatch)` against that very file.
+    let path = alphanumeric(component.rsplit_once(':').map_or(component, |(p, _)| p));
+    if !path.is_empty() && q.contains(&path) {
+        return true;
+    }
+    let title = alphanumeric(&row.title);
+    !title.is_empty() && (q.contains(&title) || title.contains(&q))
+}
+
+/// Does `component` name a file rather than a topic?
+///
+/// A path separator or a file extension is enough — `Cargo.toml` and `deny.toml`
+/// are real root-level citations with neither a directory nor a line number, and
+/// must not be mistaken for prose.
+fn names_a_file(component: &str) -> bool {
+    let path = component.rsplit_once(':').map_or(component, |(p, _)| p);
+    let path = path.trim();
+    if path.is_empty() {
+        return false;
+    }
+    path.contains('/')
+        || path.contains('\\')
+        || path
+            .rsplit_once('.')
+            .is_some_and(|(stem, ext)| !stem.is_empty() && ext.chars().all(|c| c.is_alphanumeric()))
+}
+
+/// A string reduced to its lower-cased alphanumerics, so a restatement cannot
+/// hide behind punctuation, case, or spacing differences.
+fn alphanumeric(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
 /// Map an empty string to `None` so a blank/absent value falls to the honesty
 /// marker instead of rendering as literal empty text.
 fn non_empty(s: &str) -> Option<String> {
@@ -291,7 +363,8 @@ fn fence_for(content: &str) -> String {
 /// (bare fields), then — when `syn` is `Some` — overlays matching
 /// `FindingProse` prose by title; a synthesis finding with no metrics-title
 /// match is appended as an additional, synthesis-only row so no verified data
-/// is silently dropped.  Pushes the `app_block` (`app_name` + one
+/// is silently dropped.  Rows that merely restate themselves are then dropped
+/// ([`is_self_restatement`], #6082).  Pushes the `app_block` (`app_name` + one
 /// `finding_block` per row) only when the merged list is non-empty.
 /// Test: `reporter_tests.rs::{reporter_fills_red_findings_deterministically,
 /// reporter_merges_synthesis_prose_onto_deterministic_finding,
@@ -328,6 +401,10 @@ pub(super) fn push_finding_band(
             }
         }
     }
+
+    // #6082: drop the model's restatements of its own findings before numbering,
+    // so the surviving rows are numbered contiguously.
+    rows.retain(|row| !is_self_restatement(row));
 
     if rows.is_empty() {
         return;

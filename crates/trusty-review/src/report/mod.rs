@@ -16,6 +16,8 @@
 pub mod analyze_adapter;
 // #6041: per-endpoint paths, request budgets, and partial-fetch vocabulary.
 pub mod analyze_endpoints;
+// #6082: the per-finding half of the analyze mapping, split out under the cap.
+pub(crate) mod analyze_findings;
 pub mod analyze_scope;
 // #5453/#6004: the tga-authored authorship artifact, receiving half.
 pub mod authorship;

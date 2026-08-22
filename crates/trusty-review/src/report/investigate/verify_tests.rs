@@ -132,10 +132,18 @@ fn matches_whitespace_insensitively() {
 /// GREEN in that run carried a file, a line, or a quote — so nothing on the
 /// page let a reader check any of them. Attribution is not elaboration.
 /// What: a green citing a real file with a real quote keeps `file`/`line` and
-/// drops the quote and every prose field.
+/// the quote that match came from, and drops every prose field.
+///
+/// #6082 changed the quote half. It used to be blanked here, which left the
+/// citation unfalsifiable: "Manifest crate reads OS-level environment for API
+/// token resolution parity" cited `trusty-agents-common/Cargo.toml:58` — which
+/// is `fd-lock = { workspace = true }` under a file-locking comment — and
+/// neither the page nor the JSON twin retained anything showing the mismatch.
+/// The quote is evidence, not elaboration; the prose fields are elaboration and
+/// are still dropped.
 /// Test: this test itself.
 #[test]
-fn green_carries_its_citation_without_elaboration() {
+fn green_keeps_its_verified_quote() {
     let sel = selection("a.rs", "code\n");
     let mut g = raw("green", "a.rs", "code", None);
     g.title = "Clean dependency tree".to_string();
@@ -146,13 +154,16 @@ fn green_carries_its_citation_without_elaboration() {
     assert_eq!(out.verified[0].severity, Severity::Green);
     assert_eq!(out.verified[0].file, "a.rs");
     assert_eq!(out.verified[0].line, Some(1));
-    assert!(out.verified[0].evidence_quote.is_empty());
+    assert_eq!(
+        out.verified[0].evidence_quote, "code",
+        "the quote the citation was verified from is kept"
+    );
     assert!(out.verified[0].description.is_empty());
 }
 
 /// #6080: an uncited GREEN is rejected, not admitted as a bare title.
 ///
-/// Why/What: see [`green_carries_its_citation_without_elaboration`] — the same
+/// Why/What: see [`green_keeps_its_verified_quote`] — the same
 /// fail-closed rule RED/AMBER have always had. A clean signal a reader cannot
 /// check is an assertion, and this guardrail exists to admit no assertions.
 /// Test: this test itself.
@@ -164,6 +175,39 @@ fn an_uncited_green_is_rejected() {
     let out = verify_findings(vec![g], &sel);
     assert!(out.verified.is_empty());
     assert_eq!(out.rejected, 1);
+}
+
+/// #6082: a citation is rendered only when a verified quote backs it.
+///
+/// Why: the Security Posture preamble claims every counted finding's quote was
+/// mechanically verified, and a `file:line` with no surviving quote is exactly
+/// the shape that claim cannot cover — the reader gets a pointer and no way to
+/// check it. `component_ref` is the one place that decides, so it is asserted
+/// directly rather than through a render.
+/// What: a verified finding yields `file:line`; the same finding with its quote
+/// stripped yields nothing, and the bullet then renders as a bare topic.
+/// Test: this test itself.
+#[test]
+fn an_unquoted_green_renders_without_a_citation() {
+    let sel = selection("a.rs", "code\n");
+    let mut g = raw("green", "a.rs", "code", None);
+    g.title = "Clean dependency tree".to_string();
+    let out = verify_findings(vec![g], &sel);
+    let quoted = &out.verified[0];
+
+    assert_eq!(
+        crate::report::investigate::component_ref(quoted),
+        "a.rs:1",
+        "a verified quote earns a citation"
+    );
+
+    let mut unquoted = quoted.clone();
+    unquoted.evidence_quote = String::new();
+    assert_eq!(
+        crate::report::investigate::component_ref(&unquoted),
+        "",
+        "with no quote to check it against, the citation is not rendered"
+    );
 }
 
 /// Why: a finding with no title is meaningless and must be rejected.

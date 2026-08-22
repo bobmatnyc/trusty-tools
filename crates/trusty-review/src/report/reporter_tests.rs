@@ -470,7 +470,9 @@ fn reporter_injects_synthesis_prose() {
             severity: "RED".to_string(),
             description: "Raw query concatenation.".to_string(),
             evidence: "one path".to_string(),
-            component: "auth".to_string(),
+            // #6082: a component must name a file — a bare topic word is the
+            // shape `is_self_restatement` now suppresses.
+            component: "lib/auth/session.ts:58".to_string(),
             business_impact: "data loss".to_string(),
             remediation: "parameterise".to_string(),
             cost_effort: "moderate".to_string(),
@@ -651,6 +653,135 @@ fn finding_numbering_restarts_per_severity_section() {
     assert!(
         !md.contains("N. **"),
         "literal N. must never render anywhere"
+    );
+}
+
+// ─── Self-restating findings are suppressed (#6082) ──────────────────────────
+
+/// Render the bundled template with one synthesis finding, and return the
+/// markdown — the shared body of the self-restatement tests below.
+fn render_with_finding(f: crate::report::synthesize::FindingProse) -> String {
+    use crate::report::synthesize::Synthesis;
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let mut model = fixture_model(tmp.path());
+    let slug = model.repositories[0].slug.clone();
+    let mut f = f;
+    f.app_slug = slug;
+    model.synthesis = Some(Synthesis {
+        code_quality_summary: None,
+        security_summary: None,
+        authorship_summary: None,
+        executive_summary: None,
+        top_risks: vec![],
+        findings: vec![f],
+        notes: vec![],
+    });
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    Reporter::new(tmp.path()).render(&model, &template)
+}
+
+/// A finding shaped like the dogfood report's #156/#157, with the fields the
+/// individual tests vary left to the caller.
+fn restating_finding() -> crate::report::synthesize::FindingProse {
+    crate::report::synthesize::FindingProse {
+        app_slug: String::new(),
+        title: "Extract method — hnsw_store".to_string(),
+        severity: "AMBER".to_string(),
+        description: "The HNSW store module is flagged for method extraction".to_string(),
+        evidence: "crates/trusty-common/src/memory_core/store/hnsw_store.rs (extract method)"
+            .to_string(),
+        component: "trusty-common memory_core".to_string(),
+        business_impact: "harder to change".to_string(),
+        remediation: "decompose the flagged functions".to_string(),
+        cost_effort: "moderate".to_string(),
+        evidence_measured: false,
+    }
+}
+
+/// #6082: findings #156 and #157 of the dogfood report were the model
+/// re-reporting analyze findings #1 and #3. Their Evidence block quoted the
+/// finding's own LABEL instead of a line of source, and their Component was a
+/// prose topic instead of a path — the shape no genuine finding has.
+#[test]
+fn a_self_quoting_finding_is_suppressed() {
+    let mut f = restating_finding();
+    // A real path, so only the self-quote can be what suppresses it.
+    f.component = "crates/trusty-common/src/memory_core/store/hnsw_store.rs".to_string();
+
+    let md = render_with_finding(f);
+
+    assert!(
+        !md.contains("Extract method — hnsw_store"),
+        "a finding quoting its own label must not survive:\n{md}"
+    );
+}
+
+/// A Component naming a topic rather than a file is the other half of the same
+/// shape — the reader is given nothing to open.
+#[test]
+fn a_finding_with_a_non_path_component_is_suppressed() {
+    let md = render_with_finding(restating_finding());
+
+    assert!(
+        !md.contains("Extract method — hnsw_store"),
+        "a finding citing a topic instead of a file must not survive:\n{md}"
+    );
+}
+
+/// The filter must not reach a genuine finding: a real path plus a quote of real
+/// source, which is what every legitimate finding in the graded report looked
+/// like (e.g. #155, `const MEM_CEILING_MB: u64 = 8 * 1024;`).
+#[test]
+fn a_genuine_finding_survives_the_self_quote_filter() {
+    let mut f = restating_finding();
+    f.title = "Hardcoded illustrative resource ceilings for gauges".to_string();
+    f.component = "crates/trusty-mpm/src/tui/health/screen.rs:384".to_string();
+    f.evidence = "const MEM_CEILING_MB: u64 = 8 * 1024;".to_string();
+
+    let md = render_with_finding(f);
+
+    assert!(
+        md.contains("Hardcoded illustrative resource ceilings"),
+        "a genuine finding must survive:\n{md}"
+    );
+}
+
+/// A root-level manifest citation (`Cargo.toml`, `deny.toml`) has neither a
+/// directory nor a line number and must still read as a file, not a topic.
+#[test]
+fn a_root_level_manifest_component_is_not_a_topic() {
+    let mut f = restating_finding();
+    f.title = "Unpinned caret-range AWS SDK dependencies".to_string();
+    f.component = "Cargo.toml".to_string();
+    f.evidence = "aws-config = \"^1\"".to_string();
+
+    let md = render_with_finding(f);
+
+    assert!(
+        md.contains("Unpinned caret-range AWS SDK dependencies"),
+        "Cargo.toml is a real citation:\n{md}"
+    );
+}
+
+/// #6082: an AMBER finding's business impact exists for every red/amber finding
+/// the investigation produces (138 of 138 in the dogfood run) and rendered only
+/// for the 3 REDs — the template had no slot for it in the amber block.
+#[test]
+fn an_amber_finding_renders_its_business_impact() {
+    let mut f = restating_finding();
+    f.title = "Cross-process ledger writes can silently lose updates".to_string();
+    f.component = "crates/trusty-agents-common/src/workstreams/ledger.rs:33".to_string();
+    f.evidence = "let mut ledger = read_ledger()?;".to_string();
+    f.business_impact = "concurrent sessions silently drop workstream state".to_string();
+
+    let md = render_with_finding(f);
+
+    assert!(
+        md.contains("concurrent sessions silently drop workstream state"),
+        "an AMBER finding must render its business impact:\n{md}"
     );
 }
 
