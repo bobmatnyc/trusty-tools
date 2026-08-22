@@ -2835,3 +2835,185 @@ fn write_emits_the_authorship_document_alongside() {
         "{code_review}"
     );
 }
+
+// ─── #6082 lap 5: title-collision merge ───────────────────────────────────────
+
+/// Three AMBER hotspots shaped like the graded report's: TWO share the canned
+/// analyze title "Split oversized impl block" against different files, which is
+/// what made title an ambiguous merge key.
+fn fixture_model_with_colliding_titles(dir: &Path) -> ReportModel {
+    let metrics = r#"{
+      "loc": { "total": 5000, "by_language": [ { "language": "Rust", "loc": 5000 } ] },
+      "counts": { "files": 20, "functions": 150 },
+      "findings": [
+        { "title": "Split oversized impl block", "severity": "amber", "category": "maintainability",
+          "component": "crates/trusty-common/src/memory_core/store/hnsw_store.rs",
+          "description": "cyclomatic complexity 140 (grade F); long_impl_block" },
+        { "title": "Extract method — dispatch", "severity": "amber", "category": "maintainability",
+          "component": "crates/trusty-common/src/tickets/server.rs",
+          "description": "cyclomatic complexity 118 (grade F); long_function" },
+        { "title": "Split oversized impl block", "severity": "amber", "category": "maintainability",
+          "component": "crates/trusty-common/src/tickets/api/backends/jira/backend.rs",
+          "description": "cyclomatic complexity 112 (grade F); long_impl_block" }
+      ]
+    }"#;
+    std::fs::write(dir.join("acme.json"), metrics).expect("write metrics");
+
+    let toml = r#"
+        [report]
+        title = "Acme Due Diligence"
+        analyst = "bobmatnyc"
+
+        [[repositories]]
+        name = "Acme Web"
+        path = "/nonexistent/acme-web"
+        metrics = "acme.json"
+    "#;
+    let manifest_path = dir.join("manifest.toml");
+    let manifest = parse_manifest(toml, &manifest_path).expect("manifest parse");
+    ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None).expect("build model")
+}
+
+/// One AMBER narrative, with the fields each test varies left to the caller.
+fn amber_prose(
+    title: &str,
+    component: &str,
+    evidence: &str,
+) -> crate::report::synthesize::FindingProse {
+    crate::report::synthesize::FindingProse {
+        trace_verdict: String::new(),
+        app_slug: String::new(),
+        title: title.to_string(),
+        severity: "AMBER".to_string(),
+        description: "the block has grown past what one reader can hold".to_string(),
+        evidence: evidence.to_string(),
+        component: component.to_string(),
+        business_impact: String::new(),
+        remediation: "decompose it".to_string(),
+        cost_effort: "moderate".to_string(),
+        evidence_measured: false,
+    }
+}
+
+/// Render the colliding-title fixture with `findings` attached as synthesis.
+fn render_colliding(findings: Vec<crate::report::synthesize::FindingProse>) -> String {
+    use crate::report::synthesize::Synthesis;
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let mut model = fixture_model_with_colliding_titles(tmp.path());
+    let slug = model.repositories[0].slug.clone();
+    let findings = findings
+        .into_iter()
+        .map(|mut f| {
+            f.app_slug = slug.clone();
+            f
+        })
+        .collect();
+    model.synthesis = Some(Synthesis {
+        code_quality_summary: None,
+        security_summary: None,
+        authorship_summary: None,
+        executive_summary: None,
+        top_risks: vec![],
+        findings,
+        notes: vec![],
+    });
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    Reporter::new(tmp.path()).render(&model, &template)
+}
+
+/// The Component recorded in the same finding block as `needle` — the last
+/// `**Component:**` line before it, which is the one belonging to that block.
+fn component_for(md: &str, needle: &str) -> String {
+    let at = md
+        .find(needle)
+        .unwrap_or_else(|| panic!("'{needle}' never rendered:\n{md}"));
+    let before = &md[..at];
+    let marker = "**Component:**";
+    let start = before
+        .rfind(marker)
+        .unwrap_or_else(|| panic!("no component line precedes '{needle}'"))
+        + marker.len();
+    before[start..]
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+/// #6082 lap 5 (BLOCKER 1): two narratives sharing one title must land on their
+/// own components.
+///
+/// Why: matching on title text alone sent both narratives to the FIRST row
+/// carrying that title. The graded report's AMBER #1 rendered `hnsw_store.rs`
+/// as its Component under the Jira backend's narrative, and the hnsw narrative
+/// was never rendered at all — a silent cross-wire, exit 0.
+/// What: two AMBER metrics rows share the canned title against different files;
+/// each narrative names its own file. Asserts each business impact renders
+/// against the Component it belongs to.
+/// Test: this test itself.
+#[test]
+fn colliding_titles_attach_to_their_own_components() {
+    let mut hnsw = amber_prose(
+        "Split oversized impl block",
+        "crates/trusty-common/src/memory_core/store/hnsw_store.rs:327",
+        "fn insert(&mut self, id: u64) {",
+    );
+    hnsw.business_impact = "vector maintenance carries the deepest risk".to_string();
+    let mut jira = amber_prose(
+        "Split oversized impl block",
+        "crates/trusty-common/src/tickets/api/backends/jira/backend.rs:368",
+        "let jql = format!(\"project = {}\", key);",
+    );
+    jira.business_impact = "ticket sync carries the second risk".to_string();
+
+    let md = render_colliding(vec![hnsw, jira]);
+
+    assert!(
+        component_for(&md, "vector maintenance carries the deepest risk").contains("hnsw_store.rs"),
+        "the hnsw narrative must sit on the hnsw row:\n{md}"
+    );
+    assert!(
+        component_for(&md, "ticket sync carries the second risk").contains("jira/backend.rs"),
+        "the jira narrative must sit on the jira row:\n{md}"
+    );
+}
+
+/// #6082 lap 5 (BLOCKER 1, second arm): a self-restating narrative must never
+/// delete the measurement underneath it.
+///
+/// Why: this is a fail-open branch — the graded render dropped
+/// `tickets/server.rs` (cyclomatic 118, grade F) entirely and still exited 0,
+/// listing 167 of the 168 AMBER findings the metrics measured. The narrative
+/// was junk; the hotspot was not.
+/// What: a narrative whose evidence quotes its own file path, against a
+/// metrics-backed row. Asserts the metrics title and description still render,
+/// and that the refused narrative's own prose does not.
+/// Test: this test itself.
+#[test]
+fn a_self_restating_narrative_never_deletes_its_metrics_row() {
+    let mut restating = amber_prose(
+        "Extract method — dispatch",
+        "trusty-common tickets server",
+        "crates/trusty-common/src/tickets/server.rs (extract method — dispatch)",
+    );
+    restating.business_impact = "harder to change over time".to_string();
+
+    let md = render_colliding(vec![restating]);
+
+    assert!(
+        md.contains("cyclomatic complexity 118 (grade F)"),
+        "the measured hotspot must survive a junk narrative:\n{md}"
+    );
+    assert!(
+        md.contains("Extract method — dispatch"),
+        "the finding must still be listed:\n{md}"
+    );
+    assert!(
+        !md.contains("harder to change over time"),
+        "the restating narrative must still be refused:\n{md}"
+    );
+}

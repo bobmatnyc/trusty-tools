@@ -57,6 +57,19 @@ const REMOTE_MARKERS: &[&str] = &[
 /// Longest first: `remote-code-execution` must be matched before a bare
 /// `remote`, or the rewrite would leave a broken fragment behind.
 const REACHABILITY_REWRITES: &[(&str, &str)] = &[
+    // #6082 lap 5: the hedged form. RED finding 3's business impact read
+    // "enabling remote/local code execution" — no pattern below matches it,
+    // because the `/local` sits between the two words every other pattern
+    // expects to be adjacent, so the sentence never even triggered the check.
+    (
+        "remote/local code execution",
+        "local-process-reachable code execution",
+    ),
+    (
+        "remote/local code-execution",
+        "local-process-reachable code-execution",
+    ),
+    ("remote/local", "local-process-reachable"),
     (
         "unauthenticated remote-code-execution",
         "unauthenticated local-process-reachable code-execution",
