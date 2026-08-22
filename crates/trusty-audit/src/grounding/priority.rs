@@ -132,10 +132,13 @@ pub const BYTES_PER_FILE: usize = 10 * 1024;
 pub const DEFAULT_MAX_BYTES: usize = DEFAULT_MAX_FILES * BYTES_PER_FILE;
 
 /// Environment override for [`DEFAULT_MAX_FILES`].
-pub const ENV_MAX_FILES: &str = "TRUSTY_AUDIT_INVESTIGATE_MAX_FILES";
+///
+/// Spelled once in `trusty_common::env_vars` (#6082) because trusty-review reads
+/// the same variable — see [`Budget::child_env`].
+pub const ENV_MAX_FILES: &str = trusty_common::env_vars::ENV_AUDIT_INVESTIGATE_MAX_FILES;
 
 /// Environment override for [`DEFAULT_MAX_BYTES`].
-pub const ENV_MAX_BYTES: &str = "TRUSTY_AUDIT_INVESTIGATE_MAX_BYTES";
+pub const ENV_MAX_BYTES: &str = trusty_common::env_vars::ENV_AUDIT_INVESTIGATE_MAX_BYTES;
 
 impl Budget {
     /// The budget THIS manifest runs under: what it declares, else the machine's.
@@ -173,6 +176,30 @@ impl Budget {
     #[must_use]
     pub fn from_env() -> Self {
         Self::resolve(env_positive(ENV_MAX_FILES), env_positive(ENV_MAX_BYTES))
+    }
+
+    /// This budget as the environment pairs a `tga audit` child passes down.
+    ///
+    /// Why (#6082): the manifest is the interface, and on the sweep path the
+    /// manifest arrives too late. `tga audit` writes the manifest and then, in
+    /// the SAME process, runs `trusty-review report` against it; the audit's
+    /// grounding pass only edits the file once that child has exited. So the
+    /// 240-file budget [`write_into`] records reaches a re-render and never the
+    /// report the sweep itself produces — the 2026-08-22 dogfood run declared
+    /// `investigate_max_files = 240` in its manifest over an investigation whose
+    /// own snapshot recorded `{"max_files": 40}`, trusty-review's bare default.
+    /// The environment reaches the grandchild BEFORE the file does.
+    /// What: both variables, always both, so a raised file budget never meets an
+    /// unraised byte budget (#6148). It is the lowest tier trusty-review
+    /// consults — an explicit `--investigate-max-files` and a manifest key both
+    /// still win — so this adds a floor and overrides nothing.
+    /// Test: `priority_tests::the_child_environment_carries_both_halves`.
+    #[must_use]
+    pub fn child_env(self) -> [(&'static str, String); 2] {
+        [
+            (ENV_MAX_FILES, self.max_files.to_string()),
+            (ENV_MAX_BYTES, self.max_bytes.to_string()),
+        ]
     }
 
     /// [`Budget::from_env`]'s rule, as a pure function.
@@ -715,6 +742,39 @@ path = "/w/repos/acme-web"
         assert_eq!(
             parsed["report"]["investigate_max_bytes"].as_integer(),
             Some(1_200_000)
+        );
+    }
+
+    /// #6082: the budget also travels by environment, because the manifest key
+    /// arrives too late on the sweep path — `tga audit` renders from the
+    /// manifest in the same process that wrote it, and grounding edits that file
+    /// only after the child exits. Both halves go, always: a raised file budget
+    /// against an unraised byte budget reads fewer files than it asked for and
+    /// says nothing (#6148). Fails against the pre-fix code, which had no such
+    /// channel — the 2026-08-22 run declared `investigate_max_files = 240` in a
+    /// manifest whose investigation recorded `max_files: 40`.
+    #[test]
+    fn the_child_environment_carries_both_halves() {
+        let pairs = Budget {
+            max_files: 240,
+            max_bytes: 2_457_600,
+        }
+        .child_env();
+        assert_eq!(
+            pairs,
+            [
+                ("TRUSTY_AUDIT_INVESTIGATE_MAX_FILES", "240".to_owned()),
+                ("TRUSTY_AUDIT_INVESTIGATE_MAX_BYTES", "2457600".to_owned()),
+            ]
+        );
+        assert_eq!(
+            pairs[0].0,
+            trusty_common::env_vars::ENV_AUDIT_INVESTIGATE_MAX_FILES,
+            "trusty-review reads the same constant, so the spelling cannot drift"
+        );
+        assert_eq!(
+            pairs[1].0,
+            trusty_common::env_vars::ENV_AUDIT_INVESTIGATE_MAX_BYTES
         );
     }
 

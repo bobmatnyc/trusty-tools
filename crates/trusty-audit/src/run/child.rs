@@ -141,6 +141,15 @@ pub(super) async fn spawn_tga(
     if let Some((name, value)) = github_access.env() {
         command.env(name, value);
     }
+    // #6082: the investigation budget, down the one channel that reaches the
+    // grandchild in time. `tga audit` writes the manifest and runs
+    // `trusty-review report` against it in the same process, and this crate's
+    // grounding pass edits that manifest only after the child exits — so the
+    // budget it records there reaches a re-render and never this run's report.
+    // See `grounding::priority::Budget::child_env`.
+    for (name, value) in crate::grounding::priority::Budget::from_env().child_env() {
+        command.env(name, value);
+    }
 
     let spawned = command.spawn();
 

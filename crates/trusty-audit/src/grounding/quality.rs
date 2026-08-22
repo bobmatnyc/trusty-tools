@@ -21,7 +21,7 @@
 //!
 //! | Rule | Effect |
 //! |---|---|
-//! | [`MIN_EVIDENCE_SCORE`] | a hit below it is noise, and is dropped |
+//! | [`MIN_EVIDENCE_SHARE`] | a hit far below its own query's best hit is noise, and is dropped |
 //! | [`demoted_for`] | a test file sorts after every production file, except under "test coverage" |
 //! | [`dependency_manifests`] | the build manifests present in the tree lead the dependencies dimension |
 //!
@@ -31,15 +31,28 @@ use std::path::Path;
 
 use super::evidence::FileEvidence;
 
-/// Relevance below which a hit is a top-N filler row, not evidence.
+/// Share of its own query's best hit below which a hit is a filler row.
 ///
-/// Why 0.15: the promotion this rule exists to stop scored 0.02, and the
-/// genuine hits in the same run scored 0.6–0.9. A floor an order of magnitude
-/// above the observed noise and well below the observed signal drops the filler
-/// without adjudicating between real hits — which is the search lane's job, not
-/// this constant's. It is deliberately not tunable: a per-run knob would turn a
-/// correctness rule into a setting nobody sets.
-pub const MIN_EVIDENCE_SCORE: f32 = 0.15;
+/// Why RELATIVE rather than absolute (#6082): the floor shipped as an absolute
+/// `0.15`, calibrated against a run whose filler scored 0.02 and whose signal
+/// scored 0.6–0.9. The endpoint the discovery leg actually calls does not
+/// produce scores on that scale. `POST /indexes/{id}/search` fuses its lanes
+/// with Reciprocal Rank Fusion — `Σ weight / (60 + rank)` over lane weights that
+/// sum to one — so the highest score any hit can carry is `1/61 ≈ 0.0164`, an
+/// order of magnitude BELOW the floor. Every hit of every query failed it, on
+/// every run, and the discovery leg returned nothing whatever the index held:
+/// the 2026-08-22 dogfood audit read 85 840 indexed chunks and wrote zero
+/// search-derived evidence rows. An absolute constant cannot be right for both
+/// score spaces, and a floor that can reject a whole result set is a floor that
+/// will.
+///
+/// Why 0.5: measured against its own query's best hit, the rule is scale-free —
+/// it drops the 0.02 filler beside a 0.9 hit exactly as the absolute floor did,
+/// and keeps the head of an RRF list. The head is kept by construction: `best`
+/// always clears `best * 0.5`, so no query can be silently emptied by this rule
+/// again. Still deliberately not tunable, for the reason the absolute constant
+/// was not.
+pub const MIN_EVIDENCE_SHARE: f32 = 0.5;
 
 /// The dimension for which a test file IS the evidence.
 pub const TEST_DIMENSION: &str = "test coverage";
@@ -47,13 +60,35 @@ pub const TEST_DIMENSION: &str = "test coverage";
 /// The dimension whose evidence is enumerable rather than searchable.
 pub const DEPENDENCY_DIMENSION: &str = "dependencies";
 
-/// True when this hit is worth ranking at all.
+/// The floor one query's hits are judged against: a share of its own best hit.
+///
+/// Why: see [`MIN_EVIDENCE_SHARE`]. Taking `best` as an argument is what keeps
+/// the rule scale-free, and what makes "this filter emptied the result set"
+/// unreachable rather than merely unlikely.
+/// What: `best * MIN_EVIDENCE_SHARE` for a finite positive best; `0.0` for
+/// anything else, so a query whose scores are all zero, negative or `NaN` is
+/// judged by [`is_evidence`]'s own finiteness check alone rather than by a
+/// floor derived from a number that means nothing.
+/// Test: `super::quality_tests::the_floor_scales_with_the_best_hit`.
+#[must_use]
+pub fn evidence_floor(best: f32) -> f32 {
+    if best.is_finite() && best > 0.0 {
+        best * MIN_EVIDENCE_SHARE
+    } else {
+        0.0
+    }
+}
+
+/// True when this hit is worth ranking, against `floor` for the same query.
 ///
 /// A `NaN` score fails this, which is the safe direction: the daemon should
 /// never send one, and a comparison against `NaN` is false in both directions.
+/// `floor` comes from [`evidence_floor`] over the same query's hits.
+/// Test: `super::quality_tests::{rrf_scale_hits_clear_a_relative_floor,
+/// a_filler_row_beside_a_real_hit_is_dropped}`.
 #[must_use]
-pub fn is_evidence(score: f32) -> bool {
-    score >= MIN_EVIDENCE_SCORE
+pub fn is_evidence(score: f32, floor: f32) -> bool {
+    score.is_finite() && score >= floor
 }
 
 /// True when `path` should sort behind every production file for `dimension`.

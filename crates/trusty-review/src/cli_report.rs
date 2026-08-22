@@ -438,20 +438,66 @@ fn target_snapshots(model: &ReportModel) -> Vec<CorpusSnapshot> {
 /// Why: the wave-3 investigation caps how much of a repo is sent to the LLM;
 /// operators tune it via a CLI flag or a manifest key, falling back to sane
 /// defaults, in one place so both budget dimensions resolve consistently.
-/// What: CLI flag > manifest `[report].investigate_max_*` > [`Budget::default`].
-/// Test: `tests::report_args_parse_investigate_budget`.
+///
+/// #6082 adds the environment tier, BELOW both. `trusty-audit` writes the budget
+/// it wants into `[report]`, but on the sweep path that write lands after the
+/// `tga audit` child has already run this binary — so the key was in the shipped
+/// manifest and never in the run that produced the report, and the investigation
+/// silently used the 40-file default over a manifest declaring 240. The
+/// environment crosses both process boundaries before the file does. It is the
+/// lowest tier because an operator's flag and an operator's manifest key are
+/// both explicit and this is not.
+///
+/// What: CLI flag > manifest `[report].investigate_max_*` >
+/// `TRUSTY_AUDIT_INVESTIGATE_MAX_*` > [`Budget::default`]. A non-numeric, zero
+/// or negative variable reads as absent rather than disabling the
+/// investigation.
+/// Test: `tests::{report_args_parse_investigate_budget,
+/// the_environment_budget_is_read_below_the_manifest}`.
 fn resolve_budget(args: &ReportArgs, manifest: &Manifest) -> Budget {
+    resolve_budget_from(
+        args,
+        manifest,
+        env_budget(trusty_common::env_vars::ENV_AUDIT_INVESTIGATE_MAX_FILES),
+        env_budget(trusty_common::env_vars::ENV_AUDIT_INVESTIGATE_MAX_BYTES),
+    )
+}
+
+/// [`resolve_budget`]'s precedence rule, over values already read.
+///
+/// Why: taking the environment tier as a parameter is what lets the precedence
+/// be tested without `std::env::set_var`, which is `unsafe` in edition 2024 and
+/// unsound under the parallel test harness.
+/// Test: `tests::the_environment_budget_is_read_below_the_manifest`.
+fn resolve_budget_from(
+    args: &ReportArgs,
+    manifest: &Manifest,
+    env_files: Option<usize>,
+    env_bytes: Option<usize>,
+) -> Budget {
     let default = Budget::default();
     Budget {
         max_files: args
             .investigate_max_files
             .or(manifest.report.investigate_max_files)
+            .or(env_files)
             .unwrap_or(default.max_files),
         max_bytes: args
             .investigate_max_bytes
             .or(manifest.report.investigate_max_bytes)
+            .or(env_bytes)
             .unwrap_or(default.max_bytes),
     }
+}
+
+/// A positive integer from `name`, or `None` for absent/unusable.
+fn env_budget(name: &str) -> Option<usize> {
+    std::env::var(name)
+        .ok()?
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|n| *n > 0)
 }
 
 /// Fail before any work when the required inference credential is absent.
@@ -751,6 +797,46 @@ mod tests {
         assert_eq!(
             budget.max_bytes, 1024,
             "manifest key fills the unset CLI flag"
+        );
+    }
+
+    /// #6082: the environment is the tier below the manifest, and it is what
+    /// carries an audit's budget across the two process boundaries in time.
+    ///
+    /// Why this is the regression: `trusty-audit` records the budget in
+    /// `[report]`, but on the sweep path `tga audit` has already run this binary
+    /// against that manifest by the time the key is written — so the shipped
+    /// manifest declared `investigate_max_files = 240` while the investigation
+    /// that produced the report recorded `{"max_files": 40}`, this crate's bare
+    /// default. Against the pre-fix `resolve_budget`, which had no environment
+    /// tier at all, the first assertion below reads 40 and fails.
+    #[test]
+    fn the_environment_budget_is_read_below_the_manifest() {
+        let args = ReportArgs::try_parse_from(["report", "--manifest", "m.toml", "--synthesize"])
+            .expect("parse");
+        let bare = load_manifest_from_str(
+            "[report]\ntitle = \"T\"\n\n[[repositories]]\nname = \"A\"\npath = \"/x\"\n",
+        );
+
+        let from_env = resolve_budget_from(&args, &bare, Some(240), Some(2_457_600));
+        assert_eq!(from_env.max_files, 240, "the audit's budget arrives");
+        assert_eq!(from_env.max_bytes, 2_457_600);
+
+        let declared = load_manifest_from_str(
+            "[report]\ntitle = \"T\"\ninvestigate_max_files = 3\n\n[[repositories]]\nname = \"A\"\npath = \"/x\"\n",
+        );
+        let mixed = resolve_budget_from(&args, &declared, Some(240), Some(2_457_600));
+        assert_eq!(mixed.max_files, 3, "an operator's manifest key still wins");
+        assert_eq!(
+            mixed.max_bytes, 2_457_600,
+            "and the environment fills only what the manifest left unset"
+        );
+
+        let none = resolve_budget_from(&args, &bare, None, None);
+        assert_eq!(
+            none.max_files,
+            Budget::default().max_files,
+            "no manifest key and no variable is still the default"
         );
     }
 

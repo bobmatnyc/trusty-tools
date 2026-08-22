@@ -27,6 +27,30 @@ pub const ENV_OPENROUTER_API_KEY: &str = "OPENROUTER_API_KEY";
 /// Test: `env_var_names_are_stable`.
 pub const ENV_GITHUB_TOKEN: &str = "GITHUB_TOKEN";
 
+/// Investigation file budget an audit asks its renderer for
+/// (`TRUSTY_AUDIT_INVESTIGATE_MAX_FILES`).
+///
+/// Why (#6082): `trusty-audit` writes this budget into the manifest, but on the
+/// sweep path the manifest edit lands after the `tga audit` child has already
+/// run `trusty-review report` — so the renderer read its own 40-file default and
+/// the audit's 240 never arrived. The environment reaches the grandchild before
+/// the file does, so the same number travels both ways and the two spellings
+/// have to agree; a literal in each crate is the drift this module exists to
+/// stop.
+/// What: the exact env-var name; pass to `std::env::var`. Read by
+/// `trusty_audit::grounding::priority::Budget` and by `trusty-review`'s
+/// `resolve_budget`, in both cases BELOW an explicit flag and below the
+/// manifest key.
+/// Test: `env_var_names_are_stable`.
+pub const ENV_AUDIT_INVESTIGATE_MAX_FILES: &str = "TRUSTY_AUDIT_INVESTIGATE_MAX_FILES";
+
+/// Investigation byte budget an audit asks its renderer for
+/// (`TRUSTY_AUDIT_INVESTIGATE_MAX_BYTES`).
+///
+/// Why/What/Test: the byte half of [`ENV_AUDIT_INVESTIGATE_MAX_FILES`], resolved
+/// under the same precedence.
+pub const ENV_AUDIT_INVESTIGATE_MAX_BYTES: &str = "TRUSTY_AUDIT_INVESTIGATE_MAX_BYTES";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -37,5 +61,13 @@ mod tests {
     fn env_var_names_are_stable() {
         assert_eq!(ENV_OPENROUTER_API_KEY, "OPENROUTER_API_KEY");
         assert_eq!(ENV_GITHUB_TOKEN, "GITHUB_TOKEN");
+        assert_eq!(
+            ENV_AUDIT_INVESTIGATE_MAX_FILES,
+            "TRUSTY_AUDIT_INVESTIGATE_MAX_FILES"
+        );
+        assert_eq!(
+            ENV_AUDIT_INVESTIGATE_MAX_BYTES,
+            "TRUSTY_AUDIT_INVESTIGATE_MAX_BYTES"
+        );
     }
 }

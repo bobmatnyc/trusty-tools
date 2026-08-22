@@ -510,11 +510,20 @@ pub async fn discover<C: SearchClient>(
 
 /// Merge one query's hits into a dimension's running best-per-file list.
 ///
-/// #6082: a hit below [`quality::MIN_EVIDENCE_SCORE`] never enters the list. A
-/// hybrid search returns its top-N whether or not it found anything, so an
-/// empty-handed query returns filler rows rather than no rows.
+/// #6082: a hit far below its own query's best never enters the list. A hybrid
+/// search returns its top-N whether or not it found anything, so an empty-handed
+/// query returns filler rows rather than no rows. The floor is derived from THIS
+/// query's hits ([`quality::evidence_floor`]) rather than from a constant,
+/// because the score scale is the daemon's to choose and an absolute floor on
+/// the wrong scale rejects everything — which is what it did.
 fn merge(scored: &mut Vec<(f32, FileEvidence)>, hits: &[Hit], query: &str) {
-    for hit in hits.iter().filter(|h| quality::is_evidence(h.score)) {
+    let best = hits
+        .iter()
+        .map(|h| h.score)
+        .filter(|s| s.is_finite())
+        .fold(f32::NEG_INFINITY, f32::max);
+    let floor = quality::evidence_floor(best);
+    for hit in hits.iter().filter(|h| quality::is_evidence(h.score, floor)) {
         if hit.path.is_empty() {
             continue;
         }
