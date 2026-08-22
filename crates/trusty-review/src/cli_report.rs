@@ -20,6 +20,7 @@ use trusty_review::config::{Provider, ReviewConfig};
 use trusty_review::llm::{build_provider, resolve_model, resolve_provider_and_model};
 use trusty_review::report::{
     Budget, CorpusSnapshot, Instructions, Reporter, TemplateLoader, benchmark,
+    discover_manifest_instructions,
     investigate::{Investigation, Verifier, apply_investigation, merge_investigation_prose},
     load_instructions, load_manifest,
     manifest::Manifest,
@@ -384,13 +385,18 @@ fn resolve_corpus_dir(args: &ReportArgs, manifest: &Manifest) -> Result<PathBuf>
     })
 }
 
-/// Resolve and load the analyst instructions brief, honouring precedence (#2340).
+/// Resolve and load the auditor instructions brief, honouring precedence
+/// (#2340, extended by #6180).
 ///
-/// Why: the brief may come from the `--instructions` flag or the manifest
-/// `[report].instructions` key; the flag wins, and a manifest-relative path is
-/// resolved against the manifest directory so authors write portable paths.
-/// What: returns `Ok(None)` when no source is configured; otherwise loads via
-/// [`load_instructions`] (missing file → error; empty file → warn + `None`).
+/// Why: the brief may come from the `--instructions` flag, the manifest
+/// `[report].instructions` key, or — since #6180 — an `instructions.md` the
+/// engagement author dropped beside the manifest with nothing declaring it. The
+/// flag wins, then the key, then discovery; a relative key is resolved against
+/// the manifest directory so authors write portable paths.
+/// What: returns `Ok(None)` when no source is configured AND no file was
+/// discovered; otherwise loads via [`load_instructions`] (missing file → error;
+/// empty file → warn + `None`) or [`discover_manifest_instructions`] (absent →
+/// `None`; present but unreadable → error).
 /// Test: instructions loading/validation is covered by `instructions_tests.rs`;
 /// precedence is exercised by `tests::report_args_parse_defaults` shape.
 fn load_report_instructions(
@@ -412,7 +418,9 @@ fn load_report_instructions(
     match resolved {
         Some(path) => Ok(load_instructions(&path)
             .with_context(|| format!("failed to load analyst instructions {}", path.display()))?),
-        None => Ok(None),
+        // #6180: nothing was declared, so look for the file that travels with the
+        // engagement. Absent is the normal case and changes nothing.
+        None => Ok(discover_manifest_instructions(&args.manifest)?),
     }
 }
 

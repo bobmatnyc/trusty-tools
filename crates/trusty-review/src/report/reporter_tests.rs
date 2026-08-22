@@ -1565,6 +1565,57 @@ fn reporter_records_instructions_verbatim() {
     assert!(md.contains("provenance: declared"));
 }
 
+/// Why: #6180 — instructions can now arrive with nothing declaring them, so the
+/// page must name the file that extended the auditor prompt and state that the
+/// deterministic checks still ran. A reader who sees only the brief cannot tell
+/// whether it overrode the guards.
+/// What: renders a model whose instructions came from a discovered
+/// `instructions.md` and asserts the note names the file and the guards; then
+/// asserts a model with no instructions renders no such note at all.
+/// Test: this test itself.
+#[test]
+fn the_instructions_note_names_the_file_and_the_guards() {
+    use crate::report::instructions::Instructions;
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    std::fs::write(tmp.path().join("acme.json"), "{}").expect("metrics");
+    let toml = "[report]\ntitle = \"Acme\"\n\n[[repositories]]\nname = \"Acme Web\"\npath = \"/nonexistent/x\"\nmetrics = \"acme.json\"\n";
+    let manifest_path = tmp.path().join("manifest.toml");
+    let manifest = parse_manifest(toml, &manifest_path).expect("manifest");
+    let instr = Instructions {
+        text: "Weigh secrets handling above all.".to_string(),
+        source: tmp.path().join("instructions.md"),
+    };
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("template");
+
+    let model = ReportModel::build(
+        &manifest,
+        &manifest_path,
+        "report-technical-dd",
+        Some(&instr),
+    )
+    .expect("model");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+    assert!(md.contains("Custom auditor instructions from"), "{md}");
+    assert!(md.contains("instructions.md"), "{md}");
+    assert!(md.contains("EXTEND the auditor prompt"), "{md}");
+    assert!(
+        md.contains("deterministic post-synthesis checks"),
+        "the note must say the guards still ran: {md}"
+    );
+
+    // Absent instructions render nothing — the no-instructions page is unchanged.
+    let bare =
+        ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None).expect("model");
+    let bare_md = Reporter::new(tmp.path()).render(&bare, &template);
+    assert!(
+        !bare_md.contains("Custom auditor instructions"),
+        "{bare_md}"
+    );
+    assert!(!bare_md.contains("## Analyst Instructions"), "{bare_md}");
+}
+
 /// Why: #2342.2 — Section 3 self-describes trusty-review's own scoring model; it
 /// must never render as "not stated".
 /// What: renders the generic template and asserts the normalized-band text.

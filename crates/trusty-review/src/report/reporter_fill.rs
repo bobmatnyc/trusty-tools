@@ -30,10 +30,16 @@ pub(super) fn crate_version() -> &'static str {
 /// Why: #2340 requires every report to record the analyst brief verbatim (a
 /// declared-provenance section) so the reader knows what the analysis was asked
 /// to focus on; when no brief was supplied the placeholder renders empty rather
-/// than as a honesty marker.
+/// than as a honesty marker. #6180 made the brief arrivable without anyone
+/// declaring it — an `instructions.md` dropped beside the manifest — so the note
+/// now states two things a reader could otherwise only infer: which file
+/// extended the auditor prompt, and that extending it did not switch off the
+/// deterministic checks the report is graded against.
 /// What: returns a markdown section (heading + source note + the verbatim brief)
-/// when `model.instructions` is set, else `""`.
-/// Test: `reporter_tests.rs::reporter_records_instructions_verbatim`.
+/// when `model.instructions` is set, else `""` — an absent brief still renders
+/// nothing at all, so a run without instructions is unchanged.
+/// Test: `reporter_tests.rs::{reporter_records_instructions_verbatim,
+/// the_instructions_note_names_the_file_and_the_guards}`.
 pub(super) fn instructions_block(model: &ReportModel) -> String {
     let Some(text) = &model.instructions else {
         return String::new();
@@ -43,7 +49,12 @@ pub(super) fn instructions_block(model: &ReportModel) -> String {
         .as_deref()
         .unwrap_or("analyst instructions");
     format!(
-        "## Analyst Instructions\n\n_Focus directives supplied by the analyst ({source}) (provenance: declared)._\n\n{text}\n"
+        "## Analyst Instructions\n\n\
+         _Custom auditor instructions from `{source}` were applied: they EXTEND the auditor \
+         prompt and steer emphasis only. The report's deterministic post-synthesis checks — \
+         reachability, topology grounding, the numeric guardrail — still run and still correct \
+         or reject a claim these instructions asked for (provenance: declared)._\n\n\
+         {text}\n"
     )
 }
 

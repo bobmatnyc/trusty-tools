@@ -426,6 +426,99 @@ fn prompt_excludes_greens() {
     );
 }
 
+// ── #6180: custom auditor instructions in the prompt ────────────────────────
+
+/// Build the same fixture with an `instructions.md` already loaded onto it, as
+/// `cli_report::load_report_instructions` leaves the model after discovery.
+fn fixture_model_with_instructions(text: &str) -> ReportModel {
+    let mut model = fixture_model(vec![red("SQL injection risk")]);
+    model.instructions = Some(text.to_string());
+    model.instructions_source = Some("engagement/instructions.md".to_string());
+    model
+}
+
+/// Why: #6180's whole point is that the file reaches the auditor. A discovered
+/// `instructions.md` that loads but never lands in the prompt would satisfy every
+/// other test and deliver nothing.
+/// What: asserts the verbatim text and the additive-overlay heading appear in the
+/// synthesis user message.
+/// Test: this test itself.
+#[test]
+fn discovered_instructions_reach_the_synthesis_prompt() {
+    let model =
+        fixture_model_with_instructions("Weigh secrets handling above every other dimension.");
+    let req = build_synthesis_prompt(
+        &model,
+        "stub/model",
+        SynthesisTier::Full,
+        SYNTHESIS_DEFAULT_MAX_TOKENS,
+    );
+    let digest = &req.messages[0].content;
+    assert!(
+        digest.contains("Weigh secrets handling above every other dimension."),
+        "instructions must reach the prompt verbatim: {digest}"
+    );
+    assert!(
+        digest.contains("Analyst focus directives"),
+        "instructions must arrive under the additive-overlay heading: {digest}"
+    );
+}
+
+/// Why: "missing instructions.md = zero behavior change" is only a claim until
+/// the two prompts are compared byte for byte.
+/// What: builds the prompt from the same fixture with and without instructions
+/// and asserts every request field is identical except the one added block.
+/// Test: this test itself.
+#[test]
+fn no_instructions_leaves_the_prompt_byte_identical() {
+    let bare = fixture_model(vec![red("SQL injection risk")]);
+    let with = fixture_model_with_instructions("Weigh secrets handling above all.");
+
+    let a = build_synthesis_prompt(
+        &bare,
+        "stub/model",
+        SynthesisTier::Full,
+        SYNTHESIS_DEFAULT_MAX_TOKENS,
+    );
+    let b = build_synthesis_prompt(
+        &with,
+        "stub/model",
+        SynthesisTier::Full,
+        SYNTHESIS_DEFAULT_MAX_TOKENS,
+    );
+
+    // The system prompt, model, and budget are untouched by instructions — only
+    // the user digest gains a block.
+    assert_eq!(a.system, b.system);
+    assert_eq!(a.model, b.model);
+    assert_eq!(a.max_tokens, b.max_tokens);
+    assert_ne!(a.messages[0].content, b.messages[0].content);
+    assert!(
+        !a.messages[0].content.contains("Analyst focus directives"),
+        "a model with no instructions must carry no directives block"
+    );
+
+    // And the bare prompt is exactly the with-instructions prompt minus the
+    // appended block — nothing earlier in the assembly shifted.
+    let extra = b.messages[0]
+        .content
+        .strip_prefix(
+            a.messages[0]
+                .content
+                .strip_suffix(TRAILING_SYNTHESIS_DIRECTIVE)
+                .expect("bare digest ends with the closing directive"),
+        )
+        .expect("the with-instructions digest extends the bare one");
+    assert!(
+        extra.starts_with("\n## Analyst focus directives"),
+        "{extra}"
+    );
+}
+
+/// The closing line `build_digest` appends after the optional directives block;
+/// everything before it must be identical with and without instructions.
+const TRAILING_SYNTHESIS_DIRECTIVE: &str = "\nSynthesise the narrative sections from the data above, obeying every rule in the system prompt. Where the analyst focus directives above are relevant, weight the executive summary and top risks toward them — but only using figures and findings actually present in the data.\n";
+
 /// Why: a routing prefix must be stripped so the bare id reaches the provider.
 /// What: asserts `bedrock/` and `openrouter/` are stripped from `req.model`.
 /// Test: this test itself.

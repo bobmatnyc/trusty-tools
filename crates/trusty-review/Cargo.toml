@@ -38,7 +38,7 @@ name        = "trusty-review"
 # `reporter_findings` and `synthesize_grounding` are crate-private, and the one
 # new `synthesize` helper is a private free function; no public type changes
 # shape.
-version     = "0.24.2"
+version     = "0.25.0"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true
