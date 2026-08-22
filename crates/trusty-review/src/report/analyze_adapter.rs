@@ -807,15 +807,18 @@ impl AnalyzeMetricsSource for HttpAnalyzeMetricsSource {
 
 /// Derive the trusty-search/analyze index id for a local checkout path.
 ///
-/// Why: trusty-search registers an index under the repo directory's basename
-/// (`trusty-search index .` and the git hooks both derive the id from the
-/// directory name), so the report can address the same index without extra
-/// configuration.
-/// What: returns the final path component as a `String`, or `None` for a
-/// path with no basename (e.g. `/`).
-/// Test: `derive_index_id_uses_basename`.
+/// Why: the renderer must address the SAME index the audit indexed, and the two
+/// run as separate processes with no shared state but the manifest's checkout
+/// path. Until #6149 both derived the repo directory's BASENAME, so a machine
+/// holding two checkouts of one repository served whichever registered first and
+/// the report measured a tree it never audited. Both sides now call
+/// [`trusty_common::derive_checkout_index_id`], which hashes the canonical path
+/// into the id.
+/// What: forwards to that function — `"<slugified basename>-<8 hex>"`, or `None`
+/// for a path with no final component (e.g. `/`).
+/// Test: `derive_index_id_distinguishes_same_named_checkouts`.
 pub fn derive_index_id(path: &Path) -> Option<String> {
-    path.file_name().map(|n| n.to_string_lossy().into_owned())
+    trusty_common::derive_checkout_index_id(path)
 }
 
 // ─── Model enrichment (precedence seam, #2448) ───────────────────────────────

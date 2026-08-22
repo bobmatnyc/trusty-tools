@@ -31,12 +31,12 @@
 //!
 //! ## The index id is a cross-process contract
 //!
-//! trusty-review derives the id it looks up from the checkout path's basename
-//! (`report::analyze_adapter::derive_index_id`). [`index_id_for`] applies that
-//! same rule to the same value — the path written into `manifest.toml`, which is
-//! the only thing the renderer reads. An id derived any other way would index
-//! every repository under a name nobody ever queries, leaving the reports
-//! exactly as hollow as before while looking fixed.
+//! trusty-review derives the id it looks up from the checkout path written into
+//! `manifest.toml`, which is the only thing the renderer reads. [`index_id_for`]
+//! derives it from the same value through the same function
+//! ([`trusty_common::derive_checkout_index_id`], #6149) — an id derived any
+//! other way indexes every repository under a name nobody ever queries, leaving
+//! the reports exactly as hollow as before while looking fixed.
 //!
 //! ## What the wait does, and does not, guarantee
 //!
@@ -144,16 +144,17 @@ pub(super) fn binary_from_override(override_value: Option<&str>) -> String {
 /// The trusty-search index id for a checkout path.
 ///
 /// Why: this must agree with `trusty_review::report::analyze_adapter::
-/// derive_index_id`, which is what the renderer looks the index up by. The two
-/// crates share no Cargo edge (DOC-67 §5), so the agreement is a copied rule
-/// rather than a call — copied deliberately, and pinned by
-/// `super::tests::the_index_id_is_the_checkout_basename`.
-/// What: the final path component, exactly as `derive_index_id` returns it —
-/// `None` for a path with no basename, e.g. `/`.
-/// Test: `super::tests::{the_index_id_is_the_checkout_basename,
+/// derive_index_id`, which is what the renderer looks the index up by. Until
+/// #6149 both were the checkout BASENAME, copied rather than called — and two
+/// checkouts of one repository therefore collided on one id, so the sweep
+/// indexed one tree and the renderer read another. Both now call
+/// [`trusty_common::derive_checkout_index_id`], so the agreement is a call.
+/// What: `"<slugified basename>-<8 hex over the canonical path>"` — `None` for a
+/// path with no final component, e.g. `/`.
+/// Test: `super::tests::{the_index_id_distinguishes_two_checkouts_of_one_repo,
 /// index_ids_match_the_manifest_paths_the_renderer_reads}`.
 pub fn index_id_for(path: &Path) -> Option<String> {
-    path.file_name().map(|n| n.to_string_lossy().into_owned())
+    trusty_common::derive_checkout_index_id(path)
 }
 
 /// The membership probe's argument vector.

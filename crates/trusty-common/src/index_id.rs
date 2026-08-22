@@ -104,6 +104,87 @@ pub fn derive_index_id(project_root: &Path) -> String {
         .into_owned()
 }
 
+/// Version tag mixed into every checkout-id digest preimage.
+///
+/// Why: a future change to this derivation must move every id wholesale into a
+/// disjoint space rather than re-pointing an already-registered id at different
+/// content — the same property [`crate::project_index_id`] mixes its own tag in
+/// for. What: the literal `"checkout-v1"`. Test:
+/// `derive_checkout_index_id_is_pinned_for_a_known_input`.
+const CHECKOUT_SCHEME_VERSION: &str = "checkout-v1";
+
+/// Hex digits of digest appended to a checkout index id.
+///
+/// 8 (32 bits) keeps the id readable in a log line and a URL path segment while
+/// leaving collision probability negligible for the tens of checkouts one
+/// machine holds. Uniqueness lives entirely here; the label is cosmetic.
+const CHECKOUT_DIGEST_HEX: usize = 8;
+
+/// Label used when a checkout's basename slugifies to nothing at all.
+const CHECKOUT_FALLBACK_LABEL: &str = "checkout";
+
+/// Derive a collision-resistant trusty-search index id for ONE checkout (#6149).
+///
+/// Why: [`derive_index_id`] is the bare basename, so two checkouts of one
+/// repository — an audit engagement's clone and the operator's working tree —
+/// collide on a single id. trusty-search's registry is one-`root_path`-per-id,
+/// so the second checkout is silently served the FIRST one's content: the graded
+/// self-audit of 2026-08-21 measured complexity against a tree it never audited.
+/// The id is a cross-process contract that `trusty-audit`, `trusty-review` and
+/// `tga` each derive independently, and this is the one implementation all three
+/// call, so they cannot drift.
+///
+/// It is deliberately PURE — a function of the path and nothing else. No git
+/// shell-out, no environment, no daemon. [`crate::derive_project_index_id`]
+/// partitions on richer inputs, but two of them (`origin`, `operator`) are live
+/// git state resolved per process, and three separate processes must agree on
+/// this id; a component that varies with a process's `HOME` would reintroduce
+/// exactly the divergence being fixed.
+///
+/// What: `"<slugified basename>-<8 hex>"` over the CANONICAL path, so a
+/// symlinked or `..`-laden spelling of one tree derives one id. `None` for a
+/// path with no final component, e.g. `/` — every caller already treats that as
+/// "no index id could be derived". A path that cannot be canonicalised (it does
+/// not exist yet) is normalised through [`Path::components`] instead, which
+/// still collapses a trailing separator, a repeated separator and a `.`
+/// component — `tga` anchors a `path = "."` config entry as `<base>/.`, and
+/// that must not derive a second id for the tree `<base>` already names.
+///
+/// Known limitation: the id changes when the directory MOVES, because the path
+/// is the whole partitioning input. That orphans the old index rather than
+/// merging two trees — the strictly weaker of the two failures, and the same
+/// tradeoff [`crate::project_index_id`] documents at length.
+///
+/// # Postconditions
+/// Non-empty; a single URL path segment matching `[a-z0-9][a-z0-9-]*`; and a
+/// pure function of the canonical path — identical input, identical id, in every
+/// process and across daemon restarts.
+///
+/// Test: `derive_checkout_index_id_distinguishes_same_named_checkouts`,
+/// `derive_checkout_index_id_is_stable_across_calls`,
+/// `derive_checkout_index_id_is_a_single_url_safe_segment`,
+/// `derive_checkout_index_id_is_pinned_for_a_known_input`.
+#[must_use]
+pub fn derive_checkout_index_id(checkout: &Path) -> Option<String> {
+    let canonical = std::fs::canonicalize(checkout)
+        .unwrap_or_else(|_| checkout.components().collect::<PathBuf>());
+    let name = canonical.file_name()?.to_string_lossy().into_owned();
+    let slug = crate::slug::slugify_string(&name);
+    let label = if slug.is_empty() {
+        CHECKOUT_FALLBACK_LABEL
+    } else {
+        slug.as_str()
+    };
+    let mut preimage: Vec<u8> = Vec::with_capacity(128);
+    crate::project_index_id::push_field(&mut preimage, CHECKOUT_SCHEME_VERSION.as_bytes());
+    crate::project_index_id::push_field(
+        &mut preimage,
+        &crate::project_index_id::path_bytes(&canonical),
+    );
+    let digest = format!("{:016x}", crate::project_index_id::fnv1a_64(&preimage));
+    Some(format!("{label}-{}", &digest[..CHECKOUT_DIGEST_HEX]))
+}
+
 /// Decide whether `a` and `b` name the same on-disk directory tree.
 ///
 /// Why: a trusty-search index identifies a searchable DIRECTORY TREE, so every
@@ -191,6 +272,105 @@ mod tests {
     #[test]
     fn derive_index_id_empty_for_root() {
         assert_eq!(derive_index_id(Path::new("/")), "");
+    }
+
+    /// #6149, the defect itself: the engagement clone and the operator's own
+    /// checkout share a basename, and under [`derive_index_id`] they share an
+    /// id — which is how a report measured a tree nobody audited. This assertion
+    /// fails against the pre-fix derivation.
+    #[test]
+    fn derive_checkout_index_id_distinguishes_same_named_checkouts() {
+        let engagement = Path::new("/w/dogfood-audit-final/repos/local/trusty-tools");
+        let working = Path::new("/Users/masa/Projects/trusty-tools");
+
+        let a = derive_checkout_index_id(engagement).expect("has a basename");
+        let b = derive_checkout_index_id(working).expect("has a basename");
+
+        assert_eq!(
+            derive_index_id(engagement),
+            derive_index_id(working),
+            "the basename rule is what collides"
+        );
+        assert_ne!(a, b, "the checkout rule must not: {a} vs {b}");
+        assert!(a.starts_with("trusty-tools-"), "still readable: {a}");
+        assert!(b.starts_with("trusty-tools-"), "still readable: {b}");
+    }
+
+    /// The id is a cross-process contract, so it has to be the same value on
+    /// every call, in every process — including for two spellings of one tree.
+    #[test]
+    fn derive_checkout_index_id_is_stable_across_calls() {
+        let tmp = scratch_dir("checkout-stable");
+        let real = tmp.join("repos/acme-api");
+        fs::create_dir_all(&real).unwrap();
+
+        let first = derive_checkout_index_id(&real).expect("id");
+        assert_eq!(derive_checkout_index_id(&real), Some(first.clone()));
+        assert_eq!(
+            derive_checkout_index_id(&tmp.join("repos/../repos/acme-api")),
+            Some(first.clone()),
+            "a `..`-laden spelling names the same tree and must derive one id"
+        );
+        assert!(first.starts_with("acme-api-"), "{first}");
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// A path that does not exist cannot be canonicalised, and the spellings
+    /// that reach this function are the ones a config file wrote: a trailing
+    /// separator, and the `<base>/.` a `path = "."` entry anchors to. All three
+    /// name one tree, so all three must derive one id.
+    #[test]
+    fn derive_checkout_index_id_normalises_an_uncanonicalisable_path() {
+        let plain = derive_checkout_index_id(Path::new("/w/repos/acme-api")).expect("id");
+        for spelling in [
+            "/w/repos/acme-api/",
+            "/w/repos/acme-api/.",
+            "/w//repos/acme-api",
+        ] {
+            assert_eq!(
+                derive_checkout_index_id(Path::new(spelling)).as_deref(),
+                Some(plain.as_str()),
+                "{spelling}"
+            );
+        }
+    }
+
+    /// An index id is a URL path segment and a filename component; a basename
+    /// that slugifies to nothing must still produce a well-formed id, and `/`
+    /// must still say "no id", which is what every caller branches on.
+    #[test]
+    fn derive_checkout_index_id_is_a_single_url_safe_segment() {
+        for path in [
+            "/w/repos/My Project!",
+            "/w/repos/Repo_With_Underscores",
+            "/w/repos/…",
+        ] {
+            let id = derive_checkout_index_id(Path::new(path)).expect("id");
+            assert!(
+                id.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+                "{path} → {id}"
+            );
+            assert!(!id.starts_with('-') && !id.ends_with('-'), "{path} → {id}");
+        }
+        assert!(
+            derive_checkout_index_id(Path::new("/w/repos/…"))
+                .expect("id")
+                .starts_with("checkout-"),
+            "a basename with no slug-able character falls back to a label"
+        );
+        assert_eq!(derive_checkout_index_id(Path::new("/")), None);
+    }
+
+    /// The digest rule is a wire format: changing it re-points every registered
+    /// id at nothing. This pins one input so a silent change fails here.
+    #[test]
+    fn derive_checkout_index_id_is_pinned_for_a_known_input() {
+        assert_eq!(
+            derive_checkout_index_id(Path::new("/w/repos/acme-api")).as_deref(),
+            Some("acme-api-05d116f5")
+        );
     }
 
     #[test]

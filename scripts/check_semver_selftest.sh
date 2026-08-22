@@ -378,15 +378,41 @@ chmod +x "${STUB_DIR}/cargo"
 # Build the breaking predecessor from the same rule release_type applies:
 # drop the major when there is one, otherwise drop the minor.
 #
+# AN EXCLUDED CRATE CANNOT BE THE STUB (#6149). Every row in
+# semver-checks-crate-exclusions.tsv makes the gate SKIP that crate before it
+# reaches a check, so a stub picked from that list turns each case that asserts
+# on a verdict into "the gate never reached the check — this case proves
+# nothing". That is the #5717 failure recurring through a different door: a
+# trusty-common MINOR bump lands on patch == 0, which drops it from the
+# candidate list by the `z == 0` rule below, and the sorted fallback then picked
+# `tga` — excluded since 2026-08-19. Filtering the exclusions here fixes the
+# class rather than the instance; the alternative, never bumping trusty-common's
+# minor, is not a rule anyone can keep.
+#
 # trusty-common is preferred for continuity with the captured fixtures; any
 # qualifying crate works, and none qualifying is a loud failure rather than a
 # quietly degraded run.
 PICK="$("$REAL_CARGO" metadata --no-deps --format-version 1 2>/dev/null | python3 -c '
 import json, sys
 
+# Same parse the gate applies: tab-separated, `#` comments and blanks skipped,
+# crate name in field 1.
+excluded = set()
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            excluded.add(line.split("\t", 1)[0].strip())
+except OSError:
+    pass
+
 cands = []
 for p in json.load(sys.stdin)["packages"]:
     if p.get("publish") == []:
+        continue
+    if p["name"] in excluded:
         continue
     kinds = {k for t in p["targets"] for k in t["kind"]}
     if not kinds & {"lib", "rlib", "cdylib", "proc-macro"}:
@@ -406,7 +432,7 @@ cands.sort()
 preferred = [c for c in cands if c[0] == "trusty-common"] or cands
 if preferred:
     print(" ".join(preferred[0]))
-')"
+' "${REPO_ROOT}/scripts/semver-checks-crate-exclusions.tsv")"
 # shellcheck disable=SC2086
 set -- $PICK
 STUB_CRATE="${1:-}"

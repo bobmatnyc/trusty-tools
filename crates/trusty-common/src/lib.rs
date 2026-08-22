@@ -601,7 +601,10 @@ pub use slug::slugify_string;
 /// Test: `cargo test -p trusty-common --features unconditional-only --
 /// index_id::tests`.
 pub mod index_id;
-pub use index_id::{derive_index_id, find_git_root, identifies_same_path, resolve_project_root};
+pub use index_id::{
+    derive_checkout_index_id, derive_index_id, find_git_root, identifies_same_path,
+    resolve_project_root,
+};
 
 /// Project-derived trusty-search index identity — the PARTITIONING key
 /// (epic #4207; supersedes the approach closed as won't-do in #4063).
