@@ -194,7 +194,7 @@ pub(crate) fn synthesis_schema(top_risks_cap: usize, findings_cap: usize) -> Res
                 },
                 "security_summary": {
                     "type": "string",
-                    "description": "ONE paragraph characterising security posture from the lint-graded RED/AMBER findings ONLY — this is code-hygiene signal, not a SAST/CVE/secrets scan. Empty string if the data supports nothing."
+                    "description": "ONE paragraph characterising security posture from the evidence-inspected RED/AMBER findings ONLY — this is code-hygiene signal, not lint output and not a SAST/CVE/secrets scan. Empty string if the data supports nothing."
                 },
                 // #5453/#6004: high-level authorship/key-person-risk narrative slot.
                 "authorship_summary": {

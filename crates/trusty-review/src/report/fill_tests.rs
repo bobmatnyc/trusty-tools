@@ -193,3 +193,27 @@ fn visit_scalars_reaches_nested_block_values() {
     seen.sort();
     assert_eq!(seen, vec!["1553771", "42", "7"]);
 }
+
+/// #6080: a Top Risks row said "the installer uses an unsigned curl|sh
+/// pattern", and that pipe split the cell — every column after it shifted and
+/// the row rendered with a different shape than its header.
+#[test]
+fn pipe_in_a_table_cell_is_escaped() {
+    let mut scope = Scope::new();
+    scope.set("risk", "the installer uses an unsigned curl|sh pattern");
+    let out = render("| 1 | {{risk}} | AMBER |\n", &scope);
+    assert_eq!(
+        out,
+        "| 1 | the installer uses an unsigned curl\\|sh pattern | AMBER |\n"
+    );
+}
+
+/// Why/What (#6080): outside a table a pipe is ordinary prose — a shell
+/// snippet in a paragraph must not grow backslashes.
+#[test]
+fn pipe_outside_a_table_is_left_alone() {
+    let mut scope = Scope::new();
+    scope.set("summary", "run `curl … | sh`");
+    let out = render("The docs say {{summary}} to install.\n", &scope);
+    assert_eq!(out, "The docs say run `curl … | sh` to install.\n");
+}

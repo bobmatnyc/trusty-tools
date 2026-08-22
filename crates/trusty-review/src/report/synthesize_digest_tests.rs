@@ -41,6 +41,7 @@ fn repo(slug: &str, findings: Vec<MetricFinding>) -> RepositoryReport {
             findings,
             ..Default::default()
         }),
+        analyze_gap: None,
         authorship: None,
         inspect_priority: Vec::new(),
     }

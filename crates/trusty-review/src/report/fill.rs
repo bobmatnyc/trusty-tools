@@ -151,16 +151,41 @@ fn render_scope(text: &str, scope: &Scope, re: &Regex) -> String {
 }
 
 /// Substitute `{{field}}` placeholders using a scope's scalars.
+///
+/// A value landing in a markdown table cell has its `|` characters escaped —
+/// see [`in_table_row`].
 fn substitute_scalars(text: &str, scope: &Scope, re: &Regex) -> String {
     re.replace_all(text, |caps: &Captures| {
         let key = &caps[1];
-        scope
+        let value = scope
             .scalars
             .get(key)
             .cloned()
-            .unwrap_or_else(|| HONESTY_MARKER.to_string())
+            .unwrap_or_else(|| HONESTY_MARKER.to_string());
+        let at = caps.get(0).map_or(0, |m| m.start());
+        if in_table_row(text, at) {
+            return value.replace('|', "\\|");
+        }
+        value
     })
     .into_owned()
+}
+
+/// Does the placeholder at byte offset `at` sit inside a markdown table row?
+///
+/// Why (#6080): a Top Risks row read "the installer uses an unsigned curl|sh
+/// pattern", and that one unescaped pipe split the cell in two — every column
+/// after it shifted, and the row rendered as a different table shape than its
+/// header. The value is prose from a model or a repository, so it can contain
+/// any character; the template is what knows the value is about to become a
+/// cell, and that knowledge is exactly "this line starts with `|`".
+/// What: scans back to the start of the line containing `at` and reports
+/// whether its first non-whitespace character is `|`.
+/// Test: `fill_tests::{pipe_in_a_table_cell_is_escaped,
+/// pipe_outside_a_table_is_left_alone}`.
+fn in_table_row(text: &str, at: usize) -> bool {
+    let line_start = text[..at].rfind('\n').map_or(0, |i| i + 1);
+    text[line_start..at].trim_start().starts_with('|')
 }
 
 /// Byte offsets describing the first top-level block found in a template.

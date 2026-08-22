@@ -91,6 +91,16 @@ pub struct SelectedFile {
     /// The manifest's one-line reason this file was ranked (#6082) — the query
     /// or measurement that found it. `None` for a path-heuristic selection.
     pub selected_by: Option<String>,
+    /// The dimension the MANIFEST declared this file as evidence for (#6080).
+    ///
+    /// Why: `dimensions` mixes the declared dimension with every dimension a
+    /// path heuristic guessed, so it cannot answer "which dimension's query
+    /// found this file". The coverage section's per-dimension example needs
+    /// exactly that: a file declared for `state management` that also matches
+    /// `authentication & secrets` by path name must not be printed as the auth
+    /// example carrying a state-management reason.
+    /// Test: `select_tests::per_dimension_example_prefers_the_declared_file`.
+    pub declared_for: Option<String>,
 }
 
 /// One dimension's share of the examined set (#6082).
@@ -477,6 +487,7 @@ struct Candidate {
     path: String,
     dimensions: Vec<String>,
     reason: Option<String>,
+    declared_for: Option<String>,
 }
 
 /// Score one tracked file and fold in what the manifest declared about it.
@@ -511,6 +522,7 @@ fn candidate(
         path,
         dimensions,
         reason,
+        declared_for: declaration.and_then(|d| d.dimension.clone()),
     }
 }
 
@@ -594,6 +606,7 @@ pub fn select_files(
             truncated,
             dimensions: c.dimensions.clone(),
             selected_by: c.reason.clone(),
+            declared_for: c.declared_for.clone(),
         });
     }
 
@@ -620,7 +633,7 @@ pub fn select_files(
 /// finding needs both, and the reason is the part no path-name ranking could
 /// ever have supplied.
 /// What: one row per covered dimension, in the canonical order, counting the
-/// examined files that carry it. `example` names the first such file and its
+/// examined files that carry it. `example` names the best such file and its
 /// selection reason — the manifest's when it declared one, the path-name
 /// heuristic otherwise. "test coverage" can be covered by an unexamined test
 /// directory, so a row with zero files and no example is a real state.
@@ -636,7 +649,7 @@ fn per_dimension(selected: &[SelectedFile], covered: &[String]) -> Vec<Dimension
             DimensionCoverage {
                 dimension: dimension.clone(),
                 files_examined: hits.len(),
-                example: hits.first().map(|f| {
+                example: best_example(&hits, dimension).map(|f| {
                     let why = f
                         .selected_by
                         .clone()
@@ -646,6 +659,26 @@ fn per_dimension(selected: &[SelectedFile], covered: &[String]) -> Vec<Dimension
             }
         })
         .collect()
+}
+
+/// The file a dimension's coverage line should name as its example.
+///
+/// Why (#6080): `hits` is in rank order, so the first entry is whichever file
+/// the manifest ranked highest OVERALL — not necessarily one the manifest
+/// attributed to THIS dimension. A file declared for `state management` that a
+/// path heuristic also reads as auth-related outranks the auth-declared file
+/// below it, and the line then prints an auth example whose stated reason is a
+/// state-management query. Preferring the dimension's own declared files makes
+/// the example the top-ranked evidence hit for that dimension, which is the
+/// highest-scoring one the manifest writer found.
+/// What: the first hit the manifest declared FOR this dimension; failing that,
+/// the first hit at all (a purely heuristic dimension has no declared file).
+/// Test: `select_tests::per_dimension_example_prefers_the_declared_file`.
+fn best_example<'a>(hits: &[&'a SelectedFile], dimension: &str) -> Option<&'a SelectedFile> {
+    hits.iter()
+        .find(|f| f.declared_for.as_deref() == Some(dimension))
+        .or_else(|| hits.first())
+        .copied()
 }
 
 /// Read a file as UTF-8, truncating to `min(MAX_FILE_BYTES, remaining)` on a char

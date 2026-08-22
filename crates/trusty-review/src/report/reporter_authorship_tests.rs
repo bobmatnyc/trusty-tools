@@ -14,6 +14,7 @@ fn repo(authorship: Option<AuthorshipSummary>) -> RepositoryReport {
         local_path: None,
         scan: None,
         metrics: None,
+        analyze_gap: None,
         authorship,
         inspect_priority: Vec::new(),
     }

@@ -32,7 +32,19 @@ const CQ_LANGUAGE_COUNT: usize = 3;
 /// The Security Posture text when the security dimension recorded no GREEN
 /// finding — an explicit statement, never a blank cell.
 const NO_CLEAN_SIGNALS: &str = "No clean security signals were recorded: the investigation raised no GREEN finding in \
-     this dimension. That is an absence of positive evidence, not a negative result.";
+     this dimension that cites the file it was read from. That is an absence of positive \
+     evidence, not a negative result.";
+
+/// The Code Quality maintainability cell when the trusty-analyze lane
+/// contributed nothing.
+///
+/// #6080: maintainability findings come from trusty-analyze alone, but the
+/// count was taken from `metrics.findings`, which the investigation pass also
+/// writes into. A run whose analyze data was rejected as stale therefore
+/// printed `0 ⁽ᵐ⁾` — a measured zero asserting a measurement nobody made, on
+/// the same page whose Gaps & Caveats said the lane was rejected.
+const MAINTAINABILITY_NOT_ASSESSED: &str =
+    "Not assessed — the trusty-analyze lane contributed no data (see Gaps & Caveats)";
 
 /// Push one `code_quality_row` per repository carrying metrics.
 ///
@@ -59,7 +71,12 @@ pub fn push_code_quality_rows(root: &mut Scope, model: &ReportModel) {
         let loc = repo_loc(repo);
         let langs = top_languages(repo);
         let complexity = repo.metrics.as_ref().and_then(bucket_summary);
-        let maintainability = repo.metrics.as_ref().map(maintainability_count);
+        // #6080: only a repository whose analyze lane actually landed can state
+        // a maintainability count; otherwise the cell names the gap.
+        let maintainability = match repo.analyze_gap.is_some() {
+            true => None,
+            false => repo.metrics.as_ref().map(maintainability_count),
+        };
         if loc == 0 && langs.is_empty() && complexity.is_none() && maintainability.is_none() {
             continue;
         }
@@ -74,11 +91,15 @@ pub fn push_code_quality_rows(root: &mut Scope, model: &ReportModel) {
         if let Some(summary) = complexity {
             row.set("cq_complexity", tag(summary, Provenance::Measured));
         }
-        if let Some(count) = maintainability {
-            row.set(
+        match maintainability {
+            Some(count) => row.set(
                 "cq_maintainability_count",
                 tag(count.to_string(), Provenance::Measured),
-            );
+            ),
+            None => row.set(
+                "cq_maintainability_count",
+                tag(MAINTAINABILITY_NOT_ASSESSED, Provenance::NotStated),
+            ),
         }
         root.push_block("code_quality_row", row);
     }
@@ -122,13 +143,14 @@ fn maintainability_count(m: &AnalyzeMetrics) -> usize {
 /// What: counts non-GREEN [`SECURITY_DIMENSION`] findings per repository,
 /// pushing one row (`app_name`/`violation_domain`/`violation_count`, the block's
 /// unchanged column shape) per repository with at least one; sets
-/// `security_clean_signals` from that dimension's GREEN finding titles, or
-/// [`NO_CLEAN_SIGNALS`] when it recorded none.
+/// `security_clean_signals` from that dimension's GREEN findings that carry a
+/// `file:line`, each rendered with it, or [`NO_CLEAN_SIGNALS`] when none does.
 /// Test: `reporter_codesec_tests::{security_rows_count_only_the_security_dimension,
 /// security_section_credits_clean_signals,
-/// security_section_states_when_no_clean_signal_exists}`.
+/// security_section_states_when_no_clean_signal_exists,
+/// an_uncited_green_is_not_a_clean_signal}`.
 pub fn push_security_violation_rows(root: &mut Scope, model: &ReportModel) {
-    let mut clean: Vec<&str> = Vec::new();
+    let mut clean: Vec<String> = Vec::new();
     let mut assessed = false;
     for repo in &model.repositories {
         let Some(m) = &repo.metrics else { continue };
@@ -140,7 +162,14 @@ pub fn push_security_violation_rows(root: &mut Scope, model: &ReportModel) {
             .filter(|f| f.category == SECURITY_DIMENSION)
         {
             if f.severity == Severity::Green {
-                clean.push(&f.title);
+                // #6080: a clean signal must name the file it was read from.
+                // An uncited GREEN title is an assertion, and one of them —
+                // "Raw SQL string interpolation via multi-line concatenation
+                // for PR upsert" — was a defect listed as a strength with
+                // nothing in the report a reader could check it against.
+                if !f.component.trim().is_empty() {
+                    clean.push(format!("{} (`{}`)", f.title, f.component.trim()));
+                }
             } else {
                 count += 1;
             }

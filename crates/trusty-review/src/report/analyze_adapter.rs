@@ -905,10 +905,19 @@ pub async fn enrich_with_analyze_gaps(
                             partial.entry(caveat).or_default().push(repo.name.clone());
                         }
                     }
-                    Err(gap) => stale.push(gap),
+                    Err(gap) => {
+                        // #6080: the investigation pass writes into the same
+                        // `metrics` struct, so a section reporting an
+                        // analyze-only figure needs this marker to tell a
+                        // measurement from an artefact of that sharing.
+                        repo.analyze_gap =
+                            Some(super::analyze_scope::STALE_INDEX_REMEDY.to_string());
+                        stale.push(gap);
+                    }
                 }
             }
             AnalyzeFetch::Missing(gap) => {
+                repo.analyze_gap = Some(super::analyze_scope::NO_ANALYZE_DATA_REMEDY.to_string());
                 missing.entry(gap).or_default().push(repo.name.clone());
             }
         }

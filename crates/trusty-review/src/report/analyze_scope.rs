@@ -85,6 +85,21 @@ pub fn accept(
 /// How many example paths the gap line names before it stops.
 const EXAMPLE_PATHS: usize = 2;
 
+/// What an operator does about a stale index — stated once, read everywhere.
+///
+/// Why (#6080): Key Facts wrote its own remedy for a missing complexity
+/// profile ("re-run with `--analyze`") while §9 stated the real one for this
+/// case, and the two contradicted each other on the same page. Every surface
+/// that reports the gap now renders this string.
+pub const STALE_INDEX_REMEDY: &str = "Re-index the audited checkout under a distinct index id.";
+
+/// What an operator does when no analyze data reached a repository at all.
+///
+/// Why: the counterpart of [`STALE_INDEX_REMEDY`], homed beside it so the two
+/// analyze-lane remedies stay one lookup rather than two (#6080).
+pub const NO_ANALYZE_DATA_REMEDY: &str =
+    "Build a trusty-analyze index for this checkout and re-run with `--analyze`.";
+
 /// The Gaps & Caveats line for a repository whose analyze data described a
 /// different checkout.
 ///
@@ -105,7 +120,7 @@ pub fn stale_index_gap(repo: &str, index_id: &str, paths: &[String]) -> String {
         "trusty-analyze data rejected as stale for {repo} — the index '{index_id}' describes a \
          different checkout ({} of its component paths fall outside the audited tree, e.g. {}). \
          Complexity distribution and analyze-derived findings are therefore not assessed for \
-         this application, not clean. Re-index the audited checkout under a distinct index id.",
+         this application, not clean. {STALE_INDEX_REMEDY}",
         paths.len(),
         examples.join(", ")
     )
