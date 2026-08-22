@@ -34,9 +34,15 @@ use super::provenance::{Provenance, tag};
 /// (label line + verbatim quote) instead of splicing the quote inline into a
 /// prose sentence, which mangled markdown and spliced a spurious "No data"
 /// line into multi-line quotes (defects #2/#3).
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct FindingRow {
     title: String,
+    /// True once this row's narrative is settled — a synthesis row (which is
+    /// its own narrative) or a metrics row one has merged onto. An unclaimed
+    /// row is the only kind [`match_row`] will pair a narrative with, which is
+    /// what stops a second narrative sharing the title from overwriting the
+    /// first (#6082 lap 5).
+    claimed: bool,
     category: Option<String>,
     component: Option<String>,
     description: Option<String>,
@@ -95,6 +101,7 @@ impl FindingRow {
     fn from_prose(f: &super::synthesize::FindingProse) -> Self {
         FindingRow {
             title: f.title.clone(),
+            claimed: true,
             category: None,
             component: dedupe_field(&f.component),
             description: prose_field(&f.description),
@@ -201,6 +208,70 @@ fn is_self_restatement(row: &FindingRow) -> bool {
     }
     let title = alphanumeric(&row.title);
     !title.is_empty() && (q.contains(&title) || title.contains(&q))
+}
+
+/// The row a synthesis narrative belongs to, when that pairing is unambiguous.
+///
+/// Why: matching on title text alone cross-wired two findings and lost a third
+/// (#6082 lap 5). The graded report carried 15 metrics rows titled "Split
+/// oversized impl block"; both synthesis narratives that shared that title
+/// matched the FIRST of them, so the `hnsw_store.rs` row rendered the Jira
+/// backend's narrative, the hnsw narrative was never rendered at all, and the
+/// Jira row never received its own. Title is an ambiguous key whenever the
+/// analyze daemon emits one canned remediation title per hotspot, which is its
+/// normal output — so the component has to break the tie.
+/// What: candidates are the UNCLAIMED rows carrying the same title, which alone
+/// stops a second narrative from overwriting the first. A single candidate is
+/// matched on title as before, so the common unique-title case is unchanged.
+/// Two or more are disambiguated by component identity — the narrative's own
+/// `component` when the model wrote a path, else its `evidence` line, which
+/// names the file even when `component` is a topic phrase. Exact matches are
+/// preferred over suffix matches, and an unresolvable tie matches nothing
+/// rather than guessing.
+/// Test: `reporter_tests::{colliding_titles_attach_to_their_own_components,
+/// a_second_narrative_cannot_overwrite_a_claimed_row}`.
+fn match_row(rows: &[FindingRow], f: &super::synthesize::FindingProse) -> Option<usize> {
+    let candidates: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| !r.claimed && r.title == f.title)
+        .map(|(i, _)| i)
+        .collect();
+    match candidates.as_slice() {
+        [] => None,
+        [only] => Some(*only),
+        many => {
+            let ids: Vec<String> = [
+                f.component.as_str(),
+                f.evidence.lines().next().unwrap_or(""),
+            ]
+            .iter()
+            .map(|c| normalized_path(c))
+            .filter(|c| !c.is_empty())
+            .collect();
+            let row_path = |i: &usize| normalized_path(rows[*i].component.as_deref().unwrap_or(""));
+            many.iter()
+                .find(|i| {
+                    let p = row_path(i);
+                    !p.is_empty() && ids.contains(&p)
+                })
+                .or_else(|| {
+                    many.iter().find(|i| {
+                        let p = row_path(i);
+                        !p.is_empty() && ids.iter().any(|c| c.ends_with(&p) || p.ends_with(c))
+                    })
+                })
+                .copied()
+        }
+    }
+}
+
+/// A component reduced to a comparable file identity: the path half of a
+/// `path:line` citation, lower-cased down to its alphanumerics so punctuation
+/// and separator differences cannot hide a match.
+fn normalized_path(component: &str) -> String {
+    let path = component.rsplit_once(':').map_or(component, |(p, _)| p);
+    alphanumeric(path.trim())
 }
 
 /// Does `component` name a file rather than a topic?
@@ -382,15 +453,19 @@ fn fence_for(content: &str) -> String {
 /// synthesis is off, unavailable, or guardrail-rejected — title/severity
 /// (implied by which block)/category/component are verbatim, always-available
 /// facts from `metrics.findings`.  When synthesis IS available, its prose is
-/// merged onto the SAME row for a matching title — never pushed as a second row
-/// — so a finding renders exactly once no matter the synthesis outcome.
+/// merged onto the SAME row — never pushed as a second row — so a finding
+/// renders exactly once no matter the synthesis outcome.  A metrics row is
+/// never deleted (#6082 lap 5): it is the measurement, and the narrative is
+/// only an overlay on it.
 /// What: builds one [`FindingRow`] per `repo.metrics.findings` entry of `band`
-/// (bare fields), then — when `syn` is `Some` — overlays matching
-/// `FindingProse` prose by title; a synthesis finding with no metrics-title
-/// match is appended as an additional, synthesis-only row so no verified data
-/// is silently dropped.  Rows that merely restate themselves are then dropped
-/// ([`is_self_restatement`], #6082).  Pushes the `app_block` (`app_name` + one
-/// `finding_block` per row) only when the merged list is non-empty.
+/// (bare fields), then — when `syn` is `Some` — overlays each `FindingProse`
+/// onto the row [`match_row`] pairs it with; a narrative with no match is
+/// appended as an additional, synthesis-only row so no verified data is
+/// silently dropped.  A narrative that merely restates its own finding
+/// ([`is_self_restatement`], #6082) is refused: on a metrics row the overlay is
+/// skipped and the raw metrics fields render, and a synthesis-only row is
+/// dropped outright.  Pushes the `app_block` (`app_name` + one `finding_block`
+/// per row) only when the merged list is non-empty.
 /// Test: `reporter_tests.rs::{reporter_fills_red_findings_deterministically,
 /// reporter_merges_synthesis_prose_onto_deterministic_finding,
 /// reporter_injects_synthesis_prose,
@@ -420,16 +495,33 @@ pub(super) fn push_finding_band(
             .iter()
             .filter(|f| f.app_slug == repo.slug && f.severity.to_uppercase() == band_label)
         {
-            match rows.iter_mut().find(|r| r.title == f.title) {
-                Some(row) => row.merge_prose(f),
-                None => rows.push(FindingRow::from_prose(f)),
+            match match_row(&rows, f) {
+                // #6082 lap 5: a narrative that merely restates the finding is
+                // refused, but the metrics row it would have landed on stays.
+                // Dropping the merged row deleted the measurement too — the
+                // graded report lost `tickets/server.rs` (cyclomatic 118, grade
+                // F) entirely and still exited 0, rendering 167 of 168 AMBER
+                // findings. A refused narrative falls back to the raw metrics
+                // fields, which is how every un-synthesized hotspot renders.
+                Some(i) => {
+                    let mut merged = rows[i].clone();
+                    merged.merge_prose(f);
+                    if !is_self_restatement(&merged) {
+                        merged.claimed = true;
+                        rows[i] = merged;
+                    }
+                }
+                // A synthesis-only row has no measurement behind it, so a
+                // restatement here is dropped: nothing else would render.
+                None => {
+                    let row = FindingRow::from_prose(f);
+                    if !is_self_restatement(&row) {
+                        rows.push(row);
+                    }
+                }
             }
         }
     }
-
-    // #6082: drop the model's restatements of its own findings before numbering,
-    // so the surviving rows are numbered contiguously.
-    rows.retain(|row| !is_self_restatement(row));
 
     if rows.is_empty() {
         return;

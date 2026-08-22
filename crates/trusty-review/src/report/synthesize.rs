@@ -749,15 +749,49 @@ fn apply_guardrail(
     }
 
     // RED/AMBER finding elaborations.
-    for f in raw.findings {
+    for mut f in raw.findings {
         let sev = f.severity.to_uppercase();
         if sev != "RED" && sev != "AMBER" {
-            out.notes.push(format!(
+            notes.push(format!(
                 "synthesis: dropped finding '{}' (non-RED/AMBER severity '{}')",
                 f.title, f.severity
             ));
             continue;
         }
+        // #6082 lap 5: a finding's OWN narrative fields take the same grounding
+        // pass the paragraphs do. Wiring the guard to the summaries and the
+        // top-risk rows alone left RED finding 3's business impact stating
+        // "remote/local code execution" two lines from a Security Posture
+        // paragraph the same guard had corrected to "not remotely".
+        // `evidence` is excluded deliberately: it is a verbatim quote verified
+        // against the file, so rewriting it would make the displayed quote
+        // diverge from the one that was checked. `component` is routing data,
+        // not narrative.
+        let label = format!("finding '{}'", f.title);
+        f.description = ground_field(
+            &format!("{label} description"),
+            &f.description,
+            grounding,
+            notes,
+        );
+        f.business_impact = ground_field(
+            &format!("{label} business impact"),
+            &f.business_impact,
+            grounding,
+            notes,
+        );
+        f.remediation = ground_field(
+            &format!("{label} remediation"),
+            &f.remediation,
+            grounding,
+            notes,
+        );
+        f.cost_effort = ground_field(
+            &format!("{label} cost/effort"),
+            &f.cost_effort,
+            grounding,
+            notes,
+        );
         match verify_all(
             &[
                 &f.description,
@@ -770,9 +804,7 @@ fn apply_guardrail(
             allowed,
         ) {
             Ok(()) => out.findings.push(f),
-            Err(tok) => out
-                .notes
-                .push(format!("{REJECTED_NOTE} in finding '{}': {tok}", f.title)),
+            Err(tok) => notes.push(format!("{REJECTED_NOTE} in finding '{}': {tok}", f.title)),
         }
     }
 
@@ -786,6 +818,36 @@ fn apply_guardrail(
         return Err(SynthesisError::NoVerifiableContent);
     }
     Ok(out)
+}
+
+/// Run the grounding guardrail alone over one narrative field of a finding.
+///
+/// Why: a finding is verified as a WHOLE by [`verify_all`] — one bad figure
+/// anywhere rejects the entire finding — so its fields cannot go through
+/// [`admit_field`], which rejects per field. This is the grounding half on its
+/// own, leaving that all-or-nothing numeric contract untouched (#6082 lap 5).
+/// What: returns the text with any reachability claim corrected, or an empty
+/// string when the claim could not be corrected safely. An emptied field falls
+/// through to the reporter's honesty marker, which is what an absent field has
+/// always rendered as.
+/// Test: `synthesize_tests.rs::{synthesize_grounds_a_finding_business_impact,
+/// synthesize_empties_an_uncorrectable_remote_claim_in_a_finding}`.
+fn ground_field(label: &str, raw: &str, grounding: &Grounding, notes: &mut Vec<String>) -> String {
+    let text = raw.trim();
+    if text.is_empty() {
+        return String::new();
+    }
+    match grounding.check(text) {
+        GroundingOutcome::Clean => text.to_string(),
+        GroundingOutcome::Rewritten(fixed, corrections) => {
+            notes.extend(corrections);
+            fixed
+        }
+        GroundingOutcome::Rejected(reason) => {
+            notes.push(format!("{UNGROUNDED_NOTE} in {label}: {reason}"));
+            String::new()
+        }
+    }
 }
 
 /// Run both guardrails over one narrative field and return what may ship.

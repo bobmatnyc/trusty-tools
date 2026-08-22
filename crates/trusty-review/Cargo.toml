@@ -33,7 +33,12 @@ name        = "trusty-review"
 # lands, so 0.24.1 is the next free position either way. Nothing public changes
 # shape: `synthesize_grounding` and `investigate::regions` are both crate-private
 # modules, and the two new `analyze_findings` constants are `pub(crate)`.
-version     = "0.24.1"
+#
+# #6082 lap 5: PATCH bump — both fixes are internal to the render pipeline.
+# `reporter_findings` and `synthesize_grounding` are crate-private, and the one
+# new `synthesize` helper is a private free function; no public type changes
+# shape.
+version     = "0.24.2"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true

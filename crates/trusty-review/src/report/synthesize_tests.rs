@@ -2363,6 +2363,122 @@ fn synthesize_grounds_the_top_risk_row_description() {
     );
 }
 
+/// One RED narrative against the grounded fixture, varying only the field the
+/// test is about.
+fn grounded_finding(business_impact: &str) -> super::FindingProse {
+    super::FindingProse {
+        trace_verdict: String::new(),
+        app_slug: "acme-web".to_string(),
+        title: "Run handler executes an arbitrary caller-supplied executable".to_string(),
+        severity: "RED".to_string(),
+        description: "the request body overrides the executable path with no validation"
+            .to_string(),
+        evidence: "pub claude_cmd: Option<String>,".to_string(),
+        component: "crates/acme-daemon/src/control_routes.rs".to_string(),
+        business_impact: business_impact.to_string(),
+        remediation: "validate the path and require auth".to_string(),
+        cost_effort: "medium".to_string(),
+        evidence_measured: true,
+    }
+}
+
+/// #6082 lap 5 (BLOCKER 2): a finding's own business impact takes the grounding
+/// pass, and the hedged `remote/local` wording is a claim the guard corrects.
+///
+/// Why: the guard was wired to the summaries and the top-risk rows only, so RED
+/// finding 3's business impact shipped "enabling remote/local code execution"
+/// two lines from a Security Posture paragraph the same guard had corrected to
+/// "not remotely" — the one remaining RCE-class string in the document,
+/// contradicting the corrected paragraph. The hedged spelling also matched no
+/// rewrite pattern, so the sentence never triggered the check at all.
+/// What: the graded report's own wording as a finding's `business_impact`.
+/// Asserts it survives with the remote claim rewritten and the correction noted.
+/// Test: this test itself.
+#[test]
+fn synthesize_grounds_a_finding_business_impact() {
+    let model = grounded_fixture_model();
+    let grounding = crate::report::synthesize_grounding::Grounding::from_model(&model);
+    let allowed = allowed_numbers(&serde_json::to_value(&model).unwrap());
+    let raw = super::RawSynthesis {
+        executive_summary: String::new(),
+        code_quality_summary: String::new(),
+        security_summary: String::new(),
+        authorship_summary: String::new(),
+        top_risks: vec![],
+        findings: vec![grounded_finding(
+            "An attacker reaching the acme-daemon control_routes endpoint could cause it to \
+             execute an arbitrary binary, enabling remote/local code execution",
+        )],
+    };
+
+    let result = super::apply_guardrail(raw, &allowed, Vec::new(), &grounding)
+        .expect("the corrected finding keeps this Ok");
+
+    assert_eq!(result.findings.len(), 1, "{:?}", result.notes);
+    let impact = &result.findings[0].business_impact;
+    assert!(
+        !impact.to_lowercase().contains("remote"),
+        "the remote claim must not survive in the business impact: {impact}"
+    );
+    assert!(
+        impact.contains("local-process-reachable code execution"),
+        "the corrected wording must replace it: {impact}"
+    );
+    assert!(
+        result
+            .notes
+            .iter()
+            .any(|n| n.contains("reachability corrected")),
+        "the correction must be recorded: {:?}",
+        result.notes
+    );
+}
+
+/// #6082 lap 5 (BLOCKER 2): an uncorrectable remote claim in a finding field
+/// empties that field rather than shipping it.
+///
+/// Why: fail-closed is the posture every other grounded field takes, and an
+/// emptied field renders as the honesty marker the deterministic composition
+/// already fills.
+/// What: business-impact prose whose remote wording survives every rewrite.
+/// Asserts the finding still ships (the measurement is real), its business
+/// impact is empty, and the note names the grounding rejection.
+/// Test: this test itself.
+#[test]
+fn synthesize_empties_an_uncorrectable_remote_claim_in_a_finding() {
+    let model = grounded_fixture_model();
+    let grounding = crate::report::synthesize_grounding::Grounding::from_model(&model);
+    let allowed = allowed_numbers(&serde_json::to_value(&model).unwrap());
+    let raw = super::RawSynthesis {
+        executive_summary: String::new(),
+        code_quality_summary: String::new(),
+        security_summary: String::new(),
+        authorship_summary: String::new(),
+        top_risks: vec![],
+        findings: vec![grounded_finding(
+            "The acme-daemon control_routes surface offers remote code execution and \
+             remote-management access to the internet.",
+        )],
+    };
+
+    let result = super::apply_guardrail(raw, &allowed, Vec::new(), &grounding)
+        .expect("the finding's other fields keep this Ok");
+
+    assert_eq!(result.findings.len(), 1, "{:?}", result.notes);
+    assert!(
+        result.findings[0].business_impact.is_empty(),
+        "an uncorrectable claim must be dropped: {}",
+        result.findings[0].business_impact
+    );
+    assert!(
+        result.notes.iter().any(|n| {
+            n.contains("claim contradicts the report's own data") && n.contains("business impact")
+        }),
+        "the rejection must be recorded: {:?}",
+        result.notes
+    );
+}
+
 /// #6082 lap 4: the prompt states both grounding facts, so the model is told
 /// the answer rather than only judged for guessing.
 #[test]
