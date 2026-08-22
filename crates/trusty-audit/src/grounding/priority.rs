@@ -224,11 +224,20 @@ fn env_positive(name: &str) -> Option<usize> {
 /// thing that MUST reach the report. The two are independent — `[report].gaps`
 /// belongs to the run, `inspect_priority` to one repository — so a gap is
 /// recorded whether or not the repository entry can be found.
+///
+/// Why the BUDGET is written even when the ranking is not (#6149): the budget is
+/// CONFIGURATION, not evidence. It used to sit inside the `priorities`
+/// non-empty branch, so a run whose grounding legs degraded wrote its gaps and
+/// nothing else — and trusty-review, finding no `investigate_max_files`, fell
+/// back to its own 40-file default. The evidence failure silently took the
+/// investigation depth with it: exactly the compounding the confirmation run of
+/// 2026-08-21 hit, where the index collision cost the grounding AND left the
+/// 240-file budget unwritten.
 /// What: appends each gap to `[report].gaps`, skipping duplicates so a resumed
 /// sweep does not restate them, fills the investigation budget keys when the
 /// manifest declares none, and replaces the matched repository's
-/// `inspect_priority` with the ranking. Nothing is written when there is nothing
-/// to record.
+/// `inspect_priority` with the ranking. Nothing is written when there is no
+/// ranking, no gap and no budget to record.
 ///
 /// # Errors
 ///
@@ -250,7 +259,7 @@ pub fn write_into(
     attributed_only: bool,
     gaps: &[String],
 ) -> Result<(), String> {
-    if priorities.is_empty() && gaps.is_empty() {
+    if priorities.is_empty() && gaps.is_empty() && budget.is_none() {
         return Ok(());
     }
     let text = std::fs::read_to_string(path)
@@ -260,11 +269,13 @@ pub fn write_into(
         .map_err(|e| format!("{} is not readable as TOML ({e})", path.display()))?;
 
     record_gaps(&mut doc, gaps)?;
+    // #6149: configuration first, and unconditionally — a degraded evidence leg
+    // must not silently drop the investigation budget with it.
+    if let Some(budget) = budget {
+        record_budget(&mut doc, budget)?;
+    }
     if !priorities.is_empty() {
         record_priorities(&mut doc, checkout, priorities)?;
-        if let Some(budget) = budget {
-            record_budget(&mut doc, budget)?;
-        }
         if attributed_only {
             record_attributed_only(&mut doc)?;
         }
@@ -704,6 +715,47 @@ path = "/w/repos/acme-web"
         assert_eq!(
             parsed["report"]["investigate_max_bytes"].as_integer(),
             Some(1_200_000)
+        );
+    }
+
+    /// #6149: the budget is configuration, not evidence. A run whose grounding
+    /// legs both failed produces gaps and no ranking, and it must STILL declare
+    /// the budget — otherwise trusty-review falls back to its own 40-file
+    /// default and the evidence failure quietly costs the investigation depth
+    /// too. Fails against the pre-fix code, which wrote the budget only inside
+    /// the non-empty-ranking branch.
+    #[test]
+    fn a_degraded_grounding_still_declares_the_budget() {
+        let out = recorded(
+            SAMPLE,
+            "/w/repos/acme-api",
+            &[],
+            Some(Budget {
+                max_files: DEFAULT_MAX_FILES,
+                max_bytes: DEFAULT_MAX_BYTES,
+            }),
+            &[
+                "acme-api: complexity data unavailable: index root mismatch",
+                "acme-api: the search index matched no evidence for any dimension",
+            ],
+        );
+        let parsed: toml::Value = toml::from_str(&out).expect("valid TOML");
+        assert_eq!(
+            parsed["report"]["investigate_max_files"].as_integer(),
+            Some(240),
+            "{out}"
+        );
+        assert_eq!(
+            parsed["report"]["investigate_max_bytes"].as_integer(),
+            Some(2_457_600),
+            "{out}"
+        );
+        assert_eq!(parsed["report"]["gaps"].as_array().expect("array").len(), 3);
+        assert!(
+            parsed["repositories"].as_array().expect("array")[0]
+                .get("inspect_priority")
+                .is_none(),
+            "a degraded run declares no ranking: {out}"
         );
     }
 

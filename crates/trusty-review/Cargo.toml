@@ -22,7 +22,7 @@ name        = "trusty-review"
 # `#[non_exhaustive]` (the note above covers three OTHER report types), so an
 # external struct literal breaks. For a `0.y.z` crate the breaking bump is the
 # MINOR position.
-version     = "0.22.0"
+version     = "0.22.1"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true

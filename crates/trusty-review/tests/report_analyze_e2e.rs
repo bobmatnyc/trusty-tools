@@ -21,13 +21,16 @@ use trusty_review::report::{
 
 // ─── In-process analyze mock ─────────────────────────────────────────────────
 
-/// The index id the mock serves; must equal the repo checkout basename so
-/// `derive_index_id` resolves to it.
-const INDEX_ID: &str = "acme-core";
+/// Basename of the fixture checkout.
+///
+/// #6149: this is no longer the index id. The id is derived from the checkout's
+/// CANONICAL PATH, which is inside a per-run tempdir, so the mock is told which
+/// id to serve rather than knowing one at compile time.
+const REPO_DIR: &str = "acme-core";
 
 /// Body for `GET /indexes` — one served index (analyze shape: array of objects).
-fn indexes_body() -> String {
-    format!(r#"[{{"id":"{INDEX_ID}","root_path":null}}]"#)
+fn indexes_body(index_id: &str) -> String {
+    format!(r#"[{{"id":"{index_id}","root_path":null}}]"#)
 }
 
 /// Body for `/complexity_distribution` — the whole-corpus A-F histogram (#5320).
@@ -60,7 +63,7 @@ fn refactor_body() -> String {
 }
 
 /// Route the request path to the right fixture body.
-fn body_for(path: &str) -> String {
+fn body_for(path: &str, index_id: &str) -> String {
     if path.starts_with("/indexes/") && path.contains("/complexity_distribution") {
         distribution_body()
     } else if path.contains("/diagnostics") {
@@ -68,7 +71,7 @@ fn body_for(path: &str) -> String {
     } else if path.contains("/refactor-suggestions") {
         refactor_body()
     } else if path == "/indexes" || path.starts_with("/indexes?") {
-        indexes_body()
+        indexes_body(index_id)
     } else {
         "{}".to_string()
     }
@@ -76,7 +79,7 @@ fn body_for(path: &str) -> String {
 
 /// Spawn a blocking HTTP/1.1 mock serving the analyze endpoints; returns its
 /// base URL. The listener thread runs for the process lifetime (daemonised).
-fn spawn_mock() -> String {
+fn spawn_mock(index_id: String) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
     let addr = listener.local_addr().expect("addr");
     std::thread::spawn(move || {
@@ -92,7 +95,7 @@ fn spawn_mock() -> String {
                 .and_then(|l| l.split_whitespace().nth(1))
                 .unwrap_or("/")
                 .to_string();
-            let body = body_for(&path);
+            let body = body_for(&path, &index_id);
             let resp = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
@@ -111,7 +114,7 @@ fn spawn_mock() -> String {
 /// built-in scan is non-empty and `local_path` resolves. Returns the temp dir
 /// (kept alive) and the manifest path.
 fn write_fixture(dir: &std::path::Path) -> std::path::PathBuf {
-    let repo = dir.join(INDEX_ID);
+    let repo = dir.join(REPO_DIR);
     std::fs::create_dir_all(repo.join("src")).expect("mkdir repo");
     std::fs::write(repo.join("src").join("a.rs"), "fn a() {}\n").expect("write src");
 
@@ -140,9 +143,18 @@ fn write_fixture(dir: &std::path::Path) -> std::path::PathBuf {
 /// Test: this test itself.
 #[tokio::test]
 async fn analyze_populates_complexity_and_findings() {
-    let base_url = spawn_mock();
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let manifest_path = write_fixture(tmp.path());
+    // #6149: the id is derived from the checkout's canonical path, so the mock
+    // is told which index to serve — deriving it here through the same public
+    // function the enrichment calls is also what proves the two agree.
+    let index_id = trusty_review::report::derive_index_id(&tmp.path().join(REPO_DIR))
+        .expect("the fixture checkout has a final path component");
+    assert!(
+        index_id.starts_with("acme-core-"),
+        "readable, and per-checkout: {index_id}"
+    );
+    let base_url = spawn_mock(index_id);
 
     let manifest = load_manifest(&manifest_path).expect("manifest loads");
     let template = TemplateLoader::new()

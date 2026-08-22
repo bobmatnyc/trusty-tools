@@ -1534,33 +1534,51 @@ fn search_binary_resolution_prefers_the_env_override() {
     assert!(!crate::audit::resolve_search_binary().is_empty());
 }
 
-/// The cross-process contract, pinned as a rule.
+/// The cross-process contract, pinned as a rule (#6149).
 ///
-/// trusty-review looks the index up by the checkout path's basename
-/// (`report::analyze_adapter::derive_index_id`, a `path.file_name()` mapped to a
-/// `String`). No Cargo edge joins the two crates, so this is a copy of that
-/// rule — including the two shapes that are easy to get wrong: a trailing `.`,
-/// which `Path` normalises away rather than treating as the final component, and
-/// a root path, which has no basename at all and which BOTH sides must decline.
+/// trusty-review looks the index up through the same function this calls
+/// (`trusty_common::derive_checkout_index_id`), so the assertions here are the
+/// shapes that are easy to get wrong: two checkouts of one repository, which
+/// must NOT share an id; a trailing separator and a trailing `.`, which `Path`
+/// normalises away rather than treating as the final component and which must
+/// therefore derive the SAME id; and a root path, which has no final component
+/// at all and which both sides must decline.
 #[test]
-fn the_index_id_is_the_checkout_basename() {
+fn the_index_id_distinguishes_two_checkouts_of_one_repo() {
     use std::path::Path;
 
-    assert_eq!(
-        index_id_for(Path::new("/src/northwind-web")).as_deref(),
-        Some("northwind-web")
-    );
+    let one = index_id_for(Path::new("/src/northwind-web")).expect("id");
+    let other = index_id_for(Path::new("/w/repos/local/northwind-web")).expect("id");
+    assert_ne!(one, other, "{one} vs {other}");
+    assert!(one.starts_with("northwind-web-"), "{one}");
+
     assert_eq!(
         index_id_for(Path::new("/src/northwind-web/")).as_deref(),
-        Some("northwind-web"),
+        Some(one.as_str()),
         "a trailing separator is not a component"
     );
     assert_eq!(
         index_id_for(Path::new("/src/northwind-web/.")).as_deref(),
-        Some("northwind-web"),
+        Some(one.as_str()),
         "`base_dir.join(\".\")` is what a `path: .` config entry anchors to"
     );
     assert_eq!(index_id_for(Path::new("/")), None);
+}
+
+/// The agreement with trusty-review is a call now, not a copied rule.
+#[test]
+fn the_index_id_is_the_shared_derivation() {
+    use std::path::Path;
+
+    for path in ["/src/northwind-web", "/w/repos/local/northwind-web", "/"] {
+        let path = Path::new(path);
+        assert_eq!(
+            index_id_for(path),
+            trusty_common::derive_checkout_index_id(path),
+            "{}",
+            path.display()
+        );
+    }
 }
 
 /// The ids indexed are derived from the paths the renderer reads.
@@ -1608,11 +1626,24 @@ fn index_ids_match_the_manifest_paths_the_renderer_reads() {
     let ids: Vec<Option<String>> = entries.iter().map(|e| index_id_for(&e.path)).collect();
     assert_eq!(
         ids,
-        vec![
-            Some("northwind-web".to_string()),
-            Some("northwind-api".to_string())
-        ],
-        "each id is the basename of the path written into manifest.toml"
+        entries
+            .iter()
+            .map(|e| trusty_common::derive_checkout_index_id(&e.path))
+            .collect::<Vec<_>>(),
+        "each id derives from the path written into manifest.toml, through the \
+         function the renderer calls"
+    );
+    assert!(
+        ids[0]
+            .as_deref()
+            .is_some_and(|id| id.starts_with("northwind-web-")),
+        "{ids:?}"
+    );
+    assert!(
+        ids[1]
+            .as_deref()
+            .is_some_and(|id| id.starts_with("northwind-api-")),
+        "{ids:?}"
     );
 }
 
@@ -1696,12 +1727,13 @@ async fn an_unindexed_repository_is_indexed_before_the_render() {
 
     assert_eq!(outcomes.len(), 1);
     assert_eq!(outcomes[0].status, RepoIndexStatus::Indexed);
-    assert_eq!(outcomes[0].index_id.as_deref(), Some("acme-web"));
+    let id = index_id_for(&dir.path().join("acme-web")).expect("id");
+    assert_eq!(outcomes[0].index_id.as_deref(), Some(id.as_str()));
     let calls = stub_log(&log);
     assert_eq!(calls.len(), 2, "one probe, then one index: {calls:?}");
-    assert_eq!(calls[0], "index-status acme-web");
+    assert_eq!(calls[0], format!("index-status {id}"));
     assert!(
-        calls[1].starts_with("index ") && calls[1].ends_with("--name acme-web"),
+        calls[1].starts_with("index ") && calls[1].ends_with(&format!("--name {id}")),
         "the index is built under the id the renderer looks up: {calls:?}"
     );
     assert!(
@@ -1725,10 +1757,11 @@ async fn an_already_indexed_repository_is_not_reindexed() {
     let outcomes = crate::audit::repo_index::ensure_repositories_indexed_with(stub, &entries).await;
 
     assert_eq!(outcomes[0].status, RepoIndexStatus::AlreadyServed);
+    let id = index_id_for(&dir.path().join("acme-served")).expect("id");
     let calls = stub_log(&log);
     assert_eq!(
         calls,
-        vec!["index-status acme-served".to_string()],
+        vec![format!("index-status {id}")],
         "the probe is the only invocation — no reindex: {calls:?}"
     );
 }

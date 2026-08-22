@@ -8,13 +8,16 @@
 //!
 //! ## The index id is a cross-process contract
 //!
-//! trusty-review derives the id it looks up from the checkout path's basename
-//! (`trusty_review::report::analyze_adapter::derive_index_id`), and
-//! `tga::audit::repo_index::index_id_for` applies that same rule from the other
-//! side. [`index_id_for`] is the third copy of one rule, and it is a copy
-//! deliberately: this crate has a Cargo edge to neither, and an id derived any
-//! other way would index every repository under a name nobody ever queries —
-//! leaving the reports exactly as hollow as before while looking fixed.
+//! Three crates derive the id independently — this one when it indexes,
+//! `trusty_review::report::analyze_adapter::derive_index_id` when the renderer
+//! looks it up, `tga::audit::repo_index::index_id_for` from the sweep's other
+//! side — and an id derived any other way indexes a repository under a name
+//! nobody ever queries. Until #6149 the rule was the checkout BASENAME, copied
+//! into all three; two checkouts of one repository therefore collided on one id
+//! and the daemon served whichever tree registered first. All three now call
+//! [`trusty_common::derive_checkout_index_id`], which hashes the canonical path
+//! into the id, so the agreement is a call rather than a copy and two checkouts
+//! can no longer collide.
 //!
 //! ## Two verbs, not one
 //!
@@ -48,12 +51,15 @@ pub enum IndexStatus {
 
 /// The trusty-search index id for a checkout path.
 ///
-/// Why/What/Test: see the module docs — the final path component, exactly as
-/// `derive_index_id` returns it. `None` for a path with no basename, e.g. `/`.
-/// Test: `index_tests::the_index_id_is_the_checkout_basename`.
+/// Why/What/Test: see the module docs. A thin forward to
+/// [`trusty_common::derive_checkout_index_id`], kept as a named function here
+/// because the module's callers and tests read better against it and because it
+/// is the seam a future scheme change moves. `None` for a path with no final
+/// component, e.g. `/`.
+/// Test: `index_tests::the_index_id_distinguishes_two_checkouts_of_one_repo`.
 #[must_use]
 pub fn index_id_for(path: &Path) -> Option<String> {
-    path.file_name().map(|n| n.to_string_lossy().into_owned())
+    trusty_common::derive_checkout_index_id(path)
 }
 
 /// Wall-clock budget for the index-root probe.
@@ -61,17 +67,17 @@ const ROOT_PROBE_BUDGET: std::time::Duration = std::time::Duration::from_secs(10
 
 /// Refuse an index that is rooted at a DIFFERENT checkout than the audited one.
 ///
-/// Why: the index id is the checkout BASENAME (see the module docs), so two
-/// checkouts of the same repository collide on one id. The graded self-audit of
-/// 2026-08-21 hit exactly that: the audited tree was the engagement's own
-/// clone, the daemon was already serving an index of the same name rooted at
-/// `~/Projects/trusty-tools` at a different branch and commit, and every
-/// complexity hotspot the report stamped "measured" was measured against code
-/// that was never audited. Nothing in the pipeline compared the two roots, so
-/// the wrong tree's measurements arrived indistinguishable from the right
-/// tree's. An id collision cannot be fixed by choosing a better id here — the
-/// id is a cross-process contract three crates derive independently — so the
-/// fix is to CHECK the root and degrade loudly.
+/// Why: this is the BACKSTOP, not the primary defence. The primary defence is
+/// the id itself: since #6149 it hashes the canonical checkout path, so two
+/// checkouts of one repository can no longer collide by construction. What is
+/// left for this guard is everything a derivation cannot see — an id registered
+/// under the old basename scheme, a directory that moved after it was indexed,
+/// and a daemon whose registry disagrees with this machine's filesystem. The
+/// graded self-audit of 2026-08-21 is what both defences answer: the audited
+/// tree was the engagement's own clone, the daemon was already serving an index
+/// of the same name rooted at `~/Projects/trusty-tools` at a different branch
+/// and commit, and every complexity hotspot the report stamped "measured" was
+/// measured against code that was never audited.
 ///
 /// What: reads `root_path` off `GET /indexes/{id}/status` and compares it to
 /// `checkout`, canonicalising both so a symlinked or `..`-laden path still
@@ -117,9 +123,8 @@ pub async fn root_matches(base_url: &str, index_id: &str, checkout: &Path) -> Re
         return Ok(());
     }
     Err(format!(
-        "the trusty-search index '{index_id}' is rooted at {served}, not at {} — the index id is \
-         the checkout basename, so another checkout of the same repository is being served under \
-         it",
+        "the trusty-search index '{index_id}' is rooted at {served}, not at {} — another checkout \
+         is registered under this id, so its content would be reported as this one's",
         checkout.display()
     ))
 }
@@ -244,15 +249,37 @@ mod index_tests {
         }
     }
 
-    /// The rule three crates apply independently. A drift here indexes every
-    /// repository under a name nobody queries.
+    /// #6149: the rule three crates apply, now via one shared implementation.
+    /// A drift here indexes every repository under a name nobody queries.
     #[test]
-    fn the_index_id_is_the_checkout_basename() {
-        assert_eq!(
-            index_id_for(Path::new("/w/repos/acme-api")).as_deref(),
-            Some("acme-api")
-        );
+    fn the_index_id_distinguishes_two_checkouts_of_one_repo() {
+        let engagement = Path::new("/w/dogfood-audit-final/repos/local/trusty-tools");
+        let working = Path::new("/Users/masa/Projects/trusty-tools");
+
+        let a = index_id_for(engagement).expect("id");
+        let b = index_id_for(working).expect("id");
+        assert_ne!(a, b, "{a} vs {b}");
+        assert!(a.starts_with("trusty-tools-"), "{a}");
         assert_eq!(index_id_for(Path::new("/")), None);
+    }
+
+    /// The three sites are one function now, so the agreement is checkable
+    /// rather than asserted: this crate's id IS trusty-common's.
+    #[test]
+    fn the_index_id_is_the_shared_derivation() {
+        for path in [
+            "/w/repos/acme-api",
+            "/Users/masa/Projects/trusty-tools",
+            "/",
+        ] {
+            let path = Path::new(path);
+            assert_eq!(
+                index_id_for(path),
+                trusty_common::derive_checkout_index_id(path),
+                "{}",
+                path.display()
+            );
+        }
     }
 
     #[test]
@@ -366,9 +393,9 @@ mod index_tests {
         assert!(seen.contains("index /w/repos/xsv --name xsv"), "{seen}");
     }
 
-    /// The id is a basename, so two checkouts of one repository collide. The
-    /// comparison has to resolve symlinks and `..`, or a legitimate root reads
-    /// as a mismatch and the repository loses its code analysis for nothing.
+    /// The backstop still has to be precise: the comparison resolves symlinks
+    /// and `..`, or a legitimate root reads as a mismatch and the repository
+    /// loses its code analysis for nothing.
     #[test]
     fn same_tree_resolves_before_it_compares() {
         let tmp = tempfile::tempdir().expect("tempdir");
