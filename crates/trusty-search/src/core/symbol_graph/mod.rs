@@ -20,12 +20,15 @@
 mod build;
 mod contrib;
 mod graph;
+mod resolve;
 mod traverse;
 
 #[cfg(test)]
 mod contrib_tests;
 #[cfg(test)]
 mod persist_tests;
+#[cfg(test)]
+mod resolve_tests;
 #[cfg(test)]
 mod tests;
 
@@ -71,4 +74,4 @@ pub type ChunkTuple = (
 );
 
 // Re-export public surface (matches the original monolithic module surface).
-pub use graph::{SymbolGraph, SymbolNode};
+pub use graph::{SymbolGraph, SymbolMatch, SymbolNode};

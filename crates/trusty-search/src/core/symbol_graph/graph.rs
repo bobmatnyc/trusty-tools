@@ -20,10 +20,40 @@ use crate::core::corpus::{CorpusStore, PersistedKgNode};
 use crate::core::entity::EdgeKind;
 
 use super::max_kg_nodes;
+use super::resolve::{resolve_name, NameIndex, NameResolution};
+
+/// Outcome of [`SymbolGraph::resolve_symbol`], in qualified-key terms.
+///
+/// Why: an entry point that matches several definitions is a fact the caller
+/// must be able to report rather than a choice the graph makes silently
+/// (#6167).
+/// What: `One` when exactly one definition matched; `Several` carries the
+/// highest-degree pick plus every candidate, most-connected first.
+/// Test: `bare_name_lookup_reports_every_candidate`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SymbolMatch {
+    NotFound,
+    One(String),
+    Several {
+        chosen: String,
+        candidates: Vec<String>,
+    },
+}
 
 /// A node in the symbol graph. One node per defining symbol (function or method).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SymbolNode {
+    /// Qualified identity — `<file>::<symbol>` for chunk-derived symbols, the
+    /// extractor-minted id for contributed nodes (ADR-0009).
+    ///
+    /// Why: `symbol` alone is not unique across a workspace. Keying the graph
+    /// by it collapsed every same-named definition onto one node and made every
+    /// call to a common name an edge to an arbitrary crate (#6167).
+    /// What: the string every map, every persisted adjacency entry, and every
+    /// traversal start point is keyed by.
+    /// Test: `each_definition_of_a_shared_name_gets_its_own_node`.
+    #[serde(default)]
+    pub key: String,
     /// Defining symbol name. For Rust methods this is qualified (`Foo::bar`);
     /// for free functions it's the bare name.
     pub symbol: String,
@@ -31,6 +61,10 @@ pub struct SymbolNode {
     pub chunk_id: String,
     /// Source file path (for debugging / display).
     pub file: String,
+    /// Whether this symbol can be the target of a call edge. `false` for
+    /// containers (module, class, struct, impl) and for contributed nodes.
+    #[serde(default)]
+    pub callable: bool,
     /// Node kind for contributed (non-code-symbol) nodes — e.g. `table`,
     /// `proc`, `view`, `csharp_method` (ADR-0009). `None` for chunk-derived
     /// code symbols. In-RAM only: derived persistence (`PersistedKgNode`)
@@ -52,11 +86,13 @@ pub struct SymbolNode {
 #[derive(Debug, Default, Clone)]
 pub struct SymbolGraph {
     pub(crate) graph: DiGraph<SymbolNode, EdgeKind>,
-    /// Symbol name → node index. Holds the *first* definition seen if a symbol
-    /// is defined twice (rare; e.g. `cfg`-gated duplicates).
-    pub(crate) by_symbol: HashMap<String, NodeIndex>,
-    /// chunk_id → symbol name, so callers can resolve a search hit to its node.
-    pub(crate) chunk_to_symbol: HashMap<String, String>,
+    /// Qualified-identity and name lookup tables (#6167). Replaces the old
+    /// `by_symbol: HashMap<String, NodeIndex>`, which kept only the first
+    /// definition of each name and dropped every later one.
+    pub(crate) names: NameIndex,
+    /// chunk_id → qualified node key, so callers can resolve a search hit to
+    /// its own node rather than to a same-named one in another crate.
+    pub(crate) chunk_to_key: HashMap<String, String>,
     /// Count of edges dropped during `load_from_corpus` due to unrecognized
     /// kind tags (issue #816).
     ///
@@ -89,7 +125,7 @@ impl SymbolGraph {
         let mut nodes: Vec<(String, PersistedKgNode)> = Vec::with_capacity(self.graph.node_count());
         for node in self.graph.node_weights() {
             nodes.push((
-                node.symbol.clone(),
+                node.key.clone(),
                 PersistedKgNode {
                     chunk_id: node.chunk_id.clone(),
                     file: node.file.clone(),
@@ -101,11 +137,11 @@ impl SymbolGraph {
         let mut rev: HashMap<String, Vec<(String, String)>> = HashMap::new();
         for edge in self.graph.edge_references() {
             let src = match self.graph.node_weight(edge.source()) {
-                Some(n) => n.symbol.clone(),
+                Some(n) => n.key.clone(),
                 None => continue,
             };
             let tgt = match self.graph.node_weight(edge.target()) {
-                Some(n) => n.symbol.clone(),
+                Some(n) => n.key.clone(),
                 None => continue,
             };
             // Use EdgeKind::tag() — handles Custom("s") → "custom:s" correctly.
@@ -138,23 +174,35 @@ impl SymbolGraph {
             return Ok(None);
         }
         let mut g = Self::new();
-        for (symbol, persisted) in nodes {
+        for (key, persisted) in nodes {
+            // A key written before #6167 is a bare symbol name; one written
+            // since is `<file>::<symbol>`. Recover the display symbol from the
+            // file prefix when it is there, so an un-migrated corpus still
+            // loads (with the old one-node-per-name behaviour) instead of
+            // rendering file paths as symbol names.
+            let symbol = key
+                .strip_prefix(&format!("{}::", persisted.file))
+                .unwrap_or(&key)
+                .to_string();
             let idx = g.graph.add_node(SymbolNode {
+                key: key.clone(),
                 symbol: symbol.clone(),
                 chunk_id: persisted.chunk_id.clone(),
                 file: persisted.file.clone(),
                 kind: None,
+                callable: true,
             });
-            g.by_symbol.insert(symbol, idx);
-            g.chunk_to_symbol
-                .insert(persisted.chunk_id, g.graph[idx].symbol.clone());
+            g.names.insert(&persisted.file, &symbol, idx, true);
+            g.names.by_key.insert(key, idx);
+            g.chunk_to_key
+                .insert(persisted.chunk_id, g.graph[idx].key.clone());
         }
         for (src, targets) in adj_fwd {
-            let Some(&src_idx) = g.by_symbol.get(&src) else {
+            let Some(&src_idx) = g.names.by_key.get(&src) else {
                 continue;
             };
             for (kind_tag, tgt) in targets {
-                let Some(&tgt_idx) = g.by_symbol.get(&tgt) else {
+                let Some(&tgt_idx) = g.names.by_key.get(&tgt) else {
                     continue;
                 };
                 // Use EdgeKind::from_tag (ADR-0010 Option H):
@@ -238,9 +286,33 @@ impl SymbolGraph {
         self.unknown_edge_tags_dropped
     }
 
-    /// Look up the defining symbol for a chunk_id, if any.
+    /// Look up the qualified node key for a chunk_id, if any.
+    ///
+    /// Why: KG expansion seeds from a search hit's chunk id. Returning the
+    /// display symbol made the seed ambiguous — a hit on trusty-search's
+    /// `HnswStore::upsert` expanded from trusty-common's same-named node
+    /// (#6167). The qualified key names exactly one node.
+    /// What: returns `<file>::<symbol>`, which every traversal entry point
+    /// accepts directly.
+    /// Test: `chunk_seed_expands_from_its_own_definition`.
     pub fn symbol_for_chunk(&self, chunk_id: &str) -> Option<&str> {
-        self.chunk_to_symbol.get(chunk_id).map(|s| s.as_str())
+        self.chunk_to_key.get(chunk_id).map(|s| s.as_str())
+    }
+
+    /// Display symbol for a qualified node key.
+    pub fn display_symbol(&self, key: &str) -> Option<&str> {
+        self.names
+            .by_key
+            .get(key)
+            .map(|&i| self.graph[i].symbol.as_str())
+    }
+
+    /// Source file for a qualified node key.
+    pub fn file_of(&self, key: &str) -> Option<&str> {
+        self.names
+            .by_key
+            .get(key)
+            .map(|&i| self.graph[i].file.as_str())
     }
 
     /// Compute total degree (in + out) for every symbol node.
@@ -248,18 +320,23 @@ impl SymbolGraph {
     /// Why: Degree information is useful for diagnostics (`GET /graph/stats`),
     /// future ranking experiments, and any caller that needs a quick measure
     /// of how connected each symbol is in the call graph.
-    /// What: returns `symbol → total_degree` where total_degree = in_degree +
-    /// out_degree across all edge kinds. Symbols with no edges are present
-    /// with value 0.
+    /// What: returns `qualified_key → total_degree` where total_degree =
+    /// in_degree + out_degree across all edge kinds. Keyed by qualified
+    /// identity since #6167 — keying by display symbol collapsed every
+    /// same-named definition into one entry.
     /// Test: covered indirectly by graph stats tests and `edge_kind_breakdown`.
     pub fn degrees(&self) -> HashMap<String, usize> {
         let mut out: HashMap<String, usize> = HashMap::with_capacity(self.graph.node_count());
-        for (sym, &idx) in self.by_symbol.iter() {
-            let d_in = self.graph.edges_directed(idx, Direction::Incoming).count();
-            let d_out = self.graph.edges_directed(idx, Direction::Outgoing).count();
-            out.insert(sym.clone(), d_in + d_out);
+        for (key, &idx) in self.names.by_key.iter() {
+            out.insert(key.clone(), self.degree_of(idx));
         }
         out
+    }
+
+    /// In + out degree of one node, across every edge kind.
+    pub(crate) fn degree_of(&self, idx: NodeIndex) -> usize {
+        self.graph.edges_directed(idx, Direction::Incoming).count()
+            + self.graph.edges_directed(idx, Direction::Outgoing).count()
     }
 
     /// Iterate all nodes, returning `(symbol, chunk_id, file)` tuples.
@@ -292,6 +369,32 @@ impl SymbolGraph {
                 Some((src.symbol.clone(), tgt.symbol.clone(), e.weight().clone()))
             })
             .collect()
+    }
+
+    /// Resolve a caller-supplied symbol reference to one node, reporting
+    /// ambiguity instead of hiding it (#6167).
+    ///
+    /// Why: `get_call_chain` anchored a bare name to whichever definition
+    /// registered first, landing in the wrong file 43% of the time on the
+    /// dogfood index — with nothing in the output saying so.
+    /// What: accepts a qualified `<file>::<symbol>` key, a `<path>::<symbol>`
+    /// form where the path is a suffix of the real file path, `Type::method`,
+    /// or a bare name. Returns the chosen node plus every other candidate,
+    /// ordered by degree, so the caller can report the ambiguity.
+    /// Test: `path_qualified_entry_point_anchors_instead_of_404`,
+    /// `bare_name_lookup_reports_every_candidate`.
+    pub fn resolve_symbol(&self, name: &str) -> SymbolMatch {
+        match resolve_name(&self.names, name, |i| self.degree_of(i)) {
+            NameResolution::NotFound => SymbolMatch::NotFound,
+            NameResolution::Unique(i) => SymbolMatch::One(self.graph[i].key.clone()),
+            NameResolution::Ambiguous { chosen, candidates } => SymbolMatch::Several {
+                chosen: self.graph[chosen].key.clone(),
+                candidates: candidates
+                    .into_iter()
+                    .map(|i| self.graph[i].key.clone())
+                    .collect(),
+            },
+        }
     }
 
     /// Read `TRUSTY_MAX_KG_NODES` from the environment, falling back to the default.

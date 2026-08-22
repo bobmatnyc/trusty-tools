@@ -17,6 +17,7 @@ use petgraph::graph::NodeIndex;
 use crate::core::chunker::ChunkType;
 use crate::core::entity::{EdgeKind, EntityType, RawEntity};
 
+use super::resolve::{qualified_key, resolve_callee};
 use super::{graph::SymbolGraph, graph::SymbolNode, ChunkTuple};
 
 impl SymbolGraph {
@@ -40,11 +41,10 @@ impl SymbolGraph {
     ) -> Self {
         let mut g = Self::new();
         g.register_symbol_nodes(chunks);
-        let by_suffix = g.build_suffix_lookup();
-        g.add_call_and_inherit_edges(chunks, &by_suffix);
+        g.add_call_and_inherit_edges(chunks);
         g.add_module_contains_edges(chunks);
-        g.add_test_relation_edges(chunks, &by_suffix);
-        g.add_doc_concept_edges(chunks, entities_by_file, &by_suffix);
+        g.add_test_relation_edges(chunks);
+        g.add_doc_concept_edges(chunks, entities_by_file);
         g
     }
 
@@ -110,17 +110,32 @@ impl SymbolGraph {
 
     // ── Pass 1: register symbol nodes ─────────────────────────────────────
 
-    /// Register one `SymbolNode` per unique `function_name` in the corpus.
+    /// Register one `SymbolNode` per DEFINITION in the corpus (#6167).
     ///
-    /// Why: every later pass keys on `by_symbol`, so symbols must exist before
-    /// any edges are drawn. Hard cap via `max_kg_nodes()` prevents runaway RSS.
-    /// What: first-write-wins for the symbol → node mapping.
-    /// Test: `test_build_simple_graph`, `test_chunk_with_no_function_name_is_skipped`.
+    /// Why: this used to register one node per unique `function_name` and
+    /// silently drop every later definition of the same name. On the dogfood
+    /// index that left a single `write` node standing in for hundreds, and
+    /// pointed trusty-search's `HnswStore::upsert` traces at trusty-common's
+    /// same-named method.
+    /// What: keys each node by `<file>::<symbol>`, so two files defining the
+    /// same name get two nodes. `callable` records whether the chunk is a call
+    /// target at all — a module or struct never is. The `max_kg_nodes()` cap is
+    /// unchanged and still bounds RSS.
+    /// Test: `each_definition_of_a_shared_name_gets_its_own_node`,
+    /// `test_build_simple_graph`, `test_chunk_with_no_function_name_is_skipped`.
     pub(crate) fn register_symbol_nodes(&mut self, chunks: &[ChunkTuple]) {
         let cap = Self::max_kg_nodes();
         let mut cap_warned = false;
-        for (chunk_id, file, name, _calls, _inh, _ct) in chunks {
-            self.register_one_symbol(chunk_id, file, name.as_deref(), cap, &mut cap_warned);
+        for (chunk_id, file, name, _calls, _inh, ct) in chunks {
+            let callable = !Self::is_container(ct);
+            self.register_one_symbol(
+                chunk_id,
+                file,
+                name.as_deref(),
+                callable,
+                cap,
+                &mut cap_warned,
+            );
         }
     }
 
@@ -129,6 +144,7 @@ impl SymbolGraph {
         chunk_id: &str,
         file: &str,
         name: Option<&str>,
+        callable: bool,
         cap: usize,
         cap_warned: &mut bool,
     ) {
@@ -136,24 +152,33 @@ impl SymbolGraph {
         if name.is_empty() {
             return;
         }
-        if self.by_symbol.contains_key(name) {
-            self.chunk_to_symbol
-                .insert(chunk_id.to_string(), name.to_string());
+        let key = qualified_key(file, name);
+        if let Some(&existing) = self.names.by_key.get(&key) {
+            // Same symbol, same file, another chunk (e.g. a split body). Point
+            // the chunk at the node already standing for that definition.
+            self.chunk_to_key.insert(chunk_id.to_string(), key);
+            let _ = existing;
             return;
         }
-        if Self::cap_exceeded(cap, self.by_symbol.len()) {
+        if Self::cap_exceeded(cap, self.names.by_key.len()) {
             Self::warn_cap_once(cap, cap_warned);
             return;
         }
         let idx = self.graph.add_node(SymbolNode {
+            key: key.clone(),
             symbol: name.to_string(),
             chunk_id: chunk_id.to_string(),
             file: file.to_string(),
             kind: None,
+            callable,
         });
-        self.by_symbol.insert(name.to_string(), idx);
-        self.chunk_to_symbol
-            .insert(chunk_id.to_string(), name.to_string());
+        self.names.insert(file, name, idx, callable);
+        self.chunk_to_key.insert(chunk_id.to_string(), key);
+    }
+
+    /// Node defining `name` in `file`, if the corpus has one.
+    fn node_in_file(&self, file: &str, name: &str) -> Option<NodeIndex> {
+        self.names.by_key.get(&qualified_key(file, name)).copied()
     }
 
     fn cap_exceeded(cap: usize, current: usize) -> bool {
@@ -171,50 +196,42 @@ impl SymbolGraph {
         }
     }
 
-    // ── Suffix lookup ──────────────────────────────────────────────────────
-
-    /// Build a `simple_name → NodeIndex` map for fast qualified-callee resolution.
-    ///
-    /// Why: callers often write `bar()` even when only `Foo::bar` is defined;
-    /// looking up by trailing identifier avoids an O(N) per-edge scan.
-    /// What: for every symbol `A::B::name`, registers `name → idx` (first-write-wins).
-    /// Test: `test_simple_callee_resolves_to_qualified_definition`.
-    pub(crate) fn build_suffix_lookup(&self) -> HashMap<String, NodeIndex> {
-        let mut by_suffix: HashMap<String, NodeIndex> = HashMap::new();
-        for (sym, &idx) in self.by_symbol.iter() {
-            if let Some(suffix) = sym.rsplit("::").next() {
-                by_suffix.entry(suffix.to_string()).or_insert(idx);
-            }
-        }
-        by_suffix
-    }
-
     // ── Pass 2: call and inherit edges ─────────────────────────────────────
 
-    pub(crate) fn add_call_and_inherit_edges(
-        &mut self,
-        chunks: &[ChunkTuple],
-        by_suffix: &HashMap<String, NodeIndex>,
-    ) {
-        for (_chunk_id, _file, name, calls, inherits_from, _ct) in chunks {
+    /// Wire `CallsFunction` and `Implements` edges, one caller chunk at a time.
+    ///
+    /// Why: the caller's own file is the strongest evidence available about
+    /// which `write` a call to `write` means, and the previous implementation
+    /// threw it away — it resolved every callee against one global bare-name
+    /// map (#6167).
+    /// What: looks the caller up by its own qualified key, then resolves each
+    /// callee relative to the caller's file. A callee with no grounds in any
+    /// scope produces no edge.
+    /// Test: `bare_name_collision_does_not_create_a_cross_crate_edge`,
+    /// `test_calls_function_edges_present_in_graph`.
+    pub(crate) fn add_call_and_inherit_edges(&mut self, chunks: &[ChunkTuple]) {
+        for (_chunk_id, file, name, calls, inherits_from, _ct) in chunks {
             let Some(name) = name else { continue };
-            let Some(&from) = self.by_symbol.get(name) else {
+            let Some(from) = self.node_in_file(file, name) else {
                 continue;
             };
-            self.add_edges_for_targets(from, calls, by_suffix, EdgeKind::CallsFunction);
-            self.add_edges_for_targets(from, inherits_from, by_suffix, EdgeKind::Implements);
+            self.add_edges_for_targets(from, file, calls, EdgeKind::CallsFunction);
+            self.add_edges_for_targets(from, file, inherits_from, EdgeKind::Implements);
         }
     }
 
     fn add_edges_for_targets(
         &mut self,
         from: NodeIndex,
+        caller_file: &str,
         targets: &[String],
-        by_suffix: &HashMap<String, NodeIndex>,
         kind: EdgeKind,
     ) {
+        let require_callable = kind == EdgeKind::CallsFunction;
         for target in targets {
-            let Some(to) = self.resolve_callee_fast(target, by_suffix) else {
+            let Some((to, _grounds)) =
+                resolve_callee(&self.names, caller_file, target, require_callable)
+            else {
                 continue;
             };
             if from == to {
@@ -247,7 +264,7 @@ impl SymbolGraph {
             return;
         }
         let Some(name) = name else { return };
-        let Some(&from) = self.by_symbol.get(name) else {
+        let Some(from) = self.node_in_file(file, name) else {
             return;
         };
         let Some(siblings) = by_file.get(file) else {
@@ -286,7 +303,7 @@ impl SymbolGraph {
         let mut by_file: HashMap<&str, Vec<(&str, NodeIndex)>> = HashMap::new();
         for (_chunk_id, file, name, _calls, _inh, _ct) in chunks {
             if let Some(name) = name {
-                if let Some(&idx) = self.by_symbol.get(name) {
+                if let Some(idx) = self.node_in_file(file, name) {
                     by_file
                         .entry(file.as_str())
                         .or_default()
@@ -295,17 +312,6 @@ impl SymbolGraph {
             }
         }
         by_file
-    }
-
-    pub(crate) fn resolve_callee_fast(
-        &self,
-        callee: &str,
-        by_suffix: &HashMap<String, NodeIndex>,
-    ) -> Option<NodeIndex> {
-        if let Some(&idx) = self.by_symbol.get(callee) {
-            return Some(idx);
-        }
-        by_suffix.get(callee).copied()
     }
 
     // ── Pass 4a: test relation edges ───────────────────────────────────────
@@ -318,22 +324,18 @@ impl SymbolGraph {
     /// symbols and adds `callee → test` `TestedBy` edges. Emits symmetric
     /// `CoOccursInTest` edges between pairs of tests sharing a callee.
     /// Test: `test_phase_bc_edges_wired_from_entities`.
-    pub(crate) fn add_test_relation_edges(
-        &mut self,
-        chunks: &[ChunkTuple],
-        by_suffix: &HashMap<String, NodeIndex>,
-    ) {
+    pub(crate) fn add_test_relation_edges(&mut self, chunks: &[ChunkTuple]) {
         let mut callee_to_tests: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::new();
-        for (_chunk_id, _file, name, calls, _inh, ct) in chunks {
+        for (_chunk_id, file, name, calls, _inh, ct) in chunks {
             if !matches!(ct, ChunkType::Test) {
                 continue;
             }
             let Some(name) = name else { continue };
-            let Some(&test_idx) = self.by_symbol.get(name) else {
+            let Some(test_idx) = self.node_in_file(file, name) else {
                 continue;
             };
             for callee in calls {
-                let Some(callee_idx) = self.resolve_callee_fast(callee, by_suffix) else {
+                let Some((callee_idx, _)) = resolve_callee(&self.names, file, callee, true) else {
                     continue;
                 };
                 if callee_idx == test_idx {
@@ -377,7 +379,6 @@ impl SymbolGraph {
         &mut self,
         chunks: &[ChunkTuple],
         entities_by_file: &[(String, Vec<RawEntity>)],
-        by_suffix: &HashMap<String, NodeIndex>,
     ) {
         if entities_by_file.is_empty() {
             return;
@@ -393,7 +394,10 @@ impl SymbolGraph {
                     EntityType::NaturalLanguagePhrase => EdgeKind::ReferencesConcept,
                     _ => continue,
                 };
-                let Some(target_idx) = self.resolve_callee_fast(&ent.text, by_suffix) else {
+                // A doc concept names a symbol, not a call site — resolve it
+                // against the entity's own file and accept containers too.
+                let Some((target_idx, _)) = resolve_callee(&self.names, file, &ent.text, false)
+                else {
                     continue;
                 };
                 for (_sym, src_idx) in siblings.iter() {

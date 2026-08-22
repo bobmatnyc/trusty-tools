@@ -167,7 +167,8 @@ fn test_zero_hops_returns_empty() {
 fn test_symbol_for_chunk() {
     let chunks = vec![chunk("a:1", "a.rs", Some("alpha"), &[])];
     let g = SymbolGraph::build_from_chunks(&chunks);
-    assert_eq!(g.symbol_for_chunk("a:1"), Some("alpha"));
+    // Since #6167 this is the qualified node key, not the bare display name.
+    assert_eq!(g.symbol_for_chunk("a:1"), Some("a.rs::alpha"));
     assert_eq!(g.symbol_for_chunk("missing"), None);
 }
 
@@ -175,26 +176,32 @@ fn test_symbol_for_chunk() {
 fn test_neighbors_by_edge_filters_by_kind() {
     let mut g = SymbolGraph::new();
     let a = g.graph.add_node(SymbolNode {
+        key: "a.rs::a".into(),
         symbol: "a".into(),
         chunk_id: "a:1".into(),
         file: "a.rs".into(),
         kind: None,
+        callable: true,
     });
     let b = g.graph.add_node(SymbolNode {
+        key: "b.rs::b".into(),
         symbol: "b".into(),
         chunk_id: "b:1".into(),
         file: "b.rs".into(),
         kind: None,
+        callable: true,
     });
     let c = g.graph.add_node(SymbolNode {
+        key: "c.rs::c".into(),
         symbol: "c".into(),
         chunk_id: "c:1".into(),
         file: "c.rs".into(),
         kind: None,
+        callable: true,
     });
-    g.by_symbol.insert("a".into(), a);
-    g.by_symbol.insert("b".into(), b);
-    g.by_symbol.insert("c".into(), c);
+    g.names.insert("a.rs", "a", a, true);
+    g.names.insert("b.rs", "b", b, true);
+    g.names.insert("c.rs", "c", c, true);
     g.graph.add_edge(a, b, EdgeKind::CallsFunction);
     g.graph.add_edge(a, c, EdgeKind::Implements);
 

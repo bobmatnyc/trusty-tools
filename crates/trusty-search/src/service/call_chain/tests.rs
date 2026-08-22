@@ -168,8 +168,8 @@ fn request_validate_rejects_bad_direction() {
 fn resolve_entry_point_exact_match() {
     let chunks = vec![mk_chunk("a:1:5", "a.rs", "alpha", 1, 5, "fn alpha() {}")];
     let g = SymbolGraph::build_from_chunks(&[tuple("a:1:5", "a.rs", "alpha", &[])]);
-    let (sym, _c) = resolve_entry_point("alpha", &g, &chunks).expect("resolved");
-    assert_eq!(sym, "alpha");
+    let a = resolve_entry_point("alpha", &g, &chunks).expect("resolved");
+    assert_eq!(a.symbol, "alpha");
 }
 
 #[test]
@@ -195,9 +195,9 @@ fn resolve_entry_point_fuzzy_match_picks_most_connected() {
         tuple("d:1:5", "d.rs", "caller_two", &["authenticate"]),
     ];
     let g = SymbolGraph::build_from_chunks(&tuples);
-    let (sym, _c) = resolve_entry_point("auth", &g, &chunks).expect("resolved");
+    let a = resolve_entry_point("auth", &g, &chunks).expect("resolved");
     assert_eq!(
-        sym, "authenticate",
+        a.symbol, "authenticate",
         "most-connected should win the fuzzy tie"
     );
 }
@@ -218,9 +218,9 @@ fn resolve_entry_point_file_line_form() {
         "authenticate",
         &[],
     )]);
-    let (sym, c) = resolve_entry_point("src/auth.rs:15", &g, &chunks).expect("resolved");
-    assert_eq!(sym, "authenticate");
-    assert_eq!(c.start_line, 10);
+    let a = resolve_entry_point("src/auth.rs:15", &g, &chunks).expect("resolved");
+    assert_eq!(a.symbol, "authenticate");
+    assert_eq!(a.chunk.start_line, 10);
 }
 
 #[test]
