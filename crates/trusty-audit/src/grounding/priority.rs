@@ -33,12 +33,14 @@ use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value};
 /// Why: a ranking that only says WHICH files to read cannot tell the report why
 /// any of them was read, and "why" is the whole difference between a coverage
 /// section that states a percentage and one a due-diligence reader can weigh.
-/// The two optional fields are what trusty-review renders per dimension.
+/// The three optional fields are what trusty-review renders per dimension.
 /// What: `path` is repo-relative; `dimension` is a DD dimension spelled as
 /// trusty-review spells it (absent for a signal that belongs to no single
 /// dimension, such as a complexity hotspot); `reason` is one line naming the
-/// query or measurement that selected it.
-/// Test: `priority_tests::a_dimension_and_reason_are_written_as_a_table`.
+/// query or measurement that selected it; `hotspot` is the file's worst
+/// measured function, when the complexity leg ranked this file (#6145).
+/// Test: `priority_tests::{a_dimension_and_reason_are_written_as_a_table,
+/// a_hotspot_is_written_as_a_nested_table}`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct Priority {
@@ -48,6 +50,8 @@ pub struct Priority {
     pub dimension: Option<String>,
     /// One line naming the query or measurement that selected it.
     pub reason: Option<String>,
+    /// The file's hottest function, when trusty-analyze measured one (#6145).
+    pub hotspot: Option<FunctionHotspot>,
 }
 
 impl Priority {
@@ -56,10 +60,35 @@ impl Priority {
     pub fn bare(path: impl Into<String>) -> Self {
         Self {
             path: path.into(),
-            dimension: None,
-            reason: None,
+            ..Self::default()
         }
     }
+}
+
+/// The worst measured function inside one ranked file (#6145).
+///
+/// Why: `/complexity_hotspots` ranks FUNCTIONS and the manifest names FILES, so
+/// collapsing chunks to files discarded the only part of the measurement that
+/// says WHERE in a 900-line file the complexity is. The owner ruled that
+/// analysis must target the most complex functions, and a path alone cannot
+/// carry that instruction to the crate that acts on it (trusty-review, #6146).
+/// What: the winning chunk's own line range and cyclomatic count, plus its name
+/// when the daemon supplied one. The range is what makes it actionable; the
+/// name is what makes it readable, and a chunk the parser could not name still
+/// has a usable range.
+/// Test: `super::hotspot_tests::the_hottest_function_of_each_file_is_kept`,
+/// `priority_tests::a_hotspot_is_written_as_a_nested_table`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct FunctionHotspot {
+    /// The function's name, when trusty-analyze named it.
+    pub function: Option<String>,
+    /// First line of the measured chunk, 1-based.
+    pub start_line: u32,
+    /// Last line of the measured chunk, 1-based and inclusive.
+    pub end_line: u32,
+    /// The chunk's cyclomatic complexity — the number that ranked it.
+    pub cyclomatic: u32,
 }
 
 /// The investigation budget the audit asks for, in files and content bytes.
@@ -352,7 +381,7 @@ fn ranked(priorities: &[Priority]) -> Array {
 
 /// One priority as TOML: a bare path, or a table when it carries attribution.
 fn entry(priority: &Priority) -> Value {
-    if priority.dimension.is_none() && priority.reason.is_none() {
+    if priority.dimension.is_none() && priority.reason.is_none() && priority.hotspot.is_none() {
         return Value::from(priority.path.as_str());
     }
     let mut table = InlineTable::new();
@@ -363,7 +392,29 @@ fn entry(priority: &Priority) -> Value {
     if let Some(reason) = &priority.reason {
         table.insert("reason", Value::from(reason.as_str()));
     }
+    // #6145: nested rather than four `hotspot_*` siblings, so the measurement
+    // reads as one fact and a reader can tell at a glance which keys came from
+    // the complexity leg.
+    if let Some(hotspot) = &priority.hotspot {
+        table.insert("hotspot", Value::InlineTable(hotspot_table(hotspot)));
+    }
     Value::InlineTable(table)
+}
+
+/// One measured function as a nested inline table (#6145).
+fn hotspot_table(hotspot: &FunctionHotspot) -> InlineTable {
+    let mut table = InlineTable::new();
+    if let Some(function) = &hotspot.function {
+        table.insert("function", Value::from(function.as_str()));
+    }
+    for (key, value) in [
+        ("start_line", hotspot.start_line),
+        ("end_line", hotspot.end_line),
+        ("cyclomatic", hotspot.cyclomatic),
+    ] {
+        table.insert(key, Value::from(i64::from(value)));
+    }
+    table
 }
 
 #[cfg(test)]
@@ -409,7 +460,73 @@ path = "/w/repos/acme-web"
             path: path.to_owned(),
             dimension: Some(dimension.to_owned()),
             reason: Some(reason.to_owned()),
+            hotspot: None,
         }
+    }
+
+    /// #6145: the complexity leg's entry — a path and the function it measured,
+    /// with no dimension, which is the shape `evidence::blend` produces.
+    #[test]
+    fn a_hotspot_is_written_as_a_nested_table() {
+        let out = recorded(
+            SAMPLE,
+            "/w/repos/acme-api",
+            &[Priority {
+                path: "src/pay.rs".to_owned(),
+                dimension: None,
+                reason: Some("trusty-analyze complexity hotspot (rank 1)".to_owned()),
+                hotspot: Some(FunctionHotspot {
+                    function: Some("settle_invoice".to_owned()),
+                    start_line: 40,
+                    end_line: 190,
+                    cyclomatic: 31,
+                }),
+            }],
+            None,
+            &[],
+        );
+        let parsed: toml::Value = toml::from_str(&out).expect("still valid TOML");
+        let first = &parsed["repositories"].as_array().expect("array")[0]["inspect_priority"]
+            .as_array()
+            .expect("declared")[0];
+        assert_eq!(first["path"].as_str(), Some("src/pay.rs"), "{out}");
+        let hotspot = &first["hotspot"];
+        assert_eq!(
+            hotspot["function"].as_str(),
+            Some("settle_invoice"),
+            "{out}"
+        );
+        assert_eq!(hotspot["start_line"].as_integer(), Some(40), "{out}");
+        assert_eq!(hotspot["end_line"].as_integer(), Some(190), "{out}");
+        assert_eq!(hotspot["cyclomatic"].as_integer(), Some(31), "{out}");
+    }
+
+    /// #6145: an unnamed chunk writes its range and omits the key rather than
+    /// declaring a function called "".
+    #[test]
+    fn an_unnamed_hotspot_omits_the_function_key() {
+        let out = recorded(
+            SAMPLE,
+            "/w/repos/acme-api",
+            &[Priority {
+                path: "src/pay.rs".to_owned(),
+                hotspot: Some(FunctionHotspot {
+                    function: None,
+                    start_line: 4,
+                    end_line: 44,
+                    cyclomatic: 12,
+                }),
+                ..Priority::default()
+            }],
+            None,
+            &[],
+        );
+        let parsed: toml::Value = toml::from_str(&out).expect("still valid TOML");
+        let hotspot = &parsed["repositories"].as_array().expect("array")[0]["inspect_priority"]
+            .as_array()
+            .expect("declared")[0]["hotspot"];
+        assert!(hotspot.get("function").is_none(), "{out}");
+        assert_eq!(hotspot["start_line"].as_integer(), Some(4), "{out}");
     }
 
     /// #6082: an attributed entry becomes a table carrying its dimension and the
