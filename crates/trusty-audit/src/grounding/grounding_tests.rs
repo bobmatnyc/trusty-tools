@@ -284,7 +284,10 @@ async fn an_unindexable_checkout_is_a_named_gap() {
     )
     .await;
     assert!(out.priorities.is_empty());
-    assert_eq!(out.index_id.as_deref(), Some("acme-api"));
+    assert_eq!(
+        out.index_id,
+        index::index_id_for(Path::new("/w/repos/acme-api"))
+    );
     assert_eq!(out.gaps.len(), 1, "{:?}", out.gaps);
     assert!(out.gaps[0].contains("acme-api"), "{:?}", out.gaps);
     assert!(out.gaps[0].contains("not allowlisted"), "{:?}", out.gaps);

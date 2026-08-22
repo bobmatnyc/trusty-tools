@@ -45,9 +45,9 @@ pub const ENV_ANALYZE_BIN: &str = "TRUSTY_ANALYZE_BIN";
 /// `tga`, which owns the same three names (`tga::audit::ENV_ANALYZE_URL`), and
 /// linking a workspace-version `tga` into a client whose entire discipline is
 /// running PINNED binaries would defeat the pinning. It is a copied
-/// cross-process contract, the same deliberate copy `tga::audit::index_id_for`
-/// is of trusty-review's id rule, and it is pinned by
-/// `daemon_tests::the_analyze_defaults_match_the_contract_tga_uses`.
+/// cross-process contract — unlike the index id, which since #6149 is one
+/// shared function in `trusty-common` rather than three copies — and it is
+/// pinned by `daemon_tests::the_analyze_defaults_match_the_contract_tga_uses`.
 pub const ENV_ANALYZE_URL: &str = "TRUSTY_ANALYZE_URL";
 
 /// The trusty-analyze daemon's address when nothing overrides it.

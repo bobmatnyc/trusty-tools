@@ -1,15 +1,16 @@
 //! Does the analyze data describe the tree this report audits? (#6137)
 //!
-//! Why: `analyze_adapter::derive_index_id` addresses a trusty-analyze index by
-//! the checkout directory's BASENAME, so two checkouts of the same repository
-//! at different paths — `/Users/x/Projects/trusty-tools` and
-//! `.../repos/local/trusty-tools` — resolve to the same index id. The daemon
-//! answers with whichever one it indexed. That is how one due-diligence run
-//! stamped twenty complexity findings ⁽ᵐ⁾ measured whose component paths all
-//! pointed at a different checkout on a different branch: the report presented
-//! another tree's code as a measurement of the audited one. An out-of-tree path
-//! is stale-index evidence, not measurement, and there is no way to tell from
-//! the data alone which commit it describes.
+//! Why: this is the BACKSTOP for a data-scope question the id derivation cannot
+//! answer. `analyze_adapter::derive_index_id` used to address an index by the
+//! checkout directory's BASENAME, so two checkouts of one repository —
+//! `/Users/x/Projects/trusty-tools` and `.../repos/local/trusty-tools` —
+//! resolved to the same id and the daemon answered with whichever it had
+//! indexed. That is how one due-diligence run stamped twenty complexity findings
+//! ⁽ᵐ⁾ measured whose component paths all pointed at a different checkout on a
+//! different branch. #6149 removed that collision from the id itself, but an
+//! index registered under the OLD scheme, or one whose tree has since moved,
+//! still answers; and an out-of-tree path is stale-index evidence either way,
+//! with no way to tell from the data alone which commit it describes.
 //! What: [`out_of_tree_components`] reports the ABSOLUTE component paths in a
 //! fetched [`AnalyzeMetrics`] that do not live under the audited checkout.
 //! Relative paths are in-tree by construction (they are read against the

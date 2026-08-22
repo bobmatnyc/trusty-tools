@@ -395,7 +395,7 @@ pub fn resolve_operator_identity(root: &Path) -> Option<String> {
 /// the boundary unambiguous regardless of the field's own contents.
 /// What: writes `<decimal len>:<bytes>` to `buf`.
 /// Test: covered by `label_ambiguity_does_not_collide`.
-fn push_field(buf: &mut Vec<u8>, value: &[u8]) {
+pub(crate) fn push_field(buf: &mut Vec<u8>, value: &[u8]) {
     buf.extend_from_slice(value.len().to_string().as_bytes());
     buf.push(b':');
     buf.extend_from_slice(value);
@@ -427,7 +427,7 @@ fn push_opt(buf: &mut Vec<u8>, value: Option<String>) {
 /// What: the underlying `OsStr` bytes on unix; the lossy UTF-8 encoding
 /// elsewhere (Windows `OsStr` is UTF-16 and has no byte view).
 /// Test: covered by `sibling_clones_of_same_repo_derive_distinct_ids`.
-fn path_bytes(p: &Path) -> Vec<u8> {
+pub(crate) fn path_bytes(p: &Path) -> Vec<u8> {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
@@ -453,7 +453,7 @@ fn path_bytes(p: &Path) -> Vec<u8> {
 /// What: standard FNV-1a over `bytes`, then a splitmix64 finalizer so that
 /// paths differing in a single character still differ in most output bits.
 /// Test: `digest_is_stable_for_identical_inputs`.
-fn fnv1a_64(bytes: &[u8]) -> u64 {
+pub(crate) fn fnv1a_64(bytes: &[u8]) -> u64 {
     const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
     let mut hash = OFFSET_BASIS;

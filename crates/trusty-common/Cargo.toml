@@ -2,7 +2,7 @@
 name = "trusty-common"
 # 0.40.0 (#5809): the MCP extraction (ADR-0040 Phase 1) removed the public
 # `src/mcp/*` modules. Cargo's 0.x rule makes that a MINOR bump, not a patch.
-version = "0.40.1"
+version = "0.41.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

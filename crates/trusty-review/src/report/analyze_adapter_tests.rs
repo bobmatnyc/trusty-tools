@@ -599,12 +599,34 @@ fn new_trims_trailing_slash() {
     assert_eq!(src.base_url, "http://127.0.0.1:7879");
 }
 
+/// #6149: the renderer and the audit are separate processes agreeing on one id.
+/// Two checkouts of one repository must not derive the same one — that is the
+/// collision that had this crate reading another tree's measurements.
 #[test]
-fn derive_index_id_uses_basename() {
-    assert_eq!(
-        derive_index_id(std::path::Path::new("/home/me/northwind-web")).as_deref(),
-        Some("northwind-web")
-    );
+fn derive_index_id_distinguishes_same_named_checkouts() {
+    let engagement = std::path::Path::new("/w/dogfood/repos/local/northwind-web");
+    let working = std::path::Path::new("/home/me/northwind-web");
+
+    let a = derive_index_id(engagement).expect("id");
+    let b = derive_index_id(working).expect("id");
+    assert_ne!(a, b, "{a} vs {b}");
+    assert!(b.starts_with("northwind-web-"), "still readable: {b}");
+    assert_eq!(derive_index_id(std::path::Path::new("/")), None);
+}
+
+/// The agreement is a call, not a copy: this crate's id IS trusty-common's, so
+/// the audit that indexed under it and this renderer cannot drift.
+#[test]
+fn derive_index_id_is_the_shared_derivation() {
+    for path in ["/home/me/northwind-web", "/w/repos/acme-api", "/"] {
+        let path = std::path::Path::new(path);
+        assert_eq!(
+            derive_index_id(path),
+            trusty_common::derive_checkout_index_id(path),
+            "{}",
+            path.display()
+        );
+    }
 }
 
 #[test]
