@@ -2924,6 +2924,16 @@ fn render_colliding(findings: Vec<crate::report::synthesize::FindingProse>) -> S
     Reporter::new(tmp.path()).render(&model, &template)
 }
 
+/// Section 5.2, the AMBER findings list. The hotspot tables elsewhere in the
+/// report repeat a finding's metrics fields, so a document-wide search cannot
+/// tell a rendered finding from a dropped one.
+fn amber_section(md: &str) -> &str {
+    md.split("### 5.2")
+        .nth(1)
+        .and_then(|s| s.split("### 5.3").next())
+        .expect("AMBER section present")
+}
+
 /// The Component recorded in the same finding block as `needle` — the last
 /// `**Component:**` line before it, which is the one belonging to that block.
 fn component_for(md: &str, needle: &str) -> String {
@@ -2971,14 +2981,16 @@ fn colliding_titles_attach_to_their_own_components() {
     jira.business_impact = "ticket sync carries the second risk".to_string();
 
     let md = render_colliding(vec![hnsw, jira]);
+    let amber = amber_section(&md);
 
     assert!(
-        component_for(&md, "vector maintenance carries the deepest risk").contains("hnsw_store.rs"),
-        "the hnsw narrative must sit on the hnsw row:\n{md}"
+        component_for(amber, "vector maintenance carries the deepest risk")
+            .contains("hnsw_store.rs"),
+        "the hnsw narrative must sit on the hnsw row:\n{amber}"
     );
     assert!(
-        component_for(&md, "ticket sync carries the second risk").contains("jira/backend.rs"),
-        "the jira narrative must sit on the jira row:\n{md}"
+        component_for(amber, "ticket sync carries the second risk").contains("jira/backend.rs"),
+        "the jira narrative must sit on the jira row:\n{amber}"
     );
 }
 
@@ -3003,17 +3015,20 @@ fn a_self_restating_narrative_never_deletes_its_metrics_row() {
     restating.business_impact = "harder to change over time".to_string();
 
     let md = render_colliding(vec![restating]);
+    // Scoped to 5.2: the metrics description also appears in the hotspot
+    // tables, so a document-wide search would pass even with the row dropped.
+    let amber = amber_section(&md);
 
     assert!(
-        md.contains("cyclomatic complexity 118 (grade F)"),
-        "the measured hotspot must survive a junk narrative:\n{md}"
+        amber.contains("Extract method — dispatch"),
+        "the finding must still be listed:\n{amber}"
     );
     assert!(
-        md.contains("Extract method — dispatch"),
-        "the finding must still be listed:\n{md}"
+        amber.contains("cyclomatic complexity 118 (grade F)"),
+        "the measured hotspot must survive a junk narrative:\n{amber}"
     );
     assert!(
-        !md.contains("harder to change over time"),
-        "the restating narrative must still be refused:\n{md}"
+        !amber.contains("harder to change over time"),
+        "the restating narrative must still be refused:\n{amber}"
     );
 }
