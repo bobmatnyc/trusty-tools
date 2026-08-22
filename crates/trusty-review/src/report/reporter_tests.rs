@@ -713,11 +713,14 @@ fn a_self_quoting_finding_is_suppressed() {
     // A real path, so only the self-quote can be what suppresses it.
     f.component = "crates/trusty-common/src/memory_core/store/hnsw_store.rs".to_string();
 
-    let md = render_with_finding(f);
+    // Scoped to the report body: since #6082 lap 6 a refused narrative is
+    // DISCLOSED under Synthesis Status, so its title appears in the document by
+    // design. What must not survive is the rendered finding.
+    let body = report_body(&render_with_finding(f));
 
     assert!(
-        !md.contains("Extract method — hnsw_store"),
-        "a finding quoting its own label must not survive:\n{md}"
+        !body.contains("Extract method — hnsw_store"),
+        "a finding quoting its own label must not survive:\n{body}"
     );
 }
 
@@ -725,12 +728,24 @@ fn a_self_quoting_finding_is_suppressed() {
 /// shape — the reader is given nothing to open.
 #[test]
 fn a_finding_with_a_non_path_component_is_suppressed() {
-    let md = render_with_finding(restating_finding());
+    let body = report_body(&render_with_finding(restating_finding()));
 
     assert!(
-        !md.contains("Extract method — hnsw_store"),
-        "a finding citing a topic instead of a file must not survive:\n{md}"
+        !body.contains("Extract method — hnsw_store"),
+        "a finding citing a topic instead of a file must not survive:\n{body}"
     );
+}
+
+/// The rendered document without its appended Synthesis Status list.
+///
+/// A refused narrative is disclosed there by title (#6082 lap 6), so a
+/// document-wide `!contains(title)` assertion can no longer tell a suppressed
+/// finding from a rendered one.
+fn report_body(md: &str) -> String {
+    md.split("## Synthesis Status")
+        .next()
+        .unwrap_or(md)
+        .to_string()
 }
 
 /// The filter must not reach a genuine finding: a real path plus a quote of real
@@ -743,11 +758,11 @@ fn a_genuine_finding_survives_the_self_quote_filter() {
     f.component = "crates/trusty-mpm/src/tui/health/screen.rs:384".to_string();
     f.evidence = "const MEM_CEILING_MB: u64 = 8 * 1024;".to_string();
 
-    let md = render_with_finding(f);
+    let amber = amber_section(&render_with_finding(f)).to_string();
 
     assert!(
-        md.contains("Hardcoded illustrative resource ceilings"),
-        "a genuine finding must survive:\n{md}"
+        amber.contains("Hardcoded illustrative resource ceilings"),
+        "a genuine finding must survive:\n{amber}"
     );
 }
 
@@ -760,11 +775,11 @@ fn a_root_level_manifest_component_is_not_a_topic() {
     f.component = "Cargo.toml".to_string();
     f.evidence = "aws-config = \"^1\"".to_string();
 
-    let md = render_with_finding(f);
+    let amber = amber_section(&render_with_finding(f)).to_string();
 
     assert!(
-        md.contains("Unpinned caret-range AWS SDK dependencies"),
-        "Cargo.toml is a real citation:\n{md}"
+        amber.contains("Unpinned caret-range AWS SDK dependencies"),
+        "Cargo.toml is a real citation:\n{amber}"
     );
 }
 
@@ -3081,5 +3096,94 @@ fn a_self_restating_narrative_never_deletes_its_metrics_row() {
     assert!(
         !amber.contains("harder to change over time"),
         "the restating narrative must still be refused:\n{amber}"
+    );
+}
+
+/// #6082 lap 6: an unmatched narrative citing a topic phrase must not be
+/// numbered as a finding.
+///
+/// Why: the graded report listed 156 AMBER items against the 155 AMBER findings
+/// its own metrics measured. The extra one — "Split oversized impl block
+/// (hnsw_store)", component `trusty-common (memory_core/store)`, Evidence body
+/// the file's own path — is the exact shape `is_self_restatement` exists to
+/// refuse, and it slipped through because the parenthesised half of that topic
+/// phrase carries a slash, so `names_a_file` read it as a path.
+/// What: the live orphan's shape against the three-row colliding-title fixture.
+/// Asserts the numbered list stops at the third measured row, that the orphan's
+/// prose does not render, and that Synthesis Status names it.
+/// Test: this test itself.
+#[test]
+fn an_unplaced_narrative_is_disclosed_not_numbered() {
+    let mut orphan = amber_prose(
+        "Split oversized impl block (hnsw_store)",
+        "trusty-common (memory_core/store)",
+        "crates/trusty-common/src/memory_core/store/hnsw_store.rs",
+    );
+    orphan.business_impact = "vector-store logic sits in one oversized block".to_string();
+
+    let md = render_colliding(vec![orphan]);
+    let amber = amber_section(&md);
+
+    assert!(
+        amber.contains("\n3. **"),
+        "the three measured rows must still render:\n{amber}"
+    );
+    assert!(
+        !amber.contains("\n4. **"),
+        "the unplaced narrative must not be numbered:\n{amber}"
+    );
+    assert!(
+        !amber.contains("vector-store logic sits in one oversized block"),
+        "the orphan's prose must not render as a finding:\n{amber}"
+    );
+
+    let status = md
+        .split("## Synthesis Status")
+        .nth(1)
+        .expect("Synthesis Status section present");
+    assert!(
+        status.contains(
+            "synthesis: narrative not rendered — 'Split oversized impl block \
+                         (hnsw_store)'"
+        ),
+        "the dropped narrative must be disclosed:\n{status}"
+    );
+    assert!(
+        status.contains(
+            "component 'trusty-common (memory_core/store)' matches no measured \
+                         finding"
+        ),
+        "the disclosure must name the component that matched nothing:\n{status}"
+    );
+}
+
+/// #6082 lap 6, other arm: a narrative that cites a real file and quotes a line
+/// out of it still renders on its own.
+///
+/// Why: most of the graded report's findings arrive this way — the investigation
+/// injects a metrics row per verified finding, but a narrative whose title the
+/// row does not carry still has a file, a line and a quote behind it. Refusing
+/// every unmatched narrative would delete those, which is the failure the lap-5
+/// fix was about.
+/// Test: this test itself.
+#[test]
+fn a_narrative_citing_a_real_file_still_renders() {
+    let mut verified = amber_prose(
+        "compact_orphans deletes across three transactions",
+        "crates/trusty-common/src/memory_core/store/hnsw_store.rs:221",
+        "let live = self.live_ids()?;",
+    );
+    verified.business_impact = "a just-inserted vector can be silently deleted".to_string();
+
+    let amber_md = render_colliding(vec![verified]);
+    let amber = amber_section(&amber_md);
+
+    assert!(
+        amber.contains("a just-inserted vector can be silently deleted"),
+        "a verified narrative with no metrics row must still render:\n{amber}"
+    );
+    assert!(
+        amber.contains("\n4. **"),
+        "it is numbered alongside the three measured rows:\n{amber}"
     );
 }

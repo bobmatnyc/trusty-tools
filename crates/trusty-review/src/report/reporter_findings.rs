@@ -279,10 +279,23 @@ fn normalized_path(component: &str) -> String {
 /// A path separator or a file extension is enough — `Cargo.toml` and `deny.toml`
 /// are real root-level citations with neither a directory nor a line number, and
 /// must not be mistaken for prose.
+///
+/// #6082 lap 6: interior whitespace or a parenthesis disqualifies it first. A
+/// tracked path has neither, and the graded report's AMBER #156 cited
+/// `trusty-common (memory_core/store)` — a topic phrase that slipped through
+/// because the parenthesised half carries a slash. That one row was the whole
+/// difference between the 155 AMBER findings the metrics measured and the 156
+/// the render numbered.
 fn names_a_file(component: &str) -> bool {
     let path = component.rsplit_once(':').map_or(component, |(p, _)| p);
     let path = path.trim();
     if path.is_empty() {
+        return false;
+    }
+    if path
+        .chars()
+        .any(|c| c.is_whitespace() || c == '(' || c == ')')
+    {
         return false;
     }
     path.contains('/')
@@ -481,6 +494,49 @@ pub(super) fn push_finding_band(
     finding_block: &str,
     index: &mut usize,
 ) {
+    let (rows, _) = band_rows(repo, syn, band, band_label);
+    if rows.is_empty() {
+        return;
+    }
+
+    let mut app_scope = Scope::new();
+    app_scope.set("app_name", repo.name.clone());
+    for row in rows {
+        *index += 1;
+        app_scope.push_block(finding_block, row.into_scope(*index));
+    }
+    root.push_block(app_block, app_scope);
+}
+
+/// The status-note prefix every unrendered narrative is disclosed under.
+///
+/// Distinct from the two synthesis-time prefixes in `synthesize.rs`: those name
+/// a claim the guardrail refused, this names a narrative the render could not
+/// place. A reader who sees one should not have to guess which happened.
+const UNPLACED_NOTE: &str = "synthesis: narrative not rendered";
+
+/// Build one severity band's rows for one repository, with a disclosure line for
+/// every narrative that reached no row.
+///
+/// Why: [`push_finding_band`] and [`unplaced_narrative_lines`] must agree
+/// exactly on which narratives render — a second implementation of the pairing
+/// would drift, and the whole point of the disclosure is that it accounts for
+/// what the numbered list leaves out.
+/// What: one bare row per `metrics.findings` entry of `band`, then each
+/// `FindingProse` overlaid onto the row [`match_row`] pairs it with. A narrative
+/// with no row still renders as its own, unless [`is_self_restatement`] refuses
+/// it — in which case it is DISCLOSED rather than dropped in silence (#6082
+/// lap 6). The graded report numbered one such entry as AMBER #156, citing the
+/// topic phrase `trusty-common (memory_core/store)` with the file's own path as
+/// its entire Evidence body.
+/// Test: `reporter_tests::{an_unplaced_narrative_is_disclosed_not_numbered,
+/// a_narrative_citing_a_real_file_still_renders}`.
+fn band_rows(
+    repo: &RepositoryReport,
+    syn: Option<&super::synthesize::Synthesis>,
+    band: Severity,
+    band_label: &str,
+) -> (Vec<FindingRow>, Vec<String>) {
     let mut rows: Vec<FindingRow> = repo
         .metrics
         .iter()
@@ -488,6 +544,7 @@ pub(super) fn push_finding_band(
         .filter(|f| f.severity == band)
         .map(FindingRow::from_metric)
         .collect();
+    let mut notes = Vec::new();
 
     if let Some(syn) = syn {
         for f in syn
@@ -511,27 +568,56 @@ pub(super) fn push_finding_band(
                         rows[i] = merged;
                     }
                 }
-                // A synthesis-only row has no measurement behind it, so a
-                // restatement here is dropped: nothing else would render.
                 None => {
                     let row = FindingRow::from_prose(f);
-                    if !is_self_restatement(&row) {
-                        rows.push(row);
+                    match unplaced_reason(&row) {
+                        Some(reason) => {
+                            notes.push(format!("{UNPLACED_NOTE} — '{}': {reason}", f.title));
+                        }
+                        None => rows.push(row),
                     }
                 }
             }
         }
     }
+    (rows, notes)
+}
 
-    if rows.is_empty() {
-        return;
+/// Why a narrative matching no metrics row must not be numbered, if it must not.
+///
+/// Why: a refused narrative that lands on a metrics row still renders that row's
+/// measurement, so the reader loses nothing. A refused narrative with no row
+/// behind it renders as nothing at all, and until #6082 lap 6 that happened in
+/// silence — which is what the Synthesis Status list exists to prevent.
+/// What: `None` for a narrative that cites a file and quotes out of it, which
+/// renders as its own row. Otherwise the reason, phrased for the status list.
+fn unplaced_reason(row: &FindingRow) -> Option<String> {
+    if !is_self_restatement(row) {
+        return None;
     }
+    let component = row.component.as_deref().unwrap_or("none stated");
+    Some(format!(
+        "component '{component}' matches no measured finding, and its evidence restates the \
+         finding instead of quoting a line out of the file"
+    ))
+}
 
-    let mut app_scope = Scope::new();
-    app_scope.set("app_name", repo.name.clone());
-    for row in rows {
-        *index += 1;
-        app_scope.push_block(finding_block, row.into_scope(*index));
+/// Every synthesis narrative this render leaves out of the numbered lists.
+///
+/// Why: a narrative the reporter cannot place used to be either numbered with no
+/// measurement behind it or dropped in silence. Both hide the same fact from the
+/// reader; the Synthesis Status list is where this report already discloses what
+/// the guardrails refused.
+/// What: replays [`band_rows`] over every repository and both bands, returning
+/// its disclosure lines. Pure — it renders nothing.
+/// Test: `reporter_tests::an_unplaced_narrative_is_disclosed_not_numbered`.
+pub(super) fn unplaced_narrative_lines(model: &super::model::ReportModel) -> Vec<String> {
+    let syn = model.synthesis.as_ref();
+    let mut out = Vec::new();
+    for repo in &model.repositories {
+        for (band, label) in [(Severity::Red, "RED"), (Severity::Amber, "AMBER")] {
+            out.extend(band_rows(repo, syn, band, label).1);
+        }
     }
-    root.push_block(app_block, app_scope);
+    out
 }

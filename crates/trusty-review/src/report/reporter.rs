@@ -29,7 +29,7 @@ use super::reporter_facts::fill_key_facts;
 use super::reporter_fill::{
     crate_version, fill_profile, instructions_block, set_executive_summary, set_scoring_model,
 };
-use super::reporter_findings::push_finding_band;
+use super::reporter_findings::{push_finding_band, unplaced_narrative_lines};
 use super::reporter_graph_datasets::{
     inject_complexity_distribution_dataset, inject_loc_by_technology_dataset,
 };
@@ -607,16 +607,22 @@ fn green_topic_line(finding: &super::metrics::MetricFinding) -> String {
 /// Why: a reader must never mistake a deterministically-composed section for one
 /// the model wrote; the note names every field the numeric guardrail rejected.
 /// What: when `model.synthesis` is present, appends a status block whose lines
-/// come from `Synthesis::status_lines`.  The absent branch survives only for
+/// come from `Synthesis::status_lines`, followed by one line per narrative the
+/// finding bands could not place (#6082 lap 6, see
+/// [`unplaced_narrative_lines`]).  The absent branch survives only for
 /// [`Reporter::render`], which stays infallible for unit tests —
 /// [`Reporter::write`] rejects a synthesis-free model outright (#5454).
-/// Test: `reporter_tests.rs::reporter_appends_guardrail_rejection_note`.
+/// Test: `reporter_tests.rs::{reporter_appends_guardrail_rejection_note,
+/// an_unmeasured_orphan_narrative_is_not_numbered}`.
 fn append_synthesis_note(out: &mut String, model: &ReportModel) {
     let Some(syn) = &model.synthesis else {
         return;
     };
     out.push_str("\n\n## Synthesis Status\n\n");
     for line in syn.status_lines() {
+        out.push_str(&format!("- {line}\n"));
+    }
+    for line in unplaced_narrative_lines(model) {
         out.push_str(&format!("- {line}\n"));
     }
 }

@@ -36,7 +36,27 @@ use super::topology::CrateTopology;
 /// Deliberately short and literal. A finding whose own remediation or evidence
 /// says "localhost" is stating its reachability; inferring one from softer
 /// words would make the check fire on findings it was never about.
-const LOOPBACK_MARKERS: &[&str] = &["localhost", "loopback", "127.0.0.1", "::1"];
+///
+/// #6082 lap 6: the socket spellings state the same fact without the word
+/// localhost. The graded report's RED finding 2 shipped "a remote code execution
+/// risk" because its remediation proposed "token or local-socket verification"
+/// and none of the four original markers matched — the finding never entered
+/// [`Grounding::local_only`], so the sentence had no owner and the check never
+/// ran on it. A remediation that proposes verifying the peer over a local socket
+/// is stating that the peer is on this host, which is a reachability statement
+/// as literal as "localhost".
+const LOOPBACK_MARKERS: &[&str] = &[
+    "localhost",
+    "loopback",
+    "127.0.0.1",
+    "::1",
+    "local-socket",
+    "local socket",
+    "unix socket",
+    "unix-socket",
+    "unix domain socket",
+    "unix-domain socket",
+];
 
 /// Text markers that scope a finding to a network-reachable surface.
 ///
@@ -176,12 +196,30 @@ impl Grounding {
     /// Why: every input is already in the report — the findings' own prose and
     /// the measured cargo topology — so nothing here is a second source of
     /// truth that could drift from what the report renders.
-    /// What: walks every repository's metric findings and its verified
-    /// investigation findings for loopback/remote markers, and folds every
-    /// declared [`CrateTopology`] into the load-bearing set.
+    /// What: [`Self::from_model_with`] over the investigation the model already
+    /// carries.
     /// Test: `synthesize_grounding_tests.rs::{a_loopback_finding_is_indexed,
     /// a_remote_finding_vetoes_its_tokens}`.
     pub(crate) fn from_model(model: &ReportModel) -> Self {
+        Self::from_model_with(model, model.investigation.as_ref())
+    }
+
+    /// Gather the grounding facts, reading the investigation from `inv` rather
+    /// than from the model's own copy.
+    ///
+    /// Why: the investigation prose is guarded BEFORE `apply_investigation`
+    /// records it on the model (#6082 lap 6), so at that point
+    /// `model.investigation` is still `None` and the two loopback-scoped
+    /// findings this report has would be invisible to the guard checking them.
+    /// What: walks every repository's metric findings and `inv`'s verified
+    /// findings for loopback/remote markers, and folds every declared
+    /// [`CrateTopology`] into the load-bearing set.
+    /// Test: `synthesize_grounding_tests.rs::a_loopback_finding_is_indexed`,
+    /// `synthesize_tests.rs::investigation_business_impact_states_host_local_reach`.
+    pub(crate) fn from_model_with(
+        model: &ReportModel,
+        inv: Option<&super::investigate::Investigation>,
+    ) -> Self {
         let mut out = Grounding::default();
         for repo in &model.repositories {
             if let Some(metrics) = &repo.metrics {
@@ -194,7 +232,7 @@ impl Grounding {
                 }
             }
         }
-        if let Some(inv) = &model.investigation {
+        if let Some(inv) = inv {
             for repo in &inv.repos {
                 for f in &repo.findings {
                     out.ingest(

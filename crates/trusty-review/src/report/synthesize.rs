@@ -820,6 +820,66 @@ fn apply_guardrail(
     Ok(out)
 }
 
+/// Run the grounding guardrail over the verified investigation's own prose.
+///
+/// Why: the guard used to run on synthesis prose only, and
+/// `merge_investigation_prose` overwrites that prose with the investigation's
+/// for every RED/AMBER finding — so the guarded copy was discarded before
+/// render. That is how RED finding 2 of the lap-6 report shipped "a remote code
+/// execution risk" in its business impact while the guard's own note in the same
+/// document recorded a correction it had made elsewhere. Correcting `inv` BEFORE
+/// `apply_investigation` fixes every downstream copy at once: the injected
+/// `metrics.findings` rows, `model.investigation` in the JSON twin, the
+/// synthesis prompt, and the merged prose that renders.
+/// What: builds the [`Grounding`] from the model plus `inv` (the model has not
+/// recorded it yet), then runs [`ground_field`] over each RED/AMBER finding's
+/// description, business impact, remediation and cost/effort. `evidence_quote`
+/// is excluded for the same reason it is in [`apply_guardrail`]: it is verified
+/// verbatim against the file. Returns one status line per correction or
+/// rejection, for the caller to fold into [`Synthesis::notes`].
+/// Test: `synthesize_tests.rs::{investigation_business_impact_states_host_local_reach,
+/// investigation_grounding_leaves_a_clean_finding_alone}`.
+pub fn ground_investigation_prose(
+    model: &ReportModel,
+    inv: &mut crate::report::investigate::Investigation,
+) -> Vec<String> {
+    let grounding = Grounding::from_model_with(model, Some(inv));
+    let mut notes = Vec::new();
+    for repo in &mut inv.repos {
+        for f in &mut repo.findings {
+            if f.severity == crate::report::metrics::Severity::Green {
+                continue; // greens are title-only topics; they carry no narrative
+            }
+            let label = format!("investigation finding '{}'", f.title);
+            f.description = ground_field(
+                &format!("{label} description"),
+                &f.description,
+                &grounding,
+                &mut notes,
+            );
+            f.business_impact = ground_field(
+                &format!("{label} business impact"),
+                &f.business_impact,
+                &grounding,
+                &mut notes,
+            );
+            f.remediation = ground_field(
+                &format!("{label} remediation"),
+                &f.remediation,
+                &grounding,
+                &mut notes,
+            );
+            f.cost_effort = ground_field(
+                &format!("{label} cost/effort"),
+                &f.cost_effort,
+                &grounding,
+                &mut notes,
+            );
+        }
+    }
+    notes
+}
+
 /// Run the grounding guardrail alone over one narrative field of a finding.
 ///
 /// Why: a finding is verified as a WHOLE by [`verify_all`] — one bad figure

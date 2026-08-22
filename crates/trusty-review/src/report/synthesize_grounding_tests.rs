@@ -1,6 +1,9 @@
 //! Tests for the claim-level grounding guardrail (#6082 lap 4).
 
 use super::*;
+use crate::report::investigate::{
+    Investigation, InvestigationStatus, RepoInvestigation, VerifiedFinding,
+};
 use crate::report::metrics::{AnalyzeMetrics, MetricFinding, Severity};
 use crate::report::model::{ReportModel, RepositoryReport};
 use crate::report::topology::CrateNode;
@@ -347,6 +350,88 @@ fn a_crate_name_is_matched_on_its_own_boundaries() {
         panic!("expected a rejection");
     };
     assert!(reason.contains("trusty-mpm-gui"), "reason was: {reason}");
+}
+
+// ─── Loopback scope stated without the word localhost (#6082 lap 6) ──────────
+
+/// The lap-6 live defect, verbatim.
+///
+/// RED finding 2 of the graded report shipped "a remote code execution risk" in
+/// its business impact. The sentence matched the `remote code execution` rewrite
+/// pattern fine — what failed was SCOPE: the finding's own text says
+/// "local-socket verification", not "localhost", so it never entered
+/// `local_only` and the sentence had no owner to be checked against.
+fn control_routes_investigation() -> Investigation {
+    Investigation {
+        repos: vec![RepoInvestigation {
+            slug: "estate".to_string(),
+            name: "Estate".to_string(),
+            status: InvestigationStatus::Available,
+            findings: vec![VerifiedFinding {
+                trace_verdict: String::new(),
+                title: "Control-plane HTTP handlers have no authentication or authorization"
+                    .to_string(),
+                severity: Severity::Red,
+                dimension: "authentication & secrets".to_string(),
+                file: "crates/trusty-mpm/src/daemon/api/control_routes.rs".to_string(),
+                line: Some(259),
+                evidence_quote: "pub async fn ctl_run_session(".to_string(),
+                description: "The session run/connect/stop/auth endpoints accept requests with \
+                              no auth check, allowing anyone reaching the daemon to spawn \
+                              processes and control sessions."
+                    .to_string(),
+                business_impact: LIVE_BUSINESS_IMPACT.to_string(),
+                remediation: "Add an authentication/authorization middleware layer (token or \
+                              local-socket verification) in front of the control routes."
+                    .to_string(),
+                cost_effort: "medium".to_string(),
+            }],
+            deps: Default::default(),
+            coverage: Default::default(),
+            traces: None,
+            verdicts: None,
+        }],
+    }
+}
+
+/// The sentence as it rendered at line 115 of the graded report.
+const LIVE_BUSINESS_IMPACT: &str = "An attacker who reaches the daemon port can execute arbitrary \
+                                    claude/tmux processes in operator-controlled workdirs, a \
+                                    remote code execution risk.";
+
+/// A remediation proposing local-socket verification states the same
+/// reachability "localhost" does, so the finding is indexed local-only.
+#[test]
+fn a_local_socket_remediation_scopes_its_finding() {
+    let mut model = model_with(vec![repo("estate", vec![], None)]);
+    model.investigation = Some(control_routes_investigation());
+    let g = Grounding::from_model(&model);
+    assert_eq!(g.local_only.len(), 1, "local_only was: {:?}", g.local_only);
+    assert!(g.local_only[0].tokens.contains("daemon"));
+}
+
+/// The live sentence is rewritten to state host-local reach.
+///
+/// Fails before the fix: `local_only` is empty, `local_subject` finds no owner
+/// for the sentence, and `check` returns `Clean` with the claim intact.
+#[test]
+fn the_live_remote_code_execution_claim_is_rewritten() {
+    let mut model = model_with(vec![repo("estate", vec![], None)]);
+    model.investigation = Some(control_routes_investigation());
+    let GroundingOutcome::Rewritten(text, notes) =
+        Grounding::from_model(&model).check(LIVE_BUSINESS_IMPACT)
+    else {
+        panic!("expected the live business impact to be rewritten");
+    };
+    assert!(
+        !text.to_lowercase().contains("remote"),
+        "the corrected sentence still asserts remote reach: {text}"
+    );
+    assert!(
+        text.contains("local-process-reachable code execution"),
+        "the correction must state host-local reach: {text}"
+    );
+    assert_eq!(notes.len(), 1, "notes were: {notes:?}");
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

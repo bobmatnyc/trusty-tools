@@ -2594,3 +2594,94 @@ fn prompt_carries_the_grounding_facts() {
         "a leaf crate must not be offered as load-bearing"
     );
 }
+
+// ── Investigation prose takes the grounding pass (#6082 lap 6) ──────────────
+
+/// The rendered half of the lap-6 reachability defect.
+///
+/// Why: the guard ran over the synthesis narrative only, and
+/// `merge_investigation_prose` overwrites that narrative with the
+/// investigation's own prose for every RED/AMBER finding — so the guarded copy
+/// never reached the page. Line 115 of the graded report carried the raw claim,
+/// and so did both of its JSON storage sites.
+/// What: grounds the investigation, then merges it exactly as the report
+/// pipeline does, and reads the prose that would render.
+fn control_routes_investigation() -> crate::report::investigate::Investigation {
+    use crate::report::investigate::{
+        Investigation, InvestigationStatus, RepoInvestigation, VerifiedFinding,
+    };
+    Investigation {
+        repos: vec![RepoInvestigation {
+            slug: "acme-core".to_string(),
+            name: "Acme Core".to_string(),
+            status: InvestigationStatus::Available,
+            findings: vec![VerifiedFinding {
+                trace_verdict: String::new(),
+                title: "Control-plane HTTP handlers have no authentication or authorization"
+                    .to_string(),
+                severity: Severity::Red,
+                dimension: "authentication & secrets".to_string(),
+                file: "crates/trusty-mpm/src/daemon/api/control_routes.rs".to_string(),
+                line: Some(259),
+                evidence_quote: "pub async fn ctl_run_session(".to_string(),
+                description: "The session run/connect/stop/auth endpoints accept requests with \
+                              no auth check, allowing anyone reaching the daemon to spawn \
+                              processes and control sessions."
+                    .to_string(),
+                business_impact: "An attacker who reaches the daemon port can execute arbitrary \
+                                  claude/tmux processes in operator-controlled workdirs, a \
+                                  remote code execution risk."
+                    .to_string(),
+                remediation: "Add an authentication/authorization middleware layer (token or \
+                              local-socket verification) in front of the control routes."
+                    .to_string(),
+                cost_effort: "medium".to_string(),
+            }],
+            deps: Default::default(),
+            coverage: Default::default(),
+            traces: None,
+            verdicts: None,
+        }],
+    }
+}
+
+/// The prose that reaches the page states host-local reach, not remote.
+#[test]
+fn investigation_business_impact_states_host_local_reach() {
+    let model = fixture_model(vec![red("Unrelated")]);
+    let mut inv = control_routes_investigation();
+    let notes = super::ground_investigation_prose(&model, &mut inv);
+
+    let impact = &inv.repos[0].findings[0].business_impact;
+    assert!(
+        !impact.to_lowercase().contains("remote"),
+        "the investigation record still asserts remote reach: {impact}"
+    );
+    assert!(
+        impact.contains("local-process-reachable code execution"),
+        "the correction must state host-local reach: {impact}"
+    );
+    assert_eq!(notes.len(), 1, "notes were: {notes:?}");
+
+    // The merged prose is what renders, and it inherits the correction.
+    let mut synthesis = Synthesis::default();
+    crate::report::investigate::merge_investigation_prose(&mut synthesis, &inv);
+    let merged = synthesis
+        .findings
+        .iter()
+        .find(|f| f.title.starts_with("Control-plane"))
+        .expect("the RED finding must merge into the synthesis prose");
+    assert_eq!(&merged.business_impact, impact);
+}
+
+/// A finding with no reachability claim is passed through untouched.
+#[test]
+fn investigation_grounding_leaves_a_clean_finding_alone() {
+    let model = fixture_model(vec![red("Unrelated")]);
+    let mut inv = control_routes_investigation();
+    let clean = "Callers cannot tell a failed write from a skipped one.".to_string();
+    inv.repos[0].findings[0].business_impact = clean.clone();
+    let notes = super::ground_investigation_prose(&model, &mut inv);
+    assert_eq!(inv.repos[0].findings[0].business_impact, clean);
+    assert!(notes.is_empty(), "notes were: {notes:?}");
+}
