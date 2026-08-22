@@ -429,17 +429,31 @@ fn unverifiable(t: &FindingTrace, reason: String) -> FindingVerdict {
 
 /// Collapse a reason to one line within [`REASON_MAX_CHARS`].
 ///
-/// The schema bounds it, but a provider that ignores `maxLength` must not be
-/// able to splice a multi-line body into a single-line report bullet.
+/// Why: the schema bounds it, but a provider that ignores `maxLength` must not
+/// be able to splice a multi-line body into a single-line report bullet — and
+/// the live run showed the second half of that: Haiku returned a 340-character
+/// reason and a plain character cut ended the rendered bullet "…visible in the
+/// tr", which reads as corrupted text rather than as an abbreviation.
+/// What: collapses all whitespace to single spaces, then — only when the result
+/// is over the cap — cuts at the last word boundary inside it and appends an
+/// ellipsis. A reason already within the cap is returned untouched, so the
+/// common case gains no marker.
+/// Test: `verdict_tests::{a_multi_line_reason_is_collapsed_and_bounded,
+/// an_over_long_reason_is_cut_at_a_word_boundary,
+/// a_reason_within_the_cap_is_untouched}`.
 fn truncate_reason(s: &str) -> String {
-    let one_line: String = s
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(REASON_MAX_CHARS)
-        .collect();
-    one_line.trim().to_string()
+    let one_line = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() <= REASON_MAX_CHARS {
+        return one_line;
+    }
+    // Leave room for the ellipsis so the whole bullet still fits the cap.
+    let cut: String = one_line.chars().take(REASON_MAX_CHARS - 1).collect();
+    let head = match cut.rsplit_once(' ') {
+        Some((head, _)) if !head.is_empty() => head,
+        // A single word longer than the cap has no boundary to cut at.
+        _ => cut.trim_end(),
+    };
+    format!("{}…", head.trim_end())
 }
 
 /// Fold a verdict set onto its findings.

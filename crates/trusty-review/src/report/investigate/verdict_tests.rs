@@ -524,6 +524,31 @@ async fn a_multi_line_reason_is_collapsed_and_bounded() {
     assert!(reason.chars().count() <= REASON_MAX_CHARS, "{reason}");
 }
 
+/// Why: on the live engagement Haiku returned a 340-character reason and a
+/// plain character cut ended the rendered bullet "…visible in the tr", which
+/// reads as corrupted text rather than as an abbreviation.
+/// What: the cut lands on a word boundary and the ellipsis says it was cut.
+#[test]
+fn an_over_long_reason_is_cut_at_a_word_boundary() {
+    let long = format!("{} visible in the trace", "word ".repeat(80));
+    let out = truncate_reason(&long);
+    assert!(out.chars().count() <= REASON_MAX_CHARS, "{out}");
+    assert!(out.ends_with('…'), "{out}");
+    assert!(
+        out.trim_end_matches('…').ends_with("word"),
+        "the cut must land between words: {out}"
+    );
+}
+
+/// A reason already inside the cap gains no ellipsis.
+#[test]
+fn a_reason_within_the_cap_is_untouched() {
+    assert_eq!(
+        truncate_reason("  the shrink is  guarded at line 41 "),
+        "the shrink is guarded at line 41"
+    );
+}
+
 // ── The gaps line ───────────────────────────────────────────────────────────
 
 fn repo_with(verdicts: Option<VerdictSet>) -> super::super::RepoInvestigation {
