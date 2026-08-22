@@ -9,6 +9,7 @@ fn model_with(findings: Vec<MetricFinding>) -> ReportModel {
         analyst: None,
         client: None,
         vendor_methodology: crate::report::model::vendor_methodology(),
+        inference: None,
         instructions: None,
         instructions_source: None,
         report_date: "2026-08-21".to_string(),
