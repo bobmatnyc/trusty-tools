@@ -171,8 +171,29 @@ fn coverage_lines(repo: &RepoInvestigation) -> String {
     out.push_str(&format!(
         "- verified findings: {total} ({risk} RED/AMBER evidence-backed, {clean} clean signals)\n"
     ));
+    out.push_str(&trace_line(repo));
     out.push_str(&batch_lines(c));
     out
+}
+
+/// Render how many candidate findings got a symbol-graph anchor (#6166).
+///
+/// Why: the no-trace count is the honest half. On the engagement that drove
+/// this, 13 of 30 candidates resolved to a symbol the graph placed in a
+/// DIFFERENT file, and a coverage section that printed only the successes would
+/// have read as a complete trace of a third of the findings.
+/// What: one line when the repository has a trace set, nothing otherwise, so a
+/// report from before this pass renders byte-identically.
+/// Test: `render_tests::{coverage_section_states_the_trace_counts,
+/// coverage_section_omits_the_trace_line_without_traces}`.
+fn trace_line(repo: &RepoInvestigation) -> String {
+    let Some(t) = &repo.traces else {
+        return String::new();
+    };
+    format!(
+        "- traces assembled: {} of {} candidate findings ({} no-trace)\n",
+        t.assembled, t.candidates, t.no_trace,
+    )
 }
 
 /// One repository's verified findings, split for reporting (#6080).

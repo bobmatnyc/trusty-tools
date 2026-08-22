@@ -272,6 +272,7 @@ fn leaky_investigation(slug: &str) -> Investigation {
                 cost_effort: format!("low — rotate {FAKE_TOKEN}"),
             }],
             deps: Default::default(),
+            traces: None,
             coverage: Coverage {
                 budget: Budget::default(),
                 dimensions_covered: vec![format!("secrets {FAKE_TOKEN}")],

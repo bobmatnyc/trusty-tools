@@ -65,6 +65,50 @@ fn repo(
             batches_succeeded: 1,
             batches_failed: vec![],
         },
+        traces: None,
+    }
+}
+
+/// Why (#6166): the coverage section must state the no-trace count, not only
+/// the successes — 13 of 30 candidates refused on the live engagement, and a
+/// line that printed only "17 assembled" would read as a complete trace.
+/// What: a repository carrying a trace set renders one counted line.
+/// Test: this test itself.
+#[test]
+fn coverage_section_states_the_trace_counts() {
+    let mut r = repo(InvestigationStatus::Available, vec![finding()], deps_none());
+    r.traces = Some(crate::report::investigate::TraceSet {
+        index_id: Some("acme-1234abcd".to_string()),
+        traces: vec![],
+        candidates: 30,
+        assembled: 17,
+        no_trace: 13,
+        limits: crate::report::investigate::TraceLimits::default(),
+    });
+    let out = coverage_lines(&r);
+    assert!(
+        out.contains("- traces assembled: 17 of 30 candidate findings (13 no-trace)\n"),
+        "{out}"
+    );
+}
+
+/// A report from before the trace pass renders byte-identically.
+#[test]
+fn coverage_section_omits_the_trace_line_without_traces() {
+    let out = coverage_lines(&repo(
+        InvestigationStatus::Available,
+        vec![finding()],
+        deps_none(),
+    ));
+    assert!(!out.contains("traces assembled"), "{out}");
+}
+
+/// An empty inventory, for fixtures that care about coverage only.
+fn deps_none() -> DependencyInventory {
+    DependencyInventory {
+        deps: vec![],
+        total: 0,
+        manifests_examined: vec![],
     }
 }
 

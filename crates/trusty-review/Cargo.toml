@@ -22,7 +22,13 @@ name        = "trusty-review"
 # `#[non_exhaustive]` (the note above covers three OTHER report types), so an
 # external struct literal breaks. For a `0.y.z` crate the breaking bump is the
 # MINOR position.
-version     = "0.23.1"
+#
+# #6166: MINOR bump — `RepoInvestigation` gains a `traces` field and
+# `cargo-semver-checks` reports `constructible_struct_adds_field`, which for a
+# `0.y.z` crate takes the MINOR position. `#[non_exhaustive]` would foreclose
+# the next such bump, and it cannot go on this struct: the `trusty-review`
+# binary is a separate compilation unit and builds one with a struct literal.
+version     = "0.24.0"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true

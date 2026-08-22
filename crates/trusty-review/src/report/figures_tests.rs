@@ -63,6 +63,7 @@ fn printed_figures_carry_the_coverage_percentage() {
             },
             findings: Vec::new(),
             deps: Default::default(),
+            traces: None,
         }],
     });
 
