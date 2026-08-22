@@ -326,7 +326,7 @@ fn bound(s: &str, max: usize) -> String {
 ///
 /// Why: the endpoint answers `text/plain`, so this is the parse. Only the entry
 /// node is read — see [`CallChainEntry`] for why the edges below it are dropped.
-/// What: finds the `## \`<symbol>\` [ENTRY]  <file>:<line>` header and the
+/// What: finds the ``## `<symbol>` [ENTRY]  <file>:<line>`` header and the
 /// `Signature:` line under it. `None` when no entry header is present, which the
 /// caller treats as the symbol being absent.
 /// Test: `trace_client_tests::{the_entry_node_parses_out_of_a_call_chain_report,
