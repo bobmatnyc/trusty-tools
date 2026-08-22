@@ -18,6 +18,7 @@ fn repo() -> RepositoryReport {
         analyze_gap: None,
         authorship: None,
         inspect_priority: Vec::new(),
+        crate_topology: None,
     }
 }
 

@@ -32,6 +32,7 @@ fn model_with(findings: Vec<MetricFinding>) -> ReportModel {
             analyze_gap: None,
             authorship: None,
             inspect_priority: Vec::new(),
+            crate_topology: None,
         }],
         gaps: vec![],
         synthesis: None,

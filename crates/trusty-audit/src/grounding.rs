@@ -25,6 +25,7 @@
 //! | [`index`] | is this checkout in trusty-search, and indexing it if not |
 //! | [`hotspots`] | asking trusty-analyze which files are worst, and ranking them |
 //! | [`evidence`] | asking trusty-search where each DD dimension's evidence is (#6082) |
+//! | [`topology`] | reading a Cargo workspace's own crate graph (#6147) |
 //! | [`priority`] | writing that ranking, and the gaps, into the manifest |
 //!
 //! ## Fail-open, and never silently
@@ -59,6 +60,7 @@ pub mod hotspots;
 pub mod index;
 pub mod priority;
 pub mod quality;
+pub mod topology;
 
 #[cfg(test)]
 mod grounding_tests;
@@ -387,6 +389,11 @@ pub async fn ground_manifest(
     let instructions = instructions_from(manifest);
     let budget = priority::Budget::for_manifest(manifest);
     let mut grounding = ground(tools, checkout, display, instructions.as_deref(), budget).await;
+    // #6147: the crate graph is read from the checkout's own manifests, so it
+    // depends on neither daemon and is measured whether or not either answered.
+    // It writes its own key, after the ranking, so one leg's write failure
+    // cannot take the other's data with it.
+    let topology_gaps = topology::ground_into(manifest, checkout, display);
     if let Err(cause) = priority::write_into(
         manifest,
         checkout,
@@ -400,6 +407,18 @@ pub async fn ground_manifest(
              evidence ranking"
         ));
     }
+    // Recorded through the same `[report].gaps` key every other leg uses, which
+    // `priority::write_into` above owns — so they are appended after it ran.
+    if !topology_gaps.is_empty()
+        && let Err(cause) =
+            priority::write_into(manifest, checkout, &[], None, false, &topology_gaps)
+    {
+        grounding.gaps.push(format!(
+            "{display}: {cause} — the rendered report does not state why its crate topology \
+             is missing"
+        ));
+    }
+    grounding.gaps.extend(topology_gaps);
     grounding.gaps
 }
 

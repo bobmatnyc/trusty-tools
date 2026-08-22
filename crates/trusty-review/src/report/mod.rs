@@ -64,6 +64,9 @@ pub mod synthesize_prompt;
 pub mod template;
 // #5405: the board-correlation figures tga hands over beside the manifest.
 pub mod ticketing;
+/// #6147: the crate graph trusty-audit measures, rendered into the Code Quality
+/// & Architecture section and stated to synthesis.
+pub mod topology;
 
 // ── Re-exports for convenience ─────────────────────────────────────────────
 

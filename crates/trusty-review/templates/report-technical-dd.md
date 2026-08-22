@@ -231,6 +231,20 @@ report against others normalized through this same template.
 | {{cq_app_name}} | {{cq_loc}} | {{cq_tech}} | {{cq_complexity}} | {{cq_maintainability_count}} |
 <!-- END code_quality_row -->
 
+<!-- #6147: the crate topology, read from the audited workspace's own cargo
+     metadata. Absent for a repository that is not a Cargo workspace, and the
+     whole block then renders as nothing. -->
+
+<!-- BEGIN crate_topology -->
+{{ct_summary}}
+
+| Crate | Direct internal deps | Depended on by |
+|---|---|---|
+<!-- BEGIN ct_row -->
+| {{ct_crate}} | {{ct_deps}} | {{ct_inbound}} |
+<!-- END ct_row -->
+<!-- END crate_topology -->
+
 ## Security Posture
 
 *This table counts the RED and AMBER findings the repo-evidence investigation

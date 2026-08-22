@@ -379,7 +379,7 @@ fn record_priorities(
 /// the same directory by a symlinked or non-normalised path still matches. A
 /// path that cannot be canonicalised — the checkout has since been deleted —
 /// falls back to the textual comparison rather than erroring.
-fn names_checkout(entry: &Table, checkout: &Path) -> bool {
+pub(super) fn names_checkout(entry: &Table, checkout: &Path) -> bool {
     let Some(declared) = entry.get("path").and_then(Item::as_str) else {
         return false;
     };

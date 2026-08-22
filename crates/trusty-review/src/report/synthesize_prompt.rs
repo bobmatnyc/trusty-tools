@@ -604,6 +604,13 @@ fn build_digest(model: &ReportModel, elaboration_cap: usize) -> String {
         msg.push('\n');
     }
 
+    // #6147: the architecture section's one deterministic input. Stated as its
+    // own block rather than as per-repository profile bullets because the
+    // architecture paragraph reads it as a whole — a member count means little
+    // without the edge count and the shared core beside it. Empty (and so
+    // absent) unless a repository declared one.
+    msg.push_str(&super::topology::prompt_facts(model));
+
     // #2357 follow-up: ONE combined compact-findings digest across all repos,
     // replacing the old per-repo full-title bullet list. Greens are excluded
     // structurally by `gather_compact_findings` (the no-green rule, unchanged).
