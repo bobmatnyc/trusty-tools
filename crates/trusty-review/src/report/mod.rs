@@ -59,6 +59,10 @@ pub mod split;
 pub mod synthesize;
 pub mod synthesize_digest;
 pub mod synthesize_guard;
+// #6082 lap 4: the claim-level companion to `synthesize_guard`'s numeric check —
+// prompt hints plus a fail-closed post-check for reachability and load-bearing
+// claims. Used only by `synthesize` and `synthesize_prompt`.
+pub(crate) mod synthesize_grounding;
 // #6009 shape 3: whitelist-based synonym normalization, used only by
 // `synthesize::parse_raw` — not part of the public report API.
 pub(crate) mod synthesize_normalize;

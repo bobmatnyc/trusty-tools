@@ -135,7 +135,7 @@ fn impl_block_finding(r: &WireRefactor, severity: Severity) -> Option<MetricFind
         .map(|(a, b)| format!(" (lines {a}–{b})"))
         .unwrap_or_default();
     Some(MetricFinding {
-        title: "Split oversized impl block".to_string(),
+        title: IMPL_BLOCK_TITLE.to_string(),
         severity,
         category: "maintainability".to_string(),
         component: r.file.clone(),
@@ -143,12 +143,27 @@ fn impl_block_finding(r: &WireRefactor, severity: Severity) -> Option<MetricFind
         // as a function; on an impl block it is the same mislabel one level down.
         description: rationale.replace("long_function", "long_impl_block"),
         remediation: format!(
-            "Split the impl block{where_} across focused submodules — the analyzer reported no \
-             function name for this region, so it is a whole-impl hotspot rather than one long \
-             function"
+            "{IMPL_BLOCK_REMEDIATION_PREFIX}{where_} across focused submodules — the analyzer \
+             reported no function name for this region, so it is a whole-impl hotspot rather than \
+             one long function"
         ),
     })
 }
+
+/// The title every whole-impl hotspot finding carries.
+///
+/// Shared with [`super::investigate::regions`], which recognises a rendered
+/// region finding by this title and re-derives the region's span and score from
+/// it (#6082 lap 4). Changing it here without changing that consumer would
+/// silently switch the LLM-finding region checks off.
+pub(crate) const IMPL_BLOCK_TITLE: &str = "Split oversized impl block";
+
+/// The opening words of every whole-impl hotspot remediation, up to and
+/// including the line range when one was stated.
+///
+/// Shared with [`super::investigate::regions`] for the same reason as
+/// [`IMPL_BLOCK_TITLE`].
+pub(crate) const IMPL_BLOCK_REMEDIATION_PREFIX: &str = "Split the impl block";
 
 /// The `(first, last)` line range stated in a suggested action, when it states one.
 ///

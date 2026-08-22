@@ -28,7 +28,12 @@ name        = "trusty-review"
 # `0.y.z` crate takes the MINOR position. `#[non_exhaustive]` would foreclose
 # the next such bump, and it cannot go on this struct: the `trusty-review`
 # binary is a separate compilation unit and builds one with a struct literal.
-version     = "0.24.0"
+#
+# #6082 lap 4: PATCH bump — 0.24.0 is on `main` and being published as this
+# lands, so 0.24.1 is the next free position either way. Nothing public changes
+# shape: `synthesize_grounding` and `investigate::regions` are both crate-private
+# modules, and the two new `analyze_findings` constants are `pub(crate)`.
+version     = "0.24.1"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true
