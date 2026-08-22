@@ -32,6 +32,7 @@
 use serde::Deserialize;
 
 use crate::llm::{ChatMessage, LlmRequest, ResponseSchema, strip_provider_prefix};
+use crate::report::manifest::FunctionHotspot;
 
 use super::select::{DIMENSIONS, SelectedFile};
 
@@ -289,10 +290,14 @@ fn build_digest(
         files.len(),
     ));
     for f in files {
-        msg.push_str(&format!(
-            "### FILE: {}\n\n```\n{}\n```\n\n",
-            f.path, f.content
-        ));
+        msg.push_str(&format!("### FILE: {}\n\n", f.path));
+        // #6146: the manifest measured this file's worst function, so the
+        // prompt names it BEFORE the content — a model reading 900 lines needs
+        // the instruction first, not after it has already skimmed them.
+        if let Some(focus) = f.hotspot.as_ref().and_then(FunctionHotspot::focus) {
+            msg.push_str(&format!("{focus}\n\n"));
+        }
+        msg.push_str(&format!("```\n{}\n```\n\n", f.content));
     }
 
     msg.push_str(&format!(

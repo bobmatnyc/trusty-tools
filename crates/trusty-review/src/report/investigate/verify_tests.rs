@@ -18,6 +18,7 @@ fn selection(path: &str, content: &str) -> Selection {
             truncated: false,
             dimensions: vec![],
             selected_by: None,
+            hotspot: None,
             declared_for: None,
         }],
         total_files: 1,

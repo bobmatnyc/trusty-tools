@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use super::{ManifestError, RepositorySource, parse_manifest, slugify};
+use super::{FunctionHotspot, ManifestError, RepositorySource, parse_manifest, slugify};
 
 fn parse(text: &str) -> std::result::Result<super::Manifest, ManifestError> {
     parse_manifest(text, Path::new("manifest.toml"))
@@ -291,6 +291,79 @@ fn parse_inspect_priority_attribution() {
             .contains("credential handling"),
     );
     assert!(p[1].dimension.is_none(), "a bare path carries none");
+}
+
+/// #6145/#6146: trusty-audit declares the file's worst measured function as a
+/// nested table, and this reader turns it into the prompt's focus line. A
+/// manifest written before the key existed — every shape in
+/// `parse_inspect_priority_shapes` above — carries `None` and is unaffected.
+#[test]
+fn parse_hotspot_table() {
+    let toml = r#"
+        [report]
+        title = "Acme DD"
+
+        [[repositories]]
+        name = "Website"
+        path = "/tmp/acme-web"
+        inspect_priority = [
+            { path = "src/pay.rs", reason = "trusty-analyze complexity hotspot (rank 1)", hotspot = { function = "settle_invoice", start_line = 40, end_line = 190, cyclomatic = 31 } },
+            { path = "src/queue.rs", hotspot = { start_line = 4, end_line = 44, cyclomatic = 12 } },
+            "src/plain.rs",
+        ]
+    "#;
+    let m = parse(toml).expect("parse ok");
+    let p = &m.repositories[0].inspect_priority;
+
+    let measured = p[0].hotspot.as_ref().expect("a declared measurement");
+    assert_eq!(measured.function.as_deref(), Some("settle_invoice"));
+    assert_eq!((measured.start_line, measured.end_line), (40, 190));
+    assert_eq!(measured.cyclomatic, 31);
+    assert_eq!(
+        measured.focus().as_deref(),
+        Some(
+            "Hotspot: lines 40-190, fn settle_invoice, cyclomatic 31 — prioritize DD analysis of \
+             this function."
+        )
+    );
+
+    // An unnamed measurement still points at its range.
+    let unnamed = p[1].hotspot.as_ref().expect("a declared measurement");
+    assert_eq!(unnamed.function, None);
+    assert_eq!(
+        unnamed.focus().as_deref(),
+        Some("Hotspot: lines 4-44, cyclomatic 12 — prioritize DD analysis of this function.")
+    );
+
+    assert!(p[2].hotspot.is_none(), "a bare path carries none");
+    assert_eq!(p[0].weight, 1000, "the position still sets the weight");
+}
+
+/// #6146: a table missing the range is inert, not a manifest that fails to
+/// load. The interface's rule is that a declaration it cannot act on costs
+/// nothing — the same rule a priority naming no tracked file already follows.
+#[test]
+fn a_hotspot_without_a_range_has_no_focus_line() {
+    let toml = r#"
+        [report]
+        title = "Acme DD"
+
+        [[repositories]]
+        name = "Website"
+        path = "/tmp/acme-web"
+        inspect_priority = [
+            { path = "src/pay.rs", hotspot = { function = "settle_invoice" } },
+            { path = "src/queue.rs", hotspot = { function = "drain", start_line = 90, end_line = 12 } },
+        ]
+    "#;
+    let m = parse(toml).expect("a half-written table must not fail the load");
+    for entry in &m.repositories[0].inspect_priority {
+        assert_eq!(
+            entry.hotspot.as_ref().and_then(FunctionHotspot::focus),
+            None,
+            "{entry:?}"
+        );
+    }
 }
 
 /// Why: the declared order IS the ranking, so an unweighted list must come out

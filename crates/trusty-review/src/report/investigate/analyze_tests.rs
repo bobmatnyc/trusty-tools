@@ -20,6 +20,7 @@ fn file(path: &str, content: &str) -> SelectedFile {
         truncated: false,
         dimensions: vec!["authentication & secrets".to_string()],
         selected_by: None,
+        hotspot: None,
         declared_for: None,
     }
 }
@@ -89,6 +90,92 @@ fn request_embeds_files() {
         schema.schema["properties"]["findings"]["maxItems"],
         MAX_FINDINGS_PER_BATCH
     );
+}
+
+/// #6146: a file the manifest measured arrives with the measurement stated
+/// beside it, BEFORE its content, so the model reads the instruction first.
+/// A file with no measurement leaves the digest byte-identical.
+#[test]
+fn a_hotspot_file_carries_a_focus_line() {
+    let mut hot = file("src/pay.rs", "fn settle_invoice() {}");
+    hot.hotspot = Some(FunctionHotspot {
+        function: Some("settle_invoice".to_string()),
+        start_line: 40,
+        end_line: 190,
+        cyclomatic: 31,
+    });
+    let plain = file("src/util.rs", "fn noop() {}");
+
+    let digest = |files: &[SelectedFile]| {
+        build_request(
+            "Acme",
+            files,
+            1,
+            1,
+            2,
+            None,
+            "stub/model",
+            MAX_FINDINGS_PER_BATCH,
+            false,
+        )
+        .messages[0]
+            .content
+            .clone()
+    };
+
+    let both = digest(&[hot.clone(), plain.clone()]);
+    assert!(
+        both.contains(
+            "Hotspot: lines 40-190, fn settle_invoice, cyclomatic 31 — prioritize DD analysis of \
+             this function."
+        ),
+        "{both}"
+    );
+    let focus_at = both.find("Hotspot: lines").expect("the focus line");
+    let fence_at = both.find("```").expect("the first fence");
+    assert!(
+        focus_at < fence_at,
+        "the instruction must precede the content: {both}"
+    );
+    assert_eq!(
+        both.matches("Hotspot: lines").count(),
+        1,
+        "the unmeasured file gains nothing: {both}"
+    );
+    assert!(
+        !digest(&[plain]).contains("Hotspot"),
+        "a batch with no measurement is unchanged"
+    );
+}
+
+/// #6146: a range the writer could not supply produces NO focus line rather
+/// than one pointing at lines 0-0. Same for an inverted range.
+#[test]
+fn an_unusable_hotspot_range_adds_nothing() {
+    for (start, end) in [(0, 0), (0, 90), (90, 12)] {
+        let mut f = file("src/pay.rs", "code");
+        f.hotspot = Some(FunctionHotspot {
+            function: Some("settle_invoice".to_string()),
+            start_line: start,
+            end_line: end,
+            cyclomatic: 31,
+        });
+        let req = build_request(
+            "Acme",
+            &[f],
+            1,
+            1,
+            1,
+            None,
+            "stub/model",
+            MAX_FINDINGS_PER_BATCH,
+            false,
+        );
+        assert!(
+            !req.messages[0].content.contains("Hotspot"),
+            "lines {start}-{end} must not reach the prompt"
+        );
+    }
 }
 
 /// Why: a routing prefix must be stripped so the bare id reaches the provider.

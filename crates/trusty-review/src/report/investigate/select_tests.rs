@@ -39,6 +39,7 @@ fn priorities(paths: &[&str]) -> Vec<InspectionPriority> {
             weight: 1000 - i as u32,
             dimension: None,
             reason: None,
+            hotspot: None,
         })
         .collect()
 }
@@ -514,6 +515,7 @@ fn evidence(path: &str, dimension: &str, reason: &str) -> Vec<InspectionPriority
         weight: 1000,
         dimension: Some(dimension.to_string()),
         reason: Some(reason.to_string()),
+        hotspot: None,
     }]
 }
 
@@ -634,11 +636,13 @@ fn per_dimension_example_prefers_the_declared_file() {
             weight: 1000,
             dimension: Some("state management".to_string()),
             reason: Some("trusty-search hit for \"shared mutable state\"".to_string()),
+            hotspot: None,
         },
         InspectionPriority {
             path: "README.md".to_string(),
             weight: 999,
             dimension: Some("authentication & secrets".to_string()),
+            hotspot: None,
             reason: Some("trusty-search hit for \"credential handling\"".to_string()),
         },
     ];
@@ -681,7 +685,69 @@ fn an_unattributed_manifest_selects_exactly_as_before() {
     assert_eq!(order(&sel), BASELINE_ORDER);
     assert_eq!(sel.attributed_files, 0);
     assert!(
-        sel.files.iter().all(|f| f.selected_by.is_none()),
-        "nothing claims a reason it does not have"
+        sel.files
+            .iter()
+            .all(|f| f.selected_by.is_none() && f.hotspot.is_none()),
+        "nothing claims a reason or a measurement it does not have"
     );
+}
+
+/// #6145/#6146: the manifest's measurement reaches the selected file, so the
+/// analyze step can state it beside that file's content, and the coverage
+/// section names the function alongside the reason. Selection itself is
+/// unchanged — a measurement is not a ranking signal.
+#[test]
+fn a_declared_hotspot_reaches_the_selected_file_and_the_coverage_row() {
+    let tmp = fixture();
+    let files = list_tracked_files(tmp.path());
+    let mut prio = evidence(
+        "README.md",
+        "scalability",
+        "trusty-analyze complexity hotspot (rank 1)",
+    );
+    prio[0].hotspot = Some(FunctionHotspot {
+        function: Some("drain_queue".to_string()),
+        start_line: 40,
+        end_line: 190,
+        cyclomatic: 31,
+    });
+    let sel = select_files(
+        tmp.path(),
+        &files,
+        None,
+        Budget::default(),
+        RiskSignals {
+            priorities: &prio,
+            ..Default::default()
+        },
+    );
+
+    let readme = sel
+        .files
+        .iter()
+        .find(|f| f.path == "README.md")
+        .expect("the declared file is selected");
+    assert_eq!(
+        readme.hotspot.as_ref().and_then(FunctionHotspot::focus),
+        Some(
+            "Hotspot: lines 40-190, fn drain_queue, cyclomatic 31 — prioritize DD analysis of this \
+             function."
+                .to_string()
+        )
+    );
+    assert!(
+        sel.files
+            .iter()
+            .filter(|f| f.path != "README.md")
+            .all(|f| f.hotspot.is_none()),
+        "no other file gains a measurement"
+    );
+
+    let example = sel
+        .per_dimension
+        .iter()
+        .find(|d| d.dimension == "scalability")
+        .and_then(|d| d.example.clone())
+        .expect("an example");
+    assert!(example.contains("hottest fn drain_queue"), "{example}");
 }

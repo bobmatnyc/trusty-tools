@@ -30,6 +30,7 @@ fn selfile(path: &str, content: &str) -> SelectedFile {
         truncated: false,
         dimensions: vec![],
         selected_by: None,
+        hotspot: None,
         declared_for: None,
     }
 }
