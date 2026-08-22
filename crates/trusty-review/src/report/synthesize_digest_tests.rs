@@ -74,6 +74,7 @@ fn model_with(repos: Vec<RepositoryReport>, investigation: Option<Investigation>
 
 fn verified_finding(title: &str, file: &str, line: u64, description: &str) -> VerifiedFinding {
     VerifiedFinding {
+        trace_verdict: String::new(),
         title: title.to_string(),
         severity: Severity::Red,
         dimension: "authentication & secrets".to_string(),
@@ -147,6 +148,7 @@ fn excludes_greens() {
 fn enriches_from_investigation() {
     let inv = Investigation {
         repos: vec![RepoInvestigation {
+            verdicts: None,
             slug: "a".to_string(),
             name: "App a".to_string(),
             status: InvestigationStatus::Available,
@@ -250,6 +252,7 @@ fn elaboration_targets_exclude_verified_and_cap_at_10() {
     }
     let inv = Investigation {
         repos: vec![RepoInvestigation {
+            verdicts: None,
             slug: "a".to_string(),
             name: "App a".to_string(),
             status: InvestigationStatus::Available,
@@ -335,6 +338,7 @@ fn renders_context_with_tail_note() {
 fn renders_elaboration_targets_or_none() {
     let inv = Investigation {
         repos: vec![RepoInvestigation {
+            verdicts: None,
             slug: "a".to_string(),
             name: "App a".to_string(),
             status: InvestigationStatus::Available,

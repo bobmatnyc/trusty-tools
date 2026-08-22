@@ -20,7 +20,7 @@ use trusty_review::config::{Provider, ReviewConfig};
 use trusty_review::llm::{build_provider, resolve_model, resolve_provider_and_model};
 use trusty_review::report::{
     Budget, CorpusSnapshot, Instructions, Reporter, TemplateLoader, benchmark,
-    investigate::{Investigation, apply_investigation, merge_investigation_prose},
+    investigate::{Investigation, Verifier, apply_investigation, merge_investigation_prose},
     load_instructions, load_manifest,
     manifest::Manifest,
     model::{InferenceAttribution, ReportModel, RoleAttribution},
@@ -608,6 +608,35 @@ fn credential_rule(provider: Provider, openrouter_api_key: &str) -> Result<()> {
 ///
 /// Test: the build path is network-bound; the failure decisions are covered by
 /// `report::synthesize::tests` and `tests/report_investigate.rs` with stubs.
+/// Build the verifier-role client the trace-verdict pass calls (#6166 leg 2).
+///
+/// Why: the verdict pass must run on the model the manifest declares for the
+/// verifier role, not on the reviewer already in hand — a second opinion from
+/// the same call is not a second opinion. Failing to build it is NOT fatal:
+/// `run_verdicts` records every traced finding UNVERIFIABLE, which the coverage
+/// section and the gaps line both state, and that is strictly more honest than
+/// losing a whole render over an optional annotation pass.
+/// What: `None` on any build failure, with the reason on stderr so an operator
+/// sees why no finding got a verdict.
+/// Test: the build path is network-bound; the `None` branch is covered by
+/// `verdict_tests::without_a_verifier_every_candidate_is_unverifiable`.
+async fn build_verdict_verifier(config: &ReviewConfig) -> Option<Verifier> {
+    let role = &config.role_models.verifier;
+    match build_provider(&role.model, &role.provider, config).await {
+        Ok(provider) => Some(Verifier {
+            provider,
+            model: role.model.clone(),
+        }),
+        Err(e) => {
+            eprintln!(
+                "[trusty-review report] verifier provider unavailable ({e}) — every traced \
+                 finding will be recorded as unverifiable"
+            );
+            None
+        }
+    }
+}
+
 async fn run_synthesis(
     config: &ReviewConfig,
     model: &mut ReportModel,
@@ -625,9 +654,15 @@ async fn run_synthesis(
     // #6082: only the manifest declares this — there is no CLI flag, because the
     // producer that reached a healthy index is the only party that knows whether
     // the declared list is the whole intended sample.
+    // #6166 leg 2: the verdict pass runs on the VERIFIER role, built through the
+    // same `build_provider` path as the reviewer. A build failure is not fatal
+    // here (unlike the reviewer's): the pass fails closed, recording every traced
+    // finding as unverifiable, which is a stated gap rather than a lost render.
+    let verifier = build_verdict_verifier(config).await;
     if let Some(inv) = run_investigation(
         provider.clone(),
         &role.model,
+        verifier.as_ref(),
         model,
         budget,
         attributed_only,
@@ -985,10 +1020,12 @@ mod tests {
         };
         Investigation {
             repos: vec![RepoInvestigation {
+                verdicts: None,
                 slug: "acme-core".to_string(),
                 name: "Acme Core".to_string(),
                 status: InvestigationStatus::Available,
                 findings: vec![VerifiedFinding {
+                    trace_verdict: String::new(),
                     title: "Hardcoded credential".to_string(),
                     severity: trusty_review::report::metrics::Severity::Red,
                     dimension: "security".to_string(),

@@ -42,6 +42,11 @@ struct FindingRow {
     description: Option<String>,
     evidence_quote: Option<String>,
     evidence_measured: bool,
+    /// The one-line trace verdict marker (#6166 leg 2), or empty. Rendered as an
+    /// extra bullet under the evidence block; it is a mechanical record of what
+    /// the verifier decided, so it carries no `inferred` tag and is never
+    /// punctuation-deduped.
+    trace_verdict: String,
     business_impact: Option<String>,
     remediation: Option<String>,
     cost_effort: Option<String>,
@@ -95,6 +100,7 @@ impl FindingRow {
             description: prose_field(&f.description),
             evidence_quote: raw_evidence(&f.evidence),
             evidence_measured: f.evidence_measured,
+            trace_verdict: f.trace_verdict.clone(),
             business_impact: prose_field(&f.business_impact),
             remediation: prose_field(&f.remediation),
             cost_effort: prose_field(&f.cost_effort),
@@ -115,6 +121,7 @@ impl FindingRow {
         self.description = prose_field(&f.description);
         self.evidence_quote = raw_evidence(&f.evidence);
         self.evidence_measured = f.evidence_measured;
+        self.trace_verdict = f.trace_verdict.clone();
         self.business_impact = prose_field(&f.business_impact);
         self.remediation = prose_field(&f.remediation);
         self.cost_effort = prose_field(&f.cost_effort);
@@ -142,6 +149,7 @@ impl FindingRow {
                     self.component.as_deref().unwrap_or(""),
                     quote,
                     self.evidence_measured,
+                    &self.trace_verdict,
                 ),
             );
         }
@@ -309,10 +317,23 @@ fn raw_evidence(s: &str) -> Option<String> {
 /// longer than the longest backtick run the quote itself contains (see
 /// [`fence_for`]), so a quote that itself contains a ``` fence still renders
 /// correctly.
+///
+/// #6166 leg 2: a non-empty `trace_verdict` adds one `- **Trace:**` bullet
+/// AFTER the fence. It is placed outside the fence because it is a statement
+/// about the quote, not part of it — the verified quote must stay byte-for-byte
+/// what the guardrail matched. An empty verdict adds nothing, so a finding the
+/// verdict pass did not reach renders byte-identically to before.
 /// Test: `reporter_tests::{evidence_renders_as_fenced_block,
 /// evidence_with_blank_line_fences_cleanly,
-/// evidence_containing_triple_backticks_uses_longer_fence}`.
-fn render_evidence_block(file_label: &str, quote: &str, measured: bool) -> String {
+/// evidence_containing_triple_backticks_uses_longer_fence,
+/// a_trace_verdict_renders_under_the_evidence_fence,
+/// no_trace_verdict_leaves_the_evidence_block_unchanged}`.
+fn render_evidence_block(
+    file_label: &str,
+    quote: &str,
+    measured: bool,
+    trace_verdict: &str,
+) -> String {
     let prov_tag = if measured {
         Provenance::Measured
     } else {
@@ -325,7 +346,11 @@ fn render_evidence_block(file_label: &str, quote: &str, measured: bool) -> Strin
         format!("- **Evidence** (`{file_label}`){prov_tag}:")
     };
     let fence = fence_for(quote);
-    format!("{label}\n{fence}\n{quote}\n{fence}")
+    let block = format!("{label}\n{fence}\n{quote}\n{fence}");
+    if trace_verdict.trim().is_empty() {
+        return block;
+    }
+    format!("{block}\n- **Trace:** {}", trace_verdict.trim())
 }
 
 /// Choose a fence marker at least one backtick longer than the longest run of

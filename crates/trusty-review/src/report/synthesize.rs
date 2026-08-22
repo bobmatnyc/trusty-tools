@@ -207,6 +207,16 @@ pub struct FindingProse {
     /// tagged ⁽ⁱ⁾ inferred like the rest of the prose.
     #[serde(default)]
     pub evidence_measured: bool,
+    /// The one-line trace verdict marker for this finding, or empty (#6166 leg
+    /// 2).
+    ///
+    /// Never LLM-authored: synthesis has no way to produce it, and the field is
+    /// `#[serde(default)]` so a synthesis response that omits it (every one of
+    /// them) deserialises unchanged. It is carried here because the investigation
+    /// prose is the row that wins for a verified finding, and the marker has to
+    /// travel with it to reach the rendered evidence block.
+    #[serde(default)]
+    pub trace_verdict: String,
 }
 
 impl Synthesis {
