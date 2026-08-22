@@ -28,9 +28,3 @@ Fixed
   so on the console, and names `taudit render` as the recovery. That degradation
   previously had no line anywhere: the same run shipped 37 ranked paths beside an
   investigation whose every examined file read "path-name heuristic".
-
-Changed
-
-- `grounding::quality::MIN_EVIDENCE_SCORE` is replaced by `MIN_EVIDENCE_SHARE`,
-  and `is_evidence` takes the floor its query earned as a second argument.
-  `evidence_floor` derives that floor.
