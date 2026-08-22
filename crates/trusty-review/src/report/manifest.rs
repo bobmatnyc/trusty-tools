@@ -254,7 +254,7 @@ const PRIORITY_BASE_WEIGHT: u32 = 1000;
 /// still bounds what is actually read. A path matching no tracked file is
 /// inert — it neither errors nor displaces anything.
 /// Test: `manifest_tests::{parse_inspect_priority_shapes,
-/// inspect_priority_weights_follow_declared_rank}`;
+/// inspect_priority_weights_follow_declared_rank, parse_hotspot_table}`;
 /// `select_tests::manifest_priority_outranks_heuristics`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct InspectionPriority {
@@ -269,6 +269,71 @@ pub struct InspectionPriority {
     /// One line naming the query or measurement that selected it (#6082),
     /// rendered in the Investigation Coverage section.
     pub reason: Option<String>,
+    /// The file's worst measured function, when the writer measured one
+    /// (#6145). It becomes a focus line in the investigation prompt (#6146).
+    pub hotspot: Option<FunctionHotspot>,
+}
+
+/// The worst measured function inside one prioritised file (#6145, #6146).
+///
+/// Why: a ranked path says which file to read and nothing about where to look
+/// inside it, so a 900-line file arrived at the model as 900 undifferentiated
+/// lines. trusty-audit measures complexity per function and now declares the
+/// winner here, which is what lets the investigation prompt say "this function"
+/// (owner ruling: target analysis of the most complex functions).
+/// What: the line range and cyclomatic count as the writer measured them, plus
+/// the function's name when its parser supplied one. Every field defaults, and
+/// [`FunctionHotspot::focus`] is what decides whether the record says enough to
+/// act on — a half-written table is inert, the same way a priority naming no
+/// tracked file is inert, rather than failing the whole manifest load. Nothing
+/// here changes which files are selected; only what the prompt says about a
+/// file already selected.
+/// Test: `manifest_tests::parse_hotspot_table`;
+/// `analyze_tests::a_hotspot_file_carries_a_focus_line`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FunctionHotspot {
+    /// The function's name, when the writer named it.
+    #[serde(default)]
+    pub function: Option<String>,
+    /// First line of the measured function, 1-based.
+    #[serde(default)]
+    pub start_line: u32,
+    /// Last line of the measured function, 1-based and inclusive.
+    #[serde(default)]
+    pub end_line: u32,
+    /// The function's cyclomatic complexity — the number that ranked it.
+    #[serde(default)]
+    pub cyclomatic: u32,
+}
+
+impl FunctionHotspot {
+    /// The one-line instruction this measurement earns, when it earns one.
+    ///
+    /// Why: the range is what makes the record actionable, so a table without
+    /// one has nothing to point the model at and must produce no line at all —
+    /// an empty or invented focus line would be worse than none. The name is
+    /// omitted when the writer could not supply it rather than rendered as an
+    /// empty `fn `.
+    /// What: `Hotspot: lines {start}-{end}, fn {name}, cyclomatic {n} —
+    /// prioritize DD analysis of this function.`, or `None` when the range is
+    /// absent or inverted.
+    /// Test: `manifest_tests::a_hotspot_without_a_range_has_no_focus_line`.
+    #[must_use]
+    pub fn focus(&self) -> Option<String> {
+        if self.start_line == 0 || self.end_line < self.start_line {
+            return None;
+        }
+        let named = self
+            .function
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map_or_else(String::new, |name| format!("fn {name}, "));
+        Some(format!(
+            "Hotspot: lines {}-{}, {named}cyclomatic {} — prioritize DD analysis of this function.",
+            self.start_line, self.end_line, self.cyclomatic
+        ))
+    }
 }
 
 /// One validated repository entry mapping to a single per-application block.
@@ -414,6 +479,9 @@ enum RawInspectionPriority {
         /// One line naming what selected it (#6082).
         #[serde(default)]
         reason: Option<String>,
+        /// The file's worst measured function (#6145), as a nested table.
+        #[serde(default)]
+        hotspot: Option<FunctionHotspot>,
     },
 }
 
@@ -432,17 +500,20 @@ impl RawInspectionPriority {
                 weight: positional,
                 dimension: None,
                 reason: None,
+                hotspot: None,
             },
             RawInspectionPriority::Weighted {
                 path,
                 weight,
                 dimension,
                 reason,
+                hotspot,
             } => InspectionPriority {
                 path,
                 weight: weight.unwrap_or(positional),
                 dimension,
                 reason,
+                hotspot,
             },
         }
     }

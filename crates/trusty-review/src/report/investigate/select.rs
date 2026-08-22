@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::report::manifest::InspectionPriority;
+use crate::report::manifest::{FunctionHotspot, InspectionPriority};
 use crate::report::metrics::AnalyzeMetrics;
 
 /// The per-file content ceiling before truncation (~24 KiB).
@@ -91,6 +91,11 @@ pub struct SelectedFile {
     /// The manifest's one-line reason this file was ranked (#6082) — the query
     /// or measurement that found it. `None` for a path-heuristic selection.
     pub selected_by: Option<String>,
+    /// The manifest's measurement of this file's worst function (#6145). The
+    /// analyze step turns it into a focus line beside this file's content
+    /// (#6146); `None` leaves the prompt byte-identical to what it was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hotspot: Option<FunctionHotspot>,
 }
 
 /// One dimension's share of the examined set (#6082).
@@ -446,6 +451,7 @@ struct Declared {
     weight: u32,
     dimension: Option<String>,
     reason: Option<String>,
+    hotspot: Option<FunctionHotspot>,
 }
 
 /// The manifest priorities, normalised for matching.
@@ -458,6 +464,7 @@ fn declarations(priorities: &[InspectionPriority]) -> Vec<Declared> {
             weight: p.weight,
             dimension: p.dimension.clone(),
             reason: p.reason.clone(),
+            hotspot: p.hotspot.clone(),
         })
         .collect()
 }
@@ -477,6 +484,7 @@ struct Candidate {
     path: String,
     dimensions: Vec<String>,
     reason: Option<String>,
+    hotspot: Option<FunctionHotspot>,
 }
 
 /// Score one tracked file and fold in what the manifest declared about it.
@@ -511,6 +519,8 @@ fn candidate(
         path,
         dimensions,
         reason,
+        // #6145: the measurement rides with the declaration that carried it.
+        hotspot: declaration.and_then(|d| d.hotspot.clone()),
     }
 }
 
@@ -594,6 +604,7 @@ pub fn select_files(
             truncated,
             dimensions: c.dimensions.clone(),
             selected_by: c.reason.clone(),
+            hotspot: c.hotspot.clone(),
         });
     }
 
@@ -622,9 +633,13 @@ pub fn select_files(
 /// What: one row per covered dimension, in the canonical order, counting the
 /// examined files that carry it. `example` names the first such file and its
 /// selection reason — the manifest's when it declared one, the path-name
-/// heuristic otherwise. "test coverage" can be covered by an unexamined test
-/// directory, so a row with zero files and no example is a real state.
-/// Test: `select_tests::per_dimension_coverage_names_why_a_file_was_read`.
+/// heuristic otherwise — and the function the manifest measured inside it when
+/// it named one (#6145), because "read for complexity" and "read for the
+/// 150-line function that carries it" are not the same claim. "test coverage"
+/// can be covered by an unexamined test directory, so a row with zero files and
+/// no example is a real state.
+/// Test: `select_tests::{per_dimension_coverage_names_why_a_file_was_read,
+/// coverage_names_the_measured_function}`.
 fn per_dimension(selected: &[SelectedFile], covered: &[String]) -> Vec<DimensionCoverage> {
     covered
         .iter()
@@ -641,11 +656,29 @@ fn per_dimension(selected: &[SelectedFile], covered: &[String]) -> Vec<Dimension
                         .selected_by
                         .clone()
                         .unwrap_or_else(|| "path-name heuristic".to_string());
-                    format!("{} ({why})", f.path)
+                    match f.hotspot.as_ref().and_then(named_function) {
+                        Some(function) => format!("{} ({why}; hottest fn {function})", f.path),
+                        None => format!("{} ({why})", f.path),
+                    }
                 }),
             }
         })
         .collect()
+}
+
+/// The measured function's name, when the record names one AND has the range
+/// that makes it actionable (#6145).
+///
+/// Gated on [`FunctionHotspot::focus`] rather than on the name alone, so the
+/// coverage section and the prompt agree about which records count.
+fn named_function(hotspot: &FunctionHotspot) -> Option<String> {
+    hotspot.focus()?;
+    hotspot
+        .function
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 /// Read a file as UTF-8, truncating to `min(MAX_FILE_BYTES, remaining)` on a char
