@@ -466,9 +466,9 @@ fn the_default_budget_keeps_the_floor_semantics() {
 
     // The audit's own default budget is above the floor and still bounded.
     let default = Caps::for_budget(crate::grounding::priority::DEFAULT_MAX_FILES);
-    assert_eq!(default.priority_paths, 120);
-    assert_eq!(default.files_per_dimension, 17);
-    assert_eq!(default.top_k, 26);
+    assert_eq!(default.priority_paths, 240);
+    assert_eq!(default.files_per_dimension, 34);
+    assert_eq!(default.top_k, 51);
 }
 
 /// The daemon's own response shape parses, and chunk paths come back
