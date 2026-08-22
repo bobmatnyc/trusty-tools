@@ -338,7 +338,7 @@ fn repo_config_voice_overrides_env() {
     )
     .expect("write repo config");
 
-    let config = ReviewConfig::from_env_and_file_inner(None, None, Some(&repo_config));
+    let config = ReviewConfig::from_env_and_file_inner(None, None, Some(&repo_config), None);
 
     unsafe {
         std::env::remove_var("TRUSTY_REVIEW_VOICE_PACKAGE");
@@ -368,7 +368,7 @@ fn repo_config_review_template_overrides_env() {
     std::fs::write(&repo_config, "[review]\ntemplate = \"repo-template\"\n")
         .expect("write repo config");
 
-    let config = ReviewConfig::from_env_and_file_inner(None, None, Some(&repo_config));
+    let config = ReviewConfig::from_env_and_file_inner(None, None, Some(&repo_config), None);
 
     unsafe {
         std::env::remove_var("TRUSTY_REVIEW_TEMPLATE");
@@ -397,7 +397,8 @@ fn repo_config_cli_review_template_wins() {
         ..Default::default()
     };
 
-    let config = ReviewConfig::from_env_and_file_inner(None, Some(&overrides), Some(&repo_config));
+    let config =
+        ReviewConfig::from_env_and_file_inner(None, Some(&overrides), Some(&repo_config), None);
 
     assert_eq!(config.review_template.as_deref(), Some("cli-template"));
 }
@@ -425,7 +426,7 @@ fn no_repo_config_preserves_pre_2995_env_over_file_precedence() {
     std::fs::write(&explicit_config, "[voice]\npackage = \"file-voice\"\n")
         .expect("write explicit config");
 
-    let config = ReviewConfig::from_env_and_file_inner(Some(&explicit_config), None, None);
+    let config = ReviewConfig::from_env_and_file_inner(Some(&explicit_config), None, None, None);
 
     unsafe {
         std::env::remove_var("TRUSTY_REVIEW_VOICE_PACKAGE");
@@ -693,6 +694,112 @@ fn role_models_fireworks_falls_back_to_pinned_defaults() {
     assert_eq!(
         roles.verifier.model,
         crate::llm::models::DEFAULT_VERIFIER_MODEL
+    );
+}
+
+// ── #6135: the manifest layer ────────────────────────────────────────────────
+
+/// Why: the observed failure — a June-dated `~/.config/trusty-review/config.toml`
+/// pinning `provider = "bedrock"` hijacked a render of an OpenRouter engagement.
+/// The manifest travels with the package and states what produced the run, so it
+/// must outrank both the host's environment and its config file.
+/// What: a manifest declaring OpenRouter plus all three models, against an env
+/// layer and a config file that both say Bedrock.
+/// Test: this test itself.
+#[test]
+fn role_models_manifest_beats_env_and_config_file() {
+    let manifest = RoleManifest {
+        reviewer_model: Some("anthropic/claude-opus-4.8".to_string()),
+        verifier_model: Some("anthropic/claude-haiku-4.5".to_string()),
+        summarizer_model: Some("anthropic/claude-haiku-4.5".to_string()),
+        provider: Some("openrouter".to_string()),
+    };
+    let env = RoleEnv {
+        reviewer_model: Some("us.anthropic.claude-sonnet-4-6".to_string()),
+        provider: Some("bedrock".to_string()),
+        ..Default::default()
+    };
+    let file = FileModels {
+        reviewer: Some(RoleConfigOverride {
+            provider: Some("bedrock".to_string()),
+            model: Some("us.anthropic.claude-sonnet-4-6".to_string()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let roles = RoleModels::resolve_with_manifest(None, Some(&manifest), &env, Some(&file));
+    assert_eq!(roles.reviewer.provider, Provider::OpenRouter);
+    assert_eq!(roles.reviewer.model, "anthropic/claude-opus-4.8");
+    assert_eq!(roles.verifier.provider, Provider::OpenRouter);
+    assert_eq!(roles.summarizer.model, "anthropic/claude-haiku-4.5");
+}
+
+/// Why: an explicit CLI flag is the operator's statement about THIS call, so the
+/// manifest sits below it.
+/// What: `--provider bedrock` against an OpenRouter manifest.
+/// Test: this test itself.
+#[test]
+fn role_models_cli_still_beats_the_manifest() {
+    let cli = RoleCliOverrides {
+        provider: Some("bedrock".to_string()),
+        ..Default::default()
+    };
+    let manifest = RoleManifest {
+        provider: Some("openrouter".to_string()),
+        ..Default::default()
+    };
+    let roles =
+        RoleModels::resolve_with_manifest(Some(&cli), Some(&manifest), &RoleEnv::default(), None);
+    assert_eq!(roles.reviewer.provider, Provider::Bedrock);
+}
+
+/// Why: back-compat — a manifest with no `[inference]` section must resolve
+/// exactly as it did before #6135, so an already-delivered package keeps
+/// rendering.
+/// What: the same layers resolved with and without a `None` manifest.
+/// Test: this test itself.
+#[test]
+fn role_models_without_a_manifest_layer_are_unchanged() {
+    let env = RoleEnv {
+        reviewer_model: Some("us.anthropic.claude-sonnet-4-6".to_string()),
+        provider: Some("bedrock".to_string()),
+        ..Default::default()
+    };
+    let with_none = RoleModels::resolve_with_manifest(None, None, &env, None);
+    let without = RoleModels::resolve(None, &env, None);
+    assert_eq!(with_none.reviewer.model, without.reviewer.model);
+    assert_eq!(with_none.reviewer.provider, without.reviewer.provider);
+    assert_eq!(with_none.reviewer.provider, Provider::Bedrock);
+}
+
+/// Why: the layer has to survive the whole `ReviewConfig` load, which is what a
+/// render actually calls — not only the `RoleModels` resolver.
+/// What: a config file pinning Bedrock in a tempdir, loaded first with no
+/// manifest (it decides) and then with an OpenRouter manifest (it does not). No
+/// env var is set or cleared: the manifest outranks the environment either way,
+/// which is what keeps this test independent of the machine running it.
+/// Test: this test itself.
+#[test]
+fn config_manifest_layer_beats_a_local_config_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "[models.reviewer]\nprovider = \"bedrock\"\nmodel = \"us.anthropic.claude-sonnet-4-6\"\n",
+    )
+    .expect("write config");
+
+    let manifest = RoleManifest {
+        reviewer_model: Some("anthropic/claude-opus-4.8".to_string()),
+        provider: Some("openrouter".to_string()),
+        ..Default::default()
+    };
+    let portable = ReviewConfig::from_env_and_manifest(Some(&path), None, Some(&manifest));
+    assert_eq!(portable.role_models.reviewer.provider, Provider::OpenRouter);
+    assert_eq!(
+        portable.role_models.reviewer.model,
+        "anthropic/claude-opus-4.8"
     );
 }
 

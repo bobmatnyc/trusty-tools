@@ -565,22 +565,26 @@ async fn deps_from_state_routes_a_bare_openrouter_slug_to_openrouter() {
     );
 }
 
-/// #6114: a model the resolved provider cannot run stops before any review.
+/// #6135: a prefix the id contradicts resolves to the catalogue the id belongs
+/// to, and the review runs there.
 ///
-/// Why: the error must name both halves so an operator sees what disagreed,
-/// rather than reading a verdict produced by a model they never selected.
-/// What: pins a Bedrock inference-profile id to Fireworks by prefix.
+/// Why: #6114 stopped this call. The owner ruling of 2026-08-21 replaced the
+/// refusal with a resolution — the caller still never gets a verdict from a
+/// model they did not name, because the model itself is preserved; only the
+/// provider that runs it is corrected.
+/// What: pins a Bedrock inference-profile id to Fireworks by prefix against a
+/// Bedrock-startup state, and asserts the review runs on Bedrock.
 /// Test: this test itself.
 #[tokio::test]
-async fn deps_from_state_rejects_a_model_the_startup_provider_cannot_run() {
+async fn deps_from_state_resolves_a_prefix_the_id_contradicts() {
     let state = bedrock_startup_state();
-    let msg = match super::deps_from_state(&state, "fireworks/us.anthropic.claude-sonnet-4-6").await
-    {
-        Ok(_) => panic!("a bedrock profile id must not be sent to Fireworks"),
-        Err(e) => format!("{e:?}"),
-    };
-    assert!(
-        msg.contains("us.anthropic.claude-sonnet-4-6") && msg.contains("fireworks"),
-        "the error must name the id and the provider: {msg}"
+    let deps = super::deps_from_state(&state, "fireworks/us.anthropic.claude-sonnet-4-6")
+        .await
+        .expect("a contradicting prefix resolves rather than stopping the call");
+    assert_eq!(
+        deps.llm.name(),
+        "approve-dispatch-stub",
+        "the id belongs to Bedrock's catalogue, which is the startup provider — so the \
+         already-built one is reused rather than a second being constructed"
     );
 }

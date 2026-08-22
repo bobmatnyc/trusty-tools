@@ -1023,8 +1023,9 @@ impl Session {
                 config: self.config_path.clone(),
             })?;
         let models = config.map(|c| c.models).unwrap_or_default();
-        let inference =
-            crate::inference::selection_env(true, &models, |name| std::env::var(name).ok())?;
+        // #6135: both halves — the pairs the child inherits, and the identity
+        // the index states when no manifest declares its own.
+        let inference = crate::inference::resolve(true, &models, |name| std::env::var(name).ok())?;
         rerender::rerender(
             &self.work,
             &self.cwd,

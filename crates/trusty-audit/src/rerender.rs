@@ -229,7 +229,7 @@ pub async fn rerender(
     cwd: &Path,
     config: &Path,
     key: &SecretKey,
-    inference: &[(&'static str, String)],
+    inference: &crate::inference::Inference,
     options: &RerenderOptions,
     progress: &Progress,
 ) -> Result<RerenderReport, AuditError> {
@@ -268,12 +268,33 @@ pub async fn rerender(
     progress.operation_started(Operation::Rerender, total);
     let mut reports = Vec::with_capacity(total);
     let mut taken = HashSet::new();
+    // #6135: what the delivered manifests declare is what the children will
+    // resolve from — it outranks the pairs this run injects — so the index
+    // states that, falling back to this run's own selection when no manifest
+    // declares one.
+    let mut declared: Option<crate::index_report::InferenceRecord> = None;
     for (index, manifest) in manifests.into_iter().enumerate() {
+        if declared.is_none()
+            && let Ok(Some(read)) = AuditManifest::load_if_present(&manifest)
+        {
+            declared = read
+                .inference
+                .as_ref()
+                .map(crate::index_report::InferenceRecord::declared);
+        }
         let name = unique_name(&manifest, index, &mut taken);
         progress.unit_started(Operation::Rerender, name.as_str(), index + 1, total);
         let unit_started = std::time::Instant::now();
-        let mut rendered =
-            render_one(&review, &tools, &manifest, &output, name, key, inference).await?;
+        let mut rendered = render_one(
+            &review,
+            &tools,
+            &manifest,
+            &output,
+            name,
+            key,
+            &inference.env,
+        )
+        .await?;
         // Timed here rather than inside `render_one`, which returns from two
         // places — a manifest that will not parse is still a unit that took time.
         rendered.duration_ms = Some(millis(unit_started.elapsed()));
@@ -299,6 +320,12 @@ pub async fn rerender(
         &output,
         &review,
         review_version.as_deref(),
+        declared.or_else(|| {
+            inference
+                .selection
+                .as_ref()
+                .map(crate::index_report::InferenceRecord::of)
+        }),
         &reports,
         started.elapsed(),
     )?;
@@ -871,7 +898,7 @@ mod rerender_tests {
             cwd,
             config,
             &key(),
-            &[],
+            &crate::inference::Inference::default(),
             &RerenderOptions {
                 from: from.map(Path::to_path_buf),
                 out: None,
@@ -1495,7 +1522,7 @@ mod rerender_tests {
             &engagement,
             &config,
             &key(),
-            &[],
+            &crate::inference::Inference::default(),
             &RerenderOptions::default(),
             &Progress::none(),
         )

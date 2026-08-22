@@ -35,9 +35,41 @@ use crate::error::AuditError;
 pub struct AuditManifest {
     /// Engagement metadata.
     pub report: ReportSection,
+    /// The inference identity the run that wrote this manifest used (#6135).
+    ///
+    /// Absent in every manifest written before the key existed, and in any
+    /// hand-written one — which is why a render still resolves its own provider
+    /// when it is missing rather than refusing.
+    #[serde(default)]
+    pub inference: Option<InferenceSection>,
     /// The configured repository set, in config order.
     #[serde(default)]
     pub repositories: Vec<RepositoryEntry>,
+}
+
+/// The `[inference]` section: which provider and models rendered this report.
+///
+/// Why: `crate::inference::write_into_manifest` writes it and
+/// `trusty-review` resolves from it (#6135). This crate reads it back for one
+/// purpose — stating in `index.md` which models a re-render will actually use,
+/// since the manifest outranks anything the re-render itself would inject.
+/// What: four identity strings, never a credential.
+/// Test: `super::manifest_tests::reads_the_inference_section`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[non_exhaustive]
+pub struct InferenceSection {
+    /// Provider id.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Reviewer role model id.
+    #[serde(default)]
+    pub reviewer: Option<String>,
+    /// Verifier role model id.
+    #[serde(default)]
+    pub verifier: Option<String>,
+    /// Summarizer role model id.
+    #[serde(default)]
+    pub summarizer: Option<String>,
 }
 
 /// The `[report]` section: who the engagement is for and what it is called.
@@ -158,6 +190,33 @@ path = "/work/repos/acme-web"
                 .map(|r| r.name.as_str())
                 .collect::<Vec<_>>(),
             vec!["acme-api", "acme-web"]
+        );
+    }
+
+    /// Why: #6135 — the section a sweep writes is what a re-render resolves
+    /// from, and `index.md` states it, so this reader has to see it.
+    /// What: a manifest carrying the section, and one without.
+    /// Test: this test itself.
+    #[test]
+    fn reads_the_inference_section() {
+        let text = format!(
+            "{SAMPLE}\n[inference]\nprovider = \"openrouter\"\n\
+             reviewer = \"anthropic/claude-opus-4.8\"\n\
+             verifier = \"anthropic/claude-haiku-4.5\"\n\
+             summarizer = \"anthropic/claude-haiku-4.5\"\n"
+        );
+        let manifest = AuditManifest::from_toml(&text, Path::new("manifest.toml")).expect("parses");
+        let inference = manifest.inference.expect("declared");
+        assert_eq!(inference.provider.as_deref(), Some("openrouter"));
+        assert_eq!(
+            inference.reviewer.as_deref(),
+            Some("anthropic/claude-opus-4.8")
+        );
+
+        let older = AuditManifest::from_toml(SAMPLE, Path::new("manifest.toml")).expect("parses");
+        assert!(
+            older.inference.is_none(),
+            "a manifest written before the key existed still loads"
         );
     }
 

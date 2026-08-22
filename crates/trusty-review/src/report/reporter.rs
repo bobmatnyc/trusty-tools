@@ -303,6 +303,17 @@ pub(super) fn build_scope(model: &ReportModel) -> Scope {
         tag(&model.vendor_methodology, Provenance::Measured),
     );
     root.set("report_version", tag(crate_version(), Provenance::Measured));
+    // #6135: which models produced this report. Measured — the tool resolved it
+    // and knows it. A model built outside the report command carries none, and
+    // the row then says so rather than reading as a report with no inference.
+    root.set(
+        "inference_models",
+        match &model.inference {
+            Some(attribution) => tag(attribution.line(), Provenance::Measured),
+            None => "not recorded — this report was rendered without a resolved model selection"
+                .to_string(),
+        },
+    );
     root.set("provenance_legend", provenance::LEGEND);
     root.set("analyst_instructions_block", instructions_block(model));
     // #6004: the Key Facts block frontloads density/complexity/author/

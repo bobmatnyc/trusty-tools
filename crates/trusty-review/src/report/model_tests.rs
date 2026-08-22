@@ -122,3 +122,48 @@ fn a_missing_authorship_file_is_the_same_named_gap() {
         model.gaps
     );
 }
+
+/// Why: #6135 replaced #6114's refusal with an attribution, so the line the
+/// report shows IS the guarantee — an adjusted id must read `requested → ran`
+/// and an unadjusted one must not pretend anything changed.
+/// What: builds the record from two resolutions, one of each kind.
+/// Test: this test itself.
+#[test]
+fn attribution_renders_requested_and_ran() {
+    use crate::config::Provider;
+    use crate::llm::resolve_model;
+    use crate::report::model::{InferenceAttribution, RoleAttribution};
+
+    let straight = resolve_model("anthropic/claude-opus-4.8", &Provider::OpenRouter)
+        .expect("an agreeing pair resolves");
+    let adjusted = resolve_model("bedrock/anthropic/claude-sonnet-4.6", &Provider::OpenRouter)
+        .expect("a translatable id resolves");
+
+    let record = InferenceAttribution::of(
+        "the manifest's [inference] section",
+        vec![
+            RoleAttribution::of("reviewer", "anthropic/claude-opus-4.8", &straight),
+            RoleAttribution::of("verifier", "bedrock/anthropic/claude-sonnet-4.6", &adjusted),
+        ],
+    );
+
+    assert_eq!(
+        record.provider, "openrouter",
+        "the reviewer's provider leads"
+    );
+    let line = record.line();
+    assert!(
+        line.contains("reviewer: anthropic/claude-opus-4.8"),
+        "an unadjusted role shows one id: {line}"
+    );
+    assert!(
+        line.contains(
+            "verifier: bedrock/anthropic/claude-sonnet-4.6 → us.anthropic.claude-sonnet-4-6"
+        ),
+        "an adjusted role shows both halves: {line}"
+    );
+    assert!(
+        line.contains("the manifest's [inference] section"),
+        "the line states which layer selected the models: {line}"
+    );
+}

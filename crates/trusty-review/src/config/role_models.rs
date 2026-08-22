@@ -101,9 +101,39 @@ impl RoleModels {
         env: &RoleEnv,
         file_models: Option<&FileModels>,
     ) -> Self {
+        Self::resolve_with_manifest(cli_overrides, None, env, file_models)
+    }
+
+    /// [`Self::resolve`] with the manifest layer #6135 added above the env one.
+    ///
+    /// Why: a report manifest carries the inference identity of the run that
+    /// produced it, and that identity must survive travelling to another machine
+    /// — which the environment and the host's config file do not. Owner ruling
+    /// 2026-08-21: "In audit mode, trusty review should use the same provider as
+    /// audit to make it portable. From the manifest."
+    /// What: the chain becomes CLI flag → manifest → env var → config file →
+    /// built-in default, per field. `manifest = None` (or a manifest with no
+    /// `[inference]` section) leaves resolution byte-identical to before, which
+    /// is what keeps an old package rendering as it always did.
+    ///
+    /// The manifest sits ABOVE the environment deliberately: `trusty-audit` sets
+    /// both to the same values, so the order only matters for a re-render on a
+    /// host whose own environment disagrees — and there the manifest is the one
+    /// that knows what produced the report.
+    /// Test: `config_tests::role_models_manifest_beats_env_and_config_file`,
+    /// `config_tests::role_models_without_a_manifest_layer_are_unchanged`.
+    pub fn resolve_with_manifest(
+        cli_overrides: Option<&RoleCliOverrides>,
+        manifest: Option<&RoleManifest>,
+        env: &RoleEnv,
+        file_models: Option<&FileModels>,
+    ) -> Self {
+        let manifest_provider = manifest.and_then(|m| m.provider.as_deref());
         let reviewer = resolve_role(
             cli_overrides.and_then(|c| c.reviewer_model.as_deref()),
             cli_overrides.and_then(|c| c.provider.as_deref()),
+            manifest.and_then(|m| m.reviewer_model.as_deref()),
+            manifest_provider,
             env.reviewer_model.as_deref(),
             env.provider.as_deref(),
             file_models.and_then(|f| f.reviewer.as_ref()),
@@ -116,6 +146,8 @@ impl RoleModels {
         let verifier = resolve_role(
             cli_overrides.and_then(|c| c.verifier_model.as_deref()),
             cli_overrides.and_then(|c| c.provider.as_deref()),
+            manifest.and_then(|m| m.verifier_model.as_deref()),
+            manifest_provider,
             env.verifier_model.as_deref(),
             env.provider.as_deref(),
             file_models.and_then(|f| f.verifier.as_ref()),
@@ -128,6 +160,8 @@ impl RoleModels {
         let summarizer = resolve_role(
             cli_overrides.and_then(|c| c.summarizer_model.as_deref()),
             cli_overrides.and_then(|c| c.provider.as_deref()),
+            manifest.and_then(|m| m.summarizer_model.as_deref()),
+            manifest_provider,
             env.summarizer_model.as_deref(),
             env.provider.as_deref(),
             file_models.and_then(|f| f.summarizer.as_ref()),
@@ -192,6 +226,27 @@ pub struct RoleEnv {
     pub reviewer_model: Option<String>,
     pub verifier_model: Option<String>,
     pub summarizer_model: Option<String>,
+    pub provider: Option<String>,
+}
+
+/// Per-role model ids a report manifest declares (#6135).
+///
+/// Why: the manifest is the durable carrier of a run's inference identity — it
+/// travels with the package, so a re-render on another machine reproduces the
+/// provider and models the original run used instead of inheriting the host's
+/// config. See [`RoleModels::resolve_with_manifest`] for where it sits.
+/// What: the same four fields as [`RoleEnv`], deliberately: they are the same
+/// selection, arriving through a different channel. A key is NEVER among them.
+/// Test: `config_tests::role_models_manifest_beats_env_and_config_file`.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RoleManifest {
+    /// Reviewer model id declared by the manifest.
+    pub reviewer_model: Option<String>,
+    /// Verifier model id declared by the manifest.
+    pub verifier_model: Option<String>,
+    /// Summarizer model id declared by the manifest.
+    pub summarizer_model: Option<String>,
+    /// Provider id declared by the manifest.
     pub provider: Option<String>,
 }
 
@@ -272,6 +327,8 @@ fn parse_provider_layer(raw: Option<&str>, source: &str) -> Option<Provider> {
 pub(super) fn resolve_role(
     cli_model: Option<&str>,
     cli_provider: Option<&str>,
+    manifest_model: Option<&str>,
+    manifest_provider: Option<&str>,
     env_model: Option<&str>,
     env_provider: Option<&str>,
     file: Option<&RoleConfigOverride>,
@@ -281,9 +338,10 @@ pub(super) fn resolve_role(
     default_temp: f32,
     default_max_tokens: u32,
 ) -> RoleConfig {
-    // Provider: CLI → env → config file → built-in default.
+    // Provider: CLI → manifest (#6135) → env → config file → built-in default.
     // #5679: each layer parses on its own so a bad value yields the next layer, not the default.
     let provider = parse_provider_layer(cli_provider, "--provider")
+        .or_else(|| parse_provider_layer(manifest_provider, "manifest [inference].provider"))
         .or_else(|| parse_provider_layer(env_provider, "TRUSTY_REVIEW_PROVIDER"))
         .or_else(|| {
             parse_provider_layer(
@@ -293,12 +351,14 @@ pub(super) fn resolve_role(
         })
         .unwrap_or(default_provider);
 
-    // Model: CLI → env → config file → tier default → pinned built-in default.
+    // Model: CLI → manifest → env → config file → tier default → pinned built-in
+    // default.
     // #5971: the tier is the built-in layer, so an explicitly-named id at any of
-    // the three layers above still wins. `default_model` remains the fallback
+    // the layers above still wins. `default_model` remains the fallback
     // for a (tier, provider) pair with no verified id — notably Bedrock's opus
     // tiers, which are deliberately unmapped.
     let model = cli_model
+        .or(manifest_model)
         .or(env_model)
         .or(file.and_then(|f| f.model.as_deref()))
         .or_else(|| default_tier.resolve(provider.provider_id()))

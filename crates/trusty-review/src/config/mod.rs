@@ -39,7 +39,7 @@ pub use context::{ContextConfig, ContextFileConfig, InvocationSurface};
 pub use repo_config::find_repo_config_path;
 pub use review_template::ReviewFileConfig;
 pub use role_models::{
-    FileModels, RoleCliOverrides, RoleConfig, RoleConfigOverride, RoleEnv, RoleModels,
+    FileModels, RoleCliOverrides, RoleConfig, RoleConfigOverride, RoleEnv, RoleManifest, RoleModels,
 };
 pub use verification::{VerificationConfig, VerificationFileConfig};
 
@@ -388,8 +388,32 @@ impl ReviewConfig {
         config_path: Option<&std::path::Path>,
         cli_overrides: Option<&RoleCliOverrides>,
     ) -> Self {
+        Self::from_env_and_manifest(config_path, cli_overrides, None)
+    }
+
+    /// [`Self::from_env_and_file`] with a report manifest's declared inference
+    /// identity as a precedence layer (#6135).
+    ///
+    /// Why: `trusty-review report --manifest <m>` is handed a file that states
+    /// which provider and models produced the run. That statement must outrank
+    /// the host's own `~/.config/trusty-review/config.toml`, which knows nothing
+    /// about the engagement — a stale local `provider = "bedrock"` is what
+    /// hijacked a render on 2026-08-21.
+    /// What: threads `manifest` into [`RoleModels::resolve_with_manifest`];
+    /// everything else is unchanged. `None` is exactly today's behaviour.
+    /// Test: `config_tests::config_manifest_layer_beats_a_local_config_file`.
+    pub fn from_env_and_manifest(
+        config_path: Option<&std::path::Path>,
+        cli_overrides: Option<&RoleCliOverrides>,
+        manifest: Option<&RoleManifest>,
+    ) -> Self {
         let repo_config_path = resolve_repo_config_path(config_path);
-        Self::from_env_and_file_inner(config_path, cli_overrides, repo_config_path.as_deref())
+        Self::from_env_and_file_inner(
+            config_path,
+            cli_overrides,
+            repo_config_path.as_deref(),
+            manifest,
+        )
     }
 
     /// Injectable core of `from_env_and_file` — takes the repo-scoped config
@@ -414,6 +438,7 @@ impl ReviewConfig {
         config_path: Option<&std::path::Path>,
         cli_overrides: Option<&RoleCliOverrides>,
         repo_config_path: Option<&std::path::Path>,
+        manifest: Option<&RoleManifest>,
     ) -> Self {
         // Try to load the config file; silently fall back to defaults.  Parse
         // it once so both the `[models]` and `[verification]` tables come from
@@ -433,7 +458,8 @@ impl ReviewConfig {
             toml_file.as_ref().map(|f| &f.coverage);
 
         let env = RoleEnv::from_env();
-        let role_models = RoleModels::resolve(cli_overrides, &env, file_models.as_ref());
+        let role_models =
+            RoleModels::resolve_with_manifest(cli_overrides, manifest, &env, file_models.as_ref());
         let verification = VerificationConfig::from_env_and_file(file_verification.as_ref());
         let context = ContextConfig::from_env_and_file(file_context.as_ref());
         let context_sources = crate::integrations::context::ContextSourcesConfig::from_env_and_file(

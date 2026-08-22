@@ -404,7 +404,10 @@ fn mcp_run_mode(config: &ReviewConfig) -> RunMode {
 /// review on the startup provider anyway, and reported a `reviewer_model_fallback`
 /// string. That is still a review of the caller's diff by a model the caller did
 /// not ask for, and #6114 rules it out — a request that names a model either runs
-/// that model or fails. The fallback plumbing goes with it.
+/// that model or fails. The fallback plumbing goes with it. #6135 keeps the model
+/// and moves only the provider: a prefix the id contradicts routes to the
+/// catalogue the id belongs to, or takes that provider's own spelling of the same
+/// model, so the caller still never gets a verdict from a model they did not name.
 ///
 /// What: resolves the override's provider via `resolve_provider_and_model`; when
 /// it matches the startup provider, cheaply clones `state.llm` (no allocation).
@@ -414,14 +417,14 @@ fn mcp_run_mode(config: &ReviewConfig) -> RunMode {
 ///
 /// # Errors
 ///
-/// [`ToolError::InvalidParams`] when `reviewer_model` cannot be reconciled with
-/// the provider that would execute it, or when the matching provider cannot be
-/// built (missing credential, invalid model id).
+/// [`ToolError::InvalidParams`] when `reviewer_model` names a provider this build
+/// cannot call with no verified equivalent in one it can, or when the resolved
+/// provider cannot be built (missing credential, invalid model id).
 ///
 /// Test: `deps_from_state_openrouter_override_switches_provider`,
 /// `deps_from_state_no_override_reuses_startup_provider`,
 /// `deps_from_state_build_failure_is_an_error`,
-/// `deps_from_state_rejects_a_model_the_startup_provider_cannot_run`
+/// `deps_from_state_resolves_a_prefix_the_id_contradicts`
 /// (in `tools_dispatch_tests.rs`).
 async fn deps_from_state(state: &AppState, reviewer_model: &str) -> Result<ReviewDeps, ToolError> {
     let startup_provider = &state.config.role_models.reviewer.provider;

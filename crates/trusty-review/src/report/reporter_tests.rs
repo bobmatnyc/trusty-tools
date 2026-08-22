@@ -147,6 +147,54 @@ fn render_contains_expected() {
     assert!(!md.contains("{{"));
 }
 
+/// Why: #6135 — the report is what makes a wrong model impossible to hide, now
+/// that a naming difference resolves instead of stopping the run. The Report
+/// Metadata row is where a reader sees it, so it must carry the provider, every
+/// role, and both halves of any id the resolver adjusted.
+/// What: renders the bundled template with an attribution set, then again with
+/// none, and asserts the second states its absence rather than rendering blank.
+/// Test: this test itself.
+#[test]
+fn inference_models_row_states_what_ran() {
+    use crate::config::Provider;
+    use crate::llm::resolve_model;
+    use crate::report::model::{InferenceAttribution, RoleAttribution};
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let mut model = fixture_model(tmp.path());
+    let straight = resolve_model("anthropic/claude-opus-4.8", &Provider::OpenRouter)
+        .expect("an agreeing pair resolves");
+    let adjusted = resolve_model("bedrock/anthropic/claude-sonnet-4.6", &Provider::OpenRouter)
+        .expect("a translatable id resolves");
+    model.inference = Some(InferenceAttribution::of(
+        "the manifest's [inference] section",
+        vec![
+            RoleAttribution::of("reviewer", "anthropic/claude-opus-4.8", &straight),
+            RoleAttribution::of("verifier", "bedrock/anthropic/claude-sonnet-4.6", &adjusted),
+        ],
+    ));
+
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    assert!(md.contains("| Inference models |"), "{md}");
+    assert!(md.contains("reviewer: anthropic/claude-opus-4.8"), "{md}");
+    assert!(
+        md.contains(
+            "verifier: bedrock/anthropic/claude-sonnet-4.6 → us.anthropic.claude-sonnet-4-6"
+        ),
+        "an adjusted id renders as requested → ran: {md}"
+    );
+    assert!(md.contains("the manifest's [inference] section"), "{md}");
+
+    // A model with no resolved selection states that, rather than leaving a row
+    // a reader would take for "no inference was involved".
+    let bare = Reporter::new(tmp.path()).render(&fixture_model(tmp.path()), &template);
+    assert!(bare.contains("not recorded"), "{bare}");
+}
+
 /// (a) #6004: a model WITH analyze data yields both the Code Quality &
 /// Architecture and Security Posture sections populated — never blank
 /// scaffolding.

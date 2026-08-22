@@ -80,6 +80,7 @@ in the coverage data provided — and name it specifically.
 | Source document | {{source_document_reference}} |
 | Vendor / methodology | CAST (CAST Software) — CAST Highlight + CAST Imaging |
 | Report date / version | {{report_date}} / {{report_version}} |
+| Inference models | {{inference_models}} |
 | Target / deal codename | {{target_codename}} |
 | Client | {{client_name}} |
 | Applications / systems assessed | {{applications_list}} |

@@ -36,6 +36,109 @@ pub fn vendor_methodology() -> String {
     )
 }
 
+/// Which models this render actually ran, per role (#6135).
+///
+/// Why: owner ruling 2026-08-21 — "The report should include which models are
+/// used." That is the guarantee replacing #6114's refusal: a naming difference
+/// no longer stops the run, so the report is what makes a wrong model
+/// impossible to hide. Recording it on the model puts it in the JSON twin as
+/// well as the page.
+/// What: the provider every role resolved to, one row per role, and the layer
+/// the selection came from. `requested` and `ran` differ only when the resolver
+/// adjusted the id; both are kept so the page can show `requested → ran`.
+/// Test: `model_tests::attribution_renders_requested_and_ran`.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct InferenceAttribution {
+    /// The provider the reviewer role runs on — the pass that does the judging.
+    pub provider: String,
+    /// Where this selection came from: the manifest, or the host's own layers.
+    pub source: String,
+    /// One row per role, in reviewer/verifier/summarizer order.
+    pub roles: Vec<RoleAttribution>,
+}
+
+/// One role's resolved model (#6135).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RoleAttribution {
+    /// `reviewer`, `verifier`, or `summarizer`.
+    pub role: String,
+    /// The id the configuration asked for, verbatim.
+    pub requested: String,
+    /// The id that will run.
+    pub ran: String,
+    /// The provider that will run it.
+    pub provider: String,
+    /// Why `requested` and `ran` differ, when they do.
+    pub note: Option<String>,
+}
+
+impl RoleAttribution {
+    /// One role's row, from the resolution that decided it.
+    ///
+    /// Why: the mapping from a [`ModelResolution`](crate::llm::ModelResolution)
+    /// to the recorded row lives here, so the CLI cannot spell an attribution
+    /// differently from anything else that records one.
+    /// Test: `model_tests::attribution_renders_requested_and_ran`.
+    #[must_use]
+    pub fn of(role: &str, requested: &str, resolved: &crate::llm::ModelResolution) -> Self {
+        Self {
+            role: role.to_string(),
+            requested: requested.to_string(),
+            ran: resolved.model.clone(),
+            provider: resolved.provider.to_string(),
+            note: resolved.note.clone(),
+        }
+    }
+}
+
+impl InferenceAttribution {
+    /// The whole record, from the per-role rows and the layer that selected them.
+    ///
+    /// The provider is the first row's — the reviewer's, in call order — because
+    /// that is the pass that does the judging and the one the credential
+    /// preflight checks.
+    #[must_use]
+    pub fn of(source: &str, roles: Vec<RoleAttribution>) -> Self {
+        let provider = roles
+            .first()
+            .map_or_else(|| "not recorded".to_string(), |r| r.provider.clone());
+        Self {
+            provider,
+            source: source.to_string(),
+            roles,
+        }
+    }
+
+    /// The one-line form the report metadata table shows.
+    ///
+    /// Why: the page has one row for this, and a reader scanning it wants the
+    /// provider first and the adjustments visible without opening the JSON.
+    /// What: `provider — reviewer <id>; verifier <id>; summarizer <id>`, with an
+    /// adjusted role rendered as `requested → ran`.
+    /// Test: `model_tests::attribution_renders_requested_and_ran`.
+    #[must_use]
+    pub fn line(&self) -> String {
+        let roles = self
+            .roles
+            .iter()
+            .map(|r| {
+                if r.requested == r.ran {
+                    format!("{}: {}", r.role, r.ran)
+                } else {
+                    format!("{}: {} → {}", r.role, r.requested, r.ran)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        format!(
+            "{} — {roles} (selected from {})",
+            self.provider, self.source
+        )
+    }
+}
+
 /// The fully assembled, render-ready report model.
 ///
 /// Why: a single source of truth for both the markdown fill and the JSON output;
@@ -67,6 +170,16 @@ pub struct ReportModel {
     /// The source path the instructions were loaded from, if any (#2340).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions_source: Option<String>,
+    /// Which models this render ran, per role (#6135).
+    ///
+    /// Why: the anti-silent-wrong-model guarantee. Set by `cmd_report` from the
+    /// resolved config, so both the page and the JSON twin state what actually
+    /// ran — including any id the resolver adjusted.
+    /// What: `None` only for a model built outside the report command (a test
+    /// fixture, a caller that never resolved inference); the CLI always sets it.
+    /// Test: `reporter_tests::inference_models_row_states_what_ran`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference: Option<InferenceAttribution>,
     /// Report date (ISO-8601, generation day).
     pub report_date: String,
     /// Generation timestamp date (ISO-8601, generation day).
@@ -255,6 +368,9 @@ impl ReportModel {
             analyst: manifest.report.analyst.clone(),
             client: manifest.report.client.clone(),
             vendor_methodology: vendor_methodology(),
+            // #6135: filled by `cmd_report` once the config layers have resolved
+            // — this constructor knows the manifest, not the inference chain.
+            inference: None,
             instructions: instructions.map(|i| i.text.clone()),
             instructions_source: instructions.map(|i| i.source.display().to_string()),
             report_date: today.clone(),

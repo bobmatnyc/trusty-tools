@@ -76,6 +76,7 @@
 | Source document | {{source_document_filename}} |
 | Vendor / methodology | {{vendor_methodology}} |
 | Report date / version | {{report_date}} |
+| Inference models | {{inference_models}} |
 | Target / deal codename | {{target_codename}} |
 | Client | {{client_name}} |
 | Applications / systems assessed | {{applications_list}} |

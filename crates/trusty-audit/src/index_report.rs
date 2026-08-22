@@ -115,6 +115,66 @@ impl ToolVersion {
     }
 }
 
+/// Which models produced the reports in this directory (#6135).
+///
+/// Why: owner ruling 2026-08-21 — "The report should include which models are
+/// used." The index states it beside the tool versions for the same reason it
+/// states those: a reader opening a delivered directory can otherwise not tell
+/// what judged the code. It is the run-level half of the attribution; each
+/// report states its own on the page and in its JSON twin.
+/// What: the provider, the three role model ids, and the layer they came from —
+/// a manifest that declares its own outranks anything the run would inject, so
+/// `source` is what tells a reader which of the two they are looking at.
+/// Test: `super::index_tests::the_index_states_which_models_rendered`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct InferenceRecord {
+    /// Provider id — `openrouter` unless the engagement pinned another.
+    pub provider: String,
+    /// Reviewer role model id.
+    pub reviewer: String,
+    /// Verifier role model id.
+    pub verifier: String,
+    /// Summarizer role model id.
+    pub summarizer: String,
+    /// The layer that selected them.
+    pub source: String,
+}
+
+impl InferenceRecord {
+    /// The record a resolved [`crate::inference::Selection`] states.
+    #[must_use]
+    pub fn of(selection: &crate::inference::Selection) -> Self {
+        Self {
+            provider: selection.provider.clone(),
+            reviewer: selection.reviewer.clone(),
+            verifier: selection.verifier.clone(),
+            summarizer: selection.summarizer.clone(),
+            source: selection.source.to_owned(),
+        }
+    }
+
+    /// The record a manifest declares, when it declares a whole one.
+    ///
+    /// A partially-declared section is reported as far as it goes: the
+    /// undeclared roles resolve through `trusty-review`'s own layers, and
+    /// "not declared" is the honest cell for them.
+    #[must_use]
+    pub fn declared(section: &crate::manifest::InferenceSection) -> Self {
+        let or_absent = |v: &Option<String>| {
+            v.clone()
+                .unwrap_or_else(|| "not declared — resolved by the renderer".to_owned())
+        };
+        Self {
+            provider: or_absent(&section.provider),
+            reviewer: or_absent(&section.reviewer),
+            verifier: or_absent(&section.verifier),
+            summarizer: or_absent(&section.summarizer),
+            source: "the manifest's [inference] section".to_owned(),
+        }
+    }
+}
+
 /// One unit of work the run drove, and what it left behind.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -162,6 +222,12 @@ pub struct IndexReport {
     pub generated_at: String,
     /// The tools responsible, in the order they are worth reading.
     pub tools: Vec<ToolVersion>,
+    /// Which models produced these reports (#6135).
+    ///
+    /// `None` when this run selected nothing — no credential, so no report was
+    /// rendered by any model — and the section then says so rather than being
+    /// omitted, for the same reason an unknown tool version is stated.
+    pub inference: Option<InferenceRecord>,
     /// One entry per unit the run drove, in the run's own order.
     pub entries: Vec<IndexEntry>,
     /// Wall clock around the whole run.
@@ -259,6 +325,7 @@ pub fn render(report: &IndexReport, dir: &Path) -> String {
     );
     summary(report, &mut out);
     versions(report, &mut out);
+    inference(report, &mut out);
     timings(report, &mut out);
     reports(report, dir, &mut out);
     contents(report.producer, &mut out);
@@ -309,6 +376,28 @@ fn versions(report: &IndexReport, out: &mut String) {
         "\n`trusty-audit` bakes no build-time git metadata, so its git revision is \
          **not recorded** — the version above is what it was compiled at.\n\n",
     );
+}
+
+/// Which models judged the code in this directory (#6135).
+fn inference(report: &IndexReport, out: &mut String) {
+    out.push_str("## Inference\n\n");
+    let Some(record) = &report.inference else {
+        out.push_str(
+            "Not recorded — this run selected no model, so nothing here was produced by \
+             inference.\n\n",
+        );
+        return;
+    };
+    out.push_str("| role | model |\n| --- | --- |\n");
+    out.push_str(&format!("| provider | `{}` |\n", record.provider));
+    out.push_str(&format!("| reviewer | `{}` |\n", record.reviewer));
+    out.push_str(&format!("| verifier | `{}` |\n", record.verifier));
+    out.push_str(&format!("| summarizer | `{}` |\n", record.summarizer));
+    out.push_str(&format!(
+        "\nSelected from {}. Each report states the same selection in its own metadata section \
+         and JSON twin, including any model id the renderer adjusted.\n\n",
+        record.source
+    ));
 }
 
 /// How long each piece took, and what that measurement covers.
@@ -642,6 +731,7 @@ pub fn recorded_tools(work: &crate::workdir::WorkDir) -> Vec<ToolVersion> {
 pub fn write_sweep(
     work: &crate::workdir::WorkDir,
     report: &crate::run::RunReport,
+    inference: Option<&crate::inference::Selection>,
     total: Duration,
 ) -> Result<(), AuditError> {
     let tools = recorded_tools(work);
@@ -665,6 +755,8 @@ pub fn write_sweep(
         producer: Producer::Sweep,
         generated_at: local_now(),
         tools,
+        // #6135: what judged the code, stated beside what ran it.
+        inference: inference.map(InferenceRecord::of),
         entries,
         total: Some(total),
     };
@@ -690,6 +782,7 @@ pub fn write_render(
     out_dir: &Path,
     review: &Path,
     version: Option<&str>,
+    inference: Option<InferenceRecord>,
     reports: &[crate::rerender::RenderedReport],
     total: Duration,
 ) -> Result<(), AuditError> {
@@ -726,6 +819,7 @@ pub fn write_render(
             review_version,
             ToolVersion::unknown("tga", "not recorded — a re-render runs no `tga`"),
         ],
+        inference,
         entries,
         total: Some(total),
     };
@@ -759,6 +853,7 @@ mod index_tests {
                 "2.9.4".to_owned(),
                 "recorded at install",
             )],
+            inference: None,
             entries,
             total: Some(Duration::from_secs(3_723)),
         }
@@ -788,6 +883,40 @@ mod index_tests {
         assert!(
             text.contains("[00-acme-api/00-acme-api.md](00-acme-api/00-acme-api.md)"),
             "the one report must be linked relatively: {text}"
+        );
+    }
+
+    /// Why: #6135, owner ruling 2026-08-21 — "The report should include which
+    /// models are used." The index is where a recipient sees it for the whole
+    /// directory, beside the tool versions.
+    /// What: renders an index with a record and one without, and asserts both
+    /// state something rather than one of them being silently shorter.
+    /// Test: this test itself.
+    #[test]
+    fn the_index_states_which_models_rendered() {
+        let mut index = report(Producer::Sweep, Vec::new());
+        index.inference = Some(InferenceRecord {
+            provider: "openrouter".to_owned(),
+            reviewer: "anthropic/claude-opus-4.8".to_owned(),
+            verifier: "anthropic/claude-haiku-4.5".to_owned(),
+            summarizer: "anthropic/claude-haiku-4.5".to_owned(),
+            source: "the manifest's [inference] section".to_owned(),
+        });
+        let text = render(&index, Path::new("out"));
+        assert!(text.contains("## Inference"), "{text}");
+        assert!(
+            text.contains("| reviewer | `anthropic/claude-opus-4.8` |"),
+            "{text}"
+        );
+        assert!(
+            text.contains("the manifest's [inference] section"),
+            "{text}"
+        );
+
+        let none = render(&report(Producer::Sweep, Vec::new()), Path::new("out"));
+        assert!(
+            none.contains("## Inference") && none.contains("Not recorded"),
+            "an absent selection is stated, not omitted: {none}"
         );
     }
 

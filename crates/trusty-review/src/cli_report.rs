@@ -17,13 +17,13 @@ use anyhow::{Context as _, Result};
 use clap::Parser;
 
 use trusty_review::config::{Provider, ReviewConfig};
-use trusty_review::llm::{build_provider, resolve_provider_and_model};
+use trusty_review::llm::{build_provider, resolve_model, resolve_provider_and_model};
 use trusty_review::report::{
     Budget, CorpusSnapshot, Instructions, Reporter, TemplateLoader, benchmark,
     investigate::{Investigation, apply_investigation, merge_investigation_prose},
     load_instructions, load_manifest,
     manifest::Manifest,
-    model::ReportModel,
+    model::{InferenceAttribution, ReportModel, RoleAttribution},
     parse_section_instructions, run_investigation,
     synthesize::Synthesis,
     synthesize::Synthesizer,
@@ -130,24 +130,39 @@ pub struct ReportArgs {
 /// the markdown + JSON pair.  Progress → STDERR; written paths → STDOUT.
 /// Test: arg parsing via `tests::report_args_parse_defaults`; full render via
 /// `tests/report_e2e.rs`.
-pub async fn cmd_report(config: ReviewConfig, args: ReportArgs) -> Result<()> {
-    // #5454: the credential is checked FIRST, before the manifest is read or a
-    // single repository is walked. A DD render takes minutes, and discovering an
-    // unset key at the end of it wastes all of them.
-    preflight_inference_credential(&config)?;
-
+pub async fn cmd_report(config_path: Option<&Path>, args: ReportArgs) -> Result<()> {
     if args.synthesize {
         eprintln!(
             "[trusty-review report] --synthesize is deprecated and ignored: synthesis is always on"
         );
     }
 
+    // #6135: the manifest is read BEFORE the config, because it is a config
+    // layer — it carries the provider and per-role models of the run that
+    // produced it, and those outrank this host's `config.toml`. Reading one
+    // small TOML file keeps #5454's promise intact: the credential is still
+    // checked before a single repository is walked.
     eprintln!(
         "[trusty-review report] Loading manifest: {}",
         args.manifest.display()
     );
     let manifest = load_manifest(&args.manifest)
         .with_context(|| format!("failed to load manifest {}", args.manifest.display()))?;
+    let declared = manifest.inference.as_ref().map(|i| i.as_role_layer());
+    let config = ReviewConfig::from_env_and_manifest(config_path, None, declared.as_ref());
+    let attribution = resolve_attribution(
+        &config,
+        match &declared {
+            Some(_) => "the manifest's [inference] section",
+            None => "this host's environment and config",
+        },
+    )?;
+    eprintln!("[trusty-review report] Inference: {}", attribution.line());
+
+    // #5454: the credential is checked before any repository is walked. A DD
+    // render takes minutes, and discovering an unset key at the end of it wastes
+    // all of them.
+    preflight_inference_credential(&config)?;
 
     // Template precedence: CLI flag > manifest [report].template > default.
     let template_name = args
@@ -181,6 +196,8 @@ pub async fn cmd_report(config: ReviewConfig, args: ReportArgs) -> Result<()> {
         instructions.as_ref(),
     )
     .context("failed to assemble report model")?;
+    // #6135: what ran, on the page and in the JSON twin.
+    model.inference = Some(attribution);
 
     // #2357 layered instructions: parse the active template's own
     // `<!-- instruct:<section_id> ... -->` overrides (if any) BEFORE the render
@@ -452,10 +469,45 @@ fn resolve_budget(args: &ReportArgs, manifest: &Manifest) -> Budget {
 /// Test: the rule itself, via [`credential_rule`].
 fn preflight_inference_credential(config: &ReviewConfig) -> Result<()> {
     let role = &config.role_models.reviewer;
-    // #6114: an id whose shape contradicts the provider stops here, before the
-    // sweep spends minutes on a render that would run a different model.
+    // #6135: the id resolves rather than refusing, so what this checks is the
+    // credential for the provider the resolution landed on.
     let (provider, _) = resolve_provider_and_model(&role.model, &role.provider)?;
     credential_rule(provider, &config.openrouter_api_key)
+}
+
+/// Resolve every role and record what will run (#6135).
+///
+/// Why: owner ruling 2026-08-21 — the report states which models are used, and
+/// an id the resolver adjusted shows both halves. Resolving all three roles here
+/// (rather than only the reviewer the synthesis pass builds) is what lets the
+/// manifest's whole declared selection be attributed.
+/// What: one [`ModelResolution`] per role, folded into the record the page and
+/// the JSON twin carry. `source` names the layer the selection came from, which
+/// is the fact that distinguishes a portable render from one that inherited the
+/// host's config.
+///
+/// # Errors
+///
+/// Only when a role's id names a provider this build cannot call and has no
+/// verified equivalent — see [`trusty_review::llm::resolve_model`].
+///
+/// Test: `tests::attribution_names_every_role`,
+/// `tests::attribution_shows_a_translated_id_as_requested_then_ran`.
+fn resolve_attribution(config: &ReviewConfig, source: &str) -> Result<InferenceAttribution> {
+    let roles = &config.role_models;
+    let mut rows = Vec::with_capacity(3);
+    for (name, role) in [
+        ("reviewer", &roles.reviewer),
+        ("verifier", &roles.verifier),
+        ("summarizer", &roles.summarizer),
+    ] {
+        let resolved = resolve_model(&role.model, &role.provider)?;
+        if let Some(note) = &resolved.note {
+            eprintln!("[trusty-review report] {name} model: {note}");
+        }
+        rows.push(RoleAttribution::of(name, &role.model, &resolved));
+    }
+    Ok(InferenceAttribution::of(source, rows))
 }
 
 /// The preflight rule itself, as a pure function.
@@ -475,10 +527,15 @@ fn credential_rule(provider: Provider, openrouter_api_key: &str) -> Result<()> {
         return Ok(());
     }
     if openrouter_api_key.trim().is_empty() {
+        // #6135: the provider is named, because it may have come from the
+        // manifest rather than from anything on this machine — an operator
+        // reading "set OPENROUTER_API_KEY" on a host configured for Bedrock
+        // needs to see WHICH provider asked for it.
         anyhow::bail!(
-            "{key} is not set, and a due-diligence report requires inference. Set it before \
-             starting the run:\n\n    export {key}=<your OpenRouter API key>\n\nKeys are issued at \
-             https://openrouter.ai/keys.",
+            "this render runs on the {provider} provider, and {key} is not set. A due-diligence \
+             report requires inference, and no other provider is substituted for the one \
+             selected. Set it before starting the run:\n\n    export {key}=<your OpenRouter API \
+             key>\n\nKeys are issued at https://openrouter.ai/keys.",
             key = trusty_common::env_vars::ENV_OPENROUTER_API_KEY,
         );
     }
@@ -721,7 +778,75 @@ mod tests {
                 msg.contains("OPENROUTER_API_KEY") && msg.contains("export OPENROUTER_API_KEY="),
                 "the message must name the variable and how to set it: {msg}"
             );
+            // #6135: the provider may have come from the manifest rather than
+            // from anything on this machine, so the message names it.
+            assert!(
+                msg.contains("openrouter"),
+                "the message must name the provider that asked for the key: {msg}"
+            );
         }
+    }
+
+    /// Why: #6135 — the report states which models ran, and that record starts
+    /// here. All three roles are resolved, not only the reviewer the synthesis
+    /// pass builds, so the manifest's whole declared selection is attributed.
+    /// What: resolves against a config whose role models are the built-in
+    /// OpenRouter defaults, and asserts one row per role.
+    /// Test: this test itself.
+    #[test]
+    fn attribution_names_every_role() {
+        let manifest = trusty_review::config::RoleManifest {
+            reviewer_model: Some("anthropic/claude-opus-4.8".to_string()),
+            verifier_model: Some("anthropic/claude-haiku-4.5".to_string()),
+            summarizer_model: Some("anthropic/claude-haiku-4.5".to_string()),
+            provider: Some("openrouter".to_string()),
+        };
+        let config = ReviewConfig::from_env_and_manifest(None, None, Some(&manifest));
+        let record = resolve_attribution(&config, "the manifest's [inference] section")
+            .expect("the declared selection resolves");
+
+        assert_eq!(record.provider, "openrouter");
+        assert_eq!(
+            record
+                .roles
+                .iter()
+                .map(|r| r.role.as_str())
+                .collect::<Vec<_>>(),
+            vec!["reviewer", "verifier", "summarizer"]
+        );
+        assert!(
+            record.roles.iter().all(|r| r.requested == r.ran),
+            "nothing was adjusted here: {:?}",
+            record.roles
+        );
+        assert_eq!(record.roles[0].ran, "anthropic/claude-opus-4.8");
+    }
+
+    /// Why: the resolver adjusting an id must never be invisible — that is the
+    /// whole anti-silent-wrong-model guarantee once refusal is gone.
+    /// What: a manifest whose reviewer id is pinned to Bedrock but spelled for
+    /// OpenRouter, resolved and attributed.
+    /// Test: this test itself.
+    #[test]
+    fn attribution_shows_a_translated_id_as_requested_then_ran() {
+        let manifest = trusty_review::config::RoleManifest {
+            reviewer_model: Some("bedrock/anthropic/claude-sonnet-4.6".to_string()),
+            provider: Some("bedrock".to_string()),
+            ..Default::default()
+        };
+        let config = ReviewConfig::from_env_and_manifest(None, None, Some(&manifest));
+        let record =
+            resolve_attribution(&config, "the manifest's [inference] section").expect("resolves");
+
+        let reviewer = &record.roles[0];
+        assert_eq!(reviewer.requested, "bedrock/anthropic/claude-sonnet-4.6");
+        assert_eq!(reviewer.ran, "us.anthropic.claude-sonnet-4-6");
+        assert!(reviewer.note.is_some(), "the adjustment must be recorded");
+        assert!(
+            record.line().contains(" → "),
+            "the page shows both halves: {}",
+            record.line()
+        );
     }
 
     /// Why: the preflight must not stand between an operator with a key and a run.

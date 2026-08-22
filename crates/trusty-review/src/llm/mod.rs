@@ -12,6 +12,7 @@
 //! object-safe; `provider_factory_*` tests cover the routing logic.
 
 pub mod bedrock;
+pub mod dialect;
 pub mod error;
 pub mod fireworks;
 pub mod models;
@@ -265,23 +266,96 @@ pub fn strip_provider_prefix(model: &str) -> &str {
 /// What: strips a known prefix, else infers the provider from the id's shape via
 /// [`trusty_common::inference::infer_provider_from_model_shape`], else falls
 /// back to `default_provider`. Whichever route is taken, the resulting pair is
-/// checked for a shape conflict before it is returned. Precedence: explicit
-/// prefix > unambiguous id shape > `default_provider`.
+/// reconciled before it is returned. Precedence: explicit prefix > unambiguous
+/// id shape > `default_provider`.
+///
+/// #6135 changed the terminal arm: a pair that cannot be reconciled is RESOLVED
+/// and the run proceeds — see [`resolve_model`], which additionally reports what
+/// the resolution changed. This function discards that record and is the form to
+/// call when only the pair is wanted.
 ///
 /// # Errors
 ///
-/// [`LlmError::Validation`], naming both the requested id and the provider that
-/// would execute it, when the two disagree.
+/// [`LlmError::Validation`] only when no reasonable resolution exists — the id
+/// names a provider this crate cannot call and has no counterpart in one it can.
 ///
 /// Test: `provider_factory_prefix_routing`,
 /// `bare_openrouter_slug_routes_to_openrouter_not_the_default`,
 /// `bare_bedrock_profile_id_routes_to_bedrock_not_the_default`,
-/// `prefix_that_contradicts_the_id_shape_is_an_error`,
+/// `a_contradicting_pair_resolves_instead_of_failing`,
 /// `ambiguous_bare_id_still_uses_the_default_provider`.
 pub fn resolve_provider_and_model(
     model: &str,
     default_provider: &Provider,
 ) -> Result<(Provider, String), LlmError> {
+    let resolved = resolve_model(model, default_provider)?;
+    Ok((resolved.provider, resolved.model))
+}
+
+/// What a model id resolved to, and how that differs from what was asked for.
+///
+/// Why: the owner ruling of 2026-08-21 replaced #6114's refusal with an
+/// attribution guarantee — a naming difference resolves and the run proceeds,
+/// but the report must state what actually ran. A `(provider, model)` pair alone
+/// cannot say that, because it has forgotten the request.
+/// What: the provider and bare id that will execute, the operator's original
+/// string, and `note` — present only when the two differ, carrying the one line
+/// the report and the log both show.
+/// Test: `a_contradicting_pair_resolves_instead_of_failing`,
+/// `a_translatable_id_keeps_the_pinned_provider`,
+/// `an_exact_resolution_records_no_adjustment`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ModelResolution {
+    /// The provider that will execute the call.
+    pub provider: Provider,
+    /// The bare model id that will run, prefix stripped.
+    pub model: String,
+    /// What the caller asked for, verbatim, prefix included.
+    pub requested: String,
+    /// Why the resolved pair differs from the request, when it does.
+    pub note: Option<String>,
+}
+
+impl ModelResolution {
+    /// Whether the resolver changed anything about the request.
+    #[must_use]
+    pub fn adjusted(&self) -> bool {
+        self.note.is_some()
+    }
+
+    /// `requested → ran`, or just the id when nothing was adjusted.
+    ///
+    /// One place decides how an adjustment reads, so the report body, the JSON
+    /// twin, and the log line cannot describe the same resolution differently.
+    #[must_use]
+    pub fn attribution(&self) -> String {
+        if self.adjusted() {
+            format!("{} → {} ({})", self.requested, self.model, self.provider)
+        } else {
+            format!("{} ({})", self.model, self.provider)
+        }
+    }
+}
+
+/// Resolve a model id to the provider and id that will actually run it.
+///
+/// Why: this is [`resolve_provider_and_model`] with the record kept. Owner
+/// ruling 2026-08-21: "Models selection should be robust. We shouldn't fail on
+/// naming/id issue. The report should include which models are used."
+/// What: the same precedence — explicit prefix > unambiguous id shape >
+/// `default_provider` — with the reconciliation in [`reconcile`].
+///
+/// # Errors
+///
+/// [`LlmError::Validation`] when the id belongs to a provider this crate cannot
+/// call and no verified counterpart exists in one it can.
+///
+/// Test: see [`ModelResolution`].
+pub fn resolve_model(
+    model: &str,
+    default_provider: &Provider,
+) -> Result<ModelResolution, LlmError> {
     if let Some(bare) = model.strip_prefix(BEDROCK_MODEL_PREFIX) {
         return reconcile(Provider::Bedrock, bare, model);
     }
@@ -292,52 +366,110 @@ pub fn resolve_provider_and_model(
         return reconcile(Provider::Fireworks, bare, model);
     }
     // #6114: no routing prefix — let an unambiguous id shape name its provider
-    // before the configured default gets it.
+    // before the configured default gets it. Nothing is adjusted here: the id
+    // runs exactly as written, on the provider whose catalogue it is in.
     if let Some(inferred) = trusty_common::inference::infer_provider_from_model_shape(model)
         .and_then(Provider::from_provider_id)
     {
-        return Ok((inferred, model.to_string()));
+        return Ok(ModelResolution {
+            provider: inferred,
+            model: model.to_string(),
+            requested: model.to_string(),
+            note: None,
+        });
     }
     reconcile(default_provider.clone(), model, model)
 }
 
-/// Refuse a `(provider, model)` pair whose id names a different provider.
+/// Resolve a `(provider, model)` pair whose id names a different provider.
 ///
-/// Why: #6114 — the id and the provider that will execute it must agree, and
-/// when they do not the only safe outcome is a loud stop. Silently running the
-/// provider's default model is the failure this exists to prevent.
-/// What: `Ok((provider, bare))` when the shape agrees or is ambiguous;
-/// [`LlmError::Validation`] naming `requested`, the inferred provider, and
-/// `provider` otherwise. `requested` is the operator's original string (prefix
-/// included) so the message quotes what they actually typed.
+/// Why: #6114 made this pair a hard stop, because running the provider's own
+/// default instead is the silent-wrong-model failure of the #6093 incident. The
+/// owner ruling of 2026-08-21 keeps that guarantee but moves it from refusal to
+/// attribution: the run proceeds on the operator's evident intent, and the
+/// report states what ran. A stop that blocks a due-diligence render over a
+/// spelling is the worse outcome now that the report cannot hide the answer.
+/// What: three arms, in order.
+///
+/// 1. The shape agrees, or is only a dotted-vendor guess: the pair stands.
+/// 2. The id has a verified counterpart in the pinned provider's own dialect:
+///    the provider the operator pinned wins and the id is translated
+///    ([`dialect::translate_model_dialect`]).
+/// 3. Otherwise the id keeps its own catalogue and the call routes to the
+///    provider that catalogue belongs to.
+///
+/// `requested` is the operator's original string (prefix included) so the note
+/// quotes what they actually typed.
 ///
 /// Uses [`conclusive_shape_mismatch`], not the plain form: every caller here
 /// reaches this with a provider the operator pinned by prefix, or with a
-/// default that only sees ids no shape claimed. Rejecting a pinned provider on
-/// the dotted-vendor guess would break `openrouter/anthropic.claude-x`, a
-/// working configuration, on a vendor-name coincidence.
+/// default that only sees ids no shape claimed. Overruling a pinned provider on
+/// the dotted-vendor guess would move `openrouter/anthropic.claude-x`, a working
+/// configuration, onto another provider on a vendor-name coincidence.
+///
+/// # Errors
+///
+/// [`LlmError::Validation`] when arm 3 has nowhere to route to — the shape names
+/// a provider `trusty-review` cannot call. Unreachable through
+/// [`classify_model_shape`]'s current answers, and kept as the honest terminal
+/// arm rather than a silent substitution.
 ///
 /// [`conclusive_shape_mismatch`]: trusty_common::inference::conclusive_shape_mismatch
-/// Test: `prefix_that_contradicts_the_id_shape_is_an_error`,
-/// `every_contradicting_pair_is_refused`,
+/// [`classify_model_shape`]: trusty_common::inference::classify_model_shape
+/// Test: `a_contradicting_pair_resolves_instead_of_failing`,
+/// `a_translatable_id_keeps_the_pinned_provider`,
+/// `every_contradicting_pair_resolves`,
 /// `explicit_prefix_survives_a_probable_bedrock_shape`.
-fn reconcile(
-    provider: Provider,
-    bare: &str,
-    requested: &str,
-) -> Result<(Provider, String), LlmError> {
-    if let Some(inferred) =
+fn reconcile(provider: Provider, bare: &str, requested: &str) -> Result<ModelResolution, LlmError> {
+    let Some(inferred) =
         trusty_common::inference::conclusive_shape_mismatch(provider.provider_id(), bare)
-    {
+    else {
+        return Ok(ModelResolution {
+            provider,
+            model: bare.to_string(),
+            requested: requested.to_string(),
+            note: None,
+        });
+    };
+
+    // #6135 arm 2: the same model, spelled the way the pinned provider spells
+    // it. Only ever a VERIFIED id — see `dialect`.
+    if let Some(translated) = dialect::translate_model_dialect(bare, provider.provider_id()) {
+        let note = format!(
+            "requested {requested:?}, which is {inferred}'s spelling; ran {translated:?}, the \
+             same model as {provider} publishes it",
+            inferred = inferred.as_str()
+        );
+        tracing::warn!(%requested, resolved = %translated, provider = %provider, "model id translated to the pinned provider's dialect");
+        return Ok(ModelResolution {
+            provider,
+            model: translated,
+            requested: requested.to_string(),
+            note: Some(note),
+        });
+    }
+
+    // #6135 arm 3: no counterpart to translate to, so keep the model the
+    // operator named and run it where it exists.
+    let Some(routed) = Provider::from_provider_id(inferred) else {
         return Err(LlmError::Validation(format!(
-            "model id {requested:?} names the {inferred} provider by its shape, but this call \
-             would run on {provider}. Refusing to substitute a different model than the one \
-             requested. Either set the provider to {inferred}, or pin one explicitly with a \
-             routing prefix (\"bedrock/…\", \"openrouter/…\", \"fireworks/…\").",
+            "model id {requested:?} belongs to the {inferred} catalogue, which this build cannot \
+             call, and no verified equivalent exists on {provider}. Name a model one of \
+             bedrock/openrouter/fireworks publishes.",
             inferred = inferred.as_str()
         )));
-    }
-    Ok((provider, bare.to_string()))
+    };
+    let note = format!(
+        "requested {requested:?} on {provider}; ran on {routed} instead — the id belongs to its \
+         catalogue and {provider} publishes no verified equivalent"
+    );
+    tracing::warn!(%requested, provider = %routed, "model id routed to the provider whose catalogue it belongs to");
+    Ok(ModelResolution {
+        provider: routed,
+        model: bare.to_string(),
+        requested: requested.to_string(),
+        note: Some(note),
+    })
 }
 
 /// Build an `Arc<dyn LlmProvider>` from the resolved role config.
@@ -595,53 +727,106 @@ mod tests {
         assert_eq!(prov, Provider::Bedrock);
     }
 
-    /// #6114: an explicit prefix that contradicts the id's shape is an error
-    /// naming both, never a silent run on the prefixed provider's default.
+    /// #6135 (owner ruling 2026-08-21): an explicit prefix that contradicts the
+    /// id's shape RESOLVES and the run proceeds — #6114's refusal became an
+    /// attribution. The model stays the one the operator named; only where it
+    /// runs changes, and the resolution says so.
     #[test]
-    fn prefix_that_contradicts_the_id_shape_is_an_error() {
-        let err =
-            resolve_provider_and_model("bedrock/anthropic/claude-opus-4.8", &Provider::OpenRouter)
-                .expect_err("a bedrock/ prefix on an OpenRouter slug must not resolve");
-        let msg = err.to_string();
+    fn a_contradicting_pair_resolves_instead_of_failing() {
+        let resolution = resolve_model("bedrock/anthropic/claude-opus-4.8", &Provider::OpenRouter)
+            .expect(
+                "a bedrock/ prefix on an OpenRouter slug resolves rather than stopping the run",
+            );
+        assert_eq!(
+            resolution.provider,
+            Provider::OpenRouter,
+            "Bedrock publishes no verified Opus 4.8 profile, so the id keeps its own catalogue"
+        );
+        assert_eq!(resolution.model, "anthropic/claude-opus-4.8");
+        assert!(resolution.adjusted(), "the change must be recorded");
+        let note = resolution.note.clone().unwrap_or_default();
         assert!(
-            msg.contains("anthropic/claude-opus-4.8"),
-            "the error must name the requested id: {msg}"
+            note.contains("anthropic/claude-opus-4.8")
+                && note.contains("bedrock")
+                && note.contains("openrouter"),
+            "the note must name the id and both providers: {note}"
         );
         assert!(
-            msg.contains("bedrock") && msg.contains("openrouter"),
-            "the error must name both providers: {msg}"
+            resolution
+                .attribution()
+                .contains("bedrock/anthropic/claude-opus-4.8 → anthropic/claude-opus-4.8"),
+            "the attribution must show requested → ran: {}",
+            resolution.attribution()
         );
     }
 
-    /// #6114: the refusal is symmetric across all three backends, so no pairing
-    /// is left with a silent substitution.
+    /// #6135: where the pinned provider publishes the same model, IT wins and
+    /// the id is translated into its dialect — the operator pinned the provider
+    /// for this call, and the model survives the translation intact.
     #[test]
-    fn every_contradicting_pair_is_refused() {
-        // A Bedrock profile id pinned to Fireworks by prefix cannot run.
-        let err = resolve_provider_and_model(
-            "fireworks/us.anthropic.claude-sonnet-4-6",
-            &Provider::OpenRouter,
-        )
-        .expect_err("a bedrock profile id must not be sent to Fireworks");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("us.anthropic.claude-sonnet-4-6") && msg.contains("fireworks"),
-            "the error must name the id and the provider: {msg}"
+    fn a_translatable_id_keeps_the_pinned_provider() {
+        let resolution =
+            resolve_model("bedrock/anthropic/claude-sonnet-4.6", &Provider::OpenRouter)
+                .expect("a translatable slug resolves");
+        assert_eq!(resolution.provider, Provider::Bedrock);
+        assert_eq!(
+            resolution.model, "us.anthropic.claude-sonnet-4-6",
+            "the id must be Bedrock's VERIFIED profile, never a derived spelling"
         );
+        assert!(resolution.adjusted());
+    }
 
-        // A fireworks-native id pinned to OpenRouter by prefix cannot run.
-        resolve_provider_and_model(
-            "openrouter/accounts/fireworks/models/llama-v3p1-70b-instruct",
-            &Provider::Bedrock,
-        )
-        .expect_err("a fireworks-native id must not be sent to OpenRouter");
+    /// #6135: the resolution is symmetric across all three backends, so no
+    /// pairing is left as a hard stop — and none is left as a silent
+    /// substitution either, because every one records what it changed.
+    #[test]
+    fn every_contradicting_pair_resolves() {
+        for (requested, default, expect_provider) in [
+            (
+                "fireworks/us.anthropic.claude-sonnet-4-6",
+                Provider::OpenRouter,
+                Provider::Bedrock,
+            ),
+            (
+                "openrouter/accounts/fireworks/models/llama-v3p1-70b-instruct",
+                Provider::Bedrock,
+                Provider::Fireworks,
+            ),
+        ] {
+            let resolution =
+                resolve_model(requested, &default).expect("every contradiction has a resolution");
+            assert_eq!(
+                resolution.provider, expect_provider,
+                "{requested:?} must route to the catalogue its id belongs to"
+            );
+            assert!(
+                resolution.adjusted(),
+                "{requested:?} changed provider and must say so"
+            );
+        }
 
-        // Unprefixed, that same id resolves to Fireworks on its shape alone.
-        let (prov, _) = resolved(
+        // Unprefixed, the fireworks-native id resolves to Fireworks on its shape
+        // alone — nothing was adjusted, because nothing contradicted it.
+        let resolution = resolve_model(
             "accounts/fireworks/models/llama-v3p1-70b-instruct",
             &Provider::OpenRouter,
+        )
+        .expect("resolves");
+        assert_eq!(resolution.provider, Provider::Fireworks);
+        assert!(!resolution.adjusted());
+    }
+
+    /// #6135: an ordinary resolution records nothing, so the report shows one id
+    /// rather than a `requested → ran` pair that changed nothing.
+    #[test]
+    fn an_exact_resolution_records_no_adjustment() {
+        let resolution = resolve_model("anthropic/claude-opus-4.8", &Provider::OpenRouter)
+            .expect("an agreeing pair resolves");
+        assert!(!resolution.adjusted());
+        assert_eq!(
+            resolution.attribution(),
+            "anthropic/claude-opus-4.8 (openrouter)"
         );
-        assert_eq!(prov, Provider::Fireworks);
     }
 
     /// #6114 (code-critic MEDIUM 2): an explicit routing prefix survives a

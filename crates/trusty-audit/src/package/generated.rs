@@ -148,10 +148,34 @@ pub(super) fn render_index(
         producer: crate::index_report::Producer::Package,
         generated_at: crate::index_report::local_now(),
         tools: crate::index_report::recorded_tools(work),
+        // #6135: read back from the manifests the package ships, because those
+        // are what a recipient's own re-render will resolve from.
+        inference: declared_inference(report),
         entries,
         total: (measured > 0).then(|| std::time::Duration::from_millis(measured)),
     };
     crate::index_report::render(&index, Path::new(REPORTS_PREFIX))
+}
+
+/// The inference identity the packaged manifests declare (#6135).
+///
+/// Why: the package carries manifests, and `trusty-review` resolves provider and
+/// models from them ahead of anything on the recipient's machine — so what they
+/// declare IS what a re-render will use, and the index states it rather than
+/// leaving the recipient to open a TOML file.
+/// What: the first manifest that declares a section. Every repository in one
+/// sweep gets the same selection, so the first is the run's. `None` — a sweep
+/// with no credential, or manifests written before the key existed — leaves the
+/// section stating that rather than omitting it.
+fn declared_inference(report: &RunReport) -> Option<crate::index_report::InferenceRecord> {
+    report.repos.iter().find_map(|run| {
+        let path = run.output.join(crate::manifest::AuditManifest::FILE_NAME);
+        let manifest = crate::manifest::AuditManifest::load_if_present(&path).ok()??;
+        manifest
+            .inference
+            .as_ref()
+            .map(crate::index_report::InferenceRecord::declared)
+    })
 }
 
 /// One line per repository the package does not cover.

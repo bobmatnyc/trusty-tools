@@ -40,6 +40,7 @@ fn model_with(repos: Vec<RepositoryReport>) -> ReportModel {
         analyst: None,
         client: None,
         vendor_methodology: crate::report::model::vendor_methodology(),
+        inference: None,
         instructions: None,
         instructions_source: None,
         report_date: "2026-08-18".to_string(),

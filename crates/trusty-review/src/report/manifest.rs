@@ -34,8 +34,75 @@ use super::error::ManifestError;
 pub struct Manifest {
     /// The top-level `[report]` metadata section.
     pub report: ReportSection,
+    /// The run's declared inference identity, when the manifest carries one
+    /// (#6135). `None` for every manifest written before this key existed, which
+    /// is what keeps an old package rendering exactly as it did.
+    pub inference: Option<InferenceSection>,
     /// One or more validated repository entries (never empty after loading).
     pub repositories: Vec<RepositoryEntry>,
+}
+
+/// The `[inference]` section: which provider and models a run is rendered with.
+///
+/// Why: owner ruling 2026-08-21 — "In audit mode, trusty review should use the
+/// same provider as audit to make it portable. From the manifest." Until now the
+/// identity travelled only as environment variables on the child `trusty-review`
+/// process, so a package re-rendered on another machine — the #6080 use case —
+/// fell through to whatever `~/.config/trusty-review/config.toml` happened to
+/// say. A June-dated local config pinning `provider = "bedrock"` is what hijacked
+/// a render on 2026-08-21 and misdirected the #6093 mitigation before it. The
+/// manifest ships with the package; the host's config does not.
+/// What: the provider and the three per-role model ids `trusty-audit` resolved,
+/// each optional so a partially-declared section still loads and the undeclared
+/// roles fall through to the layers below. Never a credential — a key stays in
+/// the environment (`OPENROUTER_API_KEY`), because a manifest is delivered to
+/// the client.
+/// Test: `manifest_tests::{parse_inference_section, an_absent_inference_section_is_none}`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[non_exhaustive]
+pub struct InferenceSection {
+    /// Provider id — `openrouter`, `bedrock`, `fireworks`.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Model id for the reviewer role (the pass that does the judging).
+    #[serde(default)]
+    pub reviewer: Option<String>,
+    /// Model id for the verifier role.
+    #[serde(default)]
+    pub verifier: Option<String>,
+    /// Model id for the summarizer role.
+    #[serde(default)]
+    pub summarizer: Option<String>,
+}
+
+impl InferenceSection {
+    /// Whether this section declares anything at all.
+    ///
+    /// A section present but empty must behave exactly like an absent one, so
+    /// the resolution layer is skipped rather than applied with four `None`s.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.provider.is_none()
+            && self.reviewer.is_none()
+            && self.verifier.is_none()
+            && self.summarizer.is_none()
+    }
+
+    /// This section as the config precedence layer it becomes.
+    ///
+    /// Why: `config::RoleManifest` is where resolution happens, and it must not
+    /// depend on the `report` feature this type lives behind. Converting here
+    /// keeps the dependency pointing one way.
+    /// Test: `manifest_tests::the_section_becomes_a_resolution_layer`.
+    #[must_use]
+    pub fn as_role_layer(&self) -> crate::config::RoleManifest {
+        crate::config::RoleManifest {
+            reviewer_model: self.reviewer.clone(),
+            verifier_model: self.verifier.clone(),
+            summarizer_model: self.summarizer.clone(),
+            provider: self.provider.clone(),
+        }
+    }
 }
 
 /// The `[report]` metadata section of a manifest.
@@ -288,6 +355,10 @@ impl RepositorySource {
 #[derive(Debug, Deserialize)]
 struct RawManifest {
     report: ReportSection,
+    /// #6135: the run's declared provider/model identity, absent in every
+    /// manifest written before it existed.
+    #[serde(default)]
+    inference: Option<InferenceSection>,
     #[serde(default)]
     repositories: Vec<RawRepositoryEntry>,
 }
@@ -470,6 +541,9 @@ fn validate(raw: RawManifest) -> std::result::Result<Manifest, ManifestError> {
 
     Ok(Manifest {
         report: raw.report,
+        // #6135: an empty `[inference]` table declares nothing, so it must reach
+        // the resolver as absent rather than as four unset overrides.
+        inference: raw.inference.filter(|i| !i.is_empty()),
         repositories,
     })
 }
