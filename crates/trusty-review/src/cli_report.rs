@@ -28,6 +28,7 @@ use trusty_review::report::{
     parse_section_instructions, run_investigation,
     synthesize::Synthesis,
     synthesize::Synthesizer,
+    synthesize::ground_investigation_prose,
     template::DEFAULT_TEMPLATE,
 };
 
@@ -667,7 +668,7 @@ async fn run_synthesis(
     // here (unlike the reviewer's): the pass fails closed, recording every traced
     // finding as unverifiable, which is a stated gap rather than a lost render.
     let verifier = build_verdict_verifier(config).await;
-    if let Some(inv) = run_investigation(
+    if let Some(mut inv) = run_investigation(
         provider.clone(),
         &role.model,
         verifier.as_ref(),
@@ -686,6 +687,14 @@ async fn run_synthesis(
         // landed a failure discarded the whole investigation — minutes of real
         // LLM spend, unrecoverable.
         persist_investigation(out_dir, &inv);
+        // #6082 lap 6: guard the investigation's own prose BEFORE it is copied
+        // anywhere. `merge_investigation_prose` below overwrites the guarded
+        // synthesis prose with this text, so guarding only the synthesis half
+        // left the rendered finding stating the claim the guard had rejected.
+        // Correcting here reaches every copy: the injected `metrics.findings`
+        // rows, `model.investigation` in the JSON twin, the synthesis prompt,
+        // and the merged prose.
+        let inv_notes = ground_investigation_prose(model, &mut inv);
         apply_investigation(model, &inv);
         // #6009: capture the raw response next to the report output on an
         // unparseable-response failure, so a future occurrence is diagnosable
@@ -695,6 +704,7 @@ async fn run_synthesis(
             .with_raw_capture_dir(out_dir)
             .synthesize(model)
             .await?;
+        synthesis.notes.extend(inv_notes);
         merge_investigation_prose(&mut synthesis, &inv);
         Ok(synthesis)
     } else {
