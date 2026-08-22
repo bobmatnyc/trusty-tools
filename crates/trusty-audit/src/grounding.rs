@@ -274,6 +274,14 @@ pub async fn ground(
             failures: vec![cause],
         },
     };
+    // #6082: judged BEFORE the manifest backfill below, because that backfill
+    // finds `Cargo.toml` in every Rust repository and would therefore create a
+    // dimension on a run where search answered nothing at all. Reading the
+    // backfilled list is how the 2026-08-22 dogfood audit shipped a report whose
+    // every file was a path-name heuristic with no gap line saying so.
+    let mut gaps = discovery_gaps(&discovery, display);
+    let search_answered = !discovery.dimensions.is_empty();
+
     let mut discovery = discovery;
     // #6082: the dependencies dimension is enumerable, not semantic. Search
     // returned three files that MENTION dependencies and no manifest, and the
@@ -283,7 +291,6 @@ pub async fn ground(
         checkout,
         caps.files_per_dimension,
     );
-    let mut gaps = discovery_gaps(&discovery, display);
 
     let hotspots = complexity(tools, &index_id, checkout, display, &mut gaps).await;
     let priorities = evidence::blend(&hotspots, &discovery.dimensions, caps.priority_paths);
@@ -296,9 +303,10 @@ pub async fn ground(
     Grounding {
         index_id: Some(index_id),
         // #6082: the ranking may decline trusty-review's heuristic top-up only
-        // when the search leg actually answered — a complexity-only ranking has
-        // no business suppressing the heuristics that are then all it has.
-        attributed: !discovery.dimensions.is_empty() && !priorities.is_empty(),
+        // when the SEARCH leg actually answered — a complexity-only ranking has
+        // no business suppressing the heuristics that are then all it has, and
+        // neither has a list the manifest enumeration alone put a dimension on.
+        attributed: search_answered && !priorities.is_empty(),
         priorities,
         gaps,
     }
@@ -394,6 +402,9 @@ pub async fn ground_manifest(
     // It writes its own key, after the ranking, so one leg's write failure
     // cannot take the other's data with it.
     let topology_gaps = topology::ground_into(manifest, checkout, display);
+    // #6082: read BEFORE the write, which is what would otherwise make the two
+    // states indistinguishable afterwards.
+    let already_rendered = investigation_exists(manifest);
     if let Err(cause) = priority::write_into(
         manifest,
         checkout,
@@ -419,7 +430,46 @@ pub async fn ground_manifest(
         ));
     }
     grounding.gaps.extend(topology_gaps);
+    if already_rendered && !grounding.priorities.is_empty() {
+        // Returned to the caller and deliberately NOT written into
+        // `[report].gaps`: the manifest now carries the ranking, so a re-render
+        // of this package does use it and the line would be false there.
+        grounding.gaps.push(format!(
+            "{display}: the evidence ranking reached the manifest after the report had already \
+             been rendered from it, so that report's investigation selected files by path name. \
+             Re-render the engagement (`taudit render`) to produce one that reads the {} ranked \
+             path(s).",
+            grounding.priorities.len()
+        ));
+    }
     grounding.gaps
+}
+
+/// Name of the snapshot trusty-review writes beside a manifest it investigated.
+///
+/// Spelled here rather than shared because it is read as EVIDENCE THAT A RENDER
+/// ALREADY HAPPENED, never as an interface — trusty-review owns the file and
+/// this only looks for it. Producer: `trusty_review::report::investigate`.
+const INVESTIGATION_SNAPSHOT: &str = "investigation.json";
+
+/// True when a render has already investigated this manifest.
+///
+/// Why: `tga audit` writes the manifest and runs `trusty-review report` against
+/// it inside ONE process, and `crate::run` grounds that manifest only once the
+/// child has exited — so on the sweep path every ranking this module produces
+/// lands in a file the report was already generated from. That degradation had
+/// no gap line anywhere: the 2026-08-22 dogfood run shipped a manifest declaring
+/// 37 ranked paths beside an `investigation.json` whose every examined file said
+/// "path-name heuristic".
+/// What: whether [`INVESTIGATION_SNAPSHOT`] sits beside `manifest`. False when
+/// the manifest has no parent and false on every path that renders later, which
+/// is the state this is meant to say nothing about.
+/// Test: `super::grounding_tests::a_ranking_that_lands_after_the_render_says_so`,
+/// which drives both states in order.
+fn investigation_exists(manifest: &Path) -> bool {
+    manifest
+        .parent()
+        .is_some_and(|dir| dir.join(INVESTIGATION_SNAPSHOT).is_file())
 }
 
 /// Longest analyst brief the discovery leg derives queries from.

@@ -575,6 +575,124 @@ async fn hotspots_and_search_hits_become_ranked_inspect_priority_in_the_manifest
     );
 }
 
+/// #6082: a search leg that answered nothing still says so when the tree has a
+/// build manifest to backfill the dependencies dimension with.
+///
+/// Why this is the regression: `quality::lead_with_manifests` ran BEFORE
+/// `discovery_gaps` read the dimension list, and it finds `Cargo.toml` in every
+/// Rust repository — so an empty search produced a non-empty `dimensions`, the
+/// "matched no evidence" line never fired, and `attributed` was computed from
+/// the backfilled list and came out TRUE. Against that code both assertions
+/// below fail, and the manifest declares `attributed_only = true` over a sample
+/// that has no search evidence in it at all. That combination shipped on
+/// 2026-08-22: a report whose every examined file said "path-name heuristic",
+/// with nothing in Gaps & Caveats saying why.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_search_that_found_nothing_is_a_gap_even_when_a_manifest_backfills_it() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let checkout = tmp.path().join("repos").join("acme-api");
+    std::fs::create_dir_all(&checkout).expect("mkdir checkout");
+    std::fs::write(checkout.join("Cargo.toml"), "[package]\nname = \"acme\"\n").expect("manifest");
+
+    let t = tools(
+        approving_search(tmp.path()),
+        stub_daemon_with(None, Some(r#"{"results":[]}"#)).await,
+        PathBuf::from("/nonexistent/trusty-analyze"),
+        stub_daemon(Some(EMPTY_HOTSPOTS)).await,
+    );
+    let out = ground(
+        &t,
+        &checkout,
+        "acme-api",
+        None,
+        priority::Budget::from_env(),
+    )
+    .await;
+
+    assert!(
+        !out.priorities.is_empty(),
+        "the enumerated build manifest is still ranked"
+    );
+    assert!(
+        out.gaps
+            .iter()
+            .any(|g| g.contains("matched no evidence for any due-diligence dimension")),
+        "the backfill must not swallow the search leg's silence: {:?}",
+        out.gaps
+    );
+    assert!(
+        !out.attributed,
+        "a dimension the enumeration created is not search-derived evidence, so the ranking may \
+         not decline trusty-review's heuristic top-up"
+    );
+}
+
+/// #6082: a ranking written into a manifest that has already been rendered from
+/// says so, and names the recovery.
+///
+/// Why this is the regression: `tga audit` writes the manifest and runs
+/// `trusty-review report` against it inside one process, and `crate::run`
+/// grounds that manifest only after the child exits. Against the pre-fix code
+/// this degradation had no line anywhere — console, manifest or report — so the
+/// 2026-08-22 run shipped 37 ranked paths beside an investigation that read none
+/// of them and declared no gap.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_ranking_that_lands_after_the_render_says_so() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let checkout = tmp.path().join("repos").join("acme-api");
+    std::fs::create_dir_all(&checkout).expect("mkdir checkout");
+    let manifest = manifest_naming(tmp.path(), &checkout);
+    let payload: &'static str = Box::leak(
+        HOTSPOTS
+            .replace("CHECKOUT", &checkout.display().to_string())
+            .into_boxed_str(),
+    );
+    let stubs = || async {
+        tools(
+            approving_search(tmp.path()),
+            stub_daemon_with(None, Some(SEARCH_HITS)).await,
+            PathBuf::from("/nonexistent/trusty-analyze"),
+            stub_daemon(Some(payload)).await,
+        )
+    };
+
+    // No snapshot beside the manifest: nothing has rendered it yet, and the
+    // ordinary path says nothing.
+    let quiet = ground_manifest(&manifest, &stubs().await, &checkout, "acme-api").await;
+    assert!(
+        !quiet.iter().any(|g| g.contains("already been rendered")),
+        "a manifest nobody has rendered is not a degradation: {quiet:?}"
+    );
+
+    // The snapshot trusty-review writes when it investigates a manifest.
+    std::fs::write(tmp.path().join("investigation.json"), "{}").expect("snapshot");
+    let late = ground_manifest(&manifest, &stubs().await, &checkout, "acme-api").await;
+    let named = late
+        .iter()
+        .find(|g| g.contains("already been rendered"))
+        .unwrap_or_else(|| panic!("the degradation must be named: {late:?}"));
+    assert!(
+        named.contains("taudit render"),
+        "and must name the recovery: {named}"
+    );
+
+    // The line is for the operator only — a re-render DOES read the ranking the
+    // manifest now carries, so stating it there would be false.
+    let written = std::fs::read_to_string(&manifest).expect("read back");
+    let parsed: toml::Value = toml::from_str(&written).expect("still valid TOML");
+    let declared: Vec<&str> = parsed["report"]
+        .get("gaps")
+        .and_then(toml::Value::as_array)
+        .map(|a| a.iter().filter_map(toml::Value::as_str).collect())
+        .unwrap_or_default();
+    assert!(
+        !declared.iter().any(|g| g.contains("already been rendered")),
+        "{written}"
+    );
+}
+
 /// #6082: the brief the manifest declares becomes queries of its own — and a
 /// manifest with no brief is the ordinary case, not a failure.
 #[test]

@@ -8,14 +8,53 @@ use super::*;
 use crate::grounding::evidence::DimensionEvidence;
 
 /// The promotion this floor exists to stop: the auth dimension's HEADLINE
-/// evidence was a call-graph test file at score 0.02.
+/// evidence was a call-graph test file at score 0.02, in a run whose genuine
+/// hits scored 0.6–0.9.
 #[test]
-fn a_noise_score_is_not_evidence() {
-    assert!(!is_evidence(0.02), "the observed noise promotion");
-    assert!(!is_evidence(0.0));
-    assert!(!is_evidence(f32::NAN), "a NaN score is never evidence");
-    assert!(is_evidence(0.62), "a genuine hit from the same run");
-    assert!(is_evidence(MIN_EVIDENCE_SCORE), "the floor itself passes");
+fn a_filler_row_beside_a_real_hit_is_dropped() {
+    let floor = evidence_floor(0.9);
+    assert!(!is_evidence(0.02, floor), "the observed noise promotion");
+    assert!(!is_evidence(0.0, floor));
+    assert!(
+        !is_evidence(f32::NAN, floor),
+        "a NaN score is never evidence"
+    );
+    assert!(is_evidence(0.62, floor), "a genuine hit from the same run");
+    assert!(is_evidence(0.9, floor), "the best hit always survives");
+}
+
+/// #6082: the floor tracks the scale the daemon actually answers on.
+///
+/// `POST /indexes/{id}/search` fuses its lanes with RRF, so no hit can score
+/// above `1/61 ≈ 0.0164`. Against the absolute `0.15` this replaced, every
+/// assertion below fails: the whole result set is rejected and the discovery leg
+/// returns nothing however good the index is.
+#[test]
+fn rrf_scale_hits_clear_a_relative_floor() {
+    // The head and tail of a real `hybrid` response over an 85 840-chunk index.
+    let (best, tail) = (0.012_94_f32, 0.007_8_f32);
+    let floor = evidence_floor(best);
+    assert!(is_evidence(best, floor), "the best RRF hit is evidence");
+    assert!(is_evidence(tail, floor), "so is the head of its tail");
+    assert!(
+        !is_evidence(best * 0.1, floor),
+        "an order-of-magnitude weaker row is still filler"
+    );
+}
+
+/// The floor is a share of the best hit, and never a number the caller must
+/// know the daemon's scale to pick.
+#[test]
+fn the_floor_scales_with_the_best_hit() {
+    assert!((evidence_floor(0.9) - 0.45).abs() < 1e-6);
+    assert!((evidence_floor(0.012_94) - 0.006_47).abs() < 1e-6);
+    for unusable in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+        assert_eq!(
+            evidence_floor(unusable),
+            0.0,
+            "an unusable best yields no floor, never one that rejects everything"
+        );
+    }
 }
 
 /// A test file matches the query that looks for the thing it tests, so without

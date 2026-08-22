@@ -555,6 +555,62 @@ fn the_query_url_names_the_index() {
     assert_eq!(client.url, "http://127.0.0.1:7878/indexes/acme-api/search");
 }
 
+/// #6082: the whole discovery pass, against the score scale the daemon really
+/// answers on.
+///
+/// Why this is the regression: `POST /indexes/{id}/search` fuses its lanes with
+/// Reciprocal Rank Fusion, so a hit's score is `Σ weight / (60 + rank)` and can
+/// never exceed `1/61 ≈ 0.0164`. The floor this replaced was an absolute `0.15`,
+/// which no hit of any query could ever clear — so `discover` returned an empty
+/// `dimensions` whatever the index held, and every assertion below fails against
+/// that code. The scores are the real head and tail of a `hybrid` response over
+/// the 2026-08-22 dogfood run's 85 840-chunk index.
+#[test]
+fn rrf_scored_hits_still_become_evidence() {
+    let stub = StubSearch::default()
+        .answering(
+            "credential handling",
+            &[
+                ("crates/x/src/api/server/auth.rs", 0.012_94),
+                ("crates/x/src/credentials/authority.rs", 0.009_7),
+            ],
+        )
+        .answering(
+            "shared mutable state",
+            &[("crates/x/src/store/handle.rs", 0.011_2)],
+        );
+
+    let discovery = block_on(discover(&stub, None, Caps::default()));
+
+    assert!(
+        discovery.failures.is_empty(),
+        "nothing failed: {:?}",
+        discovery.failures
+    );
+    let named: Vec<&str> = discovery
+        .dimensions
+        .iter()
+        .map(|d| d.dimension.as_str())
+        .collect();
+    assert_eq!(
+        named,
+        vec!["authentication & secrets", "state management"],
+        "an RRF-scored hit is evidence for the dimension whose query found it"
+    );
+    assert_eq!(
+        discovery.dimensions[0]
+            .files
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "crates/x/src/api/server/auth.rs",
+            "crates/x/src/credentials/authority.rs"
+        ],
+        "both hits clear a floor derived from their own query's best"
+    );
+}
+
 /// A daemon that is not listening is a reason, never a panic.
 #[test]
 fn a_dead_daemon_is_a_reason_not_a_panic() {
