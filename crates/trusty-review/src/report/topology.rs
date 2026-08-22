@@ -21,7 +21,7 @@
 //! producer decides what is worth a gap line, and a TypeScript repository has no
 //! crate topology to miss.
 //!
-//! Test: `topology_tests.rs`.
+//! Test: `topology_tests`.
 
 use serde::{Deserialize, Serialize};
 
@@ -259,4 +259,4 @@ pub fn prompt_facts(model: &ReportModel) -> String {
 
 #[cfg(test)]
 #[path = "topology_tests.rs"]
-mod tests;
+mod topology_tests;
