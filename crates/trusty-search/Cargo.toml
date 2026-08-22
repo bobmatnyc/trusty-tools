@@ -3,7 +3,7 @@ name = "trusty-search"
 # #4421: patch bump — 0.47.0 already published on crates.io and this PR
 # touches src/**. Every hunk is a doc-comment edit (module docs moved to the
 # inner `//!` standard, #5754) — no item signature or behavior changed.
-version = "0.47.1"
+version = "0.48.0"
 edition = "2021"
 description = "Machine-wide hybrid code search service: BM25 + vector + KG, zero cold-start, MCP server"
 readme = "README.md"
