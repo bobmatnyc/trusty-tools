@@ -216,6 +216,81 @@ fn the_shipped_template_renders_the_table() {
     assert!(rendered.contains("| core | — | 2 |"), "{rendered}");
 }
 
+/// A workspace with a leaf nothing depends on renders that leaf too.
+///
+/// #6082: the renderer used the [`TABLE_ROW_CAP`]-truncated list, and the sort
+/// puts `inbound == 0` crates last, so the cap dropped exactly the leaves — 15
+/// of 30 in the dogfood run — under a summary line still claiming 30 crates.
+#[test]
+fn every_crate_reaches_the_rendered_table() {
+    let mut crates = vec![node("core", &[], TABLE_ROW_CAP + 4)];
+    // More dependents than the cap, every one of them an inbound-0 leaf.
+    for i in 0..TABLE_ROW_CAP + 4 {
+        crates.push(node(&format!("leaf{i:02}"), &["core"], 0));
+    }
+    let members = crates.len();
+    let topology = CrateTopology {
+        members,
+        edges: members - 1,
+        cycles: Vec::new(),
+        crates,
+    };
+    let model = model_with(vec![repo("Demo", Some(topology))]);
+    let scope = crate::report::reporter::build_scope(&model);
+
+    let rendered = crate::report::fill::render(
+        "<!-- BEGIN crate_topology --><!-- BEGIN ct_row -->[{{ct_crate}}]<!-- END ct_row --><!-- \
+         END crate_topology -->",
+        &scope,
+    );
+
+    assert_eq!(
+        rendered.matches('[').count(),
+        members,
+        "every declared crate must render a row: {rendered}"
+    );
+    // The last leaf is the one the cap used to drop.
+    let last = format!("[leaf{:02}]", TABLE_ROW_CAP + 3);
+    assert!(rendered.contains(&last), "{rendered}");
+}
+
+/// The shipped template's topology table survives the polish pass as a real
+/// markdown table: header, delimiter, and CONTIGUOUS rows.
+///
+/// #6082: `ct_row`'s BEGIN/END markers each sat on their own line, so every
+/// repetition emitted `\n| row |\n` and the rows came out blank-line separated.
+/// That left the header + delimiter as a two-line table with no body, which
+/// `polish::process_table` collapses and drops — the rendered report showed 15
+/// orphan pipe-lines under no header at all. `fill::render` alone never saw it,
+/// which is why the existing template test stayed green; this one polishes.
+#[test]
+fn the_shipped_topology_table_survives_polish() {
+    let model = model_with(vec![repo("Demo", Some(three_crate_topology()))]);
+    let scope = crate::report::reporter::build_scope(&model);
+    let template = crate::report::TemplateLoader::bundled_only()
+        .load(crate::report::DEFAULT_TEMPLATE)
+        .expect("the bundled template loads");
+
+    let polished = crate::report::polish::polish(&crate::report::fill::render(&template, &scope));
+
+    let head = polished
+        .find("| Crate | Direct internal deps | Depended on by |")
+        .unwrap_or_else(|| panic!("the header must survive polish:\n{polished}"));
+    let table: Vec<&str> = polished[head..]
+        .lines()
+        .take_while(|l| l.trim_start().starts_with('|'))
+        .collect();
+
+    assert_eq!(
+        table.len(),
+        5,
+        "header + delimiter + 3 contiguous rows, no blank lines between: {table:?}"
+    );
+    assert_eq!(table[1].trim(), "|---|---|---|", "{table:?}");
+    assert_eq!(table[2].trim(), "| core | — | 2 |", "{table:?}");
+    assert_eq!(table[4].trim(), "| app | core, mid | 0 |", "{table:?}");
+}
+
 /// A repository that is not a Cargo workspace renders a report BYTE-IDENTICAL
 /// to one produced by a template with no topology block in it at all. No table,
 /// no header, and no honesty marker standing in for the missing data — a

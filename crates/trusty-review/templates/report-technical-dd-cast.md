@@ -199,6 +199,7 @@ vs. All technologies (peer set size: {{all_tech_peer_set_size}}):
 <!-- BEGIN amber_finding -->
 {{finding_index}}. **{{finding_title}}** — {{finding_description}}
 - **Component:** {{finding_component}}
+- **Business impact:** {{finding_business_impact}}
 - **Remediation:** {{finding_remediation}}
 {{finding_evidence_block}}
 <!-- END amber_finding -->

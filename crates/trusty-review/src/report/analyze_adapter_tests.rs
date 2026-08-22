@@ -137,6 +137,134 @@ fn refactor_finding_synthesises_title() {
     assert_eq!(f.component, "src/cfg.rs");
 }
 
+// ─── Nameless regions are impl blocks, not functions (#6082) ─────────────────
+
+/// The exact payload trusty-analyze returned for `impl HnswStore { … }` in the
+/// dogfood run: a region with no function name, whose prose calls it a function.
+fn nameless_region() -> WireRefactor {
+    serde_json::from_str(
+        r#"{ "file": "crates/trusty-common/src/memory_core/store/hnsw_store.rs",
+             "refactor_type": "extract_method", "severity": "critical",
+             "rationale": "cyclomatic complexity 140 (grade F); smells: long_function(603 lines), deep_nesting(depth 6)",
+             "suggested_action": "Extract the body of 'this function' (lines 342–945) into 2–3 smaller functions" }"#,
+    )
+    .unwrap()
+}
+
+/// #6082: the top four maintainability findings of the dogfood report were
+/// `impl` blocks titled "Extract method" and remediated by extracting a function
+/// body. The region carries no function name, which is exactly what identifies
+/// it, and the remediation must name an action a reader can take on an impl.
+#[test]
+fn a_nameless_region_is_labelled_an_impl_block() {
+    let f = refactor_finding(&nameless_region()).expect("critical → amber");
+
+    assert_eq!(f.title, "Split oversized impl block");
+    assert!(f.remediation.contains("Split the impl block"), "{f:?}");
+    assert!(f.remediation.contains("(lines 342–945)"), "{f:?}");
+    assert!(
+        f.description.contains("long_impl_block(603 lines)"),
+        "the long_function smell is the same mislabel one level down: {f:?}"
+    );
+    assert!(!f.description.contains("long_function"), "{f:?}");
+}
+
+/// The literal placeholder must never reach the page — it appeared 17 times in
+/// one report, and "the body of 'this function'" names nothing a reader can find.
+#[test]
+fn a_nameless_region_never_prints_the_this_function_placeholder() {
+    let f = refactor_finding(&nameless_region()).expect("critical → amber");
+    for field in [&f.title, &f.description, &f.remediation] {
+        assert!(!field.contains("this function"), "{field}");
+    }
+}
+
+/// With a function name in hand, the daemon's own placeholder is replaced by the
+/// name rather than passed through.
+#[test]
+fn a_named_function_replaces_the_placeholder_with_its_name() {
+    let r: WireRefactor = serde_json::from_str(
+        r#"{ "file": "src/cfg.rs", "function_name": "parse_config",
+             "refactor_type": "extract_method", "severity": "critical",
+             "suggested_action": "Extract the body of 'this function' into 2-3 smaller functions" }"#,
+    )
+    .unwrap();
+
+    let f = refactor_finding(&r).expect("critical → amber");
+
+    assert!(!f.remediation.contains("this function"), "{f:?}");
+    assert!(f.remediation.contains("`parse_config`"), "{f:?}");
+}
+
+/// A nameless region with neither a line range nor a rationale states nothing
+/// that identifies it. Suppressing beats mislabelling.
+#[test]
+fn an_unidentifiable_nameless_region_is_suppressed() {
+    let r: WireRefactor = serde_json::from_str(
+        r#"{ "file": "src/cfg.rs", "refactor_type": "extract_method",
+             "severity": "critical", "suggested_action": "Extract the body of 'this function'" }"#,
+    )
+    .unwrap();
+
+    assert!(refactor_finding(&r).is_none());
+}
+
+// ─── Repo-relative components (#6082) ────────────────────────────────────────
+
+fn metrics_with_components(components: &[&str]) -> AnalyzeMetrics {
+    AnalyzeMetrics {
+        findings: components
+            .iter()
+            .map(|c| MetricFinding {
+                title: "t".to_string(),
+                severity: Severity::Amber,
+                category: "maintainability".to_string(),
+                component: (*c).to_string(),
+                description: "d".to_string(),
+                remediation: "r".to_string(),
+            })
+            .collect(),
+        ..Default::default()
+    }
+}
+
+/// #6082: the daemon reports absolute paths, so 21 `**Component:**` lines
+/// carried the auditor's own filesystem layout into a document written for
+/// someone outside that machine. The investigation pass cites repo-relative
+/// paths, so one report used two path vocabularies for the same files.
+#[test]
+fn components_are_made_repo_relative() {
+    let root = Path::new("/Users/x/repos/local/trusty-tools");
+    let mut m = metrics_with_components(&[
+        "/Users/x/repos/local/trusty-tools/crates/trusty-common/src/tickets/server.rs",
+        "/Users/x/repos/local/trusty-tools/crates/trusty-search/src/main.rs:1117",
+    ]);
+
+    relativize_components(&mut m, root);
+
+    assert_eq!(
+        m.findings[0].component,
+        "crates/trusty-common/src/tickets/server.rs"
+    );
+    assert_eq!(
+        m.findings[1].component, "crates/trusty-search/src/main.rs:1117",
+        "a trailing :line suffix survives the strip"
+    );
+}
+
+/// Normalising known paths must never rewrite one it does not recognise.
+#[test]
+fn a_component_outside_the_checkout_is_left_alone() {
+    let root = Path::new("/Users/x/repos/local/trusty-tools");
+    let mut m = metrics_with_components(&["/opt/vendor/lib.rs", "crates/already/relative.rs", ""]);
+
+    relativize_components(&mut m, root);
+
+    assert_eq!(m.findings[0].component, "/opt/vendor/lib.rs");
+    assert_eq!(m.findings[1].component, "crates/already/relative.rs");
+    assert_eq!(m.findings[2].component, "");
+}
+
 /// Why (#5317): every field but the component rendered as
 /// `not stated in source data`, because the adapter dropped the rationale and
 /// the suggested action the daemon had already returned. A finding that states

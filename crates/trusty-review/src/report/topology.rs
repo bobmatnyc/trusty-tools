@@ -101,6 +101,28 @@ impl CrateTopology {
     /// Test: `topology_tests::rows_lead_with_the_shared_core`.
     #[must_use]
     pub fn table_rows(&self) -> Vec<&CrateNode> {
+        let mut rows = self.sorted_rows();
+        rows.truncate(TABLE_ROW_CAP);
+        rows
+    }
+
+    /// Every crate, foundation first — the order [`table_rows`](Self::table_rows)
+    /// truncates, before it truncates.
+    ///
+    /// Why (#6082): the rendered table used the capped list, and the cap is the
+    /// point where a reader stops being told the truth. Sorting by inbound
+    /// descending puts every crate NOTHING depends on last, so a cap of
+    /// [`TABLE_ROW_CAP`] dropped exactly the leaves — 15 of this workspace's 30
+    /// crates, every one of them with `inbound` 0 — while the summary line above
+    /// still said "30 crates". A reader had no way to see that half the
+    /// workspace was missing. The prompt still takes the capped list: it is a
+    /// token budget, and the model is told it is reading the leading rows.
+    /// What: the same total order — inbound descending, then direct-dependency
+    /// count ascending, then name — with no truncation, so the same manifest
+    /// always renders the same complete table.
+    /// Test: `topology_tests::{every_crate_reaches_the_rendered_table,
+    /// rows_lead_with_the_shared_core}`.
+    pub(crate) fn sorted_rows(&self) -> Vec<&CrateNode> {
         let mut rows: Vec<&CrateNode> = self.crates.iter().collect();
         rows.sort_by(|a, b| {
             b.inbound
@@ -108,7 +130,6 @@ impl CrateTopology {
                 .then_with(|| a.deps.len().cmp(&b.deps.len()))
                 .then_with(|| a.name.cmp(&b.name))
         });
-        rows.truncate(TABLE_ROW_CAP);
         rows
     }
 
@@ -174,14 +195,16 @@ impl CrateTopology {
 /// filled scope, so every count below is in-model by construction and a
 /// synthesis paragraph may quote it (#6137).
 /// What: one `crate_topology` scope per repository declaring one, carrying the
-/// summary line and one nested `ct_row` per crate [`CrateTopology::table_rows`]
-/// kept. `ct_crate` is prefixed with the application name only when more than
-/// one repository has a topology, so a single-repository report does not repeat
-/// its own name down a column. Nothing is pushed when no repository declares
-/// one, and the whole block then renders as nothing (`fill::render_scope`'s
-/// omit-empty rule).
+/// summary line and one nested `ct_row` per crate — EVERY crate
+/// ([`CrateTopology::sorted_rows`]), not the capped leading slice, so the row
+/// count matches the member count the summary states. `ct_crate` is prefixed
+/// with the application name only when more than one repository has a topology,
+/// so a single-repository report does not repeat its own name down a column.
+/// Nothing is pushed when no repository declares one, and the whole block then
+/// renders as nothing (`fill::render_scope`'s omit-empty rule).
 /// Test: `topology_tests::{a_declared_topology_renders_rows,
-/// no_topology_pushes_no_block, several_repositories_are_named_in_the_rows}`.
+/// every_crate_reaches_the_rendered_table, no_topology_pushes_no_block,
+/// several_repositories_are_named_in_the_rows}`.
 pub fn push_crate_topology(root: &mut Scope, model: &ReportModel) {
     let declared: Vec<(&str, &CrateTopology)> = model
         .repositories
@@ -193,7 +216,7 @@ pub fn push_crate_topology(root: &mut Scope, model: &ReportModel) {
     for (app, topology) in declared {
         let mut block = Scope::new();
         block.set("ct_summary", tag(topology.summary(), Provenance::Measured));
-        for node in topology.table_rows() {
+        for node in topology.sorted_rows() {
             let mut row = Scope::new();
             let name = match qualify {
                 true => format!("{app} / {}", node.name),

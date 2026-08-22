@@ -431,11 +431,23 @@ fn scrubbed_prose(slug: &str, band: &str, f: &VerifiedFinding, secrets: &[String
 }
 
 /// Render a finding's `component` as `file:line` (or the bare file / empty).
+///
+/// #6082: a citation is rendered ONLY when a verified evidence quote backs it.
+/// The Security Posture preamble claims every finding's quote was mechanically
+/// verified, and a `file:line` with no surviving quote is exactly the shape that
+/// claim cannot cover — the reader has a pointer and no way to check it. An
+/// unquoted finding still renders; it renders WITHOUT a citation, which is the
+/// same path an uncited GREEN has always taken and what keeps it out of the
+/// clean-signals list (`reporter::green_topic_line`).
+/// Test: `verify_tests::green_keeps_its_verified_quote`,
+/// `reporter_tests::an_unquoted_green_renders_without_a_citation`.
 fn component_ref(f: &VerifiedFinding) -> String {
-    match (f.file.is_empty(), f.line) {
-        (true, _) => String::new(),
-        (false, Some(line)) => format!("{}:{line}", f.file),
-        (false, None) => f.file.clone(),
+    if f.file.is_empty() || f.evidence_quote.trim().is_empty() {
+        return String::new();
+    }
+    match f.line {
+        Some(line) => format!("{}:{line}", f.file),
+        None => f.file.clone(),
     }
 }
 

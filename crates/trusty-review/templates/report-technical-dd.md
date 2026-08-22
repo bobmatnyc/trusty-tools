@@ -203,6 +203,7 @@ report against others normalized through this same template.
 <!-- BEGIN amber_finding -->
 {{finding_index}}. **{{finding_title}}** — {{finding_description}}
 - **Component:** {{finding_component}}
+- **Business impact:** {{finding_business_impact}}
 - **Remediation:** {{finding_remediation}}
 {{finding_evidence_block}}
 <!-- END amber_finding -->
@@ -239,18 +240,19 @@ report against others normalized through this same template.
 {{ct_summary}}
 
 | Crate | Direct internal deps | Depended on by |
-|---|---|---|
-<!-- BEGIN ct_row -->
-| {{ct_crate}} | {{ct_deps}} | {{ct_inbound}} |
-<!-- END ct_row -->
+|---|---|---|<!-- BEGIN ct_row -->
+| {{ct_crate}} | {{ct_deps}} | {{ct_inbound}} |<!-- END ct_row -->
 <!-- END crate_topology -->
 
 ## Security Posture
 
 *This table counts the RED and AMBER findings the repo-evidence investigation
 raised in its "authentication & secrets" dimension — an LLM reading the
-selected source files, with every finding's evidence quote mechanically
-verified against the file it cites. Its scope is code hygiene around
+selected source files, with each counted finding's evidence quote mechanically
+verified against the file it cites. That verification claim covers the RED and
+AMBER findings this table counts; a GREEN clean signal elsewhere in this report
+carries a `file:line` only when a verified quote backs it, and none otherwise.
+Its scope is code hygiene around
 credentials, tokens, and authentication paths in the files that were read. It
 is not a SAST scan, not a dependency/CVE scan, and not a secrets scan of the
 whole tree; the share of files read is stated under Investigation Coverage.

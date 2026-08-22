@@ -10,9 +10,9 @@
 //! What: [`verify_findings`] walks the raw findings against the selection's
 //! captured file contents.  Every band needs an existing file and a
 //! whitespace-insensitive verbatim quote match; a GREEN finding keeps its
-//! `file:line` and drops its quote and prose, so a clean signal is checkable
-//! without being elaborated (#6080).  Returns the verified findings plus the
-//! rejection count and notes.
+//! `file:line` AND the quote that match came from, and drops only its prose, so
+//! a clean signal is checkable without being elaborated (#6080, #6082).
+//! Returns the verified findings plus the rejection count and notes.
 //! Test: `verify_tests.rs` covers accept, reject (bad file / bad quote), line
 //! correction, whitespace-insensitive matching, and the green citation path.
 
@@ -192,14 +192,18 @@ pub fn verify_findings(raw: Vec<RawFinding>, selection: &Selection) -> VerifyOut
                 dimension: normalize_dimension(&f.dimension),
                 file: sel.path.clone(),
                 line: Some(m.line),
-                // A GREEN topic carries its citation, never elaboration: the
-                // no-green-analysis rule bans prose about a strength, not the
-                // `file:line` a reader checks it against.
-                evidence_quote: if green {
-                    String::new()
-                } else {
-                    complete_trailing_line(&sel.content, &m)
-                },
+                // A GREEN topic carries its citation AND the quote that citation
+                // was verified from, never elaboration: the no-green-analysis
+                // rule bans prose about a strength, not the evidence a reader
+                // checks it against. #6082 — blanking the quote here is what
+                // made a green citation uncheckable: "Manifest crate reads
+                // OS-level environment for API token resolution parity" cited
+                // trusty-agents-common/Cargo.toml:58, which is
+                // `fd-lock = { workspace = true }` under a file-locking comment,
+                // and nothing on the page or in the JSON twin could show it. The
+                // quote is kept so the citation stays falsifiable; the rendered
+                // bullet still shows only the topic and its `file:line`.
+                evidence_quote: complete_trailing_line(&sel.content, &m),
                 description: green_blank(green, &f.description),
                 business_impact: green_blank(green, &f.business_impact),
                 remediation: green_blank(green, &f.remediation),
