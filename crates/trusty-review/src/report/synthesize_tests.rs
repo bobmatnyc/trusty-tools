@@ -1159,7 +1159,7 @@ fn code_quality_summary_guardrail_rejects_unverified_figure() {
         findings: vec![],
     };
 
-    let result = super::apply_guardrail(raw, &allowed, Vec::new())
+    let result = super::apply_guardrail(raw, &allowed, Vec::new(), &Default::default())
         .expect("the clean top-risk row keeps this Ok");
 
     assert!(
@@ -1204,7 +1204,7 @@ fn security_summary_guardrail_rejects_unverified_figure() {
         findings: vec![],
     };
 
-    let result = super::apply_guardrail(raw, &allowed, Vec::new())
+    let result = super::apply_guardrail(raw, &allowed, Vec::new(), &Default::default())
         .expect("the clean top-risk row keeps this Ok");
 
     assert!(
@@ -2168,5 +2168,220 @@ fn prompt_omits_the_topology_block_when_there_is_none() {
     assert!(
         !req.messages[0].content.contains("Crate topology"),
         "no topology, no heading"
+    );
+}
+
+// ── Claim-level grounding guardrail (#6082 lap 4) ───────────────────────────
+
+/// A one-repo model whose only finding scopes itself to localhost in its own
+/// remediation, and whose topology makes `acme-leaf` a crate nothing depends on.
+fn grounded_fixture_model() -> ReportModel {
+    let mut model = fixture_model(vec![MetricFinding {
+        title: "Control-plane HTTP session endpoints have no authentication".to_string(),
+        severity: Severity::Red,
+        category: "security".to_string(),
+        component: "crates/acme-daemon/src/control_routes.rs".to_string(),
+        description: "The session handlers accept requests with no auth check".to_string(),
+        remediation: "Add an auth middleware layer before exposing them beyond localhost"
+            .to_string(),
+    }]);
+    model.repositories[0].crate_topology = Some(crate::report::topology::CrateTopology {
+        members: 4,
+        edges: 3,
+        cycles: Vec::new(),
+        crates: vec![
+            crate::report::topology::CrateNode {
+                name: "acme-core".to_string(),
+                deps: Vec::new(),
+                inbound: 3,
+            },
+            crate::report::topology::CrateNode {
+                name: "acme-leaf".to_string(),
+                deps: vec!["acme-core".to_string()],
+                inbound: 0,
+            },
+        ],
+    });
+    model
+}
+
+/// #6082 lap 4 (FIX 1): the blocking defect — a loopback-only endpoint written
+/// up as remote code execution.
+///
+/// Why: the finding is correct and RED; the reachability word is not, and the
+/// finding's own remediation says so. Pre-fix `apply_guardrail` had no claim
+/// check at all and shipped the contradiction verbatim.
+/// What: asserts the executive summary survives with the remote wording
+/// rewritten, and that a note records the correction.
+/// Test: this test itself.
+#[test]
+fn synthesize_rewrites_a_remote_claim_about_a_local_finding() {
+    let model = grounded_fixture_model();
+    let grounding = crate::report::synthesize_grounding::Grounding::from_model(&model);
+    let allowed = allowed_numbers(&serde_json::to_value(&model).unwrap());
+    let raw = super::RawSynthesis {
+        executive_summary: "The acme-daemon control plane has no auth — together an \
+                            unauthenticated remote-code-execution path."
+            .to_string(),
+        code_quality_summary: String::new(),
+        security_summary: String::new(),
+        authorship_summary: String::new(),
+        top_risks: vec![],
+        findings: vec![],
+    };
+
+    let result = super::apply_guardrail(raw, &allowed, Vec::new(), &grounding)
+        .expect("the corrected summary keeps this Ok");
+
+    let exec = result
+        .executive_summary
+        .expect("the summary is corrected, not dropped");
+    assert!(
+        !exec.to_lowercase().contains("remote"),
+        "the remote claim must not survive: {exec}"
+    );
+    assert!(exec.contains("local-process-reachable code-execution"));
+    assert!(
+        result
+            .notes
+            .iter()
+            .any(|n| n.contains("reachability corrected")),
+        "the correction must be recorded: {:?}",
+        result.notes
+    );
+}
+
+/// #6082 lap 4 (FIX 1): a remote claim this crate cannot rewrite drops the
+/// field rather than shipping it.
+///
+/// Why: fail-closed is the same posture the numeric guardrail takes — the
+/// deterministic composition fills the placeholder.
+/// What: prose whose remote wording survives every known rewrite; asserts the
+/// field is absent and the note names the grounding rejection.
+/// Test: this test itself.
+#[test]
+fn synthesize_rejects_an_uncorrectable_remote_claim() {
+    let model = grounded_fixture_model();
+    let grounding = crate::report::synthesize_grounding::Grounding::from_model(&model);
+    let allowed = allowed_numbers(&serde_json::to_value(&model).unwrap());
+    let raw = super::RawSynthesis {
+        executive_summary: String::new(),
+        code_quality_summary: String::new(),
+        security_summary: "The acme-daemon control_routes surface offers remote code execution \
+                           and remote-management access to the internet."
+            .to_string(),
+        authorship_summary: "Two authors carry the estate.".to_string(),
+        top_risks: vec![],
+        findings: vec![],
+    };
+
+    let result = super::apply_guardrail(raw, &allowed, Vec::new(), &grounding)
+        .expect("the authorship paragraph keeps this Ok");
+
+    assert!(result.security_summary.is_none());
+    assert!(
+        result.notes.iter().any(|n| {
+            n.contains("claim contradicts the report's own data") && n.contains("security summary")
+        }),
+        "the rejection must be recorded: {:?}",
+        result.notes
+    );
+}
+
+/// #6082 lap 4 (FIX 2): a crate with zero dependents called load-bearing
+/// contradicts the report's own topology table and drops the field.
+///
+/// Why: the last report named trusty-mpm load-bearing while its own table two
+/// sections down showed it with 0 dependents.
+/// What: prose naming the leaf crate as load-bearing; asserts the field is
+/// dropped and the note names the crate.
+/// Test: this test itself.
+#[test]
+fn synthesize_rejects_a_load_bearing_claim_about_a_leaf_crate() {
+    let model = grounded_fixture_model();
+    let grounding = crate::report::synthesize_grounding::Grounding::from_model(&model);
+    let allowed = allowed_numbers(&serde_json::to_value(&model).unwrap());
+    let raw = super::RawSynthesis {
+        executive_summary: "acme-core and acme-leaf are the load-bearing crates the estate \
+                            depends on."
+            .to_string(),
+        code_quality_summary: String::new(),
+        security_summary: String::new(),
+        authorship_summary: "Two authors carry the estate.".to_string(),
+        top_risks: vec![],
+        findings: vec![],
+    };
+
+    let result = super::apply_guardrail(raw, &allowed, Vec::new(), &grounding)
+        .expect("the authorship paragraph keeps this Ok");
+
+    assert!(result.executive_summary.is_none());
+    assert!(
+        result
+            .notes
+            .iter()
+            .any(|n| n.contains("acme-leaf") && n.contains("most-depended-on")),
+        "the rejection must name the crate: {:?}",
+        result.notes
+    );
+}
+
+/// #6082 lap 4: a top-risk row's description takes the same grounding pass the
+/// paragraphs do — row 1 of the graded report carried the same contradiction.
+#[test]
+fn synthesize_grounds_the_top_risk_row_description() {
+    let model = grounded_fixture_model();
+    let grounding = crate::report::synthesize_grounding::Grounding::from_model(&model);
+    let allowed: std::collections::HashSet<String> = ["RED".to_string()].into_iter().collect();
+    let raw = super::RawSynthesis {
+        executive_summary: String::new(),
+        code_quality_summary: String::new(),
+        security_summary: String::new(),
+        authorship_summary: String::new(),
+        top_risks: vec![super::RiskRow {
+            description: "acme-daemon control_routes endpoints have no auth — an unauthenticated \
+                          remote-code-execution path."
+                .to_string(),
+            severity: "RED".to_string(),
+            cost: String::new(),
+            apps: String::new(),
+        }],
+        findings: vec![],
+    };
+
+    let result = super::apply_guardrail(raw, &allowed, Vec::new(), &grounding)
+        .expect("the corrected row keeps this Ok");
+
+    assert_eq!(result.top_risks.len(), 1);
+    assert!(
+        !result.top_risks[0]
+            .description
+            .to_lowercase()
+            .contains("remote"),
+        "row 1 must be corrected: {}",
+        result.top_risks[0].description
+    );
+}
+
+/// #6082 lap 4: the prompt states both grounding facts, so the model is told
+/// the answer rather than only judged for guessing.
+#[test]
+fn prompt_carries_the_grounding_facts() {
+    let model = grounded_fixture_model();
+    let req = build_synthesis_prompt(
+        &model,
+        "stub/model",
+        SynthesisTier::Full,
+        SYNTHESIS_DEFAULT_MAX_TOKENS,
+    );
+    let digest = &req.messages[0].content;
+
+    assert!(digest.contains("Reachability of these findings"));
+    assert!(digest.contains("Control-plane HTTP session endpoints have no authentication"));
+    assert!(digest.contains("Load-bearing crates (measured from cargo metadata"));
+    assert!(digest.contains("`acme-core` — 3 dependent(s)"));
+    assert!(
+        !digest.contains("`acme-leaf` — "),
+        "a leaf crate must not be offered as load-bearing"
     );
 }

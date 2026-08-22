@@ -611,6 +611,12 @@ fn build_digest(model: &ReportModel, elaboration_cap: usize) -> String {
     // absent) unless a repository declared one.
     msg.push_str(&super::topology::prompt_facts(model));
 
+    // #6082 lap 4: the two claims the last report got wrong against its own
+    // data — a loopback-bound endpoint called remotely exploitable, and a
+    // zero-dependent crate called load-bearing. Stated here so the model can get
+    // them right; `synthesize::apply_guardrail` checks them afterwards either way.
+    msg.push_str(&super::synthesize_grounding::Grounding::from_model(model).prompt_facts());
+
     // #2357 follow-up: ONE combined compact-findings digest across all repos,
     // replacing the old per-repo full-title bullet list. Greens are excluded
     // structurally by `gather_compact_findings` (the no-green rule, unchanged).

@@ -23,6 +23,7 @@
 pub mod analyze;
 mod batch;
 pub mod deps;
+mod regions;
 mod render;
 pub mod select;
 pub mod trace;
@@ -337,6 +338,16 @@ pub async fn run_investigation(
         .await;
 
         let status = repo_status(&outcomes);
+
+        // #6082 lap 4: the analyze pass measures complexity over a REGION, and
+        // an LLM finding that credits a region's score to one symbol inside it,
+        // or restates a region the hotspot list already carries, is corrected or
+        // dropped HERE — before tracing, verdicts and coverage, so every one of
+        // them counts the set a reader actually gets.
+        let index = regions::RegionIndex::from_metrics(repo.metrics.as_ref());
+        regions::rescope_impl_claims(&mut findings, &index);
+        regions::suppress_duplicates(&mut findings, &index);
+
         let traces = trace_repo(path, &findings).await;
         // #6166 leg 2: verdicts are folded onto the findings BEFORE coverage is
         // built, so a cleared finding's new band is the one the coverage counts,

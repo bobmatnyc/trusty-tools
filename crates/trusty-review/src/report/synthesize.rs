@@ -27,6 +27,7 @@ use tracing::{debug, warn};
 
 use crate::llm::LlmProvider;
 use crate::report::model::ReportModel;
+use crate::report::synthesize_grounding::{Grounding, GroundingOutcome};
 use crate::report::synthesize_guard::{allowed_numbers_with, verify_prose};
 use crate::report::synthesize_prompt::{
     SYNTHESIS_DEFAULT_MAX_TOKENS, SYNTHESIS_TIER_LADDER, SynthesisTier, build_synthesis_prompt,
@@ -50,6 +51,13 @@ const UNPARSEABLE_CAPTURE_FILENAME: &str = "synthesis-unparseable-response.txt";
 /// The literal prefix every guardrail-rejection note carries, so the reporter and
 /// tests can assert on it.
 const REJECTED_NOTE: &str = "synthesis: rejected (unverified figure)";
+
+/// The literal prefix every grounding-rejection note carries (#6082 lap 4).
+///
+/// Kept distinct from [`REJECTED_NOTE`]: a numeric rejection means a figure was
+/// not in the data, a grounding rejection means a CLAIM contradicted it, and a
+/// reader who sees one should not have to guess which happened.
+const UNGROUNDED_NOTE: &str = "synthesis: rejected (claim contradicts the report's own data)";
 
 // ─── Injected result types ──────────────────────────────────────────────────
 
@@ -370,9 +378,15 @@ impl Synthesizer {
             }
         };
 
+        // #6082 lap 4: the claim-level ground truth, from the same deterministic
+        // model. Built once, alongside the numeric allow-set it complements.
+        let grounding = Grounding::from_model(model);
+
         for (i, tier) in SYNTHESIS_TIER_LADDER.iter().enumerate() {
             match self.try_once(model, *tier).await {
-                Attempt::Ok(raw, norm_notes) => return apply_guardrail(raw, &allowed, norm_notes),
+                Attempt::Ok(raw, norm_notes) => {
+                    return apply_guardrail(raw, &allowed, norm_notes, &grounding);
+                }
                 Attempt::Failed(e) => return Err(e),
                 Attempt::Truncated => match SYNTHESIS_TIER_LADDER.get(i + 1) {
                     Some(next) => warn!(
@@ -677,60 +691,60 @@ fn apply_guardrail(
     raw: RawSynthesis,
     allowed: &std::collections::HashSet<String>,
     seed_notes: Vec<String>,
+    grounding: &Grounding,
 ) -> Result<Synthesis, SynthesisError> {
     let mut out = Synthesis {
         notes: seed_notes,
         ..Synthesis::default()
     };
+    let notes = &mut out.notes;
 
     // Executive summary.
-    let exec = raw.executive_summary.trim();
-    if !exec.is_empty() {
-        match verify_prose(exec, allowed) {
-            Ok(()) => out.executive_summary = Some(exec.to_string()),
-            Err(tok) => out
-                .notes
-                .push(format!("{REJECTED_NOTE} in executive summary: {tok}")),
-        }
-    }
+    out.executive_summary = admit_field(
+        "executive summary",
+        &raw.executive_summary,
+        allowed,
+        grounding,
+        notes,
+    );
 
     // #6004: Code Quality & Architecture and Security Posture narratives — same
     // per-field guardrail path as the executive summary.
-    let code_quality = raw.code_quality_summary.trim();
-    if !code_quality.is_empty() {
-        match verify_prose(code_quality, allowed) {
-            Ok(()) => out.code_quality_summary = Some(code_quality.to_string()),
-            Err(tok) => out
-                .notes
-                .push(format!("{REJECTED_NOTE} in code quality summary: {tok}")),
-        }
-    }
-    let security = raw.security_summary.trim();
-    if !security.is_empty() {
-        match verify_prose(security, allowed) {
-            Ok(()) => out.security_summary = Some(security.to_string()),
-            Err(tok) => out
-                .notes
-                .push(format!("{REJECTED_NOTE} in security summary: {tok}")),
-        }
-    }
-    let authorship = raw.authorship_summary.trim();
-    if !authorship.is_empty() {
-        match verify_prose(authorship, allowed) {
-            Ok(()) => out.authorship_summary = Some(authorship.to_string()),
-            Err(tok) => out
-                .notes
-                .push(format!("{REJECTED_NOTE} in authorship summary: {tok}")),
-        }
-    }
+    out.code_quality_summary = admit_field(
+        "code quality summary",
+        &raw.code_quality_summary,
+        allowed,
+        grounding,
+        notes,
+    );
+    out.security_summary = admit_field(
+        "security summary",
+        &raw.security_summary,
+        allowed,
+        grounding,
+        notes,
+    );
+    out.authorship_summary = admit_field(
+        "authorship summary",
+        &raw.authorship_summary,
+        allowed,
+        grounding,
+        notes,
+    );
 
-    // Top-risk rows.
-    for (i, r) in raw.top_risks.into_iter().enumerate() {
-        match verify_all(&[&r.description, &r.severity, &r.cost, &r.apps], allowed) {
+    // Top-risk rows. The row's description is narrative and takes the same
+    // grounding pass the paragraphs do (#6082 lap 4) — row 1 of the last report
+    // carried the same reachability contradiction the executive summary did.
+    for (i, mut r) in raw.top_risks.into_iter().enumerate() {
+        let label = format!("top-risk row {}", i + 1);
+        let Some(description) = admit_field(&label, &r.description, allowed, grounding, notes)
+        else {
+            continue;
+        };
+        r.description = description;
+        match verify_all(&[&r.severity, &r.cost, &r.apps], allowed) {
             Ok(()) => out.top_risks.push(r),
-            Err(tok) => out
-                .notes
-                .push(format!("{REJECTED_NOTE} in top-risk row {}: {tok}", i + 1)),
+            Err(tok) => notes.push(format!("{REJECTED_NOTE} in {label}: {tok}")),
         }
     }
 
@@ -772,6 +786,49 @@ fn apply_guardrail(
         return Err(SynthesisError::NoVerifiableContent);
     }
     Ok(out)
+}
+
+/// Run both guardrails over one narrative field and return what may ship.
+///
+/// Why: the grounding check (#6082 lap 4) and the numeric check are two
+/// independent reasons a field cannot be trusted, and running them from one
+/// place is what stops a future field from being wired to only one of them.
+/// What: `None` for an empty field, for a grounding rejection, and for a numeric
+/// rejection — each of the last two recording its own note under its own prefix.
+/// Otherwise the text to keep, which is the model's own unless the grounding
+/// pass corrected a claim in it; the numeric check then runs on the CORRECTED
+/// text, so a rewrite can never smuggle a figure past it.
+/// Test: `synthesize_tests.rs::{synthesize_rewrites_a_remote_claim_about_a_local_finding,
+/// synthesize_rejects_a_load_bearing_claim_about_a_leaf_crate}`.
+fn admit_field(
+    label: &str,
+    raw: &str,
+    allowed: &std::collections::HashSet<String>,
+    grounding: &Grounding,
+    notes: &mut Vec<String>,
+) -> Option<String> {
+    let text = raw.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let grounded = match grounding.check(text) {
+        GroundingOutcome::Clean => text.to_string(),
+        GroundingOutcome::Rewritten(fixed, corrections) => {
+            notes.extend(corrections);
+            fixed
+        }
+        GroundingOutcome::Rejected(reason) => {
+            notes.push(format!("{UNGROUNDED_NOTE} in {label}: {reason}"));
+            return None;
+        }
+    };
+    match verify_prose(&grounded, allowed) {
+        Ok(()) => Some(grounded),
+        Err(tok) => {
+            notes.push(format!("{REJECTED_NOTE} in {label}: {tok}"));
+            None
+        }
+    }
 }
 
 /// Verify every field of a group; returns the first offending token on failure.
