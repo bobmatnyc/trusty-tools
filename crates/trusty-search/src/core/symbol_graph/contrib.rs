@@ -23,6 +23,8 @@
 
 use std::sync::Arc;
 
+use petgraph::graph::NodeIndex;
+
 use crate::core::corpus::contrib::{ContribEdge, ContribGraph};
 use crate::core::corpus::CorpusStore;
 use crate::core::entity::EdgeKind;
@@ -104,17 +106,30 @@ impl SymbolGraph {
         let mut stats = ContribMergeStats::default();
         for cg in graphs {
             for node in &cg.nodes {
-                if self.by_symbol.contains_key(&node.id) {
+                // Contributed identity is extractor-minted and self-contained
+                // (ADR-0009): the id IS the qualified key, with no file prefix.
+                // A literal match against a derived symbol still unifies, which
+                // `node_for_id` resolves — but only when that name has exactly
+                // one definition, so #6167's no-silent-pick rule holds here too.
+                if self.node_for_id(&node.id).is_some() {
                     stats.nodes_existing += 1;
                     continue;
                 }
                 let idx = self.graph.add_node(SymbolNode {
+                    key: node.id.clone(),
                     symbol: node.id.clone(),
                     chunk_id: String::new(),
                     file: String::new(),
                     kind: Some(node.kind.clone()),
+                    callable: false,
                 });
-                self.by_symbol.insert(node.id.clone(), idx);
+                self.names.by_key.insert(node.id.clone(), idx);
+                self.names.by_name.entry(node.id.clone()).or_default().push(
+                    super::resolve::Candidate {
+                        idx,
+                        callable: false,
+                    },
+                );
                 stats.nodes_added += 1;
             }
             for edge in &cg.edges {
@@ -130,8 +145,8 @@ impl SymbolGraph {
                     );
                     continue;
                 };
-                let (Some(&src), Some(&tgt)) =
-                    (self.by_symbol.get(&edge.from), self.by_symbol.get(&edge.to))
+                let (Some(src), Some(tgt)) =
+                    (self.node_for_id(&edge.from), self.node_for_id(&edge.to))
                 else {
                     stats.edges_dangling += 1;
                     continue;
@@ -158,8 +173,24 @@ impl SymbolGraph {
     /// What: resolves the symbol's node and returns its `kind` field.
     /// Test: `contrib_merge_adds_nodes_and_edges` asserts kinds round-trip.
     pub fn node_kind(&self, symbol: &str) -> Option<&str> {
-        let idx = self.by_symbol.get(symbol)?;
-        self.graph[*idx].kind.as_deref()
+        self.graph[self.node_for_id(symbol)?].kind.as_deref()
+    }
+
+    /// Resolve a contributed or derived node id to exactly one node.
+    ///
+    /// Why: contributed ids are keyed verbatim while derived symbols are keyed
+    /// `<file>::<symbol>` since #6167, so a lookup has to try both — and must
+    /// refuse rather than guess when a bare name has several definitions.
+    /// What: exact key first, then a name with exactly one definition.
+    /// Test: `contrib_merge_does_not_clobber_derived_nodes`.
+    pub(crate) fn node_for_id(&self, id: &str) -> Option<NodeIndex> {
+        if let Some(&idx) = self.names.by_key.get(id) {
+            return Some(idx);
+        }
+        match self.names.candidates(id) {
+            [only] => Some(only.idx),
+            _ => None,
+        }
     }
 }
 

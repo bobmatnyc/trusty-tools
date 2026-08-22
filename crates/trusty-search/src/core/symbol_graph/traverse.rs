@@ -126,7 +126,35 @@ impl SymbolGraph {
         out
     }
 
+    /// [`Self::callers_of`] returning qualified keys instead of display names.
+    ///
+    /// Why: a caller that walks further (`get_call_chain` recursing into
+    /// depth-2 callees) has to re-enter the graph at the neighbour it just
+    /// found. Re-entering by display name lands on a same-named definition in
+    /// another crate — the defect this fixes (#6167).
+    /// What: same BFS, projecting `SymbolNode::key`.
+    /// Test: `bare_name_collision_does_not_create_a_cross_crate_edge`,
+    /// `same_file_callee_still_resolves`.
+    pub fn callers_keyed(&self, symbol: &str, hops: usize) -> Vec<(String, String)> {
+        self.bfs_neighbors_by(symbol, hops, Direction::Incoming, |n| n.key.clone())
+    }
+
+    /// [`Self::callees_of`] returning qualified keys instead of display names.
+    pub fn callees_keyed(&self, symbol: &str, hops: usize) -> Vec<(String, String)> {
+        self.bfs_neighbors_by(symbol, hops, Direction::Outgoing, |n| n.key.clone())
+    }
+
     fn bfs_neighbors(&self, symbol: &str, hops: usize, dir: Direction) -> Vec<(String, String)> {
+        self.bfs_neighbors_by(symbol, hops, dir, |n| n.symbol.clone())
+    }
+
+    fn bfs_neighbors_by(
+        &self,
+        symbol: &str,
+        hops: usize,
+        dir: Direction,
+        label: impl Fn(&SymbolNode) -> String,
+    ) -> Vec<(String, String)> {
         let Some(start) = self.start_index(symbol, hops) else {
             return Vec::new();
         };
@@ -137,17 +165,33 @@ impl SymbolGraph {
             &[dir],
             |edge| edge.weight() == &EdgeKind::CallsFunction,
             |node, _edge| {
-                out.push((node.symbol.clone(), node.chunk_id.clone()));
+                out.push((label(node), node.chunk_id.clone()));
             },
         );
         out
     }
 
+    /// Resolve a traversal start point, accepting either spelling.
+    ///
+    /// Why: callers hold a qualified key (from `symbol_for_chunk` or
+    /// `resolve_entry_point`) or a plain symbol name typed by a user. Both must
+    /// work, and a name matching several definitions must not silently pick one
+    /// (#6167) — the caller resolves that ambiguity before traversing.
+    /// What: qualified key first, then a name with exactly one definition.
+    /// A name with several definitions returns `None`; use
+    /// [`SymbolGraph::resolve_symbol`] to see the candidates.
+    /// Test: `traversal_from_an_ambiguous_bare_name_returns_nothing`.
     fn start_index(&self, symbol: &str, hops: usize) -> Option<NodeIndex> {
         if hops == 0 {
             return None;
         }
-        self.by_symbol.get(symbol).copied()
+        if let Some(&idx) = self.names.by_key.get(symbol) {
+            return Some(idx);
+        }
+        match self.names.candidates(symbol) {
+            [only] => Some(only.idx),
+            _ => None,
+        }
     }
 
     /// Shared BFS engine for KG expansion.

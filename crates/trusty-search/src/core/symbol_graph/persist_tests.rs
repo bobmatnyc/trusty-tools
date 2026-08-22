@@ -225,21 +225,25 @@ fn test_custom_edge_survives_warm_boot() {
 
     let mut g = SymbolGraph::new();
     let a = g.graph.add_node(SymbolNode {
+        key: "a.rs::alpha".into(),
         symbol: "alpha".into(),
         chunk_id: "a:1".into(),
         file: "a.rs".into(),
         kind: None,
+        callable: true,
     });
     let b = g.graph.add_node(SymbolNode {
+        key: "b.rs::beta".into(),
         symbol: "beta".into(),
         chunk_id: "b:1".into(),
         file: "b.rs".into(),
         kind: None,
+        callable: true,
     });
-    g.by_symbol.insert("alpha".into(), a);
-    g.by_symbol.insert("beta".into(), b);
-    g.chunk_to_symbol.insert("a:1".into(), "alpha".into());
-    g.chunk_to_symbol.insert("b:1".into(), "beta".into());
+    g.names.insert("a.rs", "alpha", a, true);
+    g.names.insert("b.rs", "beta", b, true);
+    g.chunk_to_key.insert("a:1".into(), "a.rs::alpha".into());
+    g.chunk_to_key.insert("b:1".into(), "b.rs::beta".into());
     g.graph
         .add_edge(a, b, EdgeKind::Custom("reads_table".to_string()));
 

@@ -25,7 +25,7 @@ use chrono::Utc;
 use serde::Deserialize;
 
 use crate::core::chunker::RawChunk;
-use crate::core::symbol_graph::SymbolGraph;
+use crate::core::symbol_graph::{SymbolGraph, SymbolMatch};
 
 /// Direction of traversal for `get_call_chain`.
 ///
@@ -267,22 +267,39 @@ pub fn extract_signature(source: &str) -> Option<String> {
     None
 }
 
-/// Resolve a user-supplied `entry_point` argument to a `(symbol, chunk)`
-/// pair. The `entry_point` may be:
-/// - an exact symbol name (`authenticate`, `Foo::bar`),
-/// - a case-insensitive substring (fuzzy),
-/// - a `file:line` reference (`src/auth.rs:42`).
+/// Where a call chain starts, and how confidently.
 ///
-/// When multiple candidates match, we prefer the one with the largest total
-/// degree in the symbol graph (in + out edges) — the rationale being that
-/// the most-connected symbol is almost always what the LLM meant.
-///
+/// Why: the entry point is the whole trace's anchor. Anchoring to the wrong
+/// one of several same-named definitions makes every edge below it wrong too,
+/// and the old resolver did that silently (#6167).
+/// What: `key` is the qualified node identity to traverse from, `symbol` the
+/// name to display, and `also_matched` the other definitions the request could
+/// equally have meant — empty when the anchor was unambiguous.
 /// Test: `tests::resolve_entry_point_*`.
+pub struct EntryAnchor<'a> {
+    pub key: String,
+    pub symbol: String,
+    pub chunk: &'a RawChunk,
+    pub also_matched: Vec<String>,
+}
+
+/// Resolve a user-supplied `entry_point` to the definition it names.
+///
+/// Why: three spellings reach this function and one of them used to 404
+/// outright — `<path>::<symbol>`, the form a caller naturally writes after a
+/// search result hands it a file path (#6167).
+/// What: tries, in order, a `file:line` reference, then the symbol graph's own
+/// resolver (which accepts a qualified key, `<path>::<symbol>`, `Type::method`,
+/// or a bare name), then a chunk-only scan for corpora with no graph. Several
+/// matches resolve to the most-connected one with the rest reported in
+/// `also_matched`, never dropped.
+/// Test: `tests::resolve_entry_point_*`,
+/// `path_qualified_entry_point_anchors_instead_of_404`.
 pub fn resolve_entry_point<'a>(
     entry_point: &str,
     graph: &SymbolGraph,
     chunks: &'a [RawChunk],
-) -> Option<(String, &'a RawChunk)> {
+) -> Option<EntryAnchor<'a>> {
     // `file:line` form takes precedence — exact and unambiguous.
     if let Some((file_part, line_part)) = entry_point.rsplit_once(':') {
         if let Ok(line_no) = line_part.parse::<usize>() {
@@ -293,67 +310,78 @@ pub fn resolve_entry_point<'a>(
                     .function_name
                     .clone()
                     .unwrap_or_else(|| format!("{}:{}", c.file, c.start_line));
-                return Some((symbol, c));
+                return Some(EntryAnchor {
+                    key: format!("{}::{symbol}", c.file),
+                    symbol,
+                    chunk: c,
+                    also_matched: Vec::new(),
+                });
             }
         }
     }
 
-    // Otherwise: collect symbol candidates from the graph and pick the most
-    // connected one. Fall back to chunk-only scanning if the graph has no
-    // matches (BM25-only indexer with no symbol graph).
-    let degrees = graph.degrees();
+    if let Some(anchor) = anchor_from_graph(entry_point, graph, chunks) {
+        return Some(anchor);
+    }
+
+    // Fall back: scan chunks directly. Reached when the graph is empty (a
+    // BM25-only index) or when the name exists in the corpus but not as a
+    // graph node.
     let needle = entry_point.to_ascii_lowercase();
-
-    // First pass: exact symbol match.
-    let mut candidates: Vec<&String> = degrees
-        .keys()
-        .filter(|s| s.as_str() == entry_point)
-        .collect();
-    // Second pass: case-insensitive substring fuzzy.
-    if candidates.is_empty() {
-        candidates = degrees
-            .keys()
-            .filter(|s| s.to_ascii_lowercase().contains(&needle))
-            .collect();
-    }
-    // Sort by descending degree, then by ascending name for stability.
-    candidates.sort_by(|a, b| {
-        let da = degrees.get(*a).copied().unwrap_or(0);
-        let db = degrees.get(*b).copied().unwrap_or(0);
-        db.cmp(&da).then_with(|| a.cmp(b))
-    });
-
-    for sym in candidates {
-        if let Some(c) = chunks
-            .iter()
-            .find(|c| c.function_name.as_deref() == Some(sym.as_str()))
-        {
-            return Some((sym.clone(), c));
-        }
-    }
-
-    // Fall back: scan chunks for a function_name match (helps when the graph
-    // wasn't built but the corpus still names functions).
-    let by_name = chunks
+    let hit = chunks
         .iter()
-        .find(|c| c.function_name.as_deref() == Some(entry_point));
-    if let Some(c) = by_name {
-        return Some((entry_point.to_string(), c));
-    }
-    let fuzzy = chunks.iter().find(|c| {
-        c.function_name
-            .as_deref()
-            .is_some_and(|n| n.to_ascii_lowercase().contains(&needle))
-    });
-    if let Some(c) = fuzzy {
-        let sym = c
-            .function_name
-            .clone()
-            .unwrap_or_else(|| entry_point.to_string());
-        return Some((sym, c));
-    }
+        .find(|c| c.function_name.as_deref() == Some(entry_point))
+        .or_else(|| {
+            chunks.iter().find(|c| {
+                c.function_name
+                    .as_deref()
+                    .is_some_and(|n| n.to_ascii_lowercase().contains(&needle))
+            })
+        })?;
+    let symbol = hit
+        .function_name
+        .clone()
+        .unwrap_or_else(|| entry_point.to_string());
+    Some(EntryAnchor {
+        key: format!("{}::{symbol}", hit.file),
+        symbol,
+        chunk: hit,
+        also_matched: Vec::new(),
+    })
+}
 
-    None
+/// Resolve through the symbol graph, then find the chunk that node came from.
+fn anchor_from_graph<'a>(
+    entry_point: &str,
+    graph: &SymbolGraph,
+    chunks: &'a [RawChunk],
+) -> Option<EntryAnchor<'a>> {
+    let (key, also) = match graph.resolve_symbol(entry_point) {
+        SymbolMatch::NotFound => return None,
+        SymbolMatch::One(k) => (k, Vec::new()),
+        SymbolMatch::Several { chosen, candidates } => {
+            let others = candidates.into_iter().filter(|c| *c != chosen).collect();
+            (chosen, others)
+        }
+    };
+    let symbol = graph.display_symbol(&key)?.to_string();
+    let file = graph.file_of(&key)?.to_string();
+    // The node names its own file, so pin the chunk by file AND name rather
+    // than by name alone — the latter is what landed traces in the wrong file.
+    let chunk = chunks
+        .iter()
+        .find(|c| c.file == file && c.function_name.as_deref() == Some(symbol.as_str()))
+        .or_else(|| {
+            chunks
+                .iter()
+                .find(|c| c.function_name.as_deref() == Some(symbol.as_str()))
+        })?;
+    Some(EntryAnchor {
+        key,
+        symbol,
+        chunk,
+        also_matched: also,
+    })
 }
 
 /// Top-level entry: render the annotated call-tree report.
@@ -370,15 +398,14 @@ pub fn render_call_chain(
     graph: &SymbolGraph,
     chunks: &[RawChunk],
 ) -> Result<String, String> {
-    let (entry_symbol, entry_chunk) = resolve_entry_point(&req.entry_point, graph, chunks)
+    let anchor = resolve_entry_point(&req.entry_point, graph, chunks)
         .ok_or_else(|| format!("entry point not found: {}", req.entry_point))?;
+    let entry_symbol = anchor.symbol.clone();
 
-    // Build an index from symbol -> chunk so we don't re-scan chunks for
-    // every neighbour.
-    let by_symbol: HashMap<&str, &RawChunk> = chunks
-        .iter()
-        .filter_map(|c| c.function_name.as_deref().map(|n| (n, c)))
-        .collect();
+    // Index chunks by id: the graph hands back a chunk_id per neighbour, and
+    // that names exactly one chunk. Indexing by function_name instead is what
+    // let a neighbour render another crate's same-named body (#6167).
+    let by_chunk: HashMap<&str, &RawChunk> = chunks.iter().map(|c| (c.id.as_str(), c)).collect();
 
     let mut out = String::new();
     let direction_label = match req.direction {
@@ -392,9 +419,21 @@ pub fn render_call_chain(
         req.index_id, direction_label, req.max_depth
     ));
     out.push_str(&format!("# Generated: {}\n\n", Utc::now().to_rfc3339()));
+    if !anchor.also_matched.is_empty() {
+        out.push_str(&format!(
+            "# AMBIGUOUS: `{}` matches {} definitions; anchored to the most \
+             connected one. Re-run with one of these to pick another:\n",
+            req.entry_point,
+            anchor.also_matched.len() + 1
+        ));
+        for other in anchor.also_matched.iter().take(10) {
+            out.push_str(&format!("#   {other}\n"));
+        }
+        out.push('\n');
+    }
     out.push_str("═══════════════════════════════════════\n\n");
 
-    render_entry_block(&mut out, &entry_symbol, entry_chunk, graph, req);
+    render_entry_block(&mut out, &anchor, graph, req);
     out.push_str("\n───────────────────────────────────────\n\n");
 
     // Depth-1 callees: emit full source (when include_source) + their own
@@ -403,18 +442,22 @@ pub fn render_call_chain(
         req.direction,
         CallChainDirection::Both | CallChainDirection::Outgoing
     ) {
-        for (sym, _chunk_id) in graph.callees_of(&entry_symbol, 1) {
-            let Some(chunk) = by_symbol.get(sym.as_str()) else {
+        for (key, chunk_id) in graph.callees_keyed(&anchor.key, 1) {
+            let Some(chunk) = by_chunk.get(chunk_id.as_str()) else {
                 continue;
             };
+            let sym = graph.display_symbol(&key).unwrap_or(&key).to_string();
             render_neighbor_block(
                 &mut out,
-                &sym,
+                NeighborRef {
+                    key: &key,
+                    symbol: &sym,
+                },
                 chunk,
                 1,
                 req.include_source,
                 graph,
-                &by_symbol,
+                &by_chunk,
                 req.max_depth,
             );
             out.push_str("\n───────────────────────────────────────\n\n");
@@ -427,25 +470,34 @@ pub fn render_call_chain(
         req.direction,
         CallChainDirection::Both | CallChainDirection::Callers
     ) {
-        for (sym, _chunk_id) in graph.callers_of(&entry_symbol, 1) {
-            let Some(chunk) = by_symbol.get(sym.as_str()) else {
+        for (key, chunk_id) in graph.callers_keyed(&anchor.key, 1) {
+            let Some(chunk) = by_chunk.get(chunk_id.as_str()) else {
                 continue;
             };
-            render_caller_block(&mut out, &sym, chunk);
+            let sym = graph.display_symbol(&key).unwrap_or(&key);
+            render_caller_block(&mut out, sym, chunk);
             out.push_str("\n───────────────────────────────────────\n\n");
         }
     }
 
+    let _ = entry_symbol;
     Ok(out)
+}
+
+/// A neighbour's two identities: what to traverse by, and what to print.
+struct NeighborRef<'a> {
+    key: &'a str,
+    symbol: &'a str,
 }
 
 fn render_entry_block(
     out: &mut String,
-    symbol: &str,
-    chunk: &RawChunk,
+    anchor: &EntryAnchor<'_>,
     graph: &SymbolGraph,
     req: &ValidatedCallChainRequest,
 ) {
+    let symbol = anchor.symbol.as_str();
+    let chunk = anchor.chunk;
     let (why, what) = extract_doc_sections(&chunk.content);
     let sig = extract_signature(&chunk.content).unwrap_or_else(|| "(signature unavailable)".into());
     out.push_str(&format!(
@@ -463,12 +515,13 @@ fn render_entry_block(
         req.direction,
         CallChainDirection::Both | CallChainDirection::Outgoing
     ) {
-        let callees = graph.callees_of(symbol, 1);
+        let callees = graph.callees_keyed(&anchor.key, 1);
         out.push_str("\nCalls →\n");
         if callees.is_empty() {
             out.push_str("  (none discovered)\n");
         } else {
-            for (sym, chunk_id) in &callees {
+            for (key, chunk_id) in &callees {
+                let sym = graph.display_symbol(key).unwrap_or(key);
                 let loc = location_from_chunk_id(chunk_id);
                 out.push_str(&format!("  · {sym}  {loc}\n"));
             }
@@ -478,12 +531,13 @@ fn render_entry_block(
         req.direction,
         CallChainDirection::Both | CallChainDirection::Callers
     ) {
-        let callers = graph.callers_of(symbol, 1);
+        let callers = graph.callers_keyed(&anchor.key, 1);
         out.push_str("Called by ←\n");
         if callers.is_empty() {
             out.push_str("  (none discovered)\n");
         } else {
-            for (sym, chunk_id) in &callers {
+            for (key, chunk_id) in &callers {
+                let sym = graph.display_symbol(key).unwrap_or(key);
                 let loc = location_from_chunk_id(chunk_id);
                 out.push_str(&format!("  · {sym}  {loc}\n"));
             }
@@ -498,14 +552,15 @@ fn render_entry_block(
 #[allow(clippy::too_many_arguments)]
 fn render_neighbor_block(
     out: &mut String,
-    symbol: &str,
+    neighbor: NeighborRef<'_>,
     chunk: &RawChunk,
     depth: u32,
     include_source: bool,
     graph: &SymbolGraph,
-    by_symbol: &HashMap<&str, &RawChunk>,
+    by_chunk: &HashMap<&str, &RawChunk>,
     max_depth: u32,
 ) {
+    let symbol = neighbor.symbol;
     let (why, what) = extract_doc_sections(&chunk.content);
     let sig = extract_signature(&chunk.content).unwrap_or_else(|| "(signature unavailable)".into());
     out.push_str(&format!(
@@ -531,15 +586,16 @@ fn render_neighbor_block(
 
     // Show one more level of depth as signature-only entries.
     if depth < max_depth {
-        let next = graph.callees_of(symbol, 1);
+        let next = graph.callees_keyed(neighbor.key, 1);
         if !next.is_empty() {
             out.push_str(&format!(
                 "\nCalls →  (depth={}, signatures only)\n",
                 depth + 1
             ));
-            for (sym, _chunk_id) in &next {
-                let (next_sig, next_why) = by_symbol
-                    .get(sym.as_str())
+            for (next_key, chunk_id) in &next {
+                let sym = graph.display_symbol(next_key).unwrap_or(next_key);
+                let (next_sig, next_why) = by_chunk
+                    .get(chunk_id.as_str())
                     .map(|c| {
                         let s = extract_signature(&c.content)
                             .unwrap_or_else(|| "(signature unavailable)".into());
