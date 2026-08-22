@@ -110,6 +110,29 @@ pub enum ReportError {
         source: std::io::Error,
     },
 
+    /// An `instructions.md` sitting beside the manifest exists but could not be
+    /// read (#6180).
+    ///
+    /// Why: the fail-open doctrine covers an ABSENT optional input, never one
+    /// that is present. A file the engagement author dropped next to the
+    /// manifest and this process then skipped — bad permissions, a broken
+    /// symlink, non-UTF-8 bytes — would render a report the author believes
+    /// carries their instructions and does not. That must stop the run.
+    /// What: distinct from [`ReportError::InstructionsNotFound`], which names a
+    /// path the caller ASKED for and got wrong; here nobody asked, the file was
+    /// found, and reading it failed.
+    /// Test: `instructions_tests::an_unreadable_discovered_file_is_a_hard_error`.
+    #[error(
+        "instructions.md at {path} exists but could not be read: {source} — remove it or fix it; a discovered instructions file is never skipped"
+    )]
+    InstructionsUnreadable {
+        /// The discovered instructions path that failed to read.
+        path: PathBuf,
+        /// The underlying filesystem or decoding error.
+        #[source]
+        source: std::io::Error,
+    },
+
     /// A report was handed to the writer with no synthesis attached (#5454).
     ///
     /// Why: inference is required, so a synthesis-free model reaching disk would
