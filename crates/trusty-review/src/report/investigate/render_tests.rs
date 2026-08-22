@@ -11,7 +11,7 @@ use super::*;
 use crate::report::investigate::deps::{Dependency, DependencyInventory};
 use crate::report::investigate::select::DimensionCoverage;
 use crate::report::investigate::verify::VerifiedFinding;
-use crate::report::investigate::{BatchNote, Budget};
+use crate::report::investigate::{BatchNote, Budget, FindingVerdict, VerdictSet};
 use crate::report::metrics::Severity;
 
 fn dep(name: &str, locked: Option<&str>) -> Dependency {
@@ -25,6 +25,7 @@ fn dep(name: &str, locked: Option<&str>) -> Dependency {
 
 fn finding() -> VerifiedFinding {
     VerifiedFinding {
+        trace_verdict: String::new(),
         title: "Hardcoded secret".to_string(),
         severity: Severity::Red,
         dimension: "authentication & secrets".to_string(),
@@ -44,6 +45,7 @@ fn repo(
     deps: DependencyInventory,
 ) -> RepoInvestigation {
     RepoInvestigation {
+        verdicts: None,
         slug: "acme".to_string(),
         name: "Acme".to_string(),
         status,
@@ -101,6 +103,103 @@ fn coverage_section_omits_the_trace_line_without_traces() {
         deps_none(),
     ));
     assert!(!out.contains("traces assembled"), "{out}");
+}
+
+// ─── Trace verdicts (#6166 leg 2) ────────────────────────────────────────────
+
+fn verdict(v: crate::report::investigate::Verdict, title: &str, reason: &str) -> FindingVerdict {
+    FindingVerdict {
+        title: title.to_string(),
+        file: "src/auth.rs".to_string(),
+        verdict: v,
+        reason: reason.to_string(),
+    }
+}
+
+fn with_verdicts(verdicts: Vec<FindingVerdict>) -> RepoInvestigation {
+    let mut r = repo(InvestigationStatus::Available, vec![finding()], deps_none());
+    let confirmed = verdicts
+        .iter()
+        .filter(|v| v.verdict == Verdict::Confirmed)
+        .count();
+    let cleared = verdicts
+        .iter()
+        .filter(|v| v.verdict == Verdict::Cleared)
+        .count();
+    let unverifiable = verdicts
+        .iter()
+        .filter(|v| v.verdict == Verdict::Unverifiable)
+        .count();
+    r.verdicts = Some(VerdictSet {
+        traced: verdicts.len(),
+        verdicts,
+        confirmed,
+        cleared,
+        unverifiable,
+        model: "anthropic/claude-haiku-4.5".to_string(),
+    });
+    r
+}
+
+/// Why (#6166 leg 2): the counts are what a reader weighs the findings against,
+/// and they must state the unverifiable share rather than only the decided one.
+/// What: one summary line, and the model that judged them.
+#[test]
+fn coverage_section_states_the_verdict_counts() {
+    let out = coverage_lines(&with_verdicts(vec![
+        verdict(Verdict::Confirmed, "A", "supported at line 12"),
+        verdict(Verdict::Cleared, "B", "guarded at line 41"),
+        verdict(Verdict::Unverifiable, "C", "no verdict: verifier timeout"),
+    ]));
+    assert!(
+        out.contains("- trace verdicts: 1 confirmed, 1 cleared, 1 unverifiable of 3 traced\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains("  - judged by: anthropic/claude-haiku-4.5\n"),
+        "{out}"
+    );
+}
+
+/// Why: counts alone let a reader see that findings were cleared or unverified
+/// without learning WHICH — and a clearing moved a severity band, so its reason
+/// is an owner-visible decision that belongs on the page.
+/// What: a sub-bullet per cleared and per unverifiable finding; confirmed ones
+/// carry their verdict at the finding itself and are not repeated here.
+#[test]
+fn coverage_section_names_every_cleared_and_unverifiable_finding() {
+    let out = coverage_lines(&with_verdicts(vec![
+        verdict(Verdict::Confirmed, "Confirmed one", "supported"),
+        verdict(Verdict::Cleared, "Cleared one", "guarded at line 41"),
+        verdict(
+            Verdict::Unverifiable,
+            "Unclear one",
+            "no verdict: verifier timeout",
+        ),
+    ]));
+    assert!(
+        out.contains("  - cleared: Cleared one — guarded at line 41\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains("  - unverifiable: Unclear one — no verdict: verifier timeout\n"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("Confirmed one"),
+        "a confirmed finding is not repeated in coverage: {out}"
+    );
+}
+
+/// A report from before the verdict pass renders byte-identically.
+#[test]
+fn coverage_section_omits_the_verdict_line_without_verdicts() {
+    let out = coverage_lines(&repo(
+        InvestigationStatus::Available,
+        vec![finding()],
+        deps_none(),
+    ));
+    assert!(!out.contains("trace verdicts"), "{out}");
 }
 
 /// An empty inventory, for fixtures that care about coverage only.

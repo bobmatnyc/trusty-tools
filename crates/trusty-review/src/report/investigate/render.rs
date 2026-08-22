@@ -16,7 +16,9 @@ use crate::report::metrics::Severity;
 use crate::report::model::ReportModel;
 use crate::report::provenance::{INFERRED_TAG, MEASURED_TAG};
 
-use super::{Coverage, DependencyInventory, Investigation, InvestigationStatus, RepoInvestigation};
+use super::{
+    Coverage, DependencyInventory, Investigation, InvestigationStatus, RepoInvestigation, Verdict,
+};
 
 /// Render the appended Dependency Inventory + Investigation Coverage sections.
 ///
@@ -172,7 +174,44 @@ fn coverage_lines(repo: &RepoInvestigation) -> String {
         "- verified findings: {total} ({risk} RED/AMBER evidence-backed, {clean} clean signals)\n"
     ));
     out.push_str(&trace_line(repo));
+    out.push_str(&verdict_lines(repo));
     out.push_str(&batch_lines(c));
+    out
+}
+
+/// Render the trace-verdict counts, then name every finding the verdict pass
+/// cleared or could not check (#6166 leg 2).
+///
+/// Why: the counts alone would let a reader see that six findings were
+/// unverifiable without ever learning which six, and a cleared finding is an
+/// owner-visible decision — it changed a severity band, so the reason it changed
+/// belongs on the page next to the count rather than only in the JSON twin.
+/// What: the summary line, then one sub-bullet per cleared finding and one per
+/// unverifiable finding, each naming the title and the one-line reason. Renders
+/// nothing at all without a verdict set, so a report from before this pass
+/// renders byte-identically.
+/// Test: `render_tests::{coverage_section_states_the_verdict_counts,
+/// coverage_section_names_every_cleared_and_unverifiable_finding,
+/// coverage_section_omits_the_verdict_line_without_verdicts}`.
+fn verdict_lines(repo: &RepoInvestigation) -> String {
+    let Some(v) = &repo.verdicts else {
+        return String::new();
+    };
+    let mut out = format!("- trace verdicts: {}\n", v.summary_line());
+    if !v.model.is_empty() {
+        out.push_str(&format!("  - judged by: {}\n", v.model));
+    }
+    for f in &v.verdicts {
+        let label = match f.verdict {
+            Verdict::Cleared => "cleared",
+            Verdict::Unverifiable => "unverifiable",
+            // A confirmed finding carries its verdict at the finding itself, in
+            // section 5; repeating all of them here would bury the two that
+            // changed something.
+            Verdict::Confirmed => continue,
+        };
+        out.push_str(&format!("  - {label}: {} — {}\n", f.title, f.reason));
+    }
     out
 }
 

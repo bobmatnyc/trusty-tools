@@ -54,6 +54,14 @@ pub struct VerifiedFinding {
     pub remediation: String,
     /// Qualitative cost/effort framing.
     pub cost_effort: String,
+    /// The one-line trace verdict marker, or empty (#6166 leg 2).
+    ///
+    /// Written only by [`super::verdict::apply_verdicts`]: `verified-by-trace…`
+    /// for a CONFIRMED finding, `cleared-by-trace: <reason>` for a CLEARED one.
+    /// An UNVERIFIABLE finding — and every finding the trace pass never reached
+    /// — keeps this empty and renders exactly as it did before the pass existed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub trace_verdict: String,
 }
 
 /// The outcome of verifying one repository's raw findings.
@@ -208,6 +216,8 @@ pub fn verify_findings(raw: Vec<RawFinding>, selection: &Selection) -> VerifyOut
                 business_impact: green_blank(green, &f.business_impact),
                 remediation: green_blank(green, &f.remediation),
                 cost_effort: green_blank(green, &f.cost_effort),
+                // #6166 leg 2: the verdict pass writes this, never verification.
+                trace_verdict: String::new(),
             }),
             None => {
                 out.rejected += 1;

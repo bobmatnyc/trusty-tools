@@ -28,6 +28,7 @@ pub mod select;
 pub mod trace;
 pub mod trace_client;
 pub mod trace_symbol;
+pub mod verdict;
 pub mod verify;
 
 use std::sync::Arc;
@@ -45,6 +46,7 @@ pub use select::{
     Budget, DimensionCoverage, RiskSignals, SCALABILITY_DIMENSION, SECURITY_DIMENSION, Selection,
 };
 pub use trace::{FindingTrace, TraceAnchor, TraceLimits, TraceSet};
+pub use verdict::{FindingVerdict, Verdict, VerdictSet, Verifier};
 pub use verify::VerifiedFinding;
 
 // ─── Result types ─────────────────────────────────────────────────────────────
@@ -226,6 +228,12 @@ pub struct RepoInvestigation {
     /// to trace). A `Some` set always holds one record per candidate, including
     /// the refused ones.
     pub traces: Option<TraceSet>,
+    /// The verifier's verdict on each traced candidate (#6166 leg 2).
+    ///
+    /// `None` exactly when `traces` is `None`. A `Some` set holds one verdict
+    /// per candidate — a candidate leg 1 refused is UNVERIFIABLE carrying that
+    /// refusal, so the counts cover the traced set and not only its successes.
+    pub verdicts: Option<VerdictSet>,
 }
 
 /// The aggregate investigation result recorded on the [`ReportModel`].
@@ -266,9 +274,15 @@ impl Investigation {
 /// checkout (nothing to investigate).
 /// Test: `tests/report_investigate.rs` (mock provider, verifiable + unverifiable
 /// + multi-batch partial failure).
+///
+/// #6166 leg 2: `verifier` is the verifier-role client the verdict pass calls
+/// after tracing. `None` records every traced candidate UNVERIFIABLE rather than
+/// skipping the pass, so a run without a verifier states the gap instead of
+/// looking like a run with nothing to report.
 pub async fn run_investigation(
     provider: Arc<dyn LlmProvider>,
     llm_model: &str,
+    verifier: Option<&verdict::Verifier>,
     model: &ReportModel,
     budget: Budget,
     attributed_only: bool,
@@ -305,12 +319,13 @@ pub async fn run_investigation(
                 coverage: Coverage::empty(&selection, budget),
                 deps,
                 traces: None,
+                verdicts: None,
             });
             continue;
         }
 
         let batches = batch::partition_batches(&selection.files);
-        let (findings, rejected, outcomes) = batch::run_batches(
+        let (mut findings, rejected, outcomes) = batch::run_batches(
             provider.clone(),
             llm_model,
             &repo.name,
@@ -322,8 +337,13 @@ pub async fn run_investigation(
         .await;
 
         let status = repo_status(&outcomes);
-        let coverage = Coverage::build(&selection, rejected, budget, &outcomes, &findings);
         let traces = trace_repo(path, &findings).await;
+        // #6166 leg 2: verdicts are folded onto the findings BEFORE coverage is
+        // built, so a cleared finding's new band is the one the coverage counts,
+        // the metrics rows, and the synthesis prompt all see. Building coverage
+        // first would state a RED/AMBER split the rest of the report contradicts.
+        let verdicts = verdict_repo(verifier, traces.as_ref(), &mut findings).await;
+        let coverage = Coverage::build(&selection, rejected, budget, &outcomes, &findings);
         repos.push(RepoInvestigation {
             slug: repo.slug.clone(),
             name: repo.name.clone(),
@@ -332,6 +352,7 @@ pub async fn run_investigation(
             coverage,
             deps,
             traces,
+            verdicts,
         });
     }
 
@@ -360,6 +381,32 @@ async fn trace_repo(path: &std::path::Path, findings: &[VerifiedFinding]) -> Opt
     }
     let source = trace_client::HttpTraceSource::resolved()?;
     Some(trace::assemble_traces(path, findings, &source, TraceLimits::default()).await)
+}
+
+/// The reason recorded for every candidate when no verifier could be built.
+const NO_VERIFIER: &str = "no verdict: no verifier-role provider was available for this run";
+
+/// Run the verdict pass over one repository's traces and fold it onto the
+/// findings (#6166 leg 2).
+///
+/// Why: keeping the call and the fold adjacent means a verdict can never be
+/// recorded without being applied, or applied without being counted — the two
+/// halves of the same decision.
+/// What: `None` when the repository has no trace set (nothing was traced).
+/// Otherwise the full verdict set, with [`verdict::apply_verdicts`] already
+/// applied to `findings`.
+/// Test: `verdict_tests.rs` covers both halves directly; `tests/report_investigate.rs`
+/// exercises this wrapper, where no daemon runs and every candidate is
+/// UNVERIFIABLE.
+async fn verdict_repo(
+    verifier: Option<&verdict::Verifier>,
+    traces: Option<&TraceSet>,
+    findings: &mut [VerifiedFinding],
+) -> Option<VerdictSet> {
+    let traces = traces?;
+    let set = verdict::run_verdicts(verifier, traces, findings, NO_VERIFIER).await;
+    verdict::apply_verdicts(findings, &set, traces);
+    Some(set)
 }
 
 /// Roll up per-batch outcomes into one repository-level [`InvestigationStatus`].
@@ -429,7 +476,7 @@ pub fn apply_investigation(model: &mut ReportModel, inv: &Investigation) {
         let metrics = repo.metrics.get_or_insert_with(AnalyzeMetrics::default);
         for f in &repo_inv.findings {
             metrics.findings.push(MetricFinding {
-                title: f.title.clone(),
+                title: metric_title(f),
                 severity: f.severity,
                 category: f.dimension.clone(),
                 component: component_ref(f),
@@ -441,8 +488,76 @@ pub fn apply_investigation(model: &mut ReportModel, inv: &Investigation) {
             });
         }
     }
+    model.gaps.extend(verdict_gap_lines(inv));
     model.investigation = Some(inv.clone());
 }
+
+/// The title a finding's metrics row carries.
+///
+/// Why: a finding CLEARED down from AMBER lands in GREEN, and a GREEN renders as
+/// a one-line clean-signals bullet built from the title alone. Left as-is it
+/// would read as a strength the investigation found — the precise way this pass
+/// could make a report look better than its evidence. Naming the clearing in the
+/// title is what keeps that bullet honest, and it is safe only for GREEN: a
+/// RED/AMBER title is the join key `merge_investigation_prose` and
+/// `push_finding_band` match on, and those bands show the verdict as a `Trace`
+/// bullet under the evidence instead.
+/// What: the bare title, unless the finding is GREEN and carries a verdict
+/// marker — which can only be a clearing, since the trace pass never judges a
+/// GREEN.
+/// Test: `verdict_tests::a_cleared_amber_names_the_clearing_in_its_green_bullet`.
+fn metric_title(f: &VerifiedFinding) -> String {
+    if f.severity == Severity::Green && !f.trace_verdict.trim().is_empty() {
+        return format!("{} — {}", f.title, f.trace_verdict.trim());
+    }
+    f.title.clone()
+}
+
+/// One Gaps & Caveats line per repository whose verdict pass left findings
+/// unverified (#6166 leg 2).
+///
+/// Why: the coverage section states the counts, and a reader who skips it must
+/// still not read an unverified finding as a disproved one. This is the second,
+/// louder surface — `model.gaps` leads Gaps & Caveats.
+/// What: nothing for a repository whose every traced finding got a decided
+/// verdict; otherwise one line naming the count, the total traced, and the
+/// distinct reasons, capped so a long tail of identical reasons cannot flood the
+/// section.
+/// Test: `verdict_tests::{unverifiable_findings_reach_the_gaps_line,
+/// a_fully_verified_repository_adds_no_gap_line}`.
+fn verdict_gap_lines(inv: &Investigation) -> Vec<String> {
+    let mut out = Vec::new();
+    for repo in &inv.repos {
+        let Some(v) = &repo.verdicts else { continue };
+        if v.unverifiable == 0 {
+            continue;
+        }
+        let mut reasons: Vec<&str> = Vec::new();
+        for r in v
+            .verdicts
+            .iter()
+            .filter(|f| f.verdict == Verdict::Unverifiable)
+            .map(|f| f.reason.as_str())
+        {
+            if !reasons.contains(&r) && reasons.len() < MAX_GAP_REASONS {
+                reasons.push(r);
+            }
+        }
+        out.push(format!(
+            "Trace verdicts ({}): {} of {} traced finding(s) could not be checked against the \
+             symbol graph ({}). Read those findings as unverified, not as disproved — the trace \
+             pass neither supported nor contradicted them.",
+            repo.name,
+            v.unverifiable,
+            v.traced,
+            reasons.join("; "),
+        ));
+    }
+    out
+}
+
+/// How many distinct unverifiable reasons one gap line names.
+const MAX_GAP_REASONS: usize = 3;
 
 /// Scrub one verified finding's prose on its way into [`FindingProse`] (#5323).
 ///
@@ -465,6 +580,10 @@ fn scrubbed_prose(slug: &str, band: &str, f: &VerifiedFinding, secrets: &[String
         remediation: f.remediation.clone(),
         cost_effort: f.cost_effort.clone(),
         evidence_measured: true,
+        // #6166 leg 2: mechanical, and never scrubbed away — the verdict marker
+        // is this crate's own composed text, not model prose over repository
+        // content.
+        trace_verdict: f.trace_verdict.clone(),
     };
     super::redact::scrub_prose(&mut prose, secrets);
     prose
@@ -547,6 +666,7 @@ mod coverage_tests {
 
     fn green(dimension: &str) -> VerifiedFinding {
         VerifiedFinding {
+            trace_verdict: String::new(),
             title: "Clean signal".to_string(),
             severity: Severity::Green,
             dimension: dimension.to_string(),

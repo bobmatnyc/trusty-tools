@@ -50,6 +50,10 @@ fn all_sent_schemas() -> Vec<(&'static str, ResponseSchema)> {
             "investigation_schema",
             crate::report::investigate::analyze::investigation_schema(8),
         ),
+        (
+            "verdict_schema",
+            crate::report::investigate::verdict::verdict_schema(),
+        ),
     ]
 }
 

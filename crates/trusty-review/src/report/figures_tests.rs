@@ -53,6 +53,7 @@ fn printed_figures_carry_the_coverage_percentage() {
     let mut model = model_with(vec![repo()]);
     model.investigation = Some(Investigation {
         repos: vec![RepoInvestigation {
+            verdicts: None,
             name: "app".to_string(),
             slug: "app".to_string(),
             status: InvestigationStatus::Available,

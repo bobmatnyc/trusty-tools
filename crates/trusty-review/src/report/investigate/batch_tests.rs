@@ -89,6 +89,7 @@ fn empty_input_yields_no_batches() {
 
 fn finding(file: &str, title: &str, severity: Severity, description: &str) -> VerifiedFinding {
     VerifiedFinding {
+        trace_verdict: String::new(),
         title: title.to_string(),
         severity,
         dimension: "authentication & secrets".to_string(),

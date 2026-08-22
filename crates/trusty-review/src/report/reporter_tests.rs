@@ -465,6 +465,7 @@ fn reporter_injects_synthesis_prose() {
         executive_summary: Some("A grounded acquirer-relevant summary.".to_string()),
         top_risks: vec![],
         findings: vec![FindingProse {
+            trace_verdict: String::new(),
             app_slug: slug,
             title: "Injection risk".to_string(),
             severity: "RED".to_string(),
@@ -687,6 +688,7 @@ fn render_with_finding(f: crate::report::synthesize::FindingProse) -> String {
 /// individual tests vary left to the caller.
 fn restating_finding() -> crate::report::synthesize::FindingProse {
     crate::report::synthesize::FindingProse {
+        trace_verdict: String::new(),
         app_slug: String::new(),
         title: "Extract method — hnsw_store".to_string(),
         severity: "AMBER".to_string(),
@@ -806,6 +808,7 @@ fn evidence_renders_as_fenced_block() {
         executive_summary: None,
         top_risks: vec![],
         findings: vec![FindingProse {
+            trace_verdict: String::new(),
             app_slug: slug,
             title: "SQL injection".to_string(),
             severity: "RED".to_string(),
@@ -836,6 +839,59 @@ fn evidence_renders_as_fenced_block() {
     // The old inline, unfenced sentence form must never appear again.
     assert!(!md.contains("Evidence: let query"));
     assert!(!md.contains("{{"));
+    // #6166 leg 2: a finding the verdict pass never reached carries no marker.
+    assert!(!md.contains("- **Trace:**"), "md:\n{md}");
+}
+
+/// Why (#6166 leg 2): the verdict has to reach the page next to the finding it
+/// judged, and it must sit OUTSIDE the fence — the quote inside is the
+/// byte-for-byte text the evidence guardrail matched, and a line spliced into
+/// it would make the displayed quote diverge from the verified one.
+/// What: a `trace_verdict` renders as one `- **Trace:**` bullet after the
+/// closing fence; the fenced quote is unchanged.
+/// Test: this test itself.
+#[test]
+fn a_trace_verdict_renders_under_the_evidence_fence() {
+    use crate::report::synthesize::{FindingProse, Synthesis};
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let mut model = fixture_model(tmp.path());
+    let slug = model.repositories[0].slug.clone();
+    model.synthesis = Some(Synthesis {
+        code_quality_summary: None,
+        security_summary: None,
+        authorship_summary: None,
+        executive_summary: None,
+        top_risks: vec![],
+        findings: vec![FindingProse {
+            trace_verdict: "cleared-by-trace: the query is parameterised at line 61".to_string(),
+            app_slug: slug,
+            title: "SQL injection".to_string(),
+            severity: "RED".to_string(),
+            description: "Unsanitised query parameters".to_string(),
+            evidence: "let query = `SELECT * FROM users WHERE id = ${id}`;".to_string(),
+            component: "lib/auth/session.ts:58".to_string(),
+            business_impact: "customer data exposure".to_string(),
+            remediation: "use parameterised queries".to_string(),
+            cost_effort: "low".to_string(),
+            evidence_measured: true,
+        }],
+        notes: vec![],
+    });
+
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    assert!(
+        md.contains("```\n- **Trace:** cleared-by-trace: the query is parameterised at line 61"),
+        "the verdict must follow the CLOSING fence; md:\n{md}"
+    );
+    assert!(
+        md.contains("```\nlet query = `SELECT * FROM users WHERE id = ${id}`;\n```"),
+        "the verified quote must be untouched; md:\n{md}"
+    );
 }
 
 /// Why: this is the direct regression test for defect #3 — a blank line
@@ -861,6 +917,7 @@ fn evidence_with_blank_line_fences_cleanly() {
         executive_summary: None,
         top_risks: vec![],
         findings: vec![FindingProse {
+            trace_verdict: String::new(),
             app_slug: slug,
             title: "SQL injection".to_string(),
             severity: "RED".to_string(),
@@ -919,6 +976,7 @@ fn evidence_containing_triple_backticks_uses_longer_fence() {
         executive_summary: None,
         top_risks: vec![],
         findings: vec![FindingProse {
+            trace_verdict: String::new(),
             app_slug: slug,
             title: "SQL injection".to_string(),
             severity: "RED".to_string(),
@@ -996,6 +1054,7 @@ fn evidence_with_adjacent_hash_comment_lines_renders_byte_identical() {
         executive_summary: None,
         top_risks: vec![],
         findings: vec![FindingProse {
+            trace_verdict: String::new(),
             app_slug: slug,
             title: "ALLOWED_OAUTH_DOMAINS fails closed but is undocumented".to_string(),
             severity: "RED".to_string(),
@@ -1062,6 +1121,7 @@ fn evidence_with_blank_line_full_render_has_no_fenced_splice() {
         executive_summary: None,
         top_risks: vec![],
         findings: vec![FindingProse {
+            trace_verdict: String::new(),
             app_slug: slug,
             title: "AI Gateway secrets".to_string(),
             severity: "RED".to_string(),
@@ -1239,6 +1299,7 @@ fn reporter_merges_synthesis_prose_onto_deterministic_finding() {
         executive_summary: None,
         top_risks: vec![],
         findings: vec![FindingProse {
+            trace_verdict: String::new(),
             app_slug: slug,
             title: "SQL injection".to_string(),
             severity: "RED".to_string(),
