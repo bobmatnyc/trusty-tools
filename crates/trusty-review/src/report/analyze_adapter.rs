@@ -917,8 +917,7 @@ pub async fn enrich_with_analyze_gaps(
                 }
             }
             AnalyzeFetch::Missing(gap) => {
-                repo.analyze_gap =
-                    Some(super::analyze_scope::NO_ANALYZE_DATA_REMEDY.to_string());
+                repo.analyze_gap = Some(super::analyze_scope::NO_ANALYZE_DATA_REMEDY.to_string());
                 missing.entry(gap).or_default().push(repo.name.clone());
             }
         }
