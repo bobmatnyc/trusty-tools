@@ -309,7 +309,7 @@ async fn complexity(
     checkout: &Path,
     display: &str,
     gaps: &mut Vec<String>,
-) -> Vec<String> {
+) -> Vec<hotspots::RankedFile> {
     if let Err(cause) = daemons::ensure_analyze(tools).await {
         gaps.push(format!(
             "{display}: {cause} — the report's findings, complexity distribution and health \

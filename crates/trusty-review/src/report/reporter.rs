@@ -556,12 +556,20 @@ fn inject_synthesis_summary(root: &mut Scope, syn: &super::synthesize::Synthesis
 /// no-elaboration rule is about DEPTH per topic, not about how many topics a
 /// reader is allowed to see, and this is the same fixed-slot defect #2373 fixed
 /// for the top-risk rows.
-/// What: pushes one `green_topic` scope (a single `green_topic` scalar, the
-/// finding title) per `Severity::Green` finding across all repositories, in
-/// manifest order. With no green findings no block is pushed and the section
-/// collapses via omit-empty.
+/// What: pushes one `green_topic` scope (a single `green_topic` scalar) per
+/// `Severity::Green` finding across all repositories, in manifest order. Each
+/// bullet is the finding title followed by its `file:line`, in backticks, when
+/// the finding carries one. With no green findings no block is pushed and the
+/// section collapses via omit-empty.
+///
+/// #6080: the bullets were titles alone — 0 of 23 carried an attribution — and
+/// Security Posture then cited five of them as clean signals a reader had no
+/// way to check. One of those five, "Raw SQL string interpolation via
+/// multi-line concatenation for PR upsert", describes a defect and was listed
+/// as a strength. A citation does not elaborate the topic; it says where to
+/// look, which is what makes a claimed strength falsifiable.
 /// Test: `reporter_tests.rs::{reporter_fills_green_topics,
-/// reporter_renders_every_green_topic,
+/// reporter_renders_every_green_topic, green_topic_carries_its_citation,
 /// reporter_leaves_findings_honesty_marked_without_metrics}`.
 fn push_green_topics(root: &mut Scope, model: &ReportModel) {
     let greens = model
@@ -572,9 +580,22 @@ fn push_green_topics(root: &mut Scope, model: &ReportModel) {
         .filter(|f| f.severity == Severity::Green);
     for finding in greens {
         let mut row = Scope::new();
-        row.set("green_topic", finding.title.clone());
+        row.set("green_topic", green_topic_line(finding));
         root.push_block("green_topic", row);
     }
+}
+
+/// One GREEN bullet: the title, plus its `file:line` when the finding cites one.
+///
+/// Why/What: see [`push_green_topics`]. An uncited GREEN still renders — it is
+/// data the investigation produced — but it renders WITHOUT a citation, which
+/// is also what keeps it out of the Security Posture clean-signals list.
+/// Test: `reporter_tests::green_topic_carries_its_citation`.
+fn green_topic_line(finding: &super::metrics::MetricFinding) -> String {
+    if finding.component.trim().is_empty() {
+        return finding.title.clone();
+    }
+    format!("{} — `{}`", finding.title, finding.component.trim())
 }
 
 /// Append the visible `synthesis:` status note to the rendered markdown.

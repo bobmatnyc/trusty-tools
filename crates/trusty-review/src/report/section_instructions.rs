@@ -110,9 +110,15 @@ pub fn default_instruction(id: &str) -> Option<&'static str> {
              an architectural pattern or a metric not present in the data.",
         ),
         SECURITY_SUMMARY => Some(
+            // #6080: "lint-graded" described the findings as a linter's output.
+            // They are an LLM's readings of source files with every quote
+            // mechanically verified — which the disclaimer directly above this
+            // paragraph says correctly, so the paragraph contradicted it.
             "Write ONE paragraph characterising the security posture strictly from the \
-             lint-graded RED/AMBER findings provided. This is code-hygiene signal, NOT a \
-             SAST/CVE/secrets/pen-test result — never write as though it were; state that \
+             RED/AMBER findings provided — an LLM's readings of the source files that \
+             were inspected, each with its evidence quote verified against the file it \
+             cites. This is code-hygiene signal, NOT a SAST/CVE/secrets/pen-test result \
+             — never write as though it were, and never call it lint output; state that \
              limitation if it changes how a risk should be read. Take the acquirer's \
              skeptical side while still crediting a genuinely clean signal where the data \
              supports it.",

@@ -33,12 +33,14 @@ use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value};
 /// Why: a ranking that only says WHICH files to read cannot tell the report why
 /// any of them was read, and "why" is the whole difference between a coverage
 /// section that states a percentage and one a due-diligence reader can weigh.
-/// The two optional fields are what trusty-review renders per dimension.
+/// The three optional fields are what trusty-review renders per dimension.
 /// What: `path` is repo-relative; `dimension` is a DD dimension spelled as
 /// trusty-review spells it (absent for a signal that belongs to no single
 /// dimension, such as a complexity hotspot); `reason` is one line naming the
-/// query or measurement that selected it.
-/// Test: `priority_tests::a_dimension_and_reason_are_written_as_a_table`.
+/// query or measurement that selected it; `hotspot` is the file's worst
+/// measured function, when the complexity leg ranked this file (#6145).
+/// Test: `priority_tests::{a_dimension_and_reason_are_written_as_a_table,
+/// a_hotspot_is_written_as_a_nested_table}`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct Priority {
@@ -48,6 +50,8 @@ pub struct Priority {
     pub dimension: Option<String>,
     /// One line naming the query or measurement that selected it.
     pub reason: Option<String>,
+    /// The file's hottest function, when trusty-analyze measured one (#6145).
+    pub hotspot: Option<FunctionHotspot>,
 }
 
 impl Priority {
@@ -56,10 +60,35 @@ impl Priority {
     pub fn bare(path: impl Into<String>) -> Self {
         Self {
             path: path.into(),
-            dimension: None,
-            reason: None,
+            ..Self::default()
         }
     }
+}
+
+/// The worst measured function inside one ranked file (#6145).
+///
+/// Why: `/complexity_hotspots` ranks FUNCTIONS and the manifest names FILES, so
+/// collapsing chunks to files discarded the only part of the measurement that
+/// says WHERE in a 900-line file the complexity is. The owner ruled that
+/// analysis must target the most complex functions, and a path alone cannot
+/// carry that instruction to the crate that acts on it (trusty-review, #6146).
+/// What: the winning chunk's own line range and cyclomatic count, plus its name
+/// when the daemon supplied one. The range is what makes it actionable; the
+/// name is what makes it readable, and a chunk the parser could not name still
+/// has a usable range.
+/// Test: `super::hotspot_tests::the_hottest_function_of_each_file_is_kept`,
+/// `priority_tests::a_hotspot_is_written_as_a_nested_table`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct FunctionHotspot {
+    /// The function's name, when trusty-analyze named it.
+    pub function: Option<String>,
+    /// First line of the measured chunk, 1-based.
+    pub start_line: u32,
+    /// Last line of the measured chunk, 1-based and inclusive.
+    pub end_line: u32,
+    /// The chunk's cyclomatic complexity — the number that ranked it.
+    pub cyclomatic: u32,
 }
 
 /// The investigation budget the audit asks for, in files and content bytes.
@@ -71,9 +100,12 @@ impl Priority {
 /// `trusty-audit audit` still takes no new step.
 /// What: written to `[report]` PER KEY, and only where the manifest declares
 /// none — an operator who set one of the two keeps it and gets the audit's
-/// default for the other, rather than falling back to trusty-review's.
+/// default for the other, rather than falling back to trusty-review's. The two
+/// numbers are not independent: trusty-review's selection stops at whichever
+/// binds first, so `max_bytes` is DERIVED from `max_files` unless something
+/// declares it (#6148).
 /// Test: `priority_tests::{the_budget_is_recorded_once,
-/// a_declared_budget_is_left_alone}`.
+/// a_declared_budget_is_left_alone, a_raised_file_budget_raises_the_byte_budget}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Budget {
@@ -84,10 +116,20 @@ pub struct Budget {
 }
 
 /// Files the audit asks the investigation pass to read per repository.
-pub const DEFAULT_MAX_FILES: usize = 120;
+///
+/// 240 rather than the 120 #6082 shipped: the owner's ruling is that a DD
+/// sample reads above 1% of the repository, and lap-2 measured 120 at roughly
+/// 1.8% of this workspace (#6148).
+pub const DEFAULT_MAX_FILES: usize = 240;
+
+/// Content bytes one budgeted file is assumed to carry.
+///
+/// The ratio the 120-file / 1.2 MiB pair shipped with, kept as the derivation
+/// constant so the two knobs move together.
+pub const BYTES_PER_FILE: usize = 10 * 1024;
 
 /// Content bytes the audit asks it to send per repository.
-pub const DEFAULT_MAX_BYTES: usize = 1_200 * 1024;
+pub const DEFAULT_MAX_BYTES: usize = DEFAULT_MAX_FILES * BYTES_PER_FILE;
 
 /// Environment override for [`DEFAULT_MAX_FILES`].
 pub const ENV_MAX_FILES: &str = "TRUSTY_AUDIT_INVESTIGATE_MAX_FILES";
@@ -105,9 +147,13 @@ impl Budget {
     /// on a manifest that declares one: the caps would size for 120 while
     /// trusty-review read 300. One resolver, one value, both consumers.
     /// What: a positive `[report].investigate_max_files` /
-    /// `investigate_max_bytes` wins per key; an unreadable manifest, a missing
-    /// key, and an unusable value all fall back to [`Budget::from_env`].
-    /// Test: `priority_tests::a_declared_budget_is_the_effective_budget`.
+    /// `investigate_max_bytes` wins per key, then the environment override for
+    /// that key, then the default — and an absent byte value derives from
+    /// whichever file value won, so raising files in the manifest raises bytes
+    /// with it. An unreadable manifest and an unusable value both behave as if
+    /// the key were absent.
+    /// Test: `priority_tests::{a_declared_budget_is_the_effective_budget,
+    /// a_manifest_file_budget_raises_the_byte_budget}`.
     #[must_use]
     pub fn for_manifest(manifest: &Path) -> Self {
         let declared = std::fs::read_to_string(manifest)
@@ -117,20 +163,16 @@ impl Budget {
             let value = declared.as_ref()?.get("report")?.get(name)?.as_integer()?;
             usize::try_from(value).ok().filter(|n| *n > 0)
         };
-        let machine = Self::from_env();
-        Self {
-            max_files: key("investigate_max_files").unwrap_or(machine.max_files),
-            max_bytes: key("investigate_max_bytes").unwrap_or(machine.max_bytes),
-        }
+        Self::resolve(
+            key("investigate_max_files").or_else(|| env_positive(ENV_MAX_FILES)),
+            key("investigate_max_bytes").or_else(|| env_positive(ENV_MAX_BYTES)),
+        )
     }
 
     /// The budget this machine asks for, defaults unless overridden.
     #[must_use]
     pub fn from_env() -> Self {
-        Self::resolved(
-            std::env::var(ENV_MAX_FILES).ok().as_deref(),
-            std::env::var(ENV_MAX_BYTES).ok().as_deref(),
-        )
+        Self::resolve(env_positive(ENV_MAX_FILES), env_positive(ENV_MAX_BYTES))
     }
 
     /// [`Budget::from_env`]'s rule, as a pure function.
@@ -139,13 +181,29 @@ impl Budget {
     /// an unparseable or zero override falls back rather than disabling the
     /// investigation — is testable without `std::env::set_var`, which is
     /// `unsafe` in edition 2024 and unsound under the parallel harness.
-    /// What: a positive integer wins; anything else takes the default.
-    /// Test: `priority_tests::an_unusable_override_falls_back_to_the_default`.
+    /// What: a positive integer wins; anything else takes the default, and an
+    /// absent byte override derives from the file count rather than pinning
+    /// [`DEFAULT_MAX_BYTES`].
+    /// Test: `priority_tests::{an_unusable_override_falls_back_to_the_default,
+    /// a_raised_file_budget_raises_the_byte_budget}`.
     #[must_use]
     pub fn resolved(files: Option<&str>, bytes: Option<&str>) -> Self {
+        Self::resolve(positive(files), positive(bytes))
+    }
+
+    /// The one resolution rule, over values both sources have already parsed.
+    ///
+    /// Why: trusty-review's selection stops at whichever of the two caps binds
+    /// first, so a raised file budget against a fixed byte budget reads fewer
+    /// files than it asked for and says nothing — lap-2 read 76 of 120 (#6148).
+    /// What: an explicit byte value always wins; otherwise bytes are
+    /// [`BYTES_PER_FILE`] times whatever file count won, so the default pair
+    /// stays exactly [`DEFAULT_MAX_FILES`] / [`DEFAULT_MAX_BYTES`].
+    fn resolve(files: Option<usize>, bytes: Option<usize>) -> Self {
+        let max_files = files.unwrap_or(DEFAULT_MAX_FILES);
         Self {
-            max_files: positive(files).unwrap_or(DEFAULT_MAX_FILES),
-            max_bytes: positive(bytes).unwrap_or(DEFAULT_MAX_BYTES),
+            max_files,
+            max_bytes: bytes.unwrap_or_else(|| max_files.saturating_mul(BYTES_PER_FILE)),
         }
     }
 }
@@ -153,6 +211,11 @@ impl Budget {
 /// A declared override, when it parses as a positive count.
 fn positive(value: Option<&str>) -> Option<usize> {
     value?.trim().parse::<usize>().ok().filter(|n| *n > 0)
+}
+
+/// A positive environment override for `name`, when one is set.
+fn env_positive(name: &str) -> Option<usize> {
+    positive(std::env::var(name).ok().as_deref())
 }
 
 /// Record `priorities`, `budget` and `gaps` in the manifest at `path`.
@@ -352,7 +415,7 @@ fn ranked(priorities: &[Priority]) -> Array {
 
 /// One priority as TOML: a bare path, or a table when it carries attribution.
 fn entry(priority: &Priority) -> Value {
-    if priority.dimension.is_none() && priority.reason.is_none() {
+    if priority.dimension.is_none() && priority.reason.is_none() && priority.hotspot.is_none() {
         return Value::from(priority.path.as_str());
     }
     let mut table = InlineTable::new();
@@ -363,7 +426,29 @@ fn entry(priority: &Priority) -> Value {
     if let Some(reason) = &priority.reason {
         table.insert("reason", Value::from(reason.as_str()));
     }
+    // #6145: nested rather than four `hotspot_*` siblings, so the measurement
+    // reads as one fact and a reader can tell at a glance which keys came from
+    // the complexity leg.
+    if let Some(hotspot) = &priority.hotspot {
+        table.insert("hotspot", Value::InlineTable(hotspot_table(hotspot)));
+    }
     Value::InlineTable(table)
+}
+
+/// One measured function as a nested inline table (#6145).
+fn hotspot_table(hotspot: &FunctionHotspot) -> InlineTable {
+    let mut table = InlineTable::new();
+    if let Some(function) = &hotspot.function {
+        table.insert("function", Value::from(function.as_str()));
+    }
+    for (key, value) in [
+        ("start_line", hotspot.start_line),
+        ("end_line", hotspot.end_line),
+        ("cyclomatic", hotspot.cyclomatic),
+    ] {
+        table.insert(key, Value::from(i64::from(value)));
+    }
+    table
 }
 
 #[cfg(test)]
@@ -409,7 +494,73 @@ path = "/w/repos/acme-web"
             path: path.to_owned(),
             dimension: Some(dimension.to_owned()),
             reason: Some(reason.to_owned()),
+            hotspot: None,
         }
+    }
+
+    /// #6145: the complexity leg's entry — a path and the function it measured,
+    /// with no dimension, which is the shape `evidence::blend` produces.
+    #[test]
+    fn a_hotspot_is_written_as_a_nested_table() {
+        let out = recorded(
+            SAMPLE,
+            "/w/repos/acme-api",
+            &[Priority {
+                path: "src/pay.rs".to_owned(),
+                dimension: None,
+                reason: Some("trusty-analyze complexity hotspot (rank 1)".to_owned()),
+                hotspot: Some(FunctionHotspot {
+                    function: Some("settle_invoice".to_owned()),
+                    start_line: 40,
+                    end_line: 190,
+                    cyclomatic: 31,
+                }),
+            }],
+            None,
+            &[],
+        );
+        let parsed: toml::Value = toml::from_str(&out).expect("still valid TOML");
+        let first = &parsed["repositories"].as_array().expect("array")[0]["inspect_priority"]
+            .as_array()
+            .expect("declared")[0];
+        assert_eq!(first["path"].as_str(), Some("src/pay.rs"), "{out}");
+        let hotspot = &first["hotspot"];
+        assert_eq!(
+            hotspot["function"].as_str(),
+            Some("settle_invoice"),
+            "{out}"
+        );
+        assert_eq!(hotspot["start_line"].as_integer(), Some(40), "{out}");
+        assert_eq!(hotspot["end_line"].as_integer(), Some(190), "{out}");
+        assert_eq!(hotspot["cyclomatic"].as_integer(), Some(31), "{out}");
+    }
+
+    /// #6145: an unnamed chunk writes its range and omits the key rather than
+    /// declaring a function called "".
+    #[test]
+    fn an_unnamed_hotspot_omits_the_function_key() {
+        let out = recorded(
+            SAMPLE,
+            "/w/repos/acme-api",
+            &[Priority {
+                path: "src/pay.rs".to_owned(),
+                hotspot: Some(FunctionHotspot {
+                    function: None,
+                    start_line: 4,
+                    end_line: 44,
+                    cyclomatic: 12,
+                }),
+                ..Priority::default()
+            }],
+            None,
+            &[],
+        );
+        let parsed: toml::Value = toml::from_str(&out).expect("still valid TOML");
+        let hotspot = &parsed["repositories"].as_array().expect("array")[0]["inspect_priority"]
+            .as_array()
+            .expect("declared")[0]["hotspot"];
+        assert!(hotspot.get("function").is_none(), "{out}");
+        assert_eq!(hotspot["start_line"].as_integer(), Some(4), "{out}");
     }
 
     /// #6082: an attributed entry becomes a table carrying its dimension and the
@@ -456,6 +607,79 @@ path = "/w/repos/acme-web"
             }
         );
         assert_eq!(Budget::resolved(Some(" 12 "), None).max_files, 12);
+    }
+
+    /// #6148: the two caps bind together in trusty-review, so raising files
+    /// alone used to read fewer files than it asked for — lap-2 read 76 of 120.
+    #[test]
+    fn a_raised_file_budget_raises_the_byte_budget() {
+        let raised = Budget::resolved(Some("334"), None);
+        assert_eq!(raised.max_files, 334);
+        assert_eq!(
+            raised.max_bytes, 3_420_160,
+            "334 files earn 3.34 MiB, not the default cap"
+        );
+        assert!(
+            raised.max_bytes > DEFAULT_MAX_BYTES,
+            "a budget above the default must not be capped at it"
+        );
+    }
+
+    /// An explicit byte override is the one thing derivation must not overrule.
+    #[test]
+    fn an_explicit_byte_override_wins_over_the_derivation() {
+        let budget = Budget::resolved(Some("334"), Some("4096"));
+        assert_eq!(budget.max_files, 334);
+        assert_eq!(budget.max_bytes, 4096);
+    }
+
+    /// The default pair, and the ratio that ties them.
+    #[test]
+    fn the_default_budget_is_240_files_and_2_4_mib() {
+        assert_eq!(DEFAULT_MAX_FILES, 240);
+        assert_eq!(DEFAULT_MAX_BYTES, 2_457_600);
+        assert_eq!(
+            Budget::resolved(None, None),
+            Budget {
+                max_files: DEFAULT_MAX_FILES,
+                max_bytes: DEFAULT_MAX_BYTES,
+            }
+        );
+    }
+
+    /// #6148, through the manifest: the same derivation, and the same
+    /// precedence — a declared byte key still wins.
+    #[test]
+    fn a_manifest_file_budget_raises_the_byte_budget() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("manifest.toml");
+        let with = |keys: &str| {
+            SAMPLE.replace(
+                "title = \"Acme — Technical Due Diligence\"",
+                &format!("title = \"Acme\"\n{keys}"),
+            )
+        };
+
+        std::fs::write(&path, with("investigate_max_files = 334")).expect("write");
+        assert_eq!(
+            Budget::for_manifest(&path).max_bytes,
+            env_positive(ENV_MAX_BYTES).unwrap_or(3_420_160),
+            "a declared file budget carries the byte budget with it"
+        );
+
+        std::fs::write(
+            &path,
+            with("investigate_max_files = 334\ninvestigate_max_bytes = 4096"),
+        )
+        .expect("write");
+        assert_eq!(
+            Budget::for_manifest(&path),
+            Budget {
+                max_files: 334,
+                max_bytes: 4096,
+            },
+            "both declared keys win"
+        );
     }
 
     /// #6082: the budget the audit asks for is recorded once, and only when the
@@ -542,8 +766,8 @@ path = "/w/repos/acme-web"
         assert_eq!(budget.max_files, 300, "the declared key wins");
         assert_eq!(
             budget.max_bytes,
-            Budget::from_env().max_bytes,
-            "the undeclared key falls back"
+            env_positive(ENV_MAX_BYTES).unwrap_or(300 * BYTES_PER_FILE),
+            "the undeclared byte key derives from the declared file count (#6148)"
         );
         assert_eq!(
             crate::grounding::evidence::Caps::for_budget(budget.max_files).priority_paths,

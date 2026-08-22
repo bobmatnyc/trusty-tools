@@ -198,3 +198,79 @@ fn records_the_manifests_it_examined() {
     assert_eq!(inv.total, 0, "an empty workspace declares nothing");
     assert_eq!(inv.manifests_examined, vec!["Cargo.toml".to_string()]);
 }
+
+/// One dependency's Locked cell, or the empty string when it has none.
+fn locked_cell(inv: &DependencyInventory, name: &str) -> String {
+    inv.deps
+        .iter()
+        .find(|d| d.name == name)
+        .and_then(|d| d.locked.clone())
+        .unwrap_or_default()
+}
+
+/// #6080: the graded defect, both cases verbatim.
+///
+/// Why: a workspace lockfile carries several versions of one crate because
+/// transitive dependents pin older majors. First-wins reported the LOWEST —
+/// `base64` declared `0.22` rendered as `0.13.1`, `dashmap` declared `6` as
+/// `5.5.3` — so the Locked column named a version the declared requirement
+/// cannot resolve to.
+/// What: with both versions in the lock, each row shows the one satisfying its
+/// declared requirement.
+#[test]
+fn cargo_locked_version_satisfies_the_declared_req() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "Cargo.toml",
+        "[workspace.dependencies]\nbase64 = \"0.22\"\ndashmap = \"6\"\n",
+    );
+    write(
+        tmp.path(),
+        "Cargo.lock",
+        "[[package]]\nname = \"base64\"\nversion = \"0.13.1\"\n\n\
+         [[package]]\nname = \"base64\"\nversion = \"0.22.1\"\n\n\
+         [[package]]\nname = \"dashmap\"\nversion = \"5.5.3\"\n\n\
+         [[package]]\nname = \"dashmap\"\nversion = \"6.1.0\"\n",
+    );
+    let inv = build_inventory(tmp.path());
+    assert_eq!(locked_cell(&inv, "base64"), "0.22.1");
+    assert_eq!(locked_cell(&inv, "dashmap"), "6.1.0");
+}
+
+/// Why/What (#6080): with several locked versions satisfying one requirement,
+/// the build resolves to the highest, so that is what the row states.
+#[test]
+fn cargo_locked_prefers_the_highest_satisfying_version() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write(tmp.path(), "Cargo.toml", "[dependencies]\nserde = \"1\"\n");
+    write(
+        tmp.path(),
+        "Cargo.lock",
+        "[[package]]\nname = \"serde\"\nversion = \"1.0.100\"\n\n\
+         [[package]]\nname = \"serde\"\nversion = \"1.0.219\"\n",
+    );
+    let inv = build_inventory(tmp.path());
+    assert_eq!(locked_cell(&inv, "serde"), "1.0.219");
+}
+
+/// Why (#6080): naming an unrelated version as the resolution is the defect
+/// this fix exists to stop, so a requirement nothing satisfies says exactly
+/// that rather than picking one anyway.
+/// What: the cell names every candidate and states that none matches.
+#[test]
+fn cargo_locked_states_when_no_version_satisfies() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write(tmp.path(), "Cargo.toml", "[dependencies]\nfoo = \"3\"\n");
+    write(
+        tmp.path(),
+        "Cargo.lock",
+        "[[package]]\nname = \"foo\"\nversion = \"1.0.0\"\n\n\
+         [[package]]\nname = \"foo\"\nversion = \"2.0.0\"\n",
+    );
+    let inv = build_inventory(tmp.path());
+    let locked = locked_cell(&inv, "foo");
+    assert!(locked.contains("none satisfies 3"), "locked: {locked}");
+    assert!(locked.contains("1.0.0"), "locked: {locked}");
+    assert!(locked.contains("2.0.0"), "locked: {locked}");
+}

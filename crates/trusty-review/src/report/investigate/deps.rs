@@ -225,19 +225,31 @@ fn cargo_deps(root: &Path) -> Vec<Dependency> {
                     .to_string(),
                 _ => String::new(),
             };
+            let locked = locked.get(name).map_or_else(Vec::new, |v| v.clone());
             Dependency {
+                locked: resolve_locked(&spec_str, &locked),
                 name: name.clone(),
                 ecosystem: "cargo".to_string(),
                 spec: spec_str,
-                locked: locked.get(name).cloned(),
             }
         })
         .collect()
 }
 
-/// Resolved versions from `Cargo.lock` (`[[package]] name/version`).
-fn cargo_lock_versions(root: &Path) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
+/// Every resolved version in `Cargo.lock`, per package name.
+///
+/// Why: a workspace lockfile routinely carries several versions of one crate —
+/// `base64` 0.13.1 alongside 0.22.1, `dashmap` 5.5.3 alongside 6.1.0 — because
+/// transitive dependents pin older majors. Keeping only the first entry
+/// reported the LOWEST of them (cargo writes `[[package]]` blocks sorted by
+/// name then version), so a manifest declaring `base64 = "0.22"` had `0.13.1`
+/// printed against it. The list is what [`resolve_locked`] needs to pick the
+/// version the declared requirement actually resolves to.
+/// What: `name → versions`, in lockfile order, duplicates preserved.
+/// Test: `deps_tests::{cargo_locked_version_satisfies_the_declared_req,
+/// cargo_locked_prefers_the_highest_satisfying_version}`.
+fn cargo_lock_versions(root: &Path) -> BTreeMap<String, Vec<String>> {
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let Some(text) = read(root, "Cargo.lock") else {
         return out;
     };
@@ -251,11 +263,48 @@ fn cargo_lock_versions(root: &Path) -> BTreeMap<String, String> {
                 pkg.get("version").and_then(|v| v.as_str()),
             ) {
                 out.entry(name.to_string())
-                    .or_insert_with(|| ver.to_string());
+                    .or_default()
+                    .push(ver.to_string());
             }
         }
     }
     out
+}
+
+/// Pick the locked version a declared requirement resolves to.
+///
+/// Why: the Locked column answers "what is this build actually using for the
+/// version it asked for". With several versions in the lock, that is a semver
+/// question, not a first-wins one — and when NONE of them satisfies the
+/// declared requirement the honest answer is to say so rather than print an
+/// unrelated version as if it were the resolution.
+/// What: one locked version resolves to itself. With several, the highest that
+/// satisfies `spec` wins; with an empty or unparseable `spec` the highest
+/// overall wins; with none satisfying, the cell names every candidate and
+/// states that none matches. An unparseable version string is skipped for
+/// matching but still named in the no-match text.
+/// Test: `deps_tests::{cargo_locked_version_satisfies_the_declared_req,
+/// cargo_locked_prefers_the_highest_satisfying_version,
+/// cargo_locked_states_when_no_version_satisfies}`.
+fn resolve_locked(spec: &str, versions: &[String]) -> Option<String> {
+    match versions {
+        [] => return None,
+        [only] => return Some(only.clone()),
+        _ => {}
+    }
+    let parsed: Vec<(semver::Version, &String)> = versions
+        .iter()
+        .filter_map(|v| semver::Version::parse(v).ok().map(|p| (p, v)))
+        .collect();
+    let req = semver::VersionReq::parse(spec.trim()).ok();
+    let matching: Vec<&(semver::Version, &String)> = parsed
+        .iter()
+        .filter(|(v, _)| req.as_ref().is_none_or(|r| r.matches(v)))
+        .collect();
+    if let Some((_, raw)) = matching.iter().max_by(|a, b| a.0.cmp(&b.0)) {
+        return Some((*raw).clone());
+    }
+    Some(format!("{} (none satisfies {spec})", versions.join(", ")))
 }
 
 // ─── pypi ────────────────────────────────────────────────────────────────────

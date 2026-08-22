@@ -244,11 +244,16 @@ inspect_priority = [
 ```
 
 The client also asks for a wider investigation budget than `trusty-review`'s own
-default — 120 files and 1.2 MiB per repository, overridable per machine with
+default — 240 files and 2.4 MiB per repository, overridable per machine with
 `TRUSTY_AUDIT_INVESTIGATE_MAX_FILES` and `TRUSTY_AUDIT_INVESTIGATE_MAX_BYTES`.
 It writes `investigate_max_files` and `investigate_max_bytes` into `[report]`
 per key, and only where the manifest declares none: an operator who set one of
 the two keeps it, and gets the audit's default for the other.
+
+The byte budget follows the file budget at 10 KiB per file unless something
+declares it. `trusty-review` stops reading at whichever of the two binds first,
+so raising files alone used to read fewer files than it asked for and say
+nothing about it.
 
 Every leg of that is fail-open: a daemon that will not start, a checkout
 `trusty-search` refuses, an index that matches no evidence, an index with

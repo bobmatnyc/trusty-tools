@@ -129,13 +129,20 @@ pub struct Coverage {
 }
 
 impl Coverage {
-    /// Build a coverage record from a selection outcome, rejection count, and the
-    /// per-batch outcomes.
+    /// Build a coverage record from a selection outcome, rejection count, the
+    /// per-batch outcomes, and the verified findings.
+    ///
+    /// #6080: `dimensions_covered` came from file selection alone, so a
+    /// dimension the model raised findings in but no selected file matched by
+    /// name was listed as NOT investigated — while its findings sat in §5. A
+    /// dimension that produced a verified finding was covered by definition, so
+    /// findings' dimensions fold in here and drop out of `dimensions_absent`.
     fn build(
         sel: &Selection,
         rejected: usize,
         budget: Budget,
         batches: &[batch::BatchOutcome],
+        findings: &[VerifiedFinding],
     ) -> Self {
         let batches_failed: Vec<BatchNote> = batches
             .iter()
@@ -147,13 +154,29 @@ impl Coverage {
                 reason: b.status.reason(),
             })
             .collect();
+        let mut dimensions_covered = sel.dimensions_covered.clone();
+        for d in findings
+            .iter()
+            .map(|f| f.dimension.trim())
+            .filter(|d| !d.is_empty())
+        {
+            if !dimensions_covered.iter().any(|c| c == d) {
+                dimensions_covered.push(d.to_string());
+            }
+        }
+        let dimensions_absent: Vec<String> = sel
+            .dimensions_absent
+            .iter()
+            .filter(|d| !dimensions_covered.contains(d))
+            .cloned()
+            .collect();
         Coverage {
             files_examined: sel.files.len(),
             total_files: sel.total_files,
             skipped: sel.skipped,
             bytes_sent: sel.bytes_sent,
-            dimensions_covered: sel.dimensions_covered.clone(),
-            dimensions_absent: sel.dimensions_absent.clone(),
+            dimensions_covered,
+            dimensions_absent,
             per_dimension: sel.per_dimension.clone(),
             attributed_files: sel.attributed_files,
             attributed_only: sel.attributed_only,
@@ -168,7 +191,7 @@ impl Coverage {
     /// A coverage record for a repository whose selection was empty (no batches
     /// were ever attempted).
     fn empty(sel: &Selection, budget: Budget) -> Self {
-        Coverage::build(sel, 0, budget, &[])
+        Coverage::build(sel, 0, budget, &[], &[])
     }
 }
 
@@ -282,12 +305,13 @@ pub async fn run_investigation(
         .await;
 
         let status = repo_status(&outcomes);
+        let coverage = Coverage::build(&selection, rejected, budget, &outcomes, &findings);
         repos.push(RepoInvestigation {
             slug: repo.slug.clone(),
             name: repo.name.clone(),
             status,
             findings,
-            coverage: Coverage::build(&selection, rejected, budget, &outcomes),
+            coverage,
             deps,
         });
     }
@@ -463,4 +487,45 @@ pub fn merge_investigation_prose(synthesis: &mut Synthesis, inv: &Investigation)
 /// Test: `render_tests` (section content) + `reporter_tests` (absent → empty).
 pub fn report_sections(model: &ReportModel) -> String {
     render::report_sections(model)
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    fn green(dimension: &str) -> VerifiedFinding {
+        VerifiedFinding {
+            title: "Clean signal".to_string(),
+            severity: Severity::Green,
+            dimension: dimension.to_string(),
+            file: "src/lib.rs".to_string(),
+            line: Some(1),
+            evidence_quote: String::new(),
+            description: String::new(),
+            business_impact: String::new(),
+            remediation: String::new(),
+            cost_effort: String::new(),
+        }
+    }
+
+    /// #6080: a dimension that produced findings is a dimension that was
+    /// covered.
+    ///
+    /// Why: `dimensions_covered` came from file selection alone, so a
+    /// dimension the model raised findings in but no selected file matched by
+    /// name was listed as NOT investigated — while its findings sat in §5 of
+    /// the same report.
+    /// What: a finding's dimension joins the covered list and leaves the
+    /// absent one.
+    #[test]
+    fn a_dimension_with_findings_is_covered() {
+        let sel = select::Selection {
+            dimensions_covered: vec!["error handling".to_string()],
+            dimensions_absent: vec!["scalability".to_string(), "dependencies".to_string()],
+            ..Default::default()
+        };
+        let c = Coverage::build(&sel, 0, Budget::default(), &[], &[green("scalability")]);
+        assert!(c.dimensions_covered.contains(&"scalability".to_string()));
+        assert_eq!(c.dimensions_absent, vec!["dependencies".to_string()]);
+    }
 }

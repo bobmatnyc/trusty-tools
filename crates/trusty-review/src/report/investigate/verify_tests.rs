@@ -19,6 +19,7 @@ fn selection(path: &str, content: &str) -> Selection {
             dimensions: vec![],
             selected_by: None,
             hotspot: None,
+            declared_for: None,
         }],
         total_files: 1,
         skipped: 0,
@@ -124,20 +125,45 @@ fn matches_whitespace_insensitively() {
     assert_eq!(out.verified[0].line, Some(2));
 }
 
-/// Why: greens are title-only topics; they need no evidence and never reject.
-/// What: a green with no file/quote is verified as a bare topic.
+/// #6080: a GREEN carries its citation and nothing else.
+///
+/// Why: a report listed "Raw SQL string interpolation via multi-line
+/// concatenation for PR upsert" among a codebase's security strengths, and no
+/// GREEN in that run carried a file, a line, or a quote — so nothing on the
+/// page let a reader check any of them. Attribution is not elaboration.
+/// What: a green citing a real file with a real quote keeps `file`/`line` and
+/// drops the quote and every prose field.
 /// Test: this test itself.
 #[test]
-fn green_is_title_only() {
+fn green_carries_its_citation_without_elaboration() {
     let sel = selection("a.rs", "code\n");
-    let mut g = raw("green", "", "", None);
+    let mut g = raw("green", "a.rs", "code", None);
     g.title = "Clean dependency tree".to_string();
+    g.description = "should not survive".to_string();
     let out = verify_findings(vec![g], &sel);
     assert_eq!(out.verified.len(), 1);
     assert_eq!(out.rejected, 0);
     assert_eq!(out.verified[0].severity, Severity::Green);
+    assert_eq!(out.verified[0].file, "a.rs");
+    assert_eq!(out.verified[0].line, Some(1));
     assert!(out.verified[0].evidence_quote.is_empty());
-    assert!(out.verified[0].file.is_empty());
+    assert!(out.verified[0].description.is_empty());
+}
+
+/// #6080: an uncited GREEN is rejected, not admitted as a bare title.
+///
+/// Why/What: see [`green_carries_its_citation_without_elaboration`] — the same
+/// fail-closed rule RED/AMBER have always had. A clean signal a reader cannot
+/// check is an assertion, and this guardrail exists to admit no assertions.
+/// Test: this test itself.
+#[test]
+fn an_uncited_green_is_rejected() {
+    let sel = selection("a.rs", "code\n");
+    let mut g = raw("green", "", "", None);
+    g.title = "Clean dependency tree".to_string();
+    let out = verify_findings(vec![g], &sel);
+    assert!(out.verified.is_empty());
+    assert_eq!(out.rejected, 1);
 }
 
 /// Why: a finding with no title is meaningless and must be rejected.
@@ -191,4 +217,92 @@ fn quote_is_not_extended_across_a_very_long_line() {
     let out = verify_findings(vec![r], &sel);
 
     assert_eq!(out.verified[0].evidence_quote, "let a = 1;");
+}
+
+/// #6080: the same install.sh defect, one line further out.
+///
+/// Why: #6137 completed the quote to end-of-line, and the lap-2 report still
+/// cut the mitigation — because the model's stop point ALREADY sat on a line
+/// boundary ("…review the script manually") and the clause finishing it was
+/// the next line. Completion had nothing to add.
+/// What: a quote ending mid-construct pulls in one more full line, so "All
+/// downloaded binaries are SHA-256 verified." reaches the page.
+#[test]
+fn quote_completes_across_a_wrapped_sentence() {
+    let content = "# integrity guarantee. The installer script itself is not signed\n\
+                   # require a higher assurance level, download and review the script manually\n\
+                   # before running it. All downloaded binaries are SHA-256 verified.\n\
+                   set -e\n";
+    let sel = selection("install.sh", content);
+    let r = raw(
+        "amber",
+        "install.sh",
+        "# require a higher assurance level, download and review the script manually",
+        None,
+    );
+    let out = verify_findings(vec![r], &sel);
+
+    assert_eq!(out.rejected, 0);
+    let quote = &out.verified[0].evidence_quote;
+    assert!(
+        quote.contains("All downloaded binaries are SHA-256 verified."),
+        "the mitigation on the next line must survive: {quote:?}"
+    );
+    assert!(
+        !quote.contains("set -e"),
+        "exactly one extra line, never a chain: {quote:?}"
+    );
+}
+
+/// Why/What (#6080): a quote ending on punctuation is already closed, so it is
+/// left alone — that is what keeps code quotes from growing a line at a time.
+#[test]
+fn quote_is_not_extended_past_a_closed_line() {
+    let content = "let a = compute();\nlet b = other();\n";
+    let sel = selection("a.rs", content);
+    let r = raw("amber", "a.rs", "let a = compute();", None);
+    let out = verify_findings(vec![r], &sel);
+
+    assert_eq!(out.verified[0].evidence_quote, "let a = compute();");
+}
+
+/// Why/What (#6080): the one extra line obeys the same byte budget the
+/// end-of-line completion does.
+#[test]
+fn quote_extension_stops_after_one_line() {
+    let tail = "x".repeat(400);
+    let content = format!("a sentence ending in a word\n{tail}\n");
+    let sel = selection("a.md", &content);
+    let r = raw("amber", "a.md", "a sentence ending in a word", None);
+    let out = verify_findings(vec![r], &sel);
+
+    assert_eq!(
+        out.verified[0].evidence_quote,
+        "a sentence ending in a word"
+    );
+}
+
+/// #6080: one dimension under two spellings split every per-dimension count in
+/// the coverage section — "error management" (2 findings) beside "error
+/// handling" (23). The checklist is fixed; only the echo varies, so the fold
+/// happens at ingestion.
+#[test]
+fn dimension_synonyms_fold_onto_the_canonical_name() {
+    let sel = selection("a.rs", "code\n");
+    let mut r = raw("red", "a.rs", "code", None);
+    r.dimension = "Error Management".to_string();
+    let out = verify_findings(vec![r], &sel);
+    assert_eq!(out.verified[0].dimension, "error handling");
+}
+
+/// Why/What (#6080): a manifest's analyst-focus dimension is a legitimate
+/// label this crate does not enumerate, so an unknown one survives verbatim
+/// rather than being forced onto a canonical name it does not mean.
+#[test]
+fn an_unknown_dimension_survives_verbatim() {
+    let sel = selection("a.rs", "code\n");
+    let mut r = raw("red", "a.rs", "code", None);
+    r.dimension = "  analyst focus: billing  ".to_string();
+    let out = verify_findings(vec![r], &sel);
+    assert_eq!(out.verified[0].dimension, "analyst focus: billing");
 }

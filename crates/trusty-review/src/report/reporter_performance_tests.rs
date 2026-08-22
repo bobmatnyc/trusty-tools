@@ -29,6 +29,7 @@ fn model_with(findings: Vec<MetricFinding>) -> ReportModel {
                 findings,
                 ..Default::default()
             }),
+            analyze_gap: None,
             authorship: None,
             inspect_priority: Vec::new(),
         }],

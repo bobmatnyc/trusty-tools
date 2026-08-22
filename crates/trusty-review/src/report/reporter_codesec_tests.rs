@@ -17,6 +17,7 @@ fn repo(metrics: Option<AnalyzeMetrics>) -> RepositoryReport {
         local_path: None,
         scan: None,
         metrics,
+        analyze_gap: None,
         authorship: None,
         inspect_priority: Vec::new(),
     }
@@ -153,9 +154,75 @@ fn security_section_credits_clean_signals() {
 
     let rendered = crate::report::fill::render("{{security_clean_signals}}", &root);
     assert!(
-        rendered.contains("Constant-time bearer token comparison"),
+        rendered.contains("Constant-time bearer token comparison (`src/lib.rs`)"),
         "rendered: {rendered}"
     );
+}
+
+/// #6080: an uncited GREEN is not a clean signal.
+///
+/// Why: a report credited five clean signals, none carrying a file, and one of
+/// them — "Raw SQL string interpolation via multi-line concatenation for PR
+/// upsert" — described a defect. A reader had nothing to check any of them
+/// against. The citation is what makes the claim falsifiable.
+/// What: a GREEN with an empty `component` is dropped from the list, and a
+/// section left with none says so.
+#[test]
+fn an_uncited_green_is_not_a_clean_signal() {
+    let mut green = finding(SECURITY_DIMENSION, Severity::Green);
+    green.title = "Raw SQL string interpolation for PR upsert".to_string();
+    green.component = String::new();
+    let metrics = AnalyzeMetrics {
+        findings: vec![finding(SECURITY_DIMENSION, Severity::Amber), green],
+        ..Default::default()
+    };
+    let model = model_with(vec![repo(Some(metrics))]);
+    let mut root = Scope::new();
+    push_security_violation_rows(&mut root, &model);
+
+    let rendered = crate::report::fill::render("{{security_clean_signals}}", &root);
+    assert!(
+        !rendered.contains("Raw SQL string interpolation"),
+        "rendered: {rendered}"
+    );
+    assert!(
+        rendered.contains("No clean security signals"),
+        "rendered: {rendered}"
+    );
+}
+
+/// #6080: a rejected analyze lane must not print a measured zero.
+///
+/// Why: maintainability findings come from trusty-analyze alone, but the count
+/// was taken from `metrics.findings`, which the investigation pass also writes
+/// into. A run whose index was rejected as stale printed
+/// `Maintainability findings | 0 ⁽ᵐ⁾` — a measurement nobody made — on the same
+/// page whose Gaps & Caveats said the lane was rejected.
+/// What: with `analyze_gap` set, the cell states the gap instead of a count.
+#[test]
+fn maintainability_cell_states_the_analyze_gap() {
+    let metrics = AnalyzeMetrics {
+        findings: vec![finding(SECURITY_DIMENSION, Severity::Amber)],
+        loc: LocMetrics {
+            total: 500,
+            by_language: vec![LanguageLoc {
+                language: "Rust".to_string(),
+                loc: 500,
+            }],
+        },
+        ..Default::default()
+    };
+    let mut r = repo(Some(metrics));
+    r.analyze_gap = Some(crate::report::analyze_scope::STALE_INDEX_REMEDY.to_string());
+    let model = model_with(vec![r]);
+    let mut root = Scope::new();
+    push_code_quality_rows(&mut root, &model);
+
+    let template =
+        "<!-- BEGIN code_quality_row -->{{cq_maintainability_count}}<!-- END code_quality_row -->";
+    let rendered = crate::report::fill::render(template, &root);
+    assert!(rendered.contains("Not assessed"), "rendered: {rendered}");
+    assert!(!rendered.contains('0'), "no measured zero: {rendered}");
 }
 
 /// #6137: no GREEN security finding is stated as an absence of evidence, never

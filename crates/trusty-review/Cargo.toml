@@ -68,6 +68,11 @@ serde        = { workspace = true }
 serde_json   = { workspace = true }
 toml         = { workspace = true }
 
+# ── Dependency inventory (#6080) ───────────────────────────────────────────
+# Resolving a declared requirement against a multi-version Cargo.lock is a
+# semver-matching question; first-wins reported the lowest locked version.
+semver       = { workspace = true }
+
 # ── Regex (JIRA ticket-key extraction, #599) ───────────────────────────────
 # Scans PR title + body for `[A-Z][A-Z0-9]+-\d+` ticket keys so the JIRA source
 # can do an exact issueKey lookup (parity with code-intelligence's primary path).
