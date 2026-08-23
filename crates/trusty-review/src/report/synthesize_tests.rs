@@ -2400,6 +2400,53 @@ fn synthesize_rejects_an_uncorrectable_remote_claim() {
     );
 }
 
+/// #6082 lap 9: a report-level rejection names the finding it is about, so the
+/// reporter can cite that finding's §5.1/§5.2 number.
+///
+/// Why: the graded report's line read "the model's security summary was
+/// withheld — a beyond-the-host reachability claim about 'Admin stop endpoint
+/// trusts every caller with no authentication' could not be corrected safely".
+/// That finding renders as §5.2 item 92, nine hundred lines above, and the line
+/// gave the reader no way to get there. The security summary belongs to no
+/// single finding, so its `FieldCtx` carries no subject and the note was plain —
+/// but the grounding pass knew exactly which finding the claim was about.
+/// What: the same shape as `synthesize_rejects_an_uncorrectable_remote_claim`,
+/// asserting the recorded note carries the finding title as its subject — which
+/// is what `reporter_findings::finding_citations` resolves to a number.
+/// Test: this test itself, with
+/// `reporter_tests::a_status_note_cites_its_finding_number` closing the chain.
+#[test]
+fn a_report_level_rejection_names_the_finding_it_is_about() {
+    let model = grounded_fixture_model();
+    let grounding = crate::report::synthesize_grounding::Grounding::from_model(&model);
+    let allowed = allowed_numbers(&serde_json::to_value(&model).unwrap());
+    let raw = super::RawSynthesis {
+        executive_summary: String::new(),
+        code_quality_summary: String::new(),
+        security_summary: "The acme-daemon control_routes surface offers remote code execution \
+                           and remote-management access to the internet."
+            .to_string(),
+        authorship_summary: "Two authors carry the estate.".to_string(),
+        top_risks: vec![],
+        findings: vec![],
+    };
+
+    let result =
+        crate::report::synthesize_guardrail::apply_guardrail(raw, &allowed, Vec::new(), &grounding)
+            .expect("the authorship paragraph keeps this Ok");
+
+    let note = result
+        .notes
+        .iter()
+        .find(|n| n.text.contains("security summary was withheld"))
+        .expect("the rejection must be recorded");
+    assert_eq!(
+        note.subject.as_deref(),
+        Some("Control-plane HTTP session endpoints have no authentication"),
+        "the disclosure must name the finding so the reporter can number it: {note:?}"
+    );
+}
+
 /// #6082 lap 4 (FIX 2): a crate with zero dependents called load-bearing
 /// contradicts the report's own topology table and drops the field.
 ///

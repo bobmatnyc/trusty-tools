@@ -46,15 +46,27 @@
 //! 2. REMOTE-ESTABLISHED — some finding on that file carries a
 //!    [`REMOTE_MARKERS`] word. Left alone; remote wins over local on one file.
 //! 3. UNESTABLISHED — the collected data says nothing either way. A sentence
-//!    making a positive beyond-the-host reach claim (one [`REACHABILITY_REWRITES`]
-//!    recognises) is REJECTED, never rewritten: the report has no evidence the
-//!    surface is host-local either, so substituting a host-local phrase would
-//!    trade one unsupported claim for another.
+//!    making a positive beyond-the-host reach claim is REJECTED, never
+//!    rewritten: the report has no evidence the surface is host-local either, so
+//!    substituting a host-local phrase would trade one unsupported claim for
+//!    another.
 //!
 //! Tier 3 is what stops the lap-8 line. No finding on
 //! `crates/trusty-mpm/src/daemon/api/control_routes.rs` carried any reachability
 //! marker, so tier 1 could not reach it however far inheritance spread, and its
 //! business impact shipped "permits remote code execution" unexamined.
+//!
+//! #6082 lap 9 changed what makes a tier-3 sentence a reach claim. It used to be
+//! the [`REACHABILITY_REWRITES`] table, and the same file shipped again — this
+//! time "a critical remote-execution and privilege risk", a hyphenated compound
+//! no pattern matches, so the sentence was skipped rather than examined. The
+//! trigger is now the [`REACHABILITY_WORDS`] vocabulary read as tokens, which
+//! sees inside a compound and across morphological variants, narrowed to CLAIM
+//! shape by [`synthesize_grounding_text::CLAIM_WORDS`]: the word must be
+//! attributing access, attack, execution or exposure to the surface. A bare
+//! "network" in "a transient network error" still costs a reader nothing.
+//!
+//! [`synthesize_grounding_text::CLAIM_WORDS`]: super::synthesize_grounding_text::CLAIM_WORDS
 //!
 //! Test: `synthesize_grounding_tests.rs`.
 
@@ -62,8 +74,8 @@ use std::collections::BTreeSet;
 
 use super::model::ReportModel;
 use super::synthesize_grounding_text::{
-    asserts_reachability, contains_name, remove_sentence, rewrite_reachability, sentences,
-    subject_tokens,
+    asserts_reachability, asserts_reachability_claim, contains_name, remove_sentence,
+    rewrite_reachability, sentences, subject_tokens,
 };
 use super::topology::CrateTopology;
 
@@ -272,7 +284,18 @@ pub(crate) enum GroundingOutcome {
     /// The text was corrected; the notes name each correction.
     Rewritten(String, Vec<String>),
     /// The field cannot be corrected safely and must be dropped.
-    Rejected(String),
+    ///
+    /// `subject` is the §5.1/§5.2 finding the refused claim was about, when the
+    /// check identified one. Report-level prose — the executive, code-quality,
+    /// security and authorship summaries, and the top-risk rows — belongs to no
+    /// finding, so its disclosure had no subject to number and the reader was
+    /// left to search the document for the title it quoted (#6082 lap 9).
+    Rejected {
+        /// Why the field cannot ship, as the reader sees it.
+        reason: String,
+        /// The finding title the reporter resolves to a rendered number.
+        subject: Option<String>,
+    },
 }
 
 /// The grounding facts one report's synthesis is checked against.
@@ -519,7 +542,12 @@ impl Grounding {
     /// Test: `synthesize_grounding_tests.rs`.
     pub(crate) fn check(&self, text: &str, owner: Option<&str>) -> GroundingOutcome {
         if let Some(reason) = self.load_bearing_violation(text) {
-            return GroundingOutcome::Rejected(reason);
+            // A load-bearing violation names a CRATE, not a finding, so there is
+            // no §5.x row to send the reader to.
+            return GroundingOutcome::Rejected {
+                reason,
+                subject: None,
+            };
         }
         let (text, mut notes) = self.drop_false_no_clean_signal(text);
         match self.reachability(&text, owner) {
@@ -529,7 +557,7 @@ impl Grounding {
                 notes.extend(more);
                 GroundingOutcome::Rewritten(fixed, notes)
             }
-            rejected @ GroundingOutcome::Rejected(_) => rejected,
+            rejected @ GroundingOutcome::Rejected { .. } => rejected,
         }
     }
 
@@ -657,11 +685,14 @@ impl Grounding {
             };
             let corrected = rewrite_reachability(sentence);
             if asserts_reachability(&corrected) {
-                return GroundingOutcome::Rejected(format!(
-                    "a beyond-the-host reachability claim about '{}' could not be corrected \
-                     safely — the report's own evidence scopes that surface to localhost",
-                    finding.title
-                ));
+                return GroundingOutcome::Rejected {
+                    reason: format!(
+                        "a beyond-the-host reachability claim about '{}' could not be corrected \
+                         safely — the report's own evidence scopes that surface to localhost",
+                        finding.title
+                    ),
+                    subject: Some(finding.title.clone()),
+                };
             }
             out = out.replace(sentence, &corrected);
             notes.push(format!(
@@ -682,24 +713,37 @@ impl Grounding {
     /// Why: rewriting needs evidence the surface is host-local, and there is
     /// none — so the only honest outcomes are ship-unexamined or withhold. A
     /// due-diligence report withholds.
-    /// What: `Rejected` for a sentence [`REACHABILITY_REWRITES`] recognises as a
-    /// reach claim (the rewrite changes it), `Clean` otherwise. The rewrite table
-    /// rather than [`REACHABILITY_WORDS`] is the trigger here deliberately: with
-    /// no evidence either way, a bare "network" in "a transient network error"
-    /// asserts nothing about reachability and must not cost a reader the field.
+    /// What: `Rejected` for a sentence that CLAIMS reach, `Clean` otherwise. A
+    /// sentence claims reach when [`asserts_reachability_claim`] reads a
+    /// [`REACHABILITY_WORDS`] token — inside a hyphenated compound or a
+    /// morphological variant, not only as a bare word — attributing access,
+    /// attack, execution or exposure to the surface, or when
+    /// [`REACHABILITY_REWRITES`] recognises the phrase outright.
+    ///
+    /// The trigger used to be the rewrite table alone, which is how
+    /// `remote-execution` shipped: it matches no pattern, so the sentence was
+    /// skipped (#6082 lap 9). The vocabulary alone is the other error — it would
+    /// take "a transient network error" with it, and withholding a field over a
+    /// word that asserts nothing about reach costs a reader more than it saves.
+    /// The claim shape is what separates the two.
     fn refuse_unevidenced_reach(&self, text: &str, component: &str) -> GroundingOutcome {
         for sentence in sentences(text) {
             if !asserts_reachability(&sentence.to_lowercase()) {
                 continue;
             }
-            if rewrite_reachability(sentence) == sentence {
+            if !asserts_reachability_claim(sentence) && rewrite_reachability(sentence) == sentence {
                 continue;
             }
-            return GroundingOutcome::Rejected(format!(
-                "a beyond-the-host reachability claim about `{}` cannot be verified — the \
-                 collected data records no evidence of how that surface is reached",
-                component.trim()
-            ));
+            // The component has no finding this check can name — that is what
+            // "unevidenced" means here — so the disclosure cites the file.
+            return GroundingOutcome::Rejected {
+                reason: format!(
+                    "a beyond-the-host reachability claim about `{}` cannot be verified — the \
+                     collected data records no evidence of how that surface is reached",
+                    component.trim()
+                ),
+                subject: None,
+            };
         }
         GroundingOutcome::Clean
     }

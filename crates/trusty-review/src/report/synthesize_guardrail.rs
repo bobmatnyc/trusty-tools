@@ -38,6 +38,12 @@ fn unverified_figure_note(field: &str, subject: Option<&str>, token: &str) -> St
 /// Kept distinct from [`unverified_figure_note`]: a numeric rejection means a
 /// figure was not in the data, a grounding rejection means a claim contradicted
 /// it, and a reader who sees one should not have to guess which happened.
+///
+/// `subject` is what the reporter resolves to a §5.1/§5.2 number. For a
+/// finding's own field it is that finding; for report-level prose it is the
+/// finding the grounding check identified the refused claim as being about
+/// (#6082 lap 9) — without which the line quoted a title the reader then had to
+/// search nine hundred lines of document to find.
 fn ungrounded_claim_note(field: &str, subject: Option<&str>, reason: &str) -> StatusNote {
     let text = format!("the model's {field} was withheld — {reason}");
     match subject {
@@ -306,8 +312,9 @@ fn ground_field(
             notes.extend(corrections.into_iter().map(|c| note_for(ctx, c)));
             fixed
         }
-        GroundingOutcome::Rejected(reason) => {
-            notes.push(ungrounded_claim_note(ctx.field, ctx.subject, &reason));
+        GroundingOutcome::Rejected { reason, subject } => {
+            let about = ctx.subject.or(subject.as_deref());
+            notes.push(ungrounded_claim_note(ctx.field, about, &reason));
             String::new()
         }
     }
@@ -350,8 +357,9 @@ fn admit_field(
             notes.extend(corrections.into_iter().map(|c| note_for(ctx, c)));
             fixed
         }
-        GroundingOutcome::Rejected(reason) => {
-            notes.push(ungrounded_claim_note(ctx.field, ctx.subject, &reason));
+        GroundingOutcome::Rejected { reason, subject } => {
+            let about = ctx.subject.or(subject.as_deref());
+            notes.push(ungrounded_claim_note(ctx.field, about, &reason));
             return None;
         }
     };
