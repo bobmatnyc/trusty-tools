@@ -74,7 +74,7 @@ impl Drop for WriteLockGuard {
 /// fields are added in later phases.
 /// What: project_id, workdir, optional backend selection, optional prompt
 /// file, and optional claude_cmd override.
-/// Test: `ctl_run_session_returns_session_id`.
+/// Test: `ctl_run_session_accepts_default_claude_cmd`.
 #[derive(Debug, Deserialize)]
 pub struct CtlRunRequest {
     /// Registered project ID.
@@ -94,7 +94,7 @@ pub struct CtlRunRequest {
 /// Why: callers need the allocated session ID to subscribe, stop, or
 /// inspect the session.
 /// What: the stable `<project-id>-<N>` session ID string.
-/// Test: `ctl_run_session_returns_session_id`.
+/// Test: `ctl_run_session_accepts_default_claude_cmd`.
 #[derive(Debug, Serialize)]
 pub struct CtlRunResponse {
     /// Allocated session ID.
@@ -238,7 +238,7 @@ fn parse_id(s: &str) -> ControlSessionId {
 /// registry needs a typed `BackendKind`. Centralising the mapping keeps
 /// handler bodies thin.
 /// What: returns `BackendKind::Tmux` for `"tmux"`, `StreamJson` otherwise.
-/// Test: used by `ctl_run_session_returns_session_id`.
+/// Test: used by `ctl_run_session_accepts_default_claude_cmd`.
 fn parse_backend(s: Option<&str>) -> BackendKind {
     match s {
         Some("tmux") => BackendKind::Tmux,
@@ -290,31 +290,57 @@ fn is_safe_cmd_charset(s: &str) -> bool {
 /// Validate a caller-supplied `claude_cmd` override (#6197).
 ///
 /// Why: `ctl_run_session` passed `claude_cmd` straight into the spawn path, so
-/// any local process could make the daemon execute an arbitrary binary as its
-/// user. Constraining the override to the single expected binary NAME keeps the
-/// legitimate use (pointing at a specific `claude` install path) while removing
-/// the arbitrary-exec primitive.
-/// What: `None` is accepted (the registry defaults to `"claude"`). For
-/// `Some(cmd)` the value must contain only the safe command charset AND its
-/// final path component must be exactly `claude` — so `sh`, `curl`, `/bin/bash`,
-/// and `claude; rm -rf /` are all rejected. Returns `Err((400, msg))` on any
-/// violation.
+/// any local process could make the daemon execute an arbitrary binary. A
+/// basename-only check was insufficient — `/tmp/evil/claude` passed it. No CLI
+/// caller sends `claude_cmd` at all (`tm sessctl run` omits it), so the allowed
+/// set is deliberately narrow: the registry default only. An operator who needs
+/// a custom install path should set it via config, not an HTTP request.
+/// What: accepts `None` (registry defaults to `"claude"`) or the exact bare
+/// string `"claude"` (PATH-resolved). Every other value — any absolute or
+/// relative path, other binaries, shell injection — is rejected with 400.
 /// Test: `ctl_run_session_rejects_claude_cmd_outside_allowlist`,
-/// `ctl_run_session_accepts_default_claude_cmd`.
+/// `ctl_run_session_accepts_default_claude_cmd`,
+/// `validate_claude_cmd_allows_default_refuses_paths`.
 fn validate_claude_cmd(cmd: Option<&str>) -> Result<(), (StatusCode, String)> {
-    let Some(cmd) = cmd else { return Ok(()) };
-    let allowed = is_safe_cmd_charset(cmd)
-        && std::path::Path::new(cmd)
-            .file_name()
-            .and_then(|n| n.to_str())
-            == Some("claude");
-    if allowed {
+    match cmd {
+        None => Ok(()),
+        Some("claude") => Ok(()),
+        Some(other) => {
+            tracing::warn!(cmd = %other, "rejected claude_cmd outside the allowed set (#6197)");
+            Err((
+                StatusCode::BAD_REQUEST,
+                "claude_cmd override is not permitted over HTTP; omit it to use the default `claude`"
+                    .to_owned(),
+            ))
+        }
+    }
+}
+
+/// Validate a caller-supplied `prompt_file` (#6197).
+///
+/// Why: `prompt_file` is interpolated into the same tmux command line as
+/// `claude_cmd` (`crates/trusty-mpm/src/control/backend/tmux.rs`) and typed into
+/// the pane shell, so an unvalidated value was command injection
+/// (`/tmp/x; touch /tmp/PWNED; #`). The sink is now shell-quoted, but this is
+/// defense in depth at the HTTP boundary, matching `claude_cmd`'s rigor.
+/// What: `None` is accepted. For `Some(path)` the value must use the safe path
+/// charset (no shell metacharacters), be absolute, contain no `..` component,
+/// and resolve to an existing regular file. Returns `Err((400, msg))` otherwise.
+/// Test: `ctl_run_session_rejects_prompt_file_injection`,
+/// `validate_prompt_file_requires_absolute_existing_regular_file`.
+fn validate_prompt_file(prompt_file: Option<&str>) -> Result<(), (StatusCode, String)> {
+    let Some(pf) = prompt_file else { return Ok(()) };
+    let path = std::path::Path::new(pf);
+    let traversal = path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir));
+    if is_safe_cmd_charset(pf) && path.is_absolute() && !traversal && path.is_file() {
         Ok(())
     } else {
-        tracing::warn!(%cmd, "rejected claude_cmd outside the allowed set (#6197)");
+        tracing::warn!(prompt_file = %pf, "rejected invalid prompt_file (#6197)");
         Err((
             StatusCode::BAD_REQUEST,
-            "claude_cmd must name the `claude` binary (basename `claude`, no shell metacharacters)"
+            "prompt_file must be an absolute path (no `..`, no shell metacharacters) to an existing file"
                 .to_owned(),
         ))
     }
@@ -331,6 +357,12 @@ fn validate_claude_cmd(cmd: Option<&str>) -> Result<(), (StatusCode, String)> {
 /// What: returns `Err((400, msg))` when `workdir` is not absolute, contains a
 /// `ParentDir` (`..`) component, or is not an existing directory; `Ok(())`
 /// otherwise.
+///
+/// TOCTOU: the `is_dir()` check races the later `tmux new-session -c <workdir>`
+/// (#6197 MEDIUM). It is a narrow, accepted race — `workdir` is passed argv-style
+/// to tmux (not shell-interpolated), so a swap changes only the spawn cwd, not
+/// what executes; closing it would require an openat/fd-based launch tmux does
+/// not offer. Tracked, not fixed here. See #6197.
 /// Test: `ctl_run_session_rejects_relative_workdir`,
 /// `ctl_run_session_rejects_workdir_traversal`.
 fn validate_workdir(workdir: &std::path::Path) -> Result<(), (StatusCode, String)> {
@@ -359,9 +391,13 @@ fn validate_workdir(workdir: &std::path::Path) -> Result<(), (StatusCode, String
 /// `claude_cmd` and `workdir` (#6197), then deserializes `CtlRunRequest`,
 /// constructs `RunParams`, calls `state.session_registry.run_session(params)`,
 /// and returns the allocated session ID.
-/// Test: `ctl_run_session_returns_session_id`,
+/// Test: `ctl_run_session_accepts_default_claude_cmd`,
 /// `ctl_run_session_rejects_non_loopback_peer`,
-/// `ctl_run_session_rejects_claude_cmd_outside_allowlist`.
+/// `ctl_run_session_rejects_claude_cmd_outside_allowlist`,
+/// `ctl_run_session_rejects_prompt_file_injection`,
+/// `ctl_run_session_rejects_relative_workdir`,
+/// `ctl_run_session_rejects_workdir_traversal`,
+/// `ctl_run_session_accepts_default_claude_cmd`.
 pub async fn ctl_run_session(
     State(state): State<Arc<DaemonState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -372,6 +408,7 @@ pub async fn ctl_run_session(
     // anything is spawned.
     loopback_guard(&peer)?;
     validate_claude_cmd(req.claude_cmd.as_deref())?;
+    validate_prompt_file(req.prompt_file.as_deref())?;
     validate_workdir(std::path::Path::new(&req.workdir))?;
     let backend = parse_backend(req.backend.as_deref());
     let params = RunParams {
@@ -1104,6 +1141,103 @@ mod tests {
         );
     }
 
+    /// A `prompt_file` carrying shell metacharacters is rejected with 400 (#6197).
+    ///
+    /// Why (load-bearing, Fail-Open Check): `prompt_file` is interpolated into the
+    /// tmux command line and typed into the pane shell, so `"/tmp/x; touch
+    /// /tmp/PWNED; #"` executed arbitrary commands. This is the injection the
+    /// critic flagged as CRITICAL. The test sends a loopback peer (auth passes)
+    /// with that `prompt_file` and asserts 400. It fails on the current PR head,
+    /// which validated `claude_cmd`/`workdir` but NOT `prompt_file`: without the
+    /// check the request reaches `run_session` (500 under the cap-0 state) —
+    /// never the asserted 400.
+    /// Test: this test.
+    #[tokio::test]
+    async fn ctl_run_session_rejects_prompt_file_injection() {
+        let (state, _dir) = test_state_no_spawn();
+        let app = test_router(Arc::clone(&state)); // injects a loopback peer
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/control/sessions/run")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"project_id":"p","workdir":"/tmp","backend":"tmux","prompt_file":"/tmp/x; touch /tmp/PWNED; #"}"#,
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "a prompt_file with shell metacharacters must be rejected before any spawn"
+        );
+    }
+
+    /// A relative `workdir` is rejected with 400 (#6197).
+    #[tokio::test]
+    async fn ctl_run_session_rejects_relative_workdir() {
+        let (state, _dir) = test_state_no_spawn();
+        let app = test_router(Arc::clone(&state));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/control/sessions/run")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"project_id":"p","workdir":"relative/dir","backend":"stream-json"}"#,
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// A `workdir` containing `..` is rejected with 400 (#6197).
+    #[tokio::test]
+    async fn ctl_run_session_rejects_workdir_traversal() {
+        let (state, _dir) = test_state_no_spawn();
+        let app = test_router(Arc::clone(&state));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/control/sessions/run")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"project_id":"p","workdir":"/tmp/../etc","backend":"stream-json"}"#,
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// A default request (no `claude_cmd`, absolute existing `workdir`, no
+    /// `prompt_file`) passes every guard and advances to the spawn path (#6197).
+    ///
+    /// Why: proves the guards do not reject legitimate input. Under the cap-0
+    /// test state the advanced request is rejected by admission with 500 — which
+    /// is neither 400 (a validator refused) nor 403 (the auth guard refused), so
+    /// a 500 proves all guards passed and control reached `run_session`.
+    /// Test: this test.
+    #[tokio::test]
+    async fn ctl_run_session_accepts_default_claude_cmd() {
+        let (state, _dir) = test_state_no_spawn();
+        let app = test_router(Arc::clone(&state));
+        let dir = tempfile::tempdir().expect("temp dir");
+        let body = serde_json::json!({
+            "project_id": "p",
+            "workdir": dir.path().to_string_lossy(),
+            "backend": "stream-json",
+        });
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/control/sessions/run")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a valid default request must pass all guards and reach the cap-rejected spawn path"
+        );
+    }
+
     /// The loopback guard predicate accepts local and refuses remote peers (#6197).
     #[test]
     fn loopback_guard_accepts_loopback_refuses_remote() {
@@ -1113,16 +1247,19 @@ mod tests {
         assert_eq!(err.0, StatusCode::FORBIDDEN);
     }
 
-    /// `validate_claude_cmd` allows the default/`claude` forms and refuses the
-    /// arbitrary-exec and injection forms (#6197).
+    /// `validate_claude_cmd` allows only the default and refuses every path or
+    /// injection form — a basename-only check (which passed `/tmp/evil/claude`)
+    /// was insufficient (#6197 HIGH).
     #[test]
-    fn validate_claude_cmd_allows_claude_refuses_others() {
-        // Accepted: absent override, bare name, and an explicit install path.
+    fn validate_claude_cmd_allows_default_refuses_paths() {
+        // Accepted: absent override, and the exact bare default.
         assert!(validate_claude_cmd(None).is_ok());
         assert!(validate_claude_cmd(Some("claude")).is_ok());
-        assert!(validate_claude_cmd(Some("/opt/anthropic/claude")).is_ok());
-        // Refused: other binaries, shell injection, empty, and traversal-y names.
+        // Refused: any path (even basename `claude`), other binaries, injection.
         for bad in [
+            "/opt/anthropic/claude",
+            "/tmp/evil/claude",
+            "./claude",
             "sh",
             "curl",
             "/bin/bash",
@@ -1133,6 +1270,26 @@ mod tests {
             let err = validate_claude_cmd(Some(bad)).expect_err("must refuse");
             assert_eq!(err.0, StatusCode::BAD_REQUEST, "bad claude_cmd: {bad:?}");
         }
+    }
+
+    /// `validate_prompt_file` requires an absolute, non-traversing, metacharacter-
+    /// free path to an existing regular file (#6197).
+    #[test]
+    fn validate_prompt_file_requires_absolute_existing_regular_file() {
+        assert!(validate_prompt_file(None).is_ok());
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file = dir.path().join("prompt.txt");
+        std::fs::write(&file, "hi").expect("write prompt");
+        assert!(validate_prompt_file(Some(file.to_str().unwrap())).is_ok());
+        // Refused: shell injection, relative, traversal, a directory, missing.
+        assert!(validate_prompt_file(Some("/tmp/x; touch /tmp/PWNED; #")).is_err());
+        assert!(validate_prompt_file(Some("relative/prompt.txt")).is_err());
+        assert!(validate_prompt_file(Some("/tmp/../etc/hosts")).is_err());
+        assert!(
+            validate_prompt_file(Some(dir.path().to_str().unwrap())).is_err(),
+            "a directory is not a regular file"
+        );
+        assert!(validate_prompt_file(Some("/no/such/file-6197.txt")).is_err());
     }
 
     /// `validate_workdir` requires an absolute, non-traversing, existing dir (#6197).

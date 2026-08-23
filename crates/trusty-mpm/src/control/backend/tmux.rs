@@ -109,8 +109,19 @@ impl TmuxBackend {
             })?;
 
         // Build and send the `claude` start command.
+        //
+        // #6197: `cmd_str` is typed into the pane's shell as literal keystrokes
+        // (`send_line`), so an unquoted interpolated path is command injection.
+        // Shell-quote the prompt-file path via `shlex` so metacharacters in it
+        // are inert at the sink — this closes the whole class regardless of any
+        // caller-side validation (defense in depth), for this and future fields.
         let cmd_str = if let Some(pf) = prompt_file {
-            format!("{claude_cmd} --append-system-prompt-file {}", pf.display())
+            let quoted = shlex::try_quote(&pf.to_string_lossy())
+                .with_context(|| {
+                    format!("prompt_file path is not shell-quotable for session {session_id}")
+                })?
+                .into_owned();
+            format!("{claude_cmd} --append-system-prompt-file {quoted}")
         } else {
             claude_cmd
         };
