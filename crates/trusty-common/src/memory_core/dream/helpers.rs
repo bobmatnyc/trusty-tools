@@ -9,6 +9,7 @@
 use crate::memory_core::palace::Drawer;
 use crate::memory_core::retrieval::{PalaceHandle, shared_embedder};
 use crate::memory_core::store::vector::VectorStore;
+use crate::memory_core::timeouts;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -156,12 +157,28 @@ pub(crate) fn merge_into(handle: &Arc<PalaceHandle>, survivor: &Drawer, loser: &
 /// What: Snapshots drawers, calls `UsearchStore::reset` to truncate the
 /// index, then re-embeds and re-upserts each drawer. Respects the budget by
 /// stopping early — incomplete rebuilds are still safe (the next cycle picks
-/// up where this one left off).
+/// up where this one left off). #6208: the snapshot→reset→re-upsert runs under
+/// the palace write mutex so a concurrent `remember` cannot land a vector that
+/// `reset()` then wipes without re-adding.
 pub(crate) async fn rebuild_index_from_drawers(
     handle: &Arc<PalaceHandle>,
     started: std::time::Instant,
     budget: Duration,
 ) -> Result<usize> {
+    // #6208: hold the write mutex across the whole rebuild. `reset()` truncates
+    // the entire index; a `remember` that upserts between the snapshot and the
+    // re-upsert loop would be dropped by the reset and never re-added, because
+    // only the snapshotted drawers are re-embedded. Guarding snapshot→reset→
+    // re-upsert makes a mid-flight remember impossible during this region — its
+    // vector is either in the snapshot (re-added) or lands after release (never
+    // reset). The sole caller, `compact_pass`, releases its own guard before
+    // calling this, so there is no reentrancy.
+    let _write_guard = timeouts::lock_with_timeout(
+        &handle.write_mutex,
+        timeouts::write_lock_timeout(),
+        handle.id.as_str(),
+    )
+    .await?;
     let snapshot: Vec<Drawer> = handle.drawers.read().clone();
     handle
         .vector_store

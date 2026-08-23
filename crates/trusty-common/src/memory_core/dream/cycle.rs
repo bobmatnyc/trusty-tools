@@ -20,6 +20,7 @@ use crate::memory_core::semantic_consolidation::{
     SemanticConsolidator, inference_available, resolve_openrouter_api_key, validate_ollama_model,
 };
 use crate::memory_core::store::vector::VectorStore;
+use crate::memory_core::timeouts;
 use anyhow::Result;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -100,24 +101,42 @@ pub(super) async fn compact_pass(
     started: std::time::Instant,
     budget: Duration,
 ) -> Result<usize> {
-    let drawer_ids: HashSet<Uuid> = handle.drawers.read().iter().map(|d| d.id).collect();
-
-    // Addressable pass: walk every id our key_map knows about and drop
-    // anything missing from the drawer table.
-    let vector_ids = handle.vector_store.all_ids();
     let mut removed: usize = 0;
-    for vid in vector_ids {
-        if started.elapsed() >= budget {
-            break;
+    // #6208: snapshot the drawer set and reclaim orphans while holding the
+    // palace write mutex — the same lock `remember`/`forget` hold. Without it,
+    // a `remember` mid-flight (vector upserted at handle.rs:~686, drawer not yet
+    // pushed at ~708) exposes a vector with no matching drawer, which this pass
+    // would remove as a false orphan and lose permanently. The guard makes that
+    // intermediate state unobservable here; it is released before the rebuild
+    // below, which re-takes it independently (no reentrancy — tokio::Mutex is
+    // not reentrant). `remember` never holds this across `compact_pass`, and the
+    // idle dreamer holds only the `is_compacting` flag, so this cannot deadlock.
+    let (drawer_count, index_size_after) = {
+        let _write_guard = timeouts::lock_with_timeout(
+            &handle.write_mutex,
+            timeouts::write_lock_timeout(),
+            handle.id.as_str(),
+        )
+        .await?;
+        let drawer_ids: HashSet<Uuid> = handle.drawers.read().iter().map(|d| d.id).collect();
+
+        // Addressable pass: walk every id our key_map knows about and drop
+        // anything missing from the drawer table.
+        let vector_ids = handle.vector_store.all_ids();
+        for vid in vector_ids {
+            if started.elapsed() >= budget {
+                break;
+            }
+            if drawer_ids.contains(&vid) {
+                continue;
+            }
+            match handle.vector_store.remove(vid).await {
+                Ok(()) => removed += 1,
+                Err(e) => tracing::warn!(?vid, "dream compact: vector remove failed: {e:#}"),
+            }
         }
-        if drawer_ids.contains(&vid) {
-            continue;
-        }
-        match handle.vector_store.remove(vid).await {
-            Ok(()) => removed += 1,
-            Err(e) => tracing::warn!(?vid, "dream compact: vector remove failed: {e:#}"),
-        }
-    }
+        (drawer_ids.len(), handle.vector_store.index_size())
+    };
 
     // Fallback rebuild: if the index still reports significantly more
     // vectors than the drawer table holds (e.g. pre-fix orphans we can't
@@ -125,8 +144,6 @@ pub(super) async fn compact_pass(
     // from scratch. Costly but bounded — only runs when the divergence is
     // material, and re-embedding 100s of drawers takes <1s on the local
     // ONNX model.
-    let drawer_count = drawer_ids.len();
-    let index_size_after = handle.vector_store.index_size();
     // Only rebuild when we have drawers to re-embed AND the index has at
     // least 1 + 2*drawer_count entries (well past noise). Avoids tight
     // rebuild loops on a healthy small palace.

@@ -424,15 +424,12 @@ fn alias_audit_state(audit: &trusty_common::memory_core::retrieval::AliasAudit) 
 pub(crate) async fn handle_palace_compact(state: &AppState, args: Value) -> Result<Value> {
     let palace = resolve_palace(state, &args, "palace_compact")?;
     let handle = open_palace_handle(state, &palace)?;
-    // Use the live drawer table (sourced from redb at palace open) as
-    // the authoritative valid-id set, then run the vector store's
-    // synchronous compaction on a blocking thread.
-    let valid_ids: std::collections::HashSet<Uuid> =
-        handle.drawers.read().iter().map(|d| d.id).collect();
-    let vector_store = handle.vector_store.clone();
-    let res = tokio::task::spawn_blocking(move || vector_store.compact_orphans(&valid_ids))
-        .await
-        .context("join palace_compact")??;
+    // #6208: route through the handle's locked reclamation. It snapshots the
+    // valid-id set and reclaims orphans while holding the palace write mutex,
+    // so a concurrent `remember` (vector upserted, drawer not yet registered)
+    // cannot have its brand-new vector reclaimed as a false orphan. Snapshotting
+    // the valid-ids here without that lock is exactly the window #6208 closes.
+    let res = handle.compact_vector_orphans().await?;
     Ok(json!({
         "palace": palace,
         "total_checked": res.total_checked,
