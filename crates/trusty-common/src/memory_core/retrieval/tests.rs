@@ -2406,3 +2406,142 @@ async fn l2_rank_trace_emits_one_event_per_candidate() {
         "every candidate must be traced, including the ones truncation drops"
     );
 }
+
+/// Why: #6208 — `remember_with_options` upserts a new drawer's vector before it
+/// registers the drawer in `self.drawers`, both inside one `write_mutex`
+/// critical section. `palace_compact` used to snapshot its valid-id set from
+/// `self.drawers` and reclaim orphans WITHOUT taking that mutex, so a compact
+/// landing in the upsert→push window saw the vector with no matching drawer and
+/// deleted it permanently — live-reproduced at 10/60 racing drawers with
+/// DELETED_VECTORS=0. `compact_vector_orphans` now holds `write_mutex` across
+/// the whole reclamation, making that intermediate state unobservable to it.
+/// What: models the exact race deterministically. The test takes the palace
+/// write mutex (as `remember` does), upserts drawer B's vector but does NOT yet
+/// register B — the precise mid-flight state — then launches a compact
+/// concurrently and gives it time to run. With the fix the compact BLOCKS on the
+/// mutex the whole time and cannot delete B; only after B is registered and the
+/// guard drops does compact proceed, and it keeps B. Without the fix the compact
+/// never blocks: it snapshots (B absent) and deletes B inside the window, which
+/// the final search catches. Deterministic because the mutex — not the sleep —
+/// orders the two: a fixed compact can never observe the registered state before
+/// the guard is released, and an unfixed compact runs its whole snapshot+delete
+/// well within the window (a lockless redb scan of a two-row index). The sleep
+/// only bounds how long the unfixed compact is given; it never decides the fixed
+/// arm's outcome.
+/// Test: this test itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remember_racing_compact_never_loses_a_vector() {
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = Arc::new(make_handle(dir.path()));
+    let room_id = uuid::Uuid::new_v4();
+
+    // A committed baseline drawer so the palace and index are non-empty.
+    let anchor = Drawer::new(room_id, "anchor drawer stays put");
+    let anchor_id = anchor.id;
+    let mut anchor_vec = vec![0.0f32; 384];
+    anchor_vec[1] = 1.0;
+    handle
+        .vector_store
+        .upsert(anchor_id, anchor_vec)
+        .await
+        .unwrap();
+    handle.drawers.write().push(anchor);
+
+    // The racing drawer B: build it first so we know its id, then drive the two
+    // halves of `remember`'s write section by hand under the real write mutex.
+    let drawer_b = Drawer::new(room_id, "racing drawer B must survive");
+    let b_id = drawer_b.id;
+    let mut b_vec = vec![0.0f32; 384];
+    b_vec[7] = 1.0;
+
+    let write_mutex = handle.write_mutex_for_test();
+    let guard = write_mutex.lock().await;
+
+    // Step 1 of remember: vector upserted...
+    handle
+        .vector_store
+        .upsert(b_id, b_vec.clone())
+        .await
+        .unwrap();
+    // ...step 2 (drawer registration) deliberately deferred: this IS the window.
+
+    // Launch the compact while B is mid-flight.
+    let compact_handle = handle.clone();
+    let compact = tokio::spawn(async move { compact_handle.compact_vector_orphans().await });
+
+    // Give a non-blocking (pre-fix) compact ample time to snapshot + delete B.
+    // A fixed compact is blocked on the mutex here, so this changes nothing for it.
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    // Complete remember: register B, then release the write mutex.
+    handle.drawers.write().push(drawer_b);
+    drop(guard);
+
+    compact.await.unwrap().unwrap();
+
+    // B's vector must still be retrievable after the racing compaction.
+    let hits = handle.vector_store.search(&b_vec, 10).await.unwrap();
+    assert!(
+        hits.iter().any(|h| uuid_prefix_eq(h.drawer_id, b_id)),
+        "#6208: drawer B's vector was reclaimed by a compact racing its remember \
+         (hits={:?}, want {b_id})",
+        hits.iter().map(|h| h.drawer_id).collect::<Vec<_>>(),
+    );
+}
+
+/// Why: #6208's fix must not over-correct into never reclaiming. A vector whose
+/// drawer genuinely does not exist (a real orphan from a crashed write) must
+/// still be removed by `compact_vector_orphans`, exactly as before.
+/// What: upserts an orphan vector with no drawer, plus one live drawer, then
+/// compacts and asserts the orphan is gone while the live drawer's vector stays.
+/// Test: this test itself.
+#[tokio::test]
+async fn compact_vector_orphans_still_reclaims_true_orphans() {
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = Arc::new(make_handle(dir.path()));
+    let room_id = uuid::Uuid::new_v4();
+
+    let live = Drawer::new(room_id, "live drawer with a home");
+    let live_id = live.id;
+    let mut live_vec = vec![0.0f32; 384];
+    live_vec[2] = 1.0;
+    handle
+        .vector_store
+        .upsert(live_id, live_vec.clone())
+        .await
+        .unwrap();
+    handle.drawers.write().push(live);
+
+    // A homeless vector: no drawer is ever registered for it.
+    let orphan_id = uuid::Uuid::new_v4();
+    let mut orphan_vec = vec![0.0f32; 384];
+    orphan_vec[3] = 1.0;
+    handle
+        .vector_store
+        .upsert(orphan_id, orphan_vec.clone())
+        .await
+        .unwrap();
+
+    let res = handle.compact_vector_orphans().await.unwrap();
+    assert_eq!(
+        res.orphans_removed, 1,
+        "the homeless vector must be reclaimed"
+    );
+
+    let live_hits = handle.vector_store.search(&live_vec, 10).await.unwrap();
+    assert!(
+        live_hits
+            .iter()
+            .any(|h| uuid_prefix_eq(h.drawer_id, live_id)),
+        "the live drawer's vector must survive compaction"
+    );
+    let orphan_hits = handle.vector_store.search(&orphan_vec, 10).await.unwrap();
+    assert!(
+        !orphan_hits
+            .iter()
+            .any(|h| uuid_prefix_eq(h.drawer_id, orphan_id)),
+        "the orphan vector must not be retrievable after compaction"
+    );
+}

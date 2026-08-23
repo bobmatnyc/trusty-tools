@@ -2,13 +2,14 @@ use super::guard::CompactionGuard;
 use super::helpers::{MERGED_CONTENT_CAP, char_safe_prefix, merge_into, now_secs};
 use super::*;
 use crate::credentials::env_guard::EnvVarGuard;
-use crate::memory_core::palace::{Palace, PalaceId, RoomType};
+use crate::memory_core::palace::{Drawer, Palace, PalaceId, RoomType};
 use crate::memory_core::retrieval::{PalaceHandle, seed_shared_embedder_with_mock};
+use crate::memory_core::store::vector::VectorStore;
 use chrono::{Duration as ChronoDuration, Utc};
 use serial_test::serial;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tempfile::tempdir;
 use uuid::Uuid;
 
@@ -2010,5 +2011,140 @@ async fn merge_into_keeps_the_content_hash_in_step() {
         merged.content_hash(),
         memory_content_hash(merged.content()),
         "the digest must describe the body the drawer now holds"
+    );
+}
+
+/// Why: #6208 — the dream cycle's `compact_pass` snapshots the drawer-id set
+/// from `handle.drawers` and removes any vector absent from it, WITHOUT the
+/// palace write mutex. `remember` upserts a vector before it registers the
+/// drawer (both inside its own write-mutex section) and does not gate on
+/// `is_compacting`, so the idle dreamer's `compact_pass` running in that window
+/// deleted the freshly-remembered vector as a false orphan. `compact_pass` now
+/// snapshots + removes under the write mutex, so that intermediate state is
+/// unobservable to it.
+/// What: mirrors `remember_racing_compact_never_loses_a_vector` for the dream
+/// path. Holds the write mutex (as `remember` does), upserts drawer B's vector
+/// but leaves B unregistered — the mid-flight window — then runs `compact_pass`
+/// concurrently. With the guard, `compact_pass` blocks until B is registered and
+/// the guard drops, then keeps B; without it, `compact_pass` snapshots (B
+/// absent) and removes B inside the window. Deterministic: the mutex, not the
+/// sleep, orders the two.
+/// Test: this test itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remember_racing_dream_compact_pass_never_loses_a_vector() {
+    let handle = open_test_handle("dream-race-compact").await;
+
+    // A committed baseline drawer so the index is non-empty.
+    let anchor_id = handle
+        .remember(
+            "anchor drawer stays put".into(),
+            RoomType::Backend,
+            vec![],
+            0.7,
+        )
+        .await
+        .unwrap();
+
+    // Racing drawer B: model `remember`'s two write steps by hand under the
+    // real write mutex.
+    let drawer_b = Drawer::new(uuid::Uuid::new_v4(), "racing drawer B must survive");
+    let b_id = drawer_b.id;
+    let mut b_vec = vec![0.0f32; 384];
+    b_vec[7] = 1.0;
+
+    let write_mutex = handle.write_mutex_for_test();
+    let guard = write_mutex.lock().await;
+
+    // Step 1 of remember: vector upserted; step 2 (register) deferred.
+    handle.vector_store.upsert(b_id, b_vec).await.unwrap();
+
+    let compact_handle = handle.clone();
+    let compact = tokio::spawn(async move {
+        super::cycle::compact_pass(&compact_handle, Instant::now(), Duration::from_secs(60)).await
+    });
+
+    // Give a pre-guard (unguarded) compact_pass time to snapshot + remove B.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Complete remember: register B, then release the write mutex.
+    handle.drawers.write().push(drawer_b);
+    drop(guard);
+
+    compact.await.unwrap().unwrap();
+
+    let ids = handle.vector_store.all_ids();
+    assert!(
+        ids.contains(&b_id),
+        "#6208: drawer B's vector was reclaimed by a dream compact_pass racing \
+         its remember (ids={ids:?}, want {b_id})"
+    );
+    assert!(
+        ids.contains(&anchor_id),
+        "the anchor vector must survive too"
+    );
+}
+
+/// Why: #6208 — the dream cycle's fallback `rebuild_index_from_drawers`
+/// snapshots `handle.drawers`, `reset()`s the whole index, then re-upserts only
+/// the snapshotted drawers — WITHOUT the write mutex. A `remember` upserting in
+/// that window has its vector wiped by `reset()` and never re-added, because it
+/// was not in the snapshot. The rebuild now runs snapshot→reset→re-upsert under
+/// the write mutex, so a mid-flight remember cannot be lost.
+/// What: mirrors the compact_pass race for the rebuild path. Holds the write
+/// mutex, upserts B, leaves B unregistered, then runs `rebuild_index_from_drawers`
+/// concurrently. With the guard the rebuild blocks until B is registered, so B is
+/// in the snapshot and is re-embedded; without it the rebuild resets and re-adds
+/// only the anchor, dropping B. Deterministic via the mutex.
+/// Test: this test itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remember_racing_dream_rebuild_never_loses_a_vector() {
+    let handle = open_test_handle("dream-race-rebuild").await;
+
+    let anchor_id = handle
+        .remember(
+            "anchor drawer stays put".into(),
+            RoomType::Backend,
+            vec![],
+            0.7,
+        )
+        .await
+        .unwrap();
+
+    let drawer_b = Drawer::new(uuid::Uuid::new_v4(), "racing drawer B must survive");
+    let b_id = drawer_b.id;
+    let mut b_vec = vec![0.0f32; 384];
+    b_vec[9] = 1.0;
+
+    let write_mutex = handle.write_mutex_for_test();
+    let guard = write_mutex.lock().await;
+
+    handle.vector_store.upsert(b_id, b_vec).await.unwrap();
+
+    let rebuild_handle = handle.clone();
+    let rebuild = tokio::spawn(async move {
+        super::helpers::rebuild_index_from_drawers(
+            &rebuild_handle,
+            Instant::now(),
+            Duration::from_secs(60),
+        )
+        .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    handle.drawers.write().push(drawer_b);
+    drop(guard);
+
+    rebuild.await.unwrap().unwrap();
+
+    let ids = handle.vector_store.all_ids();
+    assert!(
+        ids.contains(&b_id),
+        "#6208: drawer B's vector was wiped by a dream index rebuild racing its \
+         remember (ids={ids:?}, want {b_id})"
+    );
+    assert!(
+        ids.contains(&anchor_id),
+        "the anchor vector must survive too"
     );
 }

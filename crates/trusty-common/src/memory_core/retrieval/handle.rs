@@ -26,11 +26,11 @@ use crate::memory_core::store::kg::KnowledgeGraph;
 use crate::memory_core::store::l1_cache::L1Cache;
 use crate::memory_core::store::palace_store::PalaceStore;
 use crate::memory_core::store::rooms::resolve_or_create_room_in_wing;
-use crate::memory_core::store::vector::{UsearchStore, VectorStore};
+use crate::memory_core::store::vector::{CompactionResult, UsearchStore, VectorStore};
 use crate::memory_core::timeouts;
 use anyhow::{Context, Result};
 use parking_lot::RwLock;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use uuid::Uuid;
@@ -726,6 +726,44 @@ impl PalaceHandle {
         self.rebuild_closets();
 
         Ok(id)
+    }
+
+    /// Reclaim orphaned vectors, serialised against the write pipeline.
+    ///
+    /// Why: #6208 — `remember_with_options` upserts a new drawer's vector
+    /// (line ~686) and only later pushes the drawer into `self.drawers`
+    /// (line ~708), both inside ONE `write_mutex` critical section. A compact
+    /// that snapshotted its valid-id set from `self.drawers` in that window saw
+    /// the vector row with no matching drawer and reclaimed it permanently —
+    /// silent data loss, DELETED_VECTORS=0, live-reproduced at 10/60 racing
+    /// drawers. Snapshotting under NO lock made "vector present, drawer absent"
+    /// an observable state.
+    /// What: acquires the same `write_mutex` `remember`/`forget` hold, THEN
+    /// snapshots `valid_ids` and runs the store's orphan reclamation — both
+    /// under the guard. Because a remember's upsert AND push are atomic w.r.t.
+    /// this guard, a compact here observes either the pre-remember state (no
+    /// vector, no drawer) or the post-remember state (vector present, drawer id
+    /// in `valid_ids`) — never the intermediate one — so an in-flight drawer's
+    /// vector cannot be reclaimed under any interleaving, not merely a narrowed
+    /// window. The bound is `remember`'s: reclamation runs on a blocking thread
+    /// but holds the guard for its duration, matching the existing write path.
+    /// Test: `remember_racing_compact_never_loses_a_vector`,
+    /// `compact_vector_orphans_still_reclaims_true_orphans`.
+    pub async fn compact_vector_orphans(&self) -> Result<CompactionResult> {
+        // #6208: hold the palace write mutex across BOTH the valid-id snapshot
+        // and the reclamation so a mid-flight remember (upsert done, drawer not
+        // yet pushed) cannot have its vector reclaimed as a false orphan.
+        let _write_guard = timeouts::lock_with_timeout(
+            &self.write_mutex,
+            timeouts::write_lock_timeout(),
+            self.id.as_str(),
+        )
+        .await?;
+        let valid_ids: HashSet<Uuid> = self.drawers.read().iter().map(|d| d.id).collect();
+        let vector_store = self.vector_store.clone();
+        tokio::task::spawn_blocking(move || vector_store.compact_orphans(&valid_ids))
+            .await
+            .context("join compact_vector_orphans")?
     }
 
     /// Background embed + vector-store backfill for a drawer written while the

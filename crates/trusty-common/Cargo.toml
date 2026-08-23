@@ -2,7 +2,9 @@
 name = "trusty-common"
 # 0.40.0 (#5809): the MCP extraction (ADR-0040 Phase 1) removed the public
 # `src/mcp/*` modules. Cargo's 0.x rule makes that a MINOR bump, not a patch.
-version = "0.42.0"
+# 0.42.1 (#6208): patch — additive `PalaceHandle::compact_vector_orphans` fixes
+# a data-loss race; no public item removed or changed, so not a 0.x break.
+version = "0.42.1"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
