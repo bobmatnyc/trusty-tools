@@ -217,12 +217,12 @@ fn allocate_vector_id(
 ///
 /// Why: both the allocator's collision jump and its missing-counter fallback
 /// need a bound above which NO id is taken. `VECTORS` alone is not that bound.
-/// A `VECTOR_KEYS` row can outlive its `VECTORS` row: `compact_orphans` reads
-/// the live-id set, computes orphans, and deletes them in three separate
-/// transactions, so an `upsert` that lands between the first and the third has
-/// its brand-new id treated as an orphan and its `VECTORS` row removed while
-/// the key survives. Under the in-process concurrency this store supports that
-/// is a reachable state, and a `VECTORS`-only bound would hand the id straight
+/// A `VECTOR_KEYS` row can outlive its `VECTORS` row: a palace written by a
+/// binary predating #6195 could have `compact_orphans` delete a
+/// concurrently-upserted `VECTORS` row as a false orphan while the key survived
+/// (that window is now closed — see [`HnswStore::compact_orphans`]), and a
+/// hand-edited file can present the same shape. Such a state is still reachable
+/// on disk, and a `VECTORS`-only bound would hand the id straight
 /// back out — the same aliasing this module exists to prevent, arrived at from
 /// the other table.
 /// What: `max(last VECTORS key, largest mapped VECTOR_KEYS value) + 1`, or 1
@@ -869,12 +869,22 @@ impl HnswStore {
     /// method reclaims the storage. The in-memory graph still contains
     /// those points, but they are no longer addressable; a full
     /// rebuild via `open` reclaims the graph as well.
-    /// What: Builds the set of live vector_ids by scanning `VECTOR_KEYS`,
-    /// then iterates `VECTORS` and `DELETED_VECTORS` and removes any row
-    /// whose id is not in that set, or which is tombstoned. Runs in a
-    /// single write transaction so partial progress can never be observed.
-    /// Returns the number of `VECTORS` rows removed.
-    /// Test: `compact_orphans_removes_dangling`.
+    /// What: Scans `VECTOR_KEYS` for the live-id set and `VECTORS` for orphan
+    /// candidates in read transactions (so the O(N) `VECTORS` scan holds no
+    /// write lock), then in a single write transaction re-reads `VECTOR_KEYS`
+    /// and removes only the candidates that are STILL not live, plus any
+    /// tombstoned rows with no mapping. Returns the number of `VECTORS` rows
+    /// actually removed.
+    ///
+    /// #6195: the earlier three-transaction form deleted every candidate the
+    /// read-txn snapshot found, so an `upsert` committing between the snapshot
+    /// and the delete had its brand-new `VECTORS` row deleted as a false orphan
+    /// while its `VECTOR_KEYS` mapping survived — leaving the drawer out of the
+    /// HNSW graph on the next `open`. Re-checking liveness inside the delete
+    /// transaction, which redb serialises against every writer, closes that
+    /// window: a row live at the moment of deletion is never deleted.
+    /// Test: `compact_orphans_removes_dangling`,
+    /// `compact_orphans_keeps_a_vector_upserted_after_the_live_snapshot`.
     pub fn compact_orphans(&self) -> Result<usize> {
         if self.read_only {
             return Err(HnswStoreError::ReadOnly);
@@ -913,22 +923,49 @@ impl HnswStore {
             orphans
         };
 
-        let removed = orphan_ids.len();
         if orphan_ids.is_empty() && tombstoned_ids.is_empty() {
             return Ok(0);
         }
 
         let wtx = self.db.begin_write()?;
+        let mut removed = 0usize;
         {
+            // #6195: re-read the live-id set INSIDE the write transaction and
+            // re-check every candidate against it immediately before deleting.
+            // The `orphan_ids`/`live_ids` above come from read-txn snapshots
+            // taken earlier; an `upsert` committing after the first snapshot
+            // wrote a fresh `VECTORS` row whose brand-new id appears in the
+            // orphan scan as a false orphan while its `VECTOR_KEYS` mapping is
+            // live. redb permits one writer at a time, so this read reflects
+            // every upsert committed before this txn opened and blocks any that
+            // would commit after — a row that is live at the moment of deletion
+            // is therefore never deleted. The expensive `VECTORS` scan stays in
+            // the read txn above; only the small `VECTOR_KEYS` table is re-read
+            // under the write lock, so the lock is not held over the O(N) scan.
+            let live_now: std::collections::HashSet<u64> = {
+                let keys = wtx.open_table(VECTOR_KEYS)?;
+                let mut set = std::collections::HashSet::new();
+                for entry in keys.iter()? {
+                    let (_, v) = entry?;
+                    set.insert(v.value());
+                }
+                set
+            };
             let mut vectors = wtx.open_table(VECTORS)?;
             let mut dead = wtx.open_table(DELETED_VECTORS)?;
             for id in &orphan_ids {
+                if live_now.contains(id) {
+                    // #6195: a concurrent upsert claimed this id between the
+                    // snapshot and now — it is no longer an orphan.
+                    continue;
+                }
                 let _ = vectors.remove(id)?;
                 // If this orphan was also tombstoned, clear the tombstone.
                 let _ = dead.remove(id)?;
+                removed += 1;
             }
             for id in &tombstoned_ids {
-                if live_ids.contains(id) {
+                if live_now.contains(id) {
                     // Tombstoned but still mapped — leave the vector row
                     // intact (re-upsert flow); only clear the tombstone if
                     // it has no mapping. This branch is defensive: in the
