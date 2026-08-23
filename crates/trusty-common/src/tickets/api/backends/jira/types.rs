@@ -11,6 +11,7 @@ use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde_json::{Value, json};
 
+use crate::tickets::api::backends::{ListIssuesParams, SearchIssuesParams};
 use crate::tickets::api::models::*;
 
 pub(super) const USER_AGENT: &str = "trusty-tickets/0.1";
@@ -105,6 +106,143 @@ pub(super) fn map_state(category: &str) -> IssueState {
         "In Progress" | "indeterminate" => IssueState::InProgress,
         _ => IssueState::Open,
     }
+}
+
+/// Map a caller-supplied state name to a fixed JQL `statusCategory` literal.
+///
+/// Why: keeps the closed set of category literals in one place, shared by the
+/// list and search JQL builders.
+/// What: matches a small closed set and returns a hard-coded, injection-safe
+/// literal — the input string is never interpolated.
+/// Test: `super::tests::search_jql_legit_values`.
+fn status_category(state: &str) -> &'static str {
+    match state {
+        "done" | "closed" => "Done",
+        "in_progress" => "In Progress",
+        _ => "To Do",
+    }
+}
+
+/// Escape a value for safe inclusion inside a JQL double-quoted string literal.
+///
+/// Why: JQL string terms are delimited by `"`; an unescaped `"` in an
+/// attacker-controlled filter value closes the term early and injects arbitrary
+/// clauses — JQL injection (#6198). Interpolating raw values is the defect.
+/// What: escapes the JQL quoted-string metacharacters — backslash FIRST (so a
+/// later quote's inserted backslash is never itself re-doubled), then the
+/// double-quote, then the control characters JQL forbids in a quoted literal
+/// (newline, carriage return, tab). The result is always one self-contained
+/// quoted term: a `"` from the caller can no longer break out of it.
+/// Test: `super::tests::escape_neutralises_quote_and_backslash`,
+/// `escape_handles_control_chars`, `escape_passes_plain_text_unchanged`.
+pub(super) fn escape_jql_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Build the JQL query string for `Backend::list_issues`.
+///
+/// Why: keeping construction pure makes the injection escaping directly
+/// testable — this returns exactly the `jql` string handed to the HTTP client
+/// (#6198), with no HTTP round-trip needed to verify it.
+/// What: interpolates every attacker-controlled value through
+/// `escape_jql_string`; `state` alone maps through `status_category`'s closed
+/// match to a fixed literal and is never interpolated.
+/// Test: `super::tests::list_jql_escapes_injected_assignee`,
+/// `list_jql_escapes_injected_label`, `list_jql_legit_values`.
+pub(super) fn build_list_jql(project_key: &str, p: &ListIssuesParams) -> String {
+    let mut jql = format!("project = \"{}\"", escape_jql_string(project_key));
+    if let Some(s) = &p.state {
+        jql.push_str(&format!(" AND statusCategory = \"{}\"", status_category(s)));
+    }
+    if let Some(a) = &p.assignee {
+        jql.push_str(&format!(" AND assignee = \"{}\"", escape_jql_string(a)));
+    }
+    for l in &p.labels {
+        jql.push_str(&format!(" AND labels = \"{}\"", escape_jql_string(l)));
+    }
+    jql.push_str(" ORDER BY created DESC");
+    jql
+}
+
+/// Build the JQL query string for `Backend::search_issues`.
+///
+/// Why: same as `build_list_jql` — a pure builder whose output is the exact
+/// `jql` sent to JIRA, so the escaping is unit-testable (#6198).
+/// What: escapes `query`, `assignee`, each `label`, and `priority`; `state`
+/// maps through `status_category`'s closed set to a fixed literal.
+/// Test: `super::tests::search_jql_escapes_injected_query`,
+/// `search_jql_escapes_injected_assignee`, `search_jql_escapes_injected_label`,
+/// `search_jql_escapes_injected_priority`, `search_jql_legit_values`.
+pub(super) fn build_search_jql(project_key: &str, p: &SearchIssuesParams) -> String {
+    let mut jql = format!("project = \"{}\"", escape_jql_string(project_key));
+    if let Some(q) = &p.query {
+        jql.push_str(&format!(" AND text ~ \"{}\"", escape_jql_string(q)));
+    }
+    if let Some(s) = &p.state {
+        jql.push_str(&format!(" AND statusCategory = \"{}\"", status_category(s)));
+    }
+    if let Some(a) = &p.assignee {
+        jql.push_str(&format!(" AND assignee = \"{}\"", escape_jql_string(a)));
+    }
+    for l in &p.labels {
+        jql.push_str(&format!(" AND labels = \"{}\"", escape_jql_string(l)));
+    }
+    if let Some(pri) = &p.priority {
+        jql.push_str(&format!(" AND priority = \"{}\"", escape_jql_string(pri)));
+    }
+    jql
+}
+
+/// Build the JQL for `Backend::get_milestone_issues`.
+///
+/// Why: `id` arrives from the MCP `milestone_id` string arg — an attacker trust
+/// boundary. The prior `fixVersion = {id}` was UNQUOTED and unescaped, so
+/// `id = "1 OR project = SECRET"` needed no quote-breakout at all — the bare
+/// `OR` clause injected directly and read another project's issues (#6198).
+/// What: wraps the value in quotes AND escapes it, so it is one self-contained
+/// JQL string literal a `"` cannot break out of.
+/// Test: `super::tests::milestone_issues_jql_escapes_injection`,
+/// `milestone_issues_jql_escapes_embedded_quote`, `milestone_issues_jql_legit_value`.
+pub(super) fn build_milestone_issues_jql(id: &str) -> String {
+    format!("fixVersion = \"{}\"", escape_jql_string(id))
+}
+
+/// Build the JQL for `Backend::get_epic_issues`.
+///
+/// Why: `epic_id` arrives from the MCP `epic_id` string arg — attacker
+/// controlled. The prior `parent = {epic_id}` was unquoted and unescaped,
+/// injectable exactly like `build_milestone_issues_jql` (#6198).
+/// What: quotes and escapes the value into one JQL string literal.
+/// Test: `super::tests::epic_issues_jql_escapes_injection`,
+/// `epic_issues_jql_escapes_embedded_quote`, `epic_issues_jql_legit_value`.
+pub(super) fn build_epic_issues_jql(epic_id: &str) -> String {
+    format!("parent = \"{}\"", escape_jql_string(epic_id))
+}
+
+/// Build the JQL for `Backend::list_epics`.
+///
+/// Why: uniformity — `project_key` is config-derived (JIRA_PROJECT_KEY), not an
+/// attacker vector, but routing it through `escape_jql_string` keeps every JQL
+/// term in this file escaped so a later edit cannot reintroduce a raw one (#6198).
+/// What: escapes the project key inside its quoted term; the issuetype clause is
+/// a fixed literal.
+/// Test: `super::tests::list_epics_jql_legit_value`.
+pub(super) fn build_list_epics_jql(project_key: &str) -> String {
+    format!(
+        "project = \"{}\" AND issuetype = Epic",
+        escape_jql_string(project_key)
+    )
 }
 
 /// Convert a JIRA issue JSON blob into the canonical `Issue`.

@@ -9,4 +9,7 @@ mod backend;
 mod client;
 mod types;
 
+#[cfg(test)]
+mod tests;
+
 pub use types::JiraBackend;
