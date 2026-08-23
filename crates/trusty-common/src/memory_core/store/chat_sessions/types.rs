@@ -139,6 +139,19 @@ pub enum ChatSessionStoreError {
         #[source]
         source: Box<serde_json::Error>,
     },
+    /// A stored session's `history` JSON blob failed to parse on load.
+    ///
+    /// Why (#6196): the load paths previously did `unwrap_or_default()`,
+    /// substituting an empty history and hiding data loss — a corrupt session
+    /// was then indistinguishable from a genuinely empty one. Surfacing this
+    /// lets a chat-resume caller tell "prior conversation lost" from "new empty
+    /// session". Carries `id` so the operator knows which row is corrupt.
+    #[error("chat session {id} has corrupt history json: {source}")]
+    CorruptHistory {
+        id: String,
+        #[source]
+        source: Box<serde_json::Error>,
+    },
     #[error("chat session store timestamp parse error for {field}: {source}")]
     Timestamp {
         field: &'static str,
