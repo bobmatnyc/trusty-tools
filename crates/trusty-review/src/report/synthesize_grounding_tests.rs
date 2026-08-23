@@ -225,7 +225,7 @@ fn an_uncorrectable_remote_claim_rejects_the_field() {
     let g = Grounding::from_model(&loopback_model());
     let prose = "The trusty-mpm control-plane offers remote code execution and a remote-management \
                  surface to anyone on the internet.";
-    let GroundingOutcome::Rejected(reason) = g.check(prose, None) else {
+    let GroundingOutcome::Rejected { reason, .. } = g.check(prose, None) else {
         panic!("expected a rejection, got {:?}", g.check(prose, None));
     };
     assert!(reason.contains("could not be corrected safely"));
@@ -318,7 +318,7 @@ fn instructions_that_countermand_a_guard_do_not_disable_it() {
 fn a_load_bearing_claim_about_a_leaf_crate_is_rejected() {
     let model = model_with(vec![repo("estate", vec![], Some(eight_crate_topology()))]);
     let g = Grounding::from_model(&model);
-    let GroundingOutcome::Rejected(reason) = g.check(
+    let GroundingOutcome::Rejected { reason, .. } = g.check(
         "trusty-common and trusty-mpm are the load-bearing crates the estate depends on.",
         None,
     ) else {
@@ -358,7 +358,7 @@ fn naming_a_leaf_crate_outside_a_load_bearing_claim_passes() {
 #[test]
 fn a_crate_name_is_matched_on_its_own_boundaries() {
     let model = model_with(vec![repo("estate", vec![], Some(eight_crate_topology()))]);
-    let GroundingOutcome::Rejected(reason) = Grounding::from_model(&model).check(
+    let GroundingOutcome::Rejected { reason, .. } = Grounding::from_model(&model).check(
         "trusty-mpm-gui is the load-bearing crate the estate depends on.",
         None,
     ) else {
@@ -544,7 +544,7 @@ fn an_unrewritable_network_claim_is_rejected() {
         None,
     );
     assert!(
-        matches!(outcome, GroundingOutcome::Rejected(_)),
+        matches!(outcome, GroundingOutcome::Rejected { .. }),
         "expected rejection, got: {outcome:?}"
     );
 }
@@ -711,7 +711,8 @@ fn a_sibling_finding_inherits_its_files_loopback_scope() {
 fn an_unevidenced_component_cannot_claim_beyond_host_reach() {
     let g = Grounding::from_model(&control_plane_model(false));
     let owner = format!("{CONTROL_ROUTES}:268");
-    let GroundingOutcome::Rejected(reason) = g.check(LIVE_ARBITRARY_EXEC_IMPACT, Some(&owner))
+    let GroundingOutcome::Rejected { reason, .. } =
+        g.check(LIVE_ARBITRARY_EXEC_IMPACT, Some(&owner))
     else {
         panic!(
             "expected a rejection, got {:?}",
@@ -738,6 +739,10 @@ fn an_unevidenced_component_keeps_a_non_reach_mention_of_the_network() {
         "High complexity in the network error path raises maintenance cost and the risk that a \
          new endpoint mishandles an error status.",
         "Release process cannot proceed when the external registry or network is unavailable.",
+        // #6082 lap 9: the vocabulary trigger reaches these too, so the
+        // claim-shape discriminator is the only thing keeping them.
+        "The client gives up after a transient network error.",
+        "Engine-side network and streaming logic lacks in-batch unit tests.",
     ] {
         assert_eq!(
             g.check(prose, Some(&owner)),
@@ -745,6 +750,118 @@ fn an_unevidenced_component_keeps_a_non_reach_mention_of_the_network() {
             "withheld a sentence that claims no reach: {prose}"
         );
     }
+}
+
+/// The lap-9 line, verbatim: §5.1 item 3's business impact.
+///
+/// `remote-execution` is a hyphenated compound no [`REACHABILITY_REWRITES`]
+/// pattern matches, which is why tier 3 shipped it. It is the fifth rephrasing
+/// of the same claim to reach a reader.
+const LIVE_REMOTE_EXECUTION_IMPACT: &str = "An unauthenticated client reaching the daemon can execute arbitrary commands and control \
+     sessions, a critical remote-execution and privilege risk.";
+
+/// Tier 3 rejects a reach claim whose spelling the rewrite table never saw.
+///
+/// Fails before the fix: tier 3 asked whether [`REACHABILITY_REWRITES`] could
+/// change the sentence, and no pattern matches `remote-execution`, so the
+/// sentence was skipped and the field shipped as written.
+#[test]
+fn an_unevidenced_component_rejects_a_hyphenated_reach_compound() {
+    let g = Grounding::from_model(&control_plane_model(false));
+    let owner = format!("{CONTROL_ROUTES}:259");
+    let outcome = g.check(LIVE_REMOTE_EXECUTION_IMPACT, Some(&owner));
+    let GroundingOutcome::Rejected { reason, .. } = &outcome else {
+        panic!("expected a rejection, got {outcome:?}");
+    };
+    assert!(reason.contains("cannot be verified"), "{reason}");
+    assert!(reason.contains(CONTROL_ROUTES), "{reason}");
+}
+
+/// The morphological variants the vocabulary trigger now covers.
+///
+/// Each is a positive reach claim in a spelling no rewrite pattern matches, and
+/// each is the shape a future lap would otherwise ship.
+#[test]
+fn an_unevidenced_component_rejects_reachability_word_variants() {
+    let g = Grounding::from_model(&control_plane_model(false));
+    let owner = format!("{CONTROL_ROUTES}:259");
+    for prose in [
+        "The handler is remotely exploitable by any caller.",
+        "A network-reachable attacker can spawn sessions at will.",
+        "The endpoint offers remote-execution to unauthenticated callers.",
+        "Internet exposure of this route permits arbitrary command execution.",
+    ] {
+        assert!(
+            matches!(
+                g.check(prose, Some(&owner)),
+                GroundingOutcome::Rejected { .. }
+            ),
+            "shipped an unevidenced reach claim: {prose}"
+        );
+    }
+}
+
+/// A component some finding establishes as network-reachable is tier 2, so a
+/// reach claim about it ships untouched.
+///
+/// This is the half that keeps the vocabulary trigger from swallowing genuinely
+/// remote surfaces: the discriminator decides WHETHER a sentence claims reach,
+/// and the tier decides whether the report may say so.
+#[test]
+fn a_remote_established_component_keeps_its_reach_claim() {
+    let model = model_with(vec![repo(
+        "estate",
+        vec![finding(
+            "Bot accepts commands from any chat",
+            "crates/trusty-mpm/src/telegram/mod.rs:488",
+            "Restrict the bot to an allow-list; it is publicly reachable today",
+        )],
+        None,
+    )]);
+    let g = Grounding::from_model(&model);
+    assert_eq!(
+        g.check(
+            "When the bot is left unrestricted a message from any chat could trigger real fleet \
+             operations, a significant remote-control exposure.",
+            Some("crates/trusty-mpm/src/telegram/mod.rs:488"),
+        ),
+        GroundingOutcome::Clean,
+    );
+}
+
+/// The same sentence on an UNEVIDENCED component is withheld, and that is the
+/// discriminator's cost stated plainly.
+///
+/// The live §5.2 item 114 sits on `crates/trusty-mpm/src/telegram/mod.rs`, and
+/// no finding on that file carries a [`LOOPBACK_MARKERS`] or [`REMOTE_MARKERS`]
+/// word — a Telegram bot is genuinely network-facing, but nothing the audit
+/// COLLECTED says so. Tier 3 therefore withholds "a significant remote-control
+/// exposure" and discloses the withholding. That is the policy working, not a
+/// misfire: the report has no evidence of how that surface is reached, and a
+/// visible gap beats an unexamined claim. The fix is evidence on the file — the
+/// test above shows one marker on one sibling finding is enough.
+#[test]
+fn an_unevidenced_component_withholds_a_genuine_remote_claim() {
+    let model = model_with(vec![repo(
+        "estate",
+        vec![finding(
+            "Free-text messages drive the fleet with side-effecting actions enabled",
+            "crates/trusty-mpm/src/telegram/mod.rs:488",
+            "Require explicit per-chat authorization before enabling action execution",
+        )],
+        None,
+    )]);
+    assert!(
+        matches!(
+            Grounding::from_model(&model).check(
+                "When the bot is left unrestricted a message from any chat could trigger real \
+                 fleet operations, a significant remote-control exposure.",
+                Some("crates/trusty-mpm/src/telegram/mod.rs:488"),
+            ),
+            GroundingOutcome::Rejected { .. }
+        ),
+        "an unevidenced component's reach claim must be withheld, not shipped",
+    );
 }
 
 /// A finding is judged by its OWN component, never by a word it happens to

@@ -16,6 +16,73 @@ use super::synthesize_grounding::{
     GENERIC_TOKENS, MIN_TOKEN_LEN, REACHABILITY_REWRITES, REACHABILITY_WORDS,
 };
 
+/// The nouns and verbs a reachability word must be near to be making a CLAIM
+/// about the finding's surface (#6082 lap 9).
+///
+/// Why: tier 3 in [`super::synthesize_grounding`] has no evidence either way, so
+/// it withholds rather than corrects, and withholding a field the reader would
+/// have kept is a real cost. What separates "a critical remote-execution risk"
+/// from "a transient network error" is not the word `network` — both carry one —
+/// but whether that word is attributing access, attack, execution or exposure to
+/// the surface. These are the words that attribute it.
+///
+/// What: matched as whole tokens, because a prefix match on `access` would take
+/// `accessory` with it. The reachability word itself is matched by PREFIX
+/// instead — see [`asserts_reachability_claim`] — so `remotely`, `networked` and
+/// a hyphenated `remote-execution` all count.
+pub(super) const CLAIM_WORDS: &[&str] = &[
+    "access",
+    "accessed",
+    "accessible",
+    "attack",
+    "attacker",
+    "attackers",
+    "attacks",
+    "breach",
+    "compromise",
+    "compromised",
+    "control",
+    "controlled",
+    "escalation",
+    "execute",
+    "executed",
+    "executes",
+    "execution",
+    "exploit",
+    "exploitable",
+    "exploitation",
+    "exploited",
+    "expose",
+    "exposed",
+    "exposes",
+    "exposure",
+    "hijack",
+    "hijacked",
+    "injection",
+    "intrusion",
+    "rce",
+    "reach",
+    "reachable",
+    "reached",
+    "reaching",
+    "takeover",
+    "tamper",
+    "unauthenticated",
+    "unauthorised",
+    "unauthorized",
+];
+
+/// How many tokens either side of a reachability word [`CLAIM_WORDS`] is
+/// searched over.
+///
+/// Three covers every claim shape the graded reports produced — the compound
+/// (`remote-execution`), the modifier (`network-reachable attacker`) and the
+/// short prepositional phrase (`exploitable over the network`) — while leaving a
+/// claim word in a different clause of the same sentence out of reach, which is
+/// what keeps "the network error path raises maintenance cost and the risk that
+/// a new endpoint mishandles an error status" a clean sentence.
+const CLAIM_WINDOW: usize = 3;
+
 /// Cut `sentence` out of `text`, taking the space that separated it from its
 /// neighbour so the remaining prose keeps single spacing.
 pub(super) fn remove_sentence(text: &str, sentence: &str) -> String {
@@ -100,6 +167,46 @@ pub(super) fn replace_ignore_case(haystack: &str, needle: &str, replacement: &st
 pub(super) fn asserts_reachability(sentence: &str) -> bool {
     let lower = sentence.to_lowercase();
     REACHABILITY_WORDS.iter().any(|w| lower.contains(w))
+}
+
+/// True when a sentence uses a reachability word to CLAIM reach, rather than
+/// merely mentioning a network (#6082 lap 9).
+///
+/// Why: [`asserts_reachability`] is the right trigger where the report has
+/// evidence the surface is host-local — every occurrence there contradicts the
+/// data. Tier 3 has no evidence either way, so it must tell a claim from a
+/// mention, or every finding whose prose says "a transient network error" loses
+/// its field. The lap-9 report shipped the opposite failure: tier 3 asked
+/// whether [`REACHABILITY_REWRITES`] could rewrite the sentence, and
+/// `remote-execution` matches no pattern, so §5.1 item 3's business impact went
+/// out claiming remote code execution on a surface with no evidence of reach.
+///
+/// What: splits the sentence on non-alphanumerics, so a hyphenated compound
+/// becomes two tokens and `remote-execution` reads as `remote` beside
+/// `execution`. A token counts as a reachability word when it STARTS with one,
+/// which admits `remotely`, `networked` and `networking` without a stem table.
+/// It is a claim when a [`CLAIM_WORDS`] token sits within [`CLAIM_WINDOW`]
+/// tokens of it.
+///
+/// Test: `synthesize_grounding_tests.rs::{an_unevidenced_component_rejects_a_hyphenated_reach_compound,
+/// an_unevidenced_component_rejects_reachability_word_variants,
+/// an_unevidenced_component_keeps_a_non_reach_mention_of_the_network}`.
+pub(super) fn asserts_reachability_claim(sentence: &str) -> bool {
+    let words: Vec<String> = sentence
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    words.iter().enumerate().any(|(i, word)| {
+        if !REACHABILITY_WORDS.iter().any(|r| word.starts_with(r)) {
+            return false;
+        }
+        let from = i.saturating_sub(CLAIM_WINDOW);
+        let to = (i + CLAIM_WINDOW + 1).min(words.len());
+        words[from..to]
+            .iter()
+            .any(|near| CLAIM_WORDS.contains(&near.as_str()))
+    })
 }
 
 /// Split prose into sentences on `. `, `? ` and `! ` boundaries, keeping each
