@@ -219,6 +219,48 @@ fn trajectory_caps_at_twelve_months() {
     assert_eq!(summary.monthly_trajectory.last().unwrap().month, "2025-12");
 }
 
+/// (#6082) A month's `commits` figure counts commits, not the file touches the
+/// `commits JOIN files` query returns one row of per file. Before the fix this
+/// read 7 (the row count) for 2 commits, which is how the trusty-tools
+/// self-audit reported ~9400 commits in a month that had 824.
+#[test]
+fn commits_count_commits_not_file_touches() {
+    let db = Database::open_in_memory().expect("open");
+    insert_commit(
+        &db,
+        "a1",
+        "Alice",
+        "alice@x.com",
+        "2026-01-15T00:00:00Z",
+        "repo",
+        false,
+        &["src/a.rs", "src/b.rs", "src/c.rs", "docs/d.md"],
+    );
+    insert_commit(
+        &db,
+        "b1",
+        "Bob",
+        "bob@x.com",
+        "2026-01-16T00:00:00Z",
+        "repo",
+        false,
+        &["src/e.rs", "src/f.rs", "docs/g.md"],
+    );
+
+    let summary = build_authorship_summary(db.connection(), "repo").expect("summary");
+    assert_eq!(summary.monthly_trajectory.len(), 1);
+    let january = &summary.monthly_trajectory[0];
+    assert_eq!(january.month, "2026-01");
+    assert_eq!(
+        january.commits, 2,
+        "2 commits touching 7 files must count 2, not 7"
+    );
+    assert_eq!(
+        january.active_authors, 2,
+        "active_authors was already correct and must stay so"
+    );
+}
+
 /// (#5453) One person committing under two emails is ONE author, because the
 /// aggregation joins `commits.author_id → authors.canonical_email` rather than
 /// grouping raw commit emails. Against the raw-email grouping this replaced,

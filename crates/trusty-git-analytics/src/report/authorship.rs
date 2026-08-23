@@ -108,7 +108,13 @@ pub struct MonthlyActivity {
     pub month: String,
     /// Distinct non-bot authors with a non-merge commit in this month.
     pub active_authors: u64,
-    /// Non-merge, non-bot commits in this month.
+    /// Distinct non-merge, non-bot commits in this month.
+    ///
+    /// Why: the source query returns one row per file a commit touched, so
+    /// this figure is a count of distinct `commits.id` values, never of rows
+    /// (#6082 — a row count reported ~10x reality on a repository whose
+    /// commits average ten files each).
+    /// Test: `super::authorship_tests::commits_count_commits_not_file_touches`.
     pub commits: u64,
 }
 
@@ -180,6 +186,10 @@ fn month_of(timestamp: &str) -> Option<String> {
 /// subsystems), and per-month distinct-author/commit counts limited to the
 /// most recent 12 active months (for the trajectory).
 ///
+/// The `JOIN files` returns one row per file a commit touched, so every
+/// per-COMMIT figure deduplicates on `commits.id` while every per-TOUCH figure
+/// counts rows (#6082).
+///
 /// Authors are keyed on `authors.canonical_email` via a LEFT JOIN on
 /// `commits.author_id` — the identity resolver's own output (#5453 requires
 /// reusing it rather than re-grouping raw commit emails). A commit the resolver
@@ -195,7 +205,7 @@ fn month_of(timestamp: &str) -> Option<String> {
 /// Propagates [`crate::core::errors::TgaError::DbError`] from either query.
 pub fn build_authorship_summary(conn: &Connection, repository: &str) -> Result<AuthorshipSummary> {
     let mut stmt = conn.prepare(
-        "SELECT c.author_name, c.author_email, a.canonical_email, c.timestamp, f.path \
+        "SELECT c.id, c.author_name, c.author_email, a.canonical_email, c.timestamp, f.path \
          FROM commits c \
          JOIN files f ON f.commit_id = c.id \
          LEFT JOIN authors a ON a.id = c.author_id \
@@ -203,11 +213,12 @@ pub fn build_authorship_summary(conn: &Connection, repository: &str) -> Result<A
     )?;
     let rows = stmt.query_map(params![repository], |row| {
         Ok((
-            row.get::<_, String>(0)?,
+            row.get::<_, i64>(0)?,
             row.get::<_, String>(1)?,
-            row.get::<_, Option<String>>(2)?,
-            row.get::<_, String>(3)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
             row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
         ))
     })?;
 
@@ -215,11 +226,13 @@ pub fn build_authorship_summary(conn: &Connection, repository: &str) -> Result<A
     let mut authors_by_subsystem: BTreeMap<String, std::collections::BTreeSet<String>> =
         BTreeMap::new();
     let mut months: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
-    let mut month_commits: BTreeMap<String, u64> = BTreeMap::new();
+    // #6082: keyed on `commits.id`, not incremented per row — one row arrives
+    // per file touched, so a counter here reports file-touches as commits.
+    let mut month_commits: BTreeMap<String, std::collections::BTreeSet<i64>> = BTreeMap::new();
     let mut unresolved: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
     for row in rows {
-        let (name, email, canonical_email, timestamp, path) = row?;
+        let (commit_id, name, email, canonical_email, timestamp, path) = row?;
         if is_bot(&name, &email) {
             continue;
         }
@@ -244,7 +257,7 @@ pub fn build_authorship_summary(conn: &Connection, repository: &str) -> Result<A
             .insert(author_key.clone());
         if let Some(month) = month_of(&timestamp) {
             months.entry(month.clone()).or_default().insert(author_key);
-            *month_commits.entry(month).or_insert(0) += 1;
+            month_commits.entry(month).or_default().insert(commit_id);
         }
     }
 
@@ -275,7 +288,10 @@ pub fn build_authorship_summary(conn: &Connection, repository: &str) -> Result<A
         .into_iter()
         .map(|month| MonthlyActivity {
             active_authors: months.get(&month).map(|s| s.len() as u64).unwrap_or(0),
-            commits: month_commits.get(&month).copied().unwrap_or(0),
+            commits: month_commits
+                .get(&month)
+                .map(|s| s.len() as u64)
+                .unwrap_or(0),
             month,
         })
         .collect();
