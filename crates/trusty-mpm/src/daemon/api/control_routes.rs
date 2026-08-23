@@ -326,6 +326,12 @@ fn validate_claude_cmd(cmd: Option<&str>) -> Result<(), (StatusCode, String)> {
 /// What: `None` is accepted. For `Some(path)` the value must use the safe path
 /// charset (no shell metacharacters), be absolute, contain no `..` component,
 /// and resolve to an existing regular file. Returns `Err((400, msg))` otherwise.
+///
+/// Symlink target: `is_file()` follows symlinks, so a symlink to a regular file
+/// elsewhere passes — its target location is intentionally not constrained. That
+/// is acceptable because the tmux sink shell-quotes the path
+/// (`build_claude_command`), so the target cannot inject a command; the value
+/// only names which prompt file `claude` reads. See #6197.
 /// Test: `ctl_run_session_rejects_prompt_file_injection`,
 /// `validate_prompt_file_requires_absolute_existing_regular_file`.
 fn validate_prompt_file(prompt_file: Option<&str>) -> Result<(), (StatusCode, String)> {
