@@ -16,6 +16,7 @@
 //! a tempdir-backed registry so they don't touch the real `.trusty-agents/` state.)
 
 use std::collections::HashMap;
+use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
@@ -114,23 +115,25 @@ impl TrustyBackedMemoryStore {
         let payloads = PayloadStore::open(&payload_db)
             .with_context(|| format!("open trusty payload store at {}", payload_db.display()))?;
 
-        // Hydrate the in-memory sidecar from persisted rows.
+        // Hydrate the in-memory sidecar from persisted rows. #6200: stream row
+        // by row instead of `load_all(None)` so a large palace does not buffer
+        // the whole payload table into an owned `Vec` on top of this map.
         let mut sidecar: HashMap<Segment, SegmentSidecar> = HashMap::new();
-        let rows = payloads
-            .load_all(None)
+        payloads
+            .try_for_each_row(None, |row| {
+                let Some(segment) = Segment::from_name(&row.segment) else {
+                    tracing::warn!(
+                        segment = %row.segment,
+                        "skipping persisted payload row with unknown segment prefix"
+                    );
+                    return Ok(ControlFlow::Continue(()));
+                };
+                let entry = sidecar.entry(segment).or_default();
+                entry.by_id.insert(row.id.clone(), (row.uuid, row.payload));
+                entry.by_uuid.insert(row.uuid, row.id);
+                Ok(ControlFlow::Continue(()))
+            })
             .with_context(|| format!("load payloads from {}", payload_db.display()))?;
-        for row in rows {
-            let Some(segment) = Segment::from_name(&row.segment) else {
-                tracing::warn!(
-                    segment = %row.segment,
-                    "skipping persisted payload row with unknown segment prefix"
-                );
-                continue;
-            };
-            let entry = sidecar.entry(segment).or_default();
-            entry.by_id.insert(row.id.clone(), (row.uuid, row.payload));
-            entry.by_uuid.insert(row.uuid, row.id);
-        }
 
         Ok(Self {
             registry: PalaceRegistry::new(),
