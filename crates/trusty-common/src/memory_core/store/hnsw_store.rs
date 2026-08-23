@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use hnsw_rs::prelude::{DistCosine, Hnsw};
 use parking_lot::RwLock;
-use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, Table};
+use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata};
 use thiserror::Error;
 
 use crate::memory_core::store::kg_store::{
@@ -155,97 +155,8 @@ impl From<redb::CommitError> for HnswStoreError {
     }
 }
 
-/// Reserve the next free `vector_id`, inside the caller's write transaction.
-///
-/// Why (#5005): the old allocator was a process-local `AtomicU64` seeded at
-/// open. Two live `HnswStore`s over one database file — which the vector-db
-/// cache deliberately allows, so that a palace opened twice in one process
-/// shares a single redb handle — each seeded from the same high-water mark and
-/// then issued the same ids. Because redb permits one write transaction at a
-/// time per database, moving the reservation into the transaction that does the
-/// insert makes it serialisable with every other writer on that file: the id
-/// and the row that claims it commit or roll back together.
-/// What: reads `VECTOR_ID_SEQ`, takes the first candidate with no `VECTORS`
-/// row, writes `candidate + 1` back, and returns the candidate. When the
-/// candidate IS occupied — a counter left behind by a pre-#5005 binary, or a
-/// hand-edited file — it jumps past the highest id EITHER vector table knows
-/// about (see [`high_water`]) rather than overwriting, logs the correction, and
-/// retries; after [`MAX_ALLOC_PROBES`] it fails with
-/// [`HnswStoreError::IdAllocationFailed`] instead of aliasing.
-/// A missing counter row (only reachable if the store skipped open-time
-/// seeding) falls back to the same high-water mark the seed would have used.
-/// Test: `upsert_refuses_to_reuse_an_id_already_present_in_vectors`,
-/// `two_live_stores_over_one_file_never_alias_ids`.
-fn allocate_vector_id(
-    seq: &mut Table<'_, &'static str, u64>,
-    vectors: &Table<'_, u64, &'static [u8]>,
-    keys: &Table<'_, &'static str, u64>,
-) -> Result<u64> {
-    let mut candidate = match seq.get(NEXT_VECTOR_ID)? {
-        Some(g) => g.value(),
-        None => {
-            tracing::warn!(
-                "#5005: VECTOR_ID_SEQ has no counter row at allocation time; \
-                 falling back to the VECTORS high-water mark"
-            );
-            high_water(vectors, keys)?
-        }
-    };
-
-    for probe in 0..MAX_ALLOC_PROBES {
-        if vectors.get(candidate)?.is_none() {
-            seq.insert(NEXT_VECTOR_ID, candidate.saturating_add(1))?;
-            return Ok(candidate);
-        }
-        tracing::warn!(
-            candidate,
-            probe,
-            "#5005: persisted vector_id counter is behind the VECTORS table; \
-             skipping the occupied id instead of overwriting it"
-        );
-        // Jump past the highest occupied id so one correction is enough.
-        candidate = high_water(vectors, keys)?.max(candidate.saturating_add(1));
-    }
-
-    Err(HnswStoreError::IdAllocationFailed {
-        probes: MAX_ALLOC_PROBES,
-        last_candidate: candidate,
-    })
-}
-
-/// One past the highest `vector_id` either vector table knows about.
-///
-/// Why: both the allocator's collision jump and its missing-counter fallback
-/// need a bound above which NO id is taken. `VECTORS` alone is not that bound.
-/// A `VECTOR_KEYS` row can outlive its `VECTORS` row: a palace written by a
-/// binary predating #6195 could have `compact_orphans` delete a
-/// concurrently-upserted `VECTORS` row as a false orphan while the key survived
-/// (that window is now closed — see [`HnswStore::compact_orphans`]), and a
-/// hand-edited file can present the same shape. Such a state is still reachable
-/// on disk, and a `VECTORS`-only bound would hand the id straight
-/// back out — the same aliasing this module exists to prevent, arrived at from
-/// the other table.
-/// What: `max(last VECTORS key, largest mapped VECTOR_KEYS value) + 1`, or 1
-/// when both are empty (id 0 is never issued, matching the pre-#5005 seed of
-/// `max_seen + 1`). `VECTORS.last()` is O(log n); the `VECTOR_KEYS` sweep is
-/// O(n) but runs only on the rare correction path — never on a healthy upsert,
-/// where the counter's own invariant already bounds the candidate.
-/// Test: `upsert_refuses_to_reuse_an_id_already_present_in_vectors`,
-/// `upsert_refuses_an_id_that_only_vector_keys_still_claims`.
-fn high_water(
-    vectors: &Table<'_, u64, &'static [u8]>,
-    keys: &Table<'_, &'static str, u64>,
-) -> Result<u64> {
-    let mut max_seen = match vectors.last()? {
-        Some((k, _)) => k.value(),
-        None => 0,
-    };
-    for entry in keys.iter()? {
-        let (_, v) = entry?;
-        max_seen = max_seen.max(v.value());
-    }
-    Ok(max_seen.saturating_add(1))
-}
+mod alloc;
+use alloc::allocate_vector_id;
 
 /// Public result alias to keep call-site signatures concise.
 ///
@@ -337,6 +248,19 @@ pub struct HnswStore {
     /// Test: `search_scores_a_re_upserted_drawer_by_its_current_vector`,
     /// `upsert_marks_a_shadow_before_the_graph_can_serve_it`.
     shadowed: RwLock<std::collections::HashSet<u64>>,
+    /// Test-only rendezvous for `compact_orphans` (#6195, review follow-up).
+    ///
+    /// Why: the TOCTOU the fix closes needs a real `upsert` to commit in the
+    /// window between `compact_orphans`' live-id snapshot and its orphan scan.
+    /// That window is internal, so a deterministic regression test needs a
+    /// control point there rather than a sleep. Gated `#[cfg(test)]`, so the
+    /// field, its writes, and the `wait()` calls vanish from every production
+    /// and consumer build.
+    /// What: when set, `compact_orphans` calls `wait()` on it twice at that
+    /// point — once to release the test to upsert, once to await the commit.
+    /// Test: `compact_orphans_keeps_a_vector_upserted_after_the_live_snapshot`.
+    #[cfg(test)]
+    compact_race_barrier: RwLock<Option<Arc<std::sync::Barrier>>>,
 }
 
 impl HnswStore {
@@ -476,7 +400,16 @@ impl HnswStore {
             dim,
             read_only,
             shadowed: RwLock::new(std::collections::HashSet::new()),
+            #[cfg(test)]
+            compact_race_barrier: RwLock::new(None),
         })
+    }
+
+    /// Install the test-only `compact_orphans` rendezvous. See
+    /// [`Self::compact_race_barrier`].
+    #[cfg(test)]
+    fn set_compact_race_barrier(&self, barrier: Arc<std::sync::Barrier>) {
+        *self.compact_race_barrier.write() = Some(barrier);
     }
 
     /// Whether this store rejects writes (i.e. it was opened against a
@@ -871,18 +804,20 @@ impl HnswStore {
     /// rebuild via `open` reclaims the graph as well.
     /// What: Scans `VECTOR_KEYS` for the live-id set and `VECTORS` for orphan
     /// candidates in read transactions (so the O(N) `VECTORS` scan holds no
-    /// write lock), then in a single write transaction re-reads `VECTOR_KEYS`
-    /// and removes only the candidates that are STILL not live, plus any
-    /// tombstoned rows with no mapping. Returns the number of `VECTORS` rows
-    /// actually removed.
+    /// write lock), captures each candidate's current uuid, then in the delete
+    /// write transaction re-confirms liveness with a POINT lookup per candidate
+    /// and removes only those still not live, plus any tombstoned rows with no
+    /// mapping. Returns the number of `VECTORS` rows actually removed.
     ///
     /// #6195: the earlier three-transaction form deleted every candidate the
     /// read-txn snapshot found, so an `upsert` committing between the snapshot
     /// and the delete had its brand-new `VECTORS` row deleted as a false orphan
     /// while its `VECTOR_KEYS` mapping survived — leaving the drawer out of the
-    /// HNSW graph on the next `open`. Re-checking liveness inside the delete
+    /// HNSW graph on the next `open`. Re-confirming liveness inside the delete
     /// transaction, which redb serialises against every writer, closes that
-    /// window: a row live at the moment of deletion is never deleted.
+    /// window: a row live at the moment of deletion is never deleted. The
+    /// re-check is a per-candidate point lookup, so the write-lock hold stays
+    /// O(candidates), never the O(live-count) full-table scan.
     /// Test: `compact_orphans_removes_dangling`,
     /// `compact_orphans_keeps_a_vector_upserted_after_the_live_snapshot`.
     pub fn compact_orphans(&self) -> Result<usize> {
@@ -908,6 +843,20 @@ impl HnswStore {
             (live, deads)
         };
 
+        // #6195 (test seam): a rendezvous fired ONCE, right after the live-id
+        // snapshot and before the orphan scan, so a test can land a real racing
+        // `upsert` in the exact window between the two reads with no timing
+        // dependence. `wait()` twice: first releases the test to upsert, second
+        // waits for that upsert to commit. `None` (production) is a no-op.
+        #[cfg(test)]
+        {
+            let barrier = self.compact_race_barrier.read().clone();
+            if let Some(barrier) = barrier {
+                barrier.wait();
+                barrier.wait();
+            }
+        }
+
         // Now find vector rows that are NOT in live_ids (i.e. orphans).
         let orphan_ids: Vec<u64> = {
             let rtx = self.db.begin_read()?;
@@ -927,36 +876,61 @@ impl HnswStore {
             return Ok(0);
         }
 
+        // #6195: capture the uuid (if any) that currently maps to each delete
+        // candidate, in an UNLOCKED read txn. `VECTOR_KEYS` is keyed by uuid
+        // with no id→uuid index, so one pass is the only way to answer "which
+        // uuid points at this id" — but it holds no write lock, and the map
+        // keeps only candidate ids, so memory stays O(candidates). A candidate
+        // with NO uuid here can never become mapped later: `allocate_vector_id`
+        // refuses any id already present in `VECTORS` (every candidate has a
+        // `VECTORS` row), and `upsert` never remaps an existing uuid to a
+        // different id — so only an id already mapped now can be mapped at
+        // delete time. This capture runs after the orphan scan, so an atomic
+        // `upsert` whose `VECTORS` row the scan saw has its mapping visible
+        // here too.
+        let candidate_uuid: HashMap<u64, String> = {
+            let mut want: std::collections::HashSet<u64> =
+                std::collections::HashSet::with_capacity(orphan_ids.len() + tombstoned_ids.len());
+            want.extend(orphan_ids.iter().copied());
+            want.extend(tombstoned_ids.iter().copied());
+            let rtx = self.db.begin_read()?;
+            let keys = rtx.open_table(VECTOR_KEYS)?;
+            let mut map = HashMap::new();
+            for entry in keys.iter()? {
+                let (k, v) = entry?;
+                let id = v.value();
+                if want.contains(&id) {
+                    map.insert(id, k.value().to_string());
+                }
+            }
+            map
+        };
+
         let wtx = self.db.begin_write()?;
         let mut removed = 0usize;
         {
-            // #6195: re-read the live-id set INSIDE the write transaction and
-            // re-check every candidate against it immediately before deleting.
-            // The `orphan_ids`/`live_ids` above come from read-txn snapshots
-            // taken earlier; an `upsert` committing after the first snapshot
-            // wrote a fresh `VECTORS` row whose brand-new id appears in the
-            // orphan scan as a false orphan while its `VECTOR_KEYS` mapping is
-            // live. redb permits one writer at a time, so this read reflects
-            // every upsert committed before this txn opened and blocks any that
-            // would commit after — a row that is live at the moment of deletion
-            // is therefore never deleted. The expensive `VECTORS` scan stays in
-            // the read txn above; only the small `VECTOR_KEYS` table is re-read
-            // under the write lock, so the lock is not held over the O(N) scan.
-            let live_now: std::collections::HashSet<u64> = {
-                let keys = wtx.open_table(VECTOR_KEYS)?;
-                let mut set = std::collections::HashSet::new();
-                for entry in keys.iter()? {
-                    let (_, v) = entry?;
-                    set.insert(v.value());
-                }
-                set
-            };
+            let keys = wtx.open_table(VECTOR_KEYS)?;
             let mut vectors = wtx.open_table(VECTORS)?;
             let mut dead = wtx.open_table(DELETED_VECTORS)?;
+
+            // #6195: liveness is a POINT lookup keyed by the candidate's uuid,
+            // so the write-lock hold is O(candidates·log n) — not the O(live)
+            // full `VECTOR_KEYS` scan. redb serialises this txn against every
+            // `upsert`, so the lookup sees every upsert committed before the txn
+            // and blocks any after: a row live at the moment of deletion is
+            // never deleted, and a drawer deleted in the window reads as a true
+            // orphan and is reclaimed. A candidate with no captured uuid cannot
+            // have become mapped since (see the capture note above), so it is a
+            // true orphan.
+            let is_live = |id: u64| -> Result<bool> {
+                match candidate_uuid.get(&id) {
+                    Some(uuid) => Ok(keys.get(uuid.as_str())?.map(|g| g.value()) == Some(id)),
+                    None => Ok(false),
+                }
+            };
+
             for id in &orphan_ids {
-                if live_now.contains(id) {
-                    // #6195: a concurrent upsert claimed this id between the
-                    // snapshot and now — it is no longer an orphan.
+                if is_live(*id)? {
                     continue;
                 }
                 let _ = vectors.remove(id)?;
@@ -965,12 +939,11 @@ impl HnswStore {
                 removed += 1;
             }
             for id in &tombstoned_ids {
-                if live_now.contains(id) {
-                    // Tombstoned but still mapped — leave the vector row
-                    // intact (re-upsert flow); only clear the tombstone if
-                    // it has no mapping. This branch is defensive: in the
-                    // current API a tombstoned id can never be remapped
-                    // because `delete` also removes the mapping.
+                if is_live(*id)? {
+                    // Tombstoned but still mapped — leave the vector row intact
+                    // (re-upsert flow); only clear the tombstone when it has no
+                    // mapping. Defensive: `delete` also removes the mapping, so
+                    // in the current API a tombstoned id is never remapped.
                     continue;
                 }
                 let _ = dead.remove(id)?;
