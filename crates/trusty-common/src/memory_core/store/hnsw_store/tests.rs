@@ -165,6 +165,106 @@ fn compact_orphans_removes_dangling() {
     assert_eq!(hits[0].0, u1);
 }
 
+/// Why (#6195): `compact_orphans` classes orphan candidates from read-txn
+/// snapshots taken before its delete transaction. An `upsert` that commits
+/// after the live snapshot but before the delete leaves its brand-new
+/// `VECTORS` row in the orphan scan while its `VECTOR_KEYS` mapping is live.
+/// The pre-fix delete removed the row as a false orphan, so on the next
+/// `open` the drawer never entered the HNSW graph and vector search could
+/// never return it — silent data loss. That row must survive.
+/// What: seeds a genuine orphan `VECTORS` row (an id with no mapping), then
+/// uses a held redb write transaction as a hard rendezvous. redb permits one
+/// writer at a time, so `compact_orphans` on a second thread completes both
+/// read snapshots — classing the id as an orphan — and then parks at its
+/// delete `begin_write()` behind the held transaction. The test commits the
+/// drawer's `VECTOR_KEYS` mapping THROUGH that transaction (the deterministic
+/// stand-in for the racing upsert landing in the window) and releasing the
+/// lock lets the delete run. Asserts the `VECTORS` row survives and the drawer
+/// is searchable after a reopen. Fails on the pre-fix commit.
+/// Test: this test itself is the verification.
+#[test]
+fn compact_orphans_keeps_a_vector_upserted_after_the_live_snapshot() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("hnsw.redb");
+    let dim = 8;
+
+    let raced_uuid = Uuid::new_v4().to_string();
+    let raced_id: u64 = 4242;
+    let raced_vec = unit_vec(dim, 77);
+
+    {
+        let db = Arc::new(Database::create(&path).expect("create db"));
+        let store = Arc::new(HnswStore::open(db, dim).expect("open store"));
+
+        // A live anchor drawer so the live snapshot is non-trivial.
+        let anchor = Uuid::new_v4().to_string();
+        store.upsert(&anchor, &unit_vec(dim, 1)).unwrap();
+
+        // Seed a genuine orphan: a `VECTORS` row with no `VECTOR_KEYS`
+        // mapping — the row the racing upsert will claim.
+        let encoded = postcard::to_allocvec(&raced_vec).unwrap();
+        {
+            let wtx = store.db.begin_write().unwrap();
+            {
+                let mut vectors = wtx.open_table(VECTORS).unwrap();
+                vectors.insert(raced_id, encoded.as_slice()).unwrap();
+            }
+            wtx.commit().unwrap();
+        }
+
+        // Hold a write transaction open and stage the racing upsert's mapping
+        // inside it (uncommitted). `compact_orphans`' delete `begin_write()`
+        // will block on this until we commit — the single-writer lock is the
+        // rendezvous, so correctness does not depend on timing.
+        let blocker = store.db.begin_write().unwrap();
+        {
+            let mut keys = blocker.open_table(VECTOR_KEYS).unwrap();
+            keys.insert(raced_uuid.as_str(), raced_id).unwrap();
+        }
+
+        // compact runs on another thread: its read snapshots see the orphan
+        // `VECTORS` row but NOT the still-uncommitted mapping, so it classes
+        // `raced_id` as an orphan, then parks at its delete `begin_write()`.
+        let compactor = {
+            let store = Arc::clone(&store);
+            std::thread::spawn(move || store.compact_orphans().unwrap())
+        };
+
+        // Give the compact thread ample time to pass BOTH read snapshots and
+        // park on the write lock before we commit. The snapshots are two tiny
+        // table scans (microseconds); this margin is ~5 orders larger, so the
+        // ordering — compact classes the orphan before the mapping is visible —
+        // is deterministic in practice. Committing earlier would make the
+        // mapping visible to the live snapshot and mask the bug.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        // Land the racing upsert and release the lock: the "upsert committed
+        // after the live snapshot but before the delete" interleaving.
+        blocker.commit().unwrap();
+
+        let _removed = compactor.join().expect("compact thread");
+
+        // The raced mapping is live, so its `VECTORS` row must remain.
+        let rtx = store.db.begin_read().unwrap();
+        let vectors = rtx.open_table(VECTORS).unwrap();
+        assert!(
+            vectors.get(raced_id).unwrap().is_some(),
+            "#6195: a vector upserted before the delete must not be compacted \
+             away as a false orphan"
+        );
+    }
+
+    // Reopen: the drawer must rebuild into the HNSW graph and be searchable.
+    let db = Arc::new(Database::create(&path).expect("reopen"));
+    let store = HnswStore::open(db, dim).expect("reopen store");
+    let hits = store.search(&raced_vec, 1).unwrap();
+    assert_eq!(hits.len(), 1, "#6195: the raced drawer must be searchable");
+    assert_eq!(
+        hits[0].0, raced_uuid,
+        "#6195: reopen must surface the raced drawer via vector search"
+    );
+}
+
 /// Write `(uuid → id)` and `(id → vector)` straight into redb, bypassing
 /// `upsert` and its allocator. Models a palace written by a pre-#5005
 /// binary — including one whose ids already collide.
