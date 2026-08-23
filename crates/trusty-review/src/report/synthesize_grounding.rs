@@ -24,6 +24,13 @@
 //! quartile by dependents is always rejected. A rejected field falls back to the
 //! deterministic composition (#5374), exactly as a numeric rejection does.
 //!
+//! #6082 lap 7 added a third claim and changed how the first is triggered. The
+//! third: a sentence saying this report credits no clean security signal, in a
+//! report whose Security Posture section credits eighteen. The change: what
+//! makes a sentence the reachability check's business is now the
+//! [`REACHABILITY_WORDS`] vocabulary rather than the [`REACHABILITY_REWRITES`]
+//! phrase table, so an unrecognised spelling is rejected instead of skipped.
+//!
 //! Test: `synthesize_grounding_tests.rs`.
 
 use std::collections::BTreeSet;
@@ -71,11 +78,16 @@ const REMOTE_MARKERS: &[&str] = &[
     "all interfaces",
 ];
 
-/// Phrases that assert remote reachability, with the local-reachability form
+/// Phrases that assert reachability beyond the host, with the host-local form
 /// each is rewritten to.
 ///
 /// Longest first: `remote-code-execution` must be matched before a bare
-/// `remote`, or the rewrite would leave a broken fragment behind.
+/// `remote`, and every plural before its singular, or the rewrite would leave a
+/// broken fragment behind (`remote attackers` → `any local processs`).
+///
+/// This table is a CONVENIENCE, not the gate. [`REACHABILITY_WORDS`] decides
+/// what gets checked and what may ship; a claim this table cannot rewrite is
+/// rejected rather than passed through.
 const REACHABILITY_REWRITES: &[(&str, &str)] = &[
     // #6082 lap 5: the hedged form. RED finding 3's business impact read
     // "enabling remote/local code execution" — no pattern below matches it,
@@ -111,17 +123,64 @@ const REACHABILITY_REWRITES: &[(&str, &str)] = &[
         "local-process-reachable code-execution",
     ),
     ("remotely exploitable", "exploitable by any local process"),
-    ("remote attacker", "any local process"),
     ("remote attackers", "any local process"),
+    ("remote attacker", "any local process"),
     ("remote control over", "control over"),
     ("remote unauthenticated", "unauthenticated local-process"),
+    // #6082 lap 7: the network family. RED finding 2's business impact shipped
+    // "An unauthenticated actor on the network or host can launch arbitrary
+    // claude commands" — a reachability claim carrying no `remote` token, so
+    // the pattern table above never matched it and the check never ran.
+    ("on the network or on the host", "on the host"),
+    ("on the network or host", "on the host"),
+    ("over the network", "on the host"),
+    ("across the network", "on the host"),
+    ("from the network", "from any process on the host"),
+    ("network-reachable", "reachable by any process on the host"),
+    ("network reachable", "reachable by any process on the host"),
+    ("network attackers", "any local process"),
+    ("network attacker", "any local process"),
+    ("unauthenticated network", "unauthenticated local-process"),
+    ("network-facing", "host-local"),
+    ("on the network", "on the host"),
 ];
 
-/// Words that still assert remote reachability after every known rewrite ran.
+/// Every word that asserts reachability beyond this host.
 ///
-/// Their presence in a contradicting sentence is what makes the field
-/// unrewritable, and therefore rejected rather than silently shipped.
-const RESIDUAL_REMOTE_WORDS: &[&str] = &["remote"];
+/// This list is the guardrail, and [`REACHABILITY_REWRITES`] only softens it.
+/// A sentence about a local-only finding is CHECKED when it carries one of these
+/// words, and may SHIP only when none survives the rewrite pass — so a spelling
+/// this module has never seen is rejected and disclosed rather than passed
+/// through unexamined.
+///
+/// #6082 lap 7 replaced a phrase blocklist with this vocabulary. Three laps in a
+/// row shipped the same defect in a new spelling (`RCE`, then `remote/local`,
+/// then `on the network`), each time because the trigger was a list of known
+/// phrases: an unrecognised phrase was not corrected AND not checked. Keying
+/// both halves off one word list inverts that — an unrecognised phrase is now
+/// the case that fails closed.
+///
+/// The cost is real and deliberate: a sentence about a local-only finding that
+/// mentions a network for an unrelated reason ("network I/O", "network calls to
+/// the embedder") is rejected too, and its field falls back to the honesty
+/// marker with a note in Synthesis Status. A due-diligence report claiming
+/// network reach for a loopback-bound daemon is the worse of the two errors.
+const REACHABILITY_WORDS: &[&str] = &["remote", "network", "internet"];
+
+/// The two words every "this dimension has no clean signal" sentence is built
+/// around (#6082 lap 7).
+///
+/// Two words rather than one phrase, because the model puts the dimension
+/// between them — the graded report wrote "No clean security signal is credited
+/// here", and a literal `clean signal` match misses that. Paired with
+/// [`CLEAN_SIGNAL_NEGATIONS`], which is what turns the noun phrase into a claim
+/// of absence.
+const CLEAN_SIGNAL_WORDS: (&str, &str) = ("clean", "signal");
+
+/// The negations that turn [`CLEAN_SIGNAL_WORDS`] into a claim of absence.
+const CLEAN_SIGNAL_NEGATIONS: &[&str] = &[
+    "no ", "not ", "none", "nothing", "never", "n't", "zero ", "absent", "without",
+];
 
 /// Phrases that claim a crate is what the rest of the estate is built on.
 const LOAD_BEARING_PHRASES: &[&str] = &[
@@ -188,6 +247,8 @@ pub(crate) struct Grounding {
     load_bearing: Vec<(String, usize)>,
     /// Every declared crate name — the match vocabulary for the post-check.
     known_crates: Vec<String>,
+    /// GREEN security findings the Security Posture section credits by name.
+    clean_signals: usize,
 }
 
 impl Grounding {
@@ -221,6 +282,8 @@ impl Grounding {
         inv: Option<&super::investigate::Investigation>,
     ) -> Self {
         let mut out = Grounding::default();
+        let mut from_metrics = 0usize;
+        let mut from_inv = 0usize;
         for repo in &model.repositories {
             if let Some(metrics) = &repo.metrics {
                 for f in &metrics.findings {
@@ -229,6 +292,9 @@ impl Grounding {
                         &f.component,
                         &[&f.description, &f.remediation, &f.component],
                     );
+                    if is_clean_security_signal(f.category.as_str(), f.severity, &f.component) {
+                        from_metrics += 1;
+                    }
                 }
             }
         }
@@ -246,9 +312,16 @@ impl Grounding {
                             &f.file,
                         ],
                     );
+                    if is_clean_security_signal(f.dimension.as_str(), f.severity, &f.file) {
+                        from_inv += 1;
+                    }
                 }
             }
         }
+        // The investigation's findings are COPIED into `metrics.findings` by
+        // `apply_investigation`, so after that pass both loops see the same
+        // signals. The larger count is the real one either way.
+        out.clean_signals = from_metrics.max(from_inv);
         for topology in model
             .repositories
             .iter()
@@ -312,11 +385,21 @@ impl Grounding {
                 "\n## Reachability of these findings (derived from their own remediation and \
                  evidence text)\n\nEach finding below is scoped to a loopback/localhost-only \
                  surface by its own text. Describe it as reachable by any process on the host — \
-                 never as remote, remotely exploitable, or reachable by a remote attacker:\n",
+                 never as remote, remotely exploitable, reachable by a remote attacker, or \
+                 reachable over/from/on the network:\n",
             );
             for f in &self.local_only {
                 out.push_str(&format!("- {}\n", f.title));
             }
+        }
+        if self.clean_signals > 0 {
+            out.push_str(&format!(
+                "\n## Clean security signals (measured — listed in the report you are writing \
+                 for)\n\nThe Security Posture section credits {} GREEN security finding(s), each \
+                 naming the file it was read from. Never write that no clean signal was found, \
+                 credited, or recorded.\n",
+                self.clean_signals
+            ));
         }
         if !self.load_bearing.is_empty() {
             out.push_str(
@@ -340,17 +423,71 @@ impl Grounding {
 
     /// Check one narrative field against the grounding facts.
     ///
-    /// Why: the single entry point `apply_guardrail` calls, so the two checks
+    /// Why: the single entry point `apply_guardrail` calls, so the three checks
     /// can never be applied to one field and not another.
     /// What: runs the load-bearing check first (it can only reject, so there is
-    /// nothing to rewrite afterwards), then the reachability check. Returns
-    /// `Clean` when neither fired.
+    /// nothing to rewrite afterwards), then drops any false no-clean-signal
+    /// claim, then runs the reachability check over what is left. Returns
+    /// `Clean` when none fired.
     /// Test: `synthesize_grounding_tests.rs`.
     pub(crate) fn check(&self, text: &str) -> GroundingOutcome {
         if let Some(reason) = self.load_bearing_violation(text) {
             return GroundingOutcome::Rejected(reason);
         }
-        self.reachability(text)
+        let (text, mut notes) = self.drop_false_no_clean_signal(text);
+        match self.reachability(&text) {
+            GroundingOutcome::Clean if notes.is_empty() => GroundingOutcome::Clean,
+            GroundingOutcome::Clean => GroundingOutcome::Rewritten(text, notes),
+            GroundingOutcome::Rewritten(fixed, more) => {
+                notes.extend(more);
+                GroundingOutcome::Rewritten(fixed, notes)
+            }
+            rejected @ GroundingOutcome::Rejected(_) => rejected,
+        }
+    }
+
+    /// Remove any sentence claiming this dimension credits no clean signal,
+    /// when the deterministic list credits some (#6082 lap 7).
+    ///
+    /// Why: the graded report's Security Posture paragraph ended "No clean
+    /// security signal is credited here." and the deterministic line directly
+    /// under it listed eighteen, each with a `file:line`. The model writes that
+    /// paragraph from the RED/AMBER findings alone — the GREEN clean signals are
+    /// never in its prompt — so it has no way to know the list exists and states
+    /// its absence in good faith.
+    /// What: `(text, notes)` unchanged when the report credits no clean signal,
+    /// which is the case the sentence is right about. Otherwise every sentence
+    /// carrying [`CLEAN_SIGNAL_WORDS`] under a [`CLEAN_SIGNAL_NEGATIONS`] word
+    /// is cut out and one note records the cut. The rest of the paragraph
+    /// survives: one contradicted sentence is not grounds to drop a paragraph of
+    /// otherwise-grounded prose.
+    /// Test: `synthesize_grounding_tests.rs::{a_no_clean_signal_claim_is_dropped_when_signals_exist,
+    /// a_no_clean_signal_claim_survives_when_there_are_none}`.
+    fn drop_false_no_clean_signal(&self, text: &str) -> (String, Vec<String>) {
+        if self.clean_signals == 0 {
+            return (text.to_string(), Vec::new());
+        }
+        let mut out = text.to_string();
+        let mut notes = Vec::new();
+        for sentence in sentences(text) {
+            let lower = sentence.to_lowercase();
+            let Some(at) = lower.find(CLEAN_SIGNAL_WORDS.0) else {
+                continue;
+            };
+            if !lower[at..].contains(CLEAN_SIGNAL_WORDS.1) {
+                continue;
+            }
+            if !CLEAN_SIGNAL_NEGATIONS.iter().any(|n| lower.contains(n)) {
+                continue;
+            }
+            out = remove_sentence(&out, sentence);
+            notes.push(format!(
+                "synthesis: a sentence claiming no clean signal was credited was dropped — the \
+                 Security Posture section credits {} of them, each with the file it was read from",
+                self.clean_signals
+            ));
+        }
+        (out.trim().to_string(), notes)
     }
 
     /// The crate a sentence wrongly calls load-bearing, if any.
@@ -385,12 +522,15 @@ impl Grounding {
         None
     }
 
-    /// Correct — or refuse — a remote-reachability claim about a local-only
-    /// finding.
+    /// Correct — or refuse — a beyond-the-host reachability claim about a
+    /// local-only finding.
     ///
     /// Why/What: see the module doc. A sentence is about a local-only finding
     /// when it shares one of that finding's subject tokens and no
-    /// network-reachable finding claims the same token.
+    /// network-reachable finding claims the same token. The trigger and the
+    /// ship/reject decision read the SAME [`REACHABILITY_WORDS`] vocabulary, so
+    /// a spelling [`REACHABILITY_REWRITES`] cannot correct is rejected instead
+    /// of skipped.
     fn reachability(&self, text: &str) -> GroundingOutcome {
         if self.local_only.is_empty() {
             return GroundingOutcome::Clean;
@@ -399,24 +539,24 @@ impl Grounding {
         let mut notes = Vec::new();
         for sentence in sentences(text) {
             let lower = sentence.to_lowercase();
-            if !REACHABILITY_REWRITES.iter().any(|(p, _)| lower.contains(p)) {
+            if !asserts_reachability(&lower) {
                 continue;
             }
             let Some(finding) = self.local_subject(&lower) else {
                 continue;
             };
             let corrected = rewrite_reachability(sentence);
-            if has_residual_remote(&corrected) {
+            if asserts_reachability(&corrected) {
                 return GroundingOutcome::Rejected(format!(
-                    "a remote-reachability claim about '{}' could not be corrected safely — that \
-                     finding's own text scopes it to localhost",
+                    "a beyond-the-host reachability claim about '{}' could not be corrected \
+                     safely — that finding's own text scopes it to localhost",
                     finding.title
                 ));
             }
             out = out.replace(sentence, &corrected);
             notes.push(format!(
                 "synthesis: reachability corrected — '{}' is loopback-scoped by its own text, so \
-                 the remote-reachability wording was rewritten",
+                 the beyond-the-host reachability wording was rewritten",
                 finding.title
             ));
         }
@@ -456,6 +596,31 @@ fn load_bearing_quartile(topology: &CrateTopology) -> Vec<&super::topology::Crat
     let quartile = members.div_ceil(4).max(1);
     ranked.truncate(quartile);
     ranked
+}
+
+/// Is this finding a clean security signal the Security Posture section credits?
+///
+/// Mirrors `reporter_codesec::push_security_violation_rows` exactly, including
+/// its requirement that a clean signal name the file it was read from — a GREEN
+/// with no citation is not credited, so the guardrail must not count it either.
+fn is_clean_security_signal(
+    dimension: &str,
+    severity: super::metrics::Severity,
+    cite: &str,
+) -> bool {
+    severity == super::metrics::Severity::Green
+        && dimension == super::investigate::SECURITY_DIMENSION
+        && !cite.trim().is_empty()
+}
+
+/// Cut `sentence` out of `text`, taking the space that separated it from its
+/// neighbour so the remaining prose keeps single spacing.
+fn remove_sentence(text: &str, sentence: &str) -> String {
+    let spaced = format!("{sentence} ");
+    if text.contains(&spaced) {
+        return text.replace(&spaced, "");
+    }
+    text.replace(sentence, "")
 }
 
 /// The words that identify one finding's subject: its component path segments
@@ -522,15 +687,16 @@ fn replace_ignore_case(haystack: &str, needle: &str, replacement: &str) -> Strin
     out
 }
 
-/// True when a corrected sentence still asserts remote reachability.
+/// True when a sentence asserts reachability beyond this host.
 ///
 /// A plain substring test, not a word-boundary one: every rewrite in
-/// [`REACHABILITY_REWRITES`] removes its own `remote`, so any occurrence left
-/// belongs to a phrase this module does not know how to correct — including a
-/// hyphenated one like `remote-management`, which a boundary test would miss.
-fn has_residual_remote(sentence: &str) -> bool {
+/// [`REACHABILITY_REWRITES`] removes its own reachability word, so any
+/// occurrence left belongs to a phrase this module does not know how to
+/// correct — including a hyphenated one like `remote-management` or
+/// `network-attached`, which a boundary test would miss.
+fn asserts_reachability(sentence: &str) -> bool {
     let lower = sentence.to_lowercase();
-    RESIDUAL_REMOTE_WORDS.iter().any(|w| lower.contains(w))
+    REACHABILITY_WORDS.iter().any(|w| lower.contains(w))
 }
 
 /// Split prose into sentences on `. `, `? ` and `! ` boundaries, keeping each

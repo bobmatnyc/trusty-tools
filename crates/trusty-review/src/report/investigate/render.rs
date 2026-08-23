@@ -30,7 +30,7 @@ pub fn report_sections(model: &ReportModel) -> String {
     };
     let mut out = String::new();
     out.push_str(&dependency_section(inv));
-    out.push_str(&coverage_section(inv));
+    out.push_str(&coverage_section(model, inv));
     out
 }
 
@@ -116,19 +116,92 @@ fn dependency_table(inv: &DependencyInventory) -> String {
 }
 
 /// Render the "Investigation Coverage" honesty section across all repos.
-fn coverage_section(inv: &Investigation) -> String {
+fn coverage_section(model: &ReportModel, inv: &Investigation) -> String {
     let mut out = String::from("\n\n## Investigation Coverage\n\n");
     out.push_str(&format!(
         "_What the repo-evidence pass actually inspected{MEASURED_TAG}._\n\n",
     ));
     for repo in &inv.repos {
-        out.push_str(&coverage_lines(repo));
+        let rendered = model
+            .repositories
+            .iter()
+            .find(|r| r.slug == repo.slug)
+            .and_then(|r| r.metrics.as_ref())
+            .map(|m| rendered_counts(&m.findings));
+        out.push_str(&coverage_lines(repo, rendered));
     }
     out
 }
 
+/// One repository's rendered section-5.2 entries, by band.
+#[derive(Clone, Copy, Default)]
+struct RenderedCounts {
+    red: usize,
+    amber: usize,
+    green: usize,
+}
+
+impl RenderedCounts {
+    fn total(self) -> usize {
+        self.red + self.amber + self.green
+    }
+}
+
+/// Count the entries section 5.2 renders for one repository.
+///
+/// Reads the SAME `metrics.findings` list `push_finding_band` and
+/// `push_green_topics` render from, so the reconciliation cannot state a number
+/// the page does not carry.
+fn rendered_counts(findings: &[crate::report::metrics::MetricFinding]) -> RenderedCounts {
+    let mut c = RenderedCounts::default();
+    for f in findings {
+        match f.severity {
+            Severity::Red => c.red += 1,
+            Severity::Amber => c.amber += 1,
+            Severity::Green => c.green += 1,
+        }
+    }
+    c
+}
+
+/// State how the verified-finding count adds up to what section 5.2 renders
+/// (#6082 lap 7).
+///
+/// Why: the coverage section said "verified findings: 198" and section 5.2
+/// numbered 5 RED, 145 AMBER and 68 GREEN — 218 entries. Both are correct and
+/// nothing on the page connected them, so the only reading available to a
+/// diligence reader was that one of the two numbers was wrong. The 20-entry
+/// difference is the complexity hotspots trusty-analyze measures mechanically,
+/// which never pass through the investigation at all.
+/// What: one line stating `verified + mechanically-measured = rendered`, with
+/// every number read from the data. Renders nothing when this repository has no
+/// rendered metrics, and nothing when the rendered set is SMALLER than the
+/// verified set — that is not an arithmetic this function can explain, and a
+/// reconciliation that does not reconcile is worse than none.
+/// Test: `render_tests::{coverage_reconciles_verified_against_rendered,
+/// coverage_omits_the_reconciliation_when_it_would_not_add_up}`.
+fn reconciliation_line(repo: &RepoInvestigation, rendered: Option<RenderedCounts>) -> String {
+    let Some(r) = rendered else {
+        return String::new();
+    };
+    let verified = repo.findings.len();
+    if r.total() < verified {
+        return String::new();
+    }
+    let mechanical = r.total() - verified;
+    format!(
+        "- section 5.2 reconciliation: {verified} investigation-verified finding(s) + \
+         {mechanical} finding(s) trusty-analyze measured mechanically = {} entries rendered \
+         ({} RED, {} AMBER, {} GREEN)\n",
+        r.total(),
+        r.red,
+        r.amber,
+        r.green,
+    )
+}
+
 /// Render one repository's coverage bullet block.
-fn coverage_lines(repo: &RepoInvestigation) -> String {
+fn coverage_lines(repo: &RepoInvestigation, rendered: Option<RenderedCounts>) -> String {
     let mut out = format!("### {}\n\n", repo.name);
     match &repo.status {
         InvestigationStatus::Skipped(reason) => {
@@ -173,6 +246,7 @@ fn coverage_lines(repo: &RepoInvestigation) -> String {
     out.push_str(&format!(
         "- verified findings: {total} ({risk} RED/AMBER evidence-backed, {clean} clean signals)\n"
     ));
+    out.push_str(&reconciliation_line(repo, rendered));
     out.push_str(&trace_line(repo));
     out.push_str(&verdict_lines(repo));
     out.push_str(&batch_lines(c));

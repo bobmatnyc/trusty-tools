@@ -136,6 +136,10 @@ impl Reporter {
         // sections, plus the rejected-evidence note, are appended after polish so
         // their measured/inferred rows are never subject to omit-empty.
         out.push_str(&super::investigate::report_sections(model));
+        // #6082 lap 7: the template signs off at its own end, which is no longer
+        // the document's — three sections are appended above. Move the signature
+        // down so nothing follows it.
+        out = split::signature_last(&out);
         // #6046: cut the authorship section out before the jump list is built,
         // so the code-review document links only what it still carries.
         let (code_body, authorship_section) = split::split_authorship(&out);

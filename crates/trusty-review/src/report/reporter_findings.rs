@@ -508,12 +508,18 @@ pub(super) fn push_finding_band(
     root.push_block(app_block, app_scope);
 }
 
-/// The status-note prefix every unrendered narrative is disclosed under.
+/// One synthesis narrative the render withheld, and the row it belonged to.
 ///
-/// Distinct from the two synthesis-time prefixes in `synthesize.rs`: those name
-/// a claim the guardrail refused, this names a narrative the render could not
-/// place. A reader who sees one should not have to guess which happened.
-const UNPLACED_NOTE: &str = "synthesis: narrative not rendered";
+/// Why: the number the disclosure cross-references is not known when the
+/// narrative is refused — rows are still being appended at that point — so
+/// [`band_rows`] records the row POSITION and [`unplaced_narrative_lines`]
+/// turns it into the §5.2 number once both bands' counters are settled.
+struct Unplaced {
+    /// The narrative's own title, for the reader to recognise it by.
+    title: String,
+    /// Its position in this band's row list, when the report renders that row.
+    row: Option<usize>,
+}
 
 /// Build one severity band's rows for one repository, with a disclosure line for
 /// every narrative that reached no row.
@@ -536,7 +542,7 @@ fn band_rows(
     syn: Option<&super::synthesize::Synthesis>,
     band: Severity,
     band_label: &str,
-) -> (Vec<FindingRow>, Vec<String>) {
+) -> (Vec<FindingRow>, Vec<Unplaced>) {
     let mut rows: Vec<FindingRow> = repo
         .metrics
         .iter()
@@ -570,11 +576,13 @@ fn band_rows(
                 }
                 None => {
                     let row = FindingRow::from_prose(f);
-                    match unplaced_reason(&row) {
-                        Some(reason) => {
-                            notes.push(format!("{UNPLACED_NOTE} — '{}': {reason}", f.title));
-                        }
-                        None => rows.push(row),
+                    if is_self_restatement(&row) {
+                        notes.push(Unplaced {
+                            title: f.title.clone(),
+                            row: cited_row(&rows, f),
+                        });
+                    } else {
+                        rows.push(row);
                     }
                 }
             }
@@ -583,23 +591,38 @@ fn band_rows(
     (rows, notes)
 }
 
-/// Why a narrative matching no metrics row must not be numbered, if it must not.
+/// The rendered row a withheld narrative was written about, when it names one.
 ///
-/// Why: a refused narrative that lands on a metrics row still renders that row's
-/// measurement, so the reader loses nothing. A refused narrative with no row
-/// behind it renders as nothing at all, and until #6082 lap 6 that happened in
-/// silence — which is what the Synthesis Status list exists to prevent.
-/// What: `None` for a narrative that cites a file and quotes out of it, which
-/// renders as its own row. Otherwise the reason, phrased for the status list.
-fn unplaced_reason(row: &FindingRow) -> Option<String> {
-    if !is_self_restatement(row) {
-        return None;
+/// Why: the disclosure is worth reading only if it tells the reader WHICH
+/// finding lost its narrative. The graded report's two withheld narratives each
+/// named their file exactly — `crates/…/hnsw_store.rs` and
+/// `crates/…/jira/backend.rs` — in the evidence line they quoted, and each of
+/// those files is a rendered AMBER row. That is a citation, not a guess, so the
+/// cross-reference is exact.
+/// What: the single row whose component resolves to the same file identity as
+/// the narrative's own `component` or first evidence line — the same
+/// [`normalized_path`] comparison [`match_row`] disambiguates with. `None` when
+/// nothing matches or when two rows share the file, which is when there is no
+/// one number to name.
+/// Test: `reporter_tests::an_unplaced_narrative_is_disclosed_not_numbered`.
+fn cited_row(rows: &[FindingRow], f: &super::synthesize::FindingProse) -> Option<usize> {
+    let ids: Vec<String> = [
+        f.component.as_str(),
+        f.evidence.lines().next().unwrap_or(""),
+    ]
+    .iter()
+    .map(|c| normalized_path(c))
+    .filter(|c| !c.is_empty())
+    .collect();
+    let mut hits = rows.iter().enumerate().filter(|(_, r)| {
+        let p = normalized_path(r.component.as_deref().unwrap_or(""));
+        !p.is_empty() && ids.contains(&p)
+    });
+    let first = hits.next()?;
+    match hits.next() {
+        Some(_) => None,
+        None => Some(first.0),
     }
-    let component = row.component.as_deref().unwrap_or("none stated");
-    Some(format!(
-        "component '{component}' matches no measured finding, and its evidence restates the \
-         finding instead of quoting a line out of the file"
-    ))
 }
 
 /// Every synthesis narrative this render leaves out of the numbered lists.
@@ -607,17 +630,55 @@ fn unplaced_reason(row: &FindingRow) -> Option<String> {
 /// Why: a narrative the reporter cannot place used to be either numbered with no
 /// measurement behind it or dropped in silence. Both hide the same fact from the
 /// reader; the Synthesis Status list is where this report already discloses what
-/// the guardrails refused.
-/// What: replays [`band_rows`] over every repository and both bands, returning
-/// its disclosure lines. Pure — it renders nothing.
-/// Test: `reporter_tests::an_unplaced_narrative_is_disclosed_not_numbered`.
+/// the guardrails refused. #6082 lap 7 rewrote the line itself: it used to state
+/// the pipeline's matching failure ("component … matches no measured finding,
+/// and its evidence restates the finding"), which tells a diligence reader
+/// nothing about their report. It now names the §5.2 finding the narrative was
+/// about and what that finding therefore shows.
+/// What: replays [`band_rows`] over every repository and both bands, running the
+/// same per-band counters `build_scope` numbers the rendered rows with, so the
+/// number in the line is the number on the page. Pure — it renders nothing.
+/// Test: `reporter_tests::{an_unplaced_narrative_is_disclosed_not_numbered,
+/// an_unplaced_narrative_names_its_finding_number}`.
 pub(super) fn unplaced_narrative_lines(model: &super::model::ReportModel) -> Vec<String> {
     let syn = model.synthesis.as_ref();
     let mut out = Vec::new();
+    let mut counters = [0usize; 2];
     for repo in &model.repositories {
-        for (band, label) in [(Severity::Red, "RED"), (Severity::Amber, "AMBER")] {
-            out.extend(band_rows(repo, syn, band, label).1);
+        for (slot, (band, label)) in [(Severity::Red, "RED"), (Severity::Amber, "AMBER")]
+            .into_iter()
+            .enumerate()
+        {
+            let (rows, unplaced) = band_rows(repo, syn, band, label);
+            let base = counters[slot];
+            for u in unplaced {
+                out.push(disclosure_line(label, base, &u));
+            }
+            counters[slot] = base + rows.len();
         }
     }
     out
+}
+
+/// One reader-facing line for a narrative the render withheld.
+///
+/// Why: the reader's question is "what happened to this finding?", not "why did
+/// the matcher fail?". Answer it in that order — the finding first, then what it
+/// shows, then why the narrative is gone.
+fn disclosure_line(band_label: &str, base: usize, u: &Unplaced) -> String {
+    match u.row {
+        Some(i) => format!(
+            "section 5.2, {band_label} finding {}: the model's added narrative ('{}') was \
+             withheld because it could not be verified against the collected data, so that \
+             finding shows the measured data only",
+            base + i + 1,
+            u.title,
+        ),
+        None => format!(
+            "the model's added narrative '{}' was withheld because it could not be verified \
+             against the collected data, and it cites no measured finding, so nothing in \
+             section 5.2 carries it",
+            u.title,
+        ),
+    }
 }
