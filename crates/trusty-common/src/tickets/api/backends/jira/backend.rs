@@ -17,7 +17,9 @@ use crate::tickets::api::backends::{
 };
 use crate::tickets::api::models::*;
 
-use super::types::{JiraBackend, adf_paragraph, parse_comment, parse_issue};
+use super::types::{
+    JiraBackend, adf_paragraph, build_list_jql, build_search_jql, parse_comment, parse_issue,
+};
 
 #[async_trait]
 impl Backend for JiraBackend {
@@ -115,22 +117,8 @@ impl Backend for JiraBackend {
     }
 
     async fn list_issues(&self, p: ListIssuesParams) -> Result<Vec<Issue>> {
-        let mut jql = format!("project = \"{}\"", self.project_key);
-        if let Some(s) = &p.state {
-            let cat = match s.as_str() {
-                "done" | "closed" => "Done",
-                "in_progress" => "In Progress",
-                _ => "To Do",
-            };
-            jql.push_str(&format!(" AND statusCategory = \"{cat}\""));
-        }
-        if let Some(a) = &p.assignee {
-            jql.push_str(&format!(" AND assignee = \"{a}\""));
-        }
-        for l in &p.labels {
-            jql.push_str(&format!(" AND labels = \"{l}\""));
-        }
-        jql.push_str(" ORDER BY created DESC");
+        // #6198: build via build_list_jql so every filter value is JQL-escaped.
+        let jql = build_list_jql(&self.project_key, &p);
         let body = json!({
             "jql": jql,
             "maxResults": p.limit.max(1),
@@ -146,27 +134,8 @@ impl Backend for JiraBackend {
     }
 
     async fn search_issues(&self, p: SearchIssuesParams) -> Result<Vec<Issue>> {
-        let mut jql = format!("project = \"{}\"", self.project_key);
-        if let Some(q) = &p.query {
-            jql.push_str(&format!(" AND text ~ \"{q}\""));
-        }
-        if let Some(s) = &p.state {
-            let cat = match s.as_str() {
-                "done" | "closed" => "Done",
-                "in_progress" => "In Progress",
-                _ => "To Do",
-            };
-            jql.push_str(&format!(" AND statusCategory = \"{cat}\""));
-        }
-        if let Some(a) = &p.assignee {
-            jql.push_str(&format!(" AND assignee = \"{a}\""));
-        }
-        for l in &p.labels {
-            jql.push_str(&format!(" AND labels = \"{l}\""));
-        }
-        if let Some(pri) = &p.priority {
-            jql.push_str(&format!(" AND priority = \"{pri}\""));
-        }
+        // #6198: build via build_search_jql so every filter value is JQL-escaped.
+        let jql = build_search_jql(&self.project_key, &p);
         let body = json!({
             "jql": jql,
             "maxResults": p.limit.max(1),
