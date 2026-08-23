@@ -2739,3 +2739,56 @@ fn url_path_secrets_are_still_blocked() {
         );
     }
 }
+
+#[test]
+fn custom_patterns_compile_once() {
+    // #6199: a non-default `reject_patterns` set must compile exactly once and
+    // never leak. Before the fix, `compiled_patterns` recompiled and `Box::leak`ed
+    // a fresh slice on EVERY call — a permanent per-call leak. Now the set is
+    // memoised process-wide; this test proves compile-once by observing the
+    // not-cached -> cached transition on a pattern unique to this test (so the
+    // process-wide assertion is not raced by a sibling test). `compiled_patterns`
+    // and `custom_patterns_cached` are private but reachable here because this
+    // suite is a child module of `filter`.
+    let cfg = FilterConfig {
+        reject_patterns: vec![r"(?i)^custom-noise-6199:".to_string()],
+        ..FilterConfig::default()
+    };
+
+    assert!(
+        !custom_patterns_cached(&cfg.reject_patterns),
+        "pattern set must not be cached before first use"
+    );
+    // First use compiles and memoises; a second use must find it cached rather
+    // than recompiling (and, in the old code, leaking) again.
+    let first = cfg.compiled_patterns();
+    assert_eq!(first.len(), 1);
+    assert!(
+        custom_patterns_cached(&cfg.reject_patterns),
+        "pattern set must be memoised after first use"
+    );
+    let _second = cfg.compiled_patterns();
+    assert!(
+        custom_patterns_cached(&cfg.reject_patterns),
+        "pattern set must stay memoised — no recompile per call"
+    );
+
+    // Repeated `apply` keeps matching/accepting correctly on the memoised set.
+    for _ in 0..3 {
+        assert!(
+            matches!(
+                cfg.apply("custom-noise-6199: drop me", true),
+                Err(FilterReject::NoisePattern { .. })
+            ),
+            "custom reject pattern must still fire on repeated apply"
+        );
+        assert!(
+            cfg.apply(
+                "A genuinely useful engineering memory about the parser",
+                true
+            )
+            .is_ok(),
+            "legitimate content must still pass on repeated apply"
+        );
+    }
+}
