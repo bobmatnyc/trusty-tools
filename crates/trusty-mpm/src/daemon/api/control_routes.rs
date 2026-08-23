@@ -12,12 +12,13 @@
 //! write-lock CAS, stop, and auth endpoints.
 
 use std::convert::Infallible;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::{
     Json,
-    extract::{Path, Query, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::StatusCode,
     response::sse::{Event, KeepAlive, Sse},
 };
@@ -73,7 +74,7 @@ impl Drop for WriteLockGuard {
 /// fields are added in later phases.
 /// What: project_id, workdir, optional backend selection, optional prompt
 /// file, and optional claude_cmd override.
-/// Test: `ctl_run_session_returns_session_id`.
+/// Test: `ctl_run_session_accepts_default_claude_cmd`.
 #[derive(Debug, Deserialize)]
 pub struct CtlRunRequest {
     /// Registered project ID.
@@ -93,7 +94,7 @@ pub struct CtlRunRequest {
 /// Why: callers need the allocated session ID to subscribe, stop, or
 /// inspect the session.
 /// What: the stable `<project-id>-<N>` session ID string.
-/// Test: `ctl_run_session_returns_session_id`.
+/// Test: `ctl_run_session_accepts_default_claude_cmd`.
 #[derive(Debug, Serialize)]
 pub struct CtlRunResponse {
     /// Allocated session ID.
@@ -237,11 +238,151 @@ fn parse_id(s: &str) -> ControlSessionId {
 /// registry needs a typed `BackendKind`. Centralising the mapping keeps
 /// handler bodies thin.
 /// What: returns `BackendKind::Tmux` for `"tmux"`, `StreamJson` otherwise.
-/// Test: used by `ctl_run_session_returns_session_id`.
+/// Test: used by `ctl_run_session_accepts_default_claude_cmd`.
 fn parse_backend(s: Option<&str>) -> BackendKind {
     match s {
         Some("tmux") => BackendKind::Tmux,
         _ => BackendKind::StreamJson,
+    }
+}
+
+// ── Trust-boundary guards (#6197) ─────────────────────────────────────────────
+
+/// Reject a non-loopback caller to a control-plane session route (#6197).
+///
+/// Why: these handlers spawn processes (`ctl_run_session` → `run_session`) and
+/// drive session lifecycle from a caller-supplied request, but nothing enforced
+/// that the caller was local. The daemon binds loopback-only, yet a later
+/// `0.0.0.0` rebind would expose arbitrary process spawn to the network. This
+/// mirrors the `/rpc` gate exactly, so the two process-spawning HTTP surfaces
+/// enforce the same boundary via one shared predicate.
+/// What: returns `Err((403, msg))` when `peer` is not an IPv4/IPv6 loopback
+/// address, `Ok(())` otherwise. Reuses [`super::rpc::is_loopback`] rather than
+/// re-implementing the check (single entry point).
+/// Test: `ctl_run_session_rejects_non_loopback_peer`.
+fn loopback_guard(peer: &SocketAddr) -> Result<(), (StatusCode, String)> {
+    if super::rpc::is_loopback(peer) {
+        Ok(())
+    } else {
+        tracing::warn!(%peer, "rejected non-loopback control-plane session request (#6197)");
+        Err((
+            StatusCode::FORBIDDEN,
+            "control-plane session routes are loopback-only; remote access is forbidden".to_owned(),
+        ))
+    }
+}
+
+/// True when every character of `s` is in the conservative command charset.
+///
+/// Why: the tmux backend interpolates `claude_cmd` into a shell command line
+/// (`format!("{claude_cmd} --append-system-prompt-file …")`), so a value with a
+/// space or a shell metacharacter is command injection. Restricting to a small
+/// path/argument-safe charset removes the whole class before the basename check.
+/// What: allows ASCII alphanumerics and `/ . _ -`; rejects everything else
+/// (whitespace, `;`, `|`, `&`, `$`, backtick, quotes, glob, …).
+/// Test: `ctl_run_session_rejects_claude_cmd_outside_allowlist`.
+fn is_safe_cmd_charset(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-'))
+}
+
+/// Validate a caller-supplied `claude_cmd` override (#6197).
+///
+/// Why: `ctl_run_session` passed `claude_cmd` straight into the spawn path, so
+/// any local process could make the daemon execute an arbitrary binary. A
+/// basename-only check was insufficient — `/tmp/evil/claude` passed it. No CLI
+/// caller sends `claude_cmd` at all (`tm sessctl run` omits it), so the allowed
+/// set is deliberately narrow: the registry default only. An operator who needs
+/// a custom install path should set it via config, not an HTTP request.
+/// What: accepts `None` (registry defaults to `"claude"`) or the exact bare
+/// string `"claude"` (PATH-resolved). Every other value — any absolute or
+/// relative path, other binaries, shell injection — is rejected with 400.
+/// Test: `ctl_run_session_rejects_claude_cmd_outside_allowlist`,
+/// `ctl_run_session_accepts_default_claude_cmd`,
+/// `validate_claude_cmd_allows_default_refuses_paths`.
+fn validate_claude_cmd(cmd: Option<&str>) -> Result<(), (StatusCode, String)> {
+    match cmd {
+        None => Ok(()),
+        Some("claude") => Ok(()),
+        Some(other) => {
+            tracing::warn!(cmd = %other, "rejected claude_cmd outside the allowed set (#6197)");
+            Err((
+                StatusCode::BAD_REQUEST,
+                "claude_cmd override is not permitted over HTTP; omit it to use the default `claude`"
+                    .to_owned(),
+            ))
+        }
+    }
+}
+
+/// Validate a caller-supplied `prompt_file` (#6197).
+///
+/// Why: `prompt_file` is interpolated into the same tmux command line as
+/// `claude_cmd` (`crates/trusty-mpm/src/control/backend/tmux.rs`) and typed into
+/// the pane shell, so an unvalidated value was command injection
+/// (`/tmp/x; touch /tmp/PWNED; #`). The sink is now shell-quoted, but this is
+/// defense in depth at the HTTP boundary, matching `claude_cmd`'s rigor.
+/// What: `None` is accepted. For `Some(path)` the value must use the safe path
+/// charset (no shell metacharacters), be absolute, contain no `..` component,
+/// and resolve to an existing regular file. Returns `Err((400, msg))` otherwise.
+///
+/// Symlink target: `is_file()` follows symlinks, so a symlink to a regular file
+/// elsewhere passes — its target location is intentionally not constrained. That
+/// is acceptable because the tmux sink shell-quotes the path
+/// (`build_claude_command`), so the target cannot inject a command; the value
+/// only names which prompt file `claude` reads. See #6197.
+/// Test: `ctl_run_session_rejects_prompt_file_injection`,
+/// `validate_prompt_file_requires_absolute_existing_regular_file`.
+fn validate_prompt_file(prompt_file: Option<&str>) -> Result<(), (StatusCode, String)> {
+    let Some(pf) = prompt_file else { return Ok(()) };
+    let path = std::path::Path::new(pf);
+    let traversal = path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir));
+    if is_safe_cmd_charset(pf) && path.is_absolute() && !traversal && path.is_file() {
+        Ok(())
+    } else {
+        tracing::warn!(prompt_file = %pf, "rejected invalid prompt_file (#6197)");
+        Err((
+            StatusCode::BAD_REQUEST,
+            "prompt_file must be an absolute path (no `..`, no shell metacharacters) to an existing file"
+                .to_owned(),
+        ))
+    }
+}
+
+/// Validate a caller-supplied `workdir` (#6197).
+///
+/// Why: `workdir` is passed into the backend spawn, so an unconstrained value is
+/// a path-traversal and spawn-anywhere vector. The constraint chosen: the
+/// working directory must be an ABSOLUTE path with no `..` component that
+/// resolves to an EXISTING directory. That removes relative-path and traversal
+/// tricks and refuses to spawn into a non-directory, while staying agnostic to
+/// any single project root (which these handlers do not have on hand).
+/// What: returns `Err((400, msg))` when `workdir` is not absolute, contains a
+/// `ParentDir` (`..`) component, or is not an existing directory; `Ok(())`
+/// otherwise.
+///
+/// TOCTOU: the `is_dir()` check races the later `tmux new-session -c <workdir>`
+/// (#6197 MEDIUM). It is a narrow, accepted race — `workdir` is passed argv-style
+/// to tmux (not shell-interpolated), so a swap changes only the spawn cwd, not
+/// what executes; closing it would require an openat/fd-based launch tmux does
+/// not offer. Tracked, not fixed here. See #6197.
+/// Test: `ctl_run_session_rejects_relative_workdir`,
+/// `ctl_run_session_rejects_workdir_traversal`.
+fn validate_workdir(workdir: &std::path::Path) -> Result<(), (StatusCode, String)> {
+    let traversal = workdir
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir));
+    if workdir.is_absolute() && !traversal && workdir.is_dir() {
+        Ok(())
+    } else {
+        tracing::warn!(workdir = %workdir.display(), "rejected invalid control-plane workdir (#6197)");
+        Err((
+            StatusCode::BAD_REQUEST,
+            "workdir must be an absolute path (no `..`) to an existing directory".to_owned(),
+        ))
     }
 }
 
@@ -252,14 +393,29 @@ fn parse_backend(s: Option<&str>) -> BackendKind {
 /// Why: the CLI and any future consumer POST to this endpoint instead of
 /// embedding `SessionRegistry` directly, keeping the registry a single
 /// shared owner in `DaemonState`.
-/// What: deserializes `CtlRunRequest`, constructs `RunParams`, calls
-/// `state.session_registry.run_session(params)`, and returns the allocated
-/// session ID.
-/// Test: `ctl_run_session_returns_session_id`.
+/// What: rejects a non-loopback caller (#6197), validates the caller-supplied
+/// `claude_cmd` and `workdir` (#6197), then deserializes `CtlRunRequest`,
+/// constructs `RunParams`, calls `state.session_registry.run_session(params)`,
+/// and returns the allocated session ID.
+/// Test: `ctl_run_session_accepts_default_claude_cmd`,
+/// `ctl_run_session_rejects_non_loopback_peer`,
+/// `ctl_run_session_rejects_claude_cmd_outside_allowlist`,
+/// `ctl_run_session_rejects_prompt_file_injection`,
+/// `ctl_run_session_rejects_relative_workdir`,
+/// `ctl_run_session_rejects_workdir_traversal`,
+/// `ctl_run_session_accepts_default_claude_cmd`.
 pub async fn ctl_run_session(
     State(state): State<Arc<DaemonState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(req): Json<CtlRunRequest>,
 ) -> Result<Json<CtlRunResponse>, (StatusCode, String)> {
+    // #6197: this handler spawns a caller-named executable, so it enforces the
+    // same loopback boundary as `/rpc` and validates the two spawn inputs before
+    // anything is spawned.
+    loopback_guard(&peer)?;
+    validate_claude_cmd(req.claude_cmd.as_deref())?;
+    validate_prompt_file(req.prompt_file.as_deref())?;
+    validate_workdir(std::path::Path::new(&req.workdir))?;
     let backend = parse_backend(req.backend.as_deref());
     let params = RunParams {
         project_id: req.project_id,
@@ -294,8 +450,10 @@ pub async fn ctl_run_session(
 /// `ctl_connect_write_lock_guard_lives_with_stream` (handler-level lifetime).
 pub async fn ctl_connect_session(
     State(state): State<Arc<DaemonState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Path(id_str): Path<String>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, String)> {
+    loopback_guard(&peer)?; // #6197
     let id = parse_id(&id_str);
     let handle = state
         .session_registry
@@ -339,9 +497,11 @@ pub async fn ctl_connect_session(
 /// Test: `ctl_stop_session_sends_stop_command`.
 pub async fn ctl_stop_session(
     State(state): State<Arc<DaemonState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Path(id_str): Path<String>,
     Query(query): Query<CtlStopQuery>,
 ) -> Result<Json<CtlStopResponse>, (StatusCode, String)> {
+    loopback_guard(&peer)?; // #6197
     let id = parse_id(&id_str);
     let handle = state
         .session_registry
@@ -376,8 +536,10 @@ pub async fn ctl_stop_session(
 /// Test: `ctl_auth_session_returns_state`.
 pub async fn ctl_auth_session(
     State(state): State<Arc<DaemonState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Path(id_str): Path<String>,
 ) -> Result<Json<CtlAuthResponse>, (StatusCode, String)> {
+    loopback_guard(&peer)?; // #6197
     let id = parse_id(&id_str);
     let handle = state
         .session_registry
@@ -407,8 +569,10 @@ pub async fn ctl_auth_session(
 /// Test: `ctl_list_sessions_returns_empty`, `ctl_list_sessions_full_schema`.
 pub async fn ctl_list_sessions(
     State(state): State<Arc<DaemonState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Query(query): Query<CtlListQuery>,
-) -> Json<CtlListResponse> {
+) -> Result<Json<CtlListResponse>, (StatusCode, String)> {
+    loopback_guard(&peer)?; // #6197
     let ids = state.session_registry.list_ids().await;
     let mut sessions = Vec::with_capacity(ids.len());
     for id in ids {
@@ -440,7 +604,7 @@ pub async fn ctl_list_sessions(
             });
         }
     }
-    Json(CtlListResponse { sessions })
+    Ok(Json(CtlListResponse { sessions }))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -454,12 +618,19 @@ mod tests {
     use crate::daemon::state::DaemonState;
     use axum::Router;
     use axum::body::Body;
+    use axum::extract::connect_info::MockConnectInfo;
     use axum::http::{Method, Request, StatusCode};
     use axum::routing::{get, post};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
     use tokio::sync::{RwLock, broadcast, mpsc};
     use tower::ServiceExt;
+
+    /// A loopback peer address for tests that drive the guarded routes.
+    fn loopback_peer() -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
+    }
 
     fn make_handle(id: &ControlSessionId) -> SessionActorHandle {
         let (command_tx, _) = mpsc::channel(4);
@@ -494,7 +665,38 @@ mod tests {
         (state, dir)
     }
 
-    fn test_router(state: Arc<DaemonState>) -> Router {
+    /// Build a test `DaemonState` whose control-plane concurrency cap is `0`.
+    ///
+    /// Why: the #6197 regression tests must NOT spawn a real backend. With the
+    /// cap at 0, `run_session` rejects at admission (§9.2) and returns an error
+    /// BEFORE any spawn — so when these tests run against the pre-fix code (which
+    /// has no auth/validation gate), control flow still ADVANCES into
+    /// `run_session` (the spawn path — the Fail-Open branch under test) but the
+    /// cap prevents an actual process launch in the harness. Post-fix, the guard
+    /// or the validator returns first, so the cap is never even consulted.
+    /// What: writes `config.toml` with `max_concurrent_sessions = 0` into
+    /// `paths.root` — the framework root `build_session_registry` reads, which
+    /// `FrameworkPaths::under` nests under the temp dir (not the temp dir itself).
+    fn test_state_no_spawn() -> (Arc<DaemonState>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let paths = crate::core::paths::FrameworkPaths::under(dir.path());
+        std::fs::create_dir_all(&paths.root).expect("create framework root");
+        std::fs::write(
+            paths.root.join("config.toml"),
+            "[control_plane]\nmax_concurrent_sessions = 0\n",
+        )
+        .expect("write config");
+        let state = Arc::new(DaemonState::with_paths(&paths));
+        (state, dir)
+    }
+
+    /// The five control-plane routes with state, without any ConnectInfo layer.
+    ///
+    /// Why: most tests want a loopback peer injected for them (`test_router`),
+    /// but the #6197 non-loopback guard test needs to insert its OWN peer address
+    /// into the request, so it drives these raw routes and inserts a
+    /// `ConnectInfo` manually — a `MockConnectInfo` layer would overwrite it.
+    fn test_routes(state: Arc<DaemonState>) -> Router {
         Router::new()
             .route("/api/v1/control/sessions", get(ctl_list_sessions))
             .route("/api/v1/control/sessions/run", post(ctl_run_session))
@@ -505,6 +707,15 @@ mod tests {
             .route("/api/v1/control/sessions/{id}/stop", post(ctl_stop_session))
             .route("/api/v1/control/sessions/{id}/auth", get(ctl_auth_session))
             .with_state(state)
+    }
+
+    /// Test router that injects a loopback peer for every request (#6197).
+    ///
+    /// Why: the control routes now require a `ConnectInfo<SocketAddr>` and reject
+    /// non-loopback callers; the `MockConnectInfo` layer supplies a loopback peer
+    /// so the existing behavioral tests exercise the happy path unchanged.
+    fn test_router(state: Arc<DaemonState>) -> Router {
+        test_routes(state).layer(MockConnectInfo(loopback_peer()))
     }
 
     #[tokio::test]
@@ -869,6 +1080,235 @@ mod tests {
             matches!(received, ActorCommand::Stop),
             "expected Stop, got {:?}",
             received
+        );
+    }
+
+    // ── #6197 trust-boundary regression tests ─────────────────────────────────
+
+    /// A non-loopback caller to `POST /sessions/run` is rejected with 403 (#6197).
+    ///
+    /// Why (Fail-Open Check): the pre-fix handler took no `ConnectInfo` and never
+    /// checked the peer — it advanced straight into `run_session`, the spawn
+    /// path. This test proves the handler now REFUSES a remote peer before any
+    /// spawn. It fails on the pre-fix commit: with no guard, the request reaches
+    /// `run_session` (which, under the cap-0 test state, returns 500) — never the
+    /// asserted 403. It uses the raw routes so the non-loopback peer it inserts is
+    /// not overwritten by a `MockConnectInfo` layer.
+    /// Test: this test.
+    #[tokio::test]
+    async fn ctl_run_session_rejects_non_loopback_peer() {
+        let (state, _dir) = test_state_no_spawn();
+        let app = test_routes(state);
+        // A public LAN address — the exact shape the `/rpc` guard rejects.
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)), 40000);
+        let mut req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/control/sessions/run")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"project_id":"p","workdir":"/tmp","backend":"stream-json"}"#,
+            ))
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(peer));
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a non-loopback caller must be refused before any spawn"
+        );
+    }
+
+    /// A `claude_cmd` outside the allowed set is rejected with 400 (#6197).
+    ///
+    /// Why (Fail-Open Check): the pre-fix handler passed `claude_cmd` straight
+    /// into `RunParams` and on into the spawn path with no validation — arbitrary
+    /// process execution. This test sends a loopback peer (so the auth guard
+    /// passes) with `claude_cmd` naming `sh`, and asserts a 400. It fails on the
+    /// pre-fix commit: with no validation the request reaches `run_session`
+    /// (which, under the cap-0 test state, returns 500) — never the asserted 400.
+    /// Test: this test.
+    #[tokio::test]
+    async fn ctl_run_session_rejects_claude_cmd_outside_allowlist() {
+        let (state, _dir) = test_state_no_spawn();
+        let app = test_router(Arc::clone(&state)); // injects a loopback peer
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/control/sessions/run")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"project_id":"p","workdir":"/tmp","backend":"tmux","claude_cmd":"sh"}"#,
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "a claude_cmd outside the allowed set must be rejected before any spawn"
+        );
+    }
+
+    /// A `prompt_file` carrying shell metacharacters is rejected with 400 (#6197).
+    ///
+    /// Why (load-bearing, Fail-Open Check): `prompt_file` is interpolated into the
+    /// tmux command line and typed into the pane shell, so `"/tmp/x; touch
+    /// /tmp/PWNED; #"` executed arbitrary commands. This is the injection the
+    /// critic flagged as CRITICAL. The test sends a loopback peer (auth passes)
+    /// with that `prompt_file` and asserts 400. It fails on the current PR head,
+    /// which validated `claude_cmd`/`workdir` but NOT `prompt_file`: without the
+    /// check the request reaches `run_session` (500 under the cap-0 state) —
+    /// never the asserted 400.
+    /// Test: this test.
+    #[tokio::test]
+    async fn ctl_run_session_rejects_prompt_file_injection() {
+        let (state, _dir) = test_state_no_spawn();
+        let app = test_router(Arc::clone(&state)); // injects a loopback peer
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/control/sessions/run")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"project_id":"p","workdir":"/tmp","backend":"tmux","prompt_file":"/tmp/x; touch /tmp/PWNED; #"}"#,
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "a prompt_file with shell metacharacters must be rejected before any spawn"
+        );
+    }
+
+    /// A relative `workdir` is rejected with 400 (#6197).
+    #[tokio::test]
+    async fn ctl_run_session_rejects_relative_workdir() {
+        let (state, _dir) = test_state_no_spawn();
+        let app = test_router(Arc::clone(&state));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/control/sessions/run")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"project_id":"p","workdir":"relative/dir","backend":"stream-json"}"#,
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// A `workdir` containing `..` is rejected with 400 (#6197).
+    #[tokio::test]
+    async fn ctl_run_session_rejects_workdir_traversal() {
+        let (state, _dir) = test_state_no_spawn();
+        let app = test_router(Arc::clone(&state));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/control/sessions/run")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"project_id":"p","workdir":"/tmp/../etc","backend":"stream-json"}"#,
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// A default request (no `claude_cmd`, absolute existing `workdir`, no
+    /// `prompt_file`) passes every guard and advances to the spawn path (#6197).
+    ///
+    /// Why: proves the guards do not reject legitimate input. Under the cap-0
+    /// test state the advanced request is rejected by admission with 500 — which
+    /// is neither 400 (a validator refused) nor 403 (the auth guard refused), so
+    /// a 500 proves all guards passed and control reached `run_session`.
+    /// Test: this test.
+    #[tokio::test]
+    async fn ctl_run_session_accepts_default_claude_cmd() {
+        let (state, _dir) = test_state_no_spawn();
+        let app = test_router(Arc::clone(&state));
+        let dir = tempfile::tempdir().expect("temp dir");
+        let body = serde_json::json!({
+            "project_id": "p",
+            "workdir": dir.path().to_string_lossy(),
+            "backend": "stream-json",
+        });
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/control/sessions/run")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a valid default request must pass all guards and reach the cap-rejected spawn path"
+        );
+    }
+
+    /// The loopback guard predicate accepts local and refuses remote peers (#6197).
+    #[test]
+    fn loopback_guard_accepts_loopback_refuses_remote() {
+        assert!(loopback_guard(&loopback_peer()).is_ok());
+        let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)), 1234);
+        let err = loopback_guard(&remote).expect_err("remote must be refused");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+    }
+
+    /// `validate_claude_cmd` allows only the default and refuses every path or
+    /// injection form — a basename-only check (which passed `/tmp/evil/claude`)
+    /// was insufficient (#6197 HIGH).
+    #[test]
+    fn validate_claude_cmd_allows_default_refuses_paths() {
+        // Accepted: absent override, and the exact bare default.
+        assert!(validate_claude_cmd(None).is_ok());
+        assert!(validate_claude_cmd(Some("claude")).is_ok());
+        // Refused: any path (even basename `claude`), other binaries, injection.
+        for bad in [
+            "/opt/anthropic/claude",
+            "/tmp/evil/claude",
+            "./claude",
+            "sh",
+            "curl",
+            "/bin/bash",
+            "claude; rm -rf /",
+            "claude foo",
+            "",
+        ] {
+            let err = validate_claude_cmd(Some(bad)).expect_err("must refuse");
+            assert_eq!(err.0, StatusCode::BAD_REQUEST, "bad claude_cmd: {bad:?}");
+        }
+    }
+
+    /// `validate_prompt_file` requires an absolute, non-traversing, metacharacter-
+    /// free path to an existing regular file (#6197).
+    #[test]
+    fn validate_prompt_file_requires_absolute_existing_regular_file() {
+        assert!(validate_prompt_file(None).is_ok());
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file = dir.path().join("prompt.txt");
+        std::fs::write(&file, "hi").expect("write prompt");
+        assert!(validate_prompt_file(Some(file.to_str().unwrap())).is_ok());
+        // Refused: shell injection, relative, traversal, a directory, missing.
+        assert!(validate_prompt_file(Some("/tmp/x; touch /tmp/PWNED; #")).is_err());
+        assert!(validate_prompt_file(Some("relative/prompt.txt")).is_err());
+        assert!(validate_prompt_file(Some("/tmp/../etc/hosts")).is_err());
+        assert!(
+            validate_prompt_file(Some(dir.path().to_str().unwrap())).is_err(),
+            "a directory is not a regular file"
+        );
+        assert!(validate_prompt_file(Some("/no/such/file-6197.txt")).is_err());
+    }
+
+    /// `validate_workdir` requires an absolute, non-traversing, existing dir (#6197).
+    #[test]
+    fn validate_workdir_requires_absolute_existing_dir() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        assert!(validate_workdir(dir.path()).is_ok());
+        // Relative, traversal, and non-existent absolute paths are all refused.
+        assert!(validate_workdir(std::path::Path::new("relative/dir")).is_err());
+        assert!(validate_workdir(std::path::Path::new("/tmp/../etc")).is_err());
+        assert!(
+            validate_workdir(std::path::Path::new("/no/such/dir/xyz-6197")).is_err(),
+            "a non-existent absolute path must be refused"
         );
     }
 }

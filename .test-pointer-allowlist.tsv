@@ -471,7 +471,6 @@ crates/trusty-mpm/src/daemon/api/claude_config_routes.rs	list_profiles_returns_b
 crates/trusty-mpm/src/daemon/api/claude_config_routes.rs	restart_claude_code_handles_missing_tmux
 crates/trusty-mpm/src/daemon/api/control_routes.rs	control_routes_tests
 crates/trusty-mpm/src/daemon/api/control_routes.rs	ctl_connect_write_lock_cas
-crates/trusty-mpm/src/daemon/api/control_routes.rs	ctl_run_session_returns_session_id
 crates/trusty-mpm/src/daemon/api/coordinator_routes.rs	coordinator_and_session_manager_aliases_match
 crates/trusty-mpm/src/daemon/api/coordinator_routes.rs	coordinator_chat_routes_unknown_session
 crates/trusty-mpm/src/daemon/api/coordinator_routes.rs	sm_chat_request_back_compat

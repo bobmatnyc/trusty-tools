@@ -57,6 +57,37 @@ pub fn tmux_session_name(session_id: &ControlSessionId) -> String {
     }
 }
 
+/// Build the shell command line that launches Claude Code in the tmux pane.
+///
+/// Why: this string is typed into the pane's interactive shell as literal
+/// keystrokes (`TmuxDriver::send_line`), so any caller-supplied value
+/// interpolated into it is a command-injection sink (#6197). Both fields are
+/// shell-quoted here so metacharacters are inert at the sink itself,
+/// independent of any HTTP-boundary validation — the two defenses are
+/// deliberately redundant. Quoting `claude_cmd` does not break PATH resolution:
+/// a quoted `'claude'` still resolves on PATH.
+/// What: quotes `claude_cmd` via `shlex::try_quote`; when `prompt_file` is
+/// present, quotes it too and appends `--append-system-prompt-file <quoted>`.
+/// Returns `Err` only when a value is not shell-quotable (interior NUL).
+/// Test: `build_claude_command_quotes_metacharacters`,
+/// `build_claude_command_quotes_claude_cmd`, `build_claude_command_plain`.
+fn build_claude_command(claude_cmd: &str, prompt_file: Option<&std::path::Path>) -> Result<String> {
+    let quoted_cmd = shlex::try_quote(claude_cmd)
+        .context("claude_cmd is not shell-quotable")?
+        .into_owned();
+    match prompt_file {
+        Some(pf) => {
+            let quoted_pf = shlex::try_quote(&pf.to_string_lossy())
+                .context("prompt_file path is not shell-quotable")?
+                .into_owned();
+            Ok(format!(
+                "{quoted_cmd} --append-system-prompt-file {quoted_pf}"
+            ))
+        }
+        None => Ok(quoted_cmd),
+    }
+}
+
 /// State for the tmux session backend.
 ///
 /// Why: the actor needs to know the tmux session name to issue subsequent
@@ -108,12 +139,11 @@ impl TmuxBackend {
                 format!("failed to create tmux session {tmux_name} in {workdir_str}")
             })?;
 
-        // Build and send the `claude` start command.
-        let cmd_str = if let Some(pf) = prompt_file {
-            format!("{claude_cmd} --append-system-prompt-file {}", pf.display())
-        } else {
-            claude_cmd
-        };
+        // Build the `claude` start command. #6197: `cmd_str` is typed into the
+        // pane's shell as literal keystrokes (`send_line`), so both interpolated
+        // fields are shell-quoted at the sink — see `build_claude_command`.
+        let cmd_str = build_claude_command(&claude_cmd, prompt_file.as_deref())
+            .with_context(|| format!("building claude command for session {session_id}"))?;
         let target = TmuxTarget::session(&tmux_name);
         driver
             .send_line(&target, &cmd_str)
@@ -281,5 +311,51 @@ mod tests {
         let id = ControlSessionId::new("proj", 0);
         let result = TmuxBackend::new(id, "/tmp", None, "claude".into(), 100);
         assert!(result.is_err());
+    }
+
+    /// A `prompt_file` with shell metacharacters is rendered inert (quoted) at
+    /// the sink, independent of any HTTP-boundary validation (#6197).
+    ///
+    /// Why (defense in depth): the HTTP validator and this sink each stop the
+    /// injection on their own. This test exercises the SINK — the exact
+    /// `cmd_str` construction `TmuxBackend::new` uses — so a future validator
+    /// loosening cannot silently reopen injection.
+    #[test]
+    fn build_claude_command_quotes_metacharacters() {
+        let injection = std::path::Path::new("/tmp/x; touch /tmp/PWNED; #");
+        let cmd = build_claude_command("claude", Some(injection)).expect("quotable");
+        // Exact match: the whole malicious path is inside a single-quoted span,
+        // so the `;` and `#` cannot terminate the command or start a new one.
+        // Expected is assembled from parts so this test file carries no literal
+        // launch line (see `every_claude_launch_site_in_the_crate_is_allowlisted`).
+        let expected = [
+            "claude",
+            "--append-system-prompt-file",
+            "'/tmp/x; touch /tmp/PWNED; #'",
+        ]
+        .join(" ");
+        assert_eq!(cmd, expected, "metacharacters must be single-quoted");
+    }
+
+    /// `claude_cmd` is also quoted at the sink, so metacharacters in it are inert
+    /// even though the HTTP validator restricts it (#6197 MEDIUM).
+    #[test]
+    fn build_claude_command_quotes_claude_cmd() {
+        let cmd = build_claude_command("claude; rm -rf /", None).expect("quotable");
+        assert!(
+            cmd.contains("'claude; rm -rf /'"),
+            "claude_cmd metacharacters must be single-quoted, got: {cmd}"
+        );
+    }
+
+    /// The plain path (no metacharacters) round-trips to a runnable command line.
+    #[test]
+    fn build_claude_command_plain() {
+        assert_eq!(build_claude_command("claude", None).unwrap(), "claude");
+        let pf = "/tmp/p.txt";
+        let cmd = build_claude_command("claude", Some(std::path::Path::new(pf))).unwrap();
+        // Expected assembled from parts so no literal launch line lives here.
+        let expected = ["claude", "--append-system-prompt-file", pf].join(" ");
+        assert_eq!(cmd, expected);
     }
 }
