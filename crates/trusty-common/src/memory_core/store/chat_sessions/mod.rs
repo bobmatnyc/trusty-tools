@@ -62,6 +62,18 @@ mod tests {
         wtx.commit().unwrap();
     }
 
+    /// Read the raw stored bytes for one SESSIONS row (the postcard-encoded
+    /// `ChatSessionRecord`), or `None` if the row is absent. Used to prove the
+    /// #6196 fail-closed path leaves a corrupt row byte-identical — untouched,
+    /// not merely still-unparseable.
+    fn read_raw_row(store: &ChatSessionStore, id: &str) -> Option<Vec<u8>> {
+        use crate::memory_core::store::kg_store::SESSIONS;
+        use redb::ReadableDatabase;
+        let rtx = store.db.begin_read().unwrap();
+        let table = rtx.open_table(SESSIONS).unwrap();
+        table.get(id).unwrap().map(|g| g.value().to_vec())
+    }
+
     /// Why (#6196): a session whose `history` JSON is corrupt must surface as an
     /// error, not `Ok(Some(session))` with an empty history — otherwise a
     /// chat-resume caller cannot tell "prior conversation lost" from "new empty
@@ -118,13 +130,15 @@ mod tests {
     /// message, permanently destroying the corrupt blob. Fails on the pre-fix
     /// commit (which returned `Ok` and clobbered the row).
     /// What: writes a corrupt row, asserts `append_message` returns `Err` and
-    /// the corrupt bytes are left intact (`get_session` still errors after).
+    /// the stored row bytes are BYTE-IDENTICAL before and after the failed call
+    /// (the corrupt blob is untouched, not merely still-unparseable).
     /// Test: this function.
     #[test]
     fn append_message_on_corrupt_history_fails_closed() {
         let (_d, store) = open();
         let id = "corrupt-append-1";
         write_corrupt_row(&store, id, "corrupt");
+        let before = read_raw_row(&store, id).expect("corrupt row was written");
 
         let result = store.append_message(
             id,
@@ -137,9 +151,11 @@ mod tests {
             result.is_err(),
             "append onto corrupt history must fail closed, got {result:?}"
         );
-        assert!(
-            store.get_session(id).is_err(),
-            "the corrupt row must be left intact, not clobbered by the failed append"
+        let after = read_raw_row(&store, id).expect("corrupt row must still exist");
+        assert_eq!(
+            before, after,
+            "the corrupt row bytes must be byte-identical after the failed append \
+             — the aborted write transaction must not have touched them"
         );
     }
 
