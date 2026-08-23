@@ -18,7 +18,8 @@ use crate::tickets::api::backends::{
 use crate::tickets::api::models::*;
 
 use super::types::{
-    JiraBackend, adf_paragraph, build_list_jql, build_search_jql, parse_comment, parse_issue,
+    JiraBackend, adf_paragraph, build_epic_issues_jql, build_list_epics_jql, build_list_jql,
+    build_milestone_issues_jql, build_search_jql, parse_comment, parse_issue,
 };
 
 #[async_trait]
@@ -333,7 +334,8 @@ impl Backend for JiraBackend {
     }
 
     async fn get_milestone_issues(&self, id: &str) -> Result<Vec<Issue>> {
-        let jql = format!("fixVersion = {id}");
+        // #6198: build via build_milestone_issues_jql so id is quoted + escaped.
+        let jql = build_milestone_issues_jql(id);
         let body = json!({ "jql": jql, "maxResults": 100 });
         let v = self.post("/search/jql", body).await?;
         let issues = v
@@ -392,7 +394,8 @@ impl Backend for JiraBackend {
     }
 
     async fn list_epics(&self) -> Result<Vec<Issue>> {
-        let jql = format!("project = \"{}\" AND issuetype = Epic", self.project_key);
+        // #6198: build via build_list_epics_jql so the project key is escaped.
+        let jql = build_list_epics_jql(&self.project_key);
         let v = self
             .post("/search/jql", json!({ "jql": jql, "maxResults": 100 }))
             .await?;
@@ -405,7 +408,8 @@ impl Backend for JiraBackend {
     }
 
     async fn get_epic_issues(&self, epic_id: &str) -> Result<Vec<Issue>> {
-        let jql = format!("parent = {epic_id}");
+        // #6198: build via build_epic_issues_jql so epic_id is quoted + escaped.
+        let jql = build_epic_issues_jql(epic_id);
         let v = self
             .post("/search/jql", json!({ "jql": jql, "maxResults": 100 }))
             .await?;

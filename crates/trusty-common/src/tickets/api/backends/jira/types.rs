@@ -204,6 +204,47 @@ pub(super) fn build_search_jql(project_key: &str, p: &SearchIssuesParams) -> Str
     jql
 }
 
+/// Build the JQL for `Backend::get_milestone_issues`.
+///
+/// Why: `id` arrives from the MCP `milestone_id` string arg — an attacker trust
+/// boundary. The prior `fixVersion = {id}` was UNQUOTED and unescaped, so
+/// `id = "1 OR project = SECRET"` needed no quote-breakout at all — the bare
+/// `OR` clause injected directly and read another project's issues (#6198).
+/// What: wraps the value in quotes AND escapes it, so it is one self-contained
+/// JQL string literal a `"` cannot break out of.
+/// Test: `super::tests::milestone_issues_jql_escapes_injection`,
+/// `milestone_issues_jql_escapes_embedded_quote`, `milestone_issues_jql_legit_value`.
+pub(super) fn build_milestone_issues_jql(id: &str) -> String {
+    format!("fixVersion = \"{}\"", escape_jql_string(id))
+}
+
+/// Build the JQL for `Backend::get_epic_issues`.
+///
+/// Why: `epic_id` arrives from the MCP `epic_id` string arg — attacker
+/// controlled. The prior `parent = {epic_id}` was unquoted and unescaped,
+/// injectable exactly like `build_milestone_issues_jql` (#6198).
+/// What: quotes and escapes the value into one JQL string literal.
+/// Test: `super::tests::epic_issues_jql_escapes_injection`,
+/// `epic_issues_jql_escapes_embedded_quote`, `epic_issues_jql_legit_value`.
+pub(super) fn build_epic_issues_jql(epic_id: &str) -> String {
+    format!("parent = \"{}\"", escape_jql_string(epic_id))
+}
+
+/// Build the JQL for `Backend::list_epics`.
+///
+/// Why: uniformity — `project_key` is config-derived (JIRA_PROJECT_KEY), not an
+/// attacker vector, but routing it through `escape_jql_string` keeps every JQL
+/// term in this file escaped so a later edit cannot reintroduce a raw one (#6198).
+/// What: escapes the project key inside its quoted term; the issuetype clause is
+/// a fixed literal.
+/// Test: `super::tests::list_epics_jql_legit_value`.
+pub(super) fn build_list_epics_jql(project_key: &str) -> String {
+    format!(
+        "project = \"{}\" AND issuetype = Epic",
+        escape_jql_string(project_key)
+    )
+}
+
 /// Convert a JIRA issue JSON blob into the canonical `Issue`.
 ///
 /// Why: Decouples JSON shape knowledge from the Backend impl methods.

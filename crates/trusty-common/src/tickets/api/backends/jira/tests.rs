@@ -1,16 +1,21 @@
 //! JQL-injection regression tests for the JIRA backend (#6198).
 //!
-//! Why: `search_issues` / `list_issues` interpolate attacker-controlled filter
-//! values into a JQL string. An unescaped `"` breaks out of a quoted term and
-//! injects arbitrary clauses (e.g. reading issues from another project).
-//! What: exercises the pure `build_search_jql` / `build_list_jql` builders —
-//! which produce the exact `jql` string handed to the HTTP client — asserting
-//! injected quotes are escaped and legitimate values still produce correct JQL.
+//! Why: `search_issues`, `list_issues`, `get_milestone_issues`, and
+//! `get_epic_issues` interpolated attacker-controlled values into a JQL string.
+//! A `"` broke out of a quoted term; the milestone/epic terms were unquoted, so
+//! a bare `OR` clause injected with no quote-breakout at all — either way
+//! reading issues from another project.
+//! What: exercises the pure `build_*_jql` builders — which produce the exact
+//! `jql` string handed to the HTTP client — asserting injected values are
+//! quoted + escaped and legitimate values still produce correct JQL.
 //! Test: this file is the coverage.
 
 use crate::tickets::api::backends::{ListIssuesParams, SearchIssuesParams};
 
-use super::types::{build_list_jql, build_search_jql, escape_jql_string};
+use super::types::{
+    build_epic_issues_jql, build_list_epics_jql, build_list_jql, build_milestone_issues_jql,
+    build_search_jql, escape_jql_string,
+};
 
 /// A payload that, unescaped, closes the `text`/`assignee` term and appends an
 /// attacker-chosen `OR` clause reaching a project the caller cannot see.
@@ -154,5 +159,69 @@ fn list_jql_legit_values() {
         jql,
         "project = \"PROJ\" AND statusCategory = \"Done\" \
          AND assignee = \"bob\" AND labels = \"backend\" ORDER BY created DESC"
+    );
+}
+
+// ---- get_milestone_issues / get_epic_issues: UNQUOTED injection ------------
+// These terms were `fixVersion = {id}` / `parent = {epic_id}` — no surrounding
+// quotes, so an attacker needs no quote-breakout at all: a bare ` OR ` clause
+// injects directly. The fix both quotes and escapes the value.
+
+/// The critic's documented vector: a bare `OR` clause, no quote needed.
+const INJECT_UNQUOTED: &str = "1 OR project = SECRET";
+
+#[test]
+fn milestone_issues_jql_escapes_injection() {
+    let jql = build_milestone_issues_jql(INJECT_UNQUOTED);
+    assert!(
+        !jql.contains("fixVersion = 1 OR"),
+        "unquoted injection survived: {jql}"
+    );
+    assert_eq!(jql, r#"fixVersion = "1 OR project = SECRET""#);
+}
+
+#[test]
+fn milestone_issues_jql_escapes_embedded_quote() {
+    // A quote in the payload cannot break out of the newly-added quotes either.
+    let jql = build_milestone_issues_jql(r#"1" OR x = "y"#);
+    assert_eq!(jql, r#"fixVersion = "1\" OR x = \"y""#);
+}
+
+#[test]
+fn milestone_issues_jql_legit_value() {
+    assert_eq!(
+        build_milestone_issues_jql("10042"),
+        r#"fixVersion = "10042""#
+    );
+}
+
+#[test]
+fn epic_issues_jql_escapes_injection() {
+    let jql = build_epic_issues_jql(INJECT_UNQUOTED);
+    assert!(
+        !jql.contains("parent = 1 OR"),
+        "unquoted injection survived: {jql}"
+    );
+    assert_eq!(jql, r#"parent = "1 OR project = SECRET""#);
+}
+
+#[test]
+fn epic_issues_jql_escapes_embedded_quote() {
+    let jql = build_epic_issues_jql(r#"ABC-1" OR x = "y"#);
+    assert_eq!(jql, r#"parent = "ABC-1\" OR x = \"y""#);
+}
+
+#[test]
+fn epic_issues_jql_legit_value() {
+    assert_eq!(build_epic_issues_jql("ABC-123"), r#"parent = "ABC-123""#);
+}
+
+// ---- list_epics: config-only project key, escaped for uniformity -----------
+
+#[test]
+fn list_epics_jql_legit_value() {
+    assert_eq!(
+        build_list_epics_jql("PROJ"),
+        r#"project = "PROJ" AND issuetype = Epic"#
     );
 }
