@@ -490,7 +490,9 @@ fn reporter_injects_synthesis_prose() {
     assert!(md.contains("A grounded acquirer-relevant summary."));
     assert!(md.contains("Injection risk"));
     assert!(md.contains("Raw query concatenation"));
-    assert!(md.contains("synthesis: available"));
+    // #6082 lap 8: a pass with nothing withheld has nothing to disclose, so the
+    // block is omitted rather than carrying a bare `synthesis: available` line.
+    assert!(!md.contains("## Synthesis Status"));
     // Defect #1: every synthesized field carries the inferred marker.
     assert!(md.contains(crate::report::provenance::INFERRED_TAG.trim()));
     let inferred_count = md
@@ -526,9 +528,10 @@ fn reporter_appends_guardrail_rejection_note() {
         code_quality_summary: None,
         security_summary: None,
         authorship_summary: None,
-        notes: vec![
-            "synthesis: rejected (unverified figure) in executive summary: 9999".to_string(),
-        ],
+        notes: vec![crate::report::synthesize::StatusNote::plain(
+            "the model's executive summary was withheld because it carried the figure 9999, \
+             which is not in the collected data",
+        )],
         ..Default::default()
     });
 
@@ -537,14 +540,73 @@ fn reporter_appends_guardrail_rejection_note() {
         .expect("bundled template");
     let md = Reporter::new(tmp.path()).render(&model, &template);
 
-    assert!(md.contains("synthesis: available"));
-    assert!(md.contains("rejected (unverified figure) in executive summary: 9999"));
+    assert!(md.contains("## Synthesis Status"));
+    assert!(md.contains("the model's executive summary was withheld"));
+    assert!(md.contains("the figure 9999"));
+    // #6082 lap 8: no line of the block carries a raw log prefix any more.
+    assert!(!md.contains("- synthesis:"));
     // The rejected exec summary was never injected — under the omit-empty default
     // the un-synthesised paragraph is dropped (not a marker wall) and recorded
     // under Data gaps.
     assert!(!md.contains("A grounded"));
     assert!(md.contains("Data gaps:"));
     assert!(!md.contains("{{"));
+}
+
+/// #6082 lap 8: a Synthesis Status line about a numbered finding cites its
+/// number, and no line of the block carries a raw log prefix.
+///
+/// Why: the graded report's rejection line named its finding by title only —
+/// "in investigation finding 'Hotspot HTTP client function has cyclomatic
+/// complexity 98'" — while that finding rendered as §5.2 item 47 two thousand
+/// lines above. A reader had to search the document to find out what the line
+/// was about.
+/// What: seeds one note about a uniquely-titled AMBER row and one about a title
+/// two rows share; asserts the first is cited by number and the second is not,
+/// because there is no one number to name.
+/// Test: this test itself.
+#[test]
+fn a_status_note_cites_its_finding_number() {
+    use crate::report::synthesize::StatusNote;
+
+    let md = render_colliding_with_notes(
+        vec![],
+        vec![
+            StatusNote::about(
+                "Extract method — dispatch",
+                "the model's business impact was withheld — the claim cannot be verified",
+            ),
+            StatusNote::about(
+                "Split oversized impl block",
+                "the model's remediation was withheld — the claim cannot be verified",
+            ),
+        ],
+    );
+    let status = md
+        .split("## Synthesis Status")
+        .nth(1)
+        .expect("status block");
+    assert!(
+        status.contains("section 5.2, AMBER finding 2: the model's business impact was withheld"),
+        "the uniquely-titled finding must be cited by its rendered number:\n{status}"
+    );
+    assert!(
+        status.contains("- the model's remediation was withheld"),
+        "an ambiguous title renders bare rather than guessing a number:\n{status}"
+    );
+    assert!(!status.contains("synthesis:"), "no log prefix:\n{status}");
+}
+
+/// #6082 lap 8: a pass with nothing withheld writes no Synthesis Status block.
+///
+/// Why: the block used to open with `synthesis: available`, which since #5454 is
+/// never news — a report that reaches a reader always had a successful pass
+/// behind it — so the section existed to say nothing.
+/// Test: this test itself.
+#[test]
+fn an_empty_synthesis_status_is_omitted() {
+    let md = render_colliding(vec![]);
+    assert!(!md.contains("## Synthesis Status"));
 }
 
 /// Why: #5454 — inference is required, so nothing may reach DISK without a
@@ -2963,6 +3025,17 @@ fn amber_prose(
 
 /// Render the colliding-title fixture with `findings` attached as synthesis.
 fn render_colliding(findings: Vec<crate::report::synthesize::FindingProse>) -> String {
+    render_colliding_with_notes(findings, vec![])
+}
+
+/// `render_colliding`, with guardrail disclosures seeded on the synthesis.
+///
+/// Why: since #6082 lap 8 a Synthesis Status block with nothing to disclose is
+/// omitted, so a test about that block has to give it something to say.
+fn render_colliding_with_notes(
+    findings: Vec<crate::report::synthesize::FindingProse>,
+    notes: Vec<crate::report::synthesize::StatusNote>,
+) -> String {
     use crate::report::synthesize::Synthesis;
 
     let tmp = tempfile::TempDir::new().expect("tempdir");
@@ -2982,7 +3055,7 @@ fn render_colliding(findings: Vec<crate::report::synthesize::FindingProse>) -> S
         executive_summary: None,
         top_risks: vec![],
         findings,
-        notes: vec![],
+        notes,
     });
     let template = TemplateLoader::bundled_only()
         .load("report-technical-dd")
@@ -3174,11 +3247,17 @@ fn an_unplaced_narrative_is_disclosed_not_numbered() {
 /// Test: this test itself.
 #[test]
 fn the_signature_is_the_last_content_in_the_document() {
-    let md = render_colliding(vec![amber_prose(
-        "Split oversized impl block",
-        "crates/trusty-common/src/memory_core/store/hnsw_store.rs:41",
-        "let mut guard = self.index.write();",
-    )]);
+    let md = render_colliding_with_notes(
+        vec![amber_prose(
+            "Split oversized impl block",
+            "crates/trusty-common/src/memory_core/store/hnsw_store.rs:41",
+            "let mut guard = self.index.write();",
+        )],
+        vec![crate::report::synthesize::StatusNote::plain(
+            "the model's executive summary was withheld because it carried the figure 9999, \
+             which is not in the collected data",
+        )],
+    );
     let last = md
         .lines()
         .rfind(|l| !l.trim().is_empty())

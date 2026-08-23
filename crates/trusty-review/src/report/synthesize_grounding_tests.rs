@@ -6,6 +6,7 @@ use crate::report::investigate::{
 };
 use crate::report::metrics::{AnalyzeMetrics, MetricFinding, Severity};
 use crate::report::model::{ReportModel, RepositoryReport};
+use crate::report::synthesize_grounding_text::replace_ignore_case;
 use crate::report::topology::CrateNode;
 
 fn node(name: &str, inbound: usize) -> CrateNode {
@@ -144,7 +145,10 @@ fn a_remote_finding_vetoes_its_tokens() {
     let g = Grounding::from_model(&model);
     assert!(g.remote_tokens.contains("trusty-mpm"));
     assert_eq!(
-        g.check("The trusty-mpm daemon is an unauthenticated remote-code-execution path."),
+        g.check(
+            "The trusty-mpm daemon is an unauthenticated remote-code-execution path.",
+            None
+        ),
         GroundingOutcome::Clean
     );
 }
@@ -201,8 +205,8 @@ fn a_remote_claim_about_a_local_finding_is_rewritten() {
                  session HTTP endpoints with no auth, and a handler that spawns processes — \
                  together an unauthenticated remote-code-execution path. A JQL injection adds \
                  a query-tampering vector.";
-    let GroundingOutcome::Rewritten(fixed, notes) = g.check(prose) else {
-        panic!("expected a rewrite, got {:?}", g.check(prose));
+    let GroundingOutcome::Rewritten(fixed, notes) = g.check(prose, None) else {
+        panic!("expected a rewrite, got {:?}", g.check(prose, None));
     };
     assert!(
         !fixed.to_lowercase().contains("remote"),
@@ -211,7 +215,7 @@ fn a_remote_claim_about_a_local_finding_is_rewritten() {
     assert!(fixed.contains("local-process-reachable code-execution"));
     assert!(fixed.contains("A JQL injection adds a query-tampering vector."));
     assert_eq!(notes.len(), 1);
-    assert!(notes[0].contains("reachability corrected"));
+    assert!(notes[0].contains("reachability wording was corrected"));
 }
 
 /// A remote claim this module cannot rewrite fails the field closed and names
@@ -221,8 +225,8 @@ fn an_uncorrectable_remote_claim_rejects_the_field() {
     let g = Grounding::from_model(&loopback_model());
     let prose = "The trusty-mpm control-plane offers remote code execution and a remote-management \
                  surface to anyone on the internet.";
-    let GroundingOutcome::Rejected(reason) = g.check(prose) else {
-        panic!("expected a rejection, got {:?}", g.check(prose));
+    let GroundingOutcome::Rejected(reason) = g.check(prose, None) else {
+        panic!("expected a rejection, got {:?}", g.check(prose, None));
     };
     assert!(reason.contains("could not be corrected safely"));
     assert!(reason.contains("Control-plane HTTP session endpoints"));
@@ -234,7 +238,10 @@ fn an_uncorrectable_remote_claim_rejects_the_field() {
 fn a_remote_claim_about_an_unrelated_subject_is_left_alone() {
     let g = Grounding::from_model(&loopback_model());
     assert_eq!(
-        g.check("The Telegram bot token grants remote control over managed daemons."),
+        g.check(
+            "The Telegram bot token grants remote control over managed daemons.",
+            None
+        ),
         GroundingOutcome::Clean
     );
 }
@@ -244,7 +251,10 @@ fn a_remote_claim_about_an_unrelated_subject_is_left_alone() {
 fn reachability_is_inert_without_a_local_finding() {
     let g = Grounding::from_model(&model_with(vec![repo("estate", vec![], None)]));
     assert_eq!(
-        g.check("An unauthenticated remote-code-execution path exists in trusty-mpm."),
+        g.check(
+            "An unauthenticated remote-code-execution path exists in trusty-mpm.",
+            None
+        ),
         GroundingOutcome::Clean
     );
 }
@@ -288,17 +298,17 @@ fn instructions_that_countermand_a_guard_do_not_disable_it() {
     let g = Grounding::from_model(&model);
     let prose = "The trusty-mpm control_routes session endpoints are an unauthenticated \
                  remote-code-execution path.";
-    let GroundingOutcome::Rewritten(fixed, notes) = g.check(prose) else {
+    let GroundingOutcome::Rewritten(fixed, notes) = g.check(prose, None) else {
         panic!(
             "instructions must not disable the reachability guard, got {:?}",
-            g.check(prose)
+            g.check(prose, None)
         );
     };
     assert!(
         !fixed.to_lowercase().contains("remote"),
         "the guard must still strip the remote claim: {fixed}"
     );
-    assert!(notes[0].contains("reachability corrected"));
+    assert!(notes[0].contains("reachability wording was corrected"));
 }
 
 // ─── Load-bearing post-check ─────────────────────────────────────────────────
@@ -308,9 +318,10 @@ fn instructions_that_countermand_a_guard_do_not_disable_it() {
 fn a_load_bearing_claim_about_a_leaf_crate_is_rejected() {
     let model = model_with(vec![repo("estate", vec![], Some(eight_crate_topology()))]);
     let g = Grounding::from_model(&model);
-    let GroundingOutcome::Rejected(reason) =
-        g.check("trusty-common and trusty-mpm are the load-bearing crates the estate depends on.")
-    else {
+    let GroundingOutcome::Rejected(reason) = g.check(
+        "trusty-common and trusty-mpm are the load-bearing crates the estate depends on.",
+        None,
+    ) else {
         panic!("expected a rejection");
     };
     assert!(reason.contains("trusty-mpm"), "reason was: {reason}");
@@ -323,7 +334,8 @@ fn a_load_bearing_claim_about_the_shared_core_passes() {
     let model = model_with(vec![repo("estate", vec![], Some(eight_crate_topology()))]);
     assert_eq!(
         Grounding::from_model(&model).check(
-            "trusty-common and trusty-mcp are the load-bearing crates the estate depends on."
+            "trusty-common and trusty-mcp are the load-bearing crates the estate depends on.",
+            None
         ),
         GroundingOutcome::Clean
     );
@@ -334,8 +346,10 @@ fn a_load_bearing_claim_about_the_shared_core_passes() {
 fn naming_a_leaf_crate_outside_a_load_bearing_claim_passes() {
     let model = model_with(vec![repo("estate", vec![], Some(eight_crate_topology()))]);
     assert_eq!(
-        Grounding::from_model(&model)
-            .check("trusty-mpm is a multi-process manager daemon with 0 dependents."),
+        Grounding::from_model(&model).check(
+            "trusty-mpm is a multi-process manager daemon with 0 dependents.",
+            None
+        ),
         GroundingOutcome::Clean
     );
 }
@@ -344,9 +358,10 @@ fn naming_a_leaf_crate_outside_a_load_bearing_claim_passes() {
 #[test]
 fn a_crate_name_is_matched_on_its_own_boundaries() {
     let model = model_with(vec![repo("estate", vec![], Some(eight_crate_topology()))]);
-    let GroundingOutcome::Rejected(reason) = Grounding::from_model(&model)
-        .check("trusty-mpm-gui is the load-bearing crate the estate depends on.")
-    else {
+    let GroundingOutcome::Rejected(reason) = Grounding::from_model(&model).check(
+        "trusty-mpm-gui is the load-bearing crate the estate depends on.",
+        None,
+    ) else {
         panic!("expected a rejection");
     };
     assert!(reason.contains("trusty-mpm-gui"), "reason was: {reason}");
@@ -419,7 +434,7 @@ fn the_live_remote_code_execution_claim_is_rewritten() {
     let mut model = model_with(vec![repo("estate", vec![], None)]);
     model.investigation = Some(control_routes_investigation());
     let GroundingOutcome::Rewritten(text, notes) =
-        Grounding::from_model(&model).check(LIVE_BUSINESS_IMPACT)
+        Grounding::from_model(&model).check(LIVE_BUSINESS_IMPACT, None)
     else {
         panic!("expected the live business impact to be rewritten");
     };
@@ -500,7 +515,7 @@ fn the_live_network_reachability_claim_is_rewritten() {
     let mut model = model_with(vec![repo("estate", vec![], None)]);
     model.investigation = Some(network_claim_investigation());
     let GroundingOutcome::Rewritten(text, notes) =
-        Grounding::from_model(&model).check(LIVE_NETWORK_IMPACT)
+        Grounding::from_model(&model).check(LIVE_NETWORK_IMPACT, None)
     else {
         panic!("expected the live network claim to be rewritten");
     };
@@ -524,8 +539,10 @@ fn the_live_network_reachability_claim_is_rewritten() {
 fn an_unrewritable_network_claim_is_rejected() {
     let mut model = model_with(vec![repo("estate", vec![], None)]);
     model.investigation = Some(network_claim_investigation());
-    let outcome = Grounding::from_model(&model)
-        .check("Any host with network line-of-sight can stop a running session.");
+    let outcome = Grounding::from_model(&model).check(
+        "Any host with network line-of-sight can stop a running session.",
+        None,
+    );
     assert!(
         matches!(outcome, GroundingOutcome::Rejected(_)),
         "expected rejection, got: {outcome:?}"
@@ -573,7 +590,7 @@ fn a_no_clean_signal_claim_is_dropped_when_signals_exist() {
     let prose = "Error handling is frequently fail-open or lossy. No clean security signal is \
                  credited here.";
     let GroundingOutcome::Rewritten(text, notes) =
-        Grounding::from_model(&clean_signal_model()).check(prose)
+        Grounding::from_model(&clean_signal_model()).check(prose, None)
     else {
         panic!("expected the false no-clean-signal claim to be dropped");
     };
@@ -591,7 +608,7 @@ fn a_no_clean_signal_claim_is_dropped_when_signals_exist() {
 fn a_no_clean_signal_claim_survives_when_there_are_none() {
     let model = model_with(vec![repo("estate", vec![], None)]);
     assert_eq!(
-        Grounding::from_model(&model).check("No clean security signal is credited here."),
+        Grounding::from_model(&model).check("No clean security signal is credited here.", None),
         GroundingOutcome::Clean
     );
 }
@@ -608,7 +625,7 @@ fn an_uncited_green_is_not_counted_as_a_clean_signal() {
         .findings[0]
         .component = String::new();
     assert_eq!(
-        Grounding::from_model(&model).check("No clean security signal is credited here."),
+        Grounding::from_model(&model).check("No clean security signal is credited here.", None),
         GroundingOutcome::Clean
     );
 }
@@ -619,4 +636,195 @@ fn prompt_facts_state_the_clean_signal_count() {
     let facts = Grounding::from_model(&clean_signal_model()).prompt_facts();
     assert!(facts.contains("credits 1 GREEN security finding(s)"));
     assert!(facts.contains("Never write that no clean signal was found"));
+}
+
+// ─── #6082 lap 8: reachability is a property of the component ────────────────
+
+/// The lap-8 line, verbatim: §5.1 item 3's business impact.
+const LIVE_ARBITRARY_EXEC_IMPACT: &str = "Combined with the lack of auth, this permits remote code execution by pointing the session \
+     at any binary on the host.";
+
+/// The file both control-plane findings sit in.
+const CONTROL_ROUTES: &str = "crates/trusty-mpm/src/daemon/api/control_routes.rs";
+
+/// The finding that shipped the lap-8 line, with the sibling it shares a file
+/// with. `local_sibling` decides whether that sibling states a loopback scope.
+fn control_plane_model(local_sibling: bool) -> ReportModel {
+    let sibling_remediation = match local_sibling {
+        true => "Bind the control routes to localhost and add an auth middleware layer",
+        false => {
+            "Add an authentication/authorization layer (token or mTLS middleware) in front \
+                  of these control-plane routes"
+        }
+    };
+    model_with(vec![repo(
+        "estate",
+        vec![
+            finding(
+                "Control-plane HTTP handlers accept unauthenticated callers",
+                &format!("{CONTROL_ROUTES}:259"),
+                sibling_remediation,
+            ),
+            finding(
+                "Arbitrary executable path accepted from HTTP request body",
+                &format!("{CONTROL_ROUTES}:268"),
+                "Validate/allow-list the executable path and prompt file location before \
+                 constructing RunParams",
+            ),
+        ],
+        None,
+    )])
+}
+
+/// Tier 1: a finding whose own wording carries no loopback marker inherits the
+/// scope its file's sibling finding establishes.
+///
+/// This is the class the lap-8 defect belongs to. Before the fix the guard
+/// classified per finding TEXT, so item 3 was never local-only, never had a
+/// subject to be checked against, and the sentence below shipped as written.
+#[test]
+fn a_sibling_finding_inherits_its_files_loopback_scope() {
+    let g = Grounding::from_model(&control_plane_model(true));
+    let owner = format!("{CONTROL_ROUTES}:268");
+    let GroundingOutcome::Rewritten(fixed, notes) =
+        g.check(LIVE_ARBITRARY_EXEC_IMPACT, Some(&owner))
+    else {
+        panic!(
+            "expected a rewrite, got {:?}",
+            g.check(LIVE_ARBITRARY_EXEC_IMPACT, Some(&owner))
+        );
+    };
+    assert!(
+        !fixed.to_lowercase().contains("remote"),
+        "remote survived: {fixed}"
+    );
+    assert!(fixed.contains("local-process-reachable code execution"));
+    assert!(notes[0].contains("reachability wording was corrected"));
+}
+
+/// Tier 3, and what the live report actually held: NO finding on that file
+/// carries any reachability marker, so there is nothing for tier 1 to inherit.
+///
+/// The claim cannot be corrected — the report has no evidence the surface is
+/// host-local either — so it is withheld and disclosed rather than shipped.
+#[test]
+fn an_unevidenced_component_cannot_claim_beyond_host_reach() {
+    let g = Grounding::from_model(&control_plane_model(false));
+    let owner = format!("{CONTROL_ROUTES}:268");
+    let GroundingOutcome::Rejected(reason) = g.check(LIVE_ARBITRARY_EXEC_IMPACT, Some(&owner))
+    else {
+        panic!(
+            "expected a rejection, got {:?}",
+            g.check(LIVE_ARBITRARY_EXEC_IMPACT, Some(&owner))
+        );
+    };
+    assert!(reason.contains("cannot be verified"), "{reason}");
+    assert!(reason.contains(CONTROL_ROUTES), "{reason}");
+}
+
+/// Tier 3 costs a reader nothing when the sentence never claimed reach.
+///
+/// All three are live business impacts from the same report. A bare "network"
+/// in "a transient network error" states nothing about who can reach the
+/// surface, and emptying those fields would be the guard doing more damage than
+/// the claim it exists to stop.
+#[test]
+fn an_unevidenced_component_keeps_a_non_reach_mention_of_the_network() {
+    let g = Grounding::from_model(&control_plane_model(false));
+    let owner = format!("{CONTROL_ROUTES}:268");
+    for prose in [
+        "Intermittent network or daemon load can quietly degrade audit completeness without any \
+         operator signal beyond a gap line.",
+        "High complexity in the network error path raises maintenance cost and the risk that a \
+         new endpoint mishandles an error status.",
+        "Release process cannot proceed when the external registry or network is unavailable.",
+    ] {
+        assert_eq!(
+            g.check(prose, Some(&owner)),
+            GroundingOutcome::Clean,
+            "withheld a sentence that claims no reach: {prose}"
+        );
+    }
+}
+
+/// A finding is judged by its OWN component, never by a word it happens to
+/// share with another finding's title.
+///
+/// The graded report emptied §5.2 item 47's business impact — an Azure DevOps
+/// complexity hotspot — by matching its "endpoint" against the trusty-search
+/// admin finding's title tokens, then refusing a claim that finding never made.
+#[test]
+fn a_finding_is_not_judged_by_another_findings_tokens() {
+    let model = model_with(vec![repo(
+        "estate",
+        vec![
+            finding(
+                "Admin stop endpoint trusts every caller with no authentication",
+                "crates/trusty-search/src/service/server/admin.rs:74",
+                "Require an auth token or local socket ownership check on privileged admin \
+                 endpoints",
+            ),
+            finding(
+                "Hotspot HTTP client function has cyclomatic complexity 98",
+                "crates/trusty-git-analytics/src/collect/azdo/client.rs:36",
+                "Route all responses through the existing map_response_error helper",
+            ),
+        ],
+        None,
+    )]);
+    assert_eq!(
+        Grounding::from_model(&model).check(
+            "High complexity in the network error path raises maintenance cost and the risk \
+             that a new endpoint mishandles an error status.",
+            Some("crates/trusty-git-analytics/src/collect/azdo/client.rs:36"),
+        ),
+        GroundingOutcome::Clean
+    );
+}
+
+/// Tier 2 wins on a shared file: one finding binding every interface stops the
+/// whole file inheriting a loopback sibling's scope.
+#[test]
+fn a_remote_finding_on_the_file_wins_over_a_loopback_sibling() {
+    let model = model_with(vec![repo(
+        "estate",
+        vec![
+            finding(
+                "Session endpoints have no auth",
+                &format!("{CONTROL_ROUTES}:259"),
+                "Add auth before exposing them beyond localhost",
+            ),
+            finding(
+                "Daemon binds every interface",
+                &format!("{CONTROL_ROUTES}:12"),
+                "Bind loopback instead of 0.0.0.0",
+            ),
+        ],
+        None,
+    )]);
+    let g = Grounding::from_model(&model);
+    assert!(g.local_only.is_empty(), "{:?}", g.local_only);
+    assert_eq!(
+        g.check(
+            LIVE_ARBITRARY_EXEC_IMPACT,
+            Some(&format!("{CONTROL_ROUTES}:259"))
+        ),
+        GroundingOutcome::Clean
+    );
+}
+
+/// The metrics rows carry a `:line` suffix and the investigation does not, so
+/// both spellings must land on one file key or they cannot share a tier.
+#[test]
+fn a_line_suffix_does_not_split_a_component() {
+    assert_eq!(normalize_component(CONTROL_ROUTES), CONTROL_ROUTES);
+    assert_eq!(
+        normalize_component(&format!("{CONTROL_ROUTES}:268")),
+        CONTROL_ROUTES
+    );
+    assert_eq!(
+        normalize_component(&format!("{CONTROL_ROUTES}:268:9")),
+        CONTROL_ROUTES
+    );
+    assert_eq!(normalize_component("   "), "");
 }

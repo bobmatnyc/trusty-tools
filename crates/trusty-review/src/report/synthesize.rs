@@ -27,8 +27,13 @@ use tracing::{debug, warn};
 
 use crate::llm::LlmProvider;
 use crate::report::model::ReportModel;
-use crate::report::synthesize_grounding::{Grounding, GroundingOutcome};
-use crate::report::synthesize_guard::{allowed_numbers_with, verify_prose};
+use crate::report::synthesize_grounding::Grounding;
+
+// #6082 lap 8: the guardrail layer moved into `synthesize_guardrail` to keep
+// this file under the production SLOC cap. Re-exported so the public path
+// callers already use stays exactly where it was.
+pub use super::synthesize_guardrail::ground_investigation_prose;
+use crate::report::synthesize_guard::allowed_numbers_with;
 use crate::report::synthesize_prompt::{
     SYNTHESIS_DEFAULT_MAX_TOKENS, SYNTHESIS_TIER_LADDER, SynthesisTier, build_synthesis_prompt,
 };
@@ -47,17 +52,6 @@ const DEFAULT_SYNTHESIS_TIMEOUT: Duration = Duration::from_secs(120);
 /// aid, not an audit trail) so operators know where to look without parsing a
 /// timestamp out of a WARN line.
 const UNPARSEABLE_CAPTURE_FILENAME: &str = "synthesis-unparseable-response.txt";
-
-/// The literal prefix every guardrail-rejection note carries, so the reporter and
-/// tests can assert on it.
-const REJECTED_NOTE: &str = "synthesis: rejected (unverified figure)";
-
-/// The literal prefix every grounding-rejection note carries (#6082 lap 4).
-///
-/// Kept distinct from [`REJECTED_NOTE`]: a numeric rejection means a figure was
-/// not in the data, a grounding rejection means a CLAIM contradicted it, and a
-/// reader who sees one should not have to guess which happened.
-const UNGROUNDED_NOTE: &str = "synthesis: rejected (claim contradicts the report's own data)";
 
 // ─── Injected result types ──────────────────────────────────────────────────
 
@@ -98,9 +92,56 @@ pub struct Synthesis {
     /// Verified per-finding elaboration prose (rejected findings are dropped).
     #[serde(default)]
     pub findings: Vec<FindingProse>,
-    /// Human-readable guardrail/routing notes recorded during injection.
+    /// Reader-facing guardrail/routing notes recorded during injection.
     #[serde(default)]
-    pub notes: Vec<String>,
+    pub notes: Vec<StatusNote>,
+}
+
+/// One Synthesis Status disclosure, and the finding it is about.
+///
+/// Why: every line of that block is written for a diligence reader, so it must
+/// name the numbered finding it concerns rather than a pipeline label —
+/// and the §5.2 number is not knowable when the note is recorded, because the
+/// reporter has not numbered the rows yet (#6082 lap 8). Carrying the title
+/// separately from the prose lets the reporter resolve the number at render.
+/// What: `text` is a complete reader sentence on its own; `subject` is the
+/// finding title the reporter looks up, absent for report-level prose.
+/// Test: `reporter_tests.rs::{a_status_note_cites_its_finding_number,
+/// a_status_note_without_a_numbered_finding_renders_bare}`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct StatusNote {
+    /// The disclosure, as the reader sees it.
+    pub text: String,
+    /// The finding this disclosure is about, when it is about one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+}
+
+impl StatusNote {
+    /// A disclosure about no particular finding.
+    pub fn plain(text: impl Into<String>) -> Self {
+        StatusNote {
+            text: text.into(),
+            subject: None,
+        }
+    }
+
+    /// A disclosure about `subject`, which the reporter numbers if it renders.
+    pub fn about(subject: &str, text: impl Into<String>) -> Self {
+        StatusNote {
+            text: text.into(),
+            subject: Some(subject.trim().to_string()),
+        }
+    }
+
+    /// Render one status line, prefixed with `cite` when the reporter resolved
+    /// the subject to a numbered finding.
+    pub fn render(&self, cite: Option<&str>) -> String {
+        match cite {
+            Some(c) => format!("{c}: {}", self.text),
+            None => self.text.clone(),
+        }
+    }
 }
 
 /// Why one synthesis pass produced no verified narrative.
@@ -225,25 +266,6 @@ pub struct FindingProse {
     /// travel with it to reach the rendered evidence block.
     #[serde(default)]
     pub trace_verdict: String,
-}
-
-impl Synthesis {
-    /// The visible status note lines for the rendered report.
-    ///
-    /// Why: the report states which fields the numeric guardrail rejected, so a
-    /// reader can tell a section written by the model from one that fell back to
-    /// the deterministic composition (#5374).  #5454 removed the
-    /// `unavailable (<reason>)` banner: a report that reaches a reader always had
-    /// a successful synthesis pass behind it, so the only news left is the
-    /// per-field rejections.
-    /// What: a leading `synthesis: available` line, then one line per note.
-    /// Test: `synthesize_tests.rs::status_lines_render_banners`.
-    pub fn status_lines(&self) -> Vec<String> {
-        let mut lines = Vec::with_capacity(1 + self.notes.len());
-        lines.push("synthesis: available".to_string());
-        lines.extend(self.notes.iter().cloned());
-        lines
-    }
 }
 
 // ─── Synthesizer ────────────────────────────────────────────────────────────
@@ -385,7 +407,10 @@ impl Synthesizer {
         for (i, tier) in SYNTHESIS_TIER_LADDER.iter().enumerate() {
             match self.try_once(model, *tier).await {
                 Attempt::Ok(raw, norm_notes) => {
-                    return apply_guardrail(raw, &allowed, norm_notes, &grounding);
+                    let seed = norm_notes.into_iter().map(StatusNote::plain).collect();
+                    return super::synthesize_guardrail::apply_guardrail(
+                        raw, &allowed, seed, &grounding,
+                    );
                 }
                 Attempt::Failed(e) => return Err(e),
                 Attempt::Truncated => match SYNTHESIS_TIER_LADDER.get(i + 1) {
@@ -499,22 +524,22 @@ enum Attempt {
 
 /// The raw JSON contract the provider is asked to emit (pre-verification).
 #[derive(Debug, Deserialize)]
-struct RawSynthesis {
+pub(super) struct RawSynthesis {
     #[serde(default)]
-    executive_summary: String,
+    pub(super) executive_summary: String,
     /// #6004: same schema/call/guardrail as `executive_summary`.
     #[serde(default)]
-    code_quality_summary: String,
+    pub(super) code_quality_summary: String,
     /// #6004: same schema/call/guardrail as `executive_summary`.
     #[serde(default)]
-    security_summary: String,
+    pub(super) security_summary: String,
     /// #5453/#6004: same schema/call/guardrail as `executive_summary`.
     #[serde(default)]
-    authorship_summary: String,
+    pub(super) authorship_summary: String,
     #[serde(default)]
-    top_risks: Vec<RiskRow>,
+    pub(super) top_risks: Vec<RiskRow>,
     #[serde(default)]
-    findings: Vec<FindingProse>,
+    pub(super) findings: Vec<FindingProse>,
 }
 
 /// Parse the provider response into [`RawSynthesis`] plus any normalization
@@ -663,302 +688,6 @@ fn heading_section(text: &str, wanted: &str) -> Option<String> {
         .collect();
     let joined = body.join("\n").trim().to_string();
     (!joined.is_empty()).then_some(joined)
-}
-
-/// Apply the numeric guardrail to the raw synthesis, field by field.
-///
-/// Why: a field whose prose cites a figure not in the source is dropped (never
-/// repaired), so the deterministic composition (#5374) fills that placeholder and
-/// a visible rejection note is recorded.  Per-FIELD rejection stays a correctness
-/// property under #5454's required-inference rule; what changed is that a
-/// response with nothing left after the pass is an error rather than a
-/// deterministic-only report.
-/// What: verifies the executive summary and every risk row / finding against
-/// `allowed`; keeps only clean fields.  Findings must carry a RED/AMBER severity
-/// (defence-in-depth greens exclusion).  `seed_notes` (the normalization
-/// drop-notes recorded by [`crate::report::synthesize_normalize`], #6009 shape
-/// 3) are recorded first, so an unrecognized-field drop is visible in the
-/// rendered status lines alongside a numeric-guardrail rejection.  `Ok` iff at
-/// least one field survived.
-///
-/// # Errors
-///
-/// [`SynthesisError::NoVerifiableContent`] when every field was rejected.
-///
-/// Test: `synthesize_tests.rs::{synthesize_rejects_unverified_figure,
-/// synthesize_happy_path_injects}`.
-fn apply_guardrail(
-    raw: RawSynthesis,
-    allowed: &std::collections::HashSet<String>,
-    seed_notes: Vec<String>,
-    grounding: &Grounding,
-) -> Result<Synthesis, SynthesisError> {
-    let mut out = Synthesis {
-        notes: seed_notes,
-        ..Synthesis::default()
-    };
-    let notes = &mut out.notes;
-
-    // Executive summary.
-    out.executive_summary = admit_field(
-        "executive summary",
-        &raw.executive_summary,
-        allowed,
-        grounding,
-        notes,
-    );
-
-    // #6004: Code Quality & Architecture and Security Posture narratives — same
-    // per-field guardrail path as the executive summary.
-    out.code_quality_summary = admit_field(
-        "code quality summary",
-        &raw.code_quality_summary,
-        allowed,
-        grounding,
-        notes,
-    );
-    out.security_summary = admit_field(
-        "security summary",
-        &raw.security_summary,
-        allowed,
-        grounding,
-        notes,
-    );
-    out.authorship_summary = admit_field(
-        "authorship summary",
-        &raw.authorship_summary,
-        allowed,
-        grounding,
-        notes,
-    );
-
-    // Top-risk rows. The row's description is narrative and takes the same
-    // grounding pass the paragraphs do (#6082 lap 4) — row 1 of the last report
-    // carried the same reachability contradiction the executive summary did.
-    for (i, mut r) in raw.top_risks.into_iter().enumerate() {
-        let label = format!("top-risk row {}", i + 1);
-        let Some(description) = admit_field(&label, &r.description, allowed, grounding, notes)
-        else {
-            continue;
-        };
-        r.description = description;
-        match verify_all(&[&r.severity, &r.cost, &r.apps], allowed) {
-            Ok(()) => out.top_risks.push(r),
-            Err(tok) => notes.push(format!("{REJECTED_NOTE} in {label}: {tok}")),
-        }
-    }
-
-    // RED/AMBER finding elaborations.
-    for mut f in raw.findings {
-        let sev = f.severity.to_uppercase();
-        if sev != "RED" && sev != "AMBER" {
-            notes.push(format!(
-                "synthesis: dropped finding '{}' (non-RED/AMBER severity '{}')",
-                f.title, f.severity
-            ));
-            continue;
-        }
-        // #6082 lap 5: a finding's OWN narrative fields take the same grounding
-        // pass the paragraphs do. Wiring the guard to the summaries and the
-        // top-risk rows alone left RED finding 3's business impact stating
-        // "remote/local code execution" two lines from a Security Posture
-        // paragraph the same guard had corrected to "not remotely".
-        // `evidence` is excluded deliberately: it is a verbatim quote verified
-        // against the file, so rewriting it would make the displayed quote
-        // diverge from the one that was checked. `component` is routing data,
-        // not narrative.
-        let label = format!("finding '{}'", f.title);
-        f.description = ground_field(
-            &format!("{label} description"),
-            &f.description,
-            grounding,
-            notes,
-        );
-        f.business_impact = ground_field(
-            &format!("{label} business impact"),
-            &f.business_impact,
-            grounding,
-            notes,
-        );
-        f.remediation = ground_field(
-            &format!("{label} remediation"),
-            &f.remediation,
-            grounding,
-            notes,
-        );
-        f.cost_effort = ground_field(
-            &format!("{label} cost/effort"),
-            &f.cost_effort,
-            grounding,
-            notes,
-        );
-        match verify_all(
-            &[
-                &f.description,
-                &f.evidence,
-                &f.component,
-                &f.business_impact,
-                &f.remediation,
-                &f.cost_effort,
-            ],
-            allowed,
-        ) {
-            Ok(()) => out.findings.push(f),
-            Err(tok) => notes.push(format!("{REJECTED_NOTE} in finding '{}': {tok}", f.title)),
-        }
-    }
-
-    if out.executive_summary.is_none()
-        && out.code_quality_summary.is_none()
-        && out.security_summary.is_none()
-        && out.authorship_summary.is_none()
-        && out.top_risks.is_empty()
-        && out.findings.is_empty()
-    {
-        return Err(SynthesisError::NoVerifiableContent);
-    }
-    Ok(out)
-}
-
-/// Run the grounding guardrail over the verified investigation's own prose.
-///
-/// Why: the guard used to run on synthesis prose only, and
-/// `merge_investigation_prose` overwrites that prose with the investigation's
-/// for every RED/AMBER finding — so the guarded copy was discarded before
-/// render. That is how RED finding 2 of the lap-6 report shipped "a remote code
-/// execution risk" in its business impact while the guard's own note in the same
-/// document recorded a correction it had made elsewhere. Correcting `inv` BEFORE
-/// `apply_investigation` fixes every downstream copy at once: the injected
-/// `metrics.findings` rows, `model.investigation` in the JSON twin, the
-/// synthesis prompt, and the merged prose that renders.
-/// What: builds the [`Grounding`] from the model plus `inv` (the model has not
-/// recorded it yet), then runs [`ground_field`] over each RED/AMBER finding's
-/// description, business impact, remediation and cost/effort. `evidence_quote`
-/// is excluded for the same reason it is in [`apply_guardrail`]: it is verified
-/// verbatim against the file. Returns one status line per correction or
-/// rejection, for the caller to fold into [`Synthesis::notes`].
-/// Test: `synthesize_tests.rs::{investigation_business_impact_states_host_local_reach,
-/// investigation_grounding_leaves_a_clean_finding_alone}`.
-pub fn ground_investigation_prose(
-    model: &ReportModel,
-    inv: &mut crate::report::investigate::Investigation,
-) -> Vec<String> {
-    let grounding = Grounding::from_model_with(model, Some(inv));
-    let mut notes = Vec::new();
-    for repo in &mut inv.repos {
-        for f in &mut repo.findings {
-            if f.severity == crate::report::metrics::Severity::Green {
-                continue; // greens are title-only topics; they carry no narrative
-            }
-            let label = format!("investigation finding '{}'", f.title);
-            f.description = ground_field(
-                &format!("{label} description"),
-                &f.description,
-                &grounding,
-                &mut notes,
-            );
-            f.business_impact = ground_field(
-                &format!("{label} business impact"),
-                &f.business_impact,
-                &grounding,
-                &mut notes,
-            );
-            f.remediation = ground_field(
-                &format!("{label} remediation"),
-                &f.remediation,
-                &grounding,
-                &mut notes,
-            );
-            f.cost_effort = ground_field(
-                &format!("{label} cost/effort"),
-                &f.cost_effort,
-                &grounding,
-                &mut notes,
-            );
-        }
-    }
-    notes
-}
-
-/// Run the grounding guardrail alone over one narrative field of a finding.
-///
-/// Why: a finding is verified as a WHOLE by [`verify_all`] — one bad figure
-/// anywhere rejects the entire finding — so its fields cannot go through
-/// [`admit_field`], which rejects per field. This is the grounding half on its
-/// own, leaving that all-or-nothing numeric contract untouched (#6082 lap 5).
-/// What: returns the text with any reachability claim corrected, or an empty
-/// string when the claim could not be corrected safely. An emptied field falls
-/// through to the reporter's honesty marker, which is what an absent field has
-/// always rendered as.
-/// Test: `synthesize_tests.rs::{synthesize_grounds_a_finding_business_impact,
-/// synthesize_empties_an_uncorrectable_remote_claim_in_a_finding}`.
-fn ground_field(label: &str, raw: &str, grounding: &Grounding, notes: &mut Vec<String>) -> String {
-    let text = raw.trim();
-    if text.is_empty() {
-        return String::new();
-    }
-    match grounding.check(text) {
-        GroundingOutcome::Clean => text.to_string(),
-        GroundingOutcome::Rewritten(fixed, corrections) => {
-            notes.extend(corrections);
-            fixed
-        }
-        GroundingOutcome::Rejected(reason) => {
-            notes.push(format!("{UNGROUNDED_NOTE} in {label}: {reason}"));
-            String::new()
-        }
-    }
-}
-
-/// Run both guardrails over one narrative field and return what may ship.
-///
-/// Why: the grounding check (#6082 lap 4) and the numeric check are two
-/// independent reasons a field cannot be trusted, and running them from one
-/// place is what stops a future field from being wired to only one of them.
-/// What: `None` for an empty field, for a grounding rejection, and for a numeric
-/// rejection — each of the last two recording its own note under its own prefix.
-/// Otherwise the text to keep, which is the model's own unless the grounding
-/// pass corrected a claim in it; the numeric check then runs on the CORRECTED
-/// text, so a rewrite can never smuggle a figure past it.
-/// Test: `synthesize_tests.rs::{synthesize_rewrites_a_remote_claim_about_a_local_finding,
-/// synthesize_rejects_a_load_bearing_claim_about_a_leaf_crate}`.
-fn admit_field(
-    label: &str,
-    raw: &str,
-    allowed: &std::collections::HashSet<String>,
-    grounding: &Grounding,
-    notes: &mut Vec<String>,
-) -> Option<String> {
-    let text = raw.trim();
-    if text.is_empty() {
-        return None;
-    }
-    let grounded = match grounding.check(text) {
-        GroundingOutcome::Clean => text.to_string(),
-        GroundingOutcome::Rewritten(fixed, corrections) => {
-            notes.extend(corrections);
-            fixed
-        }
-        GroundingOutcome::Rejected(reason) => {
-            notes.push(format!("{UNGROUNDED_NOTE} in {label}: {reason}"));
-            return None;
-        }
-    };
-    match verify_prose(&grounded, allowed) {
-        Ok(()) => Some(grounded),
-        Err(tok) => {
-            notes.push(format!("{REJECTED_NOTE} in {label}: {tok}"));
-            None
-        }
-    }
-}
-
-/// Verify every field of a group; returns the first offending token on failure.
-fn verify_all(fields: &[&str], allowed: &std::collections::HashSet<String>) -> Result<(), String> {
-    for field in fields {
-        verify_prose(field, allowed)?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]

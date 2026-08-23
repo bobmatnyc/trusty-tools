@@ -29,7 +29,7 @@ use super::reporter_facts::fill_key_facts;
 use super::reporter_fill::{
     crate_version, fill_profile, instructions_block, set_executive_summary, set_scoring_model,
 };
-use super::reporter_findings::{push_finding_band, unplaced_narrative_lines};
+use super::reporter_findings::{finding_citations, push_finding_band, unplaced_narrative_lines};
 use super::reporter_graph_datasets::{
     inject_complexity_distribution_dataset, inject_loc_by_technology_dataset,
 };
@@ -606,27 +606,50 @@ fn green_topic_line(finding: &super::metrics::MetricFinding) -> String {
     format!("{} — `{}`", finding.title, finding.component.trim())
 }
 
-/// Append the visible `synthesis:` status note to the rendered markdown.
+/// Append the Synthesis Status block to the rendered markdown.
 ///
 /// Why: a reader must never mistake a deterministically-composed section for one
-/// the model wrote; the note names every field the numeric guardrail rejected.
-/// What: when `model.synthesis` is present, appends a status block whose lines
-/// come from `Synthesis::status_lines`, followed by one line per narrative the
-/// finding bands could not place (#6082 lap 6, see
-/// [`unplaced_narrative_lines`]).  The absent branch survives only for
+/// the model wrote, and the block is where this report discloses what the
+/// guardrails refused. #6082 lap 8 made every line of it one voice: the block
+/// used to open with the raw log line `synthesis: available` and carry
+/// log-prefixed rejections beside reader-voiced withheld-narrative lines. The
+/// banner is gone — a report that reaches a reader always had a successful
+/// synthesis pass behind it (#5454), so its presence was never news — and each
+/// remaining line names the §5.1/§5.2 finding it is about by the number the
+/// reader can look up.
+/// What: when `model.synthesis` is present AND has something to disclose,
+/// appends one line per [`StatusNote`] — cited by [`finding_citations`] when its
+/// subject renders as a numbered row — then one line per narrative the finding
+/// bands could not place (#6082 lap 6, see [`unplaced_narrative_lines`]). An
+/// empty block is omitted entirely. The absent branch survives only for
 /// [`Reporter::render`], which stays infallible for unit tests —
 /// [`Reporter::write`] rejects a synthesis-free model outright (#5454).
 /// Test: `reporter_tests.rs::{reporter_appends_guardrail_rejection_note,
+/// a_status_note_cites_its_finding_number, an_empty_synthesis_status_is_omitted,
 /// an_unmeasured_orphan_narrative_is_not_numbered}`.
 fn append_synthesis_note(out: &mut String, model: &ReportModel) {
     let Some(syn) = &model.synthesis else {
         return;
     };
-    out.push_str("\n\n## Synthesis Status\n\n");
-    for line in syn.status_lines() {
-        out.push_str(&format!("- {line}\n"));
+    let citations = finding_citations(model);
+    let mut lines: Vec<String> = syn
+        .notes
+        .iter()
+        .map(|n| {
+            let cite = n
+                .subject
+                .as_deref()
+                .and_then(|s| citations.get(s.trim()))
+                .and_then(Option::as_deref);
+            n.render(cite)
+        })
+        .collect();
+    lines.extend(unplaced_narrative_lines(model));
+    if lines.is_empty() {
+        return;
     }
-    for line in unplaced_narrative_lines(model) {
+    out.push_str("\n\n## Synthesis Status\n\n");
+    for line in lines {
         out.push_str(&format!("- {line}\n"));
     }
 }
