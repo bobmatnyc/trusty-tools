@@ -70,6 +70,27 @@ pub struct PalaceHandle {
     pub vector_store: Arc<UsearchStore>,
     pub kg: Arc<KnowledgeGraph>,
     pub drawers: Arc<RwLock<Vec<Drawer>>>,
+    /// Whether any persisted drawer row failed to load, so this handle is
+    /// serving a degraded (incomplete) view of the palace.
+    ///
+    /// Why: #6201 — `open_with_intent` deliberately fails open on drawer-load
+    /// trouble so the palace still opens instead of becoming unopenable. Two
+    /// paths degrade the corpus: the whole `DRAWERS` table failing to open
+    /// (empty fallback), and individual rows being skipped as unreadable while
+    /// the rest load (partial fallback — the more common corruption case). Both
+    /// left the resulting handle indistinguishable from a genuinely empty or
+    /// complete palace, so a caller had no signal it was missing corpus. This
+    /// flag is that signal.
+    /// What: `true` whenever a drawer row failed to load — the whole-table Err
+    /// arm OR a per-row skip (`load_drawers_with_skipped` reporting `skipped >
+    /// 0`) in `open_with_intent`. `false` on a fully successful load (a
+    /// legitimately empty table included) and for in-memory handles built via
+    /// `new`. The `warn!` logs on both paths are kept — this is the structured
+    /// twin, not a replacement.
+    /// Test: `drawer_load_degraded_true_on_corrupt_table_false_when_empty`
+    /// (whole-table) and `drawer_load_degraded_true_on_partial_row_corruption`
+    /// (per-row skip).
+    pub drawer_load_degraded: bool,
     /// On-disk data directory for this palace (where palace.json,
     /// identity.txt, l1_cache.json, the usearch index, and the KG redb
     /// store all live). `None` for in-memory tests built via `new`.
@@ -219,6 +240,9 @@ impl PalaceHandle {
             vector_store: Arc::new(vector_store),
             kg: Arc::new(kg),
             drawers: Arc::new(RwLock::new(Vec::new())),
+            // #6201: an in-memory handle never loaded a persisted table, so it
+            // is empty-by-construction, not degraded.
+            drawer_load_degraded: false,
             data_dir: None,
             decay_config: DecayConfig::default(),
             recall_log: None,
@@ -316,9 +340,26 @@ impl PalaceHandle {
         // Load full drawer table from redb (the persistent source of truth).
         // Fall back to an empty list on error so a corrupt table doesn't make
         // the palace unopenable — the L1 snapshot still provides essentials.
-        let persisted_drawers = match kg.load_drawers() {
-            Ok(d) => d,
+        // #6201: record the degrade on the handle so a caller can tell a
+        // corrupt-table fallback apart from a genuinely empty palace, instead
+        // of silently running L1-only. Both degrade paths set the flag: a
+        // whole-table Err (empty fallback) AND a partial load where individual
+        // rows were skipped as unreadable (`load_drawers_with_skipped` counts
+        // them; the per-row warns stay inside that call).
+        let mut drawer_load_degraded = false;
+        let persisted_drawers = match kg.load_drawers_with_skipped() {
+            Ok((d, skipped)) => {
+                if skipped > 0 {
+                    drawer_load_degraded = true;
+                    tracing::warn!(
+                        palace = %palace.id, skipped,
+                        "load_drawers skipped unreadable rows; corpus is degraded (partial)"
+                    );
+                }
+                d
+            }
             Err(e) => {
+                drawer_load_degraded = true;
                 tracing::warn!(palace = %palace.id, "load_drawers failed, falling back to L1 only: {e:#}");
                 Vec::new()
             }
@@ -408,6 +449,7 @@ impl PalaceHandle {
             vector_store: Arc::new(vector_store),
             kg: Arc::new(kg),
             drawers,
+            drawer_load_degraded,
             data_dir: Some(data_dir.clone()),
             decay_config: DecayConfig::default(),
             recall_log,
