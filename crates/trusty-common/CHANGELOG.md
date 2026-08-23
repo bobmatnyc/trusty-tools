@@ -6,6 +6,157 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.43.0] — 2026-08-23
+
+### Breaking
+
+- **`trusty_common::mcp` is gone, and there is no re-export shim** — the MCP protocol primitives now live in the new `trusty-mcp` crate. A consumer that used `trusty_common::mcp::{Request, Response, error_codes, initialize_response, run_stdio_loop, ServiceDescriptor, OpenRpcBuilder, ensure_daemon_up, ensure_daemon_up_single_flight, StartLock}` depends on `trusty-mcp` and imports `trusty_mcp::…` instead ([#5803](https://github.com/bobmatnyc/trusty-tools/issues/5803), ADR-0040)
+- **The `mcp` feature is replaced by `memory-rpc`**, which gates what stayed: `trusty_common::memory_rpc`, the discovery-based JSON-RPC client for the trusty-memory daemon — formerly `trusty_common::mcp::memory_rpc`. It stayed because it resolves the daemon's address through `trusty_common::daemon_addr` rather than owning any wire types
+- **`catchup` now implies `memory-rpc`** instead of `mcp`, and **`tickets` now pulls in `trusty-mcp`** for its stdio loop
+
+### Added
+
+- `env_vars::ENV_AUDIT_INVESTIGATE_MAX_FILES` and
+  `ENV_AUDIT_INVESTIGATE_MAX_BYTES`. `trusty-audit` writes these variables into
+  the `tga audit` child's environment and `trusty-review` reads them, so the two
+  spellings have to agree and neither crate may hold a literal of its own.
+- `inference::shape` (feature `inference-client`): `classify_model_shape`
+  answers which provider a model id belongs to from its spelling, and how
+  strongly. `accounts/fireworks/models/…` is Fireworks, any other
+  `vendor/model` slug is OpenRouter, and a region-scoped inference profile is
+  Bedrock — all `ShapeEvidence::Conclusive`, because each belongs to exactly one
+  catalogue. A dotted `vendor.model` id whose first segment is a known Bedrock
+  vendor is `Probable`: a vendor-name guess, not a catalogue fact.
+  `infer_provider_from_model_shape` is the same answer with the evidence
+  dropped, and returns `None` for an id that could be several providers'.
+  Two reconciliation checks read that: `shape_mismatch` reports any disagreement
+  with the provider about to execute the call, and `conclusive_shape_mismatch`
+  reports only the catalogue-fact kind. Which to call depends on where the
+  provider came from — a standing config default loses to any shape, while an
+  explicit per-call routing prefix is a human's statement about that call and
+  loses only to a catalogue fact. Call either only after stripping your own
+  routing prefixes; the same `anthropic/…` string is an OpenRouter slug to this
+  module and the Anthropic first-party family to `ProviderId::from_slug_prefix`.
+  `BEDROCK_INFERENCE_PROFILE_PREFIXES` moves here so trusty-review's Bedrock
+  model-id validator and this inference cannot disagree about the same string.
+- `derive_checkout_index_id` derives a collision-resistant trusty-search index
+  id for one checkout: the slugified basename plus 8 hex digits over the
+  canonical path, e.g. `trusty-tools-3fa9c1d2`. `derive_index_id` is the bare
+  basename, so two checkouts of one repository — an audit engagement's clone and
+  the operator's own tree — collide on a single id, and trusty-search's registry
+  is one `root_path` per id: the second checkout is silently served the first
+  one's content. It is deliberately pure, a function of the path and nothing
+  else, because `trusty-audit`, `trusty-review` and `tga` each derive this id in
+  a separate process and a component read from live git state (as
+  `derive_project_index_id` reads origin and operator) would let two of them
+  disagree. A path that cannot be canonicalised is normalised through
+  `Path::components`, so a trailing separator and a `path = "."` entry's
+  `<base>/.` still name one tree. `None` for a path with no final component.
+
+### Fixed
+
+- `compact_orphans` now re-confirms each candidate's liveness with a
+  per-candidate point lookup rather than a full `VECTOR_KEYS` scan inside the
+  delete transaction, so the write-lock hold stays O(candidates) instead of
+  O(live-count) — it no longer blocks concurrent upserts for a full live-table
+  scan on large palaces while still closing the #6195 TOCTOU.
+- `compact_orphans` no longer deletes a concurrently-upserted vector row as a
+  false orphan. It re-checks each candidate's liveness inside the delete
+  transaction, so a `VECTORS` row that is live at the moment of deletion is
+  never removed — closing a TOCTOU window where a drawer's embedding could be
+  dropped and the drawer left permanently unsearchable (#6195).
+- `ChatSessionStore` no longer silently discards a corrupt `history` blob as an
+  empty conversation (#6196). All three load paths previously did
+  `serde_json::from_str(...).unwrap_or_default()`, so a corrupt session was
+  indistinguishable from a genuinely-empty one — `get_session` returned
+  `Ok(Some(session))` with `history: []` and a chat-resume caller saw a normal
+  new session. Now `get_session` and `append_message`/`append_messages` return
+  the new `ChatSessionStoreError::CorruptHistory { id, source }` (append aborts
+  its write transaction, so the corrupt row is left intact for recovery rather
+  than clobbered), and `list_sessions` skips a corrupt row with a warn and a
+  count instead of listing it as a valid empty session.
+- The JIRA tickets backend no longer interpolates filter values into JQL
+  unescaped (#6198). Four methods built the `jql` string with raw `format!`:
+  `search_issues` (`query`, `assignee`, `labels`, `priority`) and `list_issues`
+  (`assignee`, `labels`) quoted their terms but did not escape, so a value with
+  a `"` closed the term and injected clauses; `get_milestone_issues`
+  (`fixVersion = {id}`) and `get_epic_issues` (`parent = {epic_id}`) were worse
+  — unquoted, so an `id`/`epic_id` of `1 OR project = SECRET` injected a live
+  clause with no quote-breakout needed, reading issues from a project the caller
+  could not otherwise reach. All four now build via pure `build_*_jql` helpers
+  that route every attacker-controlled value through a new `escape_jql_string`
+  (escapes backslash, double quote, and control characters) and quote every
+  term. `list_epics`' config-derived project key is escaped too for uniformity.
+  `state` was never affected — it maps through a closed match to fixed literals.
+- `FilterConfig` with a non-default `reject_patterns` set no longer recompiles
+  and `Box::leak`s its regex set on every `apply` call (#6199). A custom set is
+  now memoised process-wide keyed by its pattern strings, so each distinct set
+  compiles exactly once and callers get a cheap `Regex` clone — the default set
+  keeps its own shared cache. `Box::leak` is gone from the gate entirely. The
+  credential detector moved to a `filter::secret` submodule so the gate module
+  stays under the SLOC cap after the fix; behaviour is unchanged.
+- `PalaceHandle` now records when its drawer table loaded incompletely (#6201).
+  When `open_with_intent` fails open on drawer-load trouble the palace still
+  opens, but the returned handle was previously indistinguishable from a
+  genuinely-empty or fully-loaded palace, so a caller had no signal it was
+  missing corpus. The new `PalaceHandle::drawer_load_degraded` field is `true`
+  whenever any drawer row failed to load — both the whole-table Err path (empty
+  fallback) and the more common per-row-skip path, where `load_drawers` drops an
+  undecodable row (bad key, malformed value, invalid room_id/timestamp) and
+  returns the rest. `KnowledgeGraph::load_drawers_with_skipped` threads the
+  skipped-row count out for the open to see; `load_drawers` keeps its bare
+  `Vec<Drawer>` return, and the existing per-row and whole-table `warn!` logs are
+  kept.
+- Vector reclamation no longer deletes the vector of a drawer whose `remember`
+  is still in flight. A remember upserts the new drawer's vector before it
+  registers the drawer, and three reclamation paths snapshotted the valid-drawer
+  set and reclaimed "orphans" without the palace write lock: `palace_compact`,
+  the idle dream cycle's `compact_pass`, and its fallback index rebuild
+  (`rebuild_index_from_drawers`, which `reset()`s the whole index and re-adds
+  only the snapshotted drawers). A reclamation landing in the upsert→register
+  window saw the vector with no matching drawer and dropped it permanently. All
+  three now hold the write mutex across the snapshot and the reclamation
+  (`palace_compact` via the new `PalaceHandle::compact_vector_orphans`), so a
+  mid-flight drawer's vector can never be dropped under any interleaving (#6208).
+
+### Changed
+
+- `PayloadStore` now has a genuinely lazy read path (#6200). New public
+  `try_for_each_row(segment_filter, f)` decodes one row immediately before
+  handing it to the callback and pulls the next entry from redb only if the
+  callback continues, so an early `ControlFlow::Break` (or `Err`) reads and
+  decodes nothing past it. `load_all` becomes a thin wrapper that collects the
+  stream, so its behavior and signature are unchanged. The internal segment
+  scan behind `lookup_id_for_uuid` and `list_segment` no longer pre-collects the
+  whole segment into an owned `Vec`, and `lookup_id_for_uuid` now stops at the
+  first uuid match instead of always scanning the rest of the segment. This
+  removes the whole-table materialization a large palace incurred at startup
+  hydration.
+
+### Documentation
+
+- `http_client`'s module docs no longer break `cargo doc` for the whole
+  workspace (#6027). The module carries docs in two places — the `//!` header in
+  `http_client.rs` and the `///` block on `pub mod http_client;` in `lib.rs` —
+  and rustdoc merges both into one doc string whose link-resolution scope comes
+  from the first fragment, the `lib.rs` one. Every bare `[`loopback_client`]`-style
+  link in the `//!` header therefore resolved against the crate root and was not
+  found, and `#![deny(rustdoc::broken_intra_doc_links)]` turned that into
+  `error: could not document trusty-common`. The five links are now
+  crate-absolute; `blocking_loopback_client_builder` is intentionally left
+  unlinked because it does not exist when the `blocking-http` feature is off.
+- `memory_rpc`'s own module doc (`//!`) no longer breaks `cargo doc` for the
+  whole workspace. As with #6027's `http_client` fix, `memory_rpc.rs` carries
+  docs in two places — the `//!` header in the file and the `///` block on
+  `pub mod memory_rpc;` in `lib.rs` — and rustdoc merges both into one doc
+  string whose link-resolution scope comes from the first fragment, the
+  `lib.rs` one. The four bare `[`resolve_memory_base_url`]`-style links in the
+  `//!` header therefore resolved against the crate root and were not found,
+  which `#![deny(rustdoc::broken_intra_doc_links)]` turned into
+  `error: could not document trusty-common` under the full-feature build
+  `check_contracts.sh` runs. The four links are now crate-absolute
+  (`memory_rpc::…`).
+
 ## [0.39.0] — 2026-08-19
 
 ### Breaking
