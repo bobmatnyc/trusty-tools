@@ -215,7 +215,7 @@ fn a_remote_claim_about_a_local_finding_is_rewritten() {
     assert!(fixed.contains("local-process-reachable code-execution"));
     assert!(fixed.contains("A JQL injection adds a query-tampering vector."));
     assert_eq!(notes.len(), 1);
-    assert!(notes[0].contains("reachability wording was corrected"));
+    assert!(notes[0].text.contains("reachability wording was corrected"));
 }
 
 /// A remote claim this module cannot rewrite fails the field closed and names
@@ -308,7 +308,7 @@ fn instructions_that_countermand_a_guard_do_not_disable_it() {
         !fixed.to_lowercase().contains("remote"),
         "the guard must still strip the remote claim: {fixed}"
     );
-    assert!(notes[0].contains("reachability wording was corrected"));
+    assert!(notes[0].text.contains("reachability wording was corrected"));
 }
 
 // ─── Load-bearing post-check ─────────────────────────────────────────────────
@@ -597,9 +597,9 @@ fn a_no_clean_signal_claim_is_dropped_when_signals_exist() {
     assert_eq!(text, "Error handling is frequently fail-open or lossy.");
     assert_eq!(notes.len(), 1, "notes were: {notes:?}");
     assert!(
-        notes[0].contains("credits 1 of them"),
+        notes[0].text.contains("credits 1 of them"),
         "the note must state the measured count: {}",
-        notes[0]
+        notes[0].text
     );
 }
 
@@ -699,7 +699,7 @@ fn a_sibling_finding_inherits_its_files_loopback_scope() {
         "remote survived: {fixed}"
     );
     assert!(fixed.contains("local-process-reachable code execution"));
-    assert!(notes[0].contains("reachability wording was corrected"));
+    assert!(notes[0].text.contains("reachability wording was corrected"));
 }
 
 /// Tier 3, and what the live report actually held: NO finding on that file
@@ -944,4 +944,93 @@ fn a_line_suffix_does_not_split_a_component() {
         CONTROL_ROUTES
     );
     assert_eq!(normalize_component("   "), "");
+}
+
+// ─── #6082 lap 10: a rewrite may not emit ungrammatical debris ───────────────
+
+/// The lap-10 blocking defect, reconstructed from its live output.
+///
+/// Why: the graded report's Security Posture lead shipped "reachable by any
+/// process on the host rather than a any local process". The model's own
+/// sentence was fine — it followed the prompt hint and contrasted the host-local
+/// surface with a remote attacker — and the `remote attacker` rewrite dropped
+/// its replacement in without consuming the article in front of it, leaving a
+/// clause that also contrasts host-local reach with host-local reach.
+/// What: the pre-rewrite sentence that live line came from. The fixed pipeline
+/// either ships a grammatical sentence or withholds the field; `a any` reaches
+/// a reader in neither case.
+/// Test: this test itself.
+#[test]
+fn a_rewrite_never_ships_a_doubled_article() {
+    let g = Grounding::from_model(&loopback_model());
+    let prose = "The trusty-mpm control_routes session handlers perform no authentication; \
+                 these surfaces are loopback/localhost-scoped and thus reachable by any process \
+                 on the host rather than a remote attacker, but that is still a serious local \
+                 privilege boundary failure.";
+    match g.check(prose, None) {
+        GroundingOutcome::Rewritten(fixed, _) => {
+            assert!(!fixed.to_lowercase().contains("a any"), "debris: {fixed}");
+        }
+        GroundingOutcome::Rejected { reason, subject } => {
+            assert!(
+                reason.contains("could not be corrected"),
+                "reason: {reason}"
+            );
+            assert_eq!(
+                subject.as_deref(),
+                Some(
+                    "Control-plane HTTP session endpoints have no authentication or authorization"
+                )
+            );
+        }
+        GroundingOutcome::Clean => panic!("the remote claim must not pass through unexamined"),
+    }
+}
+
+/// A rewritten sentence that contrasts host-local reach with host-local reach
+/// states nothing, so the field is withheld rather than shipped.
+#[test]
+fn a_rewrite_that_contrasts_a_class_with_itself_is_withheld() {
+    let g = Grounding::from_model(&loopback_model());
+    let prose = "The trusty-mpm control_routes endpoints are reachable by any process on the \
+                 host rather than a remote attacker.";
+    let GroundingOutcome::Rejected { reason, subject } = g.check(prose, None) else {
+        panic!("expected a withholding, got {:?}", g.check(prose, None));
+    };
+    assert!(
+        reason.contains("could not be corrected"),
+        "reason: {reason}"
+    );
+    assert!(subject.is_some(), "the withholding must name its finding");
+}
+
+/// The article half on its own: a replacement opening with a determiner
+/// consumes the article in front of it, and the sentence still ships.
+#[test]
+fn a_rewrite_consumes_the_article_its_replacement_doubles() {
+    let g = Grounding::from_model(&loopback_model());
+    let prose = "The trusty-mpm control_routes endpoints can be driven by a remote attacker.";
+    let GroundingOutcome::Rewritten(fixed, notes) = g.check(prose, None) else {
+        panic!("expected a rewrite, got {:?}", g.check(prose, None));
+    };
+    assert_eq!(
+        fixed,
+        "The trusty-mpm control_routes endpoints can be driven by any local process."
+    );
+    assert_eq!(notes.len(), 1);
+}
+
+/// A corrected-wording disclosure names the finding it is about, so the reporter
+/// numbers it the way it already numbers the withheld lines (#6082 lap 10).
+#[test]
+fn a_correction_note_carries_the_finding_it_is_about() {
+    let g = Grounding::from_model(&loopback_model());
+    let prose = "The trusty-mpm control_routes endpoints can be driven by a remote attacker.";
+    let GroundingOutcome::Rewritten(_, notes) = g.check(prose, None) else {
+        panic!("expected a rewrite");
+    };
+    assert_eq!(
+        notes[0].subject.as_deref(),
+        Some("Control-plane HTTP session endpoints have no authentication or authorization")
+    );
 }

@@ -2351,13 +2351,19 @@ fn synthesize_rewrites_a_remote_claim_about_a_local_finding() {
         "the remote claim must not survive: {exec}"
     );
     assert!(exec.contains("local-process-reachable code-execution"));
-    assert!(
-        result
-            .notes
-            .iter()
-            .any(|n| n.text.contains("reachability wording was corrected")),
-        "the correction must be recorded: {:?}",
-        result.notes
+    let corrected = result
+        .notes
+        .iter()
+        .find(|n| n.text.contains("reachability wording was corrected"))
+        .unwrap_or_else(|| panic!("the correction must be recorded: {:?}", result.notes));
+    // #6082 lap 10: report-level prose belongs to no finding, so this note used
+    // to ship with no subject and cited its finding by title alone while the
+    // withheld lines beside it carried "section 5.1, RED finding 2". The
+    // grounding check knows which finding it corrected; carry that.
+    assert_eq!(
+        corrected.subject.as_deref(),
+        Some("Control-plane HTTP session endpoints have no authentication"),
+        "the corrected-wording note must name its finding: {corrected:?}"
     );
 }
 

@@ -66,7 +66,20 @@
 //! attributing access, attack, execution or exposure to the surface. A bare
 //! "network" in "a transient network error" still costs a reader nothing.
 //!
+//! #6082 lap 10 made the REWRITE itself fail closed. Until then a rewrite always
+//! shipped, and the graded report shipped "reachable by any process on the host
+//! rather than a any local process": the `remote attacker` rule spliced its
+//! replacement in without consuming the article in front of it, and the
+//! corrected clause then contrasted host-local reach with host-local reach.
+//! Two changes. A replacement opening with a determiner now takes the preceding
+//! article with the phrase it replaces, so no doubled article can be emitted;
+//! and every rewritten sentence is read by
+//! [`synthesize_grounding_text::grammar_debris`] before it may ship, which
+//! sends a doubled determiner or a self-contrast down the reject-and-disclose
+//! path instead. A visible withholding is the better of the two failures.
+//!
 //! [`synthesize_grounding_text::CLAIM_WORDS`]: super::synthesize_grounding_text::CLAIM_WORDS
+//! [`synthesize_grounding_text::grammar_debris`]: super::synthesize_grounding_text::grammar_debris
 //!
 //! Test: `synthesize_grounding_tests.rs`.
 
@@ -74,8 +87,8 @@ use std::collections::BTreeSet;
 
 use super::model::ReportModel;
 use super::synthesize_grounding_text::{
-    asserts_reachability, asserts_reachability_claim, contains_name, remove_sentence,
-    rewrite_reachability, sentences, subject_tokens,
+    asserts_reachability, asserts_reachability_claim, contains_name, grammar_debris,
+    remove_sentence, rewrite_reachability, sentences, subject_tokens,
 };
 use super::topology::CrateTopology;
 
@@ -274,15 +287,15 @@ struct Staged {
 /// keeps the model's paragraph with one claim corrected, the second drops it
 /// entirely — and the caller records a different note for each.
 /// What: `Clean` passes the text through untouched; `Rewritten` carries the
-/// corrected text plus one note per correction; `Rejected` carries the reason
-/// the field cannot ship.
+/// corrected text plus one [`Correction`] per correction; `Rejected` carries the
+/// reason the field cannot ship.
 /// Test: `synthesize_grounding_tests.rs`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum GroundingOutcome {
     /// Nothing contradicted the model's data.
     Clean,
-    /// The text was corrected; the notes name each correction.
-    Rewritten(String, Vec<String>),
+    /// The text was corrected; the corrections name what changed.
+    Rewritten(String, Vec<Correction>),
     /// The field cannot be corrected safely and must be dropped.
     ///
     /// `subject` is the §5.1/§5.2 finding the refused claim was about, when the
@@ -296,6 +309,27 @@ pub(crate) enum GroundingOutcome {
         /// The finding title the reporter resolves to a rendered number.
         subject: Option<String>,
     },
+}
+
+/// One disclosure that the guardrail changed the model's prose, and the finding
+/// it changed it about.
+///
+/// Why: a corrected-wording line and a withheld line are the same kind of
+/// disclosure to a reader, so both must point at the same numbered §5.1/§5.2
+/// row. Only the withheld path carried its subject, and the graded lap-10 report
+/// showed the split in one block: two lines reading "section 5.1, RED finding 2"
+/// beside a corrected-wording line that quoted a title and left the reader to
+/// find it (#6082 lap 10).
+/// What: `text` is the complete reader sentence; `subject` is the finding title
+/// the reporter resolves to a number, absent when the correction was about no
+/// single finding.
+/// Test: `synthesize_grounding_tests.rs::a_correction_note_carries_the_finding_it_is_about`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Correction {
+    /// The disclosure, as the reader sees it.
+    pub(crate) text: String,
+    /// The finding this correction was about, when it was about one.
+    pub(crate) subject: Option<String>,
 }
 
 /// The grounding facts one report's synthesis is checked against.
@@ -578,7 +612,7 @@ impl Grounding {
     /// otherwise-grounded prose.
     /// Test: `synthesize_grounding_tests.rs::{a_no_clean_signal_claim_is_dropped_when_signals_exist,
     /// a_no_clean_signal_claim_survives_when_there_are_none}`.
-    fn drop_false_no_clean_signal(&self, text: &str) -> (String, Vec<String>) {
+    fn drop_false_no_clean_signal(&self, text: &str) -> (String, Vec<Correction>) {
         if self.clean_signals == 0 {
             return (text.to_string(), Vec::new());
         }
@@ -596,11 +630,16 @@ impl Grounding {
                 continue;
             }
             out = remove_sentence(&out, sentence);
-            notes.push(format!(
-                "a sentence claiming no clean signal was credited was dropped — the Security \
-                 Posture section credits {} of them, each with the file it was read from",
-                self.clean_signals
-            ));
+            // A clean-signal claim is about the report's own GREEN list, not
+            // about any one §5.x finding, so there is no subject to number.
+            notes.push(Correction {
+                text: format!(
+                    "a sentence claiming no clean signal was credited was dropped — the Security \
+                     Posture section credits {} of them, each with the file it was read from",
+                    self.clean_signals
+                ),
+                subject: None,
+            });
         }
         (out.trim().to_string(), notes)
     }
@@ -684,22 +723,32 @@ impl Grounding {
                 },
             };
             let corrected = rewrite_reachability(sentence);
-            if asserts_reachability(&corrected) {
+            // #6082 lap 10: a rewrite that leaves the sentence ungrammatical, or
+            // contrasting one reachability class with itself, takes the same
+            // withhold path as a claim no rewrite reaches.
+            let debris = grammar_debris(&corrected);
+            if asserts_reachability(&corrected) || debris.is_some() {
+                let detail = debris.unwrap_or_else(|| {
+                    "the report's own evidence scopes that surface to localhost".to_string()
+                });
                 return GroundingOutcome::Rejected {
                     reason: format!(
                         "a beyond-the-host reachability claim about '{}' could not be corrected \
-                         safely — the report's own evidence scopes that surface to localhost",
+                         safely — {detail}",
                         finding.title
                     ),
                     subject: Some(finding.title.clone()),
                 };
             }
             out = out.replace(sentence, &corrected);
-            notes.push(format!(
-                "the beyond-the-host reachability wording was corrected — the report's own \
-                 evidence scopes '{}' to a loopback-only surface",
-                finding.title
-            ));
+            notes.push(Correction {
+                text: format!(
+                    "the beyond-the-host reachability wording was corrected — the report's own \
+                     evidence scopes '{}' to a loopback-only surface",
+                    finding.title
+                ),
+                subject: Some(finding.title.clone()),
+            });
         }
         match notes.is_empty() {
             true => GroundingOutcome::Clean,
