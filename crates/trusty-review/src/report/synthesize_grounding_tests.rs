@@ -454,3 +454,169 @@ fn replacement_is_case_insensitive_and_otherwise_verbatim() {
         "A X risk"
     );
 }
+
+// ─── Network reachability, and the vocabulary that closes the class (lap 7) ───
+
+/// The lap-7 live defect, verbatim: RED finding 2's business impact at line 120
+/// of the graded report.
+const LIVE_NETWORK_IMPACT: &str = "An unauthenticated actor on the network or host can launch arbitrary claude commands in \
+     arbitrary workdirs, stop others' sessions, or exfiltrate session state.";
+
+/// The two live findings that make the network claim checkable: the
+/// loopback-scoped admin-stop endpoint states the reach, and the control-plane
+/// finding's business impact contradicts it. They share the token `stop`.
+fn network_claim_investigation() -> Investigation {
+    let mut inv = control_routes_investigation();
+    inv.repos[0].findings[0].business_impact = LIVE_NETWORK_IMPACT.to_string();
+    inv.repos[0].findings.push(VerifiedFinding {
+        trace_verdict: String::new(),
+        title: "Admin stop endpoint trusts every caller with no authentication".to_string(),
+        severity: Severity::Amber,
+        dimension: "authentication & secrets".to_string(),
+        file: "crates/trusty-search/src/service/server/admin.rs".to_string(),
+        line: Some(74),
+        evidence_quote: "The daemon is\n/// localhost-only and trusts every caller, so no auth \
+                         is required."
+            .to_string(),
+        description: "The graceful-shutdown endpoint POST /admin/stop performs no \
+                      authentication, relying only on a localhost binding assumption."
+            .to_string(),
+        business_impact: "Any local process can shut down the daemon.".to_string(),
+        remediation: "Add a shared-secret or loopback-token check to admin endpoints rather \
+                      than relying on localhost-only assumptions."
+            .to_string(),
+        cost_effort: "medium".to_string(),
+    });
+    inv
+}
+
+/// The live sentence states host-local reach after the guard runs.
+///
+/// Fails before the fix: no phrase in `REACHABILITY_REWRITES` matched "on the
+/// network or host", so the sentence never reached the check at all and `check`
+/// returned `Clean` with the network claim intact.
+#[test]
+fn the_live_network_reachability_claim_is_rewritten() {
+    let mut model = model_with(vec![repo("estate", vec![], None)]);
+    model.investigation = Some(network_claim_investigation());
+    let GroundingOutcome::Rewritten(text, notes) =
+        Grounding::from_model(&model).check(LIVE_NETWORK_IMPACT)
+    else {
+        panic!("expected the live network claim to be rewritten");
+    };
+    assert!(
+        !text.to_lowercase().contains("network"),
+        "the corrected sentence still asserts network reach: {text}"
+    );
+    assert!(
+        text.contains("An unauthenticated actor on the host can launch arbitrary claude"),
+        "the correction must state host-local reach: {text}"
+    );
+    assert_eq!(notes.len(), 1, "notes were: {notes:?}");
+}
+
+/// A network spelling this module cannot rewrite is REJECTED, not shipped.
+///
+/// This is the whole point of keying the trigger off the word vocabulary: the
+/// unknown spelling is the case that must fail closed, because it is the case
+/// that has shipped three laps running.
+#[test]
+fn an_unrewritable_network_claim_is_rejected() {
+    let mut model = model_with(vec![repo("estate", vec![], None)]);
+    model.investigation = Some(network_claim_investigation());
+    let outcome = Grounding::from_model(&model)
+        .check("Any host with network line-of-sight can stop a running session.");
+    assert!(
+        matches!(outcome, GroundingOutcome::Rejected(_)),
+        "expected rejection, got: {outcome:?}"
+    );
+}
+
+/// Plural before singular: rewriting `remote attacker` first would leave
+/// `any local processs` behind.
+#[test]
+fn a_plural_attacker_phrase_rewrites_cleanly() {
+    assert_eq!(
+        rewrite_reachability("Remote attackers can stop the daemon."),
+        "any local process can stop the daemon."
+    );
+}
+
+// ─── Clean-signal contradiction (lap 7) ──────────────────────────────────────
+
+/// A GREEN security finding carrying a citation, which is what the Security
+/// Posture section credits as a clean signal.
+fn clean_signal_model() -> ReportModel {
+    let mut model = model_with(vec![repo(
+        "estate",
+        vec![MetricFinding {
+            title: "Constant-time comparison for the relay shared secret".to_string(),
+            severity: Severity::Green,
+            category: crate::report::investigate::SECURITY_DIMENSION.to_string(),
+            component: "crates/trusty-agents/src/relay.rs:136".to_string(),
+            description: String::new(),
+            remediation: String::new(),
+        }],
+        None,
+    )]);
+    model.gaps.clear();
+    model
+}
+
+/// The live contradiction: the paragraph's closing sentence said no clean
+/// signal was credited while the section listed eighteen.
+///
+/// Fails before the fix: `check` knows nothing about clean signals and returns
+/// `Clean`, so the sentence renders directly above the list that refutes it.
+#[test]
+fn a_no_clean_signal_claim_is_dropped_when_signals_exist() {
+    let prose = "Error handling is frequently fail-open or lossy. No clean security signal is \
+                 credited here.";
+    let GroundingOutcome::Rewritten(text, notes) =
+        Grounding::from_model(&clean_signal_model()).check(prose)
+    else {
+        panic!("expected the false no-clean-signal claim to be dropped");
+    };
+    assert_eq!(text, "Error handling is frequently fail-open or lossy.");
+    assert_eq!(notes.len(), 1, "notes were: {notes:?}");
+    assert!(
+        notes[0].contains("credits 1 of them"),
+        "the note must state the measured count: {}",
+        notes[0]
+    );
+}
+
+/// The same sentence is CORRECT for a report that credits none, and survives.
+#[test]
+fn a_no_clean_signal_claim_survives_when_there_are_none() {
+    let model = model_with(vec![repo("estate", vec![], None)]);
+    assert_eq!(
+        Grounding::from_model(&model).check("No clean security signal is credited here."),
+        GroundingOutcome::Clean
+    );
+}
+
+/// An uncited GREEN is not credited by the Security Posture section, so the
+/// guardrail must not count it either.
+#[test]
+fn an_uncited_green_is_not_counted_as_a_clean_signal() {
+    let mut model = clean_signal_model();
+    model.repositories[0]
+        .metrics
+        .as_mut()
+        .expect("metrics")
+        .findings[0]
+        .component = String::new();
+    assert_eq!(
+        Grounding::from_model(&model).check("No clean security signal is credited here."),
+        GroundingOutcome::Clean
+    );
+}
+
+/// The prompt states the measured count so the model never writes the claim.
+#[test]
+fn prompt_facts_state_the_clean_signal_count() {
+    let facts = Grounding::from_model(&clean_signal_model()).prompt_facts();
+    assert!(facts.contains("credits 1 GREEN security finding(s)"));
+    assert!(facts.contains("Never write that no clean signal was found"));
+}

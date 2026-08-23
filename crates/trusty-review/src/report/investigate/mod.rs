@@ -499,6 +499,7 @@ pub fn apply_investigation(model: &mut ReportModel, inv: &Investigation) {
             });
         }
     }
+    model.gaps.extend(batch_gap_lines(inv));
     model.gaps.extend(verdict_gap_lines(inv));
     model.investigation = Some(inv.clone());
 }
@@ -569,6 +570,70 @@ fn verdict_gap_lines(inv: &Investigation) -> Vec<String> {
 
 /// How many distinct unverifiable reasons one gap line names.
 const MAX_GAP_REASONS: usize = 3;
+
+/// How many files one batch-failure gap line names before it summarises.
+const MAX_GAP_BATCH_FILES: usize = 20;
+
+/// One Gaps & Caveats line per repository whose investigation lost a batch
+/// (#6082 lap 7).
+///
+/// Why: the batch failures were already disclosed twice — in the executive
+/// summary, which is the model's prose, and in the Investigation Coverage
+/// appendix, which is the last section of the report. Gaps & Caveats is the
+/// section whose whole purpose is the complete caveat list, and it did not
+/// carry them. The graded report lost `linear/backend.rs` that way: a reader
+/// working the caveat list had no way to learn that four batches of files were
+/// read and produced nothing.
+/// What: nothing for a repository whose every batch succeeded; otherwise one
+/// line naming the failed count, the total, the batch positions, the distinct
+/// reasons, and the files those batches carried — the same data
+/// `render::batch_lines` renders, from the same `Coverage`. The file list is
+/// capped so a run that loses many batches cannot flood the section.
+/// Test: `batch_gap_tests::{failed_batches_reach_the_gaps_line,
+/// a_fully_succeeded_investigation_adds_no_batch_gap_line,
+/// a_long_batch_file_list_is_capped}`.
+fn batch_gap_lines(inv: &Investigation) -> Vec<String> {
+    let mut out = Vec::new();
+    for repo in &inv.repos {
+        let c = &repo.coverage;
+        if c.batches_failed.is_empty() {
+            continue;
+        }
+        let mut reasons: Vec<&str> = Vec::new();
+        let mut files: Vec<&str> = Vec::new();
+        for b in &c.batches_failed {
+            let r = b.reason.as_str();
+            if !reasons.contains(&r) && reasons.len() < MAX_GAP_REASONS {
+                reasons.push(r);
+            }
+            files.extend(b.files.iter().map(String::as_str));
+        }
+        let positions: Vec<String> = c
+            .batches_failed
+            .iter()
+            .map(|b| b.index.to_string())
+            .collect();
+        let shown = files.len().min(MAX_GAP_BATCH_FILES);
+        let overflow = match files.len() - shown {
+            0 => String::new(),
+            n => format!(", and {n} more listed under Investigation Coverage"),
+        };
+        out.push(format!(
+            "Investigation batches ({}): {} of {} batch(es) were sent but their analysis \
+             truncated or failed ({}) — batch(es) {}. The {} file(s) they carried were read and \
+             produced no finding: {}{}. Read their absence as unassessed, not as clean.",
+            repo.name,
+            c.batches_failed.len(),
+            c.batches_total,
+            reasons.join("; "),
+            positions.join(", "),
+            files.len(),
+            files[..shown].join(", "),
+            overflow,
+        ));
+    }
+    out
+}
 
 /// Scrub one verified finding's prose on its way into [`FindingProse`] (#5323).
 ///
@@ -669,6 +734,106 @@ pub fn merge_investigation_prose(synthesis: &mut Synthesis, inv: &Investigation)
 /// Test: `render_tests` (section content) + `reporter_tests` (absent → empty).
 pub fn report_sections(model: &ReportModel) -> String {
     render::report_sections(model)
+}
+
+#[cfg(test)]
+mod batch_gap_tests {
+    use super::*;
+
+    fn repo_with(batches: Vec<BatchNote>) -> RepoInvestigation {
+        RepoInvestigation {
+            slug: "app".to_string(),
+            name: "App".to_string(),
+            status: InvestigationStatus::Available,
+            findings: Vec::new(),
+            deps: Default::default(),
+            coverage: Coverage {
+                batches_total: 31,
+                batches_succeeded: 31 - batches.len(),
+                batches_failed: batches,
+                ..Default::default()
+            },
+            traces: None,
+            verdicts: None,
+        }
+    }
+
+    fn note(index: usize, files: &[&str]) -> BatchNote {
+        BatchNote {
+            index,
+            batch_count: 31,
+            files: files.iter().map(|f| f.to_string()).collect(),
+            reason: "unparseable response".to_string(),
+        }
+    }
+
+    /// The blocking defect: the batch failures were disclosed in the executive
+    /// summary and in the coverage appendix, and NOT in the section whose whole
+    /// purpose is the complete caveat list.
+    ///
+    /// Fails before the fix — `model.gaps` carried no batch line at all, so
+    /// `linear/backend.rs` was lost with nothing in Gaps & Caveats to say so.
+    #[test]
+    fn failed_batches_reach_the_gaps_line() {
+        let inv = Investigation {
+            repos: vec![repo_with(vec![
+                note(
+                    1,
+                    &["crates/trusty-common/src/memory_core/store/hnsw_store.rs"],
+                ),
+                note(
+                    17,
+                    &["crates/trusty-common/src/tickets/api/backends/linear/backend.rs"],
+                ),
+            ])],
+        };
+        let lines = batch_gap_lines(&inv);
+        assert_eq!(lines.len(), 1, "lines were: {lines:?}");
+        assert!(lines[0].contains("2 of 31 batch(es)"), "{}", lines[0]);
+        assert!(lines[0].contains("batch(es) 1, 17"), "{}", lines[0]);
+        assert!(
+            lines[0].contains("backends/linear/backend.rs"),
+            "the lost file must be named: {}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains("Read their absence as unassessed, not as clean."),
+            "{}",
+            lines[0]
+        );
+    }
+
+    /// A run whose every batch succeeded adds nothing, so an unaffected report
+    /// renders byte-identically.
+    #[test]
+    fn a_fully_succeeded_investigation_adds_no_batch_gap_line() {
+        let inv = Investigation {
+            repos: vec![repo_with(Vec::new())],
+        };
+        assert!(batch_gap_lines(&inv).is_empty());
+    }
+
+    /// A run that loses many batches summarises the tail rather than flooding
+    /// the caveat list.
+    #[test]
+    fn a_long_batch_file_list_is_capped() {
+        let files: Vec<String> = (0..30).map(|i| format!("src/f{i}.rs")).collect();
+        let refs: Vec<&str> = files.iter().map(String::as_str).collect();
+        let inv = Investigation {
+            repos: vec![repo_with(vec![note(3, &refs)])],
+        };
+        let lines = batch_gap_lines(&inv);
+        assert!(
+            lines[0].contains("The 30 file(s) they carried"),
+            "{}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains("and 10 more listed under Investigation Coverage"),
+            "{}",
+            lines[0]
+        );
+    }
 }
 
 #[cfg(test)]

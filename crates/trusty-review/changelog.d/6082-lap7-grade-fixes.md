@@ -1,0 +1,7 @@
+Fixed
+- The reachability guardrail now catches a claim of network reach, not only the word "remote". What makes a sentence its business is a vocabulary of reachability words rather than a table of known phrases, so a spelling it cannot rewrite is rejected and disclosed instead of shipped — the failure that let "an unauthenticated actor on the network or host" through for a daemon bound to 127.0.0.1.
+- A Security Posture paragraph claiming no clean signal was credited is dropped when the section credits some, and the synthesis prompt now states the measured count so the model has no reason to write the claim.
+- The template's closing signature moves to the true end of the report. It used to sign off three sections early, above Synthesis Status, Dependency Inventory and Investigation Coverage.
+- Synthesis Status names the section 5.2 finding a withheld narrative belonged to and says the narrative could not be verified against the collected data, replacing wording that described the matcher rather than the report.
+- Investigation Coverage states how the verified-finding count adds up to what section 5.2 renders: verified findings plus the complexity findings trusty-analyze measures mechanically.
+- A truncated or failed investigation batch is now disclosed in Gaps & Caveats, naming the batches and the files they carried. It was disclosed only in the executive summary and the coverage appendix.

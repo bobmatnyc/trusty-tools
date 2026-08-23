@@ -14,6 +14,32 @@ use crate::report::investigate::verify::VerifiedFinding;
 use crate::report::investigate::{BatchNote, Budget, FindingVerdict, VerdictSet};
 use crate::report::metrics::Severity;
 
+/// A model carrying no repositories — the coverage section's reconciliation
+/// line needs a rendered-metrics lookup, and these cases assert the bullets
+/// around it.
+fn empty_model() -> crate::report::model::ReportModel {
+    crate::report::model::ReportModel {
+        title: "Test".to_string(),
+        template: "report-technical-dd".to_string(),
+        analyst: None,
+        client: None,
+        vendor_methodology: crate::report::model::vendor_methodology(),
+        inference: None,
+        instructions: None,
+        instructions_source: None,
+        report_date: "2026-08-21".to_string(),
+        generated_date: "2026-08-21".to_string(),
+        manifest_path: "manifest.toml".to_string(),
+        repositories: Vec::new(),
+        gaps: Vec::new(),
+        synthesis: None,
+        benchmark: None,
+        investigation: None,
+        section_instructions: Default::default(),
+        ticketing: None,
+    }
+}
+
 fn dep(name: &str, locked: Option<&str>) -> Dependency {
     Dependency {
         name: name.to_string(),
@@ -87,7 +113,7 @@ fn coverage_section_states_the_trace_counts() {
         no_trace: 13,
         limits: crate::report::investigate::TraceLimits::default(),
     });
-    let out = coverage_lines(&r);
+    let out = coverage_lines(&r, None);
     assert!(
         out.contains("- traces assembled: 17 of 30 candidate findings (13 no-trace)\n"),
         "{out}"
@@ -97,11 +123,10 @@ fn coverage_section_states_the_trace_counts() {
 /// A report from before the trace pass renders byte-identically.
 #[test]
 fn coverage_section_omits_the_trace_line_without_traces() {
-    let out = coverage_lines(&repo(
-        InvestigationStatus::Available,
-        vec![finding()],
-        deps_none(),
-    ));
+    let out = coverage_lines(
+        &repo(InvestigationStatus::Available, vec![finding()], deps_none()),
+        None,
+    );
     assert!(!out.contains("traces assembled"), "{out}");
 }
 
@@ -146,11 +171,14 @@ fn with_verdicts(verdicts: Vec<FindingVerdict>) -> RepoInvestigation {
 /// What: one summary line, and the model that judged them.
 #[test]
 fn coverage_section_states_the_verdict_counts() {
-    let out = coverage_lines(&with_verdicts(vec![
-        verdict(Verdict::Confirmed, "A", "supported at line 12"),
-        verdict(Verdict::Cleared, "B", "guarded at line 41"),
-        verdict(Verdict::Unverifiable, "C", "no verdict: verifier timeout"),
-    ]));
+    let out = coverage_lines(
+        &with_verdicts(vec![
+            verdict(Verdict::Confirmed, "A", "supported at line 12"),
+            verdict(Verdict::Cleared, "B", "guarded at line 41"),
+            verdict(Verdict::Unverifiable, "C", "no verdict: verifier timeout"),
+        ]),
+        None,
+    );
     assert!(
         out.contains("- trace verdicts: 1 confirmed, 1 cleared, 1 unverifiable of 3 traced\n"),
         "{out}"
@@ -168,15 +196,18 @@ fn coverage_section_states_the_verdict_counts() {
 /// carry their verdict at the finding itself and are not repeated here.
 #[test]
 fn coverage_section_names_every_cleared_and_unverifiable_finding() {
-    let out = coverage_lines(&with_verdicts(vec![
-        verdict(Verdict::Confirmed, "Confirmed one", "supported"),
-        verdict(Verdict::Cleared, "Cleared one", "guarded at line 41"),
-        verdict(
-            Verdict::Unverifiable,
-            "Unclear one",
-            "no verdict: verifier timeout",
-        ),
-    ]));
+    let out = coverage_lines(
+        &with_verdicts(vec![
+            verdict(Verdict::Confirmed, "Confirmed one", "supported"),
+            verdict(Verdict::Cleared, "Cleared one", "guarded at line 41"),
+            verdict(
+                Verdict::Unverifiable,
+                "Unclear one",
+                "no verdict: verifier timeout",
+            ),
+        ]),
+        None,
+    );
     assert!(
         out.contains("  - cleared: Cleared one — guarded at line 41\n"),
         "{out}"
@@ -194,11 +225,10 @@ fn coverage_section_names_every_cleared_and_unverifiable_finding() {
 /// A report from before the verdict pass renders byte-identically.
 #[test]
 fn coverage_section_omits_the_verdict_line_without_verdicts() {
-    let out = coverage_lines(&repo(
-        InvestigationStatus::Available,
-        vec![finding()],
-        deps_none(),
-    ));
+    let out = coverage_lines(
+        &repo(InvestigationStatus::Available, vec![finding()], deps_none()),
+        None,
+    );
     assert!(!out.contains("trace verdicts"), "{out}");
 }
 
@@ -243,7 +273,7 @@ fn coverage_section_states_examined_and_rejected() {
             DependencyInventory::default(),
         )],
     };
-    let out = coverage_section(&investigation);
+    let out = coverage_section(&empty_model(), &investigation);
     assert!(out.contains("## Investigation Coverage"));
     // #6078: the percentage is part of this line, not a new section.
     assert!(
@@ -275,7 +305,7 @@ fn coverage_section_states_the_attributed_only_shortfall() {
     inv.repos[0].coverage.attributed_only = true;
     inv.repos[0].coverage.files_examined = 3;
     inv.repos[0].coverage.budget.max_files = 40;
-    let out = coverage_section(&inv);
+    let out = coverage_section(&empty_model(), &inv);
     assert!(
         out.contains(
             "attributed-only selection: 3 of 40 budgeted file(s) carried search or complexity \
@@ -290,7 +320,7 @@ fn coverage_section_states_the_attributed_only_shortfall() {
     full.repos[0].coverage.files_examined = 40;
     full.repos[0].coverage.budget.max_files = 40;
     assert!(
-        !coverage_section(&full).contains("attributed-only selection"),
+        !coverage_section(&empty_model(), &full).contains("attributed-only selection"),
         "a filled budget states no shortfall"
     );
 }
@@ -303,17 +333,20 @@ fn coverage_section_states_the_attributed_only_shortfall() {
 /// Test: this test itself.
 #[test]
 fn coverage_section_names_the_discovery_source() {
-    let out = coverage_section(&discovered(
-        9,
-        vec![DimensionCoverage {
-            dimension: "error handling".to_string(),
-            files_examined: 4,
-            example: Some(
-                "src/err.rs (trusty-search hit for \"error swallowed\" (score 0.77, line 12))"
-                    .to_string(),
-            ),
-        }],
-    ));
+    let out = coverage_section(
+        &empty_model(),
+        &discovered(
+            9,
+            vec![DimensionCoverage {
+                dimension: "error handling".to_string(),
+                files_examined: 4,
+                example: Some(
+                    "src/err.rs (trusty-search hit for \"error swallowed\" (score 0.77, line 12))"
+                        .to_string(),
+                ),
+            }],
+        ),
+    );
     assert!(
         out.contains("evidence discovery: 9 of 12 examined file(s) came from manifest-declared evidence queries"),
         "{out}"
@@ -332,7 +365,7 @@ fn coverage_section_names_the_discovery_source() {
 /// Test: this test itself.
 #[test]
 fn coverage_section_names_the_heuristic_degradation() {
-    let out = coverage_section(&discovered(0, Vec::new()));
+    let out = coverage_section(&empty_model(), &discovered(0, Vec::new()));
     assert!(
         out.contains("evidence discovery: path-name heuristics only"),
         "{out}"
@@ -352,7 +385,7 @@ fn coverage_section_names_skip_reason() {
             DependencyInventory::default(),
         )],
     };
-    let out = coverage_section(&investigation);
+    let out = coverage_section(&empty_model(), &investigation);
     assert!(out.contains("investigation: skipped (no readable source files)"));
 }
 
@@ -400,7 +433,7 @@ fn coverage_prompt_summary_and_section_agree_on_counts() {
     let counts = "2 verified finding(s) (1 RED/AMBER evidence-backed, 1 clean signals)";
     let summary = investigation.coverage_prompt_summary();
     assert!(summary.contains(counts), "prompt summary: {summary}");
-    let section = coverage_section(&investigation);
+    let section = coverage_section(&empty_model(), &investigation);
     assert!(
         section.contains("verified findings: 2 (1 RED/AMBER evidence-backed, 1 clean signals)"),
         "coverage section: {section}"
@@ -491,7 +524,7 @@ fn coverage_section_reports_batch_failure() {
     let investigation = Investigation {
         repos: vec![repo_inv],
     };
-    let out = coverage_section(&investigation);
+    let out = coverage_section(&empty_model(), &investigation);
     assert!(out.contains("batches: 4 total, 3 succeeded, 1 truncated/failed"));
     assert!(out.contains("batch 2 of 4"));
     assert!(out.contains("truncated (even after concise retry)"));
@@ -524,4 +557,93 @@ fn coverage_prompt_summary_names_failed_batch() {
     let summary = investigation.coverage_prompt_summary();
     assert!(summary.contains("batch 2 of 4 truncated/failed"));
     assert!(summary.contains("truncated (even after concise retry)"));
+}
+
+// ─── Verified-vs-rendered reconciliation (#6082 lap 7) ───────────────────────
+
+/// A repository whose metrics carry `red`/`amber`/`green` rendered entries.
+fn model_rendering(red: usize, amber: usize, green: usize) -> crate::report::model::ReportModel {
+    let mut model = empty_model();
+    let mut findings = Vec::new();
+    for (n, severity) in [
+        (red, Severity::Red),
+        (amber, Severity::Amber),
+        (green, Severity::Green),
+    ] {
+        for i in 0..n {
+            findings.push(crate::report::metrics::MetricFinding {
+                title: format!("{severity:?} {i}"),
+                severity,
+                category: "maintainability".to_string(),
+                component: format!("src/f{i}.rs"),
+                description: String::new(),
+                remediation: String::new(),
+            });
+        }
+    }
+    model
+        .repositories
+        .push(crate::report::model::RepositoryReport {
+            name: "App".to_string(),
+            slug: "app".to_string(),
+            source: "/tmp/app".to_string(),
+            source_kind: "local_path".to_string(),
+            username: None,
+            git_ref: None,
+            git_info: None,
+            local_path: None,
+            scan: None,
+            metrics: Some(crate::report::metrics::AnalyzeMetrics {
+                findings,
+                ..Default::default()
+            }),
+            analyze_gap: None,
+            authorship: None,
+            inspect_priority: Vec::new(),
+            crate_topology: None,
+        });
+    model
+}
+
+/// The coverage section states how the verified count adds up to the rendered
+/// one.
+///
+/// Fails before the fix: the section said "verified findings: 3" beside a
+/// section 5.2 carrying 5 entries, with nothing on the page connecting them.
+#[test]
+fn coverage_reconciles_verified_against_rendered() {
+    let mut repo_inv = repo(
+        InvestigationStatus::Available,
+        vec![finding(), finding(), finding()],
+        DependencyInventory::default(),
+    );
+    repo_inv.slug = "app".to_string();
+    let inv = Investigation {
+        repos: vec![repo_inv],
+    };
+    let out = coverage_section(&model_rendering(1, 3, 1), &inv);
+    assert!(
+        out.contains(
+            "- section 5.2 reconciliation: 3 investigation-verified finding(s) + 2 finding(s) \
+             trusty-analyze measured mechanically = 5 entries rendered (1 RED, 3 AMBER, 1 GREEN)"
+        ),
+        "the reconciliation must state numbers that sum:\n{out}"
+    );
+}
+
+/// A rendered set smaller than the verified set is an arithmetic this line
+/// cannot explain, so it renders nothing rather than a false sum.
+#[test]
+fn coverage_omits_the_reconciliation_when_it_would_not_add_up() {
+    let mut repo_inv = repo(
+        InvestigationStatus::Available,
+        vec![finding(), finding(), finding()],
+        DependencyInventory::default(),
+    );
+    repo_inv.slug = "app".to_string();
+    let inv = Investigation {
+        repos: vec![repo_inv],
+    };
+    let out = coverage_section(&model_rendering(0, 1, 0), &inv);
+    assert!(!out.contains("reconciliation"), "{out}");
 }
