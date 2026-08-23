@@ -6,7 +6,8 @@
 //! findings, reports or reachability tiers, and nothing else in the module
 //! depends on them beyond calling them.
 //! What: sentence splitting and splicing, subject-token extraction,
-//! boundary-aware name matching, and the case-insensitive rewrite pass.
+//! boundary-aware name matching, the case-insensitive rewrite pass, and the
+//! grammar check that decides whether a rewritten sentence may ship.
 //! Test: `synthesize_grounding_tests.rs` exercises each through the guardrail
 //! and directly.
 
@@ -133,13 +134,186 @@ pub(super) fn contains_name(haystack: &str, needle: &str) -> bool {
     })
 }
 
+/// Determiners a replacement may open with.
+///
+/// A replacement starting with one of these cannot follow an article: splicing
+/// `any local process` in where `remote attacker` stood leaves `a any local
+/// process` unless the article in front is consumed with the phrase (#6082 lap
+/// 10).
+const LEADING_DETERMINERS: &[&str] = &["a", "an", "the", "any", "every", "each", "some", "no"];
+
+/// The articles [`splice_ignore_case`] consumes ahead of such a replacement.
+const CONSUMED_ARTICLES: &[&str] = &["a", "an", "the"];
+
+/// Contrast joiners a rewritten sentence is read across for a self-contrast.
+const CONTRAST_MARKERS: &[&str] = &[" rather than ", " instead of "];
+
+/// Phrases that place a surface on this host.
+///
+/// Read only on a sentence the rewrite pass changed, and only to ask whether
+/// both sides of a contrast landed in the same class.
+const HOST_LOCAL_PHRASES: &[&str] = &[
+    "on the host",
+    "on this host",
+    "any local process",
+    "local process",
+    "local-process",
+    "host-local",
+    "localhost",
+    "loopback",
+    "local socket",
+    "local-socket",
+];
+
 /// Apply every known reachability rewrite to one sentence, case-insensitively.
 pub(super) fn rewrite_reachability(sentence: &str) -> String {
     let mut out = sentence.to_string();
     for (phrase, replacement) in REACHABILITY_REWRITES {
-        out = replace_ignore_case(&out, phrase, replacement);
+        out = splice_ignore_case(&out, phrase, replacement);
     }
     out
+}
+
+/// The grammatical debris a rewrite left behind, as the reason to withhold.
+///
+/// Why: [`rewrite_reachability`] substitutes a phrase into a sentence it did not
+/// write, and the graded lap-10 report shipped the result — "reachable by any
+/// process on the host rather than a any local process". Two things went wrong
+/// at once: the replacement doubled the article in front of it, and the
+/// corrected clause contrasted host-local reach with host-local reach, which
+/// tells a reader nothing. Neither is repairable from here, so a tripped check
+/// falls back to the withhold path the module already uses for a claim it cannot
+/// correct — a visible withholding reads better than shipped nonsense.
+/// What: `Some(reason)` for two adjacent determiners, or for a contrast whose
+/// two sides carry the same reachability class. `None` when the sentence reads
+/// cleanly. Run on the REWRITTEN sentence only, so prose the module left alone
+/// is never judged by it.
+/// Test: `synthesize_grounding_tests.rs::{a_rewrite_never_ships_a_doubled_article,
+/// a_rewrite_that_contrasts_a_class_with_itself_is_withheld}`.
+pub(super) fn grammar_debris(sentence: &str) -> Option<String> {
+    if let Some(pair) = doubled_determiner(sentence) {
+        return Some(format!("the correction left '{pair}' in the sentence"));
+    }
+    if contrasts_one_class_with_itself(sentence) {
+        return Some(
+            "the correction left both sides of a contrast describing the same reachability"
+                .to_string(),
+        );
+    }
+    None
+}
+
+/// The first pair of adjacent determiners in a sentence, lower-cased.
+fn doubled_determiner(sentence: &str) -> Option<String> {
+    let raw: Vec<&str> = sentence.split_whitespace().collect();
+    raw.windows(2).find_map(|pair| {
+        // Punctuation between the two words means they are not one noun phrase.
+        if !pair[0].ends_with(|c: char| c.is_ascii_alphanumeric()) {
+            return None;
+        }
+        let (first, second) = (word_of(pair[0])?, word_of(pair[1])?);
+        let is_det = |w: &String| LEADING_DETERMINERS.contains(&w.as_str());
+        (is_det(&first) && is_det(&second)).then(|| format!("{first} {second}"))
+    })
+}
+
+/// True when a contrast in `sentence` has the same reachability class on both
+/// sides, so it draws no distinction.
+fn contrasts_one_class_with_itself(sentence: &str) -> bool {
+    let lower = sentence.to_lowercase();
+    CONTRAST_MARKERS.iter().any(|marker| {
+        let Some(at) = lower.find(marker) else {
+            return false;
+        };
+        let before = reach_class(&lower[..at]);
+        before.is_some() && before == reach_class(&lower[at + marker.len()..])
+    })
+}
+
+/// Which reachability class a clause describes, if it names one at all.
+///
+/// `Some(true)` is beyond this host and `Some(false)` is on it; a reachability
+/// word wins, because a clause carrying one is making the wider claim.
+fn reach_class(clause: &str) -> Option<bool> {
+    if REACHABILITY_WORDS.iter().any(|w| clause.contains(w)) {
+        return Some(true);
+    }
+    HOST_LOCAL_PHRASES
+        .iter()
+        .any(|p| clause.contains(p))
+        .then_some(false)
+}
+
+/// One whitespace-separated word reduced to its lower-cased letters, or `None`
+/// when nothing is left.
+fn word_of(raw: &str) -> Option<String> {
+    let word: String = raw
+        .trim_matches(|c: char| !c.is_ascii_alphanumeric())
+        .to_lowercase();
+    (!word.is_empty()).then_some(word)
+}
+
+/// Replace `needle` with `replacement`, consuming an article the replacement's
+/// own determiner would double.
+///
+/// Why: the rewrite table's replacements were written as standalone noun
+/// phrases, and the sentences they land in already carry an article — so
+/// `by a remote attacker` became `by a any local process` (#6082 lap 10).
+/// What: [`replace_ignore_case`], plus: when the replacement opens with a
+/// [`LEADING_DETERMINERS`] word, any [`CONSUMED_ARTICLES`] word immediately
+/// before the match is dropped, and its capitalization carries onto the
+/// replacement so a sentence-initial article does not lower-case the sentence.
+/// Test: `synthesize_grounding_tests.rs::a_rewrite_consumes_the_article_its_replacement_doubles`.
+fn splice_ignore_case(haystack: &str, needle: &str, replacement: &str) -> String {
+    let doubles = replacement
+        .split_whitespace()
+        .next()
+        .and_then(word_of)
+        .is_some_and(|w| LEADING_DETERMINERS.contains(&w.as_str()));
+    if !doubles {
+        return replace_ignore_case(haystack, needle, replacement);
+    }
+    let lower = haystack.to_lowercase();
+    let mut out = String::with_capacity(haystack.len());
+    let mut cursor = 0usize;
+    while let Some(rel) = lower[cursor..].find(needle) {
+        let at = cursor + rel;
+        out.push_str(&haystack[cursor..at]);
+        match take_trailing_article(&mut out) {
+            true => out.push_str(&capitalize(replacement)),
+            false => out.push_str(replacement),
+        }
+        cursor = at + needle.len();
+    }
+    out.push_str(&haystack[cursor..]);
+    out
+}
+
+/// Drop a trailing article from `out`; `true` when the one dropped was
+/// capitalized, so the caller capitalizes what replaces it.
+fn take_trailing_article(out: &mut String) -> bool {
+    let trimmed = out.trim_end();
+    if trimmed.len() == out.len() {
+        return false; // the match abuts the previous word: no article to take
+    }
+    let Some(last) = trimmed.split_whitespace().next_back() else {
+        return false;
+    };
+    if !CONSUMED_ARTICLES.contains(&last.to_lowercase().as_str()) {
+        return false;
+    }
+    let capitalized = last.starts_with(|c: char| c.is_ascii_uppercase());
+    out.truncate(trimmed.len() - last.len());
+    capitalized
+}
+
+/// Upper-case the first character of `text`.
+fn capitalize(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
 }
 
 /// Case-insensitive literal replacement preserving everything else verbatim.

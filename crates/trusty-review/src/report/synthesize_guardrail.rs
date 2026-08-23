@@ -309,7 +309,7 @@ fn ground_field(
     match grounding.check(text, ctx.component) {
         GroundingOutcome::Clean => text.to_string(),
         GroundingOutcome::Rewritten(fixed, corrections) => {
-            notes.extend(corrections.into_iter().map(|c| note_for(ctx, c)));
+            notes.extend(corrections.into_iter().map(|c| note_for(ctx, &c)));
             fixed
         }
         GroundingOutcome::Rejected { reason, subject } => {
@@ -321,10 +321,16 @@ fn ground_field(
 }
 
 /// Attach one grounding correction to the finding whose field carried it.
-fn note_for(ctx: &FieldCtx<'_>, text: String) -> StatusNote {
-    match ctx.subject {
-        Some(s) => StatusNote::about(s, text),
-        None => StatusNote::plain(text),
+///
+/// #6082 lap 10: report-level prose has no `ctx.subject`, so a correction made
+/// in it used to ship with no subject at all and cited its finding by title
+/// while the withheld lines beside it carried a §5.1/§5.2 number. The grounding
+/// check knows which finding it corrected — fall back to that, exactly as
+/// [`ground_field`] already does for a rejection.
+fn note_for(ctx: &FieldCtx<'_>, c: &crate::report::synthesize_grounding::Correction) -> StatusNote {
+    match ctx.subject.or(c.subject.as_deref()) {
+        Some(s) => StatusNote::about(s, c.text.clone()),
+        None => StatusNote::plain(c.text.clone()),
     }
 }
 
@@ -354,7 +360,7 @@ fn admit_field(
     let grounded = match grounding.check(text, ctx.component) {
         GroundingOutcome::Clean => text.to_string(),
         GroundingOutcome::Rewritten(fixed, corrections) => {
-            notes.extend(corrections.into_iter().map(|c| note_for(ctx, c)));
+            notes.extend(corrections.into_iter().map(|c| note_for(ctx, &c)));
             fixed
         }
         GroundingOutcome::Rejected { reason, subject } => {
