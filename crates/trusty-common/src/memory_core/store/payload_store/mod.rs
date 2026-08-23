@@ -168,6 +168,62 @@ mod tests {
     }
 
     #[test]
+    fn try_for_each_row_streams_lazily() {
+        use crate::memory_core::store::kg_store::{PAYLOADS, encode_payload_key};
+        use std::ops::ControlFlow;
+
+        let dir = tempdir().unwrap();
+        let store = PayloadStore::open(&dir.path().join("p.redb")).unwrap();
+
+        // Two well-formed rows; keys "1" and "2" scan in byte-ascending order.
+        store.upsert("a", "1", fixture_uuid(1), &json!(1)).unwrap();
+        store.upsert("a", "2", fixture_uuid(2), &json!(2)).unwrap();
+
+        // Row "3" holds bytes that are NOT a decodable postcard `PayloadRecord`.
+        // Decoding it fails; a lazy scan that stops at row 2 never reads it, so
+        // no error from row 3 can surface. Written directly so the codec can't
+        // "fix" it on the way in.
+        {
+            let wtx = store.db.begin_write().unwrap();
+            {
+                let mut table = wtx.open_table(PAYLOADS).unwrap();
+                let key = encode_payload_key("a", b"3");
+                table
+                    .insert(key.as_slice(), [0xFFu8, 0xFF, 0xFF].as_slice())
+                    .unwrap();
+            }
+            wtx.commit().unwrap();
+        }
+
+        // Lazy path: break right after the second row. Must succeed, because the
+        // undecodable row "3" is never pulled. An eager collect-then-invoke impl
+        // would decode row "3" up front and fail here instead.
+        let mut seen = Vec::new();
+        let streamed = store.try_for_each_row(Some("a"), |row| {
+            seen.push(row.id.clone());
+            if seen.len() == 2 {
+                Ok(ControlFlow::Break(()))
+            } else {
+                Ok(ControlFlow::Continue(()))
+            }
+        });
+        assert!(
+            streamed.is_ok(),
+            "lazy stream must not decode rows past the break: {streamed:?}"
+        );
+        assert_eq!(seen, vec!["1".to_string(), "2".to_string()]);
+
+        // Control: the eager whole-segment read DOES decode every row, so it
+        // hits the undecodable row and errors — the all-eager behavior #6200
+        // replaces with a lazy path.
+        let eager = store.load_all(Some("a"));
+        assert!(
+            eager.is_err(),
+            "eager load_all decodes every row and must fail on the undecodable one"
+        );
+    }
+
+    #[test]
     fn callers_passing_payloads_db_get_redb_sibling() {
         // Existing callers (`TrustyBackedMemoryStore`) pass `payloads.db`. Make
         // sure the resolver redirects them to `payloads.redb` so the on-disk

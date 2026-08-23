@@ -3,11 +3,13 @@
 //! Why: Houses the store implementation separately from the error/type
 //! definitions in `types.rs` so both files stay under the 500-SLOC cap.
 //! What: `PayloadStore::open` + `upsert` + `get` + `exists` +
-//! `lookup_id_for_uuid` + `delete` + `list_segment` + `load_all`.
+//! `lookup_id_for_uuid` + `delete` + `list_segment` + `load_all` +
+//! `try_for_each_row` (the lazy streaming read path, #6200).
 //! Test: All methods are covered by the CRUD round-trip tests in `mod.rs`.
 
 use redb::{Database, ReadableDatabase, ReadableTable};
 use serde_json::Value;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -237,20 +239,23 @@ impl PayloadStore {
     /// the first row whose uuid matches. The PAYLOADS table is keyed by
     /// `(segment, id)` — there is no secondary index — but the scan is
     /// bounded by the segment prefix so it stays O(rows in segment) rather
-    /// than O(total rows).
+    /// than O(total rows). #6200: the scan streams and stops at the first
+    /// match, so rows past the hit are never read or decoded.
     /// Test: `lookup_id_for_uuid_round_trips`.
     pub fn lookup_id_for_uuid(&self, segment: &str, uuid: Uuid) -> Result<Option<String>> {
         let target = *uuid.as_bytes();
-        for row in self.iter_segment(segment)? {
-            let row = row?;
-            let record_bytes = row.raw_value;
-            let record: PayloadRecord = postcard::from_bytes(&record_bytes)
+        let mut found = None;
+        self.try_for_each_raw(segment, |row| {
+            let record: PayloadRecord = postcard::from_bytes(&row.raw_value)
                 .map_err(|e| PayloadStoreError::Postcard { source: e })?;
             if record.uuid == target {
-                return Ok(Some(row.id));
+                found = Some(row.id);
+                Ok(ControlFlow::Break(()))
+            } else {
+                Ok(ControlFlow::Continue(()))
             }
-        }
-        Ok(None)
+        })?;
+        Ok(found)
     }
 
     /// Delete the row at `(segment, id)`. No-op if the row does not exist.
@@ -299,25 +304,54 @@ impl PayloadStore {
     /// Test: `list_segment_returns_rows`.
     pub fn list_segment(&self, segment: &str) -> Result<Vec<(String, Uuid, String)>> {
         let mut out = Vec::new();
-        for row in self.iter_segment(segment)? {
-            let row = row?;
+        self.try_for_each_raw(segment, |row| {
             let record: PayloadRecord = postcard::from_bytes(&row.raw_value)
                 .map_err(|e| PayloadStoreError::Postcard { source: e })?;
             out.push((row.id, Uuid::from_bytes(record.uuid), record.payload));
-        }
+            Ok(ControlFlow::Continue(()))
+        })?;
         Ok(out)
     }
 
     /// Load every row, optionally restricted to `segment_filter`.
     ///
-    /// Why: On startup, adapters rebuild their in-memory sidecar in one pass;
-    /// `load_all` lets them do that without iterating per-id.
-    /// What: Returns all rows when `segment_filter` is `None`, or just rows
-    /// matching the filter otherwise. The decoded `payload` field is a
+    /// Why: Some callers want the whole table eagerly (small tables, tests).
+    /// For large-palace startup hydration, prefer `try_for_each_row`, which
+    /// avoids buffering the entire table in a second owned `Vec` on top of the
+    /// caller's own structure (#6200).
+    /// What: Thin wrapper over `try_for_each_row` that collects every streamed
+    /// `PayloadRow` into a `Vec`. The decoded `payload` field is a
     /// `serde_json::Value` so it slots straight into callers'
     /// `HashMap<String, Value>` sidecars.
     /// Test: `load_all_filters_by_segment` and `roundtrip_persists_across_reopen`.
     pub fn load_all(&self, segment_filter: Option<&str>) -> Result<Vec<PayloadRow>> {
+        let mut out = Vec::new();
+        self.try_for_each_row(segment_filter, |row| {
+            out.push(row);
+            Ok(ControlFlow::Continue(()))
+        })?;
+        Ok(out)
+    }
+
+    /// Stream every row (optionally restricted to `segment_filter`) to `f`, one
+    /// decoded `PayloadRow` at a time.
+    ///
+    /// Why: #6200 — startup hydration of a large palace must not materialize
+    /// the whole payload table into an owned `Vec` before the caller can touch
+    /// a single row. This is the genuinely lazy read path: it decodes one row,
+    /// hands it to `f`, and only then pulls the next entry from redb. A callback
+    /// that returns `ControlFlow::Break` (or an `Err`) ends the scan, and every
+    /// row past that point is neither read from the B-tree nor decoded.
+    /// What: Opens one read transaction and walks either the bounded segment
+    /// range or the whole table, invoking `f` per decoded row. Malformed keys
+    /// are skipped defensively, exactly as the old `load_all` did.
+    /// Test: `try_for_each_row_streams_lazily` proves an early break never
+    /// decodes later rows; `load_all_filters_by_segment` and
+    /// `roundtrip_persists_across_reopen` cover the decode path via `load_all`.
+    pub fn try_for_each_row<F>(&self, segment_filter: Option<&str>, mut f: F) -> Result<()>
+    where
+        F: FnMut(PayloadRow) -> Result<ControlFlow<()>>,
+    {
         let rtx = self
             .db
             .begin_read()
@@ -332,36 +366,31 @@ impl PayloadStore {
                 source: Box::new(e),
             })?;
 
-        let mut out = Vec::new();
-        let iter = if let Some(seg) = segment_filter {
-            let prefix = segment_prefix(seg);
-            let mut end = prefix.clone();
-            end.push(0xFF);
-            Some(
-                table
+        // redb's range and iter return different concrete types, so handle each
+        // branch independently rather than unifying through a trait object.
+        // #6200: decode + invoke inside the walk and pull the next entry only if
+        // the callback continues — an early stop reads and decodes nothing past
+        // it, which is what makes this path lazy rather than a pre-collected Vec.
+        match segment_filter {
+            Some(seg) => {
+                let prefix = segment_prefix(seg);
+                let mut end = prefix.clone();
+                end.push(0xFF);
+                let range = table
                     .range::<&[u8]>(prefix.as_slice()..end.as_slice())
                     .map_err(|e| PayloadStoreError::Storage {
                         path: self.path.clone(),
                         source: Box::new(e),
-                    })?,
-            )
-        } else {
-            None
-        };
-
-        // We need to walk either a bounded range (when filtered) or the whole
-        // table (when not). redb's range and iter return different concrete
-        // types, so handle each branch independently rather than trying to
-        // unify them through a trait object.
-        match iter {
-            Some(range) => {
+                    })?;
                 for entry in range {
                     let (k, v) = entry.map_err(|e| PayloadStoreError::Storage {
                         path: self.path.clone(),
                         source: Box::new(e),
                     })?;
-                    if let Some(row) = decode_row(k.value(), v.value())? {
-                        out.push(row);
+                    if let Some(row) = decode_row(k.value(), v.value())?
+                        && f(row)?.is_break()
+                    {
+                        return Ok(());
                     }
                 }
             }
@@ -374,25 +403,34 @@ impl PayloadStore {
                         path: self.path.clone(),
                         source: Box::new(e),
                     })?;
-                    if let Some(row) = decode_row(k.value(), v.value())? {
-                        out.push(row);
+                    if let Some(row) = decode_row(k.value(), v.value())?
+                        && f(row)?.is_break()
+                    {
+                        return Ok(());
                     }
                 }
             }
         }
-        Ok(out)
+        Ok(())
     }
 
-    /// Internal: walk every row in `segment`, yielding `RowBytes` so callers
-    /// can decode value bytes once per row in whichever shape they need.
+    /// Internal: stream every row in `segment` to `f` as raw `RowBytes`, one at
+    /// a time, so callers decode the value bytes in whichever shape they need.
     ///
-    /// Why: Both `lookup_id_for_uuid` and `list_segment` scan the same range;
-    /// extracting the range scan prevents duplication.
-    /// What: Collects range results into an owned `Vec<Result<RowBytes>>` so
-    /// the redb transaction lifetime does not escape this function.
-    /// Test: Covered indirectly by `lookup_id_for_uuid_round_trips` and
+    /// Why: Both `lookup_id_for_uuid` and `list_segment` scan the same segment
+    /// range; extracting it prevents duplication. #6200: unlike the old
+    /// `iter_segment`, this does not pre-collect the range into an owned `Vec` —
+    /// it walks the B-tree lazily, so `lookup_id_for_uuid` can stop at the first
+    /// uuid match without reading the rest of the segment.
+    /// What: Opens one read transaction, range-scans the segment prefix, and
+    /// invokes `f` per row whose key survives the length-prefix bounds check.
+    /// A callback returning `ControlFlow::Break` ends the scan early.
+    /// Test: Covered by `lookup_id_for_uuid_round_trips` and
     /// `list_segment_returns_rows`.
-    fn iter_segment(&self, segment: &str) -> Result<impl Iterator<Item = Result<RowBytes>> + '_> {
+    fn try_for_each_raw<F>(&self, segment: &str, mut f: F) -> Result<()>
+    where
+        F: FnMut(RowBytes) -> Result<ControlFlow<()>>,
+    {
         let rtx = self
             .db
             .begin_read()
@@ -409,13 +447,6 @@ impl PayloadStore {
         let prefix = segment_prefix(segment);
         let mut end = prefix.clone();
         end.push(0xFF);
-
-        // Collect into an owned Vec so we don't have to thread the redb
-        // transaction lifetime through the iterator type. The PAYLOADS table
-        // is small (per-segment row counts are bounded by application sizing)
-        // so this is acceptable.
-        let mut rows: Vec<Result<RowBytes>> = Vec::new();
-        let seg_owned = segment.to_string();
         let range = table
             .range::<&[u8]>(prefix.as_slice()..end.as_slice())
             .map_err(|e| PayloadStoreError::Storage {
@@ -423,20 +454,20 @@ impl PayloadStore {
                 source: Box::new(e),
             })?;
         for entry in range {
-            match entry {
-                Ok((k, v)) => match split_payload_key(k.value(), &seg_owned) {
-                    Some(id) => rows.push(Ok(RowBytes {
-                        id,
-                        raw_value: v.value().to_vec(),
-                    })),
-                    None => continue,
-                },
-                Err(e) => rows.push(Err(PayloadStoreError::Storage {
-                    path: self.path.clone(),
-                    source: Box::new(e),
-                })),
+            let (k, v) = entry.map_err(|e| PayloadStoreError::Storage {
+                path: self.path.clone(),
+                source: Box::new(e),
+            })?;
+            if let Some(id) = split_payload_key(k.value(), segment) {
+                let row = RowBytes {
+                    id,
+                    raw_value: v.value().to_vec(),
+                };
+                if f(row)?.is_break() {
+                    return Ok(());
+                }
             }
         }
-        Ok(rows.into_iter())
+        Ok(())
     }
 }
