@@ -342,6 +342,160 @@ async fn forget_reports_deleted_and_the_drawer_stays_gone_after_reopen() {
     );
 }
 
+/// Regression test for issue #6201: a corrupt drawer table must surface as a
+/// degraded signal on the handle, not silently masquerade as an empty palace.
+///
+/// Why: `open_with_intent` deliberately fails open when `load_drawers` errors,
+/// substituting an empty list so a corrupt table can't make the palace
+/// unopenable. Before #6201 the returned handle was indistinguishable from one
+/// for a genuinely empty palace, so a caller had no signal it was running
+/// L1-only. `PalaceHandle::drawer_load_degraded` is that signal.
+/// What: forces the `load_drawers` Err arm deterministically without breaking
+/// the rest of the KG open. A fully-formed `kg.redb` is created (every table
+/// initialised), then only the `DRAWERS` table is dropped and the file's
+/// exclusive flock is held — so the ReadOnlyClient palace open falls back to a
+/// snapshot of that drawers-less image (`concurrent_open::OpenMode::Snapshot`,
+/// which skips the whole-schema re-init). Adjacency hydration still succeeds
+/// because `TRIPLES` and the rest survive, but `load_drawers` opens a read txn
+/// on a `DRAWERS` table that no longer exists and returns Err. Asserts the
+/// snapshot path was actually taken (anti-vacuous guard via `is_read_only`),
+/// that the degraded handle exposes `drawer_load_degraded == true`, and that a
+/// genuinely-empty-but-valid palace exposes it as `false`.
+/// Test: this test.
+#[test]
+fn drawer_load_degraded_true_on_corrupt_table_false_when_empty() {
+    use crate::memory_core::store::kg_redb::KgStoreRedb;
+    use crate::memory_core::store::kg_store::DRAWERS;
+    use redb::Database;
+
+    let dir = tempdir().unwrap();
+
+    // --- Degraded case: load_drawers Err -> the handle flags the degrade. ---
+    let degraded_palace = Palace {
+        id: PalaceId::new("degraded-corrupt"),
+        name: "degraded".into(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir: dir.path().join("degraded-corrupt"),
+    };
+    std::fs::create_dir_all(&degraded_palace.data_dir).unwrap();
+
+    let kg_redb = degraded_palace.data_dir.join("kg.redb");
+    // Initialise the full KG schema (every table), then release the file.
+    drop(KgStoreRedb::open(&kg_redb).expect("init full kg.redb schema"));
+    // Remove ONLY the drawers table, then hold the exclusive flock so the next
+    // open cannot re-init it and must snapshot this drawers-less image instead.
+    let live = Database::create(&kg_redb).expect("reopen kg.redb and hold its flock");
+    {
+        let wtx = live
+            .begin_write()
+            .expect("begin write to drop drawers table");
+        wtx.delete_table(DRAWERS).expect("delete drawers table");
+        wtx.commit().expect("commit drawers-table removal");
+    }
+
+    let degraded =
+        PalaceHandle::open(&degraded_palace).expect("palace must still open when degraded");
+    assert!(
+        degraded.is_read_only(),
+        "anti-vacuous guard: the open must have fallen back to a snapshot, otherwise \
+         the load_drawers Err arm is never reached and this test proves nothing"
+    );
+    assert!(
+        degraded.drawer_load_degraded,
+        "an unreadable drawer table must set drawer_load_degraded on the handle"
+    );
+    drop(live);
+
+    // --- Empty-but-valid case: load succeeds -> the flag stays false. ---
+    let (_palace, empty) = open_disk_palace(dir.path(), "empty-valid");
+    assert!(
+        empty.drawers.read().is_empty(),
+        "precondition: a freshly-created palace has no drawers"
+    );
+    assert!(
+        !empty.drawer_load_degraded,
+        "a genuinely empty but valid palace must NOT be flagged as degraded"
+    );
+}
+
+/// Regression test for issue #6201 (partial corruption): a drawer table that
+/// loads SOME rows but skips others as unreadable must flag the handle degraded.
+///
+/// Why: `load_drawers` skips a row it cannot decode (non-16-byte key, malformed
+/// value, invalid room_id/created_at) with only a `warn!` and returns the rest
+/// as `Ok`. That is the more common corruption case, and before the #6201
+/// completeness fix it took `open_with_intent`'s Ok arm and left
+/// `drawer_load_degraded == false` — a consumer reading the flag would trust a
+/// partial corpus as complete. The load now threads a skipped-row count out
+/// (`load_drawers_with_skipped`) so the open flags the degrade on this path too.
+/// What: seeds one intact drawer row, then injects a second `DRAWERS` row with a
+/// valid 16-byte key but an undecodable value. A normal read-write open must
+/// return the intact row AND report `drawer_load_degraded == true`. The
+/// `is_read_only` guard confirms this exercises the partial-load (Ok) arm, not
+/// the whole-table snapshot path the sibling test covers.
+/// Test: this test.
+#[test]
+fn drawer_load_degraded_true_on_partial_row_corruption() {
+    use crate::memory_core::store::kg_redb::KgStoreRedb;
+    use crate::memory_core::store::kg_store::DRAWERS;
+    use redb::Database;
+
+    let dir = tempdir().unwrap();
+    let palace = Palace {
+        id: PalaceId::new("partial-corrupt"),
+        name: "partial".into(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir: dir.path().join("partial-corrupt"),
+    };
+    std::fs::create_dir_all(&palace.data_dir).unwrap();
+    let kg_redb = palace.data_dir.join("kg.redb");
+
+    // One intact, round-trippable drawer row.
+    let good = Drawer::new(Uuid::new_v4(), "a genuinely valid intact drawer row");
+    let good_id = good.id;
+    {
+        let store = KgStoreRedb::open(&kg_redb).expect("open kg store to seed a good row");
+        store.upsert_drawer(&good).expect("write the good drawer");
+    }
+
+    // A second DRAWERS row: valid 16-byte key, but a value that cannot decode
+    // as a DrawerRecord — load_drawers skips it with a warn.
+    {
+        let db = Database::create(&kg_redb).expect("reopen kg.redb to inject a corrupt row");
+        let wtx = db.begin_write().expect("begin write for corrupt row");
+        {
+            let mut table = wtx.open_table(DRAWERS).expect("open drawers table");
+            let bad_key = Uuid::new_v4().into_bytes();
+            table
+                .insert(bad_key.as_slice(), [0xFFu8; 4].as_slice())
+                .expect("insert malformed drawer value");
+        }
+        wtx.commit().expect("commit corrupt row");
+    }
+
+    // A normal (read-write) open: the good row loads, the corrupt row is
+    // skipped, and the skip must surface as a degrade on the handle.
+    let handle = PalaceHandle::open(&palace).expect("palace opens with a partially-corrupt table");
+    assert!(
+        !handle.is_read_only(),
+        "anti-vacuous guard: this must be a normal read-write open, not the snapshot \
+         path — otherwise it does not exercise the partial-load (Ok) arm"
+    );
+    let loaded: Vec<Uuid> = handle.drawers.read().iter().map(|d| d.id).collect();
+    assert_eq!(
+        loaded,
+        vec![good_id],
+        "the intact row must still load even though a sibling row was unreadable"
+    );
+    assert!(
+        handle.drawer_load_degraded,
+        "a skipped (unreadable) drawer row must set drawer_load_degraded — a partial \
+         load is a degrade, not a clean empty/complete palace"
+    );
+}
+
 /// Regression test for issue #154: concurrent `remember_with_options`
 /// calls on the same palace must not race on the L1 snapshot write.
 ///

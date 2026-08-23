@@ -249,6 +249,19 @@ impl KnowledgeGraph {
         self.store.load_drawers()
     }
 
+    /// Load all drawer metadata, reporting how many rows were unreadable.
+    ///
+    /// Why: #6201 — `open_with_intent` must flag a handle as degraded when a
+    /// partially-corrupt drawer table loads fewer rows than it holds, not only
+    /// when the whole table fails to open.
+    /// What: Delegates to `KgStoreRedb::load_drawers_with_skipped`, returning
+    /// `(rows, skipped)`.
+    /// Test: `drawer_load_degraded_true_on_partial_row_corruption` in
+    /// `retrieval::tests`.
+    pub fn load_drawers_with_skipped(&self) -> Result<(Vec<Drawer>, usize)> {
+        self.store.load_drawers_with_skipped()
+    }
+
     /// Identify community-shaped knowledge gaps in the active graph.
     ///
     /// Why: Convenience accessor so callers don't need to import the

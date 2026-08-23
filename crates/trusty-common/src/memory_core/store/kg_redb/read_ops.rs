@@ -248,18 +248,40 @@ impl KgStoreRedb {
     ///
     /// Why: Cold-start retrieval needs the full drawer table to map every HNSW
     /// vector hit back to metadata.
-    /// What: Iterate DRAWERS, decode each `DrawerRecord` back into a `Drawer`.
-    /// Rows with malformed UUID/timestamp are skipped with a warning.
+    /// What: Thin wrapper over [`load_drawers_with_skipped`] that drops the
+    /// skipped-row count. Callers that only want the rows (e.g. `kg_rebuild`,
+    /// `backfill_report`) keep a bare `Vec<Drawer>` return.
     /// Test: `upsert_drawer_then_load_drawers_round_trips`.
     pub fn load_drawers(&self) -> Result<Vec<Drawer>> {
+        Ok(self.load_drawers_with_skipped()?.0)
+    }
+
+    /// Load all drawers, reporting how many rows were skipped as unreadable.
+    ///
+    /// Why: #6201 — a per-row decode failure (non-16-byte key, malformed value,
+    /// invalid room_id, invalid created_at_ms) is skipped with a warn and the
+    /// remaining rows returned, so a partially-corrupt table silently loads as
+    /// a smaller corpus. `load_drawers` alone cannot tell a caller that
+    /// happened. Threading the skip count out lets `PalaceHandle::open_with_intent`
+    /// flag the handle as degraded on the partial-load path too, not only on the
+    /// whole-table Err path.
+    /// What: Iterate DRAWERS, decode each `DrawerRecord` back into a `Drawer`;
+    /// each unreadable row increments `skipped` (keeping its existing warn) and
+    /// is dropped. Returns `(rows, skipped)`.
+    /// Test: `drawer_load_degraded_true_on_corrupt_table_false_when_empty`
+    /// (whole-table Err) and `drawer_load_degraded_true_on_partial_row_corruption`
+    /// (per-row skip), both in `retrieval::tests`.
+    pub fn load_drawers_with_skipped(&self) -> Result<(Vec<Drawer>, usize)> {
         let rtx = self.db().begin_read().context("begin load_drawers txn")?;
         let drawers = rtx.open_table(DRAWERS).context("open drawers table")?;
         let mut out = Vec::new();
+        let mut skipped = 0usize;
         for entry in drawers.iter().context("iter drawers")? {
             let (k, v) = entry.context("read drawer row")?;
             let id_bytes = k.value();
             if id_bytes.len() != 16 {
                 tracing::warn!(len = id_bytes.len(), "skip drawer with non-16-byte id key");
+                skipped += 1;
                 continue;
             }
             let mut id_arr = [0u8; 16];
@@ -272,6 +294,7 @@ impl KgStoreRedb {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(id = %id, "skip drawer with malformed value: {e}");
+                    skipped += 1;
                     continue;
                 }
             };
@@ -279,6 +302,7 @@ impl KgStoreRedb {
                 Ok(u) => u,
                 Err(e) => {
                     tracing::warn!(id = %id, "skip drawer with invalid room_id: {e}");
+                    skipped += 1;
                     continue;
                 }
             };
@@ -286,6 +310,7 @@ impl KgStoreRedb {
                 Some(dt) => dt,
                 None => {
                     tracing::warn!(id = %id, "skip drawer with invalid created_at_ms");
+                    skipped += 1;
                     continue;
                 }
             };
@@ -314,7 +339,7 @@ impl KgStoreRedb {
             drawer.fact_key = record.fact_key;
             out.push(drawer);
         }
-        Ok(out)
+        Ok((out, skipped))
     }
 
     /// Load just the set of drawer IDs.
