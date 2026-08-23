@@ -15,6 +15,8 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::report::synthesize::StatusNote;
+
 use async_trait::async_trait;
 
 use crate::llm::{LlmError, LlmProvider, LlmRequest, LlmResponse};
@@ -1034,7 +1036,7 @@ async fn synthesize_still_rejects_a_wrong_authorship_figure() {
         result
             .notes
             .iter()
-            .any(|n| n.contains("authorship summary: 84")),
+            .any(|n| n.text.contains("authorship summary") && n.text.contains("figure 84")),
         "the rejection note must name the offending token: {:?}",
         result.notes
     );
@@ -1218,7 +1220,7 @@ async fn synthesize_rejects_unverified_figure() {
         result
             .notes
             .iter()
-            .any(|n| n.contains("rejected (unverified figure)") && n.contains("9999")),
+            .any(|n| n.text.contains("not in the collected data") && n.text.contains("9999")),
         "a guardrail rejection note must be recorded: {:?}",
         result.notes
     );
@@ -1252,8 +1254,13 @@ fn code_quality_summary_guardrail_rejects_unverified_figure() {
         findings: vec![],
     };
 
-    let result = super::apply_guardrail(raw, &allowed, Vec::new(), &Default::default())
-        .expect("the clean top-risk row keeps this Ok");
+    let result = crate::report::synthesize_guardrail::apply_guardrail(
+        raw,
+        &allowed,
+        Vec::new(),
+        &Default::default(),
+    )
+    .expect("the clean top-risk row keeps this Ok");
 
     assert!(
         result.code_quality_summary.is_none(),
@@ -1261,10 +1268,9 @@ fn code_quality_summary_guardrail_rejects_unverified_figure() {
     );
     assert_eq!(result.top_risks.len(), 1, "the clean row must survive");
     assert!(
-        result
-            .notes
-            .iter()
-            .any(|n| n.contains("rejected (unverified figure)") && n.contains("code quality")),
+        result.notes.iter().any(
+            |n| n.text.contains("not in the collected data") && n.text.contains("code quality")
+        ),
         "a guardrail rejection note must name the code quality summary: {:?}",
         result.notes
     );
@@ -1297,8 +1303,13 @@ fn security_summary_guardrail_rejects_unverified_figure() {
         findings: vec![],
     };
 
-    let result = super::apply_guardrail(raw, &allowed, Vec::new(), &Default::default())
-        .expect("the clean top-risk row keeps this Ok");
+    let result = crate::report::synthesize_guardrail::apply_guardrail(
+        raw,
+        &allowed,
+        Vec::new(),
+        &Default::default(),
+    )
+    .expect("the clean top-risk row keeps this Ok");
 
     assert!(
         result.security_summary.is_none(),
@@ -1309,7 +1320,7 @@ fn security_summary_guardrail_rejects_unverified_figure() {
         result
             .notes
             .iter()
-            .any(|n| n.contains("rejected (unverified figure)") && n.contains("security")),
+            .any(|n| n.text.contains("not in the collected data") && n.text.contains("security")),
         "a guardrail rejection note must name the security summary: {:?}",
         result.notes
     );
@@ -1384,22 +1395,27 @@ async fn synthesize_with_many_findings_produces_exec_summary() {
     assert!(!result.executive_summary.unwrap().is_empty());
 }
 
-/// Why: the status note carries the `synthesis:` banner the report's readers key
-/// on, plus every guardrail rejection.
-/// What: asserts the banner line and that notes follow it in order.
+/// Why: #6082 lap 8 — a status note renders as the reader's own sentence, and
+/// gains a §5.1/§5.2 citation only when the reporter resolved its subject to a
+/// numbered row.
+/// What: asserts both render arms of [`StatusNote`].
 /// Test: this test itself.
 #[test]
-fn status_lines_render_banners() {
-    let syn = Synthesis {
-        code_quality_summary: None,
-        security_summary: None,
-        authorship_summary: None,
-        notes: vec!["synthesis: rejected (unverified figure) in top-risk row 1: 42".to_string()],
-        ..Default::default()
-    };
-    let lines = syn.status_lines();
-    assert_eq!(lines[0], "synthesis: available");
-    assert_eq!(lines[1], syn.notes[0]);
+fn a_status_note_renders_with_and_without_a_citation() {
+    let note = StatusNote::about(
+        "Hotspot HTTP client function has cyclomatic complexity 98",
+        "the model's business impact was withheld — the claim cannot be verified",
+    );
+    assert_eq!(
+        note.render(Some("section 5.2, AMBER finding 47")),
+        "section 5.2, AMBER finding 47: the model's business impact was withheld — the claim \
+         cannot be verified"
+    );
+    assert_eq!(
+        note.render(None),
+        "the model's business impact was withheld — the claim cannot be verified"
+    );
+    assert!(!note.render(None).contains("synthesis:"));
 }
 
 // ── #6009: markdown-heading fallback + raw-capture regression ──────────────
@@ -1767,7 +1783,7 @@ async fn synthesize_recovers_shape3_end_to_end() {
         result
             .notes
             .iter()
-            .any(|n| n.contains("rejected (unverified figure)") && n.contains("32")),
+            .any(|n| n.text.contains("not in the collected data") && n.text.contains("32")),
         "the rejection must be recorded: {:?}",
         result.notes
     );
@@ -2323,8 +2339,9 @@ fn synthesize_rewrites_a_remote_claim_about_a_local_finding() {
         findings: vec![],
     };
 
-    let result = super::apply_guardrail(raw, &allowed, Vec::new(), &grounding)
-        .expect("the corrected summary keeps this Ok");
+    let result =
+        crate::report::synthesize_guardrail::apply_guardrail(raw, &allowed, Vec::new(), &grounding)
+            .expect("the corrected summary keeps this Ok");
 
     let exec = result
         .executive_summary
@@ -2338,7 +2355,7 @@ fn synthesize_rewrites_a_remote_claim_about_a_local_finding() {
         result
             .notes
             .iter()
-            .any(|n| n.contains("reachability corrected")),
+            .any(|n| n.text.contains("reachability wording was corrected")),
         "the correction must be recorded: {:?}",
         result.notes
     );
@@ -2368,14 +2385,16 @@ fn synthesize_rejects_an_uncorrectable_remote_claim() {
         findings: vec![],
     };
 
-    let result = super::apply_guardrail(raw, &allowed, Vec::new(), &grounding)
-        .expect("the authorship paragraph keeps this Ok");
+    let result =
+        crate::report::synthesize_guardrail::apply_guardrail(raw, &allowed, Vec::new(), &grounding)
+            .expect("the authorship paragraph keeps this Ok");
 
     assert!(result.security_summary.is_none());
     assert!(
-        result.notes.iter().any(|n| {
-            n.contains("claim contradicts the report's own data") && n.contains("security summary")
-        }),
+        result
+            .notes
+            .iter()
+            .any(|n| { n.text.contains("security summary was withheld") }),
         "the rejection must be recorded: {:?}",
         result.notes
     );
@@ -2405,15 +2424,16 @@ fn synthesize_rejects_a_load_bearing_claim_about_a_leaf_crate() {
         findings: vec![],
     };
 
-    let result = super::apply_guardrail(raw, &allowed, Vec::new(), &grounding)
-        .expect("the authorship paragraph keeps this Ok");
+    let result =
+        crate::report::synthesize_guardrail::apply_guardrail(raw, &allowed, Vec::new(), &grounding)
+            .expect("the authorship paragraph keeps this Ok");
 
     assert!(result.executive_summary.is_none());
     assert!(
         result
             .notes
             .iter()
-            .any(|n| n.contains("acme-leaf") && n.contains("most-depended-on")),
+            .any(|n| n.text.contains("acme-leaf") && n.text.contains("most-depended-on")),
         "the rejection must name the crate: {:?}",
         result.notes
     );
@@ -2442,8 +2462,9 @@ fn synthesize_grounds_the_top_risk_row_description() {
         findings: vec![],
     };
 
-    let result = super::apply_guardrail(raw, &allowed, Vec::new(), &grounding)
-        .expect("the corrected row keeps this Ok");
+    let result =
+        crate::report::synthesize_guardrail::apply_guardrail(raw, &allowed, Vec::new(), &grounding)
+            .expect("the corrected row keeps this Ok");
 
     assert_eq!(result.top_risks.len(), 1);
     assert!(
@@ -2504,8 +2525,9 @@ fn synthesize_grounds_a_finding_business_impact() {
         )],
     };
 
-    let result = super::apply_guardrail(raw, &allowed, Vec::new(), &grounding)
-        .expect("the corrected finding keeps this Ok");
+    let result =
+        crate::report::synthesize_guardrail::apply_guardrail(raw, &allowed, Vec::new(), &grounding)
+            .expect("the corrected finding keeps this Ok");
 
     assert_eq!(result.findings.len(), 1, "{:?}", result.notes);
     let impact = &result.findings[0].business_impact;
@@ -2521,7 +2543,7 @@ fn synthesize_grounds_a_finding_business_impact() {
         result
             .notes
             .iter()
-            .any(|n| n.contains("reachability corrected")),
+            .any(|n| n.text.contains("reachability wording was corrected")),
         "the correction must be recorded: {:?}",
         result.notes
     );
@@ -2554,8 +2576,9 @@ fn synthesize_empties_an_uncorrectable_remote_claim_in_a_finding() {
         )],
     };
 
-    let result = super::apply_guardrail(raw, &allowed, Vec::new(), &grounding)
-        .expect("the finding's other fields keep this Ok");
+    let result =
+        crate::report::synthesize_guardrail::apply_guardrail(raw, &allowed, Vec::new(), &grounding)
+            .expect("the finding's other fields keep this Ok");
 
     assert_eq!(result.findings.len(), 1, "{:?}", result.notes);
     assert!(
@@ -2564,9 +2587,10 @@ fn synthesize_empties_an_uncorrectable_remote_claim_in_a_finding() {
         result.findings[0].business_impact
     );
     assert!(
-        result.notes.iter().any(|n| {
-            n.contains("claim contradicts the report's own data") && n.contains("business impact")
-        }),
+        result
+            .notes
+            .iter()
+            .any(|n| { n.text.contains("business impact was withheld") }),
         "the rejection must be recorded: {:?}",
         result.notes
     );

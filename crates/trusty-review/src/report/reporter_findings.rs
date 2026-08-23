@@ -668,10 +668,9 @@ pub(super) fn unplaced_narrative_lines(model: &super::model::ReportModel) -> Vec
 fn disclosure_line(band_label: &str, base: usize, u: &Unplaced) -> String {
     match u.row {
         Some(i) => format!(
-            "section 5.2, {band_label} finding {}: the model's added narrative ('{}') was \
-             withheld because it could not be verified against the collected data, so that \
-             finding shows the measured data only",
-            base + i + 1,
+            "{}: the model's added narrative ('{}') was withheld because it could not be \
+             verified against the collected data, so that finding shows the measured data only",
+            cite(band_label, base + i + 1),
             u.title,
         ),
         None => format!(
@@ -681,4 +680,52 @@ fn disclosure_line(band_label: &str, base: usize, u: &Unplaced) -> String {
             u.title,
         ),
     }
+}
+
+/// How a Synthesis Status line points at one numbered finding.
+///
+/// Why: RED findings render under `### 5.1` and AMBER under `### 5.2`, and every
+/// citation said 5.2 — so a line about a RED finding sent the reader to the
+/// wrong section (#6082 lap 8).
+fn cite(band_label: &str, number: usize) -> String {
+    let section = match band_label {
+        "RED" => "5.1",
+        _ => "5.2",
+    };
+    format!("section {section}, {band_label} finding {number}")
+}
+
+/// The rendered §5.1/§5.2 citation for each finding title, for the Synthesis
+/// Status block to point at.
+///
+/// Why: a guardrail note names the finding it is about by title, because the
+/// number does not exist yet when the note is recorded — the rows are numbered
+/// at render (#6082 lap 8).
+/// What: replays [`band_rows`] with the same per-band counters
+/// [`push_finding_band`] numbers with, mapping title to citation. A title that
+/// renders more than once maps to `None`: there is no one number to name, which
+/// is the same conservative rule [`cited_row`] applies.
+/// Test: `reporter_tests::a_status_note_cites_its_finding_number`.
+pub(super) fn finding_citations(
+    model: &super::model::ReportModel,
+) -> std::collections::HashMap<String, Option<String>> {
+    let syn = model.synthesis.as_ref();
+    let mut out: std::collections::HashMap<String, Option<String>> = Default::default();
+    let mut counters = [0usize; 2];
+    for repo in &model.repositories {
+        for (slot, (band, label)) in [(Severity::Red, "RED"), (Severity::Amber, "AMBER")]
+            .into_iter()
+            .enumerate()
+        {
+            let (rows, _) = band_rows(repo, syn, band, label);
+            for (i, row) in rows.iter().enumerate() {
+                let citation = cite(label, counters[slot] + i + 1);
+                out.entry(row.title.trim().to_string())
+                    .and_modify(|slot| *slot = None)
+                    .or_insert(Some(citation));
+            }
+            counters[slot] += rows.len();
+        }
+    }
+    out
 }

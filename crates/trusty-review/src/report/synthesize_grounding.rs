@@ -31,11 +31,40 @@
 //! [`REACHABILITY_WORDS`] vocabulary rather than the [`REACHABILITY_REWRITES`]
 //! phrase table, so an unrecognised spelling is rejected instead of skipped.
 //!
+//! #6082 lap 8 moved the reachability question off the finding's own wording and
+//! onto its COMPONENT, because a finding whose text happened to carry no
+//! loopback marker was never classified and so was never checked at all. A
+//! component now falls in one of three tiers, and [`Grounding::check`] takes the
+//! checked field's owning component so the tier is decided by the file the
+//! finding sits in rather than by which words the sentence happens to share with
+//! some other finding's title:
+//!
+//! 1. LOOPBACK-ESTABLISHED — some finding on that file carries a
+//!    [`LOOPBACK_MARKERS`] word. Every finding on the file inherits it, and every
+//!    [`REACHABILITY_WORDS`] occurrence in that finding's own narrative is
+//!    rewritten where [`REACHABILITY_REWRITES`] can and rejected where it cannot.
+//! 2. REMOTE-ESTABLISHED — some finding on that file carries a
+//!    [`REMOTE_MARKERS`] word. Left alone; remote wins over local on one file.
+//! 3. UNESTABLISHED — the collected data says nothing either way. A sentence
+//!    making a positive beyond-the-host reach claim (one [`REACHABILITY_REWRITES`]
+//!    recognises) is REJECTED, never rewritten: the report has no evidence the
+//!    surface is host-local either, so substituting a host-local phrase would
+//!    trade one unsupported claim for another.
+//!
+//! Tier 3 is what stops the lap-8 line. No finding on
+//! `crates/trusty-mpm/src/daemon/api/control_routes.rs` carried any reachability
+//! marker, so tier 1 could not reach it however far inheritance spread, and its
+//! business impact shipped "permits remote code execution" unexamined.
+//!
 //! Test: `synthesize_grounding_tests.rs`.
 
 use std::collections::BTreeSet;
 
 use super::model::ReportModel;
+use super::synthesize_grounding_text::{
+    asserts_reachability, contains_name, remove_sentence, rewrite_reachability, sentences,
+    subject_tokens,
+};
 use super::topology::CrateTopology;
 
 /// Text markers that scope a finding to a loopback-only surface.
@@ -88,7 +117,7 @@ const REMOTE_MARKERS: &[&str] = &[
 /// This table is a CONVENIENCE, not the gate. [`REACHABILITY_WORDS`] decides
 /// what gets checked and what may ship; a claim this table cannot rewrite is
 /// rejected rather than passed through.
-const REACHABILITY_REWRITES: &[(&str, &str)] = &[
+pub(super) const REACHABILITY_REWRITES: &[(&str, &str)] = &[
     // #6082 lap 5: the hedged form. RED finding 3's business impact read
     // "enabling remote/local code execution" — no pattern below matches it,
     // because the `/local` sits between the two words every other pattern
@@ -165,7 +194,7 @@ const REACHABILITY_REWRITES: &[(&str, &str)] = &[
 /// the embedder") is rejected too, and its field falls back to the honesty
 /// marker with a note in Synthesis Status. A due-diligence report claiming
 /// network reach for a loopback-bound daemon is the worse of the two errors.
-const REACHABILITY_WORDS: &[&str] = &["remote", "network", "internet"];
+pub(super) const REACHABILITY_WORDS: &[&str] = &["remote", "network", "internet"];
 
 /// The two words every "this dimension has no clean signal" sentence is built
 /// around (#6082 lap 7).
@@ -192,22 +221,39 @@ const LOAD_BEARING_PHRASES: &[&str] = &[
 ];
 
 /// Path and title words too generic to identify a finding's subject.
-const GENERIC_TOKENS: &[&str] = &[
+pub(super) const GENERIC_TOKENS: &[&str] = &[
     "crates", "src", "main", "lib", "mod", "test", "tests", "with", "this", "that", "from", "into",
     "have", "http", "https", "file", "line", "code", "data", "self", "type", "used", "when",
     "over", "path", "call", "rust",
 ];
 
 /// Shortest path/title word admitted as a subject token.
-const MIN_TOKEN_LEN: usize = 4;
+pub(super) const MIN_TOKEN_LEN: usize = 4;
 
-/// One finding the report's own text scopes to a loopback-only surface.
+/// One finding the report's own data scopes to a loopback-only surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LocalOnly {
     /// The finding's title, for the note the guardrail records.
     title: String,
+    /// The file this finding sits in, normalized by [`normalize_component`].
+    ///
+    /// This is what makes the classification shared: every finding on a
+    /// loopback-established file gets an entry here, whatever its own text says.
+    component: String,
     /// The words a sentence must share to be about this finding.
     tokens: BTreeSet<String>,
+}
+
+/// One finding as read, before its component's tier is known.
+///
+/// Why: a file's tier depends on EVERY finding on it, so no single finding can
+/// be classified while the walk is still running (#6082 lap 8).
+struct Staged {
+    title: String,
+    component: String,
+    tokens: BTreeSet<String>,
+    local: bool,
+    remote: bool,
 }
 
 /// What the grounding guardrail decided about one narrative field.
@@ -243,6 +289,8 @@ pub(crate) struct Grounding {
     local_only: Vec<LocalOnly>,
     /// Subject tokens belonging to at least one network-reachable finding.
     remote_tokens: BTreeSet<String>,
+    /// Files some finding establishes as network-reachable (#6082 lap 8).
+    remote_components: BTreeSet<String>,
     /// Crates admitted as load-bearing, most-depended first, with their counts.
     load_bearing: Vec<(String, usize)>,
     /// Every declared crate name — the match vocabulary for the post-check.
@@ -282,16 +330,17 @@ impl Grounding {
         inv: Option<&super::investigate::Investigation>,
     ) -> Self {
         let mut out = Grounding::default();
+        let mut staged: Vec<Staged> = Vec::new();
         let mut from_metrics = 0usize;
         let mut from_inv = 0usize;
         for repo in &model.repositories {
             if let Some(metrics) = &repo.metrics {
                 for f in &metrics.findings {
-                    out.ingest(
+                    staged.push(stage(
                         &f.title,
                         &f.component,
                         &[&f.description, &f.remediation, &f.component],
-                    );
+                    ));
                     if is_clean_security_signal(f.category.as_str(), f.severity, &f.component) {
                         from_metrics += 1;
                     }
@@ -301,7 +350,7 @@ impl Grounding {
         if let Some(inv) = inv {
             for repo in &inv.repos {
                 for f in &repo.findings {
-                    out.ingest(
+                    staged.push(stage(
                         &f.title,
                         &f.file,
                         &[
@@ -311,7 +360,7 @@ impl Grounding {
                             &f.evidence_quote,
                             &f.file,
                         ],
-                    );
+                    ));
                     if is_clean_security_signal(f.dimension.as_str(), f.severity, &f.file) {
                         from_inv += 1;
                     }
@@ -322,6 +371,7 @@ impl Grounding {
         // `apply_investigation`, so after that pass both loops see the same
         // signals. The larger count is the real one either way.
         out.clean_signals = from_metrics.max(from_inv);
+        out.classify(staged);
         for topology in model
             .repositories
             .iter()
@@ -332,30 +382,59 @@ impl Grounding {
         out
     }
 
-    /// Record one finding's reachability, if its own text states one.
-    fn ingest(&mut self, title: &str, component: &str, texts: &[&String]) {
-        let joined = texts
-            .iter()
-            .map(|t| t.to_lowercase())
-            .collect::<Vec<_>>()
-            .join(" ");
-        let remote = REMOTE_MARKERS.iter().any(|m| joined.contains(m));
-        let local = LOOPBACK_MARKERS.iter().any(|m| joined.contains(m));
-        if !remote && !local {
-            return;
+    /// Settle every staged finding's tier, then spread it across its file.
+    ///
+    /// Why: reachability is a property of the surface, not of the sentence that
+    /// happens to describe it. One finding on a file stating "localhost" states
+    /// it for every finding on that file (#6082 lap 8).
+    /// What: collects the loopback- and remote-established files, lets remote win
+    /// where both fired, then records every finding on a loopback-established
+    /// file as [`LocalOnly`] — including the ones whose own text said nothing.
+    /// A finding with no component is classified by its own text alone, as
+    /// before: there is no file to share the classification with.
+    /// Test: `synthesize_grounding_tests.rs::{a_sibling_finding_inherits_its_files_loopback_scope,
+    /// a_remote_finding_on_the_file_wins_over_a_loopback_sibling}`.
+    fn classify(&mut self, staged: Vec<Staged>) {
+        let mut local_files = BTreeSet::new();
+        for s in &staged {
+            if s.component.is_empty() {
+                continue;
+            }
+            if s.remote {
+                self.remote_components.insert(s.component.clone());
+            } else if s.local {
+                local_files.insert(s.component.clone());
+            }
         }
-        let tokens = subject_tokens(title, component);
-        if tokens.is_empty() {
-            return;
+        for f in &self.remote_components {
+            local_files.remove(f);
         }
-        if remote {
-            self.remote_tokens.extend(tokens);
-            return;
+        let mut seen = BTreeSet::new();
+        for s in staged {
+            let has_file = !s.component.is_empty();
+            let remote = if has_file {
+                self.remote_components.contains(&s.component)
+            } else {
+                s.remote
+            };
+            if remote {
+                self.remote_tokens.extend(s.tokens);
+                continue;
+            }
+            let local = if has_file {
+                local_files.contains(&s.component)
+            } else {
+                s.local
+            };
+            if !local || !seen.insert((s.title.clone(), s.component.clone())) {
+                continue;
+            }
+            self.local_only.push(LocalOnly {
+                title: s.title,
+                component: s.component,
+                tokens: s.tokens,
+            });
         }
-        self.local_only.push(LocalOnly {
-            title: title.trim().to_string(),
-            tokens,
-        });
     }
 
     /// Fold one workspace's topology into the load-bearing set and vocabulary.
@@ -429,13 +508,21 @@ impl Grounding {
     /// nothing to rewrite afterwards), then drops any false no-clean-signal
     /// claim, then runs the reachability check over what is left. Returns
     /// `Clean` when none fired.
+    ///
+    /// `owner` is the component of the finding this field belongs to, and `None`
+    /// for report-level prose that belongs to no single finding — the executive,
+    /// code-quality, security and authorship summaries, and the top-risk rows.
+    /// A named owner decides the reachability tier on its own; ownerless prose
+    /// falls back to matching sentences against every loopback-scoped finding's
+    /// subject tokens, which is the only thing available when the prose is about
+    /// the whole estate (#6082 lap 8).
     /// Test: `synthesize_grounding_tests.rs`.
-    pub(crate) fn check(&self, text: &str) -> GroundingOutcome {
+    pub(crate) fn check(&self, text: &str, owner: Option<&str>) -> GroundingOutcome {
         if let Some(reason) = self.load_bearing_violation(text) {
             return GroundingOutcome::Rejected(reason);
         }
         let (text, mut notes) = self.drop_false_no_clean_signal(text);
-        match self.reachability(&text) {
+        match self.reachability(&text, owner) {
             GroundingOutcome::Clean if notes.is_empty() => GroundingOutcome::Clean,
             GroundingOutcome::Clean => GroundingOutcome::Rewritten(text, notes),
             GroundingOutcome::Rewritten(fixed, more) => {
@@ -482,8 +569,8 @@ impl Grounding {
             }
             out = remove_sentence(&out, sentence);
             notes.push(format!(
-                "synthesis: a sentence claiming no clean signal was credited was dropped — the \
-                 Security Posture section credits {} of them, each with the file it was read from",
+                "a sentence claiming no clean signal was credited was dropped — the Security \
+                 Posture section credits {} of them, each with the file it was read from",
                 self.clean_signals
             ));
         }
@@ -522,16 +609,35 @@ impl Grounding {
         None
     }
 
-    /// Correct — or refuse — a beyond-the-host reachability claim about a
-    /// local-only finding.
+    /// Correct — or refuse — a beyond-the-host reachability claim.
     ///
-    /// Why/What: see the module doc. A sentence is about a local-only finding
-    /// when it shares one of that finding's subject tokens and no
-    /// network-reachable finding claims the same token. The trigger and the
-    /// ship/reject decision read the SAME [`REACHABILITY_WORDS`] vocabulary, so
-    /// a spelling [`REACHABILITY_REWRITES`] cannot correct is rejected instead
-    /// of skipped.
-    fn reachability(&self, text: &str) -> GroundingOutcome {
+    /// Why/What: the three tiers in the module doc, in one pass. A field whose
+    /// owning component is loopback-established is checked against that
+    /// component, with no token matching at all: the field belongs to the
+    /// finding, so guessing which finding a sentence is about can only get it
+    /// wrong. Ownerless prose keeps the token match. A field whose owning
+    /// component has no reachability evidence is tier 3 — a positive reach claim
+    /// there is rejected rather than rewritten, because "host-local" would be
+    /// just as unsupported as "remote".
+    /// Test: `synthesize_grounding_tests.rs::{a_sibling_finding_inherits_its_files_loopback_scope,
+    /// an_unevidenced_component_cannot_claim_beyond_host_reach,
+    /// an_unevidenced_component_keeps_a_non_reach_mention_of_the_network}`.
+    fn reachability(&self, text: &str, owner: Option<&str>) -> GroundingOutcome {
+        let key = owner.map(normalize_component).filter(|k| !k.is_empty());
+        let owned = key
+            .as_deref()
+            .and_then(|k| self.local_only.iter().find(|f| f.component == k));
+        // Tier 3: an owner the collected data places neither on loopback nor on
+        // the network. Tier 2 (remote-established) and an owner with no usable
+        // path both fall through to `Clean` below.
+        if let Some(k) = key.as_deref()
+            && owned.is_none()
+        {
+            return match self.remote_components.contains(k) {
+                true => GroundingOutcome::Clean,
+                false => self.refuse_unevidenced_reach(text, owner.unwrap_or_default()),
+            };
+        }
         if self.local_only.is_empty() {
             return GroundingOutcome::Clean;
         }
@@ -542,21 +648,25 @@ impl Grounding {
             if !asserts_reachability(&lower) {
                 continue;
             }
-            let Some(finding) = self.local_subject(&lower) else {
-                continue;
+            let finding = match owned {
+                Some(f) => f,
+                None => match self.local_subject(&lower) {
+                    Some(f) => f,
+                    None => continue,
+                },
             };
             let corrected = rewrite_reachability(sentence);
             if asserts_reachability(&corrected) {
                 return GroundingOutcome::Rejected(format!(
                     "a beyond-the-host reachability claim about '{}' could not be corrected \
-                     safely — that finding's own text scopes it to localhost",
+                     safely — the report's own evidence scopes that surface to localhost",
                     finding.title
                 ));
             }
             out = out.replace(sentence, &corrected);
             notes.push(format!(
-                "synthesis: reachability corrected — '{}' is loopback-scoped by its own text, so \
-                 the beyond-the-host reachability wording was rewritten",
+                "the beyond-the-host reachability wording was corrected — the report's own \
+                 evidence scopes '{}' to a loopback-only surface",
                 finding.title
             ));
         }
@@ -564,6 +674,34 @@ impl Grounding {
             true => GroundingOutcome::Clean,
             false => GroundingOutcome::Rewritten(out, notes),
         }
+    }
+
+    /// Tier 3: refuse a positive beyond-the-host reach claim about a component
+    /// the collected data says nothing about.
+    ///
+    /// Why: rewriting needs evidence the surface is host-local, and there is
+    /// none — so the only honest outcomes are ship-unexamined or withhold. A
+    /// due-diligence report withholds.
+    /// What: `Rejected` for a sentence [`REACHABILITY_REWRITES`] recognises as a
+    /// reach claim (the rewrite changes it), `Clean` otherwise. The rewrite table
+    /// rather than [`REACHABILITY_WORDS`] is the trigger here deliberately: with
+    /// no evidence either way, a bare "network" in "a transient network error"
+    /// asserts nothing about reachability and must not cost a reader the field.
+    fn refuse_unevidenced_reach(&self, text: &str, component: &str) -> GroundingOutcome {
+        for sentence in sentences(text) {
+            if !asserts_reachability(&sentence.to_lowercase()) {
+                continue;
+            }
+            if rewrite_reachability(sentence) == sentence {
+                continue;
+            }
+            return GroundingOutcome::Rejected(format!(
+                "a beyond-the-host reachability claim about `{}` cannot be verified — the \
+                 collected data records no evidence of how that surface is reached",
+                component.trim()
+            ));
+        }
+        GroundingOutcome::Clean
     }
 
     /// The local-only finding a lower-cased sentence is about, if exactly that.
@@ -574,6 +712,44 @@ impl Grounding {
                 .any(|t| contains_name(lower_sentence, t) && !self.remote_tokens.contains(t))
         })
     }
+}
+
+/// Read one finding's reachability markers, deferring the verdict to
+/// [`Grounding::classify`].
+fn stage(title: &str, component: &str, texts: &[&String]) -> Staged {
+    let joined = texts
+        .iter()
+        .map(|t| t.to_lowercase())
+        .collect::<Vec<_>>()
+        .join(" ");
+    Staged {
+        title: title.trim().to_string(),
+        component: normalize_component(component),
+        tokens: subject_tokens(title, component),
+        local: LOOPBACK_MARKERS.iter().any(|m| joined.contains(m)),
+        remote: REMOTE_MARKERS.iter().any(|m| joined.contains(m)),
+    }
+}
+
+/// Reduce a component reference to the bare file path it names.
+///
+/// Why: the same file arrives as `crates/…/control_routes.rs` from the
+/// investigation and `crates/…/control_routes.rs:268` from the metrics rows, and
+/// two findings on one file must land on one key or they cannot share a tier.
+/// What: separators normalized to `/`, any trailing `:<line>[:<column>]` dropped,
+/// lower-cased. An empty or non-path component yields an empty string, which
+/// [`Grounding::classify`] reads as "no file to share with".
+/// Test: `synthesize_grounding_tests.rs::a_line_suffix_does_not_split_a_component`.
+fn normalize_component(raw: &str) -> String {
+    let normalized = raw.trim().replace('\\', "/");
+    let mut path = normalized.as_str();
+    while let Some((head, tail)) = path.rsplit_once(':') {
+        if tail.is_empty() || !tail.bytes().all(|b| b.is_ascii_digit()) {
+            break;
+        }
+        path = head;
+    }
+    path.trim().to_lowercase()
 }
 
 /// The crates admitted as load-bearing: the top quartile by dependent count.
@@ -611,119 +787,6 @@ fn is_clean_security_signal(
     severity == super::metrics::Severity::Green
         && dimension == super::investigate::SECURITY_DIMENSION
         && !cite.trim().is_empty()
-}
-
-/// Cut `sentence` out of `text`, taking the space that separated it from its
-/// neighbour so the remaining prose keeps single spacing.
-fn remove_sentence(text: &str, sentence: &str) -> String {
-    let spaced = format!("{sentence} ");
-    if text.contains(&spaced) {
-        return text.replace(&spaced, "");
-    }
-    text.replace(sentence, "")
-}
-
-/// The words that identify one finding's subject: its component path segments
-/// and its title words, minus the generic ones.
-fn subject_tokens(title: &str, component: &str) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    for raw in component
-        .split(['/', '\\', '.', ':'])
-        .chain(title.split_whitespace())
-    {
-        let word: String = raw
-            .trim_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
-            .to_lowercase();
-        if word.len() < MIN_TOKEN_LEN || GENERIC_TOKENS.contains(&word.as_str()) {
-            continue;
-        }
-        if word.chars().all(|c| c.is_ascii_digit()) {
-            continue;
-        }
-        out.insert(word);
-    }
-    out
-}
-
-/// True when `haystack` contains `needle` bounded by non-identifier characters.
-///
-/// Why: a bare `contains` would match `trusty-mpm` inside `trusty-mpm-gui` and
-/// blame the wrong crate.
-fn contains_name(haystack: &str, needle: &str) -> bool {
-    if needle.is_empty() {
-        return false;
-    }
-    let bytes = haystack.as_bytes();
-    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'-';
-    haystack.match_indices(needle).any(|(i, _)| {
-        let before_ok = i == 0 || !ident(bytes[i - 1]);
-        let after = i + needle.len();
-        let after_ok = after >= bytes.len() || !ident(bytes[after]);
-        before_ok && after_ok
-    })
-}
-
-/// Apply every known reachability rewrite to one sentence, case-insensitively.
-fn rewrite_reachability(sentence: &str) -> String {
-    let mut out = sentence.to_string();
-    for (phrase, replacement) in REACHABILITY_REWRITES {
-        out = replace_ignore_case(&out, phrase, replacement);
-    }
-    out
-}
-
-/// Case-insensitive literal replacement preserving everything else verbatim.
-fn replace_ignore_case(haystack: &str, needle: &str, replacement: &str) -> String {
-    let lower = haystack.to_lowercase();
-    let mut out = String::with_capacity(haystack.len());
-    let mut cursor = 0usize;
-    while let Some(rel) = lower[cursor..].find(needle) {
-        let at = cursor + rel;
-        out.push_str(&haystack[cursor..at]);
-        out.push_str(replacement);
-        cursor = at + needle.len();
-    }
-    out.push_str(&haystack[cursor..]);
-    out
-}
-
-/// True when a sentence asserts reachability beyond this host.
-///
-/// A plain substring test, not a word-boundary one: every rewrite in
-/// [`REACHABILITY_REWRITES`] removes its own reachability word, so any
-/// occurrence left belongs to a phrase this module does not know how to
-/// correct — including a hyphenated one like `remote-management` or
-/// `network-attached`, which a boundary test would miss.
-fn asserts_reachability(sentence: &str) -> bool {
-    let lower = sentence.to_lowercase();
-    REACHABILITY_WORDS.iter().any(|w| lower.contains(w))
-}
-
-/// Split prose into sentences on `. `, `? ` and `! ` boundaries, keeping each
-/// sentence's own text so the caller can splice a correction back in.
-fn sentences(text: &str) -> Vec<&str> {
-    let mut out = Vec::new();
-    let mut start = 0usize;
-    let bytes = text.as_bytes();
-    for (i, b) in bytes.iter().enumerate() {
-        if !matches!(b, b'.' | b'?' | b'!' | b'\n') {
-            continue;
-        }
-        let next_is_break = bytes.get(i + 1).is_none_or(|n| n.is_ascii_whitespace());
-        if !next_is_break {
-            continue;
-        }
-        let piece = text[start..=i].trim();
-        if !piece.is_empty() {
-            out.push(piece);
-        }
-        start = i + 1;
-    }
-    let tail = text[start..].trim();
-    if !tail.is_empty() {
-        out.push(tail);
-    }
-    out
 }
 
 #[cfg(test)]

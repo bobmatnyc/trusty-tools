@@ -282,13 +282,12 @@ pub async fn cmd_report(config_path: Option<&Path>, args: ReportArgs) -> Result<
                 args.out.display()
             )
         })?;
+    // #6082 lap 8: this used to echo the report's own `synthesis: available`
+    // banner, which the Synthesis Status block no longer carries. The operator's
+    // question here is how much the guardrails withheld.
     eprintln!(
-        "[trusty-review report] {}",
-        synthesis
-            .status_lines()
-            .first()
-            .cloned()
-            .unwrap_or_default()
+        "[trusty-review report] synthesis complete — {} guardrail disclosure(s)",
+        synthesis.notes.len()
     );
     model.synthesis = Some(synthesis);
 

@@ -154,7 +154,8 @@ fn normalize_object(
     for k in unknown {
         obj.remove(&k);
         notes.push(format!(
-            "synthesis: dropped unrecognized field '{k}' in {context}"
+            "the model returned an unrecognised field '{k}' in the {context} of its response, \
+             so that field was dropped"
         ));
     }
 }
