@@ -16,7 +16,7 @@
 //! What: [`Grounding`] is built from the deterministic model and does two
 //! things. It renders [`prompt_facts`] — the reachability hints and the
 //! authoritative load-bearing list — into the synthesis prompt, so the model is
-//! told the answer rather than left to guess it. And it runs [`Grounding::check`]
+//! told the answer rather than left to guess it. And it runs [`Grounding::check_field`]
 //! over each narrative field afterwards, because a prompt instruction is a hope
 //! and this is the mechanical half: a reachability contradiction is REWRITTEN
 //! when the phrase is one this module knows how to rewrite, and the field is
@@ -34,7 +34,7 @@
 //! #6082 lap 8 moved the reachability question off the finding's own wording and
 //! onto its COMPONENT, because a finding whose text happened to carry no
 //! loopback marker was never classified and so was never checked at all. A
-//! component now falls in one of three tiers, and [`Grounding::check`] takes the
+//! component now falls in one of three tiers, and [`Grounding::check_field`] takes the
 //! checked field's owning component so the tier is decided by the file the
 //! finding sits in rather than by which words the sentence happens to share with
 //! some other finding's title:
@@ -77,6 +77,14 @@
 //! [`synthesize_grounding_text::grammar_debris`] before it may ship, which
 //! sends a doubled determiner or a self-contrast down the reject-and-disclose
 //! path instead. A visible withholding is the better of the two failures.
+//!
+//! #6082 lap 11 made a disclosure name the finding whose field it is. The tier
+//! is read from the FILE, so [`Grounding::reachability`] resolves it through
+//! that file's first loopback record — and it quoted that record's title. The
+//! graded report's RED findings 2 and 3 both sit in `control_routes.rs`, so
+//! their two withholding lines shipped byte-identical, both naming finding 2.
+//! [`Grounding::check_field`] now takes the field's own subject, and
+//! [`named_subject`] prefers it over the shared record.
 //!
 //! [`synthesize_grounding_text::CLAIM_WORDS`]: super::synthesize_grounding_text::CLAIM_WORDS
 //! [`synthesize_grounding_text::grammar_debris`]: super::synthesize_grounding_text::grammar_debris
@@ -573,8 +581,18 @@ impl Grounding {
     /// falls back to matching sentences against every loopback-scoped finding's
     /// subject tokens, which is the only thing available when the prose is about
     /// the whole estate (#6082 lap 8).
+    ///
+    /// `subject` is that finding's own title. The tier is read from the FILE, so
+    /// two findings on one file share the record it is read from — but each
+    /// disclosure must name the finding whose field it is, not that shared
+    /// record's (#6082 lap 11).
     /// Test: `synthesize_grounding_tests.rs`.
-    pub(crate) fn check(&self, text: &str, owner: Option<&str>) -> GroundingOutcome {
+    pub(crate) fn check_field(
+        &self,
+        text: &str,
+        owner: Option<&str>,
+        subject: Option<&str>,
+    ) -> GroundingOutcome {
         if let Some(reason) = self.load_bearing_violation(text) {
             // A load-bearing violation names a CRATE, not a finding, so there is
             // no §5.x row to send the reader to.
@@ -584,7 +602,7 @@ impl Grounding {
             };
         }
         let (text, mut notes) = self.drop_false_no_clean_signal(text);
-        match self.reachability(&text, owner) {
+        match self.reachability(&text, owner, subject) {
             GroundingOutcome::Clean if notes.is_empty() => GroundingOutcome::Clean,
             GroundingOutcome::Clean => GroundingOutcome::Rewritten(text, notes),
             GroundingOutcome::Rewritten(fixed, more) => {
@@ -686,10 +704,21 @@ impl Grounding {
     /// component has no reachability evidence is tier 3 — a positive reach claim
     /// there is rejected rather than rewritten, because "host-local" would be
     /// just as unsupported as "remote".
+    ///
+    /// `subject` names the finding the field belongs to. The record `owned`
+    /// finds is keyed by FILE, so every finding on one file resolves to the
+    /// first of them — correct for the tier, wrong for the disclosure, which
+    /// quotes a title (#6082 lap 11).
     /// Test: `synthesize_grounding_tests.rs::{a_sibling_finding_inherits_its_files_loopback_scope,
     /// an_unevidenced_component_cannot_claim_beyond_host_reach,
-    /// an_unevidenced_component_keeps_a_non_reach_mention_of_the_network}`.
-    fn reachability(&self, text: &str, owner: Option<&str>) -> GroundingOutcome {
+    /// an_unevidenced_component_keeps_a_non_reach_mention_of_the_network,
+    /// two_findings_on_one_file_are_each_withheld_under_their_own_title}`.
+    fn reachability(
+        &self,
+        text: &str,
+        owner: Option<&str>,
+        subject: Option<&str>,
+    ) -> GroundingOutcome {
         let key = owner.map(normalize_component).filter(|k| !k.is_empty());
         let owned = key
             .as_deref()
@@ -722,6 +751,10 @@ impl Grounding {
                     None => continue,
                 },
             };
+            // #6082 lap 11: the disclosure names the finding whose field this is
+            // — `finding` is the file's first loopback record, which is the same
+            // record for every finding on that file.
+            let named = named_subject(subject, finding);
             let corrected = rewrite_reachability(sentence);
             // #6082 lap 10: a rewrite that leaves the sentence ungrammatical, or
             // contrasting one reachability class with itself, takes the same
@@ -733,21 +766,19 @@ impl Grounding {
                 });
                 return GroundingOutcome::Rejected {
                     reason: format!(
-                        "a beyond-the-host reachability claim about '{}' could not be corrected \
-                         safely — {detail}",
-                        finding.title
+                        "a beyond-the-host reachability claim about '{named}' could not be \
+                         corrected safely — {detail}"
                     ),
-                    subject: Some(finding.title.clone()),
+                    subject: Some(named.to_string()),
                 };
             }
             out = out.replace(sentence, &corrected);
             notes.push(Correction {
                 text: format!(
                     "the beyond-the-host reachability wording was corrected — the report's own \
-                     evidence scopes '{}' to a loopback-only surface",
-                    finding.title
+                     evidence scopes '{named}' to a loopback-only surface"
                 ),
-                subject: Some(finding.title.clone()),
+                subject: Some(named.to_string()),
             });
         }
         match notes.is_empty() {
@@ -805,6 +836,23 @@ impl Grounding {
                 .any(|t| contains_name(lower_sentence, t) && !self.remote_tokens.contains(t))
         })
     }
+}
+
+/// The finding title a disclosure quotes: the field's own, or the record the
+/// tier was read from when the field belongs to no named finding.
+///
+/// Why: [`Grounding::reachability`] resolves the tier through a record keyed by
+/// FILE. Two findings on one file resolve to the same record, so quoting that
+/// record's title gave RED findings 2 and 3 of the graded report byte-identical
+/// withholding disclosures, both naming finding 2 (#6082 lap 11).
+/// What: the caller's `subject` when it is non-empty, else `fallback`'s title —
+/// which is what report-level prose, matched by subject token, still needs.
+/// Test: `synthesize_grounding_tests.rs::two_findings_on_one_file_are_each_withheld_under_their_own_title`.
+fn named_subject<'a>(subject: Option<&'a str>, fallback: &'a LocalOnly) -> &'a str {
+    subject
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(fallback.title.as_str())
 }
 
 /// Read one finding's reachability markers, deferring the verdict to

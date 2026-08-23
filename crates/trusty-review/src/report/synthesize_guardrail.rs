@@ -59,7 +59,7 @@ fn ungrounded_claim_note(field: &str, subject: Option<&str>, reason: &str) -> St
 /// growing another positional argument on every call (#6082 lap 8).
 /// What: the reader-facing field name, the §5.2 finding it belongs to (absent
 /// for report-level prose), and that finding's component, which decides its
-/// reachability tier in [`Grounding::check`].
+/// reachability tier in [`Grounding::check_field`].
 struct FieldCtx<'a> {
     field: &'a str,
     subject: Option<&'a str>,
@@ -306,7 +306,7 @@ fn ground_field(
     if text.is_empty() {
         return String::new();
     }
-    match grounding.check(text, ctx.component) {
+    match grounding.check_field(text, ctx.component, ctx.subject) {
         GroundingOutcome::Clean => text.to_string(),
         GroundingOutcome::Rewritten(fixed, corrections) => {
             notes.extend(corrections.into_iter().map(|c| note_for(ctx, &c)));
@@ -357,7 +357,7 @@ fn admit_field(
     if text.is_empty() {
         return None;
     }
-    let grounded = match grounding.check(text, ctx.component) {
+    let grounded = match grounding.check_field(text, ctx.component, ctx.subject) {
         GroundingOutcome::Clean => text.to_string(),
         GroundingOutcome::Rewritten(fixed, corrections) => {
             notes.extend(corrections.into_iter().map(|c| note_for(ctx, &c)));

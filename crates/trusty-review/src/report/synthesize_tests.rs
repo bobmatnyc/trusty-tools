@@ -2530,6 +2530,28 @@ fn synthesize_grounds_the_top_risk_row_description() {
     );
 }
 
+/// The live lap-11 shape: two RED findings on ONE loopback-established file.
+///
+/// Why: the graded report's RED findings 2 and 3 both sit in
+/// `control_routes.rs`, which is the only condition the defect needs — one file
+/// carrying more than one finding (#6082 lap 11).
+fn two_findings_on_one_file_model() -> ReportModel {
+    let mut model = grounded_fixture_model();
+    let metrics = model.repositories[0]
+        .metrics
+        .as_mut()
+        .expect("the grounded fixture carries metrics");
+    metrics.findings.push(MetricFinding {
+        title: "Run handler executes an arbitrary caller-supplied executable".to_string(),
+        severity: Severity::Red,
+        category: "security".to_string(),
+        component: "crates/acme-daemon/src/control_routes.rs".to_string(),
+        description: "the request body overrides the executable path".to_string(),
+        remediation: "validate the path before constructing RunParams".to_string(),
+    });
+    model
+}
+
 /// One RED narrative against the grounded fixture, varying only the field the
 /// test is about.
 fn grounded_finding(business_impact: &str) -> super::FindingProse {
@@ -2647,6 +2669,69 @@ fn synthesize_empties_an_uncorrectable_remote_claim_in_a_finding() {
         "the rejection must be recorded: {:?}",
         result.notes
     );
+}
+
+/// #6082 lap 11: two findings on one file are withheld under their own titles.
+///
+/// Why: the graded report's Synthesis Status block listed "RED finding 2" and
+/// "RED finding 3" with byte-identical text, both quoting finding 2's title.
+/// The reachability tier is read from the FILE, so both findings resolved to
+/// the same loopback record and the disclosure quoted that record's title.
+/// What: the invariant the reader depends on, over the notes `apply_guardrail`
+/// actually produced — two notes with different subjects never share one text,
+/// and each text names its own subject.
+/// Test: this test itself, with
+/// `synthesize_grounding_tests::two_findings_on_one_file_are_each_withheld_under_their_own_title`
+/// covering the check in isolation.
+#[test]
+fn two_withheld_findings_on_one_file_carry_their_own_titles() {
+    let model = two_findings_on_one_file_model();
+    let grounding = crate::report::synthesize_grounding::Grounding::from_model(&model);
+    let allowed = allowed_numbers(&serde_json::to_value(&model).unwrap());
+    let impact = "The acme-daemon control_routes surface offers remote code execution and \
+                  remote-management access to the internet.";
+    let mut second = grounded_finding(impact);
+    second.title = "Control-plane HTTP session endpoints have no authentication".to_string();
+    let raw = super::RawSynthesis {
+        executive_summary: String::new(),
+        code_quality_summary: String::new(),
+        security_summary: String::new(),
+        authorship_summary: String::new(),
+        top_risks: vec![],
+        findings: vec![grounded_finding(impact), second],
+    };
+
+    let result =
+        crate::report::synthesize_guardrail::apply_guardrail(raw, &allowed, Vec::new(), &grounding)
+            .expect("the findings' other fields keep this Ok");
+
+    let withheld: Vec<_> = result
+        .notes
+        .iter()
+        .filter(|n| n.text.contains("business impact was withheld"))
+        .collect();
+    assert_eq!(
+        withheld.len(),
+        2,
+        "both fields must be withheld: {withheld:?}"
+    );
+    for note in &withheld {
+        let subject = note
+            .subject
+            .as_deref()
+            .expect("a withholding names its finding");
+        assert!(
+            note.text.contains(subject),
+            "the disclosure must quote its own subject: {note:?}"
+        );
+    }
+    for (a, b) in withheld.iter().zip(withheld.iter().skip(1)) {
+        assert_ne!(a.subject, b.subject, "the fixture needs distinct subjects");
+        assert_ne!(
+            a.text, b.text,
+            "two findings with different titles must not share one disclosure"
+        );
+    }
 }
 
 /// #6082 lap 4: the prompt states both grounding facts, so the model is told

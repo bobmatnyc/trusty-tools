@@ -9,6 +9,22 @@ use crate::report::model::{ReportModel, RepositoryReport};
 use crate::report::synthesize_grounding_text::replace_ignore_case;
 use crate::report::topology::CrateNode;
 
+/// The subject-less form of [`Grounding::check_field`]: prose owned by a file,
+/// or by nothing, but by no NAMED finding.
+///
+/// Why: every test below predates the subject parameter (#6082 lap 11) and none
+/// of them exercises it — spelling `None` at 36 call sites would say nothing the
+/// name does not. The tests that do exercise it call `check_field` directly.
+trait CheckAtComponent {
+    fn check(&self, text: &str, owner: Option<&str>) -> GroundingOutcome;
+}
+
+impl CheckAtComponent for Grounding {
+    fn check(&self, text: &str, owner: Option<&str>) -> GroundingOutcome {
+        self.check_field(text, owner, None)
+    }
+}
+
 fn node(name: &str, inbound: usize) -> CrateNode {
     CrateNode {
         name: name.to_string(),
@@ -1033,4 +1049,72 @@ fn a_correction_note_carries_the_finding_it_is_about() {
         notes[0].subject.as_deref(),
         Some("Control-plane HTTP session endpoints have no authentication or authorization")
     );
+}
+
+// ─── #6082 lap 11: a disclosure names the finding whose field it is ──────────
+
+/// The lap-11 graded defect, reconstructed from its live output.
+///
+/// Why: the graded report's Synthesis Status block carried two byte-identical
+/// withholding lines — "section 5.1, RED finding 2" and "section 5.1, RED
+/// finding 3" — both quoting finding 2's title. The two findings sit on one
+/// file, `reachability` resolves the tier through the file's FIRST loopback
+/// record, and the disclosure quoted that record's title instead of the
+/// finding's own. The reader was sent to a title that names the other finding.
+/// What: both findings of the two-finding control-plane fixture, each field
+/// withheld under its own title, and the two disclosures differing.
+/// Test: this test itself, with
+/// `synthesize_tests::two_withheld_findings_on_one_file_carry_their_own_titles`
+/// closing the chain through `apply_guardrail`.
+#[test]
+fn two_findings_on_one_file_are_each_withheld_under_their_own_title() {
+    let g = Grounding::from_model(&control_plane_model(true));
+    let prose = "The trusty-mpm control-plane offers remote code execution and a remote-management \
+                 surface to anyone on the internet.";
+    let mut reasons = Vec::new();
+    for (line, title) in [
+        (
+            259,
+            "Control-plane HTTP handlers accept unauthenticated callers",
+        ),
+        (
+            268,
+            "Arbitrary executable path accepted from HTTP request body",
+        ),
+    ] {
+        let owner = format!("{CONTROL_ROUTES}:{line}");
+        let outcome = g.check_field(prose, Some(&owner), Some(title));
+        let GroundingOutcome::Rejected { reason, subject } = &outcome else {
+            panic!("expected a withholding for {title}, got {outcome:?}");
+        };
+        assert!(
+            reason.contains(title),
+            "the disclosure must quote its own finding: {reason}"
+        );
+        assert_eq!(subject.as_deref(), Some(title));
+        reasons.push(reason.clone());
+    }
+    assert_ne!(
+        reasons[0], reasons[1],
+        "two findings with different titles must not share one disclosure"
+    );
+}
+
+/// Report-level prose still names the finding the token match found for it.
+///
+/// The fix above must not turn the subject-less path into an unnamed
+/// disclosure — that was the lap-9 defect, and it is a different one.
+#[test]
+fn subjectless_prose_keeps_the_finding_the_token_match_named() {
+    let g = Grounding::from_model(&loopback_model());
+    let prose = "The trusty-mpm control-plane offers remote code execution and a remote-management \
+                 surface to anyone on the internet.";
+    let GroundingOutcome::Rejected { reason, subject } = g.check_field(prose, None, None) else {
+        panic!("expected a withholding");
+    };
+    assert!(
+        reason.contains("Control-plane HTTP session endpoints"),
+        "{reason}"
+    );
+    assert!(subject.is_some());
 }
