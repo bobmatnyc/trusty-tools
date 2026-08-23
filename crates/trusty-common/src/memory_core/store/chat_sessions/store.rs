@@ -157,6 +157,7 @@ impl ChatSessionStore {
             })?;
 
         let mut out: Vec<ChatSessionMeta> = Vec::new();
+        let mut corrupt = 0usize;
         for entry in table.iter().map_err(|e| ChatSessionStoreError::Storage {
             path: self.path.clone(),
             source: Box::new(e),
@@ -170,8 +171,21 @@ impl ChatSessionStore {
                 .map_err(|e| ChatSessionStoreError::Postcard { source: e })?;
             let created_at = parse_timestamp(&record.created_at, "created_at")?;
             let updated_at = parse_timestamp(&record.updated_at, "updated_at")?;
-            let history: Vec<ChatMessage> =
-                serde_json::from_str(&record.history).unwrap_or_default();
+            // #6196: a corrupt-history row must not masquerade as a valid empty
+            // session. One bad row must not fail the whole list, so skip it
+            // with a warn and a running count instead of `unwrap_or_default()`.
+            let history: Vec<ChatMessage> = match serde_json::from_str(&record.history) {
+                Ok(h) => h,
+                Err(source) => {
+                    corrupt += 1;
+                    tracing::warn!(
+                        session_id = %id,
+                        error = %source,
+                        "skipping chat session with corrupt history json in list_sessions",
+                    );
+                    continue;
+                }
+            };
             out.push(ChatSessionMeta {
                 id,
                 title: record.title,
@@ -179,6 +193,12 @@ impl ChatSessionStore {
                 updated_at,
                 message_count: history.len(),
             });
+        }
+        if corrupt > 0 {
+            tracing::warn!(
+                corrupt_rows = corrupt,
+                "list_sessions skipped {corrupt} chat session(s) with corrupt history json",
+            );
         }
         out.sort_by_key(|s| Reverse(s.updated_at.timestamp_millis()));
         Ok(out)
@@ -220,7 +240,16 @@ impl ChatSessionStore {
             .map_err(|e| ChatSessionStoreError::Postcard { source: e })?;
         let created_at = parse_timestamp(&record.created_at, "created_at")?;
         let updated_at = parse_timestamp(&record.updated_at, "updated_at")?;
-        let history: Vec<ChatMessage> = serde_json::from_str(&record.history).unwrap_or_default();
+        // #6196: propagate a parse failure instead of `unwrap_or_default()`, so
+        // a chat-resume caller can tell "prior conversation lost" from "new
+        // empty session" rather than seeing a normal-looking empty history.
+        let history: Vec<ChatMessage> =
+            serde_json::from_str(&record.history).map_err(|source| {
+                ChatSessionStoreError::CorruptHistory {
+                    id: id.to_string(),
+                    source: Box::new(source),
+                }
+            })?;
         Ok(Some(ChatSession {
             id: id.to_string(),
             title: record.title,
@@ -375,10 +404,20 @@ impl ChatSessionStore {
             }
         };
 
+        // #6196: fail closed on a corrupt existing history rather than
+        // `unwrap_or_default()` — the old default silently dropped the corrupt
+        // blob and overwrote the row with only the new messages, destroying the
+        // evidence permanently. `?` aborts this write transaction, so the
+        // corrupt row is left intact for recovery.
         let (title, created_at, mut history) = match existing_record {
             Some(r) => {
                 let history: Vec<ChatMessage> =
-                    serde_json::from_str(&r.history).unwrap_or_default();
+                    serde_json::from_str(&r.history).map_err(|source| {
+                        ChatSessionStoreError::CorruptHistory {
+                            id: id.to_string(),
+                            source: Box::new(source),
+                        }
+                    })?;
                 (r.title, r.created_at, history)
             }
             None => (None, now.clone(), Vec::new()),
@@ -419,7 +458,9 @@ impl ChatSessionStore {
 
         let created_at = parse_timestamp(&record.created_at, "created_at")?;
         let updated_at = parse_timestamp(&record.updated_at, "updated_at")?;
-        let history: Vec<ChatMessage> = serde_json::from_str(&record.history).unwrap_or_default();
+        // #6196: reuse the in-memory `history` we just serialised into `record`
+        // rather than re-parsing `record.history` — it cannot be corrupt (we
+        // encoded it) and the reparse was another `unwrap_or_default()` site.
         Ok(ChatSession {
             id: id.to_string(),
             title: record.title,

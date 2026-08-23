@@ -39,6 +39,110 @@ mod tests {
         (dir, store)
     }
 
+    /// Write a SESSIONS row whose `history` blob is unparseable JSON, directly
+    /// through the store's redb handle. There is no public API that produces a
+    /// corrupt row, so the #6196 regression tests craft one here (white-box:
+    /// this test module is a descendant of `chat_sessions`, so it can reach the
+    /// `pub(super)` `db` field and `ChatSessionRecord`).
+    fn write_corrupt_row(store: &ChatSessionStore, id: &str, title: &str) {
+        use crate::memory_core::store::kg_store::SESSIONS;
+        let now = chrono::Utc::now().to_rfc3339();
+        let record = super::types::ChatSessionRecord {
+            title: Some(title.to_string()),
+            created_at: now.clone(),
+            updated_at: now,
+            history: "{ this is not valid history json".to_string(),
+        };
+        let bytes = postcard::to_allocvec(&record).unwrap();
+        let wtx = store.db.begin_write().unwrap();
+        {
+            let mut table = wtx.open_table(SESSIONS).unwrap();
+            table.insert(id, bytes.as_slice()).unwrap();
+        }
+        wtx.commit().unwrap();
+    }
+
+    /// Why (#6196): a session whose `history` JSON is corrupt must surface as an
+    /// error, not `Ok(Some(session))` with an empty history — otherwise a
+    /// chat-resume caller cannot tell "prior conversation lost" from "new empty
+    /// session". Fails on the pre-fix commit (which returned `Ok(Some(empty))`).
+    /// What: writes a corrupt row, asserts `get_session` returns `Err`.
+    /// Test: this function.
+    #[test]
+    fn get_session_surfaces_corrupt_history_as_error() {
+        let (_d, store) = open();
+        let id = "corrupt-get-1";
+        write_corrupt_row(&store, id, "corrupt");
+        let result = store.get_session(id);
+        assert!(
+            result.is_err(),
+            "corrupt history must surface as an error, got {result:?}"
+        );
+    }
+
+    /// Why (#6196): in the list path a corrupt row must not masquerade as a
+    /// valid empty session. It is skipped with a warn/count instead. Fails on
+    /// the pre-fix commit (which listed the corrupt row with message_count 0).
+    /// What: persists one valid session and one corrupt row, asserts the corrupt
+    /// row is absent from the list and only the valid session remains.
+    /// Test: this function.
+    #[test]
+    fn list_sessions_skips_corrupt_row_not_render_empty() {
+        let (_d, store) = open();
+        let good = store.create_session(Some("good".into())).unwrap();
+        store
+            .upsert_session(
+                &good,
+                &[ChatMessage {
+                    role: "user".into(),
+                    content: "hi".into(),
+                }],
+            )
+            .unwrap();
+        write_corrupt_row(&store, "corrupt-list-1", "corrupt");
+
+        let metas = store.list_sessions().unwrap();
+        assert!(
+            metas.iter().all(|m| m.id != "corrupt-list-1"),
+            "corrupt row must be skipped, not rendered as a valid empty session: {metas:?}"
+        );
+        assert!(
+            metas.iter().any(|m| m.id == good),
+            "the valid session must still be listed"
+        );
+        assert_eq!(metas.len(), 1, "only the valid session should be listed");
+    }
+
+    /// Why (#6196): appending to a session with corrupt history must fail closed
+    /// rather than `unwrap_or_default()` and overwrite the row with only the new
+    /// message, permanently destroying the corrupt blob. Fails on the pre-fix
+    /// commit (which returned `Ok` and clobbered the row).
+    /// What: writes a corrupt row, asserts `append_message` returns `Err` and
+    /// the corrupt bytes are left intact (`get_session` still errors after).
+    /// Test: this function.
+    #[test]
+    fn append_message_on_corrupt_history_fails_closed() {
+        let (_d, store) = open();
+        let id = "corrupt-append-1";
+        write_corrupt_row(&store, id, "corrupt");
+
+        let result = store.append_message(
+            id,
+            ChatMessage {
+                role: "user".into(),
+                content: "new".into(),
+            },
+        );
+        assert!(
+            result.is_err(),
+            "append onto corrupt history must fail closed, got {result:?}"
+        );
+        assert!(
+            store.get_session(id).is_err(),
+            "the corrupt row must be left intact, not clobbered by the failed append"
+        );
+    }
+
     #[test]
     fn create_then_get_session_round_trips() {
         let (_d, store) = open();
