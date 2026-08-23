@@ -166,30 +166,32 @@ fn compact_orphans_removes_dangling() {
 }
 
 /// Why (#6195): `compact_orphans` classes orphan candidates from read-txn
-/// snapshots taken before its delete transaction. An `upsert` that commits
-/// after the live snapshot but before the delete leaves its brand-new
+/// snapshots taken before its delete transaction. A real `upsert` that commits
+/// AFTER the live-id snapshot but BEFORE the orphan scan leaves its brand-new
 /// `VECTORS` row in the orphan scan while its `VECTOR_KEYS` mapping is live.
-/// The pre-fix delete removed the row as a false orphan, so on the next
-/// `open` the drawer never entered the HNSW graph and vector search could
-/// never return it — silent data loss. That row must survive.
-/// What: seeds a genuine orphan `VECTORS` row (an id with no mapping), then
-/// uses a held redb write transaction as a hard rendezvous. redb permits one
-/// writer at a time, so `compact_orphans` on a second thread completes both
-/// read snapshots — classing the id as an orphan — and then parks at its
-/// delete `begin_write()` behind the held transaction. The test commits the
-/// drawer's `VECTOR_KEYS` mapping THROUGH that transaction (the deterministic
-/// stand-in for the racing upsert landing in the window) and releasing the
-/// lock lets the delete run. Asserts the `VECTORS` row survives and the drawer
-/// is searchable after a reopen. Fails on the pre-fix commit.
+/// The pre-fix delete removed the row as a false orphan, so on the next `open`
+/// the drawer never entered the HNSW graph and vector search could never return
+/// it — silent data loss. That row must survive.
+/// What: drives a genuine `store.upsert` (atomic `VECTORS` + `VECTOR_KEYS`
+/// write, fresh allocated id) into the exact window using the `#[cfg(test)]`
+/// `compact_race_barrier`. `compact_orphans` runs on a second thread and calls
+/// `wait()` twice right after its live snapshot; the test thread meets the
+/// first `wait()` (proving the snapshot is already taken and missed the drawer),
+/// performs the racing upsert, then meets the second `wait()` (proving the
+/// upsert has committed before the orphan scan runs). No sleeps: every ordering
+/// edge is a barrier, so the interleaving is guaranteed, not timing-dependent.
+/// Asserts the raced row survives and the drawer is searchable after a reopen.
+/// Fails if the liveness re-check is removed.
 /// Test: this test itself is the verification.
 #[test]
 fn compact_orphans_keeps_a_vector_upserted_after_the_live_snapshot() {
+    use std::sync::Barrier;
+
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("hnsw.redb");
     let dim = 8;
 
     let raced_uuid = Uuid::new_v4().to_string();
-    let raced_id: u64 = 4242;
     let raced_vec = unit_vec(dim, 77);
 
     {
@@ -200,47 +202,30 @@ fn compact_orphans_keeps_a_vector_upserted_after_the_live_snapshot() {
         let anchor = Uuid::new_v4().to_string();
         store.upsert(&anchor, &unit_vec(dim, 1)).unwrap();
 
-        // Seed a genuine orphan: a `VECTORS` row with no `VECTOR_KEYS`
-        // mapping — the row the racing upsert will claim.
-        let encoded = postcard::to_allocvec(&raced_vec).unwrap();
-        {
-            let wtx = store.db.begin_write().unwrap();
-            {
-                let mut vectors = wtx.open_table(VECTORS).unwrap();
-                vectors.insert(raced_id, encoded.as_slice()).unwrap();
-            }
-            wtx.commit().unwrap();
-        }
+        // Two-party rendezvous: `compact_orphans` waits on it twice, just after
+        // its live-id snapshot; this thread does the racing upsert between the
+        // two waits.
+        let barrier = Arc::new(Barrier::new(2));
+        store.set_compact_race_barrier(Arc::clone(&barrier));
 
-        // Hold a write transaction open and stage the racing upsert's mapping
-        // inside it (uncommitted). `compact_orphans`' delete `begin_write()`
-        // will block on this until we commit — the single-writer lock is the
-        // rendezvous, so correctness does not depend on timing.
-        let blocker = store.db.begin_write().unwrap();
-        {
-            let mut keys = blocker.open_table(VECTOR_KEYS).unwrap();
-            keys.insert(raced_uuid.as_str(), raced_id).unwrap();
-        }
-
-        // compact runs on another thread: its read snapshots see the orphan
-        // `VECTORS` row but NOT the still-uncommitted mapping, so it classes
-        // `raced_id` as an orphan, then parks at its delete `begin_write()`.
         let compactor = {
             let store = Arc::clone(&store);
             std::thread::spawn(move || store.compact_orphans().unwrap())
         };
 
-        // Give the compact thread ample time to pass BOTH read snapshots and
-        // park on the write lock before we commit. The snapshots are two tiny
-        // table scans (microseconds); this margin is ~5 orders larger, so the
-        // ordering — compact classes the orphan before the mapping is visible —
-        // is deterministic in practice. Committing earlier would make the
-        // mapping visible to the live snapshot and mask the bug.
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        // R1: compact has taken its live snapshot (which MISSED raced_uuid,
+        // because the upsert below has not run yet).
+        barrier.wait();
 
-        // Land the racing upsert and release the lock: the "upsert committed
-        // after the live snapshot but before the delete" interleaving.
-        blocker.commit().unwrap();
+        // The racing upsert: a real atomic write that allocates a fresh id and
+        // commits `VECTORS` + `VECTOR_KEYS` together — the production path, not
+        // a raw table poke. It lands strictly after the live snapshot.
+        let raced_id = store.upsert(&raced_uuid, &raced_vec).unwrap();
+
+        // R2: the upsert has committed; release compact to run its orphan scan
+        // (which now SEES the fresh `VECTORS` row and classes it a candidate)
+        // and its delete transaction.
+        barrier.wait();
 
         let _removed = compactor.join().expect("compact thread");
 
@@ -249,8 +234,8 @@ fn compact_orphans_keeps_a_vector_upserted_after_the_live_snapshot() {
         let vectors = rtx.open_table(VECTORS).unwrap();
         assert!(
             vectors.get(raced_id).unwrap().is_some(),
-            "#6195: a vector upserted before the delete must not be compacted \
-             away as a false orphan"
+            "#6195: a vector upserted after the live snapshot must not be \
+             compacted away as a false orphan"
         );
     }
 
