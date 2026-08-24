@@ -44,9 +44,8 @@ pub const UNRESOLVED_PATH_SENTINEL: &str = "/unknown";
 /// [`SessionRecord::is_leaked_test_adoption`] matches it as a PREFIX, because
 /// `SessionManager::mark_errored` appends `[error: …]` to whatever task a
 /// record already carries.
-/// Test: `an_adopted_reserved_record_is_a_leaked_test_adoption`,
-/// `a_created_reserved_session_is_not_a_leaked_test_adoption` in
-/// `record_tests.rs`.
+/// Test: `leaked_test_adoption_requires_both_a_reserved_name_and_an_adopted_task`
+/// in `record_tests.rs`.
 pub const ADOPTED_TASK: &str = "adopted session";
 
 /// Opaque identifier for a managed session.
@@ -574,7 +573,9 @@ impl SessionRecord {
     /// Test: `only_a_stop_nobody_asked_for_is_auto_resumable` (the full state ×
     /// cause matrix) and
     /// `legacy_record_without_stop_cause_deserializes_as_auto_resumable` in
-    /// `stop_cause_tests.rs`; the two automatic callers by
+    /// `stop_cause_tests.rs`; the #6116 clause by
+    /// `a_stopped_leaked_test_adoption_is_never_auto_resumable` in
+    /// `record_tests.rs`; the two automatic callers by
     /// `tick_never_resumes_a_deliberately_stopped_session` in
     /// `supervisor::tests` and
     /// `boot_reconcile_never_requeues_a_deliberately_stopped_session` in
@@ -603,10 +604,12 @@ impl SessionRecord {
     /// What: the tmux name is in
     /// [`trusty_common::session_naming::RESERVED_TEST_PREFIX`] AND the task
     /// begins with [`ADOPTED_TASK`], which only an automatic adoption writes.
-    /// Test: `an_adopted_reserved_record_is_a_leaked_test_adoption`,
-    /// `a_created_reserved_session_is_not_a_leaked_test_adoption`,
-    /// `an_ordinary_adopted_record_is_not_a_leaked_test_adoption` in
-    /// `record_tests.rs`.
+    /// Test: `leaked_test_adoption_requires_both_a_reserved_name_and_an_adopted_task`
+    /// (the adopted / created / ordinary-adoption matrix) and
+    /// `a_stopped_leaked_test_adoption_is_never_auto_resumable` in
+    /// `record_tests.rs`;
+    /// `a_live_leaked_test_pane_is_never_readopted_or_recreated` in
+    /// `naming_tests.rs`.
     pub fn is_leaked_test_adoption(&self) -> bool {
         trusty_common::session_naming::is_reserved_test_session_name(&self.tmux_name)
             && self.task.starts_with(ADOPTED_TASK)
