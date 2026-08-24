@@ -43,4 +43,7 @@ mod types;
 pub use self::open_failure::CorpusOpenFailure;
 pub(crate) use self::open_guard::open_serialized;
 pub use self::store_impl::CorpusStore;
+// #6171: the KG load gate lives in `core::symbol_graph` and needs the format
+// version this crate stamps into `_meta`.
+pub(crate) use self::tables::KG_GRAPH_FORMAT_VERSION;
 pub use self::types::PersistedKgNode;

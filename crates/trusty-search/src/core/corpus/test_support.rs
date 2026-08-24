@@ -25,9 +25,45 @@
 use anyhow::{Context, Result};
 
 use super::contrib::KG_CONTRIB_TABLE;
-use super::tables::KG_NODES_TABLE;
+use super::tables::{KG_NODES_TABLE, META_KEY_KG_GRAPH_FORMAT_VERSION};
 use super::CorpusStore;
 use crate::core::migration::{META_KEY_INDEXED_ROOT, META_TABLE};
+
+/// Overwrite the KG format stamp with arbitrary bytes (#6171).
+///
+/// Why: the invalidation gate has to reject three shapes a real corpus can
+/// present — no stamp at all (every pre-#6169 index), a stamp too short to
+/// decode (a truncated or half-written `_meta` row), and a version from a newer
+/// daemon. Only the store's own handle can plant them: redb's file lock means a
+/// second `Database::open` on the same path cannot reach the live corpus.
+/// What: upserts `_meta[kg_graph_format_version]` with `bytes` verbatim, or
+/// removes the key when `bytes` is `None`. Leaves the `kg_*` rows untouched, so
+/// the graph stays loadable-looking and only its stamp is wrong.
+/// Test: `unstamped_graph_is_rejected_and_rebuilt`,
+/// `short_format_stamp_is_rejected_and_rebuilt`,
+/// `future_format_stamp_is_rejected_and_rebuilt`.
+pub(crate) fn set_kg_format_stamp(store: &CorpusStore, bytes: Option<&[u8]>) -> Result<()> {
+    let txn = store.db.begin_write().context("begin kg stamp txn")?;
+    {
+        let mut table = txn
+            .open_table(META_TABLE)
+            .map_err(|e| anyhow::anyhow!("open _meta table: {e}"))?;
+        match bytes {
+            Some(b) => {
+                table
+                    .insert(META_KEY_KG_GRAPH_FORMAT_VERSION, b)
+                    .context("insert kg format stamp")?;
+            }
+            None => {
+                table
+                    .remove(META_KEY_KG_GRAPH_FORMAT_VERSION)
+                    .context("remove kg format stamp")?;
+            }
+        }
+    }
+    txn.commit().context("commit kg stamp txn")?;
+    Ok(())
+}
 
 /// Make every `_meta` read fail with a real redb error.
 ///

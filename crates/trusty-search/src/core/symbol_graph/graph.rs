@@ -16,11 +16,64 @@ use petgraph::visit::EdgeRef;
 use petgraph::Direction;
 use serde::{Deserialize, Serialize};
 
-use crate::core::corpus::{CorpusStore, PersistedKgNode};
+use crate::core::corpus::{CorpusStore, PersistedKgNode, KG_GRAPH_FORMAT_VERSION};
 use crate::core::entity::EdgeKind;
 
 use super::max_kg_nodes;
 use super::resolve::{resolve_name, NameIndex, NameResolution};
+
+/// Whether the persisted graph was written in the format this binary reads
+/// (#6171).
+///
+/// Why: PR #6169 changed a persisted node key from a bare symbol name to
+/// `<file>::<symbol>`, and rows written before it carry no marker saying so.
+/// Loading them anyway is what left `get_call_chain` answering with bare-name
+/// semantics on every index that existed before the upgrade — the fix was in
+/// construction, and nothing invalidated what construction had already
+/// written.
+/// What: compares `_meta[kg_graph_format_version]` against
+/// [`KG_GRAPH_FORMAT_VERSION`]. Fails CLOSED — a missing stamp, a short one, an
+/// unreadable one, and a version this binary does not know are all `false`, so
+/// the caller rebuilds from the chunk corpus rather than serving rows it cannot
+/// vouch for. Warns only when there are rows to discard, so a corpus that has
+/// simply never saved a graph stays quiet.
+/// Test: `stale_prefix_graph_is_rejected_and_rebuilt`,
+/// `unstamped_graph_is_rejected_and_rebuilt`,
+/// `short_format_stamp_is_rejected_and_rebuilt`,
+/// `future_format_stamp_is_rejected_and_rebuilt`,
+/// `unreadable_format_stamp_is_rejected_and_rebuilt`.
+fn kg_format_is_current(corpus: &CorpusStore) -> bool {
+    let stored = match corpus.kg_graph_format_version() {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                expected = KG_GRAPH_FORMAT_VERSION,
+                "kg: format stamp unreadable ({e}) — discarding the persisted \
+                 symbol graph and rebuilding from the chunk corpus (#6171)"
+            );
+            return false;
+        }
+    };
+    if stored == Some(KG_GRAPH_FORMAT_VERSION) {
+        return true;
+    }
+    // An unreadable count counts as "there are rows": the point of the warning
+    // is that something is being discarded, and staying silent about a corpus
+    // that cannot even be counted would hide the more serious fault.
+    let nodes = corpus.kg_node_count().unwrap_or(1);
+    if nodes > 0 {
+        tracing::warn!(
+            found = stored.unwrap_or(0),
+            expected = KG_GRAPH_FORMAT_VERSION,
+            nodes,
+            "kg: persisted symbol graph predates the #6169 call-edge fix — \
+             discarding it and rebuilding from the chunk corpus (#6171); \
+             call_chain answers on this index were keyed by bare symbol name \
+             until this rebuild completes"
+        );
+    }
+    false
+}
 
 /// Outcome of [`SymbolGraph::resolve_symbol`], in qualified-key terms.
 ///
@@ -161,25 +214,33 @@ impl SymbolGraph {
     /// Why: warm-boot skips full `build_from_chunks` when a saved graph exists,
     /// preserving Phase B/C edges computed at ingest time.
     /// What: reads three KG tables, reconstructs the `petgraph::DiGraph`. Returns
-    /// `Ok(None)` when the node table is empty (fresh DB / not yet saved).
+    /// `Ok(None)` when the node table is empty (fresh DB / not yet saved) and,
+    /// since #6171, when [`kg_format_is_current`] rejects the stored format —
+    /// every caller already treats `Ok(None)` as "rebuild from chunks", so a
+    /// stale graph is replaced automatically with nothing to delete by hand.
     /// Option H (ADR-0010, issue #816/#818): `"custom:"`-prefixed tags parse to
     /// `Custom(s)` and always round-trip; bare unrecognized tags are dropped and
     /// counted in `unknown_edge_tags_dropped`.
     /// Test: `test_save_load_round_trip_preserves_graph`,
     /// `test_load_from_corpus_counts_unknown_edge_tags`,
-    /// `test_custom_edge_survives_warm_boot`.
+    /// `test_custom_edge_survives_warm_boot`,
+    /// `stale_prefix_graph_is_rejected_and_rebuilt`.
     pub fn load_from_corpus(corpus: &CorpusStore) -> anyhow::Result<Option<Self>> {
+        // #6171: rows written before #6169 mean something else; never hydrate them.
+        if !kg_format_is_current(corpus) {
+            return Ok(None);
+        }
         let (nodes, adj_fwd, _adj_rev) = corpus.load_kg_graph()?;
         if nodes.is_empty() {
             return Ok(None);
         }
         let mut g = Self::new();
         for (key, persisted) in nodes {
-            // A key written before #6167 is a bare symbol name; one written
-            // since is `<file>::<symbol>`. Recover the display symbol from the
-            // file prefix when it is there, so an un-migrated corpus still
-            // loads (with the old one-node-per-name behaviour) instead of
-            // rendering file paths as symbol names.
+            // #6171: the format gate above guarantees every key here is
+            // `<file>::<symbol>`, so the prefix strip recovers the display
+            // symbol. The `unwrap_or` keeps a damaged row rendering as its own
+            // key rather than panicking; it is no longer the pre-#6169
+            // bare-name path, which now never reaches this loop.
             let symbol = key
                 .strip_prefix(&format!("{}::", persisted.file))
                 .unwrap_or(&key)

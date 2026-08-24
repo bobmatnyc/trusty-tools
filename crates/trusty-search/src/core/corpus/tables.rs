@@ -87,6 +87,35 @@ pub(super) const ENTITIES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition:
 /// [`PersistedKgNode`] (carries `chunk_id` + `file` for round-trip equality).
 pub(crate) const KG_NODES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("kg_nodes");
 
+/// Format version of the node/edge rows in the three `kg_*` tables (#6171).
+///
+/// Why: PR #6169 changed what a persisted node key MEANS. Before it, a key was
+/// a bare symbol name and one name held one node; since it, a key is
+/// `<file>::<symbol>` and every definition has its own node. The rows carry no
+/// marker separating the two, so a graph written by the older daemon loaded
+/// straight back into the newer one and kept answering `get_call_chain` with
+/// the old bare-name semantics until someone reindexed by hand.
+/// What: a monotonic `u32` stamped into `_meta` under
+/// [`META_KEY_KG_GRAPH_FORMAT_VERSION`] by `CorpusStore::save_kg_graph`, in the
+/// same transaction as the rows it describes. `1` is the post-#6169
+/// qualified-key format; a pre-#6169 corpus carries no stamp at all and reads
+/// as version 0. Bump this whenever the meaning of a persisted key, adjacency
+/// entry, or edge tag changes in a way an older graph cannot satisfy.
+/// Test: `stale_prefix_graph_is_rejected_and_rebuilt`,
+/// `saved_graph_stamps_the_current_format_version` in
+/// `core::symbol_graph::persist_tests`.
+pub(crate) const KG_GRAPH_FORMAT_VERSION: u32 = 1;
+
+/// `_meta` key holding [`KG_GRAPH_FORMAT_VERSION`] as 4 little-endian bytes.
+///
+/// Why: the KG format turns over independently of the corpus schema version —
+/// a KG rebuild is cheap and self-healing, where a schema migration rewrites
+/// chunk rows — so it gets its own key rather than forcing a
+/// `CURRENT_SCHEMA_VERSION` bump and a migration for every graph change.
+/// What: absent, short, or unreadable all mean "pre-#6169" and force a rebuild.
+/// Test: `unstamped_graph_is_rejected_and_rebuilt`.
+pub(crate) const META_KEY_KG_GRAPH_FORMAT_VERSION: &str = "kg_graph_format_version";
+
 /// redb table holding the forward (source → targets) KG adjacency list.
 ///
 /// Why: BFS expansion walks outgoing edges by symbol; storing the full edge

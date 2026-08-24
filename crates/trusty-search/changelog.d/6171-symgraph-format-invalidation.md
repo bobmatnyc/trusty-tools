@@ -1,0 +1,6 @@
+Fixed
+
+- **A symbol graph persisted before the #6169 fix kept loading, so `get_call_chain` answered with the old bare-name semantics on every index built before the upgrade.** #6169 changed how call edges are constructed; it invalidated nothing already on disk, and the previous release note said so — an existing index kept its stale graph until someone reindexed by hand. The persisted rows carried no marker separating the two formats, so nothing could tell them apart — [#6171](https://github.com/bobmatnyc/trusty-tools/issues/6171)
+  - `save_kg_graph` now stamps a KG format version into `_meta`, in the same redb transaction as the rows it describes, so the stamp and the graph can never disagree
+  - `SymbolGraph::load_from_corpus` checks that stamp before hydrating anything and returns `Ok(None)` when it does not match. Every caller already reads `Ok(None)` as "rebuild from the chunk corpus", so a stale graph is replaced on the next warm-boot with no manual reindex and nothing to delete
+  - the check fails closed: a missing stamp (every pre-#6169 index), a truncated one, an unreadable `_meta` table, and a version from a newer daemon all force the rebuild. A version mismatch logs which format was found and how many nodes were discarded; a corpus that has simply never saved a graph stays silent
