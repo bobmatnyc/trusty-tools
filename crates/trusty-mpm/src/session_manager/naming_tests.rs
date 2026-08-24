@@ -1004,3 +1004,194 @@ async fn dedupe_name_against_caps_suffixed_length_at_64() {
     );
     assert_ne!(result, long, "the taken candidate must still be suffixed");
 }
+
+/// #6116: a live session in the test-owned namespace is never adopted, even
+/// though its pane resolves a working directory.
+///
+/// Why: a test that spawns a real tmux session leaks it when its process dies
+/// hard — SIGKILL, a `cargo test` timeout, an aborted run — none of which run
+/// `Drop`. Three such sessions leaked on 2026-08-24, this loop adopted each
+/// one, and the operator's picker grew three `(active)` ghosts. The refusal
+/// reads the NAME, so it holds whether or not any test-side cleanup ran.
+/// What: one live `tm-xtest-…` pane with a resolvable cwd — the shape #6118
+/// would otherwise adopt — asserting no record is written, the name lands in
+/// `reserved_test_refused`, and neither `external_adopted` nor
+/// `adoption_declined` claims it. Before this fix the pane was adopted.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn reconcile_refuses_to_adopt_a_reserved_test_session() {
+    let dir = TempDir::new().unwrap();
+    let workspace = TempDir::new().unwrap();
+    // #3965: `#[serial]` + `$HOME` override — see `HomeGuard` above. A refused
+    // pane never reaches `validate_and_repair`; pin `$HOME` anyway so a future
+    // refactor cannot silently reopen the real-`$HOME` write.
+    let _home = set_home(dir.path());
+    let leaked = format!(
+        "{}deadrt4242-01",
+        trusty_common::session_naming::RESERVED_TEST_PREFIX
+    );
+    let fake = std::sync::Arc::new(PaneCwdTmux {
+        alive: vec![leaked.clone()],
+        pane_cwd: Some(workspace.path().to_path_buf()),
+    });
+
+    let mgr = SessionManager::new(dir.path(), fake).await.unwrap();
+    let report = mgr.reconcile_on_boot(false).await.expect("reconcile");
+
+    assert_eq!(
+        mgr.list().await.len(),
+        0,
+        "a leaked test session must leave no record for the picker to show"
+    );
+    assert!(
+        report.reserved_test_refused.contains(&leaked),
+        "the refused session must be named in the report; report: {report:?}"
+    );
+    assert!(
+        report.external_adopted.is_empty() && report.adoption_declined.is_empty(),
+        "refusal is by name, not a cwd-resolution decline; report: {report:?}"
+    );
+}
+
+/// #6116: an adopted reserved-namespace record whose tmux session is gone is
+/// tombstoned, while an ordinary record and a CREATED session in the same
+/// namespace both still become `Stopped`.
+///
+/// Why: such a record was adopted by a daemon build predating the refusal
+/// above — the store outlives that upgrade — and `Stopped` would leave a
+/// picker row nothing can ever resume, which is what forced the owner into
+/// `session_delete force`. The two paired records are the over-reach guards:
+/// resumability is taken away from ADOPTED test sessions only, not from every
+/// record whose name happens to be in the namespace.
+/// What: three Active records, no live tmux; asserts `Deleted` plus a stamped
+/// `terminal_at` for the adopted one, `Stopped` for the other two, and that
+/// each id lands in exactly one report list. Before this fix all three were
+/// `Stopped`.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn reconcile_tombstones_an_adopted_reserved_record_whose_tmux_is_gone() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let fake = FakeTmuxDriver::new();
+    let mgr = SessionManager::new(dir.path(), fake).await.unwrap();
+
+    let leaked_name = reserved_name("deadrt4242-01");
+    let leaked = super::tests::make_active_test_record(
+        &leaked_name,
+        super::record::ADOPTED_TASK,
+        "/tmp/leak-ws",
+    );
+    let ordinary = super::tests::make_active_test_record("tm-trusty-tools-01", "real", "/tmp/ws");
+    // A project legitimately named `xtest-…`: same namespace, created not
+    // adopted, so nothing here may touch it.
+    let created =
+        super::tests::make_active_test_record(&reserved_name("foo-01"), "real work", "/tmp/ws2");
+    {
+        let mut store = mgr.store.write().await;
+        store.upsert(leaked.clone()).await.unwrap();
+        store.upsert(ordinary.clone()).await.unwrap();
+        store.upsert(created.clone()).await.unwrap();
+    }
+
+    let report = mgr.reconcile_on_boot(false).await.expect("reconcile");
+
+    let after = mgr.get(&leaked.id).await.unwrap();
+    assert_eq!(
+        after.state,
+        ManagedSessionState::Deleted,
+        "a leaked test record with no tmux session must be tombstoned, not left resumable"
+    );
+    assert!(
+        after.terminal_at.is_some(),
+        "the retention clock must start when the record goes terminal"
+    );
+    assert!(
+        report.reserved_test_swept.contains(&leaked.id.to_string())
+            && !report.stopped.contains(&leaked.id.to_string()),
+        "the swept record belongs in exactly one list; report: {report:?}"
+    );
+
+    for (record, why) in [
+        (&ordinary, "an ordinary gone session stays Stopped"),
+        (&created, "a CREATED session in the namespace stays Stopped"),
+    ] {
+        assert_eq!(
+            mgr.get(&record.id).await.unwrap().state,
+            ManagedSessionState::Stopped,
+            "{why}"
+        );
+        assert!(report.stopped.contains(&record.id.to_string()));
+        assert!(!report.reserved_test_swept.contains(&record.id.to_string()));
+    }
+}
+
+/// #6116 (code-critic HIGH): a leaked test adoption whose pane is LIVE exits
+/// the loop instead of feeding it.
+///
+/// Why: the guard used to sit only on the gone arm, so a live pane was
+/// re-adopted `Active` — which restored its orphan-GC immunity, let the reaper
+/// stamp it `Unexpected` once the pane died, let the supervisor RECREATE the
+/// tmux session, and handed the next boot the same pane to re-adopt. The
+/// daemon log shows that cycle three times in one day.
+/// What: one live pane with an adopted reserved record, reconciled with
+/// `auto_resume` ON — the loop's fuel. Asserts the record ends terminal and
+/// un-auto-resumable, is absent from `adopted`, and that no session was
+/// created or killed: the pane is left to the orphan-GC, which is the only
+/// thing allowed to end it. Before this fix the record ended `Active` and the
+/// name appeared in `report.adopted`.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn a_live_leaked_test_pane_is_never_readopted_or_recreated() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let fake = FakeTmuxDriver::new();
+    let leaked_name = reserved_name("deadrt4242-01");
+    fake.seeded_names.lock().unwrap().push(leaked_name.clone());
+    let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
+
+    let leaked = super::tests::make_active_test_record(
+        &leaked_name,
+        super::record::ADOPTED_TASK,
+        "/tmp/leak-ws",
+    );
+    {
+        let mut store = mgr.store.write().await;
+        store.upsert(leaked.clone()).await.unwrap();
+    }
+    let creates_before = fake.create_cwd_calls.lock().unwrap().len();
+
+    let report = mgr.reconcile_on_boot(true).await.expect("reconcile");
+
+    let after = mgr.get(&leaked.id).await.unwrap();
+    assert_eq!(
+        after.state,
+        ManagedSessionState::Deleted,
+        "a live leaked pane must not keep its record Active — that is what sustained the loop"
+    );
+    assert!(
+        !after.is_auto_resumable(),
+        "no automatic path may relaunch a leaked test session"
+    );
+    assert!(
+        !report.adopted.contains(&leaked_name),
+        "the live pane must not be re-adopted; report: {report:?}"
+    );
+    assert_eq!(
+        fake.create_cwd_calls.lock().unwrap().len(),
+        creates_before,
+        "nothing may recreate the pane"
+    );
+    assert!(
+        fake.kill_calls.lock().unwrap().is_empty(),
+        "reconcile drops the RECORD; killing the pane is the orphan-GC's decision, \
+         and it spares a pane that is not an idle shell"
+    );
+}
+
+/// A name in the reserved test namespace, built from the constant the daemon
+/// reads back (#6116).
+fn reserved_name(tag: &str) -> String {
+    format!(
+        "{}{tag}",
+        trusty_common::session_naming::RESERVED_TEST_PREFIX
+    )
+}

@@ -601,9 +601,17 @@ async fn session_resume_headless_dead_runtime_reconciles_and_restarts() {
             // name lets one process's cleanup destroy the other process's session
             // mid-test — observed as an intermittent failure of the final
             // assertion below.
+            //
+            // #6116: the slug also puts the DERIVED name in the reserved test
+            // namespace, which the daemon's adoption sweep refuses — so a run
+            // killed hard enough to skip the guard's `Drop` leaks a session
+            // that never becomes a picker row.
             Some(format!(
-                "https://example.com/deadrt{}.git",
-                std::process::id()
+                "https://example.com/{}.git",
+                crate::test_support::tmux_session::reserved_project_slug(&format!(
+                    "deadrt{}",
+                    std::process::id()
+                ))
             )),
             Some("main".to_string()),
             RuntimeKind::default(),
@@ -616,6 +624,15 @@ async fn session_resume_headless_dead_runtime_reconciles_and_restarts() {
         record.state.to_string(),
         "provisioning",
         "sanity: create_with_id must leave a fresh record un-stopped/un-errored"
+    );
+
+    // #6116: the guard below covers a panic; nothing covers a SIGKILL. What
+    // makes a session leaked that way harmless is the namespace it is in, so
+    // assert the derived name actually landed there rather than assuming it.
+    assert!(
+        trusty_common::session_naming::is_reserved_test_session_name(&record.tmux_name),
+        "this fixture's real tmux session must be one the daemon refuses to adopt, got {}",
+        record.tmux_name
     );
 
     let tmux_bin = trusty_mpm::core::tmux::resolve_tmux_binary_or_bare();
@@ -638,7 +655,8 @@ async fn session_resume_headless_dead_runtime_reconciles_and_restarts() {
     // #6116: owned by an RAII guard. `wait_for_stable_dead_runtime` below
     // panics on a 10s timeout by design, and the post-hoc `kill-session` this
     // replaces never ran on that path — every such run leaked a real
-    // `tm-deadrt<pid>-01` session permanently.
+    // `tm-deadrt<pid>-01` session permanently. `Drop` still cannot run on a
+    // SIGKILL; `spawn` also sweeps what an earlier hard-killed run left behind.
     let scratch = crate::test_support::tmux_session::ScratchTmuxSession::spawn(
         &tmux_bin,
         &record.tmux_name,

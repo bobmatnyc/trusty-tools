@@ -182,6 +182,23 @@ pub struct ReconcileReport {
     /// so the boot log has to name them — otherwise a pane simply stops
     /// appearing in `tm ls` with nothing said about where it went.
     pub adoption_declined: Vec<String>,
+    /// Live tmux names reconciliation REFUSED to adopt because they are in the
+    /// test-owned namespace
+    /// [`trusty_common::session_naming::RESERVED_TEST_PREFIX`] (#6116).
+    ///
+    /// Why: separate from [`adoption_declined`](Self::adoption_declined)
+    /// because the two say different things — a declined pane is one whose cwd
+    /// would not resolve, a refused one is a leaked test session the daemon
+    /// will not track no matter what its pane says.
+    pub reserved_test_refused: Vec<String>,
+    /// Session ids of adopted reserved-test-namespace records tombstoned this
+    /// boot, whether their pane was live or gone (#6116).
+    ///
+    /// Why: such a record was adopted by a daemon build predating the refusal
+    /// above. Left alone it either sat in the picker as a `Stopped` row nothing
+    /// could resume, or — with a live pane — fed the re-adopt/reap/resume loop
+    /// this module's doc describes.
+    pub reserved_test_swept: Vec<String>,
 }
 
 /// Manages the lifecycle of daemon-owned tmux sessions.

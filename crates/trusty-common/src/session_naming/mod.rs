@@ -117,6 +117,60 @@ pub fn is_managed_session_name(name: &str) -> bool {
         || name.starts_with(LEGACY_PREFIX_FULL)
 }
 
+/// Namespace reserved for tmux sessions this workspace's own test suite creates
+/// (#6116).
+///
+/// Why: a test that spawns a REAL tmux session leaks it whenever the test
+/// process dies hard — a SIGKILL, a `cargo test` timeout, an aborted run — none
+/// of which unwind, so no `Drop` guard runs. The leaked session keeps the `tm-`
+/// prefix, so the daemon's boot adoption sweep reads it as an ordinary managed
+/// session it has not seen yet, writes a record for it, and the operator's
+/// session picker grows an `(active)` ghost that outlives the tmux session.
+/// Three leaked on 2026-08-24 alone. A name prefix the sweep refuses closes that
+/// for every leak shape, past and future, because it decides from the name
+/// alone — no cleanup on the test side has to have run.
+///
+/// The refusal is also what returns a leaked pane to the reaper: an unadopted
+/// managed pane is `daemon::orphan_gc` input, and an idle shell with no live
+/// child is killed there after two sweeps. Adopting it is what granted it
+/// immunity.
+///
+/// What: `tm-xtest-`. It starts with [`PREFIX`], so
+/// [`is_managed_session_name`] still recognises such a session as ours — the
+/// orphan-GC's first gate — while [`is_reserved_test_session_name`] separates
+/// it from anything an operator's work is in.
+///
+/// **What a project legitimately named `xtest-…` pays.** Its sessions derive
+/// names in this namespace, and two consequences follow. Both are accepted; no
+/// such project exists in this workspace, and the alternative — a marker only a
+/// live tmux server can answer — cannot be read from a name at all.
+///
+/// 1. The daemon never AUTO-ADOPTS such a session. Sessions it created are
+///    unaffected: trusty-mpm's tombstone and no-auto-resume rules ask for an
+///    adopted provenance too (`SessionRecord::is_leaked_test_adoption`), so a
+///    created `tm-xtest-foo-01` still stops, resumes and lists normally.
+/// 2. On a machine that runs trusty-mpm's own test suite, that suite KILLS such
+///    a session once it is 30 minutes old — the tmux-level sweep sees a name
+///    and a creation time, and no provenance is recoverable from those.
+///
+/// Test: `reserved_test_prefix_is_a_managed_name`,
+/// `reserved_test_names_are_recognised`,
+/// `ordinary_managed_names_are_not_reserved`; the daemon half in
+/// trusty-mpm's `reconcile_refuses_to_adopt_a_reserved_test_session`.
+pub const RESERVED_TEST_PREFIX: &str = "tm-xtest-";
+
+/// True if `name` is in the test-owned namespace no automatic adoption may
+/// touch (#6116).
+///
+/// Why/What: see [`RESERVED_TEST_PREFIX`] — this is the one reader of it, so
+/// the daemon's refusal and the test fixture that mints such a name cannot
+/// drift apart.
+/// Test: `reserved_test_names_are_recognised`,
+/// `ordinary_managed_names_are_not_reserved`.
+pub fn is_reserved_test_session_name(name: &str) -> bool {
+    name.starts_with(RESERVED_TEST_PREFIX)
+}
+
 /// Strip whichever managed prefix `name` carries (current or legacy), for display.
 ///
 /// Why (#1955): the dashboard/coordinator short-prefix helpers
@@ -509,6 +563,30 @@ mod tests {
         assert!(!is_managed_session_name("my-tm-thing"));
         assert!(!is_managed_session_name("my-tmpm-thing"));
         assert!(!is_managed_session_name("not-trusty-mpm-x"));
+    }
+
+    /// #6116: the reserved namespace stays inside the managed one, so the
+    /// orphan-GC — whose first gate is `is_managed_session_name` — still reaps
+    /// a leaked test pane once adoption declines it.
+    #[test]
+    fn reserved_test_prefix_is_a_managed_name() {
+        assert!(RESERVED_TEST_PREFIX.starts_with(PREFIX));
+        assert!(is_managed_session_name(RESERVED_TEST_PREFIX));
+    }
+
+    #[test]
+    fn reserved_test_names_are_recognised() {
+        assert!(is_reserved_test_session_name("tm-xtest-deadrt1234-01"));
+        assert!(is_reserved_test_session_name(RESERVED_TEST_PREFIX));
+    }
+
+    #[test]
+    fn ordinary_managed_names_are_not_reserved() {
+        assert!(!is_reserved_test_session_name("tm-trusty-tools-01"));
+        assert!(!is_reserved_test_session_name("tmpm-live-session"));
+        // A true prefix, never a substring: an operator session merely
+        // mentioning the token keeps its adoption.
+        assert!(!is_reserved_test_session_name("tm-my-xtest-01"));
     }
 
     #[test]
