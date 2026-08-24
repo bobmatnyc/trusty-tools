@@ -243,6 +243,10 @@ impl BedrockProvider {
     async fn call_once(&self, req: &LlmRequest) -> Result<LlmResponse, LlmError> {
         let start = Instant::now();
 
+        // #6123: one resolver decides the model for all three providers; this
+        // one already read the request, and now says so in the same words.
+        let model = req.effective_model(&self.model);
+
         // Build system blocks and conversation messages from the LlmRequest.
         let mut system_blocks: Vec<SystemContentBlock> = Vec::new();
         if !req.system.is_empty() {
@@ -278,7 +282,7 @@ impl BedrockProvider {
         let mut sdk_req = self
             .client
             .converse()
-            .model_id(&req.model)
+            .model_id(model)
             .inference_config(inference)
             .set_messages(Some(converse_messages));
 
@@ -297,17 +301,17 @@ impl BedrockProvider {
             let lower = msg.to_lowercase();
             // Map SDK errors to LlmError variants using the error message text.
             if lower.contains("resourcenotfound") || lower.contains("no such model") {
-                LlmError::ModelNotFound(format!("model={}: {msg}", req.model))
+                LlmError::ModelNotFound(format!("model={model}: {msg}"))
             } else if lower.contains("accessdenied")
                 || lower.contains("unauthorized")
                 || lower.contains("credential")
                 || lower.contains("not authorized")
             {
                 LlmError::AccessDenied(format!(
-                    "AWS Bedrock access denied (model={}, region={}): {msg}. \
+                    "AWS Bedrock access denied (model={model}, region={}): {msg}. \
                      Ensure AWS credentials are configured and the account has \
                      bedrock:InvokeModel permission.",
-                    req.model, self.region
+                    self.region
                 ))
             } else if lower.contains("validationexception") || lower.contains("validation") {
                 LlmError::Validation(msg)
@@ -329,8 +333,8 @@ impl BedrockProvider {
                 LlmError::ModelNotReady(msg)
             } else {
                 LlmError::Transport(format!(
-                    "Bedrock Converse SDK error (model={}, region={}): {msg}",
-                    req.model, self.region
+                    "Bedrock Converse SDK error (model={model}, region={}): {msg}",
+                    self.region
                 ))
             }
         })?;
@@ -350,7 +354,7 @@ impl BedrockProvider {
         };
 
         let (input_tokens, output_tokens) = extract_token_usage(&resp);
-        let cost_usd = estimate_bedrock_cost_usd(&req.model, input_tokens, output_tokens);
+        let cost_usd = estimate_bedrock_cost_usd(model, input_tokens, output_tokens);
 
         // Bedrock Converse surfaces a stop reason (`end_turn`, `max_tokens`, …);
         // thread it through as the PRIMARY truncation signal (#1357).  `max_tokens`
@@ -359,7 +363,7 @@ impl BedrockProvider {
 
         Ok(LlmResponse {
             text,
-            model: req.model.clone(),
+            model: model.to_string(),
             input_tokens,
             output_tokens,
             latency_ms,
@@ -385,7 +389,7 @@ impl LlmProvider for BedrockProvider {
     /// Test: `bedrock_converse_request_construction` (unit, no real AWS calls).
     async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
         debug!(
-            model = %req.model,
+            model = %req.effective_model(&self.model),
             provider = "bedrock",
             region = %self.region,
             structured = req.response_schema.is_some(),
@@ -412,7 +416,7 @@ impl LlmProvider for BedrockProvider {
                     warn!(
                         attempt,
                         backoff_ms,
-                        model = %req.model,
+                        model = %req.effective_model(&self.model),
                         "bedrock transient error — retrying: {err}"
                     );
                     tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;

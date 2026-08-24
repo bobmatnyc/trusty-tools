@@ -214,9 +214,9 @@ fn reasoning_effort_from_passthrough() {
 
 /// Full request/response round-trip against a local mock HTTP server.
 ///
-/// Why: unlike the OpenRouter provider (hardcoded URL, so its "mock server"
-/// test never actually connects), the injectable base URL lets this test
-/// exercise the REAL request path: URL joining, bearer auth, JSON body,
+/// Why: the injectable base URL lets this test exercise the REAL request
+/// path rather than a struct the test built itself: URL joining, bearer auth,
+/// JSON body,
 /// response parsing, usage extraction, and finish_reason normalisation.
 /// What: binds a TcpListener, points the provider at it, sends a structured
 /// request, and asserts on both the captured request (path, auth header, bare
@@ -349,6 +349,143 @@ async fn complete_round_trips_through_mock_server() {
         resp.model,
         "accounts/fireworks/models/llama-v3p1-70b-instruct"
     );
+}
+
+/// The model on the wire is the request's, not the constructor's (#6123).
+///
+/// Why: `complete` used to serialise `self.model` and drop
+/// [`LlmRequest::model`], so a per-request override ran on the constructor's
+/// model and the response echoed the wrong id with nothing reporting the
+/// substitution. This is the only assertion that reaches the actual bytes.
+/// What: constructs the provider with one id, sends a request naming a
+/// different one, and reads the model field out of the POST body a mock
+/// server received. Also asserts the fallback: a blank request model still
+/// sends the constructor's id.
+/// Test: fails on `origin/main` with `left: "constructor/model-should-not-win"`.
+#[tokio::test]
+async fn complete_sends_the_request_model_not_the_constructor_model() {
+    let (addr, mock) = spawn_capturing_mock().await;
+    let provider = FireworksProvider::with_base_url(
+        "fw-mock-key", // pragma: allowlist secret
+        "constructor/model-should-not-win",
+        format!("http://{addr}"),
+    )
+    .expect("provider construction");
+
+    let resp = provider
+        .complete(request_naming("request/model-must-win"))
+        .await
+        .expect("mock round-trip");
+    let sent = mock.await.expect("mock server task");
+
+    assert_eq!(
+        sent["model"], "request/model-must-win",
+        "the wire model must be LlmRequest.model, not the constructor's id"
+    );
+    assert_eq!(
+        resp.model, "request/model-must-win",
+        "the response must echo the model actually called"
+    );
+
+    // A request naming no model keeps the constructor's id as the fallback.
+    let (addr, mock) = spawn_capturing_mock().await;
+    let provider = FireworksProvider::with_base_url(
+        "fw-mock-key", // pragma: allowlist secret
+        "constructor/model-is-the-fallback",
+        format!("http://{addr}"),
+    )
+    .expect("provider construction");
+    provider
+        .complete(request_naming("   "))
+        .await
+        .expect("mock round-trip");
+    let sent = mock.await.expect("mock server task");
+    assert_eq!(
+        sent["model"], "constructor/model-is-the-fallback",
+        "a blank request model must fall back to the constructor's id"
+    );
+}
+
+/// An `LlmRequest` that names `model` and nothing else of interest.
+fn request_naming(model: &str) -> LlmRequest {
+    LlmRequest {
+        model: model.to_string(),
+        system: "You are a verifier.".to_string(),
+        messages: vec![ChatMessage {
+            role: "user".to_string(),
+            content: "Verify this finding.".to_string(),
+        }],
+        temperature: 0.0,
+        max_tokens: 128,
+        response_schema: None,
+    }
+}
+
+/// Serve one canned completion and hand back the request body as JSON.
+///
+/// Why: `complete_round_trips_through_mock_server` asserts many fields of one
+/// fixed request; this returns the parsed body so a caller can vary the model
+/// and assert only that.
+/// What: binds an ephemeral loopback port, reads one request to its
+/// `Content-Length`, replies 200 with a minimal completion body that omits
+/// `model` (so `LlmResponse.model` falls through to the id the provider chose),
+/// and returns the parsed request body.
+async fn spawn_capturing_mock() -> (
+    std::net::SocketAddr,
+    tokio::task::JoinHandle<serde_json::Value>,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback");
+    let addr = listener.local_addr().expect("local addr");
+
+    let handle = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.expect("accept");
+        let mut raw = Vec::new();
+        let mut buf = vec![0u8; 8192];
+        loop {
+            let n = sock.read(&mut buf).await.expect("read");
+            if n == 0 {
+                break;
+            }
+            raw.extend_from_slice(&buf[..n]);
+            let text = String::from_utf8_lossy(&raw);
+            if let Some(header_end) = text.find("\r\n\r\n") {
+                let content_length = text.lines().find_map(|l| {
+                    l.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                });
+                if content_length.is_none_or(|cl| raw.len() - (header_end + 4) >= cl) {
+                    break;
+                }
+            }
+        }
+        let raw = String::from_utf8(raw).expect("utf-8 request");
+
+        let resp_body = serde_json::json!({
+            "choices": [{"message": {"content": "LGTM"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2}
+        })
+        .to_string();
+        let http_resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            resp_body.len(),
+            resp_body
+        );
+        sock.write_all(http_resp.as_bytes()).await.expect("write");
+        sock.shutdown().await.expect("shutdown");
+
+        let body_start = raw
+            .find("\r\n\r\n")
+            .map(|i| i + 4)
+            .expect("header terminator");
+        serde_json::from_str(&raw[body_start..]).expect("request body must be JSON")
+    });
+
+    (addr, handle)
 }
 
 // ── Live smoke test ─────────────────────────────────────────────────────────
