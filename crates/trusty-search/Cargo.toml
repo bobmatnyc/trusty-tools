@@ -9,7 +9,7 @@ name = "trusty-search"
 # forbids moving or deleting a pushed tag — so 0.49.0/its tag are a burned,
 # never-published marker and this release ships as 0.49.1 instead. No src
 # change beyond this version bump.
-version = "0.49.1"
+version = "0.49.2"
 edition = "2021"
 description = "Machine-wide hybrid code search service: BM25 + vector + KG, zero cold-start, MCP server"
 readme = "README.md"

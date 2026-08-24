@@ -157,27 +157,24 @@ pub(super) const SHRINK_GUARD_MIN_ON_DISK_VECTORS: usize = 1_000;
 /// graceful-shutdown path.
 ///
 /// This ratio guard remains in `save()` as defense-in-depth for every OTHER
-/// caller — but for the one that actually matters in practice, the periodic
+/// caller. For the one that used to matter in practice — the periodic
 /// incremental persister (`core::indexer::persist_hnsw::spawn_incremental_persist`,
 /// called every `HNSW_SNAPSHOT_BATCH_INTERVAL` batches during EVERY reindex,
-/// plus once forced after the batch loop), this guard provides essentially
-/// NO protection on any reindex large enough to matter — tracked as **issue
-/// #3970**. Reindex progress is monotonic, so on any reindex whose final
-/// vector count exceeds roughly double the on-disk starting count, the
-/// persister's own routine, healthy checkpoints WILL cross this guard's 50%
-/// threshold as completely normal forward progress — no interruption
-/// required. The moment that happens, the complete pre-reindex on-disk
-/// snapshot has already been overwritten by a partial, still-growing one,
-/// during ordinary healthy operation. From then on an ungraceful termination
-/// (SIGKILL, OOM-kill, process abort, power loss — none of which run
-/// `shutdown_flush`'s exact check) at ANY later point — including 99%
-/// complete — permanently strands the index at whatever fraction was last
-/// checkpointed, with no path back to the original complete snapshot. #3970
-/// records the recommended fix: a staged-write-then-swap for the HNSW
-/// snapshot, mirroring what the redb corpus already has via #603/#839 —
-/// explicitly NOT routing the periodic save through a skip-while-`Running`
-/// gate, which would defeat incremental persistence's entire purpose
-/// (checkpointing durability during a long-running reindex).
+/// plus once forced after the batch loop) — this guard alone provided
+/// essentially no protection on a reindex large enough to matter, because
+/// reindex progress is monotonic: on any reindex whose final vector count
+/// exceeds roughly double the on-disk starting count, the persister's own
+/// routine, healthy checkpoints WOULD cross this guard's 50% threshold as
+/// normal forward progress, overwriting the complete pre-reindex snapshot
+/// with a partial, still-growing one during ordinary operation. That gap is
+/// closed by #3975's staged-write-then-swap: while a reindex is in flight
+/// (`CodeIndexer::begin_reindex_staging`), every periodic checkpoint is
+/// redirected to a staging path instead of the live snapshot
+/// (`core::indexer::persist_hnsw::spawn_incremental_persist`), and the live
+/// snapshot is only replaced once by
+/// `service::reindex::hnsw_swap::commit_staged_hnsw_swap` after the reindex
+/// finishes and any in-flight checkpoint has quiesced. This ratio guard is no
+/// longer that path's only line of defense; see #3975.
 pub(super) const SHRINK_GUARD_RATIO_DIVISOR: usize = 2; // refuse below 50%
 
 /// Minimum plausible bytes-per-dimension-per-vector used to compute the
