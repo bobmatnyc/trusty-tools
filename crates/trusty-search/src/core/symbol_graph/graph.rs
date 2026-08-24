@@ -61,7 +61,22 @@ fn kg_format_is_current(corpus: &CorpusStore) -> bool {
     // is that something is being discarded, and staying silent about a corpus
     // that cannot even be counted would hide the more serious fault.
     let nodes = corpus.kg_node_count().unwrap_or(1);
-    if nodes > 0 {
+    if nodes == 0 {
+        return false;
+    }
+    // A stamp ABOVE this binary's is a downgrade, not a pre-#6169 graph. Saying
+    // "predates the #6169 fix" there sends the reader to the wrong issue.
+    if stored.is_some_and(|v| v > KG_GRAPH_FORMAT_VERSION) {
+        tracing::warn!(
+            found = stored.unwrap_or(0),
+            expected = KG_GRAPH_FORMAT_VERSION,
+            nodes,
+            "kg: persisted symbol graph was written by a NEWER daemon than this \
+             one — discarding it and rebuilding from the chunk corpus (#6171). \
+             Running an older binary against a newer corpus rebuilds the graph \
+             on every boot until the daemon is upgraded"
+        );
+    } else {
         tracing::warn!(
             found = stored.unwrap_or(0),
             expected = KG_GRAPH_FORMAT_VERSION,

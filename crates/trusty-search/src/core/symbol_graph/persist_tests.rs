@@ -434,6 +434,52 @@ fn stale_prefix_graph_is_rejected_and_rebuilt() {
     );
 }
 
+/// The rows and their stamp are written in ONE transaction, so a failure to
+/// stamp rolls the rows back too.
+///
+/// Why: nothing else pins this. Splitting `save_kg_graph` into two
+/// `begin_write` calls passes every other test in this file, and it would leave
+/// the window the gate exists to close — new-format rows committed under an old
+/// stamp, or an old graph left under a current one.
+/// What: saves a 2-node graph, breaks `_meta` so the stamp write fails, then
+/// saves a DIFFERENT 1-node graph. Asserts the call errors and the corpus still
+/// holds the original two nodes. Under two transactions the node table would
+/// have been cleared and refilled before the stamp failed, leaving one row.
+/// Test: this IS the test.
+#[test]
+fn a_failed_stamp_rolls_back_the_rows_it_was_written_with() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.redb");
+    save_current_format(&path);
+
+    let store = CorpusStore::open(&path).unwrap();
+    assert_eq!(
+        store.kg_node_count().expect("count"),
+        2,
+        "precondition: the corpus holds the first graph"
+    );
+
+    crate::core::corpus::test_support::break_meta_table(&store).expect("break _meta");
+
+    let replacement = vec![(
+        "src/only.rs::only".to_string(),
+        PersistedKgNode {
+            chunk_id: "only:1".to_string(),
+            file: "src/only.rs".to_string(),
+        },
+    )];
+    assert!(
+        store.save_kg_graph(&replacement, &[], &[]).is_err(),
+        "an unwritable stamp must fail the save"
+    );
+    assert_eq!(
+        store.kg_node_count().expect("count"),
+        2,
+        "the rows must roll back with the stamp — a count of 1 means the node \
+         write committed in its own transaction before the stamp failed"
+    );
+}
+
 /// A current-format graph whose stamp was lost must also be rejected.
 ///
 /// Why: fail CLOSED. An unversioned graph is indistinguishable from a

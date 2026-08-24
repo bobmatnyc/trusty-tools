@@ -101,6 +101,17 @@ pub(crate) const KG_NODES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition:
 /// qualified-key format; a pre-#6169 corpus carries no stamp at all and reads
 /// as version 0. Bump this whenever the meaning of a persisted key, adjacency
 /// entry, or edge tag changes in a way an older graph cannot satisfy.
+///
+/// The trap this does NOT catch: a migration that rewrites DATA rather than
+/// format leaves the stamp valid over keys that no longer match. A node key
+/// embeds a file path, and `chunk_to_key` is keyed by chunk id, so anything
+/// shaped like M002 (absolute → relative paths) or M003 (HNSW key
+/// relativization) desynchronizes the graph from the corpus while the version
+/// still compares equal — the gate passes and the stale keys load. Such a
+/// migration must clear the three `kg_*` tables or the stamp itself, which
+/// forces the rebuild that re-derives the keys from the migrated chunks.
+/// Bumping this constant is the wrong lever there: it would rebuild every
+/// index everywhere, not only the migrated ones.
 /// Test: `stale_prefix_graph_is_rejected_and_rebuilt`,
 /// `saved_graph_stamps_the_current_format_version` in
 /// `core::symbol_graph::persist_tests`.
