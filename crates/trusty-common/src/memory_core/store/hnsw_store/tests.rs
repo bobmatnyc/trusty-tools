@@ -851,7 +851,7 @@ fn search_returns_the_exact_top_k_below_the_exhaustive_threshold() {
 fn search_uses_the_graph_above_the_exhaustive_threshold() {
     assert_eq!(
         exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS,
-        256,
+        1024,
         "changing this bound changes the cost profile of every recall; \
          update the measurement in exhaustive.rs before changing the number"
     );
@@ -1156,4 +1156,254 @@ fn upsert_marks_a_shadow_before_the_graph_can_serve_it() {
          through the graph — a search in the window between them would score \
          the drawer by its superseded vector (#5171)"
     );
+}
+
+/// Why (#5179): #5178 bought exactness up to 256 and left 17.4% of queries
+/// losing a true top-10 neighbour at 512 and 24.5% at 1024, measured on this
+/// repo's own palace embeddings. Raising the bound to 1024 is only worth
+/// anything if the whole range up to it is actually answered exactly, and the
+/// seam is where a rounding or `<` / `<=` slip would hide: a palace holding
+/// EXACTLY the threshold count must still take the scan.
+/// What: fills a store with exactly `EXHAUSTIVE_SCAN_MAX_POINTS` drawers and
+/// asserts `search` returns the brute-force top-10 for 20 queries, in order.
+/// Deterministic — the scan is exact, so this cannot flake. On `origin/main`,
+/// where the bound is 256, a 1024-drawer store takes the graph and this fails.
+/// Test: this test itself is the verification.
+#[test]
+fn search_is_exact_at_the_exhaustive_threshold() {
+    let dim = 32;
+    let n = exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS;
+    let k = 10usize;
+    let pool: Vec<Vec<f32>> = (0..n)
+        .map(|i| spread_vec(dim, 600_000 + i as u64))
+        .collect();
+
+    let (_dir, store) = open_store(dim);
+    let uuids: Vec<String> = (0..n).map(|_| Uuid::new_v4().to_string()).collect();
+    for (u, v) in uuids.iter().zip(&pool) {
+        store.upsert(u, v).unwrap();
+    }
+    assert_eq!(store.len().unwrap(), n, "every drawer is live");
+
+    for q in 0..20u64 {
+        let query = spread_vec(dim, 700_000 + q);
+        let expected: Vec<String> = reference_ranking(&pool, &query)
+            .into_iter()
+            .take(k)
+            .map(|i| uuids[i].clone())
+            .collect();
+        let got: Vec<String> = store
+            .search(&query, k)
+            .unwrap()
+            .into_iter()
+            .map(|(u, _)| u)
+            .collect();
+        assert_eq!(
+            got, expected,
+            "query {q}: a palace holding exactly {n} drawers must be answered \
+             exactly (#5179)"
+        );
+    }
+}
+
+/// Why (#5179): `ef_search` was pinned at 64 whatever the collection held, so
+/// the layer-0 candidate heap covered a shrinking fraction of a growing palace
+/// and recall decayed with no signal. Scaling it is the fix; capping the scaled
+/// term is what stops a 100k-drawer palace from asking for `ef = 25_000` and
+/// spending more per query than the exhaustive scan it was routed away from.
+/// Both halves need pinning — an uncapped formula and a formula that never
+/// scales are each a regression, and neither shows up in an end-to-end recall
+/// assertion.
+/// What: asserts the floor holds for a small palace, that the live count drives
+/// the value between the floor and the cap, that the cap binds from 4096 live
+/// drawers upward, and that a large `top_k` is not clipped by the cap.
+/// Test: this test itself is the verification.
+#[test]
+fn graph_ef_search_scales_with_live_count_and_stops_at_the_cap() {
+    use graph_arm::{HNSW_MAX_EF_SEARCH, graph_ef_search};
+
+    assert_eq!(
+        HNSW_MAX_EF_SEARCH, 1024,
+        "the cap is a measured latency ceiling (~3ms per query); moving it needs \
+         a new measurement, not a guess"
+    );
+
+    assert_eq!(
+        graph_ef_search(10, 200),
+        64,
+        "the 64 floor holds for small palaces"
+    );
+    assert_eq!(graph_ef_search(10, 1025), 256, "1025 / 4 clears the floor");
+    assert_eq!(
+        graph_ef_search(10, 2112),
+        528,
+        "the real trusty-tools palace"
+    );
+    assert_eq!(
+        graph_ef_search(10, 4096),
+        1024,
+        "the cap binds exactly at 4096"
+    );
+    assert_eq!(
+        graph_ef_search(10, 100_000),
+        1024,
+        "a 100k-drawer palace must not ask for ef = 25_000 (#5179)"
+    );
+    assert_eq!(
+        graph_ef_search(5_000, 100_000),
+        10_000,
+        "the cap clamps the live-scaled term only — a caller asking for a large \
+         top_k still gets 2k, since returning too few results is a different \
+         defect from taking too long"
+    );
+}
+
+/// Why (#5179): the first-guess candidate count exists so an ordinarily-churned
+/// palace answers in one traversal instead of entering `graph_nearest`'s
+/// widening loop. If it stopped tracking the graph's overhang, the loop would
+/// still return correct results and nothing would fail — the regression would be
+/// silent and purely a cost one, which is exactly what a direct assertion
+/// catches.
+/// What: asserts the steady state is the historical `2k`, that the guess scales
+/// with the dead-and-shadow overhang, and that it never exceeds the point count.
+/// Test: this test itself is the verification.
+#[test]
+fn graph_candidates_inflate_by_the_graphs_dead_weight() {
+    use graph_arm::graph_candidates;
+
+    assert_eq!(
+        graph_candidates(10, 2000, 2000),
+        20,
+        "a palace with no churn since open pays exactly the historical 2k"
+    );
+    assert_eq!(
+        graph_candidates(10, 2000, 4000),
+        40,
+        "half the graph dead doubles the first guess"
+    );
+    assert_eq!(
+        graph_candidates(10, 100, 1000),
+        200,
+        "a ten-fold overhang inflates ten-fold"
+    );
+    assert_eq!(
+        graph_candidates(10, 10, 15),
+        15,
+        "the guess never exceeds the number of points the graph holds"
+    );
+}
+
+/// Why (#5179, promoted from #5178's round-2 review): above the exhaustive
+/// threshold `Hnsw::search` truncated to `2k` candidates and `HnswStore::search`
+/// dropped tombstoned ids afterwards, so the filter ran after the slot count was
+/// already fixed. A palace whose nearest neighbours have been deleted within the
+/// session therefore returned fewer than `k` live hits — or none — while live
+/// neighbours sat in the graph. The same defect class #5178 fixed on the
+/// exhaustive arm, left standing on this one.
+/// What: 1030 live drawers drawn from the isotropic `spread_vec` distribution,
+/// then 60 more that are near-copies of the query — so every deleted drawer
+/// outranks every live one and no over-fetch sized on the average dead fraction
+/// can reach past them. The near-copies are inserted LAST, into a graph that
+/// already holds every live drawer, so their layer-0 neighbour lists point at
+/// live drawers and the widening this test exercises is the candidate budget,
+/// not graph reachability — the separate limit #5171 owns and the exhaustive
+/// threshold exists to avoid. Live count stays above the threshold, so the graph
+/// arm is selected by the store's own rule rather than by a test hook. Asserts
+/// `search` still fills `k` with live drawers. Pre-fix this returns nothing at
+/// all: the `2k` cut lands entirely inside the deleted cluster.
+/// Test: this test itself is the verification.
+#[test]
+fn search_above_the_threshold_fills_k_despite_tombstoned_nearest_neighbours() {
+    let dim = 32;
+    let k = 5usize;
+    let live_n = exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS + 6;
+    let dead_n = 60usize;
+    let (_dir, store) = open_store(dim);
+
+    let query = spread_vec(dim, 424_242);
+    let survivors: Vec<String> = (0..live_n)
+        .map(|i| {
+            let u = Uuid::new_v4().to_string();
+            store
+                .upsert(&u, &spread_vec(dim, 800_000 + i as u64))
+                .unwrap();
+            u
+        })
+        .collect();
+    // Each doomed drawer is the query nudged by 1%, so it outranks every
+    // isotropic live drawer by orders of magnitude.
+    let doomed: Vec<String> = (0..dead_n)
+        .map(|i| {
+            let noise = spread_vec(dim, 950_000 + i as u64);
+            let raw: Vec<f32> = query
+                .iter()
+                .zip(&noise)
+                .map(|(q, n)| q * 0.99 + n * 0.01)
+                .collect();
+            let norm: f32 = raw.iter().map(|x| x * x).sum::<f32>().sqrt();
+            let v: Vec<f32> = raw.into_iter().map(|x| x / norm).collect();
+            let u = Uuid::new_v4().to_string();
+            store.upsert(&u, &v).unwrap();
+            u
+        })
+        .collect();
+    for u in &doomed {
+        store.delete(u).unwrap();
+    }
+    assert_eq!(store.len().unwrap(), live_n, "only the survivors are live");
+    assert!(
+        live_n > exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS,
+        "this test is about the graph arm; it must be the arm selected"
+    );
+
+    let hits = store.search(&query, k).unwrap();
+    assert_eq!(
+        hits.len(),
+        k,
+        "deleted drawers must not spend the caller's result slots — {dead_n} \
+         tombstoned points nearer than every live drawer left {} hits (#5179)",
+        hits.len()
+    );
+    for (u, _) in &hits {
+        assert!(
+            survivors.contains(u),
+            "every returned drawer must be live: {u} is tombstoned"
+        );
+    }
+}
+
+/// Why (#5179): `graph_nearest` widens its candidate pool until `k` live ids
+/// survive, so a palace that cannot supply `k` live drawers at all is where a
+/// widening loop written carelessly spins forever. The termination condition is
+/// the requested count reaching the graph's point count, and nothing else proves
+/// it holds.
+/// What: a palace above the threshold whose live drawers number fewer than the
+/// requested `k`. Asserts `search` returns every live drawer and terminates.
+/// Test: this test itself is the verification.
+#[test]
+fn search_above_the_threshold_stops_widening_when_the_graph_is_exhausted() {
+    let dim = 8;
+    let live_n = exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS + 3;
+    let (_dir, store) = open_store(dim);
+    let survivors: Vec<String> = (0..live_n)
+        .map(|i| {
+            let u = Uuid::new_v4().to_string();
+            store
+                .upsert(&u, &spread_vec(dim, 310_000 + i as u64))
+                .unwrap();
+            u
+        })
+        .collect();
+
+    // Ask for far more than the palace can supply; the loop must stop at the
+    // graph's point count rather than doubling forever.
+    let hits = store.search(&spread_vec(dim, 999_999), live_n * 4).unwrap();
+    assert!(
+        !hits.is_empty() && hits.len() <= live_n,
+        "search must terminate and return at most the live drawers, got {}",
+        hits.len()
+    );
+    for (u, _) in &hits {
+        assert!(survivors.contains(u), "{u} is not a live drawer");
+    }
 }

@@ -33,6 +33,9 @@ use crate::memory_core::store::kg_store::{
 mod exhaustive;
 use exhaustive::{EXHAUSTIVE_SCAN_MAX_POINTS, exhaustive_nearest, resolve_shadowed};
 
+mod graph_arm;
+use graph_arm::graph_nearest;
+
 /// Default HNSW connectivity. Maps to `max_nb_connection` in `hnsw_rs`.
 ///
 /// Why: 16 is the recommended value from the original HNSW paper for
@@ -54,13 +57,6 @@ const HNSW_MAX_LAYER: usize = 16;
 /// Initial expected element count hint passed to `Hnsw::new`. Used only to
 /// pre-allocate; the index grows transparently.
 const HNSW_INITIAL_CAPACITY: usize = 1024;
-
-/// Default `ef_search` used when none is supplied by the caller.
-///
-/// Why: A small multiple of `top_k` (here, max(top_k, 64)) is the standard
-/// recommendation. We pick a baseline of 64 so the search quality stays
-/// stable for small `top_k`.
-const HNSW_DEFAULT_EF_SEARCH: usize = 64;
 
 /// How many candidate ids the allocator may probe before it gives up.
 ///
@@ -533,8 +529,16 @@ impl HnswStore {
     /// queries — and because `hnsw_rs` seeds its level RNG from OS entropy,
     /// *which* drawer went missing changed on every palace open. See
     /// [`exhaustive`] for the measurement and the threshold's rationale.
+    ///
+    /// #5179: above the threshold both graph budgets scale with the collection
+    /// rather than sitting at a constant — `ef_search` with the live-drawer
+    /// count, and the candidate pool with what survives the tombstone filter, so
+    /// deleted ids cannot spend the caller's `k` result slots. See
+    /// [`graph_arm`].
     /// Test: `upsert_and_search_round_trips`, `delete_filters_results`,
     /// `search_returns_the_exact_top_k_below_the_exhaustive_threshold`,
+    /// `search_is_exact_at_the_exhaustive_threshold`,
+    /// `search_above_the_threshold_fills_k_despite_tombstoned_nearest_neighbours`,
     /// `search_scores_a_re_upserted_drawer_by_its_current_vector`.
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<(String, f32)>> {
         if query.len() != self.dim {
@@ -562,11 +566,6 @@ impl HnswStore {
             }
         }
 
-        // Over-fetch so tombstoning doesn't starve callers asking for k. 2x is
-        // sufficient in the common case; for pathological cases the caller can
-        // re-issue. Bounds the graph arm only — the scan returns everything.
-        let want = k.saturating_mul(2).max(k);
-        let ef = HNSW_DEFAULT_EF_SEARCH.max(k * 2);
         // #5171: `reverse.len()` is the LIVE drawer count — `get_nb_point()`
         // also counts tombstones and shadows, so a small palace could churn
         // past the threshold mid-session and silently revert to the approximate
@@ -580,11 +579,11 @@ impl HnswStore {
             if reverse.len() <= EXHAUSTIVE_SCAN_MAX_POINTS {
                 exhaustive_nearest(&index, query, &tombstones)
             } else {
-                index
-                    .search(query, want, ef)
-                    .into_iter()
-                    .map(|hit| (hit.d_id as u64, hit.distance))
-                    .collect()
+                // #5179: both budgets are functions of the collection, not
+                // constants — a fixed `ef` let recall decay as the palace grew,
+                // and a fixed `2k` candidate count let deleted points spend the
+                // caller's result slots. See [`graph_arm`].
+                graph_nearest(&index, query, &tombstones, k, reverse.len())
             }
         };
 
