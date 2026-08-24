@@ -52,6 +52,22 @@
 //! being tracked is exactly what the orphan-GC keys on (#6118 — such a pane is
 //! now declined, and reported in [`ReconcileReport::adoption_declined`]).
 //!
+//! **A test's tmux session is never adopted, however it leaked.** A test that
+//! spawns a real tmux session cannot clean it up when its process dies hard —
+//! a SIGKILL, a `cargo test` timeout and an aborted run all skip `Drop`, so the
+//! RAII guard PR #6125 added covers the panic path and nothing beyond it. Three
+//! `tm-deadrt<pid>-01` sessions leaked that way on 2026-08-24, this loop adopted
+//! each one, and the operator's picker grew three `(active)` ghosts that
+//! outlived the tmux sessions. Names carrying
+//! [`trusty_common::session_naming::RESERVED_TEST_PREFIX`] are now refused here
+//! and reported in [`ReconcileReport::reserved_test_refused`] — a decision made
+//! from the name alone, so it holds for every leak shape whether or not any
+//! test-side cleanup ran. Refusal also hands the leaked pane back to
+//! `daemon::orphan_gc`, which kills an idle shell with no live child; adopting
+//! it was what made it permanent. An already-adopted record in that namespace
+//! whose tmux session is gone is tombstoned rather than marked `Stopped`, since
+//! there is no test to resume — see the gone arm below.
+//!
 //! **Declining is a kill decision, so the probe behind it retries.** An
 //! undeclared pane is orphan-GC input, and that GC kills an idle-shell pane
 //! with no live child after two sweeps. See
@@ -86,7 +102,8 @@ impl SessionManager {
     /// against the store: live → `Active`; gone → `Stopped` (unless already
     /// `Decommissioned`). A managed session unknown to the store is adopted as
     /// `Active` under an id derived from its tmux name (#6117), and only when
-    /// its pane resolves a working directory (#6118) — see this module's doc.
+    /// its pane resolves a working directory (#6118) and its name is not in the
+    /// test-owned reserved namespace (#6116) — see this module's doc.
     /// When `auto_resume` is true, every session this pass marked `Stopped`
     /// whose stop was not asked for is immediately resumed (#6194 — a record
     /// already carrying [`StopCause::Deliberate`] keeps it and is left down).
@@ -107,7 +124,10 @@ impl SessionManager {
     /// `repeated_reconcile_of_one_resolvable_pane_keeps_one_record`;
     /// `boot_reconcile_never_requeues_a_deliberately_stopped_session`,
     /// `boot_reconcile_still_auto_resumes_a_session_lost_with_the_daemon`
-    /// (#6194) in `stop_cause_tests.rs`.
+    /// (#6194) in `stop_cause_tests.rs`;
+    /// `reconcile_refuses_to_adopt_a_reserved_test_session`,
+    /// `reconcile_tombstones_a_reserved_test_record_whose_tmux_is_gone`
+    /// (#6116) in `naming_tests.rs`.
     pub async fn reconcile_on_boot(
         &self,
         auto_resume: bool,
@@ -210,6 +230,24 @@ impl SessionManager {
                 record.stop_cause = None;
                 report.adopted.push(record.tmux_name.clone());
                 info!(name = %record.tmux_name, "reconcile: re-adopted live session");
+            } else if crate::core::names::is_reserved_test_session_name(&record.tmux_name) {
+                // #6116: a test's session that is gone leaves nothing to
+                // resume, so `Stopped` would keep a row in the picker no
+                // automatic path can ever clear. This reaches records a daemon
+                // build predating the refusal above already adopted — the
+                // store is durable across the upgrade that adds the refusal.
+                record.set_lifecycle_state(ManagedSessionState::Deleted, Utc::now());
+                record.pending_decision = None;
+                record.proposed_default = None;
+                report.reserved_test_swept.push(record.id.to_string());
+                warn!(
+                    id = %record.id,
+                    name = %record.tmux_name,
+                    "reconcile: tombstoned a reserved test-namespace record whose tmux session \
+                     is gone (#6116) — a leaked test session is not a stopped session"
+                );
+                guard.upsert(record).await?;
+                continue;
             } else {
                 // Session is gone — mark Stopped (resumable), never Orphaned.
                 record.state = ManagedSessionState::Stopped;
@@ -260,6 +298,19 @@ impl SessionManager {
         let mut newly_resolved: Vec<(ManagedSessionId, PathBuf)> = Vec::new();
         for name in live_names.iter().flatten() {
             if known_names.contains(name) {
+                continue;
+            }
+            // #6116: the test suite owns this namespace; a session in it is a
+            // leak from a hard-killed test run, never work to track.
+            if crate::core::names::is_reserved_test_session_name(name) {
+                warn!(
+                    name = %name,
+                    "reconcile: refusing to adopt a reserved test-namespace session (#6116) — \
+                     it leaked from a test process that died before its cleanup ran. Left \
+                     untracked for the orphan-GC, which kills an idle shell with no live child \
+                     on two consecutive sweeps"
+                );
+                report.reserved_test_refused.push(name.clone());
                 continue;
             }
             // #6118: a pane whose cwd will not resolve is NOT adopted. #2158

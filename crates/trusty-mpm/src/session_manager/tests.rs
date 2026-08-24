@@ -1145,7 +1145,10 @@ async fn decommission_full_still_terminates_the_runtime() {
 
 // Build a minimal Active session record for reconcile tests (avoids repeating
 // 20-field struct literals when only tmux_name / task / ws_path vary).
-fn make_active_test_record(tmux_name: &str, task: &str, ws_path: &str) -> SessionRecord {
+// `pub(super)` since #6116: the sibling `naming_tests` reconcile coverage seeds
+// the same shape, and a second copy of a 27-field literal is one field addition
+// away from drifting.
+pub(super) fn make_active_test_record(tmux_name: &str, task: &str, ws_path: &str) -> SessionRecord {
     SessionRecord {
         id: ManagedSessionId::new(),
         tmux_name: tmux_name.into(),

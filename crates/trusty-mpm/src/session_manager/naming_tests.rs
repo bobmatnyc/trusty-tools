@@ -1004,3 +1004,110 @@ async fn dedupe_name_against_caps_suffixed_length_at_64() {
     );
     assert_ne!(result, long, "the taken candidate must still be suffixed");
 }
+
+/// #6116: a live session in the test-owned namespace is never adopted, even
+/// though its pane resolves a working directory.
+///
+/// Why: a test that spawns a real tmux session leaks it when its process dies
+/// hard — SIGKILL, a `cargo test` timeout, an aborted run — none of which run
+/// `Drop`. Three such sessions leaked on 2026-08-24, this loop adopted each
+/// one, and the operator's picker grew three `(active)` ghosts. The refusal
+/// reads the NAME, so it holds whether or not any test-side cleanup ran.
+/// What: one live `tm-xtest-…` pane with a resolvable cwd — the shape #6118
+/// would otherwise adopt — asserting no record is written, the name lands in
+/// `reserved_test_refused`, and neither `external_adopted` nor
+/// `adoption_declined` claims it. Before this fix the pane was adopted.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn reconcile_refuses_to_adopt_a_reserved_test_session() {
+    let dir = TempDir::new().unwrap();
+    let workspace = TempDir::new().unwrap();
+    // #3965: `#[serial]` + `$HOME` override — see `HomeGuard` above. A refused
+    // pane never reaches `validate_and_repair`; pin `$HOME` anyway so a future
+    // refactor cannot silently reopen the real-`$HOME` write.
+    let _home = set_home(dir.path());
+    let leaked = format!(
+        "{}deadrt4242-01",
+        trusty_common::session_naming::RESERVED_TEST_PREFIX
+    );
+    let fake = std::sync::Arc::new(PaneCwdTmux {
+        alive: vec![leaked.clone()],
+        pane_cwd: Some(workspace.path().to_path_buf()),
+    });
+
+    let mgr = SessionManager::new(dir.path(), fake).await.unwrap();
+    let report = mgr.reconcile_on_boot(false).await.expect("reconcile");
+
+    assert_eq!(
+        mgr.list().await.len(),
+        0,
+        "a leaked test session must leave no record for the picker to show"
+    );
+    assert!(
+        report.reserved_test_refused.contains(&leaked),
+        "the refused session must be named in the report; report: {report:?}"
+    );
+    assert!(
+        report.external_adopted.is_empty() && report.adoption_declined.is_empty(),
+        "refusal is by name, not a cwd-resolution decline; report: {report:?}"
+    );
+}
+
+/// #6116: a reserved-namespace record whose tmux session is gone is
+/// tombstoned, while an ordinary record in the same pass still becomes
+/// `Stopped`.
+///
+/// Why: such a record was adopted by a daemon build predating the refusal
+/// above — the store outlives that upgrade — and `Stopped` would leave a
+/// picker row nothing can ever resume, which is what forced the owner into
+/// `session_delete force`. The paired ordinary record is the over-reach guard:
+/// resumability is taken away from the test namespace only.
+/// What: two Active records, no live tmux; asserts `Deleted` plus a stamped
+/// `terminal_at` for the reserved one, `Stopped` for the other, and that each
+/// id lands in exactly one report list. Before this fix both were `Stopped`.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn reconcile_tombstones_a_reserved_test_record_whose_tmux_is_gone() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let fake = FakeTmuxDriver::new();
+    let mgr = SessionManager::new(dir.path(), fake).await.unwrap();
+
+    let leaked_name = format!(
+        "{}deadrt4242-01",
+        trusty_common::session_naming::RESERVED_TEST_PREFIX
+    );
+    let leaked = super::tests::make_active_test_record(&leaked_name, "leaked test", "/tmp/leak-ws");
+    let ordinary = super::tests::make_active_test_record("tm-trusty-tools-01", "real", "/tmp/ws");
+    {
+        let mut store = mgr.store.write().await;
+        store.upsert(leaked.clone()).await.unwrap();
+        store.upsert(ordinary.clone()).await.unwrap();
+    }
+
+    let report = mgr.reconcile_on_boot(false).await.expect("reconcile");
+
+    let after = mgr.get(&leaked.id).await.unwrap();
+    assert_eq!(
+        after.state,
+        ManagedSessionState::Deleted,
+        "a leaked test record with no tmux session must be tombstoned, not left resumable"
+    );
+    assert!(
+        after.terminal_at.is_some(),
+        "the retention clock must start when the record goes terminal"
+    );
+    assert!(
+        report.reserved_test_swept.contains(&leaked.id.to_string())
+            && !report.stopped.contains(&leaked.id.to_string()),
+        "the swept record belongs in exactly one list; report: {report:?}"
+    );
+
+    let untouched = mgr.get(&ordinary.id).await.unwrap();
+    assert_eq!(
+        untouched.state,
+        ManagedSessionState::Stopped,
+        "an ordinary gone session stays Stopped and resumable"
+    );
+    assert!(report.stopped.contains(&ordinary.id.to_string()));
+}

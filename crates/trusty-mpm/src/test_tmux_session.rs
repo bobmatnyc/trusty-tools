@@ -28,10 +28,137 @@
 //! spelled `crate::…` in the lib and `trusty_mpm::…` in the bin, and no single
 //! spelling compiles in both.
 //!
+//! **What `Drop` cannot cover, and what does.** A `Drop` guard runs on an
+//! unwinding panic and on nothing else: a SIGKILL, a `cargo test` timeout, an
+//! aborted run and a killed terminal all end the process without unwinding, so
+//! the session survives. Three did on 2026-08-24. Two mechanisms cover that gap,
+//! and neither is this guard:
+//!
+//! * The daemon refuses to adopt any session named under
+//!   [`trusty_common::session_naming::RESERVED_TEST_PREFIX`] (#6116), so a
+//!   leaked one never becomes a record or a picker row, and stays visible to
+//!   `daemon::orphan_gc`, which kills an idle shell with no live child.
+//!   [`reserved_session_name`] and [`reserved_project_slug`] are the two ways a
+//!   fixture lands in that namespace — both build from the same constant the
+//!   daemon reads, so the mint and the refusal cannot drift.
+//! * [`ScratchTmuxSession::spawn`] sweeps stale reserved-namespace sessions
+//!   once per test process, so the NEXT run on this machine reaps what the last
+//!   one leaked. It is bounded by age
+//!   ([`STALE_SESSION_AGE_SECS`]) so a concurrently running suite is never
+//!   touched. What it does NOT do: reap anything before that next run happens,
+//!   reap on a machine where the suite never runs again, or help at all if tmux
+//!   is unreachable. It reduces how long a leak lives; the daemon-side refusal
+//!   is what makes the leak harmless while it does.
+//!
 //! Test: [`tests`] below — a session that outlives a panicking closure is gone
-//! afterwards, and a guard never touches a name it did not create.
+//! afterwards, a guard never touches a name it did not create, and the stale
+//! sweep selects by age and namespace.
 
 use std::process::Command;
+use std::sync::Once;
+
+/// Age past which a reserved-namespace session is certainly leaked (#6116).
+///
+/// Why: no test in this suite holds a tmux session for anything close to half
+/// an hour, so a survivor this old cannot belong to a run still in progress —
+/// which is what makes the sweep safe to run while sibling test binaries and
+/// other engineers' `cargo test` processes are using the same tmux server.
+const STALE_SESSION_AGE_SECS: i64 = 1_800;
+
+/// Runs [`sweep_stale_reserved_sessions`] once per test process.
+static SWEEP_ONCE: Once = Once::new();
+
+/// A tmux session name in the namespace the daemon refuses to adopt (#6116).
+///
+/// What: `tm-xtest-<tag>-<pid>`, unique per process so the two targets this
+/// file compiles into cannot collide in the machine-global tmux namespace when
+/// cargo runs them concurrently.
+/// Test: [`tests::a_minted_name_is_one_the_daemon_refuses`].
+pub(crate) fn reserved_session_name(tag: &str) -> String {
+    format!(
+        "{}{tag}-{}",
+        trusty_common::session_naming::RESERVED_TEST_PREFIX,
+        std::process::id()
+    )
+}
+
+/// The repo/project slug a fixture passes to `create_with_id` so the tmux name
+/// the daemon DERIVES lands in the reserved namespace (#6116).
+///
+/// Why: a fixture that seeds a record does not choose its `tmux_name` —
+/// `build_managed_session_name` derives `tm-<project>-NN` from the repo url. So
+/// the namespace has to be reached through the project slug, not by naming the
+/// session directly.
+/// What: the reserved prefix with `tm-` and the trailing dash removed
+/// (`xtest`), joined to `tag`. Feed it as the repo segment of a url and the
+/// derived name is `tm-xtest-<tag>-NN`.
+/// Test: [`tests::a_derived_project_slug_yields_a_reserved_name`]; end to end
+/// by `session_resume_headless_dead_runtime_reconciles_and_restarts`, which
+/// asserts the name it actually got is reserved.
+pub(crate) fn reserved_project_slug(tag: &str) -> String {
+    let leaf = trusty_common::session_naming::RESERVED_TEST_PREFIX
+        .strip_prefix(trusty_common::session_naming::PREFIX)
+        .unwrap_or(trusty_common::session_naming::RESERVED_TEST_PREFIX)
+        .trim_end_matches('-');
+    format!("{leaf}-{tag}")
+}
+
+/// Pick the reserved-namespace sessions in a `tmux list-sessions` listing that
+/// are older than `max_age_secs`.
+///
+/// Why: the selection is the whole risk in the sweep — killing a session a
+/// concurrent run still needs would be worse than the leak it cleans up — so it
+/// is a pure function over the listing text, testable without a tmux server.
+/// What: reads `<created-epoch> <session-name>` lines (the format
+/// [`sweep_stale_reserved_sessions`] requests, created first because a session
+/// name may contain spaces), and keeps names in the reserved namespace whose
+/// age exceeds `max_age_secs`. An unparseable line is skipped, never killed.
+/// Test: [`tests::stale_sweep_selects_only_old_reserved_sessions`].
+fn stale_reserved_names(listing: &str, now_epoch: i64, max_age_secs: i64) -> Vec<String> {
+    listing
+        .lines()
+        .filter_map(|line| line.trim_end().split_once(' '))
+        .filter_map(|(created, name)| Some((created.trim().parse::<i64>().ok()?, name)))
+        .filter(|(created, name)| {
+            now_epoch - created > max_age_secs
+                && trusty_common::session_naming::is_reserved_test_session_name(name)
+        })
+        .map(|(_, name)| name.to_string())
+        .collect()
+}
+
+/// Kill reserved-namespace sessions left behind by an earlier, hard-killed test
+/// process (#6116).
+///
+/// Why/What: see this module's docs — `Drop` cannot run after a SIGKILL, so the
+/// next run cleans up instead. Best-effort throughout: a tmux that will not
+/// answer (no server yet, no binary) simply sweeps nothing.
+/// Test: the selection half via [`stale_reserved_names`]; the kill half is the
+/// same `kill-session -t =<name>` call [`ScratchTmuxSession::drop`] makes.
+fn sweep_stale_reserved_sessions(tmux_bin: &str) {
+    let Ok(out) = Command::new(tmux_bin)
+        .args(["list-sessions", "-F", "#{session_created} #{session_name}"])
+        .output()
+    else {
+        return;
+    };
+    if !out.status.success() {
+        return;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    for name in stale_reserved_names(
+        &String::from_utf8_lossy(&out.stdout),
+        now,
+        STALE_SESSION_AGE_SECS,
+    ) {
+        eprintln!("test-support: killing leaked test tmux session '{name}' (#6116)");
+        let _ = Command::new(tmux_bin)
+            .args(["kill-session", "-t", &format!("={name}")])
+            .output();
+    }
+}
 
 /// A real tmux session owned by a test, killed when this value drops.
 ///
@@ -56,6 +183,10 @@ impl ScratchTmuxSession {
     /// ownership claim honest: the caller gets no guard, so nothing later kills
     /// a session someone else created.
     pub(crate) fn spawn(tmux_bin: &str, name: &str, pane_command: &str) -> Self {
+        // #6116: reap what an earlier hard-killed run leaked, before adding to
+        // the namespace. Once per process, mirroring `test_support`'s
+        // `sweep_stale_test_dirs`.
+        SWEEP_ONCE.call_once(|| sweep_stale_reserved_sessions(tmux_bin));
         let status = Command::new(tmux_bin)
             .args(["new-session", "-d", "-s", name, pane_command])
             .status()
@@ -120,11 +251,62 @@ mod tests {
     /// Process-unique, so the two targets this file compiles into cannot
     /// collide in the machine-global tmux namespace when cargo runs them
     /// concurrently.
+    ///
+    /// #6116: minted through [`reserved_session_name`] — these tests spawn real
+    /// sessions, so a hard kill leaks THEM too, and the leak has to land in the
+    /// namespace the daemon refuses to adopt.
     fn scratch_name(tag: &str) -> String {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.subsec_nanos());
-        format!("tm-scratchguard-{tag}-{}-{nanos}", std::process::id())
+        reserved_session_name(&format!("guard-{tag}-{nanos}"))
+    }
+
+    /// The mint and the daemon's refusal read the same constant, so a fixture
+    /// cannot drift out of the namespace that protects it.
+    #[test]
+    fn a_minted_name_is_one_the_daemon_refuses() {
+        let name = reserved_session_name("mint");
+        assert!(trusty_common::session_naming::is_reserved_test_session_name(&name));
+        // Still managed, so the orphan-GC keeps its first gate on the pane.
+        assert!(trusty_common::session_naming::is_managed_session_name(
+            &name
+        ));
+    }
+
+    /// A fixture that reaches the namespace through a derived name gets there
+    /// too: `tm-<project>-NN` built from the slug is reserved.
+    #[test]
+    fn a_derived_project_slug_yields_a_reserved_name() {
+        let derived = trusty_common::session_naming::build_managed_session_name(
+            Some(&reserved_project_slug("deadrt1234")),
+            std::path::Path::new("/tmp"),
+            &[],
+        )
+        .expect("derive a name");
+        assert!(
+            trusty_common::session_naming::is_reserved_test_session_name(&derived),
+            "a fixture's derived name must land in the reserved namespace, got {derived}"
+        );
+    }
+
+    /// The sweep's whole risk is what it selects: only the reserved namespace,
+    /// only past the age bound, and never a line it could not parse.
+    #[test]
+    fn stale_sweep_selects_only_old_reserved_sessions() {
+        let now = 1_000_000;
+        let listing = "\
+900000 tm-xtest-deadrt1-01
+999999 tm-xtest-running-now-01
+900000 tm-trusty-tools-01
+900000 work
+not-an-epoch tm-xtest-garbage-01
+";
+        assert_eq!(
+            stale_reserved_names(listing, now, STALE_SESSION_AGE_SECS),
+            vec!["tm-xtest-deadrt1-01".to_string()],
+            "only the aged, reserved, parseable session may be killed"
+        );
     }
 
     /// The defect #6116 reports, inverted into an assertion: the fixture panics
