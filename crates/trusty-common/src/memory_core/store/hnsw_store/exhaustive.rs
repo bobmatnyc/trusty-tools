@@ -32,15 +32,23 @@ use redb::ReadableTable;
 /// Live-drawer ceiling at or below which [`super::HnswStore::search`] scans
 /// exhaustively instead of traversing the graph.
 ///
-/// Why (#5171): the recall loss this scan removes is not confined to tiny
-/// collections — on real embeddings it was still 3.2% of queries at 256 points
-/// — but the scan has to stay cheap enough that it never becomes the reason a
-/// recall is slow. 256 is where the two curves meet on this workload: an
-/// in-memory scan of 256 384-dim vectors costs about the same as the
-/// `VECTOR_KEYS` reverse-map build `search` already performs on every call, and
-/// it covers 99% of this machine's real palaces. Above it the graph traversal's
-/// sublinear cost is worth its approximation, which is the trade HNSW exists to
-/// make.
+/// Why (#5171, raised 256 → 1024 by #5179): the recall loss this scan removes
+/// does not stop at 256 — #5171 set the bound on cost, not on where the defect
+/// ends, and the regime it left behind was measured on this repo's own palace
+/// embeddings at 17.4% of queries losing a true top-10 neighbour at 512 points
+/// and 24.5% at 1024. Exactness is worth buying wherever it is affordable, and
+/// at 1024 points the scan costs on the order of 400µs per query — the same
+/// order as the graph traversal it replaces there, because with a candidate
+/// budget scaled to the collection (see [`super::graph_arm`]) the traversal
+/// evaluates a comparable number of distances anyway. Past 1024 the scan's
+/// linear cost stops being repayable and HNSW's sublinear cost is worth its
+/// approximation, which is the trade the algorithm exists to make. The palace
+/// this repo keeps for itself holds ~2100 live vectors, so the regime above the
+/// bound is real and not hypothetical; #5179 narrows it rather than closing it.
+///
+/// Nothing migrates when this number changes: no graph is persisted, and
+/// `HnswStore::open_with_mode` rebuilds the index from the raw `VECTORS` rows on
+/// every open.
 /// What: compared against the number of LIVE drawers — `VECTOR_KEYS` rows, the
 /// `reverse` map `search` builds two statements earlier. Not
 /// `Hnsw::get_nb_point()`, which also counts tombstoned points and re-upsert
@@ -51,8 +59,11 @@ use redb::ReadableTable;
 /// per delete or re-upsert, and `HnswStore::open` rebuilds one point per live
 /// vector — so a bulk `palace_reembed` at most doubles it.
 /// Test: `search_uses_the_graph_above_the_exhaustive_threshold`,
+/// `search_is_exact_at_the_exhaustive_threshold`,
 /// `deleting_drawers_does_not_push_a_small_palace_off_the_exhaustive_path`.
-pub(super) const EXHAUSTIVE_SCAN_MAX_POINTS: usize = 256;
+// #5179: raised from 256 so the whole regime #5171 measured as still lossy is
+// answered exactly.
+pub(super) const EXHAUSTIVE_SCAN_MAX_POINTS: usize = 1024;
 
 /// Every live point in `index`, ranked by exact distance to `query`, best
 /// first — the whole ranking, not a prefix of it.
