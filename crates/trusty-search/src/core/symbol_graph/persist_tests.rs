@@ -318,3 +318,260 @@ fn test_load_from_corpus_counts_unknown_edge_tags() {
         "expected 1 dropped edge"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #6171 — a persisted graph predating the #6169 fix is detected and discarded.
+//
+// PR #6169 changed a node key from a bare symbol name to `<file>::<symbol>` but
+// invalidated nothing already on disk, so `get_call_chain` kept answering with
+// the old bare-name semantics on every index built before the upgrade. These
+// tests pin the load-time format gate that replaces it automatically.
+// ---------------------------------------------------------------------------
+
+/// Two chunks whose symbols share a name across files — the collision #6169
+/// fixed, so a graph built from them is unambiguously the new format.
+fn colliding_chunks() -> Vec<ChunkTuple> {
+    vec![
+        chunk(
+            "a:1",
+            "crates/search/src/store.rs",
+            Some("upsert"),
+            &["write"],
+        ),
+        chunk("b:1", "crates/common/src/hnsw.rs", Some("write"), &[]),
+    ]
+}
+
+/// Persist a graph the way this binary does, then close the store.
+fn save_current_format(path: &std::path::Path) {
+    let graph = SymbolGraph::build_from_chunks(&colliding_chunks());
+    let store = CorpusStore::open(path).unwrap();
+    graph.save_to_corpus(&store).expect("save kg");
+}
+
+/// `save_kg_graph` must stamp the format it wrote, in the same commit.
+///
+/// Why: without the stamp there is nothing on disk separating a pre-#6169
+/// graph from a current one, which is the whole of #6171.
+/// What: saves a graph, reopens the store, and reads the stamp back.
+/// Test: this IS the test.
+#[test]
+fn saved_graph_stamps_the_current_format_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.redb");
+    save_current_format(&path);
+
+    let store = CorpusStore::open(&path).unwrap();
+    assert_eq!(
+        store.kg_graph_format_version().expect("read stamp"),
+        Some(crate::core::corpus::KG_GRAPH_FORMAT_VERSION),
+        "a freshly saved graph must carry the current format stamp"
+    );
+    assert!(
+        SymbolGraph::load_from_corpus(&store)
+            .expect("load")
+            .is_some(),
+        "a correctly stamped graph must still load"
+    );
+}
+
+/// A pre-#6169 graph — bare-name keys, no stamp — must not be hydrated.
+///
+/// Why: this is the exact on-disk shape #6171 reports. Loading it is what
+/// produced wrong `call_chain` answers on upgraded indexes.
+/// What: writes bare-name node keys and an edge between them directly, strips
+/// the stamp `save_kg_graph` added, and asserts the load declines. `Ok(None)`
+/// is the contract every caller already reads as "rebuild from chunks".
+/// Test: this IS the test.
+#[test]
+fn stale_prefix_graph_is_rejected_and_rebuilt() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.redb");
+    let store = CorpusStore::open(&path).unwrap();
+
+    // The pre-#6169 writer keyed nodes by bare name, so `upsert` in one crate
+    // and `write` in another collapsed onto single nodes and got an edge
+    // between them on name alone.
+    let nodes = vec![
+        (
+            "upsert".to_string(),
+            PersistedKgNode {
+                chunk_id: "a:1".to_string(),
+                file: "crates/search/src/store.rs".to_string(),
+            },
+        ),
+        (
+            "write".to_string(),
+            PersistedKgNode {
+                chunk_id: "b:1".to_string(),
+                file: "crates/common/src/hnsw.rs".to_string(),
+            },
+        ),
+    ];
+    let adj_fwd = vec![(
+        "upsert".to_string(),
+        vec![("Calls".to_string(), "write".to_string())],
+    )];
+    let adj_rev = vec![(
+        "write".to_string(),
+        vec![("Calls".to_string(), "upsert".to_string())],
+    )];
+    store
+        .save_kg_graph(&nodes, &adj_fwd, &adj_rev)
+        .expect("save");
+    crate::core::corpus::test_support::set_kg_format_stamp(&store, None).expect("strip stamp");
+
+    assert!(
+        SymbolGraph::load_from_corpus(&store)
+            .expect("load")
+            .is_none(),
+        "a bare-name graph must be discarded, not hydrated with its stale edge"
+    );
+    assert_eq!(
+        store.kg_node_count().expect("count"),
+        2,
+        "the gate declines to LOAD the rows; the rebuild's save is what replaces them"
+    );
+}
+
+/// The rows and their stamp are written in ONE transaction, so a failure to
+/// stamp rolls the rows back too.
+///
+/// Why: nothing else pins this. Splitting `save_kg_graph` into two
+/// `begin_write` calls passes every other test in this file, and it would leave
+/// the window the gate exists to close — new-format rows committed under an old
+/// stamp, or an old graph left under a current one.
+/// What: saves a 2-node graph, breaks `_meta` so the stamp write fails, then
+/// saves a DIFFERENT 1-node graph. Asserts the call errors and the corpus still
+/// holds the original two nodes. Under two transactions the node table would
+/// have been cleared and refilled before the stamp failed, leaving one row.
+/// Test: this IS the test.
+#[test]
+fn a_failed_stamp_rolls_back_the_rows_it_was_written_with() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.redb");
+    save_current_format(&path);
+
+    let store = CorpusStore::open(&path).unwrap();
+    assert_eq!(
+        store.kg_node_count().expect("count"),
+        2,
+        "precondition: the corpus holds the first graph"
+    );
+
+    crate::core::corpus::test_support::break_meta_table(&store).expect("break _meta");
+
+    let replacement = vec![(
+        "src/only.rs::only".to_string(),
+        PersistedKgNode {
+            chunk_id: "only:1".to_string(),
+            file: "src/only.rs".to_string(),
+        },
+    )];
+    assert!(
+        store.save_kg_graph(&replacement, &[], &[]).is_err(),
+        "an unwritable stamp must fail the save"
+    );
+    assert_eq!(
+        store.kg_node_count().expect("count"),
+        2,
+        "the rows must roll back with the stamp — a count of 1 means the node \
+         write committed in its own transaction before the stamp failed"
+    );
+}
+
+/// A current-format graph whose stamp was lost must also be rejected.
+///
+/// Why: fail CLOSED. An unversioned graph is indistinguishable from a
+/// pre-#6169 one, and a cheap unnecessary rebuild beats a wrong call chain.
+/// What: saves a real graph, removes only the stamp, and asserts the decline.
+/// Test: this IS the test.
+#[test]
+fn unstamped_graph_is_rejected_and_rebuilt() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.redb");
+    save_current_format(&path);
+
+    let store = CorpusStore::open(&path).unwrap();
+    crate::core::corpus::test_support::set_kg_format_stamp(&store, None).expect("strip stamp");
+    assert!(
+        SymbolGraph::load_from_corpus(&store)
+            .expect("load")
+            .is_none(),
+        "an unstamped graph must be treated as pre-#6169"
+    );
+}
+
+/// A stamp too short to decode is an unversioned graph, not a version 0 one.
+#[test]
+fn short_format_stamp_is_rejected_and_rebuilt() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.redb");
+    save_current_format(&path);
+
+    let store = CorpusStore::open(&path).unwrap();
+    crate::core::corpus::test_support::set_kg_format_stamp(&store, Some(&[1u8, 0]))
+        .expect("plant short stamp");
+    assert_eq!(
+        store.kg_graph_format_version().expect("read stamp"),
+        None,
+        "a 2-byte value must not decode as a version"
+    );
+    assert!(
+        SymbolGraph::load_from_corpus(&store)
+            .expect("load")
+            .is_none(),
+        "a short stamp must be treated as pre-#6169"
+    );
+}
+
+/// A stamp from a newer daemon is rejected in the same direction.
+///
+/// Why: the gate is an equality check, not a floor. A format this binary has
+/// never seen is exactly as unreadable as one it has outgrown, and rebuilding
+/// from chunks is always a correct answer.
+/// What: plants version 999 and asserts the decline.
+/// Test: this IS the test.
+#[test]
+fn future_format_stamp_is_rejected_and_rebuilt() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.redb");
+    save_current_format(&path);
+
+    let store = CorpusStore::open(&path).unwrap();
+    crate::core::corpus::test_support::set_kg_format_stamp(&store, Some(&999u32.to_le_bytes()))
+        .expect("plant future stamp");
+    assert!(
+        SymbolGraph::load_from_corpus(&store)
+            .expect("load")
+            .is_none(),
+        "an unknown future format must be discarded, not hydrated"
+    );
+}
+
+/// A `_meta` table that will not open must decline the load, not fail it.
+///
+/// Why: the failure path. If the stamp cannot be read, the rows cannot be
+/// vouched for either — but surfacing an `Err` here would take the KG offline
+/// where a rebuild would have restored it.
+/// What: breaks `_meta`'s on-disk schema, then asserts `Ok(None)`.
+/// Test: this IS the test.
+#[test]
+fn unreadable_format_stamp_is_rejected_and_rebuilt() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.redb");
+    save_current_format(&path);
+
+    let store = CorpusStore::open(&path).unwrap();
+    crate::core::corpus::test_support::break_meta_table(&store).expect("break _meta");
+    assert!(
+        store.kg_graph_format_version().is_err(),
+        "precondition: the stamp read must actually fail"
+    );
+    assert!(
+        SymbolGraph::load_from_corpus(&store)
+            .expect("load must not error")
+            .is_none(),
+        "an unreadable stamp must fall back to a rebuild, not propagate an error"
+    );
+}

@@ -13,8 +13,8 @@ use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata};
 
 use super::store_impl::CorpusStore;
 use super::tables::{
-    KG_COMMUNITIES_TABLE, KG_EDGES_REV_TABLE, KG_EDGES_TABLE, KG_NODES_TABLE,
-    KG_SYMBOL_COMMUNITY_TABLE,
+    KG_COMMUNITIES_TABLE, KG_EDGES_REV_TABLE, KG_EDGES_TABLE, KG_GRAPH_FORMAT_VERSION,
+    KG_NODES_TABLE, KG_SYMBOL_COMMUNITY_TABLE, META_KEY_KG_GRAPH_FORMAT_VERSION,
 };
 use super::types::{load_adjacency, PersistedKgNode};
 
@@ -30,8 +30,13 @@ impl CorpusStore {
     /// forward/reverse adjacencies. Each value is `serde_json`-encoded. An
     /// `(adj_fwd, adj_rev)` row whose vector is empty is skipped to keep the
     /// stored graph minimal.
+    /// The format stamp is written in this same transaction (#6171). Splitting
+    /// it into a second commit would leave a window where the rows are the new
+    /// format and the stamp still says the old one, or worse the reverse — a
+    /// current stamp over rows an interrupted write left in the old format.
     /// Test: `save_load_kg_roundtrip` round-trips a synthetic graph through
-    /// `save_kg_graph` + `load_kg_graph` and asserts equality.
+    /// `save_kg_graph` + `load_kg_graph` and asserts equality;
+    /// `saved_graph_stamps_the_current_format_version` covers the stamp.
     pub fn save_kg_graph(
         &self,
         nodes: &[(String, PersistedKgNode)],
@@ -77,8 +82,64 @@ impl CorpusStore {
                     .with_context(|| format!("insert kg rev adjacency for {tgt}"))?;
             }
         }
+        {
+            // #6171: stamp the format the rows above were just written in, so a
+            // later load can tell them apart from a pre-#6169 bare-name graph.
+            let mut meta_tbl = txn
+                .open_table(crate::core::migration::META_TABLE)
+                .context("open _meta table for kg format stamp")?;
+            meta_tbl
+                .insert(
+                    META_KEY_KG_GRAPH_FORMAT_VERSION,
+                    KG_GRAPH_FORMAT_VERSION.to_le_bytes().as_slice(),
+                )
+                .context("insert kg_graph_format_version")?;
+        }
         txn.commit().context("commit kg graph upsert txn")?;
         Ok(())
+    }
+
+    /// Format version of the persisted KG rows, or `None` when there is no
+    /// usable stamp (#6171).
+    ///
+    /// Why: `SymbolGraph::load_from_corpus` must not hydrate rows whose keys
+    /// mean something other than what this binary expects. A pre-#6169 corpus
+    /// carries no stamp, so "no stamp" has to be a distinguishable answer
+    /// rather than an error the caller might paper over.
+    /// What: reads `_meta[kg_graph_format_version]` and decodes 4 little-endian
+    /// bytes. Returns `Ok(None)` when `_meta` or the key is absent, or when the
+    /// stored value is not exactly 4 bytes — every one of those is an
+    /// unversioned graph, which the caller treats as pre-#6169. A redb failure
+    /// is still an `Err`: the caller cannot read the stamp, so it also cannot
+    /// trust the rows, and the two are reported separately so an on-disk fault
+    /// is not silently filed as "old format".
+    /// Test: `unstamped_graph_is_rejected_and_rebuilt`,
+    /// `short_format_stamp_is_rejected_and_rebuilt`,
+    /// `unreadable_format_stamp_is_rejected_and_rebuilt` in
+    /// `core::symbol_graph::persist_tests`.
+    pub fn kg_graph_format_version(&self) -> Result<Option<u32>> {
+        use crate::core::migration::META_TABLE;
+
+        let txn = self
+            .db
+            .begin_read()
+            .context("begin kg format stamp read txn")?;
+        let table = match txn.open_table(META_TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(anyhow::anyhow!("open _meta table: {e}")),
+        };
+        let Some(value) = table
+            .get(META_KEY_KG_GRAPH_FORMAT_VERSION)
+            .context("read kg_graph_format_version")?
+        else {
+            return Ok(None);
+        };
+        let bytes = value.value();
+        let Ok(four) = <[u8; 4]>::try_from(bytes) else {
+            return Ok(None);
+        };
+        Ok(Some(u32::from_le_bytes(four)))
     }
 
     /// Load the persisted symbol graph (issue #41 phase 2).

@@ -415,6 +415,11 @@ impl CorpusStore {
                 let mut dst_meta = dst_txn.open_table(META_TABLE)?;
                 // Copy only the two well-known meta keys — skip any unknown
                 // future keys to stay forward-compatible.
+                // #6171: `kg_graph_format_version` is deliberately absent from
+                // this list, for the same reason `kg_nodes`/`kg_edges` are —
+                // the rows it describes are not copied, and a stamp without
+                // its rows would claim a format for a graph that is not there.
+                // The end-of-reindex `save_kg_graph` writes both together.
                 for key in &[META_KEY_INDEXED_ROOT, META_KEY_SCHEMA_VERSION] {
                     if let Some(val) = src_meta
                         .get(key)

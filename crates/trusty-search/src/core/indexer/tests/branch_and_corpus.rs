@@ -747,6 +747,89 @@ async fn runtime_kg_catch_up_falls_back_to_rebuild_without_corpus() {
     );
 }
 
+/// A persisted graph predating the #6169 fix is detected at load and rebuilt,
+/// with no manual reindex and nothing to delete by hand (#6171).
+///
+/// Why: #6169 fixed how call edges are CONSTRUCTED and invalidated nothing
+/// already written, so every index built before the upgrade kept serving
+/// bare-name `call_chain` answers off its stale rows. This is the end-to-end
+/// proof that the load-time format gate replaces them by itself.
+/// What: indexes two files (which builds and persists a current-format graph),
+/// overwrites the corpus with the pre-#6169 shape — bare-name keys, no format
+/// stamp — clears the in-memory graph, and calls the same catch-up path
+/// warm-boot uses. Asserts the served graph is rebuilt with qualified keys and
+/// that the corpus now carries the current stamp.
+/// Test: this IS the test.
+#[tokio::test]
+async fn stale_persisted_graph_is_detected_and_rebuilt() {
+    use crate::core::corpus::{PersistedKgNode, KG_GRAPH_FORMAT_VERSION};
+
+    let dir = tempfile::tempdir().unwrap();
+    let redb_path = dir.path().join("index.redb");
+
+    let idx = make_indexer_with_corpus(&redb_path);
+    idx.index_files_batch(&[
+        ("src/caller.rs".into(), "fn caller() { callee(); }".into()),
+        ("src/callee.rs".into(), "fn callee() {}".into()),
+    ])
+    .await
+    .expect("index batch");
+
+    let corpus = idx.corpus_store().expect("corpus wired");
+
+    // Replace the persisted graph with what the pre-#6169 daemon wrote: keys
+    // are bare symbol names, and no format stamp exists to say so.
+    let nodes = vec![
+        (
+            "caller".to_string(),
+            PersistedKgNode {
+                chunk_id: "stale:1".to_string(),
+                file: "src/caller.rs".to_string(),
+            },
+        ),
+        (
+            "callee".to_string(),
+            PersistedKgNode {
+                chunk_id: "stale:2".to_string(),
+                file: "src/callee.rs".to_string(),
+            },
+        ),
+    ];
+    let adj_fwd = vec![(
+        "caller".to_string(),
+        vec![("Calls".to_string(), "callee".to_string())],
+    )];
+    corpus
+        .save_kg_graph(&nodes, &adj_fwd, &[])
+        .expect("plant stale graph");
+    crate::core::corpus::test_support::set_kg_format_stamp(&corpus, None).expect("strip stamp");
+
+    idx.clear_symbol_graph_in_memory().await;
+    assert_eq!(idx.snapshot_symbol_graph().await.node_count(), 0);
+
+    idx.catch_up_symbol_graph().await;
+
+    let graph = idx.snapshot_symbol_graph().await;
+    assert!(
+        graph.node_count() > 0,
+        "the stale graph must be rebuilt from chunks, not left empty"
+    );
+    assert!(
+        graph.file_of("caller").is_none(),
+        "a bare name must no longer BE a node key after the rebuild"
+    );
+    assert_eq!(
+        graph.file_of("src/caller.rs::caller"),
+        Some("src/caller.rs"),
+        "the rebuilt graph must key nodes by qualified identity"
+    );
+    assert_eq!(
+        corpus.kg_graph_format_version().expect("read stamp"),
+        Some(KG_GRAPH_FORMAT_VERSION),
+        "the rebuild must re-stamp the corpus so the next boot loads it cheaply"
+    );
+}
+
 /// Issue #2984 Phase 1 HIGH finding 3: `embed_deferred_chunks` must skip
 /// chunks that already have a stored vector rather than blindly re-embedding
 /// the whole corpus — the locked design decision is "incremental catch-up,
