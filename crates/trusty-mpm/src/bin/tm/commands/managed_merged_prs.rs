@@ -140,7 +140,8 @@ fn diagnostic_lines(merged: &serde_json::Value) -> Vec<String> {
 /// deal with by hand.
 /// Test: HTTP path covered by integration test; CLI parse by
 /// `cli_parses_session_prune_worktrees` and
-/// `cli_prune_worktrees_discard_dirty_is_opt_in`.
+/// `cli_prune_worktrees_discard_dirty_is_opt_in`; the #5830 timeout override by
+/// `merged_pr_request_outlives_the_default_client_timeout`.
 pub(crate) async fn session_prune_worktrees(
     client: &reqwest::Client,
     url: &str,
@@ -148,16 +149,28 @@ pub(crate) async fn session_prune_worktrees(
     discard_dirty: bool,
     merged_prs: bool,
 ) -> anyhow::Result<()> {
-    let resp = client
+    let mut request = client
         .post(format!("{url}/api/v1/sessions/managed/prune-worktrees"))
         .json(&serde_json::json!({
             "dry_run": dry_run,
             "discard_dirty": discard_dirty,
             // #2919: the merged-PR reclaim pass, off unless explicitly asked for.
             "merged_prs": merged_prs,
-        }))
-        .send()
-        .await?;
+        }));
+    if merged_prs {
+        // #5830: the merged-PR survey runs synchronously in the handler and
+        // takes minutes, so the client's 10s default aborted every invocation.
+        request = request.timeout(trusty_mpm::client::http_client::RECLAIM_SURVEY_REQUEST_TIMEOUT);
+        // The wait is long and the daemon streams nothing, so say what is
+        // happening — an operator with no output cannot tell a running survey
+        // from a wedged one.
+        eprintln!(
+            "merged-PR pass: surveying every registered worktree (classify, then byte-walk) \
+             — this takes minutes on a large workspace and prints nothing until it \
+             finishes (#5830)"
+        );
+    }
+    let resp = request.send().await?;
     let body: serde_json::Value = resp.error_for_status()?.json().await?;
     let paths = body
         .get("paths")

@@ -34,6 +34,11 @@ mod types;
 // `DaemonClient::spawn_managed_session` rather than keeping its own copy.
 pub(crate) use config::PROVISION_REQUEST_TIMEOUT;
 
+// #5830: the `tm` binary is a separate crate from this library, so the
+// merged-PR survey bound is re-exported publicly for the same reason
+// `default_client` below is a public seam.
+pub use config::RECLAIM_SURVEY_REQUEST_TIMEOUT;
+
 pub use types::{
     BreakerRow, ChatMessage, ConfigRecommendation, CoordinatorChatOutcome, CoordinatorContext,
     CoordinatorSession, DiscoveredProjectRow, EventRow, FleetByProjectWireResponse,
