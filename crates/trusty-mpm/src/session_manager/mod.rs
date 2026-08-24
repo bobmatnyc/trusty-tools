@@ -133,6 +133,10 @@ mod slots_tests;
 #[cfg(test)]
 mod send_input_gate_tests;
 
+// #6194: a stop somebody asked for must survive both automatic resume paths.
+#[cfg(test)]
+mod stop_cause_tests;
+
 /// Shared real-git fixtures for the #4091 dirty-worktree-guard tests, used by
 /// both `worktree_safety::worktree_safety_tests` and `prune::orphan_tests`.
 #[cfg(test)]
@@ -146,7 +150,7 @@ pub mod real_tmux;
 pub use injection_status::InjectionStatus;
 pub use manager::{ManagedError, ManagedTmuxDriver, ReconcileReport, SessionManager};
 pub use prune::{MAX_EPHEMERAL_AGE_HOURS, PruneAction, PruneFilter, PruneOutcome, PrunedSession};
-pub use record::{ManagedSessionId, ManagedSessionState, RecordError, SessionRecord};
+pub use record::{ManagedSessionId, ManagedSessionState, RecordError, SessionRecord, StopCause};
 pub use retention::{
     RetentionDebounce, RetentionOutcome, RetentionVerdict, TERMINAL_RECORD_RETENTION_DAYS,
     retention_verdict,

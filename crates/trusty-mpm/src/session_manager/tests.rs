@@ -1172,6 +1172,7 @@ fn make_active_test_record(tmux_name: &str, task: &str, ws_path: &str) -> Sessio
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
+        stop_cause: None,
     }
 }
 
@@ -1270,6 +1271,7 @@ async fn manager_reconcile_skips_decommissioned() {
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
+        stop_cause: None,
     };
     {
         let mut store = mgr.store.write().await;
@@ -1331,6 +1333,7 @@ async fn manager_reconcile_skips_deleted() {
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
+        stop_cause: None,
     };
     {
         let mut store = mgr.store.write().await;
@@ -1402,6 +1405,7 @@ async fn manager_reconcile_backfills_stale_pending_decision_on_terminal_record()
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
+        stop_cause: None,
     };
     {
         let mut store = mgr.store.write().await;
@@ -1990,6 +1994,7 @@ pub(super) async fn seed_record(
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
+        stop_cause: None,
     };
     if seeds_live_tmux {
         mgr.tmux
@@ -2497,6 +2502,7 @@ async fn reap_aged_ephemeral_picks_old_ephemeral_only() {
             injection_status: Default::default(),
             worktree_owner: None,
             terminal_at: None,
+            stop_cause: None,
         };
         mgr.store.write().await.upsert(record).await.expect("seed");
     }
@@ -2587,6 +2593,7 @@ async fn manager_decommission_unowned_skips_deletion() {
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
+        stop_cause: None,
     };
     mgr.store.write().await.upsert(record).await.unwrap();
 

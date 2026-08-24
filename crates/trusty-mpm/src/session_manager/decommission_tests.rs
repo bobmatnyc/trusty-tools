@@ -224,6 +224,7 @@ fn owned_record(id: ManagedSessionId, state: ManagedSessionState) -> SessionReco
         injection_status: Default::default(),
         worktree_owner: Some(id),
         terminal_at: None,
+        stop_cause: None,
     }
 }
 

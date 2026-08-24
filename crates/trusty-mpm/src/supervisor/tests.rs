@@ -21,7 +21,7 @@ use crate::activity::cache::{ActivityState, ActivityVerdict};
 use crate::activity::monitor::{ActivityError, ActivityMonitor, LlmClassifier};
 use crate::session_manager::{
     ManagedError, ManagedSessionId, ManagedSessionState, ManagedTmuxDriver, SessionManager,
-    SessionRecord,
+    SessionRecord, StopCause,
 };
 
 use super::Supervisor;
@@ -158,6 +158,24 @@ fn resume_cfg() -> SupervisorConfig {
     }
 }
 
+/// Stamp a seeded record's [`StopCause`] (#6194).
+///
+/// Why: `seed_sessions` writes records straight into the store, so there is no
+/// transition to write a cause. The auto-resume gate reads one, and these tests
+/// need each of its values.
+/// Test: `tick_never_resumes_a_deliberately_stopped_session`,
+/// `tick_still_resumes_a_session_whose_runtime_exited`.
+async fn set_stop_cause(
+    mgr: &Arc<SessionManager>,
+    id: &ManagedSessionId,
+    cause: Option<StopCause>,
+) {
+    let mut store = mgr.store.write().await;
+    let mut record = store.cached_get(id).expect("seeded record");
+    record.stop_cause = cause;
+    store.upsert(record).await.expect("stamp stop_cause");
+}
+
 /// Seed `n` records directly into the store in a given state, with a workspace
 /// so `resume` has a directory to re-spawn into.
 async fn seed_sessions(
@@ -196,6 +214,7 @@ async fn seed_sessions(
             injection_status: Default::default(),
             worktree_owner: None,
             terminal_at: None,
+            stop_cause: None,
         };
         store.upsert(rec).await.expect("seed upsert");
         ids.push(id);
@@ -332,6 +351,7 @@ fn rec(state: ManagedSessionState, pending: Option<&str>) -> SessionRecord {
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
+        stop_cause: None,
     }
 }
 
@@ -421,6 +441,68 @@ async fn tick_auto_resumes_stopped() {
     let after = mgr.list().await;
     assert_eq!(after[0].state, ManagedSessionState::Active);
     assert_eq!(*tmux.create_calls.lock().unwrap(), 1);
+}
+
+/// A sweep never relaunches a session somebody stopped on purpose (#6194).
+///
+/// Why: this is the reported defect. `tmux kill-session` on a leaked pane and
+/// `tm session stop` both leave a `Stopped` record carrying
+/// [`StopCause::Deliberate`], and the sweep resumed every `Stopped` record it
+/// saw — so the session was back within one interval and only
+/// `tm session decommission` broke the loop. `create_calls` is the load-bearing
+/// assertion: against the pre-fix code the record reads `Active` at the end
+/// because the sweep respawned it.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn tick_never_resumes_a_deliberately_stopped_session() {
+    let dir = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    let tmux = FakeTmux::new();
+    let mgr = make_manager(&dir, tmux.clone()).await;
+    let ids = seed_sessions(&mgr, 1, ManagedSessionState::Stopped, &ws).await;
+    set_stop_cause(&mgr, &ids[0], Some(StopCause::Deliberate)).await;
+
+    let report = run_tick::<StubClassifier>(&mgr, &resume_cfg(), None).await;
+
+    assert!(
+        report.resumed.is_empty(),
+        "the sweep respawned a session the operator had stopped: {:?}",
+        report.resumed
+    );
+    assert_eq!(report.resume_failures, 0, "not resuming is not a failure");
+    assert_eq!(
+        *tmux.create_calls.lock().unwrap(),
+        0,
+        "no tmux session may be created for a deliberately stopped record"
+    );
+    assert_eq!(mgr.list().await[0].state, ManagedSessionState::Stopped);
+}
+
+/// A sweep still relaunches a session whose runtime exited on its own (#6194).
+///
+/// Why: the other direction. Gating auto-resume on the stop cause must not
+/// disable auto-resume — a runtime that died with nothing asking is exactly
+/// what the mode exists to bring back.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn tick_still_resumes_a_session_whose_runtime_exited() {
+    let dir = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    let tmux = FakeTmux::new();
+    let mgr = make_manager(&dir, tmux.clone()).await;
+    let ids = seed_sessions(&mgr, 1, ManagedSessionState::Stopped, &ws).await;
+    set_stop_cause(&mgr, &ids[0], Some(StopCause::Unexpected)).await;
+
+    let report = run_tick::<StubClassifier>(&mgr, &resume_cfg(), None).await;
+
+    assert_eq!(report.resumed.len(), 1);
+    assert_eq!(*tmux.create_calls.lock().unwrap(), 1);
+    let after = mgr.list().await;
+    assert_eq!(after[0].state, ManagedSessionState::Active);
+    assert_eq!(
+        after[0].stop_cause, None,
+        "a resumed session carries no stop cause"
+    );
 }
 
 #[tokio::test]

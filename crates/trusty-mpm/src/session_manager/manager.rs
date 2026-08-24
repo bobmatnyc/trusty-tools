@@ -29,7 +29,7 @@ use tracing::{error, info, warn};
 use crate::core::names::SessionNameError;
 use crate::core::sm::control::Submit;
 
-use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
+use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord, StopCause};
 use super::resume_workdir;
 use super::slots::SlotRegistry;
 use super::store::{SessionStore, StoreError};
@@ -560,8 +560,12 @@ impl SessionManager {
     /// state guard — so a stale zombie-reconcile path (`runtime-stop` then
     /// `resume`) can never flip a deleted/decommissioned tombstone back to a
     /// live `Stopped` state and resurrect it (code-critic CRITICAL).
+    /// Records [`StopCause::Deliberate`] (#6194): every "end this session"
+    /// request reaches this method, so no automatic path may relaunch what it
+    /// stopped — see [`SessionRecord::is_auto_resumable`].
     /// Test: `manager_stop_keeps_workspace`; `stop_refuses_terminal_record`
-    /// (a Deleted record cannot be stopped) in `delete_tests`.
+    /// (a Deleted record cannot be stopped) in `delete_tests`;
+    /// `stop_records_deliberate_cause` in `stop_cause_tests`.
     pub async fn stop(&self, id: &ManagedSessionId) -> Result<SessionRecord, ManagedError> {
         let mut record = self.get(id).await?;
         if record.state.is_terminal() {
@@ -580,6 +584,11 @@ impl SessionManager {
         // abrupt `kill_session`. The snapshot above already preserved the pane.
         self.graceful_terminate_runtime(&record.tmux_name).await;
         record.state = ManagedSessionState::Stopped;
+        // #6194: every "end this session" request lands here — `tm session
+        // stop`, the HTTP/MCP stop routes, the idle auto-stop, and the reaper
+        // that finds the tmux target gone — so this is where the intent is
+        // recorded, and an automatic resume must not undo it.
+        record.stop_cause = Some(StopCause::Deliberate);
         self.store.write().await.upsert(record.clone()).await?;
         info!(id = %id, name = %record.tmux_name, "managed session stopped (workspace intact)");
         Ok(record)
@@ -657,14 +666,16 @@ impl SessionManager {
     /// the surviving shell is the scope of #2023 component C, not this method.
     ///
     /// NOTE — auto-resume supervisors: `tm supervisor --auto-resume`
-    /// (`supervisor::poller::run_tick`) auto-resumes EVERY `Stopped` record
-    /// once `cfg.auto_resume` is true, and `resume()` kills the preserved pane
-    /// as described above. So the "pane left alive" guarantee this method
-    /// provides only holds for `auto_resume = false` / interactive
-    /// deployments — under an auto-resume supervisor the session is still
-    /// revived (and its idle pane replaced) by that mode's own design.
-    /// Reconciling supervisor-revive vs. preserve-on-exit semantics is tracked
-    /// as a follow-up (#2026).
+    /// (`supervisor::poller::run_tick`) auto-resumes a `Stopped` record whose
+    /// stop nobody asked for, and `resume()` kills the preserved pane as
+    /// described above. This method records [`StopCause::Unexpected`], so its
+    /// records ARE that kind — the "pane left alive" guarantee holds for
+    /// `auto_resume = false` / interactive deployments, and under an auto-resume
+    /// supervisor the session is still revived (and its idle pane replaced) by
+    /// that mode's own design. What #6194 changed is the other half: a stop
+    /// somebody DID ask for now records [`StopCause::Deliberate`] and is left
+    /// down. Reconciling supervisor-revive vs. preserve-on-exit semantics for
+    /// this path remains a follow-up (#2026).
     ///
     /// What: loads the record, captures a pane snapshot the same way `stop`
     /// does (best-effort — the pane usually still exists, it is just an idle
@@ -750,6 +761,9 @@ impl SessionManager {
             record.pane_id = self.tmux.get_pane_id(&record.tmux_name);
         }
         record.state = ManagedSessionState::Stopped;
+        // #6194: nothing asked for this stop — the runtime exited on its own —
+        // so relaunching it is the self-healing action auto-resume exists for.
+        record.stop_cause = Some(StopCause::Unexpected);
         guard.upsert(record.clone()).await?;
         drop(guard);
         info!(
@@ -923,6 +937,10 @@ impl SessionManager {
 
         record.state = ManagedSessionState::Active;
         record.last_activity_at = Some(Utc::now());
+        // #6194: the session is running again, so the reason it last stopped no
+        // longer describes it — a later crash must be auto-resumable even if
+        // this resume followed a deliberate stop.
+        record.stop_cause = None;
         self.store.write().await.upsert(record.clone()).await?;
         Ok(record)
     }

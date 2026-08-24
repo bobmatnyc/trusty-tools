@@ -292,6 +292,7 @@ impl SessionManager {
             injection_status: Default::default(),
             worktree_owner: None,
             terminal_at: None,
+            stop_cause: None,
         };
 
         // ── Guard 1: collision check (+ the no-collision persist) — the
@@ -499,6 +500,7 @@ mod tests {
             injection_status: Default::default(),
             worktree_owner: None,
             terminal_at: None,
+            stop_cause: None,
         }
     }
 
@@ -529,6 +531,7 @@ mod tests {
             injection_status: Default::default(),
             worktree_owner: None,
             terminal_at: None,
+            stop_cause: None,
         }
     }
 

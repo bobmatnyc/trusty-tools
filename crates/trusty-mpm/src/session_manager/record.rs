@@ -203,6 +203,41 @@ impl fmt::Display for ManagedSessionState {
     }
 }
 
+/// Why a session's runtime stopped, recorded at the moment it stopped (#6194).
+///
+/// Why: [`ManagedSessionState::Stopped`] answers "is the runtime running" and
+/// nothing else, so the two ways a session reaches it are indistinguishable
+/// afterwards — somebody ended it on purpose, or it died with nothing asking.
+/// The automatic resume paths need that difference: relaunching a session whose
+/// runtime crashed is the point of `auto_resume`, and relaunching one the
+/// operator just killed undoes their decision. Before this enum, `tmux
+/// kill-session` and `tm session stop` were both undone within one supervisor
+/// interval, and only `tm session decommission` — a terminal, workspace-deleting
+/// state — made a session stay down.
+/// What: two variants written by the transitions into `Stopped`, never inferred
+/// later. Deliberate is written by [`super::SessionManager::stop`], the one path
+/// every "end this session" request reaches — `tm session stop`, the HTTP and
+/// MCP stop routes, the idle auto-stop, and the reaper that finds a record's
+/// tmux target gone while the daemon was watching it. Unexpected is written by
+/// [`super::SessionManager::mark_runtime_exited_stopped`] (the runtime process
+/// exited under a pane that is still alive) and by boot reconciliation, which
+/// cannot attribute a tmux session that vanished while the daemon was down.
+/// `None` on a record means no transition into `Stopped` has been recorded —
+/// every pre-#6194 record loads that way, and reads as auto-resumable, which is
+/// exactly the behavior those records had before this field existed.
+/// Test: `stop_records_deliberate_cause`, `runtime_exit_records_unexpected_cause`,
+/// `record_without_stop_cause_is_auto_resumable` in `stop_cause_tests.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopCause {
+    /// Someone ended this session on purpose — an explicit stop request, or the
+    /// session's tmux target killed out from under a watching daemon.
+    Deliberate,
+    /// Nothing asked for the stop: the runtime exited on its own, or the daemon
+    /// restarted and found the session's tmux target already gone.
+    Unexpected,
+}
+
 /// Full record for a managed session, persisted to disk.
 ///
 /// Why: persistence enables crash recovery — the manager can reload all known
@@ -464,9 +499,48 @@ pub struct SessionRecord {
     /// grandfather the entire pre-existing backlog for another full window.
     #[serde(default)]
     pub terminal_at: Option<DateTime<Utc>>,
+
+    /// Why this session's runtime stopped, when it did (#6194).
+    ///
+    /// Why: the automatic resume paths must not undo a stop somebody asked for.
+    /// See [`StopCause`] for the full rationale and for which transition writes
+    /// which variant; [`Self::is_auto_resumable`] is the one place it is read.
+    ///
+    /// `#[serde(default)]` (→ `None`) keeps every pre-#6194 record
+    /// deserializable, and `None` reads as auto-resumable — the behavior those
+    /// records already had. A record is not migrated on load: the next
+    /// transition into `Stopped` writes the cause, and a record already sitting
+    /// in `Stopped` from before the fix stays auto-resumable until then.
+    #[serde(default)]
+    pub stop_cause: Option<StopCause>,
 }
 
 impl SessionRecord {
+    /// Whether an AUTOMATIC resume may relaunch this session (#6194).
+    ///
+    /// Why: the two unattended relaunch paths — the supervisor's per-tick sweep
+    /// ([`crate::supervisor::poller::run_tick`]) and the auto-resume tail of
+    /// [`super::SessionManager::reconcile_on_boot`] — both used to act on state
+    /// alone, so every `Stopped` record was a relaunch candidate. That respawned
+    /// sessions an operator had just killed: `tmux kill-session` on a leaked
+    /// pane, and `tm session stop`, were each undone within one interval, and
+    /// only `tm session decommission` stopped the loop. This predicate is the
+    /// single place both paths ask the question, so the two cannot drift.
+    /// What: `true` only for a `Stopped` record whose stop was not
+    /// [`StopCause::Deliberate`]. Every other state is `false`, including
+    /// `Errored` — neither caller relaunches those today, and this predicate
+    /// answers "may an automatic path relaunch it", not "may it be resumed":
+    /// an operator's own `tm session resume` is unaffected by this and still
+    /// revives a deliberately-stopped session.
+    /// Test: `deliberately_stopped_session_is_not_auto_resumable`,
+    /// `unexpectedly_stopped_session_is_auto_resumable`,
+    /// `record_without_stop_cause_is_auto_resumable`,
+    /// `only_stopped_records_are_auto_resumable` in `stop_cause_tests.rs`.
+    pub fn is_auto_resumable(&self) -> bool {
+        matches!(self.state, ManagedSessionState::Stopped)
+            && self.stop_cause != Some(StopCause::Deliberate)
+    }
+
     /// Set this record's lifecycle state, keeping [`Self::terminal_at`]
     /// consistent with it.
     ///

@@ -76,6 +76,7 @@ fn rec(
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
+        stop_cause: None,
     }
 }
 

@@ -116,6 +116,9 @@ impl SessionManager {
         // reads. The setter clears it.
         record.set_lifecycle_state(ManagedSessionState::Active, Utc::now());
         record.last_activity_at = Some(Utc::now());
+        // #6194: the operator is relaunching into this pane, so the reason it
+        // last stopped no longer describes it — same clear `resume` does.
+        record.stop_cause = None;
         // #4337: a reactivation always precedes the client `exec`-ing a fresh
         // `claude` back into this SAME pane, guaranteeing a genuinely NEW
         // top-level `SessionStart` is imminent. Clearing the old id here
