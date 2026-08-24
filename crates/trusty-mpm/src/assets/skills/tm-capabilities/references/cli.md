@@ -2,7 +2,7 @@
 
 Generated from `Cli::command()` (clap's command-tree introspection) — every `tm <command>` and its nested subcommands, verbatim. Source: `crates/trusty-mpm/src/bin/tm/cli/mod.rs` (top-level `Command` enum) plus one action enum per group under `cli/actions/*.rs`. Regenerate with `tm generate capabilities`.
 
-58 top-level commands.
+59 top-level commands.
 
 - `agent` — Inspect the deployed agent roster's declared skills (DOC-42, issue #2889)
   - `list` — List every deployed agent with its declared skills
@@ -205,6 +205,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `tui` — Launch the ratatui multi-session TUI dashboard
 - `update` — Refresh a loaded alias — pull latest and re-deploy managed config (DOC-24)
 - `validate` — Validate a workspace's deployed `.claude/{agents,skills}` payload and `settings.json` against the canonical bundled roster (issue #2158)
+- `wait` — Wait for a condition, in-turn, without blocking past the harness ceiling
 - `watch` — Watch a board for label-routed issues and dispatch them autonomously
   - `listen` — Long-running: poll on `--interval-secs`, dispatching new issues each cycle
   - `poll` — One-shot: list label-matched issues, dispatch each, then exit
