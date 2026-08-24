@@ -544,56 +544,6 @@ impl SessionManager {
         })
     }
 
-    /// Stop the runtime of a managed session, keeping the workspace intact.
-    ///
-    /// Why: a session ENDURES beyond its running runtime. `stop` terminates the
-    /// tmux session and the `claude` process inside it, but PRESERVES the
-    /// workspace directory on disk and the session record so the session can
-    /// be resumed later via `resume`.
-    /// What: captures a pane snapshot, then GRACEFULLY terminates the runtime via
-    /// [`Self::graceful_terminate_runtime`] (SIGTERM the `claude` process, grace
-    /// window, then reclaim the pane — #1975) so the process can flush state
-    /// before it dies, marks the record `Stopped` (workspace path untouched), and
-    /// persists.
-    /// A TERMINAL record (`Decommissioned`/`Deleted`) is REFUSED with
-    /// [`ManagedError::InvalidState`] — mirroring [`resume`](Self::resume)'s
-    /// state guard — so a stale zombie-reconcile path (`runtime-stop` then
-    /// `resume`) can never flip a deleted/decommissioned tombstone back to a
-    /// live `Stopped` state and resurrect it (code-critic CRITICAL).
-    /// Records [`StopCause::Deliberate`] (#6194): every "end this session"
-    /// request reaches this method, so no automatic path may relaunch what it
-    /// stopped — see [`SessionRecord::is_auto_resumable`].
-    /// Test: `manager_stop_keeps_workspace`; `stop_refuses_terminal_record`
-    /// (a Deleted record cannot be stopped) in `delete_tests`;
-    /// `stop_records_deliberate_cause` in `stop_cause_tests`.
-    pub async fn stop(&self, id: &ManagedSessionId) -> Result<SessionRecord, ManagedError> {
-        let mut record = self.get(id).await?;
-        if record.state.is_terminal() {
-            return Err(ManagedError::InvalidState(
-                id.to_string(),
-                format!(
-                    "cannot stop a session in terminal state '{}'; \
-                     a decommissioned/deleted record is gone for good",
-                    record.state
-                ),
-            ));
-        }
-        super::snapshot::capture_into(&mut record, &*self.tmux).await;
-        // Graceful teardown (#1975): give the claude process a SIGTERM + grace
-        // window to checkpoint before its tmux pane is reclaimed, instead of an
-        // abrupt `kill_session`. The snapshot above already preserved the pane.
-        self.graceful_terminate_runtime(&record.tmux_name).await;
-        record.state = ManagedSessionState::Stopped;
-        // #6194: every "end this session" request lands here — `tm session
-        // stop`, the HTTP/MCP stop routes, the idle auto-stop, and the reaper
-        // that finds the tmux target gone — so this is where the intent is
-        // recorded, and an automatic resume must not undo it.
-        record.stop_cause = Some(StopCause::Deliberate);
-        self.store.write().await.upsert(record.clone()).await?;
-        info!(id = %id, name = %record.tmux_name, "managed session stopped (workspace intact)");
-        Ok(record)
-    }
-
     /// Confirm the record's recorded `pane_id` (when known) is still alive,
     /// refusing loudly rather than letting a caller fall through to a
     /// session-scoped tmux target that could resolve to an unrelated pane

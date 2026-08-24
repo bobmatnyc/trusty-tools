@@ -21,7 +21,7 @@ use tracing::{info, warn};
 
 use super::driver::ManagedTmuxDriver;
 use super::manager::{ManagedError, SessionManager};
-use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
+use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord, StopCause};
 
 /// Backoff between the boot-adopt path's working-directory probes; its length
 /// plus one is how many times [`resolve_adoptable_cwd`] asks.
@@ -400,6 +400,13 @@ impl SessionManager {
                 }) {
                     let mut stale = stale.clone();
                     stale.state = ManagedSessionState::Stopped;
+                    // #6194: every transition into Stopped records why. This
+                    // one converges a record whose pane is simply dead —
+                    // nobody asked for it — which is what the record already
+                    // read as before the field existed, so this is a
+                    // behavior-preserving write that keeps the invariant
+                    // total. `get_or_insert` so an earlier Deliberate stands.
+                    stale.stop_cause.get_or_insert(StopCause::Unexpected);
                     stale.last_activity_at = Some(Utc::now());
                     if let Err(e) = store.upsert(stale).await {
                         drop(store);

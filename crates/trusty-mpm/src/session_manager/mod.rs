@@ -34,6 +34,8 @@ pub mod search_gc;
 pub mod session_guard;
 pub mod slots;
 pub mod snapshot;
+// #6194: `stop` / `stop_with_cause`, split out of `manager.rs` at its SLOC cap.
+pub mod stop;
 pub mod store;
 // #5007: the read-failure fallback's severity split and the `store_health`
 // accessor that makes it visible instead of silent.

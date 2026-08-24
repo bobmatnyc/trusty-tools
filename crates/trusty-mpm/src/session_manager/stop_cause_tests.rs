@@ -10,10 +10,13 @@
 //! What: the [`SessionRecord::is_auto_resumable`] matrix and its serde
 //! back-compat, the three transitions that write a [`StopCause`]
 //! (`stop`, `mark_runtime_exited_stopped`, `resume`), and the boot-reconcile
-//! half of the auto-resume gate. The supervisor half lives in
-//! `supervisor::tests` (`tick_never_resumes_a_deliberately_stopped_session`,
-//! `tick_still_resumes_a_session_whose_runtime_exited`), where the tick
-//! harness already is.
+//! half of the auto-resume gate. Two siblings hold the rest, each where its
+//! harness already lives: `supervisor::tests` covers the sweep
+//! (`tick_never_resumes_a_deliberately_stopped_session`,
+//! `tick_still_resumes_a_session_whose_runtime_exited`), and
+//! `daemon::state::tests` covers the tmux-gone reaper's two cases
+//! (`reap_marks_a_targeted_kill_deliberate`,
+//! `reap_leaves_a_whole_server_loss_auto_resumable`).
 //! Test: this file IS the test module; run `cargo test -p trusty-mpm`.
 
 use std::sync::Arc;

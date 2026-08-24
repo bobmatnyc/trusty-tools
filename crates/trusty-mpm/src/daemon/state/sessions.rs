@@ -897,20 +897,48 @@ impl DaemonState {
     /// `TmuxDriver` or tmux binary. The outer function handles the tmux call;
     /// this method is the deterministic, testable heart.
     /// What: for every Active managed session whose `tmux_name` is absent from
-    /// `live`, calls `SessionManager::stop` (best-effort kill + mark Stopped).
-    /// Failures are logged and swallowed so the caller's reap loop continues.
-    /// Test: `reap_dead_managed_sessions_marks_stopped` in `super::tests`.
+    /// `live`, calls `SessionManager::stop_with_cause` (best-effort kill + mark
+    /// Stopped). Failures are logged and swallowed so the caller's reap loop
+    /// continues.
+    ///
+    /// #6194 — WHICH cause, and why the empty set is its own case. An EMPTY
+    /// `live` means no tmux session of any kind exists on this host, because
+    /// `TmuxDriver::list_sessions` maps "no server running" to `Ok(vec![])`.
+    /// That is a whole-server loss — `tmux kill-server`, a crash, an upgrade, a
+    /// logout — and it is not attributable to anyone's decision about any
+    /// individual session, so those records are stopped as
+    /// [`StopCause::Unexpected`] and stay auto-resumable, which is how the
+    /// supervisor recovered such a fleet before #6194. A NON-EMPTY `live` means
+    /// the tmux server is up and other sessions are running, so a record whose
+    /// own name is missing was killed on purpose:
+    /// [`StopCause::Deliberate`], and no automatic path revives it. The
+    /// one-session host is genuinely ambiguous — tmux exits its server when the
+    /// last session dies, so killing the only session and killing the server
+    /// produce the identical observation — and it is resolved toward restoring
+    /// the fleet, the more recoverable of the two mistakes (`tm session stop`
+    /// still records Deliberate on that host and still sticks).
+    ///
+    /// Test: `reap_dead_managed_sessions_marks_stopped`,
+    /// `reap_marks_a_targeted_kill_deliberate`,
+    /// `reap_leaves_a_whole_server_loss_auto_resumable` in `super::tests`.
     pub(crate) async fn reap_managed_against(&self, live: &std::collections::HashSet<String>) {
         let mgr = self.session_manager().await;
         let records = mgr.list().await;
+        // #6194: an empty live set is a lost tmux SERVER, not N killed sessions.
+        let cause = if live.is_empty() {
+            crate::session_manager::StopCause::Unexpected
+        } else {
+            crate::session_manager::StopCause::Deliberate
+        };
         for r in records {
             if matches!(r.state, crate::session_manager::ManagedSessionState::Active)
                 && !live.contains(&r.tmux_name)
             {
-                match mgr.stop(&r.id).await {
+                match mgr.stop_with_cause(&r.id, cause).await {
                     Ok(_) => tracing::info!(
                         id = %r.id,
                         name = %r.tmux_name,
+                        cause = ?cause,
                         "reaper: marked managed session Stopped (tmux gone, #1744)"
                     ),
                     Err(e) => tracing::warn!(

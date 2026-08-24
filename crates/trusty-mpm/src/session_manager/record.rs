@@ -217,11 +217,15 @@ impl fmt::Display for ManagedSessionState {
 /// What: two variants written by the transitions into `Stopped`, never inferred
 /// later. Deliberate is written by [`super::SessionManager::stop`], the one path
 /// every "end this session" request reaches — `tm session stop`, the HTTP and
-/// MCP stop routes, the idle auto-stop, and the reaper that finds a record's
-/// tmux target gone while the daemon was watching it. Unexpected is written by
-/// [`super::SessionManager::mark_runtime_exited_stopped`] (the runtime process
-/// exited under a pane that is still alive) and by boot reconciliation, which
-/// cannot attribute a tmux session that vanished while the daemon was down.
+/// MCP stop routes, and the idle auto-stop — and by the tmux-gone reaper when
+/// the tmux server is still up, which makes a missing session someone's
+/// decision. Unexpected covers everything that cannot be attributed to a
+/// decision: [`super::SessionManager::mark_runtime_exited_stopped`] (the runtime
+/// exited under a pane that is still alive), boot reconciliation (the daemon
+/// was down and cannot know what happened), and the same reaper when the whole
+/// tmux server is gone rather than one session — see
+/// [`super::SessionManager::stop_with_cause`] for why the reaper's two cases
+/// differ.
 /// `None` on a record means no transition into `Stopped` has been recorded —
 /// every pre-#6194 record loads that way, and reads as auto-resumable, which is
 /// exactly the behavior those records had before this field existed.
@@ -230,11 +234,12 @@ impl fmt::Display for ManagedSessionState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StopCause {
-    /// Someone ended this session on purpose — an explicit stop request, or the
-    /// session's tmux target killed out from under a watching daemon.
+    /// Someone ended this session on purpose — an explicit stop request, or
+    /// this session's tmux target killed while the tmux server kept running.
     Deliberate,
-    /// Nothing asked for the stop: the runtime exited on its own, or the daemon
-    /// restarted and found the session's tmux target already gone.
+    /// Nothing asked for the stop: the runtime exited on its own, the tmux
+    /// server itself went away, or the daemon restarted and found the session's
+    /// tmux target already gone.
     Unexpected,
 }
 
