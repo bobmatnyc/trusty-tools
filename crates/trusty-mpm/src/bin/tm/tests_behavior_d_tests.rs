@@ -465,15 +465,19 @@ fn cli_parses_session_prune_idle_defaults() {
 
 #[test]
 fn cli_parses_session_decommission_ephemeral() {
-    // #1508: the bulk-teardown verb takes no arguments.
+    // #1508: the bulk-teardown verb takes no required arguments, and #6118's
+    // `--dry-run` must stay OFF by default — the pre-#6118 behaviour.
     let cli = Cli::try_parse_from(["trusty-mpm", "session", "decommission-ephemeral"]).unwrap();
     match cli.command.unwrap() {
         Command::Session {
-            action: SessionAction::DecommissionEphemeral,
-        } => {}
+            action: SessionAction::DecommissionEphemeral { dry_run },
+        } => assert!(!dry_run, "the sweep must not silently become a preview"),
         other => panic!("expected session decommission-ephemeral, got {other:?}"),
     }
 }
+
+// #6118: the rest of this issue's CLI-parse coverage lives in
+// `tests_prune_selector_cli_tests.rs` — this file is at the 3000-SLOC test cap.
 
 #[test]
 fn cli_parses_session_prune() {

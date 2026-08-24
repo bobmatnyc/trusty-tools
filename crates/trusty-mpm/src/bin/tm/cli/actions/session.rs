@@ -405,9 +405,17 @@ pub(crate) enum SessionAction {
     /// one-shot "clean up all my throwaway sessions" verb. REAL sessions default
     /// `ephemeral=false` and are unreachable, so durable work is never harmed.
     /// What: POSTs `/api/v1/sessions/managed/decommission-ephemeral` and prints the
-    /// count torn down.
-    /// Test: `cli_parses_session_decommission_ephemeral`.
-    DecommissionEphemeral,
+    /// count torn down. `--dry-run` (#6118) previews that same selection without
+    /// tearing anything down — one call, one boolean, so the preview and the
+    /// real sweep cannot disagree about what they picked.
+    /// Test: `cli_parses_session_decommission_ephemeral`,
+    /// `cli_parses_session_decommission_ephemeral_dry_run`.
+    DecommissionEphemeral {
+        /// Report which ephemeral sessions WOULD be torn down, without
+        /// stopping, removing, or tombstoning any of them.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Print a cross-format catch-up digest for paused sessions (DOC-28 cutover bridge).
     ///
     /// Why: during migration from claude-mpm to trusty-mpm, paused sessions may
@@ -441,9 +449,20 @@ pub(crate) enum SessionAction {
     /// fail-closed default never touches a RUNNING session.
     /// What: POSTs `/api/v1/sessions/managed/prune` with the `--state` filter;
     /// `--dry-run` reports what WOULD be pruned without mutating.
-    /// Test: `cli_parses_session_prune`.
+    ///
+    /// `--state unresolvable` (#6118) is the targeted cleanup for adoption
+    /// ghosts: records naming no resolvable workspace (`cwd` is the `/unknown`
+    /// sentinel and no `workspace_path`), which every other filter missed
+    /// because their own live panes held them immune. It needs no
+    /// `--include-active` and is not widened by it — 23 such records were
+    /// measured on one host where `--state all --include-active` was the only
+    /// command that reached them, and it also selected 32 healthy working
+    /// sessions. Such a record has no workspace, so this can delete no file: it
+    /// reclaims the leaked pane and the store row.
+    /// Test: `cli_parses_session_prune`, `cli_parses_session_prune_unresolvable`.
     Prune {
-        /// Which records to target: `ephemeral` | `stopped` | `decommissioned` | `deleted` | `all`.
+        /// Which records to target: `ephemeral` | `stopped` | `decommissioned` |
+        /// `deleted` | `all` | `unresolvable`.
         #[arg(long)]
         state: String,
         /// Report what WOULD be pruned without killing, removing, or tombstoning

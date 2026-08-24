@@ -29,12 +29,15 @@ use crate::session_manager::{DirtyWorktreePolicy, PruneFilter};
 /// only when they really mean it — also include RUNNING sessions via
 /// `include_active`. Modelling it as a typed body keeps the safety defaults
 /// explicit (running sessions are spared unless `include_active` is `true`).
-/// What: `state` (the [`PruneFilter`] spelling), `dry_run` (default false), and
-/// `include_active` (default false).
-/// Test: `prune_route_dry_run_reports`, `prune_route_rejects_bad_state`.
+/// What: `state` (the [`PruneFilter`] spelling), `dry_run` (default false),
+/// `include_active` (default false), and `invoking_session` (#6118, default
+/// absent).
+/// Test: `prune_route_dry_run_reports`, `prune_route_rejects_bad_state`,
+/// `prune_route_rejects_an_unparseable_invoking_session`.
 #[derive(Debug, Deserialize)]
 pub struct PruneRequest {
-    /// Which records to target: `ephemeral` | `stopped` | `decommissioned` | `all`.
+    /// Which records to target: `ephemeral` | `stopped` | `decommissioned` |
+    /// `deleted` | `all` | `unresolvable`.
     pub state: String,
     /// When true, report what WOULD be pruned without mutating anything.
     #[serde(default)]
@@ -43,6 +46,34 @@ pub struct PruneRequest {
     /// Defaults to false — the fail-closed safety default.
     #[serde(default)]
     pub include_active: bool,
+    /// The managed session id this prune was invoked FROM, which is then never
+    /// a target (#6118).
+    ///
+    /// Why: the daemon cannot discover this — it occupies no pane — so the
+    /// caller supplies it. The CLI sends `$TM_MANAGED_SESSION_ID` when the
+    /// operator is inside a managed session. Absent means "the caller is not a
+    /// session", which is correct for the MCP tool and for an ad-hoc shell.
+    /// A value present but unparseable is REJECTED rather than dropped: silently
+    /// ignoring it would run the sweep with the protection the caller asked for
+    /// switched off.
+    #[serde(default)]
+    pub invoking_session: Option<String>,
+}
+
+/// Query string for POST …/managed/decommission-ephemeral (#6118).
+///
+/// Why: the verb had no preview mode, so an operator could only learn its
+/// selection by running it. A query param rather than a body keeps every
+/// existing bodyless caller working — axum's `Json` extractor rejects an empty
+/// body, so adding a body would have broken the CLI, the MCP path, and any
+/// script that POSTs nothing.
+/// What: `dry_run` (default false — the pre-#6118 behaviour).
+/// Test: `ephemeral_route_dry_run_reports_without_tearing_down`.
+#[derive(Debug, Deserialize)]
+pub struct EphemeralQuery {
+    /// When true, report what WOULD be torn down and mutate nothing.
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
 /// POST /api/v1/sessions/managed/decommission-ephemeral — bulk-tear-down ephemeral (#1508).
@@ -51,16 +82,33 @@ pub struct PruneRequest {
 /// harnesses and operators. REAL sessions default `ephemeral=false` and are
 /// unreachable, so this can never harm durable work.
 /// What: delegates to
-/// [`SessionManager::decommission_all_ephemeral`](crate::session_manager::SessionManager::decommission_all_ephemeral)
-/// and returns `{ decommissioned: <count> }`.
+/// [`SessionManager::sweep_all_ephemeral`](crate::session_manager::SessionManager::sweep_all_ephemeral)
+/// and returns `{ decommissioned: <count>, dry_run: <bool> }`.
+///
+/// 🔴 #6118: `dry_run` is ECHOED, and that echo is load-bearing, not cosmetic.
+/// This daemon is long-lived by design — a CLI upgrade never bounces it — and
+/// axum silently drops a query param the handler does not declare, so a daemon
+/// predating this change accepts `?dry_run=true` and performs a REAL teardown,
+/// returning 200. The status alone cannot tell that apart from an honoured
+/// preview; only the echoed field can, which is why the CLI refuses to report a
+/// dry run the daemon did not confirm. Same failure shape, and the same remedy,
+/// as `session_picker_prune::decommission_dead_record`'s `workspace_removed`
+/// check.
 /// Test: `decommission_ephemeral_route_tears_down_only_ephemeral` in
-/// tests/session_manager_mvp.rs.
+/// tests/session_manager_mvp.rs;
+/// `ephemeral_route_dry_run_reports_without_tearing_down` in this file;
+/// the CLI's refusal by `decommission_ephemeral_refuses_a_dry_run_a_stale_daemon_ignored`.
 pub async fn decommission_ephemeral_route(
     State(state): State<Arc<DaemonState>>,
+    axum::extract::Query(q): axum::extract::Query<EphemeralQuery>,
 ) -> impl IntoResponse {
     let mgr = state.session_manager().await;
-    match mgr.decommission_all_ephemeral().await {
-        Ok(count) => Json(serde_json::json!({ "decommissioned": count })).into_response(),
+    match mgr.sweep_all_ephemeral(q.dry_run).await {
+        Ok(outcome) => Json(serde_json::json!({
+            "decommissioned": outcome.count(),
+            "dry_run": q.dry_run,
+        }))
+        .into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -304,8 +352,14 @@ pub async fn prune_worktrees_route(
 /// with the request's `dry_run`/`include_active`. Returns the
 /// [`crate::session_manager::PruneOutcome`] JSON (its `dry_run`, `filter`, and
 /// per-session `action` list).
+///
+/// #6118: a present-but-unparseable `invoking_session` is a 400. Dropping it
+/// would run the sweep with the self-exclusion the caller explicitly asked for
+/// silently disabled — the failure arm has to be louder than the success arm it
+/// protects.
 /// Test: `prune_route_dry_run_reports`, `prune_route_rejects_bad_state` in
-/// tests/session_manager_mvp.rs.
+/// tests/session_manager_mvp.rs;
+/// `prune_route_rejects_an_unparseable_invoking_session` in this file.
 pub async fn prune_managed_route(
     State(state): State<Arc<DaemonState>>,
     Json(req): Json<PruneRequest>,
@@ -317,11 +371,26 @@ pub async fn prune_managed_route(
             return (StatusCode::BAD_REQUEST, e).into_response();
         }
     };
+    let invoker = match req
+        .invoking_session
+        .as_deref()
+        .map(str::parse::<uuid::Uuid>)
+    {
+        None => None,
+        Some(Ok(u)) => Some(crate::session_manager::record::ManagedSessionId::from(u)),
+        Some(Err(_)) => {
+            let msg = "invalid invoking_session: not a UUID — refusing the prune rather than \
+                       running it without the requested self-exclusion (#6118)"
+                .to_string();
+            warn!("prune route: {msg}");
+            return (StatusCode::BAD_REQUEST, msg).into_response();
+        }
+    };
     let mgr = state.session_manager().await;
     // `caller: None` — the HTTP route is an operator surface, never a session
     // acting on its own behalf; the #3649 owner gate does not apply here.
     match mgr
-        .prune_managed(filter, req.dry_run, req.include_active, None)
+        .prune_managed(filter, req.dry_run, req.include_active, None, invoker)
         .await
     {
         Ok(outcome) => Json(outcome).into_response(),
@@ -359,6 +428,94 @@ mod tests {
                 .expect("explicit body parses");
         assert!(explicit.discard_dirty, "the opt-in must round-trip");
         assert!(explicit.merged_prs, "the #2919 opt-in must round-trip");
+    }
+
+    /// 🔴 #6118 FAIL-OPEN GUARD: an unparseable `invoking_session` REFUSES the
+    /// prune rather than running it without the self-exclusion.
+    ///
+    /// Why: the field's whole purpose is keeping the sweep off the caller's own
+    /// session. Dropping a malformed value and proceeding would run exactly the
+    /// sweep the caller asked to be protected from — the measured `--state all
+    /// --include-active` case that selected the operator's own running session.
+    /// A 400 costs one retry; the open arm costs the terminal the command was
+    /// typed in.
+    /// What: posts a well-formed body whose `invoking_session` is not a UUID and
+    /// asserts 400. The CONTROL sends the same body with the field ABSENT and
+    /// asserts it is accepted, so the test cannot pass merely because the route
+    /// rejects everything.
+    /// Test: this function IS the test.
+    #[tokio::test]
+    async fn prune_route_rejects_an_unparseable_invoking_session() {
+        let root = crate::test_support::hermetic_temp_dir();
+        let state =
+            Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+
+        let bad = prune_managed_route(
+            State(state.clone()),
+            Json(PruneRequest {
+                state: "unresolvable".into(),
+                dry_run: true,
+                include_active: false,
+                invoking_session: Some("not-a-uuid".into()),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(
+            bad.status(),
+            StatusCode::BAD_REQUEST,
+            "a malformed self-exclusion must stop the prune, not be dropped"
+        );
+
+        // CONTROL: absent is legitimate (an ad-hoc shell, the MCP tool).
+        let ok = prune_managed_route(
+            State(state),
+            Json(PruneRequest {
+                state: "unresolvable".into(),
+                dry_run: true,
+                include_active: false,
+                invoking_session: None,
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(ok.status(), StatusCode::OK);
+    }
+
+    /// #6118: the ephemeral route's `dry_run` is honoured AND echoed.
+    ///
+    /// Why: the echo is what lets the CLI tell a real preview from an older
+    /// daemon that dropped the param and swept for real. A route that honours
+    /// the flag but does not report it is indistinguishable from one that
+    /// ignored it.
+    /// What: posts `?dry_run=true` against an empty store and asserts both keys
+    /// come back, with `dry_run: true`.
+    /// Test: this function IS the test.
+    #[tokio::test]
+    async fn ephemeral_route_dry_run_reports_without_tearing_down() {
+        let root = crate::test_support::hermetic_temp_dir();
+        let state =
+            Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+        let body = body_json(
+            decommission_ephemeral_route(
+                State(state),
+                axum::extract::Query(EphemeralQuery { dry_run: true }),
+            )
+            .await
+            .into_response(),
+        )
+        .await;
+        assert_eq!(
+            body.get("dry_run").and_then(serde_json::Value::as_bool),
+            Some(true),
+            "the route must echo the honoured preview flag: {body}"
+        );
+        assert_eq!(
+            body.get("decommissioned")
+                .and_then(serde_json::Value::as_u64),
+            Some(0),
+            "an empty store sweeps nothing: {body}"
+        );
     }
 
     /// Read a route response's JSON body.

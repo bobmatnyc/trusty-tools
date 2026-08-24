@@ -606,25 +606,68 @@ pub(crate) async fn session_decommission(
 /// unreachable, so durable work is never harmed.
 /// What: POSTs `/api/v1/sessions/managed/decommission-ephemeral` and prints the
 /// returned `decommissioned` count.
+///
+/// 🔴 #6118: under `--dry-run` the daemon's echoed `dry_run` is CHECKED, not
+/// trusted. A daemon predating that route change has no `Query<EphemeralQuery>`
+/// extractor, so axum drops the param, the sweep really runs, and the response
+/// is still a 200 carrying a count — indistinguishable from an honoured preview
+/// by status alone. A missing or `false` echo is therefore an error, not a
+/// warning: reporting "would decommission N" for a teardown that already
+/// happened is worse than failing. Same skew and the same remedy as
+/// `session_picker_prune::decommission_dead_record`'s `workspace_removed`
+/// check.
 /// Test: HTTP path covered by `decommission_ephemeral_route_tears_down_only_ephemeral`
-/// in tests/session_manager_mvp.rs; CLI parse by `cli_parses_session_decommission_ephemeral`.
+/// in tests/session_manager_mvp.rs; CLI parse by `cli_parses_session_decommission_ephemeral`;
+/// the skew refusal by `decommission_ephemeral_refuses_a_dry_run_a_stale_daemon_ignored`.
 pub(crate) async fn session_decommission_ephemeral(
     client: &reqwest::Client,
     url: &str,
+    dry_run: bool,
 ) -> anyhow::Result<()> {
     let resp = client
         .post(format!(
             "{url}/api/v1/sessions/managed/decommission-ephemeral"
         ))
+        .query(&[("dry_run", if dry_run { "true" } else { "false" })])
         .send()
         .await?;
     let body: serde_json::Value = resp.error_for_status()?.json().await?;
+    println!("{}", ephemeral_sweep_line(&body, dry_run)?);
+    Ok(())
+}
+
+/// Render one `decommission-ephemeral` response, refusing a dry run the daemon
+/// did not confirm (#6118).
+///
+/// Why: extracted so the version-skew refusal is directly assertable. Inline in
+/// the HTTP function it could only be reached through a live daemon, which is
+/// exactly the daemon a test cannot build an OLD version of.
+/// What: `Err` when `dry_run` was requested and the body's `dry_run` is not
+/// `true`; otherwise the operator line, which says "would decommission" for a
+/// confirmed preview and "decommissioned" for a real sweep. A real sweep does
+/// not check the echo — an older daemon's real teardown is what it asked for.
+/// Test: `decommission_ephemeral_refuses_a_dry_run_a_stale_daemon_ignored`,
+/// `decommission_ephemeral_reports_a_confirmed_dry_run`.
+pub(crate) fn ephemeral_sweep_line(
+    body: &serde_json::Value,
+    dry_run: bool,
+) -> anyhow::Result<String> {
     let count = body
         .get("decommissioned")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
-    println!("decommissioned {count} ephemeral session(s)");
-    Ok(())
+    if dry_run && body.get("dry_run").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err(anyhow::anyhow!(
+            "the daemon did not confirm --dry-run (no `dry_run: true` in its response), so it \
+             may be running an older build that ignored the flag and TORE DOWN {count} \
+             ephemeral session(s). Restart the daemon (`tm daemon restart`) and re-run."
+        ));
+    }
+    Ok(if dry_run {
+        format!("would decommission {count} ephemeral session(s) (dry run)")
+    } else {
+        format!("decommissioned {count} ephemeral session(s)")
+    })
 }
 
 /// `tm session prune --state <filter> [--dry-run] [--include-active]` — by-state prune (#1508).
@@ -653,6 +696,11 @@ pub(crate) async fn session_prune(
             "state": state,
             "dry_run": dry_run,
             "include_active": include_active,
+            // #6118: the session this command was typed in is never a target.
+            // The daemon occupies no pane and cannot discover it, so the CLI
+            // reports it; absent means the operator is not inside a managed
+            // session.
+            "invoking_session": std::env::var("TM_MANAGED_SESSION_ID").ok(),
         }))
         .send()
         .await?;

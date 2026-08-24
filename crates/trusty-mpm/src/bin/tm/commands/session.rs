@@ -395,8 +395,8 @@ pub(crate) async fn session(
         // #1508: bulk teardown + by-state prune go through direct HTTP (like
         // `PruneIdle`), not chat-core — they are fleet-wide store operations, not
         // single-session intents.
-        SessionAction::DecommissionEphemeral => {
-            crate::commands::managed::session_decommission_ephemeral(client, url).await?
+        SessionAction::DecommissionEphemeral { dry_run } => {
+            crate::commands::managed::session_decommission_ephemeral(client, url, dry_run).await?
         }
         SessionAction::Prune {
             state,

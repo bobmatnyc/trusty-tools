@@ -377,6 +377,7 @@ async fn prune_reports_dirty_worktree_retained() {
             false,
             false,
             None,
+            None,
         )
         .await
         .expect("prune stopped");

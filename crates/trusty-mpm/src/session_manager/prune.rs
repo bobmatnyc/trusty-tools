@@ -230,7 +230,9 @@ fn is_tombstone(record: &SessionRecord) -> bool {
 /// each rule readable and individually testable.
 /// What: `Ephemeral` → `ephemeral && state != Decommissioned`; `Stopped` →
 /// `state == Stopped`; `Decommissioned` → `state == Decommissioned`; `All` → any
-/// non-running record (the caller still applies [`is_running`] as the final gate).
+/// non-running record (the caller still applies [`is_running`] as the final
+/// gate); `Unresolvable` → the record names no resolvable workspace (#6118),
+/// which is the one arm the caller does NOT gate on liveness.
 /// Test: the per-filter `prune_*` tests.
 fn matches_filter(record: &SessionRecord, filter: PruneFilter) -> bool {
     match filter {
@@ -241,6 +243,9 @@ fn matches_filter(record: &SessionRecord, filter: PruneFilter) -> bool {
         PruneFilter::Decommissioned => record.state == ManagedSessionState::Decommissioned,
         PruneFilter::Deleted => record.state == ManagedSessionState::Deleted,
         PruneFilter::All => true,
+        // #6118: the class no state-keyed filter could express — a record with
+        // no resolvable workspace, held immune by its own live pane.
+        PruneFilter::Unresolvable => record.workspace_unresolvable(),
     }
 }
 
@@ -357,14 +362,28 @@ impl SessionManager {
     /// Test: `decommission_all_ephemeral_ignores_non_ephemeral` (asserts the
     /// ephemeral-only decommission path and the non-ephemeral safety exclusion).
     pub async fn decommission_all_ephemeral(&self) -> Result<usize, ManagedError> {
-        // Ephemeral sessions are throwaway by definition: include running ones so a
-        // panicking test that left an Active ephemeral session is still cleaned up.
-        // `caller: None` — this is an operator/daemon-internal bulk sweep, never a
-        // session acting on its own behalf; the #3649 owner gate does not apply.
-        let outcome = self
-            .prune_managed(PruneFilter::Ephemeral, false, true, None)
-            .await?;
-        Ok(outcome.count())
+        Ok(self.sweep_all_ephemeral(false).await?.count())
+    }
+
+    /// [`decommission_all_ephemeral`](Self::decommission_all_ephemeral) with a
+    /// preview mode, returning the full outcome rather than a bare count
+    /// (#6118).
+    ///
+    /// Why: `tm session decommission-ephemeral` had no `--dry-run` at all, so
+    /// its selection could not be inspected before it ran — an operator's only
+    /// way to learn what it would tear down was to tear it down. Because the
+    /// preview and the real sweep are ONE call differing in one boolean, they
+    /// cannot select different sets; a separate "what would this do" query is
+    /// exactly how a dry run drifts from the thing it previews.
+    /// What: delegates to [`prune_managed`](Self::prune_managed) with
+    /// `PruneFilter::Ephemeral` and `include_active = true` — a running
+    /// ephemeral session is throwaway by definition, so a panicking test that
+    /// left one Active is still cleaned up. `caller`/`invoker` are `None`: this
+    /// is an operator/daemon-internal bulk sweep occupying no pane.
+    /// Test: `ephemeral_dry_run_selects_exactly_what_the_real_run_does`.
+    pub async fn sweep_all_ephemeral(&self, dry_run: bool) -> Result<PruneOutcome, ManagedError> {
+        self.prune_managed(PruneFilter::Ephemeral, dry_run, true, None, None)
+            .await
     }
 
     /// Prune managed sessions by state — bulk teardown + compaction (#1508).
@@ -379,6 +398,14 @@ impl SessionManager {
     /// NEVER killed or removed unless `include_active` is explicitly `true`. The
     /// `Decommissioned` filter only ever removes tombstones (it cannot reach a
     /// running record by construction).
+    ///
+    /// #6118 amends that invariant in exactly one place, and narrows it in
+    /// another. `PruneFilter::Unresolvable` reaches a running record without
+    /// `include_active`, because its predicate — no resolvable workspace at all
+    /// — cannot hold for a healthy session and does hold for a leaked pane;
+    /// nothing on disk is reachable through such a record, since it has no
+    /// `workspace_path` to remove. In the other direction, `invoker` is now
+    /// excluded from the target set for EVERY filter, `include_active` included.
     ///
     /// What: snapshots `store.all()`, selects records that both
     /// [`matches_filter`] AND pass the running-state gate (unless `include_active`),
@@ -407,7 +434,13 @@ impl SessionManager {
     /// running-state safety gate), `prune_decommissioned_compacts` (compaction),
     /// `prune_all_targets_non_running`, `prune_dry_run_reports_without_mutating`,
     /// `prune_compaction_releases_the_slot`,
-    /// `prune_compaction_keeps_the_slot_when_the_worktree_is_still_on_disk`.
+    /// `prune_compaction_keeps_the_slot_when_the_worktree_is_still_on_disk`;
+    /// the #6118 additions by `unresolvable_filter_selects_a_live_ghost_pane`,
+    /// `healthy_active_session_is_never_selected_by_the_unresolvable_filter`,
+    /// `unresolvable_dry_run_selects_exactly_what_the_real_run_does`,
+    /// `prune_never_selects_the_invoking_session`, and
+    /// `unresolvable_duplicates_sharing_a_pane_are_both_tombstoned` in
+    /// `super::prune_unresolvable_tests`.
     ///
     /// `caller` (#3649, Option B): threaded straight through to
     /// [`decommission`](Self::decommission) for each non-tombstone target —
@@ -416,12 +449,23 @@ impl SessionManager {
     /// `Some(id)` applies the owner gate per-target, so a fleet-wide prune
     /// invoked on behalf of a specific session still cannot reclaim a peer
     /// session's actively-owned worktree.
+    ///
+    /// `invoker` (#6118) is the SELF-EXCLUSION, and it is a different question
+    /// from `caller`: `caller` gates which worktrees a target may give up,
+    /// while `invoker` removes one record from the target set entirely, for
+    /// every filter and regardless of `include_active`. It exists because the
+    /// measured `--state all --include-active` sweep selected the operator's own
+    /// running session — a tidy-up that takes down the terminal it was typed in
+    /// is an outage, not a cleanup. `None` (the daemon's own sweeps, the MCP
+    /// tool) excludes nothing, because those callers occupy no pane; the CLI
+    /// fills it from `$TM_MANAGED_SESSION_ID`.
     pub async fn prune_managed(
         &self,
         filter: PruneFilter,
         dry_run: bool,
         include_active: bool,
         caller: Option<ManagedSessionId>,
+        invoker: Option<ManagedSessionId>,
     ) -> Result<PruneOutcome, ManagedError> {
         // Snapshot the full set ONCE (reloads-on-read so out-of-process writes are
         // seen). We then mutate per record below, each of which re-reads/saves.
@@ -442,10 +486,21 @@ impl SessionManager {
         // `include_active` short-circuits before the probe, so the bulk
         // ephemeral sweep (which ignores liveness by design) still runs on a
         // host with no reachable tmux.
+        //
+        // #6118: `Unresolvable` skips the probe rather than passing it. Its
+        // members are live BY DEFINITION — that liveness is exactly what made
+        // them unreachable — so liveness is not an input to the decision. See
+        // `PruneFilter::selects_regardless_of_liveness`.
         let tmux = self.tmux.as_ref();
+        let ignore_liveness = include_active || filter.selects_regardless_of_liveness();
         let mut targets: Vec<SessionRecord> = Vec::new();
         for record in all.into_iter().filter(|r| matches_filter(r, filter)) {
-            if include_active || !is_running(&record, tmux)? {
+            // #6118: the invoking session is never a target, on any filter.
+            if invoker == Some(record.id) {
+                info!(id = %record.id, "prune: skipping the invoking session");
+                continue;
+            }
+            if ignore_liveness || !is_running(&record, tmux)? {
                 targets.push(record);
             }
         }
@@ -1193,3 +1248,7 @@ mod orphan_tests;
 #[cfg(test)]
 #[path = "prune_slot_tests.rs"]
 mod slot_tests;
+
+#[cfg(test)]
+#[path = "prune_unresolvable_tests.rs"]
+mod prune_unresolvable_tests;

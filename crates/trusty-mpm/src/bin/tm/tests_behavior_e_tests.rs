@@ -707,3 +707,66 @@ fn ls_help_states_that_a_plain_listing_prunes() {
         );
     }
 }
+
+/// #6118: `--state unresolvable` parses, and needs no `--include-active`.
+///
+/// Why: `--state active` was rejected outright when an operator went looking for
+/// this class, so the new spelling has to reach the daemon from the CLI — and it
+/// has to do so without the blanket flag that also selects healthy sessions.
+///
+/// This test and its sibling below live HERE rather than beside the rest of the
+/// `cli_parses_session_*` family: `tests_behavior_d_tests.rs` sits at the
+/// 3000-SLOC test cap, and adding them there pushed it to 3013.
+/// Test: this function IS the test.
+#[test]
+fn cli_parses_session_prune_unresolvable() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "session",
+        "prune",
+        "--state",
+        "unresolvable",
+        "--dry-run",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Session {
+            action:
+                SessionAction::Prune {
+                    state,
+                    dry_run,
+                    include_active,
+                },
+        } => {
+            assert_eq!(state, "unresolvable");
+            assert!(dry_run);
+            assert!(
+                !include_active,
+                "the unresolvable selector must not need the blanket flag"
+            );
+        }
+        other => panic!("expected session prune, got {other:?}"),
+    }
+}
+
+/// #6118: `decommission-ephemeral` accepts `--dry-run`.
+///
+/// Why: the verb had no preview flag at all, so an operator's only way to learn
+/// what it would tear down was to tear it down.
+/// Test: this function IS the test.
+#[test]
+fn cli_parses_session_decommission_ephemeral_dry_run() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "session",
+        "decommission-ephemeral",
+        "--dry-run",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Session {
+            action: SessionAction::DecommissionEphemeral { dry_run },
+        } => assert!(dry_run),
+        other => panic!("expected session decommission-ephemeral, got {other:?}"),
+    }
+}

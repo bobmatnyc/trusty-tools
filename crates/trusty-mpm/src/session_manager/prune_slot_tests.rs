@@ -92,7 +92,7 @@ async fn prune_compaction_releases_the_slot() {
     let keeper_slot = find(&before, keeper.id).expect("keeper observed");
 
     let outcome = mgr
-        .prune_managed(PruneFilter::Decommissioned, false, false, None)
+        .prune_managed(PruneFilter::Decommissioned, false, false, None, None)
         .await
         .expect("prune decommissioned");
     assert_eq!(outcome.count(), 1, "the tombstone is the only target");
@@ -181,7 +181,7 @@ async fn prune_compaction_keeps_the_slot_when_the_worktree_is_still_on_disk() {
         .slot;
 
     let outcome = mgr
-        .prune_managed(PruneFilter::Decommissioned, false, false, None)
+        .prune_managed(PruneFilter::Decommissioned, false, false, None, None)
         .await
         .expect("prune decommissioned");
     assert_eq!(outcome.count(), 1, "the record is still compacted");
@@ -330,7 +330,7 @@ async fn prune_dry_run_releases_no_slot() {
     .await;
     let before = slots_held(&mgr).await;
 
-    mgr.prune_managed(PruneFilter::Decommissioned, true, false, None)
+    mgr.prune_managed(PruneFilter::Decommissioned, true, false, None, None)
         .await
         .expect("dry-run prune");
 
