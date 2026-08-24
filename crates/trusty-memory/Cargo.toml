@@ -1,9 +1,10 @@
 [package]
 name = "trusty-memory"
-# #4421: patch bump — 0.23.0 already published on crates.io and this PR
-# touches src/**. Every hunk is a doc-comment edit (module docs moved to the
-# inner `//!` standard, #5754) — no item signature or behavior changed.
-version = "0.23.2"
+# CHECK 5 semver break at 9fe56f1ca: commits 82366ef2d (#5811/#5831) and
+# 3c9fa3ee8 (#6024) removed find_project_root, ProjectPin, and four
+# project_root consts from the public surface. Cargo's 0.x rule puts a
+# breaking change in the MINOR position, so the bump lands here, not patch.
+version = "0.24.0"
 edition = "2021"
 description = "MCP server (stdio + HTTP/SSE) for trusty-memory"
 license.workspace = true
