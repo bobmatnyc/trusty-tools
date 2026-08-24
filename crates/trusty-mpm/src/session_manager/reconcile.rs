@@ -221,7 +221,9 @@ impl SessionManager {
             .iter()
             .filter(|r| !matches!(r.state, ManagedSessionState::Decommissioned))
             .filter_map(|r| r.workspace_path.clone())
-            .filter(|p| p.as_path() != Path::new("/unknown"))
+            // #6118: one spelling of the sentinel, shared with every other
+            // reader of it.
+            .filter(|p| p.as_path() != Path::new(super::record::UNRESOLVED_PATH_SENTINEL))
             .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
             .collect();
 

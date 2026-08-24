@@ -1406,7 +1406,7 @@ async fn decode_response(
 /// Test: this function IS the test.
 #[tokio::test]
 async fn decommission_ephemeral_route_tears_down_only_ephemeral() {
-    use trusty_mpm::daemon::managed_routes::decommission_ephemeral_route;
+    use trusty_mpm::daemon::managed_routes::{EphemeralQuery, decommission_ephemeral_route};
     use trusty_mpm::session_manager::ManagedSessionState;
 
     // FakeNoopTmuxDriver: no real tmux sessions are created — nothing can escape
@@ -1442,9 +1442,35 @@ async fn decommission_ephemeral_route_tears_down_only_ephemeral() {
     // No real tmux sessions were created (FakeNoopTmuxDriver), so no reap
     // guards are needed (#1790).
 
-    let (status, body) =
-        decode_response(decommission_ephemeral_route(axum::extract::State(state.clone())).await)
-            .await;
+    // #6118: the PREVIEW runs first, against the same seeded fleet, and must
+    // report the same two sessions while mutating nothing — otherwise the flag
+    // that now guards this destructive verb is unproven end-to-end.
+    let (preview_status, preview) = decode_response(
+        decommission_ephemeral_route(
+            axum::extract::State(state.clone()),
+            axum::extract::Query(EphemeralQuery { dry_run: true }),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(preview_status, axum::http::StatusCode::OK);
+    assert_eq!(
+        preview["decommissioned"], 2,
+        "the preview must report the same two sessions, got {preview}"
+    );
+    assert_eq!(
+        preview["dry_run"], true,
+        "the route must echo the honoured preview flag, got {preview}"
+    );
+
+    let (status, body) = decode_response(
+        decommission_ephemeral_route(
+            axum::extract::State(state.clone()),
+            axum::extract::Query(EphemeralQuery { dry_run: false }),
+        )
+        .await,
+    )
+    .await;
     assert_eq!(status, axum::http::StatusCode::OK);
     assert_eq!(
         body["decommissioned"], 2,

@@ -95,7 +95,13 @@ async fn prune_stale_active_removable_without_force_when_tmux_dead() {
         .expect("simulate tmux death");
 
     let outcome = mgr
-        .prune_managed(crate::session_manager::PruneFilter::All, false, false, None)
+        .prune_managed(
+            crate::session_manager::PruneFilter::All,
+            false,
+            false,
+            None,
+            None,
+        )
         .await
         .expect("prune all");
     assert_eq!(
@@ -181,7 +187,13 @@ async fn prune_refuses_when_the_tmux_probe_fails() {
     *fake.list_sessions_should_fail.lock().unwrap() = true;
 
     let err = mgr
-        .prune_managed(crate::session_manager::PruneFilter::All, false, false, None)
+        .prune_managed(
+            crate::session_manager::PruneFilter::All,
+            false,
+            false,
+            None,
+            None,
+        )
         .await
         .expect_err("an unobservable liveness probe must refuse the prune (#5859)");
     assert!(
@@ -196,7 +208,13 @@ async fn prune_refuses_when_the_tmux_probe_fails() {
 
     // `include_active` never consults the probe, so it is unaffected.
     let outcome = mgr
-        .prune_managed(crate::session_manager::PruneFilter::All, false, true, None)
+        .prune_managed(
+            crate::session_manager::PruneFilter::All,
+            false,
+            true,
+            None,
+            None,
+        )
         .await
         .expect("include_active skips the liveness gate entirely");
     assert_eq!(outcome.count(), 1);

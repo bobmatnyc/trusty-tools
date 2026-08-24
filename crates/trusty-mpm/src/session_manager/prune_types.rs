@@ -27,7 +27,9 @@ use std::fmt;
 /// records; [`Decommissioned`](PruneFilter::Decommissioned) and
 /// [`Deleted`](PruneFilter::Deleted) select existing tombstones (for compaction
 /// only); [`All`](PruneFilter::All) selects every NON-running record (ephemeral,
-/// stopped, errored, decommissioned, and deleted).
+/// stopped, errored, decommissioned, and deleted);
+/// [`Unresolvable`](PruneFilter::Unresolvable) selects records naming no
+/// resolvable workspace, whether or not their pane is alive (#6118).
 /// Test: `prune_filter_parse_round_trip`, and the per-filter `prune_*` tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PruneFilter {
@@ -43,6 +45,27 @@ pub enum PruneFilter {
     /// Every NON-running record: ephemeral, stopped, errored, decommissioned,
     /// and deleted.
     All,
+    /// Only records naming no resolvable workspace —
+    /// [`SessionRecord::workspace_unresolvable`](super::record::SessionRecord::workspace_unresolvable)
+    /// (#6118).
+    ///
+    /// Why this exists as its own variant rather than as a flag on the others:
+    /// the class is defined by the RECORD, not by a lifecycle state, and every
+    /// state-keyed filter above therefore misses it. The 23 such records
+    /// measured on the reporting host were `Active` with live panes, so
+    /// `ephemeral`, `stopped`, `decommissioned` and `deleted` each selected 0 of
+    /// them, and the one command that did reach them — `--state all
+    /// --include-active` — also selected 32 healthy working sessions including
+    /// the operator's own.
+    ///
+    /// 🔴 This is the ONE filter whose selection ignores tmux liveness (see
+    /// [`selects_regardless_of_liveness`](Self::selects_regardless_of_liveness)),
+    /// because a live pane is the DEFINING property of the class — that is
+    /// precisely why nothing could reach it. The blast radius is bounded by the
+    /// predicate instead: an unresolvable record has no `workspace_path`, so its
+    /// teardown cannot remove a directory, a worktree, or a branch. What it does
+    /// reclaim is the leaked pane and the store row.
+    Unresolvable,
 }
 
 impl PruneFilter {
@@ -63,8 +86,9 @@ impl PruneFilter {
             "decommissioned" => Ok(Self::Decommissioned),
             "deleted" => Ok(Self::Deleted),
             "all" => Ok(Self::All),
+            "unresolvable" => Ok(Self::Unresolvable),
             other => Err(format!(
-                "unknown prune filter `{other}` (expected: ephemeral | stopped | decommissioned | deleted | all)"
+                "unknown prune filter `{other}` (expected: ephemeral | stopped | decommissioned | deleted | all | unresolvable)"
             )),
         }
     }
@@ -81,7 +105,31 @@ impl PruneFilter {
             Self::Decommissioned => "decommissioned",
             Self::Deleted => "deleted",
             Self::All => "all",
+            Self::Unresolvable => "unresolvable",
         }
+    }
+
+    /// Whether this filter's selection stands on the record alone, so the tmux
+    /// liveness probe is skipped rather than applied (#6118).
+    ///
+    /// Why: `include_active` is a BLANKET lift of the liveness gate — it is what
+    /// turned a targeted cleanup into a 55-session sweep that included the
+    /// operator's own working session. [`Unresolvable`](Self::Unresolvable)
+    /// needs the gate lifted for a class whose members are live BY DEFINITION,
+    /// and forcing the operator to reach for `include_active` to get there means
+    /// typing the flag whose default behaviour is the footgun. Answering the
+    /// question per-filter keeps the lift narrow: the predicate, not a flag,
+    /// bounds what a live-pane teardown can reach.
+    ///
+    /// This does NOT reintroduce the #5859 fail-closed hazard, which was about
+    /// an UNDETERMINABLE probe reading as "not running" and tearing down a live
+    /// pane thought dead. Here liveness is not an input to the decision at all,
+    /// so there is no verdict to get wrong.
+    /// What: `true` for `Unresolvable`, `false` for every other filter.
+    /// Test: `unresolvable_filter_selects_a_live_ghost_pane`,
+    /// `unresolvable_filter_needs_no_include_active`.
+    pub fn selects_regardless_of_liveness(&self) -> bool {
+        matches!(self, Self::Unresolvable)
     }
 }
 

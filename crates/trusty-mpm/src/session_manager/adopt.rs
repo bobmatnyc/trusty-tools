@@ -99,7 +99,9 @@ pub(super) fn derive_source_id_for_record(record: &SessionRecord) -> Option<Stri
         .filter(|p| p.is_dir())
         .or_else(|| {
             let c = record.cwd.as_path();
-            (c != Path::new("/unknown") && c.is_dir()).then_some(c)
+            // #6118: one spelling of the sentinel, shared with every other
+            // reader of it.
+            (c != Path::new(super::record::UNRESOLVED_PATH_SENTINEL) && c.is_dir()).then_some(c)
         })?;
     let gh = trusty_common::github_path::derive_github_path(path)?;
     Some(format!("{}/{}", gh.owner, gh.repo))

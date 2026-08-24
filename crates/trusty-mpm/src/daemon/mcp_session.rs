@@ -301,8 +301,10 @@ pub async fn session_prune(
     let filter = PruneFilter::parse(filter)?;
     let mgr = state.session_manager().await;
     // TODO(#3649): populate `caller` once the MCP transport threads it through.
+    // #6118: `invoker` stays `None` here — an MCP call occupies no pane, so
+    // there is no invoking session to exclude.
     let outcome = mgr
-        .prune_managed(filter, dry_run, include_active, None)
+        .prune_managed(filter, dry_run, include_active, None, None)
         .await
         .map_err(managed_err)?;
     serde_json::to_value(&outcome).map_err(|e| format!("failed to serialize prune outcome: {e}"))
