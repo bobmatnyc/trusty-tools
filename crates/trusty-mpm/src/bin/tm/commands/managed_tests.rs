@@ -1228,3 +1228,60 @@ fn ls_table_columns_align_when_a_row_carries_an_annotation() {
         );
     }
 }
+
+/// 🔴 #6118 FAIL-OPEN GUARD: a `--dry-run` the daemon did not confirm is an
+/// ERROR, never a reported preview.
+///
+/// Why: this daemon is long-lived by design — a CLI upgrade never bounces it —
+/// and axum silently drops a query param the running handler does not declare.
+/// A daemon predating the `?dry_run=` param therefore accepts the request, runs
+/// the REAL sweep, and returns 200 with a count. Rendering that as "would
+/// decommission 7" tells the operator nothing happened when seven sessions were
+/// just torn down. The echoed `dry_run` field is the only signal that can tell
+/// the two apart, so its absence has to fail the command.
+/// What: three bodies against the same requested `dry_run: true` — a missing
+/// echo, an explicit `false`, and a confirmed `true` — plus a real sweep, which
+/// deliberately does NOT require the echo (an older daemon's real teardown is
+/// what a real sweep asked for).
+/// Test: this function IS the test.
+#[test]
+fn decommission_ephemeral_refuses_a_dry_run_a_stale_daemon_ignored() {
+    use super::ephemeral_sweep_line;
+
+    let missing = serde_json::json!({ "decommissioned": 7 });
+    let err = ephemeral_sweep_line(&missing, true).expect_err("a silent daemon must fail the run");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("did not confirm --dry-run") && msg.contains('7'),
+        "the refusal must say what may have been torn down: {msg}"
+    );
+
+    let denied = serde_json::json!({ "decommissioned": 2, "dry_run": false });
+    assert!(
+        ephemeral_sweep_line(&denied, true).is_err(),
+        "an explicit `dry_run: false` is the same skew, stated outright"
+    );
+
+    // CONTROL: a real sweep never consults the echo, so the same silent body is
+    // rendered without complaint — otherwise the guard above would have broken
+    // the ordinary path rather than the skewed one.
+    let real = ephemeral_sweep_line(&missing, false).expect("a real sweep needs no echo");
+    assert_eq!(real, "decommissioned 7 ephemeral session(s)");
+}
+
+/// #6118: a confirmed dry run reports itself as one.
+///
+/// Why: the guard above must not be satisfiable by refusing everything — the
+/// honoured path has to render, and has to say "would" rather than claiming a
+/// teardown that never happened.
+/// Test: this function IS the test.
+#[test]
+fn decommission_ephemeral_reports_a_confirmed_dry_run() {
+    use super::ephemeral_sweep_line;
+
+    let body = serde_json::json!({ "decommissioned": 3, "dry_run": true });
+    assert_eq!(
+        ephemeral_sweep_line(&body, true).expect("a confirmed preview renders"),
+        "would decommission 3 ephemeral session(s) (dry run)"
+    );
+}

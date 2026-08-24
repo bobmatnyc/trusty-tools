@@ -12,11 +12,26 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 use uuid::Uuid;
 
 use super::injection_status::InjectionStatus;
+
+/// The literal path a record carries when its working directory could not be
+/// resolved at all.
+///
+/// Why: this string was spelled out four times — `adopt::derive_source_id`,
+/// `reconcile`'s known-workspace set, `dedup::is_resolved_existing`, and (since
+/// #6118) [`SessionRecord::workspace_unresolvable`] — and every one of them is
+/// deciding the same question about the same value. A fifth spelling is how the
+/// four drift apart, so they now read one constant.
+/// What: `/unknown`, the value the pre-#6126 external-adopt path stubbed into
+/// `cwd`/`workspace_path` when `get_pane_cwd` returned nothing. It is not a real
+/// path and is never created on disk.
+/// Test: `unresolvable_filter_selects_a_live_ghost_pane`,
+/// `is_resolved_existing_false_for_none_and_unknown_sentinel`.
+pub const UNRESOLVED_PATH_SENTINEL: &str = "/unknown";
 
 /// Opaque identifier for a managed session.
 ///
@@ -574,6 +589,48 @@ impl SessionRecord {
         } else if !was_terminal || self.terminal_at.is_none() {
             self.terminal_at = Some(now);
         }
+    }
+
+    /// Whether this record names no workspace a caller could ever resume,
+    /// attach to, or reason about (#6118).
+    ///
+    /// Why: the pre-#6126 external-adopt path minted a record for every
+    /// unrecognised tmux pane, and stubbed `cwd` to
+    /// [`UNRESOLVED_PATH_SENTINEL`] with `workspace_path` unset whenever
+    /// `get_pane_cwd` came back empty. #6126 stopped MINTING those, but nothing
+    /// could SELECT the ones already in the store: 23 of them sat `Active` on
+    /// the reporting host, and every existing selector missed them — `--state`
+    /// has no variant for them, `prune-idle` keys on an activity verdict, and
+    /// the `tm ls` auto-prune requires a dead pane. This predicate is the
+    /// missing question, asked once so the prune engine and its tests agree on
+    /// the answer.
+    ///
+    /// 🔴 It is deliberately a RECORD-SHAPE test with no filesystem probe. A
+    /// record naming a real directory on an unmounted volume is NOT unresolvable
+    /// by this rule, which is what keeps the selector out of the mass-tombstone
+    /// hazard `session_picker_prune::workspace_verified_gone` documents at
+    /// length: `try_exists` answers `Ok(false)` for every path on an unplugged
+    /// drive, so any probe-based widening would select a whole volume's sessions
+    /// at once. The sentinel cannot be produced that way — only by an adopt that
+    /// already failed to resolve anything.
+    ///
+    /// A healthy session therefore never satisfies this, whatever its state or
+    /// liveness: it was spawned with a real `cwd`, and a provisioned one also
+    /// carries a `workspace_path`.
+    /// What: `true` only when BOTH coordinates are unresolvable — `cwd` is the
+    /// sentinel, AND `workspace_path` is absent or is itself the sentinel. One
+    /// resolvable coordinate is enough to keep the record.
+    /// Test: `unresolvable_filter_selects_a_live_ghost_pane`,
+    /// `healthy_active_session_is_never_selected_by_the_unresolvable_filter`,
+    /// `unresolvable_filter_keeps_a_record_that_still_names_a_workspace`.
+    pub fn workspace_unresolvable(&self) -> bool {
+        let sentinel = Path::new(UNRESOLVED_PATH_SENTINEL);
+        let cwd_unresolvable = self.cwd == sentinel;
+        let workspace_unresolvable = match &self.workspace_path {
+            None => true,
+            Some(p) => p == sentinel,
+        };
+        cwd_unresolvable && workspace_unresolvable
     }
 }
 

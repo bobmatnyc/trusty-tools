@@ -9,6 +9,8 @@
 //! persistent sentinel drawer when the probe palace is empty (e.g. after a
 //! redb v2→v3 migration wipes the vector store) so the palace re-populates
 //! itself on the next deep-probe request without operator intervention.
+//! Issue #6217 routes `PalaceHandle::drawer_load_degraded` out through the
+//! payload so a partial drawer corpus is readable over HTTP, not only in logs.
 //! What: `health()` axum handler, `HealthQuery` params struct,
 //! `HealthResponse` wire struct, `HealthProbeError`,
 //! `ensure_health_probe_palace`, `run_health_round_trip`, and the testable
@@ -186,6 +188,31 @@ pub(super) struct HealthResponse {
     /// `health_omits_unopenable_palaces_when_none`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(super) unopenable_palaces: Vec<UnopenablePalace>,
+    /// Ids of currently-open palaces serving a partial drawer corpus
+    /// (issue #6217).
+    ///
+    /// Why: `PalaceHandle::open_with_intent` fails open on drawer-load trouble
+    /// (#6201) — a corrupt `DRAWERS` table or an unreadable row does not stop
+    /// the palace opening, it just yields fewer drawers than the palace holds.
+    /// #6201 recorded that on the handle as `drawer_load_degraded` but wired it
+    /// to nothing, so the only trace an operator got was a `warn!` line at open
+    /// time. Recall keeps answering, with silently missing corpus. This field is
+    /// the API surface for that state.
+    /// What: palace ids read from the handle cache via
+    /// [`trusty_common::memory_core::PalaceRegistry::peek`], sorted, and omitted
+    /// entirely when none are degraded so a healthy payload is unchanged. It
+    /// deliberately leaves `status` at `"ok"`: a partial corpus is durable state
+    /// an operator must repair, not a live outage a restart can clear, and
+    /// `status: "degraded"` already means "the round-trip probe just failed".
+    /// Cache-only, so a degraded palace that has been idle-evicted is absent
+    /// until the next access re-opens it — the price of a `/health` that does no
+    /// I/O.
+    /// Test: `health_reports_drawer_degraded_palace`,
+    /// `health_omits_drawer_degraded_when_all_healthy`,
+    /// `health_drawer_degraded_names_only_the_degraded_palace`,
+    /// `health_drawer_degraded_check_opens_no_palace`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) drawer_degraded_palaces: Vec<String>,
 }
 
 /// One palace the daemon has on disk but could not open (issue #4911).
@@ -248,9 +275,12 @@ pub(super) struct WorkerHealth {
 /// suitable for 1-second LB polling without ONNX overhead.
 /// Issue #4911: `unopenable_palaces` lists palaces present on disk that startup
 /// hydration refused, so a skipped palace is visible instead of merely absent.
+/// Issue #6217: `drawer_degraded_palaces` lists open palaces whose drawer table
+/// loaded only partially, so a corpus with holes is visible instead of merely
+/// logged. `status` stays `"ok"` for it — see the field's own docs for why.
 /// What: Returns HTTP 200 with `{status, version, rss_mb, disk_bytes,
 /// cpu_pct, uptime_secs, open_fds?, fd_soft_limit?, detail?,
-/// unopenable_palaces?}`. Without
+/// unopenable_palaces?, drawer_degraded_palaces?}`. Without
 /// `?probe=true`, `status` is always `"ok"` (daemon is alive). With
 /// `?probe=true`, `status` is `"ok"` or `"degraded"` based on the
 /// remember/recall/forget cycle. The handler never returns non-200 so
@@ -263,7 +293,9 @@ pub(super) struct WorkerHealth {
 /// `health_endpoint_round_trip_with_palace_is_ok`,
 /// `health_probe_palace_is_invisible`,
 /// `health_probe_cleans_up_on_success`,
-/// `health_probe_cleans_up_on_recall_miss`.
+/// `health_probe_cleans_up_on_recall_miss`,
+/// `health_reports_drawer_degraded_palace`,
+/// `health_drawer_degraded_check_opens_no_palace`.
 pub(super) async fn health(
     State(state): State<AppState>,
     Query(query): Query<HealthQuery>,
@@ -370,6 +402,33 @@ pub(super) async fn health(
         .collect();
     unopenable_palaces.sort_by(|a, b| a.id.cmp(&b.id));
 
+    // #6217: a palace whose drawer table loaded only partially is serving a
+    // corpus with holes, and until now said so nowhere but a startup warn line.
+    // `list` + `peek` are both cache-only — a `parking_lot::Mutex` lock and an
+    // `Arc` clone, no disk access and no LRU promotion — so this stays safe on
+    // the cheap path monitors poll every second. The cost is that an
+    // idle-evicted palace drops out of the report until it is next opened;
+    // reporting it would mean opening it, and `/health` must not do I/O.
+    let mut drawer_degraded_palaces: Vec<String> = state
+        .registry
+        .list()
+        .into_iter()
+        .filter(|id| {
+            state
+                .registry
+                .peek(id)
+                .is_some_and(|handle| handle.drawer_load_degraded)
+        })
+        .map(|id| id.as_str().to_string())
+        .collect();
+    drawer_degraded_palaces.sort();
+    if !drawer_degraded_palaces.is_empty() {
+        tracing::warn!(
+            palaces = ?drawer_degraded_palaces,
+            "/health: open palaces are serving a partial drawer corpus"
+        );
+    }
+
     Json(HealthResponse {
         status,
         detail,
@@ -385,6 +444,7 @@ pub(super) async fn health(
         daemon_state,
         worker,
         unopenable_palaces,
+        drawer_degraded_palaces,
     })
 }
 

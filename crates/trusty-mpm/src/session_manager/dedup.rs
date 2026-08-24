@@ -300,7 +300,8 @@ fn group_key(record: &SessionRecord) -> Option<String> {
 /// `is_resolved_existing_false_for_none_and_unknown_sentinel`.
 pub(crate) fn is_resolved_existing(record: &SessionRecord) -> bool {
     match &record.workspace_path {
-        Some(p) => p.as_path() != Path::new("/unknown") && p.exists(),
+        // #6118: one spelling of the sentinel, shared with every other reader.
+        Some(p) => p.as_path() != Path::new(super::record::UNRESOLVED_PATH_SENTINEL) && p.exists(),
         None => false,
     }
 }

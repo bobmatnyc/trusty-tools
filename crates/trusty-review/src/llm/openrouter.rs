@@ -19,8 +19,13 @@
 //! in the response body.  This avoids the complexity of two calls or of
 //! parsing streamed usage frames.
 //!
-//! Test: `complete_builds_correct_request` verifies the request structure
-//! against a mock HTTP server (no real network calls in tests).
+//! The base URL is a constructor field (default `OPENROUTER_BASE_URL`) so
+//! tests can do a real mock-server round-trip, mirroring `fireworks.rs`.
+//!
+//! Test: `complete_sends_the_request_model_not_the_constructor_model` reads the
+//! model out of the POST body a mock server received;
+//! `complete_builds_correct_request` verifies the rest of the request structure
+//! (no real network calls in tests).
 
 use std::time::Instant;
 
@@ -30,7 +35,7 @@ use tracing::{debug, warn};
 
 use super::{LlmProvider, LlmRequest, LlmResponse, error::LlmError};
 
-const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
+const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const CONNECT_TIMEOUT_SECS: u64 = 10;
 const READ_TIMEOUT_SECS: u64 = 120;
 const HTTP_REFERER: &str = "https://github.com/bobmatnyc/trusty-tools";
@@ -218,6 +223,7 @@ pub fn estimate_cost_usd(model: &str, input_tokens: u32, output_tokens: u32) -> 
 pub struct OpenRouterProvider {
     api_key: String,
     model: String,
+    base_url: String,
     client: reqwest::Client,
 }
 
@@ -226,10 +232,28 @@ impl OpenRouterProvider {
     ///
     /// Why: callers obtain the api_key from `ReviewConfig::openrouter_api_key`
     /// and the model from a resolved `RoleConfig::model`.
-    /// What: builds a `reqwest::Client` with connect and read timeouts;
-    /// returns `LlmError::AccessDenied` if the key is empty.
+    /// What: delegates to [`Self::with_base_url`] against the public
+    /// OpenRouter endpoint.
     /// Test: `new_returns_error_on_empty_key`.
     pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Result<Self, LlmError> {
+        Self::with_base_url(api_key, model, OPENROUTER_BASE_URL)
+    }
+
+    /// Construct a provider with an explicit base URL.
+    ///
+    /// Why: lets tests point the provider at a mock HTTP server and assert on
+    /// the bytes it actually sends — the round-trip coverage the hardcoded URL
+    /// made impossible, and what proves #6123's model override reaches the
+    /// wire. Mirrors `FireworksProvider::with_base_url`.
+    /// What: builds a `reqwest::Client` with connect and read timeouts;
+    /// returns `LlmError::AccessDenied` if the key is empty. A trailing `/` on
+    /// `base_url` is trimmed so path joining is uniform.
+    /// Test: `complete_sends_the_request_model_not_the_constructor_model`.
+    pub fn with_base_url(
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+        base_url: impl Into<String>,
+    ) -> Result<Self, LlmError> {
         let api_key = api_key.into();
         if api_key.is_empty() {
             return Err(LlmError::AccessDenied(
@@ -244,6 +268,7 @@ impl OpenRouterProvider {
         Ok(Self {
             api_key,
             model: model.into(),
+            base_url: base_url.into().trim_end_matches('/').to_string(),
             client,
         })
     }
@@ -277,11 +302,20 @@ impl LlmProvider for OpenRouterProvider {
     /// set, sends `response_format: { type: "json_schema", json_schema: { name,
     /// strict: true, schema } }` to force the model to emit structured JSON;
     /// the assistant message content will be the clean JSON object.
-    /// Test: `complete_builds_correct_request`,
+    ///
+    /// The model sent is [`LlmRequest::effective_model`] — the request's own
+    /// id, falling back to the constructor's only when the request names none
+    /// (#6123).
+    /// Test: `complete_sends_the_request_model_not_the_constructor_model`,
+    /// `complete_builds_correct_request`,
     /// `complete_with_schema_sends_response_format` (mock server in tests).
     async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+        // #6123: the request's model is the model for this call; the id passed
+        // to the constructor is only the fallback when the request names none.
+        let model = req.effective_model(&self.model);
+
         debug!(
-            model = %self.model,
+            model = %model,
             structured = req.response_schema.is_some(),
             "openrouter complete request"
         );
@@ -312,7 +346,7 @@ impl LlmProvider for OpenRouterProvider {
         });
 
         let body = OrcRequest {
-            model: &self.model,
+            model,
             messages: &messages,
             stream: false,
             temperature: req.temperature,
@@ -324,7 +358,7 @@ impl LlmProvider for OpenRouterProvider {
 
         let http_resp = self
             .client
-            .post(OPENROUTER_URL)
+            .post(format!("{}/chat/completions", self.base_url))
             .bearer_auth(&self.api_key)
             .header("HTTP-Referer", HTTP_REFERER)
             .header("X-Title", X_TITLE)
@@ -341,7 +375,7 @@ impl LlmProvider for OpenRouterProvider {
             let body_text = http_resp.text().await.unwrap_or_default();
             return Err(match status.as_u16() {
                 401 | 403 => LlmError::AccessDenied(body_text),
-                404 => LlmError::ModelNotFound(format!("model={}: {body_text}", self.model)),
+                404 => LlmError::ModelNotFound(format!("model={model}: {body_text}")),
                 422 => LlmError::Validation(body_text),
                 429 => LlmError::RateLimited,
                 _ => LlmError::Upstream {
@@ -374,7 +408,7 @@ impl LlmProvider for OpenRouterProvider {
             .map(|u| (u.prompt_tokens, u.completion_tokens))
             .unwrap_or((0, 0));
 
-        let model_used = orc.model.unwrap_or_else(|| self.model.clone());
+        let model_used = orc.model.unwrap_or_else(|| model.to_string());
         let cost_usd = estimate_cost_usd(&model_used, input_tokens, output_tokens);
 
         Ok(LlmResponse {

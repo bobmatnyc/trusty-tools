@@ -38,7 +38,12 @@ name        = "trusty-review"
 # `reporter_findings` and `synthesize_grounding` are crate-private, and the one
 # new `synthesize` helper is a private free function; no public type changes
 # shape.
-version     = "0.25.0"
+#
+# #6123: PATCH bump — 0.25.0 is published on crates.io and this change touches
+# `src/**`, so the pre-merge guard requires the next free position. The public
+# surface only grows: `LlmRequest::effective_model` and
+# `OpenRouterProvider::with_base_url` are added, nothing changes shape or moves.
+version     = "0.25.1"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true

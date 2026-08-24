@@ -78,7 +78,8 @@ pub use proxy::{
     proxy_unfocus,
 };
 pub use prune::{
-    PruneRequest, decommission_ephemeral_route, prune_managed_route, prune_worktrees_route,
+    EphemeralQuery, PruneRequest, decommission_ephemeral_route, prune_managed_route,
+    prune_worktrees_route,
 };
 pub use reactivate::reactivate_managed_session;
 pub use rename::{RenameRequest, rename_managed_session};

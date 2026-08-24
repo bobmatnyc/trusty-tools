@@ -2133,6 +2133,7 @@ async fn prune_by_state_never_touches_active() {
             false,
             false,
             None,
+            None,
         )
         .await
         .expect("prune stopped");
@@ -2173,6 +2174,7 @@ async fn prune_decommissioned_compacts() {
             crate::session_manager::PruneFilter::Decommissioned,
             false,
             false,
+            None,
             None,
         )
         .await
@@ -2230,6 +2232,7 @@ async fn prune_deleted_compacts() {
             false,
             false,
             None,
+            None,
         )
         .await
         .expect("compact deleted");
@@ -2275,7 +2278,13 @@ async fn prune_all_targets_non_running() {
     seed_record(&mgr, &dir, tomb, ManagedSessionState::Decommissioned, false).await;
 
     let outcome = mgr
-        .prune_managed(crate::session_manager::PruneFilter::All, false, false, None)
+        .prune_managed(
+            crate::session_manager::PruneFilter::All,
+            false,
+            false,
+            None,
+            None,
+        )
         .await
         .expect("prune all");
     assert_eq!(
@@ -2324,6 +2333,7 @@ async fn prune_dry_run_reports_without_mutating() {
             true,
             false,
             None,
+            None,
         )
         .await
         .expect("dry run");
@@ -2353,6 +2363,8 @@ fn prune_filter_parse_round_trip() {
         PruneFilter::Decommissioned,
         PruneFilter::Deleted,
         PruneFilter::All,
+        // #6118: the unresolvable-workspace selector round-trips like the rest.
+        PruneFilter::Unresolvable,
     ] {
         assert_eq!(PruneFilter::parse(f.as_str()).unwrap(), f);
     }
@@ -2383,6 +2395,7 @@ async fn prune_outcome_serializes() {
             crate::session_manager::PruneFilter::Ephemeral,
             true,
             false,
+            None,
             None,
         )
         .await

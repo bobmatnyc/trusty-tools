@@ -112,7 +112,16 @@ pub fn tool_list_response() -> Value {
     ));
     tools.push(tool(
         "search_issues",
-        "Search issues with a free-text query and optional filters.",
+        // #6216: state the matching semantics — callers cannot adapt to
+        // behaviour they are not told about.
+        "Search issues with a free-text query and optional filters. \
+         On the GitHub backend, `query` is treated as literal search terms, \
+         never as search syntax: each whitespace-separated term must appear \
+         (AND), and a term shaped like a qualifier (`is:open`, `repo:o/r`) \
+         matches that text rather than filtering. Use the `state`, `labels` \
+         and `assignee` arguments for filtering. A `query` or `label` \
+         containing a double quote or a control character is rejected, as is \
+         an `assignee` that is not a GitHub username (or `@me` / `*`).",
         json!({
             "backend": backend_schema(),
             "query": { "type": "string" },
