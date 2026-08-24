@@ -11,7 +11,9 @@ use axum::http::{Request, StatusCode};
 use serde_json::Value;
 use tower::util::ServiceExt;
 use trusty_common::memory_core::palace::PalaceId;
-use trusty_common::memory_core::retrieval::RecallResult;
+use trusty_common::memory_core::retrieval::{PalaceHandle, RecallResult};
+use trusty_common::memory_core::store::kg::KnowledgeGraph;
+use trusty_common::memory_core::store::vector::UsearchStore;
 use uuid::Uuid;
 
 /// `GET /health` returns HTTP 200 with `status: "ok"` after the
@@ -684,4 +686,186 @@ async fn health_omits_unopenable_palaces_when_none() {
         v.get("unopenable_palaces").is_none(),
         "a healthy daemon's payload must be unchanged; got {v:?}"
     );
+}
+
+// ---- Issue #6217: /health must show a palace serving a partial corpus ----
+
+/// Build an in-memory palace handle for `id`, flagged degraded or not.
+///
+/// Why: the degrade is produced deep inside `PalaceHandle::open_with_intent`,
+/// which needs a corrupt redb `DRAWERS` table to reach. These tests exercise the
+/// reader, not the producer — #6201 already covers the producer — so they set
+/// the flag the open path would have set and assert what `/health` does with it.
+/// What: a handle over throwaway vector and KG stores in a leaked tempdir (the
+/// same `mem::forget` lifetime trick `test_state` uses), with
+/// `drawer_load_degraded` set as asked.
+/// Test: used by the four `health_*drawer_degraded*` tests below.
+fn degraded_handle(id: &str, degraded: bool) -> std::sync::Arc<PalaceHandle> {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().to_path_buf();
+    std::mem::forget(tmp);
+    let vs = UsearchStore::new(dir.join("idx.usearch"), 384).expect("vector store");
+    let kg = KnowledgeGraph::open(&dir.join("kg.db")).expect("kg");
+    let mut handle = PalaceHandle::new(PalaceId::new(id), String::new(), vs, kg);
+    handle.drawer_load_degraded = degraded;
+    std::sync::Arc::new(handle)
+}
+
+/// Drive the cheap (non-probe) `/health` path and return the parsed body.
+async fn health_body(state: crate::AppState) -> Value {
+    let app = router().with_state(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), 8192).await.unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+/// Why (issue #6217): #6201 made a partial drawer load observable on the handle
+/// and wired it to nothing, so a corpus with holes reached an operator only as a
+/// startup `warn!` line. `/health` is the reader that closes that gap.
+/// What: registers a degraded handle, drives the cheap `/health` path, and
+/// asserts the palace is named. Also pins the deliberate decision that a partial
+/// corpus does NOT flip `status`: it is durable state a restart cannot repair,
+/// and `status: "degraded"` already means the round-trip probe just failed.
+/// Test: this test.
+#[tokio::test]
+async fn health_reports_drawer_degraded_palace() {
+    let state = test_state();
+    state
+        .registry
+        .register_arc(degraded_handle("corrupt", true));
+
+    let v = health_body(state).await;
+
+    let listed = v["drawer_degraded_palaces"]
+        .as_array()
+        .unwrap_or_else(|| panic!("/health must name the degraded palace; got {v:?}"));
+    assert_eq!(listed.len(), 1, "exactly one palace is degraded; got {v:?}");
+    assert_eq!(listed[0], "corrupt");
+    assert_eq!(
+        v["status"], "ok",
+        "a partial corpus is reported, not escalated to a failing status; got {v:?}"
+    );
+}
+
+/// Why (issue #6217): a flag that is always set reports nothing. This is the
+/// test that catches an always-true wiring, and the one that keeps a healthy
+/// daemon's payload from growing a field present in every response.
+/// What: registers a handle with `drawer_load_degraded == false` and asserts the
+/// key is absent entirely.
+/// Test: this test.
+#[tokio::test]
+async fn health_omits_drawer_degraded_when_all_healthy() {
+    let state = test_state();
+    state
+        .registry
+        .register_arc(degraded_handle("intact", false));
+
+    let v = health_body(state).await;
+
+    assert!(
+        v.get("drawer_degraded_palaces").is_none(),
+        "a fully-loaded palace must not be reported as degraded; got {v:?}"
+    );
+}
+
+/// Why (issue #6217): "the corpus is degraded" and "one of three palaces is
+/// degraded" call for different operator responses, so the payload must
+/// distinguish them rather than collapsing to a single boolean.
+/// What: registers three handles, one degraded, and asserts only that one is
+/// named while the two intact palaces are absent.
+/// Test: this test.
+#[tokio::test]
+async fn health_drawer_degraded_names_only_the_degraded_palace() {
+    let state = test_state();
+    state
+        .registry
+        .register_arc(degraded_handle("intact-a", false));
+    state.registry.register_arc(degraded_handle("holey", true));
+    state
+        .registry
+        .register_arc(degraded_handle("intact-b", false));
+
+    let v = health_body(state).await;
+
+    let listed = v["drawer_degraded_palaces"]
+        .as_array()
+        .unwrap_or_else(|| panic!("/health must name the degraded palace; got {v:?}"));
+    assert_eq!(
+        listed.len(),
+        1,
+        "only one of three palaces is degraded; got {v:?}"
+    );
+    assert_eq!(listed[0], "holey");
+}
+
+/// Why (issue #6217): monitors poll `/health` every second, so this check must
+/// read the handle cache and never open a palace. Opening one to ask whether its
+/// drawers loaded would put disk I/O — and the redb open lock — on the liveness
+/// path, which is a worse failure than under-reporting an idle-evicted palace.
+/// What: fills a capacity-2 registry with two resident handles so a third palace,
+/// which exists on disk, is evicted. Asserts `/health` names only the resident
+/// degraded palace and leaves both residents in the cache. Opening the on-disk
+/// palace would have to evict a resident to make room, so two surviving residents
+/// and an absent third is the proof that no open happened — an assertion the
+/// weaker "cache did not grow" form misses, because a full open sweep also ends
+/// at size 2.
+/// Test: this test.
+#[tokio::test]
+async fn health_drawer_degraded_check_opens_no_palace() {
+    use trusty_common::memory_core::{Palace, PalaceRegistry};
+
+    let mut state = test_state();
+    let registry = PalaceRegistry::with_max_open(2);
+    let on_disk = PalaceId::new("on-disk-only");
+    registry
+        .create_palace(
+            &state.data_root,
+            Palace {
+                id: on_disk.clone(),
+                name: "on-disk-only".to_string(),
+                description: None,
+                created_at: chrono::Utc::now(),
+                data_dir: state.data_root.join("on-disk-only"),
+            },
+        )
+        .unwrap_or_else(|e| panic!("create_palace(on-disk-only) failed: {e:#}"));
+    // Two residents fill the capacity-2 cache and push the on-disk palace out.
+    registry.register_arc(degraded_handle("resident-intact", false));
+    registry.register_arc(degraded_handle("resident-degraded", true));
+    assert!(
+        registry.peek(&on_disk).is_none(),
+        "precondition: the on-disk palace must be evicted before /health runs"
+    );
+    state.registry = std::sync::Arc::new(registry);
+    let registry = std::sync::Arc::clone(&state.registry);
+
+    let v = health_body(state).await;
+
+    let listed = v["drawer_degraded_palaces"]
+        .as_array()
+        .unwrap_or_else(|| panic!("/health must name the resident degraded palace; got {v:?}"));
+    assert_eq!(listed.len(), 1, "only the resident is degraded; got {v:?}");
+    assert_eq!(listed[0], "resident-degraded");
+    assert!(
+        registry.peek(&PalaceId::new("resident-intact")).is_some(),
+        "/health must not evict a resident handle to inspect a palace on disk; got {v:?}"
+    );
+    assert!(
+        registry.peek(&PalaceId::new("resident-degraded")).is_some(),
+        "/health must not evict a resident handle to inspect a palace on disk; got {v:?}"
+    );
+    assert!(
+        registry.peek(&on_disk).is_none(),
+        "/health must not open a palace that is not already resident; got {v:?}"
+    );
+    assert_eq!(registry.len(), 2, "/health must not grow the cache");
 }
