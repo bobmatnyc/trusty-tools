@@ -711,6 +711,129 @@ async fn reap_dead_managed_sessions_marks_stopped() {
         crate::session_manager::ManagedSessionState::Stopped,
         "reap_managed_against must mark Active session Stopped when tmux_name absent (#1744)"
     );
+    // #6194: pin the CAUSE, not just the state. An empty live set is a lost
+    // tmux server, so the record must stay auto-resumable — and if a future
+    // change reroutes the reaper away from `stop_with_cause`, this catches it
+    // rather than letting the cause silently go unrecorded.
+    assert_eq!(
+        after.stop_cause,
+        Some(crate::session_manager::StopCause::Unexpected),
+        "an empty live set is a whole-server loss, not a decision about this session"
+    );
+    assert!(after.is_auto_resumable());
+}
+
+/// Seed one Active managed session rooted at `workspace`, wired into a state.
+///
+/// Why: the two #6194 reaper tests below differ only in the live set they reap
+/// against, so the six-step create/promote/wire sequence is shared.
+/// Test: `reap_marks_a_targeted_kill_deliberate`,
+/// `reap_leaves_a_whole_server_loss_auto_resumable`.
+async fn active_session_in_state(
+    mgr: &std::sync::Arc<crate::session_manager::SessionManager>,
+    task: &str,
+    workspace: &str,
+) -> crate::session_manager::ManagedSessionId {
+    let record = mgr
+        .create(
+            task.into(),
+            Some(PathBuf::from(workspace)),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create");
+    mgr.set_workspace(
+        &record.id,
+        PathBuf::from(workspace),
+        crate::session_manager::ManagedSessionState::Active,
+    )
+    .await
+    .expect("set Active");
+    record.id
+}
+
+/// A session killed while the tmux server is alive is not auto-resumed (#6194).
+///
+/// Why: this is the reported repro. The operator kills one managed session; the
+/// server stays up because other sessions are still running, so the reaper can
+/// attribute the disappearance to a decision and must record it as one. Before
+/// the fix the supervisor respawned this session within one interval.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn reap_marks_a_targeted_kill_deliberate() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mgr = crate::session_manager::SessionManager::new(tmp.path(), MinFakeDriver::new())
+        .await
+        .expect("session manager");
+    let mgr = std::sync::Arc::new(mgr);
+    let id = active_session_in_state(&mgr, "killed", "/tmp/test-reap-killed").await;
+    let state = DaemonState::with_session_manager(std::sync::Arc::clone(&mgr));
+
+    // The server is alive — some OTHER session is still listed — and this
+    // record's own tmux_name is not.
+    let live: std::collections::HashSet<String> =
+        ["someone-elses-shell".to_string()].into_iter().collect();
+    state.reap_managed_against(&live).await;
+
+    let after = mgr.get(&id).await.expect("get after reap");
+    assert_eq!(
+        after.state,
+        crate::session_manager::ManagedSessionState::Stopped
+    );
+    assert_eq!(
+        after.stop_cause,
+        Some(crate::session_manager::StopCause::Deliberate)
+    );
+    assert!(
+        !after.is_auto_resumable(),
+        "a session killed out-of-band while the server is alive must not be auto-resumed"
+    );
+}
+
+/// A whole-server loss leaves the entire fleet auto-resumable (#6194).
+///
+/// Why: `TmuxDriver::list_sessions` maps "no server running" to an empty list,
+/// so `tmux kill-server`, a crash, an upgrade, or a logout reaps every Active
+/// record in one tick. Stamping those `Deliberate` would leave the whole fleet
+/// permanently un-auto-resumable — worse than the defect being fixed, and a
+/// regression against the pre-#6194 supervisor, which restored exactly this.
+/// Two records so the assertion is about the sweep, not one row.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn reap_leaves_a_whole_server_loss_auto_resumable() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mgr = crate::session_manager::SessionManager::new(tmp.path(), MinFakeDriver::new())
+        .await
+        .expect("session manager");
+    let mgr = std::sync::Arc::new(mgr);
+    let first = active_session_in_state(&mgr, "fleet-a", "/tmp/test-reap-fleet-a").await;
+    let second = active_session_in_state(&mgr, "fleet-b", "/tmp/test-reap-fleet-b").await;
+    let state = DaemonState::with_session_manager(std::sync::Arc::clone(&mgr));
+
+    // No tmux session of any kind on the host — the server itself is gone.
+    let live = std::collections::HashSet::new();
+    state.reap_managed_against(&live).await;
+
+    for id in [first, second] {
+        let after = mgr.get(&id).await.expect("get after reap");
+        assert_eq!(
+            after.state,
+            crate::session_manager::ManagedSessionState::Stopped,
+            "the safety net still converges the record (#1744)"
+        );
+        assert_eq!(
+            after.stop_cause,
+            Some(crate::session_manager::StopCause::Unexpected)
+        );
+        assert!(
+            after.is_auto_resumable(),
+            "losing the tmux server is not a decision about any session — the supervisor \
+             must still be able to restore this fleet"
+        );
+    }
 }
 
 /// #3822 hardening (code-critic review): `project_registry()`'s session-

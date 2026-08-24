@@ -5,13 +5,16 @@
 //! module is that unit — a pure-ish async function over the [`SessionManager`] and
 //! an optional classifier, returning a [`TickReport`] of what it did.
 //! What: defines [`TickReport`] and [`run_tick`], which (1) lists all sessions,
-//! (2) auto-resumes every `stopped` session when `auto_resume` is set, and (3)
-//! classifies idle `active` sessions through the activity monitor when a
-//! classifier is supplied. It is a passive observer: it never answers a
-//! `pending_decision`.
+//! (2) auto-resumes each `stopped` session whose stop nobody asked for when
+//! `auto_resume` is set — a session an operator stopped or killed is left down
+//! (#6194) — and (3) classifies idle `active` sessions through the activity
+//! monitor when a classifier is supplied. It is a passive observer: it never
+//! answers a `pending_decision`.
 //! Test: `tick_auto_resumes_stopped`, `tick_skips_resume_when_disabled`,
 //! `tick_fleet_of_n_resumed`, `tick_classifies_active`,
-//! `tick_never_answers_pending_decision` in `super::tests`.
+//! `tick_never_answers_pending_decision`,
+//! `tick_never_resumes_a_deliberately_stopped_session`,
+//! `tick_still_resumes_a_session_whose_runtime_exited` in `super::tests`.
 
 use std::sync::Arc;
 
@@ -49,7 +52,10 @@ pub struct TickReport {
 /// testable with a `crate::session_manager::tests`-style fake tmux driver and a
 /// mock classifier, with zero real time elapsed.
 /// What: lists all sessions via `mgr.list()`; for each `Stopped` session, resumes
-/// it when `cfg.auto_resume` is true, counting successes and — on failure —
+/// it when `cfg.auto_resume` is true AND
+/// [`SessionRecord::is_auto_resumable`](crate::session_manager::SessionRecord::is_auto_resumable)
+/// agrees the stop was not asked for (#6194 — a deliberately stopped or killed
+/// session is left down), counting successes and — on failure —
 /// marking the session `Errored` so the fleet snapshot shows it (#5208); for each
 /// `Active` session, classifies its pane through `monitor` when `cfg.classify_idle`
 /// is true and a `monitor` is supplied. Never touches `pending_decision` — the
@@ -57,7 +63,9 @@ pub struct TickReport {
 /// [`TickReport`].
 /// Test: `tick_auto_resumes_stopped`, `tick_skips_resume_when_disabled`,
 /// `tick_fleet_of_n_resumed`, `tick_classifies_active`,
-/// `tick_never_answers_pending_decision`.
+/// `tick_never_answers_pending_decision`;
+/// `tick_never_resumes_a_deliberately_stopped_session`,
+/// `tick_still_resumes_a_session_whose_runtime_exited` (#6194).
 pub async fn run_tick<C: LlmClassifier>(
     mgr: &Arc<SessionManager>,
     cfg: &SupervisorConfig,
@@ -71,40 +79,45 @@ pub async fn run_tick<C: LlmClassifier>(
 
     for record in records {
         match record.state {
-            ManagedSessionState::Stopped if cfg.auto_resume => match mgr.resume(&record.id).await {
-                Ok(_) => {
-                    info!(
-                        id = %record.id,
-                        name = %record.tmux_name,
-                        "supervisor: auto-resumed stopped session"
-                    );
-                    report.resumed.push(record.id.to_string());
-                }
-                Err(e) => {
-                    error!(
-                        id = %record.id,
-                        name = %record.tmux_name,
-                        "supervisor: auto-resume failed: {e}"
-                    );
-                    // #5208: a failed auto-resume must not degrade to a log line
-                    // while the session stays dead and `Stopped`. Marking it
-                    // `Errored` puts it in `FleetMetrics.errored` — which drives
-                    // the console's Degraded health — and stops the sweep silently
-                    // retrying the same doomed session every interval forever.
-                    // `resume` still accepts `Errored`, so a manual retry works.
-                    if let Err(mark_err) = mgr
-                        .mark_errored(&record.id, &format!("auto-resume failed: {e}"))
-                        .await
-                    {
+            // #6194: state alone made every `Stopped` record a relaunch
+            // candidate, which respawned sessions the operator had just killed.
+            // `is_auto_resumable` reads the recorded stop cause.
+            ManagedSessionState::Stopped if cfg.auto_resume && record.is_auto_resumable() => {
+                match mgr.resume(&record.id).await {
+                    Ok(_) => {
+                        info!(
+                            id = %record.id,
+                            name = %record.tmux_name,
+                            "supervisor: auto-resumed stopped session"
+                        );
+                        report.resumed.push(record.id.to_string());
+                    }
+                    Err(e) => {
                         error!(
                             id = %record.id,
                             name = %record.tmux_name,
-                            "supervisor: could not mark failed auto-resume as errored: {mark_err}"
+                            "supervisor: auto-resume failed: {e}"
                         );
+                        // #5208: a failed auto-resume must not degrade to a log line
+                        // while the session stays dead and `Stopped`. Marking it
+                        // `Errored` puts it in `FleetMetrics.errored` — which drives
+                        // the console's Degraded health — and stops the sweep silently
+                        // retrying the same doomed session every interval forever.
+                        // `resume` still accepts `Errored`, so a manual retry works.
+                        if let Err(mark_err) = mgr
+                            .mark_errored(&record.id, &format!("auto-resume failed: {e}"))
+                            .await
+                        {
+                            error!(
+                                id = %record.id,
+                                name = %record.tmux_name,
+                                "supervisor: could not mark failed auto-resume as errored: {mark_err}"
+                            );
+                        }
+                        report.resume_failures += 1;
                     }
-                    report.resume_failures += 1;
                 }
-            },
+            }
             ManagedSessionState::Active if cfg.classify_idle => {
                 if let Some(monitor) = monitor
                     && classify_active(mgr, monitor, &record.id, &record.tmux_name).await

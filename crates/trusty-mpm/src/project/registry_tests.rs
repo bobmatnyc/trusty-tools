@@ -46,6 +46,7 @@ fn make_session_with_repo(repo_url: &str, branch: Option<&str>) -> SessionRecord
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
+        stop_cause: None,
     }
 }
 
@@ -76,6 +77,7 @@ fn make_session_no_repo() -> SessionRecord {
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
+        stop_cause: None,
     }
 }
 

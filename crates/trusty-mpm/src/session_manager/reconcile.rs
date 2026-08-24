@@ -20,6 +20,13 @@
 //! running session `Stopped` and, under `auto_resume`, queued each one for a
 //! relaunch it did not need.
 //!
+//! **A stop somebody asked for survives a daemon restart.** The gone arm reads
+//! `Stopped` records too, and before #6194 it re-queued every one of them for
+//! auto-resume — so a session the operator stopped came back the next time the
+//! daemon booted, exactly as it came back on the next supervisor tick. The arm
+//! now writes [`StopCause::Unexpected`] only when no cause is recorded yet, and
+//! queues through [`SessionRecord::is_auto_resumable`].
+//!
 //! **A terminal record with a live tmux session is reported, not repaired.**
 //! Such a record is provably self-contradictory, but nothing distinguishes its
 //! two causes. It is either a session wrongly tombstoned by a dedup pass that
@@ -64,7 +71,7 @@ use chrono::Utc;
 use tracing::{info, warn};
 
 use super::manager::{ManagedError, ReconcileReport, SessionManager};
-use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
+use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord, StopCause};
 
 impl SessionManager {
     /// Reconcile daemon state against live tmux sessions after a restart.
@@ -80,7 +87,9 @@ impl SessionManager {
     /// `Decommissioned`). A managed session unknown to the store is adopted as
     /// `Active` under an id derived from its tmux name (#6117), and only when
     /// its pane resolves a working directory (#6118) — see this module's doc.
-    /// When `auto_resume` is true, all `Stopped` sessions are immediately resumed.
+    /// When `auto_resume` is true, every session this pass marked `Stopped`
+    /// whose stop was not asked for is immediately resumed (#6194 — a record
+    /// already carrying [`StopCause::Deliberate`] keeps it and is left down).
     ///
     /// When tmux cannot be observed at all, every liveness-derived decision is
     /// skipped: no record changes state, nothing is adopted, and nothing is
@@ -95,7 +104,10 @@ impl SessionManager {
     /// `reconcile_declines_to_adopt_a_pane_whose_cwd_cannot_be_resolved`,
     /// `repeated_reconcile_of_one_unresolvable_pane_stays_at_zero_records`,
     /// `a_declined_pane_is_reapable_by_the_orphan_gc`,
-    /// `repeated_reconcile_of_one_resolvable_pane_keeps_one_record`.
+    /// `repeated_reconcile_of_one_resolvable_pane_keeps_one_record`;
+    /// `boot_reconcile_never_requeues_a_deliberately_stopped_session`,
+    /// `boot_reconcile_still_auto_resumes_a_session_lost_with_the_daemon`
+    /// (#6194) in `stop_cause_tests.rs`.
     pub async fn reconcile_on_boot(
         &self,
         auto_resume: bool,
@@ -193,14 +205,24 @@ impl SessionManager {
             if live_names.contains(&record.tmux_name) {
                 // Session is alive — re-adopt as Active.
                 record.state = ManagedSessionState::Active;
+                // #6194: it is running, so whatever stopped it last no longer
+                // describes it.
+                record.stop_cause = None;
                 report.adopted.push(record.tmux_name.clone());
                 info!(name = %record.tmux_name, "reconcile: re-adopted live session");
             } else {
                 // Session is gone — mark Stopped (resumable), never Orphaned.
                 record.state = ManagedSessionState::Stopped;
+                // #6194: this ran while the daemon was down, so nothing here can
+                // say whether the tmux session was killed or lost to a reboot —
+                // `get_or_insert` keeps a Deliberate cause an earlier stop
+                // already recorded, and calls an otherwise-unattributed
+                // disappearance Unexpected, which is the post-reboot restore
+                // `auto_resume` was built for.
+                record.stop_cause.get_or_insert(StopCause::Unexpected);
                 report.stopped.push(record.id.to_string());
                 warn!(name = %record.tmux_name, "reconcile: tmux session gone, marked Stopped (workspace intact, resumable)");
-                if auto_resume {
+                if auto_resume && record.is_auto_resumable() {
                     to_resume.push(record.id);
                 }
             }
@@ -331,6 +353,7 @@ impl SessionManager {
                 injection_status: Default::default(),
                 worktree_owner: None,
                 terminal_at: None,
+                stop_cause: None,
             };
             newly_resolved.push((id, resolved_cwd));
             guard.upsert(external).await?;

@@ -303,6 +303,7 @@ impl SessionManager {
             // call site.
             worktree_owner: None,
             terminal_at: None,
+            stop_cause: None,
         };
 
         // Persist the record. On failure the freshly-created tmux session has
