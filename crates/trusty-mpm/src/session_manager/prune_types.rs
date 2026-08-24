@@ -46,7 +46,7 @@ pub enum PruneFilter {
     /// and deleted.
     All,
     /// Only records naming no resolvable workspace —
-    /// [`SessionRecord::workspace_unresolvable`](super::record::SessionRecord::workspace_unresolvable)
+    /// [`SessionRecord::workspace_unresolvable`](crate::session_manager::record::SessionRecord::workspace_unresolvable)
     /// (#6118).
     ///
     /// Why this exists as its own variant rather than as a flag on the others:
