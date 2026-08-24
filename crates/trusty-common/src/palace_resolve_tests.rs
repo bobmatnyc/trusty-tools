@@ -73,6 +73,149 @@ fn trusty_tools_dir_is_a_marker() {
     assert!(find_project_root(&root).is_some());
 }
 
+/// Build a repo at `<tmp>/my-project` with a linked worktree under
+/// `.claude/worktrees/agent-x`, mirroring this repo's own layout.
+///
+/// Why: a hand-written `.git` file would prove the parser and nothing else. Only
+/// a real `git worktree add` writes the admin directory — `commondir` included —
+/// that [`main_checkout_of_worktree`] reads.
+/// What: returns `(main, worktree)`, or `None` when git cannot do its part, so
+/// the caller skips rather than failing on a machine without git.
+fn repo_with_worktree(tmp: &Path) -> Option<(PathBuf, PathBuf)> {
+    let main = tmp.join("my-project");
+    fs::create_dir_all(&main).unwrap();
+    if !init_repo(&main, None) {
+        return None;
+    }
+    let run = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(&main)
+            .args(args)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    // A worktree needs at least one commit to branch from.
+    fs::write(main.join("README.md"), "x").unwrap();
+    if !run(&["add", "-A"]) || !run(&["commit", "-qm", "init"]) {
+        return None;
+    }
+    let wt = main.join(".claude").join("worktrees").join("agent-x");
+    if !run(&["worktree", "add", "-q", "-b", "wt-branch", wt.to_str()?]) {
+        return None;
+    }
+    Some((main, wt))
+}
+
+/// Why (#5888): THE defect. `current.join(".git").exists()` is true for the
+/// `.git` FILE git writes in a linked worktree, so the walk stopped at the
+/// worktree and every caller read — and lazily WROTE — the pin there instead of
+/// in the checkout the project lives in. A worktree and its main checkout must
+/// answer the same root (ADR-0012 §1).
+/// What: a real `git worktree add`, guarded by an `is_file` assertion on the
+/// fixture, resolved from the worktree root and from a directory nested inside
+/// it.
+/// Test: itself. Against `4a823a0b4` both assertions return the worktree.
+#[test]
+fn a_worktree_resolves_to_its_main_checkout() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let Some((main, wt)) = repo_with_worktree(tmp.path()) else {
+        eprintln!("skipping a_worktree_resolves_to_its_main_checkout: git unavailable");
+        return;
+    };
+    assert!(
+        wt.join(".git").is_file(),
+        "fixture must reproduce git's linked-worktree `.git` FILE"
+    );
+    let expected = fs::canonicalize(&main).expect("canonicalize main");
+
+    assert_eq!(
+        find_project_root(&wt).expect("worktree resolves"),
+        expected,
+        "a worktree must resolve to the checkout that owns it"
+    );
+
+    let nested = wt.join("crates").join("foo");
+    fs::create_dir_all(&nested).unwrap();
+    assert_eq!(
+        find_project_root(&nested).expect("nested dir resolves"),
+        expected,
+        "a directory inside a worktree must resolve to the same checkout"
+    );
+}
+
+/// Why (#5888): a submodule and any `--separate-git-dir` checkout carry a `.git`
+/// file of the identical shape, and their own directory IS the project root.
+/// Following that pointer would hand the caller `<outer>/.git/modules` — git
+/// internals, not a working tree, the same wrong answer #5819 removed from
+/// [`main_worktree_root`].
+/// What: builds the `--separate-git-dir` structure, asserts the fixture really
+/// wrote a `.git` file, and asserts the walk still stops at the checkout.
+#[test]
+fn a_separate_git_dir_checkout_is_its_own_root() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let outer = tmp.path().join("outer");
+    let sub = outer.join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    if !init_repo(&outer, None) {
+        eprintln!("skipping a_separate_git_dir_checkout_is_its_own_root: git unavailable");
+        return;
+    }
+    let separate = outer.join(".git").join("modules").join("sub");
+    fs::create_dir_all(separate.parent().unwrap()).unwrap();
+    let init = Command::new("git")
+        .arg("-C")
+        .arg(&sub)
+        .args([
+            "init",
+            "-q",
+            &format!("--separate-git-dir={}", separate.display()),
+            ".",
+        ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !init {
+        eprintln!("skipping a_separate_git_dir_checkout_is_its_own_root: cannot init");
+        return;
+    }
+    assert!(
+        sub.join(".git").is_file(),
+        "fixture must reproduce the `.git` FILE a submodule checkout carries"
+    );
+
+    assert_eq!(
+        find_project_root(&sub).expect("resolves"),
+        fs::canonicalize(&sub).expect("canonicalize sub"),
+        "a checkout whose git dir is elsewhere is still its own project root"
+    );
+}
+
+/// Why (#5888): the redirect is best-effort. A `.git` file that does not parse,
+/// or whose pointer names nothing, must leave the caller with the answer it had
+/// before rather than with `None` — losing the root is worse than not following
+/// the pointer.
+#[test]
+fn a_malformed_dot_git_file_leaves_the_directory_as_the_root() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    for (name, body) in [
+        ("garbage", "not a gitdir pointer at all\n"),
+        ("empty-pointer", "gitdir:   \n"),
+        ("dangling", "gitdir: /nonexistent-trusty-test-admin-5888\n"),
+    ] {
+        let root = tmp.path().join(name);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join(".git"), body).unwrap();
+
+        assert_eq!(
+            find_project_root(&root).expect("resolves"),
+            fs::canonicalize(&root).expect("canonicalize root"),
+            "a `.git` file that does not resolve ({name}) must leave the directory as the root"
+        );
+    }
+}
+
 /// Why: outside any project the caller must be told so, not handed a guess.
 #[test]
 fn no_markers_returns_none() {
