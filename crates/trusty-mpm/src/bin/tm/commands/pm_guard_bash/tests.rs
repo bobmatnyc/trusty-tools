@@ -1252,3 +1252,33 @@ fn command_is_persistence_only_rejects_substitution_and_redirection() {
         );
     }
 }
+
+/// Why (#5843): the owner's ruling asks for `tm wait` to be whitelisted by
+/// pm_guard. Today's classifier denies by VERB, not by an allowlist, so
+/// `tm wait` already passes — this test is the defence that keeps it passing.
+/// A future deny rule that classifies by binary name, by "waits are
+/// suspicious", or by a broadened build/test predicate would silently take the
+/// one sanctioned in-turn wait mechanism away from every agent, and the guard
+/// error would name a reason that has nothing to do with waiting.
+/// What: asserts every shape of `tm wait` an agent is documented to type is
+/// classified as allowed.
+#[test]
+fn evaluate_bash_command_never_denies_tm_wait() {
+    for cmd in [
+        "tm wait --for file --path /tmp/gate.txt",
+        "tm wait --for file --path /tmp/gate.txt --contains EXIT=",
+        "tm wait --for run --pid 4242 --timeout 3600",
+        "tm wait --for run --handle /tmp/job.pid",
+        "tm wait --for check --pr 5843 --repo bobmatnyc/trusty-tools",
+        "tm wait --for check --pr 5843 --interval 30 --slice 100",
+        "trusty-mpm wait --for file --path /tmp/gate.txt",
+        // The re-run loop an agent drives: same command, over and over.
+        "tm wait --for file --path /tmp/gate.txt --timeout 1800 --slice 100",
+    ] {
+        assert_eq!(
+            evaluate_bash_command(cmd),
+            None,
+            "`tm wait` is the sanctioned in-turn wait; it must never be denied: {cmd:?}"
+        );
+    }
+}

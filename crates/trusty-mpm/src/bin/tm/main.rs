@@ -490,6 +490,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Command::Memory { action }) => memory(action).await,
         Some(Command::Compress { tool }) => run_compress(&tool).await,
+        // #5843: `tm wait` owns its own exit codes (0/75/1/2), so it never
+        // returns here — the `!` it yields coerces into this match's type.
+        Some(Command::Wait(args)) => commands::wait::run(args),
         Some(Command::Daemon {
             addr,
             tailscale,

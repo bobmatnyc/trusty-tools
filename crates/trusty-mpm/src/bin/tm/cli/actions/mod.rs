@@ -37,6 +37,8 @@ mod session;
 mod shell;
 mod slack;
 mod telegram;
+// #5843: the `tm wait` condition-poll primitive's flag set.
+mod wait;
 mod watch;
 
 pub(crate) use agent::AgentAction;
@@ -66,4 +68,5 @@ pub(crate) use session::SessionAction;
 pub(crate) use shell::ShellArg;
 pub(crate) use slack::SlackCmd;
 pub(crate) use telegram::TelegramCmd;
+pub(crate) use wait::{WaitArgs, WaitFor};
 pub(crate) use watch::{WatchArgs, WatchCmd};
