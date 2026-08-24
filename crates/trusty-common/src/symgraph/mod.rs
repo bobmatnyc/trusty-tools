@@ -37,6 +37,9 @@ pub mod graph;
 pub mod parser;
 #[cfg(feature = "symgraph-parser")]
 pub mod registry;
+// #6170: grounded callee/name resolution behind `graph` — crate-internal.
+#[cfg(feature = "symgraph-parser")]
+pub(crate) mod resolve;
 #[cfg(feature = "symgraph-parser")]
 pub mod symbol;
 
@@ -76,7 +79,7 @@ pub use editor::{
 #[cfg(feature = "symgraph-parser")]
 pub use emitter::{LayoutRules, apply_emit, assign_file, emit};
 #[cfg(feature = "symgraph-parser")]
-pub use graph::{Edge, EdgeKind, SymbolEdge, SymbolGraph, SymbolNode};
+pub use graph::{Edge, EdgeKind, SymbolEdge, SymbolGraph, SymbolMatch, SymbolNode};
 #[cfg(feature = "symgraph-parser")]
 pub use parser::{Language, file_to_module_path, parse_directory, parse_file};
 #[cfg(feature = "symgraph-parser")]
