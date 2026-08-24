@@ -101,6 +101,34 @@ pub(super) const CHAT_REQUEST_TIMEOUT: Duration = Duration::from_secs(130);
 /// second copy of the constant there would be free to drift.
 pub(crate) const PROVISION_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// Per-request timeout override for `POST …/managed/prune-worktrees` when the
+/// merged-PR reclaim pass is requested (#5830).
+///
+/// Why: that request runs the whole merged-PR survey synchronously inside the
+/// handler. The survey classifies every registered worktree (~92s measured
+/// against the real store) and then byte-walks each one, including its
+/// multi-gigabyte `target/` — a walk that
+/// [`SurveyBudget`](crate::session_manager::worktree_reclaim_sweep::SurveyBudget)'s
+/// own doc measures at over 600 seconds for 46 worktrees. Under
+/// [`DEFAULT_REQUEST_TIMEOUT`] the client hung up at 10s on EVERY invocation, so
+/// `tm session prune-worktrees --merged-prs` had never once completed on this
+/// repository. Retrying could not help — the bound was 60x short of the work.
+/// 1800s is roughly 3x the measured worst case, and stays a hard, finite bound.
+/// What: passed to `reqwest::RequestBuilder::timeout` at the
+/// `session_prune_worktrees` call site, and ONLY when `merged_prs` is set — the
+/// orphan-only sweep keeps the 10s default, so a wedged daemon still fails fast
+/// for every other prune. Mirrors [`CHAT_REQUEST_TIMEOUT`] and
+/// [`PROVISION_REQUEST_TIMEOUT`], which exist for the same reason.
+/// Test: `tests::default_client_uses_default_bounds` pins the value;
+/// `merged_pr_request_outlives_the_default_client_timeout` (in
+/// `bin/tm/commands/managed_merged_prs_tests.rs`) proves the override reaches
+/// the wire.
+///
+/// `pub` (re-exported by [`super`]): a `[[bin]]` target is a distinct crate from
+/// the library, so `tm`'s own command module cannot see `pub(crate)` — the same
+/// crate boundary [`super::default_client`] exists to cross.
+pub const RECLAIM_SURVEY_REQUEST_TIMEOUT: Duration = Duration::from_secs(1800);
+
 /// Build the `reqwest::Client` [`super::DaemonClient::new`] uses by default.
 ///
 /// Why: the one production call site for [`build_client`], pinned to this
@@ -205,6 +233,15 @@ mod tests {
         assert!(
             PROVISION_REQUEST_TIMEOUT > DEFAULT_REQUEST_TIMEOUT,
             "the provisioning override must be longer than the default, not shorter"
+        );
+        // #5830: the merged-PR survey outruns every other override here, so it
+        // must be the longest of them — shrinking it back toward the provision
+        // bound reinstates the always-times-out failure.
+        assert_eq!(RECLAIM_SURVEY_REQUEST_TIMEOUT, Duration::from_secs(1800));
+        assert!(
+            RECLAIM_SURVEY_REQUEST_TIMEOUT > PROVISION_REQUEST_TIMEOUT,
+            "the merged-PR survey outlasts a first-clone provision, so its bound \
+             must exceed the provisioning one"
         );
         let _ = default_client();
     }

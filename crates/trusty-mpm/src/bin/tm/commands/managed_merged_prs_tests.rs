@@ -7,7 +7,7 @@
 //! What: exercises the null/absent short-circuit, the dry-run and real
 //! summaries, and every stderr diagnostic branch.
 
-use super::{diagnostic_lines, print_merged_pr_pass};
+use super::{diagnostic_lines, print_merged_pr_pass, session_prune_worktrees};
 
 #[test]
 fn merged_pr_pass_surfaces_an_agent_owned_skip() {
@@ -104,6 +104,106 @@ fn merged_pr_pass_reports_a_failed_pass_rather_than_a_zero_count() {
     // would read as a healthy no-op rather than a failure.
     let body = serde_json::json!({ "error": "task panicked" });
     print_merged_pr_pass(Some(&body), false);
+}
+
+/// 🔴 #5830 REGRESSION: `--merged-prs` must outlive the client's default
+/// request timeout.
+///
+/// Why: the survey runs synchronously inside the handler and takes minutes
+/// (over 600 seconds byte-walking 46 worktrees, per `SurveyBudget`'s own doc).
+/// Against the 10s `DEFAULT_REQUEST_TIMEOUT` the CLI hung up on every single
+/// invocation — "operation timed out", deterministically, never once
+/// completing. The fix is a per-request override, and an override only helps if
+/// it actually reaches the wire.
+/// What: scales the real shape down by 1000x. A one-shot HTTP server answers
+/// after `SERVER_DELAY`; the client is built with a `CLIENT_BOUND` shorter than
+/// that, standing in for the production 10s. With `merged_prs: true` the
+/// request must survive to read the response, because the override replaced the
+/// client bound.
+///
+/// Non-vacuity: the CONTROL sends the SAME body with `merged_prs: false` against
+/// an identical server and asserts it FAILS — so the test cannot pass merely
+/// because the client bound was never applied at all. That control is also the
+/// behavioural claim itself: the orphan-only sweep keeps failing fast against a
+/// wedged daemon.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn merged_pr_request_outlives_the_default_client_timeout() {
+    use std::time::Duration;
+
+    // Comfortably longer than `CLIENT_BOUND`, short enough to keep the test
+    // fast; the gap absorbs scheduler jitter on a loaded runner.
+    const SERVER_DELAY: Duration = Duration::from_millis(1200);
+    const CLIENT_BOUND: Duration = Duration::from_millis(250);
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_millis(500))
+        .timeout(CLIENT_BOUND)
+        .build()
+        .expect("build a short-bounded test client");
+
+    let (url, server) = slow_prune_server(SERVER_DELAY).await;
+    let overridden = session_prune_worktrees(&client, &url, true, false, true).await;
+    server.await.expect("server task must not panic");
+    assert!(
+        overridden.is_ok(),
+        "`--merged-prs` must carry a per-request timeout longer than the client \
+         default; got {overridden:?}"
+    );
+
+    // CONTROL: without the opt-in the client default still bounds the call.
+    let (url, server) = slow_prune_server(SERVER_DELAY).await;
+    let plain = session_prune_worktrees(&client, &url, true, false, false).await;
+    server.await.expect("server task must not panic");
+    assert!(
+        plain.is_err(),
+        "the orphan-only sweep must keep the short default bound, otherwise this \
+         test proves nothing about the override"
+    );
+}
+
+/// A one-shot HTTP server that answers a prune-worktrees POST after `delay`.
+///
+/// Why: reproducing "the daemon is still working when the client's clock runs
+/// out" needs a peer that eventually ANSWERS — a never-answering socket (the
+/// `build_client_bounds_a_stalled_connection` shape) cannot tell a raised bound
+/// from an unraised one, because both end in an error.
+/// What: binds an ephemeral loopback port, returns its URL plus the join handle
+/// for the accept task. The task reads until the request headers end, sleeps,
+/// then writes a minimal 200 carrying the `merged_prs: null` body the route
+/// returns when the pass was not requested.
+async fn slow_prune_server(delay: std::time::Duration) -> (String, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind slow prune server");
+    let url = format!("http://{}", listener.local_addr().expect("local_addr"));
+    let handle = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.expect("accept one connection");
+        let mut seen = Vec::new();
+        let mut buf = [0u8; 1024];
+        // Read only as far as the end of the headers: the body is a few dozen
+        // bytes and reqwest sends it immediately, so nothing is left to block
+        // the response write.
+        while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
+            match sock.read(&mut buf).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => seen.extend_from_slice(&buf[..n]),
+            }
+        }
+        tokio::time::sleep(delay).await;
+        let body = br#"{"dry_run":true,"paths":[],"skipped_dirty":[],"merged_prs":null}"#;
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = sock.write_all(head.as_bytes()).await;
+        let _ = sock.write_all(body).await;
+        let _ = sock.flush().await;
+    });
+    (url, handle)
 }
 
 #[test]
