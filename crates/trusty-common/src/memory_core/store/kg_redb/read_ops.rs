@@ -248,7 +248,7 @@ impl KgStoreRedb {
     ///
     /// Why: Cold-start retrieval needs the full drawer table to map every HNSW
     /// vector hit back to metadata.
-    /// What: Thin wrapper over [`load_drawers_with_skipped`] that drops the
+    /// What: Thin wrapper over [`Self::load_drawers_with_skipped`] that drops the
     /// skipped-row count. Callers that only want the rows (e.g. `kg_rebuild`,
     /// `backfill_report`) keep a bare `Vec<Drawer>` return.
     /// Test: `upsert_drawer_then_load_drawers_round_trips`.

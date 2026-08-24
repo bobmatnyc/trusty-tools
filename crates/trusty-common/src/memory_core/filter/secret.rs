@@ -76,7 +76,8 @@ pub fn find_secret_token(content: &str) -> Option<String> {
 /// ratio) but must never bypass secret detection — otherwise an automated
 /// writer that always passes `force: true` (e.g. trusty-code's per-turn
 /// recorder) would persist raw credentials with zero screening. Extracting
-/// this single-purpose check out of [`FilterConfig::apply`] lets
+/// this single-purpose check out of
+/// [`crate::memory_core::filter::FilterConfig::apply`] lets
 /// `PalaceHandle::remember_with_options` call it on its own when `force` is
 /// set but the caller has NOT also set the explicit `allow_secret_like`
 /// opt-in.
