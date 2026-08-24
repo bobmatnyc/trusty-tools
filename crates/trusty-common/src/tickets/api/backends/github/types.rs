@@ -349,10 +349,11 @@ fn reject_unquotable(field: &'static str, value: &str) -> Result<(), SearchQuery
 /// simpler than quoting a value that never legitimately needs quotes.
 /// What: accepts the documented sentinels (`*` for "any assignee", and `@me`),
 /// otherwise requires 1-39 characters of `[A-Za-z0-9-]` with no leading or
-/// trailing hyphen — the GitHub username grammar. That character set
-/// structurally excludes space, `:` and `"`.
+/// trailing hyphen and no consecutive hyphens — the GitHub username grammar.
+/// That character set structurally excludes space, `:` and `"`.
 /// Test: `tests::legitimate_values_still_build`, `tests::assignee_sentinels_accepted`,
-/// `tests::assignee_with_whitespace_is_rejected`.
+/// `tests::assignee_with_whitespace_is_rejected`,
+/// `tests::assignee_consecutive_hyphens_rejected`.
 fn is_valid_assignee(a: &str) -> bool {
     if a == "@me" || a == "*" {
         return true;
@@ -361,6 +362,7 @@ fn is_valid_assignee(a: &str) -> bool {
         && a.len() <= 39
         && !a.starts_with('-')
         && !a.ends_with('-')
+        && !a.contains("--")
         && a.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
@@ -373,12 +375,14 @@ fn is_valid_assignee(a: &str) -> bool {
 /// What: `owner`/`repo` come from operator config, not from the search caller,
 /// and set the scope. `state` maps through a closed match to a fixed literal
 /// and is never interpolated. The three caller-controlled fields are each
-/// handled per their own grammar position: free-text `query` becomes ONE quoted
-/// phrase (so an embedded `is:`/`repo:` token stays a search term), `assignee`
-/// is allowlist-validated because its qualifier takes a bare value, and each
-/// `label` keeps its documented quoting after being checked for the characters
-/// that would defeat it.
+/// handled per their own grammar position: free-text `query` has each of its
+/// whitespace-separated terms quoted individually (so an embedded `is:`/`repo:`
+/// token stays a search term while independent-term matching survives),
+/// `assignee` is allowlist-validated because its qualifier takes a bare value,
+/// and each `label` keeps its documented quoting after being checked for the
+/// characters that would defeat it.
 /// Test: `tests::query_free_text_cannot_inject_a_second_qualifier`,
+/// `tests::query_terms_stay_independent`,
 /// `tests::assignee_with_whitespace_is_rejected`, `tests::label_quote_is_rejected`,
 /// `tests::legitimate_values_still_build`.
 pub(super) fn build_search_query(
@@ -388,14 +392,15 @@ pub(super) fn build_search_query(
 ) -> Result<String, SearchQueryError> {
     let mut q = format!("repo:{owner}/{repo}");
     if let Some(text) = &p.query {
-        let trimmed = text.trim();
-        // #6216: an all-blank query must contribute nothing — quoting it would
-        // emit a `""` phrase that matches differently from no filter at all.
-        if !trimmed.is_empty() {
-            reject_unquotable("query", trimmed)?;
-            // #6216: one quoted phrase, so `is:archived` in free text stays a
-            // search term instead of becoming a live qualifier.
-            q.push_str(&format!(" \"{trimmed}\""));
+        reject_unquotable("query", text)?;
+        // #6216: quote each term separately, not the whole string as one
+        // phrase. Both forms make an embedded `is:`/`repo:` inert, but a single
+        // phrase also forces adjacency — measured live, `crash startup` fell
+        // from 1663 hits to 373. Per-term quoting measured 1663, matching the
+        // unquoted form exactly. An all-blank query yields no terms and so
+        // contributes nothing.
+        for term in text.split_whitespace() {
+            q.push_str(&format!(" \"{term}\""));
         }
     }
     if let Some(s) = &p.state {
@@ -472,9 +477,28 @@ mod tests {
             vec!["repo:o/r".to_string()],
             "free-text query must contribute no live qualifier, got: {q}"
         );
-        assert!(
-            q.contains("\"someone is:archived\""),
-            "the caller's text is preserved verbatim as one phrase: {q}"
+        assert_eq!(
+            q, "repo:o/r \"someone\" \"is:archived\"",
+            "each term is quoted separately, so `is:archived` is an inert term"
+        );
+    }
+
+    /// Multi-word free text must stay independent AND'd terms, not one phrase.
+    ///
+    /// Why: quoting the whole string as a single phrase forces adjacency.
+    /// Measured live against `repo:microsoft/vscode`: `crash startup` unquoted
+    /// returned 1663 issues, as one phrase 373, and per-term-quoted 1663. This
+    /// pins the shape that keeps the 1663.
+    #[test]
+    fn query_terms_stay_independent() {
+        let p = SearchIssuesParams {
+            query: Some("crash startup".into()),
+            ..Default::default()
+        };
+        let q = build_search_query("o", "r", &p).expect("legitimate free text");
+        assert_eq!(
+            q, "repo:o/r \"crash\" \"startup\"",
+            "two terms must stay two terms, not become one phrase"
         );
     }
 
@@ -491,6 +515,19 @@ mod tests {
             vec!["repo:o/r".to_string()],
             "only the configured repo may scope the search, got: {q}"
         );
+    }
+
+    /// A username may contain a hyphen but not two in a row.
+    #[test]
+    fn assignee_consecutive_hyphens_rejected() {
+        let p = SearchIssuesParams {
+            assignee: Some("a--b".into()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            build_search_query("o", "r", &p),
+            Err(SearchQueryError::InvalidAssignee(_))
+        ));
     }
 
     /// An assignee takes a bare value, so whitespace in it is refused.
@@ -610,12 +647,12 @@ mod tests {
         let q = build_search_query("o", "r", &p).expect("legitimate filters must build");
         assert_eq!(
             q,
-            "repo:o/r \"crash on startup\" state:closed assignee:bob-matnyc \
+            "repo:o/r \"crash\" \"on\" \"startup\" state:closed assignee:bob-matnyc \
              label:\"bug\" label:\"help wanted\"",
         );
     }
 
-    /// An all-blank query must not emit an empty `""` phrase.
+    /// An all-blank query must not emit an empty `""` term.
     #[test]
     fn blank_query_contributes_no_phrase() {
         let p = SearchIssuesParams {
