@@ -63,6 +63,14 @@ use std::sync::Once;
 /// an hour, so a survivor this old cannot belong to a run still in progress —
 /// which is what makes the sweep safe to run while sibling test binaries and
 /// other engineers' `cargo test` processes are using the same tmux server.
+///
+/// What it cannot tell apart: a tmux listing carries a name and a creation
+/// time, no provenance. On a machine running this suite, a session the DAEMON
+/// created for a project legitimately named `xtest-…` is killed here at 30
+/// minutes like any other. The daemon-side rules avoid that class of mistake by
+/// also requiring an adopted provenance
+/// ([`crate::session_manager::SessionRecord::is_leaked_test_adoption`]); this
+/// sweep has no record to ask.
 const STALE_SESSION_AGE_SECS: i64 = 1_800;
 
 /// Runs [`sweep_stale_reserved_sessions`] once per test process.

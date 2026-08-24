@@ -826,11 +826,19 @@ impl DaemonState {
                         // It must gate the log too — a boot whose ONLY finding
                         // was declined panes would otherwise print nothing.
                         let n_declined = report.adoption_declined.len();
+                        // #6116: same reasoning as `n_declined` — a refused
+                        // test session leaves no record, and a swept one
+                        // leaves only a tombstone, so a boot whose only
+                        // finding was either would otherwise print nothing.
+                        let n_test_refused = report.reserved_test_refused.len();
+                        let n_test_swept = report.reserved_test_swept.len();
                         if n_adopted > 0
                             || n_stopped > 0
                             || n_external > 0
                             || n_stale_decisions > 0
                             || n_declined > 0
+                            || n_test_refused > 0
+                            || n_test_swept > 0
                         {
                             tracing::info!(
                                 adopted = n_adopted,
@@ -838,6 +846,8 @@ impl DaemonState {
                                 external = n_external,
                                 stale_decisions_cleared = n_stale_decisions,
                                 adoption_declined = n_declined,
+                                reserved_test_refused = n_test_refused,
+                                reserved_test_swept = n_test_swept,
                                 "session-manager reconcile complete"
                             );
                         }

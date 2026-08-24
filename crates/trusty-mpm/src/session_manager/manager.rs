@@ -191,12 +191,13 @@ pub struct ReconcileReport {
     /// would not resolve, a refused one is a leaked test session the daemon
     /// will not track no matter what its pane says.
     pub reserved_test_refused: Vec<String>,
-    /// Session ids of reserved-test-namespace records tombstoned this boot
-    /// because their tmux session was gone (#6116).
+    /// Session ids of adopted reserved-test-namespace records tombstoned this
+    /// boot, whether their pane was live or gone (#6116).
     ///
     /// Why: such a record was adopted by a daemon build predating the refusal
-    /// above and would otherwise sit in the picker as a `Stopped` row nothing
-    /// can resume.
+    /// above. Left alone it either sat in the picker as a `Stopped` row nothing
+    /// could resume, or — with a live pane — fed the re-adopt/reap/resume loop
+    /// this module's doc describes.
     pub reserved_test_swept: Vec<String>,
 }
 

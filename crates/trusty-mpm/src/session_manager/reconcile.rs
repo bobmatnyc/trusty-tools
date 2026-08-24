@@ -64,9 +64,19 @@
 //! from the name alone, so it holds for every leak shape whether or not any
 //! test-side cleanup ran. Refusal also hands the leaked pane back to
 //! `daemon::orphan_gc`, which kills an idle shell with no live child; adopting
-//! it was what made it permanent. An already-adopted record in that namespace
-//! whose tmux session is gone is tombstoned rather than marked `Stopped`, since
-//! there is no test to resume — see the gone arm below.
+//! it was what made it permanent.
+//!
+//! **A record one of those already produced is tombstoned whether its pane
+//! lives or not**, via [`SessionRecord::is_leaked_test_adoption`], and that
+//! symmetry is the point: re-adopting a LIVE one as `Active` restored its
+//! orphan-GC immunity, the reaper then stamped the dead pane `Unexpected`
+//! (auto-resumable), the supervisor RECREATED the tmux session, and the next
+//! boot re-adopted it — a loop that ran three times in one day's daemon log.
+//! [`SessionRecord::is_auto_resumable`] refuses the same records, which closes
+//! the window between a reaper stop and the next boot. The predicate asks for
+//! an adopted PROVENANCE as well as a reserved name, so a session the daemon
+//! CREATED for a project legitimately named `xtest-…` keeps ordinary
+//! stop/resume behavior.
 //!
 //! **Declining is a kill decision, so the probe behind it retries.** An
 //! undeclared pane is orphan-GC input, and that GC kills an idle-shell pane
@@ -126,7 +136,8 @@ impl SessionManager {
     /// `boot_reconcile_still_auto_resumes_a_session_lost_with_the_daemon`
     /// (#6194) in `stop_cause_tests.rs`;
     /// `reconcile_refuses_to_adopt_a_reserved_test_session`,
-    /// `reconcile_tombstones_a_reserved_test_record_whose_tmux_is_gone`
+    /// `reconcile_tombstones_an_adopted_reserved_record_whose_tmux_is_gone`,
+    /// `a_live_leaked_test_pane_is_never_readopted_or_recreated`
     /// (#6116) in `naming_tests.rs`.
     pub async fn reconcile_on_boot(
         &self,
@@ -179,9 +190,14 @@ impl SessionManager {
                 // `"attached": true` beside `"state": "decommissioned"` — and
                 // the picker hides the row either way. Report it; never
                 // auto-revive it (see this module's doc).
+                // #6116: not for a tombstoned test adoption, where a live pane
+                // is the EXPECTED state — the record is dropped while the
+                // orphan-GC still has two sweeps of work to do on the pane —
+                // and the advice to reactivate it is exactly wrong.
                 if live_names
                     .as_ref()
                     .is_some_and(|live| live.contains(&record.tmux_name))
+                    && !record.is_leaked_test_adoption()
                 {
                     warn!(
                         id = %record.id,
@@ -213,6 +229,30 @@ impl SessionManager {
                 continue;
             }
 
+            // #6116: BEFORE the live/gone branch, because liveness is what the
+            // self-sustaining loop fed on — a live leaked pane was re-adopted
+            // Active, which restored its orphan-GC immunity, and once the pane
+            // died the reaper stamped it auto-resumable and the supervisor
+            // recreated the tmux session for the next pass to re-adopt. The
+            // record is a leaked test adoption either way, so the answer is the
+            // same either way: tombstone it and let the orphan-GC have the pane.
+            // Needs no live set, so it also runs when tmux is unobservable.
+            if record.is_leaked_test_adoption() {
+                record.set_lifecycle_state(ManagedSessionState::Deleted, Utc::now());
+                record.pending_decision = None;
+                record.proposed_default = None;
+                report.reserved_test_swept.push(record.id.to_string());
+                warn!(
+                    id = %record.id,
+                    name = %record.tmux_name,
+                    "reconcile: tombstoned an adopted reserved test-namespace record (#6116) — \
+                     a leaked test session is not a session to keep, resume or relaunch; its \
+                     pane goes back to the orphan-GC"
+                );
+                guard.upsert(record).await?;
+                continue;
+            }
+
             // #5856: without an observed live set there is no evidence either
             // way, so the record keeps whatever state it already has. The
             // pre-#5856 code fell through to the `else` arm here and marked
@@ -230,24 +270,6 @@ impl SessionManager {
                 record.stop_cause = None;
                 report.adopted.push(record.tmux_name.clone());
                 info!(name = %record.tmux_name, "reconcile: re-adopted live session");
-            } else if crate::core::names::is_reserved_test_session_name(&record.tmux_name) {
-                // #6116: a test's session that is gone leaves nothing to
-                // resume, so `Stopped` would keep a row in the picker no
-                // automatic path can ever clear. This reaches records a daemon
-                // build predating the refusal above already adopted — the
-                // store is durable across the upgrade that adds the refusal.
-                record.set_lifecycle_state(ManagedSessionState::Deleted, Utc::now());
-                record.pending_decision = None;
-                record.proposed_default = None;
-                report.reserved_test_swept.push(record.id.to_string());
-                warn!(
-                    id = %record.id,
-                    name = %record.tmux_name,
-                    "reconcile: tombstoned a reserved test-namespace record whose tmux session \
-                     is gone (#6116) — a leaked test session is not a stopped session"
-                );
-                guard.upsert(record).await?;
-                continue;
             } else {
                 // Session is gone — mark Stopped (resumable), never Orphaned.
                 record.state = ManagedSessionState::Stopped;
@@ -370,7 +392,9 @@ impl SessionManager {
                 id,
                 tmux_name: name.clone(),
                 cwd: resolved_cwd.clone(),
-                task: "adopted session".to_string(),
+                // #6116: one spelling, shared with the predicate that reads it
+                // back as this record's adopted provenance.
+                task: super::record::ADOPTED_TASK.to_string(),
                 state: ManagedSessionState::Active,
                 created_at: Utc::now(),
                 last_activity_at: None,

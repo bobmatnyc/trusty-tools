@@ -33,6 +33,22 @@ use super::injection_status::InjectionStatus;
 /// `is_resolved_existing_false_for_none_and_unknown_sentinel`.
 pub const UNRESOLVED_PATH_SENTINEL: &str = "/unknown";
 
+/// The `task` an AUTOMATIC adoption writes into the record it mints (#6116).
+///
+/// Why: it is the only field distinguishing a session the daemon ADOPTED from
+/// one it CREATED, and #6116's tombstone arm must act on the first and never on
+/// the second — a project legitimately named `xtest-…` derives a name in the
+/// reserved namespace, and its own sessions stay ordinary resumable sessions.
+/// What: `adopted session`, written by
+/// [`super::SessionManager::reconcile_on_boot`]'s external-adopt loop.
+/// [`SessionRecord::is_leaked_test_adoption`] matches it as a PREFIX, because
+/// `SessionManager::mark_errored` appends `[error: …]` to whatever task a
+/// record already carries.
+/// Test: `an_adopted_reserved_record_is_a_leaked_test_adoption`,
+/// `a_created_reserved_session_is_not_a_leaked_test_adoption` in
+/// `record_tests.rs`.
+pub const ADOPTED_TASK: &str = "adopted session";
+
 /// Opaque identifier for a managed session.
 ///
 /// Why: a newtype over [`Uuid`] prevents accidental confusion with other
@@ -549,7 +565,8 @@ impl SessionRecord {
     /// only `tm session decommission` stopped the loop. This predicate is the
     /// single place both paths ask the question, so the two cannot drift.
     /// What: `true` only for a `Stopped` record whose stop was not
-    /// [`StopCause::Deliberate`]. Every other state is `false`, including
+    /// [`StopCause::Deliberate`] and which is not a leaked test adoption
+    /// ([`Self::is_leaked_test_adoption`], #6116). Every other state is `false`, including
     /// `Errored` — neither caller relaunches those today, and this predicate
     /// answers "may an automatic path relaunch it", not "may it be resumed":
     /// an operator's own `tm session resume` is unaffected by this and still
@@ -565,6 +582,34 @@ impl SessionRecord {
     pub fn is_auto_resumable(&self) -> bool {
         matches!(self.state, ManagedSessionState::Stopped)
             && self.stop_cause != Some(StopCause::Deliberate)
+            // #6116: never relaunch a test's session. The reaper stamps a
+            // gone-tmux record `Unexpected` when other sessions are live, which
+            // is auto-resumable — so without this the supervisor RECREATES the
+            // leaked pane, reconcile re-adopts it, and the loop sustains itself
+            // (observed three times in one day's daemon log).
+            && !self.is_leaked_test_adoption()
+    }
+
+    /// Whether this record is an AUTOMATIC adoption of a session in the
+    /// test-owned namespace (#6116).
+    ///
+    /// Why: the one predicate every #6116 decision asks, so the boot
+    /// reconciler's tombstone arm and [`Self::is_auto_resumable`] cannot
+    /// disagree about which records are leaked test sessions. It deliberately
+    /// asks TWO questions: a reserved NAME alone would also match a session the
+    /// daemon created for a project legitimately named `xtest-…`, and that
+    /// session is real work — tombstoning or refusing to resume it would be the
+    /// defect, not the fix.
+    /// What: the tmux name is in
+    /// [`trusty_common::session_naming::RESERVED_TEST_PREFIX`] AND the task
+    /// begins with [`ADOPTED_TASK`], which only an automatic adoption writes.
+    /// Test: `an_adopted_reserved_record_is_a_leaked_test_adoption`,
+    /// `a_created_reserved_session_is_not_a_leaked_test_adoption`,
+    /// `an_ordinary_adopted_record_is_not_a_leaked_test_adoption` in
+    /// `record_tests.rs`.
+    pub fn is_leaked_test_adoption(&self) -> bool {
+        trusty_common::session_naming::is_reserved_test_session_name(&self.tmux_name)
+            && self.task.starts_with(ADOPTED_TASK)
     }
 
     /// Set this record's lifecycle state, keeping [`Self::terminal_at`]

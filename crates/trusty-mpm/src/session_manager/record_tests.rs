@@ -574,6 +574,78 @@ fn from_wire_round_trips_every_variant() {
     assert_eq!(ManagedSessionState::from_wire(""), None);
 }
 
+/// #6116: the predicate's whole job is telling an ADOPTED test session apart
+/// from one the daemon created, so the matrix is asserted rather than assumed.
+///
+/// Why: keying on the reserved name alone would tombstone — and refuse to
+/// resume — the sessions of a project legitimately named `xtest-…`.
+/// Test: this function IS the test.
+#[test]
+fn leaked_test_adoption_requires_both_a_reserved_name_and_an_adopted_task() {
+    let reserved = format!(
+        "{}deadrt1234-01",
+        trusty_common::session_naming::RESERVED_TEST_PREFIX
+    );
+
+    let mut adopted = terminal_fixture();
+    adopted.tmux_name = reserved.clone();
+    adopted.task = ADOPTED_TASK.into();
+    assert!(adopted.is_leaked_test_adoption());
+
+    // `mark_errored` appends to the task, which must not shed the provenance.
+    let mut errored = adopted.clone();
+    errored.task = format!("{ADOPTED_TASK} [error: boom]");
+    assert!(errored.is_leaked_test_adoption());
+
+    // A session the daemon CREATED for a project named `xtest-…`.
+    let mut created = terminal_fixture();
+    created.tmux_name = reserved;
+    created.task = "implement feature X".into();
+    assert!(
+        !created.is_leaked_test_adoption(),
+        "a created session in the namespace is real work, not a leak"
+    );
+
+    // An ordinary adoption keeps every ordinary privilege.
+    let mut ordinary = terminal_fixture();
+    ordinary.tmux_name = "tm-trusty-tools-01".into();
+    ordinary.task = ADOPTED_TASK.into();
+    assert!(!ordinary.is_leaked_test_adoption());
+}
+
+/// #6116: the supervisor's per-tick sweep asks `is_auto_resumable`, and a `yes`
+/// there is what RECREATED a leaked test pane after the reaper stopped it —
+/// the loop that ran three times in one day's daemon log.
+///
+/// What: the exact record shape the reaper leaves behind (`Stopped` +
+/// `Unexpected`) for both a leaked adoption and a created session in the same
+/// namespace; only the first is refused.
+/// Test: this function IS the test.
+#[test]
+fn a_stopped_leaked_test_adoption_is_never_auto_resumable() {
+    let reserved = format!(
+        "{}deadrt1234-01",
+        trusty_common::session_naming::RESERVED_TEST_PREFIX
+    );
+
+    let mut leaked = terminal_fixture();
+    leaked.tmux_name = reserved.clone();
+    leaked.task = ADOPTED_TASK.into();
+    leaked.state = ManagedSessionState::Stopped;
+    leaked.stop_cause = Some(StopCause::Unexpected);
+    assert!(
+        !leaked.is_auto_resumable(),
+        "resuming this recreates the tmux session the next reconcile re-adopts"
+    );
+
+    let mut created = leaked.clone();
+    created.task = "implement feature X".into();
+    assert!(
+        created.is_auto_resumable(),
+        "an ordinary session in the namespace keeps post-reboot restore"
+    );
+}
+
 /// Build a minimal Active record for the `set_lifecycle_state` cases.
 fn terminal_fixture() -> SessionRecord {
     SessionRecord {

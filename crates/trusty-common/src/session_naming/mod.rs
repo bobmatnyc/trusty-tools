@@ -138,10 +138,21 @@ pub fn is_managed_session_name(name: &str) -> bool {
 /// What: `tm-xtest-`. It starts with [`PREFIX`], so
 /// [`is_managed_session_name`] still recognises such a session as ours — the
 /// orphan-GC's first gate — while [`is_reserved_test_session_name`] separates
-/// it from anything an operator's work is in. A real project whose repo is
-/// named `xtest-…` would derive a name in this namespace and be refused
-/// adoption; no such repo exists here, and the alternative (a marker only a
-/// live tmux server can answer) cannot be read from a name at all.
+/// it from anything an operator's work is in.
+///
+/// **What a project legitimately named `xtest-…` pays.** Its sessions derive
+/// names in this namespace, and two consequences follow. Both are accepted; no
+/// such project exists in this workspace, and the alternative — a marker only a
+/// live tmux server can answer — cannot be read from a name at all.
+///
+/// 1. The daemon never AUTO-ADOPTS such a session. Sessions it created are
+///    unaffected: trusty-mpm's tombstone and no-auto-resume rules ask for an
+///    adopted provenance too (`SessionRecord::is_leaked_test_adoption`), so a
+///    created `tm-xtest-foo-01` still stops, resumes and lists normally.
+/// 2. On a machine that runs trusty-mpm's own test suite, that suite KILLS such
+///    a session once it is 30 minutes old — the tmux-level sweep sees a name
+///    and a creation time, and no provenance is recoverable from those.
+///
 /// Test: `reserved_test_prefix_is_a_managed_name`,
 /// `reserved_test_names_are_recognised`,
 /// `ordinary_managed_names_are_not_reserved`; the daemon half in
