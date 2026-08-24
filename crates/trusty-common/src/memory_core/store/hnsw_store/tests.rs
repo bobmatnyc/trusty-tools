@@ -851,7 +851,7 @@ fn search_returns_the_exact_top_k_below_the_exhaustive_threshold() {
 fn search_uses_the_graph_above_the_exhaustive_threshold() {
     assert_eq!(
         exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS,
-        1024,
+        4096,
         "changing this bound changes the cost profile of every recall; \
          update the measurement in exhaustive.rs before changing the number"
     );
@@ -996,7 +996,8 @@ fn search_drops_a_shadowed_candidate_whose_vector_row_is_gone() {
 /// churn past the threshold within one session and silently revert to the
 /// approximate path — the fix disabling itself with no signal.
 /// What: fills a store past the threshold, deletes back down to a handful of
-/// live drawers (leaving 300 points in the graph), and asserts search is exact
+/// live drawers (every inserted point stays in the graph, so it holds
+/// `EXHAUSTIVE_SCAN_MAX_POINTS + 44` of them), and asserts search is exact
 /// again — which only holds on the scan path.
 /// Test: this test itself is the verification.
 #[test]
@@ -1158,16 +1159,17 @@ fn upsert_marks_a_shadow_before_the_graph_can_serve_it() {
     );
 }
 
-/// Why (#5179): #5178 bought exactness up to 256 and left 17.4% of queries
-/// losing a true top-10 neighbour at 512 and 24.5% at 1024, measured on this
-/// repo's own palace embeddings. Raising the bound to 1024 is only worth
-/// anything if the whole range up to it is actually answered exactly, and the
-/// seam is where a rounding or `<` / `<=` slip would hide: a palace holding
-/// EXACTLY the threshold count must still take the scan.
+/// Why (#5179): the ceiling has been raised twice — to 1024, then to 4096 —
+/// because the graph arm kept losing a true top-10 neighbour above it: 14.9% of
+/// queries at 1354 live vectors, 14.9% at 2048 and 20.5% at 2879, measured on
+/// this repo's own palace embeddings. A raise is only worth anything if the
+/// whole range up to the new number is actually answered exactly, and the seam
+/// is where a rounding or `<` / `<=` slip would hide: a palace holding EXACTLY
+/// the threshold count must still take the scan.
 /// What: fills a store with exactly `EXHAUSTIVE_SCAN_MAX_POINTS` drawers and
 /// asserts `search` returns the brute-force top-10 for 20 queries, in order.
-/// Deterministic — the scan is exact, so this cannot flake. On `origin/main`,
-/// where the bound is 256, a 1024-drawer store takes the graph and this fails.
+/// Deterministic — the scan is exact, so this cannot flake. Against the previous
+/// bound of 1024 a 4096-drawer store takes the graph and this fails.
 /// Test: this test itself is the verification.
 #[test]
 fn search_is_exact_at_the_exhaustive_threshold() {
@@ -1217,6 +1219,12 @@ fn search_is_exact_at_the_exhaustive_threshold() {
 /// What: asserts the floor holds for a small palace, that the live count drives
 /// the value between the floor and the cap, that the cap binds from 4096 live
 /// drawers upward, and that a large `top_k` is not clipped by the cap.
+///
+/// The floor and ramp cases are assertions about the formula, not about live
+/// behaviour: since #5179 put `EXHAUSTIVE_SCAN_MAX_POINTS` at 4096, every
+/// collection that reaches this arm is already at the cap, so `graph_ef_search`
+/// answers `HNSW_MAX_EF_SEARCH` for all of them. They are pinned anyway because
+/// the ramp is what a lowered ceiling would fall back onto.
 /// Test: this test itself is the verification.
 #[test]
 fn graph_ef_search_scales_with_live_count_and_stops_at_the_cap() {
@@ -1243,6 +1251,12 @@ fn graph_ef_search_scales_with_live_count_and_stops_at_the_cap() {
         graph_ef_search(10, 4096),
         1024,
         "the cap binds exactly at 4096"
+    );
+    assert_eq!(
+        graph_ef_search(10, exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS + 1),
+        1024,
+        "the smallest collection this arm actually sees is already at the cap \
+         (#5179)"
     );
     assert_eq!(
         graph_ef_search(10, 100_000),

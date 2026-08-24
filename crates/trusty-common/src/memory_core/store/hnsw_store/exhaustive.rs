@@ -32,19 +32,21 @@ use redb::ReadableTable;
 /// Live-drawer ceiling at or below which [`super::HnswStore::search`] scans
 /// exhaustively instead of traversing the graph.
 ///
-/// Why (#5171, raised 256 → 1024 by #5179): the recall loss this scan removes
-/// does not stop at 256 — #5171 set the bound on cost, not on where the defect
-/// ends, and the regime it left behind was measured on this repo's own palace
-/// embeddings at 17.4% of queries losing a true top-10 neighbour at 512 points
-/// and 24.5% at 1024. Exactness is worth buying wherever it is affordable, and
-/// at 1024 points the scan costs on the order of 400µs per query — the same
-/// order as the graph traversal it replaces there, because with a candidate
-/// budget scaled to the collection (see [`super::graph_arm`]) the traversal
-/// evaluates a comparable number of distances anyway. Past 1024 the scan's
-/// linear cost stops being repayable and HNSW's sublinear cost is worth its
-/// approximation, which is the trade the algorithm exists to make. The palace
-/// this repo keeps for itself holds ~2100 live vectors, so the regime above the
-/// bound is real and not hypothetical; #5179 narrows it rather than closing it.
+/// Why (#5171, raised 256 → 1024 → 4096 under #5179): the recall loss this scan
+/// removes does not stop where a previous ceiling was placed. Each raise set the
+/// bound on cost, not on where the defect ends. Above 1024 the graph arm still
+/// lost a true top-10 neighbour on 14.9% of queries at 1354 live vectors, 14.9%
+/// at 2048 and 20.5% at 2879, measured on this repo's own palace embeddings with
+/// `ef` already scaled to the collection (see [`super::graph_arm`]) — scaling
+/// narrows that regime, it does not close it.
+///
+/// The price is a linear scan, timed against the same real 384-dim embeddings:
+/// 428µs per query at 1024 points, 711µs at 2048, 986µs at 2879, and 1.40ms at
+/// 4096. 4096 is where that price stops being worth paying, and it is above
+/// every palace on this machine — the largest holds ~2900 live vectors — so the
+/// whole fleet is now answered exactly. The graph arm keeps the regime past
+/// 4096, where a linear scan is no longer repayable and HNSW's sublinear cost is
+/// worth its approximation; that is the trade the algorithm exists to make.
 ///
 /// Nothing migrates when this number changes: no graph is persisted, and
 /// `HnswStore::open_with_mode` rebuilds the index from the raw `VECTORS` rows on
@@ -52,8 +54,8 @@ use redb::ReadableTable;
 /// What: compared against the number of LIVE drawers — `VECTOR_KEYS` rows, the
 /// `reverse` map `search` builds two statements earlier. Not
 /// `Hnsw::get_nb_point()`, which also counts tombstoned points and re-upsert
-/// shadows: those accumulate within a session, so a palace of 200 real drawers
-/// could drift past 256 graph points mid-session and silently revert to the
+/// shadows: those accumulate within a session, so a palace of 2900 real drawers
+/// could drift past 4096 graph points mid-session and silently revert to the
 /// path this module exists to replace. Scan cost does follow the graph count,
 /// but the overhang is bounded by churn since the last open — one extra point
 /// per delete or re-upsert, and `HnswStore::open` rebuilds one point per live
@@ -61,9 +63,9 @@ use redb::ReadableTable;
 /// Test: `search_uses_the_graph_above_the_exhaustive_threshold`,
 /// `search_is_exact_at_the_exhaustive_threshold`,
 /// `deleting_drawers_does_not_push_a_small_palace_off_the_exhaustive_path`.
-// #5179: raised from 256 so the whole regime #5171 measured as still lossy is
-// answered exactly.
-pub(super) const EXHAUSTIVE_SCAN_MAX_POINTS: usize = 1024;
+// #5179: raised to 4096 so every palace on the fleet — the largest holds ~2900
+// live vectors — is answered exactly rather than approximately.
+pub(super) const EXHAUSTIVE_SCAN_MAX_POINTS: usize = 4096;
 
 /// Every live point in `index`, ranked by exact distance to `query`, best
 /// first — the whole ranking, not a prefix of it.

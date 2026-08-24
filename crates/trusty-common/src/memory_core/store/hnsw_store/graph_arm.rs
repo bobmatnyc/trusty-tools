@@ -55,19 +55,25 @@ const HNSW_EF_LIVE_DIVISOR: usize = 4;
 /// embeddings on an M-series laptop, a 384-dim query over ~2900 drawers takes
 /// about 0.5ms at `ef = 64` and about 2.2ms at `ef = 719`, and 1024 puts the
 /// ceiling at roughly 3ms — the most this store is willing to spend answering
-/// one recall. That the number also equals
-/// [`super::EXHAUSTIVE_SCAN_MAX_POINTS`] is a coincidence of two independent
-/// choices, NOT a cost equivalence: an `ef = 1024` traversal costs several times
-/// what scanning 1024 points costs, because each unit of `ef` carries heap and
-/// visited-set work a flat sequential scan does not. What the cap does buy is
-/// that per-query cost stops growing with the palace, which is the whole reason
-/// this arm exists. It binds from `live = 4096` upward.
+/// one recall. It is not a cost equivalence with a 1024-point scan: an
+/// `ef = 1024` traversal costs several times what scanning 1024 points costs,
+/// because each unit of `ef` carries heap and visited-set work a flat sequential
+/// scan does not. What the cap does buy is that per-query cost stops growing
+/// with the palace, which is the whole reason this arm exists.
 ///
-/// The recall it buys is real but partial: on real embeddings the scaled `ef`
-/// took top-10 misses from 23.3% of queries to 17.7% at 2048 drawers and from
-/// 20.2% to 15.6% at 2879. #5179 narrows the gap above the exhaustive threshold;
-/// closing it needs a different index structure or a rerank pass, not a larger
-/// number here.
+/// The cap binds from `live = 4096` upward, and since #5179 raised
+/// [`super::EXHAUSTIVE_SCAN_MAX_POINTS`] to 4096 that is every collection this
+/// arm sees: the `live / 4` ramp now lies entirely inside the exhaustive
+/// regime, so in practice `ef` here is this constant. The ramp is kept because
+/// it is what the ceiling would fall back onto if the scan's cost ever forces
+/// the ceiling down again, and because the divisor is the thing that would have
+/// to change for the cap to bind later rather than immediately.
+///
+/// The recall it buys is real but partial: with the scaled `ef` in place, real
+/// embeddings still lost a true top-10 neighbour on 14.9% of queries at 2048
+/// live drawers and 20.5% at 2879 — sizes now answered by the scan. Closing the
+/// gap that remains above 4096 needs a different index structure or a rerank
+/// pass, not a larger number here.
 /// What: clamps the SCALED term only. A caller asking for a large `top_k` still
 /// gets `2k`, because returning fewer results than asked for is a different
 /// defect from spending too long finding them.
