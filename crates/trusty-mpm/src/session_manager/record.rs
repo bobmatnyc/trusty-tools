@@ -29,7 +29,7 @@ use super::injection_status::InjectionStatus;
 /// What: `/unknown`, the value the pre-#6126 external-adopt path stubbed into
 /// `cwd`/`workspace_path` when `get_pane_cwd` returned nothing. It is not a real
 /// path and is never created on disk.
-/// Test: `unresolvable_record_is_selected_by_the_unresolvable_filter`,
+/// Test: `unresolvable_filter_selects_a_live_ghost_pane`,
 /// `is_resolved_existing_false_for_none_and_unknown_sentinel`.
 pub const UNRESOLVED_PATH_SENTINEL: &str = "/unknown";
 
@@ -541,7 +541,7 @@ impl SessionRecord {
     /// What: `true` only when BOTH coordinates are unresolvable — `cwd` is the
     /// sentinel, AND `workspace_path` is absent or is itself the sentinel. One
     /// resolvable coordinate is enough to keep the record.
-    /// Test: `unresolvable_record_is_selected_by_the_unresolvable_filter`,
+    /// Test: `unresolvable_filter_selects_a_live_ghost_pane`,
     /// `healthy_active_session_is_never_selected_by_the_unresolvable_filter`,
     /// `unresolvable_filter_keeps_a_record_that_still_names_a_workspace`.
     pub fn workspace_unresolvable(&self) -> bool {
