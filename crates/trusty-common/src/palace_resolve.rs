@@ -210,16 +210,34 @@ pub enum PalaceResolveError {
 /// Walk upward from `start` to the first directory carrying a project marker.
 ///
 /// Why: the pin file is anchored at a project root, so every caller that wants
-/// to read it first needs to agree on where the project begins.
+/// to read it first needs to agree on where the project begins. That answer has
+/// to be the same from a worktree and from its main checkout — ADR-0012 §1, the
+/// same property the module docs give for level 4.
 /// What: canonicalises `start` (best-effort), then ascends checking
 /// [`PROJECT_MARKERS`] at each level. Returns `None` at the filesystem root.
-/// Test: `finds_git_root_from_nested_dir`, `no_markers_returns_none`.
+///
+/// A `.git` FILE is a pointer, not a root marker, and the old check
+/// (`current.join(marker).exists()`) could not tell the two apart: a linked
+/// worktree stopped at its own directory and every caller then read and WROTE
+/// the pin there instead of in the checkout the project actually lives in
+/// (#5888). A `.git` file is now followed to the main checkout via
+/// [`main_checkout_of_worktree`], which declines for the submodule and
+/// `--separate-git-dir` shapes that carry the same file — those directories ARE
+/// their own root, so the walk stops there as before.
+/// Test: `finds_git_root_from_nested_dir`, `no_markers_returns_none`,
+/// `a_worktree_resolves_to_its_main_checkout`,
+/// `a_separate_git_dir_checkout_is_its_own_root`.
 pub fn find_project_root(start: &Path) -> Option<PathBuf> {
     let mut current = start.to_path_buf();
     if let Ok(canonical) = std::fs::canonicalize(&current) {
         current = canonical;
     }
     loop {
+        // #5888: a `.git` file points elsewhere; a `.git` directory is the root.
+        let dot_git = current.join(".git");
+        if dot_git.is_file() {
+            return Some(main_checkout_of_worktree(&dot_git).unwrap_or(current));
+        }
         for marker in PROJECT_MARKERS {
             if current.join(marker).exists() {
                 return Some(current);
@@ -229,6 +247,61 @@ pub fn find_project_root(start: &Path) -> Option<PathBuf> {
             Some(parent) if parent != current => current = parent.to_path_buf(),
             _ => return None,
         }
+    }
+}
+
+/// Resolve a linked worktree's `.git` FILE to the main checkout that owns it.
+///
+/// Why (#5888): only a linked worktree may be redirected. A submodule and any
+/// `--separate-git-dir` checkout carry a `.git` file of the identical shape, and
+/// their own directory really is the project root — redirecting those would hand
+/// the caller `<outer>/.git/modules`, which is git internals, not a working tree
+/// (the failure #5819 fixed in [`main_worktree_root`]).
+/// What: reads the `gitdir:` pointer, then reads `commondir` from the admin
+/// directory it names. `commondir` exists ONLY in a linked worktree's admin
+/// directory, so its absence is what separates the two shapes without shelling
+/// out to git. The main checkout is the parent of the common dir, and only when
+/// that common dir is itself named `.git` — otherwise the main repository is a
+/// `--separate-git-dir` one whose parent is no working tree either. Any read,
+/// parse, or shape failure returns `None`, leaving the caller with the
+/// pre-existing answer.
+/// Test: `a_worktree_resolves_to_its_main_checkout`,
+/// `a_separate_git_dir_checkout_is_its_own_root`,
+/// `a_malformed_dot_git_file_leaves_the_directory_as_the_root`.
+fn main_checkout_of_worktree(dot_git_file: &Path) -> Option<PathBuf> {
+    let raw = std::fs::read_to_string(dot_git_file).ok()?;
+    let pointer = raw
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("gitdir:"))?
+        .trim();
+    if pointer.is_empty() {
+        return None;
+    }
+    let admin = resolve_against(dot_git_file.parent()?, Path::new(pointer));
+
+    let common = std::fs::read_to_string(admin.join("commondir")).ok()?;
+    let common = common.trim();
+    if common.is_empty() {
+        return None;
+    }
+    let common_dir = std::fs::canonicalize(resolve_against(&admin, Path::new(common))).ok()?;
+
+    if common_dir.file_name() != Some(std::ffi::OsStr::new(".git")) {
+        return None;
+    }
+    let root = common_dir.parent()?;
+    root.is_dir().then(|| root.to_path_buf())
+}
+
+/// Interpret `path` relative to `base` when it is not already absolute.
+///
+/// Why: both `gitdir:` and `commondir` are documented as absolute-or-relative,
+/// and git writes the relative form for a worktree inside its own checkout.
+fn resolve_against(base: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
     }
 }
 
