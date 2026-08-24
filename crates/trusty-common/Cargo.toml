@@ -4,7 +4,7 @@ name = "trusty-common"
 # `src/mcp/*` modules. Cargo's 0.x rule makes that a MINOR bump, not a patch.
 # 0.42.1 (#6208): patch — additive `PalaceHandle::compact_vector_orphans` fixes
 # a data-loss race; no public item removed or changed, so not a 0.x break.
-version = "0.43.0"
+version = "0.43.1"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
