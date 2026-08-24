@@ -4,7 +4,7 @@ name = "trusty-memory"
 # 3c9fa3ee8 (#6024) removed find_project_root, ProjectPin, and four
 # project_root consts from the public surface. Cargo's 0.x rule puts a
 # breaking change in the MINOR position, so the bump lands here, not patch.
-version = "0.24.0"
+version = "0.24.1"
 edition = "2021"
 description = "MCP server (stdio + HTTP/SSE) for trusty-memory"
 license.workspace = true
