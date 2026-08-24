@@ -383,7 +383,7 @@ impl SymbolGraph {
     /// What: accepts a `<file>::<symbol>` key, a `<path suffix>::<symbol>`, or a
     /// bare name; ranks multiple hits by node degree so the most-connected
     /// definition leads, and reports the alternatives.
-    /// Test: `path_qualified_name_anchors_instead_of_missing`,
+    /// Test: `path_qualified_name_anchors_on_the_file_it_names`,
     /// `ambiguous_bare_name_reports_every_candidate`.
     pub fn resolve_symbol(&self, name: &str) -> SymbolMatch<'_> {
         let hits = self.ranked_indices(name);
@@ -689,7 +689,7 @@ mod tests {
         // Why: a Rust call reached a TypeScript method of the same name in the
         // sibling defect's measurement (`chatStream.ts::get`).
         // What: the only `get` in the corpus is a `.ts` symbol. Asserts the
-        // extension mismatch drops the edge even though the name is unique.
+        // language mismatch drops the edge even though the name is unique.
         let g = SymbolGraph::build_from_registry(&registry_of(vec![
             entry("ui::chat::get", "ui/src/chatStream.ts", &[]),
             entry("a::alpha::start", "crates/a/src/lib.rs", &["get"]),
@@ -702,9 +702,12 @@ mod tests {
     }
 
     #[test]
-    fn path_qualified_name_anchors_instead_of_missing() {
+    fn path_qualified_name_anchors_on_the_file_it_names() {
         // Why: `<path>::<symbol>` is how a caller names one of several
-        // same-named definitions; it used to resolve to nothing (#6167).
+        // same-named definitions. Asserting on the well-connected twin proves
+        // nothing — degree ranking returns it for a bare `write` too. This
+        // asks for the LONE definition in stamp.rs, which only real path
+        // anchoring can reach.
         let g = SymbolGraph::build_from_registry(&registry_of(vec![
             entry("agents::stamp::write", "crates/agents/src/stamp.rs", &[]),
             entry("search::store::write", "crates/search/src/store.rs", &[]),
@@ -714,9 +717,59 @@ mod tests {
                 &["write"],
             ),
         ]));
+        match g.resolve_symbol("crates/agents/src/stamp.rs::write") {
+            SymbolMatch::Unique(n) => assert_eq!(
+                n.file.display().to_string(),
+                "crates/agents/src/stamp.rs",
+                "anchored on the wrong file",
+            ),
+            other => panic!("expected Unique on stamp.rs, got {other:?}"),
+        }
+        // stamp.rs's `write` has no callers; the store.rs one does. Reaching
+        // the wrong twin would return `upsert` here.
+        assert!(
+            g.callers_of("crates/agents/src/stamp.rs::write").is_empty(),
+            "anchored on the store.rs twin: {:?}",
+            g.callers_of("crates/agents/src/stamp.rs::write"),
+        );
+        // A partial path suffix anchors the same way.
         let callers = g.callers_of("src/store.rs::write");
         assert_eq!(callers.len(), 1, "got {callers:?}");
         assert_eq!(callers[0].name, "upsert");
+    }
+
+    #[test]
+    fn a_call_never_lands_on_a_container_in_the_callers_file() {
+        // Why: the same-file exact-key shortcut returned before the callable
+        // filter, so a `Calls` edge could land on a struct sitting in the
+        // caller's own file (#6170).
+        let mut container = entry("m::Helper", "crates/a/src/lib.rs", &[]);
+        container.kind = RKind::Struct;
+        let g = SymbolGraph::build_from_registry(&registry_of(vec![
+            container,
+            entry("m::start", "crates/a/src/lib.rs", &["m::Helper"]),
+        ]));
+        assert!(
+            g.callees_of("start").is_empty(),
+            "call resolved to a container: {:?}",
+            callee_files(&g, "start"),
+        );
+    }
+
+    #[test]
+    fn sibling_extensions_of_one_language_stay_ambiguous() {
+        // Why: `.ts` and `.tsx` are one language, and treating them as two made
+        // the `.ts` twin falsely unique — an edge where the corpus is ambiguous.
+        let g = SymbolGraph::build_from_registry(&registry_of(vec![
+            entry("lib::a::get", "ui/lib/a.ts", &[]),
+            entry("widgets::b::get", "ui/widgets/b.tsx", &[]),
+            entry("app::main::start", "ui/app/main.ts", &["get"]),
+        ]));
+        assert!(
+            g.callees_of("start").is_empty(),
+            "sibling-extension twin resolved: {:?}",
+            callee_files(&g, "start"),
+        );
     }
 
     #[test]
