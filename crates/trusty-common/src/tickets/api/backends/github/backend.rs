@@ -17,7 +17,8 @@ use crate::tickets::api::backends::{
 use crate::tickets::api::models::*;
 
 use super::types::{
-    GitHubBackend, parse_comment, parse_issue, parse_label, parse_milestone, urlencode,
+    GitHubBackend, build_search_query, parse_comment, parse_issue, parse_label, parse_milestone,
+    urlencode,
 };
 
 #[async_trait]
@@ -126,24 +127,10 @@ impl Backend for GitHubBackend {
     }
 
     async fn search_issues(&self, p: SearchIssuesParams) -> Result<Vec<Issue>> {
-        let mut q = format!("repo:{}/{}", self.owner, self.repo);
-        if let Some(text) = &p.query {
-            q.push(' ');
-            q.push_str(text);
-        }
-        if let Some(s) = &p.state {
-            let st = match s.as_str() {
-                "closed" | "done" => "closed",
-                _ => "open",
-            };
-            q.push_str(&format!(" state:{st}"));
-        }
-        if let Some(a) = &p.assignee {
-            q.push_str(&format!(" assignee:{a}"));
-        }
-        for l in &p.labels {
-            q.push_str(&format!(" label:\"{l}\""));
-        }
+        // #6216: build the qualifier string through the one validating builder
+        // so a caller value containing whitespace or a quote cannot inject a
+        // second, live search qualifier.
+        let q = build_search_query(&self.owner, &self.repo, &p)?;
         let encoded = urlencode(&q);
         let url = format!(
             "/search/issues?q={encoded}&per_page={}&page={}",
