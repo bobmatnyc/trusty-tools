@@ -12,7 +12,7 @@
 //! Test: `kg_calls_edge_between_two_functions` builds a graph from a Rust
 //! source containing one function calling another and asserts the edge.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use tree_sitter::{Node, Parser};
 
 use crate::symgraph::registry::SymbolRegistry;
+use crate::symgraph::resolve::{NameIndex, bare_name, rank_matches, resolve_callee};
 use crate::symgraph::symbol::{SymbolKind, detect_language, extract_symbols};
 
 /// Lightweight node record — one per symbol the graph knows about.
@@ -70,31 +71,63 @@ pub struct SymbolEdge {
 /// Alias kept for the public API in `lib.rs`.
 pub type Edge = SymbolEdge;
 
+/// An edge before resolution: which node made the call, and the text it called.
+///
+/// Why: the caller must be a NODE, not a name — two functions in the corpus can
+/// share a name, and attributing a call to the wrong one is the defect #6170
+/// tracks. The callee stays text until [`SymbolGraph::add_edge_resolved`] finds
+/// grounds for a target.
+struct RawEdge {
+    caller: NodeIndex,
+    callee: String,
+    kind: EdgeKind,
+}
+
+/// What a caller-supplied symbol name resolved to.
+///
+/// Why: several definitions can answer to one name. A consumer that anchors a
+/// trace on a name needs to know it did, and to which alternatives — the map
+/// this replaces answered with whichever definition was registered first and
+/// said nothing (#6170, ports #6169).
+/// What: `Unique` when one definition matched, `Ambiguous` when several did —
+/// `chosen` is the most-connected one and `alternatives` holds the rest, best
+/// first — and `NotFound` when the graph knows no such name.
+/// Test: `ambiguous_bare_name_reports_every_candidate`.
+#[derive(Debug)]
+pub enum SymbolMatch<'a> {
+    NotFound,
+    Unique(&'a SymbolNode),
+    Ambiguous {
+        chosen: &'a SymbolNode,
+        alternatives: Vec<&'a SymbolNode>,
+    },
+}
+
 /// A symbol-level graph rooted at one or more files.
 ///
 /// Why: Replaces ad-hoc `grep`-style call-site searches with a structured
 /// query layer over a real graph backend (petgraph::StableGraph).
 /// What: Holds a `StableGraph<SymbolNode, EdgeKind>` as the source of
-/// truth plus a name → `NodeIndex` lookup map. Serde derives serialise the
-/// underlying `StableGraph` natively (petgraph "serde-1" feature). The
-/// name-index map is rebuilt after deserialisation via `rebuild_name_index`.
+/// truth plus a `<file>::<symbol>`-keyed name index. Serde derives serialise
+/// the underlying `StableGraph` natively (petgraph "serde-1" feature). The
+/// name index is rebuilt after deserialisation via `rebuild_name_index`.
 /// Test: `kg_calls_edge_between_two_functions`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SymbolGraph {
     /// Internal petgraph storage.
     #[serde(rename = "graph")]
     inner: StableGraph<SymbolNode, EdgeKind>,
-    /// First-occurrence lookup of node-name → NodeIndex. Skipped during
+    /// Qualified-identity lookup backing every name query. Skipped during
     /// serde and rebuilt on deserialisation by `rebuild_name_index`.
     #[serde(skip, default)]
-    name_to_idx: HashMap<String, NodeIndex>,
+    names: NameIndex,
 }
 
 impl Default for SymbolGraph {
     fn default() -> Self {
         Self {
             inner: StableGraph::new(),
-            name_to_idx: HashMap::new(),
+            names: NameIndex::default(),
         }
     }
 }
@@ -147,30 +180,60 @@ impl SymbolGraph {
             .collect()
     }
 
-    /// Insert a node, returning its `NodeIndex`. Updates the name lookup
-    /// only on first occurrence so multiple nodes sharing a name keep the
-    /// earliest index reachable (preserves prior `find by name` behaviour).
+    /// Insert a node under its own name, returning its `NodeIndex`.
     fn add_node(&mut self, node: SymbolNode) -> NodeIndex {
         let name = node.name.clone();
+        self.add_node_as(node, &name)
+    }
+
+    /// Insert a node, indexing it under `symbol` as well as its own name.
+    ///
+    /// Why: a registry entry's id (`api::handlers::write`) is what a dependency
+    /// cites, while the node keeps the bare name a consumer displays. Both have
+    /// to reach the same node (#6170).
+    /// What: adds the node, then records `<file>::<symbol>` plus the trailing
+    /// identifier in the name index. Every definition gets its own node and its
+    /// own index entry — nothing is collapsed onto a first occurrence.
+    /// Test: `same_file_callee_wins_over_an_earlier_registered_twin`.
+    fn add_node_as(&mut self, node: SymbolNode, symbol: &str) -> NodeIndex {
+        let file = node.file.display().to_string();
+        let callable = matches!(node.kind, SymbolKind::Function | SymbolKind::Method);
         let idx = self.inner.add_node(node);
-        self.name_to_idx.entry(name).or_insert(idx);
+        self.names.insert(&file, symbol, idx, callable);
         idx
     }
 
-    /// Add an edge between two named symbols. No-op if either endpoint is
-    /// unknown.
-    fn add_edge_by_name(&mut self, from: &str, to: &str, kind: EdgeKind) {
-        if let (Some(&a), Some(&b)) = (self.name_to_idx.get(from), self.name_to_idx.get(to)) {
-            self.inner.add_edge(a, b, kind);
+    /// Add an edge from `caller` to whatever `callee` resolves to, if anything.
+    ///
+    /// Why: resolving a callee against one global bare-name map bound calls to
+    /// unrelated crates (#6170). An edge now requires grounds.
+    /// What: delegates to `resolve::resolve_callee` from the caller's own file;
+    /// `Calls` edges additionally require a callable target. No grounds, no
+    /// edge — silence is the correct answer to an ambiguous name.
+    /// Test: `bare_name_collision_across_crates_creates_no_edge`.
+    fn add_edge_resolved(&mut self, caller: NodeIndex, callee: &str, kind: EdgeKind) {
+        let caller_file = self.inner[caller].file.display().to_string();
+        let require_callable = kind == EdgeKind::Calls;
+        if let Some((target, _grounds)) =
+            resolve_callee(&self.names, &caller_file, callee, require_callable)
+        {
+            self.inner.add_edge(caller, target, kind);
         }
     }
 
-    /// Repopulate `name_to_idx` from `inner` — used after deserialisation.
+    /// Repopulate the name index from `inner` — used after deserialisation.
+    ///
+    /// A graph that round-tripped through serde carries node names only, so the
+    /// registry ids `build_from_registry` indexed are not restored; name lookup
+    /// falls back to the trailing identifier for those.
     pub fn rebuild_name_index(&mut self) {
-        self.name_to_idx.clear();
+        self.names = NameIndex::default();
         for idx in self.inner.node_indices() {
-            let name = self.inner[idx].name.clone();
-            self.name_to_idx.entry(name).or_insert(idx);
+            let node = &self.inner[idx];
+            let file = node.file.display().to_string();
+            let name = node.name.clone();
+            let callable = matches!(node.kind, SymbolKind::Function | SymbolKind::Method);
+            self.names.insert(&file, &name, idx, callable);
         }
     }
 
@@ -195,31 +258,37 @@ impl SymbolGraph {
         sorted.sort_by_key(|a| a.start_line);
 
         let mut graph = SymbolGraph::default();
-        for s in &sorted {
-            graph.add_node(SymbolNode {
-                file: s.file.clone(),
-                name: s.name.clone(),
-                kind: s.kind,
-                start_line: s.start_line,
-            });
-        }
+        // #6170: keep each symbol's own node index — two symbols in one file can
+        // share a name, and a call must be attributed to the one that made it.
+        let placed: Vec<(&&crate::symgraph::symbol::Symbol, NodeIndex)> = sorted
+            .iter()
+            .map(|s| {
+                let idx = graph.add_node(SymbolNode {
+                    file: s.file.clone(),
+                    name: s.name.clone(),
+                    kind: s.kind,
+                    start_line: s.start_line,
+                });
+                (s, idx)
+            })
+            .collect();
 
-        // Collect raw edges first (by name), then resolve into petgraph.
-        let mut raw_edges: Vec<SymbolEdge> = Vec::new();
+        // Collect raw edges first, then resolve into petgraph.
+        let mut raw_edges: Vec<RawEdge> = Vec::new();
 
         let mut parser = Parser::new();
         if parser.set_language(&lang).is_ok()
             && let Some(tree) = parser.parse(&source, None)
         {
             let bytes = source.as_bytes();
-            for sym in &symbols {
+            for (sym, caller) in &placed {
                 if !matches!(sym.kind, SymbolKind::Function | SymbolKind::Method) {
                     continue;
                 }
                 if let Some(node) =
                     node_for_byte_range(tree.root_node(), sym.start_byte, sym.end_byte)
                 {
-                    collect_calls(node, bytes, lang_tag, &sym.name, &mut raw_edges);
+                    collect_calls(node, bytes, lang_tag, *caller, &mut raw_edges);
                 }
             }
 
@@ -230,26 +299,29 @@ impl SymbolGraph {
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_string();
-            let mut had_imports = false;
+            // Reuse a real symbol of that name if the file has one, as before.
+            let mut stem_idx: Option<NodeIndex> = placed
+                .iter()
+                .find(|(s, _)| s.name == file_stem)
+                .map(|(_, i)| *i);
             for sym in &symbols {
-                if matches!(sym.kind, SymbolKind::Import) {
-                    if !had_imports
-                        && !file_stem.is_empty()
-                        && !graph.name_to_idx.contains_key(&file_stem)
-                    {
-                        // Add a synthetic node for the file stem so import
-                        // edges have a resolvable source endpoint.
-                        graph.add_node(SymbolNode {
-                            file: file.to_path_buf(),
-                            name: file_stem.clone(),
-                            kind: SymbolKind::Unknown,
-                            start_line: 0,
-                        });
-                    }
-                    had_imports = true;
-                    raw_edges.push(SymbolEdge {
-                        from: file_stem.clone(),
-                        to: sym.name.clone(),
+                if !matches!(sym.kind, SymbolKind::Import) {
+                    continue;
+                }
+                if stem_idx.is_none() && !file_stem.is_empty() {
+                    // Add a synthetic node for the file stem so import
+                    // edges have a resolvable source endpoint.
+                    stem_idx = Some(graph.add_node(SymbolNode {
+                        file: file.to_path_buf(),
+                        name: file_stem.clone(),
+                        kind: SymbolKind::Unknown,
+                        start_line: 0,
+                    }));
+                }
+                if let Some(caller) = stem_idx {
+                    raw_edges.push(RawEdge {
+                        caller,
+                        callee: sym.name.clone(),
                         kind: EdgeKind::Imports,
                     });
                 }
@@ -257,7 +329,7 @@ impl SymbolGraph {
         }
 
         for e in raw_edges {
-            graph.add_edge_by_name(&e.from, &e.to, e.kind);
+            graph.add_edge_resolved(e.caller, &e.callee, e.kind);
         }
 
         Ok(graph)
@@ -270,54 +342,72 @@ impl SymbolGraph {
     /// queries against the substrate) need a `SymbolGraph` derived from
     /// that registry without re-walking source.
     /// What: Iterates `registry.iter()`, projects each `SymbolEntry` into
-    /// a `SymbolNode`, then walks `dependencies` to emit `Calls` edges
-    /// where the target resolves to another known symbol's bare name.
-    /// Test: `build_from_registry_smoke`.
+    /// a `SymbolNode` indexed under BOTH its registry id and its bare name,
+    /// then walks `dependencies` to emit a `Calls` edge wherever the callee
+    /// resolves with grounds from the caller's own file (#6170).
+    /// Test: `build_from_registry_smoke`,
+    /// `bare_name_collision_across_crates_creates_no_edge`.
     pub fn build_from_registry(registry: &SymbolRegistry) -> Self {
         let mut graph = SymbolGraph::default();
+        let entries: Vec<_> = registry.iter().collect();
 
-        for (id, entry) in registry.iter() {
-            let bare = id
-                .as_str()
-                .rsplit("::")
-                .next()
-                .unwrap_or(id.as_str())
-                .to_string();
-            let kind = registry_kind_to_symbol_kind(&entry.kind);
-            graph.add_node(SymbolNode {
-                file: entry
-                    .assigned_file
-                    .clone()
-                    .unwrap_or_else(|| PathBuf::from("")),
-                name: bare,
-                kind,
-                start_line: 0,
-            });
-        }
+        let placed: Vec<NodeIndex> = entries
+            .iter()
+            .map(|(id, entry)| {
+                let node = SymbolNode {
+                    file: entry
+                        .assigned_file
+                        .clone()
+                        .unwrap_or_else(|| PathBuf::from("")),
+                    name: bare_name(id.as_str()).to_string(),
+                    kind: registry_kind_to_symbol_kind(&entry.kind),
+                    start_line: 0,
+                };
+                graph.add_node_as(node, id.as_str())
+            })
+            .collect();
 
-        for (id, entry) in registry.iter() {
-            let from = id
-                .as_str()
-                .rsplit("::")
-                .next()
-                .unwrap_or(id.as_str())
-                .to_string();
+        for ((_, entry), &caller) in entries.iter().zip(placed.iter()) {
             for dep in &entry.dependencies {
-                let dep_bare = dep
-                    .as_str()
-                    .rsplit("::")
-                    .next()
-                    .unwrap_or(dep.as_str())
-                    .to_string();
-                graph.add_edge_by_name(&from, &dep_bare, EdgeKind::Calls);
+                graph.add_edge_resolved(caller, dep.as_str(), EdgeKind::Calls);
             }
         }
         graph
     }
 
-    /// Resolve a name to its first-occurrence `NodeIndex`.
+    /// Resolve a name to the definition it most likely means, naming the rest.
+    ///
+    /// Why: `trace_execution_flow` anchors on a name a user typed. When several
+    /// definitions answer to it, silently taking the first-registered one is
+    /// how a trace lands in the wrong crate (#6170).
+    /// What: accepts a `<file>::<symbol>` key, a `<path suffix>::<symbol>`, or a
+    /// bare name; ranks multiple hits by node degree so the most-connected
+    /// definition leads, and reports the alternatives.
+    /// Test: `path_qualified_name_anchors_instead_of_missing`,
+    /// `ambiguous_bare_name_reports_every_candidate`.
+    pub fn resolve_symbol(&self, name: &str) -> SymbolMatch<'_> {
+        let hits = self.ranked_indices(name);
+        match hits.len() {
+            0 => SymbolMatch::NotFound,
+            1 => SymbolMatch::Unique(&self.inner[hits[0]]),
+            _ => SymbolMatch::Ambiguous {
+                chosen: &self.inner[hits[0]],
+                alternatives: hits[1..].iter().map(|&i| &self.inner[i]).collect(),
+            },
+        }
+    }
+
+    /// Every definition `name` can mean, most-connected first.
+    fn ranked_indices(&self, name: &str) -> Vec<NodeIndex> {
+        rank_matches(&self.names, name, |i| {
+            self.inner.edges_directed(i, Direction::Outgoing).count()
+                + self.inner.edges_directed(i, Direction::Incoming).count()
+        })
+    }
+
+    /// Resolve a name to the best-ranked `NodeIndex`.
     fn idx_of(&self, name: &str) -> Option<NodeIndex> {
-        self.name_to_idx.get(name).copied()
+        self.ranked_indices(name).first().copied()
     }
 
     /// Symbols that call `name`.
@@ -451,7 +541,7 @@ fn node_for_byte_range<'a>(root: Node<'a>, start: usize, end: usize) -> Option<N
 }
 
 /// Walk a function body, find call expressions, attribute them to `caller`.
-fn collect_calls(node: Node, bytes: &[u8], lang: &str, caller: &str, out: &mut Vec<SymbolEdge>) {
+fn collect_calls(node: Node, bytes: &[u8], lang: &str, caller: NodeIndex, out: &mut Vec<RawEdge>) {
     let kind = node.kind();
     let is_call = match lang {
         "rust" | "javascript" | "go" => kind == "call_expression",
@@ -459,9 +549,9 @@ fn collect_calls(node: Node, bytes: &[u8], lang: &str, caller: &str, out: &mut V
         _ => false,
     };
     if is_call && let Some(callee) = call_target_name(node, bytes, lang) {
-        out.push(SymbolEdge {
-            from: caller.to_string(),
-            to: callee,
+        out.push(RawEdge {
+            caller,
+            callee,
             kind: EdgeKind::Calls,
         });
     }
@@ -490,8 +580,177 @@ fn call_target_name(node: Node, bytes: &[u8], lang: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::symgraph::registry::{SymbolEntry, SymbolId, SymbolKind as RKind, SymbolRegistry};
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    /// One registry entry: id, the file it lives in, and the names it calls.
+    fn entry(id: &str, file: &str, deps: &[&str]) -> SymbolEntry {
+        let mut e = SymbolEntry::new(
+            SymbolId(id.to_string()),
+            RKind::Function,
+            format!("fn {}() {{}}", bare_name(id)),
+            "rust",
+        );
+        e.assigned_file = Some(PathBuf::from(file));
+        e.dependencies = deps.iter().map(|d| SymbolId((*d).to_string())).collect();
+        e
+    }
+
+    fn registry_of(entries: Vec<SymbolEntry>) -> SymbolRegistry {
+        let mut reg = SymbolRegistry::new(PathBuf::from("/proj"));
+        for e in entries {
+            reg.insert(e);
+        }
+        reg
+    }
+
+    fn callee_files(g: &SymbolGraph, caller: &str) -> Vec<String> {
+        g.callees_of(caller)
+            .iter()
+            .map(|n| n.file.display().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn same_file_callee_wins_over_an_earlier_registered_twin() {
+        // Why: `upsert` calls the `write` beside it. The registry is iterated in
+        // sorted-id order, so another crate's `write` is registered first; the
+        // old global first-write-wins map handed that one back (#6170).
+        // What: two `write` definitions, one in the caller's file. Asserts the
+        // edge lands on the caller's own file.
+        let g = SymbolGraph::build_from_registry(&registry_of(vec![
+            entry("agents::stamp::write", "crates/agents/src/stamp.rs", &[]),
+            entry("search::store::write", "crates/search/src/store.rs", &[]),
+            entry(
+                "search::store::upsert",
+                "crates/search/src/store.rs",
+                &["write"],
+            ),
+        ]));
+        assert_eq!(
+            callee_files(&g, "upsert"),
+            vec!["crates/search/src/store.rs".to_string()],
+        );
+    }
+
+    #[test]
+    fn bare_name_collision_across_crates_creates_no_edge() {
+        // Why: a name that two unrelated crates define is not grounds for an
+        // edge to either — that is how 74% of callee edges went cross-crate in
+        // the sibling defect (#6167).
+        // What: `start` calls `run`; two crates define `run`, neither in the
+        // caller's tree. Asserts no callee edge at all.
+        let g = SymbolGraph::build_from_registry(&registry_of(vec![
+            entry("a::alpha::run", "crates/a/src/lib.rs", &[]),
+            entry("b::beta::run", "crates/b/src/lib.rs", &[]),
+            entry("c::gamma::start", "crates/c/src/lib.rs", &["run"]),
+        ]));
+        assert!(
+            g.callees_of("start").is_empty(),
+            "ambiguous callee resolved anyway: {:?}",
+            callee_files(&g, "start"),
+        );
+    }
+
+    #[test]
+    fn directory_scope_beats_a_distant_twin() {
+        // Why: the caller's own directory is grounds even when the name is not
+        // corpus-unique; only a tie inside the narrowest matching scope is not.
+        // What: two `helper` definitions, one in the caller's directory. The
+        // distant one sorts first, so the pre-#6170 map returned it.
+        let g = SymbolGraph::build_from_registry(&registry_of(vec![
+            entry("far::helper", "crates/far/src/util.rs", &[]),
+            entry("near::helper", "crates/near/src/util.rs", &[]),
+            entry("near::start", "crates/near/src/lib.rs", &["helper"]),
+        ]));
+        assert_eq!(
+            callee_files(&g, "start"),
+            vec!["crates/near/src/util.rs".to_string()],
+        );
+    }
+
+    #[test]
+    fn corpus_unique_name_still_resolves_across_files() {
+        // Why: grounding must not silence real cross-file edges — a name only
+        // one definition answers to is grounds in itself.
+        let g = SymbolGraph::build_from_registry(&registry_of(vec![
+            entry("a::alpha::only_one", "crates/a/src/lib.rs", &[]),
+            entry("c::gamma::start", "crates/c/src/lib.rs", &["only_one"]),
+        ]));
+        assert_eq!(
+            callee_files(&g, "start"),
+            vec!["crates/a/src/lib.rs".to_string()],
+        );
+    }
+
+    #[test]
+    fn cross_language_twin_is_not_an_edge() {
+        // Why: a Rust call reached a TypeScript method of the same name in the
+        // sibling defect's measurement (`chatStream.ts::get`).
+        // What: the only `get` in the corpus is a `.ts` symbol. Asserts the
+        // extension mismatch drops the edge even though the name is unique.
+        let g = SymbolGraph::build_from_registry(&registry_of(vec![
+            entry("ui::chat::get", "ui/src/chatStream.ts", &[]),
+            entry("a::alpha::start", "crates/a/src/lib.rs", &["get"]),
+        ]));
+        assert!(
+            g.callees_of("start").is_empty(),
+            "cross-language callee resolved: {:?}",
+            callee_files(&g, "start"),
+        );
+    }
+
+    #[test]
+    fn path_qualified_name_anchors_instead_of_missing() {
+        // Why: `<path>::<symbol>` is how a caller names one of several
+        // same-named definitions; it used to resolve to nothing (#6167).
+        let g = SymbolGraph::build_from_registry(&registry_of(vec![
+            entry("agents::stamp::write", "crates/agents/src/stamp.rs", &[]),
+            entry("search::store::write", "crates/search/src/store.rs", &[]),
+            entry(
+                "search::store::upsert",
+                "crates/search/src/store.rs",
+                &["write"],
+            ),
+        ]));
+        let callers = g.callers_of("src/store.rs::write");
+        assert_eq!(callers.len(), 1, "got {callers:?}");
+        assert_eq!(callers[0].name, "upsert");
+    }
+
+    #[test]
+    fn ambiguous_bare_name_reports_every_candidate() {
+        // Why: anchoring on a name that several definitions answer to must say
+        // so rather than pick silently (#6170).
+        let g = SymbolGraph::build_from_registry(&registry_of(vec![
+            entry("agents::stamp::write", "crates/agents/src/stamp.rs", &[]),
+            entry("search::store::write", "crates/search/src/store.rs", &[]),
+            entry(
+                "search::store::upsert",
+                "crates/search/src/store.rs",
+                &["write"],
+            ),
+        ]));
+        match g.resolve_symbol("write") {
+            SymbolMatch::Ambiguous {
+                chosen,
+                alternatives,
+            } => {
+                // The called definition is the most-connected one.
+                assert_eq!(
+                    chosen.file.display().to_string(),
+                    "crates/search/src/store.rs"
+                );
+                assert_eq!(alternatives.len(), 1);
+            }
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+        assert!(matches!(
+            g.resolve_symbol("no_such_symbol"),
+            SymbolMatch::NotFound
+        ));
+    }
 
     #[test]
     fn build_from_registry_smoke() {
@@ -501,9 +760,6 @@ mod tests {
         // `callee` in its dependencies. Asserts both nodes appear and the
         // `caller -> callee` Calls edge is present.
         // Test: this test.
-        use crate::symgraph::registry::{
-            SymbolEntry, SymbolId, SymbolKind as RKind, SymbolRegistry,
-        };
         use std::collections::BTreeSet;
 
         let tmp = tempfile::TempDir::new().unwrap();

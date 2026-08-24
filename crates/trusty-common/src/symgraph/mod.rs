@@ -37,6 +37,9 @@ pub mod graph;
 pub mod parser;
 #[cfg(feature = "symgraph-parser")]
 pub mod registry;
+// #6170: grounded callee/name resolution behind `graph` — crate-internal.
+#[cfg(feature = "symgraph-parser")]
+pub(crate) mod resolve;
 #[cfg(feature = "symgraph-parser")]
 pub mod symbol;
 
