@@ -245,7 +245,9 @@ impl fmt::Display for ManagedSessionState {
 /// every pre-#6194 record loads that way, and reads as auto-resumable, which is
 /// exactly the behavior those records had before this field existed.
 /// Test: `stop_records_deliberate_cause`, `runtime_exit_records_unexpected_cause`,
-/// `record_without_stop_cause_is_auto_resumable` in `stop_cause_tests.rs`.
+/// `legacy_record_without_stop_cause_deserializes_as_auto_resumable` in
+/// `stop_cause_tests.rs`; `reap_marks_a_targeted_kill_deliberate`,
+/// `reap_leaves_a_whole_server_loss_auto_resumable` in `daemon::state`'s tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StopCause {
@@ -552,10 +554,14 @@ impl SessionRecord {
     /// answers "may an automatic path relaunch it", not "may it be resumed":
     /// an operator's own `tm session resume` is unaffected by this and still
     /// revives a deliberately-stopped session.
-    /// Test: `deliberately_stopped_session_is_not_auto_resumable`,
-    /// `unexpectedly_stopped_session_is_auto_resumable`,
-    /// `record_without_stop_cause_is_auto_resumable`,
-    /// `only_stopped_records_are_auto_resumable` in `stop_cause_tests.rs`.
+    /// Test: `only_a_stop_nobody_asked_for_is_auto_resumable` (the full state ×
+    /// cause matrix) and
+    /// `legacy_record_without_stop_cause_deserializes_as_auto_resumable` in
+    /// `stop_cause_tests.rs`; the two automatic callers by
+    /// `tick_never_resumes_a_deliberately_stopped_session` in
+    /// `supervisor::tests` and
+    /// `boot_reconcile_never_requeues_a_deliberately_stopped_session` in
+    /// `stop_cause_tests.rs`.
     pub fn is_auto_resumable(&self) -> bool {
         matches!(self.state, ManagedSessionState::Stopped)
             && self.stop_cause != Some(StopCause::Deliberate)

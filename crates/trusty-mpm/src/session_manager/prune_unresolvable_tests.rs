@@ -71,6 +71,7 @@ async fn seed_live(
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
+        stop_cause: None,
     };
     mgr.tmux
         .create_session(tmux_name, "/tmp")
