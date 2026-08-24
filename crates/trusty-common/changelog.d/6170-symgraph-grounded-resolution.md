@@ -10,13 +10,7 @@ Fixed
   the reverse direction, a callee beside the caller now wins over a same-named
   definition that was merely registered first — `upsert` calling `write` used to
   land in whichever crate sorted earliest.
-
-Added
-
-- `SymbolGraph::resolve_symbol` returns `SymbolMatch::{Unique, Ambiguous,
-  NotFound}` for a caller-supplied name, so a consumer anchoring a trace can
-  report which definition it took and what else matched. `callers_of`,
-  `callees_of` and `context_for` anchor through the same resolution: a
-  `<path>::<symbol>` name now anchors instead of missing, and a bare name that
-  several definitions answer to picks the most-connected one rather than the
-  first registered.
+- `callers_of`, `callees_of` and `context_for` anchor through that same
+  resolution: a `<path>::<symbol>` name now anchors instead of missing, and a
+  bare name that several definitions answer to picks the most-connected one
+  rather than the first registered.
