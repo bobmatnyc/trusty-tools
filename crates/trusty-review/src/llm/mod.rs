@@ -138,6 +138,28 @@ pub struct LlmRequest {
     pub response_schema: Option<ResponseSchema>,
 }
 
+impl LlmRequest {
+    /// The model id a provider must actually call for this request.
+    ///
+    /// Why: #6123 — `OpenRouterProvider` and `FireworksProvider` sent the id
+    /// they were constructed with and dropped [`LlmRequest::model`], so a
+    /// per-request override ran on the constructor's model with nothing in the
+    /// response saying so. `BedrockProvider` already read `req.model`. One
+    /// resolver gives all three providers the same answer.
+    /// What: returns [`LlmRequest::model`] when it carries a non-blank id, and
+    /// `provider_default` — the id the provider was constructed with — only
+    /// when the request names no model at all.
+    /// Test: `request_model_overrides_the_provider_default`,
+    /// `blank_request_model_falls_back_to_the_provider_default`.
+    pub fn effective_model<'a>(&'a self, provider_default: &'a str) -> &'a str {
+        if self.model.trim().is_empty() {
+            provider_default
+        } else {
+            &self.model
+        }
+    }
+}
+
 /// Output from `LlmProvider::complete`.
 ///
 /// Why: captures the response text plus all telemetry fields required by
@@ -544,6 +566,39 @@ pub async fn build_verifier_required(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn request_naming(model: &str) -> LlmRequest {
+        LlmRequest {
+            model: model.to_string(),
+            system: String::new(),
+            messages: Vec::new(),
+            temperature: 0.0,
+            max_tokens: 16,
+            response_schema: None,
+        }
+    }
+
+    /// #6123: the request's model wins over the provider's constructor id.
+    #[test]
+    fn request_model_overrides_the_provider_default() {
+        let req = request_naming("request/model-must-win");
+        assert_eq!(
+            req.effective_model("constructor/model-should-not-win"),
+            "request/model-must-win"
+        );
+    }
+
+    /// #6123: only a request naming no model at all defers to the provider.
+    #[test]
+    fn blank_request_model_falls_back_to_the_provider_default() {
+        for blank in ["", "   ", "\t\n"] {
+            assert_eq!(
+                request_naming(blank).effective_model("constructor/model"),
+                "constructor/model",
+                "{blank:?} names no model and must defer to the provider"
+            );
+        }
+    }
 
     #[test]
     fn llm_response_serde_roundtrip() {

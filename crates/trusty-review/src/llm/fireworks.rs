@@ -284,12 +284,12 @@ impl FireworksProvider {
     /// Construct a provider with an explicit base URL.
     ///
     /// Why: lets tests point the provider at a mock HTTP server for a real
-    /// request/response round-trip — the coverage the hardcoded-URL OpenRouter
-    /// provider cannot get.
+    /// request/response round-trip.
     /// What: builds a `reqwest::Client` with connect and read timeouts;
     /// returns `LlmError::AccessDenied` if the key is empty.  A trailing `/`
     /// on `base_url` is trimmed so path joining is uniform.
-    /// Test: `complete_round_trips_through_mock_server`.
+    /// Test: `complete_round_trips_through_mock_server`,
+    /// `complete_sends_the_request_model_not_the_constructor_model`.
     pub fn with_base_url(
         api_key: impl Into<String>,
         model: impl Into<String>,
@@ -346,11 +346,20 @@ impl LlmProvider for FireworksProvider {
     /// "json_schema", json_schema: { name, schema } }` (no `strict` — see
     /// module docs) to force the model to emit structured JSON; the assistant
     /// message content will be the clean JSON object.
-    /// Test: `complete_round_trips_through_mock_server`,
+    ///
+    /// The model sent is [`LlmRequest::effective_model`] — the request's own
+    /// id, falling back to the constructor's only when the request names none
+    /// (#6123).
+    /// Test: `complete_sends_the_request_model_not_the_constructor_model`,
+    /// `complete_round_trips_through_mock_server`,
     /// `complete_with_schema_sends_response_format_without_strict`.
     async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+        // #6123: the request's model is the model for this call; the id passed
+        // to the constructor is only the fallback when the request names none.
+        let model = req.effective_model(&self.model);
+
         debug!(
-            model = %self.model,
+            model = %model,
             structured = req.response_schema.is_some(),
             "fireworks complete request"
         );
@@ -389,7 +398,7 @@ impl LlmProvider for FireworksProvider {
         };
 
         let body = FwRequest {
-            model: &self.model,
+            model,
             messages: &messages,
             stream: false,
             temperature: req.temperature,
@@ -417,7 +426,7 @@ impl LlmProvider for FireworksProvider {
             let body_text = http_resp.text().await.unwrap_or_default();
             return Err(match status.as_u16() {
                 401 | 403 => LlmError::AccessDenied(body_text),
-                404 => LlmError::ModelNotFound(format!("model={}: {body_text}", self.model)),
+                404 => LlmError::ModelNotFound(format!("model={model}: {body_text}")),
                 422 => LlmError::Validation(body_text),
                 429 => LlmError::RateLimited,
                 _ => LlmError::Upstream {
@@ -450,7 +459,7 @@ impl LlmProvider for FireworksProvider {
             .map(|u| (u.prompt_tokens, u.completion_tokens))
             .unwrap_or((0, 0));
 
-        let model_used = fw.model.unwrap_or_else(|| self.model.clone());
+        let model_used = fw.model.unwrap_or_else(|| model.to_string());
         let cost_usd = estimate_cost_usd(&model_used, input_tokens, output_tokens);
 
         Ok(LlmResponse {
