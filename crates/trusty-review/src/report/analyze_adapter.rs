@@ -216,6 +216,13 @@ pub(super) struct WireRefactor {
     pub(super) file: String,
     #[serde(default)]
     pub(super) function_name: Option<String>,
+    /// What kind of region the daemon measured, when it could tell (#6177).
+    ///
+    /// `class_body` or `function` for Python; absent for every other language and
+    /// for any daemon predating the field, which is what keeps this a pure
+    /// addition — a missing key reproduces the pre-#6177 render exactly.
+    #[serde(default)]
+    pub(super) region_kind: Option<String>,
     /// snake_case refactor type, e.g. `extract_method`.
     #[serde(default)]
     pub(super) refactor_type: String,

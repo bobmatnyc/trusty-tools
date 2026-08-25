@@ -71,14 +71,23 @@ pub(super) fn diagnostic_finding(d: &WireDiagnostic) -> Option<MetricFinding> {
 /// the analyzer's `rationale` and `remediation` = its `suggested_action`, both
 /// verbatim (#5317 — dropping them is what made the entries contentless).
 /// A suggestion carrying NO function name is a whole-`impl` region rather than
-/// a function, and is relabelled by [`impl_block_finding`] (#6082).
+/// a function, and is relabelled by [`impl_block_finding`] (#6082) — unless the
+/// daemon named the region a Python class body, which
+/// [`class_body_finding`] relabels instead (#6177).
 /// Test: `refactor_finding_synthesises_title`,
 /// `refactor_finding_carries_rationale_and_action`,
-/// `a_nameless_region_is_labelled_an_impl_block`.
+/// `a_nameless_region_is_labelled_an_impl_block`,
+/// `a_python_class_body_is_labelled_a_class_body`.
 pub(super) fn refactor_finding(r: &WireRefactor) -> Option<MetricFinding> {
     let severity = map_refactor_severity(&r.severity);
     if severity == Severity::Green {
         return None;
+    }
+    // #6177: the daemon's own answer about the region outranks the
+    // name-absent inference below — a Python class body can carry a name and
+    // still not be a function.
+    if r.region_kind.as_deref() == Some(CLASS_BODY_REGION) {
+        return class_body_finding(r, severity);
     }
     let action = humanise_refactor_type(&r.refactor_type);
     let Some(function) = r.function_name.as_deref().filter(|f| !f.is_empty()) else {
@@ -149,6 +158,68 @@ fn impl_block_finding(r: &WireRefactor, severity: Severity) -> Option<MetricFind
         ),
     })
 }
+
+/// The `region_kind` value trusty-analyze emits for a Python class body (#6177).
+///
+/// The wire spelling of `trusty_analyze::core::RegionKind::ClassBody`. The two
+/// crates have no Cargo edge on this path — the JSON is the whole seam — so this
+/// literal is the contract, exactly as `IMPL_BLOCK_TITLE` is for the renderer
+/// below.
+const CLASS_BODY_REGION: &str = "class_body";
+
+/// Build the finding for a region the daemon named a Python class body (#6177).
+///
+/// Why: the Rust half of this already exists — [`impl_block_finding`] catches a
+/// region with no function name and says "split the impl block" rather than
+/// "extract the body of this function". Python had the same shape and no signal
+/// to act on: a `class Foo:` body arrives measured like any other region, and
+/// every downstream string called it a function. A lap-4 grader on the
+/// trusty-audit self-audit report raised it. Extracting the body of a class is
+/// not an action a reader can take; moving its members out is.
+/// What: titles the finding a class body, rewrites the analyzer's
+/// `long_function` smell name, and replaces the remediation with member-splitting
+/// guidance carrying the analyzer's own line range when it stated one. Names the
+/// class when the daemon named it. A region with neither a range nor a rationale
+/// is SUPPRESSED rather than mislabelled, matching [`impl_block_finding`].
+/// Test: `a_python_class_body_is_labelled_a_class_body`,
+/// `a_named_python_class_body_is_named_in_its_remediation`,
+/// `an_unidentifiable_class_body_is_suppressed`.
+fn class_body_finding(r: &WireRefactor, severity: Severity) -> Option<MetricFinding> {
+    let lines = line_range(&r.suggested_action);
+    let rationale = r.rationale.trim();
+    if lines.is_none() && rationale.is_empty() {
+        return None;
+    }
+    let named = r
+        .function_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(|n| format!(" `{n}`"))
+        .unwrap_or_default();
+    let where_ = lines
+        .map(|(a, b)| format!(" (lines {a}–{b})"))
+        .unwrap_or_default();
+    Some(MetricFinding {
+        title: CLASS_BODY_TITLE.to_string(),
+        severity,
+        category: "maintainability".to_string(),
+        component: r.file.clone(),
+        description: rationale.replace("long_function", "long_class_body"),
+        remediation: format!(
+            "{CLASS_BODY_REMEDIATION_PREFIX}{named}{where_} by moving cohesive members into \
+             collaborating classes or modules — the analyzer measured this region as a class \
+             body, so it is not one long function"
+        ),
+    })
+}
+
+/// The title every Python class-body hotspot finding carries (#6177).
+pub(crate) const CLASS_BODY_TITLE: &str = "Split oversized class body";
+
+/// The opening words of every class-body remediation, up to the class name and
+/// line range when the analyzer stated them (#6177).
+pub(crate) const CLASS_BODY_REMEDIATION_PREFIX: &str = "Split the class body";
 
 /// The title every whole-impl hotspot finding carries.
 ///

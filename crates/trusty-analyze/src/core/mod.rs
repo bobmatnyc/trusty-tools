@@ -30,6 +30,7 @@ pub mod ner;
 pub mod quality;
 pub mod redb_open;
 pub mod refactor;
+pub mod region_kind;
 pub mod registry;
 pub mod review;
 pub mod scip;
@@ -56,6 +57,7 @@ pub use github::{
 pub use linker::link;
 pub use ner::{extract_doc_comments, NerExtractor};
 pub use refactor::{analyze as analyze_refactor, RefactorSuggestion, RefactorType, Severity};
+pub use region_kind::{classify as classify_region, RegionKind};
 pub use registry::{record_frameworks, AnalyzerRegistry};
 pub use review::{
     analyze_diff_with_chunks, analyze_diff_with_client, render_text as render_review_text,
