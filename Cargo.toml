@@ -172,7 +172,7 @@ trusty-progress = { path = "crates/trusty-progress", version = "0.3.0" }
 # trusty-installer: consumed as a LIBRARY by trusty-audit for the pinned,
 # fail-closed prebuilt download entry point (#5491, #5495). trusty-audit is
 # `publish = false`, so this entry exists for in-tree resolution.
-trusty-installer = { path = "crates/trusty-installer", version = "0.9" }
+trusty-installer = { path = "crates/trusty-installer", version = "0.10" }
 # trusty-audit: consumed as a LIBRARY by the auditor client's Tauri shell
 # (`trusty-audit-ui`, #5477 phase 1), which calls `Session::execute` in-process
 # rather than serving HTTP or shelling out to the `taudit` binary — DOC-68 §11
