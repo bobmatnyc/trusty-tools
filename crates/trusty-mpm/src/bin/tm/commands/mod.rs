@@ -15,6 +15,9 @@
 
 pub(crate) mod agent;
 pub(crate) mod auth;
+// #6274: `tm` in a plain directory initializes a repository there instead of
+// refusing; both the guided default and `tm launch` call it before detection.
+pub(crate) mod auto_git_init;
 pub(crate) mod banner;
 pub(crate) mod compress;
 pub(crate) mod daemon;

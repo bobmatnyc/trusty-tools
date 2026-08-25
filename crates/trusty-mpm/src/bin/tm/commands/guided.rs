@@ -281,6 +281,11 @@ pub(crate) async fn run_guided_default(
     let workdir = cwd.to_string_lossy().to_string();
     eprintln!("tm: no subcommand — using guided default for {workdir}");
 
+    // #6274: a plain directory becomes a git project here rather than dead-ending
+    // on `NON_GIT_FALLBACK_HINT` further down. Everything below then runs exactly
+    // as it does for a git repo with no origin remote.
+    super::auto_git_init::ensure_git_repo(&cwd)?;
+
     // Auto-register the git project root as a local path alias (non-fatal, silent).
     // Why: every `tm` invocation from a git directory populates `tm ls` with
     // the project's canonical name so operators can quickly find their projects.
