@@ -25,7 +25,9 @@ use serde::{Deserialize, Serialize};
 /// about to expire.
 /// What: when the wait began, when it was last polled, how many polls have
 /// happened, and the hard timeout in force.
-/// Test: `budget_resumes_across_invocations`, `budget_expires_at_the_deadline`.
+/// Test: `budget_resumes_across_invocations` proves `remaining` survives a
+/// re-run; `loop_returns_timeout_when_budget_exhausted` proves `expired` ends
+/// the wait once the budget reaches zero.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Budget {
     /// The canonical condition spec this budget belongs to.
