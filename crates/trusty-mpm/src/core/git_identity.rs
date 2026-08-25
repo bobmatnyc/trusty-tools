@@ -474,8 +474,14 @@ mod tests {
         let script = format!(
             r#"#!/bin/sh
 STATE="$GH_CONFIG_DIR/.fake_active"
+if [ -f "$STATE" ]; then ACTIVE=$(cat "$STATE"); else ACTIVE="{initial}"; fi
+# #5849: enforcement verifies with `gh api user`, so the fake must answer it —
+# here the honest machine, where the config dir and the credential agree.
+if [ "$1" = "api" ] && [ "$2" = "user" ]; then
+  echo "$ACTIVE"
+  exit 0
+fi
 if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
-  if [ -f "$STATE" ]; then ACTIVE=$(cat "$STATE"); else ACTIVE="{initial}"; fi
   echo "github.com"
   echo "  - Logged in to github.com account $ACTIVE (keyring)"
   echo "  - Active account: true"

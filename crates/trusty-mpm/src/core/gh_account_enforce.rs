@@ -15,7 +15,7 @@
 //! `GH_CONFIG_DIR` (the convention this codebase's `gh_identity` module and
 //! the operator's own shell tooling already use to scope `gh` state per
 //! project/context) and only ever mutates the "active" pointer INSIDE that
-//! one directory, verifying the result with a fresh `gh auth status` before
+//! one directory, verifying the result with a fresh `gh api user` probe before
 //! returning success. No `GH_CONFIG_DIR` in the environment → refusal, never
 //! a fall-through to the shared global store.
 //!
@@ -23,6 +23,28 @@
 //! `verify_active_account`) is unit-tested inline; the public entry point's
 //! refusal path is covered without a live `gh` by
 //! `ensure_gh_account_for_project_refuses_without_config_dir`.
+//!
+//! ## What verification establishes (#5849)
+//!
+//! Verification asks `gh api user --jq .login` — the login GitHub itself
+//! attributes to the credential `gh` resolves inside this `GH_CONFIG_DIR` —
+//! and compares THAT to the expected account. It previously parsed the text of
+//! a `gh auth status` transcript, which only echoes what the scoped `hosts.yml`
+//! claims: a hand-written `hosts.yml` naming an account that exists nowhere on
+//! the machine printed a green checkmark, live token scopes and `Active
+//! account: true`, and enforcement passed it.
+//!
+//! So the identity this module confirms is the one an API call runs as, not the
+//! one the config file names. When the two disagree — the #5656 divergence,
+//! where a credential can resolve from the macOS keyring rather than the scoped
+//! config dir — the API answer decides and the disagreement is logged at WARN.
+//! That is the right side to take here: every downstream `gh` call is an API
+//! call, so the API answer is what "operating as the wrong account" means.
+//! Whether `GH_CONFIG_DIR` can isolate a credential at all stays #5656's
+//! question; this module reports the divergence rather than papering over it.
+//!
+//! Every probe failure — `gh` missing, a non-zero exit, blank output, or the
+//! `GH_ENFORCE_TIMEOUT` bound — is a verification FAILURE, never a pass.
 //!
 //! ## Production wiring (#3312)
 //!
@@ -87,19 +109,21 @@ const GH_TOKEN_ENV_VARS: [&str; 2] = ["GH_TOKEN", "GITHUB_TOKEN"];
 /// active, so this also corrects (and then re-verifies) the active-user
 /// pointer INSIDE that store rather than assuming a config-dir switch is
 /// sufficient.
-/// What: runs `gh auth status` scoped to `config_dir` (with `GH_TOKEN` /
+/// What: probes the identity scoped to `config_dir` (with `GH_TOKEN` /
 /// `GITHUB_TOKEN` stripped from the child env so a stray token cannot outrank
-/// the config-dir identity); if `expected_user` is already active, returns
-/// immediately with no mutation. Otherwise runs `gh auth switch --user
-/// <expected_user>` under the same scoped, token-stripped env, then re-runs
-/// `gh auth status` and fails loudly (never silently proceeds) unless the
-/// re-check confirms `expected_user` is now active.
+/// the config-dir identity) with BOTH `gh auth status` and `gh api user --jq
+/// .login`; `gh api user` decides (#5849), the transcript only supplies the
+/// env-token-override guard and the diagnostic. If `expected_user` is the
+/// authenticated identity, returns immediately with no mutation. Otherwise
+/// runs `gh auth switch --user <expected_user>` under the same scoped,
+/// token-stripped env, re-probes, and fails loudly (never silently proceeds)
+/// unless the re-check confirms `expected_user`.
 /// Test: `verify_active_account_*`, `parse_active_account_from_status_*`
 /// cover the pure decision logic; `ensure_gh_account_for_project_*` cover the
 /// public entry point's refusal path without a live `gh`;
-/// `ensure_gh_account_in_dir_*` (#3312) exercise this function directly
-/// against a fake `gh` on `PATH`, covering the self-heal, switch-failure, and
-/// already-active no-op outcomes.
+/// `ensure_gh_account_in_dir_*` (#3312, #5849) exercise this function directly
+/// against a fake `gh` on `PATH`, covering the self-heal, switch-failure,
+/// already-active no-op, contradicted-transcript, and failed-probe outcomes.
 ///
 /// Public (#3312) so every wired production call site — the CLI's
 /// `gh_identity::resolve_project_aware` and the daemon's
@@ -119,7 +143,17 @@ pub fn ensure_gh_account_in_dir(
 
     let status_text = run_gh_scoped(&dir, ["auth", "status"])
         .context("failed to run `gh auth status` scoped to the project's GH_CONFIG_DIR")?;
-    if verify_active_account(&status_text, expected_user).is_ok() {
+    // #5849: the transcript echoes hosts.yml; `gh api user` is the identity the
+    // API calls actually run as, and it decides.
+    let probe = api_login_scoped(&dir);
+    if verify_active_account(
+        &status_text,
+        probe.as_deref().map_err(String::as_str),
+        expected_user,
+    )
+    .is_ok()
+    {
+        warn_on_identity_divergence(&status_text, &probe);
         return Ok(());
     }
 
@@ -149,11 +183,85 @@ pub fn ensure_gh_account_in_dir(
 
     let recheck = run_gh_scoped(&dir, ["auth", "status"])
         .context("failed to re-verify `gh auth status` after switching")?;
-    verify_active_account(&recheck, expected_user).map_err(|msg| {
+    let recheck_probe = api_login_scoped(&dir);
+    let verdict = verify_active_account(
+        &recheck,
+        recheck_probe.as_deref().map_err(String::as_str),
+        expected_user,
+    );
+    if verdict.is_ok() {
+        warn_on_identity_divergence(&recheck, &recheck_probe);
+    }
+    verdict.map_err(|msg| {
         anyhow::anyhow!(
             "gh account switch to '{expected_user}' did not take effect inside {dir}: {msg}"
         )
     })
+}
+
+/// Ask GitHub which login the credential scoped to `config_dir` belongs to.
+///
+/// Why (#5849): `gh auth status` reports what the scoped `hosts.yml` CLAIMS —
+/// it prints a green checkmark and live token scopes for an account that
+/// exists nowhere on the machine. `gh api user` is answered by GitHub itself
+/// using the credential `gh` resolves, so it is the identity every subsequent
+/// `gh` call will actually operate as. That is the only fact worth checking
+/// before enforcement reports success.
+/// What: `gh api user --jq .login`, scoped to `config_dir` and with the
+/// env-token overrides stripped exactly as [`run_gh_scoped`] does, bounded by
+/// [`GH_ENFORCE_TIMEOUT`]. Every failure mode — `gh` missing, a non-zero exit
+/// (unauthenticated, network, rate limit), blank output, or the timeout —
+/// returns `Err`, which [`verify_active_account`] treats as verification
+/// failure. It never yields a login it did not read from GitHub.
+/// Test: `ensure_gh_account_in_dir_fails_closed_when_the_api_probe_fails` and
+/// `ensure_gh_account_in_dir_rejects_a_transcript_the_api_contradicts` drive
+/// it through a fake `gh` on `PATH`.
+fn api_login_scoped(config_dir: &str) -> Result<String, String> {
+    let dir = config_dir.to_string();
+    run_bounded(GH_ENFORCE_TIMEOUT, move || {
+        // #5475: single `gh` entry point. `nonempty_stdout_blocking` folds a
+        // non-zero exit and a blank login into the same `Err`.
+        Some(
+            trusty_common::gh::GhCommand::new(["api", "user", "--jq", ".login"])
+                .env(GH_CONFIG_DIR_ENV, &dir)
+                .env_remove(GH_TOKEN_ENV_VARS[0])
+                .env_remove(GH_TOKEN_ENV_VARS[1])
+                .nonempty_stdout_blocking()
+                .map_err(|e| format!("`gh api user --jq .login` failed: {e}")),
+        )
+    })
+    .unwrap_or_else(|| {
+        Err(format!(
+            "`gh api user --jq .login` did not respond within {GH_ENFORCE_TIMEOUT:?}"
+        ))
+    })
+}
+
+/// Log when the scoped `hosts.yml` and the credential name different logins.
+///
+/// Why (#5656, #5849): verification now passes on the API answer alone, so a
+/// config dir whose transcript claims a DIFFERENT account would otherwise go
+/// unremarked — the credential resolved from somewhere other than the config
+/// dir (a machine keyring, per #5656), and the isolation the operator believes
+/// they configured is not the isolation they have. Enforcement is still
+/// correct to proceed (the effective identity is the expected one), but the
+/// divergence is worth a loud line in the log rather than silence.
+/// What: no-op unless the probe succeeded AND the transcript names an active
+/// login that differs from it; emits one WARN naming both.
+/// Test: side-effect logging only; the decision it guards is covered by
+/// `ensure_gh_account_in_dir_accepts_the_api_answer_over_a_stale_transcript`.
+fn warn_on_identity_divergence(status_text: &str, probe: &Result<String, String>) {
+    let Ok(api_login) = probe else { return };
+    if let Some(claimed) = parse_active_account_from_status(status_text)
+        && &claimed != api_login
+    {
+        tracing::warn!(
+            claimed_by_config_dir = %claimed,
+            authenticated_as = %api_login,
+            "gh auth status and gh api user name different accounts; \
+             the credential did not come from this GH_CONFIG_DIR (see #5656)"
+        );
+    }
 }
 
 /// Run a bounded `gh` subprocess scoped to `config_dir`, with any env-token
@@ -185,9 +293,11 @@ fn run_gh_scoped(config_dir: &str, args: [&'static str; 2]) -> anyhow::Result<St
 
 /// Parse the login marked `Active account: true` from a `gh auth status` transcript.
 ///
-/// Why: [`verify_active_account`] needs the SPECIFIC active login (not just
-/// "who is logged in", which `parse_logged_in_accounts` already answers) to
-/// confirm a switch actually took effect.
+/// Why: what the scoped config dir CLAIMS is no longer the verification
+/// itself (#5849 moved that to `gh api user`), but it is still the specific
+/// fact worth reporting when the claim and the credential disagree — the
+/// #5656 divergence. `parse_logged_in_accounts` answers "who is logged in",
+/// which is a different question.
 /// What: scans line-by-line, tracking the login introduced by the most recent
 /// "Logged in to ..." line, and returns it the first time a following
 /// "Active account: true" line is seen. Returns `None` when no login is ever
@@ -211,22 +321,32 @@ pub(crate) fn parse_active_account_from_status(auth_status: &str) -> Option<Stri
     None
 }
 
-/// Decide whether a `gh auth status` transcript confirms `expected` is active.
+/// Decide whether the scoped `gh` really authenticates as `expected`.
 ///
-/// Why: isolates the verification decision — including the defensive check
-/// for an env-token override that would make the config-dir identity
-/// unverifiable — so it is unit-testable without a live `gh` and so
-/// [`ensure_gh_account_in_dir`] never has to guess at the meaning of raw
-/// status text.
+/// Why (#5849): this decision used to rest on `status_text` alone, and a
+/// `gh auth status` transcript is not evidence of an identity — it echoes the
+/// scoped `hosts.yml`, so a `hosts.yml` naming an account that exists nowhere
+/// on the machine produced `Active account: true` and passed. `api_login` is
+/// GitHub's own answer for the credential `gh` resolved, so it is what
+/// downstream `gh` calls will operate as. Keeping the decision in one pure
+/// function keeps it unit-testable without a live `gh`.
 /// What: `Err` when the transcript mentions an environment-variable token
-/// override (defence in depth: `GH_TOKEN`/`GITHUB_TOKEN` should already be
-/// stripped from the child env, but this catches the case where `gh` reports
-/// one anyway); `Err` when no account or a DIFFERENT account is active;
-/// `Ok(())` only when [`parse_active_account_from_status`] returns exactly
-/// `expected`.
+/// override (defence in depth: `GH_TOKEN`/`GITHUB_TOKEN` are already stripped
+/// from the child env, but this catches `gh` reporting one anyway); `Err` when
+/// `api_login` is `Err`, i.e. the probe could not establish an identity at all
+/// (fail closed — an unverifiable identity is never a pass); `Err` when the
+/// probed login differs from `expected`, naming what the transcript claimed
+/// when the two disagree. `Ok(())` only when the probe returned exactly
+/// `expected`. The transcript never overrides the probe in either direction.
 /// Test: `verify_active_account_matches`, `verify_active_account_mismatch`,
-/// `verify_active_account_rejects_env_token_override`.
-pub(crate) fn verify_active_account(status_text: &str, expected: &str) -> Result<(), String> {
+/// `verify_active_account_rejects_env_token_override`,
+/// `verify_active_account_follows_the_api_over_the_transcript`,
+/// `verify_active_account_fails_closed_when_the_probe_failed`.
+pub(crate) fn verify_active_account(
+    status_text: &str,
+    api_login: Result<&str, &str>,
+    expected: &str,
+) -> Result<(), String> {
     let lower = status_text.to_lowercase();
     if lower.contains("environment variable")
         && (lower.contains("gh_token") || lower.contains("github_token"))
@@ -236,15 +356,24 @@ pub(crate) fn verify_active_account(status_text: &str, expected: &str) -> Result
              so the active account inside this GH_CONFIG_DIR cannot be verified as '{expected}'"
         ));
     }
-    match parse_active_account_from_status(status_text) {
-        Some(active) if active == expected => Ok(()),
-        Some(active) => Err(format!(
-            "active account is '{active}', expected '{expected}'"
-        )),
-        None => Err(format!(
-            "could not determine an active gh account (expected '{expected}')"
-        )),
+    let active = api_login.map_err(|why| {
+        format!(
+            "could not establish which account gh authenticates as \
+             (expected '{expected}'): {why}"
+        )
+    })?;
+    if active == expected {
+        return Ok(());
     }
+    // #5849: name the transcript's claim too when it disagrees — that gap is
+    // the #5656 divergence, and it is the operator's next lead.
+    let claimed = parse_active_account_from_status(status_text)
+        .filter(|c| c != active)
+        .map(|c| format!(" (`gh auth status` claims '{c}' is active — see #5656)"))
+        .unwrap_or_default();
+    Err(format!(
+        "gh authenticates as '{active}', expected '{expected}'{claimed}"
+    ))
 }
 
 /// Ensure `gh` operations for a project default to `gh_user` — the #2081
@@ -261,7 +390,9 @@ pub(crate) fn verify_active_account(status_text: &str, expected: &str) -> Result
 /// → a loud, actionable error (never falls through to mutating the shared
 /// default gh config). When present, delegates to
 /// [`ensure_gh_account_in_dir`], which is itself a no-op when `gh_user` is
-/// already the active account inside that directory.
+/// already the account `gh` authenticates as inside that directory. `Ok(())`
+/// means `gh api user` reported `gh_user` (#5849) — not merely that the
+/// directory's `hosts.yml` names it.
 /// Test: `ensure_gh_account_for_project_refuses_without_config_dir` proves the
 /// refusal path never attempts any `gh` call (so it can never perform a
 /// global switch) when no isolated config dir is available.
@@ -385,23 +516,56 @@ github.com
         );
     }
 
-    /// Why: [`verify_active_account`] must succeed only when the expected
-    /// login is the one marked active.
+    /// Why: [`verify_active_account`] must succeed when the probed identity is
+    /// the expected login.
     /// Test: itself.
     #[test]
     fn verify_active_account_matches() {
-        assert!(verify_active_account(SINGLE_AUTH_STATUS, "bobmatnyc").is_ok());
+        assert!(verify_active_account(SINGLE_AUTH_STATUS, Ok("bobmatnyc"), "bobmatnyc").is_ok());
     }
 
-    /// Why: a mismatched active account (the exact #2081 incident shape —
-    /// `bob-duetto` active when `bobmatnyc` was expected) must be a loud `Err`,
-    /// never a silent pass.
+    /// Why: a mismatched account (the exact #2081 incident shape —
+    /// `bob-duetto` authenticated when `bobmatnyc` was expected) must be a loud
+    /// `Err`, never a silent pass.
     /// Test: itself.
     #[test]
     fn verify_active_account_mismatch() {
-        let err = verify_active_account(MULTI_AUTH_STATUS, "bobmatnyc").unwrap_err();
+        let err =
+            verify_active_account(MULTI_AUTH_STATUS, Ok("bob-duetto"), "bobmatnyc").unwrap_err();
         assert!(err.contains("bob-duetto"), "err: {err}");
         assert!(err.contains("bobmatnyc"), "err: {err}");
+    }
+
+    /// Why (#5849): the transcript is not evidence of an identity. When
+    /// `hosts.yml` claims the expected account is active but the credential
+    /// resolves to someone else, the API answer must decide and the error must
+    /// name BOTH logins — that gap is the #5656 divergence and the operator's
+    /// next lead.
+    /// Test: itself.
+    #[test]
+    fn verify_active_account_follows_the_api_over_the_transcript() {
+        let claims_ghost = "\
+github.com
+  ✓ Logged in to github.com account nonexistent-user-xyz (keyring)
+  - Active account: true
+";
+        let err = verify_active_account(claims_ghost, Ok("bobmatnyc"), "nonexistent-user-xyz")
+            .unwrap_err();
+        assert!(err.contains("bobmatnyc"), "err: {err}");
+        assert!(err.contains("nonexistent-user-xyz"), "err: {err}");
+        assert!(err.contains("5656"), "err: {err}");
+    }
+
+    /// Why (#5849): a probe that could not answer — `gh` missing, a non-zero
+    /// exit, a timeout — leaves the identity unverified, which must fail
+    /// CLOSED even when the transcript looks perfect.
+    /// Test: itself.
+    #[test]
+    fn verify_active_account_fails_closed_when_the_probe_failed() {
+        let err = verify_active_account(SINGLE_AUTH_STATUS, Err("gh: not found"), "bobmatnyc")
+            .unwrap_err();
+        assert!(err.contains("could not establish"), "err: {err}");
+        assert!(err.contains("gh: not found"), "err: {err}");
     }
 
     /// Why: if `gh` reports it is authenticating via an environment-variable
@@ -413,7 +577,7 @@ github.com
     #[test]
     fn verify_active_account_rejects_env_token_override() {
         let text = "The value of the GH_TOKEN environment variable is being used for authentication.\ngithub.com\n  ✓ Logged in to github.com account bobmatnyc\n  - Active account: true\n";
-        let err = verify_active_account(text, "bobmatnyc").unwrap_err();
+        let err = verify_active_account(text, Ok("bobmatnyc"), "bobmatnyc").unwrap_err();
         assert!(err.contains("environment variable"), "err: {err}");
     }
 
@@ -538,18 +702,36 @@ github.com
     /// holds (or `initial` if absent); `auth switch --user X` writes `X` to
     /// the state file and exits 0, unless `FAKE_GH_SWITCH_FAILS=1` is set in
     /// the environment, in which case it exits 1 without writing anything.
+    ///
+    /// `api user --jq .login` (#5849) answers with the same state by default —
+    /// the honest machine, where the config dir and the credential agree.
+    /// `FAKE_GH_API_LOGIN=X` makes it answer `X` regardless, which is how the
+    /// transcript and the credential are made to DISAGREE; `FAKE_GH_API_FAILS=1`
+    /// makes it exit 1, standing in for an unreachable/unauthenticated probe.
     #[cfg(unix)]
     fn write_fake_gh(bin_dir: &std::path::Path, initial: &str) {
         use std::os::unix::fs::PermissionsExt;
         let script = format!(
             r#"#!/bin/sh
 STATE="$GH_CONFIG_DIR/.fake_active"
-if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
-  if [ -f "$STATE" ]; then
-    ACTIVE=$(cat "$STATE")
-  else
-    ACTIVE="{initial}"
+if [ -f "$STATE" ]; then
+  ACTIVE=$(cat "$STATE")
+else
+  ACTIVE="{initial}"
+fi
+if [ "$1" = "api" ] && [ "$2" = "user" ]; then
+  if [ "$FAKE_GH_API_FAILS" = "1" ]; then
+    echo "fake gh: api refused" >&2
+    exit 1
   fi
+  if [ -n "$FAKE_GH_API_LOGIN" ]; then
+    echo "$FAKE_GH_API_LOGIN"
+  else
+    echo "$ACTIVE"
+  fi
+  exit 0
+fi
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
   echo "github.com"
   echo "  - Logged in to github.com account $ACTIVE (keyring)"
   echo "  - Active account: true"
@@ -594,6 +776,17 @@ exit 1
         prior
     }
 
+    /// Reset every `FAKE_GH_*` knob so one test's env cannot leak into the next.
+    #[cfg(unix)]
+    fn clear_fake_gh_env() {
+        // SAFETY: guarded by `fake_gh_lock` in every caller.
+        unsafe {
+            std::env::remove_var("FAKE_GH_SWITCH_FAILS");
+            std::env::remove_var("FAKE_GH_API_LOGIN");
+            std::env::remove_var("FAKE_GH_API_FAILS");
+        }
+    }
+
     #[cfg(unix)]
     fn restore_path(prior: Option<String>) {
         // SAFETY: guarded by `fake_gh_lock` in every caller.
@@ -618,8 +811,7 @@ exit 1
         let config_dir = tempfile::tempdir().expect("config tempdir");
         write_fake_gh(bin_dir.path(), "wrong-account");
         let prior_path = prepend_path(bin_dir.path());
-        // SAFETY: guarded by fake_gh_lock.
-        unsafe { std::env::remove_var("FAKE_GH_SWITCH_FAILS") };
+        clear_fake_gh_env();
 
         let result = ensure_gh_account_in_dir("bobmatnyc", config_dir.path());
 
@@ -643,12 +835,13 @@ exit 1
         let config_dir = tempfile::tempdir().expect("config tempdir");
         write_fake_gh(bin_dir.path(), "wrong-account");
         let prior_path = prepend_path(bin_dir.path());
-        // SAFETY: guarded by fake_gh_lock; removed below.
+        clear_fake_gh_env();
+        // SAFETY: guarded by fake_gh_lock; cleared below.
         unsafe { std::env::set_var("FAKE_GH_SWITCH_FAILS", "1") };
 
         let result = ensure_gh_account_in_dir("bobmatnyc", config_dir.path());
 
-        unsafe { std::env::remove_var("FAKE_GH_SWITCH_FAILS") };
+        clear_fake_gh_env();
         restore_path(prior_path);
         let err = result.expect_err("switch failure must be a hard error");
         assert!(err.to_string().contains("bobmatnyc"), "err: {err}");
@@ -668,17 +861,110 @@ exit 1
         let config_dir = tempfile::tempdir().expect("config tempdir");
         write_fake_gh(bin_dir.path(), "bobmatnyc");
         let prior_path = prepend_path(bin_dir.path());
-        // SAFETY: guarded by fake_gh_lock; removed below. A switch attempt
+        clear_fake_gh_env();
+        // SAFETY: guarded by fake_gh_lock; cleared below. A switch attempt
         // would fail if (incorrectly) invoked, proving the no-op path.
         unsafe { std::env::set_var("FAKE_GH_SWITCH_FAILS", "1") };
 
         let result = ensure_gh_account_in_dir("bobmatnyc", config_dir.path());
 
-        unsafe { std::env::remove_var("FAKE_GH_SWITCH_FAILS") };
+        clear_fake_gh_env();
         restore_path(prior_path);
         assert!(
             result.is_ok(),
             "already-active must be a no-op Ok: {result:?}"
+        );
+        assert!(
+            !config_dir.path().join(".fake_active").exists(),
+            "no switch should have been attempted"
+        );
+    }
+
+    // ── the API answer, not the transcript, decides (#5849) ──────────────
+
+    /// Why (#5849): the reported bug. A `hosts.yml` naming an account that
+    /// exists nowhere on the machine still prints `Active account: true`, and
+    /// enforcement used to pass on that text alone. Here the transcript claims
+    /// `nonexistent-user-xyz` — exactly what is expected — while the credential
+    /// resolves to `bobmatnyc`, and enforcement must REFUSE, naming both
+    /// logins. Before this fix the same fixture returned `Ok(())`.
+    /// Test: itself.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_gh_account_in_dir_rejects_a_transcript_the_api_contradicts() {
+        let _g = fake_gh_lock();
+        let bin_dir = tempfile::tempdir().expect("bin tempdir");
+        let config_dir = tempfile::tempdir().expect("config tempdir");
+        write_fake_gh(bin_dir.path(), "nonexistent-user-xyz");
+        let prior_path = prepend_path(bin_dir.path());
+        clear_fake_gh_env();
+        // SAFETY: guarded by fake_gh_lock; cleared below.
+        unsafe { std::env::set_var("FAKE_GH_API_LOGIN", "bobmatnyc") };
+
+        let result = ensure_gh_account_in_dir("nonexistent-user-xyz", config_dir.path());
+
+        clear_fake_gh_env();
+        restore_path(prior_path);
+        let err = result.expect_err("a transcript the credential contradicts must not pass");
+        let msg = err.to_string();
+        assert!(msg.contains("bobmatnyc"), "err: {msg}");
+        assert!(msg.contains("nonexistent-user-xyz"), "err: {msg}");
+    }
+
+    /// Why (#5849): a probe that cannot answer leaves the identity unverified,
+    /// which must fail CLOSED — including when the transcript looks perfect
+    /// and names exactly the expected account.
+    /// Test: itself.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_gh_account_in_dir_fails_closed_when_the_api_probe_fails() {
+        let _g = fake_gh_lock();
+        let bin_dir = tempfile::tempdir().expect("bin tempdir");
+        let config_dir = tempfile::tempdir().expect("config tempdir");
+        write_fake_gh(bin_dir.path(), "bobmatnyc");
+        let prior_path = prepend_path(bin_dir.path());
+        clear_fake_gh_env();
+        // SAFETY: guarded by fake_gh_lock; cleared below.
+        unsafe { std::env::set_var("FAKE_GH_API_FAILS", "1") };
+
+        let result = ensure_gh_account_in_dir("bobmatnyc", config_dir.path());
+
+        clear_fake_gh_env();
+        restore_path(prior_path);
+        let err = result.expect_err("an unverifiable identity must never pass");
+        assert!(
+            err.to_string().contains("could not establish"),
+            "err: {err}"
+        );
+    }
+
+    /// Why (#5849): the API answer is authoritative in BOTH directions. A
+    /// stale transcript naming the wrong account must not force a switch when
+    /// the credential already authenticates as the expected user. Proven by
+    /// making a switch attempt fail: `Ok` is only reachable without one.
+    /// Test: itself.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_gh_account_in_dir_accepts_the_api_answer_over_a_stale_transcript() {
+        let _g = fake_gh_lock();
+        let bin_dir = tempfile::tempdir().expect("bin tempdir");
+        let config_dir = tempfile::tempdir().expect("config tempdir");
+        write_fake_gh(bin_dir.path(), "stale-account");
+        let prior_path = prepend_path(bin_dir.path());
+        clear_fake_gh_env();
+        // SAFETY: guarded by fake_gh_lock; cleared below.
+        unsafe {
+            std::env::set_var("FAKE_GH_API_LOGIN", "bobmatnyc");
+            std::env::set_var("FAKE_GH_SWITCH_FAILS", "1");
+        }
+
+        let result = ensure_gh_account_in_dir("bobmatnyc", config_dir.path());
+
+        clear_fake_gh_env();
+        restore_path(prior_path);
+        assert!(
+            result.is_ok(),
+            "the credential already matches; no switch is owed: {result:?}"
         );
         assert!(
             !config_dir.path().join(".fake_active").exists(),
