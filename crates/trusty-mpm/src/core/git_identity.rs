@@ -510,6 +510,36 @@ exit 1
         std::fs::set_permissions(&path, perms).expect("chmod fake gh");
     }
 
+    /// Remove any ambient `GH_TOKEN`/`GITHUB_TOKEN`, returning them to restore.
+    ///
+    /// #5849: an ambient token makes `ensure_gh_account_in_dir` refuse, so a
+    /// shell or CI job that exports one would otherwise decide these outcomes.
+    #[cfg(unix)]
+    fn strip_ambient_tokens() -> Vec<(&'static str, Option<std::ffi::OsString>)> {
+        ["GH_TOKEN", "GITHUB_TOKEN"]
+            .into_iter()
+            .map(|name| {
+                let prior = std::env::var_os(name);
+                // SAFETY: guarded by `fake_gh_lock` in every caller.
+                unsafe { std::env::remove_var(name) };
+                (name, prior)
+            })
+            .collect()
+    }
+
+    #[cfg(unix)]
+    fn restore_ambient_tokens(prior: Vec<(&'static str, Option<std::ffi::OsString>)>) {
+        for (name, value) in prior {
+            // SAFETY: guarded by `fake_gh_lock` in every caller.
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(name, v),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+
     #[cfg(unix)]
     fn prepend_path(dir: &std::path::Path) -> Option<String> {
         let prior = std::env::var("PATH").ok();
@@ -559,6 +589,7 @@ exit 1
         let config_dir = tempfile::tempdir().expect("config tempdir");
         write_fake_gh(bin_dir.path(), "wrong-account", false);
         let prior_path = prepend_path(bin_dir.path());
+        let prior_tokens = strip_ambient_tokens();
 
         let config = account_paired_config(config_dir.path(), "bobmatnyc");
         let result = block_on(resolve_for_config_enforced(
@@ -566,6 +597,7 @@ exit 1
             "https://github.com/acme/widget",
         ));
 
+        restore_ambient_tokens(prior_tokens);
         restore_path(prior_path);
         assert!(result.is_ok(), "expected self-heal to succeed: {result:?}");
         let state = std::fs::read_to_string(config_dir.path().join(".fake_active"))
@@ -590,6 +622,7 @@ exit 1
         let config_dir = tempfile::tempdir().expect("config tempdir");
         write_fake_gh(bin_dir.path(), "wrong-account", true);
         let prior_path = prepend_path(bin_dir.path());
+        let prior_tokens = strip_ambient_tokens();
 
         let config = account_paired_config(config_dir.path(), "bobmatnyc");
 
@@ -607,6 +640,7 @@ exit 1
             "https://github.com/acme/widget",
         ));
 
+        restore_ambient_tokens(prior_tokens);
         restore_path(prior_path);
         let err = enforced.expect_err("mismatched account with a failed switch must be an Err");
         assert!(err.to_string().contains("bobmatnyc"), "err: {err}");
