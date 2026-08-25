@@ -1420,13 +1420,13 @@ async fn guided_fallback_non_git_dir_with_managed_env_settles_quickly_returns_pr
     let project = dir.path();
 
     let client = reqwest::Client::new();
-    let start = std::time::Instant::now();
+    // The 5s timeout is the anti-hang guard; promptness itself is asserted on
+    // the poll count below, not on wall clock (#6230).
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         crate::commands::guided::fallback_protected(&client, &url, project),
     )
     .await;
-    let elapsed = start.elapsed();
 
     // Restore before any assertion can panic.
     unsafe {
@@ -1445,14 +1445,19 @@ async fn guided_fallback_non_git_dir_with_managed_env_settles_quickly_returns_pr
         !project.join("CLAUDE.md").exists(),
         "CLAUDE.md must not be written for this non-git cwd"
     );
+    // #6230: promptness is how many times the loop polled, not how long the
+    // machine took. The mock scripts "active" then "stopped", so a loop that
+    // stops the moment the record resolves polls twice; one that pays the full
+    // 400ms/80ms retry budget polls about six times. The previous
+    // `elapsed < 300ms` bound measured load rather than the loop and failed at
+    // 330ms under a concurrent suite run. One poll is also correct: a first
+    // fetch slow enough to consume the whole budget returns after a single
+    // attempt (see `fetch_managed_session_until_stopped`'s doc, #5840).
+    let polls = hits.load(std::sync::atomic::Ordering::SeqCst);
     assert!(
-        hits.load(std::sync::atomic::Ordering::SeqCst) >= 1,
-        "the retried in-place check must actually query the daemon"
-    );
-    assert!(
-        elapsed < std::time::Duration::from_millis(300),
-        "a record that settles on the second poll must not pay the full \
-         retry budget; took {elapsed:?}"
+        (1..=2).contains(&polls),
+        "the retried in-place check must query the daemon and stop as soon as \
+         the record settles: expected 1 or 2 polls, got {polls}"
     );
 }
 
