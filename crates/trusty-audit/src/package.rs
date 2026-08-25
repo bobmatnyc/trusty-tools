@@ -329,6 +329,11 @@ pub fn assemble(
     // #5824: the sweep's own failures, then the targets that never reached it.
     let mut excluded = exclusions(report);
     excluded.extend(unattempted.iter().cloned());
+    // #6246: and what the config asked for that this version does not act on. It
+    // belongs in the same list because it answers the same question a recipient
+    // asks of it — what is NOT in here — and because silence about an ignored
+    // request is indistinguishable from a request never made.
+    excluded.extend(config.unsupported_declaration());
     let generated = Generated {
         metadata: render_metadata(work, config, report, &audited, unattempted)?,
         readme: render_readme(config, &audited, &excluded),
@@ -681,6 +686,79 @@ trusty-review = "0.15.1"
         let work = WorkDir::new(dir.join("work"));
         work.create().expect("create");
         work
+    }
+
+    /// 🔴 #6246: a config asking for something this version does not do must say
+    /// so in the deliverable, not produce output identical to a config that
+    /// asked for nothing.
+    ///
+    /// Against `3771644d0` the three requested export families were dropped by
+    /// serde before anything could report them: the file set came back
+    /// byte-identical to a run made without the config, and neither bundle's
+    /// manifest carried a skip or unsupported marker.
+    #[test]
+    fn a_config_asking_for_the_unsupported_says_so() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let asking = EngagementConfig::from_toml(
+            // Bare keys go BEFORE the first table header: in TOML a bare key
+            // after one belongs to that table, not to the document.
+            &format!(
+                "exports = [\"per-commit\"]\ncodeowners = true\n{CONFIG}\n\
+                 [branch_protection]\ncollect = true\n"
+            ),
+            Path::new("engagement.toml"),
+        )
+        .expect("parses");
+        let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
+        let destination = default_destination(&work);
+
+        let package =
+            assemble(&work, &asking, &report, &[], &destination, None).expect("assembles");
+
+        let declared = package
+            .excluded
+            .iter()
+            .find(|line| line.contains("engagement config declares"))
+            .unwrap_or_else(|| panic!("{:?}", package.excluded));
+        for key in ["`branch_protection`", "`codeowners`", "`exports`"] {
+            assert!(declared.contains(key), "{declared}");
+        }
+
+        let metadata = read_entry(&destination, METADATA_ENTRY);
+        let declared_in_metadata: toml::Value = metadata.parse().expect("package.toml is TOML");
+        assert_eq!(
+            declared_in_metadata["config_not_acted_on"]
+                .as_array()
+                .map(|a| a.iter().filter_map(toml::Value::as_str).collect::<Vec<_>>()),
+            Some(vec!["branch_protection", "codeowners", "exports"]),
+            "{metadata}"
+        );
+        let readme = read_entry(&destination, README_ENTRY);
+        assert!(readme.contains("`exports`"), "{readme}");
+    }
+
+    /// A config this version fully understands makes a positive claim of it —
+    /// an empty array, never an absent key a reader has to interpret.
+    #[test]
+    fn a_fully_understood_config_claims_so_in_the_metadata() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
+        let destination = default_destination(&work);
+
+        let package =
+            assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+        assert!(package.excluded.is_empty(), "{:?}", package.excluded);
+        let metadata = read_entry(&destination, METADATA_ENTRY);
+        let parsed: toml::Value = metadata.parse().expect("package.toml is TOML");
+        assert_eq!(
+            parsed["config_not_acted_on"].as_array().map(Vec::len),
+            Some(0),
+            "an empty array is the positive claim; an absent key is not: {metadata}"
+        );
     }
 
     /// A repository that ran, with the report and database a real sweep leaves.
