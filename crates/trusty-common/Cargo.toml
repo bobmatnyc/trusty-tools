@@ -7,7 +7,10 @@ name = "trusty-common"
 # 0.43.2 (#6198): patch — the Jira backend resolves a milestone id to its
 # version name internally; every changed item is `pub(super)`, so no public
 # item was removed or changed.
-version = "0.43.2"
+# 0.44.0 (#6277): minor — the new public `uds::server` module is additive, and
+# nothing existing was removed or changed. Under Cargo's 0.x rule a MINOR bump
+# is what a published crate owes a new public module.
+version = "0.44.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

@@ -83,7 +83,7 @@ path = "src/bin/mcp_bridge.rs"
 # `uds-supervisor` is NOT dropped — trusty-console and trusty-agents still
 # depend on the shared `UdsServiceSupervisor` for trusty-review / trusty-analyze.
 trusty-mcp = { workspace = true }  # JSON-RPC / MCP primitives (ADR-0040, #5803)
-trusty-common = { path = "../trusty-common", version = "0.43", default-features = false, features = ["memory-core", "monitor-tui", "bm25", "cli-help", "update-check", "bug-capture", "console-metrics", "config-cli", "crate-config", "palace-resolve", "codex-config"] }
+trusty-common = { path = "../trusty-common", version = "0.44", default-features = false, features = ["memory-core", "monitor-tui", "bm25", "cli-help", "update-check", "bug-capture", "console-metrics", "config-cli", "crate-config", "palace-resolve", "codex-config"] }
 # `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
 # Why (issue #1318): the `trusty-console` dependency was REMOVED. The console
 # is no longer bundled into trusty-memory (single-owner-per-binary); the
@@ -175,7 +175,7 @@ serial_test = { workspace = true }
 # the production library (mirrors the trusty-mpm and trusty-search pattern).
 # `docgen` (#5205 follow-up): `tests/generated_docs.rs` renders the MCP tool
 # section of README.md from `tool_definitions()`.
-trusty-common = { path = "../trusty-common", version = "0.43", default-features = false, features = ["memory-core", "embedder-test-support", "docgen"] }
+trusty-common = { path = "../trusty-common", version = "0.44", default-features = false, features = ["memory-core", "embedder-test-support", "docgen"] }
 chrono = { workspace = true }
 
 [features]
