@@ -153,6 +153,11 @@ git worktree remove .claude/worktrees/baseline-$$
 Your own tree keeps its changes throughout, so a command that dies partway
 through leaves nothing to restore.
 
+Under trusty-mpm orchestration this is the PM's pattern, not a dispatched
+agent's: worktree removal is PM-executed via `tm session prune-worktrees`, and
+`tm hook --pm-guard` denies an agent's `git worktree remove` (#5791). An agent
+that needs a clean tree asks the PM for one.
+
 ### Stashing Work
 
 The stash stack is repo-global, not per-worktree: every worktree of a repo

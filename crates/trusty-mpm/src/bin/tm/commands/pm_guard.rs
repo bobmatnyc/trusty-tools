@@ -154,6 +154,14 @@
 //! both exemptions for the same reason the worktree guard does: both return
 //! ALLOW exactly when the caller IS a subagent, the only case the rule fires
 //! on. See that module's doc for the two markers it trusts and why.
+//! **Agent-side worktree removal (issue #5791):** immediately after the
+//! fan-out check, and placed there for the same reason, [`pm_guard`] denies a
+//! subagent's `git worktree remove` via
+//! [`crate::commands::pm_guard_bash::evaluate_worktree_remove_command`]. The
+//! owner ruled on 2026-08-19 that the PM runs the removal itself, through
+//! `tm session prune-worktrees`, once it has confirmed the agent's work is
+//! done. The PM is never denied, `list`/`prune` are never denied, and an
+//! indeterminate caller fails OPEN.
 //! **Per-subagent context ceiling (issue #4837):** immediately after the
 //! fan-out check — and ahead of the same two exemptions, for the same reason —
 //! [`pm_guard`] measures the calling subagent's accumulated context via
@@ -184,8 +192,8 @@ use crate::commands::misc::{DISABLE_HOOKS_ENV, SUB_AGENT_ENV, read_stdin_hook_pa
 use crate::commands::pm_guard_bash::{
     CommitVerdict, SHELL_EDIT_REASON, docs_commit_deny_reason, evaluate_bash_command,
     evaluate_main_checkout_commit_command, evaluate_main_checkout_destructive_command,
-    evaluate_worktree_add_command, extract_shell_edit_target, head_move_deny_reason,
-    main_checkout_head_move,
+    evaluate_worktree_add_command, evaluate_worktree_remove_command, extract_shell_edit_target,
+    head_move_deny_reason, main_checkout_head_move,
 };
 use crate::commands::pm_guard_budget::{self, BudgetDecision, DEFAULT_FILE_CHANGE_BUDGET};
 use crate::commands::pm_guard_cost;
@@ -482,6 +490,28 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
     let caller_is_subagent = pm_guard_fanout::caller_is_subagent(&payload);
 
     if let Some(reason) = pm_guard_fanout::evaluate_subagent_fanout(tool_name, caller_is_subagent) {
+        audit_denied_tool(url, session_id, tool_name, reason).await;
+        println!("{}", build_pretooluse_deny_response(reason));
+        return Ok(());
+    }
+
+    // #5791: worktree removal is PM-executed via `tm session prune-worktrees`
+    // (owner ruling 2026-08-19), never delegated to an agent. Placed here for
+    // the same structural reason as the fan-out deny directly above, and NOT
+    // with the Bash rules further up: it fires only when the caller IS a
+    // subagent, which is exactly the case Guards 1 and 4 early-return ALLOW
+    // for, so a check placed after either would be a guaranteed no-op — while
+    // `caller_is_subagent` is not resolved until this point. It inherits that
+    // resolver's fail-open bias: an indeterminate caller allows.
+    if tool_name == "Bash"
+        && let Some(reason) = evaluate_worktree_remove_command(
+            tool_input
+                .and_then(|v| v.get("command"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default(),
+            caller_is_subagent,
+        )
+    {
         audit_denied_tool(url, session_id, tool_name, reason).await;
         println!("{}", build_pretooluse_deny_response(reason));
         return Ok(());

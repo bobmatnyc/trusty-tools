@@ -344,6 +344,29 @@ mod tests {
         );
     }
 
+    /// Worktree removal is PM-executed, and the shipped prompt must say so.
+    ///
+    /// Why (#5791, owner ruling 2026-08-19): this bullet used to tell every
+    /// composed agent to "remove your worktree" after a merge, and neither
+    /// dispatch path could actually carry that out — an unisolated dispatch is
+    /// denied on the shared HEAD (#4480) and an isolated agent cannot touch the
+    /// shared registry. `tm hook --pm-guard` now denies the command; this test
+    /// keeps the prompt from drifting back to instructing what the guard
+    /// refuses, which is the state that produced the deadlock.
+    #[test]
+    fn worktree_removal_is_the_pms_in_the_shipped_base_agent() {
+        let flat = BASE_AGENT.replace('\n', " ");
+        assert!(
+            flat.contains("Never remove a worktree") && flat.contains("#5791"),
+            "`BASE-AGENT.md` must forbid an agent removing a worktree (#5791)"
+        );
+        assert!(
+            flat.contains("tm session prune-worktrees"),
+            "`BASE-AGENT.md` must name the PM's replacement command, not just \
+             refuse (#5791)"
+        );
+    }
+
     /// The `BASE-*` templates are what every other asset's `extends:` chain
     /// roots at. Shipping the roster without them would make composition
     /// impossible for every consumer, which is precisely why all 42 moved
