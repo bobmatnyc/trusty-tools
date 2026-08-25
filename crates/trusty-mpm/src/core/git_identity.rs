@@ -242,12 +242,14 @@ pub async fn resolve_for_config_enforced(
 ) -> anyhow::Result<GitIdentity> {
     let identity = resolve_for_config(config, repo_url)?;
 
-    if let Some((dir, account)) =
-        configured_account_pair(select_github_config_for(config, repo_url))
-    {
-        tokio::task::spawn_blocking(move || ensure_gh_account_in_dir(&account, &dir))
-            .await
-            .map_err(|e| anyhow::anyhow!("gh account enforcement task panicked: {e}"))??;
+    if let Some(target) = configured_account_pair(select_github_config_for(config, repo_url)) {
+        // #5849: the host travels with the account, so enforcement attests the
+        // host this project's `gh` calls actually run on.
+        tokio::task::spawn_blocking(move || {
+            ensure_gh_account_in_dir(&target.account, &target.config_dir, &target.host)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("gh account enforcement task panicked: {e}"))??;
     }
 
     Ok(identity)
@@ -474,8 +476,14 @@ mod tests {
         let script = format!(
             r#"#!/bin/sh
 STATE="$GH_CONFIG_DIR/.fake_active"
+if [ -f "$STATE" ]; then ACTIVE=$(cat "$STATE"); else ACTIVE="{initial}"; fi
+# #5849: enforcement verifies with `gh api user`, so the fake must answer it —
+# here the honest machine, where the config dir and the credential agree.
+if [ "$1" = "api" ] && [ "$2" = "user" ]; then
+  echo "$ACTIVE"
+  exit 0
+fi
 if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
-  if [ -f "$STATE" ]; then ACTIVE=$(cat "$STATE"); else ACTIVE="{initial}"; fi
   echo "github.com"
   echo "  - Logged in to github.com account $ACTIVE (keyring)"
   echo "  - Active account: true"
@@ -502,6 +510,36 @@ exit 1
             .permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(&path, perms).expect("chmod fake gh");
+    }
+
+    /// Remove any ambient `GH_TOKEN`/`GITHUB_TOKEN`, returning them to restore.
+    ///
+    /// #5849: an ambient token makes `ensure_gh_account_in_dir` refuse, so a
+    /// shell or CI job that exports one would otherwise decide these outcomes.
+    #[cfg(unix)]
+    fn strip_ambient_tokens() -> Vec<(&'static str, Option<std::ffi::OsString>)> {
+        ["GH_TOKEN", "GITHUB_TOKEN"]
+            .into_iter()
+            .map(|name| {
+                let prior = std::env::var_os(name);
+                // SAFETY: guarded by `fake_gh_lock` in every caller.
+                unsafe { std::env::remove_var(name) };
+                (name, prior)
+            })
+            .collect()
+    }
+
+    #[cfg(unix)]
+    fn restore_ambient_tokens(prior: Vec<(&'static str, Option<std::ffi::OsString>)>) {
+        for (name, value) in prior {
+            // SAFETY: guarded by `fake_gh_lock` in every caller.
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(name, v),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -553,6 +591,7 @@ exit 1
         let config_dir = tempfile::tempdir().expect("config tempdir");
         write_fake_gh(bin_dir.path(), "wrong-account", false);
         let prior_path = prepend_path(bin_dir.path());
+        let prior_tokens = strip_ambient_tokens();
 
         let config = account_paired_config(config_dir.path(), "bobmatnyc");
         let result = block_on(resolve_for_config_enforced(
@@ -560,6 +599,7 @@ exit 1
             "https://github.com/acme/widget",
         ));
 
+        restore_ambient_tokens(prior_tokens);
         restore_path(prior_path);
         assert!(result.is_ok(), "expected self-heal to succeed: {result:?}");
         let state = std::fs::read_to_string(config_dir.path().join(".fake_active"))
@@ -584,6 +624,7 @@ exit 1
         let config_dir = tempfile::tempdir().expect("config tempdir");
         write_fake_gh(bin_dir.path(), "wrong-account", true);
         let prior_path = prepend_path(bin_dir.path());
+        let prior_tokens = strip_ambient_tokens();
 
         let config = account_paired_config(config_dir.path(), "bobmatnyc");
 
@@ -601,6 +642,7 @@ exit 1
             "https://github.com/acme/widget",
         ));
 
+        restore_ambient_tokens(prior_tokens);
         restore_path(prior_path);
         let err = enforced.expect_err("mismatched account with a failed switch must be an Err");
         assert!(err.to_string().contains("bobmatnyc"), "err: {err}");

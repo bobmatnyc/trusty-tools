@@ -99,7 +99,9 @@ impl GhAccountStatus {
     /// `verify_active_account` compares them byte-for-byte — so a `gh_user`
     /// persisted as `Acme-Bot` against a `gh` that reports `acme-bot` would
     /// pass a naive membership test here and then fail that later exact match.
-    /// Returning the canonical form makes the two agree by construction.
+    /// Returning the canonical form makes the two agree by construction. Since
+    /// #5849 that later match is against `gh api user --jq .login`, GitHub's
+    /// own spelling, so the canonical form is what it will be compared to.
     /// What: case-insensitive lookup over `logged_in`, returning `gh`'s
     /// spelling. `active` is deliberately not consulted — a project may name
     /// any logged-in account, not only the currently active one.
@@ -408,7 +410,7 @@ const GH_ENFORCE_TIMEOUT: Duration = Duration::from_secs(5);
 #[path = "gh_account_enforce.rs"]
 mod enforce;
 pub use enforce::{
-    GH_CONFIG_DIR_ENV, configured_account_pair, ensure_gh_account_for_project,
+    AccountTarget, GH_CONFIG_DIR_ENV, configured_account_pair, ensure_gh_account_for_project,
     ensure_gh_account_in_dir,
 };
 

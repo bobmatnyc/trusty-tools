@@ -1,5 +1,8 @@
 import { defineConfig } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
+// #5936: emptyOutDir below deletes the tracked ui-source-hash.txt; this
+// re-writes it after the build that removed it.
+import { stampUiBundle } from '../../../scripts/lib/vite-stamp-bundle.mjs';
 
 // Why: trusty-memory embeds the built dist/ directly in the Rust binary via
 // rust-embed, so we want a self-contained, relative-path-friendly bundle.
@@ -9,7 +12,7 @@ import { svelte } from '@sveltejs/vite-plugin-svelte';
 // binds elsewhere).
 // Test: `pnpm build` produces ui/dist/index.html and ui/dist/assets/*.
 export default defineConfig({
-  plugins: [svelte()],
+  plugins: [svelte(), stampUiBundle('trusty-memory')],
   base: './',
   // Why: Svelte 5 exports map 'browser' → real client runtime and 'default' →
   // throwing SSR stub. Without pinning 'browser', Vite resolves to the SSR
