@@ -162,10 +162,28 @@ pub enum PinnedError {
     },
 
     /// The pinned version was never published as a stable release.
+    ///
+    /// #6164: when the crate IS published and only this version is missing, the
+    /// message names release-list lag as the likely cause. That reading was
+    /// unavailable to the operator who hit it — `trusty-audit audit` failed half
+    /// an hour after trusty-review 0.23.0 went live, reported `0.22.1` as the
+    /// newest published version, and read as a hard version-not-found error; a
+    /// manual retry with no other change succeeded. The lookup already retries
+    /// (`preflight::RETRY_AFTER`), so reaching this means the wait was too
+    /// short, which is exactly when the suggestion is worth making.
     #[error(
         "{crate_name} {version} is not a published stable release, so it could not \
-         be installed; nothing was installed. Published stable versions: {}",
-        if available.is_empty() { "none".to_owned() } else { available.join(", ") }
+         be installed; nothing was installed. Published stable versions: {}.{}",
+        if available.is_empty() { "none".to_owned() } else { available.join(", ") },
+        if available.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " {crate_name} itself is published, so if {version} was released in the last \
+                 half hour this is most likely a release list that has not caught up yet — \
+                 wait and run the same command again"
+            )
+        }
     )]
     VersionNotPublished {
         /// The crate that was pinned.

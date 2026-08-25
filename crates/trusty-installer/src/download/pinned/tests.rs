@@ -818,6 +818,75 @@ async fn preflight_names_the_tool_whose_version_was_never_published() {
     assert!(rendered.contains("9.9.9"), "{rendered}");
 }
 
+/// 🔴 #6164: `trusty-audit audit` failed half an hour after trusty-review 0.23.0
+/// went live, reporting `0.22.1` as the newest published version, and a manual
+/// retry with no other change succeeded. The lookup now retries — and when the
+/// retries run out, the message says what the operator could not read off the
+/// old one: the crate IS published, so a version this new is most likely a list
+/// that has not caught up, and the same command is worth running again.
+///
+/// Against `main` the second assertion fails: the message stopped at the list of
+/// published versions.
+#[tokio::test]
+async fn a_pin_that_names_no_release_still_fails_after_retrying() {
+    let Some(target) = tier1() else {
+        return;
+    };
+    let base = Fixture::new(target)
+        .publish("demo-tool", "0.22.1", Flaw::None)
+        .start()
+        .await;
+
+    let checked = preflight(&base, &[PinnedTool::new("demo-tool", "0.23.0")]).await;
+
+    let rendered = checked[0]
+        .problem
+        .as_ref()
+        .expect("a version that is never published must still fail")
+        .to_string();
+    assert!(
+        rendered.contains("0.22.1"),
+        "the message keeps the published list: {rendered}"
+    );
+    assert!(
+        rendered.contains("has not caught up") && rendered.contains("run the same command again"),
+        "the message must name the likely cause and suggest the retry: {rendered}"
+    );
+}
+
+/// The other half of #6164's closure condition: retry when the version is
+/// absent but the crate exists. A crate the list has never heard of is a typo,
+/// and waiting to say so helps nobody — so it is refused on the first answer.
+#[test]
+fn only_a_missing_version_of_a_known_crate_is_retried() {
+    use crate::download::release::ResolveError;
+
+    assert!(super::preflight::worth_retrying(
+        &ResolveError::NotPublished {
+            available: vec!["0.22.1".to_owned()],
+        }
+    ));
+    assert!(!super::preflight::worth_retrying(
+        &ResolveError::NotPublished { available: vec![] }
+    ));
+    // A transport failure is a different error with a different message, and a
+    // proxy refusing does not start working in twenty seconds.
+    assert!(!super::preflight::worth_retrying(&ResolveError::Fetch(
+        anyhow::anyhow!("connection refused")
+    )));
+
+    // A crate with no releases at all keeps the plain message: there is nothing
+    // to suggest waiting for.
+    let unknown = PinnedError::VersionNotPublished {
+        crate_name: "typo-tool".to_owned(),
+        version: "1.0.0".to_owned(),
+        available: vec![],
+    }
+    .to_string();
+    assert!(unknown.contains("none"), "{unknown}");
+    assert!(!unknown.contains("has not caught up"), "{unknown}");
+}
+
 /// Why: the set is reported WHOLE. Stopping at the first refusal would make a
 /// recipient fix one tool, re-run, and meet the next.
 /// What: an unpublished pin between two published ones; all three come back.

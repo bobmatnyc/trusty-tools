@@ -135,22 +135,94 @@ pub(super) async fn resolve_pin(
     })?;
 
     // Check 2 — the EXACT pinned version is published. #5491: never `latest`.
-    let resolved =
-        release::resolve_pinned_tag_from_url(client, endpoints.releases_url, name, version)
-            .await
-            .map_err(|e| match e {
-                release::ResolveError::NotPublished { available } => {
-                    PinnedError::VersionNotPublished {
+    // #6164: retried, because a release list read minutes after a publish can
+    // answer without the new version in it.
+    let resolved = resolve_published_tag(client, endpoints, name, version).await?;
+    Ok((target, resolved))
+}
+
+/// How long to wait before each retry of the release-list lookup (#6164).
+///
+/// Why: `trusty-audit audit` failed hard about thirty minutes after
+/// trusty-review 0.23.0 went live, reporting `0.22.1` as the newest published
+/// version; a manual retry with no other change succeeded. Two attempts across
+/// twenty seconds is what covers a cached list, and it is deliberately far
+/// short of that thirty-minute window: an installer that blocks for half an
+/// hour is a worse failure than one that stops and says to try again, which is
+/// why [`PinnedError::VersionNotPublished`] also names the cause.
+/// What: one entry per retry, so the total added wait is their sum. Zero in a
+/// test build — every case that reaches this asks for a version the fixture
+/// server will never publish, so real sleeps would only make the suite slower
+/// without exercising anything.
+#[cfg(not(test))]
+const RETRY_AFTER: &[std::time::Duration] = &[
+    std::time::Duration::from_secs(5),
+    std::time::Duration::from_secs(15),
+];
+#[cfg(test)]
+const RETRY_AFTER: &[std::time::Duration] = &[std::time::Duration::ZERO, std::time::Duration::ZERO];
+
+/// The release-list lookup, retried while the answer looks like a stale list.
+///
+/// Why: see [`RETRY_AFTER`]. A version that was published minutes ago and a
+/// version that never existed produce the identical answer from a release list,
+/// so the only thing separating them is asking again.
+/// What: [`release::resolve_pinned_tag_from_url`], retried per [`RETRY_AFTER`]
+/// while [`worth_retrying`] holds. A transport failure is NOT retried — it is
+/// already [`PinnedError::ReleaseLookupFailed`], which says the list could not
+/// be read rather than that the version is missing, and a proxy refusing does
+/// not start working in twenty seconds.
+/// Test: `super::tests::a_pin_that_names_no_release_still_fails_after_retrying`.
+async fn resolve_published_tag(
+    client: &reqwest::Client,
+    endpoints: &Endpoints<'_>,
+    name: &str,
+    version: &str,
+) -> Result<release::ResolvedTag, PinnedError> {
+    let mut waits = RETRY_AFTER.iter();
+    loop {
+        let error = match release::resolve_pinned_tag_from_url(
+            client,
+            endpoints.releases_url,
+            name,
+            version,
+        )
+        .await
+        {
+            Ok(resolved) => return Ok(resolved),
+            Err(e) => e,
+        };
+        match waits.next() {
+            Some(wait) if worth_retrying(&error) => tokio::time::sleep(*wait).await,
+            _ => {
+                return Err(match error {
+                    release::ResolveError::NotPublished { available } => {
+                        PinnedError::VersionNotPublished {
+                            crate_name: name.to_owned(),
+                            version: version.to_owned(),
+                            available,
+                        }
+                    }
+                    release::ResolveError::Fetch(source) => PinnedError::ReleaseLookupFailed {
                         crate_name: name.to_owned(),
                         version: version.to_owned(),
-                        available,
-                    }
-                }
-                release::ResolveError::Fetch(source) => PinnedError::ReleaseLookupFailed {
-                    crate_name: name.to_owned(),
-                    version: version.to_owned(),
-                    source,
-                },
-            })?;
-    Ok((target, resolved))
+                        source,
+                    },
+                });
+            }
+        }
+    }
+}
+
+/// Whether this lookup failure could be a release list that has not caught up.
+///
+/// Why: the closure condition #6164 states — retry when the version is absent
+/// but the crate itself exists. A crate the list has never heard of is a typo
+/// or a wrong crate name, and waiting twenty seconds to say so helps nobody.
+/// What: true only for [`release::ResolveError::NotPublished`] carrying at
+/// least one published version, which is how "this crate exists" is expressed
+/// here.
+/// Test: `super::tests::only_a_missing_version_of_a_known_crate_is_retried`.
+pub(super) fn worth_retrying(error: &release::ResolveError) -> bool {
+    matches!(error, release::ResolveError::NotPublished { available } if !available.is_empty())
 }
