@@ -108,6 +108,13 @@ pub struct GithubAccess {
     /// disk — only exposed into a child's environment, the same shape as
     /// `super::boards::Boards::env`.
     token: Option<String>,
+    /// Whether this process must ALSO hand the token to the child's git
+    /// transport, under the name that transport reads (#6244).
+    ///
+    /// Set by `super::sweep_with_env` from
+    /// [`super::git_credentials::GitCredential::supplies_github_token`]; see
+    /// [`Self::git_transport_env`].
+    supply_git_transport: bool,
 }
 
 impl GithubAccess {
@@ -115,6 +122,35 @@ impl GithubAccess {
     /// credential was read.
     pub fn env(&self) -> Option<(&'static str, &str)> {
         self.token.as_deref().map(|t| (ENV_GITHUB_TOKEN, t))
+    }
+
+    /// The same token again, under the name tga's GIT TRANSPORT reads (#6244).
+    ///
+    /// Why: [`Self::env`] sets `TRUSTY_AUDIT_GITHUB_TOKEN`, which only the
+    /// generated config's `github:` section references — that is the REST client
+    /// that reads issues. `tga`'s `git fetch` resolves its credential from
+    /// `GITHUB_TOKEN` / `GH_TOKEN` instead, so a recipient logged in with `gh`
+    /// and nothing else had a usable credential this crate held and never passed
+    /// on: every fetch failed and pull-request collection came back empty.
+    /// What: `Some` only when the sweep resolved that the `gh` login is the ONLY
+    /// source — an operator who exported their own token already reaches the
+    /// child through inheritance, and replacing it is not this crate's call.
+    /// Test: `github_issues_tests::{the_gh_login_reaches_the_git_transport,
+    /// an_operators_own_token_is_not_replaced}`.
+    pub(crate) fn git_transport_env(&self) -> Option<(&'static str, &str)> {
+        if !self.supply_git_transport {
+            return None;
+        }
+        self.token
+            .as_deref()
+            .map(|t| (super::git_credentials::ENV_GITHUB_TOKEN, t))
+    }
+
+    /// The same access, told whether it must supply the git transport (#6244).
+    #[must_use]
+    pub(crate) fn supplying_git_transport(mut self, needed: bool) -> Self {
+        self.supply_git_transport = needed;
+        self
     }
 
     /// The real token value, for the outbound credential guards ONLY (#5980
@@ -204,6 +240,7 @@ impl GithubAccess {
     pub(crate) fn with_token(token: impl Into<String>) -> Self {
         Self {
             token: Some(token.into()),
+            supply_git_transport: false,
         }
     }
 }
@@ -232,7 +269,10 @@ pub async fn resolve_github_access() -> GithubAccess {
 /// an_ok_result_is_carried_through}`.
 fn from_probe_result(result: Result<String, trusty_common::gh::GhError>) -> GithubAccess {
     match result {
-        Ok(token) => GithubAccess { token: Some(token) },
+        Ok(token) => GithubAccess {
+            token: Some(token),
+            supply_git_transport: false,
+        },
         Err(_) => GithubAccess::default(),
     }
 }
@@ -321,11 +361,41 @@ pub(crate) fn verify_unchanged(
 mod github_issues_tests {
     use super::*;
 
+    /// 🔴 #6244: the `gh` login must reach the child's GIT TRANSPORT, not only
+    /// the REST client that reads issues.
+    ///
+    /// Against `3771644d0` there was no second variable: the token went out as
+    /// `TRUSTY_AUDIT_GITHUB_TOKEN` alone, which tga's fetch does not read, so a
+    /// recipient logged in only with `gh` had every fetch fail while a usable
+    /// credential sat in this process's memory.
+    #[test]
+    fn the_gh_login_reaches_the_git_transport() {
+        let access = GithubAccess::with_token("gho_x").supplying_git_transport(true);
+        assert_eq!(
+            access.git_transport_env(),
+            Some((super::super::git_credentials::ENV_GITHUB_TOKEN, "gho_x"))
+        );
+        // The REST client's own variable is unchanged — this adds a channel.
+        assert_eq!(access.env(), Some((ENV_GITHUB_TOKEN, "gho_x")));
+    }
+
+    /// An operator's own exported token already reaches the child by
+    /// inheritance, so this crate writes nothing over it.
+    #[test]
+    fn an_operators_own_token_is_not_replaced() {
+        assert_eq!(GithubAccess::with_token("gho_x").git_transport_env(), None);
+        assert_eq!(
+            GithubAccess::default()
+                .supplying_git_transport(true)
+                .git_transport_env(),
+            None,
+            "there is no token to supply"
+        );
+    }
+
     #[test]
     fn a_repo_with_a_token_gets_the_placeholder_never_the_value() {
-        let access = GithubAccess {
-            token: Some("ghp_real-token-do-not-write-me-down".to_owned()),
-        };
+        let access = GithubAccess::with_token("ghp_real-token-do-not-write-me-down");
         let section = access.section(GithubLeg::Present("acme/api"));
         assert_eq!(section.repo.as_deref(), Some("acme/api"));
         assert_eq!(

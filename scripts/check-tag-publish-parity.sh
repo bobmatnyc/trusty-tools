@@ -271,7 +271,9 @@ if [ "$DISTINCT" -gt 1 ]; then
   echo "FAIL: TAG-SPLIT — the accepted alias tags for ${PKG_NAME} ${VERSION} name" >&2
   echo "      DIFFERENT commits, so at least one of them misrepresents the release:" >&2
   paste -d' ' <(printf '%s\n' $FOUND_TAGS) <(printf '%s\n' $FOUND_SHAS) | sed 's/^/        /' >&2
-  echo "      Delete and re-push the wrong one so both name the publish commit." >&2
+  echo "      Tags here are IMMUTABLE (#6178) — the wrong one cannot be deleted or" >&2
+  echo "      moved, so this version number is burned. Bump to the next version and" >&2
+  echo "      tag it fresh, at the commit you intend to publish." >&2
   exit 1
 fi
 
@@ -288,14 +290,18 @@ if [ "$TAG_SHA" != "$PUBLISH_SHA" ]; then
     echo "      published 7d5cf82e1 — and every other release gate stays green through" >&2
     echo "      it. Commits added since the tag:" >&2
     git log --oneline "${TAG_SHA}..${PUBLISH_SHA}" 2>/dev/null | sed 's/^/        /' >&2
-    echo "      Move the tag onto ${PUBLISH_SHA} and re-push it, or reset this" >&2
-    echo "      checkout back to ${TAG_SHA}. Do not publish with them disagreeing:" >&2
-    echo "        git tag -f ${MATCHED_TAG} ${PUBLISH_SHA}" >&2
-    echo "        git push --force origin ${MATCHED_TAG}" >&2
+    echo "      Tags here are IMMUTABLE (#6178): a force-update and a delete are both" >&2
+    echo "      rejected with GH013, so moving ${MATCHED_TAG} onto ${PUBLISH_SHA} is not" >&2
+    echo "      an option. Move the CHECKOUT onto the tag instead, then re-run:" >&2
+    echo "        git reset --hard ${TAG_SHA}" >&2
+    echo "      If ${TAG_SHA} cannot pass the publish gate, this version number is" >&2
+    echo "      burned — bump to the next version and tag it fresh." >&2
   else
     echo "      The tag is NOT an ancestor of HEAD — these are divergent histories," >&2
     echo "      so the tagged tree and the tree about to ship differ by more than" >&2
-    echo "      added commits. Re-tag the commit you intend to publish." >&2
+    echo "      added commits. Tags here are IMMUTABLE (#6178), so this version" >&2
+    echo "      number is burned: bump to the next version and tag the commit you" >&2
+    echo "      intend to publish." >&2
   fi
   exit 1
 fi
@@ -331,9 +337,10 @@ if [ -n "$VCS_INFO" ]; then
     echo "FAIL: VCS-INFO-MISMATCH — ${VCS_INFO} records ${recorded}, but" >&2
     echo "      ${MATCHED_TAG} names ${TAG_SHA}. The tag does not describe the" >&2
     echo "      published tree. This is the 2026-08-11 defect observed directly." >&2
-    echo "      Move the tag onto the published commit — leaving it is a permanent" >&2
-    echo "      misstatement of what shipped:" >&2
-    echo "        git tag -f ${MATCHED_TAG} ${recorded} && git push --force origin ${MATCHED_TAG}" >&2
+    echo "      The upload already happened and tags here are IMMUTABLE (#6178), so" >&2
+    echo "      this misstatement is PERMANENT for ${VERSION} — it cannot be corrected" >&2
+    echo "      in place. Bump and re-release only if a truthful tag is worth more" >&2
+    echo "      than a spent version number." >&2
     exit 1
   fi
   echo "PASS: ${VCS_INFO} records ${recorded}, matching ${MATCHED_TAG}." >&2

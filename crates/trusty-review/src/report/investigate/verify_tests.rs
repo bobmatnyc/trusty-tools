@@ -27,6 +27,7 @@ fn selection(path: &str, content: &str) -> Selection {
         dimensions_covered: vec![],
         dimensions_absent: vec![],
         per_dimension: vec![],
+        test_census: Default::default(),
         attributed_files: 0,
         attributed_only: false,
     }

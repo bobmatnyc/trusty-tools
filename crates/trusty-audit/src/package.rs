@@ -7,7 +7,7 @@
 //! email. This module reduces them to one file and prints its path.
 //!
 //! What: [`assemble`] collects what a completed sweep produced, generates the
-//! three files that explain it ([`generated`]), and writes a single zip.
+//! files that explain it ([`generated`]), and writes a single zip.
 //! [`ReturnPackage`] is what a front end renders — the path, every member, and
 //! every repository left out.
 //!
@@ -98,13 +98,16 @@ use crate::workdir::{Area, WorkDir};
 // visibility change — so it moved rather than anything else splitting.
 mod credential_scan;
 
-// #6080: the three members this crate generates rather than collects — the
-// README, `package.toml`, and the new `reports/index.md`. Split out when the
-// index pushed this file past the 500-SLOC production cap. This file decides
-// what goes into the archive; that one writes the files describing the result.
+// #6080, #6245: the members this crate generates rather than collects — the
+// README, `package.toml`, `reports/index.md`, and `failures/index.md`. Split
+// out when the index pushed this file past the 500-SLOC production cap. This
+// file decides what goes into the archive; that one writes the files describing
+// the result.
 mod generated;
 
-use generated::{Generated, exclusions, render_index, render_metadata, render_readme};
+use generated::{
+    Generated, exclusions, render_failures, render_index, render_metadata, render_readme,
+};
 
 /// Filename of the return package, when the recipient does not choose one.
 pub const PACKAGE_FILE_NAME: &str = "audit-return-package.zip";
@@ -130,6 +133,24 @@ pub const INDEX_ENTRY: &str = "reports/index.md";
 
 /// Directory inside the zip holding the tga extract databases (#5479).
 pub const EXTRACT_PREFIX: &str = "extract";
+
+/// Directory inside the zip holding the record of every repository that failed.
+///
+/// Why (#6245): a failed target used to leave NOTHING in the package — no log,
+/// no record, just absence from `reports/`. A recipient could not tell "this
+/// repository failed" from "this repository was never attempted", and
+/// diagnosing either meant re-running the sweep on the machine that had it. Two
+/// of 59 repositories exited 1 on the 2026-08-25 run and shipped no trace at
+/// all.
+/// What: one `failures/<stem>.log` per failed repository — the child's own
+/// combined output, copied through the same credential scan every other
+/// collected member goes through — plus a generated [`FAILURES_ENTRY`] naming
+/// each one, why it failed, and where its log is.
+/// Test: `super::package_tests::a_failed_repository_ships_its_log_and_a_record`.
+pub const FAILURES_PREFIX: &str = "failures";
+
+/// The generated member that names every repository that failed, and why.
+pub const FAILURES_ENTRY: &str = "failures/index.md";
 
 /// Where the package lands when nothing overrides it.
 ///
@@ -324,11 +345,23 @@ pub fn assemble(
         )?;
         collect_extract(work, &stem, &run.repo.name, &mut collected)?;
     }
+    // #6245: the log of every repository that failed, as a collected member —
+    // so it goes through the same symlink, hardlink and credential guards the
+    // reports do. A log that is not on disk is simply absent; the generated
+    // record below still names the repository and why it failed.
+    for run in report.failures() {
+        collect_log(run, &mut collected)?;
+    }
     collected.sort_by(|a, b| a.0.cmp(&b.0));
 
     // #5824: the sweep's own failures, then the targets that never reached it.
     let mut excluded = exclusions(report);
     excluded.extend(unattempted.iter().cloned());
+    // #6246: and what the config asked for that this version does not act on. It
+    // belongs in the same list because it answers the same question a recipient
+    // asks of it — what is NOT in here — and because silence about an ignored
+    // request is indistinguishable from a request never made.
+    excluded.extend(config.unsupported_declaration());
     let generated = Generated {
         metadata: render_metadata(work, config, report, &audited, unattempted)?,
         readme: render_readme(config, &audited, &excluded),
@@ -336,6 +369,9 @@ pub fn assemble(
         // actually going into this archive rather than the files the sweep left
         // on disk. Before `fill_archive`, because it is one of the members.
         index: render_index(work, report, &collected),
+        // #6245: `None` on a clean sweep — a `failures/` directory holding an
+        // index that says "none" is worse than no directory.
+        failures: render_failures(report, &collected),
     };
 
     write_archive(
@@ -459,6 +495,45 @@ fn collect_dir(
             entry.path().to_path_buf(),
         ));
     }
+    Ok(())
+}
+
+/// One failed repository's child log, as a member under [`FAILURES_PREFIX`].
+///
+/// Why (#6245): the log is the only thing that says what the child was doing
+/// when it stopped, and it was staying on the machine that ran the sweep — so a
+/// recipient holding the package could not diagnose a failed repository without
+/// re-running it. It ships through the collected-member path rather than as
+/// generated text because it is bytes ANOTHER program wrote, and every such byte
+/// goes through [`credential_scan::copy_member`]'s scan.
+/// What: the same symlink and hardlink refusals [`collect_dir`] applies, then
+/// `failures/<stem>.log`. A log that is not on disk — a child that never got far
+/// enough to have one — is skipped in silence; [`render_failures`] names the
+/// repository either way.
+///
+/// # Errors
+///
+/// [`AuditError::UnsafePackageEntry`] when the log is a symlink or is
+/// hardlinked, for the same reason a report under `out/` would be.
+/// Test: `super::package_tests::a_failed_repository_ships_its_log_and_a_record`.
+fn collect_log(run: &RepoRun, into: &mut Vec<(String, PathBuf)>) -> Result<(), AuditError> {
+    let Ok(metadata) = std::fs::symlink_metadata(&run.log) else {
+        return Ok(());
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(AuditError::UnsafePackageEntry {
+            path: run.log.clone(),
+            kind: "symlink",
+        });
+    }
+    if !metadata.is_file() {
+        return Ok(());
+    }
+    refuse_if_hardlinked(&run.log)?;
+    into.push((
+        format!("{FAILURES_PREFIX}/{}.log", output_stem(run)),
+        run.log.clone(),
+    ));
     Ok(())
 }
 
@@ -595,11 +670,19 @@ fn fill_archive(
     let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(file));
     let mut files = Vec::with_capacity(collected.len() + 3);
 
-    for (entry, text) in [
-        (README_ENTRY, generated.readme),
-        (METADATA_ENTRY, generated.metadata),
-        (INDEX_ENTRY, generated.index),
-    ] {
+    let members = [
+        (README_ENTRY, Some(generated.readme)),
+        (METADATA_ENTRY, Some(generated.metadata)),
+        (INDEX_ENTRY, Some(generated.index)),
+        // #6245: absent on a clean sweep — see `Generated::failures`.
+        (FAILURES_ENTRY, generated.failures),
+    ];
+    for (entry, text) in members.into_iter().filter_map(|(e, t)| t.map(|t| (e, t))) {
+        // #6245: this member quotes the reason strings recorded for each failed
+        // repository, and a reason can carry text a child produced. Generated or
+        // not, it is scanned before it is written — the same bar every collected
+        // member meets.
+        credential_scan::refuse_if_credential(&text, entry, config, github_token)?;
         start(&mut zip, entry, text.len() as u64, temporary)?;
         zip.write_all(text.as_bytes())
             .map_err(|source| AuditError::Package {
@@ -681,6 +764,79 @@ trusty-review = "0.15.1"
         let work = WorkDir::new(dir.join("work"));
         work.create().expect("create");
         work
+    }
+
+    /// 🔴 #6246: a config asking for something this version does not do must say
+    /// so in the deliverable, not produce output identical to a config that
+    /// asked for nothing.
+    ///
+    /// Against `3771644d0` the three requested export families were dropped by
+    /// serde before anything could report them: the file set came back
+    /// byte-identical to a run made without the config, and neither bundle's
+    /// manifest carried a skip or unsupported marker.
+    #[test]
+    fn a_config_asking_for_the_unsupported_says_so() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let asking = EngagementConfig::from_toml(
+            // Bare keys go BEFORE the first table header: in TOML a bare key
+            // after one belongs to that table, not to the document.
+            &format!(
+                "exports = [\"per-commit\"]\ncodeowners = true\n{CONFIG}\n\
+                 [branch_protection]\ncollect = true\n"
+            ),
+            Path::new("engagement.toml"),
+        )
+        .expect("parses");
+        let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
+        let destination = default_destination(&work);
+
+        let package =
+            assemble(&work, &asking, &report, &[], &destination, None).expect("assembles");
+
+        let declared = package
+            .excluded
+            .iter()
+            .find(|line| line.contains("engagement config declares"))
+            .unwrap_or_else(|| panic!("{:?}", package.excluded));
+        for key in ["`branch_protection`", "`codeowners`", "`exports`"] {
+            assert!(declared.contains(key), "{declared}");
+        }
+
+        let metadata = read_entry(&destination, METADATA_ENTRY);
+        let declared_in_metadata: toml::Value = metadata.parse().expect("package.toml is TOML");
+        assert_eq!(
+            declared_in_metadata["config_not_acted_on"]
+                .as_array()
+                .map(|a| a.iter().filter_map(toml::Value::as_str).collect::<Vec<_>>()),
+            Some(vec!["branch_protection", "codeowners", "exports"]),
+            "{metadata}"
+        );
+        let readme = read_entry(&destination, README_ENTRY);
+        assert!(readme.contains("`exports`"), "{readme}");
+    }
+
+    /// A config this version fully understands makes a positive claim of it —
+    /// an empty array, never an absent key a reader has to interpret.
+    #[test]
+    fn a_fully_understood_config_claims_so_in_the_metadata() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
+        let destination = default_destination(&work);
+
+        let package =
+            assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+        assert!(package.excluded.is_empty(), "{:?}", package.excluded);
+        let metadata = read_entry(&destination, METADATA_ENTRY);
+        let parsed: toml::Value = metadata.parse().expect("package.toml is TOML");
+        assert_eq!(
+            parsed["config_not_acted_on"].as_array().map(Vec::len),
+            Some(0),
+            "an empty array is the positive claim; an absent key is not: {metadata}"
+        );
     }
 
     /// A repository that ran, with the report and database a real sweep leaves.
@@ -1464,13 +1620,118 @@ api_key = "lin_api_do-not-package-me"
         let metadata = read_entry(&destination, METADATA_ENTRY);
         assert!(metadata.contains("repositories_excluded = 1"), "{metadata}");
 
-        // The failed repository's own output must not ride along.
+        // The failed repository's own REPORT must not ride along. Its log does,
+        // under `failures/` — see `a_failed_repository_ships_its_log_and_a_record`.
         assert!(
             !entries(&destination)
                 .iter()
-                .any(|e| e.contains("01-acme-web")),
-            "the excluded repository's files are in the package"
+                .any(|e| e.starts_with(&format!("{REPORTS_PREFIX}/01-acme-web"))),
+            "the excluded repository's report files are in the package"
         );
+    }
+
+    /// 🔴 #6245: a repository that failed must leave a trace in the package —
+    /// its own log, and a record naming what went wrong.
+    ///
+    /// Against `3771644d0` a failed target left NOTHING: no `failures/`
+    /// directory, no log, only absence from `reports/`. Two of 59 repositories
+    /// exited 1 on the 2026-08-25 run and shipped no trace at all, so "failed"
+    /// and "never attempted" were the same observation from the outside.
+    #[test]
+    fn a_failed_repository_ships_its_log_and_a_record() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let report = RunReport::of(vec![
+            audited(&work, "00-acme-api", "acme-api"),
+            failed(&work, "01-acme-web", "acme-web"),
+        ]);
+        std::fs::write(
+            &report.repos[1].log,
+            "stage: collect\nfatal: could not read\n",
+        )
+        .expect("the child left a log");
+        let destination = default_destination(&work);
+
+        assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+
+        let log = read_entry(&destination, "failures/01-acme-web.log");
+        assert!(log.contains("fatal: could not read"), "{log}");
+
+        let record = read_entry(&destination, FAILURES_ENTRY);
+        for expected in ["acme-web", "exited with code 3", "failures/01-acme-web.log"] {
+            assert!(record.contains(expected), "{record}");
+        }
+    }
+
+    /// A repository whose child never wrote a log still gets a record, and the
+    /// record says so — silence about a missing log is the defect one level
+    /// down from the one #6245 is about.
+    #[test]
+    fn a_failure_with_no_log_still_gets_a_record() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let report = RunReport::of(vec![
+            audited(&work, "00-acme-api", "acme-api"),
+            failed(&work, "01-acme-web", "acme-web"),
+        ]);
+        let destination = default_destination(&work);
+
+        assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+        let record = read_entry(&destination, FAILURES_ENTRY);
+        assert!(record.contains("no log survived"), "{record}");
+        assert!(
+            !entries(&destination).iter().any(|e| e.ends_with(".log")),
+            "there was no log to package"
+        );
+    }
+
+    /// A clean sweep gets no `failures/` directory: an index that says "none"
+    /// reads worse than no directory at all.
+    #[test]
+    fn a_clean_sweep_has_no_failures_directory() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
+        let destination = default_destination(&work);
+
+        assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
+        assert!(
+            !entries(&destination)
+                .iter()
+                .any(|e| e.starts_with(FAILURES_PREFIX)),
+            "{:?}",
+            entries(&destination)
+        );
+    }
+
+    /// The generated failure record quotes reason strings, and a reason can
+    /// carry text a child produced — so it is scanned like every other member
+    /// rather than trusted because this crate wrote it.
+    #[test]
+    fn a_failure_record_carrying_a_credential_is_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let mut leaking = failed(&work, "01-acme-web", "acme-web");
+        leaking.result = RepoResult::Failed {
+            reason: format!(
+                "provider rejected the key {}",
+                config().openrouter_key.expose()
+            ),
+        };
+        let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api"), leaking]);
+        let destination = default_destination(&work);
+
+        let err = assemble(&work, &config(), &report, &[], &destination, None)
+            .expect_err("a generated member carrying the key is refused");
+        assert!(
+            matches!(err, AuditError::CredentialInPackage { .. }),
+            "{err:?}"
+        );
+        assert!(!destination.exists(), "a refused assembly leaves no zip");
     }
 
     /// The default lands inside the root that `rm -rf <work-dir>` removes, and

@@ -85,6 +85,7 @@ pub(super) async fn spawn_tga(
     log: &Path,
     cwd: &Path,
     budget: std::time::Duration,
+    investigation: crate::grounding::priority::Budget,
     progress: &Progress,
     target: &str,
     scrubber: &Scrubber,
@@ -141,13 +142,27 @@ pub(super) async fn spawn_tga(
     if let Some((name, value)) = github_access.env() {
         command.env(name, value);
     }
+    // #6244: the same credential again, under the name tga's GIT TRANSPORT
+    // reads. The line above serves the REST client that reads issues; the fetch
+    // that runs before every collection resolves `GITHUB_TOKEN` instead, so
+    // without this a recipient logged in only with `gh` had every fetch fail and
+    // got a header-only `pr-metrics.csv` per repository. Set only when the sweep
+    // resolved that the `gh` login is the only source — see
+    // `github_issues::GithubAccess::git_transport_env`.
+    if let Some((name, value)) = github_access.git_transport_env() {
+        command.env(name, value);
+    }
     // #6082: the investigation budget, down the one channel that reaches the
     // grandchild in time. `tga audit` writes the manifest and runs
     // `trusty-review report` against it in the same process, and this crate's
     // grounding pass edits that manifest only after the child exits — so the
     // budget it records there reaches a re-render and never this run's report.
     // See `grounding::priority::Budget::child_env`.
-    for (name, value) in crate::grounding::priority::Budget::from_env().child_env() {
+    // #6247: the sweep resolves it ONCE and hands it down, rather than this
+    // spawn re-reading the environment. The same value is what the grounding
+    // pass writes into the manifest, so the file cannot name a budget the
+    // investigation did not run under.
+    for (name, value) in investigation.child_env() {
         command.env(name, value);
     }
 

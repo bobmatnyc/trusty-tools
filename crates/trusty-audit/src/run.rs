@@ -131,6 +131,11 @@ mod report;
 // which repositories are audited, `child.rs` runs one.
 mod child;
 
+// #6244: whether a `git fetch` can authenticate without a prompt — the
+// engagement-global preflight, and the one credential this crate holds that the
+// child's git transport would otherwise never see.
+pub(crate) mod git_credentials;
+
 use approve::approve_for_indexing;
 use child::spawn_tga;
 use pins::{PinnedBinaries, pinned_binaries};
@@ -369,8 +374,17 @@ where
     // every repository, so failing per-repo would just repeat one misconfiguration.
     // #6135: both halves at once — the pairs the child inherits, and the
     // identity the manifest records. See `inference::Inference`.
+    // #6244: read from the injected lookup, BEFORE it is consumed below. What is
+    // resolved here is only the operator's half — the `gh` login is folded in
+    // after `resolve_github_access`, which is where it is read.
+    let declared_credential = git_credentials::GitCredential::of_environment(&operator);
     let inference =
         inference::resolve(!config.openrouter_key.is_empty(), &config.models, operator)?;
+    // #6247: resolved ONCE for the sweep, for the same reason the inference
+    // selection above is — the budget is a property of the engagement, not of a
+    // repository. Every child is handed this value and every manifest records
+    // it, so the file cannot name a budget its own investigation never used.
+    let investigation = grounding::priority::Budget::for_engagement(&config.report);
     // #5857: ONE resolution per invocation. `crate::chain` resolved the boards
     // an hour ago to state its gaps and hands that result down, so the coverage
     // the report claims and the sections the child gets cannot diverge over a
@@ -402,6 +416,25 @@ where
     // per-repository one. See `github_issues`'s module docs for why a `gh`
     // that cannot answer still lets the sweep proceed.
     let github_access = github_issues::resolve_github_access().await;
+    // #6244: whether a `git fetch` can authenticate at all, resolved once for
+    // the same reason the inference selection and the boards are — a machine
+    // with no credential is a fact about the engagement, not about a repository,
+    // and repeating the discovery 59 times is how it ended up stated 59 times
+    // and read none. The `gh` login is folded in LAST, matching tga's own order.
+    let git_credential = declared_credential.with_gh_login(github_access.raw_token());
+    if git_credential.sources().is_empty() {
+        // Only now is the remote probe worth its subprocess per repository: with
+        // a credential in hand there is nothing to refuse, so nothing to ask.
+        let checkouts: Vec<(String, PathBuf)> = selected
+            .iter()
+            .map(|repo| (repo.name.clone(), absolute_checkout(work, &repo.path)))
+            .collect();
+        git_credential.refuse_if_fetching(&git_credentials::github_backed(&checkouts).await)?;
+    }
+    // #6244: the child's git transport reads `GITHUB_TOKEN`, which is not the
+    // variable `GithubAccess::env` sets. See `GithubAccess::git_transport_env`.
+    let github_access =
+        github_access.supplying_git_transport(git_credential.supplies_github_token());
     // #5869: materialized once for the whole sweep — resolving reads
     // `.env.local` and opens the secure store, which is not a per-child cost,
     // let alone a per-line one.
@@ -435,6 +468,7 @@ where
                     index,
                     repo,
                     budget,
+                    investigation,
                     progress,
                     total,
                     &scrubber,
@@ -589,6 +623,7 @@ async fn run_one(
     index: usize,
     repo: SelectedRepo,
     budget: std::time::Duration,
+    investigation: grounding::priority::Budget,
     progress: &Progress,
     total: usize,
     scrubber: &Scrubber,
@@ -628,6 +663,7 @@ async fn run_one(
                 &log,
                 work.root(),
                 budget,
+                investigation,
                 progress,
                 &repo.name,
                 scrubber,
@@ -660,7 +696,10 @@ async fn run_one(
     let manifest = output.join(AuditManifest::FILE_NAME);
     if manifest.is_file() {
         let tools = grounding::Tools::pinned(binaries.search.clone(), binaries.analyze.clone());
-        gaps.extend(grounding::ground_manifest(&manifest, &tools, &checkout, &repo.name).await);
+        gaps.extend(
+            grounding::ground_manifest(&manifest, &tools, &checkout, &repo.name, investigation)
+                .await,
+        );
         // #6135: the provider and models this run used, written into the file
         // that ships. Without it a re-render on another machine resolves its own
         // provider from that machine's config — which is how a June-dated local
@@ -858,6 +897,137 @@ trusty-review = "0.15.1"
              printf '[report]\\ntitle = \"Acme\"\\n{gaps}\\n[[repositories]]\\n\
              name = \"acme\"\\npath = \"/r\"\\n' > \"$out/manifest.toml\"\nexit 0\n"
         )
+    }
+
+    /// #6244: the preflight refuses on a machine with no credential, and only
+    /// when the engagement provably fetches. These checkouts name no remote, so
+    /// the sweep must run whatever this machine happens to have — a refusal here
+    /// would strand every engagement over paths on disk.
+    ///
+    /// The lookup answers for nothing, so no source is declared: on a machine
+    /// where `gh` cannot answer either, this is the arm that reaches the remote
+    /// probe and finds nothing to fetch.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_sweep_over_checkouts_with_no_remote_needs_no_credential() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, &writes_a_manifest(None));
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        let report = sweep_with_operator(&work, |_| None)
+            .await
+            .expect("a sweep that fetches nothing needs no credential");
+        assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
+    }
+
+    /// A stub `tga` that records the investigation budget it was handed (#6247).
+    fn records_its_budget_env() -> String {
+        format!(
+            "{}{}",
+            writes_a_manifest(None).trim_end_matches("exit 0\n"),
+            "{\n  echo \"files=$TRUSTY_AUDIT_INVESTIGATE_MAX_FILES\"\n  \
+             echo \"bytes=$TRUSTY_AUDIT_INVESTIGATE_MAX_BYTES\"\n} \
+             > \"$out/budget-env.txt\"\nexit 0\n",
+        )
+    }
+
+    /// An engagement that asks for a wider investigation than the default.
+    ///
+    /// 77 rather than a round number: it matches neither
+    /// [`grounding::priority::DEFAULT_MAX_FILES`] nor `trusty-review`'s own
+    /// default, so a value arriving from either tier is visible as a wrong
+    /// number rather than as a coincidence.
+    fn config_declaring_a_budget() -> EngagementConfig {
+        EngagementConfig::from_toml(
+            &format!("{CONFIG}\n[report]\ninvestigate_max_files = 77\n"),
+            Path::new("engagement.toml"),
+        )
+        .expect("parses")
+    }
+
+    /// 🔴 #6247: the budget an engagement declares must reach the process that
+    /// samples the files, not just the manifest that describes the run.
+    ///
+    /// Asserts on the environment the SPAWNED PROCESS received, because that is
+    /// the only channel that reaches `trusty-review` before it renders — the
+    /// manifest is written by this child and edited afterwards, so a budget
+    /// recorded there reaches a re-render and never this run's report.
+    ///
+    /// Against `3771644d0` this fails on the first assertion: `spawn_tga` read
+    /// `Budget::from_env()`, so the child was handed the compiled default 240
+    /// whatever the engagement declared, and the operator's 240-file manifest
+    /// sat beside a report claiming 40.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_child_environment_carries_the_engagement_investigation_budget() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, &records_its_budget_env());
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        let report = sweep(
+            &work,
+            &config_declaring_a_budget(),
+            &RunOptions::default(),
+            &Progress::none(),
+        )
+        .await
+        .expect("the sweep completes");
+        assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
+
+        let seen = std::fs::read_to_string(report.repos[0].output.join("budget-env.txt"))
+            .expect("the stub recorded its environment");
+        assert!(seen.contains("files=77"), "{seen}");
+        // Derived from the declared file count, so a raised file budget never
+        // meets an unraised byte budget (#6148).
+        assert!(
+            seen.contains(&format!(
+                "bytes={}",
+                77 * grounding::priority::BYTES_PER_FILE
+            )),
+            "{seen}"
+        );
+    }
+
+    /// 🔴 #6247: the manifest that ships must name the budget the investigation
+    /// actually ran under — one resolution, two consumers.
+    ///
+    /// Against `3771644d0` the two were resolved independently: the child got
+    /// `Budget::from_env()` and `ground_manifest` re-resolved from the manifest
+    /// the child had just written, so the file could state a budget no sampler
+    /// used. Here the child records 77 and the file must agree.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_recorded_budget_is_the_one_the_child_ran_under() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, &records_its_budget_env());
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        let report = sweep(
+            &work,
+            &config_declaring_a_budget(),
+            &RunOptions::default(),
+            &Progress::none(),
+        )
+        .await
+        .expect("the sweep completes");
+
+        let written = std::fs::read_to_string(report.repos[0].output.join("manifest.toml"))
+            .expect("the child wrote a manifest");
+        let parsed: toml::Value = written.parse().expect("the manifest is TOML");
+        assert_eq!(
+            parsed["report"]["investigate_max_files"].as_integer(),
+            Some(77),
+            "{written}"
+        );
+        let seen = std::fs::read_to_string(report.repos[0].output.join("budget-env.txt"))
+            .expect("the stub recorded its environment");
+        assert!(seen.contains("files=77"), "{seen}");
     }
 
     /// A stub `tga` shaped like the child of the 2026-08-19 dogfood run: it

@@ -112,6 +112,47 @@ describe('flagship tool records are grounded in the repository', () => {
 		}
 	});
 
+	/**
+	 * The "MCP tools: N" fact card was wrong on `/tools/trusty-memory` — it said
+	 * 45 against a dispatcher carrying 47, because a tool added to the crate
+	 * changes nothing on the page. The count is the one fact-card number that is
+	 * mechanically re-derivable, so it is derived here rather than trusted.
+	 *
+	 * Each crate exposes its tool set in a different shape, so the pattern is
+	 * per-crate: trusty-memory dispatches by name in a match, trusty-search
+	 * declares a descriptor table. Both are counted from the crate source the
+	 * daemon actually serves.
+	 */
+	const TOOL_COUNT_SOURCES = [
+		{
+			slug: 'trusty-memory',
+			source: 'crates/trusty-memory/src/tools/mod.rs',
+			// Each dispatch arm: `"memory_remember" => handle_memory_remember(...)`.
+			// The `other =>` catch-all carries no quotes and is not counted.
+			pattern: /^\s*"[a-z_]+" =>/gm
+		},
+		{
+			slug: 'trusty-search',
+			source: 'crates/trusty-search/src/mcp/tools/descriptors.rs',
+			// Each descriptor in the tools/list JSON: `"name": "search_lexical"`.
+			pattern: /"name": "[a-z_]+"/g
+		}
+	];
+
+	it.each(TOOL_COUNT_SOURCES)(
+		'$slug fact card names the tool count its crate actually serves',
+		({ slug, source, pattern }) => {
+			const declared = readFileSync(path.join(REPO_ROOT, source), 'utf8').match(pattern);
+			expect(declared, source).not.toBeNull();
+
+			const page = readFileSync(path.join(HERE, '../routes/tools', slug, '+page.svelte'), 'utf8');
+			const card = page.match(/\{\s*label:\s*'MCP tools',\s*value:\s*'(\d+)'\s*\}/);
+			expect(card, `${slug} has an 'MCP tools' fact card`).not.toBeNull();
+
+			expect(Number(card![1]), `${slug} fact card vs ${source}`).toBe(declared!.length);
+		}
+	);
+
 	it('never names a retired binary or a `cp` install', () => {
 		const prose = JSON.stringify(TOOLS);
 		for (const banned of [

@@ -143,16 +143,25 @@ commit_more "$repo" 2
 run_case "fast-forward drift" 1 "TAG-DRIFT" "$repo" trusty-example
 
 # The remedy has to name the fast-forward, or whoever hits this at 2am reads it
-# as a botched tag and re-tags the wrong commit.
+# as a botched tag and tags the wrong commit.
+#
+# It must also give a remedy that can actually RUN here. Tags on this repo are
+# immutable (#6178): a `git tag -f` + force-push is rejected with GH013, so the
+# remedy is to move the checkout onto the tag. Asserting `git tag -f` is ABSENT
+# is the regression guard — the old text shipped a command that always fails.
 out="$(bash "$GATE" --repo "$repo" --no-fetch trusty-example 2>&1 || true)"
 if ! grep -qF "ANCESTOR of HEAD" <<< "$out"; then
   fail_case "fast-forward diagnosis: the failure did not identify the fast-forward" "$out"
-elif ! grep -qF "git tag -f" <<< "$out"; then
-  fail_case "fast-forward diagnosis: no re-tag remedy given" "$out"
+elif grep -qF "git tag -f" <<< "$out"; then
+  fail_case "fast-forward diagnosis: offered the inexecutable re-tag remedy (#6178)" "$out"
+elif ! grep -qF "git reset --hard" <<< "$out"; then
+  fail_case "fast-forward diagnosis: no executable remedy given" "$out"
+elif ! grep -qF "IMMUTABLE" <<< "$out"; then
+  fail_case "fast-forward diagnosis: did not say why the tag cannot be moved" "$out"
 elif ! grep -qF "unrelated commit 2" <<< "$out"; then
   fail_case "fast-forward diagnosis: the commits added since the tag were not listed" "$out"
 else
-  pass_case "the fast-forward failure names the cause, lists the drift, and gives the re-tag remedy"
+  pass_case "the fast-forward failure names the cause, lists the drift, and gives an executable remedy"
 fi
 
 # ===========================================================================

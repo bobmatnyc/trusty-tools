@@ -17,7 +17,8 @@ use crate::report::model::ReportModel;
 use crate::report::provenance::{INFERRED_TAG, MEASURED_TAG};
 
 use super::{
-    Coverage, DependencyInventory, Investigation, InvestigationStatus, RepoInvestigation, Verdict,
+    Coverage, DependencyInventory, ExposureKind, Investigation, InvestigationStatus,
+    RepoInvestigation, Verdict,
 };
 
 /// Render the appended Dependency Inventory + Investigation Coverage sections.
@@ -247,6 +248,7 @@ fn coverage_lines(repo: &RepoInvestigation, rendered: Option<RenderedCounts>) ->
         "- verified findings: {total} ({risk} RED/AMBER evidence-backed, {clean} clean signals)\n"
     ));
     out.push_str(&reconciliation_line(repo, rendered));
+    out.push_str(&exposure_lines(repo));
     out.push_str(&trace_line(repo));
     out.push_str(&verdict_lines(repo));
     out.push_str(&batch_lines(c));
@@ -373,6 +375,13 @@ fn discovery_lines(c: &Coverage) -> String {
         ));
     }
     for d in &c.per_dimension {
+        // #6193: the test-coverage row is enumerated, not sampled, so it states
+        // its own basis rather than borrowing the "N file(s) examined — e.g."
+        // shape of the five rows that ARE sampled.
+        if d.dimension == super::select::TEST_DIMENSION {
+            out.push_str(&format!("  - {}: {}\n", d.dimension, c.test_census.line()));
+            continue;
+        }
         out.push_str(&format!(
             "  - {}: {} file(s) examined{}\n",
             d.dimension,
@@ -381,6 +390,51 @@ fn discovery_lines(c: &Coverage) -> String {
                 .as_deref()
                 .map(|e| format!(" — e.g. {e}"))
                 .unwrap_or_default(),
+        ));
+    }
+    out
+}
+
+/// Render what the source said about this repository's reachability (#6191).
+///
+/// Why: the reachability guard now has an evidence source, and a guard whose
+/// evidence a reader cannot see is indistinguishable from the text-marker
+/// inference it replaced. This line states how much was collected and from where,
+/// which is also what makes the bound visible: only examined files carry facts.
+/// What: one line with the per-kind counts, and a sub-bullet naming each file
+/// the source placed beyond this host — the class that used to be withheld.
+/// Nothing at all when no fact was collected, so a repository whose examined
+/// files state neither renders exactly as before.
+/// Test: `render_tests::{coverage_section_states_the_exposure_evidence,
+/// coverage_section_omits_the_exposure_line_without_evidence}`.
+fn exposure_lines(repo: &RepoInvestigation) -> String {
+    if repo.exposure.is_empty() {
+        return String::new();
+    }
+    let mut counts: Vec<(ExposureKind, usize)> = Vec::new();
+    for f in &repo.exposure {
+        match counts.iter_mut().find(|(k, _)| *k == f.kind) {
+            Some(entry) => entry.1 += 1,
+            None => counts.push((f.kind, 1)),
+        }
+    }
+    counts.sort_by_key(|(k, _)| std::cmp::Reverse(*k));
+    let parts: Vec<String> = counts
+        .iter()
+        .map(|(k, n)| format!("{n} {}", k.label()))
+        .collect();
+    let mut out = format!(
+        "- reachability evidence: {} file(s) of the examined set state a bind address or an \
+         outbound call in their own source ({})\n",
+        repo.exposure.len(),
+        parts.join(", "),
+    );
+    for f in repo.exposure.iter().filter(|f| f.kind.is_beyond_host()) {
+        out.push_str(&format!(
+            "  - beyond this host: {} ({}) — `{}`\n",
+            f.file,
+            f.kind.label(),
+            f.evidence,
         ));
     }
     out

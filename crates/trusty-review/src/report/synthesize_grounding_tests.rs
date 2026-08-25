@@ -421,6 +421,7 @@ fn control_routes_investigation() -> Investigation {
             coverage: Default::default(),
             traces: None,
             verdicts: None,
+            exposure: Vec::new(),
         }],
     }
 }
@@ -1117,4 +1118,60 @@ fn subjectless_prose_keeps_the_finding_the_token_match_named() {
         "{reason}"
     );
     assert!(subject.is_some());
+}
+
+// ── #6191: collected bind/exposure evidence ─────────────────────────────────
+
+/// A measured bind address beats a marker in someone's prose. The finding's own
+/// remediation proposes local-socket verification — the tier-1 marker #6082
+/// lap 6 added — but the file's source binds every interface, so the file is
+/// remote-established and its reach claims may ship.
+#[test]
+fn collected_bind_evidence_outranks_a_text_marker() {
+    use crate::report::investigate::{ExposureFact, ExposureKind};
+    let mut model = model_with(vec![repo("estate", vec![], None)]);
+    let mut inv = control_routes_investigation();
+    inv.repos[0].exposure = vec![ExposureFact {
+        file: "crates/trusty-mpm/src/daemon/api/control_routes.rs".to_string(),
+        kind: ExposureKind::PublicBind,
+        evidence: "TcpListener::bind(\"0.0.0.0:8080\")".to_string(),
+    }];
+    model.investigation = Some(inv);
+
+    let g = Grounding::from_model(&model);
+    assert!(
+        g.local_only.is_empty(),
+        "a measured public bind must not be classified host-local: {:?}",
+        g.local_only
+    );
+}
+
+/// The Telegram-gateway shape. Nothing in the finding text says `0.0.0.0` or
+/// `internet-facing`, so before #6191 the file was UNESTABLISHED and every true
+/// reach claim about it was withheld. An outbound call collected from source is
+/// evidence the file is not host-local.
+#[test]
+fn a_collected_outbound_call_establishes_reach_a_marker_never_stated() {
+    use crate::report::investigate::{ExposureFact, ExposureKind};
+    let mut model = model_with(vec![repo("estate", vec![], None)]);
+    let mut inv = control_routes_investigation();
+    inv.repos[0].exposure = vec![ExposureFact {
+        file: "crates/trusty-mpm/src/daemon/api/control_routes.rs".to_string(),
+        kind: ExposureKind::NetworkClient,
+        evidence: "https://api.telegram.org/bot".to_string(),
+    }];
+    model.investigation = Some(inv);
+
+    let g = Grounding::from_model(&model);
+    assert!(g.local_only.is_empty(), "{:?}", g.local_only);
+}
+
+/// The silent half: with no collected fact the file falls through to the marker
+/// walk, so an evidence-free run classifies exactly as it did before #6191.
+#[test]
+fn no_collected_evidence_leaves_the_marker_path_in_place() {
+    let mut model = model_with(vec![repo("estate", vec![], None)]);
+    model.investigation = Some(control_routes_investigation());
+    let g = Grounding::from_model(&model);
+    assert_eq!(g.local_only.len(), 1, "{:?}", g.local_only);
 }
