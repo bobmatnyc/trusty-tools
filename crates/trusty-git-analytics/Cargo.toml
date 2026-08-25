@@ -26,7 +26,7 @@ name = "tga"
 # the `tga` binary; trusty-audit resolves it by version at runtime, not through
 # a Cargo edge), so the gate has nobody to protect here. The exception is
 # recorded as a `tga` row in scripts/semver-checks-crate-exclusions.tsv.
-version = "3.3.2"
+version = "3.3.3"
 publish = true
 edition = "2021"
 # Aligned with the workspace MSRV (1.94) per #254. Required for
