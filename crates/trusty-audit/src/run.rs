@@ -131,6 +131,11 @@ mod report;
 // which repositories are audited, `child.rs` runs one.
 mod child;
 
+// #6244: whether a `git fetch` can authenticate without a prompt — the
+// engagement-global preflight, and the one credential this crate holds that the
+// child's git transport would otherwise never see.
+pub(crate) mod git_credentials;
+
 use approve::approve_for_indexing;
 use child::spawn_tga;
 use pins::{PinnedBinaries, pinned_binaries};
@@ -369,6 +374,10 @@ where
     // every repository, so failing per-repo would just repeat one misconfiguration.
     // #6135: both halves at once — the pairs the child inherits, and the
     // identity the manifest records. See `inference::Inference`.
+    // #6244: read from the injected lookup, BEFORE it is consumed below. What is
+    // resolved here is only the operator's half — the `gh` login is folded in
+    // after `resolve_github_access`, which is where it is read.
+    let declared_credential = git_credentials::GitCredential::of_environment(&operator);
     let inference =
         inference::resolve(!config.openrouter_key.is_empty(), &config.models, operator)?;
     // #6247: resolved ONCE for the sweep, for the same reason the inference
@@ -407,6 +416,25 @@ where
     // per-repository one. See `github_issues`'s module docs for why a `gh`
     // that cannot answer still lets the sweep proceed.
     let github_access = github_issues::resolve_github_access().await;
+    // #6244: whether a `git fetch` can authenticate at all, resolved once for
+    // the same reason the inference selection and the boards are — a machine
+    // with no credential is a fact about the engagement, not about a repository,
+    // and repeating the discovery 59 times is how it ended up stated 59 times
+    // and read none. The `gh` login is folded in LAST, matching tga's own order.
+    let git_credential = declared_credential.with_gh_login(github_access.raw_token());
+    if git_credential.sources().is_empty() {
+        // Only now is the remote probe worth its subprocess per repository: with
+        // a credential in hand there is nothing to refuse, so nothing to ask.
+        let checkouts: Vec<(String, PathBuf)> = selected
+            .iter()
+            .map(|repo| (repo.name.clone(), absolute_checkout(work, &repo.path)))
+            .collect();
+        git_credential.refuse_if_fetching(&git_credentials::github_backed(&checkouts).await)?;
+    }
+    // #6244: the child's git transport reads `GITHUB_TOKEN`, which is not the
+    // variable `GithubAccess::env` sets. See `GithubAccess::git_transport_env`.
+    let github_access =
+        github_access.supplying_git_transport(git_credential.supplies_github_token());
     // #5869: materialized once for the whole sweep — resolving reads
     // `.env.local` and opens the secure store, which is not a per-child cost,
     // let alone a per-line one.
@@ -869,6 +897,29 @@ trusty-review = "0.15.1"
              printf '[report]\\ntitle = \"Acme\"\\n{gaps}\\n[[repositories]]\\n\
              name = \"acme\"\\npath = \"/r\"\\n' > \"$out/manifest.toml\"\nexit 0\n"
         )
+    }
+
+    /// #6244: the preflight refuses on a machine with no credential, and only
+    /// when the engagement provably fetches. These checkouts name no remote, so
+    /// the sweep must run whatever this machine happens to have — a refusal here
+    /// would strand every engagement over paths on disk.
+    ///
+    /// The lookup answers for nothing, so no source is declared: on a machine
+    /// where `gh` cannot answer either, this is the arm that reaches the remote
+    /// probe and finds nothing to fetch.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_sweep_over_checkouts_with_no_remote_needs_no_credential() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, &writes_a_manifest(None));
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        let report = sweep_with_operator(&work, |_| None)
+            .await
+            .expect("a sweep that fetches nothing needs no credential");
+        assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
     }
 
     /// A stub `tga` that records the investigation budget it was handed (#6247).

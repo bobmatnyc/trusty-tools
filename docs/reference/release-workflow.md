@@ -75,8 +75,10 @@ e.g. `trusty-mcp-core-v0.2.0`. The version comes from the crate's `Cargo.toml`.
    Its CHECK 6 is the one that catches a tag left behind by a fast-forward —
    see [Tag/Publish-Commit Parity Guard](#tagpublish-commit-parity-guard) below.
    🔴 If main moved between steps 5 and 7 and you fast-forwarded this checkout
-   to satisfy the merged-main check, the tag from step 5 is now stale. Re-tag
-   before publishing; do not publish with the two disagreeing.
+   to satisfy the merged-main check, the tag from step 5 is now stale. Reset the
+   checkout back to the tag (`git reset --hard <crate-name>-v<version>`) and
+   publish that commit; do not publish with the two disagreeing, and do not try
+   to move the tag — [tags here are immutable](#release-tags-are-immutable).
 8. Publish: `cargo publish -p <crate-name>`.
    - **UI-embedding crates** (trusty-search, trusty-memory, trusty-analyze): prefix with `SKIP_UI_BUILD=1`:
      ```bash
@@ -166,8 +168,8 @@ origin over local refs, accepting both the crate-dir and `tga` alias series)
 against `git rev-parse HEAD` — the sha1 `cargo package` writes into
 `.cargo_vcs_info.json`. Four named findings: `TAG-MISSING`, `TAG-SPLIT` (the
 two alias series disagree), `TAG-DRIFT` (the fast-forward case, whose message
-lists the commits added since the tag and gives the re-tag command), and
-`VCS-INFO-MISMATCH`.
+lists the commits added since the tag and tells you to reset the checkout onto
+it), and `VCS-INFO-MISMATCH`.
 
 **After publishing**, confirm what cargo recorded rather than what it was
 expected to record — this is the only check that still works once the upload
@@ -194,6 +196,35 @@ it, before the tag becomes something anyone has relied on.
 failure and asserts the finding code, not just a non-zero exit. CI runs the
 self-test rather than the gate: on a tag push the workflow checkout IS the
 tagged commit, so the comparison is true by construction and proves nothing.
+
+## Release Tags Are Immutable
+
+🔴 **A pushed `*-v*` tag cannot be moved, force-updated, or deleted.** An
+enforcing GitHub ruleset rejects all three with `GH013`, and `admin: true` on
+the account does not lift it. The ruleset does not appear in
+`gh api repos/bobmatnyc/trusty-tools/rulesets` or in the branch-protection
+endpoint, so the first sign of it is the rejected push.
+
+This repo documented a "re-tag before publishing" recovery for years. It never
+worked here. Issue #6178 proved it on 2026-08-22: a force-update and a delete
+were both attempted against real stranded tags and both were rejected.
+
+**What to do instead**, by situation:
+
+| Situation | Remedy |
+|---|---|
+| Tagged, then fast-forwarded; the tagged tree is fine to ship | `git reset --hard <tag>`, re-run preflight, publish. Move the checkout, never the tag. |
+| Tagged a commit that can never pass the publish gate | The version number is **burned**. Bump to the next version, tag fresh, publish that. |
+| Already published, and `--vcs-info` reports `VCS-INFO-MISMATCH` | The tag permanently misstates what shipped and cannot be corrected. Record it, and bump-and-re-release only if a truthful tag matters more than a spent version number. |
+
+**Proven 2026-08-22.** `trusty-search-v0.49.0` and `trusty-review-v0.24.0` are
+stranded at `4af0ef8ee` — a commit whose tree cannot pass the publish gate — so
+both version numbers are permanently spent. The release shipped as
+`trusty-search-v0.49.1` and `trusty-review-v0.24.1`.
+
+**The cheap prevention** is ordering: tag as late as possible, immediately
+before `cargo publish`, once every other gate is already green. A tag that
+exists for thirty seconds has nothing to strand.
 
 ## Version-Parity Guard (issue #3366)
 

@@ -85,6 +85,7 @@ fn repo(
             dimensions_covered: vec!["authentication & secrets".to_string()],
             dimensions_absent: vec!["scalability".to_string()],
             per_dimension: vec![],
+            test_census: Default::default(),
             attributed_files: 0,
             attributed_only: false,
             rejected: 2,
@@ -94,6 +95,7 @@ fn repo(
             batches_failed: vec![],
         },
         traces: None,
+        exposure: Vec::new(),
     }
 }
 
@@ -646,4 +648,83 @@ fn coverage_omits_the_reconciliation_when_it_would_not_add_up() {
     };
     let out = coverage_section(&model_rendering(0, 1, 0), &inv);
     assert!(!out.contains("reconciliation"), "{out}");
+}
+
+// ── #6193: the enumerated test-coverage row ─────────────────────────────────
+
+/// The five sampled dimensions render as "N file(s) examined"; test coverage
+/// does not, because its answer is a property of the repository rather than of
+/// what the budget let the LLM read. The row must SAY that, or a reader takes
+/// its count for a sixth sample.
+#[test]
+fn the_test_coverage_row_states_the_enumeration() {
+    let mut r = repo(InvestigationStatus::Available, vec![finding()], deps_none());
+    r.coverage.test_census = crate::report::investigate::TestCensus {
+        test_files: 412,
+        packages_total: 21,
+        packages_with_tests: 18,
+        packages_without_tests: vec!["crates/x".to_string()],
+    };
+    r.coverage.per_dimension = vec![crate::report::investigate::DimensionCoverage {
+        dimension: crate::report::investigate::select::TEST_DIMENSION.to_string(),
+        files_examined: 412,
+        example: Some(r.coverage.test_census.line()),
+    }];
+
+    let out = coverage_lines(&r, None);
+    assert!(out.contains("412 test file(s) enumerated"), "{out}");
+    assert!(out.contains("not sampled"), "{out}");
+    assert!(out.contains("18 of 21 package(s) carry tests"), "{out}");
+    assert!(
+        !out.contains("test coverage: 412 file(s) examined"),
+        "the row must not borrow the sampled shape: {out}"
+    );
+}
+
+// ── #6191: the collected reachability evidence ──────────────────────────────
+
+/// A guard whose evidence a reader cannot see is indistinguishable from the
+/// text-marker inference it replaced. The section states the counts and names
+/// every file the source placed beyond this host — the class that used to be
+/// withheld.
+#[test]
+fn coverage_section_states_the_exposure_evidence() {
+    use crate::report::investigate::{ExposureFact, ExposureKind};
+    let mut r = repo(InvestigationStatus::Available, vec![finding()], deps_none());
+    r.exposure = vec![
+        ExposureFact {
+            file: "src/daemon.rs".to_string(),
+            kind: ExposureKind::LoopbackBind,
+            evidence: "TcpListener::bind(\"127.0.0.1:7878\")".to_string(),
+        },
+        ExposureFact {
+            file: "src/telegram.rs".to_string(),
+            kind: ExposureKind::NetworkClient,
+            evidence: "https://api.telegram.org/bot".to_string(),
+        },
+    ];
+
+    let out = coverage_lines(&r, None);
+    assert!(out.contains("- reachability evidence: 2 file(s)"), "{out}");
+    assert!(out.contains("1 loopback bind"), "{out}");
+    assert!(out.contains("1 outbound network call"), "{out}");
+    assert!(
+        out.contains("beyond this host: src/telegram.rs"),
+        "the network-facing file must be named: {out}"
+    );
+    assert!(
+        !out.contains("beyond this host: src/daemon.rs"),
+        "a loopback bind is not beyond this host: {out}"
+    );
+}
+
+/// A repository whose examined files state nothing renders byte-identically to
+/// a pre-#6191 report.
+#[test]
+fn coverage_section_omits_the_exposure_line_without_evidence() {
+    let out = coverage_lines(
+        &repo(InvestigationStatus::Available, vec![finding()], deps_none()),
+        None,
+    );
+    assert!(!out.contains("reachability evidence"), "{out}");
 }

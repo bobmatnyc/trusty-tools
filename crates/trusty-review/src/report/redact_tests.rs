@@ -280,6 +280,7 @@ fn leaky_investigation(slug: &str) -> Investigation {
                 dimensions_covered: vec![format!("secrets {FAKE_TOKEN}")],
                 ..Default::default()
             },
+            exposure: Vec::new(),
         }],
     }
 }

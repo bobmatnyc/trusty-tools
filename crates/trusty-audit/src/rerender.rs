@@ -231,6 +231,7 @@ pub async fn rerender(
     key: &SecretKey,
     inference: &crate::inference::Inference,
     options: &RerenderOptions,
+    pinned_review: Option<&str>,
     progress: &Progress,
 ) -> Result<RerenderReport, AuditError> {
     let choice = resolve_source(options.from.clone(), cwd, config, work.root());
@@ -254,6 +255,9 @@ pub async fn rerender(
     // known before the first child rather than only after the last one. The
     // index reads the same answer rather than spawning a second `--version`.
     let review_version = crate::index_report::tool_version(&review);
+    // #6173: reconcile the engagement's own copy against the engagement's own
+    // pin, which nothing on this path did.
+    reconcile_review_pin(review_source, review_version.as_deref(), pinned_review)?;
     // #6081: this is the tga-free render path, and nothing on it started a
     // daemon or indexed anything — so `--analyze` fetched nothing and every
     // analyze-derived section rendered empty over a clean exit. Resolved once,
@@ -564,6 +568,52 @@ fn resolve_review(
     let resolved =
         trusty_common::bin_resolve::resolve_binary(name).unwrap_or_else(|| PathBuf::from(name));
     (resolved, ReviewSource::Path)
+}
+
+/// Refuse an engagement-local renderer that is not at the engagement's pin.
+///
+/// Why: #6173. `install`, `run`, and `guided` all reconcile pins through
+/// [`crate::run::pins::pinned_binaries`], which refuses on a mismatch. `render`
+/// never called it, and its default resolves the engagement's own
+/// `tools/trusty-review`. So bumping the pin 0.23.0 -> 0.23.1 and re-rendering
+/// executed the 0.23.0 copy and exited 0; the only trace was the version in the
+/// report metadata, read after the report had been believed. `describe_renderer`
+/// (#6080) discloses a version only for a `PATH`-resolved renderer, which is a
+/// different branch and stays silent here.
+///
+/// `pinned_binaries` itself is the wrong instrument for this path: it demands
+/// all four tools be installed and verified, and a recipient re-rendering a
+/// delivered package has only `trusty-review`. This checks the one binary
+/// `render` actually drives.
+///
+/// What: refuses only on a KNOWN difference against a KNOWN pin, and only for
+/// [`ReviewSource::Engagement`]. `Explicit` is the operator naming a copy on
+/// purpose — the documented escape hatch, and refusing it would leave no way
+/// out. `Path` is nobody's choice and already discloses itself. No pin (a
+/// package re-rendered where no `engagement.toml` loads) and no version (a
+/// binary that will not answer `--version`) are both absences, not differences.
+/// Test: `super::rerender_tests::a_stale_engagement_copy_is_refused_against_the_pin`,
+/// `super::rerender_tests::an_engagement_copy_at_the_pin_renders`,
+/// `super::rerender_tests::an_explicit_renderer_is_never_reconciled`.
+fn reconcile_review_pin(
+    source: ReviewSource,
+    version: Option<&str>,
+    pinned: Option<&str>,
+) -> Result<(), AuditError> {
+    if source != ReviewSource::Engagement {
+        return Ok(());
+    }
+    let (Some(version), Some(pinned)) = (version, pinned) else {
+        return Ok(());
+    };
+    if version == pinned {
+        return Ok(());
+    }
+    Err(AuditError::VersionMismatch {
+        tool: RequiredTool::TrustyReview.crate_name(),
+        pinned: pinned.to_owned(),
+        installed: version.to_owned(),
+    })
 }
 
 /// Render one manifest, recording rather than propagating its failure.
@@ -904,6 +954,8 @@ mod rerender_tests {
                 out: None,
                 review: Some(review.to_path_buf()),
             },
+            // These drive an EXPLICIT renderer, which #6173 never reconciles.
+            None,
             &Progress::none(),
         )
         .await
@@ -1524,6 +1576,9 @@ mod rerender_tests {
             &key(),
             &crate::inference::Inference::default(),
             &RerenderOptions::default(),
+            // The pin this stub answers with, so reconciliation is satisfied
+            // rather than skipped — see #6173.
+            Some("0.21.0"),
             &Progress::none(),
         )
         .await
@@ -1537,6 +1592,87 @@ mod rerender_tests {
             !crate::cli::render(&crate::session::Outcome::Rerendered(report)).contains("NOTE:"),
             "a chosen renderer owes no unchosen-renderer disclosure"
         );
+    }
+
+    /// 🔴 THE #6173 REGRESSION TEST — the engagement bumped its pin, the
+    /// engagement's own `tools/` copy is still the old one, and `render` drove
+    /// it and exited 0.
+    ///
+    /// This is the live 2026-08-22 sequence: pin bumped 0.23.0 -> 0.23.1, the
+    /// `tools/trusty-review` left by the last `install` still at 0.23.0, and
+    /// the only trace a version in the report metadata read afterwards.
+    /// `describe_renderer` (#6080) says nothing here, because the renderer WAS
+    /// chosen — it is the engagement's, just not the engagement's current one.
+    /// Against `fa8afbccc` this returns `Ok` and renders at 0.23.0.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stale_engagement_copy_is_refused_against_the_pin() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let engagement = tmp.path().join("dogfood-audit");
+        let config = engagement_config_in(&engagement);
+        report_dir(&engagement.join("work").join("out"), "01-acme-api");
+        let engagement_work = WorkDir::new(engagement.join("work"));
+        engagement_work.create().expect("the engagement's work dir");
+        stub_review(
+            &engagement_work.path(crate::workdir::Area::Tools),
+            &WRITES_A_REPORT.replace(
+                "#!/bin/sh\n",
+                "#!/bin/sh\ncase \"$1\" in --version) echo 'trusty-review 0.23.0'; exit 0;; esac\n",
+            ),
+        );
+        let session = work_in(tmp.path());
+
+        let refusal = super::rerender(
+            &session,
+            &engagement,
+            &config,
+            &key(),
+            &crate::inference::Inference::default(),
+            &RerenderOptions::default(),
+            Some("0.23.1"),
+            &Progress::none(),
+        )
+        .await
+        .expect_err("a copy off the pin must not render");
+
+        assert!(
+            matches!(
+                &refusal,
+                AuditError::VersionMismatch { tool, pinned, installed }
+                    if *tool == "trusty-review" && pinned == "0.23.1" && installed == "0.23.0"
+            ),
+            "the refusal must name both versions, got {refusal:?}"
+        );
+    }
+
+    /// An engagement copy AT the pin renders — the refusal above is about drift,
+    /// not about the engagement branch existing.
+    #[test]
+    fn an_engagement_copy_at_the_pin_renders() {
+        reconcile_review_pin(ReviewSource::Engagement, Some("0.23.1"), Some("0.23.1"))
+            .expect("a copy at the pin is what the engagement asked for");
+    }
+
+    /// `--review-bin` is the documented escape hatch (#6173's own workaround),
+    /// so reconciling it would leave no way past a bad pin. `PATH` is nobody's
+    /// choice and discloses itself instead (#6080).
+    #[test]
+    fn an_explicit_renderer_is_never_reconciled() {
+        for source in [ReviewSource::Explicit, ReviewSource::Path] {
+            reconcile_review_pin(source, Some("0.23.0"), Some("0.23.1"))
+                .unwrap_or_else(|e| panic!("{source:?} must not be reconciled: {e}"));
+        }
+    }
+
+    /// An absence is not a difference: a package re-rendered where no
+    /// `engagement.toml` loads pins nothing, and a binary that will not answer
+    /// `--version` states nothing to compare.
+    #[test]
+    fn an_absent_pin_or_version_is_not_a_mismatch() {
+        reconcile_review_pin(ReviewSource::Engagement, Some("0.23.0"), None)
+            .expect("no pin, nothing to reconcile against");
+        reconcile_review_pin(ReviewSource::Engagement, None, Some("0.23.1"))
+            .expect("no version, nothing to reconcile");
     }
 
     /// 🔴 #6080: with nothing installed and no flag, the renderer is whatever

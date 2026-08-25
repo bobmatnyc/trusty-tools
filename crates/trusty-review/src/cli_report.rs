@@ -1057,6 +1057,7 @@ mod tests {
                 deps: Default::default(),
                 traces: None,
                 coverage: Default::default(),
+                exposure: Vec::new(),
             }],
         }
     }

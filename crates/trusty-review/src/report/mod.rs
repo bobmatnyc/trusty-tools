@@ -64,6 +64,7 @@ pub mod synthesize_guard;
 // claims. Used only by `synthesize` and `synthesize_prompt`.
 pub(crate) mod synthesize_grounding;
 mod synthesize_grounding_text;
+mod synthesize_grounding_vocab;
 mod synthesize_guardrail;
 // #6009 shape 3: whitelist-based synonym normalization, used only by
 // `synthesize::parse_raw` — not part of the public report API.

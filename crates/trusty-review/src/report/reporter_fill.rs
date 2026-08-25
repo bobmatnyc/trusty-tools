@@ -37,9 +37,12 @@ pub(super) fn crate_version() -> &'static str {
 /// deterministic checks the report is graded against.
 /// What: returns a markdown section (heading + source note + the verbatim brief)
 /// when `model.instructions` is set, else `""` — an absent brief still renders
-/// nothing at all, so a run without instructions is unchanged.
+/// nothing at all, so a run without instructions is unchanged. #6189 adds the
+/// withholding notice between the note and the brief when this run's guards
+/// refused anything; see [`withheld_notice`].
 /// Test: `reporter_tests.rs::{reporter_records_instructions_verbatim,
-/// the_instructions_note_names_the_file_and_the_guards}`.
+/// the_instructions_note_names_the_file_and_the_guards,
+/// the_instructions_section_counts_withheld_claims}`.
 pub(super) fn instructions_block(model: &ReportModel) -> String {
     let Some(text) = &model.instructions else {
         return String::new();
@@ -53,8 +56,41 @@ pub(super) fn instructions_block(model: &ReportModel) -> String {
          _Custom auditor instructions from `{source}` were applied: they EXTEND the auditor \
          prompt and steer emphasis only. The report's deterministic post-synthesis checks — \
          reachability, topology grounding, the numeric guardrail — still run and still correct \
-         or reject a claim these instructions asked for (provenance: declared)._\n\n\
-         {text}\n"
+         or reject a claim these instructions asked for (provenance: declared)._\n\
+         {}\n\
+         {text}\n",
+        withheld_notice(model),
+    )
+}
+
+/// The notice that this run's guards withheld claims, or an empty string
+/// (#6189).
+///
+/// Why: the note above already warns that the guards may refuse a claim the
+/// instructions asked for. Whether they DID is the operator's actual question,
+/// and the answer sat only in Synthesis Status at the end of the document. The
+/// notice states the count and points at the list; it never says which claims
+/// were instruction-driven, because the guards refuse a field without knowing
+/// what steered the model toward writing it.
+/// What: `""` when nothing was withheld — the section then renders byte-identically
+/// to a pre-#6189 run. Otherwise one paragraph with the count from
+/// [`super::reporter_findings::withheld_claim_count`].
+/// Test: `reporter_tests.rs::{the_instructions_section_counts_withheld_claims,
+/// the_instructions_section_is_silent_when_nothing_was_withheld}`.
+fn withheld_notice(model: &ReportModel) -> String {
+    let n = super::reporter_findings::withheld_claim_count(model);
+    if n == 0 {
+        return String::new();
+    }
+    let (claims, verb) = if n == 1 {
+        ("claim", "was")
+    } else {
+        ("claims", "were")
+    };
+    format!(
+        "\n**{n} synthesized {claims} {verb} withheld by those checks in this run** — each is \
+         named, with its reason and the finding it was about, under Synthesis Status at the end \
+         of this report. A claim these instructions asked for may be among them.\n"
     )
 }
 

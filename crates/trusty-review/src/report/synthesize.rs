@@ -115,6 +115,16 @@ pub struct StatusNote {
     /// The finding this disclosure is about, when it is about one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject: Option<String>,
+    /// True when this note discloses that a guard WITHHELD content (#6189).
+    ///
+    /// Why: a routing note and a withholding read alike in the Synthesis Status
+    /// list, but only the second is something a reader who supplied
+    /// `instructions.md` needs pointing at — an instruction can ask for a claim
+    /// the guards then refuse, and the refusal was visible only in that list.
+    /// The Analyst Instructions section counts these to raise the notice.
+    /// Test: `reporter_tests::the_instructions_section_counts_withheld_claims`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub withheld: bool,
 }
 
 impl StatusNote {
@@ -123,6 +133,7 @@ impl StatusNote {
         StatusNote {
             text: text.into(),
             subject: None,
+            withheld: false,
         }
     }
 
@@ -131,7 +142,14 @@ impl StatusNote {
         StatusNote {
             text: text.into(),
             subject: Some(subject.trim().to_string()),
+            withheld: false,
         }
+    }
+
+    /// Mark this note as disclosing a withholding (#6189).
+    pub fn withheld(mut self) -> Self {
+        self.withheld = true;
+        self
     }
 
     /// Render one status line, prefixed with `cite` when the reporter resolved
