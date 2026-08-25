@@ -26,7 +26,7 @@ name = "tga"
 # the `tga` binary; trusty-audit resolves it by version at runtime, not through
 # a Cargo edge), so the gate has nobody to protect here. The exception is
 # recorded as a `tga` row in scripts/semver-checks-crate-exclusions.tsv.
-version = "3.3.2"
+version = "3.3.3"
 publish = true
 edition = "2021"
 # Aligned with the workspace MSRV (1.94) per #254. Required for
@@ -87,6 +87,11 @@ serde_yaml = { workspace = true }
 # #5236: the DD manifest handed to trusty-review is a TOML file (DOC-67 §6);
 # the file IS the seam, so tga serializes it rather than taking a Cargo edge.
 toml = { workspace = true }
+# #6190: trusty-audit writes its own keys into that same file, so a re-run
+# merges into the document rather than replacing it. `toml_edit` is what
+# preserves the keys, tables, and formatting this crate does not own — a
+# `toml::Value` round trip would rewrite every one of them.
+toml_edit = { workspace = true }
 # Database
 # Bumped from 0.31 to align with trusty-memory-core / trusty-cto-db
 # (rusqlite 0.39, libsqlite3-sys 0.37). Cargo's `links = "sqlite3"`

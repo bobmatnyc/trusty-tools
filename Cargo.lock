@@ -10262,7 +10262,7 @@ dependencies = [
 
 [[package]]
 name = "tga"
-version = "3.3.2"
+version = "3.3.3"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -10293,6 +10293,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "toml 0.8.23",
+ "toml_edit 0.22.27",
  "tracing",
  "tracing-subscriber",
  "tracing-test",

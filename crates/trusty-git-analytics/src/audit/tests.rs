@@ -380,6 +380,9 @@ fn audit_args_parse_every_flag() {
         "/tmp/acme-dd",
         "--weeks",
         "26",
+        // #6163: the mode that writes the manifest and leaves the render to a
+        // caller that grounds the manifest first.
+        "--no-render",
     ])
     .expect("flags must parse");
 
@@ -392,6 +395,7 @@ fn audit_args_parse_every_flag() {
         Some(std::path::Path::new("/tmp/acme-dd"))
     );
     assert_eq!(parsed.args.weeks, Some(26));
+    assert!(parsed.args.no_render);
 }
 
 #[test]
@@ -401,6 +405,9 @@ fn audit_runs_with_no_flags_at_all() {
     let parsed = AuditOnly::try_parse_from(["tga-audit"]).expect("bare invocation must parse");
     assert!(parsed.args.org.is_none());
     assert!(parsed.args.output.is_none());
+    // #6163: the render is what a bare run is FOR, so the new flag must not
+    // change what an operator gets by typing `tga audit`.
+    assert!(!parsed.args.no_render);
 }
 
 #[test]
