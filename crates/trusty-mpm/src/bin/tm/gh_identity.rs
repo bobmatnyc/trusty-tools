@@ -91,8 +91,13 @@ pub(crate) fn resolve_project_aware(
     // call, when the project pairs `config_dir` with an explicit `account`.
     // A project that never configures `account` alongside `config_dir` sees
     // no behaviour change here.
-    if let Some((dir, account)) = trusty_mpm::core::gh_account::configured_account_pair(selected) {
-        trusty_mpm::core::gh_account::ensure_gh_account_in_dir(&account, &dir)?;
+    if let Some(target) = trusty_mpm::core::gh_account::configured_account_pair(selected) {
+        // #5849: enforce on the project's configured host, not an assumed one.
+        trusty_mpm::core::gh_account::ensure_gh_account_in_dir(
+            &target.account,
+            &target.config_dir,
+            &target.host,
+        )?;
     }
 
     resolve_gh_env_anyhow(selected)

@@ -410,7 +410,7 @@ const GH_ENFORCE_TIMEOUT: Duration = Duration::from_secs(5);
 #[path = "gh_account_enforce.rs"]
 mod enforce;
 pub use enforce::{
-    GH_CONFIG_DIR_ENV, configured_account_pair, ensure_gh_account_for_project,
+    AccountTarget, GH_CONFIG_DIR_ENV, configured_account_pair, ensure_gh_account_for_project,
     ensure_gh_account_in_dir,
 };
 

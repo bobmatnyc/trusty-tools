@@ -160,9 +160,9 @@ const GH_HOST_ENV: &str = "GH_HOST";
 pub fn ensure_gh_account_in_dir(
     expected_user: &str,
     config_dir: &std::path::Path,
+    host: &str,
 ) -> anyhow::Result<()> {
     let dir = config_dir.to_string_lossy().to_string();
-    let host = crate::core::trusty_tools_config::DEFAULT_GITHUB_HOST;
 
     // #5849: an ambient token outranks GH_CONFIG_DIR for every later `gh` call,
     // so nothing verified inside this directory would describe them.
@@ -175,27 +175,26 @@ pub fn ensure_gh_account_in_dir(
         );
     }
 
-    let status_text = run_gh_scoped(&dir, ["auth", "status"])
+    let status_text = run_gh_scoped(&dir, host, ["auth", "status"])
         .context("failed to run `gh auth status` scoped to the project's GH_CONFIG_DIR")?;
     // #5849: the transcript echoes hosts.yml; `gh api user` is the identity the
     // API calls actually run as, and it decides.
-    let probe = api_login_scoped(&dir);
-    let verdict = verify_active_account(
+    let probe = api_login_scoped(&dir, host);
+    match verify_active_account(
         &status_text,
         probe.as_deref().map_err(String::as_str),
         expected_user,
-    );
-    if verdict.is_ok() {
-        warn_on_identity_divergence(&status_text, &probe);
-        return Ok(());
-    }
-    // #5849: correcting on an unanswerable probe would rewrite the project's
-    // config dir over a network blip, then blame the switch for the failure.
-    if probe.is_err() {
-        anyhow::bail!(
-            "refusing to switch accounts inside {dir}: {}",
-            verdict.unwrap_err()
-        );
+    ) {
+        Ok(()) => {
+            warn_on_identity_divergence(&status_text, &probe);
+            return Ok(());
+        }
+        // #5849: correcting on an unanswerable probe would rewrite the
+        // project's config dir over a network blip, then blame the switch.
+        Err(msg) if probe.is_err() => {
+            anyhow::bail!("refusing to switch accounts inside {dir}: {msg}")
+        }
+        Err(_) => {}
     }
 
     // #5475: single `gh` entry point; the scoping env is `scoped_gh`'s.
@@ -209,6 +208,7 @@ pub fn ensure_gh_account_in_dir(
             expected_user,
         ],
         &dir,
+        host,
     )
     .output_blocking()
     .with_context(|| format!("failed to spawn `gh auth switch --user {expected_user}`"))?;
@@ -222,9 +222,9 @@ pub fn ensure_gh_account_in_dir(
         );
     }
 
-    let recheck = run_gh_scoped(&dir, ["auth", "status"])
+    let recheck = run_gh_scoped(&dir, host, ["auth", "status"])
         .context("failed to re-verify `gh auth status` after switching")?;
-    let recheck_probe = api_login_scoped(&dir);
+    let recheck_probe = api_login_scoped(&dir, host);
     let verdict = verify_active_account(
         &recheck,
         recheck_probe.as_deref().map_err(String::as_str),
@@ -257,13 +257,14 @@ pub fn ensure_gh_account_in_dir(
 /// Test: `ensure_gh_account_in_dir_fails_closed_when_the_api_probe_fails` and
 /// `ensure_gh_account_in_dir_rejects_a_transcript_the_api_contradicts` drive
 /// it through a fake `gh` on `PATH`.
-fn api_login_scoped(config_dir: &str) -> Result<String, String> {
+fn api_login_scoped(config_dir: &str, host: &str) -> Result<String, String> {
     let dir = config_dir.to_string();
+    let host = host.to_string();
     run_bounded(GH_ENFORCE_TIMEOUT, move || {
         // #5475: single `gh` entry point. `nonempty_stdout_blocking` folds a
         // non-zero exit and a blank login into the same `Err`.
         Some(
-            scoped_gh(["api", "user", "--jq", ".login"], &dir)
+            scoped_gh(["api", "user", "--jq", ".login"], &dir, &host)
                 .nonempty_stdout_blocking()
                 .map_err(|e| format!("`gh api user --jq .login` failed: {e}")),
         )
@@ -325,13 +326,14 @@ fn identity_divergence(status_text: &str, api_login: &str) -> Option<String> {
 /// Test: `ensure_gh_account_in_dir_self_heals_mismatch` and its siblings drive
 /// this against a fake `gh` on `PATH`; `ensure_gh_account_for_project_*` cover
 /// the refusal path that never reaches it.
-fn run_gh_scoped(config_dir: &str, args: [&'static str; 2]) -> anyhow::Result<String> {
+fn run_gh_scoped(config_dir: &str, host: &str, args: [&'static str; 2]) -> anyhow::Result<String> {
     let config_dir = config_dir.to_string();
+    let host = host.to_string();
     run_bounded(GH_ENFORCE_TIMEOUT, move || {
         // #5475: single `gh` entry point. A non-zero exit still yields text —
         // only a spawn failure is an error here.
         Some(
-            scoped_gh(args, &config_dir)
+            scoped_gh(args, &config_dir, &host)
                 .output_blocking()
                 .map(|out| out.combined())
                 .map_err(|e| format!("failed to spawn `gh {}`: {e}", args.join(" "))),
@@ -348,24 +350,24 @@ fn run_gh_scoped(config_dir: &str, args: [&'static str; 2]) -> anyhow::Result<St
 
 /// Build a `gh` invocation pinned to one config dir, host, and no env token.
 ///
-/// Why: the probes and the switch must all speak about the SAME identity.
-/// Leaving `GH_HOST` to the ambient environment let a probe answer for a
-/// different host than the `gh auth switch --hostname github.com` this module
-/// runs, so the check and the correction could disagree (#5849). Pinning it
-/// here keeps every scoped call in one place.
-/// What: sets `GH_CONFIG_DIR` and `GH_HOST` (always
-/// `DEFAULT_GITHUB_HOST` — this enforcement is github.com-only; a GHE project
-/// would need the host threaded through from `GithubConfig`), and removes both
-/// env-token overrides.
+/// Why: the probes and the switch must all speak about the SAME identity on the
+/// SAME host. Leaving `GH_HOST` to the ambient environment let a probe answer
+/// for a different host than the `gh auth switch --hostname` this module runs
+/// (#5849), and hardcoding github.com would have attested the wrong host for a
+/// project whose `github.host` points at an enterprise instance — which is the
+/// host `gh_identity::resolve_gh_env` emits for its real `gh` calls.
+/// What: sets `GH_CONFIG_DIR` and `GH_HOST` (the project's configured host, via
+/// [`AccountTarget::host`]), and removes both env-token overrides.
 /// Test: covered through `run_gh_scoped` and [`api_login_scoped`] by the
 /// `ensure_gh_account_in_dir_*` fake-`gh` tests.
-fn scoped_gh<const N: usize>(args: [&str; N], config_dir: &str) -> trusty_common::gh::GhCommand {
+fn scoped_gh<const N: usize>(
+    args: [&str; N],
+    config_dir: &str,
+    host: &str,
+) -> trusty_common::gh::GhCommand {
     trusty_common::gh::GhCommand::new(args)
         .env(GH_CONFIG_DIR_ENV, config_dir)
-        .env(
-            GH_HOST_ENV,
-            crate::core::trusty_tools_config::DEFAULT_GITHUB_HOST,
-        )
+        .env(GH_HOST_ENV, host)
         .env_remove(GH_TOKEN_ENV_VARS[0])
         .env_remove(GH_TOKEN_ENV_VARS[1])
 }
@@ -380,12 +382,18 @@ fn scoped_gh<const N: usize>(args: [&str; N], config_dir: &str) -> trusty_common
 /// passes for one identity and the work runs as another. Refusing is the only
 /// honest outcome, since nothing inside the config dir can change it.
 /// What: the first of `GH_TOKEN`/`GITHUB_TOKEN` present in this process's
-/// environment with a non-blank value, else `None`.
-/// Test: `ensure_gh_account_in_dir_refuses_under_an_ambient_token`.
+/// environment with a value that is not the empty string. Deliberately NOT
+/// trimmed: `gh` is Go and its own test is `!= ""`, so it SELECTS a whitespace
+/// token — with `GH_TOKEN="   "` gh 2.89.0 exits zero and hands `"   "` on as
+/// the credential (`trusty_common::gh::GhCommand::nonempty_stdout` records the
+/// measurement). Trimming here would read that as absent and let the check
+/// proceed under a token `gh` is already using.
+/// Test: `ambient_token_override_counts_a_whitespace_token`,
+/// `ensure_gh_account_in_dir_refuses_under_an_ambient_token`.
 fn ambient_token_override() -> Option<&'static str> {
     GH_TOKEN_ENV_VARS
         .into_iter()
-        .find(|name| std::env::var_os(name).is_some_and(|v| !v.to_string_lossy().trim().is_empty()))
+        .find(|name| std::env::var_os(name).is_some_and(|v| !v.is_empty()))
 }
 
 /// Parse the login marked `Active account: true` from a `gh auth status` transcript.
@@ -510,14 +518,43 @@ pub fn ensure_gh_account_for_project(gh_user: &str) -> anyhow::Result<()> {
             )
         })?;
 
-    ensure_gh_account_in_dir(gh_user, &config_dir)
+    // #5849: this entry point reads only an env var, so it has no project
+    // config to take a host from — github.com is the only answer available.
+    ensure_gh_account_in_dir(
+        gh_user,
+        &config_dir,
+        crate::core::trusty_tools_config::DEFAULT_GITHUB_HOST,
+    )
+}
+
+/// What enforcement checks, for one project: an account, inside a config dir,
+/// on a host.
+///
+/// Why (#5849): the host used to be assumed `github.com`, so a project whose
+/// `github.host` names an enterprise instance had its account verified on a
+/// host its real `gh` calls never touch. Carrying all three together means the
+/// probes, the `gh auth switch --hostname`, and
+/// `gh_identity::resolve_gh_env`'s `GH_HOST` cannot drift apart.
+/// What: `config_dir` and `account` come straight from [`GithubConfig`];
+/// `host` is its `host` when set to a non-blank value, else
+/// `DEFAULT_GITHUB_HOST`.
+/// Test: `configured_account_pair_both_set`,
+/// `configured_account_pair_carries_a_custom_host`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AccountTarget {
+    /// The isolated `GH_CONFIG_DIR` enforcement operates inside.
+    pub config_dir: PathBuf,
+    /// The login every `gh` call for this project must authenticate as.
+    pub account: String,
+    /// The GitHub host that identity is checked (and switched) on.
+    pub host: String,
 }
 
 /// Decide WHETHER `#2081` account enforcement applies to a resolved
-/// [`GithubConfig`], and extract the `(config_dir, account)` pair to enforce
-/// when it does — the single decision point every wired call site (#3312)
-/// shares, so the CLI and the daemon can never diverge on when enforcement
-/// runs.
+/// [`GithubConfig`], and extract the [`AccountTarget`] to enforce when it
+/// does — the single decision point every wired call site (#3312) shares, so
+/// the CLI and the daemon can never diverge on when enforcement runs.
 ///
 /// Why: `account` alone documents intent (see `gh_identity`'s module docs and
 /// its `account_with_config_dir_is_ok` test) and `config_dir` alone is just an
@@ -529,28 +566,44 @@ pub fn ensure_gh_account_for_project(gh_user: &str) -> anyhow::Result<()> {
 /// chain already refuses to select alone) must see NO behaviour change: this
 /// returns `None` and the caller skips enforcement entirely, never spawning a
 /// `gh` subprocess and never failing a project that never opted in.
-/// What: `Some((dir, account))` only when `config.config_dir` is set AND
+/// What: `Some(target)` only when `config.config_dir` is set AND
 /// `config.account` is set to a non-blank value (trimmed); `None` for a
 /// `None` `config`, a blank/whitespace-only `account`, or either field
-/// missing.
+/// missing. The target's `host` follows `config.host`, falling back to
+/// `DEFAULT_GITHUB_HOST` (#5849).
 /// Test: `configured_account_pair_both_set`,
+/// `configured_account_pair_carries_a_custom_host`,
 /// `configured_account_pair_config_dir_only`,
 /// `configured_account_pair_account_only`,
 /// `configured_account_pair_blank_account`, `configured_account_pair_none`.
-pub fn configured_account_pair(config: Option<&GithubConfig>) -> Option<(PathBuf, String)> {
+pub fn configured_account_pair(config: Option<&GithubConfig>) -> Option<AccountTarget> {
     let cfg = config?;
-    let dir = cfg.config_dir.clone()?;
+    let config_dir = cfg.config_dir.clone()?;
     let account = cfg
         .account
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())?;
-    Some((dir, account.to_string()))
+    let host = cfg
+        .host
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(crate::core::trusty_tools_config::DEFAULT_GITHUB_HOST);
+    Some(AccountTarget {
+        config_dir,
+        account: account.to_string(),
+        host: host.to_string(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The host the fake-`gh` tests enforce on; the fake ignores it, so any
+    /// value works — this names github.com to match the common project.
+    const TEST_HOST: &str = crate::core::trusty_tools_config::DEFAULT_GITHUB_HOST;
 
     /// Real `gh auth status` output with two github.com accounts logged in.
     const MULTI_AUTH_STATUS: &str = "\
@@ -734,7 +787,26 @@ github.com
         let cfg = github_cfg(Some("/cfg/acct"), Some("bobmatnyc"));
         assert_eq!(
             configured_account_pair(Some(&cfg)),
-            Some((PathBuf::from("/cfg/acct"), "bobmatnyc".to_string()))
+            Some(AccountTarget {
+                config_dir: PathBuf::from("/cfg/acct"),
+                account: "bobmatnyc".to_string(),
+                host: crate::core::trusty_tools_config::DEFAULT_GITHUB_HOST.to_string(),
+            })
+        );
+    }
+
+    /// Why (#5849): a project pointing `github.host` at an enterprise instance
+    /// must have its account verified THERE — `resolve_gh_env` emits that host
+    /// for the project's real `gh` calls, so enforcing against github.com would
+    /// attest a host the work never touches.
+    /// Test: itself.
+    #[test]
+    fn configured_account_pair_carries_a_custom_host() {
+        let mut cfg = github_cfg(Some("/cfg/acct"), Some("bobmatnyc"));
+        cfg.host = Some("github.acme.example".to_string());
+        assert_eq!(
+            configured_account_pair(Some(&cfg)).map(|t| t.host),
+            Some("github.acme.example".to_string())
         );
     }
 
@@ -947,7 +1019,7 @@ exit 1
         let prior_tokens = strip_ambient_tokens();
         clear_fake_gh_env();
 
-        let result = ensure_gh_account_in_dir("bobmatnyc", config_dir.path());
+        let result = ensure_gh_account_in_dir("bobmatnyc", config_dir.path(), TEST_HOST);
 
         restore_ambient_tokens(prior_tokens);
         restore_path(prior_path);
@@ -975,7 +1047,7 @@ exit 1
         // SAFETY: guarded by fake_gh_lock; cleared below.
         unsafe { std::env::set_var("FAKE_GH_SWITCH_FAILS", "1") };
 
-        let result = ensure_gh_account_in_dir("bobmatnyc", config_dir.path());
+        let result = ensure_gh_account_in_dir("bobmatnyc", config_dir.path(), TEST_HOST);
 
         clear_fake_gh_env();
         restore_ambient_tokens(prior_tokens);
@@ -1004,7 +1076,7 @@ exit 1
         // would fail if (incorrectly) invoked, proving the no-op path.
         unsafe { std::env::set_var("FAKE_GH_SWITCH_FAILS", "1") };
 
-        let result = ensure_gh_account_in_dir("bobmatnyc", config_dir.path());
+        let result = ensure_gh_account_in_dir("bobmatnyc", config_dir.path(), TEST_HOST);
 
         clear_fake_gh_env();
         restore_ambient_tokens(prior_tokens);
@@ -1041,7 +1113,7 @@ exit 1
         // SAFETY: guarded by fake_gh_lock; cleared below.
         unsafe { std::env::set_var("FAKE_GH_API_LOGIN", "bobmatnyc") };
 
-        let result = ensure_gh_account_in_dir("nonexistent-user-xyz", config_dir.path());
+        let result = ensure_gh_account_in_dir("nonexistent-user-xyz", config_dir.path(), TEST_HOST);
 
         clear_fake_gh_env();
         restore_ambient_tokens(prior_tokens);
@@ -1069,7 +1141,7 @@ exit 1
         // SAFETY: guarded by fake_gh_lock; cleared below.
         unsafe { std::env::set_var("FAKE_GH_API_FAILS", "1") };
 
-        let result = ensure_gh_account_in_dir("bobmatnyc", config_dir.path());
+        let result = ensure_gh_account_in_dir("bobmatnyc", config_dir.path(), TEST_HOST);
 
         clear_fake_gh_env();
         restore_ambient_tokens(prior_tokens);
@@ -1104,7 +1176,7 @@ exit 1
         // SAFETY: guarded by fake_gh_lock; cleared below.
         unsafe { std::env::set_var("FAKE_GH_API_EMPTY", "1") };
 
-        let result = ensure_gh_account_in_dir("bobmatnyc", config_dir.path());
+        let result = ensure_gh_account_in_dir("bobmatnyc", config_dir.path(), TEST_HOST);
 
         clear_fake_gh_env();
         restore_ambient_tokens(prior_tokens);
@@ -1142,7 +1214,7 @@ exit 1
         // SAFETY: guarded by fake_gh_lock; restored below.
         unsafe { std::env::set_var("GH_TOKEN", "gho_someoneelses_token") };
 
-        let result = ensure_gh_account_in_dir("bobmatnyc", config_dir.path());
+        let result = ensure_gh_account_in_dir("bobmatnyc", config_dir.path(), TEST_HOST);
 
         clear_fake_gh_env();
         restore_ambient_tokens(prior_tokens);
@@ -1151,6 +1223,25 @@ exit 1
         let msg = err.to_string();
         assert!(msg.contains("GH_TOKEN"), "err: {msg}");
         assert!(msg.contains(GH_CONFIG_DIR_ENV), "err: {msg}");
+    }
+
+    /// Why (#5849): `gh` is Go and tests its token variables with `!= ""`, so
+    /// `GH_TOKEN="   "` is a credential it SELECTS — measured on gh 2.89.0,
+    /// which exits zero and hands the whitespace on. A trimmed emptiness test
+    /// here would read that as absent and verify an identity `gh` is not using.
+    /// Test: itself.
+    #[cfg(unix)]
+    #[test]
+    fn ambient_token_override_counts_a_whitespace_token() {
+        let _g = fake_gh_lock();
+        let prior_tokens = strip_ambient_tokens();
+        // SAFETY: guarded by fake_gh_lock; restored below.
+        unsafe { std::env::set_var("GH_TOKEN", "   ") };
+
+        let seen = ambient_token_override();
+
+        restore_ambient_tokens(prior_tokens);
+        assert_eq!(seen, Some("GH_TOKEN"));
     }
 
     /// Why: the divergence decision must be readable without a subscriber —
@@ -1195,7 +1286,7 @@ exit 1
             std::env::set_var("FAKE_GH_SWITCH_FAILS", "1");
         }
 
-        let result = ensure_gh_account_in_dir("bobmatnyc", config_dir.path());
+        let result = ensure_gh_account_in_dir("bobmatnyc", config_dir.path(), TEST_HOST);
 
         clear_fake_gh_env();
         restore_ambient_tokens(prior_tokens);

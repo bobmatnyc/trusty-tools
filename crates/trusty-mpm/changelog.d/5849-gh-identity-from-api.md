@@ -17,7 +17,12 @@ Fixed
   cannot rewrite the project's config dir. Enforcement additionally refuses
   outright when an ambient `GH_TOKEN`/`GITHUB_TOKEN` is set: that token outranks
   `GH_CONFIG_DIR` for every later `gh` call, so no scoped probe can speak for
-  what those calls will do. When the transcript and the
+  what those calls will do — including a whitespace-only token, which `gh`
+  selects rather than ignores. Enforcement also now runs on the project's
+  configured `github.host` instead of assuming github.com, so a project pointed
+  at an enterprise instance is verified on the host its work actually uses;
+  `configured_account_pair` returns an `AccountTarget` carrying that host
+  alongside the config dir and account. When the transcript and the
   credential name different accounts (the divergence tracked in
   [#5656](https://github.com/bobmatnyc/trusty-tools/issues/5656)) the API
   answer decides and the disagreement is logged at WARN.

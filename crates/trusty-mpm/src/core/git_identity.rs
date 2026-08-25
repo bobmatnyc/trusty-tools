@@ -242,12 +242,14 @@ pub async fn resolve_for_config_enforced(
 ) -> anyhow::Result<GitIdentity> {
     let identity = resolve_for_config(config, repo_url)?;
 
-    if let Some((dir, account)) =
-        configured_account_pair(select_github_config_for(config, repo_url))
-    {
-        tokio::task::spawn_blocking(move || ensure_gh_account_in_dir(&account, &dir))
-            .await
-            .map_err(|e| anyhow::anyhow!("gh account enforcement task panicked: {e}"))??;
+    if let Some(target) = configured_account_pair(select_github_config_for(config, repo_url)) {
+        // #5849: the host travels with the account, so enforcement attests the
+        // host this project's `gh` calls actually run on.
+        tokio::task::spawn_blocking(move || {
+            ensure_gh_account_in_dir(&target.account, &target.config_dir, &target.host)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("gh account enforcement task panicked: {e}"))??;
     }
 
     Ok(identity)
