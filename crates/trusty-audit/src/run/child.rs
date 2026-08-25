@@ -141,6 +141,16 @@ pub(super) async fn spawn_tga(
     if let Some((name, value)) = github_access.env() {
         command.env(name, value);
     }
+    // #6244: the same credential again, under the name tga's GIT TRANSPORT
+    // reads. The line above serves the REST client that reads issues; the fetch
+    // that runs before every collection resolves `GITHUB_TOKEN` instead, so
+    // without this a recipient logged in only with `gh` had every fetch fail and
+    // got a header-only `pr-metrics.csv` per repository. Set only when the sweep
+    // resolved that the `gh` login is the only source — see
+    // `github_issues::GithubAccess::git_transport_env`.
+    if let Some((name, value)) = github_access.git_transport_env() {
+        command.env(name, value);
+    }
     // #6082: the investigation budget, down the one channel that reaches the
     // grandchild in time. `tga audit` writes the manifest and runs
     // `trusty-review report` against it in the same process, and this crate's

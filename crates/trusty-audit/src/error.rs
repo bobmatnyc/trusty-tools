@@ -312,6 +312,36 @@ pub enum AuditError {
         path: PathBuf,
     },
 
+    /// No non-interactive git credential, on an engagement that must fetch.
+    ///
+    /// Why: #6244. `tga audit` fetches each repository before it collects, and
+    /// its fetch resolves a credential non-interactively or not at all. On a
+    /// machine with none, every fetch failed, pull-request collection produced a
+    /// header-only `pr-metrics.csv` for all 59 repositories of a real
+    /// engagement, and the run reported success — the only trace was the same
+    /// one-line gap repeated inside 59 separate manifests. The failure is
+    /// engagement-global and knowable before any child runs, so it is raised
+    /// once, up front, rather than 59 times where nobody reads it.
+    /// What: the count, one repository by name, and each way to supply a
+    /// credential without a prompt. Raised only when the engagement provably
+    /// fetches — see `crate::run::git_credentials::GitCredential::refuse_if_fetching`.
+    /// Test: `crate::run::git_credentials::git_credential_tests::nothing_at_all_refuses_a_fetching_engagement`.
+    #[error(
+        "no non-interactive git credential is available, and {repositories} of this \
+         engagement's repositories are cloned from github.com (starting with {first}). \
+         `tga audit` fetches each one before it collects, so pull-request collection would \
+         produce an empty `pr-metrics.csv` for every repository and the run would still \
+         report success. Supply a credential and run again — any one of: `gh auth login`; \
+         a personal access token in GITHUB_TOKEN or GH_TOKEN; an SSH key at \
+         ~/.ssh/id_ed25519 or ~/.ssh/id_rsa; an ssh-agent (SSH_AUTH_SOCK)"
+    )]
+    NoGitCredential {
+        /// How many selected checkouts name a `github.com` remote.
+        repositories: usize,
+        /// One of them, by registered name, so the message is concrete.
+        first: String,
+    },
+
     /// The selection file carries fewer entries than it declares.
     ///
     /// Why: #5555. A producer that crashes part-way through writing the file
