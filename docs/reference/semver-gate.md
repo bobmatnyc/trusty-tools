@@ -255,6 +255,35 @@ remedy, never a skip: on the release path this gate is the last barrier, so a
 missing tool reporting green would put the repo back where #4088 found it. CI
 installs the same pinned version as a prebuilt binary.
 
+### Native prerequisites on Linux ([#5440](https://github.com/bobmatnyc/trusty-tools/issues/5440))
+
+The gate builds rustdoc with `--only-explicit-features`, so every feature that
+is not in `scripts/semver-checks-feature-exclusions.tsv` is on and its build
+scripts run. That makes the crate's native dependencies the gate's
+prerequisites too, and a missing one aborts the build before a single API is
+compared — exit 3, NO VERDICT, which is not a pass.
+
+On Debian/Ubuntu, running the gate over `trusty-common` needs:
+
+```bash
+sudo apt-get install -y libdbus-1-dev
+```
+
+`keyring-store` pulls `libdbus-sys`, whose `build.rs` calls `pkg-config dbus-1`
+and panics when the headers are absent. The panic names the pkg-config package
+and never the cargo feature, which is what made #5440 hard to read.
+
+macOS needs nothing: `keyring` resolves to `security-framework` there and
+`libdbus-sys` is not in the dependency graph, so the local publish path
+(`preflight-publish.sh` CHECK 5, run on the maintainer's Mac) never wanted it.
+`.github/workflows/semver-checks.yml` installs the package on `ubuntu-latest`
+before the gate runs; run `32789222713` is the first release-tag run to compare
+under it, reporting `196 checks: 196 pass, 58 skip` for `trusty-common` 0.43.1.
+
+A native dependency a runner cannot supply at all is a different problem — see
+[#5690](https://github.com/bobmatnyc/trusty-tools/issues/5690) for
+`trusty-search`'s `cuda` feature, which wants `nvcc`.
+
 ## Skips, and why each one is a fact rather than an excuse
 
 | Condition | Behaviour |
