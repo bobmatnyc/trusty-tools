@@ -380,6 +380,11 @@ where
     let declared_credential = git_credentials::GitCredential::of_environment(&operator);
     let inference =
         inference::resolve(!config.openrouter_key.is_empty(), &config.models, operator)?;
+    // #6247: resolved ONCE for the sweep, for the same reason the inference
+    // selection above is — the budget is a property of the engagement, not of a
+    // repository. Every child is handed this value and every manifest records
+    // it, so the file cannot name a budget its own investigation never used.
+    let investigation = grounding::priority::Budget::for_engagement(&config.report);
     // #5857: ONE resolution per invocation. `crate::chain` resolved the boards
     // an hour ago to state its gaps and hands that result down, so the coverage
     // the report claims and the sections the child gets cannot diverge over a
@@ -463,6 +468,7 @@ where
                     index,
                     repo,
                     budget,
+                    investigation,
                     progress,
                     total,
                     &scrubber,
@@ -617,6 +623,7 @@ async fn run_one(
     index: usize,
     repo: SelectedRepo,
     budget: std::time::Duration,
+    investigation: grounding::priority::Budget,
     progress: &Progress,
     total: usize,
     scrubber: &Scrubber,
@@ -656,6 +663,7 @@ async fn run_one(
                 &log,
                 work.root(),
                 budget,
+                investigation,
                 progress,
                 &repo.name,
                 scrubber,
@@ -688,7 +696,10 @@ async fn run_one(
     let manifest = output.join(AuditManifest::FILE_NAME);
     if manifest.is_file() {
         let tools = grounding::Tools::pinned(binaries.search.clone(), binaries.analyze.clone());
-        gaps.extend(grounding::ground_manifest(&manifest, &tools, &checkout, &repo.name).await);
+        gaps.extend(
+            grounding::ground_manifest(&manifest, &tools, &checkout, &repo.name, investigation)
+                .await,
+        );
         // #6135: the provider and models this run used, written into the file
         // that ships. Without it a re-render on another machine resolves its own
         // provider from that machine's config — which is how a June-dated local
@@ -909,6 +920,114 @@ trusty-review = "0.15.1"
             .await
             .expect("a sweep that fetches nothing needs no credential");
         assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
+    }
+
+    /// A stub `tga` that records the investigation budget it was handed (#6247).
+    fn records_its_budget_env() -> String {
+        format!(
+            "{}{}",
+            writes_a_manifest(None).trim_end_matches("exit 0\n"),
+            "{\n  echo \"files=$TRUSTY_AUDIT_INVESTIGATE_MAX_FILES\"\n  \
+             echo \"bytes=$TRUSTY_AUDIT_INVESTIGATE_MAX_BYTES\"\n} \
+             > \"$out/budget-env.txt\"\nexit 0\n",
+        )
+    }
+
+    /// An engagement that asks for a wider investigation than the default.
+    ///
+    /// 77 rather than a round number: it matches neither
+    /// [`grounding::priority::DEFAULT_MAX_FILES`] nor `trusty-review`'s own
+    /// default, so a value arriving from either tier is visible as a wrong
+    /// number rather than as a coincidence.
+    fn config_declaring_a_budget() -> EngagementConfig {
+        EngagementConfig::from_toml(
+            &format!("{CONFIG}\n[report]\ninvestigate_max_files = 77\n"),
+            Path::new("engagement.toml"),
+        )
+        .expect("parses")
+    }
+
+    /// 🔴 #6247: the budget an engagement declares must reach the process that
+    /// samples the files, not just the manifest that describes the run.
+    ///
+    /// Asserts on the environment the SPAWNED PROCESS received, because that is
+    /// the only channel that reaches `trusty-review` before it renders — the
+    /// manifest is written by this child and edited afterwards, so a budget
+    /// recorded there reaches a re-render and never this run's report.
+    ///
+    /// Against `3771644d0` this fails on the first assertion: `spawn_tga` read
+    /// `Budget::from_env()`, so the child was handed the compiled default 240
+    /// whatever the engagement declared, and the operator's 240-file manifest
+    /// sat beside a report claiming 40.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_child_environment_carries_the_engagement_investigation_budget() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, &records_its_budget_env());
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        let report = sweep(
+            &work,
+            &config_declaring_a_budget(),
+            &RunOptions::default(),
+            &Progress::none(),
+        )
+        .await
+        .expect("the sweep completes");
+        assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
+
+        let seen = std::fs::read_to_string(report.repos[0].output.join("budget-env.txt"))
+            .expect("the stub recorded its environment");
+        assert!(seen.contains("files=77"), "{seen}");
+        // Derived from the declared file count, so a raised file budget never
+        // meets an unraised byte budget (#6148).
+        assert!(
+            seen.contains(&format!(
+                "bytes={}",
+                77 * grounding::priority::BYTES_PER_FILE
+            )),
+            "{seen}"
+        );
+    }
+
+    /// 🔴 #6247: the manifest that ships must name the budget the investigation
+    /// actually ran under — one resolution, two consumers.
+    ///
+    /// Against `3771644d0` the two were resolved independently: the child got
+    /// `Budget::from_env()` and `ground_manifest` re-resolved from the manifest
+    /// the child had just written, so the file could state a budget no sampler
+    /// used. Here the child records 77 and the file must agree.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_recorded_budget_is_the_one_the_child_ran_under() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, &records_its_budget_env());
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        let report = sweep(
+            &work,
+            &config_declaring_a_budget(),
+            &RunOptions::default(),
+            &Progress::none(),
+        )
+        .await
+        .expect("the sweep completes");
+
+        let written = std::fs::read_to_string(report.repos[0].output.join("manifest.toml"))
+            .expect("the child wrote a manifest");
+        let parsed: toml::Value = written.parse().expect("the manifest is TOML");
+        assert_eq!(
+            parsed["report"]["investigate_max_files"].as_integer(),
+            Some(77),
+            "{written}"
+        );
+        let seen = std::fs::read_to_string(report.repos[0].output.join("budget-env.txt"))
+            .expect("the stub recorded its environment");
+        assert!(seen.contains("files=77"), "{seen}");
     }
 
     /// A stub `tga` shaped like the child of the 2026-08-19 dogfood run: it

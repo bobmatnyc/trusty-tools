@@ -7,7 +7,7 @@
 	const facts = [
 		{ label: 'Package', value: 'trusty-memory' },
 		{ label: 'Default port', value: '7070' },
-		{ label: 'MCP tools', value: '45' },
+		{ label: 'MCP tools', value: '47' },
 		{ label: 'Storage', value: 'usearch + redb, on disk' }
 	];
 </script>

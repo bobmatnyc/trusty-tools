@@ -119,6 +119,7 @@ PAGE	guides	docs/trusty-agents/user/configuration.md	/guides/trusty-agents/confi
 PAGE	guides	docs/trusty-agents/user/agents-and-skills.md	/guides/trusty-agents/agents-and-skills	Agents and Skills
 PAGE	guides	docs/trusty-git-analytics/user/README.md	/guides/trusty-git-analytics	trusty-git-analytics User Guide
 PAGE	guides	docs/trusty-git-analytics/user/user-guide.md	/guides/trusty-git-analytics/user-guide	Using tga
+PAGE	guides	docs/guides/audit-instructions.md	/guides/audit-instructions	Engagement Instructions (instructions.md)
 
 SECTION	reference	Reference
 PAGE	reference	docs/architecture/harnesses.md	/reference/harnesses	Harnesses

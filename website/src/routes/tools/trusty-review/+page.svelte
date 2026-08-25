@@ -116,5 +116,44 @@
 			result. Every value carries a marker saying whether it was measured, declared, or inferred, and
 			a figure that appears nowhere in the underlying data is rejected before it can reach the page.
 		</p>
+		<p class="mt-4 max-w-3xl text-foundry-secondary">
+			The data appendix is not left as pipe tables alone. Each populated dataset carries a declared
+			chart type, and the renderer turns it into a Mermaid chart under its table — an
+			<code class="text-sm">xychart-beta</code> for bar and stacked-bar data, a
+			<code class="text-sm">radar-beta</code> for radar. That pass is pure rendering from the rows already
+			in the table: no model, no network. The table stays the authoritative source and the chart is a
+			derived view of it, so a dataset that stayed empty simply gets no chart.
+		</p>
+		<p class="mt-4 max-w-3xl text-foundry-secondary">
+			<code class="text-sm">--analyze</code> fills the complexity sections from a running trusty-analyze
+			daemon — the complexity distribution and the RED/AMBER finding bands, mapped from the daemon's own
+			measurements rather than from prose. It fails open per dataset: whatever answered is kept and whatever
+			did not is named under Gaps &amp; Caveats, and a run where the daemon is absent falls back to the
+			built-in scan and produces the same output a run without the flag would.
+		</p>
+	</div>
+
+	<div>
+		<h2 class="font-display text-2xl font-bold sm:text-3xl">Telling it what to look for</h2>
+		<p class="mt-4 max-w-3xl text-foundry-secondary">
+			A report can carry an analyst brief: a free-form markdown file naming the focus areas, the
+			concerns to chase, and the questions this particular review has to answer. Pass it with
+			<code class="text-sm">--instructions &lt;path&gt;</code>, name it under the manifest's
+			<code class="text-sm">[report].instructions</code> key, or drop a file called
+			<code class="text-sm">instructions.md</code> next to
+			<code class="text-sm">manifest.toml</code> and it is picked up with no flag and no key. Those three
+			are a precedence order, highest first.
+		</p>
+		<p class="mt-4 max-w-3xl text-foundry-secondary">
+			The brief is recorded verbatim in the report as its Analyst Instructions section, so every
+			report says what it was asked to look for. Under
+			<code class="text-sm">--synthesize</code> it also steers where the prose puts its emphasis.
+			What it cannot do is loosen a guard: a figure the numeric guardrail cannot trace back to the
+			collected data is withheld whether or not the brief asked for it, and the report discloses the
+			withholding. Leave the file out and the run is unchanged.
+			<a class="underline hover:text-foundry-text" href="/docs/guides/audit-instructions"
+				>The instructions.md guide</a
+			> has the mechanism and a template to start from.
+		</p>
 	</div>
 </ToolPage>

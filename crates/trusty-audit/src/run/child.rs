@@ -85,6 +85,7 @@ pub(super) async fn spawn_tga(
     log: &Path,
     cwd: &Path,
     budget: std::time::Duration,
+    investigation: crate::grounding::priority::Budget,
     progress: &Progress,
     target: &str,
     scrubber: &Scrubber,
@@ -157,7 +158,11 @@ pub(super) async fn spawn_tga(
     // grounding pass edits that manifest only after the child exits — so the
     // budget it records there reaches a re-render and never this run's report.
     // See `grounding::priority::Budget::child_env`.
-    for (name, value) in crate::grounding::priority::Budget::from_env().child_env() {
+    // #6247: the sweep resolves it ONCE and hands it down, rather than this
+    // spawn re-reading the environment. The same value is what the grounding
+    // pass writes into the manifest, so the file cannot name a budget the
+    // investigation did not run under.
+    for (name, value) in investigation.child_env() {
         command.env(name, value);
     }
 

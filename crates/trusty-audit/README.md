@@ -244,11 +244,24 @@ inspect_priority = [
 ```
 
 The client also asks for a wider investigation budget than `trusty-review`'s own
-default — 240 files and 2.4 MiB per repository, overridable per machine with
-`TRUSTY_AUDIT_INVESTIGATE_MAX_FILES` and `TRUSTY_AUDIT_INVESTIGATE_MAX_BYTES`.
-It writes `investigate_max_files` and `investigate_max_bytes` into `[report]`
-per key, and only where the manifest declares none: an operator who set one of
-the two keeps it, and gets the audit's default for the other.
+default — 240 files and 2.4 MiB per repository. An engagement declares its own
+in `engagement.toml`, and that declaration wins over both the machine and the
+default:
+
+```toml
+[report]
+investigate_max_files = 240
+investigate_max_bytes = 2457600
+```
+
+Per key, the precedence is the declared value, then
+`TRUSTY_AUDIT_INVESTIGATE_MAX_FILES` / `TRUSTY_AUDIT_INVESTIGATE_MAX_BYTES` in
+the environment, then the default. The sweep resolves it once and hands the same
+number to every `tga audit` child and to the pass that writes
+`investigate_max_files` / `investigate_max_bytes` into each manifest's
+`[report]` — so the budget the file names is the budget the investigation ran
+under, not a second resolution of it. A manifest that already declares one of
+the two keys keeps it and gets the resolved value for the other.
 
 The byte budget follows the file budget at 10 KiB per file unless something
 declares it. `trusty-review` stops reading at whichever of the two binds first,
