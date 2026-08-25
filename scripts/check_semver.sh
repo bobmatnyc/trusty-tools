@@ -1281,6 +1281,16 @@ The tool's own output is above. The usual causes:
     the gate. The `toolchain:` line above says which rustc that was. Install a
     newer one (`rustup toolchain install stable`), or point the gate at one:
         SEMVER_GATE_TOOLCHAIN_BIN=<dir> bash scripts/check_semver.sh --crate <c>
+  * A NATIVE LIBRARY THE FEATURE SET NEEDS IS ABSENT (issue #5440). The gate
+    builds with --only-explicit-features, so every non-excluded feature is on
+    and its build scripts run. On Linux, trusty-common's `keyring-store` pulls
+    libdbus-sys, whose build.rs shells out to `pkg-config dbus-1` and panics
+    when the headers are missing. The error text names the pkg-config package,
+    not the cargo feature. Remedy on Debian/Ubuntu:
+        sudo apt-get install -y libdbus-1-dev
+    macOS needs nothing here — keyring resolves to security-framework there and
+    libdbus-sys is not in the graph at all. CI installs the package in
+    .github/workflows/semver-checks.yml.
   * the baseline could not be fetched from crates.io.
   * a genuine compile error in the crate — build it directly to see it.
 
