@@ -119,6 +119,13 @@ pub(crate) async fn launch(
     let live_path = resolve_dir(dir)?;
     let live_path = live_path.canonicalize().unwrap_or(live_path);
 
+    // #6274: a plain directory becomes a git project here, so step 2 below reads
+    // the origin remote of a real repository instead of failing on "not a git
+    // repo". A fresh repo has no origin, so `tm launch` still lands on the
+    // no-remote error that points at `tm connect` — the same answer it gives for
+    // any repo without a GitHub remote.
+    super::auto_git_init::ensure_git_repo(&live_path)?;
+
     // Auto-register the git project root as a local path alias (non-fatal, silent).
     super::managed_root::try_register_alias(&live_path);
     let live_workdir = live_path.to_string_lossy().to_string();
