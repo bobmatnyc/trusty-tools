@@ -74,6 +74,16 @@ pub struct Cli {
 pub enum Verb {
     /// Walk the pre-run steps: repository selection, then tooling.
     Guided,
+    /// Create `engagement.toml` without a terminal, for a scripted run.
+    ///
+    /// The README's sequence — workdir, add repo, targets, audit — begins at a
+    /// step that needs a config, and until now only a bare `trusty-audit` on a
+    /// real terminal ever wrote one. A CI or scripted caller had no way to get
+    /// past `add repo` except by faking a pty. This is that way: it reads
+    /// `OPENROUTER_API_KEY` from the environment, never prompts, and writes the
+    /// same file the interactive cold start writes. A directory that is already
+    /// an engagement is left exactly as it is.
+    Init,
     /// Create the working directory and print what lands where.
     Workdir,
     /// Print the engagement metadata from the companion manifest.
@@ -262,6 +272,10 @@ impl Cli {
     pub fn to_command(&self) -> Command {
         match &self.verb {
             None | Some(Verb::Guided) => Command::Guided,
+            // #6159: the non-interactive half of the cold start. It takes no
+            // flags — every value it writes comes from the environment or the
+            // pinned release list, which is what makes it scriptable.
+            Some(Verb::Init) => Command::Init,
             Some(Verb::Workdir) => Command::WorkDir,
             Some(Verb::Manifest) => Command::Manifest,
             Some(Verb::Tools) => Command::Tools,
@@ -402,6 +416,7 @@ mod cli_tests {
     fn argv_for(command: &Command) -> Vec<&'static str> {
         match command {
             Command::Guided => vec!["taudit", "guided"],
+            Command::Init => vec!["taudit", "init"],
             Command::WorkDir => vec!["taudit", "workdir"],
             Command::Manifest => vec!["taudit", "manifest"],
             Command::Tools => vec!["taudit", "tools"],
@@ -434,6 +449,7 @@ mod cli_tests {
     fn all_commands() -> Vec<Command> {
         vec![
             Command::Guided,
+            Command::Init,
             Command::WorkDir,
             Command::Manifest,
             Command::Tools,

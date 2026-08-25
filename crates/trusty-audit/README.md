@@ -72,6 +72,7 @@ never reads it.
 
 ```
 trusty-audit                    # guided flow: register targets, install, sweep
+trusty-audit init               # write engagement.toml with no terminal, for a script
 trusty-audit workdir            # create the working directory, print what lands where
 trusty-audit add repo OWNER/NAME    # register a repository, after checking it can be read
 trusty-audit add board jira:KEY     # register a JIRA project or Linear team
@@ -88,6 +89,24 @@ trusty-audit run --fresh        # audit every selected repository again
 trusty-audit package            # assemble the deliverable zip to send back
 trusty-audit audit              # all four of the above, in one invocation
 ```
+
+Every verb below `init` needs an `engagement.toml`, and the bare launch above is
+the only one that writes it interactively — `add repo` on a fresh directory
+refuses with `NoEngagementConfig`. `trusty-audit init` is the write on its own:
+it reads `OPENROUTER_API_KEY` from the environment, never prompts, records the
+latest published version of each pinned tool, and leaves an existing engagement
+exactly as it is. That makes the sequence runnable from a script or a CI job:
+
+```
+export OPENROUTER_API_KEY=…
+trusty-audit init
+trusty-audit install
+trusty-audit add repo acme/api
+trusty-audit audit
+```
+
+`init` writes the file and nothing else — `install` is the download, so a caller
+decides for itself when to pay for it.
 
 `targets` and `repos` answer different questions, and reaching for the wrong one
 is the mistake worth naming. `targets` lists the REGISTRY — what `add` wrote, and

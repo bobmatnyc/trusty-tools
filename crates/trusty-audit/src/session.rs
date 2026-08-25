@@ -22,7 +22,13 @@
 
 use std::path::{Path, PathBuf};
 
+// #6159: creating an engagement without a terminal. Its own module because this
+// file is at the 500-SLOC production cap.
+pub mod init;
+
 use crate::chain::{self, ChainOptions, ChainReport};
+// #6159: `PinResolver` is the seam that keeps `init`'s test off the release list.
+use crate::cli::bootstrap::PinResolver;
 use crate::clone::{self, CloneOptions, CloneReport};
 use crate::config::{EngagementConfig, SecretKey};
 use crate::discover::{self, DiscoveredRepo};
@@ -37,6 +43,7 @@ use crate::run::{self, RunOptions, RunReport};
 use crate::tools::{self, InstalledTool, RequiredTool, ToolStatus};
 use crate::validate;
 use crate::workdir::{Area, WorkDir};
+use init::InitReport;
 
 /// Everything `trusty-audit` can be asked to do.
 ///
@@ -50,6 +57,19 @@ use crate::workdir::{Area, WorkDir};
 pub enum Command {
     /// What a bare invocation runs: the guided flow, starting at repo selection.
     Guided,
+    /// Write the first `engagement.toml` with no terminal involved (#6159).
+    ///
+    /// Why: `crate::cli::bootstrap::cold_start` is the only thing that ever
+    /// synthesised an engagement, and it needs a `/dev/tty` to ask for the key
+    /// on. So the README's documented sequence failed at `add repo` with
+    /// [`AuditError::NoEngagementConfig`] for every scripted and CI caller, and
+    /// the observed workaround was allocating a pty with `script -q /dev/null`.
+    /// This is the same write with the prompt removed: the key comes from the
+    /// environment, and nothing else about the file differs.
+    ///
+    /// Carries no argument for the same reason it is scriptable — every value
+    /// it writes comes from the environment or the pinned release list.
+    Init,
     /// Create the working directory and report its layout.
     WorkDir,
     /// Read the companion `manifest.toml` and report the engagement metadata.
@@ -184,7 +204,11 @@ impl Command {
             // key into does not exist. An exported key, or the config's when
             // there is one — `Session::rerender` owns that second fallback,
             // exactly as `Session::engagement_config` owns it for the sweep.
-            Self::Package { .. } | Self::Distribute(_) | Self::Rerender(_) => {
+            // #6159: `init` writes the key into the config it creates, so it
+            // needs one — but it must never PROMPT, because being runnable
+            // without a terminal is the entire capability. The environment is
+            // therefore its only source; there is no config yet to fall back on.
+            Self::Package { .. } | Self::Distribute(_) | Self::Rerender(_) | Self::Init => {
                 CredentialNeed::Environment
             }
             Self::Guided
@@ -274,6 +298,9 @@ pub struct GuidedStatus {
 pub enum Outcome {
     /// From [`Command::Guided`].
     Guided(GuidedStatus),
+    /// From [`Command::Init`] — where the config is, and whether this call
+    /// wrote it.
+    Initialized(InitReport),
     /// From [`Command::WorkDir`].
     WorkDir(WorkDirReport),
     /// From [`Command::Manifest`].
@@ -428,6 +455,12 @@ pub struct Session {
     /// Test: `super::session_tests::a_credential_in_the_environment_is_the_one_packaged`,
     /// `super::session_tests::a_supplied_credential_beats_the_configs_own`.
     credential: Option<SecretKey>,
+    /// Where [`Command::Init`] gets the versions it pins (#6159).
+    ///
+    /// A field for the reason [`Session::repo_probe`] is one: resolving the
+    /// latest published release reaches the network, and the branches above
+    /// that call have to be provable from a test binary that has none.
+    pins: PinResolver,
     /// Where live progress goes while a long capability runs (#5823).
     ///
     /// A field rather than a parameter on [`Session::execute`] because progress
@@ -459,8 +492,23 @@ impl Session {
             auto_install: true,
             repo_probe: validate::RepoProbe::real(),
             credential: None,
+            pins: PinResolver::LatestPublished,
             progress: Progress::none(),
         }
+    }
+
+    /// Pin [`Command::Init`] to exact versions instead of asking the release
+    /// list.
+    ///
+    /// `#[cfg(test)]` for the same reason [`Session::with_repo_probe`] is: it is
+    /// the injection seam that makes the no-network branches provable, and it
+    /// does not exist in a shipped build, so `execute` stays the only door.
+    /// Test: `super::session_tests::init_writes_an_engagement_without_a_terminal`.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_pins(mut self, pins: crate::config::ToolPins) -> Self {
+        self.pins = PinResolver::Fixed(pins);
+        self
     }
 
     /// Point the repository check at a different pair of `gh` invocations.
@@ -622,6 +670,17 @@ impl Session {
     pub async fn execute(&self, command: Command) -> Result<Outcome, AuditError> {
         match command {
             Command::Guided => self.guided().await.map(Outcome::Guided),
+            // #6159: the cold start without the prompt. It shares
+            // `bootstrap::create_engagement` with the interactive path rather
+            // than growing a second writer of a plaintext key.
+            Command::Init => init::init(
+                &self.config_path,
+                &self.work,
+                self.credential.as_ref(),
+                &self.pins,
+            )
+            .await
+            .map(Outcome::Initialized),
             Command::WorkDir => self.work_dir_report().map(Outcome::WorkDir),
             Command::Manifest => AuditManifest::load(&self.manifest_path).map(Outcome::Manifest),
             Command::Tools => tools::status(&self.work).map(Outcome::Tools),
@@ -1193,6 +1252,137 @@ path = "/work/repos/acme-api"
 
     fn session_in(dir: &Path) -> Session {
         Session::new(WorkDir::new(dir.join("work")))
+    }
+
+    /// #6159: a session that can run `init` with no terminal and no network —
+    /// the key the front end would have resolved from the environment, and pins
+    /// that answer without a release list.
+    fn init_session_in(dir: &Path, key: Option<&str>) -> Session {
+        let mut session = session_in(dir)
+            .with_config_path(dir.join("engagement.toml"))
+            .with_pins(crate::cli::bootstrap::fixed_pins("9.9.9"));
+        if let Some(key) = key {
+            session = session.with_credential(Some(SecretKey::new(key.to_owned())));
+        }
+        session
+    }
+
+    /// 🔴 #6159, the regression this ticket is: the README's sequence begins at
+    /// a step that needs `engagement.toml`, and before `init` the only thing
+    /// that wrote one asked for the key on `/dev/tty`. Against `main` this test
+    /// cannot even be written — there is no `Command::Init` — which is the
+    /// defect: a scripted caller's only route was faking a pty.
+    ///
+    /// Everything here runs with no terminal, no network, and no process
+    /// environment read, and the file must come out owner-readable with the key
+    /// in it and the four pins recorded.
+    #[tokio::test]
+    async fn init_writes_an_engagement_without_a_terminal() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = init_session_in(tmp.path(), Some("sk-or-v1-test"));
+
+        let Outcome::Initialized(report) = session.execute(Command::Init).await.expect("init runs")
+        else {
+            panic!("init must report what it wrote");
+        };
+        assert!(report.created, "a fresh directory must be written into");
+        assert_eq!(report.path, tmp.path().join("engagement.toml"));
+        assert_eq!(
+            report.pins,
+            vec![
+                ("tga".to_owned(), "9.9.9".to_owned()),
+                ("trusty-search".to_owned(), "9.9.9".to_owned()),
+                ("trusty-analyze".to_owned(), "9.9.9".to_owned()),
+                ("trusty-review".to_owned(), "9.9.9".to_owned()),
+            ]
+        );
+
+        // The file loads, carries the key, and is owner-readable only — the
+        // three properties `create_engagement` owes, asserted through `init`
+        // because that is the path a scripted caller takes.
+        let config = EngagementConfig::load_if_present(&report.path)
+            .expect("readable")
+            .expect("written");
+        assert_eq!(config.openrouter_key.expose(), "sk-or-v1-test");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&report.path)
+                .expect("metadata")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "the key must not be world-readable");
+        }
+
+        // And the sequence the README documents now gets past its first step:
+        // `add repo` refused with `NoEngagementConfig` before this existed.
+        let refusal = session
+            .execute(Command::AddTarget {
+                kind: TargetKind::Repo,
+                spec: "not a spec at all".to_owned(),
+            })
+            .await
+            .expect_err("the spec is still nonsense");
+        assert!(
+            !matches!(refusal, AuditError::NoEngagementConfig { .. }),
+            "the missing config must no longer be what stops registration: {refusal}"
+        );
+    }
+
+    /// Idempotent means no-op. A script with `taudit init` at the top runs it on
+    /// every invocation, and a second run must not replace the key the
+    /// engagement has been running on with whatever is exported today.
+    #[tokio::test]
+    async fn init_over_an_existing_engagement_changes_nothing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        init_session_in(tmp.path(), Some("sk-or-v1-first"))
+            .execute(Command::Init)
+            .await
+            .expect("first init");
+        let before = std::fs::read_to_string(tmp.path().join("engagement.toml")).expect("written");
+
+        let Outcome::Initialized(report) = init_session_in(tmp.path(), Some("sk-or-v1-second"))
+            .execute(Command::Init)
+            .await
+            .expect("second init")
+        else {
+            panic!("init reports");
+        };
+        assert!(!report.created, "the second call must write nothing");
+        assert_eq!(
+            std::fs::read_to_string(&report.path).expect("still there"),
+            before,
+            "an existing engagement must survive byte for byte"
+        );
+    }
+
+    /// There is no config to fall back on and no terminal to ask on, so a
+    /// missing key is the end of the line — and the refusal names both sources
+    /// rather than leaving a CI log saying only that something failed.
+    #[tokio::test]
+    async fn init_without_a_key_in_the_environment_refuses() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let refusal = init_session_in(tmp.path(), None)
+            .execute(Command::Init)
+            .await
+            .expect_err("no key anywhere must refuse");
+
+        let rendered = refusal.to_string();
+        assert!(
+            rendered.contains(run::ENV_INFERENCE_CREDENTIAL),
+            "{rendered}"
+        );
+        assert!(
+            !tmp.path().join("engagement.toml").exists(),
+            "a refusal must leave no half-written engagement"
+        );
+    }
+
+    /// #6159: `init` must never prompt — being runnable without a terminal is
+    /// the whole capability — so the environment is its only source.
+    #[test]
+    fn init_reads_the_environment_and_never_prompts() {
+        assert_eq!(Command::Init.credential_need(), CredentialNeed::Environment);
     }
 
     /// 🔴 #6080: the re-render calls a model, so a run with no key anywhere must
