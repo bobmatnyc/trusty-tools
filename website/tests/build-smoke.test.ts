@@ -343,6 +343,21 @@ describe('production build', () => {
 		expect(text, 'tmux is not covered').toContain('tmux');
 		expect(text, 'the verification step is missing').toContain('tm doctor');
 
+		// The kuzu-memory section. Both targets are named because they do
+		// different jobs — one rewrites config, the other moves data — and a
+		// page carrying only one of them sends a reader away with half a
+		// migration. The two required flags are asserted with `kuzu-data`
+		// because the command hard-errors without them, so a page that omits
+		// them documents an invocation that cannot run.
+		expect(text, 'the config target is missing').toContain('trusty-memory migrate kuzu-memory');
+		expect(text, 'the data target is missing').toContain('trusty-memory migrate kuzu-data');
+		for (const flag of ['--from', '--palace', '--dry-run', '--limit']) {
+			expect(text, `${flag} is not documented`).toContain(flag);
+		}
+		// The refusal caveat, and the predicate that stands in for the four.
+		expect(text, 'the hot-predicate refusal is missing').toContain('is_alias_for');
+		expect(text, 'kg_assert is not named as the deliberate path').toContain('kg_assert');
+
 		// Reachable: from every page's nav/footer, and from the tool page.
 		expect(landingPage, 'nav does not link the migration page').toContain(
 			`href="${MIGRATION_ROUTE}"`
