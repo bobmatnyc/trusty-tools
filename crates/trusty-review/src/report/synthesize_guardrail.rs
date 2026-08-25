@@ -30,6 +30,7 @@ fn unverified_figure_note(field: &str, subject: Option<&str>, token: &str) -> St
         Some(s) => StatusNote::about(s, text),
         None => StatusNote::plain(text),
     }
+    .withheld()
 }
 
 /// One reader-facing disclosure that a CLAIM the model wrote contradicts the
@@ -50,6 +51,7 @@ fn ungrounded_claim_note(field: &str, subject: Option<&str>, reason: &str) -> St
         Some(s) => StatusNote::about(s, text),
         None => StatusNote::plain(text),
     }
+    .withheld()
 }
 
 /// What one narrative field is, for the disclosure that names it.
