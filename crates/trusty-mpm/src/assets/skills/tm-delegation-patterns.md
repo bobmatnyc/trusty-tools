@@ -318,36 +318,66 @@ A claim drawer covers the work area, never the merge queue. Who may merge on a
 shared repository is its own claim: `Skill(skill="tm-workflow")`,
 "Merge-Queue Ownership".
 
-## Long-Wait Delegation (issues #2833, #4792)
+## Long-Wait Delegation (issues #2833, #4792, #5843)
 
 A delegated agent's own gate (`cargo test -p <crate>`, a release build) blocks in
-its foreground; **CI does not**. Agents push, take a one-shot status read, report,
-and stop — the PM re-engages when checks settle. Make both halves explicit in the
-delegation prompt instead of hoping the agent improvises:
+its foreground; **CI does not**, by default. Agents push, take a one-shot status
+read, report, and stop — the PM re-engages when checks settle. Make both halves
+explicit in the delegation prompt instead of hoping the agent improvises:
 
 1. **Keep the gate under the ceiling.** Ask for **crate-scoped** gates
    (`cargo test -p <crate>`, `cargo clippy -p <crate>`), never
    `cargo test --workspace` — the scoped run finishes inside one invocation and
    its raw output is the evidence you collect.
-2. **Forbid the CI block.** "Do NOT use `gh pr checks --watch` — it streams check
-   output into your context (546k tokens over 54 minutes on one PR). Push, take a
-   one-shot `gh pr checks <pr>` read, report it, and end your turn."
-3. **Forbid parking too.** "Do not background your gate and end the turn
-   expecting a notification, and do not sleep-poll. Block quietly in the
-   foreground on your own commands; hand back an observation, not a promise to
-   report."
-4. **PM re-engagement.** When the agent hands back with CI pending, own the gap
-   yourself — see the next section.
+2. **Name which CI pattern the agent should use** — the brief picks one rather
+   than leaving the agent to improvise:
+   - **Default — one-shot and stop.** "Do NOT use `gh pr checks --watch` — it
+     streams check output into your context (546k tokens over 54 minutes on
+     one PR). Push, take a one-shot `gh pr checks <pr>` read, report it, and
+     end your turn." PM re-engagement (below) owns what happens next.
+   - **`tm wait --for check`, only when the brief wants the agent to hold its
+     own turn for a bounded window instead of ending it.**
+     `tm wait --for check --pr <n> [--repo <owner/repo>] --timeout <secs>`
+     cross-reads `state`, never `bucket` alone, never streams, and prints a
+     `rerun=` command on exit 75 that the agent re-issues until exit 0 (met)
+     or exit 1 (timeout — report the timeout itself and stop). This is the
+     sanctioned one-shot-plus-rerun form (#5843), not a reason to prefer
+     agent-side waiting generally — a run that legitimately takes 15+ minutes
+     is still better handed to PM re-engagement than re-issued a dozen times
+     in one turn.
+3. **Forbid parking, and name `tm wait` as the replacement for a hand-rolled
+   poll.** "Do not background your gate and end the turn expecting a
+   notification, and do not hand-roll a `sleep`/`until` poll loop — use
+   `tm wait --for run|file` for a condition you own, or the CI pattern named
+   above. Block quietly on your own commands; hand back an observation, not a
+   promise to report."
+4. **The agent's OWN condition — not CI — always uses `tm wait`.** A sentinel
+   file another process writes, or a pid the agent is waiting to exit, is
+   `tm wait --for file` / `tm wait --for run` outright (see BASE-AGENT's
+   "Never Narrate a Wait"). Prescribe it in the brief instead of leaving the
+   agent to reach for `sleep`.
+5. **PM re-engagement.** When the agent hands back with CI pending — whether
+   from the default pattern or from a `tm wait --for check` that hit its
+   `--timeout`, own the gap yourself — see the next section.
 
 The daemon idle-nudge (#2621) does NOT cover in-conversation subagents — they
 have no tmux pane — so PM-side re-engagement is the only mechanism below the
-managed-session layer.
+managed-session layer for the CI-settle notification `tm wait` cannot itself
+deliver: a CI run can legitimately outlast one turn's whole budget, and nothing
+brings a stopped agent back except the PM's `SendMessage`.
 
-## PM Re-Engagement (issues #2833, #4792)
+## PM Re-Engagement (issues #2833, #4792, #5843)
 
 An agent that pushes, takes a one-shot status read, reports, and stops has done
 the right thing. Nothing wakes it again, so the work is abandoned unless the PM
 re-engages. That is the whole mechanism at this layer.
+
+A hand-back reading `tm-wait status=timeout for=check …` is the same situation
+under the `tm wait --for check` pattern (previous section) as an ordinary
+one-shot CI-pending report: the agent's own bounded budget ran out, not the CI
+run. Re-engage it exactly as below — never as a park (next section) and never
+by nudging it to re-run `tm wait` itself, since nothing brought the agent back
+to issue that re-run.
 
 **Re-engage the SAME agent.** `SendMessage` it the outcome — the merge go-ahead,
 or the failing check output — once the run should have settled. Never open a
@@ -379,11 +409,18 @@ is not a park. Surface it to the user; do not nudge it.
 **Why blocking waits are not the fix.** They were retired for context cost, not
 because they failed to work: `gh pr checks --watch` streams check output for the
 whole run, and one engineer burned 546k tokens over 54 minutes on a single PR.
-Do not restore that advice anywhere.
+Do not restore that advice anywhere. `tm wait` is not a reintroduction of it —
+it never streams, returns within a bounded slice printed on its own line, and
+is the sanctioned in-turn wait for an agent's own condition (BASE-AGENT, "Never
+Narrate a Wait"). What stays retired is `--watch` and any hand-rolled
+sleep-poll for CI specifically, because a CI run can legitimately outlast a
+whole turn's budget — that case is still PM re-engagement's job.
 
 **Prevention.** Tell the engineer/QA to use crate-scoped gates
 (`cargo test -p <crate>`, not `cargo test --workspace`) — the scoped run finishes
-well under the 10-minute tool ceiling, so agents rarely re-issue at all.
+well under the 10-minute tool ceiling, so agents rarely re-issue at all. For an
+agent's own file/process condition, name `tm wait` in the brief so it never
+reaches for `sleep`.
 
 ## Concurrent Dispatch: Declare File Ownership
 
