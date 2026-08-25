@@ -74,6 +74,14 @@ struct PackageMetadata {
     /// emitted, so an empty array is a positive claim of full coverage rather
     /// than an absent key a reader has to interpret.
     not_attempted: Vec<String>,
+    /// Top-level engagement-config keys this version does not act on (#6246).
+    ///
+    /// Always emitted, for the same reason `not_attempted` is: an empty array is
+    /// a positive claim that everything the config asked for was acted on, where
+    /// an absent key leaves the reader to interpret a silence. An engagement
+    /// that requested three extra export families got output byte-identical to
+    /// one that requested none, and nothing in either bundle said which.
+    config_not_acted_on: Vec<String>,
     tools: Vec<ToolVersion>,
     repositories: Vec<PackagedRepo>,
 }
@@ -292,6 +300,7 @@ pub(super) fn render_metadata(
         repositories_audited: audited.len(),
         repositories_excluded: report.repos.len() - audited.len(),
         not_attempted: unattempted.to_vec(),
+        config_not_acted_on: config.unsupported_keys(),
         tools,
         repositories,
     };

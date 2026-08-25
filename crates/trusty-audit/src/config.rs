@@ -406,11 +406,71 @@ pub struct EngagementConfig {
     /// Engagement label, when the generator recorded one.
     #[serde(default)]
     pub engagement: Option<String>,
+    /// Every top-level key this version does not recognise (#6246).
+    ///
+    /// Why: unknown keys are tolerated so a config written by a newer generator
+    /// still loads (#5478) — but tolerated used to mean DISCARDED IN SILENCE.
+    /// An engagement that asked for three extra export families got output
+    /// byte-identical to one that asked for nothing, with no warning anywhere:
+    /// the operator was left inferring silence as "the config did nothing".
+    /// Capturing them is what lets [`Self::unsupported_declaration`] say so.
+    /// What: serde's catch-all for unmatched keys. Read it through
+    /// [`Self::unsupported_keys`], never directly — the raw map is ordered by
+    /// the file and carries values this crate has no meaning for.
+    ///
+    /// The honest limit: TOP-LEVEL keys only. A stray key inside a table this
+    /// crate does understand — an `exports` written after `[tools]`, which TOML
+    /// reads as `tools.exports` — is still absorbed by that table's own type and
+    /// still discarded in silence. `[models]` is the one exception, and it
+    /// refuses such a key outright (see [`ModelPins`]).
+    /// Test: `super::config_tests::a_key_this_version_does_not_act_on_is_captured`.
+    #[serde(flatten)]
+    extra: toml::Table,
 }
 
 impl EngagementConfig {
     /// Filename the handoff package uses.
     pub const FILE_NAME: &'static str = "engagement.toml";
+
+    /// Top-level keys this version does not act on, sorted and named.
+    ///
+    /// Sorted rather than in file order so two runs over the same config produce
+    /// the same line, which is what makes the declaration diffable.
+    /// Test: `super::config_tests::a_key_this_version_does_not_act_on_is_captured`.
+    pub fn unsupported_keys(&self) -> Vec<String> {
+        let mut keys: Vec<String> = self.extra.keys().cloned().collect();
+        keys.sort();
+        keys
+    }
+
+    /// One line declaring what the config asked for and this version ignored.
+    ///
+    /// Why (#6246): the deliverable must state an unsupported request, because
+    /// its absence from the output is otherwise indistinguishable from the
+    /// output of a run that never asked. An engagement requesting per-commit
+    /// tables, CODEOWNERS metadata and branch-protection metadata got a file set
+    /// byte-identical to one requesting none, and nothing in either bundle said
+    /// which had happened.
+    /// What: `None` when every key was recognised — an empty declaration is
+    /// worse than no declaration. The line names the keys and says plainly that
+    /// nothing in the package covers them, so a reader is not left inferring
+    /// whether the capability ran and found nothing.
+    /// Test: `super::config_tests::the_declaration_names_every_ignored_key`,
+    /// `crate::package::package_tests::a_config_asking_for_the_unsupported_says_so`.
+    pub fn unsupported_declaration(&self) -> Option<String> {
+        let keys = self.unsupported_keys();
+        if keys.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "the engagement config declares {} — this version of trusty-audit acts on none of \
+             them, so nothing in this package covers what they asked for",
+            keys.iter()
+                .map(|k| format!("`{k}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    }
 
     /// The target set this file declares, or `None` when it declares none.
     ///
@@ -1213,6 +1273,60 @@ trusty-review = "0.15.1"
             EngagementConfig::from_toml(SAMPLE, Path::new("engagement.toml")).expect("parses");
         assert!(cfg.boards.jira.is_none());
         assert!(cfg.boards.linear.is_none());
+    }
+
+    /// 🔴 #6246: a key this version does not act on is CAPTURED, not discarded.
+    ///
+    /// Against `3771644d0` serde dropped every unmatched key on the floor: an
+    /// engagement asking for per-commit tables, CODEOWNERS metadata and
+    /// branch-protection metadata parsed identically to one asking for nothing,
+    /// and no later stage had anything to report.
+    #[test]
+    fn a_key_this_version_does_not_act_on_is_captured() {
+        let cfg = EngagementConfig::from_toml(
+            // Bare keys go BEFORE the first table header: in TOML a bare key
+            // after one belongs to that table, not to the document.
+            &format!("exports = [\"per-commit\"]\n{SAMPLE}\n[branch_protection]\ncollect = true\n"),
+            Path::new("engagement.toml"),
+        )
+        .expect("an unknown key still loads — a newer generator's config must not be refused");
+        assert_eq!(cfg.unsupported_keys(), ["branch_protection", "exports"]);
+    }
+
+    /// The declaration names every ignored key and says plainly that nothing
+    /// covers them — a recipient must not be left inferring whether the
+    /// capability ran and found nothing.
+    #[test]
+    fn the_declaration_names_every_ignored_key() {
+        let cfg = EngagementConfig::from_toml(
+            &format!("codeowners = true\nexports = [\"per-commit\"]\n{SAMPLE}"),
+            Path::new("engagement.toml"),
+        )
+        .expect("parses");
+        let line = cfg
+            .unsupported_declaration()
+            .expect("two keys were not acted on");
+        for expected in [
+            "`codeowners`",
+            "`exports`",
+            "nothing in this package covers",
+        ] {
+            assert!(line.contains(expected), "{line}");
+        }
+    }
+
+    /// A config this version fully understands declares nothing: an empty
+    /// declaration is worse than no declaration.
+    #[test]
+    fn a_fully_understood_config_declares_nothing() {
+        let cfg =
+            EngagementConfig::from_toml(SAMPLE, Path::new("engagement.toml")).expect("parses");
+        assert!(
+            cfg.unsupported_keys().is_empty(),
+            "{:?}",
+            cfg.unsupported_keys()
+        );
+        assert_eq!(cfg.unsupported_declaration(), None);
     }
 
     /// 🔴 #6247: the engagement gets a place to declare the investigation
