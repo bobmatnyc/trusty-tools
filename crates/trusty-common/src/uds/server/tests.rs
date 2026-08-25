@@ -205,15 +205,19 @@ async fn call(
         .expect("round trip")
 }
 
-/// Poll until the server has bound, so a test never races the accept loop.
+/// Poll until the server is answering, so a test never races the accept loop.
+///
+/// `socket.exists()` is not the readiness question: `bind_hardened` creates the
+/// file before `serve_until` reaches its first `accept`, so an existence check
+/// can hand the test a socket nothing is serving yet.
 async fn await_socket(socket: &std::path::Path) {
     for _ in 0..200 {
-        if socket.exists() {
+        if crate::uds::socket_is_serving(socket, Duration::from_millis(200)).await {
             return;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    panic!("server never bound {}", socket.display());
+    panic!("server never began serving {}", socket.display());
 }
 
 #[tokio::test]
@@ -288,6 +292,47 @@ async fn serve_handles_concurrent_connections_without_serialising() {
 }
 
 #[tokio::test]
+async fn serve_survives_a_panicking_handler_and_answers_the_next_connection() {
+    // #6277 review: a panicking handler used to be swallowed whole — the
+    // client saw a dropped connection and the server logged nothing. The log
+    // line itself needs a global tracing subscriber to assert, which is not
+    // worth the cross-test interference; what is worth asserting is that one
+    // panicking connection neither answers nor takes the accept loop with it.
+    let router = RpcRouter::new()
+        .typed("boom", |_req: ()| async move {
+            panic!("a handler exploded");
+            #[allow(unreachable_code)]
+            Ok::<(), RpcError>(())
+        })
+        .typed("greet", |req: Greet| async move {
+            Ok(Greeting {
+                text: format!("hello {}", req.name),
+            })
+        });
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (socket, _stop, _handle) = spawn_server(tmp.path(), router, RpcServeOptions::default());
+    await_socket(&socket).await;
+
+    let request = json!({ "jsonrpc": "2.0", "id": 1, "method": "boom", "params": null });
+    let panicked: Result<RpcResponse, _> =
+        crate::uds::send_framed_request(&socket, &request, Duration::from_secs(10)).await;
+    assert!(
+        panicked.is_err(),
+        "a panicking handler answers nothing; the client must see a transport \
+         failure rather than hang: {panicked:?}"
+    );
+
+    // The property that matters: the server is still serving.
+    let response = call(&socket, 2, "greet", json!({ "name": "ada" })).await;
+    assert_eq!(
+        response.result,
+        Some(json!({ "text": "hello ada" })),
+        "one panicking connection must not stop the accept loop"
+    );
+}
+
+#[tokio::test]
 async fn serve_stops_on_shutdown() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (socket, stop, handle) =
@@ -355,6 +400,55 @@ async fn serve_rejects_an_oversized_frame() {
         other => panic!("expected FrameTooLarge, got {other:?}"),
     }
     writer.abort();
+}
+
+/// Serve one frame over a socket pair under `max_frame_bytes`, holding the
+/// write half open so the outcome comes from the budget rather than an EOF.
+async fn serve_one_frame(body: Vec<u8>, max_frame_bytes: u64) -> Result<Served, RpcServerError> {
+    let (mut client, server) = tokio::net::UnixStream::pair().expect("socketpair");
+    let writer = tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt as _;
+        let _ = client.write_all(&body).await;
+        let _ = client.flush().await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    });
+    let options = RpcServeOptions {
+        max_frame_bytes,
+        ..RpcServeOptions::default()
+    };
+    let outcome = handle_connection(server, Arc::new(greeting_router()), options).await;
+    writer.abort();
+    outcome
+}
+
+#[tokio::test]
+async fn frame_of_exactly_the_budget_including_its_newline_is_accepted() {
+    // The documented boundary, asserted from both sides: `max_frame_bytes`
+    // counts the terminator, so a JSON body of `max_frame_bytes - 1` is the
+    // largest one that fits. `uds::rpc`'s reader draws the line at the same
+    // byte, and a test here is what stops the two ends drifting apart.
+    let empty = frame(1, "greet", json!({ "name": "" })).len();
+    let budget = (empty + 40) as u64;
+    let padding = "x".repeat(budget as usize - 1 - empty);
+    let mut body = frame(1, "greet", json!({ "name": padding }));
+    assert_eq!(
+        body.len() as u64,
+        budget - 1,
+        "the JSON body must be one byte short of the budget"
+    );
+    body.push(b'\n');
+
+    assert_eq!(
+        serve_one_frame(body.clone(), budget)
+            .await
+            .expect("a frame that exactly fills the budget is accepted"),
+        Served::Answered { errored: false }
+    );
+
+    match serve_one_frame(body, budget - 1).await {
+        Err(RpcServerError::FrameTooLarge { limit }) => assert_eq!(limit, budget - 1),
+        other => panic!("one byte over the budget must be refused, got {other:?}"),
+    }
 }
 
 #[tokio::test]

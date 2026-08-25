@@ -130,17 +130,28 @@ pub struct RpcServeOptions {
     /// peer which connects and never writes hold a task for that long.
     pub read_timeout: Duration,
 
-    /// Largest request frame accepted without a newline.
+    /// Largest request frame accepted, counting its terminating newline.
+    ///
+    /// Precisely: a frame is accepted when its JSON body plus the `\n` is at
+    /// most `max_frame_bytes`, so the usable payload is `max_frame_bytes - 1`.
+    /// The terminator counting against the budget is not an accident to be
+    /// tidied away — [`crate::uds::rpc`]'s `read_one_frame` reads with the same
+    /// `take(max_frame_bytes)` and the same comparison, and the two ends have to
+    /// draw the line at the same byte. Moving it here alone would produce a
+    /// frame one end sends happily and the other refuses.
     ///
     /// Defaults to [`MAX_FRAME_BYTES`], the same control-plane budget
-    /// [`crate::uds::send_framed_request`] applies on the client side. A service
-    /// exchanging bulk payloads raises it here, mirroring
-    /// [`crate::uds::send_framed_request_capped`] — the two ends must agree, so
-    /// raising one without the other only moves which side refuses.
+    /// [`crate::uds::send_framed_request`] applies. A service exchanging bulk
+    /// payloads raises it here, mirroring
+    /// [`crate::uds::send_framed_request_capped`] — and must raise the client's
+    /// to match, or it has only moved which side refuses.
     ///
     /// Not settable per method: the method name lives inside the frame this
     /// budget governs the reading of, so it is not known until after the budget
     /// has already been enforced.
+    ///
+    /// Test: `frame_of_exactly_the_budget_including_its_newline_is_accepted`,
+    /// `serve_rejects_an_oversized_frame`.
     pub max_frame_bytes: u64,
 }
 
@@ -253,11 +264,13 @@ pub async fn handle_connection(
 /// The listener is borrowed, not consumed, so a caller can unlink the socket
 /// while it is still bound — see the module docs for why that order matters.
 ///
-/// A connection that errors is logged and dropped without answering.
+/// A connection that errors — or whose handler panics — is logged and dropped
+/// without answering, and the loop keeps accepting.
 ///
 /// Test: `serve_round_trips_a_request_over_a_real_socket`,
 /// `serve_stops_on_shutdown`,
-/// `serve_handles_concurrent_connections_without_serialising`.
+/// `serve_handles_concurrent_connections_without_serialising`,
+/// `serve_survives_a_panicking_handler_and_answers_the_next_connection`.
 pub async fn serve_until(
     listener: &UnixListener,
     router: Arc<RpcRouter>,
@@ -280,13 +293,33 @@ pub async fn serve_until(
         };
         let router = Arc::clone(&router);
         tokio::spawn(async move {
-            match handle_connection(stream, router, options).await {
-                Ok(Served::Answered { .. }) => {}
-                Ok(Served::LivenessProbe) => {
+            // #6277 review: the connection runs in an INNER task whose
+            // `JoinHandle` is awaited, because a panicking handler is otherwise
+            // invisible. Tokio stores the panic payload in the handle and drops
+            // it with the handle, so a dropped handle turns a caller-visible
+            // hang-up into a server that logged nothing at all. Awaiting it
+            // costs one task per connection and buys the one log line that says
+            // which method took the process down a path nobody expected.
+            let inner = tokio::spawn(handle_connection(stream, router, options));
+            match inner.await {
+                Ok(Ok(Served::Answered { .. })) => {}
+                Ok(Ok(Served::LivenessProbe)) => {
                     tracing::debug!("liveness probe connected and closed without a frame");
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     tracing::warn!(error = %e, "uds rpc connection failed; nothing was answered");
+                }
+                // A panic is the handler's bug, not the client's, so it is an
+                // ERROR rather than the WARN a refused or broken connection
+                // gets. `JoinError`'s `Display` carries the panic message.
+                Err(join) if join.is_panic() => {
+                    tracing::error!(
+                        error = %join,
+                        "uds rpc handler panicked; the connection was dropped unanswered"
+                    );
+                }
+                Err(join) => {
+                    tracing::warn!(error = %join, "uds rpc connection task was cancelled");
                 }
             }
         });
