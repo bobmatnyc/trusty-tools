@@ -625,6 +625,32 @@ fn classify_rpc_response_rejects_a_non_trusty_result() {
     assert!(!outcome.is_confirmed_down());
 }
 
+/// Why (#6277): JSON-RPC 2.0 §5 says a response carries EXACTLY one of `result`
+/// and `error`. A frame with both is malformed, and an earlier version of
+/// `classify_rpc_response` silently took the error branch — reporting a specific
+/// coded reason read off a frame whose shape already proves the sender is not
+/// speaking the protocol. A squatter that emits both would have been described
+/// with far more confidence than it earned.
+/// What: a both-present frame is `BadEnvelope`, and — like every other answered
+/// outcome — is not confirmed-down.
+/// Test: This is the test.
+#[test]
+fn classify_rpc_response_rejects_a_frame_carrying_both_result_and_error() {
+    let frame = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {"status": "ok", "version": "9.9.9"},
+        "error": {"code": -32603, "message": "handler failed"},
+    });
+    let outcome = classify_rpc_response(&frame);
+    assert!(
+        matches!(outcome, ProbeOutcome::BadEnvelope { .. }),
+        "a frame carrying both halves is malformed, not a health answer and not \
+         a coded refusal; got {outcome:?}"
+    );
+    assert!(!outcome.is_confirmed_down());
+}
+
 /// Why: the whole point of the UDS leg — a real socket answering a real
 /// `review.health` frame must reach `Serving` with the version the status table
 /// renders, through the SAME `effective_status` the HTTP legs use.
@@ -874,6 +900,16 @@ fn down_health_string_is_not_a_kickstart_licence() {
         ProbeOutcome::Refused,
         ProbeOutcome::Timeout,
         ProbeOutcome::HttpError { status: 502 },
+        // #6277: the UDS analogue of `HttpError`, and it renders `down` for the
+        // same reason — a daemon that refused with a code is not healthy, and
+        // the only non-`down` words available (`unknown`, `stale`) are tolerated
+        // by `VerifyTailReport::build` and `status`'s exit code, so either would
+        // print VERIFIED for a stack with a refusing daemon in it. The safety
+        // comes from `is_confirmed_down`, which this test's partition pins.
+        ProbeOutcome::RpcError {
+            code: -32601,
+            message: "unknown method".to_owned(),
+        },
         ProbeOutcome::BadEnvelope {
             got: "<html>squatter</html>".to_owned(),
         },
@@ -918,6 +954,13 @@ fn only_transport_failures_are_confirmed_down() {
         ProbeOutcome::Unprobeable,
         ProbeOutcome::NoAddress,
         ProbeOutcome::HttpError { status: 503 },
+        // #6277: a JSON-RPC error frame means the daemon accepted the
+        // connection, read the frame, and chose to refuse — the strongest
+        // available evidence it is ALIVE, so it must never authorise a repair.
+        ProbeOutcome::RpcError {
+            code: -32603,
+            message: "handler failed".to_owned(),
+        },
         ProbeOutcome::BadEnvelope {
             got: "clap: unexpected argument '--json'".to_owned(),
         },

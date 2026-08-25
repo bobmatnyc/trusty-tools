@@ -323,20 +323,22 @@ mod tests {
     #[test]
     fn serve_args_pass_the_explicit_socket_path() {
         let socket = trusty_review::service::socket_path().expect("resolve socket path");
+        let args = serve_args().expect("build serve args");
         assert_eq!(
-            serve_args().expect("build serve args"),
+            args,
             vec![
                 "serve".to_string(),
                 "--socket".to_string(),
                 socket.display().to_string(),
             ]
         );
+        // `serve` still ACCEPTS `--port` as a deprecated no-op so an
+        // un-reinstalled plist does not crash-loop the daemon (#6277). A freshly
+        // written plist must not carry it: the shim is for units this install is
+        // replacing, not for the one it emits.
         assert!(
-            !serve_args()
-                .expect("build serve args")
-                .iter()
-                .any(|a| a == "--port"),
-            "the retired TCP flag must not survive in the plist (#6277)"
+            !args.iter().any(|a| a == "--port"),
+            "the retired TCP flag must not survive in a newly written plist (#6277)"
         );
     }
 }

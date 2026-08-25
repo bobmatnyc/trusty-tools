@@ -603,13 +603,29 @@ async fn probe_url(client: &reqwest::Client, base: &str) -> ProbeOutcome {
 /// What: a `result` carrying a string `status` → `Serving`. A `result` without
 /// one → `BadEnvelope` (something answered on this socket that is not the
 /// daemon we asked for). An `error` → `RpcError` with the code and a bounded
-/// message. A frame with neither → `BadEnvelope`, since a well-formed response
-/// always carries exactly one of the two.
+/// message.
+///
+/// **Neither present, or BOTH present → `BadEnvelope`.** JSON-RPC 2.0 §5 says a
+/// response carries exactly one of the two, so a frame with both is malformed
+/// and its sender is not a peer this probe understands. Taking the `error`
+/// branch on a both-present frame — which an earlier version of this function
+/// did silently — reports a specific coded reason read off a frame whose shape
+/// already proves the sender is not speaking the protocol. `BadEnvelope` is the
+/// honest verdict, and it keeps the same never-confirmed-down safety.
 ///
 /// Test: `tests::probe_uds_reads_the_health_envelope_off_a_result_frame`,
 /// `tests::classify_rpc_response_reports_an_error_frame_as_answered_not_down`,
-/// `tests::classify_rpc_response_rejects_a_non_trusty_result`.
+/// `tests::classify_rpc_response_rejects_a_non_trusty_result`,
+/// `tests::classify_rpc_response_rejects_a_frame_carrying_both_result_and_error`.
 pub fn classify_rpc_response(frame: &serde_json::Value) -> ProbeOutcome {
+    let has_result = frame.get("result").is_some_and(|r| !r.is_null());
+    let has_error = frame.get("error").is_some_and(|e| !e.is_null());
+    if has_result && has_error {
+        return ProbeOutcome::BadEnvelope {
+            got: sample(frame.to_string().as_bytes()),
+        };
+    }
+
     if let Some(error) = frame.get("error").filter(|e| !e.is_null()) {
         return ProbeOutcome::RpcError {
             code: error

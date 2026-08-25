@@ -93,15 +93,20 @@ impl ReviewConnector {
         }
     }
 
-    /// The socket this connector dials.
+    /// The socket this connector dials, or why it could not be resolved.
     ///
-    /// Returns `None` when the data directory cannot be resolved — treated by
-    /// `detect()` as "cannot tell", which reports `Available` rather than
-    /// claiming the daemon is absent.
-    fn socket_path(&self) -> Option<PathBuf> {
+    /// Why the error is carried rather than discarded: a data directory that
+    /// cannot be resolved or created is an operator-fixable condition
+    /// (permissions, a `TRUSTY_DATA_DIR_OVERRIDE` pointing somewhere unusable),
+    /// and it is indistinguishable on the dashboard from a daemon that is simply
+    /// not running. `detect()` still reports `Available` — nothing was observed,
+    /// so claiming otherwise would be a guess — but puts the reason in `hint`, so
+    /// the card says what to fix instead of silently under-reporting.
+    fn socket_path(&self) -> Result<PathBuf, String> {
         match &self.socket {
-            Some(p) => Some(p.clone()),
-            None => trusty_common::daemon_socket_path("trusty-review").ok(),
+            Some(p) => Ok(p.clone()),
+            None => trusty_common::daemon_socket_path("trusty-review")
+                .map_err(|e| format!("could not resolve the trusty-review socket path: {e:#}")),
         }
     }
 }
@@ -171,30 +176,53 @@ impl ServiceConnector for ReviewConnector {
     /// What: binary check → `review.health` over the socket → status. `url` is
     /// deliberately `None`: a UDS daemon has no URL, and ADR-0032 makes
     /// trusty-console the only HTTP surface in the workspace, so a synthesised
-    /// `http://` address would be a link that cannot work.
+    /// `http://` address would be a link that cannot work. A socket path that
+    /// cannot be resolved reports `Available` with the reason in `hint` — see
+    /// [`ReviewConnector::socket_path`].
     /// Test: `review_connector_reports_available_when_nothing_is_serving`,
-    /// `review_connector_reads_the_version_off_a_live_socket`.
+    /// `review_connector_reads_the_version_off_a_live_socket`,
+    /// `review_connector_surfaces_an_unresolvable_socket_path_as_a_hint`.
     fn detect(&self) -> ServiceInfo {
-        let base = |status: ServiceStatus, version: Option<String>| ServiceInfo {
-            id: self.id().to_string(),
-            display_name: self.display_name().to_string(),
-            status,
-            version,
-            url: None,
-            hint: None,
-        };
+        self.detect_from(self.socket_path())
+    }
+}
+
+impl ReviewConnector {
+    /// [`ServiceConnector::detect`]'s body, over an already-resolved path.
+    ///
+    /// Why: the unresolvable-path arm is only reachable when
+    /// `trusty_common::daemon_socket_path` fails, and the only way to make it
+    /// fail from a test is to set `TRUSTY_DATA_DIR_OVERRIDE` — which is
+    /// process-global and, in this crate's test binary, is read by five sibling
+    /// connectors running in parallel. An earlier version of the test did that
+    /// and turned `detect::agents`'s unrelated test red. Taking the resolved
+    /// result as a parameter makes the arm assertable with no global state at
+    /// all.
+    /// What: binary check, then the three verdicts.
+    /// Test: `review_connector_surfaces_an_unresolvable_socket_path_as_a_hint`.
+    fn detect_from(&self, socket: Result<PathBuf, String>) -> ServiceInfo {
+        let base =
+            |status: ServiceStatus, version: Option<String>, hint: Option<String>| ServiceInfo {
+                id: self.id().to_string(),
+                display_name: self.display_name().to_string(),
+                status,
+                version,
+                url: None,
+                hint,
+            };
 
         if !binary_on_path("trusty-review") {
-            return base(ServiceStatus::Absent, None);
+            return base(ServiceStatus::Absent, None, None);
         }
 
-        let Some(socket) = self.socket_path() else {
-            return base(ServiceStatus::Available, None);
+        let socket = match socket {
+            Ok(p) => p,
+            Err(reason) => return base(ServiceStatus::Available, None, Some(reason)),
         };
 
         match probe_health(&socket) {
-            Some(health) => base(ServiceStatus::Running, health.version),
-            None => base(ServiceStatus::Available, None),
+            Some(health) => base(ServiceStatus::Running, health.version, None),
+            None => base(ServiceStatus::Available, None, None),
         }
     }
 }
@@ -228,6 +256,58 @@ mod tests {
         assert_eq!(info.id, "trusty-review");
         assert_eq!(info.display_name, "Trusty Review");
         assert!(info.url.is_none(), "a UDS daemon has no URL to render");
+    }
+
+    /// Why (#6277): a data directory that cannot be resolved is operator-fixable
+    /// — a permissions problem, or a `TRUSTY_DATA_DIR_OVERRIDE` pointing
+    /// somewhere unusable — but on the dashboard it looks identical to a daemon
+    /// that is merely stopped. Reporting the reason turns a silent under-report
+    /// into something actionable, without upgrading the verdict: nothing was
+    /// observed, so `Available` is still the honest status.
+    ///
+    /// Drives `detect_from` rather than `detect`, so no environment variable is
+    /// touched. The first version of this test set `TRUSTY_DATA_DIR_OVERRIDE` to
+    /// force the failure and turned `detect::agents`'s unrelated test red — five
+    /// connectors read that variable and this crate runs its tests in parallel.
+    /// What: a resolution failure reports `Available` carrying the reason.
+    /// Test: this is the test.
+    #[test]
+    fn review_connector_surfaces_an_unresolvable_socket_path_as_a_hint() {
+        if which::which("trusty-review").is_err() {
+            eprintln!("skip: trusty-review is not on PATH, so detect() short-circuits to Absent");
+            return;
+        }
+
+        let info = ReviewConnector::new().detect_from(Err(
+            "could not resolve the trusty-review socket path: nope".to_string(),
+        ));
+
+        assert_eq!(
+            info.status,
+            ServiceStatus::Available,
+            "nothing was observed, so the verdict must not claim more than that"
+        );
+        let hint = info.hint.expect("an unresolvable path must explain itself");
+        assert!(
+            hint.contains("socket path"),
+            "the hint must name what could not be resolved: {hint}"
+        );
+    }
+
+    /// Why: the hint is for the failure case only. A connector that attached one
+    /// to a healthy or merely-stopped daemon would put a permanent "something is
+    /// wrong" note on a card where nothing is.
+    /// What: the resolvable path leaves `hint` empty.
+    /// Test: this is the test.
+    #[test]
+    fn review_connector_attaches_no_hint_when_the_path_resolves() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let info = ReviewConnector::new().detect_from(Ok(tmp.path().join("absent.sock")));
+        assert!(
+            info.hint.is_none(),
+            "a resolvable path must not carry a remediation hint: {:?}",
+            info.hint
+        );
     }
 
     /// Why: `Running` is the verdict that has to be earned by an ANSWER, and
