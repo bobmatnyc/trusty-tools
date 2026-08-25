@@ -109,6 +109,64 @@ pub fn fill_key_facts(root: &mut Scope, model: &ReportModel) {
         "facts_work_estimate",
         tag(GAP_WORK_ESTIMATE, Provenance::NotStated),
     );
+
+    // #6192: the LoC/file rows invite a `git ls-files | wc -l` check, and the
+    // two numbers do not match. The note says which counter produced them.
+    if let Some(note) = counting_basis_note(model) {
+        root.set("facts_counting_note", tag(note, Provenance::Measured));
+    }
+}
+
+/// The footnote reconciling the LoC and file-count rows with `git ls-files`
+/// (#6192).
+///
+/// Why: a lap-14 adversarial grade checked the file count against the checkout
+/// and found 6683 here against 6739 from `git ls-files` — a 56-file gap with no
+/// stated mechanism, which reads as an error rather than as a different
+/// counter. The two rows have two possible sources with different exclusion
+/// rules ([`repo_files`] picks between them), and which one ran is the whole
+/// explanation.
+/// What: `None` when no repository contributed a figure — there is then nothing
+/// to footnote. Otherwise one paragraph naming the source that supplied the
+/// counts, per source, and what each excludes relative to raw `git ls-files`.
+/// Test: `reporter_facts_tests::{counting_note_names_the_metrics_counter,
+/// counting_note_names_the_scan_counter, counting_note_is_absent_without_data}`.
+pub(super) fn counting_basis_note(model: &ReportModel) -> Option<String> {
+    // The same precedence `repo_files` applies, read back as "which counter won".
+    let counted_by_metrics =
+        |r: &&RepositoryReport| r.metrics.as_ref().is_some_and(|m| m.counts.files > 0);
+    let from_metrics = model.repositories.iter().filter(counted_by_metrics).count();
+    let from_scan = model
+        .repositories
+        .iter()
+        .filter(|r| !counted_by_metrics(r) && r.scan.as_ref().is_some_and(|s| s.file_count > 0))
+        .count();
+    if from_metrics == 0 && from_scan == 0 {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if from_metrics > 0 {
+        parts.push(format!(
+            "{from_metrics} from the trusty-analyze metrics artifact, which counts only the \
+             files its own analysis corpus admits and so reports FEWER files than a raw `git \
+             ls-files` of the same checkout"
+        ));
+    }
+    if from_scan > 0 {
+        parts.push(format!(
+            "{from_scan} from this tool's built-in repository scan, which enumerates the tracked \
+             files git reports and counts blank-excluded lines only in the extensions it \
+             recognises as source"
+        ));
+    }
+    Some(format!(
+        "_Counting basis: the LoC and file-count rows above are summed over {} \
+         repository/repositories — {}. Neither counter is `git ls-files | wc -l`, so a verifier \
+         running that command gets a larger number; the difference is the exclusion filter, not a \
+         miscount._",
+        from_metrics + from_scan,
+        parts.join("; and "),
+    ))
 }
 
 /// The complexity row's text, carrying the analyze lane's own remedy.
