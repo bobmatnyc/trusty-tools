@@ -68,6 +68,38 @@ fn secret_needles<'a>(
     needles
 }
 
+/// Refuse text this crate GENERATED if it carries any credential (#6245).
+///
+/// Why: the generated members used to be trusted by construction — this crate
+/// wrote every byte of them, and [`crate::config::SecretKey`] has no
+/// `Serialize`, so no credential could reach them through a type. `failures`
+/// breaks that assumption: it quotes the reason string recorded for each failed
+/// repository, and a reason can carry text a child produced. Trust by
+/// construction is only trust while the construction holds.
+/// What: the same needle set and the same refusal [`copy_member`] applies, over
+/// a string already in memory. `entry` names the member in the error, since
+/// there is no source file to name.
+///
+/// # Errors
+///
+/// [`AuditError::CredentialInPackage`] when `text` carries any configured
+/// secret or the `gh`-derived token.
+/// Test: `super::super::package_tests::a_failure_record_carrying_a_credential_is_refused`.
+pub(super) fn refuse_if_credential(
+    text: &str,
+    entry: &str,
+    config: &EngagementConfig,
+    github_token: Option<&str>,
+) -> Result<(), AuditError> {
+    let needles = secret_needles(config, github_token);
+    if CredentialScan::over(&needles).feed(text.as_bytes()) {
+        return Err(AuditError::CredentialInPackage {
+            path: std::path::PathBuf::from(entry),
+        });
+    }
+    Ok(())
+}
+
 /// Copy one file into the archive, refusing it if it carries any credential.
 pub(super) fn copy_member(
     zip: &mut Archive,

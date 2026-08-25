@@ -1,15 +1,16 @@
-//! The three members this crate GENERATES into the return package.
+//! The members this crate GENERATES into the return package.
 //!
 //! Why: split out of `crate::package` when the packaged index (#6080) pushed
 //! that file past the 500-SLOC production cap — the second split, after
 //! `credential_scan`. It separates on a real line: `package.rs` decides what
 //! goes into the archive and refuses what must not, and this file writes the
-//! three files that describe the result. Nothing here reads the filesystem
+//! files that describe the result. Nothing here reads the filesystem
 //! except the tool record, and nothing here writes.
 //!
 //! What: [`render_readme`] (the page the recipient reads before sending),
-//! [`render_metadata`] (`package.toml`), and [`render_index`]
-//! (`reports/index.md`, #6080), plus [`exclusions`], the one line per
+//! [`render_metadata`] (`package.toml`), [`render_index`]
+//! (`reports/index.md`, #6080) and [`render_failures`]
+//! (`failures/index.md`, #6245), plus [`exclusions`], the one line per
 //! repository the package does not cover that the first two share.
 //!
 //! Test: `super::package_tests`.
@@ -25,7 +26,7 @@ use crate::run::{RepoRun, RunReport};
 use crate::tools;
 use crate::workdir::WorkDir;
 
-/// The three members this crate writes into the archive itself.
+/// The members this crate writes into the archive itself.
 ///
 /// Why: one value rather than three `String` parameters threaded through
 /// `super::write_archive` and `super::fill_archive` — the index (#6080) was the
@@ -40,6 +41,11 @@ pub(super) struct Generated {
     pub(super) metadata: String,
     /// [`super::INDEX_ENTRY`] — what the reports are, and a link to each.
     pub(super) index: String,
+    /// [`super::FAILURES_ENTRY`] — every repository that failed, and why.
+    ///
+    /// `None` when the sweep had no failures: a `failures/` directory holding
+    /// an index that says "none" reads worse than no directory at all (#6245).
+    pub(super) failures: Option<String>,
 }
 
 /// The generated `package.toml`.
@@ -176,6 +182,66 @@ fn declared_inference(report: &RunReport) -> Option<crate::index_report::Inferen
             .as_ref()
             .map(crate::index_report::InferenceRecord::declared)
     })
+}
+
+/// The record of every repository that failed, or `None` if none did.
+///
+/// Why (#6245): a failed target left NOTHING in the package — no log, no record,
+/// only absence from `reports/`. "Failed" and "never attempted" were the same
+/// observation from the outside, and diagnosing either meant re-running the
+/// sweep on the machine that had it. Two of 59 repositories exited 1 on the
+/// 2026-08-25 run and shipped no trace at all.
+/// What: one section per failure, naming the repository, the reason the sweep
+/// recorded (which carries the exit code, the timeout, or why the child never
+/// started), how long it ran, any gaps its manifest stated, and the log member
+/// carrying its own output — or the fact that no log survived, which is itself
+/// the answer to "how far did it get".
+///
+/// `packaged` is the member list, so the log is linked only when it is actually
+/// in this archive rather than when it happened to be on disk — the same rule
+/// [`render_index`] follows.
+/// Test: `super::package_tests::a_failed_repository_ships_its_log_and_a_record`,
+/// `super::package_tests::a_clean_sweep_has_no_failures_directory`.
+pub(super) fn render_failures(
+    report: &RunReport,
+    packaged: &[(String, PathBuf)],
+) -> Option<String> {
+    let failures: Vec<&RepoRun> = report.failures().collect();
+    if failures.is_empty() {
+        return None;
+    }
+    let mut out = String::from(
+        "# Repositories this audit did not cover\n\n\
+         Each section below is a repository the sweep attempted and did not finish. \
+         It is here so a failure reads as a failure rather than as an absence — \
+         a repository missing from `reports/` with no section here was never attempted.\n",
+    );
+    for run in failures {
+        let entry = format!("{}/{}.log", super::FAILURES_PREFIX, super::output_stem(run));
+        out.push_str(&format!("\n## {}\n\n", run.repo.name));
+        out.push_str(&format!("- Checkout: `{}`\n", run.repo.path.display()));
+        if let crate::run::RepoResult::Failed { reason } = &run.result {
+            out.push_str(&format!("- What went wrong: {reason}\n"));
+        }
+        if let Some(ms) = run.duration_ms {
+            out.push_str(&format!("- Ran for: {} s\n", ms / 1000));
+        }
+        if packaged.iter().any(|(name, _)| name == &entry) {
+            out.push_str(&format!("- Its own output: [`{entry}`]({entry})\n"));
+        } else {
+            out.push_str(
+                "- Its own output: no log survived, so the child stopped before it \
+                 wrote one\n",
+            );
+        }
+        if !run.gaps.is_empty() {
+            out.push_str("\nGaps it stated before it stopped:\n\n");
+            for gap in &run.gaps {
+                out.push_str(&format!("- {gap}\n"));
+            }
+        }
+    }
+    Some(out)
 }
 
 /// One line per repository the package does not cover.
