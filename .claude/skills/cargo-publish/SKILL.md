@@ -134,9 +134,21 @@ version instead). Runs six checks and fails loud on any of them:
    1. On 2026-08-11 that shipped `tga-v2.17.0` tagged at `246e4ca2` while the
    published `.cargo_vcs_info.json` recorded `7d5cf82e1`, with every gate green.
 
-   🔴 **If you fast-forward this checkout after tagging, re-tag before
-   publishing.** `git tag -f <tag> <new-head> && git push --force origin <tag>`.
+   🔴 **If you fast-forward this checkout after tagging, reset back onto the
+   tag before publishing.** `git reset --hard <tag>`, then re-run preflight.
    The gate prints that command with the SHAs filled in.
+
+   🔴 **Never reach for `git tag -f` or `git tag -d` here — tags on this repo
+   are immutable (#6178).** An enforcing ruleset rejects both a force-update
+   and a delete with `GH013`, `admin: true` does not lift it, and the ruleset
+   is invisible to the GitHub API, so you find out when the push fails. Move
+   the checkout onto the tag; never the tag onto the checkout.
+
+   If the tagged commit can never pass the publish gate, that version number is
+   **burned** — bump to the next version and tag fresh. Proven 2026-08-22:
+   `trusty-search-v0.49.0` and `trusty-review-v0.24.0` are permanently stranded
+   at `4af0ef8ee`, and the release shipped as `0.49.1` / `0.24.1`. Tag as late
+   as possible, immediately before `cargo publish`, so nothing can strand.
 
    After `cargo publish`, verify what cargo recorded rather than what it should
    have recorded — the only check that still works post-upload:

@@ -462,9 +462,24 @@ whether HEAD EQUALS `origin/main`, so a tag several commits behind HEAD passes
 both. That is where a release lands whenever `main` moves and the run is
 fast-forwarded to satisfy CHECK 1 — which shipped `tga-v2.17.0` tagged at
 `246e4ca2` against a published `.cargo_vcs_info.json` of `7d5cf82e1` on
-2026-08-11, all gates green. **Fast-forwarded after tagging? Re-tag before
-publishing.** After `cargo publish`, run `make publish-verify CRATE=<crate>`.
+2026-08-11, all gates green. **Fast-forwarded after tagging? Reset the checkout
+back to the tagged commit and publish that** — `git reset --hard <tag>`. After
+`cargo publish`, run `make publish-verify CRATE=<crate>`.
 See [release-workflow.md](docs/reference/release-workflow.md#tagpublish-commit-parity-guard).
+
+🔴 **Release tags here are immutable — a stranded tag burns its version number
+(#6178).** An enforcing ruleset rejects both a force-update and a delete of a
+`*-v*` tag with GH013, and `admin: true` on the account does not lift it. The
+ruleset is invisible to the GitHub API, so nothing warns you before the push
+fails. Any recipe that says re-tag, move the tag, or delete and re-push cannot
+execute on this repo — reset the checkout to the tag instead of moving the tag
+to the checkout.
+
+When the tagged commit can never pass the publish gate, that version number is
+spent: **bump to the next version and tag fresh.** Proven 2026-08-22 —
+`trusty-search-v0.49.0` and `trusty-review-v0.24.0` are permanently stranded at
+`4af0ef8ee`, and the release shipped as `0.49.1` / `0.24.1` instead. Tag as late
+as you can, immediately before `cargo publish`, so there is nothing to strand.
 
 🔴 **CRITICAL macOS note:** never use `cp` to install a release binary on
 macOS — always `cargo install`. A plain `cp` over an on-PATH binary leaves a
