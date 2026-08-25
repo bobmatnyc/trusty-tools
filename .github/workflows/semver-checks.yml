@@ -100,6 +100,15 @@ jobs:
     # #5311: was 40. The tag path checks one crate; a release PR can declare
     # several, and they are compared serially in this one job.
     timeout-minutes: 60
+    # #5688: what this run actually did, in one sentence, for the `verdict` job
+    # below to wear as its check name. Every branch that can conclude sets it
+    # BEFORE it exits, including the failing ones, so the fallback fires only
+    # when a step this job does not control died first.
+    outputs:
+      verdict_label: >-
+        ${{ steps.noop.outputs.verdict_label
+            || steps.enforce.outputs.verdict_label
+            || 'SemVer: verdict unavailable — the gate job did not reach a conclusion' }}
     steps:
       # fetch-depth: 0 — the pull-request path needs `git merge-base` and
       # `git show <merge-base>:crates/<X>/Cargo.toml`, neither of which a
@@ -303,12 +312,24 @@ jobs:
       # this issue was filed for. Both fail the job — a non-verdict is not a
       # pass — but a reader must be able to tell which one they are looking at
       # from the annotation alone.
+      #
+      # #5688: EXIT 0 IS THREE DIFFERENT FACTS, and they used to render as one
+      # green tick. The gate exits 0 when it compared a crate and found nothing
+      # wrong, when every selected crate was a recorded skip, and when the
+      # advisory inventory could not be built (`NO INVENTORY`, tool exit 101 —
+      # observed on PR #5686's trusty-search run, where the `cuda` feature wanted
+      # nvcc). Only the first is coverage. The counts come from the gate's own
+      # `semver-gate-verdict:` line, so nothing here re-parses the prose summary
+      # that preflight-publish.sh CHECK 5 reads; a line this step cannot find is
+      # treated as blindness, never as a clean compare.
       - name: Enforce public-API SemVer against crates.io
+        id: enforce
         if: steps.crate.outputs.have_work == 'true'
         env:
           SKIP_UI_BUILD: '1'
           CRATES: ${{ steps.crate.outputs.crates }}
         run: |
+          set -uo pipefail
           # One `--crate` per selected crate: check_semver.sh accumulates them
           # and reports a single verdict over the whole set, so a release PR
           # that bumps several gets one pass through the tool rather than N.
@@ -317,15 +338,59 @@ jobs:
             args+=(--crate "$c")
           done
           rc=0
-          bash scripts/check_semver.sh "${args[@]}" || rc=$?
-          if [[ "$rc" -eq 0 ]]; then
-            exit 0
-          fi
-          if [[ "$rc" -eq 3 ]]; then
-            echo "::error title=SemVer gate could not run::No verdict was computed for ${CRATES}. cargo-semver-checks never completed a comparison (see the log), so whether this release breaks the public API is UNKNOWN. Do not read this as a required version bump, and do not publish on it."
-          else
+          # REDIRECTED, NOT PIPED. A pipeline's status is its last command's, and
+          # the gate's exit code is the entire verdict — `| tee` here would
+          # report every failing run as a pass.
+          bash scripts/check_semver.sh "${args[@]}" > "${RUNNER_TEMP}/gate.log" 2>&1 || rc=$?
+          cat "${RUNNER_TEMP}/gate.log"
+
+          verdict_line="$(grep -E '^semver-gate-verdict:' "${RUNNER_TEMP}/gate.log" | tail -1 || true)"
+          compared="$(printf '%s' "$verdict_line" | sed -nE 's/.*[[:space:]]compared=([0-9]+).*/\1/p')"
+          blind="$(printf '%s' "$verdict_line" | sed -nE 's/.*[[:space:]]blind=([0-9]+).*/\1/p')"
+          inventoried="$(printf '%s' "$verdict_line" | sed -nE 's/.*[[:space:]]inventoried=([0-9]+).*/\1/p')"
+
+          if [[ "$rc" -eq 1 ]]; then
+            label="SemVer: BREAK — a breaking public-API change without a breaking bump"
             echo "::error title=SemVer break::${CRATES} has a breaking public-API change without a breaking version bump. See the failing lints in the log."
+          elif [[ "$rc" -eq 3 ]]; then
+            label="SemVer: NO VERDICT — the gate never compared anything"
+            echo "::error title=SemVer gate could not run::No verdict was computed for ${CRATES}. cargo-semver-checks never completed a comparison (see the log), so whether this release breaks the public API is UNKNOWN. Do not read this as a required version bump, and do not publish on it."
+          elif [[ "$rc" -ne 0 ]]; then
+            label="SemVer: gate malfunctioned (exit ${rc})"
+            echo "::error title=SemVer gate malfunctioned::check_semver.sh exited ${rc}, which is not one of its documented statuses (0 clean, 1 break, 2 usage, 3 no verdict). Nothing was compared."
+          elif [[ -z "$compared" ]]; then
+            label="SemVer: NO COMPARISON — the gate printed no verdict line"
+            echo "::warning title=SemVer gate reported no counts::check_semver.sh exited 0 but printed no 'semver-gate-verdict:' line, so how much it compared is unknown. Treat this as uncompared, not as clean."
+          elif [[ "${blind:-0}" -gt 0 ]]; then
+            label="SemVer: INCOMPLETE — ${blind} crate(s) could not be compared"
+            echo "::warning title=SemVer comparison incomplete::${blind} crate(s) reached cargo-semver-checks and produced no inventory, so nothing examined their public API. Green here means the version numbers already permit a break, not that the break was reviewed."
+          elif [[ "$compared" -eq 0 ]]; then
+            label="SemVer: NO COMPARISON — every selected crate was skipped"
+            echo "::warning title=SemVer compared nothing::Every crate selected for this run was a recorded skip (unpublished, bin-only, or excluded), so no public API was examined. See the skip reasons in the log."
+          elif [[ "${inventoried:-0}" -gt 0 ]]; then
+            # An inventoried crate WAS compared, but its findings are advisory:
+            # the declared bump already permits a break, so "no break" would be
+            # the wrong sentence even though the gate is green.
+            label="SemVer: ${compared} crate(s) compared — ${inventoried} advisory inventory (breaking bump)"
+            echo "::notice title=SemVer inventory::${inventoried} crate(s) already carry a breaking version bump, so their findings are an advisory inventory rather than a pass/fail verdict. Read the listed breaks in the log and confirm each was intended."
+          else
+            label="SemVer: ${compared} crate(s) compared, no break"
+            echo "::notice title=SemVer compared::${compared} crate(s) were compared against their previous crates.io release and no break was found."
           fi
+
+          echo "verdict_label=${label}" >> "$GITHUB_OUTPUT"
+          {
+            echo "## ${label}"
+            echo
+            echo "Crates selected: \`${CRATES}\`"
+            echo
+            echo "\`\`\`"
+            echo "${verdict_line:-<no semver-gate-verdict line>}"
+            echo "\`\`\`"
+            echo
+            echo "\`compared\` counts crates whose public API was actually examined."
+            echo "See [#5688](https://github.com/bobmatnyc/trusty-tools/issues/5688) for why this is spelled out."
+          } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
 
       # #5311: the no-op path, and it must EXECUTE rather than be skipped —
@@ -334,9 +399,60 @@ jobs:
       # compare against the registry. The verdict for the release itself is
       # still owned by scripts/preflight-publish.sh CHECK 5 and by the tag-push
       # run of this same workflow; neither is weakened by this branch.
+      #
+      # #5688: still `success`, and still for #5311's reason — but it now says so
+      # where a reader will see it. PR #5686 carried a real break (a public field
+      # added to `SearchAppState` without `#[non_exhaustive]`) past this branch,
+      # because the only place this path admitted to comparing nothing was the
+      # job log, which nobody opens on a green check.
       - name: No release under test — nothing to compare
+        id: noop
         if: steps.crate.outputs.have_work != 'true'
         run: |
           echo "No crate's declared version changed against the base branch, so this"
           echo "branch releases nothing and there is no registry baseline to compare."
           echo "Reporting success rather than not reporting at all — see #5311."
+          echo "verdict_label=SemVer: no comparison ran — this branch declares no version bump" >> "$GITHUB_OUTPUT"
+          {
+            echo "## SemVer: no comparison ran"
+            echo
+            echo "No crate's declared version changed against the base branch, so nothing"
+            echo "is being released and there is no registry baseline to compare against."
+            echo "**cargo-semver-checks did not examine this branch's public API.**"
+            echo
+            echo "This is a pass by design ([#5311](https://github.com/bobmatnyc/trusty-tools/issues/5311)),"
+            echo "not a statement that the API is unchanged. The verdict for a release is owned by"
+            echo "\`scripts/preflight-publish.sh\` CHECK 5 and by this workflow's tag-push run."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # #5688: the verdict as a CHECK NAME, which is the one surface `gh pr checks`
+  # and the merge box render without anyone opening a log. The gate job's own
+  # name cannot carry it — that string is the branch-protection context, and a
+  # context whose name moves is a context that never reports. So this second,
+  # deliberately UNREQUIRED job wears the sentence instead.
+  #
+  # It mirrors the gate's conclusion rather than always passing: a check named
+  # "SemVer: BREAK" that reports green would be a worse conflation than the one
+  # this issue is about.
+  verdict:
+    name: ${{ needs.semver-checks.outputs.verdict_label }}
+    needs: semver-checks
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Both values reach the shell through `env:`, never through `${{ }}`
+      # interpolation inside `run:` — the label is assembled from this
+      # workflow's own constants and the gate's integer counts, and keeping the
+      # seam closed means a future edit that puts a crate name in it cannot
+      # become a script injection.
+      - name: Restate the verdict
+        env:
+          LABEL: ${{ needs.semver-checks.outputs.verdict_label }}
+          GATE: ${{ needs.semver-checks.result }}
+        run: |
+          echo "$LABEL"
+          if [ "$GATE" != "success" ]; then
+            echo "::error title=SemVer gate did not pass::The 'Public API / SemVer' job concluded '${GATE}'. Read it, not this job."
+            exit 1
+          fi
