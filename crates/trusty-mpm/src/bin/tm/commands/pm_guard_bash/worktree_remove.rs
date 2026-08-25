@@ -33,19 +33,24 @@ use super::shell_lex;
 
 /// Deny reason for an agent-side `git worktree remove` (#5791).
 ///
-/// Why: a bare refusal makes the model retry or hand-roll a `rm -rf`. The text
-/// names the ruling, the one session allowed to run the removal, the exact
-/// command that does it, and what the agent should do instead — report and
-/// stop. It also says which worktree verbs still work, so an agent reading a
-/// registry does not treat the whole subcommand as blocked.
+/// Why: a bare refusal makes the model retry or hand-roll a `rm -rf`, which is
+/// the worse outcome — it destroys unsaved work and leaves a stale registry
+/// entry behind, so the text forecloses it explicitly rather than leaving it
+/// as the obvious next thing to try. The text also names the ruling, the one
+/// session allowed to run the removal, the exact command that does it, and
+/// what the agent should do instead — report and stop. It says which worktree
+/// verbs still work, so an agent reading a registry does not treat the whole
+/// subcommand as blocked.
 /// What: the `permissionDecisionReason` string emitted on this deny.
 /// Test: `denies_worktree_remove_from_a_subagent`.
 pub(crate) const WORKTREE_REMOVE_DENY_REASON: &str = "Worktree removal is PM-executed (#5791, owner ruling 2026-08-19): an agent never removes a \
      worktree, its own included. Report back instead — name the merged PR and the worktree path, \
      then stop. The PM confirms the work is done and reclaims the tree with \
      `tm session prune-worktrees --merged-prs --force`, which spares any worktree still holding \
-     unsaved work or still owned by a live agent. `git worktree list` and `git worktree prune` \
-     are not blocked, and SendMessage is never blocked — use it to report the path back.";
+     unsaved work or still owned by a live agent. `rm -rf` on the worktree directory is not the \
+     workaround either — it destroys unsaved work and leaves a stale registry entry git still \
+     believes in. `git worktree list` and `git worktree prune` are not blocked, and SendMessage \
+     is never blocked — use it to report the path back.";
 
 /// Classify a Bash command for agent-side worktree removal: `Some(reason)`
 /// denies, `None` allows.
@@ -77,7 +82,15 @@ pub(crate) fn evaluate_worktree_remove_command(
 /// env-prefixed spelling both resolve), and looks for the adjacent
 /// `worktree remove` token pair. Same residual bypasses as the sibling
 /// `worktree add` guard: a verb built by variable expansion or hidden in a
-/// command substitution is not resolved.
+/// command substitution is not resolved, and — largest of them, tracked as
+/// [issue #3981](https://github.com/bobmatnyc/trusty-tools/issues/3981) —
+/// `pm_guard`'s Guard 2/3 escape hatches
+/// (`TRUSTY_MPM_DISABLE_HOOKS`/`TRUSTY_MPM_PM_UNRESTRICTED`) bypass this rule
+/// entirely when set, and a subagent Guard 4 already exempts can set either
+/// through an ordinary, unblocked `.claude/settings.json` write. That gap
+/// predates this rule and is not widened by it; the remedy belongs in the
+/// edit-tool classifier. See the same note on
+/// [`super::evaluate_worktree_add_command`].
 fn command_removes_a_worktree(command: &str) -> bool {
     for segment in super::split_shell_segments(command) {
         let trimmed = segment.trim();

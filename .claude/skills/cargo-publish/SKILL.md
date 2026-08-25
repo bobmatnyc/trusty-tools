@@ -196,15 +196,16 @@ git worktree add -b feature/publish-<crate> \
 cd .claude/worktrees/publish-<crate>
 
 # Work, test, tag, and push from inside this worktree
-# When complete: git worktree remove --force .claude/worktrees/publish-<crate>
+# When complete: report the worktree path to the PM — see Cleanup below
 ```
 
 **Why**: Concurrent sessions may hold uncommitted work in the main checkout.
-Worktrees are isolated. After a squash-merge, clean up the local branch:
-```bash
-git branch -D feature/publish-<crate>
-git push origin --delete feature/publish-<crate>
-```
+Worktrees are isolated.
+
+🔴 **Do not remove the worktree yourself (#5791).** `tm hook --pm-guard` denies
+a dispatched agent's `git worktree remove`, so reaching for it mid-publish
+fails; `rm -rf` is not the workaround. Report the path and let the PM run the
+prune verb — see "Cleanup After Publishing" below.
 
 ## macOS cdhash Trap (RED — High Impact)
 
@@ -719,18 +720,20 @@ Release flow:
 
 ## Cleanup After Publishing
 
-Once the PR merges and the main branch absorbs your commits:
+Once the PR merges and the main branch absorbs your commits, report — do not
+remove. Worktree removal is PM-executed (#5791, owner ruling 2026-08-19): name
+the merged PR, the worktree path (`.claude/worktrees/publish-<crate>`), and the
+branch (`feature/publish-<crate>`), then stop.
+
+The PM reclaims the tree:
 
 ```bash
-# From main checkout or any other worktree:
-git worktree remove --force .claude/worktrees/publish-<crate>
-
-# Clean up local branch
-git branch -D feature/publish-<crate>
-
-# Clean up remote branch (if pushed)
-git push origin --delete feature/publish-<crate>
+tm session prune-worktrees --merged-prs            # preview, the default
+tm session prune-worktrees --merged-prs --force    # reclaim
 ```
+
+That pass removes the checkout only. The remote branch is usually already gone
+via `gh pr merge --delete-branch`; the local branch survives the sweep.
 
 ## Quality Checklist
 
@@ -745,8 +748,8 @@ Before declaring a publish complete:
 - [ ] Waited 100s and verified on crates.io API
 - [ ] Binary installed with `cargo install --path … --locked` (if applicable)
 - [ ] `<binary> --version` shows correct version
-- [ ] Worktree cleaned up (`git worktree remove`)
-- [ ] Local and remote branches cleaned up
+- [ ] Worktree path and branch reported to the PM for its prune verb (#5791 — never removed by the agent)
+- [ ] Remote branch cleaned up
 
 ## Connection-Safe Daemon Restart (issue #534)
 
