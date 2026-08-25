@@ -827,24 +827,38 @@ fn worktree_name_collides_detects_existing_dir_and_branch() {
         "an in-use name (dir + branch both exist) must collide"
     );
 
-    // (c) Remove the worktree directory (but not the branch) via `git worktree
-    // remove`, which deletes the dir but leaves the branch ref intact — the
-    // branch-only check must still report a collision.
-    let remove = std::process::Command::new("git")
+    // (c) Remove the worktree directory (but not the branch) — the branch-only
+    // check must still report a collision.
+    //
+    // #6099: delete the directory directly rather than shelling out to
+    // `git worktree remove`. The unit under test, `worktree_name_collides`,
+    // reads exactly two things: whether the directory exists, and whether
+    // `git rev-parse` resolves the branch ref. It never consults git's
+    // worktree ADMIN list under `.git/worktrees/`. Routing this step through
+    // `git worktree remove` made the fixture depend on that admin entry
+    // surviving, and it does not always: once the entry is gone, `remove`
+    // exits 128 with `'<path>' is not a working tree`, which is the panic this
+    // test raised about once per six full-suite runs. A probe on git 2.54.0
+    // confirms the mapping — deleting the admin entry (or letting a prune
+    // delete it after the directory goes missing) reproduces that exact
+    // message, while deleting only the directory leaves `remove` succeeding.
+    // What removes the entry under load is still unidentified; this fix drops
+    // the dependency on it instead of guessing.
+    let worktree_dir = base.join(".worktrees").join("tm-fresh-01");
+    if worktree_dir.exists() {
+        std::fs::remove_dir_all(&worktree_dir).expect("remove the worktree directory");
+    }
+    // Best-effort, and deliberately not asserted: it only keeps git's admin
+    // list consistent with what is on disk, which no assertion below reads.
+    // This mirrors `decommission::remove_session_worktree`'s own teardown.
+    let _ = std::process::Command::new("git")
         .arg("-C")
         .arg(base)
-        .args(["worktree", "remove", "--force"])
-        .arg(base.join(".worktrees").join("tm-fresh-01"))
-        .output()
-        .expect("git worktree remove");
+        .args(["worktree", "prune"])
+        .output();
     assert!(
-        remove.status.success(),
-        "git worktree remove failed: {}",
-        String::from_utf8_lossy(&remove.stderr)
-    );
-    assert!(
-        !base.join(".worktrees").join("tm-fresh-01").exists(),
-        "worktree dir must be gone after `git worktree remove`"
+        !worktree_dir.exists(),
+        "worktree dir must be gone before the branch-only check"
     );
     assert!(
         worktree_name_collides(base, "tm-fresh-01"),

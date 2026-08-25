@@ -64,12 +64,32 @@ completion path for a subagent; only the PM's `SendMessage` resumes you.
    finish", "will resume when the monitor reports completion", "monitoring in
    the background" — these do nothing. The task is stranded until a human
    notices.
-2. To await a long operation, STAY IN THE TURN: start it with
-   `run_in_background`, then poll an until-loop against its output file or the
-   process until the condition holds.
+2. To await a long operation, STAY IN THE TURN and use `tm wait` — it polls the
+   condition in a bounded slice and returns before the harness's ~120s
+   auto-background ceiling, so the agent re-issues the same command instead of
+   parking:
+
+   ```bash
+   tm wait --for run   --pid <n>                            --timeout <secs>  # a process exits
+   tm wait --for file  --path <file> [--contains <literal>] --timeout <secs>  # a sentinel appears
+   tm wait --for check --pr <n> [--repo <owner/repo>]       --timeout <secs>  # CI settles — never --watch, never bucket alone
+   ```
+
+   Exit 0 (`status=met`) is terminal — the condition holds; continue. Exit 75
+   (`status=pending`) is NOT terminal — the printed line names the exact
+   `rerun=` command and the remaining budget; re-issue it verbatim rather than
+   retyping it, because the `--timeout` budget spans invocations and a retyped
+   command that drops `--timeout` resets a deadline that must not reset. Exit 1
+   (`status=timeout`) is terminal — report the timeout itself as your
+   observation and stop. Exit 2 (`status=error`) is a usage mistake or four
+   failed probes in a row — fix the invocation rather than retrying it blind.
 3. 🔴 FOREGROUND `sleep` IS BLOCKED IN THIS HARNESS. `sleep 60 && check` does
    not work, and reaching for it is the exact move that produces the parking
-   this rule prevents. Background the waiter too:
+   this rule prevents. `tm wait` (above) is the sanctioned replacement — reach
+   for it before reaching for `sleep` at all.
+
+   No `tm` on PATH? Fall back to a hand-rolled until-loop, backgrounding the
+   waiter too since foreground `sleep` is blocked either way:
 
    ```bash
    # both calls use run_in_background; then read the sentinel file

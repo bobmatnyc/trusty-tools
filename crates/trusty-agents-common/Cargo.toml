@@ -7,7 +7,7 @@ name = "trusty-agents-common"
 # preview_unmanaged_bundled_skills, audit_agent_tier all gained a fallible
 # Result-wrapped return; TierAuditError is a new public type) — for a 0.y.z
 # crate, Cargo's rule makes the MINOR position the breaking position.
-version = "0.6.0"
+version = "0.6.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

@@ -2359,6 +2359,14 @@ impl Drop for KillSessionGuard<'_> {
 /// pointed at coverage which did not exist).
 #[test]
 #[ignore = "requires a live tmux binary; run with --include-ignored"]
+// #6127: `#[serial]` — the `#[serial]` `HomeGuard` tests above reassign the
+// process-global `$HOME`, and this test reads it through the #5784 host-state
+// gate, which refuses tmux whenever `$HOME` is not this uid's real home. Since
+// `serial_test` only excludes `#[serial]` tests from each OTHER, running
+// unmarked left this test free to observe a sibling's temp `$HOME` mid-flight
+// and fail with "tmux access refused". Serialising joins that same exclusion
+// set; the guard itself is untouched.
+#[serial_test::serial]
 fn live_pane_scoped_send_targets_original_pane_not_sibling() {
     let driver = TmuxDriver::discover().expect("tmux must be installed for this live test");
     let session_name = format!("trusty-mpm-test-pane-{}", std::process::id());
