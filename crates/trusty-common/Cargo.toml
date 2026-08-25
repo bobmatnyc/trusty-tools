@@ -4,7 +4,10 @@ name = "trusty-common"
 # `src/mcp/*` modules. Cargo's 0.x rule makes that a MINOR bump, not a patch.
 # 0.42.1 (#6208): patch — additive `PalaceHandle::compact_vector_orphans` fixes
 # a data-loss race; no public item removed or changed, so not a 0.x break.
-version = "0.43.1"
+# 0.43.2 (#6198): patch — the Jira backend resolves a milestone id to its
+# version name internally; every changed item is `pub(super)`, so no public
+# item was removed or changed.
+version = "0.43.2"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

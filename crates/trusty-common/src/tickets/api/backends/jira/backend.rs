@@ -19,7 +19,7 @@ use crate::tickets::api::models::*;
 
 use super::types::{
     JiraBackend, adf_paragraph, build_epic_issues_jql, build_list_epics_jql, build_list_jql,
-    build_milestone_issues_jql, build_search_jql, parse_comment, parse_issue,
+    build_milestone_issues_jql, build_search_jql, parse_comment, parse_issue, resolve_version_name,
 };
 
 #[async_trait]
@@ -334,8 +334,13 @@ impl Backend for JiraBackend {
     }
 
     async fn get_milestone_issues(&self, id: &str) -> Result<Vec<Issue>> {
-        // #6198: build via build_milestone_issues_jql so id is quoted + escaped.
-        let jql = build_milestone_issues_jql(id);
+        // #6198: a quoted fixVersion term matches on version NAME, so resolve the
+        // id to its name first; unquoting would reopen the JQL injection.
+        let versions = self
+            .get(&format!("/project/{}/versions", self.project_key))
+            .await?;
+        let version_name = resolve_version_name(&versions, id)?;
+        let jql = build_milestone_issues_jql(&version_name);
         let body = json!({ "jql": jql, "maxResults": 100 });
         let v = self.post("/search/jql", body).await?;
         let issues = v
