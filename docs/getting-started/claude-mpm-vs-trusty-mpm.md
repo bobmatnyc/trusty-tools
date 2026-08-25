@@ -2,7 +2,7 @@
 
 ## The 30-Second Answer
 
-**trusty-mpm** (`tm`) is the **Rust** successor to the Python `claude-mpm` project. Both are session orchestrators, but trusty-mpm is a rebuilt, production-grade system with:
+**trusty-mpm** (`tm`) is a **Rust** implementation of agent orchestration. It shares the same orchestration **concepts** with the Python `claude-mpm` project (session management, PM/agent/skill delegation), but is an independent implementation with no code relation, different maintainers, and different distribution channels. trusty-mpm is production-grade with:
 - **Single binary:** `tm` (instead of scattered Python packages)
 - **Managed daemons:** Runs trusty-memory and trusty-search as system services, not ad-hoc
 - **Main-checkout by default, worktrees on request:** A session runs on the project's main checkout unless launched with `--worktree`; a main-checkout session and every agent it dispatches may write documents and configuration only, and a dispatched agent that writes is automatically granted its own git worktree, cleaned up on decommission

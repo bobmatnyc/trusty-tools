@@ -51,7 +51,7 @@ else's guard test too).
 | 7788 | `trusty-console` | `trusty-console/src/lib.rs::DEFAULT_PORT` | Yes |
 | 7878 | `trusty-search` | `trusty-search/src/service/constants.rs::DEFAULT_PORT` | Yes |
 | 7879 | `trusty-analyze` | `trusty-analyze/src/service/events.rs::DEFAULT_PORT` | Yes |
-| 7880 | `trusty-mpm` daemon (`trusty-mpmd` / `tm`) | `trusty-mpm/src/core/discovery.rs::DEFAULT_DAEMON_ADDR` | Yes |
+| 7880 | `trusty-mpm` daemon (`trusty-mpmd` / `tm`) | `trusty-mpm/src/core/discovery.rs::DEFAULT_DAEMON_ADDR` | No |
 | 7881 | `trusty-mpm` **supervisor** metrics/health listener — a distinct process from the 7880 daemon above | `trusty-mpm/src/supervisor/config.rs::DEFAULT_METRICS_ADDR` | Yes |
 | 7882 | `trusty-code` (`tcode serve --http`) | `trusty-code/src/serve/mod.rs::DEFAULT_HTTP_PORT` (mirrored by `trusty-code-gui/src/state.rs::DEFAULT_DAEMON_URL`) | No (#3364 follow-up) |
 | 7890 | `trusty-embedderd` `--http` mode (manual/dev-run only; auto-spawn always uses `--stdio`/UDS) | `trusty-embedderd/src/lib.rs::Args::http_addr` | No |
