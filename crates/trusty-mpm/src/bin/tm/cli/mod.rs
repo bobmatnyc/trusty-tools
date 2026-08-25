@@ -528,6 +528,29 @@ pub(crate) enum Command {
         #[arg(long)]
         tool: String,
     },
+    /// Wait for a condition, in-turn, without blocking past the harness ceiling.
+    ///
+    /// Why (#5843): an agent has no sanctioned way to wait for a long-running
+    /// background operation. Foreground `sleep` is rejected by the guards, and
+    /// the harness auto-backgrounds a foreground call near ~120s — so an agent
+    /// facing a 1h cold build ends its turn and loses the work. `tm wait` polls
+    /// a CONDITION and returns before that ceiling, so the wait spans as many
+    /// invocations as it needs while every invocation stays inside the ceiling.
+    /// What: one invocation polls the condition every `--interval` seconds
+    /// until it is met, the `--slice` ceiling is reached, or the hard
+    /// `--timeout` budget (which SPANS re-runs, recorded in a state file keyed
+    /// by the condition) is exhausted. The verb surface is the exit code plus
+    /// one `tm-wait …` status line on stdout:
+    ///
+    ///   exit 0  status=met      — terminal, the condition holds.
+    ///   exit 75 status=pending  — NOT terminal. Re-run the IDENTICAL command;
+    ///                             the status line carries remaining budget.
+    ///   exit 1  status=timeout  — terminal, the hard timeout was exhausted.
+    ///   exit 2                  — usage error or an unrecoverable probe error.
+    ///
+    /// Test: `commands::wait::tests`; `cli_parses_wait_*` in
+    /// `tests_behavior_a.rs`.
+    Wait(WaitArgs),
     /// Run the trusty-mpm daemon.
     Daemon {
         /// Address the daemon HTTP API binds to.

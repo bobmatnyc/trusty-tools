@@ -108,4 +108,6 @@ pub(crate) mod sync_assets;
 pub(crate) mod telegram;
 pub(crate) mod ticket;
 pub(crate) mod tmux_attach;
+// #5843: the condition-poll wait primitive that replaces backgrounding.
+pub(crate) mod wait;
 pub(crate) mod watch;
