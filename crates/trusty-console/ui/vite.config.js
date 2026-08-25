@@ -1,5 +1,8 @@
 import { defineConfig } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
+// #5936: emptyOutDir below deletes the tracked ui-source-hash.txt; this
+// re-writes it after the build that removed it.
+import { stampUiBundle } from '../../../scripts/lib/vite-stamp-bundle.mjs';
 
 // Why: Svelte 5 ships separate browser and server export conditions in its
 // package.json exports map. Without pinning the 'browser' condition, Vite
@@ -12,7 +15,7 @@ import { svelte } from '@sveltejs/vite-plugin-svelte';
 // Test: Build with `pnpm run build`; the resulting bundle must not contain
 // the SSR stub and must mount without throwing in a browser.
 export default defineConfig({
-  plugins: [svelte()],
+  plugins: [svelte(), stampUiBundle('trusty-console')],
   base: '/ui/',
   resolve: {
     conditions: ['browser', 'module', 'import', 'default'],

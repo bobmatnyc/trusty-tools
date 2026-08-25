@@ -91,8 +91,13 @@ pub(crate) fn resolve_project_aware(
     // call, when the project pairs `config_dir` with an explicit `account`.
     // A project that never configures `account` alongside `config_dir` sees
     // no behaviour change here.
-    if let Some((dir, account)) = trusty_mpm::core::gh_account::configured_account_pair(selected) {
-        trusty_mpm::core::gh_account::ensure_gh_account_in_dir(&account, &dir)?;
+    if let Some(target) = trusty_mpm::core::gh_account::configured_account_pair(selected) {
+        // #5849: enforce on the project's configured host, not an assumed one.
+        trusty_mpm::core::gh_account::ensure_gh_account_in_dir(
+            &target.account,
+            &target.config_dir,
+            &target.host,
+        )?;
     }
 
     resolve_gh_env_anyhow(selected)
@@ -267,8 +272,14 @@ mod tests {
         let script = format!(
             r#"#!/bin/sh
 STATE="$GH_CONFIG_DIR/.fake_active"
+if [ -f "$STATE" ]; then ACTIVE=$(cat "$STATE"); else ACTIVE="{initial}"; fi
+# #5849: enforcement verifies with `gh api user`, so the fake must answer it —
+# here the honest machine, where the config dir and the credential agree.
+if [ "$1" = "api" ] && [ "$2" = "user" ]; then
+  echo "$ACTIVE"
+  exit 0
+fi
 if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
-  if [ -f "$STATE" ]; then ACTIVE=$(cat "$STATE"); else ACTIVE="{initial}"; fi
   echo "github.com"
   echo "  - Logged in to github.com account $ACTIVE (keyring)"
   echo "  - Active account: true"
@@ -309,6 +320,44 @@ exit 1
         prior
     }
 
+    /// Remove any ambient `GH_TOKEN`/`GITHUB_TOKEN`, returning them to restore.
+    ///
+    /// #5849: an ambient token makes `ensure_gh_account_in_dir` refuse, so a
+    /// shell or CI job that exports one would otherwise decide these outcomes.
+    /// Keys are spelled as literals (never a loop variable) so
+    /// `env_isolation_tests`' rule-1 source scan can read what these write.
+    #[cfg(unix)]
+    type AmbientTokens = (Option<std::ffi::OsString>, Option<std::ffi::OsString>);
+
+    #[cfg(unix)]
+    fn strip_ambient_tokens() -> AmbientTokens {
+        let prior = (
+            std::env::var_os("GH_TOKEN"),
+            std::env::var_os("GITHUB_TOKEN"),
+        );
+        // SAFETY: guarded by `fake_gh_lock` in every caller.
+        unsafe {
+            std::env::remove_var("GH_TOKEN");
+            std::env::remove_var("GITHUB_TOKEN");
+        }
+        prior
+    }
+
+    #[cfg(unix)]
+    fn restore_ambient_tokens(prior: AmbientTokens) {
+        // SAFETY: guarded by `fake_gh_lock` in every caller.
+        unsafe {
+            match prior.0 {
+                Some(v) => std::env::set_var("GH_TOKEN", v),
+                None => std::env::remove_var("GH_TOKEN"),
+            }
+            match prior.1 {
+                Some(v) => std::env::set_var("GITHUB_TOKEN", v),
+                None => std::env::remove_var("GITHUB_TOKEN"),
+            }
+        }
+    }
+
     #[cfg(unix)]
     fn restore_path(prior: Option<String>) {
         // SAFETY: guarded by `fake_gh_lock` in every caller.
@@ -335,12 +384,14 @@ exit 1
         let config_dir = tempfile::tempdir().expect("config tempdir");
         write_fake_gh(bin_dir.path(), "wrong-account", false);
         let prior_path = prepend_path(bin_dir.path());
+        let prior_tokens = strip_ambient_tokens();
 
         let mut cfg = gh(&config_dir.path().display().to_string());
         cfg.account = Some("bobmatnyc".to_string());
         let config = cfg_of(Some(cfg), Vec::new());
         let result = resolve_project_aware(&config, None);
 
+        restore_ambient_tokens(prior_tokens);
         restore_path(prior_path);
         assert!(result.is_ok(), "expected self-heal to succeed: {result:?}");
         let state = std::fs::read_to_string(config_dir.path().join(".fake_active"))
@@ -366,12 +417,14 @@ exit 1
         let config_dir = tempfile::tempdir().expect("config tempdir");
         write_fake_gh(bin_dir.path(), "wrong-account", true);
         let prior_path = prepend_path(bin_dir.path());
+        let prior_tokens = strip_ambient_tokens();
 
         let mut cfg = gh(&config_dir.path().display().to_string());
         cfg.account = Some("bobmatnyc".to_string());
         let config = cfg_of(Some(cfg), Vec::new());
         let result = resolve_project_aware(&config, None);
 
+        restore_ambient_tokens(prior_tokens);
         restore_path(prior_path);
         let err = result.expect_err("mismatched account with a failed switch must be an Err");
         assert!(err.to_string().contains("bobmatnyc"), "err: {err}");

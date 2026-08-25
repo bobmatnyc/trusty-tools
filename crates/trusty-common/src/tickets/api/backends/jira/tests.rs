@@ -7,14 +7,18 @@
 //! reading issues from another project.
 //! What: exercises the pure `build_*_jql` builders — which produce the exact
 //! `jql` string handed to the HTTP client — asserting injected values are
-//! quoted + escaped and legitimate values still produce correct JQL.
+//! quoted + escaped and legitimate values still produce correct JQL. Also covers
+//! `resolve_version_name`, the id→name lookup the quoted `fixVersion` term
+//! requires, over a mocked `/project/{key}/versions` response body.
 //! Test: this file is the coverage.
+
+use serde_json::json;
 
 use crate::tickets::api::backends::{ListIssuesParams, SearchIssuesParams};
 
 use super::types::{
     build_epic_issues_jql, build_list_epics_jql, build_list_jql, build_milestone_issues_jql,
-    build_search_jql, escape_jql_string,
+    build_search_jql, escape_jql_string, resolve_version_name,
 };
 
 /// A payload that, unescaped, closes the `text`/`assignee` term and appends an
@@ -223,5 +227,96 @@ fn list_epics_jql_legit_value() {
     assert_eq!(
         build_list_epics_jql("PROJ"),
         r#"project = "PROJ" AND issuetype = Epic"#
+    );
+}
+
+// ---- get_milestone_issues: id resolves to the NAME the quote matches on -----
+// The #6198 escaping quotes the `fixVersion` term, and a quoted term matches by
+// version NAME. Passing the numeric id straight through therefore matched
+// nothing, so the backend resolves it against `/project/{key}/versions` first.
+
+/// A stand-in for the `GET /project/{key}/versions` response body.
+fn versions_fixture() -> serde_json::Value {
+    json!([
+        { "id": "10041", "name": "1.0" },
+        { "id": "10042", "name": "Sprint 12" },
+    ])
+}
+
+#[test]
+fn resolve_version_name_maps_numeric_id() {
+    assert_eq!(
+        resolve_version_name(&versions_fixture(), "10042").unwrap(),
+        "Sprint 12"
+    );
+}
+
+#[test]
+fn milestone_jql_uses_resolved_name() {
+    // The regression: a numeric id must reach JQL as the version's NAME.
+    let name = resolve_version_name(&versions_fixture(), "10042").unwrap();
+    let jql = build_milestone_issues_jql(&name);
+    // What the pre-fix backend emitted — a quoted id, which matches no version.
+    assert_ne!(jql, r#"fixVersion = "10042""#, "id reached JQL unresolved");
+    assert_eq!(jql, r#"fixVersion = "Sprint 12""#);
+}
+
+#[test]
+fn resolved_name_needing_escape_stays_quoted() {
+    // A version NAME can itself carry a quote — the escaper still contains it.
+    let versions = json!([{ "id": "10043", "name": r#"1.0" OR project = "SECRET"# }]);
+    let name = resolve_version_name(&versions, "10043").unwrap();
+    let jql = build_milestone_issues_jql(&name);
+    assert!(!jql.contains(r#"1.0" OR"#), "breakout survived: {jql}");
+    assert_eq!(jql, r#"fixVersion = "1.0\" OR project = \"SECRET""#);
+}
+
+#[test]
+fn resolve_version_name_accepts_numeric_json_id() {
+    let versions = json!([{ "id": 10042, "name": "Sprint 12" }]);
+    assert_eq!(
+        resolve_version_name(&versions, "10042").unwrap(),
+        "Sprint 12"
+    );
+}
+
+#[test]
+fn resolve_version_name_prefers_id_over_name() {
+    // A version NAMED like another version's id must not win the lookup.
+    let versions = json!([
+        { "id": "9", "name": "10042" },
+        { "id": "10042", "name": "Sprint 12" },
+    ]);
+    assert_eq!(
+        resolve_version_name(&versions, "10042").unwrap(),
+        "Sprint 12"
+    );
+}
+
+#[test]
+fn resolve_version_name_accepts_direct_name() {
+    // Callers that already pass a name keep working.
+    assert_eq!(
+        resolve_version_name(&versions_fixture(), "Sprint 12").unwrap(),
+        "Sprint 12"
+    );
+}
+
+#[test]
+fn resolve_version_name_errors_on_unknown_id() {
+    // An unknown id must be an error, not a silently empty issue list.
+    let err = resolve_version_name(&versions_fixture(), "99999").unwrap_err();
+    assert!(
+        err.to_string().contains("no project version matches"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn resolve_version_name_errors_on_non_array() {
+    let err = resolve_version_name(&json!({ "errorMessages": ["nope"] }), "10042").unwrap_err();
+    assert!(
+        err.to_string().contains("was not an array"),
+        "unexpected error: {err}"
     );
 }
