@@ -6,7 +6,9 @@
 //! did nothing; `tm launch` failed with "no git origin remote found". The
 //! operator's next move was always the same — run `git init`, re-run `tm`. This
 //! module takes that step for them and then lets the ordinary flow continue
-//! exactly as it does for a git repository with no origin remote.
+//! exactly as it does for a git repository with no origin remote — which since
+//! #6276 means a working session in that checkout, not a second refusal (see
+//! [`super::origin_plan`]).
 //! What: [`ensure_git_repo`] probes for an existing repository, applies the
 //! sanity guards, runs `git init`, and prints a one-line notice. The decision
 //! is the pure [`plan_auto_init`]; the "is there a repository here" stderr

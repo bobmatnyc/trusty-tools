@@ -60,6 +60,9 @@ pub(crate) mod mcp;
 pub(crate) mod memory;
 pub(crate) mod meta;
 pub(crate) mod misc;
+// #6276: the one decision about a repository's origin remote — a local-only
+// repository proceeds to a session in its own checkout instead of refusing.
+pub(crate) mod origin_plan;
 pub(crate) mod pane_identity;
 pub(crate) mod picker_delete;
 pub(crate) mod picker_delete_glob;

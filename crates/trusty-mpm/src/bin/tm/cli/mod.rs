@@ -613,6 +613,10 @@ pub(crate) enum Command {
     /// agents, skills, MCP config) into the project before starting or
     /// attaching to the session in the current terminal (behaves like running
     /// `claude-mpm`).
+    ///
+    /// A GitHub-backed project is provisioned into a managed clone. A local
+    /// repository with no origin remote runs its session in the checkout
+    /// itself — it is not refused.
     Launch {
         /// Project directory to launch in (defaults to the current directory).
         dir: Option<String>,
