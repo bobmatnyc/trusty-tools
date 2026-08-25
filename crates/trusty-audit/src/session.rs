@@ -1022,6 +1022,14 @@ impl Session {
                 env: run::ENV_INFERENCE_CREDENTIAL,
                 config: self.config_path.clone(),
             })?;
+        // #6173: `render` drives the engagement's own `tools/trusty-review`,
+        // so it owes the same pin reconciliation `run` performs. The pin is
+        // read here, where the config is already loaded, and is `None` when no
+        // engagement config loads — a delivered package re-rendered on a
+        // machine that never ran the engagement pins nothing.
+        let pinned_review = config
+            .as_ref()
+            .map(|c| c.tools.trusty_review.version().to_owned());
         let models = config.map(|c| c.models).unwrap_or_default();
         // #6135: both halves — the pairs the child inherits, and the identity
         // the index states when no manifest declares its own.
@@ -1033,6 +1041,7 @@ impl Session {
             &key,
             &inference,
             options,
+            pinned_review.as_deref(),
             &self.progress,
         )
         .await
