@@ -93,175 +93,24 @@
 
 use std::collections::BTreeSet;
 
+use super::investigate::ExposureIndex;
 use super::model::ReportModel;
 use super::synthesize_grounding_text::{
     asserts_reachability, asserts_reachability_claim, contains_name, grammar_debris,
     remove_sentence, rewrite_reachability, sentences, subject_tokens,
 };
+use super::synthesize_grounding_vocab::{
+    CLEAN_SIGNAL_NEGATIONS, CLEAN_SIGNAL_WORDS, LOAD_BEARING_PHRASES, LOOPBACK_MARKERS,
+    REMOTE_MARKERS,
+};
 use super::topology::CrateTopology;
 
-/// Text markers that scope a finding to a loopback-only surface.
-///
-/// Deliberately short and literal. A finding whose own remediation or evidence
-/// says "localhost" is stating its reachability; inferring one from softer
-/// words would make the check fire on findings it was never about.
-///
-/// #6082 lap 6: the socket spellings state the same fact without the word
-/// localhost. The graded report's RED finding 2 shipped "a remote code execution
-/// risk" because its remediation proposed "token or local-socket verification"
-/// and none of the four original markers matched — the finding never entered
-/// [`Grounding::local_only`], so the sentence had no owner and the check never
-/// ran on it. A remediation that proposes verifying the peer over a local socket
-/// is stating that the peer is on this host, which is a reachability statement
-/// as literal as "localhost".
-const LOOPBACK_MARKERS: &[&str] = &[
-    "localhost",
-    "loopback",
-    "127.0.0.1",
-    "::1",
-    "local-socket",
-    "local socket",
-    "unix socket",
-    "unix-socket",
-    "unix domain socket",
-    "unix-domain socket",
-];
-
-/// Text markers that scope a finding to a network-reachable surface.
-///
-/// A finding carrying one of these vetoes the contradiction check for every
-/// subject token it shares, so a genuinely remote endpoint in the same
-/// repository can still be described as remote.
-const REMOTE_MARKERS: &[&str] = &[
-    "0.0.0.0",
-    "internet-facing",
-    "publicly reachable",
-    "publicly accessible",
-    "all interfaces",
-];
-
-/// Phrases that assert reachability beyond the host, with the host-local form
-/// each is rewritten to.
-///
-/// Longest first: `remote-code-execution` must be matched before a bare
-/// `remote`, and every plural before its singular, or the rewrite would leave a
-/// broken fragment behind (`remote attackers` → `any local processs`).
-///
-/// This table is a CONVENIENCE, not the gate. [`REACHABILITY_WORDS`] decides
-/// what gets checked and what may ship; a claim this table cannot rewrite is
-/// rejected rather than passed through.
-pub(super) const REACHABILITY_REWRITES: &[(&str, &str)] = &[
-    // #6082 lap 5: the hedged form. RED finding 3's business impact read
-    // "enabling remote/local code execution" — no pattern below matches it,
-    // because the `/local` sits between the two words every other pattern
-    // expects to be adjacent, so the sentence never even triggered the check.
-    (
-        "remote/local code execution",
-        "local-process-reachable code execution",
-    ),
-    (
-        "remote/local code-execution",
-        "local-process-reachable code-execution",
-    ),
-    ("remote/local", "local-process-reachable"),
-    (
-        "unauthenticated remote-code-execution",
-        "unauthenticated local-process-reachable code-execution",
-    ),
-    (
-        "unauthenticated remote code execution",
-        "unauthenticated local-process-reachable code execution",
-    ),
-    (
-        "remote-code-execution",
-        "local-process-reachable code-execution",
-    ),
-    (
-        "remote code execution",
-        "local-process-reachable code execution",
-    ),
-    (
-        "remote code-execution",
-        "local-process-reachable code-execution",
-    ),
-    ("remotely exploitable", "exploitable by any local process"),
-    ("remote attackers", "any local process"),
-    ("remote attacker", "any local process"),
-    ("remote control over", "control over"),
-    ("remote unauthenticated", "unauthenticated local-process"),
-    // #6082 lap 7: the network family. RED finding 2's business impact shipped
-    // "An unauthenticated actor on the network or host can launch arbitrary
-    // claude commands" — a reachability claim carrying no `remote` token, so
-    // the pattern table above never matched it and the check never ran.
-    ("on the network or on the host", "on the host"),
-    ("on the network or host", "on the host"),
-    ("over the network", "on the host"),
-    ("across the network", "on the host"),
-    ("from the network", "from any process on the host"),
-    ("network-reachable", "reachable by any process on the host"),
-    ("network reachable", "reachable by any process on the host"),
-    ("network attackers", "any local process"),
-    ("network attacker", "any local process"),
-    ("unauthenticated network", "unauthenticated local-process"),
-    ("network-facing", "host-local"),
-    ("on the network", "on the host"),
-];
-
-/// Every word that asserts reachability beyond this host.
-///
-/// This list is the guardrail, and [`REACHABILITY_REWRITES`] only softens it.
-/// A sentence about a local-only finding is CHECKED when it carries one of these
-/// words, and may SHIP only when none survives the rewrite pass — so a spelling
-/// this module has never seen is rejected and disclosed rather than passed
-/// through unexamined.
-///
-/// #6082 lap 7 replaced a phrase blocklist with this vocabulary. Three laps in a
-/// row shipped the same defect in a new spelling (`RCE`, then `remote/local`,
-/// then `on the network`), each time because the trigger was a list of known
-/// phrases: an unrecognised phrase was not corrected AND not checked. Keying
-/// both halves off one word list inverts that — an unrecognised phrase is now
-/// the case that fails closed.
-///
-/// The cost is real and deliberate: a sentence about a local-only finding that
-/// mentions a network for an unrelated reason ("network I/O", "network calls to
-/// the embedder") is rejected too, and its field falls back to the honesty
-/// marker with a note in Synthesis Status. A due-diligence report claiming
-/// network reach for a loopback-bound daemon is the worse of the two errors.
-pub(super) const REACHABILITY_WORDS: &[&str] = &["remote", "network", "internet"];
-
-/// The two words every "this dimension has no clean signal" sentence is built
-/// around (#6082 lap 7).
-///
-/// Two words rather than one phrase, because the model puts the dimension
-/// between them — the graded report wrote "No clean security signal is credited
-/// here", and a literal `clean signal` match misses that. Paired with
-/// [`CLEAN_SIGNAL_NEGATIONS`], which is what turns the noun phrase into a claim
-/// of absence.
-const CLEAN_SIGNAL_WORDS: (&str, &str) = ("clean", "signal");
-
-/// The negations that turn [`CLEAN_SIGNAL_WORDS`] into a claim of absence.
-const CLEAN_SIGNAL_NEGATIONS: &[&str] = &[
-    "no ", "not ", "none", "nothing", "never", "n't", "zero ", "absent", "without",
-];
-
-/// Phrases that claim a crate is what the rest of the estate is built on.
-const LOAD_BEARING_PHRASES: &[&str] = &[
-    "load-bearing",
-    "load bearing",
-    "most depended",
-    "most-depended",
-    "depended on by the rest",
-];
-
-/// Path and title words too generic to identify a finding's subject.
-pub(super) const GENERIC_TOKENS: &[&str] = &[
-    "crates", "src", "main", "lib", "mod", "test", "tests", "with", "this", "that", "from", "into",
-    "have", "http", "https", "file", "line", "code", "data", "self", "type", "used", "when",
-    "over", "path", "call", "rust",
-];
-
-/// Shortest path/title word admitted as a subject token.
-pub(super) const MIN_TOKEN_LEN: usize = 4;
+// The four tables `synthesize_grounding_text` reads keep their existing path
+// through this module, so the split that moved them (#6191, SLOC cap) changed no
+// import anywhere else.
+pub(super) use super::synthesize_grounding_vocab::{
+    GENERIC_TOKENS, MIN_TOKEN_LEN, REACHABILITY_REWRITES, REACHABILITY_WORDS,
+};
 
 /// One finding the report's own data scopes to a loopback-only surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -436,7 +285,14 @@ impl Grounding {
         // `apply_investigation`, so after that pass both loops see the same
         // signals. The larger count is the real one either way.
         out.clean_signals = from_metrics.max(from_inv);
-        out.classify(staged);
+        // #6191: the investigation's collected bind/exposure facts decide a
+        // file's tier before any text marker gets a vote.
+        let evidence = ExposureIndex::from_facts(
+            inv.into_iter()
+                .flat_map(|i| i.repos.iter())
+                .flat_map(|r| r.exposure.iter()),
+        );
+        out.classify(staged, &evidence);
         for topology in model
             .repositories
             .iter()
@@ -457,12 +313,29 @@ impl Grounding {
     /// file as [`LocalOnly`] — including the ones whose own text said nothing.
     /// A finding with no component is classified by its own text alone, as
     /// before: there is no file to share the classification with.
+    ///
+    /// #6191: `evidence` is the collection-side answer, read from the files'
+    /// own source, and it settles a file's tier OUTRIGHT — a measured bind
+    /// address is a fact about the surface, and a marker in some finding's prose
+    /// is a guess about it. Only a file the collector said nothing about falls
+    /// through to the marker walk below, which is what leaves an
+    /// evidence-free run byte-identical to the pre-#6191 one.
     /// Test: `synthesize_grounding_tests.rs::{a_sibling_finding_inherits_its_files_loopback_scope,
-    /// a_remote_finding_on_the_file_wins_over_a_loopback_sibling}`.
-    fn classify(&mut self, staged: Vec<Staged>) {
+    /// a_remote_finding_on_the_file_wins_over_a_loopback_sibling,
+    /// collected_bind_evidence_outranks_a_text_marker,
+    /// a_collected_outbound_call_establishes_reach_a_marker_never_stated}`.
+    fn classify(&mut self, staged: Vec<Staged>, evidence: &ExposureIndex) {
         let mut local_files = BTreeSet::new();
         for s in &staged {
             if s.component.is_empty() {
+                continue;
+            }
+            if let Some(kind) = evidence.kind(&s.component) {
+                if kind.is_beyond_host() {
+                    self.remote_components.insert(s.component.clone());
+                } else {
+                    local_files.insert(s.component.clone());
+                }
                 continue;
             }
             if s.remote {

@@ -161,6 +161,7 @@ fn enriches_from_investigation() {
             deps: Default::default(),
             traces: None,
             coverage: coverage(),
+            exposure: Vec::new(),
         }],
     };
     let model = model_with(
@@ -262,6 +263,7 @@ fn elaboration_targets_exclude_verified_and_cap_at_10() {
             deps: Default::default(),
             traces: None,
             coverage: coverage(),
+            exposure: Vec::new(),
         }],
     };
     let model = model_with(vec![repo("a", metric_findings)], Some(inv));
@@ -346,6 +348,7 @@ fn renders_elaboration_targets_or_none() {
             deps: Default::default(),
             traces: None,
             coverage: coverage(),
+            exposure: Vec::new(),
         }],
     };
     let model = model_with(

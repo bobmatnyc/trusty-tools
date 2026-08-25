@@ -151,6 +151,8 @@ pub struct Selection {
     pub dimensions_absent: Vec<String>,
     /// Per-dimension coverage of the examined set (#6082).
     pub per_dimension: Vec<DimensionCoverage>,
+    /// Test presence over the WHOLE tracked list, not the examined set (#6193).
+    pub test_census: super::test_census::TestCensus,
     /// Examined files the manifest itself named, with a reason (#6082). Zero
     /// means the ranking was path names and complexity alone — which is what
     /// the coverage section must SAY rather than imply.
@@ -197,6 +199,10 @@ pub const SECURITY_DIMENSION: &str = DIMENSIONS[0];
 /// cross-references (#6137) — that section has no data source of its own, but
 /// §5 does carry these findings and must be pointed at.
 pub const SCALABILITY_DIMENSION: &str = DIMENSIONS[4];
+
+/// The one dimension of [`DIMENSIONS`] whose figures are ENUMERATED rather than
+/// sampled (#6193). See [`super::test_census`].
+pub const TEST_DIMENSION: &str = DIMENSIONS[5];
 
 /// The DD dimensions a file matches by path/name heuristics (excluding tests,
 /// which are presence-only and handled separately).
@@ -273,8 +279,18 @@ pub fn dimensions_for(path: &str) -> Vec<String> {
 }
 
 /// True when a path looks like a test file/dir (presence-only coverage signal).
-fn is_test_path(path: &str) -> bool {
-    let p = path.to_ascii_lowercase();
+///
+/// Shared with [`super::test_census`] (#6193), which enumerates the same
+/// recognition over the whole tracked list so the dimension's counts stop moving
+/// with the byte budget. One predicate, so the coverage split and the census can
+/// never disagree about what a test file is.
+pub(super) fn is_test_path(path: &str) -> bool {
+    // The directory checks below all wanted a LEADING separator, so a repository
+    // whose tests live in a root `tests/` — the Cargo default — matched none of
+    // them: the tracked list is repo-relative, and `tests/api.rs` has no slash
+    // in front. Prefixing one makes the first segment a segment like any other
+    // (#6193).
+    let p = format!("/{}", path.to_ascii_lowercase());
     p.contains("/test/")
         || p.contains("/tests/")
         || p.contains("/__tests__/")
@@ -286,7 +302,7 @@ fn is_test_path(path: &str) -> bool {
         || p.ends_with(".spec.ts")
         || p.ends_with("_test.go")
         || p.ends_with("_test.py")
-        || p.starts_with("test_")
+        || p.contains("/test_")
 }
 
 /// True when the path has a recognised source-code extension (a relevance boost
@@ -623,8 +639,12 @@ pub fn select_files(
 
     let (dimensions_covered, dimensions_absent) = coverage_split(&selected, files);
     let skipped = total_files.saturating_sub(selected.len());
+    // #6193: enumerated over `files`, the whole tracked list — so it does not
+    // move when the budget does.
+    let test_census = super::test_census::census(files);
     Selection {
-        per_dimension: per_dimension(&selected, &dimensions_covered),
+        per_dimension: per_dimension(&selected, &dimensions_covered, &test_census),
+        test_census,
         attributed_files: selected.iter().filter(|f| f.selected_by.is_some()).count(),
         attributed_only: signals.attributed_only,
         files: selected,
@@ -651,12 +671,31 @@ pub fn select_files(
 /// 150-line function that carries it" are not the same claim. "test coverage"
 /// can be covered by an unexamined test directory, so a row with zero files and
 /// no example is a real state.
+///
+/// #6193: the `test coverage` row is the exception, and now the only one that
+/// is. Its `files_examined` is the census's enumerated test-file count and its
+/// `example` is the census line, because that dimension's answer is a property
+/// of the repository rather than of what the budget let the LLM read — two runs
+/// with different budgets used to report different test-coverage figures for an
+/// unchanged checkout.
 /// Test: `select_tests::{per_dimension_coverage_names_why_a_file_was_read,
-/// coverage_names_the_measured_function}`.
-fn per_dimension(selected: &[SelectedFile], covered: &[String]) -> Vec<DimensionCoverage> {
+/// coverage_names_the_measured_function,
+/// the_test_coverage_row_is_enumerated_not_sampled}`.
+fn per_dimension(
+    selected: &[SelectedFile],
+    covered: &[String],
+    census: &super::test_census::TestCensus,
+) -> Vec<DimensionCoverage> {
     covered
         .iter()
         .map(|dimension| {
+            if dimension == TEST_DIMENSION {
+                return DimensionCoverage {
+                    dimension: dimension.clone(),
+                    files_examined: census.test_files,
+                    example: Some(census.line()),
+                };
+            }
             let hits: Vec<&SelectedFile> = selected
                 .iter()
                 .filter(|f| f.dimensions.iter().any(|d| d == dimension))
@@ -757,7 +796,7 @@ fn coverage_split(selected: &[SelectedFile], all_files: &[PathBuf]) -> (Vec<Stri
     let mut covered = Vec::new();
     let mut absent = Vec::new();
     for &dim in DIMENSIONS {
-        let hit = if dim == "test coverage" {
+        let hit = if dim == TEST_DIMENSION {
             has_tests
         } else {
             selected

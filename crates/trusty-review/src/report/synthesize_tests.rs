@@ -2803,6 +2803,7 @@ fn control_routes_investigation() -> crate::report::investigate::Investigation {
             coverage: Default::default(),
             traces: None,
             verdicts: None,
+            exposure: Vec::new(),
         }],
     }
 }
