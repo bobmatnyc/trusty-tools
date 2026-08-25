@@ -45,6 +45,47 @@ fn run_hook(stdin_json: &str) -> (bool, String) {
     )
 }
 
+/// Run `tm hook` until its stderr contains `want`, or a generous deadline
+/// expires; returns the stderr that satisfied the condition.
+///
+/// Why (#6161): `tm hook` bounds its own work with two fail-open internal
+/// timeouts so it can never block the user's prompt — a 500ms stdin read
+/// (`read_stdin_hook_payload`) and a 300ms detection ceiling
+/// (`detect_idle_parking_from_payload`). Under concurrent suite load either can
+/// elapse, and the hook then exits 0 having written NOTHING to stderr. That is
+/// correct production behaviour, and it is indistinguishable from a real
+/// regression to a test that reads stderr exactly once — which is how this
+/// suite failed with `got: ""` on an otherwise-green commit.
+/// What: re-invokes the hook until `want` appears, checking the fail-open
+/// `exit 0` invariant on every attempt (that one must hold unconditionally, so
+/// it is never retried past). Deadline expiry panics with the attempt count and
+/// the last stderr observed, so a genuine regression still fails loudly rather
+/// than looping.
+/// Test: used by `hook_flags_idle_parking_final_message_on_subagent_stop` and
+/// `hook_flags_idle_parking_on_main_stop`.
+fn run_hook_until_stderr_contains(stdin_json: &str, want: &str) -> String {
+    const DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+    let start = std::time::Instant::now();
+    let mut attempts = 0usize;
+    loop {
+        let (ok, stderr) = run_hook(stdin_json);
+        attempts += 1;
+        assert!(
+            ok,
+            "hook must exit 0 (fail-open) on every attempt, stderr={stderr}"
+        );
+        if stderr.contains(want) {
+            return stderr;
+        }
+        assert!(
+            start.elapsed() < DEADLINE,
+            "`tm hook` never wrote {want:?} to stderr within {DEADLINE:?} \
+             ({attempts} attempts); last stderr: {stderr:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
 /// Write a single-line JSONL transcript with one assistant message and return
 /// the temp file (kept alive by the caller so the path stays valid).
 fn transcript_with_assistant(text: &str) -> tempfile::NamedTempFile {
@@ -72,12 +113,11 @@ fn hook_flags_idle_parking_final_message_on_subagent_stop() {
     let tf = transcript_with_assistant(
         "I've started a background polling monitor for the checks and will report back once green.",
     );
-    let (ok, stderr) = run_hook(&payload("SubagentStop", tf.path()));
-
-    assert!(ok, "hook must exit 0 (fail-open), stderr={stderr}");
-    assert!(
-        stderr.contains("IDLE-PARKING WARNING (#2610)"),
-        "expected idle-parking warning on stderr, got: {stderr:?}"
+    // #6161: poll for the warning rather than racing the hook's fail-open
+    // internal timeouts — see `run_hook_until_stderr_contains`.
+    let stderr = run_hook_until_stderr_contains(
+        &payload("SubagentStop", tf.path()),
+        "IDLE-PARKING WARNING (#2610)",
     );
     assert!(
         stderr.contains("session=sess-2610"),
@@ -88,13 +128,9 @@ fn hook_flags_idle_parking_final_message_on_subagent_stop() {
 #[test]
 fn hook_flags_idle_parking_on_main_stop() {
     let tf = transcript_with_assistant("Standing by for the CI run to complete.");
-    let (ok, stderr) = run_hook(&payload("Stop", tf.path()));
-
-    assert!(ok, "hook must exit 0 (fail-open), stderr={stderr}");
-    assert!(
-        stderr.contains("IDLE-PARKING WARNING (#2610)"),
-        "expected idle-parking warning on stderr for Stop, got: {stderr:?}"
-    );
+    // #6161: same fail-open-timeout race as the SubagentStop case above.
+    let _stderr =
+        run_hook_until_stderr_contains(&payload("Stop", tf.path()), "IDLE-PARKING WARNING (#2610)");
 }
 
 #[test]
