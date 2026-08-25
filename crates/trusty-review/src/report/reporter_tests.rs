@@ -1693,6 +1693,104 @@ fn the_instructions_note_names_the_file_and_the_guards() {
     assert!(!bare_md.contains("## Analyst Instructions"), "{bare_md}");
 }
 
+/// #6189: a guard that withholds an instruction-driven claim used to be visible
+/// only in Synthesis Status at the end of the document, so the 2026-08-23 live
+/// test of #6180 found the withholding correct and easy to miss. The Analyst
+/// Instructions section now raises the count where the operator is looking.
+///
+/// Assert the count, the pointer to the list, and the list itself in one body:
+/// a notice naming a number no reader can go and check would be worse than
+/// none.
+#[test]
+fn the_instructions_section_counts_withheld_claims() {
+    use crate::report::instructions::Instructions;
+    use crate::report::synthesize::{StatusNote, Synthesis};
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    std::fs::write(tmp.path().join("acme.json"), "{}").expect("metrics");
+    let toml = "[report]\ntitle = \"Acme\"\n\n[[repositories]]\nname = \"Acme Web\"\npath = \"/nonexistent/x\"\nmetrics = \"acme.json\"\n";
+    let manifest_path = tmp.path().join("manifest.toml");
+    let manifest = parse_manifest(toml, &manifest_path).expect("manifest");
+    let instr = Instructions {
+        text: "Weigh secrets handling above all.".to_string(),
+        source: tmp.path().join("instructions.md"),
+    };
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("template");
+
+    let mut model = ReportModel::build(
+        &manifest,
+        &manifest_path,
+        "report-technical-dd",
+        Some(&instr),
+    )
+    .expect("model");
+    model.synthesis = Some(Synthesis {
+        notes: vec![
+            StatusNote::plain("the model's executive summary was withheld — no evidence")
+                .withheld(),
+            StatusNote::plain("the model's security summary was withheld — no evidence").withheld(),
+            // A routing note is not a withholding and must not be counted.
+            StatusNote::plain("synthesis routed the authorship narrative to section 5"),
+        ],
+        ..Default::default()
+    });
+
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+    let section = md
+        .split("## Analyst Instructions")
+        .nth(1)
+        .expect("instructions section")
+        .split("## 1.")
+        .next()
+        .expect("body before §1");
+    assert!(
+        section.contains("2 synthesized claims were withheld"),
+        "the notice must count only the withholdings:\n{section}"
+    );
+    assert!(
+        section.contains("Synthesis Status"),
+        "the notice must point at the list that names them:\n{section}"
+    );
+    assert!(
+        md.contains("## Synthesis Status"),
+        "the list the notice points at must exist:\n{md}"
+    );
+}
+
+/// The silent half: a run whose guards refused nothing renders the Analyst
+/// Instructions section exactly as it did before #6189.
+#[test]
+fn the_instructions_section_is_silent_when_nothing_was_withheld() {
+    use crate::report::instructions::Instructions;
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    std::fs::write(tmp.path().join("acme.json"), "{}").expect("metrics");
+    let toml = "[report]\ntitle = \"Acme\"\n\n[[repositories]]\nname = \"Acme Web\"\npath = \"/nonexistent/x\"\nmetrics = \"acme.json\"\n";
+    let manifest_path = tmp.path().join("manifest.toml");
+    let manifest = parse_manifest(toml, &manifest_path).expect("manifest");
+    let instr = Instructions {
+        text: "Weigh secrets handling above all.".to_string(),
+        source: tmp.path().join("instructions.md"),
+    };
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("template");
+    let model = ReportModel::build(
+        &manifest,
+        &manifest_path,
+        "report-technical-dd",
+        Some(&instr),
+    )
+    .expect("model");
+
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+    assert!(md.contains("## Analyst Instructions"), "{md}");
+    assert!(!md.contains("were withheld by those checks"), "{md}");
+    assert!(!md.contains("was withheld by those checks"), "{md}");
+}
+
 /// Why: #2342.2 — Section 3 self-describes trusty-review's own scoring model; it
 /// must never render as "not stated".
 /// What: renders the generic template and asserts the normalized-band text.
