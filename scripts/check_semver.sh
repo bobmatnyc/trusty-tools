@@ -879,6 +879,34 @@ verdict_computed() {
   return 0
 }
 
+# emit_verdict_line <checked> <skipped> <inventoried> <blind> — restate the run's
+# tallies in a fixed, machine-readable shape.
+#
+# Why: `.github/workflows/semver-checks.yml` has to tell "compared and found
+#   nothing" apart from "declined to compare" and from "tried and could not", so
+#   its GitHub check stops rendering all three as the same green
+#   (issue #5688; PR #5686 shipped a real break under one of them). The gate
+#   already holds those numbers; the workflow reading them out of the prose
+#   SUMMARY line would be a SECOND parser of a format
+#   `scripts/preflight-publish.sh` CHECK 5 already parses, free to drift from it.
+#   This is the one that is meant to be parsed.
+#
+# What: one line on stdout, alongside the human summary and never instead of it.
+#   `compared` is the number of crates whose API was actually examined — the
+#   PASS/FAIL arm and the advisory INVENTORY arm both examine one — so a
+#   consumer needs no knowledge of the arms to ask the only question that
+#   matters. Deliberately carries neither `crate(s) checked` nor `N checks:`,
+#   the substrings CHECK 5 and verdict_computed grep for, so adding it cannot
+#   shift either of their answers.
+#
+# Test: `scripts/check_semver_selftest.sh` — the already-breaking, blind and
+#   404-skip cases each assert the counts this line reports.
+emit_verdict_line() {
+  local checked="$1" skipped="$2" inventoried="$3" blind="$4"
+  printf 'semver-gate-verdict: compared=%d examined=%d skipped=%d inventoried=%d blind=%d\n' \
+    "$((checked + inventoried))" "$checked" "$skipped" "$inventoried" "$blind"
+}
+
 # no_verdict_because — one clause naming why verdict_computed refused, so the two
 # causes never share a message. "it never ran" and "it ran and skipped every
 # lint" have different remedies, and #5440 is the second one.
@@ -987,6 +1015,7 @@ fi
 
 if [[ -z "$CANDIDATES" ]]; then
   echo "semver gate: scanned ${SCANNED}; no crate source changed (docs-only / CI-only) — OK."
+  emit_verdict_line 0 0 0 0
   exit 0
 fi
 
@@ -1298,3 +1327,4 @@ if [[ "$inventory_blind" -ne 0 ]]; then
   SUMMARY="${SUMMARY}, ${inventory_blind} inventory NOT computed"
 fi
 echo "${SUMMARY} — OK."
+emit_verdict_line "$checked" "$skipped" "$inventoried" "$inventory_blind"
