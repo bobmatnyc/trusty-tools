@@ -250,6 +250,10 @@ pub async fn refactor_suggestions(
             chunk.start_line as u32,
             chunk.end_line as u32,
             chunk.function_name.as_deref(),
+            // #6177: a Python class body and a nameless function body were
+            // indistinguishable downstream. The chunk's own opening definition
+            // line tells them apart.
+            crate::core::classify_region(&chunk.file, &chunk.content),
             &metrics,
             &smells,
         );

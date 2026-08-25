@@ -15,6 +15,7 @@
 //! grade F + LongFunction (Critical + ExtractMethod), and severity bump
 //! (grade C + 3 smells → High).
 
+use crate::core::region_kind::RegionKind;
 use crate::types::{CodeSmell, ComplexityGrade, ComplexityMetrics};
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +27,19 @@ pub struct RefactorSuggestion {
     pub line_start: u32,
     pub line_end: u32,
     pub function_name: Option<String>,
+    /// What kind of region was measured, when the analyzer can tell (#6177).
+    ///
+    /// Why: a hotspot's remediation only makes sense once the reader knows what
+    /// was measured. A Python `class Foo:` body and a nameless function body
+    /// were indistinguishable downstream — both arrived with `function_name:
+    /// None` — so a class body got "extract the body of this function", which is
+    /// not an action anyone can take against one.
+    /// What: `Some` only for Python today; `None` for every other language,
+    /// which leaves their payloads byte-identical and their consumers unchanged.
+    /// Test: `crate::core::region_kind::tests`, and
+    /// `service::handlers::analysis::tests::refactor_suggestions_carry_the_python_region_kind`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region_kind: Option<RegionKind>,
     pub refactor_type: RefactorType,
     pub severity: Severity,
     pub rationale: String,
@@ -190,6 +204,9 @@ fn rationale_for(metrics: &ComplexityMetrics, smells: &[CodeSmell]) -> String {
 /// "metrics + smells" to "actionable advice". Centralising avoids divergence.
 /// What: returns one suggestion when the grade is B–F, with severity bumped if
 /// 3+ smells are present. Returns an empty vector for grade A (clean code).
+/// `region_kind` (#6177) is carried through verbatim — this engine does not
+/// classify, it only records what the caller measured — so a `None` produces a
+/// payload byte-identical to the pre-#6177 one.
 /// Test: see `mod tests` — covers grade A, grade B, grade F + smell, and
 /// severity bump.
 #[allow(clippy::too_many_arguments)]
@@ -199,6 +216,7 @@ pub fn analyze(
     line_start: u32,
     line_end: u32,
     function_name: Option<&str>,
+    region_kind: Option<RegionKind>,
     metrics: &ComplexityMetrics,
     smells: &[CodeSmell],
 ) -> Vec<RefactorSuggestion> {
@@ -225,6 +243,7 @@ pub fn analyze(
         line_start,
         line_end,
         function_name: function_name.map(str::to_string),
+        region_kind,
         refactor_type,
         severity,
         rationale,
@@ -251,14 +270,14 @@ mod tests {
     #[test]
     fn grade_a_emits_no_suggestion() {
         let m = metrics(2); // grade A
-        let s = analyze("c1", "f.rs", 1, 10, Some("clean"), &m, &[]);
+        let s = analyze("c1", "f.rs", 1, 10, Some("clean"), None, &m, &[]);
         assert!(s.is_empty(), "grade A should not produce suggestions");
     }
 
     #[test]
     fn grade_b_no_smells_emits_low_suggestion() {
         let m = metrics(7); // grade B
-        let s = analyze("c2", "f.rs", 1, 20, Some("ok_fn"), &m, &[]);
+        let s = analyze("c2", "f.rs", 1, 20, Some("ok_fn"), None, &m, &[]);
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].severity, Severity::Low);
         assert_eq!(s[0].complexity_before, Some(7));
@@ -269,7 +288,7 @@ mod tests {
         let mut m = metrics(30); // grade F
         m.smells = vec![CodeSmell::LongFunction { lines: 120 }];
         let smells = m.smells.clone();
-        let s = analyze("c3", "f.rs", 1, 200, Some("god_fn"), &m, &smells);
+        let s = analyze("c3", "f.rs", 1, 200, Some("god_fn"), None, &m, &smells);
         assert_eq!(s.len(), 1);
         let sug = &s[0];
         assert_eq!(sug.severity, Severity::Critical);
@@ -290,7 +309,7 @@ mod tests {
             CodeSmell::MissingDocstring,
         ];
         let smells = m.smells.clone();
-        let s = analyze("c4", "f.rs", 1, 50, Some("messy_fn"), &m, &smells);
+        let s = analyze("c4", "f.rs", 1, 50, Some("messy_fn"), None, &m, &smells);
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].severity, Severity::High);
         // First smell wins: DeepNesting → ReduceNesting.
@@ -302,7 +321,7 @@ mod tests {
         let mut m = metrics(11); // grade C
         m.smells = vec![CodeSmell::TooManyParams { count: 9 }];
         let smells = m.smells.clone();
-        let s = analyze("c5", "f.rs", 1, 30, Some("wide_fn"), &m, &smells);
+        let s = analyze("c5", "f.rs", 1, 30, Some("wide_fn"), None, &m, &smells);
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].refactor_type, RefactorType::IntroduceParameterObject);
         // complexity_after is None for non-ExtractMethod refactors.
@@ -326,7 +345,7 @@ mod tests {
             CodeSmell::MissingDocstring,
         ];
         let smells = m.smells.clone();
-        let s = analyze("c6", "f.rs", 1, 200, Some("worst"), &m, &smells);
+        let s = analyze("c6", "f.rs", 1, 200, Some("worst"), None, &m, &smells);
         assert_eq!(s[0].severity, Severity::Critical);
     }
 }

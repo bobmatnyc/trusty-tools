@@ -160,3 +160,74 @@ fn smells_pagination_offset_beyond_total_returns_empty() {
     assert_eq!(returned, 0);
     assert!(!truncated, "should not be truncated when page is empty");
 }
+
+/// #6177: the refactor payload must carry what kind of region was measured, or a
+/// Python class body reaches the report indistinguishable from a nameless
+/// function — which is how it got "extract the body of this function".
+///
+/// The handler's own path is `analyze_refactor(.., classify_region(file,
+/// content), ..)`; this exercises that pair and asserts the field survives
+/// serialisation under the wire name the report reads.
+#[test]
+fn refactor_suggestions_carry_the_python_region_kind() {
+    use crate::core::{analyze_refactor, classify_region, RegionKind};
+    use crate::types::{CodeSmell, ComplexityGrade, ComplexityMetrics};
+
+    let chunk = make_chunk(
+        "app/models.py:12:615",
+        "app/models.py",
+        "class Order:\n    def total(self):\n        return 0\n",
+    );
+    let metrics = ComplexityMetrics {
+        cyclomatic: 40,
+        cognitive: 40,
+        grade: ComplexityGrade::F,
+        smells: vec![CodeSmell::LongFunction { lines: 603 }],
+    };
+    let smells = metrics.smells.clone();
+
+    let out = analyze_refactor(
+        &chunk.id,
+        &chunk.file,
+        chunk.start_line as u32,
+        chunk.end_line as u32,
+        chunk.function_name.as_deref(),
+        classify_region(&chunk.file, &chunk.content),
+        &metrics,
+        &smells,
+    );
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].region_kind, Some(RegionKind::ClassBody));
+
+    let json = serde_json::to_string(&out[0]).expect("serialises");
+    assert!(json.contains("\"region_kind\":\"class_body\""), "{json}");
+}
+
+/// Every other language keeps its pre-#6177 payload: the key is absent, so a
+/// consumer reading the JSON sees exactly what it saw before.
+#[test]
+fn a_rust_region_emits_no_region_kind_key() {
+    use crate::core::{analyze_refactor, classify_region};
+    use crate::types::{ComplexityGrade, ComplexityMetrics};
+
+    let chunk = make_chunk("src/lib.rs:1:10", "src/lib.rs", "impl Store {\n}\n");
+    let metrics = ComplexityMetrics {
+        cyclomatic: 40,
+        cognitive: 40,
+        grade: ComplexityGrade::F,
+        smells: vec![],
+    };
+    let out = analyze_refactor(
+        &chunk.id,
+        &chunk.file,
+        1,
+        10,
+        None,
+        classify_region(&chunk.file, &chunk.content),
+        &metrics,
+        &[],
+    );
+    assert_eq!(out[0].region_kind, None);
+    let json = serde_json::to_string(&out[0]).expect("serialises");
+    assert!(!json.contains("region_kind"), "{json}");
+}

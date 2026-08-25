@@ -974,3 +974,73 @@ async fn enrich_ignores_repositories_with_no_local_checkout() {
             .is_empty()
     );
 }
+
+// ── #6177: the Python class-body region ─────────────────────────────────────
+
+/// A Python class body the daemon named as one.
+fn python_class_body(function_name: &str) -> WireRefactor {
+    let name = if function_name.is_empty() {
+        "null".to_string()
+    } else {
+        format!("\"{function_name}\"")
+    };
+    serde_json::from_str(&format!(
+        r#"{{ "file": "app/models.py", "function_name": {name},
+             "region_kind": "class_body", "refactor_type": "extract_method",
+             "severity": "critical",
+             "rationale": "cyclomatic complexity 118 (grade F); smells: long_function(603 lines)",
+             "suggested_action": "Extract the body of 'this function' (lines 12-615) into 2-3 smaller functions" }}"#
+    ))
+    .expect("wire refactor")
+}
+
+/// The Python half of the #6082 impl-block relabel. Extracting the body of a
+/// class is not an action a reader can take; moving its members out is.
+#[test]
+fn a_python_class_body_is_labelled_a_class_body() {
+    let f = refactor_finding(&python_class_body("")).expect("critical → amber");
+
+    assert_eq!(f.title, "Split oversized class body");
+    assert!(f.remediation.contains("Split the class body"), "{f:?}");
+    assert!(f.remediation.contains("(lines 12–615)"), "{f:?}");
+    assert!(
+        f.description.contains("long_class_body(603 lines)"),
+        "{f:?}"
+    );
+    assert!(!f.description.contains("long_function"), "{f:?}");
+    for field in [&f.title, &f.description, &f.remediation] {
+        assert!(!field.contains("this function"), "{field}");
+    }
+}
+
+/// A class body CAN carry a name, unlike the Rust impl-block case, so the
+/// daemon's answer about the region has to outrank the name-absent inference —
+/// a named class body would otherwise render as "Extract method — Order".
+#[test]
+fn a_named_python_class_body_is_named_in_its_remediation() {
+    let f = refactor_finding(&python_class_body("Order")).expect("critical → amber");
+    assert_eq!(f.title, "Split oversized class body");
+    assert!(f.remediation.contains("`Order`"), "{f:?}");
+}
+
+/// With neither a line range nor a rationale nothing distinguishes the region,
+/// so it is suppressed rather than mislabelled — the same rule
+/// `impl_block_finding` follows.
+#[test]
+fn an_unidentifiable_class_body_is_suppressed() {
+    let r: WireRefactor = serde_json::from_str(
+        r#"{ "file": "app/models.py", "region_kind": "class_body",
+             "refactor_type": "extract_method", "severity": "critical",
+             "rationale": "", "suggested_action": "Extract the body of 'this function'" }"#,
+    )
+    .expect("wire refactor");
+    assert!(refactor_finding(&r).is_none());
+}
+
+/// A daemon predating the field, or any non-Python language, renders exactly as
+/// it did before #6177.
+#[test]
+fn an_absent_region_kind_renders_as_before() {
+    let f = refactor_finding(&nameless_region()).expect("critical → amber");
+    assert_eq!(f.title, "Split oversized impl block");
+}
