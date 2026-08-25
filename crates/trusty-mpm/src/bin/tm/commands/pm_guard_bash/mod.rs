@@ -37,12 +37,18 @@ mod main_checkout;
 mod persistence;
 mod sed_awk;
 mod shell_lex;
+mod worktree_remove;
 
 pub(crate) use main_checkout::{
     CommitVerdict, docs_commit_deny_reason, evaluate_main_checkout_commit_command,
     evaluate_main_checkout_destructive_command, head_move_deny_reason, main_checkout_head_move,
 };
 pub(crate) use persistence::command_is_persistence_only;
+// #5791: worktree removal is PM-executed, so an agent's `git worktree remove`
+// denies. The sibling `worktree add` guard above is a different rule with a
+// different scope — that one is about WHERE a tree is provisioned, this one is
+// about WHO may destroy one.
+pub(crate) use worktree_remove::evaluate_worktree_remove_command;
 
 use std::path::{Path, PathBuf};
 

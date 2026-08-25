@@ -321,12 +321,27 @@ than edits. The guard reads this from the bundled agent's own frontmatter
 (`dispatch_isolation.rs`), so a custom or project-local agent it does not ship is
 never denied — declare `isolation: "worktree"` for one that writes.
 
-Cleanup after merge is the agent's own job, stated once in BASE-AGENT's Git
-Workflow section: worktree removed first (git refuses to delete a checked-out
-branch), then the local branch. The remote branch is usually already gone via
-`gh pr merge --delete-branch`; when it isn't, `git push origin --delete
-<branch>` goes last, since until the squash-merge lands the branch is the only
-durable copy of the workstream.
+🔴 **Cleanup after merge is the PM's to run, not the agent's (#5791, owner
+ruling 2026-08-19).** The agent reports the merged PR, the worktree path, and
+the branch, then stops; the PM confirms the work is done and reclaims the tree:
+
+```bash
+tm session prune-worktrees --merged-prs            # preview, the default
+tm session prune-worktrees --merged-prs --force    # reclaim
+```
+
+That pass spares any worktree still holding unsaved work, still claimed by a
+managed session, or still owned by a live agent, and it reports each one it
+spared with the reason. It removes the checkout only — the local branch stays,
+and the remote branch is usually already gone via `gh pr merge --delete-branch`.
+`tm hook --pm-guard` denies an agent-side `git worktree remove` and names this
+command as the remedy, so an agent that reaches for it gets redirected rather
+than silently blocked. BASE-AGENT's Git Workflow section states the agent's half.
+
+Two guards made this undelegable before the ruling and still do: an unisolated
+dispatch is denied as a second writer on the shared HEAD (#4480), and an
+isolated agent's git operations are confined to its own worktree, so it cannot
+act on the shared registry at all.
 
 **Escape hatch — a throwaway worktree.** If you genuinely need a clean tree to
 run one command — a baseline check, a bisect, a build against `origin/main` —
@@ -343,6 +358,10 @@ This escape hatch used to stash the main checkout, operate, then restore. The
 throwaway worktree needs no main checkout at all, and a run that dies partway
 through leaves every other tree exactly as it was instead of stranding
 uncommitted work in a stash entry a human has to go find (#4730).
+
+It is the PM's hatch, not an agent's. An agent does not create its own worktree
+(#5649), and the guard denies it the `remove` line outright (#5791). An agent
+that needs a clean tree asks the PM for one.
 
 Project-specific worktree hazards (binary-install caveats, code-signing caches,
 and the like) belong in the project's own reference docs, not here.

@@ -780,8 +780,11 @@ fn pm_guard_worktree_add_denial_is_not_budget_eligible() {
 
 #[test]
 fn pm_guard_allows_non_add_worktree_subcommands_and_ordinary_temp_usage() {
-    // list/remove/prune must never be blocked, and ordinary temp usage
-    // (mktemp, temp-file writes, cargo build artifacts) must keep working.
+    // list/remove/prune must never be blocked BY THE WORKTREE-ADD RULE, and
+    // ordinary temp usage (mktemp, temp-file writes, cargo build artifacts)
+    // must keep working. These payloads carry no subagent marker, so they are
+    // the PM's own calls; #5791 denies `remove` only to a subagent, and that
+    // arm has its own tests below.
     for command in [
         "git worktree list",
         "git worktree remove /tmp/wt-x",
@@ -955,6 +958,86 @@ fn pm_guard_subagent_keeps_its_working_tool_surface() {
     assert_eq!(run_pm_guard(edit, &[]).trim(), "");
     let read = r#"{"hook_event_name":"PreToolUse","agent_id":"agent-abc123","tool_name":"Read","tool_input":{"file_path":"/x/a.rs"}}"#;
     assert_eq!(run_pm_guard(read, &[]).trim(), "");
+}
+
+// ---------------------------------------------------------------------------
+// Agent-side worktree removal denial (issue #5791) —
+// `commands::pm_guard_bash::worktree_remove`.
+//
+// The pure policy is unit-tested in that module; these cases prove the caller
+// context resolves through the real binary and that the ruling's remedy
+// reaches the agent in the documented deny shape.
+// ---------------------------------------------------------------------------
+
+/// Assert the printed deny names the ruling and the command that replaces it.
+fn assert_worktree_remove_denied(stdout: &str) {
+    assert_denied(stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("deny stdout must be valid JSON");
+    let reason = parsed["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("reason is a string");
+    assert!(
+        reason.contains("#5791") && reason.contains("tm session prune-worktrees"),
+        "the worktree-removal deny must name the ruling and the PM's command, got: {reason}"
+    );
+}
+
+#[test]
+fn pm_guard_denies_worktree_remove_from_native_subagent() {
+    // The case the owner ruling exists for: an agent cleaning up after a merge
+    // it completed. It must fire AHEAD of Guard 4, which would otherwise exempt
+    // this exact payload.
+    let payload = r#"{"hook_event_name":"PreToolUse","agent_id":"agent-abc123","agent_type":"version-control","tool_name":"Bash","tool_input":{"command":"git worktree remove --force .claude/worktrees/agent-x"}}"#;
+    assert_worktree_remove_denied(&run_pm_guard(payload, &[]));
+}
+
+#[test]
+fn pm_guard_denies_worktree_remove_from_mpm_subagent_env() {
+    // trusty-agents spawns subagents as their own top-level Claude Code
+    // sessions, which carry no `agent_id`; without this arm the rule is a no-op
+    // for that whole class, and it must fire ahead of Guard 1.
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git worktree remove /some/tree"}}"#;
+    assert_worktree_remove_denied(&run_pm_guard(payload, &[("CLAUDE_MPM_SUB_AGENT", "1")]));
+}
+
+#[test]
+fn pm_guard_allows_worktree_remove_from_pm() {
+    // The ruling puts the PM in charge of the removal, so the PM's own call
+    // must pass silently — a regression here breaks the sanctioned path.
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git worktree remove --force .claude/worktrees/agent-x"}}"#;
+    assert_eq!(run_pm_guard(payload, &[]).trim(), "");
+}
+
+#[test]
+fn pm_guard_leaves_a_subagents_read_only_worktree_verbs_alone() {
+    // Only removal is cut. Reading and repairing the registry stay available,
+    // so an agent can still report what it found.
+    for command in ["git worktree list", "git worktree prune"] {
+        let payload = format!(
+            r#"{{"hook_event_name":"PreToolUse","agent_id":"agent-abc123","tool_name":"Bash","tool_input":{{"command":"{command}"}}}}"#
+        );
+        assert_eq!(
+            run_pm_guard(&payload, &[]).trim(),
+            "",
+            "expected allow for: {command}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_worktree_remove_yields_to_operator_escape_hatches() {
+    // Guards 2/3 are human escape hatches and stay ahead of every rule in the
+    // file, this one included.
+    let payload = r#"{"hook_event_name":"PreToolUse","agent_id":"agent-abc123","tool_name":"Bash","tool_input":{"command":"git worktree remove /some/tree"}}"#;
+    assert_eq!(
+        run_pm_guard(payload, &[("TRUSTY_MPM_DISABLE_HOOKS", "1")]).trim(),
+        ""
+    );
+    assert_eq!(
+        run_pm_guard(payload, &[("TRUSTY_MPM_PM_UNRESTRICTED", "1")]).trim(),
+        ""
+    );
 }
 
 // ---------------------------------------------------------------------------

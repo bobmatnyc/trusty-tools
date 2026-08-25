@@ -129,12 +129,12 @@ approval; it affects every contributor's build and debugging experience.
 **Worktree-lifecycle note:** this project's parallel-worktree discipline
 means every fresh `git worktree add` is a cold build — there is no shared
 `target/` to inherit. Don't delete a *live* worktree's `target/` mid-task
-expecting a quick rebuild. Cleanup today is **manual**, per the project
-`CLAUDE.md`'s Worktree Discipline section: once a worktree's PR merges, remove
-it with `git worktree remove --force <path>` (its `target/` goes with it).
-Automatic reclamation of merged-PR worktree `target/` dirs is a proposed
-follow-up (#2919) — it is not yet shipped; don't rely on it happening for
-you.
+expecting a quick rebuild. Reclaiming a merged worktree (and the `target/`
+inside it) is the PM's to run, never an agent's (#5791): `tm session
+prune-worktrees --merged-prs --force` sweeps the trees whose PR has landed
+(#2919), sparing any that still holds unsaved work or a live owner. Nothing
+runs it automatically, so a machine that has not had it run still carries every
+merged worktree's `target/`.
 
 Reference: <https://doc.rust-lang.org/cargo/reference/profiles.html#incremental>
 

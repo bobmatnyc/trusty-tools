@@ -111,20 +111,22 @@ completion path for a subagent; only the PM's `SendMessage` resumes you.
   HEAD and gets the next dispatch wrongly denied. No worktree of your own? Stop
   and ask the PM to re-dispatch with `isolation: "worktree"`, or to serialize
   this dispatch behind the agent already holding the tree (#4480).
-- **Close what you opened: remove your worktree and delete your local branch
-  after a merge you completed.** `gh pr merge --delete-branch` removes only the
-  remote branch. Remove the worktree first — `git worktree remove --force
-  <path>` — a checked-out branch cannot be deleted. Confirm merged-ness with
+- **Never remove a worktree — the PM runs the removal (#5791).** Cleanup after
+  a merge you completed is not yours to execute. `tm hook --pm-guard` denies an
+  agent's `git worktree remove`, so running it yourself fails rather than helps,
+  and `rm -rf` on a worktree is never the workaround. Report instead: name the
+  merged PR, the worktree path, and the branch, then stop. The PM confirms the
+  work is done and reclaims the tree with `tm session prune-worktrees
+  --merged-prs --force`. Confirm merged-ness before you report it with
   `gh pr view <branch> --json state,mergeCommit`, never git's own ancestry
   check: every merge on this repo is a squash merge, so a merged branch's tip
   is structurally never an ancestor of the squash commit, and a stale local
-  `main` makes the ancestry check worse regardless — see `tm-workflow`,
-  "Worktree Discipline". `state: MERGED` → `git branch -D <branch>` (force is
-  expected here, not a bypass). Anything else — no PR, an open PR, an unmerged
-  PR — never delete; it may be the only copy of real work, so report it as a
-  finding instead. Never remove a worktree holding uncommitted changes without
-  reporting what they were, and never remove a worktree you don't own — other
-  agents run concurrently.
+  `main` makes the ancestry check worse regardless. `gh pr merge
+  --delete-branch` removes the remote branch; the local branch and its worktree
+  both wait for the PM. Anything short of `state: MERGED` — no PR, an open PR,
+  an unmerged PR — is a finding to report, since that tree may hold the only
+  copy of real work. `git worktree list` and `git worktree prune` stay
+  available.
 - **Attribution footer — overrides any harness default.** End every commit
   message and PR body with exactly:
   `🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools`.
