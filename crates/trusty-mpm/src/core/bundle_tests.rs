@@ -1040,7 +1040,7 @@ fn idle_park_mitigation_2833_guidance_survives_composition() {
          guidance the prompt now points at (#2833)"
     );
     assert!(
-        skill.contains("## PM Re-Engagement (issues #2833, #4792)"),
+        skill.contains("## PM Re-Engagement (issues #2833, #4792, #5843)"),
         "tm-delegation-patterns must carry the PM Re-Engagement section the \
          prompt names by title (#2833, #4792)"
     );
