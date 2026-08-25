@@ -54,6 +54,17 @@
 					><code class="text-sm">tm gui</code> — an optional desktop shell over the same daemon.</span
 				>
 			</li>
+			<li class="flex gap-3">
+				<span aria-hidden="true" class="mt-[0.55em] h-1 w-1 shrink-0 bg-foundry-primary"></span>
+				<span
+					><code class="text-sm">tm wait</code> — poll a condition rather than sleep on it:
+					<code class="text-sm">--for run</code> until a process exits,
+					<code class="text-sm">--for file</code> until a sentinel appears (optionally containing a
+					string), <code class="text-sm">--for check</code> until a pull request's checks settle. It exits
+					0 when the condition holds and 75 while it is still pending, so an agent whose turn has a ceiling
+					re-runs the identical command instead of losing the wait.</span
+				>
+			</li>
 		</ul>
 	</div>
 
