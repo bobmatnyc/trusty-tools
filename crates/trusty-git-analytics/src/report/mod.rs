@@ -14,6 +14,8 @@ pub mod aggregator;
 // #5453/#6004: ownership/bus-factor/trajectory figures the DD report renders.
 pub mod authorship;
 pub mod dd_manifest;
+// #6190: folding a rebuilt manifest into one trusty-audit has already grounded.
+pub mod dd_manifest_merge;
 pub mod drilldown;
 pub mod errors;
 pub mod formatters;

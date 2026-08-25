@@ -95,6 +95,24 @@ pub struct AuditArgs {
     /// Limit collection to the last N ISO weeks.
     #[arg(long, value_name = "N")]
     pub weeks: Option<u32>,
+
+    /// Write the manifest and stop, leaving the report to a later render.
+    ///
+    /// Why (#6163): tga writes the manifest and renders from it inside one
+    /// process, and trusty-audit grounds that same manifest only after this
+    /// process exits — so the report it produced was always built from an
+    /// ungrounded file, with `inspect_priority`, `attributed_only`, and the
+    /// search-evidence ranking landing too late to reach it. This flag is what
+    /// lets a caller ground first and render second.
+    /// What: skips the `trusty-review report` invocation. Everything before it
+    /// — the sweep, the artifacts, the manifest — is unchanged, including the
+    /// preconditions this command checks up front, so a run that would have
+    /// rendered a report still refuses early if it could not have.
+    /// Test: `crate::audit::tests::{audit_args_parse_every_flag,
+    /// audit_runs_with_no_flags_at_all}` — the second pins the default, which
+    /// is the half that matters: a bare `tga audit` must still render.
+    #[arg(long)]
+    pub no_render: bool,
 }
 
 impl AuditArgs {
@@ -291,8 +309,24 @@ pub async fn run(config: Config, db: &mut Database, args: AuditArgs) -> anyhow::
     manifest.report.gaps.extend(authorship_gaps);
 
     let manifest_path = output.join(MANIFEST_FILE);
-    std::fs::write(&manifest_path, manifest.to_toml()?)?;
+    // #6190: trusty-audit's grounding pass writes `inspect_priority`,
+    // `crate_topology` and the `investigate_*` budget into this same file after
+    // this process exits, so a second run into a live engagement must fold into
+    // what is there rather than replace it.
+    let existing = read_existing_manifest(&manifest_path)?;
+    std::fs::write(
+        &manifest_path,
+        manifest.to_toml_merged(existing.as_deref())?,
+    )?;
     println!("\nManifest: {}", manifest_path.display());
+
+    // #6163: the caller asked for the manifest alone, because it grounds this
+    // file and renders it itself once the ranking is in place.
+    if args.no_render {
+        println!("Skipping the report render (--no-render).");
+        relay.finish().await;
+        return Ok(());
+    }
 
     let phase = announce(relay.bus(), PHASE_RENDER);
     let rendered = render_report(&manifest_path, &output).await;
@@ -344,6 +378,33 @@ fn fail_phase(progress: Option<&ProgressBus>, phase: &'static str, reason: Strin
 
 /// Filename of the DD manifest written into the audit's output directory.
 const MANIFEST_FILE: &str = "manifest.toml";
+
+/// The manifest already sitting where this run is about to write one (#6190).
+///
+/// Why: `manifest.toml` has a second writer, and losing what it put there is
+/// silent — the run exits 0 and the collapsed investigation only shows up in
+/// the delivered report. So an unreadable existing file is an error rather than
+/// a reason to fall through to a replacing write.
+/// What: `None` when nothing is there yet, which is the ordinary first-run case
+/// and every run inside a trusty-audit sweep (each repository gets its own
+/// output directory).
+/// Test: `super::super::report::dd_manifest_merge_tests` covers what happens to
+/// the text this returns.
+///
+/// # Errors
+///
+/// Propagates a read that fails for any reason other than the file's absence.
+fn read_existing_manifest(path: &Path) -> anyhow::Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(anyhow::Error::new(e).context(format!(
+            "the existing manifest at {} could not be read; it may carry investigation scope this \
+             run does not own, so it is not overwritten",
+            path.display()
+        ))),
+    }
+}
 
 /// Filename of the ticketing artifact, beside the manifest (#5405).
 const TICKETING_FILE: &str = "ticketing.json";

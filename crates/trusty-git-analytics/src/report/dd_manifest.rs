@@ -61,6 +61,18 @@ pub enum DdManifestError {
     /// The manifest could not be serialized as TOML.
     #[error("failed to serialize the DD manifest as TOML: {0}")]
     Serialize(#[from] toml::ser::Error),
+
+    /// An existing `manifest.toml` could not be merged into (#6190).
+    ///
+    /// Why: the only alternative is the replacing write this ticket removed, so
+    /// refusing is deliberate — a file this crate cannot parse is a file whose
+    /// contents it cannot promise to preserve.
+    /// Test: `super::dd_manifest_merge_tests::an_unparseable_manifest_is_refused_not_replaced`.
+    #[error(
+        "the existing manifest could not be merged into ({0}); move it aside and re-run rather \
+         than overwriting it — it may carry investigation scope this run does not own"
+    )]
+    MergeSource(String),
 }
 
 /// Engagement metadata for one audit run.
@@ -199,6 +211,28 @@ impl DdManifest {
     /// (a non-UTF-8 repository path is the only realistic case).
     pub fn to_toml(&self) -> Result<String, DdManifestError> {
         Ok(toml::to_string_pretty(self)?)
+    }
+
+    /// The TOML to write, given whatever the output directory already holds.
+    ///
+    /// Why (#6190): `manifest.toml` has a second writer — trusty-audit's
+    /// grounding pass — and this crate's write used to replace the whole file,
+    /// which silently discarded that pass's investigation scope. Routing every
+    /// write through one function is what keeps the replacing form from coming
+    /// back at a second call site.
+    /// What: [`super::dd_manifest_merge::merge_into`] when a manifest is already
+    /// there, [`Self::to_toml`] when the file is new.
+    /// Test: `super::dd_manifest_merge_tests`.
+    ///
+    /// # Errors
+    ///
+    /// [`DdManifestError::Serialize`], or [`DdManifestError::MergeSource`] when
+    /// `existing` is present but not readable as TOML.
+    pub fn to_toml_merged(&self, existing: Option<&str>) -> Result<String, DdManifestError> {
+        match existing {
+            Some(text) => super::dd_manifest_merge::merge_into(self, text),
+            None => self.to_toml(),
+        }
     }
 }
 
