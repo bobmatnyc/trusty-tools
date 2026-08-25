@@ -68,6 +68,24 @@ pub fn render(outcome: &Outcome) -> String {
             }
             out
         }
+        // #6159: `created` is the line that matters. A caller re-running `init`
+        // must be able to see that the key in its environment is NOT the key
+        // this engagement runs on, which "wrote the config" would hide.
+        Outcome::Initialized(report) => {
+            if !report.created {
+                return format!(
+                    "Engagement already configured: {}\n  (left as it is; delete it to start \
+                     over)\n",
+                    report.path.display()
+                );
+            }
+            let mut out = format!("Engagement created: {}\n", report.path.display());
+            for (crate_name, version) in &report.pins {
+                out.push_str(&format!("  pinned {crate_name} {version}\n"));
+            }
+            out.push_str("Next: taudit install, then taudit add repo <owner/name>\n");
+            out
+        }
         Outcome::WorkDir(report) => {
             // #5915: this used to say "everything this client wrote". Approving
             // a clone for indexing writes a row to `trusty-search`'s own

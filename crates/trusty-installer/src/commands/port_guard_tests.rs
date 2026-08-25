@@ -477,6 +477,37 @@ fn lsof_naming_a_pid_reports_it_held() {
     );
 }
 
+/// Why (#6264): the end-to-end shape of the reported failure. `tctl install`
+/// refused to bootstrap trusty-search with "port 7878 is held by pid 76275,
+/// which launchd does not supervise" while the launchd-supervised daemon was
+/// the actual listener — the PID in the message was a client connected to the
+/// daemon. Asserting through `decide` (not just the parser) is what pins the
+/// operator-visible outcome: the bootstrap must PROCEED.
+/// What: a dump carrying client rows ahead of the supervised listener
+/// classifies as `Held(listener)`, and `decide` with launchd running that same
+/// listener returns `Proceed`.
+/// Test: This is the test.
+#[test]
+fn a_supervised_listener_among_client_rows_is_the_holder() {
+    let holder = probe_port_holder_from(7878, Ok((LISTENER_AMONG_CLIENTS, "exit status: 0")));
+    assert_eq!(
+        holder,
+        PortHolder::Held(77860),
+        "the LISTEN holder is the daemon, not the client that connected to it"
+    );
+    assert_eq!(
+        decide(
+            "trusty-search",
+            7878,
+            &holder,
+            LaunchdOwner::Running(77860),
+            false
+        ),
+        PortVerdict::Proceed,
+        "a bootstrap over the supervised daemon's own port must not be refused"
+    );
+}
+
 /// Why: `lsof` missing from `PATH` or failing to spawn is an unanswerable
 /// probe, which the fail-closed contract turns into a refusal — never a pass.
 /// What: an `Err` observation classifies as `Unknown` relaying the cause.
@@ -506,15 +537,49 @@ fn unparseable_lsof_output_is_unknown() {
 
 // ── the lsof field parser ───────────────────────────────────────────────────
 
+/// A real `lsof -nP -iTCP:7878 -FpT` dump, captured on the reporting machine
+/// while the launchd-supervised trusty-search daemon served six live clients.
+///
+/// Why: the #6264 refusal named a PID that was never the listener, and a
+/// hand-written fixture could have encoded the wrong shape and agreed with the
+/// bug. The only edit to the captured bytes is the listener's PID, lowered from
+/// `19554` to `77860` so it sorts AFTER the clients — the ordering that makes
+/// the pre-fix `first()` pick a client. Clients `19554` and `19555` stand in
+/// for the trusty-review and trusty-analyze processes that were connected.
+const LISTENER_AMONG_CLIENTS: &str = "\
+p19554
+f13
+TST=ESTABLISHED
+TQR=0
+TQS=0
+p19555
+f9
+TST=ESTABLISHED
+TQR=0
+TQS=0
+p77860
+f10
+TST=LISTEN
+TQR=0
+TQS=0
+f71
+TST=ESTABLISHED
+TQR=0
+TQS=0
+";
+
 /// Why: the PID the refusal names comes straight out of this parser; a wrong
 /// PID makes the guard's remediation dangerous (it would tell an operator to
 /// kill the wrong process).
-/// What: parses a realistic `lsof -Fp` block and recovers the PID.
+/// What: parses a realistic `lsof -FpT` block and recovers the PID.
 /// Test: This is the test.
 #[test]
-fn parse_lsof_pids_reads_process_blocks() {
-    assert_eq!(parse_lsof_pids("p4242\n"), vec![4242]);
-    assert_eq!(parse_lsof_pids("p4242\np555\n"), vec![4242, 555]);
+fn parse_lsof_listen_pids_reads_process_blocks() {
+    assert_eq!(parse_lsof_listen_pids("p4242\nTST=LISTEN\n"), vec![4242]);
+    assert_eq!(
+        parse_lsof_listen_pids("p4242\nTST=LISTEN\np555\nTST=LISTEN\n"),
+        vec![4242, 555]
+    );
 }
 
 /// Why: `lsof` prints nothing when the filter matches no listener; that empty
@@ -523,21 +588,50 @@ fn parse_lsof_pids_reads_process_blocks() {
 /// What: empty and whitespace-only input parse to no pids.
 /// Test: This is the test.
 #[test]
-fn parse_lsof_pids_empty() {
-    assert!(parse_lsof_pids("").is_empty());
-    assert!(parse_lsof_pids("\n \n").is_empty());
+fn parse_lsof_listen_pids_empty() {
+    assert!(parse_lsof_listen_pids("").is_empty());
+    assert!(parse_lsof_listen_pids("\n \n").is_empty());
 }
 
-/// Why: `-Fp` is a request, not a guarantee — `lsof` still emits other field
+/// Why: `-FpT` is a request, not a guarantee — `lsof` still emits other field
 /// lines in some configurations, and a parser that accepted them would produce
 /// garbage PIDs (an `f` descriptor number read as a process id).
-/// What: only `p`-prefixed numeric lines are read; command/user/descriptor
-/// fields are ignored.
+/// What: only `p`-prefixed numeric lines are read as PIDs; command, user,
+/// descriptor and name fields are ignored.
 /// Test: This is the test.
 #[test]
-fn parse_lsof_pids_ignores_other_fields() {
-    let text = "p4242\ncmd-trusty-search\nu501\nf7\nn127.0.0.1:7878\n";
-    assert_eq!(parse_lsof_pids(text), vec![4242]);
+fn parse_lsof_listen_pids_ignores_other_fields() {
+    let text = "p4242\ncmd-trusty-search\nu501\nf7\nn127.0.0.1:7878\nTST=LISTEN\n";
+    assert_eq!(parse_lsof_listen_pids(text), vec![4242]);
+}
+
+/// Why (#6264): THE regression test. `lsof` lists processes in PID order, so a
+/// client connected TO the port that started before the daemon sorts ahead of
+/// it. The pre-fix parser returned every PID and the caller took the first, so
+/// the guard named a client as the port's holder — and since launchd does not
+/// supervise that client, `decide` produced the #4230 orphan refusal against a
+/// healthy install. Under the pre-fix parser this asserts `77860` and gets
+/// `19554`.
+/// What: a captured dump whose listener sorts last still yields the listener,
+/// and no client PID appears at all.
+/// Test: This is the test.
+#[test]
+fn parse_lsof_listen_pids_skips_client_connections() {
+    assert_eq!(parse_lsof_listen_pids(LISTENER_AMONG_CLIENTS), vec![77860]);
+}
+
+/// Why: an `lsof` build that reports no TCP state at all would otherwise make
+/// every visible holder invisible, turning a guard that names the squatter into
+/// one that can only say "something is there" — a worse refusal, not a safer
+/// one. `-sTCP:LISTEN` remains the filter in that case, exactly as before.
+/// What: a dump with no `TST=` line yields every PID in it.
+/// Test: This is the test.
+#[test]
+fn parse_lsof_listen_pids_without_state_fields_falls_back_to_every_pid() {
+    assert_eq!(
+        parse_lsof_listen_pids("p4242\nf7\np555\nf9\n"),
+        vec![4242, 555]
+    );
 }
 
 // ── port resolution ─────────────────────────────────────────────────────────

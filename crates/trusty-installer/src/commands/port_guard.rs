@@ -44,6 +44,15 @@
 //! the explicit [`ALLOW_FOREIGN_PORT_ENV`] operator override, which downgrades
 //! a refusal to a loud warning and is named in every refusal message.
 //!
+//! #6264: the probe reads `lsof`'s per-file TCP state and reports only a
+//! process holding the port in LISTEN. It used to take the first PID in the
+//! dump and trust `-sTCP:LISTEN` to have removed the clients connected TO the
+//! port; `lsof` lists in PID order, so a client older than the daemon sorted
+//! first and the guard refused a bootstrap over a process that was not holding
+//! the port at all. Every trusty daemon this guard covers still binds TCP
+//! (verified against each crate's source for #6264), so the port table itself
+//! is not stale — only the holder attribution was.
+//!
 //! Test: `port_guard_tests.rs` covers the full [`decide`] table (every
 //! holder × owner combination, both override states), the `lsof` parser, and
 //! the port-resolution precedence. The two subprocess probes are side-effecting
@@ -222,20 +231,62 @@ fn clear_recipe(port: u16, pid: u32) -> String {
     )
 }
 
-/// Extract listening PIDs from `lsof -F p` field output.
+/// Extract the PIDs that hold a LISTEN socket from `lsof -F pT` field output.
 ///
-/// Why: keeping the parse pure and separate from the spawn is what lets the
-/// `Unknown` (fail-closed) branch be reasoned about at all — output that
-/// exists but yields no PID is a parse failure, not an empty port.
-/// What: `lsof -F` emits one field per line, `p<pid>` starting each process
-/// block. Returns every parsed PID in order, ignoring all other field lines.
-/// Test: `parse_lsof_pids_reads_process_blocks`, `parse_lsof_pids_empty`,
-/// `parse_lsof_pids_ignores_other_fields`.
-pub fn parse_lsof_pids(text: &str) -> Vec<u32> {
-    text.lines()
-        .filter_map(|l| l.trim().strip_prefix('p'))
-        .filter_map(|n| n.trim().parse::<u32>().ok())
-        .collect()
+/// Why (#6264): the pre-fix parser returned EVERY PID in the dump and the
+/// caller took the first, trusting the `-sTCP:LISTEN` selector to have removed
+/// the client connections. A process connected TO the port is not a holder of
+/// it, and `lsof` lists processes in PID order, so any client with a lower PID
+/// than the daemon sorts ahead of it — the guard then accuses a client of
+/// squatting and refuses a bootstrap the supervised daemon would have survived.
+/// Reading `lsof`'s own per-file `TST=` state makes LISTEN the parser's
+/// decision instead of a selector's, so a dump that reaches this function with
+/// client rows still in it yields the listener.
+///
+/// What: `lsof -F` emits one field per line; `p<pid>` opens a process block,
+/// `f<fd>` opens a file within it, and `TST=<state>` carries that file's TCP
+/// state. A PID is returned only when one of its files is in `LISTEN`, in
+/// first-seen order, deduplicated (a daemon has several files on its port).
+/// When the dump carries NO `TST=` line at all — an `lsof` build that does not
+/// report TCP state — every PID is returned, which is exactly the pre-fix
+/// behaviour and keeps `-sTCP:LISTEN` as the only filter rather than
+/// classifying a visible holder as invisible.
+///
+/// Test: `parse_lsof_listen_pids_reads_process_blocks`,
+/// `parse_lsof_listen_pids_empty`, `parse_lsof_listen_pids_ignores_other_fields`,
+/// `parse_lsof_listen_pids_skips_client_connections`,
+/// `parse_lsof_listen_pids_without_state_fields_falls_back_to_every_pid`.
+pub fn parse_lsof_listen_pids(text: &str) -> Vec<u32> {
+    let mut current: Option<u32> = None;
+    let mut every: Vec<u32> = Vec::new();
+    let mut listening: Vec<u32> = Vec::new();
+    let mut saw_state = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(pid) = line
+            .strip_prefix('p')
+            .and_then(|n| n.trim().parse::<u32>().ok())
+        {
+            current = Some(pid);
+            if !every.contains(&pid) {
+                every.push(pid);
+            }
+        } else if let Some(state) = line.strip_prefix("TST=") {
+            saw_state = true;
+            if state.trim() == "LISTEN" {
+                if let Some(pid) = current {
+                    if !listening.contains(&pid) {
+                        listening.push(pid);
+                    }
+                }
+            }
+        }
+    }
+    if saw_state {
+        listening
+    } else {
+        every
+    }
 }
 
 /// The port range a member auto-walks when its default port is taken.
@@ -361,8 +412,11 @@ pub fn decide_over_range(
 /// culprit, but it can distinguish "nothing is there" from "something is there
 /// that I cannot see", which is exactly the missing bit.
 ///
-/// What: runs `lsof -nP -iTCP:<port> -sTCP:LISTEN -Fp`. A parseable PID →
-/// [`PortHolder::Held`] (the first; a port with several listeners is still not
+/// What: runs `lsof -nP -iTCP:<port> -sTCP:LISTEN -FpT`. The `T` field carries
+/// each file's TCP state, so [`parse_lsof_listen_pids`] can confirm LISTEN
+/// itself rather than trusting `-sTCP:LISTEN` to have filtered (#6264). A
+/// listening PID → [`PortHolder::Held`] (the first; a port with several
+/// listeners is still not
 /// ours). No PID → cross-check by binding `127.0.0.1:<port>`: a successful bind
 /// (immediately dropped) is the only thing that yields [`PortHolder::Free`];
 /// `AddrInUse` yields [`PortHolder::Unknown`] naming the invisible holder; any
@@ -381,7 +435,9 @@ pub fn decide_over_range(
 /// the interpretation of each outcome is covered through `decide`.
 fn probe_port_holder(port: u16) -> PortHolder {
     let lsof = std::process::Command::new("lsof")
-        .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-Fp"])
+        // #6264: `-FpT` adds the per-file TCP state so the LISTEN decision is
+        // this crate's, not the `-sTCP:LISTEN` selector's.
+        .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-FpT"])
         .output();
     let observation = match &lsof {
         Ok(out) => Ok((String::from_utf8_lossy(&out.stdout), out.status.to_string())),
@@ -410,26 +466,27 @@ fn probe_port_holder(port: u16) -> PortHolder {
 /// is precisely the non-root blindness, and makes deleting the cross-check a
 /// test failure.
 ///
-/// What: `Err` (spawn failure) → [`PortHolder::Unknown`]. A parseable PID →
-/// [`PortHolder::Held`]. Non-empty output with no parseable PID →
-/// `Unknown`. EMPTY output → defer to [`port_is_bindable`]; never `Free`
-/// directly.
+/// What: `Err` (spawn failure) → [`PortHolder::Unknown`]. A LISTENING PID →
+/// [`PortHolder::Held`]. Non-empty output naming no listener — unparseable
+/// text, or (since #6264) a dump carrying only client connections → `Unknown`.
+/// EMPTY output → defer to [`port_is_bindable`]; never `Free` directly.
 ///
 /// Test: `empty_lsof_output_on_an_occupied_port_is_unknown_not_free`,
 /// `empty_lsof_output_on_a_free_port_is_free`,
 /// `lsof_naming_a_pid_reports_it_held`, `lsof_spawn_failure_is_unknown`,
-/// `unparseable_lsof_output_is_unknown`.
+/// `unparseable_lsof_output_is_unknown`,
+/// `a_supervised_listener_among_client_rows_is_the_holder`.
 fn probe_port_holder_from(port: u16, observation: Result<(&str, &str), &str>) -> PortHolder {
     let (stdout, status) = match observation {
         Ok(v) => v,
         Err(e) => return PortHolder::Unknown(format!("could not run `lsof`: {e}")),
     };
-    if let Some(pid) = parse_lsof_pids(stdout).first() {
+    if let Some(pid) = parse_lsof_listen_pids(stdout).first() {
         return PortHolder::Held(*pid);
     }
     if !stdout.trim().is_empty() {
         return PortHolder::Unknown(format!(
-            "`lsof` printed output with no parseable pid (exit {status})"
+            "`lsof` printed output naming no LISTEN holder of port {port} (exit {status})"
         ));
     }
     // `lsof` named nobody. That is NOT proof the port is free — see this
