@@ -491,6 +491,45 @@ printf '# nothing here\n\n' > "${R}/crates/cratea/ui-dist/ui-source-hash.txt"
 commit_all "$R" "digest-less stamp"
 run_case "case22 stamp with no digest" 1 "STAMP-MISSING" "$R"
 
+# ---------------------------------------------------------------------------
+# Case 23 — #5936: every crate that builds its bundle IN PLACE must re-stamp
+# from its Vite config. Runs against THIS repo, not a fixture.
+#
+# `build.emptyOutDir: true` deletes the tracked ui-source-hash.txt on every
+# `pnpm build`, so the crates whose bundle_dir IS the Vite outDir
+# (<src_dir>/dist) need scripts/lib/vite-stamp-bundle.mjs wired in to put it
+# back. trusty-search is exempt and must stay exempt: it builds into ui/dist
+# and mirrors to a separate ui-dist/, which its Makefile's sync-ui stamps.
+#
+# This asserts the WIRING, not the stamping — the stamping itself is cases 20
+# and 21. #5936 recurred four times precisely because a fix that reached one
+# crate left the other two exposed, so the uniformity is what needs a gate.
+# ---------------------------------------------------------------------------
+WIRED_CHECKED=0
+while IFS="$(printf '\t')" read -r crate src_dir bundle_dir _rest; do
+  case "${crate:-}" in '' | \#*) continue ;; esac
+  # Only crates whose committed bundle is the Vite outDir are exposed.
+  [ "$bundle_dir" = "${src_dir}/dist" ] || continue
+  WIRED_CHECKED=$((WIRED_CHECKED + 1))
+  config="${REPO_ROOT}/${src_dir}/vite.config.js"
+  if [ ! -f "$config" ]; then
+    fail_case "case23 ${crate}: ${src_dir}/vite.config.js is missing"
+  elif ! grep -qF "stampUiBundle('${crate}')" "$config"; then
+    fail_case "case23 ${crate}: ${src_dir}/vite.config.js does not call stampUiBundle('${crate}')" \
+      "emptyOutDir deletes ${bundle_dir}/ui-source-hash.txt and nothing re-stamps it (#5936)."
+  else
+    pass_case "case23 ${crate} re-stamps its bundle from vite.config.js"
+  fi
+done < "${SCRIPT_DIR}/ui-bundle-manifest.tsv"
+
+# A loop that matched nothing would report all-clear having inspected nothing —
+# the vacuous-scan shape every case above exists to refuse.
+if [ "$WIRED_CHECKED" -eq 0 ]; then
+  fail_case "case23 inspected no crates — the manifest has no in-place bundle rows to check"
+else
+  pass_case "case23 inspected ${WIRED_CHECKED} in-place bundle crate(s)"
+fi
+
 echo
 echo "check-ui-bundle-freshness-selftest: ${PASSED} passed, ${FAILED} failed, ${SKIPPED} skipped"
 [ "$FAILED" -eq 0 ] || exit 1

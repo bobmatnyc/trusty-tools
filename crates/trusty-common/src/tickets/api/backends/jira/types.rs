@@ -204,18 +204,68 @@ pub(super) fn build_search_jql(project_key: &str, p: &SearchIssuesParams) -> Str
     jql
 }
 
+/// Resolve a milestone identifier to the JIRA version NAME that JQL matches on.
+///
+/// Why: JQL compares a QUOTED `fixVersion` term against the version NAME, and a
+/// numeric version id only matches when the term is UNQUOTED. The #6198 escaping
+/// quotes every term, so an id passed straight through matched nothing.
+/// Unquoting would reopen the injection, so the id is resolved to its name here
+/// instead.
+/// What: scans the `GET /project/{key}/versions` array for a version whose `id`
+/// equals `milestone`, then falls back to one whose `name` equals it so a caller
+/// that already passes a name keeps working. A miss is an error, never an empty
+/// result — an empty issue list is indistinguishable from a real milestone that
+/// happens to have no issues.
+/// Test: `super::tests::resolve_version_name_maps_numeric_id`,
+/// `resolve_version_name_accepts_numeric_json_id`,
+/// `resolve_version_name_prefers_id_over_name`,
+/// `resolve_version_name_accepts_direct_name`,
+/// `resolve_version_name_errors_on_unknown_id`,
+/// `resolve_version_name_errors_on_non_array`.
+pub(super) fn resolve_version_name(versions: &Value, milestone: &str) -> Result<String> {
+    let Some(arr) = versions.as_array() else {
+        bail!("jira: project versions response was not an array");
+    };
+    // JIRA Cloud sends ids as strings; accept a bare number defensively.
+    fn field(v: &Value, key: &str) -> Option<String> {
+        match v.get(key) {
+            Some(Value::String(s)) => Some(s.clone()),
+            Some(Value::Number(n)) => Some(n.to_string()),
+            _ => None,
+        }
+    }
+    let matched = arr
+        .iter()
+        .find(|v| field(v, "id").as_deref() == Some(milestone))
+        .or_else(|| {
+            arr.iter()
+                .find(|v| field(v, "name").as_deref() == Some(milestone))
+        });
+    let Some(version) = matched else {
+        bail!("jira: no project version matches milestone '{milestone}'");
+    };
+    match field(version, "name") {
+        Some(name) if !name.is_empty() => Ok(name),
+        _ => bail!("jira: project version '{milestone}' has no name for fixVersion to match"),
+    }
+}
+
 /// Build the JQL for `Backend::get_milestone_issues`.
 ///
-/// Why: `id` arrives from the MCP `milestone_id` string arg — an attacker trust
-/// boundary. The prior `fixVersion = {id}` was UNQUOTED and unescaped, so
-/// `id = "1 OR project = SECRET"` needed no quote-breakout at all — the bare
-/// `OR` clause injected directly and read another project's issues (#6198).
+/// Why: `version_name` arrives from the MCP `milestone_id` string arg — an
+/// attacker trust boundary. The prior `fixVersion = {id}` was UNQUOTED and
+/// unescaped, so `id = "1 OR project = SECRET"` needed no quote-breakout at all —
+/// the bare `OR` clause injected directly and read another project's issues
+/// (#6198).
 /// What: wraps the value in quotes AND escapes it, so it is one self-contained
-/// JQL string literal a `"` cannot break out of.
+/// JQL string literal a `"` cannot break out of. The quote makes the term match
+/// on version NAME, which is why the caller resolves an id through
+/// `resolve_version_name` first.
 /// Test: `super::tests::milestone_issues_jql_escapes_injection`,
-/// `milestone_issues_jql_escapes_embedded_quote`, `milestone_issues_jql_legit_value`.
-pub(super) fn build_milestone_issues_jql(id: &str) -> String {
-    format!("fixVersion = \"{}\"", escape_jql_string(id))
+/// `milestone_issues_jql_escapes_embedded_quote`, `milestone_issues_jql_legit_value`,
+/// `milestone_jql_uses_resolved_name`, `resolved_name_needing_escape_stays_quoted`.
+pub(super) fn build_milestone_issues_jql(version_name: &str) -> String {
+    format!("fixVersion = \"{}\"", escape_jql_string(version_name))
 }
 
 /// Build the JQL for `Backend::get_epic_issues`.
