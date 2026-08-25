@@ -16,7 +16,10 @@
   ADR-0034 and ADR-0035 are the records of the amendments.
   Its `0600` access-control premise is separately corrected by
   [#5099](https://github.com/bobmatnyc/trusty-tools/issues/5099) — see the
-  correction note in Consequences.
+  correction note in Consequences. A **Design Principle** section was added
+  2026-08-25 (owner clarification, not a new ADR) restating this ADR's
+  Decision in the owner's own words, for discoverability — see that section
+  below.
 - **Date:** 2026-08-07
 - **Accepted:** 2026-08-07 (owner ruling, verbatim below)
 - **Scope:** Workspace-wide (every trusty-\* daemon that currently binds HTTP:
@@ -32,6 +35,26 @@
   `tm 1.3.5` criterion (c)
 - **Supersedes / Superseded by:** **Supersedes ADR-0018.** Ratifies
   ADR-0031 (Proposed) as the mechanism — see Related Decisions.
+
+## Design Principle
+
+> 🔴 **Owner clarification, 2026-08-25.** Restating the Decision below in
+> the owner's own words, for discoverability — this adds no new decision;
+> it states the one already in force, in one paragraph, where a service
+> author will find it before reading the rest of this ADR. The owner's
+> framing: "these services are designed to be fast local services that can
+> be extended to web via a shared daemon, console." Concretely: **every
+> trusty-\* service is a fast local service that speaks UDS (Unix domain
+> sockets) for all inter-service and multi-client traffic; no trusty-\*
+> service binds its own HTTP listener; `trusty-console` is the one shared
+> daemon that extends any of them to the web, over HTTP, when web or
+> external access is actually needed.** If you are writing a new trusty-\*
+> service, or adding a capability to an existing one, and you find yourself
+> reaching for `axum`, a TCP listener, or an HTTP client to reach another
+> trusty-\* crate: that capability speaks UDS internally, and reaches the
+> web (if it needs to at all) only by routing through console — see the
+> Decision section below for the full ruling, and Consequences for what
+> that costs.
 
 ## Context
 

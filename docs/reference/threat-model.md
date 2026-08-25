@@ -28,6 +28,14 @@ reached each one directly.
 
 ## The doctrine, in one paragraph
 
+🔴 **Read this first — the paragraph below documents ADR-0018, which is
+superseded.** The live design principle is
+[ADR-0032's Design Principle section](../adr/0032-no-service-owns-http-console-is-the-only-http-surface.md#design-principle):
+every trusty-\* service is a fast local service that speaks UDS, and
+`trusty-console` is the one shared daemon that extends any of them to the
+web over HTTP. Start a new service, or add a capability to an existing one,
+by reading that paragraph before this section's ADR-0018 history.
+
 **[ADR-0018 — Loopback-only doctrine](../adr/0018-loopback-only-doctrine.md)**
 (amending [ADR-0011](../adr/0011-tctl-owns-service-lifecycle.md)) is the
 controlling decision: `trusty-console` is the only daemon allowed to bind an
