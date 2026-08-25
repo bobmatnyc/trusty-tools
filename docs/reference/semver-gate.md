@@ -550,6 +550,42 @@ together**, and each outcome gets its own label:
 because the reason is a fact about the crate that is already recorded in a
 reviewable file — but it says `NOT VERIFIED`, because nothing looked at the API.
 
+### The same question, asked of the GitHub check ([#5688](https://github.com/bobmatnyc/trusty-tools/issues/5688))
+
+The four labels above were CHECK 5's alone. The `Public API / SemVer` check on a
+pull request had none: a run that compared a crate and found nothing wrong and a
+run that never looked both rendered as `Public API / SemVer — pass`, same name,
+same colour, the distinction visible only inside a job log nobody opens on a
+green tick. [PR #5686](https://github.com/bobmatnyc/trusty-tools/pull/5686)
+shipped a real break under that tick — a public field added to `SearchAppState`
+without `#[non_exhaustive]` — and a human caught it, not the gate.
+
+`check_semver.sh` now prints its tallies in a fixed shape beside the human
+summary, and `semver-checks.yml` turns them into a sentence:
+
+```
+semver-gate-verdict: compared=1 examined=1 skipped=0 inventoried=0 blind=0
+```
+
+`compared` is the number of crates whose public API was actually examined — the
+pass/fail arm and the advisory inventory arm both examine one. That sentence
+becomes the name of a second, deliberately **unrequired** `verdict` job, so it
+reads in `gh pr checks` and in the merge box without opening anything:
+
+| Check name | What happened |
+|---|---|
+| `SemVer: no comparison ran — this branch declares no version bump` | the #5311 short-circuit. Nothing examined the API |
+| `SemVer: N crate(s) compared, no break` | a real comparison, clean |
+| `SemVer: N crate(s) compared — M advisory inventory (breaking bump)` | compared, and the findings are permitted by the declared bump |
+| `SemVer: INCOMPLETE — N crate(s) could not be compared` | reached `cargo-semver-checks` and got no inventory back (exit 101, a missing native toolchain) |
+| `SemVer: NO COMPARISON — every selected crate was skipped` | every selection was a recorded skip |
+| `SemVer: BREAK` / `SemVer: NO VERDICT` | the gate job's own two failure states |
+
+The gate job keeps the name `Public API / SemVer` and keeps reporting `success`
+on the no-bump path. That name is the branch-protection context, and a context
+whose name moves is a context that never reports — which is the deadlock #5311
+exists to avoid. The sentence rides on the extra job instead.
+
 ### The override, and what it is not for
 
 ```bash

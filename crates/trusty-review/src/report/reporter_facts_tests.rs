@@ -257,3 +257,55 @@ fn complexity_gap_carries_the_lane_remedy() {
     );
     assert!(!rendered.contains("re-run with"), "rendered: {rendered}");
 }
+
+// ─── #6192: the counting-basis footnote ──────────────────────────────────────
+
+/// Render just the footnote placeholder for one model.
+fn counting_note(model: &ReportModel) -> String {
+    let mut scope = Scope::new();
+    fill_key_facts(&mut scope, model);
+    crate::report::fill::render("{{facts_counting_note}}", &scope)
+}
+
+/// A metrics-supplied count names the analyze artifact as the counter.
+#[test]
+fn counting_note_names_the_metrics_counter() {
+    let metrics = AnalyzeMetrics {
+        loc: LocMetrics {
+            total: 6683,
+            by_language: vec![lang("Rust", 6683)],
+        },
+        counts: CountMetrics {
+            files: 6683,
+            functions: 10,
+        },
+        ..Default::default()
+    };
+    let note = counting_note(&model_with(vec![repo(Some(metrics))]));
+    assert!(note.contains("Counting basis"), "{note}");
+    assert!(note.contains("trusty-analyze metrics artifact"), "{note}");
+    assert!(note.contains("git ls-files"), "{note}");
+    assert!(!note.contains("built-in repository scan"), "{note}");
+}
+
+/// A scan-supplied count names the built-in scan instead.
+#[test]
+fn counting_note_names_the_scan_counter() {
+    let scan = RepoScan {
+        total_loc: 100,
+        file_count: 6739,
+        by_language: vec![lang("Rust", 100)],
+        frameworks: vec![],
+    };
+    let note = counting_note(&model_with(vec![repo_with(None, Some(scan))]));
+    assert!(note.contains("built-in repository scan"), "{note}");
+    assert!(!note.contains("trusty-analyze metrics artifact"), "{note}");
+}
+
+/// Nothing measured, nothing to footnote — the placeholder stays a marker, so a
+/// data-free run renders exactly as it did before #6192.
+#[test]
+fn counting_note_is_absent_without_data() {
+    let note = counting_note(&model_with(vec![repo(None)]));
+    assert_eq!(note, crate::report::fill::HONESTY_MARKER);
+}

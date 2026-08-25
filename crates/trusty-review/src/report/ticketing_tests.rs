@@ -178,3 +178,32 @@ fn coverage_line_states_a_zero_run() {
     assert!(line.contains("300 commit(s)"), "{line}");
     assert!(line.contains("12 synced board item(s)"), "{line}");
 }
+
+/// #6192: a lap-14 grader re-derived the §8 commit total with `git log`, found
+/// 2972 against 2909, and had no way to tell a structural gap from an error.
+/// Both shapes of the line now state the mechanism.
+#[test]
+fn coverage_line_footnotes_the_commit_basis() {
+    let linked = TicketingSummary {
+        schema_version: "v0".into(),
+        commits: 2972,
+        commits_linked: 1200,
+        work_items: 800,
+        work_items_linked: 700,
+        sources: vec!["github".into()],
+    };
+    let zero = TicketingSummary {
+        commits_linked: 0,
+        ..linked.clone()
+    };
+
+    for line in [linked.coverage_line(), zero.coverage_line()] {
+        assert!(line.contains("Commit-count basis"), "{line}");
+        assert!(line.contains("squash"), "{line}");
+        assert!(line.contains("git log"), "{line}");
+        assert!(
+            line.contains("not expected to reconcile"),
+            "the footnote must say both figures are correct: {line}"
+        );
+    }
+}

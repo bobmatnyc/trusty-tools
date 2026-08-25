@@ -587,6 +587,11 @@ elif [[ "$out" != *"breaking change(s) listed above"* ]]; then
   fail_case "inventory/already-breaking: exit 0 but the breaks were never reported" "$out"
 elif [[ "$out" == *"VERDICT: BREAK"* ]]; then
   fail_case "inventory/already-breaking: a permitted break was rendered as a SemVer verdict" "$out"
+elif [[ "$out" != *"semver-gate-verdict: compared=1 examined=0 skipped=0 inventoried=1 blind=0"* ]]; then
+  # #5688: semver-checks.yml reads this line to decide what its GitHub check
+  # says. An inventoried crate WAS compared, so `compared` must count it —
+  # reporting 0 here would label a real comparison "no comparison ran".
+  fail_case "inventory/already-breaking: the machine-readable verdict line did not count the inventoried crate as compared (#5688)" "$out"
 else
   pass_case "an already-breaking bump is inventoried, advisory (#5297b)"
 fi
@@ -603,6 +608,11 @@ elif [[ "$out" != *"inventory NOT computed"* ]]; then
   fail_case "inventory/blind: the summary line hid the missing inventory" "$out"
 elif [[ "$out" == *"no breaking changes found"* ]]; then
   fail_case "inventory/blind: a run that produced nothing was reported as clean" "$out"
+elif [[ "$out" != *"semver-gate-verdict: compared=0 examined=0 skipped=0 inventoried=0 blind=1"* ]]; then
+  # #5688: this is the shape that rendered as a plain green check on PR #5686's
+  # trusty-search run. `compared=0 blind=1` is what makes semver-checks.yml
+  # label it INCOMPLETE instead of clean.
+  fail_case "inventory/blind: the machine-readable verdict line did not report the blind run as uncompared (#5688)" "$out"
 else
   pass_case "an inventory that could not run says so, in the line and in the summary"
 fi

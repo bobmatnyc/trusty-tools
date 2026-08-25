@@ -120,6 +120,24 @@
 					downloads fails in the first thirty seconds, naming the URL it could not reach.</span
 				>
 			</li>
+			<li class="flex gap-3">
+				<span aria-hidden="true" class="mt-[0.55em] h-1 w-1 shrink-0 bg-foundry-primary"></span>
+				<span
+					><span class="font-semibold text-foundry-text"
+						>An <code class="text-sm">instructions.md</code>, if this engagement has a brief.</span
+					>
+					Optional. A free-form markdown file sitting beside
+					<code class="text-sm">manifest.toml</code> naming the focus areas and concerns this review
+					has to address.
+					<code class="text-sm">trusty-audit render</code> finds it there on its own — no flag, no
+					manifest key — and records it verbatim in the report as its Analyst Instructions section.
+					Leave it out and the run is unchanged; put one there that cannot be read and the run stops
+					rather than quietly ignoring it.
+					<a class="underline hover:text-foundry-text" href="/docs/guides/audit-instructions"
+						>Guide and template</a
+					>.</span
+				>
+			</li>
 		</ul>
 	</div>
 

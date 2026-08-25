@@ -508,7 +508,14 @@ async fn hotspots_and_search_hits_become_ranked_inspect_priority_in_the_manifest
         PathBuf::from("/nonexistent/trusty-analyze"),
         stub_daemon(Some(payload)).await,
     );
-    let gaps = ground_manifest(&manifest, &t, &checkout, "acme-api").await;
+    let gaps = ground_manifest(
+        &manifest,
+        &t,
+        &checkout,
+        "acme-api",
+        priority::Budget::from_env(),
+    )
+    .await;
     assert!(gaps.is_empty(), "{gaps:?}");
 
     let written = std::fs::read_to_string(&manifest).expect("read back");
@@ -660,7 +667,14 @@ async fn a_ranking_that_lands_after_the_render_says_so() {
 
     // No snapshot beside the manifest: nothing has rendered it yet, and the
     // ordinary path says nothing.
-    let quiet = ground_manifest(&manifest, &stubs().await, &checkout, "acme-api").await;
+    let quiet = ground_manifest(
+        &manifest,
+        &stubs().await,
+        &checkout,
+        "acme-api",
+        priority::Budget::from_env(),
+    )
+    .await;
     assert!(
         !quiet.iter().any(|g| g.contains("already been rendered")),
         "a manifest nobody has rendered is not a degradation: {quiet:?}"
@@ -668,7 +682,14 @@ async fn a_ranking_that_lands_after_the_render_says_so() {
 
     // The snapshot trusty-review writes when it investigates a manifest.
     std::fs::write(tmp.path().join("investigation.json"), "{}").expect("snapshot");
-    let late = ground_manifest(&manifest, &stubs().await, &checkout, "acme-api").await;
+    let late = ground_manifest(
+        &manifest,
+        &stubs().await,
+        &checkout,
+        "acme-api",
+        priority::Budget::from_env(),
+    )
+    .await;
     let named = late
         .iter()
         .find(|g| g.contains("already been rendered"))
@@ -737,7 +758,14 @@ async fn a_gap_is_recorded_in_the_manifest_the_renderer_reads() {
         PathBuf::from("/nonexistent/trusty-analyze"),
         dead,
     );
-    let gaps = ground_manifest(&manifest, &t, &checkout, "acme-api").await;
+    let gaps = ground_manifest(
+        &manifest,
+        &t,
+        &checkout,
+        "acme-api",
+        priority::Budget::from_env(),
+    )
+    .await;
     assert_eq!(gaps.len(), 1, "{gaps:?}");
 
     let written = std::fs::read_to_string(&manifest).expect("read back");
@@ -776,7 +804,14 @@ async fn a_manifest_that_cannot_be_written_is_a_named_gap() {
         PathBuf::from("/nonexistent/trusty-analyze"),
         stub_daemon(Some(payload)).await,
     );
-    let gaps = ground_manifest(&manifest, &t, &checkout, "acme-api").await;
+    let gaps = ground_manifest(
+        &manifest,
+        &t,
+        &checkout,
+        "acme-api",
+        priority::Budget::from_env(),
+    )
+    .await;
     assert_eq!(gaps.len(), 1, "{gaps:?}");
     assert!(gaps[0].contains("acme-api"), "{gaps:?}");
     assert!(gaps[0].contains("does not state"), "{gaps:?}");

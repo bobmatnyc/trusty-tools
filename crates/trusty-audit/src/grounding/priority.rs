@@ -178,6 +178,35 @@ impl Budget {
         Self::resolve(env_positive(ENV_MAX_FILES), env_positive(ENV_MAX_BYTES))
     }
 
+    /// The budget THIS ENGAGEMENT runs under, resolved once for the sweep.
+    ///
+    /// Why (#6247): before this, the value the child ran under came from
+    /// [`Budget::from_env`] inside the spawn, and the value written into the
+    /// delivered manifest came from [`Budget::for_manifest`] afterwards. Two
+    /// resolutions of one number, and an operator had no way to declare it at
+    /// all — so a run could hand back a manifest naming a budget its own
+    /// investigation pass never used. `crate::run::sweep` now resolves here,
+    /// once, and hands the SAME value to every child and to every manifest it
+    /// records, which is what makes the two agree by construction rather than
+    /// by both happening to fall through to the same tier.
+    /// What: a positive declared key wins per key, then the environment
+    /// override for that key, then the default — the same ladder
+    /// [`Budget::for_manifest`] applies to a manifest's own keys, so an
+    /// operator moving a value between the two files gets the same answer. A
+    /// zero or absent value reads as undeclared rather than as a disabled
+    /// investigation.
+    /// Test: `priority_tests::{a_declared_engagement_budget_wins,
+    /// an_engagement_declaring_nothing_matches_the_machine,
+    /// an_engagement_file_budget_raises_the_byte_budget}`.
+    #[must_use]
+    pub fn for_engagement(settings: &crate::config::ReportSettings) -> Self {
+        let declared = |value: Option<usize>| value.filter(|n| *n > 0);
+        Self::resolve(
+            declared(settings.investigate_max_files).or_else(|| env_positive(ENV_MAX_FILES)),
+            declared(settings.investigate_max_bytes).or_else(|| env_positive(ENV_MAX_BYTES)),
+        )
+    }
+
     /// This budget as the environment pairs a `tga audit` child passes down.
     ///
     /// Why (#6082): the manifest is the interface, and on the sweep path the
@@ -898,6 +927,49 @@ path = "/w/repos/acme-web"
         assert_eq!(Budget::for_manifest(&path), Budget::from_env());
         assert_eq!(
             Budget::for_manifest(&tmp.path().join("absent.toml")),
+            Budget::from_env()
+        );
+    }
+
+    /// A `[report]` section carrying whichever keys the arguments name.
+    fn settings(files: Option<usize>, bytes: Option<usize>) -> crate::config::ReportSettings {
+        let mut declared = String::new();
+        if let Some(files) = files {
+            declared.push_str(&format!("investigate_max_files = {files}\n"));
+        }
+        if let Some(bytes) = bytes {
+            declared.push_str(&format!("investigate_max_bytes = {bytes}\n"));
+        }
+        toml::from_str(&declared).expect("parses")
+    }
+
+    /// 🔴 #6247: an engagement that declares a budget gets it, and gets it in
+    /// both dimensions — the file count it named and a byte count derived from
+    /// that count rather than pinned to the default.
+    #[test]
+    fn a_declared_engagement_budget_wins() {
+        let budget = Budget::for_engagement(&settings(Some(77), None));
+        assert_eq!(budget.max_files, 77, "the declared key wins");
+        assert_eq!(
+            budget.max_bytes,
+            env_positive(ENV_MAX_BYTES).unwrap_or(77 * BYTES_PER_FILE),
+            "the undeclared byte key derives from the declared file count (#6148)"
+        );
+        let both = Budget::for_engagement(&settings(Some(77), Some(4096)));
+        assert_eq!(both.max_bytes, 4096, "an explicit byte budget still wins");
+    }
+
+    /// An engagement that declares nothing — and one whose declaration is
+    /// unusable — falls through to the machine's answer, rather than reading as
+    /// a request for a zero-file investigation.
+    #[test]
+    fn an_engagement_declaring_nothing_matches_the_machine() {
+        assert_eq!(
+            Budget::for_engagement(&settings(None, None)),
+            Budget::from_env()
+        );
+        assert_eq!(
+            Budget::for_engagement(&settings(Some(0), Some(0))),
             Budget::from_env()
         );
     }

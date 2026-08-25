@@ -2581,6 +2581,12 @@ fn assert_template_states_ticketing_coverage(template_name: &str) {
         !md.contains("## 8. Ticketing & Delivery Traceability\n\n_No data available"),
         "{template_name}: a populated section must not collapse:\n{md}"
     );
+    // #6192: the commit total is the figure a verifier re-derives with
+    // `git log`, so the section states why the two do not match.
+    assert!(
+        md.contains("Commit-count basis") && md.contains("squash"),
+        "{template_name}: the commit-count footnote must reach the page:\n{md}"
+    );
     assert!(!md.contains("{{ticketing_coverage}}"));
 }
 
@@ -2734,6 +2740,12 @@ fn key_facts_renders_scan_loc_without_analyze_metrics() {
     assert!(
         !block.contains("No data available"),
         "Key Facts must never collapse while the sweep holds data:\n{block}"
+    );
+    // #6192: the file count invites a `git ls-files` check, so the block states
+    // which counter produced it. The polish pass must not drop the paragraph.
+    assert!(
+        block.contains("Counting basis") && block.contains("git ls-files"),
+        "the counting-basis footnote must reach the page:\n{block}"
     );
     // A genuinely absent input names itself in its own row rather than
     // blanking the block around the data that IS present.
