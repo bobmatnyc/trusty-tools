@@ -9,12 +9,12 @@
 //! to contradict.
 //!
 //! That changes what "no daemon running" means here. `port` answered from a
-//! file the daemon wrote on bind, so an absent file meant an absent daemon.
-//! The path resolves whether or not anything is listening, so this command
-//! reports the path AND whether a process is answering on it, and exits
-//! non-zero when nothing is — preserving the property that
-//! `$(trusty-review socket)` fails cleanly rather than handing a caller a path
-//! to a dead socket.
+//! file the daemon wrote on bind, so an absent file meant an absent daemon. The
+//! path resolves whether or not anything is listening, so this command reports
+//! the path AND whether a process is answering on it, and exits non-zero when
+//! nothing is — preserving the property that `$(trusty-review socket)` fails
+//! cleanly rather than handing a caller a path to a dead socket. See
+//! [`handle_socket`] for exactly what each format puts on stdout in that case.
 //!
 //! What: prints one of two formats to stdout:
 //!   - default:  the bare path  →  `/Users/x/…/trusty-review.sock\n`
@@ -75,12 +75,21 @@ pub fn format_output(socket: &Path, serving: bool, format: SocketFormat) -> Stri
 ///
 /// Why: exposes the daemon's endpoint as a first-class CLI surface so an
 /// operator can check what a consumer would dial.
-/// What: resolves the path through the shared entry point, probes it, prints
-/// the requested format, and returns `Err` when nothing is serving so shell
-/// substitution fails cleanly. The probe is
+///
+/// What: resolves the path through the shared entry point, probes it, prints the
+/// requested format, and returns `Err` when nothing is serving. The probe is
 /// `trusty_common::uds::socket_is_serving` — a bare connect — rather than a
 /// `review.health` call, because the question here is "is the endpoint live",
 /// and a daemon that is up but degraded must not be reported as absent.
+///
+/// **The two formats differ in what they put on stdout when nothing answers,
+/// and the difference is the point.** Path mode writes the bare path to stdout
+/// ONLY when the socket is live, so `$(trusty-review socket)` yields an empty
+/// string plus a non-zero status rather than a path to a dead socket that an
+/// unchecked substitution would go on to use. The path still reaches the
+/// operator, on stderr, inside the error. JSON mode always prints, because its
+/// `serving` field is the machine-readable answer a caller asked for — printing
+/// nothing would withhold the very fact the format exists to report.
 ///
 /// # Errors
 ///
@@ -93,7 +102,9 @@ pub async fn handle_socket(format: SocketFormat) -> Result<()> {
     let socket = trusty_common::daemon_socket_path("trusty-review")?;
     let serving = trusty_common::uds::socket_is_serving(&socket, PROBE_TIMEOUT).await;
 
-    println!("{}", format_output(&socket, serving, format));
+    if serving || format == SocketFormat::Json {
+        println!("{}", format_output(&socket, serving, format));
+    }
 
     if !serving {
         anyhow::bail!(

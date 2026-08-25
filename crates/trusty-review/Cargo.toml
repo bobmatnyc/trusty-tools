@@ -225,6 +225,11 @@ tempfile     = { workspace = true }
 # that carries no version requirement, so this does NOT make trusty-review's
 # publish wait for trusty-console's and trusty-installer's. A `workspace = true`
 # entry would carry the version and create exactly that ordering constraint.
+#
+# One developer-visible cost: trusty-console has a `build.rs` that builds its
+# Svelte UI, so `cargo test -p trusty-review` now needs pnpm on PATH. Without it,
+# set `SKIP_UI_BUILD=1` — the build script's documented escape hatch, and what CI
+# uses.
 trusty-console   = { path = "../trusty-console" }
 trusty-installer = { path = "../trusty-installer" }
 # Why (#5466): `git2` was REMOVED. Its only use was the profile diff-sampler

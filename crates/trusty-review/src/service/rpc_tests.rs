@@ -362,39 +362,80 @@ fn remove_if_present_deletes_a_stale_file_and_tolerates_an_absent_one() {
 /// shutdown, not assumed gone.
 ///
 /// Why: neither `bind_hardened` nor tokio's `UnixListener::Drop` removes the
-/// path. A daemon that returned without unlinking leaves a file that
-/// `bind_hardened` refuses on the next start — under launchd's `KeepAlive`
-/// that is a ten-second crash loop. `rpc::serve` unlinks explicitly; this
-/// asserts it rather than trusting the comment.
-/// What: runs `serve` against a temp path, shuts it down with SIGTERM's
-/// stand-in, and asserts the file no longer exists.
+/// path. A daemon that returned without unlinking leaves a file the next
+/// `bind_hardened` refuses — under launchd's `KeepAlive::Always` that is a
+/// ten-second crash loop with no operator-visible cause.
+///
+/// The test drives `serve_with_shutdown`, which is the production body — the
+/// bind, the loop, and the unlink. Nothing here touches the file, so deleting
+/// the `remove_file` in `rpc.rs` turns this red. An earlier version of this test
+/// spawned `serve_until` and then deleted the socket itself; it asserted the
+/// filesystem, not the daemon, and passed either way.
+/// What: serves on a temp path, resolves the shutdown future, and asserts the
+/// file is gone once `serve_with_shutdown` returns.
 /// Test: this is the test.
 #[tokio::test]
 async fn rpc_unlinks_its_socket_on_shutdown() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let socket = tmp.path().join("sockets").join("review.sock");
-    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
-    assert!(socket.exists(), "the bind must create the file");
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
-    let (shutdown, served) = spawn_serve(listener);
-    let _ = shutdown.send(());
-    served.await.expect("join");
+    let socket_for_serve = socket.clone();
+    let served = tokio::spawn(async move {
+        super::serve_with_shutdown(test_state(), &socket_for_serve, async {
+            let _ = shutdown_rx.await;
+        })
+        .await
+    });
 
-    // `spawn_serve` drives `serve_until` directly, so replicate the unlink
-    // `rpc::serve` performs around it and assert the ordering contract holds.
-    std::fs::remove_file(&socket).expect("unlink");
+    // The bind is inside the task, so wait for the file to appear before asking
+    // it to stop — otherwise a fast shutdown could race the bind and the
+    // assertion below would pass without the unlink ever running.
+    wait_for_socket(&socket).await;
+
+    let _ = shutdown_tx.send(());
+    served
+        .await
+        .expect("join")
+        .expect("serve returned an error");
+
     assert!(
         !socket.exists(),
         "a socket file left behind makes the next launchd start fail its bind"
     );
 }
 
+/// Poll until `socket` exists, or panic after a bounded wait.
+///
+/// A condition poll rather than a sleep: the bind takes microseconds, and a
+/// fixed sleep would either flake on a loaded machine or slow every run.
+async fn wait_for_socket(socket: &std::path::Path) {
+    for _ in 0..200 {
+        if socket.exists() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("{} never appeared", socket.display());
+}
+
 /// Why (#6277 design review): the shared frame budget is 8 MiB, and a
 /// `review.run` request carries a caller-supplied raw diff that nothing bounds
-/// before it arrives. Under the default this would be a dropped connection
-/// rather than an answer, and the failure would only appear on a large PR.
-/// What: sends a `local_diff_text` comfortably past `MAX_FRAME_BYTES`'s shared
-/// default and asserts the server ANSWERS — the answer's content is the
+/// before it arrives. Under the default the connection is dropped unanswered,
+/// and the failure would only ever appear on a large PR.
+///
+/// The frame MUST go over a real socket. The budget is enforced by the
+/// `take(max_frame_bytes)` in `serve_until`'s `handle_connection`, so a test
+/// that called `RpcRouter::dispatch` on the bytes directly would bypass the only
+/// code the budget lives in — `serve_options()` could regress to
+/// `RpcServeOptions::default()` and that test would still pass while every large
+/// `review.run` in production was silently dropped. This one goes through
+/// `spawn_serve`, which uses `super::serve_options()`.
+///
+/// What: dials with the PLAIN client — `send_framed_request` writes the request
+/// uncapped, which is the other half of the asymmetry `MAX_FRAME_BYTES` documents
+/// — with a `local_diff_text` past the shared default, and asserts a response
+/// frame comes back carrying the request id. The answer's CONTENT is the
 /// pipeline's business, not this test's.
 /// Test: this is the test.
 #[tokio::test]
@@ -406,29 +447,36 @@ async fn rpc_accepts_a_review_request_larger_than_the_shared_default() {
         );
     }
 
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let socket = tmp.path().join("sockets").join("review.sock");
+    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
+    let (shutdown, served) = spawn_serve(listener);
+
     // One byte-per-char diff past the shared default, still inside ours.
     let oversized = "x".repeat((trusty_common::uds::MAX_FRAME_BYTES + 1024) as usize);
-    let frame = json!({
+    let request = json!({
         "jsonrpc": "2.0",
         "id": 9,
         "method": METHOD_RUN,
         "params": {"local_diff_text": oversized},
     });
-    let encoded = serde_json::to_vec(&frame).expect("encode");
+    let encoded_len = serde_json::to_vec(&request).expect("encode").len() as u64;
     assert!(
-        encoded.len() as u64 > trusty_common::uds::MAX_FRAME_BYTES,
+        encoded_len > trusty_common::uds::MAX_FRAME_BYTES,
         "the frame must actually exceed the shared default to prove anything"
     );
-
-    // Dispatch directly: the frame budget is enforced by `serve_until`'s read,
-    // and what this asserts is that the SERVICE's budget is the larger one. The
-    // socket half is covered by `rpc_health_answers_over_a_real_socket`.
     assert!(
-        (encoded.len() as u64) < MAX_FRAME_BYTES,
-        "a {} byte frame must fit this service's {} byte budget",
-        encoded.len(),
-        MAX_FRAME_BYTES
+        encoded_len < MAX_FRAME_BYTES,
+        "a {encoded_len} byte frame must fit this service's {MAX_FRAME_BYTES} byte budget"
     );
-    let response = build_router(test_state()).dispatch(&encoded).await;
+
+    let response: trusty_common::uds::server::RpcResponse =
+        trusty_common::uds::send_framed_request(&socket, &request, Duration::from_secs(60))
+            .await
+            .expect("an oversized review.run must be answered, not dropped");
+
     assert_eq!(response.id, json!(9), "the oversized request was answered");
+
+    let _ = shutdown.send(());
+    served.await.expect("join");
 }

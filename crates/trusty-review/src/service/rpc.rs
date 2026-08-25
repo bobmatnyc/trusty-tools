@@ -47,32 +47,41 @@ pub const METHOD_STATUS: &str = "review.status";
 /// it is the same verb the CLI spells `trusty-review run`.
 pub const METHOD_RUN: &str = "review.run";
 
-/// Largest request or response frame this service exchanges, in bytes.
+/// Largest REQUEST frame this service will read, in bytes.
 ///
 /// Why: [`trusty_common::uds::MAX_FRAME_BYTES`] is 8 MiB, sized for
 /// control-plane frames. Two of these three methods fit inside it with room to
 /// spare — a `HealthResponse` is a few hundred bytes and a `StatusResponse` is
-/// smaller. [`METHOD_RUN`] is the one that does not obviously fit, and the
-/// pressure is on the REQUEST, not the response:
+/// smaller. [`METHOD_RUN`] is the one that does not: it carries
+/// `local_diff_text`, a caller-supplied raw unified diff that nothing bounds
+/// before it arrives — `pipeline::diff::truncate_diff` cuts it to
+/// `MAX_DIFF_CHARS` (160 000) only AFTER the frame has been read. A caller
+/// handing over a whole monorepo diff, generated files included, can exceed
+/// 8 MiB, and under the default budget that arrives as a dropped connection
+/// rather than as an answer.
 ///
-/// - The response is a `ReviewResult`. Its size is bounded by what the reviewer
-///   model emits, which the provider caps in output tokens; a large real report
-///   measures in tens of kilobytes.
-/// - The request carries `local_diff_text`, a caller-supplied raw unified diff.
-///   Nothing bounds it before it arrives — `pipeline::diff::truncate_diff` cuts
-///   it to `MAX_DIFF_CHARS` (160 000) only AFTER the frame has been read. A
-///   caller handing over a whole monorepo diff, generated files included, can
-///   exceed 8 MiB, and under the default budget that arrives as a dropped
-///   connection rather than as an answer.
+/// What: 32 MiB, four times the shared default, applied to the server's read.
+/// The budget is per connection, not per method (the method name lives inside
+/// the frame the budget governs the reading of), so it has to cover the largest
+/// of the three.
 ///
-/// What: 32 MiB, four times the shared default. The budget is per connection,
-/// not per method (the method name lives inside the frame the budget governs
-/// the reading of), so it has to cover the largest of the three.
+/// **Which end this figure binds, precisely.** Each end caps only what it
+/// READS, and neither caps what it writes:
 ///
-/// A client that sends [`METHOD_RUN`] must dial with
-/// [`trusty_common::uds::send_framed_request_capped`] and this figure, or it has
-/// only moved which end refuses. A client that only asks for [`METHOD_HEALTH`]
-/// needs nothing: its frames are far inside the default.
+/// - This constant feeds `RpcServeOptions::max_frame_bytes`, which
+///   `handle_connection` applies as `take(..)` on the REQUEST read. It is the
+///   reason a large `review.run` is answered instead of dropped.
+/// - A client's `max_frame_bytes` — the fourth argument to
+///   [`trusty_common::uds::send_framed_request_capped`] — bounds only its
+///   RESPONSE read. `dial_and_send` writes the request with a plain
+///   `write_all`, uncapped.
+///
+/// So a `review.run` client does NOT need the capped variant to SEND a large
+/// diff; plain [`trusty_common::uds::send_framed_request`] writes it and this
+/// server accepts it. It would need the capped variant only if a `ReviewResult`
+/// could exceed the shared 8 MiB response default — which it does not: the
+/// result is bounded by what the reviewer model emits, which the provider caps
+/// in output tokens, and a large real report measures in tens of kilobytes.
 ///
 /// Test: `rpc_accepts_a_review_request_larger_than_the_shared_default`.
 pub const MAX_FRAME_BYTES: u64 = 32 * 1024 * 1024;
@@ -182,14 +191,48 @@ fn serve_options() -> RpcServeOptions {
 /// Test: `rpc_health_answers_over_a_real_socket`,
 /// `rpc_unlinks_its_socket_on_shutdown`.
 pub async fn serve(state: AppState, socket: &Path) -> Result<()> {
+    // Migration cleanup, deliberately OUTSIDE `serve_with_shutdown`: it resolves
+    // the real `$HOME` and the real data directory, so a test that drove it
+    // would delete a developer's own files. It also belongs to the process
+    // entry point rather than the serve loop — it is a one-time upgrade concern,
+    // not part of serving.
+    remove_retired_discovery_files();
+
+    serve_with_shutdown(state, socket, trusty_common::shutdown_signal()).await
+}
+
+/// [`serve`]'s body, with the shutdown future supplied by the caller.
+///
+/// Why: `serve` waits on SIGTERM/SIGINT, which a test cannot deliver to its own
+/// process without affecting the whole test binary. Taking the future as a
+/// parameter is what lets `rpc_unlinks_its_socket_on_shutdown` drive the REAL
+/// shutdown path and assert the socket file is gone — rather than re-implementing
+/// the loop and deleting the file itself, which is a test that passes whether or
+/// not the unlink below exists.
+///
+/// What: binds through `bind_singleton_hardened`, serves via [`serve_until`],
+/// then removes the socket file BEFORE dropping the listener — the order
+/// `webhook_relay::listener` records, because reversed there is a window in which
+/// nothing answers the path but the file is still there, and a successor that
+/// rebinds in that window has its fresh socket deleted by this process.
+///
+/// # Errors
+///
+/// As [`serve`].
+///
+/// Test: `rpc_unlinks_its_socket_on_shutdown`,
+/// `rpc_accepts_a_review_request_larger_than_the_shared_default`.
+pub async fn serve_with_shutdown(
+    state: AppState,
+    socket: &Path,
+    shutdown: impl std::future::Future<Output = ()> + Send,
+) -> Result<()> {
     // #6277: no `SelfOrigins` / `with_guarded_middleware` here, and its absence
     // is deliberate rather than an oversight. That machinery is browser-CSRF
     // defence for an HTTP surface reachable from a page; it has no meaning on a
     // Unix socket, where the trust boundary is the 0700 directory, the 0600
     // socket, and the `ensure_peer_is_self` uid check `serve_until` runs on
     // every accepted connection before a byte is read.
-    remove_retired_discovery_files();
-
     let listener = trusty_common::uds::bind_singleton_hardened(socket)
         .await
         .with_context(|| format!("bind trusty-review socket at {}", socket.display()))?;
@@ -198,13 +241,7 @@ pub async fn serve(state: AppState, socket: &Path) -> Result<()> {
     info!(socket = %socket.display(), methods = ?router.method_names().collect::<Vec<_>>(), "trusty-review serving");
     eprintln!("trusty-review: serving on {}", socket.display());
 
-    serve_until(
-        &listener,
-        Arc::clone(&router),
-        serve_options(),
-        trusty_common::shutdown_signal(),
-    )
-    .await;
+    serve_until(&listener, Arc::clone(&router), serve_options(), shutdown).await;
 
     if let Err(e) = std::fs::remove_file(socket) {
         tracing::debug!(socket = %socket.display(), error = %e, "socket already gone");
