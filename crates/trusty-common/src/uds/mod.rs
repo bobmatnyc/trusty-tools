@@ -56,6 +56,9 @@ pub mod dir;
 mod peer;
 pub mod probe;
 pub mod rpc;
+// #6277: the serving half of `rpc`, so a daemon migrating off HTTP under
+// ADR-0032 supplies a method table rather than a fourth hand-rolled accept loop.
+pub mod server;
 pub mod singleton;
 
 /// On-demand supervision of a UDS-serving child process (#5089 step 2).
