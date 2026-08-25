@@ -31,6 +31,16 @@
 	 *     is, and the code is the one that decides.
 	 *   - ports and the loopback guards — `docs/architecture/port-assignments.md`
 	 *     and `docs/reference/threat-model.md`
+	 *   - the kuzu-memory targets, their required flags, and the idempotency
+	 *     claims — `crates/trusty-memory/src/commands/migrate.rs` and
+	 *     `src/main.rs`'s `Migrate` variant; the importer's behaviour and the
+	 *     four refused predicates —
+	 *     `crates/trusty-memory/src/commands/kuzu_migrate.rs` and
+	 *     `crates/trusty-memory/src/prompt_facts.rs::HOT_PREDICATES`, pinned by
+	 *     `kuzu_migrate_refuses_hot_predicates_and_passes_cold_ones`. There is
+	 *     no default `--from` path: the handler errors when it is absent, so
+	 *     the `~/.open-mpm/...` path in the example is kuzu-memory's own
+	 *     convention rather than a default this command applies.
 	 *
 	 * claude-mpm claims are deliberately general — a Python package on PyPI
 	 * that discovers everything through the real `~/.claude`. Nothing about its
@@ -478,6 +488,86 @@ tm --version</pre>
 			</p>
 		</div>
 
+		<!-- ============ kuzu-memory ============ -->
+		<div class="min-w-0">
+			<h2 id="kuzu" class="scroll-mt-24 font-display text-2xl font-bold sm:text-3xl">
+				Migrating your kuzu-memory data
+			</h2>
+			<p class="mt-4 max-w-3xl text-foundry-secondary">
+				If the memory server you were running is <code class="text-sm">kuzu-memory</code>,
+				trusty-memory migrates it for you rather than leaving you to re-enter anything.
+				<code class="text-sm">trusty-memory migrate</code> takes two targets, and they are independent:
+				one rewrites configuration, the other moves data. Most people want both, in that order.
+			</p>
+
+			<h3 class="mt-8 font-display text-lg font-semibold text-foundry-text">
+				<code class="text-base">kuzu-memory</code> — the configuration
+			</h3>
+			<p class="mt-3 max-w-3xl text-foundry-secondary">
+				Scans every <code class="text-sm">.claude/settings.json</code> and
+				<code class="text-sm">settings.local.json</code> under your home directory, drops any
+				<code class="text-sm">kuzu-memory</code> or <code class="text-sm">kuzu_memory</code>
+				entry from the <code class="text-sm">mcpServers</code> block, and inserts a canonical
+				<code class="text-sm">trusty-memory</code> one in its place. Unrelated keys survive, each
+				write is atomic with a <code class="text-sm">.bak</code> alongside it, and a file already
+				carrying a <code class="text-sm">trusty-memory</code> entry is left byte-for-byte alone — so running
+				it twice is safe.
+			</p>
+
+			<div class="mt-6 max-w-xl min-w-0">
+				<p class="eyebrow">shell — look first, then write</p>
+				<pre
+					class="mt-2 overflow-x-auto rounded-sm border border-foundry-border bg-foundry-card p-3 text-xs leading-relaxed text-foundry-text">trusty-memory migrate kuzu-memory --dry-run
+trusty-memory migrate kuzu-memory</pre>
+			</div>
+
+			<h3 class="mt-8 font-display text-lg font-semibold text-foundry-text">
+				<code class="text-base">kuzu-data</code> — the memories themselves
+			</h3>
+			<p class="mt-3 max-w-3xl text-foundry-secondary">
+				Reads a kuzu-memory <code class="text-sm">store.redb</code> and imports it into a palace:
+				every entity becomes a drawer, every relation becomes a knowledge-graph triple. There is no
+				default source path — <code class="text-sm">--from</code> and
+				<code class="text-sm">--palace</code> are both required, and the command errors naming the missing
+				one rather than guessing. The palace is created if it does not exist yet. Re-running it changes
+				nothing: drawer ids come from a stable hash of the entity id and the palace name, and an existing
+				triple is skipped rather than duplicated.
+			</p>
+
+			<div class="mt-6 max-w-xl min-w-0">
+				<p class="eyebrow">shell</p>
+				<pre
+					class="mt-2 overflow-x-auto rounded-sm border border-foundry-border bg-foundry-card p-3 text-xs leading-relaxed text-foundry-text">trusty-memory migrate kuzu-data \
+  --from ~/.open-mpm/memory/store.redb \
+  --palace your-project --dry-run</pre>
+			</div>
+
+			<p class="mt-4 max-w-3xl text-sm text-foundry-secondary">
+				<code class="text-sm">--dry-run</code> prints the schema it found and the plan without
+				writing. <code class="text-sm">--limit &lt;N&gt;</code> caps how many entities are imported,
+				which is the way to try it on a slice before committing to the whole store. Drop
+				<code class="text-sm">--dry-run</code> to run it for real.
+			</p>
+
+			<div class="card mt-8 max-w-3xl">
+				<p class="eyebrow">One class of triple does not come across</p>
+				<p class="mt-3 text-foundry-secondary">
+					Four predicates — <code class="text-sm">is_alias_for</code>,
+					<code class="text-sm">has_convention</code>, <code class="text-sm">is_fact</code>, and
+					<code class="text-sm">is_shorthand_for</code> — put a fact on the surface injected into
+					every turn of every session, and the importer refuses them outright. A bulk import of a
+					legacy file is not somebody deciding a standing rule should be in front of every session,
+					so a relation whose type collides with one of the four is logged and skipped while the
+					rest of the import continues. Ordinary relation types —
+					<code class="text-sm">relates_to</code>, <code class="text-sm">mentions</code>,
+					<code class="text-sm">derived_from</code>, <code class="text-sm">part_of</code>,
+					<code class="text-sm">alias_of</code> — are unaffected. If one of the four really was a
+					standing rule, re-assert it with <code class="text-sm">kg_assert</code>, which is the
+					deliberate path and carries the real gate.
+				</p>
+			</div>
+		</div>
+
 		<!-- ============ where sessions run ============ -->
 		<div class="min-w-0">
 			<h2 class="font-display text-2xl font-bold sm:text-3xl">Where the work happens</h2>
@@ -535,6 +625,29 @@ tm --version</pre>
 				<span aria-hidden="true" class="w-5 shrink-0 font-mono text-sm text-foundry-primary">3</span
 				>
 				<div class="min-w-0">
+					<p class="font-semibold text-foundry-text">
+						Bring your kuzu-memory data across — only if you ran it.
+					</p>
+					<p class="mt-1 text-sm">
+						<code class="text-xs">trusty-memory migrate kuzu-memory</code> repoints the MCP config,
+						then
+						<code class="text-xs"
+							>trusty-memory migrate kuzu-data --from &lt;store.redb&gt; --palace &lt;name&gt;</code
+						>
+						imports the memories. Both take
+						<code class="text-xs">--dry-run</code>, and both are safe to re-run.
+						<a
+							href="#kuzu"
+							class="text-foundry-primary underline decoration-1 underline-offset-2 hover:decoration-2"
+							>The full section</a
+						> covers what each one touches and the one class of triple it declines to import.
+					</p>
+				</div>
+			</li>
+			<li class="flex gap-3">
+				<span aria-hidden="true" class="w-5 shrink-0 font-mono text-sm text-foundry-primary">4</span
+				>
+				<div class="min-w-0">
 					<p class="font-semibold text-foundry-text">Register the project.</p>
 					<p class="mt-1 text-sm">
 						From the project directory, <code class="text-xs">tm project init</code> registers it with
@@ -544,7 +657,7 @@ tm --version</pre>
 				</div>
 			</li>
 			<li class="flex gap-3">
-				<span aria-hidden="true" class="w-5 shrink-0 font-mono text-sm text-foundry-primary">4</span
+				<span aria-hidden="true" class="w-5 shrink-0 font-mono text-sm text-foundry-primary">5</span
 				>
 				<div class="min-w-0">
 					<p class="font-semibold text-foundry-text">Clear a stale output style.</p>
@@ -559,7 +672,7 @@ tm --version</pre>
 				</div>
 			</li>
 			<li class="flex gap-3">
-				<span aria-hidden="true" class="w-5 shrink-0 font-mono text-sm text-foundry-primary">5</span
+				<span aria-hidden="true" class="w-5 shrink-0 font-mono text-sm text-foundry-primary">6</span
 				>
 				<div class="min-w-0">
 					<p class="font-semibold text-foundry-text">Verify before you start work.</p>
@@ -573,7 +686,7 @@ tm --version</pre>
 				</div>
 			</li>
 			<li class="flex gap-3">
-				<span aria-hidden="true" class="w-5 shrink-0 font-mono text-sm text-foundry-primary">6</span
+				<span aria-hidden="true" class="w-5 shrink-0 font-mono text-sm text-foundry-primary">7</span
 				>
 				<div class="min-w-0">
 					<p class="font-semibold text-foundry-text">Start a session.</p>
@@ -590,6 +703,7 @@ tm --version</pre>
 			<p class="eyebrow">shell — the whole thing</p>
 			<pre
 				class="mt-2 overflow-x-auto rounded-sm border border-foundry-border bg-foundry-card p-3 text-xs leading-relaxed text-foundry-text">tm install
+trusty-memory migrate kuzu-memory      # only if you ran kuzu-memory
 cd ~/your-project
 tm project init
 tm doctor
