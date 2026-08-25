@@ -382,10 +382,14 @@ fn discovery_gaps(discovery: &evidence::Discovery, display: &str) -> Vec<String>
 /// What: the gaps [`ground`] produced, plus one more when the manifest itself
 /// could not be updated. A write failure is a gap rather than an error for the
 /// same reason every other leg is: it costs this repository's ranking, not the
-/// sweep. The budget is resolved ONCE, by
-/// [`priority::Budget::for_manifest`], and the same value both sizes the
-/// evidence caps and reaches `[report]` — so a manifest that already declares
-/// one gets a ranking sized for what trusty-review will actually read (#6082).
+/// sweep.
+///
+/// `budget` is resolved ONCE PER SWEEP by
+/// [`priority::Budget::for_engagement`] and handed in, and it is the SAME value
+/// the caller gave the `tga audit` child. That is what makes the recorded
+/// `[report]` budget and the budget the investigation pass ran under one number
+/// rather than two independent resolutions of it (#6082, #6247). It both sizes
+/// the evidence caps and reaches `[report]`.
 /// Test: `super::grounding_tests::{hotspots_become_ranked_inspect_priority_in_the_manifest,
 /// a_manifest_that_cannot_be_written_is_a_named_gap}`.
 pub async fn ground_manifest(
@@ -393,9 +397,9 @@ pub async fn ground_manifest(
     tools: &Tools,
     checkout: &Path,
     display: &str,
+    budget: priority::Budget,
 ) -> Vec<String> {
     let instructions = instructions_from(manifest);
-    let budget = priority::Budget::for_manifest(manifest);
     let mut grounding = ground(tools, checkout, display, instructions.as_deref(), budget).await;
     // #6147: the crate graph is read from the checkout's own manifests, so it
     // depends on neither daemon and is measured whether or not either answered.

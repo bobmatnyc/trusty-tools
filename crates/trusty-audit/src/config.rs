@@ -319,6 +319,41 @@ pub struct BoardCredentials {
     pub linear: Option<LinearCredentials>,
 }
 
+/// What the engagement asks the investigation pass to read, per repository.
+///
+/// Why (#6247): the investigation budget had no declaration point an operator
+/// could write. `crate::grounding::priority::Budget` resolved it from the
+/// process environment and the compiled default, while the budget the sweep
+/// RECORDED was re-resolved later from the per-repository manifest — two
+/// resolutions of one value, computed at different times by different
+/// functions. An engagement that wanted a wider sample had nowhere to say so,
+/// and the manifest it got back could name a budget the sampler never ran
+/// under.
+/// What: the same two key names `trusty-review` reads from its own manifest
+/// `[report]` section, so an operator moving between the two files types the
+/// same thing. Both optional and both independent — see
+/// [`crate::grounding::priority::Budget::for_engagement`] for the precedence
+/// and for why an absent byte budget is derived rather than pinned.
+///
+/// ```toml
+/// [report]
+/// investigate_max_files = 240
+/// investigate_max_bytes = 2457600
+/// ```
+///
+/// Test: `super::config_tests::a_declared_investigation_budget_loads`,
+/// `super::config_tests::a_config_with_no_report_table_still_loads`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[non_exhaustive]
+pub struct ReportSettings {
+    /// Files the investigation pass may read per repository.
+    #[serde(default)]
+    pub investigate_max_files: Option<usize>,
+    /// Total content bytes it may send per repository.
+    #[serde(default)]
+    pub investigate_max_bytes: Option<usize>,
+}
+
 /// The engagement config that travels inside the handoff package.
 ///
 /// Why: the recipient can read this file before running anything — that
@@ -346,6 +381,12 @@ pub struct EngagementConfig {
     /// engagement registers no boards.
     #[serde(default)]
     pub boards: BoardCredentials,
+    /// What this engagement asks the investigation pass to read (#6247).
+    ///
+    /// Absent means the machine's environment overrides, then the compiled
+    /// defaults — see [`crate::grounding::priority::Budget::for_engagement`].
+    #[serde(default)]
+    pub report: ReportSettings,
     /// What this engagement audits (#5979).
     ///
     /// Absent and empty are DIFFERENT states, which is why this is an `Option`
@@ -1172,6 +1213,32 @@ trusty-review = "0.15.1"
             EngagementConfig::from_toml(SAMPLE, Path::new("engagement.toml")).expect("parses");
         assert!(cfg.boards.jira.is_none());
         assert!(cfg.boards.linear.is_none());
+    }
+
+    /// 🔴 #6247: the engagement gets a place to declare the investigation
+    /// budget. Before this the two keys had no home in this file at all, so an
+    /// operator asking for a wider sample had nowhere to ask.
+    #[test]
+    fn a_declared_investigation_budget_loads() {
+        let cfg = EngagementConfig::from_toml(
+            &format!(
+                "{SAMPLE}\n[report]\ninvestigate_max_files = 240\ninvestigate_max_bytes = 2457600\n"
+            ),
+            Path::new("engagement.toml"),
+        )
+        .expect("parses");
+        assert_eq!(cfg.report.investigate_max_files, Some(240));
+        assert_eq!(cfg.report.investigate_max_bytes, Some(2_457_600));
+    }
+
+    /// Every config written before the section existed still loads, and reads
+    /// as "declares nothing" rather than as "declares zero".
+    #[test]
+    fn a_config_with_no_report_table_still_loads() {
+        let cfg =
+            EngagementConfig::from_toml(SAMPLE, Path::new("engagement.toml")).expect("parses");
+        assert!(cfg.report.investigate_max_files.is_none());
+        assert!(cfg.report.investigate_max_bytes.is_none());
     }
 
     #[test]
