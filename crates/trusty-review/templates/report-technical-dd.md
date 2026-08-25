@@ -109,6 +109,12 @@
 | Estimated work volume | {{facts_work_estimate}} |
 | 12-month trajectory | {{facts_trajectory}} |
 
+<!-- #6192: the LoC and file-count rows are the two an independent verifier
+     re-derives with `git ls-files`, and the numbers do not match. The note
+     names the counter that produced them and what it excludes. -->
+
+{{facts_counting_note}}
+
 ## 2. Executive Summary
 
 {{executive_summary_paragraph}}
