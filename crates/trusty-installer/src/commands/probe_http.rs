@@ -1,5 +1,5 @@
-//! HTTP `GET /health` daemon probe — the transport behind every `tctl` health
-//! verdict (#4246).
+//! Daemon health probe — the transport behind every `tctl` health verdict
+//! (#4246), over HTTP or, since #6277, over a Unix socket.
 //!
 //! Why: `tctl` used to probe a daemon by spawning `<binary> health --json` — a
 //! contract NO shipped daemon implements. Every distinct failure (clap exit 2
@@ -13,10 +13,14 @@
 //! launchd applied its measured 5s default, well inside search's 30s-per-index
 //! flush floor — #4393 has since made the renderer declare the window).
 //!
-//! Every one of those daemons *does* answer `GET /health` over loopback today,
-//! so this module replaces the subprocess contract with the transport that
-//! actually exists. Three properties are load-bearing and each has a named
-//! regression test — remove any one of them and #4246 comes straight back:
+//! Every one of those daemons *does* answer a health query on a transport it
+//! actually serves, so this module replaces the subprocess contract with that
+//! transport. Since #6277 (ADR-0032) which transport that is varies per member:
+//! trusty-review serves a hardened Unix socket and is probed through
+//! [`uds_socket_for`] / [`classify_rpc_response`]; everything else still answers
+//! `GET /health` over loopback. Three properties are load-bearing and each has a
+//! named regression test — remove any one of them and #4246 comes straight
+//! back:
 //!
 //! 1. **[`build_probe_client`] is proxy-free.** reqwest 0.12 honours
 //!    `HTTP_PROXY`/`http_proxy`/`ALL_PROXY` for `127.0.0.1` — hyper-util's proxy
@@ -34,18 +38,23 @@
 //!    [`classify_response`]. trusty-analyze answers **HTTP 503** with
 //!    `status:"degraded"` when search is unreachable; a 2xx-only liveness check
 //!    (`ensure::daemon::health_ok`) calls that `down` and kickstarts it, while
-//!    trusty-review answers **200** + the same `degraded` for the identical
-//!    condition.
+//!    trusty-review answers the same `degraded` in a result frame for the
+//!    identical condition. [`classify_rpc_response`] applies the same body-first
+//!    rule on the socket side, which is why a degraded UDS member is `Serving`
+//!    and only an `error` frame is `RpcError`.
 //!
 //! What:
 //! - [`ProbeOutcome`] — the typed verdict, replacing the old flat `String`. It
 //!   keeps *why* a probe failed (`Refused` vs `Timeout` vs `HttpError` vs
-//!   `BadEnvelope`) instead of collapsing them, which is what lets `verify_tail`
-//!   gate its destructive repair on a genuine TCP-level observation.
+//!   `RpcError` vs `BadEnvelope`) instead of collapsing them, which is what lets
+//!   `verify_tail` gate its destructive repair on a genuine transport-level
+//!   observation.
 //! - [`probe_member_http_blocking`] — the sync entry point `super::probe` calls.
 //! - [`resolve_probe_bases`] / [`probe_bases`] / [`reconcile`] /
 //!   [`classify_response`] / [`effective_status`] / [`fixed_port_for`] — the
 //!   composable halves, unit-tested without a live daemon.
+//! - [`uds_socket_for`] / [`classify_rpc_response`] — the same split for the UDS
+//!   members (#6277).
 //!
 //! Test: `tests` (sibling `probe_http_tests.rs`) — covers the proxy immunity,
 //! the port-walk precedence rule, 503+degraded, envelope rejection, the
@@ -104,10 +113,49 @@ pub fn fixed_port_for(binary: &str) -> Option<u16> {
         "trusty-search" => Some(7878),
         "trusty-analyze" => Some(7879),
         "trusty-mpm" => Some(7880),
-        "trusty-review" => Some(7891),
+        // #6277: NO trusty-review row. It serves a Unix socket rather than a
+        // TCP port (ADR-0032) — see [`uds_socket_for`]. Leaving 7891 here would
+        // dial whatever happens to be on that port and report it as review.
         _ => None,
     }
 }
+
+/// The Unix socket a member serves, for the daemons that no longer serve TCP.
+///
+/// Why (#6277, ADR-0032): trusty-review is the first member to move its own
+/// transport onto UDS. Its probe has to move with it IN THE SAME CHANGE, or
+/// `tctl` dials a dead 7891, reads `Refused`, and — because `Refused` is one of
+/// the two variants [`ProbeOutcome::is_confirmed_down`] accepts — kickstarts a
+/// daemon that is running perfectly. That is #4246 exactly, which is why the
+/// design review made the daemon swap and its consumers one PR.
+///
+/// What: the path from `trusty_common::daemon_socket_path`, the same call the
+/// daemon binds through, for members that serve UDS; `None` for every member
+/// still on HTTP. A member with a socket is probed ONLY over it — there is no
+/// second leg to reconcile, because there is no second transport, and no
+/// discovery file that could disagree with a derived path.
+///
+/// ADR-0035's console-side aggregator routing is deliberately NOT done here:
+/// its own open questions are unresolved, so this is a transport swap and
+/// nothing more.
+///
+/// Test: `tests::uds_members_have_no_fixed_port`,
+/// `tests::probe_uds_reads_the_health_envelope_off_a_result_frame`.
+pub fn uds_socket_for(binary: &str) -> Option<std::path::PathBuf> {
+    match binary {
+        "trusty-review" => trusty_common::daemon_socket_path(binary).ok(),
+        _ => None,
+    }
+}
+
+/// The method a UDS member answers a health probe on.
+///
+/// Duplicated as a literal rather than imported: `trusty-installer` has no Cargo
+/// edge on `trusty-review`, and adding one to share a `&str` would pull an
+/// LLM-pipeline crate into `tctl`'s build. `trusty_review::service::METHOD_HEALTH`
+/// is the definition; `trusty-review/tests/uds_consumer_contract.rs` is what
+/// keeps the two equal.
+const UDS_HEALTH_METHOD: &str = "review.health";
 
 /// The typed result of probing one member's health (#4246).
 ///
@@ -154,6 +202,23 @@ pub enum ProbeOutcome {
         /// A bounded sample of what was received, for diagnosis.
         got: String,
     },
+    /// A UDS member answered with a JSON-RPC error frame rather than a result
+    /// (#6277).
+    ///
+    /// Why its own variant: there is no HTTP status code on a socket, so
+    /// [`Self::HttpError`] has nothing to carry, and folding this into
+    /// [`Self::BadEnvelope`] would lose the coded reason — a method name the
+    /// client has drifted off (`-32601`) reads completely differently from a
+    /// handler that failed (`-32603`), and only the code says which. Like
+    /// `HttpError` it is NOT confirmed-down: the daemon accepted the
+    /// connection, read the frame, and chose to refuse, which is the strongest
+    /// possible evidence that it is alive.
+    RpcError {
+        /// The JSON-RPC error code.
+        code: i64,
+        /// The daemon's own message, bounded for display.
+        message: String,
+    },
     /// The probe could not be performed locally (HTTP client or async runtime
     /// could not be constructed). Says nothing about the daemon.
     ProbeFailed {
@@ -192,7 +257,8 @@ impl ProbeOutcome {
     /// # Invariant — this string is for DISPLAY ONLY
     /// `health_string() == "down"` does **NOT** imply
     /// [`Self::is_confirmed_down`], and that gap is deliberate rather than an
-    /// oversight. `NoAddress`, `HttpError`, `BadEnvelope` and `ProbeFailed` all
+    /// oversight. `NoAddress`, `HttpError`, `BadEnvelope`, `RpcError` and
+    /// `ProbeFailed` all
     /// render `down` while being explicitly NOT confirmed-down: each means
     /// "something answered, or we never looked", which is not evidence that a
     /// process is dead. The two views answer different questions — this one asks
@@ -219,6 +285,7 @@ impl ProbeOutcome {
             | Self::Timeout
             | Self::HttpError { .. }
             | Self::BadEnvelope { .. }
+            | Self::RpcError { .. }
             | Self::ProbeFailed { .. } => health_str::DOWN,
         }
     }
@@ -267,9 +334,9 @@ impl ProbeOutcome {
     ///
     /// # Invariant — this is NARROWER than [`Self::health_string`]`() == "down"`
     /// The two are deliberately NOT equivalent, and callers must not treat them
-    /// as interchangeable. Four variants — `NoAddress`, `HttpError`,
-    /// `BadEnvelope`, `ProbeFailed` — report `down` for display while returning
-    /// `false` here. `NoAddress` is the sharpest example: it reports `down`
+    /// as interchangeable. Five variants — `NoAddress`, `HttpError`,
+    /// `BadEnvelope`, `RpcError`, `ProbeFailed` — report `down` for display
+    /// while returning `false` here. `NoAddress` is the sharpest example: it reports `down`
     /// on purpose (mapping it to `unknown` would make
     /// `VerifyTailReport::build` and `status`'s exit code print `VERIFIED` for a
     /// member whose address was never resolved), yet it is emphatically not
@@ -471,8 +538,8 @@ pub fn classify_response(status_code: u16, body: &[u8]) -> ProbeOutcome {
 /// - An empty leg set is `NoAddress`.
 ///
 /// What: picks the minimum-rank outcome — healthy `Serving` (0) < degraded
-/// `Serving` (1) < `BadEnvelope` (2) < `HttpError` (3) < `Timeout` (4) <
-/// `Refused` (5) < everything else (6).
+/// `Serving` (1) < `BadEnvelope` (2) < `HttpError` / `RpcError` (3) <
+/// `Timeout` (4) < `Refused` (5) < everything else (6).
 /// Test: `tests::reconcile_serving_leg_beats_refused_leg`,
 /// `tests::reconcile_answered_leg_beats_refused_leg`,
 /// `tests::reconcile_all_refused_stays_refused`,
@@ -488,7 +555,10 @@ pub fn reconcile(outcomes: Vec<ProbeOutcome>) -> ProbeOutcome {
                 }
             }
             ProbeOutcome::BadEnvelope { .. } => 2,
-            ProbeOutcome::HttpError { .. } => 3,
+            // #6277: an RPC error frame ranks with `HttpError` — both mean a
+            // daemon accepted the connection and refused with a reason, which
+            // outranks any refusal on another leg.
+            ProbeOutcome::HttpError { .. } | ProbeOutcome::RpcError { .. } => 3,
             ProbeOutcome::Timeout => 4,
             ProbeOutcome::Refused => 5,
             _ => 6,
@@ -516,6 +586,103 @@ async fn probe_url(client: &reqwest::Client, base: &str) -> ProbeOutcome {
     match resp.bytes().await {
         Ok(body) => classify_response(status_code, &body),
         Err(e) => classify_transport_error(&e),
+    }
+}
+
+/// Classify one JSON-RPC response frame into a [`ProbeOutcome`] (#6277).
+///
+/// Why: this is [`classify_response`]'s counterpart for the UDS transport, and
+/// it reuses the same envelope rule deliberately — a health body is a health
+/// body regardless of what carried it, so [`effective_status`]'s
+/// warming/degraded downgrade and the `status`-field check that keeps a squatter
+/// out apply unchanged. What it cannot reuse is the status code, because a
+/// socket has none: the `error` half of a JSON-RPC frame is the analogue, and it
+/// gets its own [`ProbeOutcome::RpcError`] arm rather than being flattened into
+/// `HttpError { status: 0 }`.
+///
+/// What: a `result` carrying a string `status` → `Serving`. A `result` without
+/// one → `BadEnvelope` (something answered on this socket that is not the
+/// daemon we asked for). An `error` → `RpcError` with the code and a bounded
+/// message. A frame with neither → `BadEnvelope`, since a well-formed response
+/// always carries exactly one of the two.
+///
+/// Test: `tests::probe_uds_reads_the_health_envelope_off_a_result_frame`,
+/// `tests::classify_rpc_response_reports_an_error_frame_as_answered_not_down`,
+/// `tests::classify_rpc_response_rejects_a_non_trusty_result`.
+pub fn classify_rpc_response(frame: &serde_json::Value) -> ProbeOutcome {
+    if let Some(error) = frame.get("error").filter(|e| !e.is_null()) {
+        return ProbeOutcome::RpcError {
+            code: error
+                .get("code")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0),
+            message: sample(
+                error
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("(no message)")
+                    .as_bytes(),
+            ),
+        };
+    }
+
+    let Some(result) = frame.get("result").filter(|r| !r.is_null()) else {
+        return ProbeOutcome::BadEnvelope {
+            got: sample(frame.to_string().as_bytes()),
+        };
+    };
+    if result.get("status").and_then(|s| s.as_str()).is_none() {
+        return ProbeOutcome::BadEnvelope {
+            got: sample(result.to_string().as_bytes()),
+        };
+    }
+    ProbeOutcome::Serving {
+        status: effective_status(result),
+        version: result
+            .get("version")
+            .and_then(|x| x.as_str())
+            .map(str::to_owned),
+    }
+}
+
+/// Dial `socket` and classify one health exchange (#6277).
+///
+/// Why: the UDS counterpart of [`probe_url`]. The transport failures map onto
+/// the SAME taxonomy the HTTP leg uses, because `verify_tail`'s kickstart gate
+/// reads the variant and must not care which transport produced it: a dial the
+/// kernel refused (no listener, or no socket file) is `Refused`, an elapsed
+/// budget is `Timeout`, and everything else means something answered and is
+/// therefore never confirmed-down.
+///
+/// A peer that accepts and hangs up without a frame arrives as
+/// `UdsRpcError::NoResponse` and is classified `BadEnvelope`, not `Refused`. It
+/// accepted the connection, so a process is alive on that socket and restarting
+/// it would be a guess.
+///
+/// What: one `send_framed_request` at [`REQUEST_TIMEOUT`], then
+/// [`classify_rpc_response`].
+///
+/// Test: `tests::probe_uds_reads_the_health_envelope_off_a_result_frame`,
+/// `tests::probe_uds_reports_refused_for_an_absent_socket`.
+async fn probe_socket(socket: &std::path::Path) -> ProbeOutcome {
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": UDS_HEALTH_METHOD,
+    });
+    match trusty_common::uds::send_framed_request::<_, serde_json::Value>(
+        socket,
+        &request,
+        REQUEST_TIMEOUT,
+    )
+    .await
+    {
+        Ok(frame) => classify_rpc_response(&frame),
+        Err(trusty_common::uds::UdsRpcError::Timeout { .. }) => ProbeOutcome::Timeout,
+        Err(trusty_common::uds::UdsRpcError::Dial { .. }) => ProbeOutcome::Refused,
+        Err(e) => ProbeOutcome::BadEnvelope {
+            got: sample(e.to_string().as_bytes()),
+        },
     }
 }
 
@@ -584,9 +751,19 @@ pub async fn probe_bases(
 /// [`ProbeOutcome::ProbeFailed`] — a LOCAL failure, never a daemon verdict, and
 /// so never a reason to kickstart), resolves both legs for `app`/`binary`, and
 /// probes them.
+/// #6277: a member with a Unix socket ([`uds_socket_for`]) is probed over it
+/// INSTEAD, and the HTTP legs are not attempted at all. There is nothing to
+/// reconcile: a UDS member has one transport, one derived path, and no
+/// discovery file, so a second leg could only contribute a false refusal.
+///
 /// Test: `tests::probe_uses_http_addr_when_fixed_port_unknown`,
-/// `tests::probe_no_address_when_nothing_resolves`.
+/// `tests::probe_no_address_when_nothing_resolves`,
+/// `tests::probe_uds_reads_the_health_envelope_off_a_result_frame`.
 pub async fn probe_daemon_http(app: &str, binary: &str) -> ProbeOutcome {
+    if let Some(socket) = uds_socket_for(binary) {
+        return probe_socket(&socket).await;
+    }
+
     let client = match build_probe_client() {
         Ok(c) => c,
         Err(e) => {

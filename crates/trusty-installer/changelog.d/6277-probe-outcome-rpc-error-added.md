@@ -1,0 +1,4 @@
+Added
+
+- **`ProbeOutcome::RpcError { code, message }`** — a UDS member that answered with a JSON-RPC error frame. A socket carries no HTTP status code, so `HttpError` has nothing to hold, and folding this into `BadEnvelope` would lose the coded reason: a client drifted onto a wrong method name (`-32601`) reads nothing like a handler that failed (`-32603`). Like `HttpError` it renders `down` and is NOT confirmed-down — the daemon accepted the connection and chose to refuse, which is evidence it is alive. `ProbeOutcome` is a public enum, so an exhaustive `match` on it downstream needs a new arm ([#6277](https://github.com/bobmatnyc/trusty-tools/issues/6277))
+- **`uds_socket_for(binary)`** — resolves the Unix socket a member serves, or `None` for a member still on HTTP ([#6277](https://github.com/bobmatnyc/trusty-tools/issues/6277))

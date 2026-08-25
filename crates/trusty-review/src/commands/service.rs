@@ -11,10 +11,11 @@
 //! plist to bootstrap.
 //! What: on macOS routes `ServiceAction` to a single launchd operation via the
 //! shared `trusty_common::launchd` module; the agent runs `trusty-review serve`
-//! (the long-lived HTTP webhook daemon). On non-macOS the entry point returns a
-//! clear error rather than emitting confusing plist output.
+//! (the long-lived review daemon, on a Unix socket since #6277). On non-macOS
+//! the entry point returns a clear error rather than emitting confusing plist
+//! output.
 //! Test: `service_label_matches_tctl_convention` and
-//! `serve_args_pass_explicit_default_port` (macOS-only, pure) pin the
+//! `serve_args_pass_the_explicit_socket_path` (macOS-only, pure) pin the
 //! load-bearing label + args; the install/uninstall paths are side-effecting
 //! `launchctl` calls exercised manually (never in the test suite, per the
 //! hermetic-test rule).
@@ -89,23 +90,35 @@ pub fn run_service_action(action: &ServiceAction) -> Result<()> {
 
 /// The daemon serve args embedded in the launchd plist.
 ///
-/// Why: the launchd agent must start the long-lived HTTP webhook server, which
-/// is `trusty-review serve`. The port is passed EXPLICITLY (rather than
-/// relying solely on `serve`'s `default_value_t = DEFAULT_PORT`) as defense in
-/// depth (#2566 review): a `KeepAlive::Always` / 10s-throttle launchd agent
-/// that silently inherited a colliding default would crash-loop indefinitely
-/// with no obvious cause, whereas an explicit `--port` here makes the bound
-/// port a visible, testable part of the plist contract, independent of
-/// whatever `serve`'s CLI default happens to be at any given moment.
-/// What: returns `["serve", "--port", "<DEFAULT_PORT>"]`.
-/// Test: `serve_args_pass_explicit_default_port`.
+/// Why: the launchd agent must start the long-lived review daemon, which is
+/// `trusty-review serve`. The socket is passed EXPLICITLY (rather than relying
+/// on `serve`'s own default) for the reason #2566's review gave for the port it
+/// replaces: a `KeepAlive::Always` / 10s-throttle agent that silently inherited
+/// a changed default would crash-loop with no obvious cause, whereas a literal
+/// path in the plist makes the bound endpoint a visible, greppable part of the
+/// unit — `launchctl print` shows it, and an operator chasing a dead daemon can
+/// compare it against what a consumer dials.
+///
+/// #6277: the flag is `--socket` since the transport moved off TCP; the plist is
+/// rewritten by `service install`, so an upgraded host picks it up on the next
+/// install rather than carrying a stale `--port`.
+///
+/// # Errors
+///
+/// When the socket path cannot be resolved — the data directory is
+/// unavailable. Previously infallible, because a port is a literal and a path
+/// is not.
+///
+/// What: returns `["serve", "--socket", "<socket path>"]`.
+/// Test: `serve_args_pass_the_explicit_socket_path`.
 #[cfg(target_os = "macos")]
-fn serve_args() -> Vec<String> {
-    vec![
+fn serve_args() -> Result<Vec<String>> {
+    let socket = trusty_review::service::socket_path()?;
+    Ok(vec![
         "serve".to_string(),
-        "--port".to_string(),
-        trusty_review::service::DEFAULT_PORT.to_string(),
-    ]
+        "--socket".to_string(),
+        socket.display().to_string(),
+    ])
 }
 
 /// Resolve the log directory for the review launchd agent.
@@ -141,7 +154,7 @@ fn launchd_config() -> Result<trusty_common::launchd::LaunchdConfig> {
     Ok(LaunchdConfig {
         label: LAUNCHD_LABEL.to_string(),
         exe_path: exe,
-        args: serve_args(),
+        args: serve_args()?,
         log_dir,
         keep_alive: KeepAlive::Always,
         throttle_interval: 10,
@@ -297,24 +310,33 @@ mod tests {
         );
     }
 
-    /// Why: the launchd agent must start the HTTP webhook daemon with an
-    /// EXPLICIT `--port` (#2566 review — defense in depth against a future
-    /// `DEFAULT_PORT` drift silently reintroducing the trusty-mpm :7880
-    /// collision); a wrong or missing port arg would load a plist that either
-    /// runs the wrong subcommand or falls back to whatever `serve`'s CLI
-    /// default happens to be.
+    /// Why: the launchd agent must start the daemon on the SAME socket its
+    /// consumers dial, and pass it explicitly (#2566 review's defense-in-depth
+    /// argument, carried across the #6277 transport swap). A plist that named a
+    /// different path — or that still passed the retired `--port` — would load
+    /// an agent that either fails to parse its own arguments or binds where
+    /// nothing looks.
     /// What: asserts the embedded args are exactly
-    /// `["serve", "--port", "<DEFAULT_PORT>"]`.
+    /// `["serve", "--socket", "<socket_path()>"]`, resolved through the shared
+    /// entry point rather than re-derived here.
     /// Test: this is the test.
     #[test]
-    fn serve_args_pass_explicit_default_port() {
+    fn serve_args_pass_the_explicit_socket_path() {
+        let socket = trusty_review::service::socket_path().expect("resolve socket path");
         assert_eq!(
-            serve_args(),
+            serve_args().expect("build serve args"),
             vec![
                 "serve".to_string(),
-                "--port".to_string(),
-                trusty_review::service::DEFAULT_PORT.to_string(),
+                "--socket".to_string(),
+                socket.display().to_string(),
             ]
+        );
+        assert!(
+            !serve_args()
+                .expect("build serve args")
+                .iter()
+                .any(|a| a == "--port"),
+            "the retired TCP flag must not survive in the plist (#6277)"
         );
     }
 }

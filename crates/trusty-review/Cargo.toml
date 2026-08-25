@@ -43,7 +43,7 @@ name        = "trusty-review"
 # `src/**`, so the pre-merge guard requires the next free position. The public
 # surface only grows: `LlmRequest::effective_model` and
 # `OpenRouterProvider::with_base_url` are added, nothing changes shape or moves.
-version     = "0.26.0"
+version     = "0.27.0"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true
@@ -77,11 +77,11 @@ tokio        = { workspace = true }
 async-trait  = { workspace = true }
 futures-util = { workspace = true }
 
-# ── HTTP (library code only — no axum in lib unconditionally) ──────────────
+# ── HTTP client only. #6277 removed axum, tower and tower-http along with the
+#    TCP listener they served: ADR-0032 moves this daemon's own transport onto
+#    a Unix socket and leaves trusty-console as the workspace's only HTTP
+#    surface. `reqwest` stays — it is how this crate CALLS trusty-search.
 reqwest      = { workspace = true }
-axum         = { workspace = true, optional = true }
-tower        = { workspace = true, optional = true }
-tower-http   = { workspace = true, optional = true }
 tempfile     = { workspace = true }
 
 # ── Serialisation ──────────────────────────────────────────────────────────
@@ -135,7 +135,11 @@ clap         = { workspace = true }
 # `webhook-relay` (#5182): the console->target relay wire contract AND its
 # receive half — the durable inbox, the listener, and the hardened UDS bind
 # this crate mounts in `webhook_listener`. Implies `uds` and `webhook-hmac`.
-trusty-common = { workspace = true, features = ["intent-source", "config-cli", "webhook-relay", "gh-cli"] }
+# `uds` (#6277) is named explicitly even though `webhook-relay` already implies
+# it: the serve transport depends on `uds::server` directly now, and an implied
+# feature is one refactor away from disappearing under a consumer that never
+# said it needed it.
+trusty-common = { workspace = true, features = ["intent-source", "config-cli", "webhook-relay", "gh-cli", "uds"] }
 # JSON-RPC / MCP primitives (ADR-0040, #5803). Optional: only the `mcp` feature
 # compiles `src/mcp/`.
 trusty-mcp = { workspace = true, optional = true }
@@ -172,18 +176,17 @@ aws-smithy-types       = { workspace = true }
 features = ["http-server", "mcp", "report"]
 
 [features]
-# Why: mirrors trusty-analyze / trusty-common convention — axum + tower-http
-#      are gated behind `http-server` so `--no-default-features` library
-#      consumers (e.g. CLI one-shot, unit tests) do not pull the full HTTP
-#      stack.  The webhook server and axum router live in the future `service`
-#      module and will be compiled only under this feature.
+# Why: gates the `service` module — `AppState`, the three operations, and the
+#      UDS listener — so `--no-default-features` library consumers (CLI
+#      one-shot, unit tests) do not compile the daemon.
 #
-# The feature is defined now even though Stage 1 does not yet implement the
-# service module, so downstream consumers can safely write:
-#   trusty-review = { features = ["http-server"] }
-# without a manifest change in a later stage.
+# #6277: the NAME is now a misnomer and is kept deliberately. It no longer
+# pulls axum or tower — ADR-0032 replaced the TCP listener with a Unix socket,
+# and `trusty-common/axum-server` went with it. Renaming it would be a breaking
+# change to every consumer's manifest for no behaviour, so the rename waits for
+# a change that is already breaking those consumers.
 default     = ["http-server", "mcp", "report"]
-http-server = ["dep:axum", "dep:tower", "dep:tower-http", "trusty-common/axum-server"]
+http-server = []
 # Why: gates the MCP stdio JSON-RPC service + the shared MCP primitives behind
 #      an opt-in feature so library-only consumers do not pull in the stdio
 #      loop.  Enabled by default so `cargo install` and the default binary
@@ -211,8 +214,19 @@ report      = []
 # context-orchestrator timeout fail-open test (#550).
 tokio        = { workspace = true, features = ["test-util"] }
 tempfile     = { workspace = true }
-tower        = { workspace = true }
-axum         = { workspace = true }
+# #6277: the combined-PR obligation from the design review —
+# `tests/uds_consumer_contract.rs` stands this daemon up on a temp socket and
+# asserts BOTH consumers see it healthy. A gap between the daemon and either
+# consumer leaves `tctl` kickstarting a live daemon (#4246), which is why they
+# ship together and why the proof lives here rather than in three separate
+# crates that each mock the other side.
+#
+# PATH-ONLY, deliberately no `version`: `cargo package` strips a dev-dependency
+# that carries no version requirement, so this does NOT make trusty-review's
+# publish wait for trusty-console's and trusty-installer's. A `workspace = true`
+# entry would carry the version and create exactly that ordering constraint.
+trusty-console   = { path = "../trusty-console" }
+trusty-installer = { path = "../trusty-installer" }
 # Why (#5466): `git2` was REMOVED. Its only use was the profile diff-sampler
 # tests, which went with `src/profile/`.
 # serial_test: run env-mutating tests serially to prevent env-var races across

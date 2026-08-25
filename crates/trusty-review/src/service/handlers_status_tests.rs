@@ -9,8 +9,6 @@
 
 use std::sync::Arc;
 
-use axum::{body::to_bytes, extract::State, http::StatusCode, response::IntoResponse as _};
-
 use crate::service::handlers::{
     AppState, DepInfo, DepState, DepStatus, compute_status, handle_health,
 };
@@ -185,16 +183,12 @@ async fn health_required_dep_down_sets_degraded() {
         Arc::new(FailSearch),
         None,
     );
-    let response = handle_health(State(state)).await;
-    let resp: axum::response::Response = response.into_response();
-    assert_eq!(
-        resp.status(),
-        StatusCode::OK,
-        "HTTP status must be 200 even when degraded (spec REV-706)"
-    );
-
-    let body_bytes = to_bytes(resp.into_body(), 65536).await.expect("body bytes");
-    let body: serde_json::Value = serde_json::from_slice(&body_bytes).expect("valid JSON");
+    // #6277: a degraded dependency reports in the STATUS FIELD, never as a
+    // failed call — the property spec REV-706 stated as "200 even when
+    // degraded" and the UDS transport states as "a result frame, not an error
+    // frame". `handle_health` is infallible, so the type system now carries it.
+    let health = handle_health(&state).await;
+    let body: serde_json::Value = serde_json::to_value(&health).expect("serialize health");
 
     assert_eq!(
         body["status"], "degraded",
@@ -236,12 +230,8 @@ async fn health_optional_dep_down_stays_ok() {
         Arc::new(FakeSearch),
         Some(Arc::new(FakeAnalyze)),
     );
-    let response = handle_health(State(state)).await;
-    let resp: axum::response::Response = response.into_response();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let body_bytes = to_bytes(resp.into_body(), 65536).await.expect("body bytes");
-    let body: serde_json::Value = serde_json::from_slice(&body_bytes).expect("valid JSON");
+    let health = handle_health(&state).await;
+    let body: serde_json::Value = serde_json::to_value(&health).expect("serialize health");
 
     assert_eq!(
         body["status"], "ok",

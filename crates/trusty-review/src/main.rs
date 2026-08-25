@@ -28,10 +28,10 @@ use trusty_review::config::ReviewConfig;
 
 use commands::calibrate::{CalibrateArgs, cmd_calibrate};
 use commands::compare::{CompareArgs, cmd_compare};
-use commands::port::{PortFormat, handle_port};
 use commands::run::{RunArgs, cmd_run};
 #[cfg(feature = "http-server")]
 use commands::serve::{ServeArgs, cmd_serve};
+use commands::socket::{SocketFormat, handle_socket};
 
 // ─── CLI top-level ────────────────────────────────────────────────────────────
 
@@ -84,35 +84,32 @@ enum Commands {
     /// same --local-diff / --base [--head] local-diff flags as `run` (#2993).
     Compare(CompareArgs),
 
-    /// Report the listening port of the running trusty-review daemon.
+    /// Report the Unix socket the trusty-review daemon serves on.
     ///
-    /// Reads the `http_addr` discovery file written at daemon bind time and
-    /// prints the address in one of three machine-readable formats:
+    /// #6277 replaced `trusty-review port` and its `http_addr` discovery file:
+    /// the daemon binds a socket whose path is derived from the data directory,
+    /// so there is no port to report and no file that can go stale.
     ///
-    ///   trusty-review port          → bare port:  7891
-    ///   trusty-review port --addr   → host:port:  127.0.0.1:7891
-    ///   trusty-review port --json   → JSON:       {"addr":"127.0.0.1","port":7891}
+    ///   trusty-review socket          → bare path: /…/trusty-review.sock
+    ///   trusty-review socket --json   → JSON:      {"socket":"…","serving":true}
     ///
-    /// Exits non-zero when no daemon discovery file is found so shell
-    /// substitution (`$(trusty-review port)`) fails safely.
-    Port {
-        /// Print `host:port` instead of the bare port number.
-        #[arg(long, conflicts_with = "json")]
-        addr: bool,
-
-        /// Print a JSON object `{"addr":"…","port":…}`.
-        #[arg(long, conflicts_with = "addr")]
+    /// Exits non-zero when nothing is answering on the socket, so shell
+    /// substitution (`$(trusty-review socket)`) fails safely.
+    Socket {
+        /// Print a JSON object `{"socket":"…","serving":…}`.
+        #[arg(long)]
         json: bool,
     },
 
-    /// Start the long-lived HTTP server (port 7891 by default).
+    /// Start the long-lived daemon on its Unix socket (#6277).
     ///
-    /// Exposes:
-    ///   GET  /health                  — liveness + dep status
-    ///   GET  /status                  — in-flight count + last error
-    ///   POST /review                  — synchronous on-demand review
+    /// Serves three JSON-RPC methods over that socket:
+    ///   review.health                 — liveness + dep status
+    ///   review.status                 — in-flight count + last error
+    ///   review.run                    — synchronous on-demand review
     ///
-    /// GitHub webhooks do not arrive here. Run `webhook-listen` for those:
+    /// Run `trusty-review socket` to see the path. GitHub webhooks do not
+    /// arrive here — run `webhook-listen` for those:
     /// `trusty-console` verifies the delivery and relays it over UDS (#5181).
     ///
     /// Pass --stdio to run as a MCP JSON-RPC stdio service instead.
@@ -199,19 +196,6 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    // `port` is synchronous — dispatch before the async runtime to keep the
-    // binary start-up cost minimal for machine-readable invocations.
-    if let Commands::Port { addr, json } = &cli.command {
-        let format = if *json {
-            PortFormat::Json
-        } else if *addr {
-            PortFormat::Addr
-        } else {
-            PortFormat::Port
-        };
-        return handle_port(format);
-    }
-
     // `service` drives macOS launchd (`launchctl`) synchronously — dispatch
     // before the async runtime so `tctl install`/`tctl start` hooks pay no
     // tokio start-up cost for a plist write.
@@ -254,10 +238,17 @@ async fn async_main(cli: Cli) -> Result<()> {
         Commands::Calibrate(args) => cmd_calibrate(config, args).await,
         Commands::WebhookListen => trusty_review::webhook_listener::run(config).await,
         Commands::Config(cmd) => cmd.run().await,
-        // Port is handled synchronously in `main` before this function is
-        // called; this arm is unreachable at runtime but required for
-        // exhaustive match.
-        Commands::Port { .. } => unreachable!("port dispatched before async_main"),
+        // #6277: `socket` probes the endpoint, which is async, so unlike the
+        // `port` command it replaces it cannot be dispatched before the runtime
+        // is up.
+        Commands::Socket { json } => {
+            let format = if json {
+                SocketFormat::Json
+            } else {
+                SocketFormat::Path
+            };
+            handle_socket(format).await
+        }
         // `service` is likewise dispatched synchronously in `main`.
         #[cfg(feature = "http-server")]
         Commands::Service { .. } => unreachable!("service dispatched before async_main"),

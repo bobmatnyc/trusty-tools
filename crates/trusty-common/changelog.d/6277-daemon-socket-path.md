@@ -1,0 +1,3 @@
+Added
+
+- **`daemon_socket_path(app_name)`** — the UDS counterpart of `read_daemon_addr`, returning `<data dir>/<app>.sock`. The socket path is a cross-crate contract: `trusty-review` binds it while `trusty-console` and `trusty-installer` dial it, and neither consumer has a Cargo edge on the daemon to import a constant from. Deriving it in three places is the drift that produces a daemon that is up and a probe that reports it down. Unconditional rather than behind the `uds` feature, so a caller that only wants the path does not compile the socket machinery (ADR-0032, [#6277](https://github.com/bobmatnyc/trusty-tools/issues/6277))

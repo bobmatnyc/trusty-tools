@@ -1,77 +1,108 @@
 //! `ServiceConnector` implementation for `trusty-review`.
 //!
-//! Why: trusty-review writes its bound address to `~/.trusty-review/http_addr`
-//! on successful bind. This connector reads that file and probes the TCP port.
-//! The console previously excluded trusty-review per decision #1069; issue #1163
-//! lifts that exclusion now that the Review dashboard tab is implemented.
-//! What: `ReviewConnector` implements `ServiceConnector::detect()` using
-//! `~/.trusty-review/http_addr` as the discovery file and `trusty-review` as
-//! the binary name. Falls back to probing the default port (7880) when no
-//! discovery file is found, matching the AnalyzeConnector pattern.
-//! Test: `test_review_connector_with_stale_addr_file` and
-//! `test_review_connector_no_addr_file` below.
+//! Why: trusty-review served TCP loopback HTTP and published its bound address
+//! in `~/.trusty-review/http_addr`; this connector read that file and probed the
+//! port. #6277 (ADR-0032) moved the daemon onto a hardened Unix socket, so both
+//! halves of that are gone — there is no port and no discovery file. It also
+//! removes a bug the file made possible: a stale `http_addr` plus a squatter on
+//! the fallback port read as a healthy trusty-review. There is no fallback now,
+//! because there is nothing to fall back FROM: the socket path is derived, and
+//! the daemon and this connector resolve it through the same
+//! `trusty_common::daemon_socket_path` call.
+//!
+//! The retired fallback was `127.0.0.1:7880` — two port moves stale, and
+//! trusty-mpm's daemon port since #2566, so a running `tm` reported
+//! trusty-review as Running. It is deleted rather than corrected.
+//!
+//! What: `ReviewConnector::detect()` dials `review.health` over the socket and
+//! reads `version` off the answer.
+//! Test: `review_connector_reports_available_when_nothing_is_serving`,
+//! `review_connector_reads_the_version_off_a_live_socket`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::connector::{ServiceConnector, ServiceInfo, ServiceStatus};
 
-use super::helpers::{binary_on_path, fetch_health_version, read_addr_file, tcp_probe};
+use super::helpers::binary_on_path;
+
+/// How long one health dial may take, end to end.
+///
+/// A local socket answers in single-digit milliseconds; trusty-review's own
+/// health handler bounds its dependency probes at 2 s (#3658), so this leaves
+/// headroom over that without letting one wedged service stall the console's
+/// whole detection pass.
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// The method name `trusty-review`'s router registers for its health check.
+///
+/// Duplicated as a literal rather than imported: `trusty-console` has no Cargo
+/// edge on `trusty-review` and adding one to share a `&str` would pull an
+/// LLM-pipeline crate into the console's build. `rpc::METHOD_HEALTH` is the
+/// definition; this is the client's copy, and the integration test in
+/// `trusty-review/tests/uds_consumer_contract.rs` is what keeps them equal.
+const METHOD_HEALTH: &str = "review.health";
+
+/// The `result` half of a `review.health` response, as far as the console reads
+/// it.
+///
+/// Only `version` is consumed — the card renders it. `status` is deserialised
+/// too so a body that carries neither is refused as not-a-health-envelope
+/// rather than silently rendering a versionless Running card.
+#[derive(Debug, serde::Deserialize)]
+struct HealthEnvelope {
+    /// `"ok"` or `"degraded"`. Presence is what makes this a health answer.
+    #[allow(dead_code)]
+    status: String,
+    /// The daemon's own version, rendered on the service card.
+    version: Option<String>,
+}
 
 /// ServiceConnector for `trusty-review`.
 ///
-/// Why: trusty-review stores its data under `~/.trusty-review/`. An `http_addr`
-/// file there (if written by the running daemon) gives the exact address;
-/// otherwise we probe the default port 7880.
-/// What: Implements `detect()` checking `~/.trusty-review/http_addr`, then
-/// falling back to `http://127.0.0.1:7880` TCP probe when the file is absent.
-/// Test: `test_review_connector_with_stale_addr_file`,
-/// `test_review_connector_no_addr_file` below.
+/// Why: the console's dashboard needs to know whether the review daemon is
+/// running, and since #6277 that question is answered by dialling its socket.
+/// What: implements `detect()` — binary on PATH, then one `review.health` call.
+/// Test: see the module docs.
 pub struct ReviewConnector {
-    /// Override for the home directory (used in tests).
-    home_dir: Option<PathBuf>,
+    /// Override for the socket path (used in tests).
+    ///
+    /// Before #6277 this was a HOME override, because the discovery file lived
+    /// under `~`. The socket path comes from the data directory now, which
+    /// `TRUSTY_DATA_DIR_OVERRIDE` already redirects — but that variable is
+    /// process-global and this connector runs beside five others in one poll,
+    /// so a path override keeps a test from redirecting its siblings too.
+    socket: Option<PathBuf>,
 }
 
 impl ReviewConnector {
     /// Create a new `ReviewConnector`.
-    ///
-    /// Why: Production callers use `new()`; tests use `with_home()`.
-    /// What: Stores no state except the optional home override.
-    /// Test: Created in `all_connectors()` and in unit tests.
     pub fn new() -> Self {
-        Self { home_dir: None }
+        Self { socket: None }
     }
 
-    /// Create a connector that uses `home_dir` instead of the real home.
+    /// Create a connector that dials `socket` instead of the resolved path.
     ///
-    /// Why: Unit tests must not read or write the real user's `~/.trusty-*`
-    /// directories. Injecting a temp dir keeps tests hermetic.
-    /// What: Stores `home_dir` for use in `addr_file_path()`.
-    /// Test: `test_review_connector_with_stale_addr_file`,
-    /// `test_review_connector_no_addr_file`.
-    #[cfg(test)]
-    pub fn with_home(home_dir: PathBuf) -> Self {
+    /// Why: unit tests must not dial the real user's running daemon, and the
+    /// integration test needs to point this at a socket it bound itself.
+    /// What: stores `socket` for use by `detect()`.
+    /// Test: `review_connector_reports_available_when_nothing_is_serving`.
+    pub fn with_socket(socket: PathBuf) -> Self {
         Self {
-            home_dir: Some(home_dir),
+            socket: Some(socket),
         }
     }
 
-    fn addr_file_path(&self) -> PathBuf {
-        let home = self
-            .home_dir
-            .clone()
-            .or_else(dirs::home_dir)
-            .unwrap_or_else(|| PathBuf::from("/tmp"));
-        home.join(".trusty-review").join("http_addr")
-    }
-
-    /// Default address string for trusty-review.
+    /// The socket this connector dials.
     ///
-    /// Why: trusty-review's fixed default port is 7880. Used as a fallback
-    /// when no http_addr file is found.
-    /// What: Returns the address string `"127.0.0.1:7880"`.
-    /// Test: Covered by the detect() fallback path.
-    pub(crate) fn default_addr() -> &'static str {
-        "127.0.0.1:7880"
+    /// Returns `None` when the data directory cannot be resolved — treated by
+    /// `detect()` as "cannot tell", which reports `Available` rather than
+    /// claiming the daemon is absent.
+    fn socket_path(&self) -> Option<PathBuf> {
+        match &self.socket {
+            Some(p) => Some(p.clone()),
+            None => trusty_common::daemon_socket_path("trusty-review").ok(),
+        }
     }
 }
 
@@ -79,6 +110,47 @@ impl Default for ReviewConnector {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Dial `review.health` and return the envelope, or `None` if nothing answered.
+///
+/// Why: `ServiceConnector::detect` is synchronous — the poller calls it inside
+/// `spawn_blocking` — and the shared UDS client is async. The exchange runs on
+/// a dedicated thread with its own current-thread runtime rather than through
+/// `Handle::block_on`, for the reason `trusty-installer`'s
+/// `probe_member_http_blocking` records: building a runtime and blocking on it
+/// from inside another runtime's worker panics, and this way the call is safe
+/// from any caller regardless of what it is running on.
+///
+/// What: one `send_framed_request` bounded by [`HEALTH_TIMEOUT`], then a
+/// JSON-RPC envelope check. A response carrying an `error` is `None`: the
+/// daemon answered, but not with health, and the console has nothing to render.
+///
+/// Test: `review_connector_reports_available_when_nothing_is_serving`.
+fn probe_health(socket: &Path) -> Option<HealthEnvelope> {
+    let socket = socket.to_path_buf();
+    let handle = std::thread::Builder::new()
+        .name("console-review-probe".to_owned())
+        .spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .ok()?;
+            rt.block_on(async {
+                let request = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": METHOD_HEALTH,
+                });
+                let response: trusty_common::uds::server::RpcResponse =
+                    trusty_common::uds::send_framed_request(&socket, &request, HEALTH_TIMEOUT)
+                        .await
+                        .ok()?;
+                serde_json::from_value::<HealthEnvelope>(response.result?).ok()
+            })
+        })
+        .ok()?;
+    handle.join().ok()?
 }
 
 impl ServiceConnector for ReviewConnector {
@@ -92,63 +164,37 @@ impl ServiceConnector for ReviewConnector {
 
     /// Detect trusty-review status.
     ///
-    /// Why: Reads `~/.trusty-review/http_addr` — the file the daemon writes
-    /// immediately after successfully binding its port. Falls back to probing
-    /// the default port 7880 when no discovery file is present (matches the
-    /// AnalyzeConnector pattern).
-    /// What: Binary check → addr file + TCP probe → fallback default-port TCP → status.
-    /// Test: `test_review_connector_with_stale_addr_file`,
-    /// `test_review_connector_no_addr_file`.
+    /// Why: the console dashboard's Review tab needs to know whether the daemon
+    /// is up, and `tctl` makes the same call for a different reason — so the two
+    /// must agree, which they do by dialling the same method on the same
+    /// derived path (#6277).
+    /// What: binary check → `review.health` over the socket → status. `url` is
+    /// deliberately `None`: a UDS daemon has no URL, and ADR-0032 makes
+    /// trusty-console the only HTTP surface in the workspace, so a synthesised
+    /// `http://` address would be a link that cannot work.
+    /// Test: `review_connector_reports_available_when_nothing_is_serving`,
+    /// `review_connector_reads_the_version_off_a_live_socket`.
     fn detect(&self) -> ServiceInfo {
-        if !binary_on_path("trusty-review") {
-            return ServiceInfo {
-                id: self.id().to_string(),
-                display_name: self.display_name().to_string(),
-                status: ServiceStatus::Absent,
-                version: None,
-                url: None,
-                hint: None,
-            };
-        }
-
-        // Try the discovery file first.
-        if let Some(addr) = read_addr_file(&self.addr_file_path())
-            && tcp_probe(&addr)
-        {
-            let base_url = format!("http://{addr}");
-            let version = fetch_health_version(&addr);
-            return ServiceInfo {
-                id: self.id().to_string(),
-                display_name: self.display_name().to_string(),
-                status: ServiceStatus::Running,
-                version,
-                url: Some(base_url),
-                hint: None,
-            };
-        }
-
-        // Fallback: probe the well-known default port.
-        let default_addr = Self::default_addr();
-        if tcp_probe(default_addr) {
-            let base_url = format!("http://{default_addr}");
-            let version = fetch_health_version(default_addr);
-            return ServiceInfo {
-                id: self.id().to_string(),
-                display_name: self.display_name().to_string(),
-                status: ServiceStatus::Running,
-                version,
-                url: Some(base_url),
-                hint: None,
-            };
-        }
-
-        ServiceInfo {
+        let base = |status: ServiceStatus, version: Option<String>| ServiceInfo {
             id: self.id().to_string(),
             display_name: self.display_name().to_string(),
-            status: ServiceStatus::Available,
-            version: None,
+            status,
+            version,
             url: None,
             hint: None,
+        };
+
+        if !binary_on_path("trusty-review") {
+            return base(ServiceStatus::Absent, None);
+        }
+
+        let Some(socket) = self.socket_path() else {
+            return base(ServiceStatus::Available, None);
+        };
+
+        match probe_health(&socket) {
+            Some(health) => base(ServiceStatus::Running, health.version),
+            None => base(ServiceStatus::Available, None),
         }
     }
 }
@@ -157,80 +203,70 @@ impl ServiceConnector for ReviewConnector {
 
 #[cfg(test)]
 mod tests {
-    use super::super::helpers::tcp_probe;
     use super::*;
-    use std::fs;
-    use tempfile::TempDir;
 
-    fn make_home_with_addr(rel_path: &str, content: &str) -> TempDir {
-        let tmp = TempDir::new().expect("tempdir");
-        let path = tmp.path().join(rel_path);
-        fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
-        fs::write(&path, content).expect("write addr file");
-        tmp
-    }
-
-    /// Why: stale addr file must yield Available (not Running) because TCP on
-    /// port 14997 fails. However, the ReviewConnector also probes the default
-    /// port 7880 as a fallback. If `trusty-review` is running on 7880 in the
-    /// test environment this test returns Running — which is correct behaviour.
-    /// What: creates `.trusty-review/http_addr = 127.0.0.1:14997` and calls
-    /// detect(); branches on whether the binary is present and the default port
-    /// is reachable, producing a deterministic assertion regardless of environment.
-    /// Test: this test itself.
+    /// Why: the pre-#6277 connector fell back to probing `127.0.0.1:7880` when
+    /// its discovery file was missing — trusty-mpm's port since #2566 — so a
+    /// running `tm` made this report a trusty-review that was not there. The
+    /// fallback is gone, and this is what keeps it gone: an absent socket is
+    /// `Available`, never `Running`, whatever else is listening on the machine.
+    /// What: points the connector at a path in an empty temp dir and asserts
+    /// the verdict, branching only on whether the binary is installed.
+    /// Test: this is the test.
     #[test]
-    fn test_review_connector_with_stale_addr_file() {
-        let tmp = make_home_with_addr(".trusty-review/http_addr", "127.0.0.1:14997");
-        let connector = ReviewConnector::with_home(tmp.path().to_path_buf());
+    fn review_connector_reports_available_when_nothing_is_serving() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let connector = ReviewConnector::with_socket(tmp.path().join("absent.sock"));
         let info = connector.detect();
-        let binary_present = which::which("trusty-review").is_ok();
-        let default_running = tcp_probe(ReviewConnector::default_addr());
-        if !binary_present {
-            assert_eq!(info.status, ServiceStatus::Absent, "binary absent → Absent");
-        } else if default_running {
-            assert_eq!(
-                info.status,
-                ServiceStatus::Running,
-                "binary present, default port running → Running"
-            );
+
+        let expected = if which::which("trusty-review").is_ok() {
+            ServiceStatus::Available
         } else {
-            assert_eq!(
-                info.status,
-                ServiceStatus::Available,
-                "binary present, no running daemon → Available"
-            );
-        }
+            ServiceStatus::Absent
+        };
+        assert_eq!(info.status, expected);
         assert_eq!(info.id, "trusty-review");
         assert_eq!(info.display_name, "Trusty Review");
+        assert!(info.url.is_none(), "a UDS daemon has no URL to render");
     }
 
-    /// Why: no addr file; result depends on whether the binary is present and
-    /// the daemon is running on the default port.
-    /// What: empty temp HOME; branches deterministically on
-    /// `which::which("trusty-review")` and a probe of the default port.
-    /// Test: this test itself.
-    #[test]
-    fn test_review_connector_no_addr_file() {
-        let tmp = TempDir::new().expect("tempdir");
-        let connector = ReviewConnector::with_home(tmp.path().to_path_buf());
-        let info = connector.detect();
-        let binary_present = which::which("trusty-review").is_ok();
-        let default_running = tcp_probe(ReviewConnector::default_addr());
-        if !binary_present {
-            assert_eq!(info.status, ServiceStatus::Absent, "binary absent → Absent");
-        } else if default_running {
-            assert_eq!(
-                info.status,
-                ServiceStatus::Running,
-                "binary present, default port running → Running"
-            );
-        } else {
-            assert_eq!(
-                info.status,
-                ServiceStatus::Available,
-                "binary present, no running daemon → Available"
-            );
+    /// Why: `Running` is the verdict that has to be earned by an ANSWER, and
+    /// the version it carries is what the card renders. A connector that
+    /// reported Running off a bare connect would have no version to show and
+    /// would call a wedged daemon healthy.
+    /// What: binds a socket that answers one `review.health` frame with a real
+    /// envelope, and asserts the connector reads the version off it.
+    /// Test: this is the test.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn review_connector_reads_the_version_off_a_live_socket() {
+        if which::which("trusty-review").is_err() {
+            eprintln!("skip: trusty-review is not on PATH, so detect() short-circuits to Absent");
+            return;
         }
-        assert!(info.url.is_none() || info.status == ServiceStatus::Running);
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let socket = tmp.path().join("sockets").join("review.sock");
+        let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
+
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            let Ok((mut conn, _)) = listener.accept().await else {
+                return;
+            };
+            let mut sink = Vec::new();
+            let _ = conn.read_to_end(&mut sink).await;
+            let reply = br#"{"jsonrpc":"2.0","id":1,"result":{"status":"ok","version":"9.9.9"}}"#;
+            let _ = conn.write_all(reply).await;
+            let _ = conn.write_all(b"\n").await;
+            let _ = conn.flush().await;
+        });
+
+        let connector = ReviewConnector::with_socket(socket);
+        let info = tokio::task::spawn_blocking(move || connector.detect())
+            .await
+            .expect("detect");
+
+        assert_eq!(info.status, ServiceStatus::Running);
+        assert_eq!(info.version.as_deref(), Some("9.9.9"));
     }
 }

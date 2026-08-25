@@ -887,9 +887,10 @@ pub mod daemon_guard;
 /// Why: Both trusty-search and trusty-memory persist their bound `host:port`
 /// to disk for discovery by CLI and MCP clients. Centralising keeps them in sync.
 /// What: Exposes [`daemon_addr::write_daemon_addr`], [`daemon_addr::read_daemon_addr`],
-/// [`daemon_addr::check_already_running`], and
+/// [`daemon_addr::check_already_running`],
 /// [`daemon_addr::resolve_daemon_base_url`] (discovery-first `http://` base
-/// URL resolution, issue #2033).
+/// URL resolution, issue #2033), and [`daemon_addr::daemon_socket_path`] — the
+/// UDS counterpart a daemon binds and its consumers dial (#6277, ADR-0032).
 /// Test: `cargo test -p trusty-common --features unconditional-only --
 /// daemon_addr::tests`.
 pub mod daemon_addr;
@@ -1044,8 +1045,8 @@ pub use data_dir::{DATA_DIR_OVERRIDE_ENV, is_dir, resolve_data_dir, sanitize_dat
 
 // Daemon address
 pub use daemon_addr::{
-    check_already_running, read_daemon_addr, remove_daemon_addr, resolve_daemon_base_url,
-    write_daemon_addr,
+    check_already_running, daemon_socket_path, read_daemon_addr, remove_daemon_addr,
+    resolve_daemon_base_url, write_daemon_addr,
 };
 
 // Health probe

@@ -101,6 +101,46 @@ pub fn remove_daemon_addr(app_name: &str) -> Result<()> {
     }
 }
 
+/// Resolve the Unix socket a UDS-transport daemon binds (#6277, ADR-0032).
+///
+/// Why: ADR-0032 moves each trusty-* service's own transport onto UDS, and the
+/// path is a CROSS-CRATE contract — `trusty-review` binds it while
+/// `trusty-console` and `trusty-installer` dial it, and neither of those two
+/// has a Cargo edge on `trusty-review` to import a constant from. Deriving the
+/// path in each of the three crates is the drift this repo's common-entry-point
+/// rule exists to stop: a server and a client that disagree about the path
+/// produce a daemon that is up and a probe that reports it down, which is the
+/// #4246 false-`down` class all over again.
+///
+/// What: `{resolve_data_dir(app_name)}/<app_name>.sock`. It sits beside the
+/// `http_addr` file this module's other helpers own, because the question is
+/// the same one — where does this daemon answer — and there is no reason for
+/// two layouts. Deliberately NOT under [`crate::uds::scratch_socket_dir`]: the
+/// scratch directory is for sockets a supervisor spawns and reaps
+/// (`webhook_relay`), while a resident daemon's own endpoint belongs with the
+/// rest of its persistent state, and a data-dir path is redirectable in tests
+/// through `TRUSTY_DATA_DIR_OVERRIDE`.
+///
+/// Unconditional rather than behind the `uds` feature: a caller that only needs
+/// the PATH (a doctor command printing it, a test planting a fixture) should
+/// not have to compile the socket machinery to ask for it.
+///
+/// A caller that binds this path should expect `bind_hardened` to narrow the
+/// containing data directory to `0700` — the socket is only unreachable to
+/// another uid because its directory is.
+///
+/// # Errors
+///
+/// Whatever [`crate::data_dir::resolve_data_dir`] returns — the data directory
+/// could not be resolved or created.
+///
+/// Test: `daemon_socket_path_sits_beside_the_addr_file`,
+/// `daemon_socket_path_honours_the_data_dir_override`.
+pub fn daemon_socket_path(app_name: &str) -> Result<std::path::PathBuf> {
+    let dir = crate::data_dir::resolve_data_dir(app_name)?;
+    Ok(dir.join(format!("{app_name}.sock")))
+}
+
 /// Probe whether an existing daemon recorded at `addr_file` is healthy and,
 /// if so, return its base URL so the caller can refuse to start a duplicate.
 ///
@@ -237,6 +277,57 @@ mod tests {
             std::env::remove_var(DATA_DIR_OVERRIDE_ENV);
         }
         assert_eq!(got.as_deref(), Some("127.0.0.1:12345"));
+    }
+
+    /// Why (#6277): the socket path is a cross-crate contract that three crates
+    /// read and none of them shares a Cargo edge with the other two, so the
+    /// layout has to be pinned here rather than re-derived at each call site.
+    /// What: the socket is `<app>.sock` in the same directory `write_daemon_addr`
+    /// writes `http_addr` into.
+    /// Test: itself.
+    #[test]
+    fn daemon_socket_path_sits_beside_the_addr_file() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile_like_dir();
+        // SAFETY: guarded by ENV_LOCK, this module's convention for the override.
+        unsafe { std::env::set_var(DATA_DIR_OVERRIDE_ENV, &tmp) };
+
+        let socket = daemon_socket_path("trusty-review").expect("resolve socket path");
+        let dir = crate::data_dir::resolve_data_dir("trusty-review").expect("resolve data dir");
+
+        unsafe { std::env::remove_var(DATA_DIR_OVERRIDE_ENV) };
+
+        assert_eq!(socket, dir.join("trusty-review.sock"));
+        assert_eq!(
+            socket.parent(),
+            Some(dir.as_path()),
+            "the socket must live in the data dir, beside http_addr"
+        );
+    }
+
+    /// Why (#6277): every consumer test — and the combined-PR integration test —
+    /// redirects the daemon's endpoint by setting `TRUSTY_DATA_DIR_OVERRIDE`. A
+    /// path helper that ignored the override would make those tests silently
+    /// dial the developer's real daemon.
+    /// What: the resolved socket sits under the override root.
+    /// Test: itself.
+    #[test]
+    fn daemon_socket_path_honours_the_data_dir_override() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile_like_dir();
+        // SAFETY: guarded by ENV_LOCK, this module's convention for the override.
+        unsafe { std::env::set_var(DATA_DIR_OVERRIDE_ENV, &tmp) };
+
+        let socket = daemon_socket_path("trusty-review").expect("resolve socket path");
+
+        unsafe { std::env::remove_var(DATA_DIR_OVERRIDE_ENV) };
+
+        assert!(
+            socket.starts_with(&tmp),
+            "{} must sit under the override root {}",
+            socket.display(),
+            tmp.display()
+        );
     }
 
     // ── Code Contract tests (#5724, ADR-0047) ────────────────────────────────
