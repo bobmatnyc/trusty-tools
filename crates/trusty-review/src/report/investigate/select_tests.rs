@@ -751,3 +751,56 @@ fn a_declared_hotspot_reaches_the_selected_file_and_the_coverage_row() {
         .expect("an example");
     assert!(example.contains("hottest fn drain_queue"), "{example}");
 }
+
+/// #6193: the test-coverage row used to count EXAMINED files, so shrinking the
+/// budget shrank the dimension's figures for an unchanged repository. It is now
+/// enumerated over the whole tracked list, and a one-file budget proves it: the
+/// count survives a selection that reads almost nothing.
+#[test]
+fn the_test_coverage_row_is_enumerated_not_sampled() {
+    let tmp = fixture();
+    let files = list_tracked_files(tmp.path());
+
+    let full = select_files(
+        tmp.path(),
+        &files,
+        None,
+        Budget::default(),
+        RiskSignals::default(),
+    );
+    let starved = select_files(
+        tmp.path(),
+        &files,
+        None,
+        Budget {
+            max_files: 1,
+            max_bytes: 64,
+        },
+        RiskSignals::default(),
+    );
+
+    assert!(
+        starved.files.len() < full.files.len(),
+        "the budget must bite"
+    );
+    assert_eq!(
+        full.test_census, starved.test_census,
+        "the census must not move with the budget"
+    );
+    assert_eq!(full.test_census.test_files, 1, "{:?}", full.test_census);
+
+    let row = |sel: &Selection| {
+        sel.per_dimension
+            .iter()
+            .find(|d| d.dimension == super::TEST_DIMENSION)
+            .cloned()
+            .expect("a test-coverage row")
+    };
+    assert_eq!(row(&full).files_examined, row(&starved).files_examined);
+    assert!(
+        row(&full)
+            .example
+            .is_some_and(|e| e.contains("not sampled")),
+        "the row must state its own basis"
+    );
+}

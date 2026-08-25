@@ -23,9 +23,11 @@
 pub mod analyze;
 mod batch;
 pub mod deps;
+pub mod exposure;
 mod regions;
 mod render;
 pub mod select;
+pub mod test_census;
 pub mod trace;
 pub mod trace_client;
 pub mod trace_symbol;
@@ -43,9 +45,11 @@ use crate::report::synthesize::{FindingProse, Synthesis};
 
 pub use batch::BatchStatus;
 pub use deps::{Dependency, DependencyInventory};
+pub use exposure::{ExposureFact, ExposureIndex, ExposureKind};
 pub use select::{
     Budget, DimensionCoverage, RiskSignals, SCALABILITY_DIMENSION, SECURITY_DIMENSION, Selection,
 };
+pub use test_census::TestCensus;
 pub use trace::{FindingTrace, TraceAnchor, TraceLimits, TraceSet};
 pub use verdict::{FindingVerdict, Verdict, VerdictSet, Verifier};
 pub use verify::VerifiedFinding;
@@ -119,6 +123,15 @@ pub struct Coverage {
     pub dimensions_absent: Vec<String>,
     /// Per-dimension coverage of the examined set (#6082).
     pub per_dimension: Vec<select::DimensionCoverage>,
+    /// Test presence enumerated over the whole tracked list (#6193).
+    ///
+    /// Why: the `test coverage` dimension used to count EXAMINED files, so its
+    /// figures moved with the byte budget rather than with the repository. This
+    /// is the deterministic replacement; the LLM narrates it and no longer
+    /// supplies it.
+    /// Test: `counts_test_files_over_the_whole_tracked_list`, and
+    /// `render_tests::the_test_coverage_row_states_the_enumeration`.
+    pub test_census: TestCensus,
     /// Examined files the manifest named as evidence, with a reason (#6082).
     pub attributed_files: usize,
     /// True when selection was restricted to manifest-declared paths (#6082).
@@ -185,6 +198,7 @@ impl Coverage {
             dimensions_covered,
             dimensions_absent,
             per_dimension: sel.per_dimension.clone(),
+            test_census: sel.test_census.clone(),
             attributed_files: sel.attributed_files,
             attributed_only: sel.attributed_only,
             rejected,
@@ -235,6 +249,19 @@ pub struct RepoInvestigation {
     /// per candidate — a candidate leg 1 refused is UNVERIFIABLE carrying that
     /// refusal, so the counts cover the traced set and not only its successes.
     pub verdicts: Option<VerdictSet>,
+    /// Bind/exposure facts read out of the examined files' own source (#6191).
+    ///
+    /// Why: reachability classification had no collection-side evidence at all —
+    /// it inferred a surface's reach from markers in finding text, so a
+    /// network-facing component whose findings did not spell one was withheld
+    /// rather than stated. This is that evidence source.
+    /// What: one entry per examined file whose source states a bind address or
+    /// an outbound absolute URL; empty for a repository whose examined files
+    /// state neither, which leaves the text-marker path exactly as it was.
+    /// Test: `a_loopback_bind_is_collected_with_its_line`, and
+    /// `collected_bind_evidence_outranks_a_text_marker`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub exposure: Vec<ExposureFact>,
 }
 
 /// The aggregate investigation result recorded on the [`ReportModel`].
@@ -321,9 +348,14 @@ pub async fn run_investigation(
                 deps,
                 traces: None,
                 verdicts: None,
+                exposure: Vec::new(),
             });
             continue;
         }
+
+        // #6191: read from the bytes already captured by selection, before the
+        // batches consume them — no second pass over the tree.
+        let exposure = exposure::collect(&selection.files);
 
         let batches = batch::partition_batches(&selection.files);
         let (mut findings, rejected, outcomes) = batch::run_batches(
@@ -364,6 +396,7 @@ pub async fn run_investigation(
             deps,
             traces,
             verdicts,
+            exposure,
         });
     }
 
@@ -755,6 +788,7 @@ mod batch_gap_tests {
             },
             traces: None,
             verdicts: None,
+            exposure: Vec::new(),
         }
     }
 

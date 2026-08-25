@@ -561,6 +561,7 @@ fn repo_with(verdicts: Option<VerdictSet>) -> super::super::RepoInvestigation {
         coverage: super::super::Coverage::default(),
         traces: None,
         verdicts,
+        exposure: Vec::new(),
     }
 }
 
