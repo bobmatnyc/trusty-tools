@@ -29,9 +29,14 @@
 			<span class="font-display text-lg font-bold tracking-tight">trusty-tools</span>
 		</a>
 
+		<!-- `flex-wrap` on the nav ITSELF, not just on the header row above it:
+		     the row's own wrap only decides whether the nav gets its own line,
+		     and once the nav carried a fourth link (#6268) its five items no
+		     longer fit that line at 320px — every page read
+		     `document.scrollWidth` 323 against a 320 clientWidth. -->
 		<nav
 			aria-label="Main"
-			class="order-last flex w-full items-center gap-1 sm:order-none sm:ml-auto sm:w-auto sm:gap-2"
+			class="order-last flex w-full flex-wrap items-center gap-1 sm:order-none sm:ml-auto sm:w-auto sm:gap-2"
 		>
 			{#each NAV_LINKS as link (link.href)}
 				<a
