@@ -660,6 +660,28 @@ pub(super) fn unplaced_narrative_lines(model: &super::model::ReportModel) -> Vec
     out
 }
 
+/// How many claims the deterministic guards withheld from this report (#6189).
+///
+/// Why: the withholdings are disclosed one per line in Synthesis Status, at the
+/// very end of the document. An operator who supplied `instructions.md` and
+/// then cannot find what they asked for has no reason to scroll there — the
+/// 2026-08-23 live test of #6180 confirmed the guard behaved correctly and that
+/// the withholding itself was easy to miss. The Analyst Instructions section
+/// raises the count where that operator is already looking.
+/// What: the guardrail notes that mark themselves withheld, plus the narratives
+/// the render could place on no row — the same two sources
+/// `reporter::append_synthesis_note` renders, so the count can never exceed the
+/// lines a reader can go and read. Zero without a synthesis pass.
+/// Test: `reporter_tests::{the_instructions_section_counts_withheld_claims,
+/// the_instructions_section_is_silent_when_nothing_was_withheld}`.
+pub(super) fn withheld_claim_count(model: &super::model::ReportModel) -> usize {
+    let guarded = model
+        .synthesis
+        .as_ref()
+        .map_or(0, |s| s.notes.iter().filter(|n| n.withheld).count());
+    guarded + unplaced_narrative_lines(model).len()
+}
+
 /// One reader-facing line for a narrative the render withheld.
 ///
 /// Why: the reader's question is "what happened to this finding?", not "why did
