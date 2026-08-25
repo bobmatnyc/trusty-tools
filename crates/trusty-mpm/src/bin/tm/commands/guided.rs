@@ -11,8 +11,11 @@
 //! What: [`run_guided_default`] orchestrates detection, listing, and dispatch.
 //! [`derive_project`] derives the `source_id`, managed workspace, and git root.
 //! [`fallback_protected`] is the three-way dispatch for the daemon-unreachable
-//! path; it is also the target for non-GitHub projects. [`non_github_refusal_message`]
-//! is the pure helper that produces the accurate refusal text for the
+//! path; it is also the target for non-GitHub projects. What it does about the
+//! origin remote is the pure [`super::origin_plan::plan_for_origin`] (#6276):
+//! GitHub gets the managed clone, a local-only repository runs its session
+//! here, a non-GitHub host is refused. [`non_github_refusal_message`]
+//! is the pure helper that produces the accurate refusal text for that
 //! non-GitHub-remote case (see #1777). The TTY picker is split into a pure
 //! `parse_picker_choice` + an I/O driver `run_tty_picker`.
 //!
@@ -1172,8 +1175,14 @@ pub(crate) fn managed_pane_settle_pending_message(id: &str) -> String {
 ///       project registered with `worktree: false` (#3455) gets neither clone
 ///       nor worktree and launches in the repo root instead, matching what the
 ///       daemon's `spawn_managed_on_main` would have done had it been up.
-///   (2) Inside a non-GitHub git working tree (non-GitHub remote or no remote)
-///       → return an actionable `Err`; the live checkout is never touched.
+///   (2) Inside a git working tree whose origin remote is not GitHub → return
+///       an actionable `Err`; the live checkout is never touched.
+///   (2b) Inside a git working tree with NO origin remote → print
+///       [`super::origin_plan::live_checkout_notice`] and run
+///       [`super::launch::connect`] here (#6276). There is no remote to clone
+///       from, so the session runs in the checkout itself; before #6276 this
+///       shared arm (2)'s refusal, which after #6274's auto-`git init` was the
+///       end-state of a first-ever `tm` run in a plain directory.
 ///   (3) Not inside any git working tree (plain directory or bare repo) →
 ///       classic `tm launch` path; there is no live checkout to protect,
 ///       consistent with the daemon's local-path fast path.
@@ -1248,26 +1257,35 @@ pub(crate) async fn fallback_protected(
     let origin_url = trusty_mpm::daemon::managed_routes::inproject::get_origin_url(&git_root)
         .map_err(|e| anyhow::anyhow!(e))?;
 
-    if let Some(ref raw_url) = origin_url
-        && is_github_remote(raw_url)
-    {
+    // #6276: the no-remote case proceeds to a session in this checkout; the
+    // other two arms are what this code did inline before the decision moved.
+    match super::origin_plan::plan_for_origin(origin_url.as_deref()) {
         // GitHub project: redirect deploy to the protected managed clone
         // (or, when the project opted out of worktrees, to the repo root).
-        return launch_protected_workspace(client, url, &git_root, raw_url).await;
+        super::origin_plan::OriginPlan::ManagedClone(raw_url) => {
+            launch_protected_workspace(client, url, &git_root, raw_url).await
+        }
+        // Local-only repository: there is no remote to clone from, and nothing
+        // about this checkout to protect it from — `connect` runs the session
+        // here, which is what the old refusal told the operator to do by hand.
+        super::origin_plan::OriginPlan::LiveCheckout => {
+            eprintln!("{}", super::origin_plan::live_checkout_notice(&git_root));
+            super::launch::connect(client, url, Some(git_root.to_string_lossy().into_owned())).await
+        }
+        // Non-GitHub remote: refuse to write to the live tree.
+        // NOTE: the daemon's reachability is irrelevant here — this branch is
+        // reached even when the daemon is UP. The real reason for refusal is
+        // that `tm` only auto-manages GitHub repositories (#1777).
+        super::origin_plan::OriginPlan::RefuseNonGitHub(remote_desc) => {
+            eprintln!("{}", non_github_refusal_message(remote_desc));
+            anyhow::bail!(
+                "not auto-managing: live git checkout at '{}' is a non-GitHub repository — \
+                 auto-managed clones require a GitHub remote; \
+                 use an explicit `tm` subcommand to work here manually",
+                git_root.display()
+            );
+        }
     }
-
-    // Non-GitHub remote or no remote: refuse to write to the live tree.
-    // NOTE: the daemon's reachability is irrelevant here — this branch is
-    // reached even when the daemon is UP. The real reason for refusal is
-    // that `tm` only auto-manages GitHub repositories (#1777).
-    let remote_desc = origin_url.as_deref().unwrap_or("(no remote configured)");
-    eprintln!("{}", non_github_refusal_message(remote_desc));
-    anyhow::bail!(
-        "not auto-managing: live git checkout at '{}' is a non-GitHub repository — \
-         auto-managed clones require a GitHub remote; \
-         use an explicit `tm` subcommand to work here manually",
-        git_root.display()
-    );
 }
 
 /// Launch the guided-default fallback in the workspace this project is

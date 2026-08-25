@@ -90,8 +90,10 @@ impl Drop for LaunchSessionGuard {
 /// `inproject::base_clone_path` the daemon uses, so both entry points agree — #1807)
 /// plus a per-session worktree, registers the
 /// session with the daemon, prints the banner, creates a detached tmux session
-/// running `claude` in the managed clone, and `attach`es to it. Errors with a
-/// `tm connect` hint when the directory has no parseable GitHub remote.
+/// running `claude` in the managed clone, and `attach`es to it. A remote that
+/// does not parse as `owner/repo` errors with a `tm connect` hint; a repository
+/// with NO origin remote prints a notice and runs [`connect`] against the
+/// checkout itself (#6276) rather than erroring.
 ///
 /// #5274: `worktree` is the operator's explicit request for isolation
 /// (`tm launch --worktree`). Without it the session runs in the project's own
@@ -121,9 +123,8 @@ pub(crate) async fn launch(
 
     // #6274: a plain directory becomes a git project here, so step 2 below reads
     // the origin remote of a real repository instead of failing on "not a git
-    // repo". A fresh repo has no origin, so `tm launch` still lands on the
-    // no-remote error that points at `tm connect` — the same answer it gives for
-    // any repo without a GitHub remote.
+    // repo". A fresh repo has no origin, and since #6276 step 2 starts a session
+    // in that checkout rather than stopping there.
     super::auto_git_init::ensure_git_repo(&live_path)?;
 
     // Auto-register the git project root as a local path alias (non-fatal, silent).
@@ -131,19 +132,25 @@ pub(crate) async fn launch(
     let live_workdir = live_path.to_string_lossy().to_string();
 
     // 2. Derive the GitHub identity from the origin remote.
-    //    Managed sessions REQUIRE a parseable GitHub remote (#1590). A missing or
+    //    Managed sessions REQUIRE a parseable GitHub remote (#1590). An
     //    unparseable remote is an immediate error that points the user to `tm connect`.
     //    #4734: a git failure gets its own error — telling the operator to run
     //    `tm connect` because there is "no remote" would be false advice.
-    let origin_url = trusty_mpm::daemon::managed_routes::inproject::get_origin_url(&live_path)
-        .map_err(|e| anyhow::anyhow!(e))?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no git origin remote found in '{live_workdir}'\n\
-                     Managed sessions require a GitHub remote. \
-                     Run `tm connect` to start a session in the live checkout instead."
-            )
-        })?;
+    // #6276: a repository with NO origin remote starts the session here instead
+    // of stopping — `connect` is the live-checkout path this used to name in a
+    // refusal, and it needs neither a remote nor a clean tree.
+    let raw_origin = trusty_mpm::daemon::managed_routes::inproject::get_origin_url(&live_path)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let origin_url = match super::origin_plan::plan_for_origin(raw_origin.as_deref()) {
+        super::origin_plan::OriginPlan::LiveCheckout => {
+            eprintln!("{}", super::origin_plan::live_checkout_notice(&live_path));
+            return connect(client, url, Some(live_workdir)).await;
+        }
+        // Any origin remote keeps the pre-#6276 path exactly: parse it as
+        // owner/repo, or stop with the hint below.
+        super::origin_plan::OriginPlan::ManagedClone(u)
+        | super::origin_plan::OriginPlan::RefuseNonGitHub(u) => u.to_string(),
+    };
     let gh = trusty_common::github_path::parse_github_path(&origin_url).ok_or_else(|| {
         anyhow::anyhow!(
             "could not parse a GitHub owner/repo from origin remote: {origin_url:?}\n\
