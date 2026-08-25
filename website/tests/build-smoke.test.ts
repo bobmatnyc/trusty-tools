@@ -65,6 +65,15 @@ function toolPages(): string[] {
 const AUDIT_PAGE = 'tools/trusty-git-analytics/audit.html';
 const AUDIT_ROUTE = '/tools/trusty-git-analytics/audit';
 
+/**
+ * The claude-mpm migration page (#6268).
+ *
+ * Like `AUDIT_PAGE`, it is a route with no `TOOLS` record, so `toolPages()`
+ * cannot see it and every assertion driven by that list skips it silently.
+ */
+const MIGRATION_PAGE = 'claude-mpm-migration.html';
+const MIGRATION_ROUTE = '/claude-mpm-migration';
+
 /** Prerendered doc artifacts on disk, as paths relative to the static root. */
 function docPages(): Set<string> {
 	const found = new Set<string>();
@@ -305,6 +314,46 @@ describe('production build', () => {
 	});
 
 	/**
+	 * Why: this page exists to answer one question — is trusty-mpm a version of
+	 * claude-mpm — and the failure that matters is the page prerendering as a
+	 * frame with the disambiguation, the install lines, or the checklist missing.
+	 * A file-exists check would pass on all three. The nav half is asserted with
+	 * it for the same reason the audit page's is: a page nothing links to is a
+	 * page nobody reaches, and nothing else here reads either file.
+	 * What: the artifact, its own `<title>` (it does not use `ToolPage.svelte`,
+	 * so nothing else pins that), the claims a reader came for, and the round
+	 * trip from the nav and from `/tools/trusty-mpm`.
+	 */
+	it('prerenders the claude-mpm migration page and links it from the nav', () => {
+		expect(existsSync(path.join(STATIC, MIGRATION_PAGE)), MIGRATION_PAGE).toBe(true);
+		const html = readFileSync(path.join(STATIC, MIGRATION_PAGE), 'utf8');
+
+		const title = html.match(/<title>([\s\S]*?)<\/title>/);
+		expect(title?.[1], 'migration page title').toContain('claude-mpm');
+
+		const text = visibleText(html);
+		// The disambiguation is the page's reason to exist; a build that drops it
+		// ships the exact confusion the page was written to end.
+		expect(text, 'no disambiguation').toContain('not a fork');
+		// The two install lines, and the daemon fleet the page is about.
+		expect(text).toContain('tctl install trusty-mpm');
+		for (const daemon of ['trusty-mpm', 'trusty-memory', 'trusty-search']) {
+			expect(text, `${daemon} is not named`).toContain(daemon);
+		}
+		expect(text, 'tmux is not covered').toContain('tmux');
+		expect(text, 'the verification step is missing').toContain('tm doctor');
+
+		// Reachable: from every page's nav/footer, and from the tool page.
+		expect(landingPage, 'nav does not link the migration page').toContain(
+			`href="${MIGRATION_ROUTE}"`
+		);
+		const toolPage = readFileSync(path.join(STATIC, 'tools/trusty-mpm.html'), 'utf8');
+		expect(toolPage, 'trusty-mpm tool page does not link the migration page').toContain(
+			`href="${MIGRATION_ROUTE}"`
+		);
+	});
+
+	/**
 	 * Why: the binary still ships under both `trusty-audit` and `taudit`, and the
 	 * alias is being dropped. `src/lib/tools.test.ts` guards the RECORDS; this
 	 * guards the rendered PAGES, which is where the prose actually lives.
@@ -318,7 +367,14 @@ describe('production build', () => {
 	});
 
 	it('loads no subresource from a third-party origin', () => {
-		for (const name of ['index.html', 'docs.html', AUDIT_PAGE, ...docPages(), ...toolPages()]) {
+		for (const name of [
+			'index.html',
+			'docs.html',
+			AUDIT_PAGE,
+			MIGRATION_PAGE,
+			...docPages(),
+			...toolPages()
+		]) {
 			const html = readFileSync(path.join(STATIC, name), 'utf8');
 			const subresources = [
 				...html.matchAll(/<(?:script|img|source|iframe)\b[^>]*\bsrc="([^"]+)"/g),

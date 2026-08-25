@@ -103,6 +103,19 @@
 	</div>
 
 	<div>
+		<h2 class="font-display text-2xl font-bold sm:text-3xl">Coming from claude-mpm</h2>
+		<p class="mt-4 max-w-3xl text-foundry-secondary">
+			trusty-mpm is not a fork or a version of the Python <code class="text-sm">claude-mpm</code> —
+			unrelated codebases that share an idea. If you already run one, the
+			<a
+				href="/claude-mpm-migration"
+				class="text-foundry-primary underline decoration-1 underline-offset-2 hover:decoration-2"
+				>migration guide</a
+			> covers what installs, what carries over, and what genuinely behaves differently.
+		</p>
+	</div>
+
+	<div>
 		<h2 class="font-display text-2xl font-bold sm:text-3xl">When it goes wrong</h2>
 		<p class="mt-4 max-w-3xl text-foundry-secondary">
 			<code class="text-sm">tm doctor</code> runs a full diagnostic of the stack.

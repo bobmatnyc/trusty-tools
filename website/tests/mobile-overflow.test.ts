@@ -103,6 +103,12 @@ const MAIN_TOLERANCE_PX = 1;
 // with no table and no `<pre>` at all: it is now a second plain-prose case, and
 // keeping it is what would catch wide content arriving back on it.
 // `/tools/trusty-search` is the plain-prose flagship and stays as the control.
+// `/claude-mpm-migration` (#6268) carries four tables of inline `<code>`
+// identifiers and two `<pre>` blocks — the two shapes that actually scroll a
+// page sideways — and, like the audit page, does not go through
+// `ToolPage.svelte`, so it inherits none of that component's already-measured
+// containment. It is also the page that pushed the nav to four links, which is
+// the header's own wrap case at 320px.
 const ROUTES = [
 	'/whats-new',
 	'/',
@@ -110,7 +116,8 @@ const ROUTES = [
 	'/docs/getting-started/install',
 	'/tools/trusty-search',
 	'/tools/trusty-git-analytics',
-	'/tools/trusty-git-analytics/audit'
+	'/tools/trusty-git-analytics/audit',
+	'/claude-mpm-migration'
 ];
 const WIDTHS = [375, 320];
 

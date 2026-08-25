@@ -30,7 +30,10 @@ export const GITHUB_URL = 'https://github.com/bobmatnyc/trusty-tools';
 export const NAV_LINKS: { href: string; label: string }[] = [
 	{ href: '/', label: 'Home' },
 	{ href: '/docs', label: 'Docs' },
-	{ href: '/whats-new', label: "What's new" }
+	{ href: '/whats-new', label: "What's new" },
+	// #6268: the migration page is top-level rather than under `/tools/`
+	// because its reader is choosing between two tools, not reading about one.
+	{ href: '/claude-mpm-migration', label: 'From claude-mpm' }
 ];
 
 /**
