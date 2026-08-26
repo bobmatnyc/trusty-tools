@@ -176,3 +176,27 @@ http-body-util = { workspace = true }
 # section of README.md / CLAUDE.md from the descriptor functions. Test-facing
 # only, so the feature is enabled here rather than on the production dep.
 trusty-common     = { workspace = true, features = ["docgen"] }
+# #6287: the combined-PR obligation from the design review —
+# `tests/uds_consumer_contract.rs` stands this daemon up on a temp socket and
+# asserts all four consumers see it healthy. Each names `analyze.health` in a
+# private literal because none has (or wants) a Cargo edge on a tree-sitter
+# analysis engine; a gap between the daemon and any of them leaves `tctl`
+# kickstarting a live daemon (#4246), which is why they ship together and why
+# the proof lives here rather than in four crates that each mock this side.
+#
+# PATH-ONLY, deliberately no `version`: `cargo package` strips a dev-dependency
+# that carries no version requirement, so this does NOT make trusty-analyze's
+# publish wait for the four consumers'. A `workspace = true` entry would carry
+# the version and create exactly that ordering constraint.
+#
+# One developer-visible cost: trusty-console has a `build.rs` that builds its
+# Svelte UI, so `cargo test -p trusty-analyze` now needs pnpm on PATH. Without
+# it, set `SKIP_UI_BUILD=1` — the build script's documented escape hatch, and
+# what CI uses.
+trusty-console   = { path = "../trusty-console" }
+trusty-installer = { path = "../trusty-installer" }
+tga              = { path = "../trusty-git-analytics" }
+trusty-audit     = { path = "../trusty-audit" }
+# The two consumer guards and the console connector all read process-global
+# environment, so their tests run serially.
+serial_test      = { workspace = true }

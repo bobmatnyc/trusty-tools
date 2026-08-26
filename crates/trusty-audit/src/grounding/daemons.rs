@@ -59,6 +59,9 @@ pub const ENV_ANALYZE_SOCKET: &str = "TRUSTY_ANALYZE_SOCKET";
 /// The method `trusty-analyze` answers a health probe on.
 ///
 /// Copied for the same reason [`ENV_ANALYZE_SOCKET`] is.
+/// `trusty_analyze::service::METHOD_HEALTH` is the definition;
+/// `trusty-analyze/tests/uds_consumer_contract.rs` is what keeps them equal, by
+/// driving [`ensure_analyze`] against a live router rather than a stub.
 const ANALYZE_HEALTH_METHOD: &str = "analyze.health";
 
 /// Wall-clock budget for a freshly-spawned daemon to answer `/health`.
