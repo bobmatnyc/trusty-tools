@@ -7,11 +7,6 @@
 //! Test: this file.
 
 use super::*;
-use std::sync::atomic::{AtomicU32, Ordering};
-
-/// A budget short enough to keep the transport tests fast and long enough that
-/// a loopback stub always beats it. Only the timeout tests want it hit.
-const CHEAP_TEST_BUDGET: Duration = Duration::from_secs(5);
 
 // ─── Severity map ────────────────────────────────────────────────────────────
 
@@ -388,121 +383,23 @@ fn map_metrics_populates_complexity_and_findings() {
 
 // ─── Fail-open fetch ─────────────────────────────────────────────────────────
 
+/// A socket path nothing has ever bound.
+///
+/// #6287: the pre-migration equivalent was `http://127.0.0.1:1` — a port
+/// guaranteed refused. A path inside a fresh `TempDir` is the same guarantee on
+/// the socket transport, and the `TempDir` is returned so the caller keeps it
+/// alive for the duration of the call.
+fn dead_socket() -> (tempfile::TempDir, PathBuf) {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let path = tmp.path().join("absent-analyze.sock");
+    (tmp, path)
+}
+
 #[tokio::test]
 async fn fetch_returns_none_on_unreachable_daemon() {
-    // Port 1 is never listening; the probe fails and fetch swallows it.
-    let src = HttpAnalyzeMetricsSource::new("http://127.0.0.1:1").unwrap();
+    let (_tmp, socket) = dead_socket();
+    let src = HttpAnalyzeMetricsSource::new(socket).unwrap();
     assert!(src.fetch("demo").await.is_none());
-}
-
-/// A loopback stub that closes a connection part-way through a request instead
-/// of answering it, and counts how many connections it accepted.
-///
-/// Why (#6038): this is the failure the field hit. HTTP/1.1 keep-alive lets the
-/// server close a connection the client still believes is reusable, and the
-/// close races the client's next write — so the client sees the socket go away
-/// after it has already committed the request. Closing on the Nth request of a
-/// connection (rather than right after a response) makes the race
-/// deterministic: the connection is provably still in the client's pool when
-/// the next GET is checked out.
-/// What: binds `127.0.0.1:0` and serves `[]` to every request except the
-/// `poison_at`-th on each connection, which it answers by shutting the socket
-/// down. Returns `host:port` plus the accepted-connection counter.
-/// Test: `transport_failure_on_a_reused_connection_retries_once`,
-/// `a_connection_that_keeps_dying_is_retried_exactly_once`.
-async fn closing_stub(poison_at: u32) -> (String, std::sync::Arc<AtomicU32>) {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind loopback stub");
-    let addr = listener.local_addr().expect("stub addr").to_string();
-    let connections = std::sync::Arc::new(AtomicU32::new(0));
-    let counter = std::sync::Arc::clone(&connections);
-    tokio::spawn(async move {
-        while let Ok((mut stream, _)) = listener.accept().await {
-            counter.fetch_add(1, Ordering::SeqCst);
-            tokio::spawn(async move {
-                let mut seen = 0u32;
-                let mut buf = [0u8; 1024];
-                loop {
-                    match stream.read(&mut buf).await {
-                        Ok(0) | Err(_) => return,
-                        Ok(_) => {}
-                    }
-                    seen += 1;
-                    if seen == poison_at {
-                        // The close the client cannot anticipate: the request
-                        // is already on the wire, and no response follows it.
-                        let _ = stream.shutdown().await;
-                        return;
-                    }
-                    let _ = stream
-                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n[]")
-                        .await;
-                }
-            });
-        }
-    });
-    (addr, connections)
-}
-
-/// Why (#6038): every `--analyze` render degraded to scan because one closed
-/// pooled connection was surfaced as a terminal transport error. The adapter
-/// issues three GETs back to back on one keep-alive connection, and the second
-/// one landing on a connection the daemon had closed collapsed the whole fetch.
-/// What: drives two `get_json` calls against a stub that closes the connection
-/// under the second; the first must succeed, and the second must succeed too —
-/// on the fresh connection the retry opens.
-/// Test: This is the test. Without the retry the second call returns
-/// `AnalyzeAdapterError::Transport`.
-#[tokio::test]
-async fn transport_failure_on_a_reused_connection_retries_once() {
-    let (addr, connections) = closing_stub(2).await;
-    let src = HttpAnalyzeMetricsSource::new(format!("http://{addr}")).expect("client builds");
-
-    let first: serde_json::Value = src
-        .get_json("/indexes", CHEAP_TEST_BUDGET)
-        .await
-        .expect("the first GET opens a connection and is answered");
-    assert_eq!(first, serde_json::json!([]));
-
-    let second: serde_json::Value = src
-        .get_json("/indexes/demo/diagnostics", CHEAP_TEST_BUDGET)
-        .await
-        .expect("a closed pooled connection must be retried on a fresh one");
-    assert_eq!(second, serde_json::json!([]));
-    assert_eq!(
-        connections.load(Ordering::SeqCst),
-        2,
-        "the retry must open exactly one replacement connection"
-    );
-}
-
-/// Why (#6038): "retry once" is a bound, not a loop. A peer that closes every
-/// connection must still fail-open promptly rather than spinning; the report
-/// falls back to scan either way and an unbounded retry only delays it.
-/// What: points the adapter at a stub that closes every connection on its first
-/// request, and asserts the call fails after exactly two connection attempts.
-/// Test: This is the test.
-#[tokio::test]
-async fn a_connection_that_keeps_dying_is_retried_exactly_once() {
-    let (addr, connections) = closing_stub(1).await;
-    let src = HttpAnalyzeMetricsSource::new(format!("http://{addr}")).expect("client builds");
-
-    let err = src
-        .get_json::<serde_json::Value>("/indexes", CHEAP_TEST_BUDGET)
-        .await
-        .expect_err("a peer that answers nothing cannot succeed");
-    assert!(
-        matches!(err, AnalyzeAdapterError::Transport(_)),
-        "expected a transport error, got {err:?}"
-    );
-    assert_eq!(
-        connections.load(Ordering::SeqCst),
-        2,
-        "one original attempt plus one retry, and no more"
-    );
 }
 
 // ─── Per-endpoint budgets and independence (#6041) ───────────────────────────
@@ -537,65 +434,75 @@ fn diagnostics_budget_outlives_the_daemon_deadline_ladder() {
     );
 }
 
-/// Build a raw HTTP/1.1 response with a correct `Content-Length`.
-fn http_response(status: &str, body: &str) -> String {
-    format!(
-        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-        body.len()
-    )
+/// A JSON-RPC result frame carrying `body`, which must itself be valid JSON.
+///
+/// #6287: the predecessor built an HTTP/1.1 response with a `Content-Length`.
+/// A frame is newline-terminated, so `body` is re-serialised compactly first —
+/// a pretty-printed fixture embedded verbatim would end the frame at its first
+/// line break.
+fn rpc_result(body: &str) -> String {
+    let value: serde_json::Value = serde_json::from_str(body).expect("a valid fixture");
+    format!(r#"{{"jsonrpc":"2.0","id":1,"result":{value}}}"#)
 }
 
-/// A loopback stub that answers each request from a path → response table.
+/// A JSON-RPC error frame carrying `code` and `message`.
+fn rpc_error(code: i64, message: &str) -> String {
+    format!(r#"{{"jsonrpc":"2.0","id":1,"error":{{"code":{code},"message":"{message}"}}}}"#)
+}
+
+/// A Unix-socket stub that answers each request from a method → response table.
 ///
 /// Why (#6041): the defect is about what happens when endpoints disagree — one
 /// answers in milliseconds and another does not answer at all — so the stub has
-/// to route per path rather than reply uniformly.
-/// What: binds `127.0.0.1:0` and replies with the first route whose path is a
-/// substring of the request (so order the table most-specific first). An empty
-/// response body is the "never answer" route: the client must hit its own
-/// budget. An unmatched path gets a 404.
+/// to route per method rather than reply uniformly.
+/// What: binds a socket under a fresh `TempDir` and replies with the first route
+/// whose method name appears in the request frame (so order the table
+/// most-specific first). An empty response body is the "never answer" route: the
+/// client must hit its own budget. An unmatched method gets `method_not_found`.
+/// The `TempDir` is returned because dropping it unlinks the socket.
 /// Test: `a_failing_endpoint_keeps_what_the_others_returned`,
 /// `a_fetch_where_no_endpoint_answered_falls_back_to_scan`,
-/// `a_request_that_outlives_its_budget_is_a_timeout_not_a_transport_error`.
-async fn routing_stub(routes: Vec<(&'static str, String)>) -> String {
+/// `a_request_that_outlives_its_budget_is_a_timeout_not_a_transport_error`,
+/// `a_daemon_side_deadline_is_a_timeout_not_a_rejection`.
+async fn routing_stub(routes: Vec<(&'static str, String)>) -> (tempfile::TempDir, PathBuf) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind loopback stub");
-    let addr = listener.local_addr().expect("stub addr").to_string();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let socket = tmp.path().join("analyze.sock");
+    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind the stub socket");
     let routes = std::sync::Arc::new(routes);
     tokio::spawn(async move {
-        while let Ok((mut stream, _)) = listener.accept().await {
+        while let Ok((mut conn, _)) = listener.accept().await {
             let routes = std::sync::Arc::clone(&routes);
             tokio::spawn(async move {
-                let mut buf = [0u8; 4096];
-                loop {
-                    let n = match stream.read(&mut buf).await {
-                        Ok(0) | Err(_) => return,
-                        Ok(n) => n,
-                    };
-                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
-                    let reply = routes
-                        .iter()
-                        .find(|(path, _)| req.contains(path))
-                        .map(|(_, body)| body.clone());
-                    match reply {
-                        Some(r) if r.is_empty() => std::future::pending::<()>().await,
-                        Some(r) => {
-                            let _ = stream.write_all(r.as_bytes()).await;
-                        }
-                        None => {
-                            let _ = stream
-                                .write_all(http_response("404 Not Found", "{}").as_bytes())
-                                .await;
-                        }
+                // The client writes one frame then half-closes, so reading to
+                // EOF is the whole request.
+                let mut sink = Vec::new();
+                let _ = conn.read_to_end(&mut sink).await;
+                let request = String::from_utf8_lossy(&sink).into_owned();
+                let reply = routes
+                    .iter()
+                    .find(|(method, _)| request.contains(method))
+                    .map(|(_, body)| body.clone());
+                match reply {
+                    Some(r) if r.is_empty() => std::future::pending::<()>().await,
+                    Some(r) => {
+                        let _ = conn.write_all(r.as_bytes()).await;
+                        let _ = conn.write_all(b"\n").await;
+                        let _ = conn.flush().await;
+                    }
+                    None => {
+                        let _ = conn
+                            .write_all(rpc_error(-32601, "no such method").as_bytes())
+                            .await;
+                        let _ = conn.write_all(b"\n").await;
+                        let _ = conn.flush().await;
                     }
                 }
             });
         }
     });
-    addr
+    (tmp, socket)
 }
 
 /// A five-band histogram, the shape the §7 table renders from.
@@ -611,34 +518,34 @@ const DISTRIBUTION_BODY: &str = r#"{"index_id":"demo","total":100,"buckets":[
 /// arrived in milliseconds and dropped the whole repository back to scan — the
 /// report lost data it was holding.
 /// What: a stub that answers the index probe, the histogram, and the refactor
-/// list normally while returning the daemon's own deadline 504 for diagnostics.
-/// Asserts the histogram survives, that exactly one caveat is raised, and that
-/// the caveat names diagnostics and says it ran out of time.
-/// Test: This is the test. Pre-fix the 504 propagated through `?` and
+/// list normally while returning the daemon's own deadline error for
+/// diagnostics. Asserts the histogram survives, that exactly one caveat is
+/// raised, and that the caveat names diagnostics and says it ran out of time.
+/// Test: This is the test. Pre-fix the deadline error propagated through `?` and
 /// `fetch_named` returned `Missing(Unreachable)` with no metrics at all.
 #[tokio::test]
 async fn a_failing_endpoint_keeps_what_the_others_returned() {
-    let addr = routing_stub(vec![
+    let (_tmp, socket) = routing_stub(vec![
         (
-            "/indexes/demo/complexity_distribution",
-            http_response("200 OK", DISTRIBUTION_BODY),
+            "analyze.complexity_distribution",
+            rpc_result(DISTRIBUTION_BODY),
         ),
         (
-            "/indexes/demo/diagnostics",
+            "analyze.diagnostics",
             // What trusty-analyze answers when its own deadline is hit.
-            http_response("504 Gateway Timeout", r#"{"error":"deadline exceeded"}"#),
+            rpc_error(-32005, "deadline exceeded"),
         ),
         (
-            "/indexes/demo/refactor-suggestions",
-            http_response("200 OK", r#"{"suggestions":[]}"#),
+            "analyze.refactor_suggestions",
+            rpc_result(r#"{"suggestions":[]}"#),
         ),
         (
-            "/indexes",
-            http_response("200 OK", r#"[{"id":"demo","root_path":"/tmp/demo"}]"#),
+            "analyze.list_indexes",
+            rpc_result(r#"[{"id":"demo","root_path":"/tmp/demo"}]"#),
         ),
     ])
     .await;
-    let src = HttpAnalyzeMetricsSource::new(format!("http://{addr}")).expect("client builds");
+    let src = HttpAnalyzeMetricsSource::new(socket).expect("client builds");
 
     match src.fetch_named("demo").await {
         AnalyzeFetch::Fetched { metrics, caveats } => {
@@ -674,20 +581,30 @@ async fn a_failing_endpoint_keeps_what_the_others_returned() {
 /// dataset drops out there is nothing partial to render, and reporting empty
 /// metrics would put an empty §7 and an empty findings table on the page — which
 /// reads as a clean pass.
-/// What: a stub whose index probe succeeds and whose every dataset endpoint
-/// answers 503; the fetch must fall back to scan, not to empty metrics.
+/// What: a stub whose index probe succeeds and whose every dataset method
+/// answers `internal_error`; the fetch must fall back to scan, not to empty
+/// metrics. The routes are ordered so `analyze.list_indexes` is matched before
+/// the catch-all rows that refuse the three datasets.
 /// Test: This is the test.
 #[tokio::test]
 async fn a_fetch_where_no_endpoint_answered_falls_back_to_scan() {
-    let addr = routing_stub(vec![
+    let (_tmp, socket) = routing_stub(vec![
+        ("analyze.list_indexes", rpc_result(r#"[{"id":"demo"}]"#)),
         (
-            "/indexes/demo/",
-            http_response("503 Service Unavailable", "{}"),
+            "analyze.complexity_distribution",
+            rpc_error(-32603, "index is not loaded"),
         ),
-        ("/indexes", http_response("200 OK", r#"[{"id":"demo"}]"#)),
+        (
+            "analyze.diagnostics",
+            rpc_error(-32603, "index is not loaded"),
+        ),
+        (
+            "analyze.refactor_suggestions",
+            rpc_error(-32603, "index is not loaded"),
+        ),
     ])
     .await;
-    let src = HttpAnalyzeMetricsSource::new(format!("http://{addr}")).expect("client builds");
+    let src = HttpAnalyzeMetricsSource::new(socket).expect("client builds");
 
     match src.fetch_named("demo").await {
         AnalyzeFetch::Missing(gap) => assert_eq!(gap, AnalyzeGap::Unreachable),
@@ -700,17 +617,21 @@ async fn a_fetch_where_no_endpoint_answered_falls_back_to_scan() {
 /// Why (#6041): the gap line distinguishes "ran out of time" from "nothing was
 /// listening" because the remedies differ, and that distinction has to come from
 /// the error class rather than from matching a message that can quote a URL.
-/// What: points `get_json` at a stub that never replies, with a budget short
-/// enough to be hit, and asserts the failure is a `Timeout` classified as
-/// `TimedOut` — not the `Transport` variant a dead peer produces.
-/// Test: This is the test. Pre-fix `get_json` took no budget at all.
+/// What: points `call` at a stub that never replies, with a budget short enough
+/// to be hit, and asserts the failure is a `Timeout` classified as `TimedOut` —
+/// not the `Transport` variant a dead peer produces.
+/// Test: This is the test. Pre-fix the call took no budget at all.
 #[tokio::test]
 async fn a_request_that_outlives_its_budget_is_a_timeout_not_a_transport_error() {
-    let addr = routing_stub(vec![("/indexes", String::new())]).await;
-    let src = HttpAnalyzeMetricsSource::new(format!("http://{addr}")).expect("client builds");
+    let (_tmp, socket) = routing_stub(vec![("analyze.list_indexes", String::new())]).await;
+    let src = HttpAnalyzeMetricsSource::new(socket).expect("client builds");
 
     let err = src
-        .get_json::<serde_json::Value>("/indexes", Duration::from_millis(150))
+        .call::<serde_json::Value>(
+            AnalyzeEndpoint::IndexList,
+            "demo",
+            Duration::from_millis(150),
+        )
         .await
         .expect_err("a stub that never replies cannot answer inside 150ms");
 
@@ -721,10 +642,63 @@ async fn a_request_that_outlives_its_budget_is_a_timeout_not_a_transport_error()
     assert_eq!(classify_failure(&err), EndpointFailure::TimedOut);
 }
 
+/// Why (#6287): the client-side and daemon-side deadlines are the same fact to
+/// a report reader — the analysis ran out of time — and a different fact from a
+/// daemon that answered with something unusable. Under HTTP that split was
+/// 504-versus-4xx; on the socket it is `CODE_DEADLINE_EXCEEDED` versus every
+/// other JSON-RPC code, and reading the CODE is what keeps
+/// [`classify_failure`]'s own doc honest: a message can quote a path and can be
+/// reworded, a code cannot.
+/// What: a stub that answers the diagnostics call with the daemon's own
+/// `-32005` frame, and asserts the adapter classifies it `TimedOut` rather than
+/// `Rejected` — the bucket every other `Rpc` code lands in.
+/// Test: This is the test. Against a `classify_failure` with no `-32005` arm the
+/// assertion reads `Rejected`, which is the sentence the report would print.
+#[tokio::test]
+async fn a_daemon_side_deadline_is_a_timeout_not_a_rejection() {
+    let (_tmp, socket) = routing_stub(vec![(
+        "analyze.diagnostics",
+        rpc_error(CODE_DEADLINE_EXCEEDED, "deadline exceeded over 900 files"),
+    )])
+    .await;
+    let src = HttpAnalyzeMetricsSource::new(socket).expect("client builds");
+
+    let err = src
+        .call::<serde_json::Value>(AnalyzeEndpoint::Diagnostics, "demo", Duration::from_secs(5))
+        .await
+        .expect_err("an error frame is never a result");
+
+    let AnalyzeAdapterError::Rpc { code, .. } = &err else {
+        panic!("a JSON-RPC error frame must arrive as Rpc, got {err:?}");
+    };
+    assert_eq!(
+        *code, -32005,
+        "the code this crate copies must be the one trusty-analyze sends"
+    );
+    assert_eq!(
+        classify_failure(&err),
+        EndpointFailure::TimedOut,
+        "a daemon that ran out of time points at a deadline to raise, not at a \
+         daemon to start"
+    );
+
+    // The mirror, and what keeps the assertion above from passing vacuously:
+    // every OTHER code is still a rejection.
+    let internal = AnalyzeAdapterError::Rpc {
+        code: -32603,
+        message: "index is not loaded".into(),
+    };
+    assert_eq!(classify_failure(&internal), EndpointFailure::Rejected);
+}
+
+/// #6287: the constructor took a base URL it had to normalise; it takes a
+/// socket path, which has no trailing-slash form to trim and no client to fail
+/// building. Its predecessor here was `new_trims_trailing_slash`.
 #[test]
-fn new_trims_trailing_slash() {
-    let src = HttpAnalyzeMetricsSource::new("http://127.0.0.1:7879/").unwrap();
-    assert_eq!(src.base_url, "http://127.0.0.1:7879");
+fn new_accepts_a_socket_path() {
+    let (_tmp, socket) = dead_socket();
+    let src = HttpAnalyzeMetricsSource::new(&socket).expect("infallible since #6287");
+    assert_eq!(src.socket, socket);
 }
 
 /// #6149: the renderer and the audit are separate processes agreeing on one id.
@@ -759,11 +733,13 @@ fn derive_index_id_is_the_shared_derivation() {
 
 #[test]
 fn error_display() {
-    let e = AnalyzeAdapterError::Api {
-        status: 503,
-        body: "down".into(),
+    let e = AnalyzeAdapterError::Rpc {
+        code: -32603,
+        message: "index is not loaded".into(),
     };
-    assert!(e.to_string().contains("503"));
+    let shown = e.to_string();
+    assert!(shown.contains("-32603"), "{shown}");
+    assert!(shown.contains("index is not loaded"), "{shown}");
 }
 
 // ─── Named gaps (#5239) ──────────────────────────────────────────────────────

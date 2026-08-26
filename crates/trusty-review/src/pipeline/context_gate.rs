@@ -209,10 +209,10 @@ pub async fn preflight_context(
             // socket whose path it prints for itself.
             return GateOutcome::Skip(format!(
                 "trusty-analyze static-analysis context is unavailable for index `{index}` — \
-                 refusing to review without it. No analyze daemon is used: the preconditions \
-                 are a trusty-search at {search_url} that is SERVING (a `degraded` warm boot \
-                 still counts as serving) and a runnable `trusty-analyze` binary on PATH \
-                 (override with TRUSTY_ANALYZE_BIN). (Set \
+                 refusing to review without it. No analyze daemon is used: to fix this, start \
+                 trusty-search at {search_url} and confirm it is SERVING (a `degraded` warm \
+                 boot still counts as serving), then put a runnable `trusty-analyze` binary on \
+                 PATH (override with TRUSTY_ANALYZE_BIN). (Set \
                  TRUSTY_REVIEW_REQUIRE_ANALYZE=false or [context] require_analyze=false to opt \
                  into a degraded, non-authoritative review.)"
             ));
