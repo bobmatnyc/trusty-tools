@@ -99,8 +99,6 @@ fn boot_briefly(data_dir: &Path) {
     let mut child = Command::new(&bin)
         .arg("serve")
         .arg("--foreground")
-        .arg("--http")
-        .arg("127.0.0.1:0")
         .env("TRUSTY_DATA_DIR_OVERRIDE", data_dir)
         // Quiet the daemon — we don't read its output here.
         .env("RUST_LOG", "warn")

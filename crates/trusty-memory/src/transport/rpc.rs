@@ -472,6 +472,51 @@ mod tests {
         assert!(palaces.is_empty(), "fresh state must list zero palaces");
     }
 
+    /// Why: `method_names` is the only report of how large the surface behind
+    /// the UDS router's fallback is, and nothing else can see it —
+    /// `RpcRouter::method_names` covers the folded methods only. A name that
+    /// `dispatch` routes but this function omits would be invisible to
+    /// `memory.health`, to the start-up log, and to any consumer counting the
+    /// surface. This walks the protocol arms and asserts each one is claimed.
+    /// What: dispatches every listed protocol name against a fresh state and
+    /// asserts none answers `METHOD_NOT_FOUND` — which is what a name the match
+    /// does not handle would return.
+    /// Test: itself.
+    #[tokio::test]
+    async fn method_names_covers_every_dispatched_arm() {
+        let state = test_state();
+        for method in PROTOCOL_METHODS {
+            let req = JsonRpcRequest {
+                jsonrpc: Some("2.0".to_string()),
+                id: Some(json!(1)),
+                // `hook_fired` is the one arm that validates its params, and it
+                // is reached whether or not they are valid — an invalid-params
+                // answer still proves the name is routed.
+                method: (*method).to_string(),
+                params: Some(json!({})),
+            };
+            let resp = dispatch(&state, req).await;
+            if let Some(error) = resp.error {
+                assert_ne!(
+                    error.code,
+                    error_codes::METHOD_NOT_FOUND,
+                    "{method} is listed in PROTOCOL_METHODS but dispatch does not route it"
+                );
+            }
+        }
+
+        let names = method_names();
+        assert!(
+            names.windows(2).all(|w| w[0] <= w[1]),
+            "method_names must be sorted so two reads compare equal: {names:?}"
+        );
+        assert_eq!(
+            names.len(),
+            PROTOCOL_METHODS.len() + TOOL_METHODS.len(),
+            "every protocol arm and every tool method, and nothing twice"
+        );
+    }
+
     /// Why: spec compliance — unknown methods must return -32601.
     #[tokio::test]
     async fn dispatch_unknown_method_returns_method_not_found() {

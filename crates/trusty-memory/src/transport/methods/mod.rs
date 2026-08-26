@@ -29,6 +29,10 @@ pub mod health;
 pub mod kg;
 pub mod palaces;
 
+#[cfg(test)]
+#[path = "health_tests.rs"]
+mod health_tests;
+
 use serde::{Deserialize, Serialize};
 
 use crate::attribution::{CreatorInfo, CreatorSource, HTTP_DEFAULT_CLIENT};

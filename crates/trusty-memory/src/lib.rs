@@ -137,6 +137,24 @@ pub(crate) use events::open_activity_log_with_fallback;
 pub(crate) use events::open_activity_log_with_fallback_in;
 pub use events::{DaemonEvent, HookType, InjectionKind};
 
+/// The port this daemon USED to bind. It binds nothing now (#6286).
+///
+/// 🔴 **This constant is a compile-time stub awaiting pass B of the #6286
+/// migration, not a live figure.** ADR-0032 retired the HTTP listener, so
+/// nothing in this crate reads it and no process answers on 7070.
+///
+/// It survives because `trusty-agents` builds `http://127.0.0.1:{port}` from it
+/// in `memory::trusty_client` — a REST client against routes that no longer
+/// exist. That client is one of the two independent memory clients #6286's
+/// design review scoped to pass B, where it either folds into
+/// `trusty_common::memory_rpc` or dials the socket directly. Whichever it
+/// becomes, this constant goes with it.
+///
+/// It carries no `#[deprecated]` attribute deliberately: the workspace lints at
+/// `-D warnings`, so the attribute would turn a scoped follow-up into a broken
+/// build in a crate this change is not allowed to edit.
+pub const DEFAULT_HTTP_PORT: u16 = 7070;
+
 // The daemon's serving surface. `run_http`, `run_http_dynamic`, `run_http_on`,
 // `bind_dynamic_port`, `http_addr_path` and `DEFAULT_HTTP_PORT` went with the
 // listener (#6286); `serve` and `socket_path` are what replace them.
@@ -279,7 +297,7 @@ pub struct AppState {
     /// handler compute the elapsed seconds cheaply and without a clock-skew
     /// hazard.
     /// What: a wall-monotonic `Instant`; `AppState::new` stamps it at startup.
-    /// Test: `health_endpoint_includes_resource_fields`.
+    /// Test: `health_reports_idle_worker_pool`.
     pub started_at: std::time::Instant,
     /// In-memory ring buffer of recent tracing log lines (issue #35).
     ///
@@ -290,7 +308,7 @@ pub struct AppState {
     /// What: a cheap `Arc`-backed clone of the buffer the subscriber writes
     /// to. Defaults to an empty buffer for states that never install the
     /// layer (tests, the stdio path).
-    /// Test: `logs_tail_returns_recent_lines`.
+    /// Test: `rpc_logs_tail_answers_a_bounded_page`.
     pub log_buffer: trusty_common::log_buffer::LogBuffer,
     /// Bug-capture ERROR store (bug-reporting #478, Phase 1).
     ///
@@ -321,7 +339,7 @@ pub struct AppState {
     /// the handler reads it lock-free.
     /// What: an `AtomicU64` updated by the ticker spawned in `run_http_on`.
     /// `0` until the first walk completes.
-    /// Test: `health_endpoint_includes_resource_fields`.
+    /// Test: `health_reports_idle_worker_pool`.
     pub disk_bytes: Arc<std::sync::atomic::AtomicU64>,
     /// Per-process RSS + CPU sampler, refreshed on each `/health` request
     /// (issue #35).
@@ -330,7 +348,7 @@ pub struct AppState {
     /// sampler must persist between requests — hence the shared `Mutex`.
     /// What: a `tokio::sync::Mutex<SysMetrics>` so the async health handler
     /// can sample without blocking the runtime.
-    /// Test: `health_endpoint_includes_resource_fields`.
+    /// Test: `health_reports_idle_worker_pool`.
     pub sys_metrics: Arc<tokio::sync::Mutex<trusty_common::sys_metrics::SysMetrics>>,
     /// HTTP listener address the daemon bound to, once `run_http_on` is running.
     ///
@@ -909,7 +927,7 @@ impl AppState {
     /// constructing the `AppState`, then hands a clone here so the HTTP
     /// handler and the tracing layer observe the same ring.
     /// What: replaces the empty default buffer with the supplied one.
-    /// Test: `logs_tail_returns_recent_lines`.
+    /// Test: `rpc_logs_tail_answers_a_bounded_page`.
     #[must_use]
     pub fn with_log_buffer(mut self, buffer: trusty_common::log_buffer::LogBuffer) -> Self {
         self.log_buffer = buffer;

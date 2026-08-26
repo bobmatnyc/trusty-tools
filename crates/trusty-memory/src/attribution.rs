@@ -126,8 +126,10 @@ pub const WORKSTREAM_NAME_ENV: &str = "TM_WORKSTREAM_NAME";
 /// can populate `creator:client=` without guessing. The dashboard /
 /// claude-mpm / future trusty-* clients all set this when they make
 /// writes; clients that don't get the conservative fallback below.
-/// Test: `drawer_creator_attribution_http_default`,
-/// `drawer_creator_attribution_http_header`.
+/// Test: `rpc_drawer_create_attributes_the_caller_it_was_given` — the
+/// header channel the three `drawer_creator_attribution_http_*` tests drove
+/// went with the listener (#6286); `CallerParams` carries the same three
+/// values in `params` and that test is what proves they reach the drawer.
 pub const X_TRUSTY_CLIENT_NAME: &str = "x-trusty-client-name";
 
 /// HTTP request header carrying the writing client's cwd.
@@ -137,7 +139,7 @@ pub const X_TRUSTY_CLIENT_NAME: &str = "x-trusty-client-name";
 /// process whose cwd is opaque). Absent header → `creator:cwd=` is
 /// omitted from the drawer tags rather than synthesised from the
 /// daemon's own cwd, which would be wrong.
-/// Test: `drawer_creator_attribution_http_default`.
+/// Test: `rpc_drawer_create_attributes_the_caller_it_was_given`.
 pub const X_TRUSTY_CLIENT_CWD: &str = "x-trusty-client-cwd";
 
 /// HTTP request header carrying the writing client's explicit workstream
@@ -151,7 +153,7 @@ pub const X_TRUSTY_CLIENT_CWD: &str = "x-trusty-client-cwd";
 /// applies) can self-report it directly. Absent header → `creator:workstream=`
 /// falls back to the cwd heuristic, same precedence
 /// [`CreatorInfo::new_for_caller`] applies to the MCP path.
-/// Test: `drawer_creator_attribution_http_workstream_header`.
+/// Test: `rpc_drawer_create_attributes_the_caller_it_was_given`.
 pub const X_TRUSTY_CLIENT_WORKSTREAM: &str = "x-trusty-client-workstream";
 
 /// Default client name used when an HTTP caller omits the
@@ -162,7 +164,7 @@ pub const X_TRUSTY_CLIENT_WORKSTREAM: &str = "x-trusty-client-workstream";
 /// must not yield a missing tag. The fallback is verbose on purpose so
 /// operators can tell "the caller forgot to identify itself" apart from
 /// "the caller is a known trusty-* binary".
-/// Test: `drawer_creator_attribution_http_default`.
+/// Test: `rpc_drawer_create_attributes_the_caller_it_was_given`.
 pub const HTTP_DEFAULT_CLIENT: &str = "unknown-http-client";
 
 /// Client name attached to drawers written by the MCP tool surface.

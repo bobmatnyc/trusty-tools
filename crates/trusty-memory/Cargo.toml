@@ -1,12 +1,12 @@
 [package]
 name = "trusty-memory"
-# CHECK 5 semver break at 9fe56f1ca: commits 82366ef2d (#5811/#5831) and
-# 3c9fa3ee8 (#6024) removed find_project_root, ProjectPin, and four
-# project_root consts from the public surface. Cargo's 0.x rule puts a
-# breaking change in the MINOR position, so the bump lands here, not patch.
-version = "0.24.1"
+# #6286 removes the whole HTTP-serving surface from the public API: run_http,
+# run_http_dynamic, run_http_on, bind_dynamic_port, http_addr_path, the `web`
+# and `foreground` modules, and the `axum-server` feature (renamed `daemon`).
+# Cargo's 0.x rule puts a breaking change in the MINOR position.
+version = "0.25.0"
 edition = "2021"
-description = "MCP server (stdio + HTTP/SSE) for trusty-memory"
+description = "MCP server (stdio + Unix socket) for trusty-memory"
 license.workspace = true
 repository.workspace = true
 readme = "README.md"

@@ -148,8 +148,8 @@ impl Daemon {
 /// consumer rather than here. The reverse — registered but undocumented —
 /// leaves a method nothing can discover.
 /// Test: itself.
-#[test]
-fn rpc_router_registers_every_documented_method() {
+#[tokio::test]
+async fn rpc_router_registers_every_documented_method() {
     let router = build_router(test_state());
     let registered: Vec<&str> = router.method_names().collect();
     let mut documented = FOLDED_METHODS.to_vec();
@@ -167,8 +167,8 @@ fn rpc_router_registers_every_documented_method() {
 /// silent. The `memory.` prefix keeps the two sets disjoint by construction;
 /// this is what stops a later addition breaking that by accident.
 /// Test: itself.
-#[test]
-fn rpc_folded_names_do_not_collide_with_dispatcher_names() {
+#[tokio::test]
+async fn rpc_folded_names_do_not_collide_with_dispatcher_names() {
     let dispatcher = crate::transport::rpc::method_names();
     for folded in FOLDED_METHODS.iter().chain(STREAM_METHODS) {
         assert!(
@@ -475,6 +475,48 @@ async fn rpc_remember_async_rejects_short_content() {
     daemon.shutdown().await;
 }
 
+/// Why: the contract is one-way — the method answers `queued` before the write
+/// has happened — so the only thing that proves the queue is real is observing
+/// the drawer afterwards. A method that validated its input and then dropped it
+/// would pass every other assertion in this file.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn rpc_remember_async_queues_and_persists() {
+    let state = test_state();
+    let palace = seed_palace(&state, "queued");
+    let daemon = Daemon::start(state).await;
+
+    let queued = daemon
+        .ok(
+            "memory.remember_async",
+            json!({
+                "palace": palace,
+                "content": "the fire and forget path really does persist this",
+            }),
+        )
+        .await;
+    assert_eq!(queued["status"], "queued");
+
+    // The write runs on a detached task, so poll rather than assert once. The
+    // budget is generous because the dispatch goes through the embedder.
+    let mut listed = String::new();
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        listed = daemon
+            .ok("memory.drawers_list", json!({"palace_id": palace}))
+            .await
+            .to_string();
+        if listed.contains("really does persist") {
+            break;
+        }
+    }
+    assert!(
+        listed.contains("really does persist"),
+        "the queued write must reach the palace: {listed}"
+    );
+    daemon.shutdown().await;
+}
+
 /// Why: the tail is what an operator reads instead of SSHing to the box, and
 /// the clamp is what stops a request asking for more lines than the ring holds.
 /// Test: itself.
@@ -733,6 +775,44 @@ async fn rpc_accepts_a_request_larger_than_the_shared_default() {
     .await
     .expect("a 12 MiB frame is inside this service's budget");
     assert!(response.result.is_some(), "{:?}", response.error);
+    daemon.shutdown().await;
+}
+
+/// Why: 32 MiB is a bound, not the absence of one. A frame past it must be
+/// REFUSED rather than buffered, and the refusal must not take the accept loop
+/// down with it — a peer that floods the socket would otherwise be a way to
+/// stop the daemon answering anyone.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn rpc_refuses_a_request_past_its_own_budget() {
+    let daemon = Daemon::start(test_state()).await;
+
+    // One byte past the budget, so what is under test is the boundary rather
+    // than a wildly oversized payload.
+    let padding = "x".repeat(MAX_FRAME_BYTES as usize);
+    let refused = send_framed_request_capped::<_, RpcResponse>(
+        daemon.socket(),
+        &frame(1, "memory.status", json!({"pad": padding})),
+        CALL_TIMEOUT,
+        // The client's own budget is raised past the server's so the refusal
+        // under test is the SERVER's. With both at 32 MiB the client would
+        // refuse to write and the server would never see the frame.
+        MAX_FRAME_BYTES * 2,
+    )
+    .await;
+    assert!(
+        refused.is_err(),
+        "a frame past the server's budget must not be answered"
+    );
+
+    // The loop is still serving: this is the half that matters, because a
+    // refusal that killed the accept loop would look identical on the first
+    // request.
+    let after = daemon.ok("memory.status", json!({})).await;
+    assert!(
+        after["version"].is_string(),
+        "the accept loop must survive an oversized frame: {after}"
+    );
     daemon.shutdown().await;
 }
 

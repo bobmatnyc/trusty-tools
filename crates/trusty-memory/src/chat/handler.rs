@@ -51,8 +51,8 @@ use super::tools::{all_tools, execute_get_dream_status, execute_tool, ChatBody, 
 /// error frame with zero items ahead of it, which is what an `Err` from
 /// `RpcStreamMethod::call` means.
 ///
-/// Test: `rpc_chat_streams_tokens_and_ends`,
-/// `rpc_chat_reports_a_missing_provider_before_opening`.
+/// Test: `rpc_chat_refuses_a_unary_call_naming_the_stream_requirement`,
+/// `rpc_chat_reports_a_provider_failure_as_the_terminal_error_frame`.
 pub async fn chat_stream(state: &AppState, body: ChatBody) -> Result<RpcStreamItems, RpcError> {
     let state = state.clone();
     // Select the active provider (Ollama auto-detect, else OpenRouter).

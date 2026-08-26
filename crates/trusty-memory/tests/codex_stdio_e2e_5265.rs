@@ -67,13 +67,13 @@ impl CodexSession {
     /// daemon behind. The single-flight start the bridge would use instead is
     /// proven in `crates/trusty-common/tests/single_flight_exclusion.rs`.
     /// What: spawns `serve --foreground --http 127.0.0.1:0`, waits for its
-    /// `http_addr` file, then spawns the binary with [`REGISTERED_ARGS`] against
+    /// socket, then spawns the binary with [`REGISTERED_ARGS`] against
     /// the same data dir.
     async fn spawn() -> Self {
         let data_dir = tempfile::tempdir().expect("tempdir");
 
         let daemon = std::process::Command::new(binary())
-            .args(["serve", "--foreground", "--http", "127.0.0.1:0"])
+            .args(["serve", "--foreground"])
             .env("TRUSTY_DATA_DIR_OVERRIDE", data_dir.path())
             .env("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1")
             .env("RUST_LOG", "warn")
@@ -83,12 +83,15 @@ impl CodexSession {
             .spawn()
             .expect("spawn daemon");
 
-        let readiness_file = data_dir.path().join("trusty-memory").join("http_addr");
+        let readiness_file = data_dir
+            .path()
+            .join("trusty-memory")
+            .join("trusty-memory.sock");
         let deadline = Instant::now() + DAEMON_BOOT_TIMEOUT;
         while !readiness_file.exists() {
             assert!(
                 Instant::now() < deadline,
-                "daemon did not write http_addr within {DAEMON_BOOT_TIMEOUT:?}; expected at {}",
+                "daemon did not bind its socket within {DAEMON_BOOT_TIMEOUT:?}; expected at {}",
                 readiness_file.display()
             );
             std::thread::sleep(POLL_INTERVAL);

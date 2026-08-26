@@ -6,8 +6,8 @@
 //! `chat.rs` (issue #607).
 //! What: `ChatBody`, `MAX_TOOL_ROUNDS`, `all_tools`, `execute_tool`, and every
 //! `execute_*` helper, moved verbatim. Visibility unchanged.
-//! Test: `all_tools_returns_expected_set`, `execute_tool_dispatches_known_tools`
-//! in `web::tests`.
+//! Test: `all_tools_returns_expected_set`,
+//! `execute_tool_dispatches_known_tools` in `tools_tests.rs`.
 
 use crate::kg_write::CachePolicy;
 use crate::service::helpers::{collect_palace_stats, list_palaces_blocking, open_palaces_blocking};

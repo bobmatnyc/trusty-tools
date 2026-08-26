@@ -119,7 +119,7 @@ const BODY_DEADLINE: Duration = Duration::from_millis(1500);
 /// Claude Code's real hook ceiling.
 /// What: passed to [`tokio::time::timeout`] around `emit_hook_event`.
 /// Test: covered indirectly — `emit_hook_event`'s own no-daemon path is
-/// exercised by `hook_fired_activity_emit_smoke`.
+/// exercised by `dispatch_hook_fired_emits_activity`.
 const EMIT_DEADLINE: Duration = Duration::from_millis(300);
 
 /// Default top-K for drawer recall and KG triple selection.
@@ -345,7 +345,7 @@ pub(crate) async fn handle_prompt_context_with_payload(trigger_payload: String) 
 /// What: builds a `HookEventPayload` carrying the resolved palace, the
 /// rendered injection length, a short excerpt of the user prompt, and
 /// the hook's elapsed wall-clock duration, then calls `post_hook_event`.
-/// Test: `hook_fired_activity_emit_smoke` in this module.
+/// Test: `dispatch_hook_fired_emits_activity` in this module.
 async fn emit_hook_event(trigger_payload: &str, injection: &str, start: Instant) {
     let user_prompt = parse_user_prompt(trigger_payload);
     let palace_id = resolve_palace_slug(trigger_payload);

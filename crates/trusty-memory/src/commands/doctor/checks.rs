@@ -31,7 +31,7 @@ use super::CheckResult;
 /// slow-but-serving case is covered end-to-end against a real listener by
 /// `trusty-mpm`'s `memory_slow_but_serving_daemon_is_ok`, which exercises the
 /// same timeout/refusal split from the `tm doctor` side.
-/// Test: `check_daemon_health_fails_cleanly_with_stale_addr_and_no_listener`.
+/// Test: `check_daemon_health_fails_cleanly_with_no_listener`.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Verify the fastembed model cache exists and is readable.
@@ -206,8 +206,8 @@ pub async fn check_daemon_health() -> CheckResult {
                 return CheckResult::fail(
                     label,
                     format!(
-                        "nothing is serving {} ({e}) — start with \
-                         `trusty-memory service start`",
+                        "no daemon is serving {} — it is unreachable ({e}). \
+                         Start it with `trusty-memory service start`.",
                         socket.display()
                     ),
                 );

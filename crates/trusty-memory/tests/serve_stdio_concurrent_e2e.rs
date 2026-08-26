@@ -12,7 +12,7 @@
 //!      immediately with a human-readable error rather than spawning an orphan.
 //!
 //! Test strategy: provision a single HTTP daemon in an isolated temp data dir on
-//! an OS-assigned port, wait for it to signal readiness via its `http_addr` file,
+//! an OS-assigned port, wait for it to signal readiness via its socket,
 //! then start two `serve --stdio` bridges pointing at the SAME temp dir.  Both
 //! bridges discover the daemon's address from `{tempdir}/trusty-memory/http_addr`.
 //! Tear down the daemon after the assertions.
@@ -53,7 +53,7 @@ const EXIT_DEADLINE: Duration = Duration::from_secs(15);
 /// How often to poll for the daemon's `http_addr` readiness file.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Maximum time to wait for the daemon to write its `http_addr` file.
+/// Maximum time to wait for the daemon to write its socket.
 ///
 /// Why: 30 s covers resource-constrained CI runners; on typical developer
 /// hardware the daemon writes the file in < 1 s.
@@ -136,8 +136,6 @@ fn spawn_daemon(data_path: &std::path::Path) -> std::process::Child {
     let child = std::process::Command::new(binary())
         .arg("serve")
         .arg("--foreground")
-        .arg("--http")
-        .arg("127.0.0.1:0")
         .env("TRUSTY_DATA_DIR_OVERRIDE", data_path)
         .env("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1")
         .env("RUST_LOG", "warn")
@@ -148,7 +146,7 @@ fn spawn_daemon(data_path: &std::path::Path) -> std::process::Child {
         .expect("spawn daemon");
 
     // Poll for the readiness file.
-    let readiness_file = data_path.join("trusty-memory").join("http_addr");
+    let readiness_file = data_path.join("trusty-memory").join("trusty-memory.sock");
     let deadline = std::time::Instant::now() + DAEMON_BOOT_TIMEOUT;
     loop {
         if readiness_file.exists() {
@@ -156,7 +154,7 @@ fn spawn_daemon(data_path: &std::path::Path) -> std::process::Child {
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "daemon did not write http_addr within {:?}; expected at {}",
+            "daemon did not bind its socket within {:?}; expected at {}",
             DAEMON_BOOT_TIMEOUT,
             readiness_file.display()
         );
@@ -344,7 +342,7 @@ async fn stdio_serve_concurrent_two_bridges_both_work() {
 /// exit immediately with a human-readable error when no daemon is reachable.
 /// It must NOT spawn a background `serve --foreground --http :0` squatter.
 ///
-/// What: creates an empty temp data dir (no daemon, no http_addr file),
+/// What: creates an empty temp data dir (no daemon, no socket),
 /// spawns a bridge, closes its stdin immediately, then reads stdout until
 /// EOF.  The bridge must exit within `EXIT_DEADLINE` and produce no JSON-RPC
 /// response (it exits before entering the loop).
@@ -357,7 +355,7 @@ async fn stdio_serve_concurrent_two_bridges_both_work() {
 /// Test: `cargo test -p trusty-memory --test serve_stdio_concurrent_e2e -- stdio_bridge_exits_when_no_daemon`.
 #[tokio::test]
 async fn stdio_bridge_exits_when_no_daemon() {
-    // Empty temp dir — no daemon, no http_addr file.
+    // Empty temp dir — no daemon, no socket.
     let data_dir = tempfile::tempdir().expect("tempdir");
 
     let mut cmd = tokio::process::Command::new(binary());

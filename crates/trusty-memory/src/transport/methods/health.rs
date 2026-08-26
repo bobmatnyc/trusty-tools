@@ -69,14 +69,15 @@ use crate::transport::api_error::ApiError;
 /// a lightweight liveness response without touching the memory store.
 /// Test: `health_endpoint_cheap_by_default` and
 /// `health_endpoint_probe_param_triggers_round_trip`.
-#[derive(serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize)]
 pub struct HealthQuery {
     /// When `true`, run the full remember/recall/forget round-trip.
     #[serde(default)]
-    probe: bool,
-    /// Alias for `probe` (matches the `deep=` convention on other endpoints).
+    pub probe: bool,
+    /// Alias for `probe`, kept because sibling methods spell the same idea
+    /// `deep`.
     #[serde(default)]
-    deep: bool,
+    pub deep: bool,
 }
 
 impl HealthQuery {
@@ -330,7 +331,7 @@ pub async fn health(state: &AppState, query: HealthQuery) -> Result<serde_json::
     };
 
     let (status, detail) = if query.wants_deep_probe() {
-        match run_health_round_trip(&state).await {
+        match run_health_round_trip(state).await {
             Ok(()) => ("ok".to_string(), None),
             Err(err) => {
                 tracing::warn!("/health round-trip degraded: {err}");

@@ -251,4 +251,46 @@ mod tests {
         let rpc: RpcError = ApiError::not_found("palace not found: alpha").into();
         assert_eq!(rpc.message, "palace not found: alpha");
     }
+
+    /// Why (#5549, ADR-0045): mapping every open failure to `NotFound` sent an
+    /// operator looking for a deleted palace when what they had was a palace
+    /// that could not be READ. The two answers call for different next moves,
+    /// and the only thing separating them is this branch.
+    /// What: creates a palace directory the process cannot enter (`0o000`),
+    /// then opens it by id and asserts the failure is `Internal` rather than
+    /// `NotFound` — the palace is plainly there.
+    /// Test: itself.
+    #[tokio::test]
+    async fn unreadable_palace_is_internal_not_not_found_at_open_handle() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // Running as root defeats the mode bits — the open would succeed and
+        // the test would assert nothing.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("SKIP: running as root, so 0o000 does not deny this process");
+            return;
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = AppState::new(tmp.path().to_path_buf());
+        let dir = tmp.path().join("unreadable");
+        std::fs::create_dir_all(&dir).expect("create the palace directory");
+        std::fs::write(dir.join("palace.json"), "{}").expect("seed metadata");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000))
+            .expect("deny access");
+
+        let failure = open_handle(&state, "unreadable")
+            .err()
+            .expect("an unreadable palace cannot be opened");
+
+        // Restore before the tempdir drop, or the cleanup cannot descend.
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+
+        assert_eq!(
+            failure.kind,
+            ErrorKind::Internal,
+            "a palace that is present but unreadable must not report as absent: {}",
+            failure.message
+        );
+    }
 }

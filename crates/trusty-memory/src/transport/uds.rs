@@ -53,7 +53,7 @@ use trusty_common::uds::server::{serve_until, RpcError, RpcFallback, RpcRouter, 
 
 use crate::transport::methods::{activity, admin, chat, health, kg, palaces};
 use crate::transport::rpc::{dispatch, JsonRpcRequest};
-use crate::AppState;
+use crate::{is_data_dir_override_active, AppState};
 
 /// The method `trusty-console`'s connector and `tctl`'s probe dial.
 ///
@@ -478,6 +478,14 @@ pub async fn serve_with_shutdown(
 fn remove_retired_discovery_files() {
     if let Ok(dir) = trusty_common::resolve_data_dir("trusty-memory") {
         remove_if_present(&dir.join("http_addr"));
+    }
+    // #880, applied to the removal for the same reason it applied to the write:
+    // the dotfile is at a fixed `$HOME` path that no data-dir override
+    // redirects, so an isolated instance — a test rig, CI, a parallel run —
+    // would delete the REAL daemon's file. The override is the signal that this
+    // process must not touch shared state.
+    if is_data_dir_override_active() {
+        return;
     }
     if let Some(home) = dirs::home_dir() {
         remove_if_present(&home.join(".trusty-memory").join("http_addr"));

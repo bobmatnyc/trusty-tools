@@ -18,3 +18,7 @@ pub mod tools;
 
 pub use handler::chat_stream;
 pub use tools::ChatBody;
+
+#[cfg(test)]
+#[path = "tools_tests.rs"]
+mod tools_tests;

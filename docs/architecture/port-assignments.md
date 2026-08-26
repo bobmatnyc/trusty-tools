@@ -46,7 +46,6 @@ else's guard test too).
 
 | Port | Binary / Daemon | Constant (source of truth) | Managed by launchd? |
 |------|------------------|------------------------------|----------------------|
-| 7070 | `trusty-memory` | `trusty-memory/src/http_server.rs::DEFAULT_HTTP_PORT` | Yes |
 | 7700 | `trusty-common` symgraph HTTP server (optional library feature, not a standalone daemon) | `trusty-common/src/symgraph/server.rs::DEFAULT_PORT` | No |
 | 7788 | `trusty-console` | `trusty-console/src/lib.rs::DEFAULT_PORT` | Yes |
 | 7878 | `trusty-search` | `trusty-search/src/service/constants.rs::DEFAULT_PORT` | Yes |
@@ -59,11 +58,18 @@ else's guard test too).
 ## Next Free Port
 
 The next unclaimed value in the `78xx`/`79xx` block used by this workspace
-is **7892**. `7891` and `7879` are also free again — #6277 moved
-`trusty-review` off TCP onto a Unix socket and #6287 did the same for
-`trusty-analyze` — but prefer sequential allocation over reusing a released
-value, so a stale reference to either in an old log or script cannot resolve to
-a different daemon. Whatever you pick:
+is **7892**. `7891`, `7879` and `7070` are also free again — #6277 moved
+`trusty-review` off TCP onto a Unix socket, #6287 did the same for
+`trusty-analyze`, and #6286 for `trusty-memory` — but prefer sequential
+allocation over reusing a released value, so a stale reference to any of them in
+an old log or script cannot resolve to a different daemon.
+
+`7070` is the one to be most careful about: it was the workspace's
+longest-standing default, it is still named as a taken port by the
+`known_siblings` guard tests in `trusty-console/src/service.rs` and
+`trusty-code/src/serve/mod.rs`, and `trusty_memory::DEFAULT_HTTP_PORT` still
+exists as a compile-time stub for `trusty-agents`' unmigrated REST client. None
+of those bind it; all three go when that client migrates. Whatever you pick:
 
 1. Check this table for the exact value.
 2. `grep -rn "78[0-9][0-9]\|79[0-9][0-9]" --include="*.rs"` across the
