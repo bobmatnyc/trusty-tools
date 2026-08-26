@@ -309,9 +309,11 @@ impl ApiError {
 /// failure are `internal_error`, because neither is something the caller could
 /// have sent differently. The message is carried verbatim: it is the only place
 /// a diagnostics cutoff or an unreachable trusty-search names itself.
-/// Test: `rpc_reports_invalid_params_for_a_request_naming_no_index`,
-/// `rpc_scip_status_reports_not_found_when_never_ingested`,
-/// `rpc_reports_internal_error_when_search_is_unreachable`.
+/// Test: `rpc_diagnostics_reports_deadline_exceeded_distinctly` covers every
+/// arm at once; `rpc_reports_invalid_params_for_a_request_naming_no_index`,
+/// `rpc_scip_status_reports_not_found_when_never_ingested` and
+/// `rpc_list_indexes_reports_an_unreachable_search_daemon` each drive one of
+/// them through a real handler.
 impl From<ApiError> for RpcError {
     fn from(e: ApiError) -> Self {
         let code = match e.kind {

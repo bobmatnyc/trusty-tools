@@ -378,3 +378,45 @@ async fn tr_review_tools_absent_when_feature_off() {
     let err = resp.error.expect("expected METHOD_NOT_FOUND error");
     assert_eq!(err.code, error_codes::METHOD_NOT_FOUND);
 }
+
+/// Why (#6287): this dispatcher is an RPC CLIENT of its own daemon, and it
+/// names every method by literal because `service` sits behind the
+/// `http-server` feature while the dispatcher does not — an import would make
+/// the MCP surface unbuildable in a `--no-default-features` library build. A
+/// literal that drifts from the router surfaces as `method_not_found` at
+/// runtime, in a tool the operator was using, rather than here.
+///
+/// What: scans this module's own source for every `"analyze.*"` string literal
+/// and asserts each is registered in [`crate::service::rpc::METHODS`]. Reading
+/// the source rather than a hand-kept list is deliberate: a list would be a
+/// third copy to forget, and a method added to `call(...)` with no list entry
+/// would escape.
+/// Test: this is the test.
+#[cfg(feature = "http-server")]
+#[test]
+fn mcp_names_the_methods_the_router_registers() {
+    let source = include_str!("mod.rs");
+
+    let mut cited: Vec<&str> = Vec::new();
+    for (start, _) in source.match_indices("\"analyze.") {
+        let rest = &source[start + 1..];
+        let Some(end) = rest.find('"') else { continue };
+        cited.push(&rest[..end]);
+    }
+    cited.sort_unstable();
+    cited.dedup();
+
+    assert!(
+        !cited.is_empty(),
+        "no method literals found in mcp/mod.rs — this test no longer reads the \
+         client it guards"
+    );
+    for method in &cited {
+        assert!(
+            crate::service::rpc::METHODS.contains(method),
+            "the MCP client dials `{method}`, which the router does not register; \
+             registered: {:?}",
+            crate::service::rpc::METHODS
+        );
+    }
+}

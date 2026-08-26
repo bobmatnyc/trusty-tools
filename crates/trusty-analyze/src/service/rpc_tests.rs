@@ -1167,6 +1167,108 @@ async fn rpc_refuses_a_request_past_its_own_budget() {
     handle.await.unwrap().unwrap();
 }
 
+/// Why (#6287): `analyze.diagnostics` runs external linters, so on a CI runner
+/// or a machine without clippy installed the honest answer is an empty
+/// `diagnostics` list beside a `tools_run` that names nothing — NOT an error,
+/// and not a missing envelope. A client reading `tools_run` is how
+/// `trusty-review` tells "no linter existed" from "the codebase is clean"
+/// (#5317), so the envelope has to arrive intact even when the list is empty.
+/// What: drives the method over a REAL socket against a stub search daemon
+/// serving an empty corpus, and asserts every pagination field the envelope
+/// promises. `tools_run` is not asserted non-empty: whether clippy is installed
+/// is a property of the machine, not of this daemon.
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn rpc_diagnostics_returns_empty_when_no_tools() {
+    let tmp = TempDir::new().unwrap();
+    let search_base = spawn_paged_chunk_search(serde_json::json!({ "chunks": [] })).await;
+    let socket = tmp.path().join("sockets").join("analyze.sock");
+    let state = state_in_with_search(tmp.path(), &search_base);
+    let (stop, handle) = spawn_daemon(state, &socket).await;
+
+    let response = call_over_socket(
+        &socket,
+        "analyze.diagnostics",
+        serde_json::json!({ "index_id": "demo" }),
+    )
+    .await
+    .expect("a live socket must answer");
+    assert!(response.error.is_none(), "{:?}", response.error);
+    let body = response.result.expect("diagnostics answers with a result");
+
+    assert_eq!(body["index_id"], "demo");
+    assert_eq!(body["total"], 0);
+    assert_eq!(body["returned"], 0);
+    assert_eq!(body["truncated"], false);
+    assert_eq!(
+        body["timed_out"], false,
+        "an empty corpus cannot exhaust the deadline"
+    );
+    assert!(body["cutoff"].is_null(), "a complete run reports no cutoff");
+    assert!(
+        body["diagnostics"].as_array().is_some_and(Vec::is_empty),
+        "the list must be present and empty, never absent: {body}"
+    );
+    assert!(
+        body["tools_run"].is_array(),
+        "the field that separates 'no linter ran' from 'nothing found' must \
+         always be present: {body}"
+    );
+
+    let _ = stop.send(());
+    handle.await.unwrap().unwrap();
+}
+
+/// Why (#6287, preserving #6034/#6041): a handler that exhausted its own
+/// deadline and a daemon that simply broke point at different remedies — raise
+/// the budget versus start the dependency — and under HTTP that split was 504
+/// versus 502. On the socket it is [`CODE_DEADLINE_EXCEEDED`] versus
+/// `internal_error`. `trusty-review`'s `classify_failure` reads the CODE to
+/// choose `EndpointFailure::TimedOut` over `Unanswered`, which decides which
+/// sentence its Gaps & Caveats section prints, so folding this into
+/// `internal_error` would silently drop that sentence.
+///
+/// What: the mapping itself, over every [`ApiErrorKind`]. Driving a real
+/// deadline through `analyze.diagnostics` is not an option — the budget is
+/// operator-tunable with a 180 s floor, and the test would have to outlast it.
+/// The mapping is what a client can observe, and it is what a rename or a
+/// collapsed match arm would break.
+/// Test: this is the test, with trusty-review's
+/// `a_daemon_side_deadline_is_a_timeout_not_a_rejection` holding the other end.
+#[test]
+fn rpc_diagnostics_reports_deadline_exceeded_distinctly() {
+    use crate::service::events::{ApiError, CODE_DEADLINE_EXCEEDED};
+    use trusty_common::uds::server::{RpcError, CODE_INTERNAL_ERROR};
+
+    let code_of = |e: ApiError| RpcError::from(e).code;
+
+    assert_eq!(
+        CODE_DEADLINE_EXCEEDED, -32005,
+        "trusty-review copies this literal; changing it silently breaks the \
+         Gaps & Caveats line that distinguishes a timeout from an outage"
+    );
+    assert_eq!(
+        code_of(ApiError::gateway_timeout(
+            "diagnostics for 'demo' exceeded 210s"
+        )),
+        CODE_DEADLINE_EXCEEDED
+    );
+
+    // The three arms it must stay distinct from. Without them this test would
+    // pass against a router that answered -32005 for everything.
+    assert_eq!(code_of(ApiError::internal("we broke")), CODE_INTERNAL_ERROR);
+    assert_eq!(
+        code_of(ApiError::bad_gateway("search is down")),
+        CODE_INTERNAL_ERROR
+    );
+    assert_eq!(
+        code_of(ApiError::not_found("never ingested")),
+        CODE_NOT_FOUND,
+        "#5049's ingested-but-empty distinction shares the band and must not \
+         collide with it"
+    );
+}
+
 /// Why: `remove_retired_discovery_files` is deliberately never called from a
 /// test — it resolves the real data directory. Its removal step is this
 /// function, and this is where it is proven.
