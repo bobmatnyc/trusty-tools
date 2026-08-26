@@ -164,16 +164,29 @@ jobs:
   # racing. The `skipped`-vs-`success` trade PR #5434 had to make is gone
   # rather than re-decided: on a pull request neither is reachable.
   #
-  # The remaining `if:` covers only the events that have no pull request at
-  # all (`push`, `schedule`, `workflow_dispatch`), where "no PR drift" is a
-  # true statement rather than a fabricated one. It stays a step-level `if:`
-  # and not a job-level one for the #5434 reason above.
+  # The remaining `if:` is false on three triggers, and they are NOT equally
+  # safe. `push` is filtered to `main` and `schedule` runs on the default
+  # branch, so neither can produce a check run at an open PR's head SHA —
+  # skipping the check there states something true. `workflow_dispatch: {}`
+  # is different: it takes any ref, so dispatching this workflow on a PR's own
+  # head branch publishes a `success` at that head SHA having evaluated
+  # nothing, which is the #6243 overwrite by another route. That residue is
+  # ACCEPTED, not fixed. Closing it needs either a job-level `if:` — which
+  # reopens PR #5434's skipped-required-context hazard — or running the PR
+  # gate on non-PR events, where HEAD equals the base and the scan floor
+  # turns `main` red. A manual dispatch on a PR branch is a deliberate act,
+  # so the trade is: keep the two structural hazards closed, and leave this
+  # one documented.
+  #
+  # It stays a step-level `if:` and not a job-level one for the #5434 reason
+  # above.
   #
   # Mechanically enforced: `scripts/check_version_bump_verdict_selftest.sh`
-  # refuses any step `if:` in this job other than that exact expression, and
-  # refuses a step that publishes a `$GITHUB_OUTPUT` flag for other steps to
-  # branch on. It runs as a step of this job, so the invariant is re-proven
-  # on every PR.
+  # refuses an `if:` anywhere in this job other than that exact expression at
+  # step indent, refuses a job-level `if:` outright, and refuses a step that
+  # publishes a `$GITHUB_OUTPUT` flag for other steps to branch on. Its own
+  # mutation battery re-proves that those refusals actually fire. It runs as
+  # a step of this job, so the invariant is re-proven on every PR.
   pr-version-bump:
     name: "PR version bump vs crates.io (issue #4421)"
     runs-on: ubuntu-latest

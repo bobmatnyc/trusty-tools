@@ -27,18 +27,26 @@
 #   workflow published a verdict the gate never produced.
 #
 # What: extracts the `pr-version-bump` job from the workflow and asserts the
-#   one structural property that makes the incident unreachable — on a pull
-#   request, no step in that job can be skipped, so the job cannot conclude
-#   `success` without the real check having run. Concretely:
+#   properties that keep a `pull_request` run from concluding `success` without
+#   `scripts/check-pr-version-bump.sh` having run:
 #
 #     job-block-present         the job exists and carries steps (scan floor —
 #                               an extraction that silently matches nothing
 #                               would make every assertion below vacuous)
 #     runs-the-real-gate        exactly one step runs check-pr-version-bump.sh
-#     no-conditional-skip       EVERY step `if:` in the job is exactly
-#                               `github.event_name == 'pull_request'`. A step
-#                               gated on anything narrower can be skipped on a
-#                               pull request while the job stays green.
+#     no-job-level-if           the job header (job key down to `steps:`) has no
+#                               `if:` key at all. A job-level `if:` that
+#                               evaluates false makes the WHOLE job report
+#                               `skipped`, reopening PR #5434's
+#                               skipped-required-context hazard, and it sits
+#                               above every step-scoped assertion here.
+#     no-conditional-skip       every `if:`-shaped line in the job is EXACTLY
+#                               `        if: github.event_name == 'pull_request'`,
+#                               matched whole-line at its own indent. Anything
+#                               narrower — a clause appended to that expression,
+#                               a step output, an `if:` at another indent — can
+#                               skip a step on a pull request while the job
+#                               stays green.
 #     no-verdict-flag           no step writes `$GITHUB_OUTPUT`. That is how
 #                               the pre-#6243 gate step published the boolean
 #                               every other step branched on; forbidding the
@@ -53,43 +61,58 @@
 #                               supersedes rather than races (#6243 closure
 #                               condition 2).
 #
-#   Every case fails against the pre-#6243 file. Prove it with `--workflow`:
+#   These cover the shapes that make a step skippable or the job non-running.
+#   They do NOT cover every conceivable route to a fabricated green — a second
+#   job elsewhere deliberately publishing a check run under this job's `name:`
+#   would race a real verdict and is not defended against here.
 #
-#     git show <pre-fix-rev>:.github/workflows/version-parity.yml > /tmp/pre.yml
-#     bash scripts/check_version_bump_verdict_selftest.sh --workflow /tmp/pre.yml
+#   WHAT THE ASSERTIONS ARE PROVEN AGAINST. A bare grep guarantee is worth
+#   whatever its pattern actually anchors, which is the defect the first cut of
+#   this file shipped: `grep -vcF "if: <expected>"` matched as a SUBSTRING, so
+#   `if: github.event_name == 'pull_request' && github.event.action != 'edited'`
+#   counted as conforming and the file reported 7/7 on a workflow that
+#   recreated the #6241 incident. A default run therefore does not just check
+#   the live workflow — it builds mutant copies that each recreate a known
+#   evasion and asserts this checker REJECTS them:
 #
-#   The job-level `if:` is deliberately NOT asserted away. PR #5434 established
-#   that a job-level `if:` which can be false at a PR head SHA produces a
-#   `skipped` check run alongside a real one; the fix keeps the job
-#   unconditional and gates its steps instead.
+#     mutant/narrowed-step-if    the real check step's `if:` gains
+#                                `&& github.event.action != 'edited'`
+#     mutant/job-level-if        the same narrowing clause as a job-level `if:`
+#     mutant/no-real-gate        the check-pr-version-bump.sh step is deleted
+#
+#   The first two are the mutations that passed the pre-fix checker.
 #
 # Usage:
 #   bash scripts/check_version_bump_verdict_selftest.sh
 #   bash scripts/check_version_bump_verdict_selftest.sh --workflow <path>
 #
+#   `--workflow` checks ONE file and skips the mutation battery — that is how
+#   the battery invokes this script per mutant, and how to point it at a copy
+#   of an older revision by hand.
+#
 # Exit: 0 when every case matches; 1 on the first mismatch, printing both sides.
 #
-# Test: this file IS the test. It runs as a step of the job it constrains
+# Test: this file IS the test, and the mutation battery is its own coverage
+#   proof. It runs as a step of the job it constrains
 #   (.github/workflows/version-parity.yml, "Verdict-integrity selftest"), so
 #   the invariant is re-proven on every pull request.
 
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SELF="${REPO_ROOT}/scripts/$(basename "${BASH_SOURCE[0]}")"
 ORIG_PWD="${PWD}"
 
-WORKFLOW=".github/workflows/version-parity.yml"
-JOB="pr-version-bump"
-EXPECTED_STEP_IF="github.event_name == 'pull_request'"
+SINGLE_WORKFLOW=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --workflow)
       # Resolve against the CALLER's directory, not the repo root the script
-      # is about to cd into — the mutation demo points this at a scratch copy.
+      # is about to cd into — the battery points this at a scratch copy.
       case "${2:?--workflow needs a path}" in
-        /*) WORKFLOW="$2" ;;
-        *) WORKFLOW="${ORIG_PWD}/$2" ;;
+        /*) SINGLE_WORKFLOW="$2" ;;
+        *) SINGLE_WORKFLOW="${ORIG_PWD}/$2" ;;
       esac
       shift 2
       ;;
@@ -102,10 +125,12 @@ done
 
 cd "${REPO_ROOT}" || exit 1
 
-if [ ! -f "${WORKFLOW}" ]; then
-  echo "check_version_bump_verdict_selftest: no such workflow: ${WORKFLOW}" >&2
-  exit 1
-fi
+WORKFLOW=".github/workflows/version-parity.yml"
+JOB="pr-version-bump"
+# The one permitted step condition, as a whole line at its own indent. Both the
+# expression AND the indent are part of the assertion: an `if:` anywhere else in
+# the job is a shape this file has not reasoned about, so it fails closed.
+STEP_IF_LINE="        if: github.event_name == 'pull_request'"
 
 FAILURES=0
 CASES=0
@@ -113,57 +138,145 @@ CASES=0
 assert_eq() {
   CASES=$((CASES + 1))
   if [ "$2" = "$3" ]; then
-    printf '  ok   %-56s -> %s\n' "$1" "$3"
+    printf '  ok   %-58s -> %s\n' "$1" "$3"
   else
     FAILURES=$((FAILURES + 1))
     echo "  FAIL: $1: expected '$2', got '$3'"
   fi
 }
 
-# The job block: from `  <job>:` at two-space indent up to the next key at that
-# same indent. Comment lines above the next job belong to that job, not this
-# one, but they carry no `if:`/`run:` keys so they cannot affect any count.
-job_block="$(
+# job_block <file> — the job's body: from `  <job>:` at two-space indent up to
+# the next key at that indent. Full-line comments are dropped so a comment that
+# merely QUOTES a forbidden shape cannot trip an assertion, and so the trailing
+# comment block belonging to the next job cannot either.
+job_block() {
   awk -v job="  ${JOB}:" '
     $0 == job { inside = 1; next }
-    inside && /^  [A-Za-z_#-]/ && $0 !~ /^  #/ { exit }
+    inside && /^  [^ #]/ { exit }
+    inside && /^[[:space:]]*#/ { next }
     inside { print }
-  ' "${WORKFLOW}"
-)"
+  ' "$1"
+}
 
-echo "pr-version-bump verdict integrity (${WORKFLOW}):"
+# job_header <file> — the job's own keys, above `steps:`. A job-level `if:`
+# lives here and is invisible to every step-scoped assertion.
+job_header() {
+  job_block "$1" | awk '/^    steps:/ { exit } { print }'
+}
 
-# Scan floor. Without it a renamed job would silently zero every count below
-# and the whole selftest would read as a clean bill of health (#4618's shape).
-assert_eq "job-block-present: job found" "yes" \
-  "$([ -n "${job_block}" ] && echo yes || echo no)"
-step_count="$(printf '%s\n' "${job_block}" | grep -cE '^      - (name|uses):' || true)"
-assert_eq "job-block-present: step count > 0" "yes" \
-  "$([ "${step_count:-0}" -gt 0 ] && echo yes || echo no)"
+check_workflow() {
+  local wf="$1" block header step_count if_lines conforming_if
+  block="$(job_block "${wf}")"
+  header="$(job_header "${wf}")"
 
-assert_eq "runs-the-real-gate: check-pr-version-bump.sh invoked once" "1" \
-  "$(printf '%s\n' "${job_block}" |
-    grep -c 'bash scripts/check-pr-version-bump\.sh' || true)"
+  echo "pr-version-bump verdict integrity (${wf}):"
 
-# Every step `if:` must be the event guard and nothing narrower. Counting the
-# non-conforming ones (rather than asserting the conforming count) means a
-# newly added step with a novel condition is caught too.
-assert_eq "no-conditional-skip: step ifs other than the event guard" "0" \
-  "$(printf '%s\n' "${job_block}" |
-    grep -E '^        if:' |
-    grep -vcF "if: ${EXPECTED_STEP_IF}" || true)"
+  # Scan floor. Without it a renamed job would silently zero every count below
+  # and the whole selftest would read as a clean bill of health (#4618's shape).
+  assert_eq "job-block-present: job found" "yes" \
+    "$([ -n "${block}" ] && echo yes || echo no)"
+  step_count="$(printf '%s\n' "${block}" | grep -cE '^      - (name|uses):' || true)"
+  assert_eq "job-block-present: step count > 0" "yes" \
+    "$([ "${step_count:-0}" -gt 0 ] && echo yes || echo no)"
 
-assert_eq "no-verdict-flag: steps writing \$GITHUB_OUTPUT" "0" \
-  "$(printf '%s\n' "${job_block}" | grep -c 'GITHUB_OUTPUT' || true)"
+  assert_eq "runs-the-real-gate: check-pr-version-bump.sh invoked once" "1" \
+    "$(printf '%s\n' "${block}" |
+      grep -c 'bash scripts/check-pr-version-bump\.sh' || true)"
 
-assert_eq "no-fabricated-success: success announced without checking" "0" \
-  "$(printf '%s\n' "${job_block}" |
-    grep -ci 'success without running the real check' || true)"
+  assert_eq "no-job-level-if: \`if:\` keys in the job header" "0" \
+    "$(printf '%s\n' "${header}" | grep -cE '^[[:space:]]+if:' || true)"
 
-# #6243 closure condition 2 — workflow level, outside the job block.
-assert_eq "duplicates-collapse: no edited carve-out in cancel-in-progress" "0" \
-  "$(grep -E '^  cancel-in-progress:' "${WORKFLOW}" |
-    grep -c "github.event.action" || true)"
+  # Count every `if:`-shaped line in the job, then count the ones that are
+  # EXACTLY the permitted line. The difference is what evades the guarantee —
+  # a narrowing clause appended to the expected expression, a step-output
+  # condition, or an `if:` at an unexpected indent. Whole-line `-x` matching is
+  # the point: the pre-fix substring form counted the first of those three as
+  # conforming and reported a clean pass on a workflow that recreated #6241.
+  if_lines="$(printf '%s\n' "${block}" | grep -cE '^[[:space:]]+if:' || true)"
+  conforming_if="$(printf '%s\n' "${block}" | grep -cxF "${STEP_IF_LINE}" || true)"
+  assert_eq "no-conditional-skip: ifs that are not the event guard" "0" \
+    "$((if_lines - conforming_if))"
+
+  assert_eq "no-verdict-flag: steps writing \$GITHUB_OUTPUT" "0" \
+    "$(printf '%s\n' "${block}" | grep -c 'GITHUB_OUTPUT' || true)"
+
+  assert_eq "no-fabricated-success: success announced without checking" "0" \
+    "$(printf '%s\n' "${block}" |
+      grep -ci 'success without running the real check' || true)"
+
+  # #6243 closure condition 2 — workflow level, outside the job block.
+  assert_eq "duplicates-collapse: no edited carve-out in cancel-in-progress" "0" \
+    "$(grep -E '^  cancel-in-progress:' "${wf}" |
+      grep -c "github.event.action" || true)"
+}
+
+# --- single-file mode: check one workflow, no battery -----------------------
+
+if [ -n "${SINGLE_WORKFLOW}" ]; then
+  if [ ! -f "${SINGLE_WORKFLOW}" ]; then
+    echo "check_version_bump_verdict_selftest: no such workflow: ${SINGLE_WORKFLOW}" >&2
+    exit 1
+  fi
+  check_workflow "${SINGLE_WORKFLOW}"
+  echo
+  if [ "${FAILURES}" -gt 0 ]; then
+    echo "check_version_bump_verdict_selftest: ${FAILURES}/${CASES} case(s) FAILED."
+    exit 1
+  fi
+  echo "check_version_bump_verdict_selftest: ${CASES}/${CASES} cases passed."
+  exit 0
+fi
+
+# --- default mode: the live workflow, then the mutation battery -------------
+
+check_workflow "${WORKFLOW}"
+
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/vbverdict.XXXXXX")"
+trap 'rm -rf "${TMP}"' EXIT
+
+# mutate_narrowed_step_if — append the #6241 narrowing clause to the real check
+# step's own `if:`. This is the mutation the pre-fix substring match accepted.
+awk '
+  /^      - name: Check PR version bumps against crates\.io$/ { arm = 1 }
+  arm && /^        if: / {
+    print $0 " && github.event.action != '\''edited'\''"
+    arm = 0
+    next
+  }
+  { print }
+' "${WORKFLOW}" > "${TMP}/narrowed-step-if.yml"
+
+# mutate_job_level_if — the same clause hoisted to the job header, where no
+# step-scoped assertion can see it.
+awk -v job="  pr-version-bump:" '
+  { print }
+  $0 == job {
+    print "    if: github.event_name == '\''pull_request'\'' && github.event.action != '\''edited'\''"
+  }
+' "${WORKFLOW}" > "${TMP}/job-level-if.yml"
+
+# mutate_no_real_gate — delete the invocation the whole job exists to make.
+grep -v 'bash scripts/check-pr-version-bump\.sh' "${WORKFLOW}" \
+  > "${TMP}/no-real-gate.yml"
+
+echo
+echo "mutation battery (each mutant must be REJECTED):"
+for mutant in narrowed-step-if job-level-if no-real-gate; do
+  # Sanity floor: a mutation that did not change the file proves nothing.
+  if cmp -s "${WORKFLOW}" "${TMP}/${mutant}.yml"; then
+    CASES=$((CASES + 1))
+    FAILURES=$((FAILURES + 1))
+    echo "  FAIL: mutant/${mutant}: mutation produced an unchanged file"
+    continue
+  fi
+  bash "${SELF}" --workflow "${TMP}/${mutant}.yml" > "${TMP}/${mutant}.out" 2>&1
+  rc=$?
+  assert_eq "mutant/${mutant}: rejected" "1" "${rc}"
+  if [ "${rc}" -ne 1 ]; then
+    echo "         checker output for the accepted mutant:"
+    sed 's/^/         | /' "${TMP}/${mutant}.out"
+  fi
+done
 
 echo
 if [ "${FAILURES}" -gt 0 ]; then
