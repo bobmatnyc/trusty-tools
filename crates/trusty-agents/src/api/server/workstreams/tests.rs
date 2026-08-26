@@ -290,14 +290,9 @@ mod mock_daemon {
         create_tagged_drawer_at(tmp.path(), &socket, "turn two", vec!["ws:feat-x".into()])
             .await
             .expect("second write succeeds");
-        create_tagged_drawer_at(
-            tmp.path(),
-            &socket,
-            "other turn",
-            vec!["ws:feat-y".into()],
-        )
-        .await
-        .expect("third write succeeds");
+        create_tagged_drawer_at(tmp.path(), &socket, "other turn", vec!["ws:feat-y".into()])
+            .await
+            .expect("third write succeeds");
 
         let out = drawers_by_tag_at(tmp.path(), &socket, "ws:feat-x", 10).await;
         assert_eq!(out.len(), 2);

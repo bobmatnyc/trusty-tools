@@ -324,8 +324,7 @@ pub(crate) async fn build_persona_memory(
         };
     };
 
-    let identity_rows =
-        fetch_drawers_by_tag(socket, palace, IDENTITY_TAG, IDENTITY_LIMIT).await;
+    let identity_rows = fetch_drawers_by_tag(socket, palace, IDENTITY_TAG, IDENTITY_LIMIT).await;
     let recall_rows = recall_drawers(socket, palace, query, RECALL_TOP_K).await;
 
     // Health follows whether recall — the load-bearing read — answered. A

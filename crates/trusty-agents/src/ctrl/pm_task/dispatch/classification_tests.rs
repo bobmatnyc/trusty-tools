@@ -402,18 +402,9 @@ async fn finish_turn_disabled_does_not_persist() {
     let cfg = test_persona_cfg_disabled();
     let ctx = build_turn_context(tmp.path(), None, 12, cfg.workstreams.enabled, socket).await;
     let raw = "Here you go.\n\n[[task: feat-x]]".to_string();
-    let out = finish_turn(
-        tmp.path(),
-        "izzie",
-        &client,
-        &cfg,
-        "hi",
-        raw,
-        &ctx,
-        socket,
-    )
-    .await
-    .expect("finish_turn must not error");
+    let out = finish_turn(tmp.path(), "izzie", &client, &cfg, "hi", raw, &ctx, socket)
+        .await
+        .expect("finish_turn must not error");
     assert_eq!(out, "Here you go.", "marker still stripped from display");
 
     // Give a would-be background task every chance to run; there must be
@@ -445,18 +436,9 @@ async fn finish_turn_persists_via_detached_task() {
     let cfg = test_persona_cfg();
     let ctx = build_turn_context(tmp.path(), None, 12, true, socket).await;
     let raw = "Here you go.\n\n[[task: feat-x]]".to_string();
-    let out = finish_turn(
-        tmp.path(),
-        "izzie",
-        &client,
-        &cfg,
-        "hi",
-        raw,
-        &ctx,
-        socket,
-    )
-    .await
-    .expect("finish_turn must not error");
+    let out = finish_turn(tmp.path(), "izzie", &client, &cfg, "hi", raw, &ctx, socket)
+        .await
+        .expect("finish_turn must not error");
     assert_eq!(out, "Here you go.");
 
     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -623,9 +605,9 @@ fn should_refresh_summary_true_on_cadence_boundary() {
 // -----------------------------------------------------------------
 mod mock_daemon {
     use crate::uds_mock::{self, MockMemoryDaemon, RpcError};
+    use axum::extract::State;
     use axum::routing::post;
     use axum::{Json, Router};
-    use axum::extract::State;
     use std::net::SocketAddr;
     use std::sync::{Arc, Mutex as StdMutex};
 

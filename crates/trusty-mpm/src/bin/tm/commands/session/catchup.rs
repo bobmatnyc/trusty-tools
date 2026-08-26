@@ -60,16 +60,16 @@ pub(crate) async fn handle_catchup(all_projects: bool, full: bool) -> anyhow::Re
         }
     }
 
-    // Load config for the memory URL (fail-open to default).
+    // Resolve the daemon's socket (fail-open to a path nothing serves).
     let config = trusty_mpm::core::config::MpmConfig::load_default();
-    // Discovery-first (issue #2030): resolves TRUSTY_MEMORY_URL when set, else
+    // #6286: the derived socket path, else
     // the daemon's actual discovered bound address, never a hardcoded port.
-    let memory_url = trusty_common::memory_rpc::resolve_memory_base_url_or_unreachable();
+    let memory_socket = trusty_common::memory_rpc::resolve_memory_socket_or_unreachable();
 
     for dir in &project_dirs {
         let opts = CatchupOptions {
             project_dir: dir.clone(),
-            memory_url: memory_url.clone(),
+            memory_socket: memory_socket.clone(),
             include_git: config.catchup.include_git,
             include_palace: config.catchup.include_palace,
             git_limit: config.catchup.git_limit,

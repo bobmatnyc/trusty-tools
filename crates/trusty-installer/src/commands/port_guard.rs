@@ -289,41 +289,23 @@ pub fn parse_lsof_listen_pids(text: &str) -> Vec<u32> {
     }
 }
 
-/// The port range a member auto-walks when its default port is taken.
-///
-/// Why: a daemon that WALKS treats a busy default port as a condition it is
-/// designed to survive, so refusing the install on that basis blocks a
-/// machine where it would have worked — a guard that breaks the normal path is
-/// worse than the bug it fixes. Encoding which members walk, and over what
-/// range, is what lets [`decide_over_range`] refuse only when the daemon has
-/// nowhere left to go.
-/// What: `Some(range)` for members that walk; `None` for members pinned to one
-/// port, where a busy port IS a hard failure. trusty-memory is the only
-/// stable-set walker — sourced from its own
-/// `commands/doctor/checks.rs` ("`DEFAULT_HTTP_PORT` 7070..=7079") and
-/// `commands/daemon_guard.rs` ("selects a dynamic port from 7070–7079").
-/// Test: `walk_range_matches_the_daemons_documented_behaviour`.
-pub fn walk_range_for(binary: &str) -> Option<std::ops::RangeInclusive<u16>> {
-    match binary {
-        "trusty-memory" => Some(7070..=7079),
-        _ => None,
-    }
-}
-
 /// Which port(s) `binary` is expected to serve on.
 ///
 /// Why: a guard pointed at the wrong port is worse than no guard, and there are
 /// two distinct wrong-port hazards. (1) A STALE default: the recorded
 /// `http_addr` is the PRIMARY source because it survives a `--port` override
-/// and reflects the port the daemon actually bound, so a member that already
-/// walked is checked where it really is. (2) A FRESH walker: with no recorded
-/// address, a walking member's default port being busy is not a failure — it
-/// will simply take the next one. Returning the whole walk range lets the
-/// caller refuse only when every candidate is unusable.
+/// and reflects the port the daemon actually bound, so a member is checked
+/// where it really is. (2) No recorded address: the member's documented default
+/// is the one candidate.
 /// What: a single-element vec holding the recorded port when one is recorded
-/// and parseable (authoritative — no walking, that IS the bound port); else the
-/// member's walk range when it has one; else its single documented default;
-/// else empty. Empty is reachable for a member that is not a stable-set daemon
+/// and parseable (authoritative — that IS the bound port); else the member's
+/// single documented default; else empty.
+///
+/// **The walk-range branch is gone (#6286).** trusty-memory was the only member
+/// that walked (`7070..=7079`), and ADR-0032 moved it onto a Unix socket, so
+/// nothing produced a range any more. `decide_over_range` below still iterates
+/// whatever this returns, which is how a future walker gets the #4470
+/// relaxation back without this function pretending to have one today. Empty is reachable for a member that is not a stable-set daemon
 /// at all, and — since #6277 — for a member that binds a Unix socket rather
 /// than a port. Both are pinned by `every_launchd_member_is_guardable`.
 /// Test: `resolve_guard_ports_falls_back_to_the_documented_table`,
@@ -336,7 +318,9 @@ pub fn resolve_guard_ports(binary: &str) -> Vec<u16> {
     // `127.0.0.1:7891` in it, and reading it here would make the guard refuse a
     // bootstrap because some unrelated process holds a port this daemon will
     // never bind. Checked BEFORE the recorded-address read, because that read is
-    // the one that resurrects the stale value.
+    // the one that resurrects the stale value. #6286 makes trusty-memory the
+    // sharpest case: its daemon deletes both `http_addr` files at every start,
+    // but only once it has started, and the guard runs before that.
     if super::probe_http::uds_socket_for(binary).is_some() {
         return Vec::new();
     }
@@ -344,9 +328,6 @@ pub fn resolve_guard_ports(binary: &str) -> Vec<u16> {
         if let Some(port) = super::port::parse_port_from_addr(&addr) {
             return vec![port];
         }
-    }
-    if let Some(range) = walk_range_for(binary) {
-        return range.collect();
     }
     super::probe_http::fixed_port_for(binary)
         .map(|p| vec![p])

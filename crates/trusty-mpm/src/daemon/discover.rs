@@ -1,14 +1,20 @@
 //! Runtime port discovery for trusty sidecar services.
 //!
-//! Why: trusty-memory and trusty-search do not use fixed ports — each service
-//! picks its port from its own config.toml and writes the resolved address to a
-//! well-known file (`~/.trusty-{service}/http_addr`) once the listener is bound.
-//! Call sites must read this file at runtime; hardcoding port numbers breaks when
-//! the service operator changes the config.
+//! Why: trusty-search does not use a fixed port — it picks one from its own
+//! config.toml and writes the resolved address to a well-known file
+//! (`~/.trusty-search/http_addr`) once the listener is bound. Call sites must
+//! read this file at runtime; hardcoding a port number breaks when the operator
+//! changes the config.
+//!
+//! **trusty-memory is not here any more (#6286).** ADR-0032 moved it onto a
+//! Unix socket, so it writes no `http_addr` and has no port to discover — its
+//! path is derived by `trusty_common::memory_rpc::resolve_memory_socket`. The
+//! `~/.trusty-memory/http_addr` this module used to read is still on disk on
+//! every machine that ran the old daemon, which is exactly why the read had to
+//! go rather than be left to fall through to a default.
 //!
 //! What: `discover_addr` implements the three-step resolution: env override →
-//! port file → fallback default.  `TrustyAddrs` groups the two resolved addresses
-//! for convenient daemon startup.
+//! port file → fallback default. `TrustyAddrs` carries what is left.
 //!
 //! Test: `cargo test -p trusty-mpm-daemon discover` exercises file-present,
 //! file-absent, malformed-file, and env-override cases without hitting the
@@ -17,36 +23,22 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-/// Default address for trusty-memory when `~/.trusty-memory/http_addr` is absent.
-///
-/// Why: must match the trusty-memory daemon's own `DEFAULT_HTTP_PORT` (7070,
-/// see `crates/trusty-memory/src/lib.rs`) — otherwise clients that fall through
-/// to this default hit a port nothing is listening on (issue: dream cycle log
-/// flood). The trusty-memory daemon picks dynamically from 7070..=7079 and
-/// writes the bound address to the lock file; the historical 3038 default did
-/// not match any port the daemon ever binds.
-/// What: `127.0.0.1:7070` — matches the trusty-memory daemon default.
-/// Only used as a last resort — never embed this literal at call sites.
-pub const TRUSTY_MEMORY_DEFAULT_ADDR: &str = "127.0.0.1:7070";
-
 /// Default address for trusty-search when `~/.trusty-search/http_addr` is absent.
 /// Only used as a last resort — never embed this literal at call sites.
 pub const TRUSTY_SEARCH_DEFAULT_ADDR: &str = "127.0.0.1:7878";
 
-const TRUSTY_MEMORY_DATA_DIR: &str = ".trusty-memory";
 const TRUSTY_SEARCH_DATA_DIR: &str = ".trusty-search";
 const HTTP_ADDR_FILE: &str = "http_addr";
 
-/// Resolved addresses for both trusty sidecar services.
+/// Resolved addresses for the trusty sidecar services that still serve HTTP.
 ///
-/// Why: groups the two addresses so the daemon's startup code passes them
-/// through a single function call rather than two.
+/// Why: a struct rather than a bare `SocketAddr` so the daemon's startup code
+/// keeps one call site as members migrate. #6286 removed the `memory` field:
+/// trusty-memory serves a Unix socket, and nothing read that field anyway.
 /// What: produced by `discover_all`; stored in daemon config.
 /// Test: construct directly in unit tests to inject fake addresses.
 #[derive(Debug, Clone)]
 pub struct TrustyAddrs {
-    /// Resolved HTTP address for trusty-memory.
-    pub memory: SocketAddr,
     /// Resolved HTTP address for trusty-search.
     pub search: SocketAddr,
 }
@@ -88,38 +80,27 @@ pub async fn discover_addr(
 
 /// Discovers both trusty service addresses in parallel.
 ///
-/// Why: the daemon needs both addresses at startup; running discovery in parallel
-/// avoids serializing two file reads.
-/// What: reads `~/.trusty-memory/http_addr` and `~/.trusty-search/http_addr`
-///       concurrently, applying env overrides and compiled defaults as fallbacks.
+/// Why: the daemon needs the address at startup, and keeping the call here
+/// means a future member joins in one place.
+/// What: reads `~/.trusty-search/http_addr`, applying the env override and the
+/// compiled default as fallbacks.
 /// Test: see `tests::discover_all_with_files`.
 pub async fn discover_all(home: &Path) -> TrustyAddrs {
-    let memory_dir = home.join(TRUSTY_MEMORY_DATA_DIR);
     let search_dir = home.join(TRUSTY_SEARCH_DATA_DIR);
-
-    let memory_default: SocketAddr = TRUSTY_MEMORY_DEFAULT_ADDR
-        .parse()
-        .expect("static default is valid");
     let search_default: SocketAddr = TRUSTY_SEARCH_DEFAULT_ADDR
         .parse()
         .expect("static default is valid");
-
-    let memory_env = std::env::var("TRUSTY_MEMORY_ADDR").ok();
     let search_env = std::env::var("TRUSTY_SEARCH_ADDR").ok();
 
-    let (memory, search) = tokio::join!(
-        discover_addr(&memory_dir, memory_default, memory_env.as_deref()),
-        discover_addr(&search_dir, search_default, search_env.as_deref()),
-    );
-
-    TrustyAddrs { memory, search }
+    let search = discover_addr(&search_dir, search_default, search_env.as_deref()).await;
+    TrustyAddrs { search }
 }
 
 /// Returns the path to the `http_addr` file for a given service data directory.
 ///
 /// Why: lets callers log or monitor the file without re-deriving the path.
 /// What: joins `data_dir` with the well-known filename `http_addr`.
-/// Test: assert the returned path ends with `.trusty-memory/http_addr`.
+/// Test: assert the returned path ends with `.trusty-search/http_addr`.
 #[allow(dead_code)] // Diagnostic helper for operators monitoring the port file.
 pub fn addr_file(data_dir: &Path) -> PathBuf {
     data_dir.join(HTTP_ADDR_FILE)
@@ -183,35 +164,25 @@ mod tests {
 
     #[tokio::test]
     async fn discover_all_with_files() {
-        let mem_dir = TempDir::new().unwrap();
         let srch_dir = TempDir::new().unwrap();
-        write_addr_file(&mem_dir, "127.0.0.1:4001");
         write_addr_file(&srch_dir, "127.0.0.1:4002");
 
-        // We can't call discover_all with custom dirs directly (it uses home),
-        // so test the underlying discover_addr calls in parallel instead.
-        let mem_default: SocketAddr = TRUSTY_MEMORY_DEFAULT_ADDR.parse().unwrap();
+        // We can't call discover_all with a custom dir directly (it uses home),
+        // so test the underlying discover_addr call instead.
         let srch_default: SocketAddr = TRUSTY_SEARCH_DEFAULT_ADDR.parse().unwrap();
-        let (memory, search) = tokio::join!(
-            discover_addr(mem_dir.path(), mem_default, None),
-            discover_addr(srch_dir.path(), srch_default, None),
-        );
-        assert_eq!(memory, "127.0.0.1:4001".parse::<SocketAddr>().unwrap());
+        let search = discover_addr(srch_dir.path(), srch_default, None).await;
         assert_eq!(search, "127.0.0.1:4002".parse::<SocketAddr>().unwrap());
     }
 
     #[test]
     fn addr_file_path_ends_with_http_addr() {
-        let dir = PathBuf::from("/home/user/.trusty-memory");
+        let dir = PathBuf::from("/home/user/.trusty-search");
         let p = addr_file(&dir);
         assert!(p.ends_with("http_addr"));
     }
 
     #[test]
     fn constants_parse_as_socket_addrs() {
-        TRUSTY_MEMORY_DEFAULT_ADDR
-            .parse::<SocketAddr>()
-            .expect("TRUSTY_MEMORY_DEFAULT_ADDR must be a valid SocketAddr");
         TRUSTY_SEARCH_DEFAULT_ADDR
             .parse::<SocketAddr>()
             .expect("TRUSTY_SEARCH_DEFAULT_ADDR must be a valid SocketAddr");

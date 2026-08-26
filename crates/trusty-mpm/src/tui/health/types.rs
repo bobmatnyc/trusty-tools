@@ -450,7 +450,8 @@ pub struct HealthScreen {
     /// The trusty-memory panel state.
     pub memory: PanelState,
     /// The trusty-memory daemon base URL.
-    pub memory_url: String,
+    /// #6286: a socket PATH, not a URL — trusty-memory has no listener.
+    pub memory_socket: String,
     /// Which panel `[S]`/`[X]` act on; `[Tab]` cycles it.
     pub focus: Daemon,
     /// Which right-panel tab is currently visible.

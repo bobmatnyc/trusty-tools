@@ -651,86 +651,64 @@ fn resolve_guard_ports_falls_back_to_the_documented_table() {
     assert!(resolve_guard_ports("definitely-not-a-trusty-daemon").is_empty());
 }
 
-/// Why (#4470 MEDIUM-3): trusty-memory WALKS `7070..=7079`, so a busy 7070 on
-/// a fresh machine is a condition it survives by taking the next port. The
-/// guard must therefore be handed the whole range, not just the default, or it
-/// hard-refuses an install that would have worked.
-/// What: STAGES the fresh-machine state explicitly — an empty data dir, so
-/// `read_daemon_addr` genuinely finds nothing — then asserts a walking member
-/// resolves to every port in its range, in order, with the default first.
+/// REGRESSION (#6286): a member that serves a Unix socket must resolve NO port
+/// to guard, even when a pre-migration `http_addr` is still on disk.
 ///
-/// Takes `ENV_TEST_LOCK` for its whole body. `TRUSTY_DATA_DIR_OVERRIDE` is
-/// process-global and sibling tests flip it, so reading `read_daemon_addr`
-/// without the lock races them. The first version of this test also depended on
-/// the AMBIENT host state (it returned early when a real trusty-memory
-/// `http_addr` existed), which meant it silently self-skipped on a developer
-/// machine and only ever ran on CI — green where it could not fail, absent
-/// where it could. Staging the state removes both problems: it now asserts the
-/// same thing everywhere.
+/// Why: this is the sharpest case the socket short-circuit exists for.
+/// trusty-memory ran on `127.0.0.1:7070..=7079` on every machine that predates
+/// ADR-0032, so its `http_addr` is still there — and the daemon only deletes it
+/// once it has started, which is after this guard runs. Reading it here would
+/// refuse a bootstrap because some unrelated process holds a port trusty-memory
+/// will never bind again. This test plants exactly that file.
+/// What: stages a stale `http_addr` for trusty-memory and asserts the resolution
+/// is empty rather than `[7071]`.
 /// Test: This is the test.
 #[test]
-fn resolve_guard_ports_returns_the_whole_walk_range_for_a_fresh_walker() {
+fn resolve_guard_ports_is_empty_for_a_socket_member_with_a_stale_addr_file() {
     use crate::commands::test_support as ts;
 
     let _guard = ts::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = ts::stub_empty_data_dir("port-guard-walk-range");
+    let dir = ts::stub_data_dir("trusty-memory", "127.0.0.1:7071");
 
     let ports = resolve_guard_ports("trusty-memory");
 
     ts::clear_data_dir_override(&dir);
 
-    assert_eq!(ports.len(), 10, "ports: {ports:?}");
-    assert_eq!(ports.first(), Some(&7070));
-    assert_eq!(ports.last(), Some(&7079));
-}
-
-/// Why: the other half of the resolution rule — a member that HAS recorded an
-/// address is checked exactly there, never across a walk range. This is what
-/// keeps the #4230 case strict: a daemon with a known bound port gets a
-/// single-port check, and the range relaxation cannot apply to it.
-/// What: with a planted `http_addr`, a walking member resolves to exactly the
-/// recorded port.
-/// Test: This is the test.
-#[test]
-fn resolve_guard_ports_prefers_a_recorded_address_over_the_walk_range() {
-    use crate::commands::test_support as ts;
-
-    let _guard = ts::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = ts::stub_data_dir("trusty-memory", "127.0.0.1:7073");
-
-    let ports = resolve_guard_ports("trusty-memory");
-
-    ts::clear_data_dir_override(&dir);
-
-    assert_eq!(
-        ports,
-        vec![7073],
-        "a recorded address is authoritative — no walk range applies"
+    assert!(
+        ports.is_empty(),
+        "a socket member must guard no port, stale file or not: {ports:?}"
     );
 }
 
-/// Why: the walk table decides whether a busy default port is survivable or
-/// fatal, so a wrong entry either hard-refuses a legitimate install (false
-/// walker omitted) or silently proceeds past a squatter (non-walker listed as
-/// walking). Pin it against the daemons' own documented behaviour.
-/// What: trusty-memory walks `7070..=7079` (its `commands/doctor/checks.rs` and
-/// `commands/daemon_guard.rs` both say so); every other stable-set member is
-/// pinned to one port and has no range.
+/// Why: the walk table decided whether a busy default port was survivable or
+/// fatal. Nothing walks since #6286 — trusty-memory was the only walker and it
+/// serves a socket now — and this pins that, so a member silently re-acquiring
+/// a range fails here rather than in the field.
+/// What: asserts every stable-set member resolves either its one documented
+/// port or nothing at all.
 /// Test: This is the test.
 #[test]
 fn walk_range_matches_the_daemons_documented_behaviour() {
-    assert_eq!(walk_range_for("trusty-memory"), Some(7070..=7079));
-    // #6277: trusty-review is absent — it binds no TCP port at all now, so it is
-    // neither a walker nor pinned to one. `every_launchd_member_is_guardable`
-    // covers it on the socket key instead.
-    for pinned in ["trusty-search", "trusty-analyze", "trusty-console"] {
-        assert_eq!(
-            walk_range_for(pinned),
-            None,
-            "{pinned} is pinned to one port; listing it as a walker would let the \
-             guard proceed past a squatter on its real port"
+    use crate::commands::test_support as ts;
+
+    let _guard = ts::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = ts::stub_empty_data_dir("port-guard-no-walkers");
+
+    for member in [
+        "trusty-memory",
+        "trusty-search",
+        "trusty-analyze",
+        "trusty-console",
+        "trusty-review",
+    ] {
+        let ports = resolve_guard_ports(member);
+        assert!(
+            ports.len() <= 1,
+            "{member} resolved {ports:?}; nothing walks a range since #6286"
         );
     }
+
+    ts::clear_data_dir_override(&dir);
 }
 
 /// Why: `guard_bootstrap` treats "this member has no port" as vacuously fine.

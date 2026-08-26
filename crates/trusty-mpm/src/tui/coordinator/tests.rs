@@ -12,7 +12,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::banner::{
     GLYPH_ACTIVE, GLYPH_UNREACHABLE, HELP_HINT, ProbeOutcome, USER_PALACE, compose_banner,
-    ensure_user_palace_with, probe_client, probe_memory, probe_search,
+    ensure_user_palace_at, probe_memory, probe_search,
 };
 use super::dispatch::{Dispatch, route};
 use super::events::{SlashCommand, handle_key, is_quit, parse_slash};
@@ -1037,7 +1037,10 @@ async fn probe_unreachable_search_is_inactive() {
 /// Test: this IS the test.
 #[tokio::test]
 async fn probe_unreachable_memory_is_inactive() {
-    let outcome = probe_memory(Some(&dead_loopback_url())).await;
+    let outcome = probe_memory(Some(std::path::Path::new(
+        "/nonexistent/trusty-memory.sock",
+    )))
+    .await;
     assert!(
         !outcome.active,
         "an unreachable memory daemon must probe inactive"
@@ -1073,99 +1076,87 @@ fn compose_banner_has_single_trailing_newline() {
     );
 }
 
-/// Spawn a one-shot HTTP mock that answers the FIRST request with `status_line`
-/// and records whether a SECOND request (the would-be `POST` create) ever
-/// arrives, signalling that via the returned watch channel.
+/// Spin up a mock trusty-memory daemon whose `memory.palace_get` refuses with
+/// `code`, recording whether a `palace_create` is ever asked for.
 ///
-/// Why: `ensure_user_palace_with` must only POST a create on a real 404. To prove
-/// it does NOT create on a non-404 error, the test needs to observe whether a
-/// second connection (the POST) is attempted at all.
-/// What: binds an ephemeral port; the first accepted connection replies with
-/// `status_line`; if a second connection arrives it flips `post_seen` to `true`
-/// and replies `200 OK`. Returns the base URL and a receiver for `post_seen`.
-/// Test: used by `ensure_user_palace_does_not_create_on_non_404`.
+/// Why: `ensure_user_palace_at` must only create on a genuine not-found. To
+/// prove it does NOT create on any other refusal, the test needs to observe
+/// whether the create is attempted at all.
+/// What: mounts a mock whose `memory.palace_get` answers `Err(code)` and whose
+/// `palace_create` flips a watch channel to `true` before succeeding.
+/// Test: used by `ensure_user_palace_does_not_create_on_other_errors` and
+/// `ensure_user_palace_creates_only_on_not_found`.
 async fn spawn_palace_mock(
-    status_line: &'static str,
-) -> (String, tokio::sync::watch::Receiver<bool>) {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+    code: i64,
+) -> (
+    crate::uds_mock::MockMemoryDaemon,
+    tokio::sync::watch::Receiver<bool>,
+) {
+    use crate::uds_mock::{self, RpcError};
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.local_addr().expect("addr");
     let (tx, rx) = tokio::sync::watch::channel(false);
-
-    tokio::spawn(async move {
-        // First request: the GET palace lookup → reply with the given status.
-        if let Ok((mut sock, _)) = listener.accept().await {
-            let mut buf = [0u8; 1024];
-            let _ = sock.read(&mut buf).await;
-            let body = "{}";
-            let resp = format!(
-                "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            let _ = sock.write_all(resp.as_bytes()).await;
-            let _ = sock.shutdown().await;
-        }
-        // Any SECOND request means a create POST was attempted — record it.
-        if let Ok((mut sock, _)) = listener.accept().await {
-            let _ = tx.send(true);
-            let mut buf = [0u8; 1024];
-            let _ = sock.read(&mut buf).await;
-            let resp =
-                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".to_string();
-            let _ = sock.write_all(resp.as_bytes()).await;
-            let _ = sock.shutdown().await;
-        }
-    });
-
-    (format!("http://{addr}"), rx)
+    let daemon = uds_mock::spawn(move |method: &str, _params: serde_json::Value| {
+        let tx = tx.clone();
+        let method = method.to_string();
+        Box::pin(async move {
+            match method.as_str() {
+                "memory.palace_get" => Err(RpcError::new(code, "stubbed refusal".to_string())),
+                "palace_create" => {
+                    let _ = tx.send(true);
+                    Ok(serde_json::json!({"ok": true}))
+                }
+                other => Err(RpcError::method_not_found(other, &[])),
+            }
+        })
+    })
+    .await;
+    (daemon, rx)
 }
 
 /// Why: the review flagged that `ensure_user_palace` over-eagerly created the
-/// palace — any non-2xx GET (including a transient `500`/`503`) fell through to a
-/// create POST. The fix gates creation on a *real* 404; any other error status
-/// must return `false` WITHOUT attempting a write.
-/// What: stubs the palace GET to answer `500`, runs `ensure_user_palace_with`,
-/// and asserts it returns `false` AND that no second (POST) request was made.
+/// palace — any non-2xx GET (including a transient `500`/`503`) fell through to
+/// a create. The fix gates creation on a genuine not-found; any other refusal
+/// must return `false` WITHOUT attempting a write. #6286 moved the distinction
+/// from the HTTP status onto the JSON-RPC error code.
+/// What: stubs `memory.palace_get` to refuse with the internal-error code, runs
+/// `ensure_user_palace_at`, and asserts it returns `false` AND that no create
+/// was attempted.
 /// Test: this IS the test.
 #[tokio::test]
-async fn ensure_user_palace_does_not_create_on_non_404() {
-    let (base, post_seen) = spawn_palace_mock("HTTP/1.1 500 Internal Server Error").await;
-    let client = probe_client();
-    let created = ensure_user_palace_with(&client, &base).await;
+async fn ensure_user_palace_does_not_create_on_other_errors() {
+    // -32603 is `CODE_INTERNAL_ERROR` — the "daemon state is unknown" case.
+    let (daemon, create_seen) = spawn_palace_mock(-32603).await;
+    let created = ensure_user_palace_at(daemon.socket()).await;
     assert!(
         !created,
-        "a 500 from the palace GET must NOT confirm the palace as active"
+        "an internal error from palace_get must NOT confirm the palace as active"
     );
-    // Give any erroneous POST a moment to land, then assert none was attempted.
+    // Give any erroneous create a moment to land, then assert none was made.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert!(
-        !*post_seen.borrow(),
-        "a non-404 GET error must NOT trigger a create POST"
+        !*create_seen.borrow(),
+        "a non-not-found refusal must NOT trigger a create"
     );
 }
 
-/// Why: the complement to the non-404 case — a genuine 404 means the palace is
-/// absent, so the banner SHOULD create it idempotently (D4). This pins the one
-/// status that is allowed to trigger a write.
-/// What: stubs the palace GET to answer `404` (and the create POST to answer
-/// `200`), runs `ensure_user_palace_with`, and asserts it returns `true` and that
-/// a second (POST) request was observed.
+/// Why: the complement — a genuine not-found means the palace is absent, so the
+/// banner SHOULD create it idempotently (D4). This pins the one code that is
+/// allowed to trigger a write.
+/// What: stubs `memory.palace_get` to refuse with `-32004`, runs
+/// `ensure_user_palace_at`, and asserts it returns `true` and that the create
+/// was observed.
 /// Test: this IS the test.
 #[tokio::test]
-async fn ensure_user_palace_creates_only_on_404() {
-    let (base, post_seen) = spawn_palace_mock("HTTP/1.1 404 Not Found").await;
-    let client = probe_client();
-    let created = ensure_user_palace_with(&client, &base).await;
+async fn ensure_user_palace_creates_only_on_not_found() {
+    let (daemon, create_seen) = spawn_palace_mock(trusty_common::memory_rpc::CODE_NOT_FOUND).await;
+    let created = ensure_user_palace_at(daemon.socket()).await;
     assert!(
         created,
-        "a 404 GET followed by a 2xx create POST must confirm the palace"
+        "a not-found followed by a successful create must confirm the palace"
     );
     assert!(
-        *post_seen.borrow(),
-        "a 404 GET must trigger exactly the create POST"
+        *create_seen.borrow(),
+        "a not-found must trigger exactly the create"
     );
 }
 

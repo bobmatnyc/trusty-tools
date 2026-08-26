@@ -303,8 +303,13 @@ pub async fn generate_catchup_json(opts: &CatchupOptions) -> CatchupJson {
 
     let recent_memory = if let (true, Some(palace_id)) = (opts.include_palace, palace_id.as_deref())
     {
-        match fetch_recent_palace_drawers(&opts.memory_socket, palace_id, opts.drawer_limit, watermark)
-            .await
+        match fetch_recent_palace_drawers(
+            &opts.memory_socket,
+            palace_id,
+            opts.drawer_limit,
+            watermark,
+        )
+        .await
         {
             Some(drawers) => drawers
                 .iter()

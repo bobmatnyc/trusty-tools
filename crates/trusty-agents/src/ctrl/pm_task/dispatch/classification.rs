@@ -280,7 +280,8 @@ pub(crate) async fn build_turn_context(
 
     let focused_context_block = match focused {
         Some(label) => {
-            let block = assemble_focused_block(project_path, memory_socket, label, recent_window).await;
+            let block =
+                assemble_focused_block(project_path, memory_socket, label, recent_window).await;
             tracing::info!(
                 label = %label,
                 recent_window,
@@ -314,9 +315,13 @@ async fn assemble_focused_block(
     let global_summary =
         "(global summary not yet wired in this slice — full memory remains queryable on demand)";
 
-    let ws_summary =
-        workstreams::drawers_by_tag_at(project_path, memory_socket, &workstream_summary_tag(label), 1)
-            .await;
+    let ws_summary = workstreams::drawers_by_tag_at(
+        project_path,
+        memory_socket,
+        &workstream_summary_tag(label),
+        1,
+    )
+    .await;
     let ws_summary_text = ws_summary
         .first()
         .map(|h| h.content.as_str())

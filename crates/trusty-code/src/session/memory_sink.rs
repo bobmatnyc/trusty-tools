@@ -568,7 +568,11 @@ async fn ensure_palace(socket: &std::path::Path, palace: &str, creation: PalaceC
 /// `memory_sink::tests::write_turn_warns_on_skipped_status`,
 /// `memory_sink::tests::partial_dual_write_counts_once_as_failed_turn`,
 /// `memory_sink::tests::default_memory_warnings_redact_server_payloads_in_subprocess`.
-async fn write_turn(socket: &std::path::Path, palace: &str, turn: &QueuedTurn) -> MemoryTurnOutcome {
+async fn write_turn(
+    socket: &std::path::Path,
+    palace: &str,
+    turn: &QueuedTurn,
+) -> MemoryTurnOutcome {
     // #2425: the FIRST failure wins the reported category — a turn that lost
     // both halves is still exactly one degraded turn, not two.
     let mut failure = None;

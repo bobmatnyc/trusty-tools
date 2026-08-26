@@ -138,9 +138,10 @@ mod tests {
     /// Test: this test.
     #[test]
     fn parse_palace_detail_trusts_counts_when_cached_flag_absent() {
-        let legacy =
-            parse_palace_detail(&serde_json::json!({"id": "p1", "name": "p1", "vector_count": 8400}))
-                .expect("projects");
+        let legacy = parse_palace_detail(
+            &serde_json::json!({"id": "p1", "name": "p1", "vector_count": 8400}),
+        )
+        .expect("projects");
         assert!(!legacy.counts_unknown, "absent flag != not loaded");
         assert_eq!(legacy.vectors(), Some(8400));
 

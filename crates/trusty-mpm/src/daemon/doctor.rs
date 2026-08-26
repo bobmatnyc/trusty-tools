@@ -29,7 +29,7 @@ use doctor_worktrees::check_worktrees;
 pub(crate) use doctor_worktrees::gather_worktree_counts;
 pub use doctor_worktrees::{WORKTREE_REMEDIATION_COMMAND, WorktreeOrphanCounts};
 
-use super::discover::{TRUSTY_MEMORY_DEFAULT_ADDR, TRUSTY_SEARCH_DEFAULT_ADDR, discover_addr};
+use super::discover::{TRUSTY_SEARCH_DEFAULT_ADDR, discover_addr};
 
 // Split out to keep this file under the 500-SLOC production cap (DOC-28 R4(a)).
 #[path = "doctor_output_style.rs"]
@@ -540,29 +540,23 @@ fn build_oauth_token_check(
     }
 }
 
-/// Probe the trusty-memory sidecar's `/health` endpoint.
+/// Probe trusty-memory's health (#6286).
 ///
 /// Why: memory recall and store route through trusty-memory; if it is down the
 /// PM silently loses its long-term memory, so the operator must know.
-/// What: resolves the service address via [`discover_addr`], then delegates to
+/// What: derives the daemon's socket — there is no address to discover and no
+/// `~/.trusty-memory/http_addr` to read since ADR-0032 — and hands it to
 /// [`probe_health`], which retries, distinguishes a refusal from a timeout, and
-/// reads the daemon's own worker-pool observation out of the response body.
+/// reads the daemon's own worker-pool observation out of the answer.
+///
+/// `home` is unused now and stays in the signature because `run_checks` threads
+/// one `home` into every check; the search half still needs it.
 /// Test: `memory_unreachable_is_fail`, `memory_timeout_is_unknown_not_fail`,
 /// `memory_wedged_worker_pool_is_not_ok`, `memory_warming_is_warn_not_fail`.
-async fn check_memory(home: &Path) -> DoctorCheck {
-    let dir = home.join(".trusty-memory");
-    let default = TRUSTY_MEMORY_DEFAULT_ADDR
-        .parse()
-        .expect("static default is valid");
-    let env = std::env::var("TRUSTY_MEMORY_ADDR").ok();
-    let addr = discover_addr(&dir, default, env.as_deref()).await;
-    probe_health(
-        "memory",
-        "trusty-memory",
-        &format!("http://{addr}/health"),
-        &addr.to_string(),
-    )
-    .await
+async fn check_memory(_home: &Path) -> DoctorCheck {
+    let socket = trusty_common::memory_rpc::resolve_memory_socket_or_unreachable();
+    let addr = socket.display().to_string();
+    probe_health("memory", "trusty-memory", Transport::Socket(&socket), &addr).await
 }
 
 /// Outcome of one `/health` request attempt.
@@ -583,19 +577,55 @@ enum ProbeOutcome {
     Unreachable(String),
 }
 
-/// Issue one `/health` request and classify the outcome.
-async fn probe_health_once(url: &str) -> ProbeOutcome {
-    let client = match reqwest::Client::builder().timeout(PROBE_TIMEOUT).build() {
-        Ok(c) => c,
-        Err(e) => return ProbeOutcome::Unreachable(e.to_string()),
-    };
-    match client.get(url).send().await {
-        Ok(resp) if resp.status().is_success() => {
-            ProbeOutcome::Success(resp.json::<serde_json::Value>().await.ok())
+/// How one sidecar is reached (#6286).
+///
+/// Why: trusty-search still serves HTTP and trusty-memory serves a Unix socket,
+/// but the retry, the refusal-versus-timeout split and the worker-pool read are
+/// identical and are what [`probe_health`] exists for. Naming the transport is
+/// what lets one loop and one classifier serve both.
+enum Transport<'a> {
+    /// A `/health` URL on a daemon that still binds TCP.
+    Http(&'a str),
+    /// A daemon's Unix socket; the method is `memory.health`.
+    Socket(&'a Path),
+}
+
+/// Issue one health request and classify the outcome.
+async fn probe_health_once(transport: &Transport<'_>) -> ProbeOutcome {
+    match transport {
+        Transport::Http(url) => {
+            let client = match reqwest::Client::builder().timeout(PROBE_TIMEOUT).build() {
+                Ok(c) => c,
+                Err(e) => return ProbeOutcome::Unreachable(e.to_string()),
+            };
+            match client.get(*url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    ProbeOutcome::Success(resp.json::<serde_json::Value>().await.ok())
+                }
+                Ok(resp) => ProbeOutcome::NonSuccess(resp.status().as_u16()),
+                Err(e) if e.is_timeout() => ProbeOutcome::TimedOut,
+                Err(e) => ProbeOutcome::Unreachable(e.to_string()),
+            }
         }
-        Ok(resp) => ProbeOutcome::NonSuccess(resp.status().as_u16()),
-        Err(e) if e.is_timeout() => ProbeOutcome::TimedOut,
-        Err(e) => ProbeOutcome::Unreachable(e.to_string()),
+        Transport::Socket(socket) => {
+            // The budget bounds the call, so a failure that consumed it is a
+            // timeout and one that came back early was refused. The transport
+            // does not label the two, and that distinction is what #4005 is
+            // about.
+            let started = std::time::Instant::now();
+            match trusty_common::memory_rpc::call_memory_tool_at_with_timeout(
+                socket,
+                "memory.health",
+                serde_json::json!({}),
+                PROBE_TIMEOUT,
+            )
+            .await
+            {
+                Ok(body) => ProbeOutcome::Success(Some(body)),
+                Err(_) if started.elapsed() >= PROBE_TIMEOUT => ProbeOutcome::TimedOut,
+                Err(e) => ProbeOutcome::Unreachable(format!("{e:#}")),
+            }
+        }
     }
 }
 
@@ -617,13 +647,18 @@ async fn probe_health_once(url: &str) -> ProbeOutcome {
 /// Test: `memory_unreachable_is_fail`, `memory_timeout_is_unknown_not_fail`,
 /// `memory_wedged_worker_pool_is_not_ok`, `memory_warming_is_warn_not_fail`,
 /// `memory_slow_but_serving_daemon_is_ok`.
-async fn probe_health(check: &str, service: &str, url: &str, addr: &str) -> DoctorCheck {
+async fn probe_health(
+    check: &str,
+    service: &str,
+    transport: Transport<'_>,
+    addr: &str,
+) -> DoctorCheck {
     let mut last_timeout = false;
     let mut last_err: Option<String> = None;
     let mut last_status: Option<u16> = None;
 
     for attempt in 0..PROBE_ATTEMPTS {
-        match probe_health_once(url).await {
+        match probe_health_once(&transport).await {
             ProbeOutcome::Success(body) => {
                 return interpret_health(check, service, addr, body.as_ref());
             }
@@ -652,7 +687,8 @@ async fn probe_health(check: &str, service: &str, url: &str, addr: &str) -> Doct
             check,
             CheckStatus::Unknown,
             format!(
-                "{service} at {addr} did not answer /health within {}s across {PROBE_ATTEMPTS} \
+                "{service} at {addr} did not answer its health probe within {}s across \
+                 {PROBE_ATTEMPTS} \
                  attempts, but the connection was NOT refused — the daemon may be alive and \
                  merely slow. Health could not be determined. Check the MCP surface before \
                  restarting anything.",

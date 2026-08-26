@@ -70,7 +70,7 @@ pub struct ImportOptions {
     /// still store instead of aborting the file.
     pub allow_secret_like: bool,
     /// Explicit trusty-memory base URL. `None` uses daemon discovery.
-    pub memory_url: Option<String>,
+    pub memory_socket: Option<std::path::PathBuf>,
 }
 
 /// Per-file outcome of an import.
@@ -176,9 +176,9 @@ impl ImportReport {
 /// `non_memory_files_are_skipped_and_non_markdown_ignored`,
 /// `unparseable_file_is_reported_not_fatal`.
 pub async fn run_import(opts: &ImportOptions) -> anyhow::Result<ImportReport> {
-    let base_url = match &opts.memory_url {
+    let socket = match &opts.memory_socket {
         Some(url) => url.clone(),
-        None => trusty_common::memory_rpc::resolve_memory_base_url()
+        None => trusty_common::memory_rpc::resolve_memory_socket()
             .context("resolve trusty-memory daemon address")?,
     };
 
@@ -194,7 +194,7 @@ pub async fn run_import(opts: &ImportOptions) -> anyhow::Result<ImportReport> {
     };
 
     for path in markdown_files(&opts.dir)? {
-        report.files.push(import_one(&base_url, opts, &path).await);
+        report.files.push(import_one(&socket, opts, &path).await);
     }
     report.tally();
     Ok(report)
@@ -246,7 +246,7 @@ fn markdown_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
 /// only thing standing between a re-run and a duplicate.
 /// Test: `import_is_idempotent`, `drifted_description_is_not_reimported`,
 /// `non_memory_files_are_skipped_and_non_markdown_ignored`.
-async fn import_one(base_url: &str, opts: &ImportOptions, path: &Path) -> FileResult {
+async fn import_one(socket: &Path, opts: &ImportOptions, path: &Path) -> FileResult {
     let file = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -271,7 +271,7 @@ async fn import_one(base_url: &str, opts: &ImportOptions, path: &Path) -> FileRe
         Err(e) => return failure(file, None, format!("parse failed: {e:#}"), Vec::new()),
     };
 
-    match existing_drawer(base_url, &opts.palace, &parsed).await {
+    match existing_drawer(socket, &opts.palace, &parsed).await {
         Ok(Existing::Same(drawer_id)) => {
             return skipped(file, parsed, drawer_id, "already imported", opts.dry_run);
         }
@@ -307,7 +307,7 @@ async fn import_one(base_url: &str, opts: &ImportOptions, path: &Path) -> FileRe
         };
     }
 
-    match write_drawer(base_url, opts, &parsed).await {
+    match write_drawer(socket, opts, &parsed).await {
         Ok(drawer_id) => FileResult {
             file,
             name: Some(parsed.name),
@@ -399,12 +399,12 @@ enum Existing {
 /// `drifted_description_is_not_reimported`, `truncated_candidate_set_fails_closed`,
 /// `ambiguous_candidates_fail_closed`.
 async fn existing_drawer(
-    base_url: &str,
+    socket: &Path,
     palace: &str,
     parsed: &ParsedMemory,
 ) -> anyhow::Result<Existing> {
     let result = trusty_common::memory_rpc::call_memory_tool_at(
-        base_url,
+        socket,
         "memory_list",
         json!({ "palace": palace, "tag": parsed.name, "limit": DEDUP_CANDIDATE_LIMIT }),
     )
@@ -496,12 +496,12 @@ fn has_headline_of(drawer_content: &str, derived_text: &str) -> bool {
 /// surfaced as the error so the report says why.
 /// Test: covered end-to-end by `writes_and_then_skips_against_stub_daemon`.
 async fn write_drawer(
-    base_url: &str,
+    socket: &Path,
     opts: &ImportOptions,
     parsed: &ParsedMemory,
 ) -> anyhow::Result<String> {
     let result = trusty_common::memory_rpc::call_memory_tool_at(
-        base_url,
+        socket,
         "memory_remember",
         json!({
             "palace": opts.palace,

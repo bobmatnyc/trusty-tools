@@ -52,7 +52,13 @@ static HOP_BY_HOP: &[&str] = &[
 fn full_id(service_key: &str) -> Option<&'static str> {
     match service_key {
         "search" => Some("trusty-search"),
-        "memory" => Some("trusty-memory"),
+        // #6286: NO `memory` row. trusty-memory moved to UDS (ADR-0032) and
+        // this proxy resolves a target's base URL from its `http_addr` file,
+        // which the daemon no longer writes — and which is still on disk from
+        // before the migration on every existing machine, so the row could only
+        // forward `/api/memory/*` to whatever now holds 7070. Deleted for the
+        // same reason the analyze row was, not kept inert like review's.
+        //
         // #6287: NO `analyze` row. trusty-analyze moved to UDS (ADR-0032) and
         // this proxy resolves a target's base URL from its `http_addr` file,
         // which the daemon no longer writes — so the row could only resolve
@@ -543,7 +549,11 @@ mod tests {
     #[test]
     fn test_service_key_mapping() {
         assert_eq!(full_id("search"), Some("trusty-search"));
-        assert_eq!(full_id("memory"), Some("trusty-memory"));
+        assert_eq!(
+            full_id("memory"),
+            None,
+            "trusty-memory serves a socket since #6286; a stale http_addr would forward to whatever holds 7070"
+        );
         // #6287: `analyze` is no longer allowlisted. An allowlisted key whose
         // target serves UDS resolves its base URL from a stale `http_addr`
         // file, which forwards `/api/analyze/*` to whatever now holds 7879.

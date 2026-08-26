@@ -161,8 +161,7 @@ mod tests {
         init_git_repo(&tmp);
 
         let result =
-            pm_catchup_context_with_socket(tmp.path(), UNREACHABLE_MEMORY_SOCKET.into())
-                .await;
+            pm_catchup_context_with_socket(tmp.path(), UNREACHABLE_MEMORY_SOCKET.into()).await;
 
         // Result is either Some(non-empty) or None — never panics.
         match &result {
@@ -210,7 +209,6 @@ mod tests {
 
         // Must not panic — fall through to None or Some(whitespace-only) path.
         let _result =
-            pm_catchup_context_with_socket(tmp.path(), UNREACHABLE_MEMORY_SOCKET.into())
-                .await;
+            pm_catchup_context_with_socket(tmp.path(), UNREACHABLE_MEMORY_SOCKET.into()).await;
     }
 }

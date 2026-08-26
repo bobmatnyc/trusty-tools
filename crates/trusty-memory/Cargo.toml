@@ -169,7 +169,10 @@ serial_test = { workspace = true }
 # the production library (mirrors the trusty-mpm and trusty-search pattern).
 # `docgen` (#5205 follow-up): `tests/generated_docs.rs` renders the MCP tool
 # section of README.md from `tool_definitions()`.
-trusty-common = { path = "../trusty-common", version = "0.45", default-features = false, features = ["memory-core", "embedder-test-support", "docgen"] }
+# `memory-rpc` (#6286): `tests/uds_consumer_contract.rs` drives the SHARED
+# client against a real daemon on a temp socket — the one place the two halves
+# of this migration are proven to agree.
+trusty-common = { path = "../trusty-common", version = "0.45", default-features = false, features = ["memory-core", "embedder-test-support", "docgen", "memory-rpc"] }
 chrono = { workspace = true }
 
 [features]

@@ -607,7 +607,7 @@ async fn memory_wedged_worker_pool_is_not_ok() {
     let check = probe_health(
         "memory",
         "trusty-memory",
-        &format!("http://{addr}/health"),
+        Transport::Http(&format!("http://{addr}/health")),
         &addr,
     )
     .await;
@@ -645,7 +645,7 @@ async fn memory_slow_but_serving_daemon_is_ok() {
     let check = probe_health(
         "memory",
         "trusty-memory",
-        &format!("http://{addr}/health"),
+        Transport::Http(&format!("http://{addr}/health")),
         &addr,
     )
     .await;
@@ -681,7 +681,7 @@ async fn memory_warming_is_warn_not_fail() {
     let check = probe_health(
         "memory",
         "trusty-memory",
-        &format!("http://{addr}/health"),
+        Transport::Http(&format!("http://{addr}/health")),
         &addr,
     )
     .await;
@@ -724,7 +724,7 @@ async fn memory_timeout_is_unknown_not_fail() {
         probe_health(
             "memory",
             "trusty-memory",
-            &format!("http://{addr}/health"),
+            Transport::Http(&format!("http://{addr}/health")),
             &addr,
         ),
     )
@@ -757,7 +757,7 @@ async fn health_body_without_worker_block_is_unknown() {
     let check = probe_health(
         "memory",
         "trusty-memory",
-        &format!("http://{addr}/health"),
+        Transport::Http(&format!("http://{addr}/health")),
         &addr,
     )
     .await;

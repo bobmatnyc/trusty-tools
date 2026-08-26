@@ -301,7 +301,6 @@ pub(crate) async fn run_loop<B: ratatui::backend::Backend>(
         // `terminal.draw` requires `state` mutably (the renderer scrolls the
         // palace list); the closure reborrows it for the rest of the loop.
 
-
         let key = if event::poll(INPUT_POLL)? {
             match event::read()? {
                 Event::Key(key) => Some(key),

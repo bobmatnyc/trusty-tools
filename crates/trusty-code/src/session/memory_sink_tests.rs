@@ -220,7 +220,11 @@ async fn wait_for_captures(captured: &Captured, n: usize, timeout: Duration) {
 #[tokio::test]
 async fn enqueue_drain_happy_path() {
     let (daemon, captured) = spawn_capturing_mock(PalaceState::Exists).await;
-    let sink = TurnMemorySink::new(daemon.socket().to_path_buf(), "test-palace".to_string(), PalaceCreation::Allowed);
+    let sink = TurnMemorySink::new(
+        daemon.socket().to_path_buf(),
+        "test-palace".to_string(),
+        PalaceCreation::Allowed,
+    );
 
     sink.enqueue("sess-1", "what is 2+2?", "4");
     // 3 calls: palace_info (ensure, #2424) + the two dual-write calls.
@@ -278,7 +282,11 @@ async fn enqueue_drain_happy_path() {
 #[tokio::test]
 async fn ensure_palace_creates_missing_palace_once() {
     let (daemon, captured) = spawn_capturing_mock(PalaceState::MissingUntilCreated).await;
-    let sink = TurnMemorySink::new(daemon.socket().to_path_buf(), "test-palace".to_string(), PalaceCreation::Allowed);
+    let sink = TurnMemorySink::new(
+        daemon.socket().to_path_buf(),
+        "test-palace".to_string(),
+        PalaceCreation::Allowed,
+    );
 
     sink.enqueue("sess-1", "p1", "r1");
     sink.enqueue("sess-1", "p2", "r2");
@@ -321,7 +329,11 @@ async fn ensure_palace_creates_missing_palace_once() {
 #[tokio::test]
 async fn ensure_palace_skips_create_when_palace_exists() {
     let (daemon, captured) = spawn_capturing_mock(PalaceState::Exists).await;
-    let sink = TurnMemorySink::new(daemon.socket().to_path_buf(), "test-palace".to_string(), PalaceCreation::Allowed);
+    let sink = TurnMemorySink::new(
+        daemon.socket().to_path_buf(),
+        "test-palace".to_string(),
+        PalaceCreation::Allowed,
+    );
 
     sink.enqueue("sess-1", "p1", "r1");
     sink.enqueue("sess-1", "p2", "r2");

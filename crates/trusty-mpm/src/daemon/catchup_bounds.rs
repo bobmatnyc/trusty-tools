@@ -331,7 +331,7 @@ mod tests {
         }
         generate_catchup_json(&CatchupOptions {
             project_dir: tmp.path().to_path_buf(),
-            memory_url: "http://127.0.0.1:19999".to_string(),
+            memory_socket: std::path::PathBuf::from("/nonexistent/trusty-memory.sock"),
             include_git: false,
             include_palace: false,
             git_limit: 50,

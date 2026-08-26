@@ -70,7 +70,7 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 ///
 /// Why: the trusty-* family reserves a block of fixed local ports so
 /// operators/tooling can find a daemon without a discovery file
-/// (`trusty-memory` 7070, `trusty-search` 7878, `trusty-analyze` 7879,
+/// (`trusty-search` 7878,
 /// `trusty-mpm` daemon 7880, `trusty-embedderd` `--http` mode 7890).
 /// `trusty-review` used to hold 7891 and no longer does — #6277 moved it to a
 /// Unix socket. This constant previously reused `7881`, which turned
@@ -428,12 +428,10 @@ mod tests {
     #[test]
     fn default_http_port_does_not_collide_with_known_siblings() {
         // (binary, port, source-of-truth pointer)
+        // #6286: trusty-memory has NO ROW either, for the reason the analyze
+        // note below gives — it serves a Unix socket since ADR-0032, so 7070 is
+        // not reserved by anything.
         let known_siblings: &[(&str, u16, &str)] = &[
-            (
-                "trusty-memory",
-                7070,
-                "trusty-memory/src/http_server.rs::DEFAULT_HTTP_PORT",
-            ),
             (
                 "trusty-search",
                 7878,

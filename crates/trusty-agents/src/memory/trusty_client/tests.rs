@@ -11,8 +11,8 @@
 
 use super::*;
 use crate::uds_mock::{self, MockMemoryDaemon, RpcError};
-use std::path::Path;
 use serde_json::json;
+use std::path::Path;
 use tempfile::TempDir;
 
 /// A socket path nothing can be serving.

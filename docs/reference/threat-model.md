@@ -15,12 +15,12 @@ has no HTTP listener to guard. Re-deriving those rows for the UDS topology is
 implementation work, out of scope for this update. Read ADR-0032 before
 treating any row below as prescriptive.
 
-> 🟡 **Progress note (2026-08-26, Refs #6277 / PR #6281, then #6287).**
-> `trusty-review` was the first daemon through ADR-0032's path and
-> `trusty-analyze` the second; both rows below already reflect the UDS socket
-> each now serves. The remaining four (`trusty-search`, `trusty-memory`,
-> `trusty-agents`, `trusty-mpm`) have not migrated and their rows still
-> describe the pre-ADR-0032 live topology.
+> 🟡 **Progress note (2026-08-26, Refs #6277 / PR #6281, then #6287, then
+> #6286).** `trusty-review` was the first daemon through ADR-0032's path,
+> `trusty-analyze` the second and `trusty-memory` the third; all three rows
+> below reflect the UDS socket each now serves. The remaining three
+> (`trusty-search`, `trusty-agents`, `trusty-mpm`) have not migrated and their
+> rows still describe the pre-ADR-0032 live topology.
 
 This is the authoritative reference for **who can reach which trusty-\* HTTP
 surface, from where, and what stops them.** It exists because the
@@ -77,10 +77,11 @@ doctrine's goal: a loopback TCP port is reachable by any local process, a
    #5329 removed a second, **trusty-bm25-daemon** — its per-palace Unix-socket
    JSON-RPC surface no longer exists at all, because the index it guarded now
    runs inside trusty-memory.
-2. **Each daemon's stdio/MCP surface is a client of its own HTTP daemon, not a
-   separate surface.** `trusty-memory serve --stdio` is a pure proxy to
-   `POST /rpc` and never opens redb (#1078); trusty-search's and
-   trusty-analyze's MCP servers are HTTP clients of theirs. So the "native MCP
+2. **Each daemon's stdio/MCP surface is a client of its own daemon, not a
+   separate surface.** `trusty-memory serve --stdio` is a pure proxy — to its
+   Unix socket since #6286, to `POST /rpc` before that — and never opens redb
+   (#1078); trusty-search's MCP server is an HTTP client of its daemon and
+   trusty-analyze's is a socket client of its own. So the "native MCP
    stdio bridge" listed among the direct clients below reaches the daemon
    through the same loopback port as everything else, and inherits the same
    guard. If ADR-0031's tool paths later move off HTTP, these rows will need to
@@ -95,7 +96,7 @@ the daemons' listener setup code moves independently of this doc.
 | Daemon | Default bind | Origin guard | Console-proxy allowlist | Own UI | Direct clients |
 |---|---|---|---|---|---|
 | **trusty-search** | `127.0.0.1:7878` (`service/constants.rs::DEFAULT_PORT`) | **Yes** — router-wide `SelfOrigins` guard (`service/server/mod.rs`) | Yes (`search` → `trusty-search`) | Yes, embedded (`ui/`) | CLI (`trusty-search status`/`port`), native MCP stdio bridge (HTTP→`/rpc`), embedded UI, console proxy |
-| **trusty-memory** | `127.0.0.1:7070`–`7079` (auto-selects next free); `--http` accepts any explicit addr | **Yes** — router-wide `SelfOrigins` guard (`web/mod.rs`) | Yes (`memory` → `trusty-memory`) | Yes, embedded (`ui/`) | CLI, native MCP stdio bridge — a pure HTTP proxy forwarding JSON-RPC to the daemon's own `/rpc` (no local tool logic), embedded UI, console proxy |
+| **trusty-memory** | **No TCP listener.** One hardened Unix socket at `daemon_socket_path("trusty-memory")` (`transport/uds.rs`, #6286, ADR-0032). `7070`–`7079` are free again and the `http_addr` discovery files are deleted at every start | **N/A** — the trust boundary is the `0700` directory, the `0600` socket, and the `ensure_peer_is_self` uid check on every accepted connection. The router-wide `SelfOrigins` guard was browser-CSRF defence and has no meaning here | **No** — the `memory` proxy row is deleted (#6286): it resolved a base URL from an `http_addr` file the daemon no longer writes, so it could only forward to whatever now holds 7070 | Console-hosted; the embedded `ui/` is served by `trusty-console` | CLI, native MCP stdio bridge (a pure proxy forwarding JSON-RPC to the socket; no local tool logic), `trusty_common::memory_rpc` for every other crate |
 | **trusty-analyze** | **No TCP listener.** Serves `<data dir>/trusty-analyze/trusty-analyze.sock` (`trusty_common::daemon_socket_path`), bound through `bind_singleton_hardened` (#6287, ADR-0032) | **n/a** — `SelfOrigins`/`with_guarded_middleware` deliberately not ported, for the reason the `trusty-review` row gives. Same boundary: the `0700` directory, the `0600` socket, and `ensure_peer_is_self` on every accepted connection | **n/a** — the `analyze` proxy row was removed with the listener | No embedded UI served by this daemon — `ui/dist` is still tracked, and the console-hosted mount is a follow-up | CLI, the native MCP stdio bridge (an RPC client of this daemon's own socket), `trusty-console`'s `AnalyzeConnector`, `tctl`'s health probe, `tga`'s audit guard, `trusty-audit`'s grounding guard, and `trusty-review`'s `report --analyze` adapter — all over that socket. **No webhook surface** — `POST /webhooks/github` was retired in #5181; `/sse` and the `--mcp-port` second listener went with the migration |
 | **trusty-review** | **No TCP listener.** Serves `<data dir>/trusty-review.sock` (`trusty_common::daemon_socket_path`), bound through `bind_singleton_hardened` (#6277, ADR-0032) | **n/a** — `SelfOrigins`/`with_guarded_middleware` deliberately not ported: browser-CSRF machinery has no meaning on a socket. The boundary is the `0700` directory, the `0600` socket, and `ensure_peer_is_self` on every accepted connection | **n/a** — nothing to proxy; ADR-0035 aggregator routing is deferred | No embedded UI | CLI, `trusty-console`'s `ReviewConnector`, `tctl`'s health probe — all over that socket. **No webhook surface** — `POST /pr/github/webhook` was retired in #5181; the webhook path is the separate `trusty-review-webhook.sock` (ADR-0034) |
 | **trusty-agents** | `127.0.0.1:8080` (`--port`; 7654 is the conventional dev/UI port, passed explicitly). `--bind` is an explicit non-loopback opt-in that `serve_with_config` **refuses to start without `--api-token`** (`api/server/routes.rs`) | **Yes** — router-wide `SelfOrigins` guard via `with_guarded_middleware` (`api/server/routes.rs::build_router_with_origins`) | Yes (`agents` → `trusty-agents`, #3331) | Yes, separate `agents-ui` crate | CLI, native MCP stdio bridge, `agents-ui` (Tauri — writes go over Tauri IPC, not HTTP), console proxy |

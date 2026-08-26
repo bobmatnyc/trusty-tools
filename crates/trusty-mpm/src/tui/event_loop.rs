@@ -39,13 +39,14 @@ pub(super) async fn run_loop<B: ratatui::backend::Backend>(
     // show; otherwise the coordinator chat gets the full width immediately.
     let mut state = DashboardState::default();
     let mut screen = Screen::default();
-    // Issue #2030: seed the memory panel from discovery (TRUSTY_MEMORY_URL
-    // override, else the daemon's actual discovered bound address) rather
-    // than a hardcoded port. This resolved value is what the background
-    // poller's `HealthClient` is built with and polls for the TUI's lifetime.
+    // #6286: the memory panel dials a derived socket rather than a discovered
+    // address. This resolved value is what the background poller uses for the
+    // TUI's lifetime.
     let mut health_screen = HealthScreen::new(
         health::DEFAULT_SEARCH_URL,
-        trusty_common::memory_rpc::resolve_memory_base_url_or_unreachable(),
+        trusty_common::memory_rpc::resolve_memory_socket_or_unreachable()
+            .display()
+            .to_string(),
     );
 
     // The health pollers run on detached tasks and push updates down a channel
@@ -53,7 +54,7 @@ pub(super) async fn run_loop<B: ratatui::backend::Backend>(
     let (health_tx, mut health_rx) = tokio::sync::mpsc::channel::<HealthUpdate>(16);
     spawn_health_pollers(
         health_screen.search_url.clone(),
-        health_screen.memory_url.clone(),
+        health_screen.memory_socket.clone(),
         health_tx,
     );
 
@@ -268,7 +269,7 @@ pub(super) async fn refresh_health_data(screen: &mut health::HealthScreen) {
     for daemon in [health::Daemon::Search, health::Daemon::Memory] {
         let url = match daemon {
             health::Daemon::Search => screen.search_url.clone(),
-            health::Daemon::Memory => screen.memory_url.clone(),
+            health::Daemon::Memory => screen.memory_socket.clone(),
         };
         let client = health::client_for(daemon, &url);
         let rows = match daemon {

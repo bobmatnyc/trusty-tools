@@ -594,7 +594,13 @@ async fn spawn_persist_turn_is_noop_without_palace() {
     // No palace bound and no base URL: must return without spawning or
     // panicking, so an unbound agent's turn is unaffected.
     spawn_persist_turn(&binding(None), None, "izzie", "q", "a");
-    spawn_persist_turn(&StoresConfig::default(), Some(dead_socket()), "izzie", "q", "a");
+    spawn_persist_turn(
+        &StoresConfig::default(),
+        Some(dead_socket()),
+        "izzie",
+        "q",
+        "a",
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -603,10 +609,10 @@ async fn spawn_persist_turn_is_noop_without_palace() {
 
 mod mock_daemon {
     use crate::uds_mock::{self, MockMemoryDaemon, RpcError};
+    use axum::Json;
     use axum::Router;
     use axum::extract::Path as AxumPath;
     use axum::routing::get;
-    use axum::Json;
     use std::net::SocketAddr;
     use std::sync::{Arc, Mutex as StdMutex};
 

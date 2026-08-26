@@ -177,12 +177,10 @@ fn trusty_addrs_round_trip() {
     let state = DaemonState::new();
     assert!(state.trusty_addrs().is_none());
     let addrs = crate::daemon::discover::TrustyAddrs {
-        memory: "127.0.0.1:3038".parse().unwrap(),
         search: "127.0.0.1:7878".parse().unwrap(),
     };
     state.set_trusty_addrs(addrs);
     let got = state.trusty_addrs().expect("addrs stored");
-    assert_eq!(got.memory, "127.0.0.1:3038".parse().unwrap());
     assert_eq!(got.search, "127.0.0.1:7878".parse().unwrap());
 }
 

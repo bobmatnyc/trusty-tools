@@ -304,7 +304,10 @@ pub(super) fn project_events(raw: &Value, after_id: u64) -> (u64, Vec<MemoryEven
     let mut events = Vec::new();
     // The daemon answers newest-first; the log renders oldest-first.
     for entry in entries.iter().rev() {
-        let id = entry.get("id").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        let id = entry
+            .get("id")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
         if id <= after_id {
             continue;
         }

@@ -5,7 +5,7 @@
 //! hand. DOC-50 §3.4's prose sketched a NEW, tcode-specific JSON file
 //! (`~/.trusty-code/daemon.json`, `{daemon_url, pid, started_at}`) for this —
 //! but this crate's siblings already solve the identical problem, and their
-//! convention is different: `trusty-memory` (`crates/trusty-memory/src/http_server.rs::write_http_addr_file`)
+//! convention is different: `trusty-memory` (which wrote one until #6286 retired both the file and its listener)
 //! and `trusty-search` (`crates/trusty-search/src/service/daemon.rs`) both
 //! write the bound `host:port` as PLAIN TEXT to a file named `http_addr`
 //! under `trusty_common::resolve_data_dir(<app_name>)`, atomically (tmp +
@@ -35,14 +35,14 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 /// Filename of the discovery file, written under
-/// `resolve_data_dir("trusty-code")` — mirrors `trusty-memory`'s
+/// `resolve_data_dir("trusty-code")` — mirrors what `trusty-memory`'s
 /// `http_addr` convention exactly (same filename, same directory-resolution
 /// helper, same plain-text `host:port` content).
 pub const HTTP_ADDR_FILENAME: &str = "http_addr";
 
 /// Resolve `{resolve_data_dir("trusty-code")}/http_addr`, or `None` if the
 /// data directory cannot be resolved (matches
-/// `trusty-memory::http_server::http_addr_path`'s degrade-gracefully
+/// retired `http_addr_path` did: the degrade-gracefully
 /// contract — a resolution failure here is never fatal, only a missing
 /// discovery source).
 pub fn http_addr_path() -> Option<PathBuf> {
@@ -56,7 +56,7 @@ pub fn http_addr_path() -> Option<PathBuf> {
 /// Why: a client reading this file mid-write must never observe a partial
 /// value; writing to a `.addr.tmp` sibling and renaming over the target
 /// gives POSIX atomicity. Mirrors
-/// `trusty-memory::http_server::write_http_addr_file` byte-for-byte in
+/// trusty-memory's retired `write_http_addr_file` byte-for-byte in
 /// behaviour — duplicated here (rather than adding a cross-product
 /// dependency on trusty-memory for one ~10-line helper) since both crates
 /// are independent binaries with no other shared coupling.
