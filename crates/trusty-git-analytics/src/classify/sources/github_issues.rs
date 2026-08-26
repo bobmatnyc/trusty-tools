@@ -21,6 +21,8 @@ use serde::Deserialize;
 use tracing::warn;
 
 use super::{ExternalSignal, GithubIssuesSourceConfig, EXTERNAL_SOURCE_CONFIDENCE};
+use crate::collect::github::budget::{FetchBudget, MAX_REFERENCE_LOOKUPS};
+use crate::collect::github::retry::retry_send;
 
 /// A parsed GitHub issue reference extracted from a commit message.
 ///
@@ -145,18 +147,33 @@ pub fn classify_github_issue(
 /// Fetch a GitHub issue by owner/repo/number.
 ///
 /// Why: the HTTP call must be isolated here so the resolver can inject a
-/// mock client for testing.
-/// What: issues `GET /repos/{owner}/{repo}/issues/{number}` with an
-/// optional Bearer token. Returns `None` on any error or if the token env
-/// var is unset.
-/// Test: integration-tested via the resolver with wiremock.
+/// mock client for testing. Before #6084 it also collapsed every failure into
+/// `None`, which the resolver then cached as "this issue carries no
+/// classification signal" — so under a rate limit the run cached 3681 wrong
+/// answers and kept issuing rejected requests to collect them. A throttle has
+/// to be a different answer from an absent label.
+/// What: issues `GET /repos/{owner}/{repo}/issues/{number}` with an optional
+/// Bearer token, through [`retry_send`] so `Retry-After` is honoured and every
+/// wait is charged to `budget`. `Ok(None)` means the issue genuinely carries
+/// nothing usable — a 404, a scope-less 403, an unparseable body — and is safe
+/// to cache. `Err` means the answer is unknown and must not be cached.
+/// Test: `crate::classify::sources::resolver::resolver_tests` and
+/// `github_issue_tests` in this module.
+///
+/// # Errors
+///
+/// [`CollectError::Throttled`](crate::collect::errors::CollectError::Throttled)
+/// once GitHub is rate-limiting and the run's budget is spent;
+/// [`CollectError::Http`](crate::collect::errors::CollectError::Http) on a
+/// transport failure that outlived its retries.
 pub async fn fetch_issue(
     client: &reqwest::Client,
     config: &GithubIssuesSourceConfig,
     owner_repo: &str,
     number: u64,
     api_base_override: Option<&str>,
-) -> Option<GitHubIssue> {
+    budget: &FetchBudget,
+) -> crate::collect::errors::Result<Option<GitHubIssue>> {
     let token = std::env::var(&config.token_env)
         .ok()
         .filter(|t| !t.is_empty());
@@ -169,58 +186,118 @@ pub async fn fetch_issue(
         req = req.bearer_auth(t);
     }
 
-    match req.send().await {
-        Ok(resp) if resp.status().is_success() => match resp.json::<GitHubIssue>().await {
-            Ok(issue) => Some(issue),
-            Err(e) => {
-                warn!(owner_repo, number, error = %e, "failed to parse GitHub issue response");
-                None
-            }
-        },
-        Ok(resp) => {
-            warn!(
-                owner_repo,
-                number,
-                status = %resp.status(),
-                "GitHub Issues API returned non-success; skipping"
-            );
-            None
-        }
+    let resp = retry_send(req, budget).await?;
+    if !resp.status().is_success() {
+        warn!(
+            owner_repo,
+            number,
+            status = %resp.status(),
+            "GitHub Issues API returned non-success; skipping this reference"
+        );
+        return Ok(None);
+    }
+    match resp.json::<GitHubIssue>().await {
+        Ok(issue) => Ok(Some(issue)),
         Err(e) => {
-            warn!(owner_repo, number, error = %e, "GitHub Issues API request failed; skipping");
-            None
+            warn!(owner_repo, number, error = %e, "failed to parse GitHub issue response");
+            Ok(None)
         }
     }
 }
 
-/// Build a map from `"owner/repo#number"` to `Option<ExternalSignal>`.
+/// What one [`fetch_issues_batch`] pass produced, and whether it finished.
 ///
-/// Why: same cache-before-fetch rationale as the JIRA batch helper — avoid
-/// re-fetching the same issue when multiple commits reference it.
-/// What: deduplicates `refs`, fetches each unique `(repo, number)` pair, and
-/// returns a map keyed by `"{repo}#{number}"`.
-/// Test: covered by resolver integration tests.
+/// Why (#6084): the batch used to return a bare map, so a pass that stopped at
+/// a cap or a rate limit was indistinguishable from one that looked every
+/// reference up and found nothing. The two need different handling — the
+/// second is a cacheable answer, the first is a gap the run must report.
+/// What: the signals actually resolved, plus `stopped_early` naming the bound
+/// that ended the pass. References never attempted are simply absent from
+/// `signals`, so nothing unfetched is cached as "no signal".
+/// Test: `github_issue_tests::a_rate_limited_batch_stops_and_caches_nothing`,
+/// `github_issue_tests::the_batch_stops_at_the_reference_lookup_cap`.
+#[derive(Debug, Default)]
+pub struct IssueBatch {
+    /// Resolved signals, keyed `"{repo}#{number}"`.
+    pub signals: HashMap<String, Option<ExternalSignal>>,
+    /// Set when a bound ended the pass before every reference was looked up.
+    pub stopped_early: Option<String>,
+}
+
+/// Look up every unique reference in `refs`, bounded.
+///
+/// Why: this is the `fetch_on_reference` path — one Issues-API call per unique
+/// `#N` in commit history, a count that scales with the repository rather than
+/// with anything the operator asked for. On this repo it was 3681 lookups, and
+/// under a secondary rate limit every one of them retried and failed.
+/// What: deduplicates `refs`, then stops at the first of three bounds —
+/// [`MAX_REFERENCE_LOOKUPS`] unique lookups, the shared `budget` latching, or
+/// the reference list running out. Either early stop is named in
+/// [`IssueBatch::stopped_early`] rather than left silent.
+/// Test: `github_issue_tests::*`.
 pub async fn fetch_issues_batch(
     client: &reqwest::Client,
     config: &GithubIssuesSourceConfig,
     refs: &[GitHubRef],
     api_base_override: Option<&str>,
-) -> HashMap<String, Option<ExternalSignal>> {
-    let mut out: HashMap<String, Option<ExternalSignal>> = HashMap::new();
+    budget: &FetchBudget,
+) -> IssueBatch {
+    let mut out = IssueBatch::default();
+    let mut looked_up = 0usize;
 
     for gh_ref in refs {
         let repo = gh_ref.repo.as_deref().unwrap_or(config.repo.as_str());
         let cache_key = format!("{repo}#{}", gh_ref.number);
-        if out.contains_key(&cache_key) {
+        if out.signals.contains_key(&cache_key) {
             continue;
         }
-        let issue = fetch_issue(client, config, repo, gh_ref.number, api_base_override).await;
-        let signal = issue.and_then(|iss| classify_github_issue(&iss, config));
-        out.insert(cache_key, signal);
+        if looked_up >= MAX_REFERENCE_LOOKUPS {
+            let notice = format!(
+                "GitHub reference lookups stopped at the {MAX_REFERENCE_LOOKUPS}-lookup cap; \
+                 the remaining references in this batch are UNCLASSIFIED"
+            );
+            warn!(cap = MAX_REFERENCE_LOOKUPS, "{notice}");
+            budget.note_truncation(notice.clone());
+            out.stopped_early = Some(notice);
+            break;
+        }
+
+        looked_up += 1;
+        match fetch_issue(
+            client,
+            config,
+            repo,
+            gh_ref.number,
+            api_base_override,
+            budget,
+        )
+        .await
+        {
+            Ok(issue) => {
+                let signal = issue.and_then(|iss| classify_github_issue(&iss, config));
+                out.signals.insert(cache_key, signal);
+            }
+            Err(e) => {
+                // Unknown, not absent. Recording nothing for this key is what
+                // keeps the resolver from caching a throttle as "no signal".
+                let notice = format!(
+                    "GitHub reference lookups stopped after {looked_up} of {} references: {e}. \
+                     The remaining references are UNCLASSIFIED",
+                    refs.len()
+                );
+                warn!("{notice}");
+                out.stopped_early = Some(notice);
+                break;
+            }
+        }
     }
 
     out
 }
+
+#[cfg(test)]
+#[path = "github_issue_tests.rs"]
+mod github_issue_tests;
 
 #[cfg(test)]
 mod tests {

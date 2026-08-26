@@ -16,7 +16,8 @@
 use futures::StreamExt as _;
 use tracing::{info, warn};
 
-use crate::collect::github::org_discovery::{discover_org_repos, effective_orgs};
+use crate::collect::github::budget::FetchBudget;
+use crate::collect::github::org_discovery::{discover_org_repos_within, effective_orgs};
 use crate::collect::github::repo_resolver::build_http_client;
 use crate::collect::github::reviewer_store::upsert_github_pr_reviewer;
 use crate::collect::github::types::GitHubReview;
@@ -54,11 +55,14 @@ pub(super) async fn run_github_org_discovery(gh_cfg: &GithubConfig) -> Vec<(Stri
         }
     };
 
+    // #6084: one budget for the whole multi-org pass, so a rate limit that
+    // terminates the first org does not let the second start the storm again.
+    let budget = FetchBudget::new();
     let mut all: Vec<(String, String)> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for org in &orgs {
         info!(org = %org, "discovering repositories for GitHub org");
-        match discover_org_repos(&http, org).await {
+        match discover_org_repos_within(&http, org, &budget).await {
             Ok(repos) => {
                 info!(org = %org, count = repos.len(), "org discovery complete");
                 for p in repos {
@@ -213,6 +217,21 @@ pub(super) async fn fetch_and_store_github_reviewers(
                 );
             }
         }
+    }
+
+    // #6084: per-PR review failures are logged and skipped, which is right for
+    // one bad PR and wrong for a rate limit — under a limit every remaining PR
+    // "fails" and the pass would report a clean run holding partial data.
+    for notice in gh_client.fetch_notices() {
+        stats.skip_item(format!("github reviewers: {notice}"));
+    }
+    if gh_client.throttled() {
+        stats.fail_stage(
+            "GitHub rate-limited the reviewer pass, which stopped early; pr_reviewers is \
+             incomplete for this run. Retry later, or set github.fetch_pr_reviews: false \
+             (see #6084)"
+                .to_string(),
+        );
     }
 
     if stats.reviewers_fetched > 0 {

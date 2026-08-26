@@ -22,7 +22,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::{
     confluence, datadog,
@@ -90,6 +90,11 @@ enum SourceState {
 pub struct ExternalSourceResolver {
     client: reqwest::Client,
     sources: Vec<SourceState>,
+    /// #6084: one GitHub fetch budget for the whole resolver, shared by the
+    /// warm pass and every per-commit `resolve`. The `fetch_on_reference` path
+    /// issues one lookup per unique `#N` in commit history, so the bound that
+    /// matters spans calls rather than sitting inside any one of them.
+    github_budget: crate::collect::github::budget::FetchBudget,
 }
 
 impl ExternalSourceResolver {
@@ -140,7 +145,13 @@ impl ExternalSourceResolver {
         Self {
             client,
             sources: states,
+            github_budget: crate::collect::github::budget::FetchBudget::new(),
         }
+    }
+
+    /// The GitHub fetch budget this resolver's sources share (#6084).
+    pub(crate) fn github_budget(&self) -> &crate::collect::github::budget::FetchBudget {
+        &self.github_budget
     }
 
     /// Resolve a commit message against all configured sources.
@@ -265,13 +276,21 @@ impl ExternalSourceResolver {
                     config,
                     &refs,
                     api_base_override.as_deref(),
+                    &self.github_budget,
                 )
                 .await;
+
+                // #6084: only references actually looked up are cached. A pass
+                // cut short by a rate limit reports the gap instead of writing
+                // "no signal" for references it never asked about.
+                if let Some(reason) = &fetched.stopped_early {
+                    warn!(reason = %reason, "GitHub reference classification is incomplete");
+                }
 
                 // Populate cache.
                 {
                     let mut guard = cache.lock().expect("github cache lock");
-                    for (k, sig) in &fetched {
+                    for (k, sig) in &fetched.signals {
                         guard.insert(k.clone(), sig.clone());
                     }
                 }
@@ -280,7 +299,7 @@ impl ExternalSourceResolver {
                 for gh_ref in &refs {
                     let repo = gh_ref.repo.as_deref().unwrap_or(&config.repo);
                     let key = format!("{repo}#{}", gh_ref.number);
-                    if let Some(Some(sig)) = fetched.get(&key) {
+                    if let Some(Some(sig)) = fetched.signals.get(&key) {
                         return Some(sig.clone());
                     }
                 }

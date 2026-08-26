@@ -75,6 +75,11 @@ pub(super) async fn drain_and_store_pull_requests(
             continue;
         };
         record_blank_head_refs(stats, &provider_name, &prs);
+        // #6084: a walk that stopped at a cap returns rows that look complete.
+        // Recording each notice is what keeps the shortfall visible.
+        for notice in provider.fetch_notices() {
+            stats.skip_item(format!("{provider_name}: {notice}"));
+        }
         match provider.store_pull_requests(db, &prs) {
             Ok(n) => {
                 info!(provider = %provider_name, prs = n, "stored pull requests");

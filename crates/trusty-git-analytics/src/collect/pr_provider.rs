@@ -54,4 +54,16 @@ pub trait PrProvider: Send + Sync {
     /// Propagates [`crate::core::TgaError::DbError`] on SQL failures.
     fn store_pull_requests(&self, db: &Database, prs: &[PullRequest])
         -> crate::core::Result<usize>;
+
+    /// Bounds this provider hit while fetching, in operator-facing wording.
+    ///
+    /// Why (#6084): a provider that stops at a page or budget cap returns rows
+    /// that read exactly like a complete fetch. Reporting the stop is what
+    /// keeps a trimmed sweep from being presented as the whole repository.
+    /// What: empty by default — a provider with no caps has nothing to say.
+    /// Overridden by [`crate::collect::github::GitHubClient`].
+    /// Test: `crate::collect::github::client_tests::a_listing_that_never_ends_stops_at_the_page_cap_and_says_so`.
+    fn fetch_notices(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
