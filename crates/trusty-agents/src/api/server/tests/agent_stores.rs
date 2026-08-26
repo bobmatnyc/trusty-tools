@@ -66,7 +66,10 @@ async fn mock_daemon() -> String {
                     Json(serde_json::json!({
                         "index_id": "bob-kb",
                         "chunk_count": 552,
-                        "root_path": "/Users/masa/trusty-agents/bob-kb",
+                        // Inert: nothing in this file asserts on `root_path`.
+                        // A neutral path keeps a developer's home directory out
+                        // of the fixture (#6286 review, finding 8).
+                        "root_path": "/tmp/trusty-agents/bob-kb",
                         "status": "ready",
                     })),
                 )
@@ -86,14 +89,27 @@ async fn mock_daemon() -> String {
 /// `owner-profile` answers an empty drawer page; every other palace is refused
 /// not-found, which is what the daemon does for a palace that was never
 /// created.
+///
+/// It answers ONLY `memory.drawers_list` (#6286 review, finding 9). The mock
+/// used to ignore the method name, so `stores_at` could have been rewired onto
+/// any other method — `palace_create`, say, which a status probe must never
+/// call because it CREATES the palace it is asking about — and these tests
+/// would still have reported `palace_connected: true`.
 async fn mock_memory() -> crate::uds_mock::MockMemoryDaemon {
-    crate::uds_mock::spawn(|_method: &str, params: serde_json::Value| {
+    crate::uds_mock::spawn(|method: &str, params: serde_json::Value| {
+        let method = method.to_string();
         let palace = params
             .get("palace_id")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
             .to_string();
         Box::pin(async move {
+            if method != "memory.drawers_list" {
+                return Err(crate::uds_mock::RpcError::method_not_found(
+                    &method,
+                    &["memory.drawers_list"],
+                ));
+            }
             if palace == "owner-profile" {
                 Ok(serde_json::json!({ "drawers": [] }))
             } else {

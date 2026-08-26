@@ -110,10 +110,10 @@ async fn search_returns_descriptive_unsupported_error() {
 //
 // Why: `trusty-agents` cannot take a dev-dependency on `trusty-memory` without
 // an awkward cross-crate coupling for a single test module (pulling in the
-// whole daemon crate and its ONNX embedder just to prove four methods and their
+// whole daemon crate and its ONNX embedder just to prove five methods and their
 // DTO shapes are wired correctly is disproportionate). Before #6286 this served
 // trusty-memory's five REST routes with axum; those routes are gone, so it
-// serves the four methods that replaced them over the same framed socket the
+// serves the five methods that replaced them over the same framed socket the
 // real daemon binds: `memory.health`, `palace_create`, `memory.drawer_create`,
 // `memory.drawers_list` and `memory.drawer_delete`.
 // What: An in-memory drawer store keyed by tag, guarded by a

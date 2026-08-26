@@ -236,9 +236,21 @@ fn group_by_workstream(rows: &[DrawerRow]) -> Vec<WorkstreamSummary> {
 /// palace doesn't exist yet, or the response fails to parse — a down or
 /// not-yet-provisioned trusty-memory daemon must never break the sidebar.
 ///
-/// The health probe ahead of the list call is kept from the HTTP version: it is
-/// what keeps a down daemon from costing the sidebar the full call timeout
-/// (#6286 changed the transport, not this shape).
+/// The health probe ahead of the list call is kept from the HTTP version
+/// (#6286 changed the transport, not this shape). What it buys over UDS is
+/// narrower than over HTTP: a daemon that is DOWN has its dial refused by the
+/// kernel at once, so the probe saves nothing there — it bounds the WEDGED
+/// case, where a daemon accepts the connection and never answers, at
+/// [`HEALTH_TIMEOUT`] instead of [`CALL_TIMEOUT`]. That is worth one extra
+/// round-trip here because this is the polled sidebar listing and pays the cost
+/// on every tick.
+///
+/// [`fetch_drawers_by_tag`] deliberately carries no probe (#6286 review,
+/// finding 7). It serves one-shot request paths — `workstream_history_at` and
+/// the three `classification` reads — where a probe would add an RPC per call
+/// to shorten a wedged-daemon wait that is not repeating. Both readers fail
+/// open to an empty vec either way, so the two differ in latency only, never in
+/// what a caller sees.
 async fn fetch_drawers(socket: &Path, palace_id: &str, limit: usize) -> Vec<DrawerRow> {
     if call(socket, "memory.health", json!({}), HEALTH_TIMEOUT)
         .await

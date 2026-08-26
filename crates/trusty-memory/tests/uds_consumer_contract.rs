@@ -201,6 +201,111 @@ async fn shared_client_round_trips_a_tagged_drawer_through_the_folded_methods() 
     );
 }
 
+/// Why: the `chat_*` tools are the ONE consumer path that wraps its call in an
+/// MCP `tools/call` envelope, and nothing spanned that seam against the real
+/// dispatcher. `persona_memory::call_memory_tool` passes method `"tools/call"`
+/// with `{name, arguments}` into the shared client, and a reader who assumes the
+/// client adds an envelope of its own reads that as a double-wrap that would
+/// lose every persona chat turn silently. It does not add one —
+/// `call_memory_tool_at_with_timeout` puts `method` and `params` straight into
+/// the JSON-RPC request — but the only proof that held was trusty-agents' own
+/// mock, which is a copy of the assumption under test (#6286 review, finding 1).
+///
+/// What: proves both halves of the asymmetry against a running daemon. Calling
+/// `chat_session_create` DIRECTLY is refused, because `chat_*` is absent from
+/// `transport::rpc::TOOL_METHODS` — which is why the envelope is there at all —
+/// and the same tool through `tools/call` persists a turn `chat_session_get`
+/// reads back. A double-wrapped request would fail the second half: the
+/// dispatcher would hand `dispatch_tool` the name `"tools/call"`.
+/// Test: this is the test.
+#[tokio::test]
+async fn shared_client_reaches_a_chat_tool_through_the_tools_call_envelope() {
+    let daemon = Daemon::start().await;
+
+    call_memory_tool_at(
+        &daemon.socket,
+        "palace_create",
+        json!({ "name": "chat-palace", "force": true }),
+    )
+    .await
+    .expect("palace_create");
+
+    // Half one: no direct dispatch. `chat_*` is not in `TOOL_METHODS`.
+    let direct = call_memory_tool_at(
+        &daemon.socket,
+        "chat_session_create",
+        json!({ "palace": "chat-palace", "session_id": "persona-izzie" }),
+    )
+    .await
+    .expect_err("chat_session_create is not directly dispatchable");
+    let typed = direct
+        .downcast_ref::<MemoryRpcError>()
+        .expect("the daemon's refusal arrives as a typed error");
+    assert_eq!(
+        typed.code,
+        i64::from(trusty_memory::transport::rpc::error_codes::METHOD_NOT_FOUND),
+        "expected method-not-found, got: {typed}"
+    );
+
+    // Half two: the envelope the persona path actually sends.
+    for (tool, arguments) in [
+        (
+            "chat_session_create",
+            json!({ "palace": "chat-palace", "session_id": "persona-izzie" }),
+        ),
+        (
+            "chat_turn_append",
+            json!({
+                "palace": "chat-palace",
+                "session_id": "persona-izzie",
+                "prompt": "what do you remember about me?",
+                "response": "You live in Hastings-on-Hudson.",
+            }),
+        ),
+    ] {
+        call_memory_tool_at(
+            &daemon.socket,
+            "tools/call",
+            json!({ "name": tool, "arguments": arguments }),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{tool} through the tools/call envelope: {e:#}"));
+    }
+
+    let read_back = call_memory_tool_at(
+        &daemon.socket,
+        "tools/call",
+        json!({
+            "name": "chat_session_get",
+            "arguments": { "palace": "chat-palace", "session_id": "persona-izzie" },
+        }),
+    )
+    .await
+    .expect("chat_session_get through the tools/call envelope");
+
+    // `tools/call` answers the MCP content block, with the tool's own JSON
+    // rendered as text — the shape any MCP client renders.
+    let text = read_back["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a tools/call result carries a text block: {read_back}"));
+    let session: serde_json::Value =
+        serde_json::from_str(text).unwrap_or_else(|e| panic!("session JSON in {text:?}: {e}"));
+    let history = session["history"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the session carries a history array: {session}"));
+    assert_eq!(
+        history
+            .iter()
+            .map(|m| (m["role"].as_str(), m["content"].as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (Some("user"), Some("what do you remember about me?")),
+            (Some("assistant"), Some("You live in Hastings-on-Hudson.")),
+        ],
+        "the turn persisted through a SINGLE envelope: {session}"
+    );
+}
+
 /// Why: trusty-agents' `get` and `delete` against a palace it never created
 /// must be clean empty results, and they read that off
 /// `MemoryRpcError::is_not_found`. That reads a code `trusty-common` duplicates

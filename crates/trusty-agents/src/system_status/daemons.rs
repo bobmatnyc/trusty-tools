@@ -135,6 +135,12 @@ fn version_field(body: &serde_json::Value) -> Option<String> {
 /// timeout; otherwise `up: true` with whatever `parse` extracted from the
 /// method's `result`.
 ///
+/// The budget is applied ONCE, by the shared client. `send_framed_request_capped`
+/// wraps the whole dial-write-read exchange in `tokio::time::timeout` itself
+/// (`trusty_common::uds::rpc`) and answers `UdsRpcError::Timeout`; an outer
+/// `timeout` of the same duration here could only ever lose that race, so it
+/// added a layer that reported nothing the inner one does not.
+///
 /// Test: `super::tests::uds_daemon_with_no_socket_reports_up_false`.
 async fn probe_uds(
     app_name: &'static str,
@@ -150,14 +156,15 @@ async fn probe_uds(
         "method": method,
         "params": {},
     });
-    let call = trusty_common::uds::send_framed_request_capped::<_, RpcResponse>(
+    match trusty_common::uds::send_framed_request_capped::<_, RpcResponse>(
         &socket,
         &request,
         PROBE_TIMEOUT,
         trusty_common::uds::MAX_FRAME_BYTES,
-    );
-    match tokio::time::timeout(PROBE_TIMEOUT, call).await {
-        Ok(Ok(response)) => match response.result {
+    )
+    .await
+    {
+        Ok(response) => match response.result {
             Some(result) => {
                 let (version, detail) = parse(&result);
                 DaemonStatus {
@@ -173,7 +180,7 @@ async fn probe_uds(
             // down does.
             None => DaemonStatus::down(app_name),
         },
-        Ok(Err(_)) | Err(_) => DaemonStatus::down(app_name),
+        Err(_) => DaemonStatus::down(app_name),
     }
 }
 

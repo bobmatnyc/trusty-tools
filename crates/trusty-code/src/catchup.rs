@@ -133,24 +133,32 @@ mod tests {
             .output();
     }
 
-    /// A guaranteed-never-listening loopback address (port 1 is a reserved,
-    /// unassigned TCP port) so a connection attempt fails fast rather than
-    /// hanging or timing out — the same convention
-    /// `trusty_common::memory_rpc`'s own `UNREACHABLE_PLACEHOLDER` uses.
+    /// A socket path under a directory that cannot exist, so a dial is refused
+    /// by the kernel immediately rather than hanging or waiting out a budget —
+    /// the same literal `trusty_common::memory_rpc`'s own
+    /// `UNREACHABLE_PLACEHOLDER` and `run_task::tests::isolate_ambient_daemons`
+    /// use.
+    ///
+    /// It held `"http://127.0.0.1:1"` until #6286's review: that string named a
+    /// TCP port for a transport that no longer exists, and
+    /// [`pm_catchup_context_with_socket`] takes a `PathBuf`, so it coerced into
+    /// the CWD-RELATIVE path `http:/127.0.0.1:1`. The dial still failed, but by
+    /// accident of the working directory rather than by the guarantee the doc
+    /// comment claimed.
     ///
     /// Why (#3003): passed directly to
     /// [`pm_catchup_context_with_socket`] instead of mutating the
     /// process-global `TRUSTY_MEMORY_SOCKET` env var, so this test needs no lock
     /// and cannot leak state into concurrently-running tests (e.g.
-    /// `run_task::tests::*`, which also resolves a trusty-memory URL via
+    /// `run_task::tests::*`, which also resolves a trusty-memory socket via
     /// `pm_catchup_context` inside `execute_run_task`).
-    const UNREACHABLE_MEMORY_SOCKET: &str = "http://127.0.0.1:1";
+    const UNREACHABLE_MEMORY_SOCKET: &str = "/nonexistent/trusty-memory/trusty-memory.sock";
 
     /// Verifies that `pm_catchup_context` does not panic and returns either
     /// `Some` or `None` consistently when the memory daemon is unreachable.
     ///
     /// Why: tests can never assume a live trusty-memory daemon; this test
-    /// points at an unreachable port so the palace section degrades gracefully.
+    /// points at an unreachable socket so the palace section degrades gracefully.
     /// What: creates a temp dir with a git repo, calls
     /// `pm_catchup_context_with_socket` with [`UNREACHABLE_MEMORY_SOCKET`],
     /// asserts no panic and that the returned value is well-formed.
