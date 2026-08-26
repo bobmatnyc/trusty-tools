@@ -1236,24 +1236,23 @@ async fn prompt_context_empty_palace_falls_back_to_global() {
     addr_handle.shutdown().await;
 }
 
-/// Test fixture: spin up a real HTTP daemon under a tempdir-pinned
-/// data root, create a palace with the given slug under a project
-/// tempdir whose basename matches the slug, and return everything
-/// the test needs to interact with the daemon.
+/// Test fixture: spin up a real daemon under a tempdir-pinned data
+/// root, create a palace with the given slug under a project tempdir
+/// whose basename matches the slug, and return everything the test
+/// needs to interact with the daemon.
 ///
-/// Why: the prompt-context hook talks HTTP to a live daemon; unit
-/// tests with the router alone can't exercise the `read_daemon_addr`
-/// → HTTP round trip. This helper wires it all together in one place.
+/// Why: the prompt-context hook dials a live daemon; a test with the
+/// dispatcher alone cannot exercise the socket round trip the hook
+/// actually makes. This helper wires it together in one place.
 /// What: creates two tempdirs (one for the data root, one for the
 /// project cwd whose basename equals `palace_slug`), pins
 /// `TRUSTY_DATA_DIR_OVERRIDE`, builds the `AppState`, creates the
-/// palace, spawns the HTTP server on `127.0.0.1:0`, and waits for
-/// the daemon addr file to land. Returns `(state, data_dir_tmp,
+/// palace, and serves it. Returns `(state, data_dir_tmp,
 /// project_dir_tmp, project_dir_path, palace_slug, addr_handle)`.
 /// Test: indirectly via `prompt_context_recalls_palace_drawers` and
 /// `prompt_context_empty_palace_falls_back_to_global`.
-/// Note (issue #226): gated on `axum-server` because `run_http_on` is
-/// only available when the HTTP-serving surface is compiled in.
+/// Note (#226, #6286): gated on `daemon` because the serving surface
+/// is only compiled in behind that feature.
 #[cfg(feature = "daemon")]
 async fn spin_up_test_daemon_with_palace(
     palace_slug: &str,

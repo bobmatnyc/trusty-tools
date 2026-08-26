@@ -193,10 +193,9 @@ impl Client {
     /// request is still answered correctly. The tests report it; they do not
     /// gate on it.
     async fn health(&self) -> Result<(f64, String), String> {
-        Ok(self
-            .health_full()
+        self.health_full()
             .await
-            .map(|(rss, status, _)| (rss, status))?)
+            .map(|(rss, status, _)| (rss, status))
     }
 
     /// [`Self::health`] plus the daemon version.
