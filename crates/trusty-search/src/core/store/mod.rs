@@ -23,5 +23,5 @@ mod usearch_impl;
 mod usearch_recover;
 mod usearch_store;
 
-pub use self::types::{VectorHit, VectorStore};
+pub use self::types::{StagedSwapOutcome, VectorHit, VectorStore};
 pub use self::usearch_store::UsearchStore;

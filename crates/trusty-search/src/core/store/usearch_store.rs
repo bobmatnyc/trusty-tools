@@ -935,8 +935,13 @@ impl UsearchStore {
     /// What: relaxed-load `is_view` (fast path); when set, take the HNSW write
     /// lock, `Index::load`, reserve to the restored size, clear `is_view`. The
     /// flag is double-checked under the write lock so racing writers promote at
-    /// most once. Returns `Err` if the file is unreadable or the path is unknown.
-    /// Test: `tests::test_view_promotes_to_mutable_on_write`.
+    /// most once. When the recorded file can no longer be read, the promote
+    /// falls back to rebuilding the graph from the mapping already held in
+    /// memory (issue #6299 — see [`Self::rebuild_mutable_from_view`]); it
+    /// returns `Err` only when that fallback also fails, or when no source
+    /// path was ever recorded.
+    /// Test: `tests::test_view_promotes_to_mutable_on_write`,
+    /// `tests::test_promote_rebuilds_from_view_when_snapshot_vanished`.
     pub(super) async fn ensure_mutable(&self) -> Result<()> {
         // Fast path — fresh / already-promoted store. Acquire pairs with the
         // `Release` stores in `load_from` / `promote_view_to_mutable`.
@@ -966,9 +971,17 @@ impl UsearchStore {
         if !self.is_view.load(Ordering::Acquire) {
             return Ok(());
         }
-        index
-            .load(&path_str)
-            .map_err(|e| anyhow!("usearch failed to promote view → mutable load: {e}"))?;
+        if let Err(e) = index.load(&path_str) {
+            // #6299: the recorded snapshot is gone — a staged→live swap
+            // renamed or deleted it, or something outside the daemon removed
+            // it. Rebuild from the mapping we still hold rather than failing
+            // this and every future write forever.
+            self.rebuild_mutable_from_view(&index, &path, &e.to_string())?;
+            self.is_view.store(false, Ordering::Release);
+            // Nothing on disk matches the rebuilt graph until the next save.
+            self.dirty.store(true, Ordering::Release);
+            return Ok(());
+        }
         let size = index.size();
         if index.capacity() < size {
             index

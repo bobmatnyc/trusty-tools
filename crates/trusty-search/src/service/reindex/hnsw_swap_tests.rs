@@ -554,6 +554,155 @@ async fn commit_staged_hnsw_swap_renames_sidecar_before_binary() {
     unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
 }
 
+/// Drive one index through the exact production sequence that wedged three
+/// live indexes (issue #6299): a checkpoint save redirects the store at the
+/// staging file, an idle/memory-pressure demotion re-views the store FROM that
+/// file, and then the swap resolves and the file stops existing under that
+/// name. Returns the store and the resolved paths so each caller can assert on
+/// what a write does next.
+async fn store_demoted_onto_staging(
+    id_str: &str,
+    root: &std::path::Path,
+    seed_live: bool,
+) -> (
+    std::sync::Arc<UsearchStore>,
+    IndexId,
+    IndexHandle,
+    HnswSwapPaths,
+) {
+    let store = std::sync::Arc::new(store_with_vectors(20).await);
+    let id = IndexId::new(id_str.to_string());
+    let mut indexer = CodeIndexer::new(id.0.clone(), root);
+    indexer.set_store(store.clone());
+    let handle = IndexHandle::bare(
+        id.clone(),
+        std::sync::Arc::new(tokio::sync::RwLock::new(indexer)),
+        root.to_path_buf(),
+    );
+
+    let paths = begin_staged_hnsw_swap(&handle, &id)
+        .await
+        .expect("resolves");
+    if seed_live {
+        // A complete pre-reindex snapshot, as any already-indexed project has.
+        store.save(&paths.live).await.expect("seed live");
+    }
+    // A periodic reindex checkpoint: `spawn_incremental_persist` writes to
+    // staging, and `UsearchStore::save` records staging as the store's source.
+    store.save(&paths.staging).await.expect("checkpoint save");
+    assert!(
+        store.demote_to_view().await.expect("demote"),
+        "the idle/pressure sweep demotes a clean, promoted store to a view of \
+         whatever path it last saved to — here, the staging file"
+    );
+    (store, id, handle, paths)
+}
+
+/// Why (issue #6299 — the regression this fix exists for): committing the swap
+/// renames the staging file away. The live store was still recording (and
+/// mmap-viewing) that file, so the next write's `ensure_mutable` →
+/// `promote_view_to_mutable` failed `No such file or directory` — and kept
+/// failing forever, because a failed promote never clears `is_view`. Against
+/// the pre-fix code this test fails on the `upsert` below.
+/// What: demote onto staging, commit the swap, then write.
+/// Test: this IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn write_after_commit_swap_succeeds_when_store_was_demoted_to_staging_view() {
+    let data_dir = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("TRUSTY_DATA_DIR", data_dir.path()) };
+    let root_dir = tempfile::tempdir().unwrap();
+
+    let (store, id, handle, paths) =
+        store_demoted_onto_staging("hnsw-swap-6299-commit", root_dir.path(), true).await;
+
+    commit_staged_hnsw_swap(&handle, &id, &paths).await;
+    assert!(!paths.staging.exists(), "commit renames staging away");
+
+    store
+        .upsert("post-commit".to_string().as_str(), vec![9.0, 0.0, 0.0, 0.0])
+        .await
+        .expect(
+            "a write after a committed swap must not fail 'No such file or directory' — \
+             issue #6299",
+        );
+    assert_eq!(
+        store.len().await.unwrap(),
+        21,
+        "the committed snapshot's vectors must survive the write"
+    );
+
+    unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
+}
+
+/// Why (issue #6299, abort half): aborting DELETES the staging file, wedging
+/// the same store the same way. The rolled-back corpus matches the live
+/// snapshot, so the store must fall back to it and stay writable.
+/// What: demote onto staging with a live snapshot seeded, abort the swap, then
+/// write. Against the pre-fix code the `upsert` fails ENOENT.
+/// Test: this IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn write_after_abort_swap_succeeds_when_store_was_demoted_to_staging_view() {
+    let data_dir = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("TRUSTY_DATA_DIR", data_dir.path()) };
+    let root_dir = tempfile::tempdir().unwrap();
+
+    let (store, id, handle, paths) =
+        store_demoted_onto_staging("hnsw-swap-6299-abort", root_dir.path(), true).await;
+
+    abort_staged_hnsw_swap(&handle, &id, &paths).await;
+    assert!(!paths.staging.exists(), "abort deletes staging");
+    assert!(paths.live.exists(), "abort leaves the live snapshot alone");
+
+    store
+        .upsert("post-abort", vec![9.0, 0.0, 0.0, 0.0])
+        .await
+        .expect(
+            "a write after an aborted swap must not fail 'No such file or directory' — \
+             issue #6299",
+        );
+    assert_eq!(
+        store.len().await.unwrap(),
+        21,
+        "the store must be serving the live snapshot's 20 vectors plus the new one"
+    );
+
+    unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
+}
+
+/// Why (issue #6299): a first-ever reindex that aborts has no live snapshot to
+/// fall back on, so nothing on disk can repair the store. The write must still
+/// succeed — `promote_view_to_mutable` rebuilds the graph from the mapping it
+/// still holds — and no vector may be lost doing it.
+/// What: demote onto staging with NO live snapshot, abort, then write.
+/// Test: this IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn write_after_abort_swap_rebuilds_when_no_live_snapshot_exists() {
+    let data_dir = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("TRUSTY_DATA_DIR", data_dir.path()) };
+    let root_dir = tempfile::tempdir().unwrap();
+
+    let (store, id, handle, paths) =
+        store_demoted_onto_staging("hnsw-swap-6299-abort-bare", root_dir.path(), false).await;
+    assert!(!paths.live.exists(), "no live snapshot in this scenario");
+
+    abort_staged_hnsw_swap(&handle, &id, &paths).await;
+
+    store
+        .upsert("post-abort", vec![9.0, 0.0, 0.0, 0.0])
+        .await
+        .expect("a write must self-heal rather than fail ENOENT forever — issue #6299");
+    assert_eq!(
+        store.len().await.unwrap(),
+        21,
+        "the in-memory graph must survive the rebuild"
+    );
+
+    unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
+}
+
 /// Save `store_with_vectors(5)` directly to `path` — a bare helper for
 /// tests that need a plausible pre-existing staging checkpoint without
 /// caring about its exact content.

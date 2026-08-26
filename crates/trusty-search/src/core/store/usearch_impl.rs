@@ -13,6 +13,7 @@ use std::sync::atomic::Ordering;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 
+use super::types::StagedSwapOutcome;
 use super::types::VectorHit;
 use super::types::VectorStore;
 use super::usearch_store::{hnsw_max_elements, validate_embedding, UsearchStore};
@@ -537,5 +538,18 @@ impl VectorStore for UsearchStore {
     /// [`UsearchStore::try_demote_to_view`] (issue #2164).
     async fn demote_to_view(&self) -> Result<bool> {
         self.try_demote_to_view().await
+    }
+
+    /// Issue #6299: keep `hnsw_path` / `is_view` truthful across a reindex's
+    /// staged→live HNSW swap. See
+    /// [`UsearchStore::resolve_staged_snapshot_inner`] for the mechanics.
+    async fn resolve_staged_snapshot(
+        &self,
+        staged: &Path,
+        live: &Path,
+        outcome: StagedSwapOutcome,
+    ) -> Result<()> {
+        self.resolve_staged_snapshot_inner(staged, live, outcome)
+            .await
     }
 }

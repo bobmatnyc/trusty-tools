@@ -9,7 +9,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use super::types::VectorStore;
+use super::types::{StagedSwapOutcome, VectorStore};
 use super::usearch_store::{staging_path, UsearchStore, POPULATED_SNAPSHOT_THRESHOLD_BYTES};
 
 /// Why (#4395's second defect): both writers used the same deterministic
@@ -1368,5 +1368,163 @@ async fn test_adopt_declines_on_dim_mismatch() {
         empty.len().await.unwrap(),
         0,
         "a dim-mismatched snapshot must never be adopted"
+    );
+}
+
+/// Why (issue #6299): a reindex checkpoint retargets the store at the staging
+/// file, and committing the swap renames that file onto the live path. Unless
+/// the store is told, it keeps naming a path that no longer exists.
+/// What: saves to a staging path, renames it onto live the way
+/// `commit_staged_hnsw_swap` does, resolves the swap, and asserts the store now
+/// names `live` and still accepts a write.
+/// Test: this IS the test.
+#[tokio::test]
+async fn test_resolve_staged_snapshot_commit_repoints_to_live() {
+    let dir = tempfile::tempdir().unwrap();
+    let live = dir.path().join("hnsw.usearch");
+    let staging = dir.path().join("hnsw.reindex-staging.usearch");
+
+    let store = UsearchStore::new(4).unwrap();
+    store.upsert("a", vec![1.0, 0.0, 0.0, 0.0]).await.unwrap();
+    store.save(&staging).await.unwrap();
+    assert!(
+        store.demote_to_view().await.unwrap(),
+        "demote to staging view"
+    );
+
+    std::fs::rename(
+        staging.with_extension("keys.json"),
+        live.with_extension("keys.json"),
+    )
+    .unwrap();
+    std::fs::rename(&staging, &live).unwrap();
+
+    store
+        .resolve_staged_snapshot(&staging, &live, StagedSwapOutcome::Committed)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store.hnsw_path.read().await.as_deref(),
+        Some(live.as_path()),
+        "commit must re-point the store at the live path"
+    );
+    store
+        .upsert("b", vec![0.0, 1.0, 0.0, 0.0])
+        .await
+        .expect("a write after a committed swap must not fail ENOENT");
+    assert_eq!(store.len().await.unwrap(), 2);
+}
+
+/// Why (issue #6299): aborting deletes the staging file, so a store that
+/// recorded it holds a dangling path AND a graph the rolled-back corpus no
+/// longer matches. The live snapshot is authoritative again.
+/// What: seeds a live snapshot, advances the store past it into staging,
+/// deletes staging the way `abort_staged_hnsw_swap` does, and asserts the store
+/// falls back to the live snapshot and stays writable.
+/// Test: this IS the test.
+#[tokio::test]
+async fn test_resolve_staged_snapshot_abort_restores_live_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let live = dir.path().join("hnsw.usearch");
+    let staging = dir.path().join("hnsw.reindex-staging.usearch");
+
+    let store = UsearchStore::new(4).unwrap();
+    store.upsert("a", vec![1.0, 0.0, 0.0, 0.0]).await.unwrap();
+    store.save(&live).await.unwrap();
+    store.upsert("b", vec![0.0, 1.0, 0.0, 0.0]).await.unwrap();
+    store.save(&staging).await.unwrap();
+    assert!(
+        store.demote_to_view().await.unwrap(),
+        "demote to staging view"
+    );
+
+    std::fs::remove_file(&staging).unwrap();
+    std::fs::remove_file(staging.with_extension("keys.json")).unwrap();
+
+    store
+        .resolve_staged_snapshot(&staging, &live, StagedSwapOutcome::Aborted)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store.len().await.unwrap(),
+        1,
+        "abort must roll the store back to the live snapshot"
+    );
+    store
+        .upsert("c", vec![0.0, 0.0, 1.0, 0.0])
+        .await
+        .expect("a write after an aborted swap must not fail ENOENT");
+    assert_eq!(store.len().await.unwrap(), 2);
+}
+
+/// Why (issue #6299): a store still pointing at its own live snapshot was
+/// never affected by the swap. Re-pointing it anyway would be the lie the
+/// repair exists to remove.
+/// What: records an unrelated path, resolves a swap, asserts nothing moved.
+/// Test: this IS the test.
+#[tokio::test]
+async fn test_resolve_staged_snapshot_leaves_unrelated_path_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let live = dir.path().join("hnsw.usearch");
+    let staging = dir.path().join("hnsw.reindex-staging.usearch");
+    let other = dir.path().join("someone-elses.usearch");
+
+    let store = UsearchStore::new(4).unwrap();
+    store.upsert("a", vec![1.0, 0.0, 0.0, 0.0]).await.unwrap();
+    store.save(&other).await.unwrap();
+
+    store
+        .resolve_staged_snapshot(&staging, &live, StagedSwapOutcome::Committed)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store.hnsw_path.read().await.as_deref(),
+        Some(other.as_path()),
+        "a store that never recorded the staging path must be left alone"
+    );
+}
+
+/// Why (issue #6299): the recorded snapshot can vanish for reasons this crate
+/// does not control (an operator deleting it, a future stager). A failed
+/// promote never clears `is_view`, so without a fallback the store could never
+/// heal itself and every write failed forever.
+/// What: views a snapshot, deletes the file out from under it, then writes —
+/// the promote must rebuild the graph from the mapping it still holds, keeping
+/// every vector searchable.
+/// Test: this IS the test.
+#[tokio::test]
+async fn test_promote_rebuilds_from_view_when_snapshot_vanished() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hnsw.usearch");
+
+    let seed = UsearchStore::new(4).unwrap();
+    seed.upsert("a", vec![1.0, 0.0, 0.0, 0.0]).await.unwrap();
+    seed.upsert("b", vec![0.0, 1.0, 0.0, 0.0]).await.unwrap();
+    seed.save(&path).await.unwrap();
+    drop(seed);
+
+    let store = UsearchStore::load_from(&path).await.unwrap().expect("some");
+    assert!(store.in_view_mode(), "load_from serves from the mmap view");
+
+    std::fs::remove_file(&path).unwrap();
+
+    store
+        .upsert("c", vec![0.0, 0.0, 1.0, 0.0])
+        .await
+        .expect("a write must self-heal rather than fail ENOENT forever");
+    assert!(
+        !store.in_view_mode(),
+        "the rebuild leaves the store mutable"
+    );
+    assert_eq!(store.len().await.unwrap(), 3, "no vector may be lost");
+
+    let hits = store.search(&[1.0, 0.0, 0.0, 0.0], 1).await.unwrap();
+    assert_eq!(
+        hits.first().map(|h| h.chunk_id.as_str()),
+        Some("a"),
+        "the rebuilt graph must still answer the seeded vectors"
     );
 }

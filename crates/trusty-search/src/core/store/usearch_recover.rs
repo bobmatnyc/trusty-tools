@@ -15,13 +15,22 @@
 //! Test: `super::tests::test_save_refusal_adopts_populated_snapshot`,
 //! `super::tests::test_adopt_declines_when_snapshot_is_unrecoverable`,
 //! `super::tests::test_adopt_declines_on_dim_mismatch`.
+//!
+//! Issue #6299 added a second recovery to the same file, for the opposite
+//! failure: the snapshot the store recorded is not merely stale, it is GONE.
+//! [`UsearchStore::resolve_staged_snapshot_inner`] repairs the store when a
+//! reindex's staged→live swap renames or deletes the file underneath it, and
+//! [`UsearchStore::rebuild_mutable_from_view`] is the last-resort promote
+//! fallback for a recorded path that has vanished for any other reason.
 
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
 use anyhow::{anyhow, Result};
+use usearch::Index;
 
 use super::super::store_config::MmapServeMode;
+use super::types::StagedSwapOutcome;
 use super::usearch_store::UsearchStore;
 
 /// Outcome of the guarded write inside [`UsearchStore::save`].
@@ -152,5 +161,151 @@ impl UsearchStore {
             hnsw_path.display(),
         );
         Ok(true)
+    }
+
+    /// Repair this store's `hnsw_path` / `is_view` after a reindex's staged
+    /// HNSW swap resolved (issue #6299).
+    ///
+    /// Why: see [`super::types::VectorStore::resolve_staged_snapshot`]. A
+    /// store whose recorded path was renamed or deleted under it fails every
+    /// subsequent write with `No such file or directory`, forever.
+    ///
+    /// What: does nothing unless the store actually recorded `staged` — a
+    /// store still pointing at its live snapshot was never affected by the
+    /// swap, and re-pointing it would be the lie this method exists to
+    /// remove. When it did record `staged`:
+    /// - [`StagedSwapOutcome::Committed`]: the staging file was renamed onto
+    ///   `live`, so the bytes are unchanged and only the name moved. Record
+    ///   `live`. Any mmap the store holds is of that same inode and stays
+    ///   valid, and a later promote or demote now names a file that exists.
+    /// - [`StagedSwapOutcome::Aborted`]: the staging file was deleted and the
+    ///   reindex's state is discarded (the redb corpus rolls back in the same
+    ///   step — `finish_teardown::resolve_hnsw_swap` shares one
+    ///   `StagingResolution` with `resolve_corpus_swap`), so the pre-reindex
+    ///   live snapshot is authoritative again. Adopt it through
+    ///   [`Self::adopt_on_disk_snapshot`], which re-validates it through every
+    ///   ordinary load guard. When there is no adoptable live snapshot — a
+    ///   first-ever reindex that aborted before one existed — keep the
+    ///   in-memory graph, record `live` as where a future save belongs, and
+    ///   mark the store dirty so the idle sweep never re-views a file that
+    ///   does not match what is in memory.
+    ///
+    /// Test: `super::tests::test_resolve_staged_snapshot_commit_repoints_to_live`,
+    /// `super::tests::test_resolve_staged_snapshot_abort_restores_live_snapshot`,
+    /// `super::tests::test_resolve_staged_snapshot_leaves_unrelated_path_alone`.
+    pub(super) async fn resolve_staged_snapshot_inner(
+        &self,
+        staged: &Path,
+        live: &Path,
+        outcome: StagedSwapOutcome,
+    ) -> Result<()> {
+        let recorded_staged = {
+            let guard = self.hnsw_path.read().await;
+            guard.as_deref() == Some(staged)
+        };
+        if !recorded_staged {
+            return Ok(());
+        }
+
+        if outcome == StagedSwapOutcome::Committed {
+            *self.hnsw_path.write().await = Some(live.to_path_buf());
+            tracing::info!(
+                "usearch: re-pointed store from the committed staging snapshot {} to {} \
+                 (issue #6299)",
+                staged.display(),
+                live.display(),
+            );
+            return Ok(());
+        }
+
+        let adopted = match self.adopt_on_disk_snapshot(live).await {
+            Ok(adopted) => adopted,
+            Err(e) => {
+                tracing::warn!(
+                    "usearch: could not adopt the live snapshot {} after an aborted reindex \
+                     ({e}) — keeping the in-memory graph (issue #6299)",
+                    live.display(),
+                );
+                false
+            }
+        };
+        if !adopted {
+            *self.hnsw_path.write().await = Some(live.to_path_buf());
+            // Nothing on disk matches the in-memory graph: the idle sweep must
+            // not re-view `live` (it would silently roll the graph back), and a
+            // future save has somewhere truthful to write.
+            self.dirty.store(true, Ordering::Release);
+            tracing::warn!(
+                "usearch: aborted reindex deleted the staging snapshot {} and no live snapshot \
+                 at {} could be adopted — keeping the in-memory graph, marked dirty \
+                 (issue #6299)",
+                staged.display(),
+                live.display(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Last-resort promote fallback: rebuild a mutable heap graph out of the
+    /// mmap view this store is already holding (issue #6299).
+    ///
+    /// Why: [`UsearchStore::promote_view_to_mutable`] re-reads the recorded
+    /// snapshot with `Index::load`, so a recorded path that no longer exists
+    /// made every write fail permanently — a failed promote leaves `is_view`
+    /// set, so the store could never heal itself. The vectors themselves are
+    /// not lost when that happens: a mapping outlives the unlink or rename of
+    /// the file it was made from, so the graph is still readable in memory
+    /// even though no path names it any more. Rebuilding from what is mapped
+    /// turns a permanent wedge into a self-heal that costs one serialize plus
+    /// one deserialize.
+    ///
+    /// What: serializes the mapped index into a heap buffer
+    /// (`serialized_length` + `save_to_buffer`) and deserializes it back into
+    /// the same handle with `load_from_buffer`, which — unlike
+    /// `view_from_buffer` — copies into owned memory, so the graph survives
+    /// the buffer being dropped. Called with the caller's `index` write guard
+    /// already held; it does not touch `is_view` / `dirty`, which the caller
+    /// sets. Returns the original load error alongside its own on failure, so
+    /// the log names both the vanished path and why the fallback could not
+    /// stand in for it.
+    ///
+    /// Test: `super::tests::test_promote_rebuilds_from_view_when_snapshot_vanished`.
+    pub(super) fn rebuild_mutable_from_view(
+        &self,
+        index: &Index,
+        source: &Path,
+        load_err: &str,
+    ) -> Result<()> {
+        let vectors = index.size();
+        let mut buffer = vec![0u8; index.serialized_length()];
+        index.save_to_buffer(&mut buffer).map_err(|e| {
+            anyhow!(
+                "usearch failed to promote view → mutable load: {load_err}; and the mapped \
+                 snapshot {} could not be serialized for an in-memory rebuild either: {e} \
+                 (issue #6299)",
+                source.display(),
+            )
+        })?;
+        index.load_from_buffer(&buffer).map_err(|e| {
+            anyhow!(
+                "usearch failed to promote view → mutable load: {load_err}; and the in-memory \
+                 rebuild of {} could not be deserialized: {e} (issue #6299)",
+                source.display(),
+            )
+        })?;
+        let size = index.size();
+        if index.capacity() < size {
+            index
+                .reserve(size.max(1))
+                .map_err(|e| anyhow!("usearch reserve after in-memory rebuild failed: {e}"))?;
+        }
+        tracing::error!(
+            "usearch: snapshot {} could not be re-read to promote this index ({load_err}) — \
+             rebuilt {vectors} vector(s) from the mapping still held in memory so writes \
+             proceed instead of failing forever (issue #6299). The next save re-creates the \
+             snapshot.",
+            source.display(),
+        );
+        Ok(())
     }
 }

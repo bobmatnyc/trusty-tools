@@ -47,6 +47,32 @@ impl CodeIndexer {
         Ok(true)
     }
 
+    /// Tell the wired vector store how a reindex's staged→live HNSW swap
+    /// resolved, so it can repair a snapshot path the swap moved or deleted
+    /// (issue #6299).
+    ///
+    /// Why: `service::reindex::hnsw_swap` renames or deletes the staging file
+    /// the store's periodic checkpoints were written to, and the store has no
+    /// other way to learn that the path it recorded is gone. Without this the
+    /// store keeps that dangling path, and every write after it fails
+    /// `No such file or directory` for the life of the daemon.
+    /// What: forwards to [`crate::core::store::VectorStore::resolve_staged_snapshot`],
+    /// which owns the repair. Returns `Ok(false)` when no store is wired
+    /// (BM25-only index) so the caller can chain without checking.
+    /// Test: `service::reindex::hnsw_swap_tests::write_after_commit_swap_succeeds_when_store_was_demoted_to_staging_view`.
+    pub async fn resolve_staged_hnsw_swap(
+        &self,
+        staged: &std::path::Path,
+        live: &std::path::Path,
+        outcome: crate::core::store::StagedSwapOutcome,
+    ) -> Result<bool> {
+        let Some(store) = &self.store else {
+            return Ok(false);
+        };
+        store.resolve_staged_snapshot(staged, live, outcome).await?;
+        Ok(true)
+    }
+
     /// Rewrite the HNSW key map from absolute to root-relative chunk IDs, and
     /// flush the updated sidecar to disk atomically.
     ///
