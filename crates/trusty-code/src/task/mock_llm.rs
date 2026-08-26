@@ -385,7 +385,7 @@ fn bash_response_named(call_id: &str, command: &str) -> Value {
 /// recall result's actual TEXT (not just its score) reaches
 /// `Event::MemoryRecalled`. This script has the PM call `recall_session`
 /// exactly once, then stop — `tests/recall_content_e2e.rs` pairs it with a
-/// mock trusty-memory backend (`TRUSTY_MEMORY_URL` override) that returns one
+/// mock trusty-memory backend (`TRUSTY_MEMORY_SOCKET` override) that returns one
 /// huge, high-scored result and one small, lower-scored result so the tool's
 /// own token budget drops the second one whole (mirroring
 /// `tools::recall_session`'s own budget tests) — the held-back case this

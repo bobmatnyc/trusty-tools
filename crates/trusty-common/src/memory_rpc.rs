@@ -81,6 +81,46 @@ pub const MAX_FRAME_BYTES: u64 = 32 * 1024 * 1024;
 /// tick, and a bulk import wants far longer than either.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The JSON-RPC code trusty-memory answers when the thing asked for is absent.
+///
+/// Why it is duplicated here: `trusty-common` is below `trusty-memory` in the
+/// dependency graph, so `trusty_memory::transport::api_error::CODE_NOT_FOUND`
+/// cannot be imported. The value is pinned by
+/// `memory_rpc_not_found_code_matches_the_daemon` in
+/// `trusty-memory/tests/uds_consumer_contract.rs`.
+pub const CODE_NOT_FOUND: i64 = -32004;
+
+/// The daemon answered, and what it answered was an error.
+///
+/// Why a typed error rather than a formatted string: a caller sometimes has to
+/// tell one refusal from another. trusty-agents' memory backend reads a drawer
+/// out of a palace that may never have been created, and "no such palace" has
+/// to be a clean empty result while a transport failure or an internal error
+/// has to propagate — the same distinction its REST predecessor drew from a 404
+/// status. Carrying it in the error means [`call_memory_tool_at`] keeps its
+/// `Result<Value>` signature and only the callers that care pay for it, via
+/// `anyhow::Error::downcast_ref`.
+///
+/// Test: `trusty_client::tests::get_and_delete_are_clean_when_absent`
+/// (trusty-agents), `memory_rpc_not_found_code_matches_the_daemon`.
+#[derive(Debug, thiserror::Error)]
+#[error("{method} failed: {message} ({code})")]
+pub struct MemoryRpcError {
+    /// The method that was called.
+    pub method: String,
+    /// The daemon's own JSON-RPC error code.
+    pub code: i64,
+    /// The daemon's own message.
+    pub message: String,
+}
+
+impl MemoryRpcError {
+    /// Did the daemon say the thing asked for does not exist?
+    pub fn is_not_found(&self) -> bool {
+        self.code == CODE_NOT_FOUND
+    }
+}
+
 /// A path nothing can be serving, for a caller that must never see an error.
 ///
 /// Why a path under a directory that cannot exist rather than an empty one: a
@@ -184,7 +224,11 @@ pub async fn call_memory_tool_at_with_timeout(
 
     match (response.result, response.error) {
         (Some(result), _) => Ok(result),
-        (None, Some(e)) => Err(anyhow!("{method} failed: {} ({})", e.message, e.code)),
+        (None, Some(e)) => Err(anyhow::Error::new(MemoryRpcError {
+            method: method.to_string(),
+            code: e.code,
+            message: e.message,
+        })),
         // The daemon's own contract is that exactly one of the two is present.
         (None, None) => Err(anyhow!(
             "{method} answered with neither a result nor an error"

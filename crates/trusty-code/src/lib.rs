@@ -400,6 +400,13 @@ pub mod catchup;
 /// Test: `memory_envelope::tests::*`.
 pub mod memory_envelope;
 
+/// A stand-in trusty-memory daemon on a temp Unix socket, for tests (#6286).
+///
+/// Test-only: the rigs that used to bind an ephemeral TCP port and serve
+/// `POST /rpc` share one accept loop here instead.
+#[cfg(test)]
+pub(crate) mod uds_mock;
+
 /// System-prompt assembly layer implementing the parity spec.
 ///
 /// Why: The cross-model comparison harness must assemble the same fixed

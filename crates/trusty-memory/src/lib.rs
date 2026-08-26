@@ -137,28 +137,12 @@ pub(crate) use events::open_activity_log_with_fallback;
 pub(crate) use events::open_activity_log_with_fallback_in;
 pub use events::{DaemonEvent, HookType, InjectionKind};
 
-/// The port this daemon USED to bind. It binds nothing now (#6286).
-///
-/// 🔴 **This constant is a compile-time stub awaiting pass B of the #6286
-/// migration, not a live figure.** ADR-0032 retired the HTTP listener, so
-/// nothing in this crate reads it and no process answers on 7070.
-///
-/// It survives because `trusty-agents` builds `http://127.0.0.1:{port}` from it
-/// in `memory::trusty_client` — a REST client against routes that no longer
-/// exist. That client is one of the two independent memory clients #6286's
-/// design review scoped to pass B, where it either folds into
-/// `trusty_common::memory_rpc` or dials the socket directly. Whichever it
-/// becomes, this constant goes with it.
-///
-/// It carries no `#[deprecated]` attribute deliberately: the workspace lints at
-/// `-D warnings`, so the attribute would turn a scoped follow-up into a broken
-/// build in a crate this change is not allowed to edit.
-pub const DEFAULT_HTTP_PORT: u16 = 7070;
-
 // The daemon's serving surface. `run_http`, `run_http_dynamic`, `run_http_on`,
 // `bind_dynamic_port`, `http_addr_path` and `DEFAULT_HTTP_PORT` went with the
 // listener (#6286); `serve` and `socket_path` are what replace them.
-pub use transport::uds::{serve, socket_path};
+pub use transport::socket_path;
+#[cfg(feature = "daemon")]
+pub use transport::serve;
 
 /// Return `true` when a non-default data directory is in effect.
 ///

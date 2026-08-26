@@ -16,6 +16,11 @@ use crate::stores::AgentStoreBinding;
 /// it exercises the degradation path without waiting on a real timeout.
 const DEAD_URL: &str = "http://127.0.0.1:1";
 
+/// A socket path nothing can be serving, for the memory half (#6286).
+fn dead_socket() -> &'static std::path::Path {
+    std::path::Path::new("/nonexistent/trusty-memory/trusty-memory.sock")
+}
+
 fn binding(palace: Option<&str>) -> StoresConfig {
     StoresConfig {
         bindings: vec![AgentStoreBinding {
@@ -442,13 +447,14 @@ async fn build_persona_memory_returns_unbound_without_stores() {
 
 #[tokio::test]
 async fn build_persona_memory_injects_recall_and_identity() {
-    let (addr, _state) = mock_daemon::spawn().await;
-    let base = format!("http://{addr}");
+    let (addr, memory, _state) = mock_daemon::spawn().await;
+    let search_base = format!("http://{addr}");
+    let socket = memory.socket();
 
     let mem = build_persona_memory(
         &binding(Some("owner-profile")),
-        Some(&base),
-        Some(&base),
+        Some(socket),
+        Some(&search_base),
         "where does Masa live",
     )
     .await;
@@ -473,13 +479,14 @@ async fn build_persona_memory_injects_recall_and_identity() {
 async fn build_persona_memory_dedupes_identity_out_of_recall() {
     // The identity drawer also scores on a "who are you" query; printing it
     // in both sections would waste context and read as duplicated memory.
-    let (addr, _state) = mock_daemon::spawn().await;
-    let base = format!("http://{addr}");
+    let (addr, memory, _state) = mock_daemon::spawn().await;
+    let search_base = format!("http://{addr}");
+    let socket = memory.socket();
 
     let mem = build_persona_memory(
         &binding(Some("owner-profile")),
-        Some(&base),
-        Some(&base),
+        Some(socket),
+        Some(&search_base),
         "who are you",
     )
     .await;
@@ -496,7 +503,7 @@ async fn build_persona_memory_dedupes_identity_out_of_recall() {
 async fn build_persona_memory_degrades_when_palace_unreachable() {
     let mem = build_persona_memory(
         &binding(Some("owner-profile")),
-        Some(DEAD_URL),
+        Some(dead_socket()),
         Some(DEAD_URL),
         "what do you remember",
     )
@@ -515,10 +522,11 @@ async fn build_persona_memory_degrades_when_palace_unreachable() {
 
 #[tokio::test]
 async fn build_persona_memory_without_palace_still_reports_index() {
-    let (addr, _state) = mock_daemon::spawn().await;
-    let base = format!("http://{addr}");
+    let (addr, memory, _state) = mock_daemon::spawn().await;
+    let search_base = format!("http://{addr}");
+    let socket = memory.socket();
 
-    let mem = build_persona_memory(&binding(None), Some(&base), Some(&base), "hi").await;
+    let mem = build_persona_memory(&binding(None), Some(socket), Some(&search_base), "hi").await;
 
     assert_eq!(mem.health, MemoryHealth::NoPalaceBound);
     let f = mem.binding.as_ref().expect("binding facts");
@@ -532,11 +540,11 @@ async fn build_persona_memory_without_palace_still_reports_index() {
 
 #[tokio::test]
 async fn persist_turn_creates_session_then_appends() {
-    let (addr, state) = mock_daemon::spawn().await;
-    let base = format!("http://{addr}");
+    let (_addr, memory, state) = mock_daemon::spawn().await;
+    let socket = memory.socket();
 
     persist_turn(
-        &base,
+        socket,
         "owner-profile",
         "persona-izzie",
         "what do you remember about me?",
@@ -566,16 +574,19 @@ async fn persist_turn_creates_session_then_appends() {
 
 #[tokio::test]
 async fn persist_turn_surfaces_rpc_envelope_errors() {
-    // `/rpc` answers 200 even on failure — the envelope's `error` member is
+    // The daemon answers a frame even on failure — the envelope's `error` member is
     // the only signal, so a status-only check would silently lose turns.
-    let (addr, state) = mock_daemon::spawn().await;
+    let (_addr, memory, state) = mock_daemon::spawn().await;
     state.fail_rpc();
-    let base = format!("http://{addr}");
+    let socket = memory.socket();
 
-    let err = persist_turn(&base, "p", "s", "q", "a")
+    let err = persist_turn(socket, "p", "s", "q", "a")
         .await
         .expect_err("envelope error must not be reported as success");
-    assert!(err.contains("rpc error"), "got {err}");
+    // The daemon's own message and the tool that failed both survive, so the
+    // warning the caller logs names what went wrong rather than "write failed".
+    assert!(err.contains("chat_session_create"), "got {err}");
+    assert!(err.contains("boom"), "got {err}");
 }
 
 #[tokio::test]
@@ -583,7 +594,7 @@ async fn spawn_persist_turn_is_noop_without_palace() {
     // No palace bound and no base URL: must return without spawning or
     // panicking, so an unbound agent's turn is unaffected.
     spawn_persist_turn(&binding(None), None, "izzie", "q", "a");
-    spawn_persist_turn(&StoresConfig::default(), Some(DEAD_URL), "izzie", "q", "a");
+    spawn_persist_turn(&StoresConfig::default(), Some(dead_socket()), "izzie", "q", "a");
 }
 
 // ---------------------------------------------------------------------
@@ -591,10 +602,11 @@ async fn spawn_persist_turn_is_noop_without_palace() {
 // ---------------------------------------------------------------------
 
 mod mock_daemon {
-    use axum::extract::{Path as AxumPath, Query, State};
-    use axum::routing::{get, post};
-    use axum::{Json, Router};
-    use std::collections::HashMap;
+    use crate::uds_mock::{self, MockMemoryDaemon, RpcError};
+    use axum::Router;
+    use axum::extract::Path as AxumPath;
+    use axum::routing::get;
+    use axum::Json;
     use std::net::SocketAddr;
     use std::sync::{Arc, Mutex as StdMutex};
 
@@ -602,7 +614,7 @@ mod mock_daemon {
     pub(super) struct MockState {
         /// `(tool_name, arguments)` for every `tools/call` received.
         rpc_calls: StdMutex<Vec<(String, serde_json::Value)>>,
-        /// When set, `/rpc` answers HTTP 200 with a JSON-RPC `error` member.
+        /// When set, every memory method answers a JSON-RPC error.
         fail_rpc: StdMutex<bool>,
     }
 
@@ -616,85 +628,76 @@ mod mock_daemon {
         }
     }
 
-    /// GET `/api/v1/palaces/{id}/drawers?tag=` — the identity fetch. Honors
-    /// the `tag` filter so the identity path is genuinely exercised rather
-    /// than handed pre-filtered rows.
-    async fn list_drawers(
-        AxumPath(_palace): AxumPath<String>,
-        Query(params): Query<HashMap<String, String>>,
-    ) -> Json<Vec<serde_json::Value>> {
-        if params.get("tag").map(String::as_str) == Some("identity") {
-            return Json(vec![serde_json::json!({
-                "content": "My name is Izzie.",
-                "tags": ["identity"],
-            })]);
-        }
-        Json(vec![])
-    }
-
-    /// GET `/api/v1/palaces/{id}/recall?q=` — returns the identity drawer
-    /// alongside profile drawers so the de-duplication path is covered.
-    async fn recall(
-        AxumPath(_palace): AxumPath<String>,
-        Query(_params): Query<HashMap<String, String>>,
-    ) -> Json<Vec<serde_json::Value>> {
-        Json(vec![
-            serde_json::json!({
-                "content": "Masa lives in Hastings-on-Hudson, NY.",
-                "tags": ["location"],
-                "score": 0.37,
-            }),
-            serde_json::json!({
-                "content": "My name is Izzie.",
-                "tags": ["identity"],
-                "score": 0.12,
-            }),
-        ])
-    }
-
-    /// GET `/indexes/{index}/status` — trusty-search's index probe.
+    /// GET `/indexes/{index}/status` — trusty-search's index probe, which is
+    /// still HTTP: ADR-0032 has not migrated that daemon.
     async fn index_status(AxumPath(_index): AxumPath<String>) -> Json<serde_json::Value> {
         Json(serde_json::json!({"chunk_count": 552, "status": "ready"}))
     }
 
-    async fn rpc(
-        State(state): State<Arc<MockState>>,
-        Json(body): Json<serde_json::Value>,
-    ) -> Json<serde_json::Value> {
-        if *state.fail_rpc.lock().unwrap() {
-            return Json(serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "error": {"code": -32000, "message": "boom"},
-            }));
-        }
-        let name = body["params"]["name"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string();
-        let args = body["params"]["arguments"].clone();
-        state.rpc_calls.lock().unwrap().push((name, args));
-        Json(serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "result": {"content": [{"type": "text", "text": "{}"}]},
-        }))
+    /// The trusty-memory half, on a Unix socket (#6286).
+    ///
+    /// `memory.drawers_list` honours the `tag` filter so the identity path is
+    /// genuinely exercised rather than handed pre-filtered rows;
+    /// `memory_recall` returns the identity drawer alongside a profile drawer
+    /// so the de-duplication path is covered.
+    async fn spawn_memory(state: Arc<MockState>) -> MockMemoryDaemon {
+        uds_mock::spawn(move |method: &str, params: serde_json::Value| {
+            let state = Arc::clone(&state);
+            let method = method.to_string();
+            Box::pin(async move {
+                if *state.fail_rpc.lock().unwrap() {
+                    return Err(RpcError::internal("boom"));
+                }
+                match method.as_str() {
+                    "memory.drawers_list" => {
+                        if params["tag"].as_str() == Some("identity") {
+                            return Ok(serde_json::json!([{
+                                "content": "My name is Izzie.",
+                                "tags": ["identity"],
+                            }]));
+                        }
+                        Ok(serde_json::json!([]))
+                    }
+                    "memory_recall" => Ok(serde_json::json!({
+                        "palace": params["palace"].clone(),
+                        "query": params["query"].clone(),
+                        "results": [
+                            {
+                                "content": "Masa lives in Hastings-on-Hudson, NY.",
+                                "tags": ["location"],
+                                "score": 0.37,
+                            },
+                            {
+                                "content": "My name is Izzie.",
+                                "tags": ["identity"],
+                                "score": 0.12,
+                            },
+                        ],
+                    })),
+                    "tools/call" => {
+                        let name = params["name"].as_str().unwrap_or_default().to_string();
+                        let args = params["arguments"].clone();
+                        state.rpc_calls.lock().unwrap().push((name, args));
+                        Ok(serde_json::json!({"content": [{"type": "text", "text": "{}"}]}))
+                    }
+                    other => Err(RpcError::method_not_found(other, &[])),
+                }
+            })
+        })
+        .await
     }
 
-    pub(super) async fn spawn() -> (SocketAddr, Arc<MockState>) {
+    pub(super) async fn spawn() -> (SocketAddr, MockMemoryDaemon, Arc<MockState>) {
         let state = Arc::new(MockState::default());
-        let app = Router::new()
-            .route("/api/v1/palaces/{id}/drawers", get(list_drawers))
-            .route("/api/v1/palaces/{id}/recall", get(recall))
-            .route("/indexes/{index}/status", get(index_status))
-            .route("/rpc", post(rpc))
-            .with_state(state.clone());
+        let memory = spawn_memory(Arc::clone(&state)).await;
+
+        let app = Router::new().route("/indexes/{index}/status", get(index_status));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        (addr, state)
+        (addr, memory, state)
     }
 }

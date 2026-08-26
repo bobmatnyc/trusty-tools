@@ -1,81 +1,83 @@
-//! HTTP client for an external `trusty-memory` daemon, plus a
+//! JSON-RPC client for an external `trusty-memory` daemon, plus a
 //! `MemoryBackend` enum that picks between Trusty and the local
 //! `RedbUsearchStore` at runtime.
 //!
-//! Why: trusty-agents ships an embedded memory store (redb + usearch) so it works
-//! out of the box with no external services. When operators run the
+//! Why: trusty-agents ships an embedded memory store (redb + usearch) so it
+//! works out of the box with no external services. When operators run the
 //! `trusty-memory` daemon locally, however, they get a richer Palace/Room/
-//! Drawer model that's worth using transparently. Auto-detection at startup
-//! avoids forcing a config flag — if the daemon is up, we use it; otherwise
-//! we fall back to the embedded store with no behavior change for the user.
-//! What: `TrustyMemoryClient` implements `MemoryStore` against trusty-memory's
-//! *real* HTTP surface (issue #3225 — the previous implementation targeted a
-//! `/v1/*` route family that trusty-memory's router never mounted, so the
-//! health probe always failed and every install silently ran on the embedded
-//! store even with the daemon up). The real surface is:
-//!   - `GET /health` — bare, unversioned liveness probe.
-//!   - `POST /api/v1/palaces` — idempotent-ish palace creation (`force: true`
-//!     bypasses the project-slug naming gate); one palace per `Segment`,
-//!     named `trusty-agents-{segment-prefix}` (mirrors the naming convention
-//!     already used by `TrustyBackedMemoryStore`).
-//!   - `POST /api/v1/palaces/{id}/drawers` — creates a drawer. trusty-memory
-//!     computes its own embedding server-side (ONNX, via the shared
-//!     embedder) from `content`; there is no endpoint that accepts a
-//!     caller-supplied vector, so `insert`'s `vector` argument is accepted
-//!     for trait-compatibility but not transmitted. `content` is the
-//!     JSON-serialized `payload` (not a text summary) so `get` can losslessly
-//!     round-trip it back — trusty-memory's `CreateDrawerBody` has no
-//!     side-channel metadata field, only `content`/`room`/`tags`/`importance`.
-//!   - `GET /api/v1/palaces/{id}/drawers?tag=<ns_id>` — trusty-agents' string
-//!     ids are tagged onto the drawer at insert time (`ns_id(segment, id)`)
-//!     since drawers are keyed by server-generated UUID, not caller id;
-//!     `get`/`delete` resolve the UUID via an exact tag-match lookup first.
-//!   - `DELETE /api/v1/palaces/{id}/drawers/{uuid}` — delete by resolved UUID.
+//! Drawer model that is worth using transparently. Auto-detection at startup
+//! avoids forcing a config flag — if the daemon is up, we use it; otherwise we
+//! fall back to the embedded store with no behavior change for the user.
 //!
-//!   `search(segment, query_vec, top_k)` is NOT wired to
-//!   `GET /api/v1/palaces/{id}/recall` — see that method's doc comment for
-//!   why a raw vector cannot be bridged onto trusty-memory's text-embedding
-//!   recall endpoint, and returns a descriptive error instead of silently
-//!   hitting the wrong route or fabricating results.
+//! What: `TrustyMemoryClient` implements `MemoryStore` against trusty-memory's
+//! Unix socket, through the one shared client `trusty_common::memory_rpc`
+//! (#6286). It used to hit `/health` and four `/api/v1/palaces/*` routes with
+//! its own `reqwest::Client`; ADR-0032 retired that listener, and the routes map
+//! onto methods one for one:
+//!   - `memory.health` — liveness, replacing the bare `GET /health`.
+//!   - `palace_create` — one palace per `Segment`, named
+//!     `trusty-agents-{segment-prefix}`. `force: true` bypasses the
+//!     project-slug naming gate, which is meant for user-facing palaces tied to
+//!     a project checkout, not this adapter's synthetic per-segment palaces.
+//!   - `memory.drawer_create` — trusty-memory computes its own embedding
+//!     server-side (ONNX, via the shared embedder) from `content`; no method
+//!     accepts a caller-supplied vector, so `insert`'s `vector` argument is
+//!     taken for trait-compatibility and not transmitted. `content` is the
+//!     JSON-serialized `payload` (not a text summary) so `get` can losslessly
+//!     round-trip it — `CreateDrawerBody` has no side-channel metadata field.
+//!   - `memory.drawers_list` with `tag` — trusty-agents' string ids are tagged
+//!     onto the drawer at insert time (`ns_id(segment, id)`) because drawers are
+//!     keyed by server-generated UUID, not caller id; `get`/`delete` resolve the
+//!     UUID via an exact tag-match lookup first.
+//!   - `memory.drawer_delete` — delete by resolved UUID.
+//!
+//! **Not-found is a clean empty result, not a failure.** The REST client read
+//! that off a 404 status; it now reads `MemoryRpcError::is_not_found`, so a
+//! never-created palace still answers `None` rather than a spurious error while
+//! a transport failure still propagates.
+//!
+//! `search(segment, query_vec, top_k)` is still unsupported — see that method's
+//! doc comment for why a raw vector cannot be bridged onto trusty-memory's
+//! text-embedding recall.
 //!
 //! Test: See `tests` below — `health_check_false_when_daemon_absent`;
-//! `auto_detect` falls back to local when unreachable; a mock HTTP server
-//! (mirroring the real `/health`, `/api/v1/palaces`, and
-//! `/api/v1/palaces/{id}/drawers` routes) proves `auto_detect` selects the
-//! HTTP backend when the daemon *is* reachable, and exercises the
-//! insert/get/delete round trip end to end.
+//! `auto_detect` falls back to local when unreachable; a real trusty-memory
+//! socket bound by the test proves `auto_detect` selects the RPC backend when
+//! the daemon *is* reachable, and exercises the insert/get/delete round trip.
 
 #![allow(dead_code)]
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde::Deserialize;
+use serde_json::{Value, json};
+use trusty_common::memory_rpc::{MemoryRpcError, call_memory_tool_at_with_timeout};
 use uuid::Uuid;
 
 use crate::memory::redb_usearch::RedbUsearchStore;
 use crate::memory::store::{MemoryResult, MemoryStore, Segment};
 
-/// Default address of the trusty-memory daemon for local-dev installs.
+/// The socket the trusty-memory daemon serves on.
 ///
-/// Why (issue #3336): this used to be a standalone literal (`7775`) that
-/// silently drifted from `trusty_memory::DEFAULT_HTTP_PORT` (`7070`, the
-/// daemon's actual bind default) — auto-detection probed a port nothing
-/// listens on, so every install with the daemon up on its default port
-/// fell back to the embedded store instead of using the richer HTTP
-/// backend. Deriving the port from `trusty-memory`'s own constant (already
-/// a dependency of this crate, and re-exported unconditionally — it is not
-/// gated behind the `axum-server` feature this crate deliberately disables,
-/// see the `default-features = false` comment in `Cargo.toml`) makes this a
-/// single source of truth instead of a value that can drift again.
-/// What: `http://127.0.0.1:{trusty_memory::DEFAULT_HTTP_PORT}`.
-/// Test: `default_trusty_url_port_matches_trusty_memory_default`.
-pub fn default_trusty_url() -> String {
-    format!("http://127.0.0.1:{}", trusty_memory::DEFAULT_HTTP_PORT)
+/// Why (#3336, then #6286): this was a standalone `7775` literal that had
+/// silently drifted from the daemon's real bind port, so auto-detection probed
+/// a port nothing listens on and every install fell back to the embedded store.
+/// The fix pointed it at `trusty_memory::DEFAULT_HTTP_PORT`; ADR-0032 removed
+/// both the port and the constant. The path is derived by the same
+/// `trusty_common::daemon_socket_path` call the daemon makes, so there is no
+/// value left that can drift.
+///
+/// What: `trusty_common::memory_rpc::resolve_memory_socket_or_unreachable` —
+/// fail-open, because a data directory that cannot be resolved must land on the
+/// embedded store rather than abort startup.
+/// Test: `default_trusty_socket_is_the_derived_daemon_path`.
+pub fn default_trusty_socket() -> PathBuf {
+    trusty_common::memory_rpc::resolve_memory_socket_or_unreachable()
 }
 
 /// Connect timeout for the auto-detect health probe. Kept short so startup
@@ -86,61 +88,56 @@ const HEALTH_TIMEOUT: Duration = Duration::from_millis(500);
 /// because actual operations may be slower than a TCP handshake).
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// HTTP client wrapping the trusty-memory REST API.
+/// Client wrapping the trusty-memory daemon's JSON-RPC surface.
 ///
-/// Why: Threading raw `reqwest` calls through the codebase would couple
-/// callers to URL construction and JSON shapes. Wrapping them in a typed
-/// client keeps the `MemoryStore` impl self-contained.
-/// What: Holds a base URL, a shared `reqwest::Client` (connection pooled
-/// across requests), and a small in-memory cache of palace ids already
-/// confirmed to exist (`ensure_palace` skips the create round-trip once a
-/// segment's palace is known-present for this client's lifetime). The
-/// `MemoryStore` impl maps our segment-scoped ids to `mem:{segment}:{id}`
-/// tags so different segments — and different records within a segment —
-/// don't collide in trusty-memory's UUID-keyed drawer namespace.
-/// Test: See `health_check_false_when_daemon_absent`,
-/// `auto_detect_falls_back_to_local`, and the mock-server round-trip tests.
+/// Why: threading raw RPC calls through the codebase would couple callers to
+/// method names and JSON shapes. Wrapping them in a typed client keeps the
+/// `MemoryStore` impl self-contained.
+/// What: holds the daemon's socket path and a small in-memory cache of palace
+/// ids already confirmed to exist (`ensure_palace` skips the create round-trip
+/// once a segment's palace is known-present for this client's lifetime). The
+/// `MemoryStore` impl maps our segment-scoped ids to `mem:{segment}:{id}` tags
+/// so different segments — and different records within a segment — don't
+/// collide in trusty-memory's UUID-keyed drawer namespace.
+/// Test: see `health_check_false_when_daemon_absent`,
+/// `auto_detect_falls_back_to_local`, and the live-socket round-trip tests.
 pub struct TrustyMemoryClient {
-    base_url: String,
-    client: reqwest::Client,
+    socket: PathBuf,
     /// Palace ids this client has already created/confirmed. Avoids a
-    /// `POST /api/v1/palaces` round-trip on every `insert`.
+    /// `palace_create` round-trip on every `insert`.
     ensured_palaces: RwLock<HashSet<String>>,
 }
 
 impl TrustyMemoryClient {
-    /// Construct a client against `base_url` (e.g. `http://127.0.0.1:7775`).
+    /// Construct a client dialling `socket`.
     ///
-    /// Why: Operators may run the daemon on a custom host/port; centralising
-    /// the URL here keeps the rest of the code parameterless.
-    pub fn new(base_url: impl Into<String>) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(CALL_TIMEOUT)
-            .connect_timeout(HEALTH_TIMEOUT)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+    /// Why: a test drives a daemon it bound on a temp path, and an operator can
+    /// pin one with `TRUSTY_MEMORY_SOCKET`; taking the path here keeps the rest
+    /// of the code parameterless.
+    pub fn new(socket: impl Into<PathBuf>) -> Self {
         Self {
-            base_url: base_url.into(),
-            client,
+            socket: socket.into(),
             ensured_palaces: RwLock::new(HashSet::new()),
         }
     }
 
-    /// Probe `GET /health`. Returns true on a 2xx response.
+    /// One RPC call on this client's socket.
+    async fn call(&self, method: &str, params: Value, timeout: Duration) -> Result<Value> {
+        call_memory_tool_at_with_timeout(&self.socket, method, params, timeout).await
+    }
+
+    /// Probe `memory.health`. Returns true when the daemon answers.
     ///
-    /// Why: Used by `MemoryBackend::auto_detect` to decide whether the
-    /// daemon is reachable. Any error (timeout, refused, DNS) is mapped to
-    /// false so callers don't have to handle network errors at startup.
-    /// Issue #3225: this used to probe `/v1/health`, a route trusty-memory
-    /// never mounts (its router carries `/health` bare, unversioned — see
-    /// `crates/trusty-memory/src/web/mod.rs`), so the probe always failed
-    /// against a real daemon.
+    /// Why: used by `MemoryBackend::auto_detect` to decide whether the daemon is
+    /// reachable. Any error (timeout, refused, unresolvable path) is mapped to
+    /// false so callers don't have to handle transport errors at startup.
+    /// Issue #3225 fixed this probing a route the router never mounted; #6286
+    /// moved it onto the method `trusty-console` and `tctl` dial, so all three
+    /// now agree by construction.
     pub async fn health_check(&self) -> bool {
-        let url = format!("{}/health", self.base_url.trim_end_matches('/'));
-        match self.client.get(&url).send().await {
-            Ok(resp) => resp.status().is_success(),
-            Err(_) => false,
-        }
+        self.call("memory.health", json!({}), HEALTH_TIMEOUT)
+            .await
+            .is_ok()
     }
 
     /// Build the namespaced id used to address a record on the daemon.
@@ -186,25 +183,17 @@ impl TrustyMemoryClient {
             }
         }
 
-        let url = format!("{}/api/v1/palaces", self.base_url.trim_end_matches('/'));
-        let body = CreatePalaceReq {
-            name: palace_id.clone(),
-            description: "Auto-created by trusty-agents TrustyMemoryClient".to_string(),
-            force: true,
-        };
-        let resp = self
-            .client
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .with_context(|| format!("POST {url}"))?;
-        if !resp.status().is_success() {
-            return Err(anyhow!(
-                "trusty create_palace({palace_id}) failed: HTTP {}",
-                resp.status()
-            ));
-        }
+        self.call(
+            "palace_create",
+            json!({
+                "name": palace_id,
+                "description": "Auto-created by trusty-agents TrustyMemoryClient",
+                "force": true,
+            }),
+            CALL_TIMEOUT,
+        )
+        .await
+        .with_context(|| format!("trusty palace_create({palace_id})"))?;
 
         self.ensured_palaces
             .write()
@@ -225,72 +214,53 @@ impl TrustyMemoryClient {
     /// Test: `get_and_delete_are_clean_when_absent`, plus
     /// `insert_upserts_existing_id` for the upsert-cleanup lookup path.
     async fn find_by_tag(&self, palace_id: &str, tag: &str) -> Result<Vec<DrawerRow>> {
-        let url = format!(
-            "{}/api/v1/palaces/{palace_id}/drawers",
-            self.base_url.trim_end_matches('/')
-        );
-        let resp = self
-            .client
-            .get(&url)
-            .query(&[("tag", tag), ("limit", "1")])
-            .send()
+        let raw = match self
+            .call(
+                "memory.drawers_list",
+                json!({ "palace_id": palace_id, "tag": tag, "limit": 1 }),
+                CALL_TIMEOUT,
+            )
             .await
-            .with_context(|| format!("GET {url}"))?;
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(Vec::new());
-        }
-        if !resp.status().is_success() {
-            return Err(anyhow!(
-                "trusty list_drawers failed: HTTP {}",
-                resp.status()
-            ));
-        }
-        resp.json().await.context("parsing drawers response")
+        {
+            Ok(v) => v,
+            Err(e) if is_not_found(&e) => return Ok(Vec::new()),
+            Err(e) => return Err(e.context("trusty memory.drawers_list")),
+        };
+        serde_json::from_value(raw).context("parsing drawers response")
     }
 
     /// Delete a drawer by its resolved server UUID. 404 is treated as
     /// success (already gone).
     async fn delete_by_uuid(&self, palace_id: &str, drawer_id: Uuid) -> Result<()> {
-        let url = format!(
-            "{}/api/v1/palaces/{palace_id}/drawers/{drawer_id}",
-            self.base_url.trim_end_matches('/')
-        );
-        let resp = self
-            .client
-            .delete(&url)
-            .send()
+        match self
+            .call(
+                "memory.drawer_delete",
+                json!({ "palace_id": palace_id, "drawer_id": drawer_id.to_string() }),
+                CALL_TIMEOUT,
+            )
             .await
-            .with_context(|| format!("DELETE {url}"))?;
-        if !resp.status().is_success() && resp.status() != reqwest::StatusCode::NOT_FOUND {
-            return Err(anyhow!("trusty delete failed: HTTP {}", resp.status()));
+        {
+            Ok(_) => Ok(()),
+            // Already gone is the outcome the caller wanted.
+            Err(e) if is_not_found(&e) => Ok(()),
+            Err(e) => Err(e.context("trusty memory.drawer_delete")),
         }
-        Ok(())
     }
 }
 
-#[derive(Serialize)]
-struct CreatePalaceReq {
-    name: String,
-    description: String,
-    force: bool,
+/// Did the daemon answer "no such thing" rather than fail?
+///
+/// Why: `get` and `delete` against a palace this client never created must be
+/// clean empty results, and `find_by_tag` is the lookup all three share. The
+/// REST predecessor read this off a 404 status; the typed error carries the same
+/// distinction over the socket (#6286).
+/// Test: `get_and_delete_are_clean_when_absent`.
+fn is_not_found(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<MemoryRpcError>()
+        .is_some_and(MemoryRpcError::is_not_found)
 }
 
-#[derive(Serialize)]
-struct CreateDrawerReq {
-    content: String,
-    tags: Vec<String>,
-    /// Bypasses trusty-memory's signal/noise QUALITY gate (issue #3225 —
-    /// `CreateDrawerBody::force` in `trusty-memory`'s service types).
-    /// `content` here is a JSON-serialized payload (see `insert`'s doc
-    /// comment), which the gate's `non_alphabetic_ratio` heuristic rejects
-    /// by design (it looks like raw code, not prose) — `force: true` is
-    /// required for every write this client makes. The daemon's secret
-    /// gate (`check_secret`) is NOT bypassed by this flag; it runs
-    /// unconditionally regardless of `force`.
-    force: bool,
-}
-
-/// Minimal shape we read back from `GET .../drawers` — trusty-memory's
+/// Minimal shape we read back from `memory.drawers_list` — trusty-memory's
 /// `Drawer` struct (`trusty_common::memory_core::palace::Drawer`) has many
 /// more fields; we only need `id` and `content` to resolve/round-trip a
 /// record, plus `tags` for defensive filtering client-side.
@@ -355,37 +325,29 @@ impl MemoryStore for TrustyMemoryClient {
             .into_iter()
             .next();
 
-        let url = format!(
-            "{}/api/v1/palaces/{palace_id}/drawers",
-            self.base_url.trim_end_matches('/')
-        );
-        // Serialize the full payload (rather than a text summary) as
-        // `content` so `get` can losslessly round-trip it — trusty-memory's
-        // `CreateDrawerBody` carries no separate metadata field. That makes
-        // `content` JSON-shaped, which trusty-memory's signal/noise QUALITY
-        // gate (`non_alphabetic_ratio`) rejects by design for structured
-        // payloads — `force: true` is required on every write this client
-        // makes (see `CreateDrawerReq::force`'s doc comment; the daemon's
-        // secret gate still runs regardless of `force`).
+        // Serialize the full payload (rather than a text summary) as `content`
+        // so `get` can losslessly round-trip it — `CreateDrawerBody` carries no
+        // separate metadata field. That makes `content` JSON-shaped, which
+        // trusty-memory's signal/noise QUALITY gate (`non_alphabetic_ratio`)
+        // rejects by design for structured payloads, so `force: true` is
+        // required on every write this client makes. The daemon's secret gate
+        // (`check_secret`) runs regardless of `force`.
         let content = serde_json::to_string(&payload).context("serialize payload as content")?;
-        let body = CreateDrawerReq {
-            content,
-            tags: vec![ns_id],
-            force: true,
-        };
 
-        let resp = self
-            .client
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .with_context(|| format!("POST {url}"))?;
-        if !resp.status().is_success() {
-            // Create failed — the prior drawer (if any) was never touched,
-            // so there is nothing to roll back here.
-            return Err(anyhow!("trusty insert failed: HTTP {}", resp.status()));
-        }
+        // Create failing leaves the prior drawer untouched, so there is nothing
+        // to roll back on this arm.
+        self.call(
+            "memory.drawer_create",
+            json!({
+                "palace_id": palace_id,
+                "content": content,
+                "tags": [ns_id],
+                "force": true,
+            }),
+            CALL_TIMEOUT,
+        )
+        .await
+        .context("trusty memory.drawer_create")?;
 
         // Create succeeded — now it's safe to best-effort clean up the old
         // drawer. A failure here leaves a harmless stale duplicate (caught
@@ -408,18 +370,17 @@ impl MemoryStore for TrustyMemoryClient {
     /// Why: `MemoryStore::search` takes a pre-computed `query_vec: &[f32]`
     /// (the contract the local `RedbUsearchStore`/`TrustyBackedMemoryStore`
     /// adapters satisfy by querying an in-process HNSW index directly).
-    /// trusty-memory's only HTTP recall surface is
-    /// `GET /api/v1/palaces/{id}/recall?q=<text>` — the daemon computes the
-    /// query embedding itself, server-side, from text
+    /// trusty-memory's only recall surface is text — `memory_recall` and
+    /// `memory_recall_all` take a `q` string and the daemon computes the query
+    /// embedding itself, server-side
     /// (`trusty_common::memory_core::retrieval::recall_with_default_embedder`).
-    /// There is no route that accepts a raw vector, and embeddings are not
-    /// invertible, so a caller-supplied vector cannot be turned into the `q`
-    /// text parameter that route requires. Adding a vector-accepting recall
-    /// route to trusty-memory was judged out of scope for issue #3225 (a
-    /// route-correctness fix, not a new daemon capability) — see the PR body
-    /// for the follow-up recommendation.
-    /// What: Returns a descriptive `Err` rather than silently hitting the
-    /// wrong endpoint or fabricating empty results.
+    /// No method accepts a raw vector, and embeddings are not invertible, so a
+    /// caller-supplied vector cannot be turned into the `q` text those methods
+    /// require. Adding a vector-accepting recall method to trusty-memory was
+    /// judged out of scope for issue #3225 (a route-correctness fix, not a new
+    /// daemon capability) and #6286 (a transport migration).
+    /// What: Returns a descriptive `Err` rather than silently calling the wrong
+    /// method or fabricating empty results.
     /// Test: `search_returns_descriptive_unsupported_error`.
     async fn search(
         &self,
@@ -428,12 +389,12 @@ impl MemoryStore for TrustyMemoryClient {
         _top_k: usize,
     ) -> Result<Vec<MemoryResult>> {
         Err(anyhow!(
-            "TrustyMemoryClient::search is not supported: trusty-memory's HTTP API only \
-             exposes text-query recall (GET /api/v1/palaces/{{id}}/recall?q=<text>), which \
-             computes its own embedding server-side. There is no route that accepts a \
-             pre-computed vector, so a MemoryStore::search() call cannot be bridged onto it. \
-             Use MemoryBackend::Local, or extend the daemon/trait with a text-aware recall \
-             path, for vector/semantic search against the HTTP backend."
+            "TrustyMemoryClient::search is not supported: trusty-memory exposes only \
+             text-query recall (memory_recall / memory_recall_all take a `q` string), which \
+             computes its own embedding server-side. No method accepts a pre-computed \
+             vector, so a MemoryStore::search() call cannot be bridged onto it. Use \
+             MemoryBackend::Local, or extend the daemon/trait with a text-aware recall \
+             path, for vector/semantic search against the daemon backend."
         ))
     }
 
@@ -481,31 +442,35 @@ impl MemoryStore for TrustyMemoryClient {
 /// enum lets us implement `MemoryStore` once and have callers stay
 /// transport-agnostic.
 /// What: `Local` holds an `Arc<RedbUsearchStore>` (shareable across tasks);
-/// `Trusty` holds a stateless HTTP client.
+/// `Trusty` holds a socket-dialling client.
 /// Test: `auto_detect_falls_back_to_local` exercises the selection path;
-/// `auto_detect_selects_trusty_when_daemon_reachable` exercises the
-/// happy path against a mock server mirroring the real route paths.
+/// `auto_detect_selects_trusty_when_daemon_reachable` exercises the happy path
+/// against a real trusty-memory socket the test binds.
 pub enum MemoryBackend {
     Local(Arc<RedbUsearchStore>),
     Trusty(TrustyMemoryClient),
 }
 
 impl MemoryBackend {
-    /// Auto-detect at the default daemon URL.
+    /// Auto-detect at the derived daemon socket.
     pub async fn auto_detect(local_store: Arc<RedbUsearchStore>) -> Self {
-        Self::auto_detect_with_url(&default_trusty_url(), local_store).await
+        Self::auto_detect_at(default_trusty_socket(), local_store).await
     }
 
-    /// Auto-detect at `base_url`. Falls back to `local_store` if the daemon
-    /// is unreachable within the health timeout.
-    pub async fn auto_detect_with_url(base_url: &str, local_store: Arc<RedbUsearchStore>) -> Self {
-        let client = TrustyMemoryClient::new(base_url);
+    /// Auto-detect at `socket`. Falls back to `local_store` if the daemon is
+    /// unreachable within the health timeout.
+    pub async fn auto_detect_at(
+        socket: impl Into<PathBuf>,
+        local_store: Arc<RedbUsearchStore>,
+    ) -> Self {
+        let socket = socket.into();
+        let client = TrustyMemoryClient::new(socket.clone());
         if client.health_check().await {
-            tracing::info!(url = %base_url, "trusty-memory daemon reachable; using HTTP backend");
+            tracing::info!(socket = %socket.display(), "trusty-memory daemon reachable; using the daemon backend");
             MemoryBackend::Trusty(client)
         } else {
             tracing::debug!(
-                url = %base_url,
+                socket = %socket.display(),
                 "trusty-memory daemon not reachable; using embedded local backend"
             );
             MemoryBackend::Local(local_store)

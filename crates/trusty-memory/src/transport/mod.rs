@@ -35,4 +35,10 @@ pub mod uds;
 
 pub use api_error::{ApiError, ErrorKind, CODE_NOT_FOUND, CODE_REFUSED};
 pub use rpc::{dispatch, JsonRpcError, JsonRpcRequest, JsonRpcResponse};
-pub use uds::{build_router, serve, socket_path, FOLDED_METHODS, METHOD_HEALTH, STREAM_METHODS};
+pub use uds::{socket_path, FOLDED_METHODS, METHOD_HEALTH, STREAM_METHODS};
+// The serving half needs the `daemon` feature: it registers `memory.chat`, whose
+// handler lives in the `daemon`-gated `crate::chat`. A slim library consumer
+// (trusty-agents links `MemoryMcpService` with `default-features = false`) still
+// gets `socket_path` and the method-name tables, which is what a CLIENT needs.
+#[cfg(feature = "daemon")]
+pub use uds::{build_router, serve};

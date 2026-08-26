@@ -12,10 +12,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use axum::extract::State;
-use axum::routing::post;
-use axum::{Json, Router};
-use tokio::net::TcpListener;
+use crate::uds_mock::{self, MockMemoryDaemon};
 
 use super::*;
 
@@ -237,8 +234,8 @@ async fn execute_attaches_telemetry_matching_the_rendered_text() {
         result_entry("visible one", 0.9, &["session:s1", "turn"]),
         result_entry("visible two", 0.7, &["session:s1", "turn"]),
     ];
-    let (base_url, _captured) = spawn_recall_mock(results).await;
-    let tool = RecallSessionTool::new("s1", base_url, "p");
+    let (daemon, _captured) = spawn_recall_mock(results).await;
+    let tool = RecallSessionTool::new("s1", daemon.socket(), "p");
 
     let result = tool.execute(json!({"query": "foo"})).await;
     let telemetry = recall_telemetry_of(&result);
@@ -260,7 +257,7 @@ async fn execute_attaches_telemetry_matching_the_rendered_text() {
 /// Test: this test.
 #[tokio::test]
 async fn fail_open_paths_report_no_telemetry() {
-    let tool = RecallSessionTool::new("s1", "http://127.0.0.1:1", "p");
+    let tool = RecallSessionTool::new("s1", unreachable_socket(), "p");
     let result = tool.execute(json!({"query": "anything"})).await;
     assert!(!result.is_error());
     assert!(
@@ -303,7 +300,7 @@ fn render_drop_logs_info() {
 
 #[test]
 fn schema_has_required_fields() {
-    let tool = RecallSessionTool::new("s1", "http://x", "p");
+    let tool = RecallSessionTool::new("s1", unreachable_socket(), "p");
     let schema = tool.schema();
     let params = &schema["function"]["parameters"];
     assert_eq!(schema["function"]["name"], RECALL_SESSION_TOOL_NAME);
@@ -322,45 +319,45 @@ fn schema_has_required_fields() {
 /// One captured `/rpc` call: JSON-RPC `method` + `params`.
 type Captured = Arc<Mutex<Vec<(String, Value)>>>;
 
-/// Spin up a mock `/rpc` server that always replies with the
-/// spike-verified `tools/call` envelope shape for `memory_recall`,
-/// capturing every request's method/params.
-async fn spawn_recall_mock(results: Vec<Value>) -> (String, Captured) {
+/// A socket path nothing can be serving.
+///
+/// Why (#6286): the retired rigs pointed at `http://127.0.0.1:1` — a reserved
+/// port — so a dial failed immediately rather than timing out.
+fn unreachable_socket() -> &'static std::path::Path {
+    std::path::Path::new("/nonexistent/trusty-memory/trusty-memory.sock")
+}
+
+/// Spin up a mock daemon that always replies with the spike-verified
+/// `tools/call` envelope shape for `memory_recall`, capturing every request's
+/// method and params.
+async fn spawn_recall_mock(results: Vec<Value>) -> (MockMemoryDaemon, Captured) {
     let captured: Captured = Arc::new(Mutex::new(Vec::new()));
     let store = Arc::clone(&captured);
-    let results_state = Arc::new(results);
+    let results = Arc::new(results);
 
-    async fn handle(
-        State((store, results)): State<(Captured, Arc<Vec<Value>>)>,
-        Json(body): Json<Value>,
-    ) -> Json<Value> {
-        let method = body["method"].as_str().unwrap_or_default().to_string();
-        let params = body["params"].clone();
-        store
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push((method, params.clone()));
-        let palace = params["arguments"]["palace"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string();
-        let query = params["arguments"]["query"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string();
-        let envelope = tools_call_envelope(&palace, &query, (*results).clone());
-        Json(json!({"jsonrpc": "2.0", "id": 1, "result": envelope}))
-    }
+    let daemon = uds_mock::spawn(move |method: &str, params: Value| {
+        let store = Arc::clone(&store);
+        let results = Arc::clone(&results);
+        let method = method.to_string();
+        Box::pin(async move {
+            store
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((method, params.clone()));
+            let palace = params["arguments"]["palace"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            let query = params["arguments"]["query"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            Ok(tools_call_envelope(&palace, &query, (*results).clone()))
+        })
+    })
+    .await;
 
-    let app = Router::new()
-        .route("/rpc", post(handle))
-        .with_state((store, results_state));
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
-    let addr = listener.local_addr().expect("addr");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    (format!("http://{addr}"), captured)
+    (daemon, captured)
 }
 
 #[tokio::test]
@@ -370,8 +367,8 @@ async fn execute_returns_only_session_tagged_results() {
         result_entry("other session's note", 0.8, &["session:s2", "turn"]),
         result_entry("mine again", 0.7, &["session:s1", "turn"]),
     ];
-    let (base_url, _captured) = spawn_recall_mock(results).await;
-    let tool = RecallSessionTool::new("s1", base_url, "p");
+    let (daemon, _captured) = spawn_recall_mock(results).await;
+    let tool = RecallSessionTool::new("s1", daemon.socket(), "p");
 
     let result = tool.execute(json!({"query": "foo"})).await;
     assert!(!result.is_error());
@@ -382,8 +379,8 @@ async fn execute_returns_only_session_tagged_results() {
 
 #[tokio::test]
 async fn execute_over_fetches_top_k_times_factor() {
-    let (base_url, captured) = spawn_recall_mock(vec![]).await;
-    let tool = RecallSessionTool::new("s1", base_url, "p");
+    let (daemon, captured) = spawn_recall_mock(vec![]).await;
+    let tool = RecallSessionTool::new("s1", daemon.socket(), "p");
 
     let _ = tool.execute(json!({"query": "foo", "top_k": 3})).await;
 
@@ -397,8 +394,8 @@ async fn execute_over_fetches_top_k_times_factor() {
 
 #[tokio::test]
 async fn execute_clamps_top_k_to_max() {
-    let (base_url, captured) = spawn_recall_mock(vec![]).await;
-    let tool = RecallSessionTool::new("s1", base_url, "p");
+    let (daemon, captured) = spawn_recall_mock(vec![]).await;
+    let tool = RecallSessionTool::new("s1", daemon.socket(), "p");
 
     let _ = tool.execute(json!({"query": "foo", "top_k": 999})).await;
 
@@ -411,7 +408,7 @@ async fn execute_clamps_top_k_to_max() {
 
 #[tokio::test]
 async fn execute_is_fail_open_on_unreachable_daemon() {
-    let tool = RecallSessionTool::new("s1", "http://127.0.0.1:1", "p");
+    let tool = RecallSessionTool::new("s1", unreachable_socket(), "p");
     let result = tool.execute(json!({"query": "anything"})).await;
     assert!(!result.is_error(), "must not surface as a tool error");
     assert!(result.content().contains("unavailable"));
@@ -419,7 +416,7 @@ async fn execute_is_fail_open_on_unreachable_daemon() {
 
 #[tokio::test]
 async fn execute_rejects_malformed_args_recoverably() {
-    let tool = RecallSessionTool::new("s1", "http://127.0.0.1:1", "p");
+    let tool = RecallSessionTool::new("s1", unreachable_socket(), "p");
     let result = tool.execute(json!({"top_k": 3})).await; // missing 'query'
     assert!(result.is_error());
     assert!(!result.is_fatal());
@@ -428,8 +425,8 @@ async fn execute_rejects_malformed_args_recoverably() {
 #[tokio::test]
 async fn execute_empty_when_no_session_tagged_results() {
     let results = vec![result_entry("belongs elsewhere", 0.9, &["session:other"])];
-    let (base_url, _captured) = spawn_recall_mock(results).await;
-    let tool = RecallSessionTool::new("s1", base_url, "p");
+    let (daemon, _captured) = spawn_recall_mock(results).await;
+    let tool = RecallSessionTool::new("s1", daemon.socket(), "p");
 
     let result = tool.execute(json!({"query": "anything"})).await;
     assert!(!result.is_error());

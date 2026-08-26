@@ -42,16 +42,17 @@
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use axum::{
     Json,
     extract::{Path as AxumPath, Query, State},
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use super::state::AppState;
-use crate::memory::trusty_client::default_trusty_url;
+use crate::memory::trusty_client::default_trusty_socket;
 
 /// Health-probe timeout — short so a down daemon never noticeably stalls the
 /// sidebar. Mirrors `memory::trusty_client::HEALTH_TIMEOUT`.
@@ -101,7 +102,7 @@ pub(crate) fn workstream_summary_tag(name: &str) -> String {
     format!("{WORKSTREAM_SUMMARY_TAG_PREFIX}{name}")
 }
 
-/// One row as returned by trusty-memory's `GET /api/v1/palaces/{id}/drawers`
+/// One row as returned by trusty-memory's `memory.drawers_list`
 /// — a subset of `trusty_common::memory_core::palace::Drawer`'s fields (only
 /// what grouping/summary needs).
 #[derive(Debug, Clone, Deserialize)]
@@ -229,85 +230,76 @@ fn group_by_workstream(rows: &[DrawerRow]) -> Vec<WorkstreamSummary> {
     out
 }
 
-/// Fetch a palace's drawers from a trusty-memory daemon at `base_url`.
+/// Fetch a palace's drawers from the trusty-memory daemon on `socket`.
+///
 /// Returns an empty vec (never an error) when the daemon is unreachable, the
-/// palace doesn't exist yet (404), or the response fails to parse — a down
-/// or not-yet-provisioned trusty-memory daemon must never break the sidebar.
-async fn fetch_drawers(base_url: &str, palace_id: &str, limit: usize) -> Vec<DrawerRow> {
-    let client = match reqwest::Client::builder()
-        .connect_timeout(HEALTH_TIMEOUT)
-        .timeout(CALL_TIMEOUT)
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-
-    let health_url = format!("{}/health", base_url.trim_end_matches('/'));
-    match client.get(&health_url).send().await {
-        Ok(resp) if resp.status().is_success() => {}
-        _ => return Vec::new(),
-    }
-
-    let url = format!(
-        "{}/api/v1/palaces/{palace_id}/drawers",
-        base_url.trim_end_matches('/')
-    );
-    let resp = match client
-        .get(&url)
-        .query(&[("sort", "created_desc"), ("limit", &limit.to_string())])
-        .send()
+/// palace doesn't exist yet, or the response fails to parse — a down or
+/// not-yet-provisioned trusty-memory daemon must never break the sidebar.
+///
+/// The health probe ahead of the list call is kept from the HTTP version: it is
+/// what keeps a down daemon from costing the sidebar the full call timeout
+/// (#6286 changed the transport, not this shape).
+async fn fetch_drawers(socket: &Path, palace_id: &str, limit: usize) -> Vec<DrawerRow> {
+    if call(socket, "memory.health", json!({}), HEALTH_TIMEOUT)
         .await
+        .is_err()
     {
-        Ok(r) => r,
-        Err(_) => return Vec::new(),
-    };
-    if !resp.status().is_success() {
-        // 404 (palace not yet created) and any other non-2xx are both "no
-        // workstream data yet" from this endpoint's point of view.
         return Vec::new();
     }
-    resp.json::<Vec<DrawerRow>>().await.unwrap_or_default()
+    list_drawers(socket, palace_id, None, limit).await
 }
 
 /// Fetch a palace's drawers narrowed to an EXACT `tag` match — trusty-memory
 /// supports this natively (`ListDrawersQuery.tag`), unlike the `ws:` PREFIX
-/// scan `fetch_drawers` does for the summary listing.
+/// scan [`fetch_drawers`] does for the summary listing.
 async fn fetch_drawers_by_tag(
-    base_url: &str,
+    socket: &Path,
     palace_id: &str,
     tag: &str,
     limit: usize,
 ) -> Vec<DrawerRow> {
-    let client = match reqwest::Client::builder()
-        .connect_timeout(HEALTH_TIMEOUT)
-        .timeout(CALL_TIMEOUT)
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-    let url = format!(
-        "{}/api/v1/palaces/{palace_id}/drawers",
-        base_url.trim_end_matches('/')
-    );
-    let resp = match client
-        .get(&url)
-        .query(&[
-            ("tag", tag),
-            ("sort", "created_desc"),
-            ("limit", &limit.to_string()),
-        ])
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(_) => return Vec::new(),
-    };
-    if !resp.status().is_success() {
-        return Vec::new();
+    list_drawers(socket, palace_id, Some(tag), limit).await
+}
+
+/// One `memory.drawers_list` call, newest first, fail-open.
+///
+/// Why: the two readers above differ only in whether they narrow by tag, and a
+/// "no workstream data yet" answer must be an empty list rather than an error —
+/// the palace may simply not exist, which the daemon reports as a coded refusal
+/// where the retired route answered 404.
+async fn list_drawers(
+    socket: &Path,
+    palace_id: &str,
+    tag: Option<&str>,
+    limit: usize,
+) -> Vec<DrawerRow> {
+    let mut params = json!({
+        "palace_id": palace_id,
+        "sort": "created_desc",
+        "limit": limit,
+    });
+    if let Some(tag) = tag {
+        params["tag"] = json!(tag);
     }
-    resp.json::<Vec<DrawerRow>>().await.unwrap_or_default()
+    match call(socket, "memory.drawers_list", params, CALL_TIMEOUT).await {
+        Ok(raw) => serde_json::from_value(raw).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// One RPC call against the trusty-memory daemon.
+///
+/// Why it is named rather than inlined: every call site in this module wants
+/// the shared client with its own budget, and naming it once keeps the
+/// `memory_rpc` path in one place.
+async fn call(
+    socket: &Path,
+    method: &str,
+    params: serde_json::Value,
+    timeout: Duration,
+) -> Result<serde_json::Value> {
+    trusty_common::memory_rpc::call_memory_tool_at_with_timeout(socket, method, params, timeout)
+        .await
 }
 
 /// Resolve the current project's trusty-memory palace id from `cwd`.
@@ -327,7 +319,7 @@ pub(crate) fn palace_id_for(cwd: &Path) -> Option<String> {
         .map(|r| r.id)
 }
 
-/// Core listing logic against an explicit cwd + trusty-memory base URL.
+/// Core listing logic against an explicit cwd + trusty-memory socket.
 ///
 /// Why: Extracted so tests can point at a mock daemon / tempdir project root
 /// without depending on the process cwd or a live daemon (mirrors
@@ -338,11 +330,11 @@ pub(crate) fn palace_id_for(cwd: &Path) -> Option<String> {
 /// recent drawers and groups them.
 /// Test: `list_workstreams_at_no_project_root_is_empty`,
 /// `list_workstreams_at_unreachable_daemon_is_empty_not_error`.
-pub(crate) async fn list_workstreams_at(cwd: &Path, base_url: &str) -> Vec<WorkstreamSummary> {
+pub(crate) async fn list_workstreams_at(cwd: &Path, socket: &Path) -> Vec<WorkstreamSummary> {
     let Some(palace_id) = palace_id_for(cwd) else {
         return Vec::new();
     };
-    let rows = fetch_drawers(base_url, &palace_id, WORKSTREAM_SCAN_LIMIT).await;
+    let rows = fetch_drawers(socket, &palace_id, WORKSTREAM_SCAN_LIMIT).await;
     group_by_workstream(&rows)
 }
 
@@ -350,11 +342,11 @@ pub(crate) async fn list_workstreams_at(cwd: &Path, base_url: &str) -> Vec<Works
 /// the testable-core rationale.
 pub(crate) async fn workstream_history_at(
     cwd: &Path,
-    base_url: &str,
+    socket: &Path,
     name: &str,
     limit: usize,
 ) -> Vec<HistoryItem> {
-    drawers_by_tag_at(cwd, base_url, &workstream_tag(name), limit).await
+    drawers_by_tag_at(cwd, socket, &workstream_tag(name), limit).await
 }
 
 /// Just the distinct workstream label set, most-recently-active first — the
@@ -362,8 +354,8 @@ pub(crate) async fn workstream_history_at(
 /// `ctrl::pm_task::dispatch::classification::classification_block`) presents
 /// to the model.
 /// Test: `list_workstream_labels_at_against_mock_daemon`.
-pub(crate) async fn list_workstream_labels_at(cwd: &Path, base_url: &str) -> Vec<String> {
-    list_workstreams_at(cwd, base_url)
+pub(crate) async fn list_workstream_labels_at(cwd: &Path, socket: &Path) -> Vec<String> {
+    list_workstreams_at(cwd, socket)
         .await
         .into_iter()
         .map(|w| w.name)
@@ -381,14 +373,14 @@ pub(crate) async fn list_workstream_labels_at(cwd: &Path, base_url: &str) -> Vec
 /// `create_tagged_drawer_at_and_drawers_by_tag_at_round_trip`.
 pub(crate) async fn drawers_by_tag_at(
     cwd: &Path,
-    base_url: &str,
+    socket: &Path,
     tag: &str,
     limit: usize,
 ) -> Vec<HistoryItem> {
     let Some(palace_id) = palace_id_for(cwd) else {
         return Vec::new();
     };
-    fetch_drawers_by_tag(base_url, &palace_id, tag, limit)
+    fetch_drawers_by_tag(socket, &palace_id, tag, limit)
         .await
         .into_iter()
         .map(|row| HistoryItem {
@@ -397,17 +389,6 @@ pub(crate) async fn drawers_by_tag_at(
             tags: row.tags,
         })
         .collect()
-}
-
-/// Build a short-timeout `reqwest::Client` matching the rest of this
-/// module's read paths — shared by the write path below so palace-create +
-/// drawer-create use the same connect/call timeouts as every read.
-fn build_http_client() -> Option<reqwest::Client> {
-    reqwest::Client::builder()
-        .connect_timeout(HEALTH_TIMEOUT)
-        .timeout(CALL_TIMEOUT)
-        .build()
-        .ok()
 }
 
 /// Write a `content` drawer carrying `tags` into the current project's
@@ -422,57 +403,49 @@ fn build_http_client() -> Option<reqwest::Client> {
 /// write as a side effect); it now uses the same entry point as every other
 /// caller (#5811). Returns `Err` on failure instead of silently dropping the
 /// turn — callers log it and carry on.
-/// What: idempotently ensures the palace exists (`force: true`, matching
-/// `TrustyMemoryClient::ensure_palace`), then posts the drawer with
-/// `force: true` (bypasses trusty-memory's signal/noise gate for
-/// short/structured content, same rationale as `CreateDrawerReq::force`).
+/// What: idempotently ensures the palace exists (`palace_create` with
+/// `force: true`, matching `TrustyMemoryClient::ensure_palace`), then writes the
+/// drawer with `force: true` (bypasses trusty-memory's signal/noise gate for
+/// short/structured content, the same rationale `TrustyMemoryClient` records).
 /// Test: `create_tagged_drawer_at_and_drawers_by_tag_at_round_trip`,
 /// `create_tagged_drawer_at_without_a_project_root_still_resolves_a_palace`,
 /// `create_tagged_drawer_at_malformed_pin_errs`.
 pub(crate) async fn create_tagged_drawer_at(
     cwd: &Path,
-    base_url: &str,
+    socket: &Path,
     content: &str,
     tags: Vec<String>,
 ) -> Result<()> {
     let palace_id = trusty_common::palace_resolve::resolve_palace(cwd)
         .with_context(|| format!("resolve palace for {}", cwd.display()))?
         .id;
-    let client = build_http_client().context("building trusty-memory HTTP client")?;
 
-    let create_url = format!("{}/api/v1/palaces", base_url.trim_end_matches('/'));
-    client
-        .post(&create_url)
-        .json(&serde_json::json!({
+    call(
+        socket,
+        "palace_create",
+        json!({
             "name": palace_id,
             "description": "Auto-created by trusty-agents workstream classification",
             "force": true,
-        }))
-        .send()
-        .await
-        .with_context(|| format!("POST {create_url}"))?;
+        }),
+        CALL_TIMEOUT,
+    )
+    .await
+    .with_context(|| format!("trusty palace_create({palace_id})"))?;
 
-    let drawer_url = format!(
-        "{}/api/v1/palaces/{palace_id}/drawers",
-        base_url.trim_end_matches('/')
-    );
-    let resp = client
-        .post(&drawer_url)
-        .json(&serde_json::json!({
+    call(
+        socket,
+        "memory.drawer_create",
+        json!({
+            "palace_id": palace_id,
             "content": content,
             "tags": tags,
             "force": true,
-        }))
-        .send()
-        .await
-        .with_context(|| format!("POST {drawer_url}"))?;
-    if !resp.status().is_success() {
-        bail!(
-            "trusty-memory create_drawer failed: HTTP {} ({})",
-            resp.status(),
-            drawer_url
-        );
-    }
+        }),
+        CALL_TIMEOUT,
+    )
+    .await
+    .context("trusty memory.drawer_create")?;
     Ok(())
 }
 
@@ -481,7 +454,7 @@ pub(super) async fn list_workstreams_route(
     State(_state): State<AppState>,
 ) -> Json<Vec<WorkstreamSummary>> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    Json(list_workstreams_at(&cwd, &default_trusty_url()).await)
+    Json(list_workstreams_at(&cwd, &default_trusty_socket()).await)
 }
 
 #[derive(Debug, Deserialize)]
@@ -497,7 +470,7 @@ pub(super) async fn workstream_history_route(
 ) -> Json<Vec<HistoryItem>> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let limit = q.limit.unwrap_or(DEFAULT_HISTORY_LIMIT);
-    Json(workstream_history_at(&cwd, &default_trusty_url(), &name, limit).await)
+    Json(workstream_history_at(&cwd, &default_trusty_socket(), &name, limit).await)
 }
 
 #[cfg(test)]

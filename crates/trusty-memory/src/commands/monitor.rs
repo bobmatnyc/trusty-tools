@@ -13,7 +13,7 @@
 
 use anyhow::{Context, Result};
 use trusty_common::monitor::dashboard::{MemoryData, PalaceRow, UNKNOWN_COUNT};
-use trusty_common::monitor::memory_client::{resolve_memory_url, MemoryClient};
+use trusty_common::monitor::memory_client::{resolve_memory_socket, MemoryClient};
 
 /// Format a count with comma thousands separators (`8400` → `"8,400"`).
 ///
@@ -55,17 +55,18 @@ fn fmt_opt_count(n: Option<u64>) -> String {
 /// Why: every monitor subcommand needs the same status + palace snapshot; this
 /// centralises the daemon-URL resolution and the unreachable-daemon error so
 /// each handler stays terse.
-/// What: resolves the daemon URL from the service lock file (falling back to
-/// the default port), then calls `MemoryClient::fetch_all`. A transport error
-/// becomes an `Err` so `main()` exits 1.
+/// What: derives the daemon's socket path, then calls `MemoryClient::fetch_all`.
+/// A transport error becomes an `Err` so `main()` exits 1.
 /// Test: covered indirectly by the handler tests; the live path needs a daemon.
 async fn fetch_memory_data() -> Result<MemoryData> {
-    let url = resolve_memory_url();
-    let client = MemoryClient::new(url.clone());
-    client
-        .fetch_all()
-        .await
-        .map_err(|e| anyhow::anyhow!("could not reach trusty-memory daemon at {url}: {e}"))
+    let socket = resolve_memory_socket()?;
+    let client = MemoryClient::new(socket.clone());
+    client.fetch_all().await.map_err(|e| {
+        anyhow::anyhow!(
+            "could not reach trusty-memory daemon at {}: {e}",
+            socket.display()
+        )
+    })
 }
 
 /// Print daemon status: version and aggregate palace/drawer/vector counts.
@@ -132,22 +133,23 @@ pub async fn handle_palaces(id: Option<String>, json: bool) -> Result<()> {
 
 /// Fetch one palace's live counts, or fail with a clear error.
 ///
-/// Why (issue #4682): `fetch_memory_data` returns the peek-based bulk list,
-/// whose counts are placeholder zeros for any palace the daemon has not
-/// loaded. The single-palace route opens the palace, so it is the only source
-/// that answers "how big is this palace" deterministically.
-/// What: resolves the daemon URL, calls [`MemoryClient::fetch_palace`], and
-/// wraps transport / not-found failures with the daemon address so `main()`
-/// exits 1 with an actionable message.
-/// Test: covered live by `trusty-memory monitor palaces <id>`; the URL and the
-/// projection are unit-tested in `trusty-common`.
+/// Why (issue #4682): the bulk listing's counts are placeholder zeros for any
+/// palace the daemon has not loaded. `memory.palace_get` opens the palace, so it
+/// is the only source that answers "how big is this palace" deterministically.
+/// What: derives the socket, calls [`MemoryClient::fetch_palace`], and wraps
+/// transport / not-found failures with the socket path so `main()` exits 1 with
+/// an actionable message.
+/// Test: covered live by `trusty-memory monitor palaces <id>`; the projection is
+/// unit-tested in `trusty-common`.
 async fn fetch_palace(id: &str) -> Result<PalaceRow> {
-    let url = resolve_memory_url();
-    let client = MemoryClient::new(url.clone());
-    client
-        .fetch_palace(id)
-        .await
-        .with_context(|| format!("could not read palace '{id}' from trusty-memory at {url}"))
+    let socket = resolve_memory_socket()?;
+    let client = MemoryClient::new(socket.clone());
+    client.fetch_palace(id).await.with_context(|| {
+        format!(
+            "could not read palace '{id}' from trusty-memory at {}",
+            socket.display()
+        )
+    })
 }
 
 /// Render every palace as a JSON array or an aligned plain-text table.

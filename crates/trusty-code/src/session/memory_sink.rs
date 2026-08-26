@@ -50,7 +50,7 @@
 //! when `force` was a blanket bypass and is the intended safe default for an
 //! automated writer. A `"status":"skipped"` response is still checked and
 //! warned on as a belt-and-braces guard in case a gate skips the write.
-//! [`TurnMemorySink::base_url`]/[`TurnMemorySink::palace`] expose
+//! [`TurnMemorySink::socket`]/[`TurnMemorySink::palace`] expose
 //! this sink's already-resolved binding so #2348's `recall_session` tool can
 //! target the SAME daemon/palace the turn recorder writes into, without a
 //! second, independent resolution.
@@ -208,7 +208,7 @@ struct QueuedTurn {
 pub struct TurnMemorySink {
     tx: mpsc::Sender<QueuedTurn>,
     /// This sink's already-resolved trusty-memory base URL (#2348 reuse).
-    base_url: String,
+    socket: std::path::PathBuf,
     /// This sink's already-resolved palace id (#2348 reuse).
     palace: String,
     /// Whether this sink may bring `palace` into existence (#4638).
@@ -221,49 +221,49 @@ pub struct TurnMemorySink {
 
 impl TurnMemorySink {
     /// Construct a sink writing to `palace` at the given (already-resolved)
-    /// `base_url`, and spawn its background drain task with the default
+    /// `socket`, and spawn its background drain task with the default
     /// [`QUEUE_CAPACITY`].
     /// Test: `memory_sink::tests::enqueue_drain_happy_path`.
-    pub fn new(base_url: String, palace: String, creation: PalaceCreation) -> Self {
-        Self::with_capacity(base_url, palace, QUEUE_CAPACITY, creation)
+    pub fn new(socket: std::path::PathBuf, palace: String, creation: PalaceCreation) -> Self {
+        Self::with_capacity(socket, palace, QUEUE_CAPACITY, creation)
     }
 
     /// Same as [`Self::new`], reporting each turn's durability verdict to
     /// `observer` (#2425).
     /// Test: `registry_tests::memory_durability_retains_counts_resets_streak_and_warns_at_one_and_three`.
     pub(crate) fn new_observed(
-        base_url: String,
+        socket: std::path::PathBuf,
         palace: String,
         creation: PalaceCreation,
         observer: Arc<dyn MemoryDurabilityObserver>,
     ) -> Self {
-        Self::with_capacity_observed(base_url, palace, QUEUE_CAPACITY, creation, observer)
+        Self::with_capacity_observed(socket, palace, QUEUE_CAPACITY, creation, observer)
     }
 
     /// Same as [`Self::new`] with an explicit queue capacity — tests use a
     /// tiny capacity to exercise the overflow policy cheaply.
     ///
-    /// Why: `base_url` is resolved ONCE by the caller (mirroring
+    /// Why: `socket` is resolved ONCE by the caller (mirroring
     /// `catchup::pm_catchup_context`'s own
-    /// `resolve_memory_base_url_or_unreachable()` call) rather than
+    /// `resolve_memory_socket_or_unreachable()` call) rather than
     /// re-resolved on every enqueued turn — the daemon's bound address does
     /// not change mid-session, and re-resolving on every turn would add
     /// discovery-file I/O to the hot drain path for no benefit. Tests inject
     /// a mock server's URL directly here instead of mutating the
-    /// process-global `TRUSTY_MEMORY_URL` env var (unsafe across parallel
+    /// process-global `TRUSTY_MEMORY_SOCKET` env var (unsafe across parallel
     /// tests).
     /// What: spawns [`drain`] as a detached `tokio::spawn`ed task owning the
     /// receiver half of a `capacity`-bounded channel; returns the sink
     /// holding only the sender half.
     /// Test: `memory_sink::tests::enqueue_drops_newest_when_queue_full`.
     pub fn with_capacity(
-        base_url: String,
+        socket: std::path::PathBuf,
         palace: String,
         capacity: usize,
         creation: PalaceCreation,
     ) -> Self {
         Self::with_capacity_observed(
-            base_url,
+            socket,
             palace,
             capacity,
             creation,
@@ -281,7 +281,7 @@ impl TurnMemorySink {
     /// sink for [`Self::enqueue`]'s synchronous failure paths.
     /// Test: `memory_sink::tests::dropping_sink_releases_detached_drain_observer`.
     pub(crate) fn with_capacity_observed(
-        base_url: String,
+        socket: std::path::PathBuf,
         palace: String,
         capacity: usize,
         creation: PalaceCreation,
@@ -289,7 +289,7 @@ impl TurnMemorySink {
     ) -> Self {
         let (tx, rx) = mpsc::channel(capacity);
         tokio::spawn(drain(
-            base_url.clone(),
+            socket.clone(),
             palace.clone(),
             creation,
             rx,
@@ -297,7 +297,7 @@ impl TurnMemorySink {
         ));
         Self {
             tx,
-            base_url,
+            socket,
             palace,
             creation,
             observer,
@@ -324,18 +324,18 @@ impl TurnMemorySink {
     /// What: Returns the URL passed to (or resolved by) [`Self::new`]/
     /// [`Self::with_capacity`] at construction — fixed for the sink's
     /// lifetime, mirroring `write_turn`'s own binding.
-    /// Test: `memory_sink::tests::base_url_and_palace_expose_construction_args`.
-    pub fn base_url(&self) -> &str {
-        &self.base_url
+    /// Test: `memory_sink::tests::socket_and_palace_expose_construction_args`.
+    pub fn socket(&self) -> &std::path::Path {
+        &self.socket
     }
 
     /// This sink's already-resolved palace id.
     ///
-    /// Why: see [`Self::base_url`] — the same reuse rationale applies to the
+    /// Why: see [`Self::socket`] — the same reuse rationale applies to the
     /// palace binding.
     /// What: Returns the palace passed to [`Self::new`]/[`Self::with_capacity`]
     /// at construction.
-    /// Test: `memory_sink::tests::base_url_and_palace_expose_construction_args`.
+    /// Test: `memory_sink::tests::socket_and_palace_expose_construction_args`.
     pub fn palace(&self) -> &str {
         &self.palace
     }
@@ -430,7 +430,7 @@ impl TurnMemorySink {
 /// `memory_sink::tests::forbidden_creation_never_creates_a_palace`,
 /// `memory_sink::tests::forbidden_creation_still_writes_to_an_existing_palace`.
 async fn drain(
-    base_url: String,
+    socket: std::path::PathBuf,
     palace: String,
     creation: PalaceCreation,
     mut rx: mpsc::Receiver<QueuedTurn>,
@@ -439,7 +439,7 @@ async fn drain(
     let mut palace_ensured = false;
     while let Some(turn) = rx.recv().await {
         if !palace_ensured {
-            palace_ensured = ensure_palace(&base_url, &palace, creation).await;
+            palace_ensured = ensure_palace(&socket, &palace, creation).await;
         }
         // #4638: no palace and no entitlement to make one — the writes below
         // are guaranteed to fail, so don't issue them.
@@ -457,7 +457,7 @@ async fn drain(
             });
             continue;
         }
-        observer.observe(write_turn(&base_url, &palace, &turn).await);
+        observer.observe(write_turn(&socket, &palace, &turn).await);
     }
 }
 
@@ -489,8 +489,8 @@ async fn drain(
 /// Test: `memory_sink::tests::ensure_palace_creates_missing_palace_once`,
 /// `memory_sink::tests::ensure_palace_skips_create_when_palace_exists`,
 /// `memory_sink::tests::forbidden_creation_never_creates_a_palace`.
-async fn ensure_palace(base_url: &str, palace: &str, creation: PalaceCreation) -> bool {
-    if call_tool_wrapped(base_url, "palace_info", json!({"palace": palace}))
+async fn ensure_palace(socket: &std::path::Path, palace: &str, creation: PalaceCreation) -> bool {
+    if call_tool_wrapped(socket, "palace_info", json!({"palace": palace}))
         .await
         .is_ok()
     {
@@ -504,7 +504,7 @@ async fn ensure_palace(base_url: &str, palace: &str, creation: PalaceCreation) -
         "force": true,
         "description": "trusty-code session turn history (auto-created by the turn recorder)",
     });
-    match call_tool_wrapped(base_url, "palace_create", create_params).await {
+    match call_tool_wrapped(socket, "palace_create", create_params).await {
         Ok(_) => {
             info!(palace = %palace, "turn_recorder: created missing palace (#2424)");
             true
@@ -554,8 +554,8 @@ async fn ensure_palace(base_url: &str, palace: &str, creation: PalaceCreation) -
 /// direct dispatch.
 /// What: never propagates an error — every failure is logged via
 /// `tracing::warn!` and swallowed, matching
-/// `resolve_memory_base_url_or_unreachable`'s fail-open contract (mirrored
-/// here, not reused directly, since `base_url` is already resolved by the
+/// `resolve_memory_socket_or_unreachable`'s fail-open contract (mirrored
+/// here, not reused directly, since `socket` is already resolved by the
 /// caller of [`TurnMemorySink::new`]). (#2425) It RETURNS the turn's verdict
 /// rather than propagating anything: `Degraded` with the first failed half's
 /// category if either call failed, `Durable` otherwise. The default warnings
@@ -568,7 +568,7 @@ async fn ensure_palace(base_url: &str, palace: &str, creation: PalaceCreation) -
 /// `memory_sink::tests::write_turn_warns_on_skipped_status`,
 /// `memory_sink::tests::partial_dual_write_counts_once_as_failed_turn`,
 /// `memory_sink::tests::default_memory_warnings_redact_server_payloads_in_subprocess`.
-async fn write_turn(base_url: &str, palace: &str, turn: &QueuedTurn) -> MemoryTurnOutcome {
+async fn write_turn(socket: &std::path::Path, palace: &str, turn: &QueuedTurn) -> MemoryTurnOutcome {
     // #2425: the FIRST failure wins the reported category — a turn that lost
     // both halves is still exactly one degraded turn, not two.
     let mut failure = None;
@@ -578,7 +578,7 @@ async fn write_turn(base_url: &str, palace: &str, turn: &QueuedTurn) -> MemoryTu
         "prompt": turn.prompt,
         "response": turn.response,
     });
-    if let Err(_error) = call_tool_wrapped(base_url, "chat_turn_append", append_params).await {
+    if let Err(_error) = call_tool_wrapped(socket, "chat_turn_append", append_params).await {
         failure = Some(MemoryFailureCategory::ChatTurnAppend);
         warn!(
             failure_category = "chat_turn_append",
@@ -594,7 +594,7 @@ async fn write_turn(base_url: &str, palace: &str, turn: &QueuedTurn) -> MemoryTu
         "tags": [format!("session:{}", turn.session_id), "turn"],
         "force": true,
     });
-    match call_tool_wrapped(base_url, "memory_remember", remember_params).await {
+    match call_tool_wrapped(socket, "memory_remember", remember_params).await {
         Ok(result) => {
             if result.get("status").and_then(|v| v.as_str()) == Some("skipped") {
                 // #2425: `reason` is server-controlled and quotes the rejected

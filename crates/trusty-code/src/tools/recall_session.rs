@@ -83,12 +83,12 @@ struct RecallSessionArgs {
 /// `memory_recall` call against the right daemon/palace and filter to the
 /// right session — all three are resolved once, at construction, by the
 /// caller (`task::executor::run_and_record`, reusing
-/// `session::TurnMemorySink::base_url`/`palace` rather than re-deriving
+/// `session::TurnMemorySink::socket`/`palace` rather than re-deriving
 /// them).
 /// Test: `tests::*`.
 pub struct RecallSessionTool {
     session_id: String,
-    base_url: String,
+    socket: std::path::PathBuf,
     palace: String,
 }
 
@@ -96,12 +96,12 @@ impl RecallSessionTool {
     /// Construct a tool scoped to one session's daemon/palace/id.
     pub fn new(
         session_id: impl Into<String>,
-        base_url: impl Into<String>,
+        socket: impl Into<std::path::PathBuf>,
         palace: impl Into<String>,
     ) -> Self {
         Self {
             session_id: session_id.into(),
-            base_url: base_url.into(),
+            socket: socket.into(),
             palace: palace.into(),
         }
     }
@@ -307,7 +307,7 @@ impl ToolExecutor for RecallSessionTool {
             }),
         );
 
-        let envelope = match call_memory_tool_at(&self.base_url, "tools/call", rpc_params).await {
+        let envelope = match call_memory_tool_at(&self.socket, "tools/call", rpc_params).await {
             Ok(v) => v,
             Err(e) => {
                 warn!(

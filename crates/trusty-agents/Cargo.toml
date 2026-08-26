@@ -1,6 +1,11 @@
 [package]
 name = "trusty-agents"
-version = "0.38.6"
+# #6286 replaces the memory backend's public surface: `default_trusty_url` is
+# `default_trusty_socket`, `TrustyMemoryClient::new` and
+# `MemoryBackend::auto_detect_with_url` take a socket path rather than a base
+# URL, and the workstream helpers thread a `&Path`. Cargo's 0.x rule puts a
+# breaking change in the MINOR position.
+version = "0.39.0"
 edition = "2024"
 description = "Trusty Agents: Rust-native agentic harness with multi-model routing, tool execution, and subprocess delegation."
 license.workspace = true
@@ -59,7 +64,7 @@ trusty-code = { workspace = true }
 #      `aws-types` below are already unconditional direct dependencies of this
 #      crate for the existing `llm::bedrock` (Converse, non-streaming) client.
 trusty-mcp = { workspace = true }  # JSON-RPC / MCP primitives (ADR-0040, #5803)
-trusty-common = { workspace = true, features = ["symgraph-parser", "memory-core", "cli-help", "palace-resolve", "stdio-mcp-client", "session-naming", "config-cli", "axum-server", "inference-client", "bedrock", "uds", "gh-cli"] }
+trusty-common = { workspace = true, features = ["symgraph-parser", "memory-core", "cli-help", "palace-resolve", "stdio-mcp-client", "session-naming", "config-cli", "axum-server", "inference-client", "bedrock", "uds", "memory-rpc", "gh-cli"] }
 # Why (issue #226): trusty-agents only links `trusty_memory::MemoryMcpService` for
 #      in-process `rpc.discover` merging; it does not need the axum HTTP/SSE
 #      surface (it owns its own axum stack for the orchestrator's UI). Setting

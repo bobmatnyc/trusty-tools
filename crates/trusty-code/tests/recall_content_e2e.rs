@@ -16,7 +16,7 @@
 //! Uses `TCODE_MOCK_LLM=echo-recall`
 //! ([`trusty_code::task::mock_llm::RecallEchoLlmClient`]) so the PM issues
 //! exactly one `recall_session` tool call, no live model/API key required,
-//! and `TRUSTY_MEMORY_URL` (`trusty_common::memory_rpc::TRUSTY_MEMORY_URL_ENV`)
+//! and `TRUSTY_MEMORY_SOCKET` (`trusty_common::memory_rpc::TRUSTY_MEMORY_SOCKET_ENV`)
 //! pointed at an in-process mock trusty-memory `/rpc` server that returns two
 //! results: one huge, high-scored entry that alone busts `recall_session`'s
 //! token budget (so it alone is INJECTED), and one small, lower-scored entry
@@ -38,12 +38,11 @@
 
 mod support;
 
-use axum::extract::State;
-use axum::routing::post;
-use axum::{Json, Router};
 use serde_json::{Value, json};
-use support::{StdioSession, find_session_event, project_with_agents};
-use tokio::net::TcpListener;
+use support::{
+    MockMemoryDaemon, StdioSession, find_session_event, project_with_agents,
+    spawn_mock_memory_daemon,
+};
 use tokio::sync::watch;
 
 /// The huge entry's recalled text — long enough (see `recall_session`'s own
@@ -76,52 +75,46 @@ const INJECTED_RUN_ID: &str = "run-e2e-slice-c";
 /// `tag_tx.send(Some(format!("session:{session_id}")))` once it knows the
 /// real session id, before the daemon's `recall_session` call is expected to
 /// resolve.
-async fn spawn_recall_mock_daemon() -> (String, watch::Sender<Option<String>>) {
+async fn spawn_recall_mock_daemon() -> (MockMemoryDaemon, watch::Sender<Option<String>>) {
     let (tag_tx, tag_rx) = watch::channel(None::<String>);
 
-    async fn handle(
-        State(mut rx): State<watch::Receiver<Option<String>>>,
-        Json(_body): Json<Value>,
-    ) -> Json<Value> {
-        // Block until the test driver knows the real session id and
-        // publishes the matching tag — see the function's own docs.
-        let tag = loop {
-            if let Some(tag) = rx.borrow().clone() {
-                break tag;
-            }
-            if rx.changed().await.is_err() {
-                break String::new();
-            }
-        };
+    let daemon = spawn_mock_memory_daemon(move |_method: &str, _params: Value| {
+        let mut rx = tag_rx.clone();
+        Box::pin(async move {
+            // Block until the test driver knows the real session id and
+            // publishes the matching tag — see the function's own docs.
+            let tag = loop {
+                if let Some(tag) = rx.borrow().clone() {
+                    break tag;
+                }
+                if rx.changed().await.is_err() {
+                    break String::new();
+                }
+            };
 
-        let results = vec![
-            json!({
-                "content": huge_injected_text(),
-                "score": 0.93,
-                "tags": [tag, "turn"],
-                "run_id": INJECTED_RUN_ID,
-            }),
-            json!({
-                "content": HELD_BACK_TEXT,
-                "score": 0.41,
-                "tags": [tag, "turn"],
-                // Deliberately no `run_id` — proves the tool defaults to
-                // `None` rather than panicking when the daemon omits it.
-            }),
-        ];
-        let inner =
-            json!({"palace": "p", "query": "pkce oauth flow", "results": results}).to_string();
-        let envelope = json!({"content": [{"type": "text", "text": inner}]});
-        Json(json!({"jsonrpc": "2.0", "id": 1, "result": envelope}))
-    }
+            let results = vec![
+                json!({
+                    "content": huge_injected_text(),
+                    "score": 0.93,
+                    "tags": [tag, "turn"],
+                    "run_id": INJECTED_RUN_ID,
+                }),
+                json!({
+                    "content": HELD_BACK_TEXT,
+                    "score": 0.41,
+                    "tags": [tag, "turn"],
+                    // Deliberately no `run_id` — proves the tool defaults to
+                    // `None` rather than panicking when the daemon omits it.
+                }),
+            ];
+            let inner =
+                json!({"palace": "p", "query": "pkce oauth flow", "results": results}).to_string();
+            Ok(json!({"content": [{"type": "text", "text": inner}]}))
+        })
+    })
+    .await;
 
-    let app = Router::new().route("/rpc", post(handle)).with_state(tag_rx);
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
-    let addr = listener.local_addr().expect("addr");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    (format!("http://{addr}"), tag_tx)
+    (daemon, tag_tx)
 }
 
 /// Drive `task.run` -> `session.attach` -> read-until-`session_done`,
@@ -199,7 +192,7 @@ async fn run_recall_task_to_completion(
 /// Bob's mandatory API-driven e2e directive, not just the in-process unit
 /// tests in `tools::recall_session::tests` and `events_tests`.
 /// What: spawns the daemon with `TCODE_MOCK_LLM=echo-recall` and
-/// `TRUSTY_MEMORY_URL` pointed at the mock trusty-memory server, runs the
+/// `TRUSTY_MEMORY_SOCKET` pointed at the mock trusty-memory socket, runs the
 /// scripted recall task to completion, finds the one `memory_recalled`
 /// event, and asserts: exactly two results; the injected (first) result
 /// carries its full text and `run_id`; the held-back (second) result carries
@@ -207,14 +200,15 @@ async fn run_recall_task_to_completion(
 /// Test: this test.
 #[tokio::test]
 async fn held_back_recall_result_carries_its_text_and_run_id_over_the_wire() {
-    let (mock_base_url, tag_tx) = spawn_recall_mock_daemon().await;
+    let (mock_daemon, tag_tx) = spawn_recall_mock_daemon().await;
+    let mock_socket = mock_daemon.socket().display().to_string();
     let project = project_with_agents();
     let mut daemon = StdioSession::spawn_with_mock_llm_variant_and_env(
         project.path(),
         trusty_code::task::mock_llm::MOCK_LLM_ECHO_RECALL,
         &[(
-            trusty_common::memory_rpc::TRUSTY_MEMORY_URL_ENV,
-            &mock_base_url,
+            trusty_common::memory_rpc::TRUSTY_MEMORY_SOCKET_ENV,
+            &mock_socket,
         )],
     );
 

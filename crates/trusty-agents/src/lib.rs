@@ -107,6 +107,10 @@ pub mod llm;
 pub mod local_inference;
 pub mod logging;
 pub mod mcp;
+/// A stand-in trusty-memory daemon on a temp Unix socket, for tests (#6286).
+#[cfg(test)]
+pub(crate) mod uds_mock;
+
 pub mod memory;
 pub mod mistake_log;
 pub mod perf;
