@@ -4,8 +4,15 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Sidecar code-analysis daemon for [trusty-search](../trusty-search). Fetches chunk
-corpora from the trusty-search daemon, runs static analysis, and serves results via
-HTTP (port 7879) and MCP stdio.
+corpora from the trusty-search daemon, runs static analysis, and serves results as
+JSON-RPC over a Unix socket and via MCP stdio.
+
+> **#6287 (ADR-0032): the daemon no longer binds `127.0.0.1:7879`.** It serves
+> `<data dir>/trusty-analyze/trusty-analyze.sock`, which every consumer derives
+> through the same `trusty_common::daemon_socket_path` call rather than reading
+> a written-down address. `trusty-analyze port` became
+> [`trusty-analyze socket`](#socket-discovery-trusty-analyze-socket); the `/sse`
+> stream and the `--mcp-port` HTTP/SSE listener are deleted, not moved.
 
 ## 📚 Documentation
 
@@ -111,37 +118,33 @@ trusty-analyze health
 
 ### Ops health check
 
-Probe the daemon over HTTP without the CLI — useful for monitoring, systemd
-`ExecStartPost`, or container readiness probes:
+Probe the daemon without the CLI — useful for monitoring, systemd
+`ExecStartPost`, or container readiness probes. There is no `curl` form any
+more; a JSON-RPC frame over the socket is the whole exchange:
 
 ```bash
-# Port-safe idiom — resolves the live port without hard-coding 7879:
-curl http://127.0.0.1:$(trusty-analyze port)/health
-# → {"status":"ok","search_reachable":true}
-
-# Or with the full host:port form:
-curl http://$(trusty-analyze port --addr)/health
-
-# Hard-coded form (works when port is always 7879):
-curl http://127.0.0.1:7879/health
+printf '{"jsonrpc":"2.0","id":1,"method":"analyze.health"}\n' \
+  | nc -U "$(trusty-analyze socket)"
+# → {"jsonrpc":"2.0","id":1,"result":{"status":"ok","version":"…","search_reachable":true}}
 ```
 
 `search_reachable` reflects whether the upstream `trusty-search` daemon (port
-7878) is responding; a `false` here means analysis endpoints will fail even
-though the analyzer process itself is up.
+7878, still HTTP) is responding; a `false` here means every analysis method
+will fail even though the analyzer process itself is up, and `status` reads
+`degraded` rather than `ok`.
 
-### Port discovery (`trusty-analyze port`)
+### Socket discovery (`trusty-analyze socket`)
 
-The `port` subcommand reads the daemon's live address from its discovery file
-so scripts work even when the daemon auto-selected a free port:
+`socket` replaces `port` (#6287). The path is derived, not discovered, so it
+resolves whether or not anything is listening — which is why this command also
+reports liveness and exits non-zero when nothing answers, preserving the
+property that `$(trusty-analyze socket)` fails rather than handing a caller a
+path to a dead socket:
 
 ```bash
-trusty-analyze port          # bare port:     7879
-trusty-analyze port --addr   # host:port:     127.0.0.1:7879
-trusty-analyze port --json   # JSON:          {"addr":"127.0.0.1","port":7879}
+trusty-analyze socket         # bare path: /Users/x/…/trusty-analyze.sock
+trusty-analyze socket --json  # JSON:      {"socket":"…","serving":true}
 ```
-
-Falls back to `7879` when no daemon is running.
 
 ## Features
 
@@ -152,7 +155,7 @@ Falls back to `7879` when no daemon is running.
 - Concept clustering (k-means over hashed bag-of-words embeddings)
 - Facts store: `(subject, predicate, object)` knowledge triples, persisted in redb
 - SCIP protobuf ingest for LSP-quality symbol data
-- Full HTTP API + MCP stdio server (every endpoint has a tool equivalent)
+- Full JSON-RPC surface over a Unix socket + MCP stdio server (every method has a tool equivalent)
 
 ## Claude Code Integration
 
@@ -207,50 +210,61 @@ this table is generated from it, not maintained by hand.
 | `upsert_fact` | always | `subject`, `predicate`, `object`, `index_id`, `confidence?`, `provenance?` | Insert or update a canonical fact triple |
 <!-- END GENERATED: mcp-tools -->
 
-### HTTP equivalents
+### RPC equivalents
 
-Parity rule: every HTTP endpoint has an MCP tool. This mapping is hand-written
-— the route a tool forwards to lives in the dispatcher's match arms, not in the
+Parity rule: every RPC method has an MCP tool. This mapping is hand-written —
+the method a tool forwards to lives in the dispatcher's match arms, not in the
 descriptors, so the generator above cannot derive it. The tool names here are
 cross-checked against the descriptors by `http_equivalents_name_only_real_tools`
-in `tests/generated_docs.rs`, so the list cannot name a tool that does not exist.
+in `tests/generated_docs.rs`, so the list cannot name a tool that does not exist,
+and the method names are cross-checked against the router by
+`mcp_names_the_methods_the_router_registers`.
 
-| Tool | HTTP equivalent |
+#6287 replaced the URL column: these were HTTP routes on port 7879 until
+ADR-0032 moved the daemon onto a socket.
+
+| Tool | RPC method |
 |------|-----------------|
-| `analyzer_health` | `GET /health` |
-| `complexity_hotspots` | `GET /indexes/:id/complexity_hotspots` |
-| `find_smells` | `GET /indexes/:id/smells` |
-| `analyze_quality` | `GET /indexes/:id/quality` |
-| `run_diagnostics` | (composite diagnostics run) |
-| `list_facts` | `GET /facts` |
-| `upsert_fact` | `POST /facts` |
-| `delete_fact` | `DELETE /facts/:id` |
-| `ingest_scip` | `POST /indexes/:id/scip` |
-| `cluster_concepts` | `GET /indexes/:id/clusters` |
-| `extract_graph` | knowledge-graph extraction |
-| `extract_ner` | named-entity extraction (optional ONNX) |
-| `list_entities` | enumerate extracted entities |
-| `list_analyze_indexes` | `GET /indexes` (used by the trusty-console dashboard) |
-| `suggest_refactors` | refactor suggestions |
-| `review_diff` | review a unified diff |
-| `review_github_pr` | review a GitHub pull request |
-| `deep_analysis` | combined deep-analysis pass |
-| `console_metrics` | daemon health + index stats for the trusty-console dashboard |
+| `analyzer_health` | `analyze.health` |
+| `complexity_hotspots` | `analyze.complexity_hotspots` |
+| `complexity_distribution` | `analyze.complexity_distribution` |
+| `find_smells` | `analyze.smells` |
+| `analyze_quality` | `analyze.quality` |
+| `run_diagnostics` | `analyze.diagnostics` |
+| `list_facts` | `analyze.facts_list` |
+| `upsert_fact` | `analyze.facts_upsert` |
+| `delete_fact` | `analyze.facts_delete` |
+| `ingest_scip` | `analyze.scip_ingest` |
+| `cluster_concepts` | `analyze.clusters` |
+| `extract_graph` | `analyze.graph` |
+| `extract_ner` | `analyze.ner` (optional ONNX) |
+| `list_entities` | `analyze.entities` |
+| `list_analyze_indexes` | `analyze.list_indexes` |
+| `suggest_refactors` | `analyze.refactor_suggestions` |
+| `review_diff` | `analyze.review` |
+| `review_github_pr` | `analyze.review_github_pr` |
+| `deep_analysis` | `analyze.deep_analysis` |
+| `console_metrics` | `analyze.health` plus `analyze.list_indexes`, for the trusty-console dashboard |
 
-## HTTP API
+## RPC Surface
 
-Port 7879. Requires trusty-search on port 7878.
+JSON-RPC 2.0 over `<data dir>/trusty-analyze/trusty-analyze.sock`, one
+newline-terminated frame per request. Requires trusty-search on port 7878.
+`service::rpc::METHODS` is the authoritative list — the four crates that dial
+these names by literal are checked against it by
+`tests/uds_consumer_contract.rs`:
 
 ```
-GET  /health
-GET  /indexes/:id/complexity_hotspots[?top_k=N]
-GET  /indexes/:id/smells[?category=<name>]
-GET  /indexes/:id/quality
-GET  /indexes/:id/clusters?k=N&method=bow
-GET  /facts[?subject=<s>&predicate=<p>]
-POST /facts
-DELETE /facts/:id
-POST /indexes/:id/scip
+analyze.health                    analyze.graph
+analyze.list_indexes              analyze.entities
+analyze.complexity_hotspots       analyze.clusters
+analyze.complexity_distribution   analyze.ner
+analyze.smells                    analyze.scip_ingest
+analyze.refactor_suggestions      analyze.scip_status
+analyze.quality                   analyze.review
+analyze.diagnostics               analyze.review_github_pr
+analyze.facts_list                analyze.deep_analysis
+analyze.facts_upsert              analyze.facts_delete
 ```
 
 ## Deep-Analysis LLM Pass
@@ -305,14 +319,14 @@ accumulation, recommendations extraction) is identical.
 | Variable | Default | Description |
 |---|---|---|
 | `TRUSTY_SEARCH_URL` | `http://127.0.0.1:7878` | trusty-search daemon address |
-| `TRUSTY_ANALYZER_PORT` | `7879` | Analyzer listen port |
+| `TRUSTY_ANALYZE_SOCKET` | derived from the data dir | Analyzer socket path, honoured by `trusty-audit`'s guard. `TRUSTY_ANALYZER_PORT` was removed with the listener (#6287). |
 | `RUST_LOG` | `warn` | Tracing filter |
 
 ## Feature Flags
 
 | Flag | Description |
 |---|---|
-| `http-server` | Axum HTTP daemon (enabled by default). Required for the `trusty-analyze` binary. |
+| `http-server` | The `service` module — the UDS daemon and the axum client it uses to reach trusty-search (enabled by default). Required for the `trusty-analyze` binary. The name predates #6287 and is now about which dependencies compile, not about a listener this daemon binds. |
 | `ner` | Optional ONNX-backed named entity recognition (separate model file required). Off by default; not on the boot path. |
 
 `bundled-ort`, `load-dynamic`, and `cuda` were removed in #5067 along with the
@@ -321,18 +335,18 @@ neural clustering embedder. One install command works on every host.
 ## Architecture
 
 The crate is a single `trusty-analyze` package containing the CLI binary
-(`trusty-analyze`) and a library. All analysis engines, the HTTP server, and the
-MCP stdio server live within this one crate. Shared types (complexity metrics,
+(`trusty-analyze`) and a library. All analysis engines, the socket server, and
+the MCP stdio server live within this one crate. Shared types (complexity metrics,
 code smells, knowledge-graph entities, facts) come from `trusty-common`.
 
 ```
-trusty-search (port 7878)                trusty-analyze (port 7879)
+trusty-search (port 7878, HTTP)          trusty-analyze (trusty-analyze.sock)
   GET /indexes/:id/chunks  ──────────►   complexity analysis (tree-sitter)
   (bulk corpus export)                   blame + temporal decay
                                          quality grade aggregation
                                          k-means concept clustering
                                          facts store (redb)
-                                         axum HTTP API + MCP stdio
+                                         JSON-RPC over UDS + MCP stdio
 ```
 
 ## Development

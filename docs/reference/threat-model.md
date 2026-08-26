@@ -8,19 +8,19 @@ inter-service traffic moves to UDS, and only `trusty-console` keeps HTTP.
 [ADR-0018](../adr/0018-loopback-only-doctrine.md), the doctrine this document
 was written to audit compliance against, is now `Superseded by 0032`. The
 bind/guard/console-proxy-allowlist table below still describes the **live**
-topology as of this writing for five of the six daemons in ADR-0032's Scope
+topology as of this writing for four of the six daemons in ADR-0032's Scope
 — it is no longer a description of the target architecture, and most of its
 columns (per-daemon bind address, origin guard) stop applying once a daemon
 has no HTTP listener to guard. Re-deriving those rows for the UDS topology is
 implementation work, out of scope for this update. Read ADR-0032 before
 treating any row below as prescriptive.
 
-> 🟡 **Progress note (2026-08-26, Refs #6277, PR #6281).** `trusty-review` is
-> no longer part of "nothing has migrated": it is the first daemon through
-> ADR-0032's path, and its row below already reflects the UDS socket it now
-> serves. The remaining five daemons (`trusty-search`, `trusty-memory`,
-> `trusty-analyze`, `trusty-agents`, `trusty-mpm`) have not migrated and
-> their rows still describe the pre-ADR-0032 live topology.
+> 🟡 **Progress note (2026-08-26, Refs #6277 / PR #6281, then #6287).**
+> `trusty-review` was the first daemon through ADR-0032's path and
+> `trusty-analyze` the second; both rows below already reflect the UDS socket
+> each now serves. The remaining four (`trusty-search`, `trusty-memory`,
+> `trusty-agents`, `trusty-mpm`) have not migrated and their rows still
+> describe the pre-ADR-0032 live topology.
 
 This is the authoritative reference for **who can reach which trusty-\* HTTP
 surface, from where, and what stops them.** It exists because the
@@ -60,9 +60,10 @@ reasoning — it is the compliance inventory the ADR promises.
 ADR-0018 governs bind-address reachability; ADR-0031 governs which local
 transport inter-crate callers use to reach an already-loopback-bound daemon —
 UDS for inter-crate same-host traffic, one shared HTTP server for everything
-external. **Migration has started but is not complete** — `trusty-review` has
-moved (PR #6281, see the progress note above); the inventory below still
-describes the live topology for the other five daemons. Whatever HTTP remains
+external. **Migration has started but is not complete** — `trusty-review` (PR
+#6281) and `trusty-analyze` (#6287) have moved, see the progress note above;
+the inventory below still describes the live topology for the other four
+daemons. Whatever HTTP remains
 under ADR-0031 stays governed by ADR-0018 exactly as written, and ADR-0031
 authorises no new off-loopback binding. If adopted it would *strengthen* this
 doctrine's goal: a loopback TCP port is reachable by any local process, a
@@ -95,7 +96,7 @@ the daemons' listener setup code moves independently of this doc.
 |---|---|---|---|---|---|
 | **trusty-search** | `127.0.0.1:7878` (`service/constants.rs::DEFAULT_PORT`) | **Yes** — router-wide `SelfOrigins` guard (`service/server/mod.rs`) | Yes (`search` → `trusty-search`) | Yes, embedded (`ui/`) | CLI (`trusty-search status`/`port`), native MCP stdio bridge (HTTP→`/rpc`), embedded UI, console proxy |
 | **trusty-memory** | `127.0.0.1:7070`–`7079` (auto-selects next free); `--http` accepts any explicit addr | **Yes** — router-wide `SelfOrigins` guard (`web/mod.rs`) | Yes (`memory` → `trusty-memory`) | Yes, embedded (`ui/`) | CLI, native MCP stdio bridge — a pure HTTP proxy forwarding JSON-RPC to the daemon's own `/rpc` (no local tool logic), embedded UI, console proxy |
-| **trusty-analyze** | `127.0.0.1:7879` (`commands/port.rs::DEFAULT_PORT`) | **Yes** — router-wide `SelfOrigins` guard (`service/routes.rs`) | Yes (`analyze` → `trusty-analyze`) | Yes, embedded (`ui/`) | CLI, native MCP stdio bridge, embedded UI, console proxy. **No webhook surface** — `POST /webhooks/github` was retired in #5181 and 404s |
+| **trusty-analyze** | **No TCP listener.** Serves `<data dir>/trusty-analyze/trusty-analyze.sock` (`trusty_common::daemon_socket_path`), bound through `bind_singleton_hardened` (#6287, ADR-0032) | **n/a** — `SelfOrigins`/`with_guarded_middleware` deliberately not ported, for the reason the `trusty-review` row gives. Same boundary: the `0700` directory, the `0600` socket, and `ensure_peer_is_self` on every accepted connection | **n/a** — the `analyze` proxy row was removed with the listener | No embedded UI served by this daemon — `ui/dist` is still tracked, and the console-hosted mount is a follow-up | CLI, the native MCP stdio bridge (an RPC client of this daemon's own socket), `trusty-console`'s `AnalyzeConnector`, `tctl`'s health probe, `tga`'s audit guard, `trusty-audit`'s grounding guard, and `trusty-review`'s `report --analyze` adapter — all over that socket. **No webhook surface** — `POST /webhooks/github` was retired in #5181; `/sse` and the `--mcp-port` second listener went with the migration |
 | **trusty-review** | **No TCP listener.** Serves `<data dir>/trusty-review.sock` (`trusty_common::daemon_socket_path`), bound through `bind_singleton_hardened` (#6277, ADR-0032) | **n/a** — `SelfOrigins`/`with_guarded_middleware` deliberately not ported: browser-CSRF machinery has no meaning on a socket. The boundary is the `0700` directory, the `0600` socket, and `ensure_peer_is_self` on every accepted connection | **n/a** — nothing to proxy; ADR-0035 aggregator routing is deferred | No embedded UI | CLI, `trusty-console`'s `ReviewConnector`, `tctl`'s health probe — all over that socket. **No webhook surface** — `POST /pr/github/webhook` was retired in #5181; the webhook path is the separate `trusty-review-webhook.sock` (ADR-0034) |
 | **trusty-agents** | `127.0.0.1:8080` (`--port`; 7654 is the conventional dev/UI port, passed explicitly). `--bind` is an explicit non-loopback opt-in that `serve_with_config` **refuses to start without `--api-token`** (`api/server/routes.rs`) | **Yes** — router-wide `SelfOrigins` guard via `with_guarded_middleware` (`api/server/routes.rs::build_router_with_origins`) | Yes (`agents` → `trusty-agents`, #3331) | Yes, separate `agents-ui` crate | CLI, native MCP stdio bridge, `agents-ui` (Tauri — writes go over Tauri IPC, not HTTP), console proxy |
 | **trusty-mpm** | `127.0.0.1:7880` | **Yes** — `guard_router` wraps the listener with the `SelfOrigins` guard (`daemon/api/origin_guard.rs`) | Yes (`mpm` → `trusty-mpm`, #1849 Phase 1) | No embedded UI (separate `trusty-mpm-gui` Tauri app) | CLI (`tm`), native MCP stdio bridge, `trusty-mpm-gui` (talks **directly** to the daemon, not gateway-first — migration tracked as [#3333](https://github.com/bobmatnyc/trusty-tools/issues/3333), #1849 Phase 2), console proxy |

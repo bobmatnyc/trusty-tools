@@ -267,6 +267,20 @@ carve-out this ADR does not close.
   > (`trusty-search`, `trusty-memory`, `trusty-analyze`, `trusty-agents`,
   > `trusty-mpm`) have not migrated; this bullet's re-derivation work remains
   > open for them.
+  >
+  > 🟡 **Progress note (2026-08-26, Refs #6287).** `trusty-analyze` is the
+  > second, and the first to exercise this ADR's harder cases. Its `/sse`
+  > stream and its `--mcp-port` second HTTP/SSE listener were DELETED rather
+  > than ported: `/sse`'s only subscriber was the daemon's own SPA, and
+  > `--mcp-port` had no in-repo consumer at all — a second
+  > ADR-0032-forbidden surface the original scoping missed. Its own MCP stdio
+  > server was an HTTP client of its own daemon, so it became an RPC client of
+  > its own socket in the same change. Four crates dialled port 7879 and all
+  > four moved in lockstep;
+  > `crates/trusty-analyze/tests/uds_consumer_contract.rs` is what proves they
+  > agree. Still open for it: the console-hosted mount for `ui/dist`, which
+  > this ADR's Scope leaves as follow-up work. Four daemons remain
+  > (`trusty-search`, `trusty-memory`, `trusty-agents`, `trusty-mpm`).
 - ADR-0031 should be moved from Proposed to Accepted, or folded into this
   ADR's text, now that its central open question (adopt UDS?) is settled.
   **Recommendation, not a unilateral rewrite:** this ADR does not change
