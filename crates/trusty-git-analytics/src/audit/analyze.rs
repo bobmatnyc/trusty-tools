@@ -90,7 +90,7 @@ pub fn default_analyze_socket() -> anyhow::Result<PathBuf> {
 /// the binary again". `trusty-analyze serve` exits immediately when
 /// `trusty-search` is unreachable, which is the usual reason a spawn produces no
 /// daemon, so the message names that ordering rather than the symptom.
-/// What: the address probed, the binary tried, and the underlying cause.
+/// What: the socket probed, the binary tried, and the underlying cause.
 /// Test: `super::tests::an_analyze_daemon_that_never_comes_up_refuses_the_audit`.
 #[derive(Debug, thiserror::Error)]
 #[error(
@@ -118,9 +118,9 @@ pub struct AnalyzeDaemonUnavailable {
 /// Why: the two values come from the environment and the two budgets are fixed,
 /// which makes the whole guard untestable if it reads them itself. Taking them
 /// as a value is what lets a test drive the spawn-and-poll path against a stub
-/// executable on an ephemeral port — the same split
+/// executable on a temp-dir socket — the same split
 /// [`super::review::binary_from_override`] uses for its rule.
-/// What: the daemon address, the binary to spawn, and the readiness budget.
+/// What: the daemon socket, the binary to spawn, and the readiness budget.
 /// Test: `super::tests::a_reachable_analyze_daemon_is_not_restarted`.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -138,8 +138,8 @@ pub struct AnalyzeGuard {
 impl AnalyzeGuard {
     /// The guard this process runs with, resolved from the environment.
     ///
-    /// Why/What: reads [`ENV_ANALYZE_URL`] and [`ENV_ANALYZE_BIN`], applying
-    /// [`url_from_override`] and [`binary_from_override`]. Reading the two
+    /// Why/What: reads [`ENV_ANALYZE_SOCKET`] and [`ENV_ANALYZE_BIN`], applying
+    /// [`socket_from_override`] and [`binary_from_override`]. Reading the two
     /// variables is all this does; the rules live in those pure functions so the
     /// tests never call `std::env::set_var`, which is `unsafe` in edition 2024
     /// and unsound under parallel tests (#5308 review).

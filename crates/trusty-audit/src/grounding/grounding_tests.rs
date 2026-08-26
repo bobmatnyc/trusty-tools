@@ -133,16 +133,75 @@ fn stub_binary(at: &Path, name: &str, script: &str) -> PathBuf {
 }
 
 /// Tools whose budgets are short enough that no failing test waits on one.
-fn tools(search: PathBuf, search_url: String, analyze: PathBuf, analyze_url: String) -> Tools {
+fn tools(search: PathBuf, search_url: String, analyze: PathBuf, analyze_socket: PathBuf) -> Tools {
     Tools {
         search,
         search_url,
         analyze,
-        analyze_url,
+        analyze_socket,
         bind_timeout: Duration::from_millis(60),
         startup_timeout: Duration::from_millis(150),
         poll_interval: Duration::from_millis(20),
     }
+}
+
+/// A stand-in `trusty-analyze` socket (#6287).
+///
+/// Why: the analyze leg dials a Unix socket now, so [`stub_daemon`] — one HTTP
+/// listener that answered for both daemons — can no longer stand in for it. The
+/// search half stays HTTP, which is why both stubs still exist.
+///
+/// What: binds a hardened socket under `dir` and answers two methods.
+/// `analyze.health` always reports `ok`; `analyze.complexity_hotspots` returns
+/// `hotspots` as its result, or a JSON-RPC error when `hotspots` is `None` —
+/// which is what the pre-#6287 stub's HTTP 500 meant, and what the fetch leg
+/// must still turn into a named gap rather than an empty ranking.
+fn stub_analyze_socket(dir: &Path, hotspots: Option<&'static str>) -> PathBuf {
+    // A distinct filename per stub: one test builds its `Tools` twice from the
+    // same temp dir, and a socket path can only be bound once.
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let socket = dir.join("sockets").join(format!("trusty-analyze-{n}.sock"));
+    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind the stub socket");
+    tokio::spawn(async move {
+        while let Ok((mut conn, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+                let mut sink = Vec::new();
+                let _ = conn.read_to_end(&mut sink).await;
+                let request = String::from_utf8_lossy(&sink).into_owned();
+                let reply = if request.contains("analyze.health") {
+                    r#"{"jsonrpc":"2.0","id":1,"result":{"status":"ok","version":"0.0.0","search_reachable":true}}"#.to_owned()
+                } else if request.contains("analyze.complexity_hotspots") {
+                    match hotspots {
+                        // Compacted, not interpolated raw: the fixtures are
+                        // pretty-printed and a frame is newline-terminated, so
+                        // embedding one verbatim would end the frame at its
+                        // first line break.
+                        Some(json) => {
+                            let value: serde_json::Value =
+                                serde_json::from_str(json).expect("a valid hotspot fixture");
+                            format!(r#"{{"jsonrpc":"2.0","id":1,"result":{value}}}"#)
+                        }
+                        None => r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"index is not loaded"}}"#.to_owned(),
+                    }
+                } else {
+                    r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"no such method"}}"#
+                        .to_owned()
+                };
+                let _ = conn.write_all(reply.as_bytes()).await;
+                let _ = conn.write_all(b"\n").await;
+                let _ = conn.flush().await;
+            });
+        }
+    });
+    socket
+}
+
+/// A socket path nothing has ever bound — the analyze equivalent of
+/// [`dead_url`].
+fn dead_socket(dir: &Path) -> PathBuf {
+    dir.join("absent-analyze.sock")
 }
 
 const HOTSPOTS: &str = r#"{"index_id":"acme-api","top_n":60,"hotspots":[
@@ -187,11 +246,12 @@ fn manifest_naming(dir: &Path, checkout: &Path) -> PathBuf {
 #[tokio::test]
 async fn a_checkout_with_no_basename_never_reaches_a_daemon() {
     let dead = dead_url().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
     let t = tools(
         PathBuf::from("/nonexistent/trusty-search"),
-        dead.clone(),
-        PathBuf::from("/nonexistent/trusty-analyze"),
         dead,
+        PathBuf::from("/nonexistent/trusty-analyze"),
+        dead_socket(tmp.path()),
     );
     let out = ground(
         &t,
@@ -217,11 +277,12 @@ async fn a_checkout_with_no_basename_never_reaches_a_daemon() {
 #[tokio::test]
 async fn a_search_daemon_that_will_not_start_is_a_named_gap() {
     let dead = dead_url().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
     let t = tools(
         PathBuf::from("/nonexistent/trusty-search"),
-        dead.clone(),
-        PathBuf::from("/nonexistent/trusty-analyze"),
         dead,
+        PathBuf::from("/nonexistent/trusty-analyze"),
+        dead_socket(tmp.path()),
     );
     let out = ground(
         &t,
@@ -250,7 +311,7 @@ async fn a_reachable_search_daemon_is_not_restarted() {
         PathBuf::from("/nonexistent/trusty-search"),
         search_url,
         PathBuf::from("/nonexistent/trusty-analyze"),
-        dead_url().await,
+        dead_socket(tmp.path()),
     );
     let _ = tmp;
     daemons::ensure_search(&t)
@@ -273,7 +334,7 @@ async fn an_unindexable_checkout_is_a_named_gap() {
         search,
         stub_daemon(None).await,
         PathBuf::from("/nonexistent/trusty-analyze"),
-        dead_url().await,
+        dead_socket(tmp.path()),
     );
     let out = ground(
         &t,
@@ -306,7 +367,7 @@ async fn an_analyze_daemon_that_will_not_start_is_a_named_gap() {
         approving_search(tmp.path()),
         stub_daemon_with(None, Some(SEARCH_HITS)).await,
         PathBuf::from("/nonexistent/trusty-analyze"),
-        dead_url().await,
+        dead_socket(tmp.path()),
     );
     let out = ground(
         &t,
@@ -342,7 +403,7 @@ async fn an_unreachable_hotspots_endpoint_is_a_named_gap() {
         approving_search(tmp.path()),
         stub_daemon_with(None, Some(SEARCH_HITS)).await,
         PathBuf::from("/nonexistent/trusty-analyze"),
-        stub_daemon(None).await,
+        stub_analyze_socket(tmp.path(), None),
     );
     let out = ground(
         &t,
@@ -353,7 +414,14 @@ async fn an_unreachable_hotspots_endpoint_is_a_named_gap() {
     )
     .await;
     assert_eq!(out.gaps.len(), 1, "{:?}", out.gaps);
-    assert!(out.gaps[0].contains("500"), "{:?}", out.gaps);
+    // #6287: the reachable-but-broken daemon answers a JSON-RPC error frame
+    // where it used to answer HTTP 500. The gap must carry the daemon's own
+    // reason either way — that is what separates it from an unreachable one.
+    assert!(
+        out.gaps[0].contains("index is not loaded"),
+        "{:?}",
+        out.gaps
+    );
     assert!(
         out.gaps[0].contains("search-derived evidence only"),
         "{:?}",
@@ -372,7 +440,7 @@ async fn an_empty_hotspot_list_is_a_named_gap() {
         approving_search(tmp.path()),
         stub_daemon_with(None, Some(SEARCH_HITS)).await,
         PathBuf::from("/nonexistent/trusty-analyze"),
-        stub_daemon(Some(EMPTY_HOTSPOTS)).await,
+        stub_analyze_socket(tmp.path(), Some(EMPTY_HOTSPOTS)),
     );
     let out = ground(
         &t,
@@ -401,7 +469,7 @@ async fn a_search_that_answers_nothing_is_a_named_gap() {
         approving_search(tmp.path()),
         stub_daemon_with(None, Some(r#"{"results":[]}"#)).await,
         PathBuf::from("/nonexistent/trusty-analyze"),
-        stub_daemon(Some(EMPTY_HOTSPOTS)).await,
+        stub_analyze_socket(tmp.path(), Some(EMPTY_HOTSPOTS)),
     );
     let out = ground(
         &t,
@@ -436,7 +504,7 @@ async fn failing_evidence_queries_are_named_once_with_their_count() {
         approving_search(tmp.path()),
         stub_daemon(None).await, // answers /health, 404s every query
         PathBuf::from("/nonexistent/trusty-analyze"),
-        stub_daemon(Some(EMPTY_HOTSPOTS)).await,
+        stub_analyze_socket(tmp.path(), Some(EMPTY_HOTSPOTS)),
     );
     let out = ground(
         &t,
@@ -465,7 +533,7 @@ async fn a_daemon_that_binds_but_never_answers_is_a_named_gap() {
         approving_search(tmp.path()),
         listening_but_unhealthy().await,
         PathBuf::from("/nonexistent/trusty-analyze"),
-        dead_url().await,
+        dead_socket(tmp.path()),
     );
     let out = ground(
         &t,
@@ -506,7 +574,7 @@ async fn hotspots_and_search_hits_become_ranked_inspect_priority_in_the_manifest
         approving_search(tmp.path()),
         stub_daemon_with(None, Some(SEARCH_HITS)).await,
         PathBuf::from("/nonexistent/trusty-analyze"),
-        stub_daemon(Some(payload)).await,
+        stub_analyze_socket(tmp.path(), Some(payload)),
     );
     let gaps = ground_manifest(
         &manifest,
@@ -606,7 +674,7 @@ async fn a_search_that_found_nothing_is_a_gap_even_when_a_manifest_backfills_it(
         approving_search(tmp.path()),
         stub_daemon_with(None, Some(r#"{"results":[]}"#)).await,
         PathBuf::from("/nonexistent/trusty-analyze"),
-        stub_daemon(Some(EMPTY_HOTSPOTS)).await,
+        stub_analyze_socket(tmp.path(), Some(EMPTY_HOTSPOTS)),
     );
     let out = ground(
         &t,
@@ -661,7 +729,7 @@ async fn a_ranking_that_lands_after_the_render_says_so() {
             approving_search(tmp.path()),
             stub_daemon_with(None, Some(SEARCH_HITS)).await,
             PathBuf::from("/nonexistent/trusty-analyze"),
-            stub_daemon(Some(payload)).await,
+            stub_analyze_socket(tmp.path(), Some(payload)),
         )
     };
 
@@ -752,11 +820,12 @@ async fn a_gap_is_recorded_in_the_manifest_the_renderer_reads() {
     std::fs::create_dir_all(&checkout).expect("mkdir checkout");
     let manifest = manifest_naming(tmp.path(), &checkout);
     let dead = dead_url().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
     let t = tools(
         PathBuf::from("/nonexistent/trusty-search"),
-        dead.clone(),
-        PathBuf::from("/nonexistent/trusty-analyze"),
         dead,
+        PathBuf::from("/nonexistent/trusty-analyze"),
+        dead_socket(tmp.path()),
     );
     let gaps = ground_manifest(
         &manifest,
@@ -802,7 +871,7 @@ async fn a_manifest_that_cannot_be_written_is_a_named_gap() {
         approving_search(tmp.path()),
         stub_daemon_with(None, Some(SEARCH_HITS)).await,
         PathBuf::from("/nonexistent/trusty-analyze"),
-        stub_daemon(Some(payload)).await,
+        stub_analyze_socket(tmp.path(), Some(payload)),
     );
     let gaps = ground_manifest(
         &manifest,

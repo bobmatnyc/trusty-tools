@@ -21,6 +21,7 @@
 //!
 //! Test: `daemon_tests`, and `super::grounding_tests` for the live arms.
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use std::time::Instant;
@@ -39,22 +40,26 @@ pub const ENV_SEARCH_BIN: &str = "TRUSTY_SEARCH_BIN";
 /// Environment variable naming the `trusty-analyze` binary.
 pub const ENV_ANALYZE_BIN: &str = "TRUSTY_ANALYZE_BIN";
 
-/// Environment variable overriding the trusty-analyze daemon's address.
+/// Environment variable overriding the trusty-analyze daemon's socket.
 ///
 /// Why a literal rather than a shared constant: this crate has no Cargo edge to
-/// `tga`, which owns the same three names (`tga::audit::ENV_ANALYZE_URL`), and
+/// `tga`, which owns the same names (`tga::audit::ENV_ANALYZE_SOCKET`), and
 /// linking a workspace-version `tga` into a client whose entire discipline is
 /// running PINNED binaries would defeat the pinning. It is a copied
 /// cross-process contract — unlike the index id, which since #6149 is one
 /// shared function in `trusty-common` rather than three copies — and it is
 /// pinned by `daemon_tests::the_analyze_defaults_match_the_contract_tga_uses`.
-pub const ENV_ANALYZE_URL: &str = "TRUSTY_ANALYZE_URL";
+///
+/// #6287 renamed it from `TRUSTY_ANALYZE_URL`: the value it carries is a
+/// filesystem path now, and a variable still saying URL would leave an operator
+/// setting `http://…` and getting a dial failure naming a socket they never
+/// configured.
+pub const ENV_ANALYZE_SOCKET: &str = "TRUSTY_ANALYZE_SOCKET";
 
-/// The trusty-analyze daemon's address when nothing overrides it.
-const DEFAULT_ANALYZE_URL: &str = "http://127.0.0.1:7879";
-
-/// The port `trusty-analyze serve` binds when the address names none.
-const DEFAULT_ANALYZE_PORT: u16 = 7879;
+/// The method `trusty-analyze` answers a health probe on.
+///
+/// Copied for the same reason [`ENV_ANALYZE_SOCKET`] is.
+const ANALYZE_HEALTH_METHOD: &str = "analyze.health";
 
 /// Wall-clock budget for a freshly-spawned daemon to answer `/health`.
 ///
@@ -87,10 +92,17 @@ pub fn search_base_url() -> String {
     DaemonAddrLayout::TRUSTY_SEARCH.resolve_base_url()
 }
 
-/// The trusty-analyze daemon's address: [`ENV_ANALYZE_URL`], else the default.
+/// The trusty-analyze daemon's socket: [`ENV_ANALYZE_SOCKET`], else the derived
+/// default.
+///
+/// #6287: the default is DERIVED through the same `daemon_socket_path` call the
+/// daemon binds, which is what removes the hand-synced address constant this
+/// used to fall back to. A resolution failure yields an empty path, which
+/// [`ensure_analyze`] then reports as unreachable — the same outcome a wrong
+/// path would produce, without the guess.
 #[must_use]
-pub fn analyze_base_url() -> String {
-    url_from_override(std::env::var(ENV_ANALYZE_URL).ok().as_deref())
+pub fn analyze_socket() -> PathBuf {
+    socket_from_override(std::env::var(ENV_ANALYZE_SOCKET).ok().as_deref())
 }
 
 /// The override rule itself: a non-empty value wins, everything else defaults.
@@ -98,32 +110,49 @@ pub fn analyze_base_url() -> String {
 /// Split out so the rule is asserted without any test reading or writing the
 /// process environment — `set_var` is `unsafe` in edition 2024 and unsound under
 /// the parallel harness.
-fn url_from_override(value: Option<&str>) -> String {
-    value
-        .filter(|s| !s.is_empty())
-        .unwrap_or(DEFAULT_ANALYZE_URL)
-        .to_string()
+fn socket_from_override(value: Option<&str>) -> PathBuf {
+    match value.filter(|s| !s.is_empty()) {
+        Some(p) => PathBuf::from(p),
+        None => trusty_common::daemon_socket_path("trusty-analyze").unwrap_or_default(),
+    }
+}
+
+/// Is the trusty-analyze daemon at `socket` up AND is trusty-search reachable
+/// from it?
+///
+/// Why: a degraded analyze daemon serves an empty hotspot list, which reads as
+/// "nothing complex" rather than as an outage. Before #6287 the verdict came
+/// free — the daemon answered HTTP 503 while degraded and `probe_once` counted
+/// only a 2xx — and a JSON-RPC health call answers with a result frame either
+/// way, so the check has to read `status` explicitly to keep it.
+///
+/// What: one `analyze.health` frame; `true` only for a result whose `status` is
+/// `"ok"`.
+async fn analyze_is_healthy(socket: &Path, timeout: Duration) -> bool {
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": ANALYZE_HEALTH_METHOD,
+    });
+    let Ok(response) = trusty_common::uds::send_framed_request::<
+        _,
+        trusty_common::uds::server::RpcResponse,
+    >(socket, &request, timeout)
+    .await
+    else {
+        return false;
+    };
+    response
+        .result
+        .as_ref()
+        .and_then(|r: &serde_json::Value| r.get("status"))
+        .and_then(serde_json::Value::as_str)
+        == Some("ok")
 }
 
 /// The health endpoint for a base address, tolerating a trailing slash.
 fn health_url(base: &str) -> String {
     format!("{}/health", base.trim_end_matches('/'))
-}
-
-/// The port to bind, read out of the daemon's address.
-///
-/// Why: `trusty-analyze serve` takes `--port`, not a URL, so an operator who
-/// moved the daemon with [`ENV_ANALYZE_URL`] must get a daemon on THAT port —
-/// spawning on 7879 and then probing the override would wait out the whole
-/// budget and refuse a correctly-configured run.
-fn port_of(url: &str) -> u16 {
-    url.trim_start_matches("http://")
-        .trim_start_matches("https://")
-        .split('/')
-        .next()
-        .and_then(|authority| authority.rsplit(':').next())
-        .and_then(|port| port.parse::<u16>().ok())
-        .unwrap_or(DEFAULT_ANALYZE_PORT)
 }
 
 /// The argument vector `trusty-search` is started with.
@@ -138,8 +167,14 @@ fn search_start_args() -> [&'static str; 2] {
 }
 
 /// The argument vector `trusty-analyze` is started with.
-fn analyze_serve_args(port: u16) -> [String; 3] {
-    ["serve".to_string(), "--port".to_string(), port.to_string()]
+///
+/// #6287: a bare `serve`. The daemon derives its socket path from the data
+/// directory, so passing one would start a daemon on a path
+/// [`hotspots::fetch`] does not dial.
+///
+/// [`hotspots::fetch`]: super::hotspots::fetch
+fn analyze_serve_args() -> [&'static str; 1] {
+    ["serve"]
 }
 
 /// Ensure the trusty-search daemon answers, starting it if it does not.
@@ -170,29 +205,71 @@ pub async fn ensure_search(tools: &Tools) -> Result<(), String> {
 /// # Errors
 ///
 /// The same shape [`ensure_search`] returns. A daemon that is up but degraded
-/// answers `/health` non-2xx, so it is reported here rather than surfacing later
-/// as an empty hotspot list.
+/// reports `status: "degraded"`, so it is reported here rather than surfacing
+/// later as an empty hotspot list — see [`analyze_is_healthy`].
+///
+/// #6287: the two-phase wait [`wait_ready`] performs for trusty-search does not
+/// apply here. Its first phase separates "the process is not there" from "the
+/// process is there and still warming up" by asking whether anything ACCEPTS a
+/// TCP connection, which is a weaker question than a health probe. A Unix socket
+/// answers that same question through `socket_is_serving`, so the two phases are
+/// kept — one budget for the bind, then the full startup budget for health.
 ///
 /// Test: `super::grounding_tests::an_analyze_daemon_that_will_not_start_is_a_named_gap`.
 pub async fn ensure_analyze(tools: &Tools) -> Result<(), String> {
-    let health = health_url(&tools.analyze_url);
-    if probe_once(&health).await {
+    let at = tools.analyze_socket.display().to_string();
+    if analyze_is_healthy(&tools.analyze_socket, CONNECT_TIMEOUT).await {
         return Ok(());
     }
     let binary = tools.analyze.display().to_string();
-    let args = analyze_serve_args(port_of(&tools.analyze_url));
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    spawn_detached(&tools.analyze, &args).map_err(|e| {
-        refusal(
-            "trusty-analyze",
-            &tools.analyze_url,
-            &binary,
-            &e.to_string(),
-        )
-    })?;
-    wait_ready(&health, &tools.analyze_url, tools)
+    spawn_detached(&tools.analyze, &analyze_serve_args())
+        .map_err(|e| refusal("trusty-analyze", &at, &binary, &e.to_string()))?;
+    wait_analyze_ready(tools)
         .await
-        .map_err(|cause| refusal("trusty-analyze", &tools.analyze_url, &binary, &cause))
+        .map_err(|cause| refusal("trusty-analyze", &at, &binary, &cause))
+}
+
+/// [`wait_ready`]'s UDS counterpart, with the same two budgets (#6287).
+///
+/// Why the phases survive the transport change: a binary that dies immediately —
+/// which is what `trusty-analyze serve` does when trusty-search is unreachable —
+/// must cost the short bind budget, not the full 60-second startup one. In an
+/// unattended engagement that difference is a minute per repository spent
+/// waiting for a process that is already gone.
+///
+/// What: the socket must accept a connection within [`Tools::bind_timeout`], and
+/// only then does the health verdict get the full [`Tools::startup_timeout`].
+async fn wait_analyze_ready(tools: &Tools) -> Result<(), String> {
+    let socket = &tools.analyze_socket;
+    let bound_by = Instant::now() + tools.bind_timeout;
+    loop {
+        if analyze_is_healthy(socket, CONNECT_TIMEOUT).await {
+            return Ok(());
+        }
+        if trusty_common::uds::socket_is_serving(socket, CONNECT_TIMEOUT).await {
+            break;
+        }
+        if Instant::now() >= bound_by {
+            return Err(format!(
+                "nothing was serving it {}s after it was started",
+                tools.bind_timeout.as_secs_f32()
+            ));
+        }
+        tokio::time::sleep(tools.poll_interval).await;
+    }
+    let ready_by = Instant::now() + tools.startup_timeout;
+    loop {
+        tokio::time::sleep(tools.poll_interval).await;
+        if analyze_is_healthy(socket, CONNECT_TIMEOUT).await {
+            return Ok(());
+        }
+        if Instant::now() >= ready_by {
+            return Err(format!(
+                "it is serving but did not report healthy within {}s",
+                tools.startup_timeout.as_secs_f32()
+            ));
+        }
+    }
 }
 
 /// Wait for a daemon this call just spawned, in two phases.
@@ -287,31 +364,33 @@ fn refusal(service: &str, url: &str, binary: &str, cause: &str) -> String {
 mod daemon_tests {
     use super::*;
 
-    /// The three values this crate copies rather than imports, pinned against
-    /// the contract `tga::audit::analyze` spells on the other side of the wire.
+    /// The values this crate copies rather than imports, pinned against the
+    /// contract `tga::audit::analyze` spells on the other side of the wire.
+    ///
+    /// #6287: the address and port constants are gone with the transport. What
+    /// is left to pin is the variable name and the method name — and the socket
+    /// DEFAULT no longer needs pinning at all, because both sides derive it from
+    /// `trusty_common::daemon_socket_path` rather than each spelling a literal.
     #[test]
     fn the_analyze_defaults_match_the_contract_tga_uses() {
-        assert_eq!(ENV_ANALYZE_URL, "TRUSTY_ANALYZE_URL");
-        assert_eq!(DEFAULT_ANALYZE_URL, "http://127.0.0.1:7879");
-        assert_eq!(DEFAULT_ANALYZE_PORT, 7879);
-    }
-
-    #[test]
-    fn an_absent_or_empty_override_falls_back_to_the_default_address() {
-        assert_eq!(url_from_override(None), DEFAULT_ANALYZE_URL);
-        assert_eq!(url_from_override(Some("")), DEFAULT_ANALYZE_URL);
+        assert_eq!(ENV_ANALYZE_SOCKET, "TRUSTY_ANALYZE_SOCKET");
+        assert_eq!(ANALYZE_HEALTH_METHOD, "analyze.health");
         assert_eq!(
-            url_from_override(Some("http://127.0.0.1:9999")),
-            "http://127.0.0.1:9999"
+            socket_from_override(None),
+            trusty_common::daemon_socket_path("trusty-analyze").unwrap_or_default(),
+            "the fallback must be the same path the daemon binds"
         );
     }
 
     #[test]
-    fn the_spawn_port_comes_from_the_configured_url() {
-        assert_eq!(port_of("http://127.0.0.1:9999"), 9999);
-        assert_eq!(port_of("http://127.0.0.1:9999/"), 9999);
-        assert_eq!(port_of("http://localhost"), DEFAULT_ANALYZE_PORT);
-        assert_eq!(port_of("not a url"), DEFAULT_ANALYZE_PORT);
+    fn an_absent_or_empty_override_falls_back_to_the_default_socket() {
+        let derived = trusty_common::daemon_socket_path("trusty-analyze").unwrap_or_default();
+        assert_eq!(socket_from_override(None), derived);
+        assert_eq!(socket_from_override(Some("")), derived);
+        assert_eq!(
+            socket_from_override(Some("/tmp/pinned-analyze.sock")),
+            PathBuf::from("/tmp/pinned-analyze.sock")
+        );
     }
 
     #[test]
@@ -327,16 +406,12 @@ mod daemon_tests {
         assert_eq!(search_start_args(), ["start", "--foreground"]);
     }
 
+    /// #6287: a bare `serve`. The daemon derives its socket from the data
+    /// directory, so passing one would start a daemon on a path
+    /// `hotspots::fetch` does not dial.
     #[test]
-    fn the_analyze_spawn_names_the_port_it_will_be_probed_on() {
-        assert_eq!(
-            analyze_serve_args(9999),
-            [
-                "serve".to_string(),
-                "--port".to_string(),
-                "9999".to_string()
-            ]
-        );
+    fn the_analyze_spawn_is_a_bare_serve() {
+        assert_eq!(analyze_serve_args(), ["serve"]);
     }
 
     #[test]
