@@ -62,8 +62,9 @@ name: Version parity
 # sees changed paths but zero of them under `crates/*/src/`, so a docs-only
 # or website-only PR still costs one shell scan-floor check, not a
 # skipped-forever gate. The SAME "required context must never go pending/
-# skipped" reasoning is why the job's `edited`-action guard below lives in a
-# step, not a job-level `if:` — see the job's own header comment.
+# skipped" reasoning is why `pr-version-bump` carries no job-level `if:` —
+# see the job's own header comment, which also records why every ACTION in
+# that list runs the real check rather than short-circuiting (#6243).
 on:
   push:
     branches: [main]
@@ -77,6 +78,7 @@ on:
       - "scripts/lib/source_class.sh"
       - "scripts/check_source_class_selftest.sh"
       - "scripts/check_scan_floor_selftest.sh"
+      - "scripts/check_version_bump_verdict_selftest.sh"
       - ".github/workflows/version-parity.yml"
   # Every three hours. Fine-grained enough that a publish is caught in one
   # working session, coarse enough to stay well inside crates.io's API-usage
@@ -100,9 +102,17 @@ on:
 # old `${{ github.ref }}` group, since it is push-to-main only and therefore
 # only ever saw the LAST commit of a merge train. Per-ref group on pull_request
 # so a new push still supersedes the superseded run. Matches ci.yml.
+#
+# #6243: the `edited` carve-out is gone. It was there because an `edited` run
+# used to be a no-op that must not cancel a real in-flight evaluation — with
+# the no-op removed, every `pull_request` run is a real evaluation, so the
+# newest one is always the one worth keeping. Collapsing duplicates is now
+# the safe default rather than a hazard. It is not by itself the fix for
+# #6243: in that incident the first run had already COMPLETED when the second
+# was created, so nothing was in progress to cancel.
 concurrency:
   group: version-parity-${{ github.event_name == 'push' && github.sha || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'edited' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Pre-merge guard (#4421). Pure shell + one HTTP GET per touched crate: no
@@ -125,37 +135,66 @@ jobs:
   # in its own header comment.
   #
   # So the job always runs and always concludes `success` or `failure` —
-  # never `skipped` — and the `edited`-without-base-change case (and any
-  # non-`pull_request` trigger, e.g. `workflow_dispatch`) is handled by the
-  # first step below, which exits 0 and sets an output that gates every
-  # subsequent step. `edited` WITH a base change (a retarget, #3838) still
-  # runs the real check — the gate step only short-circuits the no-op case.
+  # never `skipped`.
+  #
+  # #6243 — WHY EVERY STEP'S `if:` IS `github.event_name == 'pull_request'`
+  # AND NOTHING NARROWER. This job used to carry a first step that set a
+  # `run_check` output and reported `success` WITHOUT running the check
+  # whenever a `pull_request: edited` event arrived with no base change. That
+  # is a real check run at the PR's head SHA, and branch protection reads the
+  # LATEST check run per (app, name, head_sha) — so the no-op published a
+  # `success` ON TOP OF a completed real verdict at the same SHA and became
+  # the answer an armed auto-merge would act on.
+  #
+  # Live on PR #6241, head `19f206de`: a `synchronize` run (32803218879) ran
+  # the real check and concluded `failure` at 02:55:42Z; a title/body `edited`
+  # event fired 17 seconds later, and run 32803235300 skipped every real step
+  # and concluded `success` at 02:55:50Z. `origin/main` genuinely carried
+  # `trusty-mpm 1.5.0` and `trusty-agents-common 0.6.0` unbumped against
+  # crates.io — the `failure` was correct and the `success` overwrote it. The
+  # two runs were two distinct trigger events, not a duplicate webhook
+  # delivery, so no concurrency setting could have collapsed them: the first
+  # had already completed when the second was created.
+  #
+  # The rule this job now holds: a run that did not evaluate the check does
+  # not report a verdict on a pull request. Every `pull_request` action —
+  # `edited` with no base change included — runs the real check. It costs
+  # ~11 seconds and produces the same answer as the `synchronize` run at that
+  # head, so two runs on one head_sha agree by construction instead of
+  # racing. The `skipped`-vs-`success` trade PR #5434 had to make is gone
+  # rather than re-decided: on a pull request neither is reachable.
+  #
+  # The remaining `if:` covers only the events that have no pull request at
+  # all (`push`, `schedule`, `workflow_dispatch`), where "no PR drift" is a
+  # true statement rather than a fabricated one. It stays a step-level `if:`
+  # and not a job-level one for the #5434 reason above.
+  #
+  # Mechanically enforced: `scripts/check_version_bump_verdict_selftest.sh`
+  # refuses any step `if:` in this job other than that exact expression, and
+  # refuses a step that publishes a `$GITHUB_OUTPUT` flag for other steps to
+  # branch on. It runs as a step of this job, so the invariant is re-proven
+  # on every PR.
   pr-version-bump:
     name: "PR version bump vs crates.io (issue #4421)"
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Skip the real check on a title/body-only edit (never `skipped` — always `success`)
-        id: gate
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          EVENT_ACTION: ${{ github.event.action }}
-          BASE_CHANGED: ${{ toJSON(github.event.changes.base) }}
-        run: |
-          if [[ "$EVENT_NAME" == "pull_request" && ( "$EVENT_ACTION" != "edited" || "$BASE_CHANGED" != "null" ) ]]; then
-            echo "run_check=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "run_check=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Nothing to check here (event=$EVENT_NAME action=$EVENT_ACTION, base unchanged) — reporting success without running the real check."
-          fi
-
       # fetch-depth: 0 — the guard needs `git merge-base` against the base
       # branch and `git show <merge-base>:crates/<X>/Cargo.toml`, neither of
       # which a shallow checkout can resolve.
       - uses: actions/checkout@v5
-        if: steps.gate.outputs.run_check == 'true'
+        if: github.event_name == 'pull_request'
         with:
           fetch-depth: 0
+
+      # Verdict-integrity selftest (#6243). Asserts against this very file
+      # that no step in this job can skip the real check while the job still
+      # reports `success` on a pull request. Runs before the real gate for the
+      # same reason the scan-floor selftest does: a gate whose green can be
+      # fabricated makes the real run's green meaningless.
+      - name: Verdict-integrity selftest (no success without running the check)
+        if: github.event_name == 'pull_request'
+        run: bash scripts/check_version_bump_verdict_selftest.sh
 
       # Scan-floor mutation self-test (issue #4618): re-proves in CI that this
       # gate REFUSES a vacuous scan. Without it the floor is untested code and a
@@ -163,7 +202,7 @@ jobs:
       # Runs before the real gate — a gate that cannot fail makes the real run's
       # green meaningless. Mirrors line-cap.yml's selftest-then-gate ordering.
       - name: Scan-floor selftest (must refuse an empty scan)
-        if: steps.gate.outputs.run_check == 'true'
+        if: github.event_name == 'pull_request'
         run: bash scripts/check_scan_floor_selftest.sh pr_version_bump
 
       # Publish-ORDER selftest (issue #5358). Different question from this
@@ -180,7 +219,7 @@ jobs:
       # a checked-in cargo-metadata fixture, no cargo, no network, well under
       # a second. It never runs `cargo publish` — every case is --list-only.
       - name: Publish-order selftest (optional + dev dep edges must order first)
-        if: steps.gate.outputs.run_check == 'true'
+        if: github.event_name == 'pull_request'
         run: bash scripts/publish-dry-run-order_selftest.sh
 
       # Shared-classification selftest (#5765). This gate decides which crates
@@ -192,7 +231,7 @@ jobs:
       # required context of the two. Pure shell, no network, well under a
       # second.
       - name: Source-classification selftest (both gates share one definition)
-        if: steps.gate.outputs.run_check == 'true'
+        if: github.event_name == 'pull_request'
         run: bash scripts/check_source_class_selftest.sh
 
       # #4688: diff against the base branch AS IT IS NOW, not the frozen
@@ -202,7 +241,7 @@ jobs:
       # ATTRIBUTION note in scripts/check-pr-version-bump.sh for the failure
       # this removes (PR #4666 / run 30839255128).
       - name: Refresh the base branch ref
-        if: steps.gate.outputs.run_check == 'true'
+        if: github.event_name == 'pull_request'
         run: |
           git fetch --no-tags --quiet origin \
             "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
@@ -211,7 +250,7 @@ jobs:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
 
       - name: Check PR version bumps against crates.io
-        if: steps.gate.outputs.run_check == 'true'
+        if: github.event_name == 'pull_request'
         env:
           PR_VERSION_BUMP_BASE: origin/${{ github.event.pull_request.base.ref }}
         run: bash scripts/check-pr-version-bump.sh
