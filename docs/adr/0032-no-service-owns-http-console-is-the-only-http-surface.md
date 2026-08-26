@@ -256,6 +256,17 @@ carve-out this ADR does not close.
   (webhook ingress) being resolved, and is out of scope for this ADR. This
   ADR only flags the document as superseded-pending-revision (see the note
   added to that file).
+
+  > 🟡 **Progress note (2026-08-26, Refs #6277, PR #6281).** `trusty-review`
+  > is the first daemon migrated through this ADR's path: `trusty-review
+  > serve` now binds a UDS socket via `trusty_common::uds::server` instead of
+  > an HTTP listener, and `trusty-console` and `trusty-installer` moved to
+  > dialing it over UDS in the same PR. `docs/reference/threat-model.md`'s
+  > `trusty-review` row and `docs/architecture/port-assignments.md` were
+  > updated accordingly. The other five daemons named in this ADR's Scope
+  > (`trusty-search`, `trusty-memory`, `trusty-analyze`, `trusty-agents`,
+  > `trusty-mpm`) have not migrated; this bullet's re-derivation work remains
+  > open for them.
 - ADR-0031 should be moved from Proposed to Accepted, or folded into this
   ADR's text, now that its central open question (adopt UDS?) is settled.
   **Recommendation, not a unilateral rewrite:** this ADR does not change
