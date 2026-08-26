@@ -8,8 +8,9 @@
 //! the framed JSON-RPC envelope [`crate::uds`] defines. There is no address to
 //! discover, no port to walk, and nothing for a stale file to disagree with.
 //!
-//! What: [`call_memory_tool`] derives the socket, writes one frame, reads one
-//! back, and returns the envelope's `result`. [`call_memory_tool_at`] takes the
+//! What: [`crate::memory_rpc::call_memory_tool`] derives the socket, writes one frame, reads one
+//! back, and returns the envelope's `result`.
+//! [`crate::memory_rpc::call_memory_tool_at`] takes the
 //! socket explicitly, for a caller that resolved it once and threads it through
 //! (catch-up's `CatchupOptions::memory_socket`) or a test pointing at a daemon
 //! it started itself.
@@ -101,8 +102,11 @@ pub const CODE_NOT_FOUND: i64 = -32004;
 /// `Result<Value>` signature and only the callers that care pay for it, via
 /// `anyhow::Error::downcast_ref`.
 ///
-/// Test: `trusty_client::tests::get_and_delete_are_clean_when_absent`
-/// (trusty-agents), `memory_rpc_not_found_code_matches_the_daemon`.
+/// Test: `call_memory_tool_at_reports_a_dead_socket_rather_than_hanging` covers
+/// the transport half; the code itself is pinned against the daemon by
+/// `memory_rpc_not_found_code_matches_the_daemon` in
+/// `trusty-memory/tests/uds_consumer_contract.rs`, and trusty-agents'
+/// `get_and_delete_are_clean_when_absent` covers the caller that reads it.
 #[derive(Debug, thiserror::Error)]
 #[error("{method} failed: {message} ({code})")]
 pub struct MemoryRpcError {

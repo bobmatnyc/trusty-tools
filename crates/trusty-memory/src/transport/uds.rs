@@ -48,9 +48,9 @@ use std::path::PathBuf;
 #[cfg(feature = "daemon")]
 use std::sync::Arc;
 
-use anyhow::Result;
 #[cfg(feature = "daemon")]
 use anyhow::Context as _;
+use anyhow::Result;
 #[cfg(feature = "daemon")]
 use async_trait::async_trait;
 #[cfg(feature = "daemon")]

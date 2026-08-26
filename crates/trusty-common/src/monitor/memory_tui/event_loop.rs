@@ -36,13 +36,12 @@ const INPUT_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 /// and updates the status, aggregate stats, palace list, and selection clamp.
 /// Test: thin I/O glue; the pure clamp is unit-tested.
 pub(crate) async fn poll_daemon(state: &mut MemoryTuiState, client: &mut MemoryClient) {
-    if !state.daemon_status.is_online() {
-        if let Ok(resolved) = resolve_memory_socket()
-            && resolved != client.socket()
-        {
-            state.daemon_addr = resolved.display().to_string();
-            client.set_socket(resolved);
-        }
+    if !state.daemon_status.is_online()
+        && let Ok(resolved) = resolve_memory_socket()
+        && resolved != client.socket()
+    {
+        state.daemon_addr = resolved.display().to_string();
+        client.set_socket(resolved);
     }
     match client.fetch_all().await {
         Ok(data) => {

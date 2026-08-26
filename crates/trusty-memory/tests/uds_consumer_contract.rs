@@ -25,7 +25,7 @@ use std::time::Duration;
 use serde_json::json;
 use tokio::sync::oneshot;
 use trusty_common::memory_rpc::{
-    MemoryRpcError, call_memory_tool_at, call_memory_tool_at_with_timeout,
+    call_memory_tool_at, call_memory_tool_at_with_timeout, MemoryRpcError,
 };
 use trusty_memory::AppState;
 
@@ -65,14 +65,11 @@ impl Daemon {
         let (stop, shutdown) = oneshot::channel::<()>();
         let serve_socket = socket.clone();
         tokio::spawn(async move {
-            let _ = trusty_memory::transport::uds::serve_with_shutdown(
-                state,
-                &serve_socket,
-                async {
+            let _ =
+                trusty_memory::transport::uds::serve_with_shutdown(state, &serve_socket, async {
                     let _ = shutdown.await;
-                },
-            )
-            .await;
+                })
+                .await;
         });
 
         // Poll rather than sleep: the bind is fast but a loaded machine is not.
@@ -109,14 +106,10 @@ impl Drop for Daemon {
 async fn shared_client_reaches_the_health_method_consumers_dial_by_literal() {
     let daemon = Daemon::start().await;
 
-    let result = call_memory_tool_at_with_timeout(
-        &daemon.socket,
-        "memory.health",
-        json!({}),
-        CALL_TIMEOUT,
-    )
-    .await
-    .expect("the daemon answers memory.health");
+    let result =
+        call_memory_tool_at_with_timeout(&daemon.socket, "memory.health", json!({}), CALL_TIMEOUT)
+            .await
+            .expect("the daemon answers memory.health");
 
     assert!(
         result.get("status").and_then(|v| v.as_str()).is_some(),
@@ -149,7 +142,9 @@ async fn shared_client_reaches_a_dispatcher_method_through_the_fallback() {
         .as_array()
         .expect("palace_list answers a palaces array");
     assert!(
-        palaces.iter().any(|p| p.as_str() == Some("contract-palace")),
+        palaces
+            .iter()
+            .any(|p| p.as_str() == Some("contract-palace")),
         "the created palace comes back: {listed}"
     );
 }
@@ -238,7 +233,7 @@ async fn memory_rpc_not_found_code_matches_the_daemon() {
     );
     assert_eq!(
         trusty_common::memory_rpc::CODE_NOT_FOUND,
-        i64::from(trusty_memory::transport::api_error::CODE_NOT_FOUND),
+        trusty_memory::transport::api_error::CODE_NOT_FOUND,
         "the shared client's copy of the code must equal the daemon's"
     );
 }

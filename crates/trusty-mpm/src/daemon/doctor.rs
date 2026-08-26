@@ -556,7 +556,7 @@ fn build_oauth_token_check(
 async fn check_memory(_home: &Path) -> DoctorCheck {
     let socket = trusty_common::memory_rpc::resolve_memory_socket_or_unreachable();
     let addr = socket.display().to_string();
-    probe_health("memory", "trusty-memory", Transport::Socket(&socket), &addr).await
+    probe_health("memory", "trusty-memory", &socket, &addr).await
 }
 
 /// Outcome of one `/health` request attempt.
@@ -577,54 +577,37 @@ enum ProbeOutcome {
     Unreachable(String),
 }
 
-/// How one sidecar is reached (#6286).
+/// Issue one `memory.health` call and classify the outcome (#6286).
 ///
-/// Why: trusty-search still serves HTTP and trusty-memory serves a Unix socket,
-/// but the retry, the refusal-versus-timeout split and the worker-pool read are
-/// identical and are what [`probe_health`] exists for. Naming the transport is
-/// what lets one loop and one classifier serve both.
-enum Transport<'a> {
-    /// A `/health` URL on a daemon that still binds TCP.
-    Http(&'a str),
-    /// A daemon's Unix socket; the method is `memory.health`.
-    Socket(&'a Path),
-}
-
-/// Issue one health request and classify the outcome.
-async fn probe_health_once(transport: &Transport<'_>) -> ProbeOutcome {
-    match transport {
-        Transport::Http(url) => {
-            let client = match reqwest::Client::builder().timeout(PROBE_TIMEOUT).build() {
-                Ok(c) => c,
-                Err(e) => return ProbeOutcome::Unreachable(e.to_string()),
-            };
-            match client.get(*url).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    ProbeOutcome::Success(resp.json::<serde_json::Value>().await.ok())
-                }
-                Ok(resp) => ProbeOutcome::NonSuccess(resp.status().as_u16()),
-                Err(e) if e.is_timeout() => ProbeOutcome::TimedOut,
-                Err(e) => ProbeOutcome::Unreachable(e.to_string()),
+/// Why the three failure arms are told apart here rather than collapsed: they
+/// mean opposite things operationally, and #4005 is the incident that proves
+/// it. A JSON-RPC error is the daemon ANSWERING and refusing — it is up. A dial
+/// that fails inside the budget is a refusal — nothing is there. A failure that
+/// consumed the budget is a timeout — we learned nothing, and must not claim
+/// the daemon is down.
+///
+/// What: `NonSuccess` carries the daemon's own error code (as an absolute
+/// value, since the caller renders it like a status); `Unreachable` carries the
+/// transport error; `TimedOut` is the budget overrun.
+async fn probe_health_once(socket: &Path) -> ProbeOutcome {
+    let started = std::time::Instant::now();
+    match trusty_common::memory_rpc::call_memory_tool_at_with_timeout(
+        socket,
+        "memory.health",
+        serde_json::json!({}),
+        PROBE_TIMEOUT,
+    )
+    .await
+    {
+        Ok(body) => ProbeOutcome::Success(Some(body)),
+        Err(e) => {
+            if let Some(rpc) = e.downcast_ref::<trusty_common::memory_rpc::MemoryRpcError>() {
+                return ProbeOutcome::NonSuccess(rpc.code.unsigned_abs() as u16);
             }
-        }
-        Transport::Socket(socket) => {
-            // The budget bounds the call, so a failure that consumed it is a
-            // timeout and one that came back early was refused. The transport
-            // does not label the two, and that distinction is what #4005 is
-            // about.
-            let started = std::time::Instant::now();
-            match trusty_common::memory_rpc::call_memory_tool_at_with_timeout(
-                socket,
-                "memory.health",
-                serde_json::json!({}),
-                PROBE_TIMEOUT,
-            )
-            .await
-            {
-                Ok(body) => ProbeOutcome::Success(Some(body)),
-                Err(_) if started.elapsed() >= PROBE_TIMEOUT => ProbeOutcome::TimedOut,
-                Err(e) => ProbeOutcome::Unreachable(format!("{e:#}")),
+            if started.elapsed() >= PROBE_TIMEOUT {
+                return ProbeOutcome::TimedOut;
             }
+            ProbeOutcome::Unreachable(format!("{e:#}"))
         }
     }
 }
@@ -647,18 +630,13 @@ async fn probe_health_once(transport: &Transport<'_>) -> ProbeOutcome {
 /// Test: `memory_unreachable_is_fail`, `memory_timeout_is_unknown_not_fail`,
 /// `memory_wedged_worker_pool_is_not_ok`, `memory_warming_is_warn_not_fail`,
 /// `memory_slow_but_serving_daemon_is_ok`.
-async fn probe_health(
-    check: &str,
-    service: &str,
-    transport: Transport<'_>,
-    addr: &str,
-) -> DoctorCheck {
+async fn probe_health(check: &str, service: &str, socket: &Path, addr: &str) -> DoctorCheck {
     let mut last_timeout = false;
     let mut last_err: Option<String> = None;
     let mut last_status: Option<u16> = None;
 
     for attempt in 0..PROBE_ATTEMPTS {
-        match probe_health_once(&transport).await {
+        match probe_health_once(socket).await {
             ProbeOutcome::Success(body) => {
                 return interpret_health(check, service, addr, body.as_ref());
             }
@@ -701,7 +679,7 @@ async fn probe_health(
         return DoctorCheck::new(
             check,
             CheckStatus::Fail,
-            format!("{service} at {addr} returned HTTP {code}"),
+            format!("{service} at {addr} refused the health probe with code {code}"),
         );
     }
 

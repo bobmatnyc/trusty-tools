@@ -29,15 +29,19 @@ fn index_present_matches_each_shape() {
 
 #[tokio::test]
 async fn memory_unreachable_is_fail() {
-    // Port 0 never accepts a connection, so the probe must fail cleanly
-    // rather than hang.
+    // #6286: a path under a directory that cannot exist is refused by the
+    // kernel immediately, so the probe must fail cleanly rather than hang.
+    // `TRUSTY_MEMORY_SOCKET` is what `resolve_memory_socket` honours first.
     unsafe {
-        std::env::set_var("TRUSTY_MEMORY_ADDR", "127.0.0.1:0");
+        std::env::set_var(
+            trusty_common::memory_rpc::TRUSTY_MEMORY_SOCKET_ENV,
+            "/nonexistent/trusty-memory/trusty-memory.sock",
+        );
     }
     let tmp = tempfile::tempdir().unwrap();
     let check = check_memory(tmp.path()).await;
     unsafe {
-        std::env::remove_var("TRUSTY_MEMORY_ADDR");
+        std::env::remove_var(trusty_common::memory_rpc::TRUSTY_MEMORY_SOCKET_ENV);
     }
     assert_eq!(check.status, CheckStatus::Fail);
 }
@@ -542,40 +546,28 @@ async fn worktrees_without_a_reconciled_inventory_is_unknown() {
 /// Spawn a throwaway HTTP listener that answers `GET /health` with `body`
 /// after waiting `delay`.
 ///
-/// Why: the existing probe tests bind port 0 (which only ever refuses), so
-/// nothing in this suite could express "a daemon that IS serving". Both #4005
-/// (a serving daemon reported unreachable) and #4001 (a wedged daemon reported
-/// healthy) are about what doctor concludes from a REAL response, so the tests
-/// need a real socket. Hand-rolled over `TcpListener` to avoid pulling an HTTP
-/// server dependency into the test graph.
-/// What: binds an ephemeral port, returns its `host:port`, and serves the
-/// canned JSON to every connection until the test ends.
+/// Serve a canned `memory.health` answer on a temp Unix socket, after `delay`.
+///
+/// Why: the other probe tests point at a path nothing serves (which only ever
+/// refuses), so nothing else in this suite can express "a daemon that IS
+/// serving". Both #4005 (a serving daemon reported unreachable) and #4001 (a
+/// wedged daemon reported healthy) are about what doctor concludes from a REAL
+/// answer. #6286 moved that answer from an HTTP body to a JSON-RPC frame; the
+/// shared `uds_mock` binds the socket so this file does not re-derive one.
+/// What: returns the daemon handle — dropping it stops the accept loop.
 /// Test: used by the #4005/#4001 tests below.
-async fn spawn_health_listener(body: serde_json::Value, delay: std::time::Duration) -> String {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap().to_string();
-    tokio::spawn(async move {
-        loop {
-            let Ok((mut sock, _)) = listener.accept().await else {
-                return;
-            };
-            let body = body.to_string();
-            tokio::spawn(async move {
-                let mut buf = [0u8; 1024];
-                let _ = sock.read(&mut buf).await;
-                tokio::time::sleep(delay).await;
-                let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                let _ = sock.write_all(resp.as_bytes()).await;
-                let _ = sock.flush().await;
-            });
-        }
-    });
-    addr
+async fn spawn_health_listener(
+    body: serde_json::Value,
+    delay: std::time::Duration,
+) -> crate::uds_mock::MockMemoryDaemon {
+    crate::uds_mock::spawn(move |_method: &str, _params: serde_json::Value| {
+        let body = body.clone();
+        Box::pin(async move {
+            tokio::time::sleep(delay).await;
+            Ok(body)
+        })
+    })
+    .await
 }
 
 /// A `/health` body from a healthy, fully-ready daemon.
@@ -603,14 +595,9 @@ async fn memory_wedged_worker_pool_is_not_ok() {
         "daemon_state": "ready",
         "worker": {"in_flight": 6, "oldest_age_secs": 1800, "wedged": true},
     });
-    let addr = spawn_health_listener(body, std::time::Duration::ZERO).await;
-    let check = probe_health(
-        "memory",
-        "trusty-memory",
-        Transport::Http(&format!("http://{addr}/health")),
-        &addr,
-    )
-    .await;
+    let daemon = spawn_health_listener(body, std::time::Duration::ZERO).await;
+    let addr = daemon.socket().display().to_string();
+    let check = probe_health("memory", "trusty-memory", daemon.socket(), &addr).await;
 
     assert_ne!(
         check.status,
@@ -641,14 +628,10 @@ async fn memory_wedged_worker_pool_is_not_ok() {
 /// Test: itself.
 #[tokio::test]
 async fn memory_slow_but_serving_daemon_is_ok() {
-    let addr = spawn_health_listener(healthy_body(), std::time::Duration::from_millis(2500)).await;
-    let check = probe_health(
-        "memory",
-        "trusty-memory",
-        Transport::Http(&format!("http://{addr}/health")),
-        &addr,
-    )
-    .await;
+    let daemon =
+        spawn_health_listener(healthy_body(), std::time::Duration::from_millis(2500)).await;
+    let addr = daemon.socket().display().to_string();
+    let check = probe_health("memory", "trusty-memory", daemon.socket(), &addr).await;
 
     assert_eq!(
         check.status,
@@ -677,14 +660,9 @@ async fn memory_warming_is_warn_not_fail() {
         "daemon_state": "warming",
         "worker": {"in_flight": 1, "oldest_age_secs": 2, "wedged": false},
     });
-    let addr = spawn_health_listener(body, std::time::Duration::ZERO).await;
-    let check = probe_health(
-        "memory",
-        "trusty-memory",
-        Transport::Http(&format!("http://{addr}/health")),
-        &addr,
-    )
-    .await;
+    let daemon = spawn_health_listener(body, std::time::Duration::ZERO).await;
+    let addr = daemon.socket().display().to_string();
+    let check = probe_health("memory", "trusty-memory", daemon.socket(), &addr).await;
 
     assert_eq!(
         check.status,
@@ -703,30 +681,20 @@ async fn memory_warming_is_warn_not_fail() {
 /// Rendering that as `Fail` is the #4005 false negative; rendering it as `Ok`
 /// would be a false positive. It must render as its own state, and that state
 /// must never be healthy.
-/// What: points the probe at a listener that accepts the connection and then
-/// never answers, and asserts `Unknown` — explicitly neither `Ok` nor `Fail`.
+/// What: points the probe at a daemon that accepts the connection and takes a
+/// minute to answer, and asserts `Unknown` — explicitly neither `Ok` nor
+/// `Fail`.
 /// Test: itself.
 #[tokio::test]
 async fn memory_timeout_is_unknown_not_fail() {
-    // Accept connections but never respond, so the probe times out rather
-    // than being refused.
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap().to_string();
-    tokio::spawn(async move {
-        let mut held = Vec::new();
-        while let Ok((sock, _)) = listener.accept().await {
-            held.push(sock); // hold the socket open, answer nothing
-        }
-    });
+    // Accept the connection but take far longer than the budget to answer, so
+    // the probe times out rather than being refused.
+    let daemon = spawn_health_listener(healthy_body(), std::time::Duration::from_secs(60)).await;
+    let addr = daemon.socket().display().to_string();
 
     let check = tokio::time::timeout(
         std::time::Duration::from_secs(90),
-        probe_health(
-            "memory",
-            "trusty-memory",
-            Transport::Http(&format!("http://{addr}/health")),
-            &addr,
-        ),
+        probe_health("memory", "trusty-memory", daemon.socket(), &addr),
     )
     .await
     .expect("probe must stay bounded");
@@ -753,14 +721,9 @@ async fn memory_timeout_is_unknown_not_fail() {
 #[tokio::test]
 async fn health_body_without_worker_block_is_unknown() {
     let body = serde_json::json!({"status": "ok", "daemon_state": "ready"});
-    let addr = spawn_health_listener(body, std::time::Duration::ZERO).await;
-    let check = probe_health(
-        "memory",
-        "trusty-memory",
-        Transport::Http(&format!("http://{addr}/health")),
-        &addr,
-    )
-    .await;
+    let daemon = spawn_health_listener(body, std::time::Duration::ZERO).await;
+    let addr = daemon.socket().display().to_string();
+    let check = probe_health("memory", "trusty-memory", daemon.socket(), &addr).await;
 
     assert_eq!(
         check.status,

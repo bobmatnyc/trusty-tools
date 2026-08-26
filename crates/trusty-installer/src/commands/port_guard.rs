@@ -305,11 +305,13 @@ pub fn parse_lsof_listen_pids(text: &str) -> Vec<u32> {
 /// that walked (`7070..=7079`), and ADR-0032 moved it onto a Unix socket, so
 /// nothing produced a range any more. `decide_over_range` below still iterates
 /// whatever this returns, which is how a future walker gets the #4470
-/// relaxation back without this function pretending to have one today. Empty is reachable for a member that is not a stable-set daemon
-/// at all, and — since #6277 — for a member that binds a Unix socket rather
-/// than a port. Both are pinned by `every_launchd_member_is_guardable`.
+/// relaxation back without this function pretending to have one today.
+///
+/// Empty is reachable for a member that is not a stable-set daemon at all, and
+/// — since #6277 — for a member that binds a Unix socket rather than a port.
+/// Both are pinned by `every_launchd_member_is_guardable`.
 /// Test: `resolve_guard_ports_falls_back_to_the_documented_table`,
-/// `resolve_guard_ports_returns_the_whole_walk_range_for_a_fresh_walker`,
+/// `resolve_guard_ports_is_empty_for_a_socket_member_with_a_stale_addr_file`,
 /// `every_launchd_member_is_guardable`.
 pub fn resolve_guard_ports(binary: &str) -> Vec<u16> {
     // #6277: a member that binds a Unix socket has NO port, and must not

@@ -18,7 +18,7 @@
 //! separate crate and cannot reach a `#[cfg(test)]` item, which is why there
 //! are two.
 //!
-//! Test: `recall_content_e2e`.
+//! Test: `held_back_recall_result_carries_its_text_and_run_id_over_the_wire`.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};

@@ -213,6 +213,17 @@ fn startup_line(active_count: Option<usize>) -> String {
     format!("{lead}  ·  {HELP_HINT}\n")
 }
 
+/// Does `base` answer a 2xx on `/health`?
+///
+/// Why: trusty-search still serves HTTP, so the banner's search leg keeps the
+/// GET it always had. The memory leg dials a socket instead since #6286.
+async fn health_ok_with(client: &reqwest::Client, base: &str) -> bool {
+    matches!(
+        client.get(format!("{base}/health")).send().await,
+        Ok(resp) if resp.status().is_success()
+    )
+}
+
 /// Probe trusty-search health for the startup banner (fail-safe).
 ///
 /// Why: §3.1 requires search to be confirmed via its plain health probe; a
@@ -237,7 +248,7 @@ pub async fn probe_search(base: Option<&str>) -> ProbeOutcome {
 ///
 /// Why: §3.1 + decision D4 make memory "active" only when (a) the health probe
 /// succeeds AND (b) the `user` palace exists — created idempotently on first run
-/// via `POST /api/v1/palaces`. The probe is fail-safe: a down daemon or a failed
+/// via `palace_create`. The probe is fail-safe: a down daemon or a failed
 /// palace assertion degrades to `○ unreachable` with a reason note, and the TUI
 /// still opens.
 /// What: calls `memory.health` on the socket; on success, calls
@@ -337,70 +348,6 @@ pub(super) fn probe_client() -> reqwest::Client {
         .timeout(PROBE_TIMEOUT)
         .build()
         .unwrap_or_default()
-}
-
-/// GET `<base>/health` with the shared client and report whether it answered 2xx.
-///
-/// Why: both probes share the same health check; a daemon that is down, slow, or
-/// returns an error status all collapse to "not healthy" so the banner degrades
-/// cleanly. Taking the client by reference lets each probe build exactly one
-/// client and reuse it across the health check and any follow-up request.
-/// What: issues a bounded GET to `<base>/health` via `client` and returns `true`
-/// only on a 2xx response.
-/// Test: covered by `probe_unreachable_*` (dead daemon → `false`).
-async fn health_ok_with(client: &reqwest::Client, base: &str) -> bool {
-    matches!(
-        client.get(format!("{base}/health")).send().await,
-        Ok(resp) if resp.status().is_success()
-    )
-}
-
-/// Ensure the fixed `user` palace exists at `base`, creating it ONLY on a 404 (D4).
-///
-/// Why: D4 makes memory "active" only when the `user` palace is present; the
-/// banner asserts it idempotently so first-run operators get a confirmed memory
-/// line without a manual provisioning step. Crucially, creation must be gated on
-/// a *real* 404 — a transient `500`/`503` (or any other non-2xx) means the
-/// daemon's state is unknown, so blindly POSTing a create would be wrong (it
-/// could race a half-up daemon or mask a real outage). Those cases degrade to
-/// `false` (memory renders `○ unreachable`) instead of attempting a write.
-/// What: GETs `<base>/api/v1/palaces/user` with the shared `client` and branches
-/// on the status: a 2xx means the palace already exists → `true`; a 404 means it
-/// is genuinely absent → POST `<base>/api/v1/palaces` with `{"name":"user"}` and
-/// return whether the create answered 2xx; any other status (5xx, etc.) →
-/// `false` without creating; a transport error → `false`.
-/// Test: `ensure_user_palace_creates_only_on_404` exercises the status branching
-/// against a stub server; the live assertion path runs against a running daemon.
-pub(super) async fn ensure_user_palace_with(client: &reqwest::Client, base: &str) -> bool {
-    let resp = match client
-        .get(format!("{base}/api/v1/palaces/{USER_PALACE}"))
-        .send()
-        .await
-    {
-        Ok(resp) => resp,
-        // Transport error (daemon unreachable): do not attempt a create.
-        Err(_) => return false,
-    };
-
-    let status = resp.status();
-    if status.is_success() {
-        // Palace already exists.
-        return true;
-    }
-    if status != reqwest::StatusCode::NOT_FOUND {
-        // Any non-404 (5xx, etc.): state is unknown — do NOT create.
-        return false;
-    }
-
-    // Genuine 404 → the palace is absent, so create it.
-    matches!(
-        client
-            .post(format!("{base}/api/v1/palaces"))
-            .json(&serde_json::json!({ "name": USER_PALACE }))
-            .send()
-            .await,
-        Ok(resp) if resp.status().is_success()
-    )
 }
 
 /// Run the backplane probes and print the startup banner to stderr.

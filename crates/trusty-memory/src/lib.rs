@@ -140,9 +140,9 @@ pub use events::{DaemonEvent, HookType, InjectionKind};
 // The daemon's serving surface. `run_http`, `run_http_dynamic`, `run_http_on`,
 // `bind_dynamic_port`, `http_addr_path` and `DEFAULT_HTTP_PORT` went with the
 // listener (#6286); `serve` and `socket_path` are what replace them.
-pub use transport::socket_path;
 #[cfg(feature = "daemon")]
 pub use transport::serve;
+pub use transport::socket_path;
 
 /// Return `true` when a non-default data directory is in effect.
 ///
