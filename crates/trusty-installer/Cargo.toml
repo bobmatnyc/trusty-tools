@@ -77,7 +77,10 @@ tracing-subscriber = { workspace = true }
 # through `trusty_common::uds::send_framed_request` and resolves its path
 # through `daemon_socket_path`. ADR-0032 moves each service's own transport
 # onto UDS, so the probe needs the shared client rather than a hand-rolled one.
-trusty-common = { workspace = true, features = ["update-check", "config-cli", "uds"] }
+# `memory-rpc` (#6286): `ensure`'s palace stage and its `--wait` readiness probe
+# dial trusty-memory through the shared client. ADR-0032 left no `http_addr` for
+# `resolve_base_url` to read, so both read a running daemon as absent without it.
+trusty-common = { workspace = true, features = ["update-check", "config-cli", "uds", "memory-rpc"] }
 # Rustup/cargo-style progress display (#1315): Narrator `info:` lines + the
 # right-aligned ComponentTracker table for install/upgrade rows.
 trusty-progress = { workspace = true }
@@ -91,3 +94,7 @@ tempfile = { workspace = true }
 # used by `detect_does_not_hang_on_an_unresponsive_shadowing_binary` so the
 # health gate's 10s probe timeout is exercised on the virtual clock.
 tokio = { workspace = true, features = ["test-util"] }
+# The stub trusty-memory socket in `commands::test_support` implements
+# `trusty_common::uds::server::RpcFallback`, which is an `#[async_trait]` trait
+# (#6286). Test-only: no production code in this crate implements it.
+async-trait = { workspace = true }

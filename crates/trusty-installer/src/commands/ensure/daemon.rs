@@ -1,21 +1,33 @@
 //! Daemon address resolution + a thin HTTP client for the ensure stages.
 //!
 //! Why: the project-setup stages (index-register, palace-create) and the
-//! `--wait` readiness poll all talk to the trusty-search and trusty-memory HTTP
-//! daemons over loopback. Centralising "where is the daemon?" (the `http_addr`
-//! file written by each daemon) and "issue a short-timeout request" here keeps
-//! `project_setup.rs` and `readiness.rs` focused on their logic, and gives one
-//! place to configure timeouts so a dead daemon never blocks `ensure`.
+//! `--wait` readiness poll talk to trusty-search and trusty-memory.
+//! Centralising "where is the daemon?" and "issue a short-timeout request" here
+//! keeps `project_setup.rs` and `readiness.rs` focused on their logic, and
+//! gives one place to configure timeouts so a dead daemon never blocks
+//! `ensure`.
 //!
-//! What: [`resolve_base_url`] reads the daemon's recorded `host:port` via
+//! **The two daemons no longer share a transport (#6286).** trusty-search still
+//! serves loopback HTTP and is still found through its `http_addr` file.
+//! ADR-0032 moved trusty-memory onto a Unix socket, so `resolve_base_url`
+//! answered `None` for it on every machine forever — and both callers read that
+//! as "the daemon is not running": the palace stage no-opped and `--wait` never
+//! reported ready. The memory half goes through [`memory_socket`] and
+//! [`memory_serving`] instead, which derive the same path the daemon binds.
+//!
+//! What: [`resolve_base_url`] reads trusty-search's recorded `host:port` via
 //! `trusty_common::read_daemon_addr` and returns `http://<addr>`;
 //! [`build_client`] makes a `reqwest::Client` with tight timeouts;
-//! [`health_ok`] probes `GET {base}/health`.
+//! [`health_ok`] probes `GET {base}/health`; [`memory_socket`] derives
+//! trusty-memory's socket and [`memory_serving`] says whether anything answers
+//! on it.
 //!
 //! Test: `resolve_base_url` is exercised against a stubbed data dir in
 //! `tests`; `build_client` is asserted to build; `health_ok` is covered by the
-//! readiness-module integration test that stands up a stub server.
+//! readiness-module integration test that stands up a stub server;
+//! `memory_serving_is_false_for_an_absent_socket`.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -28,12 +40,57 @@ use anyhow::{Context, Result};
 /// Test: used by [`resolve_base_url`] callers; trivial.
 pub const SEARCH_APP: &str = "trusty-search";
 
-/// trusty-memory daemon app name (the data-dir / `http_addr` key).
+/// trusty-memory daemon app name (the data-dir key its socket is derived under).
 ///
-/// Why: see [`SEARCH_APP`].
+/// Why: see [`SEARCH_APP`]. Since #6286 this keys the SOCKET path rather than an
+/// `http_addr` file — `memory_rpc` derives it the same way the daemon does.
 /// What: `"trusty-memory"`.
-/// Test: used by [`resolve_base_url`] callers; trivial.
+/// Test: used by [`memory_socket`] callers; trivial.
 pub const MEMORY_APP: &str = "trusty-memory";
+
+/// How long to wait for trusty-memory's socket to prove it is being served.
+///
+/// A local dial either connects or is refused immediately; the budget only
+/// covers a loaded machine. Far below [`REQUEST_TIMEOUT`], because this is the
+/// liveness question rather than a call that does work.
+const MEMORY_PROBE_TIMEOUT: Duration = Duration::from_millis(750);
+
+/// Per-call budget for a trusty-memory method that does real work.
+///
+/// Matches [`REQUEST_TIMEOUT`]: creating a palace opens redb and may embed, and
+/// the reason for a ceiling is the same one — a hung daemon must not block
+/// `ensure` indefinitely.
+pub const MEMORY_CALL_TIMEOUT: Duration = REQUEST_TIMEOUT;
+
+/// The socket trusty-memory binds, as both it and its consumers derive it.
+///
+/// Why: `resolve_base_url(MEMORY_APP)` is permanently `None` since ADR-0032 —
+/// there is no listener to record an address and nothing writes the file — so
+/// every caller that kept asking it read a running daemon as absent.
+///
+/// # Errors
+///
+/// When the data directory cannot be resolved or created. That is an
+/// operator-fixable condition (permissions, a `TRUSTY_DATA_DIR_OVERRIDE`
+/// pointing somewhere unusable), distinct from "the daemon is not running",
+/// which this cannot and does not report — [`memory_serving`] answers that.
+///
+/// Test: `memory_serving_is_false_for_an_absent_socket` drives it.
+pub fn memory_socket() -> Result<PathBuf> {
+    trusty_common::memory_rpc::resolve_memory_socket()
+        .context("resolve the trusty-memory socket path")
+}
+
+/// Is anything serving trusty-memory's socket?
+///
+/// Why: the UDS counterpart of [`health_ok`]. A bare connect rather than a
+/// `memory.health` call, for the same reason `memory_daemon_is_serving` gives:
+/// the question is whether the endpoint is live, and a daemon that is up but
+/// degraded must not be reported absent.
+/// Test: `memory_serving_is_false_for_an_absent_socket`.
+pub async fn memory_serving(socket: &std::path::Path) -> bool {
+    trusty_common::memory_rpc::memory_daemon_is_serving(socket, MEMORY_PROBE_TIMEOUT).await
+}
 
 /// Per-request timeout for ensure's daemon calls.
 ///
@@ -166,5 +223,23 @@ mod tests {
     #[test]
     fn build_client_succeeds() {
         assert!(build_client().is_ok());
+    }
+
+    /// Why: "the daemon is not running" is the branch both callers take to
+    /// no-op, and it has to come from the socket rather than from a discovery
+    /// file nothing writes. A probe that answered `true` for an absent path
+    /// would make the palace stage attempt a call it cannot complete.
+    /// What: probes a path nothing has ever bound and asserts `false`, promptly.
+    /// Test: This is the test.
+    #[tokio::test]
+    async fn memory_serving_is_false_for_an_absent_socket() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let started = std::time::Instant::now();
+        assert!(!memory_serving(&tmp.path().join("absent.sock")).await);
+        assert!(
+            started.elapsed() < MEMORY_PROBE_TIMEOUT,
+            "a refused dial must not wait out the budget: {:?}",
+            started.elapsed()
+        );
     }
 }

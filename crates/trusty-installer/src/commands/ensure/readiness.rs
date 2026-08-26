@@ -9,8 +9,8 @@
 //! What: [`PollConfig`] (poll interval + overall timeout, env-overridable),
 //! [`poll_until_ready`] (the generic deadline-bounded loop over an injected async
 //! readiness probe — pure of HTTP so it is unit-testable), and
-//! [`probe_ready`] (the real probe: both trusty-search and trusty-memory
-//! `/health` return 2xx).
+//! [`probe_ready`] (the real probe: trusty-search's `/health` returns 2xx and
+//! something is serving trusty-memory's socket).
 //!
 //! Test: `tests` drive `poll_until_ready` with a probe that flips ready after N
 //! attempts (success) and one that never readies (timeout), asserting the
@@ -19,7 +19,7 @@
 use std::future::Future;
 use std::time::{Duration, Instant};
 
-use super::daemon::{health_ok, resolve_base_url, MEMORY_APP, SEARCH_APP};
+use super::daemon::{health_ok, memory_serving, memory_socket, resolve_base_url, SEARCH_APP};
 
 /// Env var overriding the `--wait` overall timeout, in seconds.
 ///
@@ -131,26 +131,36 @@ where
     }
 }
 
-/// The real readiness probe: both daemons' `/health` return 2xx.
+/// The real readiness probe: trusty-search answers `/health` and something is
+/// serving trusty-memory's socket.
 ///
 /// Why: "ready" for a fully-provisioned project means the search daemon (serving
 /// the just-registered index) and the memory daemon (serving the palace) are
-/// both live. A daemon with no recorded address (never started) is not ready.
-/// What: resolves each daemon's base URL; returns `true` only when BOTH resolve
-/// AND both `GET /health` return 2xx. Any resolution error or down daemon → not
-/// ready (so the loop keeps waiting until the deadline).
+/// both live.
+///
+/// **`--wait` could never report ready between #6286 pass A and this fix.** It
+/// asked `resolve_base_url(MEMORY_APP)`, which reads an `http_addr` file
+/// ADR-0032 stopped writing — so the memory arm returned `false` on every
+/// iteration and every `tctl ensure --wait` ran its whole 120-second budget and
+/// exited 4, whatever the stack was doing.
+///
+/// What: resolves trusty-search's base URL and derives trusty-memory's socket;
+/// returns `true` only when the former answers `GET /health` with a 2xx AND
+/// something is serving the latter. Any resolution error or down daemon → not
+/// ready, so the loop keeps waiting until the deadline.
 /// Test: side-effecting (network); the loop control flow is unit-tested via
-/// `poll_until_ready` with an injected probe.
+/// `poll_until_ready` with an injected probe, and the memory arm's
+/// absent-socket verdict by
+/// `super::daemon::tests::memory_serving_is_false_for_an_absent_socket`.
 pub async fn probe_ready(client: &reqwest::Client) -> bool {
     let search = match resolve_base_url(SEARCH_APP) {
         Ok(Some(b)) => b,
         _ => return false,
     };
-    let memory = match resolve_base_url(MEMORY_APP) {
-        Ok(Some(b)) => b,
-        _ => return false,
+    let Ok(socket) = memory_socket() else {
+        return false;
     };
-    health_ok(client, &search).await && health_ok(client, &memory).await
+    health_ok(client, &search).await && memory_serving(&socket).await
 }
 
 #[cfg(test)]

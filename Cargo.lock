@@ -11599,6 +11599,7 @@ name = "trusty-installer"
 version = "0.12.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "clap",
  "dirs 5.0.1",
  "flate2",
