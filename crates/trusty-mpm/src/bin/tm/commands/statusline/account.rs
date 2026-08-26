@@ -243,8 +243,8 @@ mod tests {
     /// Test: itself.
     #[test]
     fn render_claude_account_segment_single() {
-        let seg = render_claude_account_segment(Some("masa@matsuoka.com")).expect("segment");
-        assert_eq!(seg, "\u{273b}masa@matsuoka.com");
+        let seg = render_claude_account_segment(Some("someone@example.com")).expect("segment");
+        assert_eq!(seg, "\u{273b}someone@example.com");
         assert!(!seg.starts_with('@'), "must not read as a gh login: {seg}");
     }
 
