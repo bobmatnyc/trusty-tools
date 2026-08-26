@@ -1,30 +1,29 @@
 //! MCP (Model Context Protocol) server for trusty-analyzer.
 //!
-//! Why: full parity with the HTTP surface so an MCP client gets the same
-//! capabilities as a curl user. The dispatcher is a pure translator — JSON-RPC
-//! in, HTTP out — and owns no state beyond a `reqwest::Client` and the
-//! analyzer daemon's base URL.
+//! Why: full parity with the daemon's own surface so an MCP client gets the
+//! same capabilities as a direct socket caller. The dispatcher is a pure
+//! translator — MCP JSON-RPC in on stdio, daemon JSON-RPC out over the Unix
+//! socket — and owns no state beyond that socket path.
 //!
-//! Tools (mirrors `trusty-analyzer-service`):
+//! Tools (mirrors `service::rpc::METHODS`):
 //!
-//! | MCP tool              | Daemon endpoint                              |
-//! |-----------------------|----------------------------------------------|
-//! | `complexity_hotspots` | `GET /indexes/:id/complexity_hotspots`       |
-//! | `find_smells`         | `GET /indexes/:id/smells`                    |
-//! | `analyze_quality`     | `GET /indexes/:id/quality`                   |
-//! | `list_facts`          | `GET /facts`                                 |
-//! | `upsert_fact`         | `POST /facts`                                |
-//! | `delete_fact`         | `DELETE /facts/:id`                          |
-//! | `cluster_concepts`    | `GET /indexes/:id/clusters`                  |
-//! | `ingest_scip`         | `POST /indexes/:id/scip`                     |
-//! | `analyzer_health`     | `GET /health`                                |
+//! | MCP tool              | Daemon method                     |
+//! |-----------------------|-----------------------------------|
+//! | `complexity_hotspots` | `analyze.complexity_hotspots`     |
+//! | `find_smells`         | `analyze.smells`                  |
+//! | `analyze_quality`     | `analyze.quality`                 |
+//! | `list_facts`          | `analyze.facts_list`              |
+//! | `upsert_fact`         | `analyze.facts_upsert`            |
+//! | `delete_fact`         | `analyze.facts_delete`            |
+//! | `cluster_concepts`    | `analyze.clusters`                |
+//! | `ingest_scip`         | `analyze.scip_ingest`             |
+//! | `analyzer_health`     | `analyze.health`                  |
+//!
+//! #6287 removed the `sse` submodule along with the `POST /mcp` + `GET /mcp/sse`
+//! HTTP transport it served. ADR-0032 makes `trusty-console` the workspace's
+//! only HTTP surface, so a remote MCP client reaches this dispatcher through
+//! the console rather than through a second port this crate binds.
 
-// Why (issue #249): the `sse` submodule is the axum HTTP/SSE transport and
-// only compiles when the `http-server` feature is enabled. The `stdio`
-// transport stays unconditional — MCP clients (Claude Code) that spawn the
-// dispatcher as a subprocess only need stdio, never axum.
-#[cfg(feature = "http-server")]
-pub mod sse;
 pub mod stdio;
 
 // Why (#610): the `tools/list` JSON-Schema payload was extracted into its own
@@ -46,18 +45,20 @@ pub mod review;
 // implementation detail of the MCP dispatcher.
 pub(crate) mod console_metrics;
 
-// Why (#1195): the pure param/response helpers and the HTTP transport verbs
-// were extracted into sibling modules to keep this dispatcher under the
-// 500-SLOC production cap. `helpers` holds pure functions; `http_client` holds
-// the `impl AnalyzerMcpServer` GET/POST/DELETE plumbing.
+// Why (#1195): the pure param/response helpers and the transport were
+// extracted into sibling modules to keep this dispatcher under the 500-SLOC
+// production cap. `helpers` holds pure functions; `rpc_client` holds the
+// `impl AnalyzerMcpServer` socket plumbing.
 mod helpers;
-mod http_client;
+mod rpc_client;
+
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use helpers::{
-    build_query, index_id_or_default, require_str, urlencode, wrap_text_content, wrap_tool_error,
+    index_id_or_default, optional_params, require_str, wrap_text_content, wrap_tool_error,
     wrap_tool_result,
 };
 
@@ -133,51 +134,48 @@ impl Response {
     }
 }
 
-/// Per-request timeout for the MCP→daemon HTTP client (in seconds).
+/// MCP dispatcher backed by a framed socket client targeting the analyzer
+/// daemon.
 ///
-/// MCP dispatcher backed by an HTTP client targeting the analyzer daemon.
+/// #6287: this held a `reqwest::Client` and a base URL. It holds a socket path
+/// now — there is no connection pool to keep, because
+/// `send_framed_request_capped` dials per call, and a Unix connect on a local
+/// socket is microseconds rather than the TCP handshake the pool existed to
+/// amortise.
 #[derive(Clone)]
 pub struct AnalyzerMcpServer {
-    base_url: String,
-    http: reqwest::Client,
+    socket: PathBuf,
 }
 
 impl AnalyzerMcpServer {
-    /// Why: without timeouts MCP tool calls hang forever if the analyze daemon
-    /// is slow or unresponsive, blocking the entire stdio dispatch loop. The
-    /// value must clear two independent floors: the OpenRouter 120 s ceiling
-    /// `deep_analysis` can spend, and the diagnostics handler's own budget. It
-    /// used to be a flat 150 s, which cleared the first and missed the second —
-    /// below the 180 s diagnostics deadline, so `run_diagnostics` handed an MCP
-    /// caller a body-less transport timeout for any run between 150 s and the
-    /// daemon's answer. That is the exact #6018 symptom the deadline was added
-    /// to remove, reintroduced one layer out.
-    /// What: builds a `reqwest::Client` whose per-request timeout comes from
-    /// `core::deadlines::mcp_client_timeout()` — the outermost rung of the
-    /// shared ladder, so it tracks the configured deadline instead of drifting
-    /// from it. The 5 s TCP connect timeout stays short because the daemon is
-    /// always local.
+    /// Point the dispatcher at the daemon's socket.
+    ///
+    /// The per-call timeout comes from `core::deadlines::mcp_client_timeout()`,
+    /// applied in [`rpc_client`] rather than stored here. That value must clear
+    /// two independent floors: the OpenRouter 120 s ceiling `deep_analysis` can
+    /// spend, and the diagnostics handler's own budget. It used to be a flat
+    /// 150 s, which cleared the first and missed the second — below the 180 s
+    /// diagnostics deadline, so `run_diagnostics` handed an MCP caller a
+    /// body-less transport timeout for any run between 150 s and the daemon's
+    /// answer, which is the exact #6018 symptom the deadline was added to
+    /// remove, reintroduced one layer out.
+    ///
     /// Test: `mcp_client_timeout_outlives_the_daemon_and_openrouter`;
     /// `ladder_is_strictly_increasing_across_the_configurable_range` pins the
     /// ordering across the whole configurable range.
-    pub fn new(base_url: impl Into<String>) -> Self {
-        let http = reqwest::ClientBuilder::new()
-            .timeout(crate::core::mcp_client_timeout())
-            .connect_timeout(std::time::Duration::from_secs(5))
-            .build()
-            .expect("reqwest ClientBuilder is infallible with valid config");
+    pub fn new(socket: impl Into<PathBuf>) -> Self {
         Self {
-            base_url: base_url.into(),
-            http,
+            socket: socket.into(),
         }
     }
 
-    pub fn base_url(&self) -> &str {
-        &self.base_url
+    /// The socket this dispatcher dials.
+    pub fn socket(&self) -> &Path {
+        &self.socket
     }
 
-    /// Translate one JSON-RPC request into a daemon HTTP call. Always returns
-    /// a `Response`; transport / daemon failures are reported in-band.
+    /// Translate one MCP JSON-RPC request into a daemon method call. Always
+    /// returns a `Response`; transport / daemon failures are reported in-band.
     pub async fn dispatch(&self, req: Request) -> Response {
         let is_notification = req.id.is_none();
         let id = req.id.clone().unwrap_or(Value::Null);
@@ -277,16 +275,17 @@ impl AnalyzerMcpServer {
     /// Why: MCP clients enumerate resources to discover what context a server
     /// can expose. The analyzer exposes each trusty-search index as a resource
     /// so clients can see, at a glance, what is available for analysis.
-    /// What: calls `GET /indexes` on the daemon, maps each index ID to an MCP
-    /// resource descriptor (`trusty-analyzer://indexes/{id}`), and returns the
-    /// `{ resources: [...] }` envelope. A daemon failure surfaces as an empty
-    /// list rather than an error so the client still initializes cleanly.
+    /// What: calls `analyze.list_indexes` on the daemon, maps each index ID to
+    /// an MCP resource descriptor (`trusty-analyzer://indexes/{id}`), and
+    /// returns the `{ resources: [...] }` envelope. A daemon failure surfaces
+    /// as an empty list rather than an error so the client still initializes
+    /// cleanly.
     /// Test: `resources_list_returns_envelope` checks the shape when the daemon
     /// is unreachable (empty list).
     async fn list_resources(&self, id: Value) -> Response {
-        let resources = match self.get("/indexes").await {
+        let resources = match self.call(METHOD_LIST_INDEXES, Value::Null).await {
             Ok(value) => {
-                // GET /indexes returns `[{ "id": "..." }, ...]`.
+                // `analyze.list_indexes` returns `[{ "id": "..." }, ...]`.
                 let ids: Vec<String> = value
                     .as_array()
                     .map(|arr| {
@@ -307,7 +306,7 @@ impl AnalyzerMcpServer {
                     .collect::<Vec<_>>()
             }
             Err(e) => {
-                tracing::warn!("resources/list: GET /indexes failed: {e:?}");
+                tracing::warn!("resources/list: {METHOD_LIST_INDEXES} failed: {e:?}");
                 Vec::new()
             }
         };
@@ -338,8 +337,9 @@ impl AnalyzerMcpServer {
             "extract_graph" => self.handle_extract_graph(args).await,
             "list_entities" => self.handle_list_entities(args).await,
             "cluster_concepts" => self.handle_cluster_concepts(args).await,
-            // Why (#1104 rework): proxies GET /indexes for the console dashboard.
-            "list_analyze_indexes" => self.get("/indexes").await,
+            // Why (#1104 rework): proxies the index list for the console
+            // dashboard.
+            "list_analyze_indexes" => self.call(METHOD_LIST_INDEXES, Value::Null).await,
             "analyzer_health" => self.handle_analyzer_health(args).await,
             "ingest_scip" => self.handle_ingest_scip(args).await,
             "extract_ner" => self.handle_extract_ner(args).await,
@@ -361,47 +361,51 @@ impl AnalyzerMcpServer {
     }
 
     async fn handle_complexity_hotspots(&self, args: &Value) -> Result<Value, DispatchError> {
-        let index_id = index_id_or_default(args);
         let top_n = args.get("top_n").and_then(Value::as_u64).unwrap_or(20);
-        self.get(&format!(
-            "/indexes/{index_id}/complexity_hotspots?top_n={top_n}"
-        ))
+        self.call(
+            "analyze.complexity_hotspots",
+            serde_json::json!({ "index_id": index_id_or_default(args), "top_n": top_n }),
+        )
         .await
     }
 
     /// #5320: the exhaustive counterpart to `complexity_hotspots` — forwards to
-    /// `GET /indexes/{id}/complexity_distribution`, which returns all five A–F
-    /// bands plus the counted total.
+    /// `analyze.complexity_distribution`, which returns all five A–F bands plus
+    /// the counted total.
     async fn handle_complexity_distribution(&self, args: &Value) -> Result<Value, DispatchError> {
-        let index_id = index_id_or_default(args);
-        self.get(&format!("/indexes/{index_id}/complexity_distribution"))
+        self.call("analyze.complexity_distribution", index_params(args))
             .await
     }
 
     async fn handle_find_smells(&self, args: &Value) -> Result<Value, DispatchError> {
-        let index_id = index_id_or_default(args);
-        let q = build_query(args, &["limit", "offset", "omit_content"]);
-        self.get(&format!("/indexes/{index_id}/smells{q}")).await
+        self.call(
+            "analyze.smells",
+            with_index(args, optional_params(args, &["limit", "offset", "omit_content"])),
+        )
+        .await
     }
 
     async fn handle_analyze_quality(&self, args: &Value) -> Result<Value, DispatchError> {
-        let index_id = index_id_or_default(args);
-        self.get(&format!("/indexes/{index_id}/quality")).await
+        self.call("analyze.quality", index_params(args)).await
     }
 
-    /// Handle the `run_diagnostics` tool: forward to
-    /// `GET /indexes/{id}/diagnostics`, which runs the discovered external
-    /// static-analysis tools (clippy, ruff, biome, ...) on demand.
+    /// Handle the `run_diagnostics` tool: forward to `analyze.diagnostics`,
+    /// which runs the discovered external static-analysis tools (clippy, ruff,
+    /// biome, ...) on demand.
     async fn handle_run_diagnostics(&self, args: &Value) -> Result<Value, DispatchError> {
-        let index_id = index_id_or_default(args);
-        let q = build_query(args, &["language", "tools", "limit", "offset"]);
-        self.get(&format!("/indexes/{index_id}/diagnostics{q}"))
-            .await
+        self.call(
+            "analyze.diagnostics",
+            with_index(
+                args,
+                optional_params(args, &["language", "tools", "limit", "offset"]),
+            ),
+        )
+        .await
     }
 
     async fn handle_list_facts(&self, args: &Value) -> Result<Value, DispatchError> {
-        let q = build_query(args, &["subject", "predicate", "object"]);
-        self.get(&format!("/facts{q}")).await
+        let params = optional_params(args, &["subject", "predicate", "object"]);
+        self.call("analyze.facts_list", Value::Object(params)).await
     }
 
     async fn handle_upsert_fact(&self, args: &Value) -> Result<Value, DispatchError> {
@@ -425,7 +429,7 @@ impl AnalyzerMcpServer {
             "confidence": confidence,
             "provenance": provenance,
         });
-        self.post("/facts", &body).await
+        self.call("analyze.facts_upsert", body).await
     }
 
     async fn handle_delete_fact(&self, args: &Value) -> Result<Value, DispatchError> {
@@ -433,119 +437,124 @@ impl AnalyzerMcpServer {
             .get("id")
             .and_then(Value::as_u64)
             .ok_or_else(|| DispatchError::InvalidParams("missing 'id' (u64)".into()))?;
-        self.delete(&format!("/facts/{id}")).await
+        self.call("analyze.facts_delete", serde_json::json!({ "id": id }))
+            .await
     }
 
     async fn handle_extract_graph(&self, args: &Value) -> Result<Value, DispatchError> {
-        let index_id = index_id_or_default(args);
-        let mut path = format!("/indexes/{index_id}/graph");
-        if let Some(lang) = args.get("language").and_then(Value::as_str) {
-            path.push_str(&format!("?language={}", urlencode(lang)));
-        }
-        self.get(&path).await
+        self.call(
+            "analyze.graph",
+            with_index(args, optional_params(args, &["language"])),
+        )
+        .await
     }
 
     async fn handle_list_entities(&self, args: &Value) -> Result<Value, DispatchError> {
-        let index_id = index_id_or_default(args);
-        let q = build_query(args, &["kind", "language"]);
-        self.get(&format!("/indexes/{index_id}/entities{q}")).await
+        self.call(
+            "analyze.entities",
+            with_index(args, optional_params(args, &["kind", "language"])),
+        )
+        .await
     }
 
     async fn handle_cluster_concepts(&self, args: &Value) -> Result<Value, DispatchError> {
-        let index_id = index_id_or_default(args);
         let k = args.get("k").and_then(Value::as_u64).unwrap_or(8);
-        let path = match args.get("method").and_then(Value::as_str) {
-            Some(m) => format!("/indexes/{index_id}/clusters?k={k}&method={m}"),
-            None => format!("/indexes/{index_id}/clusters?k={k}"),
-        };
-        self.get(&path).await
+        let mut params = optional_params(args, &["method"]);
+        params.insert("k".into(), Value::from(k));
+        self.call("analyze.clusters", with_index(args, params)).await
     }
 
     async fn handle_analyzer_health(&self, _args: &Value) -> Result<Value, DispatchError> {
-        self.get("/health").await
+        self.call(METHOD_HEALTH, Value::Null).await
     }
 
     async fn handle_suggest_refactors(&self, args: &Value) -> Result<Value, DispatchError> {
-        let index_id = index_id_or_default(args);
         let top_k = args.get("top_k").and_then(Value::as_u64).unwrap_or(20);
-        let mut path = format!("/indexes/{index_id}/refactor-suggestions?top_k={top_k}");
-        if let Some(file) = args.get("file").and_then(Value::as_str) {
-            path.push_str(&format!("&file={}", urlencode(file)));
-        }
-        if let Some(sev) = args.get("min_severity").and_then(Value::as_str) {
-            path.push_str(&format!("&min_severity={}", urlencode(sev)));
-        }
-        self.get(&path).await
+        let mut params = optional_params(args, &["file", "min_severity"]);
+        params.insert("top_k".into(), Value::from(top_k));
+        self.call("analyze.refactor_suggestions", with_index(args, params))
+            .await
     }
 
     async fn handle_extract_ner(&self, args: &Value) -> Result<Value, DispatchError> {
-        let index_id = index_id_or_default(args);
         let top_k = args.get("top_k").and_then(Value::as_u64).unwrap_or(50);
-        self.get(&format!("/indexes/{index_id}/ner?top_k={top_k}"))
-            .await
+        self.call(
+            "analyze.ner",
+            serde_json::json!({ "index_id": index_id_or_default(args), "top_k": top_k }),
+        )
+        .await
     }
 
-    async fn handle_ingest_scip(&self, args: &Value) -> Result<Value, DispatchError> {
-        use base64::Engine;
-        let index_id = index_id_or_default(args);
-        let b64 = require_str(args, "scip_base64")?;
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(b64)
-            .map_err(|e| {
-                DispatchError::InvalidParams(format!("scip_base64 is not valid base64: {e}"))
-            })?;
-        self.post_bytes(&format!("/indexes/{index_id}/scip"), bytes)
-            .await
-    }
-
-    /// Handle the `review_diff` tool: forward a unified diff to `POST /review`.
+    /// Handle the `ingest_scip` tool: forward to `analyze.scip_ingest`.
     ///
-    /// Why: parity with the `POST /review` endpoint so MCP clients (Claude
-    /// Code) can ask for a PR review without shelling out. Like every other
-    /// analyzer tool, review is backed by trusty-search: the daemon fetches the
-    /// named index's chunk corpus to cross-reference the diff.
-    /// What: requires a `diff` string param and an `index_id` string param,
-    /// and POSTs the diff as `text/x-patch` to `/review?index_id=...`.
+    /// #6287: the base64 decode that used to happen here moved to the daemon.
+    /// The tool's own argument was always base64 and the HTTP endpoint took raw
+    /// bytes, so this handler decoded and the daemon re-parsed; a JSON-RPC frame
+    /// carries no binary, so the base64 travels as-is and one decoder is left.
+    /// The tool's schema is unchanged.
+    async fn handle_ingest_scip(&self, args: &Value) -> Result<Value, DispatchError> {
+        let b64 = require_str(args, "scip_base64")?;
+        self.call(
+            "analyze.scip_ingest",
+            serde_json::json!({
+                "index_id": index_id_or_default(args),
+                "scip_base64": b64,
+            }),
+        )
+        .await
+    }
+
+    /// Handle the `review_diff` tool: forward a unified diff to
+    /// `analyze.review`.
+    ///
+    /// Why: parity with the daemon method so MCP clients (Claude Code) can ask
+    /// for a PR review without shelling out. Like every other analyzer tool,
+    /// review is backed by trusty-search: the daemon fetches the named index's
+    /// chunk corpus to cross-reference the diff.
+    /// What: requires a `diff` string param and an `index_id` string param, and
+    /// sends both as `params`.
     /// Test: `review_diff_requires_diff_param` and
     /// `review_diff_requires_index_id` check the missing-param paths.
     async fn handle_review_diff(&self, args: &Value) -> Result<Value, DispatchError> {
         let diff = require_str(args, "diff")?;
         let index_id = require_str(args, "index_id")?;
-        let path = format!("/review?index_id={}", urlencode(index_id));
-        self.post_text(&path, diff).await
+        self.call(
+            "analyze.review",
+            serde_json::json!({ "index_id": index_id, "diff": diff }),
+        )
+        .await
     }
 
-    /// Handle the `deep_analysis` MCP tool: forward to `POST /analyze/deep`.
+    /// Handle the `deep_analysis` MCP tool: forward to `analyze.deep_analysis`.
     ///
-    /// Why: pairs with the [`POST /analyze/deep`] HTTP endpoint so MCP clients
-    /// can opt into the LLM-augmented analysis without going through the
-    /// deterministic `review_diff` path. Keeps the two surfaces separate so
-    /// `review_diff` remains cheap and deterministic.
+    /// Why: pairs with the daemon method so MCP clients can opt into the
+    /// LLM-augmented analysis without going through the deterministic
+    /// `review_diff` path. Keeps the two surfaces separate so `review_diff`
+    /// remains cheap and deterministic.
     /// What: requires `index_id`; optional `model` overrides the daemon
-    /// default. POSTs a JSON body shaped like [`DeepAnalyzeRequest`] and
-    /// returns the [`DeepAnalysisReport`] JSON.
+    /// default.
     /// Test: `deep_analysis_requires_index_id` and
-    /// `deep_analysis_posts_to_endpoint` cover param + URL construction.
+    /// `deep_analysis_calls_the_daemon_method` cover param construction.
     async fn handle_deep_analysis(&self, args: &Value) -> Result<Value, DispatchError> {
         let index_id = require_str(args, "index_id")?;
-        let mut body = serde_json::json!({ "index_id": index_id });
-        if let Some(model) = args.get("model").and_then(Value::as_str) {
-            body["model"] = Value::from(model);
-        }
-        // The HTTP endpoint accepts an optional pre-computed `report`; the MCP
+        let mut params = optional_params(args, &["model"]);
+        params.insert("index_id".into(), Value::from(index_id));
+        // The daemon method accepts an optional pre-computed `report`; the MCP
         // tool surface deliberately keeps the schema minimal (index_id +
         // model) — re-running the synthesis on the daemon is the simpler
         // ergonomics for AI clients.
-        self.post("/analyze/deep", &body).await
+        self.call("analyze.deep_analysis", Value::Object(params))
+            .await
     }
 
-    /// Handle the `review_github_pr` tool: forward to `POST /review/github-pr`.
+    /// Handle the `review_github_pr` tool: forward to
+    /// `analyze.review_github_pr`.
     ///
-    /// Why: parity with the HTTP endpoint so MCP clients can review a GitHub PR
+    /// Why: parity with the daemon method so MCP clients can review a GitHub PR
     /// by number. The daemon owns the GitHub token and the fetch/analyze/comment
     /// pipeline; the MCP server is a pure translator.
     /// What: requires `owner`, `repo`, `pr`, and `index_id`; `post_comment` is
-    /// optional (default false). POSTs a `GithubPrRequest`-shaped JSON body.
+    /// optional (default false). Sends a `GithubPrRequest`-shaped params object.
     /// Test: `review_github_pr_requires_owner` checks the missing-param path.
     async fn handle_review_github_pr(&self, args: &Value) -> Result<Value, DispatchError> {
         let owner = require_str(args, "owner")?;
@@ -566,8 +575,36 @@ impl AnalyzerMcpServer {
             "index_id": index_id,
             "post_comment": post_comment,
         });
-        self.post("/review/github-pr", &body).await
+        self.call("analyze.review_github_pr", body).await
     }
+}
+
+/// The daemon's health method, as this client names it.
+///
+/// Duplicated rather than imported from `crate::service::rpc`: the `service`
+/// module is behind the `http-server` feature and this dispatcher is not, so an
+/// import would make the MCP surface unbuildable in a `--no-default-features`
+/// library build. `mcp_names_the_methods_the_router_registers` is what keeps
+/// the two equal.
+const METHOD_HEALTH: &str = "analyze.health";
+
+/// The daemon's index-list method. Duplicated for the reason above.
+const METHOD_LIST_INDEXES: &str = "analyze.list_indexes";
+
+/// Put `index_id` into an already-built params object.
+///
+/// Why: every per-index method needs it and nine tools accept it under either
+/// `index` or `index_id` (`index_id_or_default`). Inserting it last is
+/// deliberate — a caller cannot smuggle a second `index_id` in through
+/// `optional_params` and have it win.
+fn with_index(args: &Value, mut params: serde_json::Map<String, Value>) -> Value {
+    params.insert("index_id".into(), Value::from(index_id_or_default(args)));
+    Value::Object(params)
+}
+
+/// A params object carrying nothing but `index_id`.
+fn index_params(args: &Value) -> Value {
+    serde_json::json!({ "index_id": index_id_or_default(args) })
 }
 
 #[derive(Debug)]

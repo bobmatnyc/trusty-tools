@@ -59,8 +59,8 @@ pub(super) fn descriptor() -> Value {
 /// to gather health/version data without requiring the analyzer's HTTP daemon
 /// to be discoverable or externally reachable. The console deserialises the
 /// result via `parse_report`.
-/// What: Calls `GET /health` on the analyzer HTTP daemon (same as the
-/// `analyzer_health` tool) to determine whether `trusty-search` is reachable.
+/// What: Calls `analyze.health` on the daemon (same as the `analyzer_health`
+/// tool) to determine whether `trusty-search` is reachable.
 /// Builds a `ConsoleMetricsReport` with `service_id = "trusty-analyze"`,
 /// `display_name = "Trusty Analyze"`, version from `CARGO_PKG_VERSION`,
 /// `status = Ok | Degraded` based on `search_reachable`, and a `metrics`
@@ -73,8 +73,10 @@ pub(super) fn descriptor() -> Value {
 pub(super) async fn handle_console_metrics(
     server: &super::AnalyzerMcpServer,
 ) -> Result<Value, DispatchError> {
-    // Probe the analyzer's own HTTP /health endpoint to determine status.
-    let health = server.get("/health").await;
+    // Probe the daemon's own health method to determine status.
+    let health = server
+        .call(super::METHOD_HEALTH, serde_json::Value::Null)
+        .await;
     let search_reachable = health
         .as_ref()
         .ok()
