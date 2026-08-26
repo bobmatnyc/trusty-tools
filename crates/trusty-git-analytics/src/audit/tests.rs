@@ -1129,7 +1129,8 @@ pub(super) fn free_port() -> u16 {
 /// from them. An assertion about a side effect the stub performs, such as a
 /// spawn or a file write, is a different event: it can still be pending when
 /// the counter has already flipped the daemon to ready. Gate that on the effect
-/// itself — see `serve_health_after_spawns` (#5713).
+/// itself — see `two_concurrent_guards_both_resolve_against_one_slow_daemon`'s
+/// spawn-log gate (#5713).
 async fn serve_health(degraded_replies: usize) -> u16 {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -1164,55 +1165,6 @@ async fn serve_health(degraded_replies: usize) -> u16 {
 /// healthy daemon. Returns the port it bound.
 async fn serve_healthy() -> u16 {
     serve_health(0).await
-}
-
-/// A listener whose `/health` answers `503 Service Unavailable` until
-/// `spawn_log` holds `required` lines, and `200 OK` from then on. Returns the
-/// port it bound.
-///
-/// Why a spawn log rather than [`serve_health`]'s reply counter (#5713): the
-/// counter flips on the Nth REQUEST, which is a different event from the spawns
-/// the concurrency test asserts on. Both guards could therefore reach `Ok` off
-/// the counter alone, before either detached stub had been scheduled to append
-/// its line — and on a loaded host they did, leaving the test reading an empty
-/// log and reporting `got []`.
-///
-/// Gating on the log inverts that: the daemon becomes ready BECAUSE the spawns
-/// happened, so a guard that returns `Ok` proves both lines are already on disk.
-/// It also fixes the opening-probe ordering for free. A guard's own spawn cannot
-/// precede its own opening probe, so the second guard's probe sees at most one
-/// line, misses, and spawns — by construction rather than by winning a race
-/// against the first guard's readiness polls.
-///
-/// A file rather than an in-process counter, because the thing that writes it is
-/// a detached child process — the same reason [`serve_health_gated_on`] uses one.
-async fn serve_health_after_spawns(spawn_log: std::path::PathBuf, required: usize) -> u16 {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind an ephemeral port");
-    let port = listener
-        .local_addr()
-        .expect("read the bound address")
-        .port();
-    tokio::spawn(async move {
-        while let Ok((mut stream, _)) = listener.accept().await {
-            let spawn_log = spawn_log.clone();
-            tokio::spawn(async move {
-                use tokio::io::AsyncWriteExt as _;
-                let spawned = std::fs::read_to_string(&spawn_log)
-                    .unwrap_or_default()
-                    .lines()
-                    .count();
-                let reply: &[u8] = if spawned >= required {
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
-                } else {
-                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n"
-                };
-                let _ = stream.write_all(reply).await;
-            });
-        }
-    });
-    port
 }
 
 /// An executable stub at `dir/name` running `script`, standing in for a
