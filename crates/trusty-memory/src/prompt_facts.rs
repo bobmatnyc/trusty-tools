@@ -122,6 +122,18 @@ pub const TIER_S_REAFFIRM_DAYS: i64 = 90;
 
 /// One active Tier S fact, with the moment it was last affirmed.
 ///
+/// The method serving the Tier S surface, one row per hot fact (#6286).
+///
+/// Why it lives beside [`TierSFact`] rather than in `doctor::tier_s`, which is
+/// its only production caller: the name and the row type are one contract, and
+/// `list_prompt_facts_endpoint_returns_hot_triples` pins them together. A test
+/// reaching into `doctor`'s private module to read a string it must agree with
+/// would be pinning the two halves from opposite ends of the crate.
+///
+/// It answers `{"facts": [...]}`, NOT a bare array — the REST route #6286
+/// retired returned the array itself, so every caller unwraps `facts` now.
+pub const PROMPT_FACTS_METHOD: &str = "list_prompt_facts";
+
 /// Why (#4890): ADR-0028 D8 point 4 requires each Tier S fact to carry an
 /// `affirmed_at`. It is **derived, not stored** — see [`gather_hot_facts`] for
 /// why that is the stronger design rather than a shortcut. Bundling it with the

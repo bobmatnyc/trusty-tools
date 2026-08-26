@@ -138,13 +138,13 @@ pub async fn run_pm_task_with_persona(
     // global inside `classification`) so both `build_turn_context` and
     // `finish_turn` below share one value and remain independently testable
     // against a mock daemon.
-    let workstreams_base_url = crate::memory::trusty_client::default_trusty_url();
+    let workstreams_socket = crate::memory::trusty_client::default_trusty_socket();
     let turn_ctx = classification::build_turn_context(
         project_path,
         overrides.focused_workstream.as_deref(),
         persona_cfg.workstreams.recent_window,
         persona_cfg.workstreams.enabled,
-        &workstreams_base_url,
+        &workstreams_socket,
     )
     .await;
 
@@ -158,7 +158,7 @@ pub async fn run_pm_task_with_persona(
     let memory_search_base = trusty_common::resolve_daemon_base_url("trusty-search");
     let persona_memory = persona_memory::build_persona_memory(
         &persona_cfg.stores,
-        Some(&workstreams_base_url),
+        Some(&workstreams_socket),
         memory_search_base.as_deref(),
         user_input,
     )
@@ -722,7 +722,7 @@ pub async fn run_pm_task_with_persona(
                     user_input,
                     assembly.content,
                     &turn_ctx,
-                    &workstreams_base_url,
+                    &workstreams_socket,
                 )
                 .await?;
                 // #3928: persist to the agent's OWN palace chat session (the
@@ -731,7 +731,7 @@ pub async fn run_pm_task_with_persona(
                 // already on its way.
                 persona_memory::spawn_persist_turn(
                     &persona_cfg.stores,
-                    Some(&workstreams_base_url),
+                    Some(&workstreams_socket),
                     persona_name,
                     user_input,
                     &display,
@@ -820,12 +820,12 @@ pub async fn run_pm_task_with_persona(
         user_input,
         content,
         &turn_ctx,
-        &workstreams_base_url,
+        &workstreams_socket,
     )
     .await?;
     persona_memory::spawn_persist_turn(
         &persona_cfg.stores,
-        Some(&workstreams_base_url),
+        Some(&workstreams_socket),
         persona_name,
         user_input,
         &display,

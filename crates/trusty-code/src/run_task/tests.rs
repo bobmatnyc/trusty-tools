@@ -42,7 +42,7 @@ use crate::tools::{AgentOutput, EngineerCompletionSignal, RunContext};
 /// `trusty-search` daemon, `execute_run_task` discovers and contacts them for
 /// real — `trusty-memory` because `catchup::pm_catchup_context` resolves its
 /// base URL via `resolve_memory_base_url_or_unreachable()`
-/// (`TRUSTY_MEMORY_URL` env override, else the daemon's on-disk discovery
+/// (`TRUSTY_MEMORY_SOCKET` env override, else the derived socket
 /// file), and `trusty-search` because
 /// `ensure_project_indexed_in_background` -> `ensure_project_indexed` finds
 /// the daemon via `resolve_daemon_base_url("trusty-search")` (same on-disk
@@ -63,7 +63,7 @@ use crate::tools::{AgentOutput, EngineerCompletionSignal, RunContext};
 /// of touching the process-global env var per test. `execute_run_task` has no
 /// such injection seam (it is the black-box entry point under test here), so
 /// the fix at THIS layer uses the two seams the production code itself
-/// already treats as authoritative overrides — `TRUSTY_MEMORY_URL` (an
+/// already treats as authoritative overrides — `TRUSTY_MEMORY_SOCKET` (an
 /// explicit override always wins over discovery,
 /// `resolve_memory_base_url_or_unreachable`'s own doc) and
 /// `TRUSTY_DATA_DIR_OVERRIDE` (documented in `trusty_common::data_dir` as
@@ -90,14 +90,14 @@ use crate::tools::{AgentOutput, EngineerCompletionSignal, RunContext};
 fn isolate_ambient_daemons() {
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(|| {
-        // A reserved, unassigned TCP port: connection attempts fail fast
-        // rather than hanging or timing out. Mirrors
-        // `catchup::tests::UNREACHABLE_MEMORY_URL` and
+        // A socket path under a directory that cannot exist: a dial is
+        // refused by the kernel immediately rather than hanging. Mirrors
+        // `catchup::tests::UNREACHABLE_MEMORY_SOCKET` and
         // `trusty_common::memory_rpc`'s own `UNREACHABLE_PLACEHOLDER`
-        // convention. An explicit `TRUSTY_MEMORY_URL` always wins over
-        // discovery (see `resolve_memory_base_url`), so this alone is
+        // convention. An explicit `TRUSTY_MEMORY_SOCKET` always wins over
+        // the derived path (see `resolve_memory_socket`), so this alone is
         // sufficient to stop `catchup::pm_catchup_context` from ever
-        // resolving the host's real trusty-memory address.
+        // dialling the host's real trusty-memory daemon.
         // SAFETY: `Once` guarantees this runs exactly one time, before any
         // reader in this process observes it (no test spawns a thread that
         // reads it before this call happens on the same thread that reaches
@@ -105,8 +105,8 @@ fn isolate_ambient_daemons() {
         // (and thus no unsafe-across-threads mutation) is needed.
         unsafe {
             std::env::set_var(
-                trusty_common::memory_rpc::TRUSTY_MEMORY_URL_ENV,
-                "http://127.0.0.1:1",
+                trusty_common::memory_rpc::TRUSTY_MEMORY_SOCKET_ENV,
+                "/nonexistent/trusty-memory/trusty-memory.sock",
             );
         }
 

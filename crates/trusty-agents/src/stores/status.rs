@@ -23,13 +23,21 @@
 //! object (see [`failed_stages`]) — the exact ground truth trusty-search's
 //! own `/health` handler already uses (`IndexStages::any_failed`,
 //! `core::registry.rs`) — not from HTTP status alone.
+//! **The two daemons no longer share a transport (#6286).** trusty-search is
+//! still loopback HTTP; ADR-0032 moved trusty-memory onto a Unix socket.
+//! `resolve_daemon_base_url("trusty-memory")` reads an `http_addr` file nothing
+//! writes any more, so `memory_base` was permanently `None` and EVERY
+//! memory-backed store reported `palace_connected: false` with "daemon not
+//! discoverable" whether or not the daemon was up. The palace half dials the
+//! socket through `trusty_common::memory_rpc`.
+//!
 //! What: [`StoreStatus`] is the per-store report (serialized straight to the
 //! sidecar API and the GUI card). [`resolve_store_statuses`] resolves a whole
-//! [`StoresConfig`]; base URLs are injected so tests can point at a mock
-//! server rather than the developer's live daemons.
-//! Test: `super::status::tests` — a mock trusty-search/-memory router covers
-//! connected, 404, and unreachable; config-validation short-circuiting is
-//! covered without any network at all.
+//! [`StoresConfig`]; the search base URL and the memory socket are injected so
+//! tests can point at a mock rather than the developer's live daemons.
+//! Test: `super::status::tests` — a mock trusty-search router and a mock memory
+//! socket cover connected, missing, and unreachable; config-validation
+//! short-circuiting is covered without any network at all.
 
 use std::time::Duration;
 
@@ -197,11 +205,12 @@ fn attach_tree_coverage(status: &mut StoreStatus) {
 /// Why: One entry point for both the sidecar API (`GET
 /// /api/agents/:name/stores`) and any boot-time reporting, so the GUI and the
 /// logs can never disagree about whether a store is connected.
-/// What: `search_base`/`memory_base` are full base URLs (e.g.
-/// `http://127.0.0.1:7878`); `None` means the daemon was not discoverable and
-/// every store resolves to not-connected with that as the reason — injected
-/// rather than resolved internally so tests can drive a mock server. Returns
-/// one [`StoreStatus`] per binding, in declaration order. Never errors.
+/// What: `search_base` is a full base URL (e.g. `http://127.0.0.1:7878`) and
+/// `memory_socket` is the path trusty-memory binds; `None` for either means
+/// that daemon was not discoverable and the halves it backs resolve to
+/// not-connected with that as the reason — both injected rather than resolved
+/// internally so tests can drive a mock. Returns one [`StoreStatus`] per
+/// binding, in declaration order. Never errors.
 /// Test: `resolves_connected_store_with_stats`,
 /// `reports_missing_index_as_not_connected`,
 /// `reports_undiscoverable_search_daemon`,
@@ -210,7 +219,7 @@ pub async fn resolve_store_statuses(
     agent_name: &str,
     stores: &StoresConfig,
     search_base: Option<&str>,
-    memory_base: Option<&str>,
+    memory_socket: Option<&std::path::Path>,
 ) -> Vec<StoreStatus> {
     let client = match reqwest::Client::builder().timeout(PROBE_TIMEOUT).build() {
         Ok(c) => c,
@@ -233,7 +242,7 @@ pub async fn resolve_store_statuses(
 
     let mut out = Vec::with_capacity(stores.bindings.len());
     for binding in &stores.bindings {
-        out.push(resolve_one(&client, agent_name, binding, search_base, memory_base).await);
+        out.push(resolve_one(&client, agent_name, binding, search_base, memory_socket).await);
     }
     out
 }
@@ -244,7 +253,7 @@ async fn resolve_one(
     agent_name: &str,
     binding: &AgentStoreBinding,
     search_base: Option<&str>,
-    memory_base: Option<&str>,
+    memory_socket: Option<&std::path::Path>,
 ) -> StoreStatus {
     // Config problems short-circuit before any network call — an unusable
     // binding has nothing meaningful to probe.
@@ -351,7 +360,7 @@ async fn resolve_one(
     };
 
     if let Some(palace) = &binding.palace {
-        let (ok, reason) = probe_palace(client, memory_base, palace).await;
+        let (ok, reason) = probe_palace(memory_socket, palace).await;
         status.palace_connected = Some(ok);
         status.palace_reason = reason;
     }
@@ -403,45 +412,50 @@ fn failed_stages(body: &serde_json::Value) -> Vec<String> {
 
 /// Probe whether `palace` exists on the trusty-memory daemon.
 ///
-/// Why: `GET /api/v1/palaces/{id}/drawers?limit=1` is the cheapest existence
-/// check that does NOT create anything — the `POST /api/v1/palaces` route the
-/// rest of this crate uses (`memory::trusty_client`) is an ensure/create and
-/// would silently conjure a palace that a status probe has no business
-/// creating. This mirrors `api::server::workstreams::fetch_drawers`' existing
-/// read path.
-/// What: `(true, None)` when the daemon answers 2xx; `(false, Some(reason))`
-/// for every other outcome.
-/// Test: `reports_missing_palace_without_downgrading_index`.
+/// Why: `memory.drawers_list` with `limit: 1` is the cheapest existence check
+/// that does NOT create anything — `palace_create`, which the rest of this
+/// crate uses (`memory::trusty_client`), is an ensure/create and would silently
+/// conjure a palace a status probe has no business creating. This is the
+/// method its REST predecessor (`GET …/drawers?limit=1`) folded onto.
+/// What: `(true, None)` when the daemon answers. A not-found refusal is the
+/// palace being absent — read off `MemoryRpcError::is_not_found`, the same
+/// distinction the 404 status carried — and everything else is the daemon being
+/// unreachable or in trouble, carrying its own message.
+/// Test: `reports_missing_palace_without_downgrading_index`,
+/// `reports_unopenable_palace_as_a_server_error_not_an_absence`.
 async fn probe_palace(
-    client: &reqwest::Client,
-    memory_base: Option<&str>,
+    memory_socket: Option<&std::path::Path>,
     palace: &str,
 ) -> (bool, Option<String>) {
-    let Some(base) = memory_base else {
+    let Some(socket) = memory_socket else {
         return (
             false,
             Some("trusty-memory daemon not discoverable (is it running?)".to_string()),
         );
     };
-    let url = format!(
-        "{}/api/v1/palaces/{}/drawers?limit=1",
-        base.trim_end_matches('/'),
-        palace
-    );
-    match client.get(&url).send().await {
-        Ok(resp) if resp.status().is_success() => (true, None),
-        Ok(resp) if resp.status() == reqwest::StatusCode::NOT_FOUND => (
-            false,
-            Some(format!("memory palace `{palace}` does not exist")),
-        ),
-        Ok(resp) => (
-            false,
-            Some(format!(
-                "trusty-memory returned HTTP {} for palace `{palace}`",
-                resp.status()
-            )),
-        ),
-        Err(e) => (false, Some(format!("trusty-memory unreachable: {e}"))),
+    match trusty_common::memory_rpc::call_memory_tool_at_with_timeout(
+        socket,
+        "memory.drawers_list",
+        serde_json::json!({ "palace_id": palace, "limit": 1 }),
+        PROBE_TIMEOUT,
+    )
+    .await
+    {
+        Ok(_) => (true, None),
+        Err(e) => (false, Some(describe_palace_failure(&e, palace))),
+    }
+}
+
+/// Turn a palace-probe failure into the reason a card renders.
+///
+/// Kept beside [`probe_palace`] rather than inlined so
+/// `api::server::agent_kg`'s equivalent can be read against it: the two must
+/// describe the same down daemon the same way, or one pane contradicts another.
+fn describe_palace_failure(e: &anyhow::Error, palace: &str) -> String {
+    match e.downcast_ref::<trusty_common::memory_rpc::MemoryRpcError>() {
+        Some(rpc) if rpc.is_not_found() => format!("memory palace `{palace}` does not exist"),
+        Some(rpc) => format!("trusty-memory refused the read for palace `{palace}`: {rpc}"),
+        None => format!("trusty-memory unreachable: {e:#}"),
     }
 }
 

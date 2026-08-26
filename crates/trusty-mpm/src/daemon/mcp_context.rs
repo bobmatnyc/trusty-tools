@@ -180,7 +180,7 @@ pub async fn session_context_catchup(
     }
 
     let config = crate::core::config::MpmConfig::load_default();
-    let memory_url = trusty_common::memory_rpc::resolve_memory_base_url_or_unreachable();
+    let memory_socket = trusty_common::memory_rpc::resolve_memory_socket_or_unreachable();
 
     // #5072: `absorb` sums `undatable_sessions_dropped` across projects rather
     // than concatenating it — an empty `sessions` array is only "nothing
@@ -191,7 +191,7 @@ pub async fn session_context_catchup(
     for dir in &project_dirs {
         let opts = CatchupOptions {
             project_dir: dir.clone(),
-            memory_url: memory_url.clone(),
+            memory_socket: memory_socket.clone(),
             include_git: config.catchup.include_git,
             include_palace: config.catchup.include_palace,
             git_limit: config.catchup.git_limit,

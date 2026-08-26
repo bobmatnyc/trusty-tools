@@ -29,14 +29,14 @@ pub(crate) async fn memory(action: MemoryAction) -> anyhow::Result<()> {
             dry_run,
             json,
             allow_secret_like,
-            memory_url,
+            memory_socket,
         } => {
             let opts = ImportOptions {
                 dir,
                 palace,
                 dry_run,
                 allow_secret_like,
-                memory_url,
+                memory_socket,
             };
             let report = trusty_mpm::core::memory_import::run_import(&opts).await?;
             if json {

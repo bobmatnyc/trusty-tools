@@ -89,12 +89,21 @@ fn snippet_truncates_long_content() {
     assert!(out.ends_with('…'));
 }
 
+/// A socket path nothing can be serving.
+///
+/// Why (#6286): the retired rigs pointed at `http://127.0.0.1:1` — a reserved
+/// port — so a dial failed immediately rather than timing out. A path under a
+/// directory that cannot exist is the socket equivalent.
+fn unreachable_socket() -> &'static std::path::Path {
+    std::path::Path::new("/nonexistent/trusty-memory/trusty-memory.sock")
+}
+
 #[tokio::test]
 async fn list_workstreams_at_no_project_root_is_empty() {
     // A tempdir with no git/project marker resolves no palace id, so the
     // function returns empty without ever making a network call.
     let tmp = tempfile::tempdir().expect("tempdir");
-    let out = list_workstreams_at(tmp.path(), "http://127.0.0.1:1").await;
+    let out = list_workstreams_at(tmp.path(), unreachable_socket()).await;
     assert_eq!(out, Vec::new());
 }
 
@@ -104,7 +113,7 @@ async fn list_workstreams_at_unreachable_daemon_is_empty_not_error() {
     std::fs::create_dir(tmp.path().join(".git")).expect("mkdir .git");
     // Port 1 is a reserved, never-listening port — the health probe
     // fails fast and the function degrades to an empty list.
-    let out = list_workstreams_at(tmp.path(), "http://127.0.0.1:1").await;
+    let out = list_workstreams_at(tmp.path(), unreachable_socket()).await;
     assert_eq!(out, Vec::new());
 }
 
@@ -125,13 +134,13 @@ fn workstream_summary_tag_renders_ws_summary_prefix() {
 /// pin-then-basename and returns `None` outside a project. The shared resolver
 /// answers via level 4 (`parent/dir` of the main worktree root), so a
 /// projectless caller resolves and the write proceeds to the daemon.
-/// What: asserts the call still fails LOUDLY (the daemon at port 1 is
+/// What: asserts the call still fails LOUDLY (the absent socket is
 /// unreachable) but NOT for want of a project root.
 /// Test: itself.
 #[tokio::test]
 async fn create_tagged_drawer_at_without_a_project_root_still_resolves_a_palace() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let err = create_tagged_drawer_at(tmp.path(), "http://127.0.0.1:1", "content", vec![])
+    let err = create_tagged_drawer_at(tmp.path(), unreachable_socket(), "content", vec![])
         .await
         .expect_err("an unreachable daemon must error, not silently succeed");
     let msg = err.to_string();
@@ -158,7 +167,7 @@ async fn create_tagged_drawer_at_malformed_pin_errs() {
     )
     .expect("write malformed pin");
 
-    let err = create_tagged_drawer_at(tmp.path(), "http://127.0.0.1:1", "content", vec![])
+    let err = create_tagged_drawer_at(tmp.path(), unreachable_socket(), "content", vec![])
         .await
         .expect_err("an untrustworthy pin must stop the write");
     assert!(
@@ -170,7 +179,7 @@ async fn create_tagged_drawer_at_malformed_pin_errs() {
 #[tokio::test]
 async fn drawers_by_tag_at_no_project_root_is_empty() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let out = drawers_by_tag_at(tmp.path(), "http://127.0.0.1:1", "ws:feat-x", 10).await;
+    let out = drawers_by_tag_at(tmp.path(), unreachable_socket(), "ws:feat-x", 10).await;
     assert_eq!(out, Vec::new());
 }
 
@@ -183,10 +192,8 @@ async fn drawers_by_tag_at_no_project_root_is_empty() {
 // -----------------------------------------------------------------
 mod mock_daemon {
     use super::*;
-    use axum::Router;
-    use axum::extract::{Path as AxumPath, Query, State};
-    use axum::routing::{get, post};
-    use std::net::SocketAddr;
+    use crate::uds_mock::{self, MockMemoryDaemon};
+    use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
 
     #[derive(Clone)]
@@ -201,84 +208,62 @@ mod mock_daemon {
         drawers: StdMutex<Vec<MockDrawer>>,
     }
 
-    async fn mock_health() -> Json<serde_json::Value> {
-        Json(serde_json::json!({"status": "ok"}))
-    }
-
-    async fn mock_create_palace(Json(_body): Json<serde_json::Value>) -> Json<serde_json::Value> {
-        Json(serde_json::json!({"ok": true}))
-    }
-
-    #[derive(Deserialize)]
-    struct MockCreateDrawerBody {
-        content: String,
-        #[serde(default)]
-        tags: Vec<String>,
-    }
-
-    async fn mock_create_drawer(
-        State(state): State<std::sync::Arc<MockState>>,
-        AxumPath(_palace_id): AxumPath<String>,
-        Json(body): Json<MockCreateDrawerBody>,
-    ) -> Json<serde_json::Value> {
-        let mut drawers = state.drawers.lock().unwrap();
-        let created_at = ts(drawers.len() as i64);
-        drawers.push(MockDrawer {
-            content: body.content,
-            tags: body.tags,
-            created_at,
-        });
-        Json(serde_json::json!({"ok": true}))
-    }
-
-    #[derive(Deserialize)]
-    struct MockListQuery {
-        tag: Option<String>,
-    }
-
-    async fn mock_list_drawers(
-        State(state): State<std::sync::Arc<MockState>>,
-        AxumPath(_palace_id): AxumPath<String>,
-        Query(q): Query<MockListQuery>,
-    ) -> Json<Vec<serde_json::Value>> {
-        let drawers = state.drawers.lock().unwrap();
-        let mut rows: Vec<&MockDrawer> = drawers
-            .iter()
-            .filter(|d| match &q.tag {
-                Some(t) => d.tags.iter().any(|x| x == t),
-                None => true,
+    /// Serve the three methods this module's read and write paths call.
+    ///
+    /// `memory.health` and `palace_create` answer trivially; the drawer pair is
+    /// the stateful part, and `memory.drawers_list` sorts newest-first the way
+    /// the daemon does for `sort=created_desc`.
+    async fn spawn(state: Arc<MockState>) -> MockMemoryDaemon {
+        uds_mock::spawn(move |method: &str, params: serde_json::Value| {
+            let state = Arc::clone(&state);
+            let method = method.to_string();
+            Box::pin(async move {
+                match method.as_str() {
+                    "memory.health" => Ok(serde_json::json!({"status": "ok"})),
+                    "palace_create" => Ok(serde_json::json!({"ok": true})),
+                    "memory.drawer_create" => {
+                        let mut drawers = state.drawers.lock().unwrap();
+                        let created_at = ts(drawers.len() as i64);
+                        drawers.push(MockDrawer {
+                            content: params["content"].as_str().unwrap_or_default().to_string(),
+                            tags: params["tags"]
+                                .as_array()
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|v| v.as_str().map(str::to_string))
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
+                            created_at,
+                        });
+                        Ok(serde_json::json!({"id": "d1"}))
+                    }
+                    "memory.drawers_list" => {
+                        let wanted = params["tag"].as_str().map(str::to_string);
+                        let drawers = state.drawers.lock().unwrap();
+                        let mut rows: Vec<&MockDrawer> = drawers
+                            .iter()
+                            .filter(|d| match &wanted {
+                                Some(t) => d.tags.iter().any(|x| x == t),
+                                None => true,
+                            })
+                            .collect();
+                        rows.sort_by_key(|d| std::cmp::Reverse(d.created_at));
+                        Ok(serde_json::json!(
+                            rows.into_iter()
+                                .map(|d| serde_json::json!({
+                                    "content": d.content,
+                                    "tags": d.tags,
+                                    "created_at": d.created_at,
+                                }))
+                                .collect::<Vec<_>>()
+                        ))
+                    }
+                    other => Err(uds_mock::RpcError::method_not_found(other, &[])),
+                }
             })
-            .collect();
-        rows.sort_by_key(|d| std::cmp::Reverse(d.created_at));
-        Json(
-            rows.into_iter()
-                .map(|d| {
-                    serde_json::json!({
-                        "content": d.content,
-                        "tags": d.tags,
-                        "created_at": d.created_at,
-                    })
-                })
-                .collect(),
-        )
-    }
-
-    async fn spawn(state: std::sync::Arc<MockState>) -> SocketAddr {
-        let app = Router::new()
-            .route("/health", get(mock_health))
-            .route("/api/v1/palaces", post(mock_create_palace))
-            .route(
-                "/api/v1/palaces/{id}/drawers",
-                get(mock_list_drawers).post(mock_create_drawer),
-            )
-            .with_state(state);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        addr
+        })
+        .await
     }
 
     /// Why: proves `create_tagged_drawer_at` + `drawers_by_tag_at` compose
@@ -294,27 +279,22 @@ mod mock_daemon {
     #[tokio::test]
     async fn create_tagged_drawer_at_and_drawers_by_tag_at_round_trip() {
         let state = std::sync::Arc::new(MockState::default());
-        let addr = spawn(state).await;
-        let base_url = format!("http://{addr}");
+        let daemon = spawn(state).await;
+        let socket = daemon.socket().to_path_buf();
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir(tmp.path().join(".git")).expect("mkdir .git");
 
-        create_tagged_drawer_at(tmp.path(), &base_url, "turn one", vec!["ws:feat-x".into()])
+        create_tagged_drawer_at(tmp.path(), &socket, "turn one", vec!["ws:feat-x".into()])
             .await
             .expect("first write succeeds");
-        create_tagged_drawer_at(tmp.path(), &base_url, "turn two", vec!["ws:feat-x".into()])
+        create_tagged_drawer_at(tmp.path(), &socket, "turn two", vec!["ws:feat-x".into()])
             .await
             .expect("second write succeeds");
-        create_tagged_drawer_at(
-            tmp.path(),
-            &base_url,
-            "other turn",
-            vec!["ws:feat-y".into()],
-        )
-        .await
-        .expect("third write succeeds");
+        create_tagged_drawer_at(tmp.path(), &socket, "other turn", vec!["ws:feat-y".into()])
+            .await
+            .expect("third write succeeds");
 
-        let out = drawers_by_tag_at(tmp.path(), &base_url, "ws:feat-x", 10).await;
+        let out = drawers_by_tag_at(tmp.path(), &socket, "ws:feat-x", 10).await;
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].content, "turn two", "newest-first ordering");
         assert_eq!(out[1].content, "turn one");
@@ -335,14 +315,14 @@ mod mock_daemon {
     #[tokio::test]
     async fn list_workstream_labels_at_against_mock_daemon() {
         let state = std::sync::Arc::new(MockState::default());
-        let addr = spawn(state).await;
-        let base_url = format!("http://{addr}");
+        let daemon = spawn(state).await;
+        let socket = daemon.socket().to_path_buf();
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir(tmp.path().join(".git")).expect("mkdir .git");
 
         create_tagged_drawer_at(
             tmp.path(),
-            &base_url,
+            &socket,
             "WS-CLAIM feat-x: does a thing",
             vec!["ws-claim".into(), "ws:feat-x".into()],
         )
@@ -350,14 +330,14 @@ mod mock_daemon {
         .expect("first write succeeds");
         create_tagged_drawer_at(
             tmp.path(),
-            &base_url,
+            &socket,
             "WS-CLAIM feat-y: does another thing",
             vec!["ws-claim".into(), "ws:feat-y".into()],
         )
         .await
         .expect("second write succeeds");
 
-        let labels = list_workstream_labels_at(tmp.path(), &base_url).await;
+        let labels = list_workstream_labels_at(tmp.path(), &socket).await;
         assert_eq!(labels.len(), 2);
         assert!(labels.contains(&"feat-x".to_string()));
         assert!(labels.contains(&"feat-y".to_string()));

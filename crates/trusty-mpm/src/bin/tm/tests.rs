@@ -2184,7 +2184,7 @@ fn cli_parses_memory_import() {
                     dry_run,
                     json,
                     allow_secret_like,
-                    memory_url,
+                    memory_socket,
                 },
         } => {
             assert_eq!(dir, std::path::PathBuf::from("/tmp/mem"));
@@ -2192,7 +2192,10 @@ fn cli_parses_memory_import() {
             assert!(!dry_run, "writes are the default mode");
             assert!(!json);
             assert!(!allow_secret_like);
-            assert!(memory_url.is_none(), "URL defaults to daemon discovery");
+            assert!(
+                memory_socket.is_none(),
+                "the socket path defaults to the derived one"
+            );
         }
         other => panic!("expected Memory/Import, got {other:?}"),
     }
@@ -2200,7 +2203,7 @@ fn cli_parses_memory_import() {
 
 /// Why (#4837): `--dry-run` is the safety flag an operator reaches for first,
 /// and `--json` is the machine-readable report a caller verifies with — both
-/// must round-trip, together with the explicit `--memory-url` override.
+/// must round-trip, together with the explicit `--memory-socket` override.
 #[test]
 fn cli_parses_memory_import_dry_run_json() {
     let cli = Cli::try_parse_from([
@@ -2213,8 +2216,8 @@ fn cli_parses_memory_import_dry_run_json() {
         "--dry-run",
         "--json",
         "--allow-secret-like",
-        "--memory-url",
-        "http://127.0.0.1:7070",
+        "--memory-socket",
+        "/tmp/trusty-memory.sock",
     ])
     .unwrap();
     match cli.command.unwrap() {
@@ -2224,14 +2227,17 @@ fn cli_parses_memory_import_dry_run_json() {
                     dry_run,
                     json,
                     allow_secret_like,
-                    memory_url,
+                    memory_socket,
                     ..
                 },
         } => {
             assert!(dry_run);
             assert!(json);
             assert!(allow_secret_like);
-            assert_eq!(memory_url.as_deref(), Some("http://127.0.0.1:7070"));
+            assert_eq!(
+                memory_socket.as_deref(),
+                Some(std::path::Path::new("/tmp/trusty-memory.sock"))
+            );
         }
         other => panic!("expected Memory/Import, got {other:?}"),
     }

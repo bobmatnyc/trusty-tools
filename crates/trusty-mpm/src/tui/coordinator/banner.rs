@@ -19,6 +19,7 @@
 //! async probes degrade to `unreachable` against a dead daemon and are exercised
 //! by `probe_unreachable_*`.
 
+use std::path::Path;
 use std::time::Duration;
 
 use crate::tui::health::DEFAULT_SEARCH_URL;
@@ -212,6 +213,17 @@ fn startup_line(active_count: Option<usize>) -> String {
     format!("{lead}  ·  {HELP_HINT}\n")
 }
 
+/// Does `base` answer a 2xx on `/health`?
+///
+/// Why: trusty-search still serves HTTP, so the banner's search leg keeps the
+/// GET it always had. The memory leg dials a socket instead since #6286.
+async fn health_ok_with(client: &reqwest::Client, base: &str) -> bool {
+    matches!(
+        client.get(format!("{base}/health")).send().await,
+        Ok(resp) if resp.status().is_success()
+    )
+}
+
 /// Probe trusty-search health for the startup banner (fail-safe).
 ///
 /// Why: §3.1 requires search to be confirmed via its plain health probe; a
@@ -236,37 +248,92 @@ pub async fn probe_search(base: Option<&str>) -> ProbeOutcome {
 ///
 /// Why: §3.1 + decision D4 make memory "active" only when (a) the health probe
 /// succeeds AND (b) the `user` palace exists — created idempotently on first run
-/// via `POST /api/v1/palaces`. The probe is fail-safe: a down daemon or a failed
+/// via `palace_create`. The probe is fail-safe: a down daemon or a failed
 /// palace assertion degrades to `○ unreachable` with a reason note, and the TUI
 /// still opens.
-/// What: GETs `<base>/health`; on success, GETs `<base>/api/v1/palaces/user` and,
-/// only on a real 404, POSTs `<base>/api/v1/palaces` with `{"name":"user"}` to
-/// create it. Builds a single bounded client and threads it into both helpers.
-/// Returns [`ProbeOutcome::active`] with note `palace: user` when memory is live
-/// and the palace is present/creatable, else [`ProbeOutcome::unreachable`] with a
-/// short reason. `base` defaults to the discovered trusty-memory address
-/// (issue #2030: `TRUSTY_MEMORY_URL` override, else the daemon's actual
-/// discovered bound address — never a hardcoded port) when `None`.
+/// What: calls `memory.health` on the socket; on success, calls
+/// `memory.palace_get` for the `user` palace and, only on a genuine not-found,
+/// `palace_create`s it. Returns [`ProbeOutcome::active`] with note
+/// `palace: user` when memory is live and the palace is present/creatable, else
+/// [`ProbeOutcome::unreachable`] with a short reason. `socket` defaults to the
+/// derived trusty-memory path (#6286 — there is no discovered address and no
+/// port) when `None`.
 /// Test: `probe_unreachable_memory_is_inactive` drives the dead-daemon branch;
 /// the live + palace-assertion path is exercised against a running daemon.
-pub async fn probe_memory(base: Option<&str>) -> ProbeOutcome {
+pub async fn probe_memory(socket: Option<&Path>) -> ProbeOutcome {
     let resolved;
-    let base = match base {
-        Some(b) => b,
+    let socket = match socket {
+        Some(s) => s,
         None => {
-            resolved = trusty_common::memory_rpc::resolve_memory_base_url_or_unreachable();
-            resolved.as_str()
+            resolved = trusty_common::memory_rpc::resolve_memory_socket_or_unreachable();
+            resolved.as_path()
         }
     };
-    let client = probe_client();
-    if !health_ok_with(&client, base).await {
+    if !health_ok_at(socket).await {
         return ProbeOutcome::unreachable(Some("memory daemon down".to_string()));
     }
-    if ensure_user_palace_with(&client, base).await {
+    if ensure_user_palace_at(socket).await {
         ProbeOutcome::active(Some(format!("palace: {USER_PALACE}")))
     } else {
         ProbeOutcome::unreachable(Some(format!("{USER_PALACE} palace unavailable")))
     }
+}
+
+/// Does the trusty-memory daemon answer at all?
+async fn health_ok_at(socket: &Path) -> bool {
+    trusty_common::memory_rpc::call_memory_tool_at_with_timeout(
+        socket,
+        "memory.health",
+        serde_json::json!({}),
+        PROBE_TIMEOUT,
+    )
+    .await
+    .is_ok()
+}
+
+/// Ensure the fixed `user` palace exists, creating it ONLY when the daemon says
+/// it is absent (D4).
+///
+/// Why: D4 makes memory "active" only when the `user` palace is present; the
+/// banner asserts it idempotently so first-run operators get a confirmed memory
+/// line without a manual provisioning step. Crucially, creation must be gated on
+/// a genuine not-found — any other refusal means the daemon's state is unknown,
+/// so blindly creating would be wrong (it could race a half-up daemon or mask a
+/// real outage). Those cases degrade to `false` (memory renders `○ unreachable`)
+/// instead of attempting a write. #6286 reads that distinction off
+/// `MemoryRpcError::is_not_found` where it used to read a 404 status.
+/// What: `memory.palace_get`; success means it exists → `true`; a not-found
+/// refusal means it is genuinely absent → `palace_create` and return whether
+/// that succeeded; any other error → `false` without creating.
+/// Test: `ensure_user_palace_creates_only_on_not_found`.
+pub(super) async fn ensure_user_palace_at(socket: &Path) -> bool {
+    let err = match trusty_common::memory_rpc::call_memory_tool_at_with_timeout(
+        socket,
+        "memory.palace_get",
+        serde_json::json!({ "palace_id": USER_PALACE }),
+        PROBE_TIMEOUT,
+    )
+    .await
+    {
+        Ok(_) => return true,
+        Err(e) => e,
+    };
+
+    let absent = err
+        .downcast_ref::<trusty_common::memory_rpc::MemoryRpcError>()
+        .is_some_and(trusty_common::memory_rpc::MemoryRpcError::is_not_found);
+    if !absent {
+        return false;
+    }
+
+    trusty_common::memory_rpc::call_memory_tool_at_with_timeout(
+        socket,
+        "palace_create",
+        serde_json::json!({ "name": USER_PALACE, "force": true }),
+        PROBE_TIMEOUT,
+    )
+    .await
+    .is_ok()
 }
 
 /// Build the short-timeout HTTP client shared by the startup probes.
@@ -283,70 +350,6 @@ pub(super) fn probe_client() -> reqwest::Client {
         .unwrap_or_default()
 }
 
-/// GET `<base>/health` with the shared client and report whether it answered 2xx.
-///
-/// Why: both probes share the same health check; a daemon that is down, slow, or
-/// returns an error status all collapse to "not healthy" so the banner degrades
-/// cleanly. Taking the client by reference lets each probe build exactly one
-/// client and reuse it across the health check and any follow-up request.
-/// What: issues a bounded GET to `<base>/health` via `client` and returns `true`
-/// only on a 2xx response.
-/// Test: covered by `probe_unreachable_*` (dead daemon → `false`).
-async fn health_ok_with(client: &reqwest::Client, base: &str) -> bool {
-    matches!(
-        client.get(format!("{base}/health")).send().await,
-        Ok(resp) if resp.status().is_success()
-    )
-}
-
-/// Ensure the fixed `user` palace exists at `base`, creating it ONLY on a 404 (D4).
-///
-/// Why: D4 makes memory "active" only when the `user` palace is present; the
-/// banner asserts it idempotently so first-run operators get a confirmed memory
-/// line without a manual provisioning step. Crucially, creation must be gated on
-/// a *real* 404 — a transient `500`/`503` (or any other non-2xx) means the
-/// daemon's state is unknown, so blindly POSTing a create would be wrong (it
-/// could race a half-up daemon or mask a real outage). Those cases degrade to
-/// `false` (memory renders `○ unreachable`) instead of attempting a write.
-/// What: GETs `<base>/api/v1/palaces/user` with the shared `client` and branches
-/// on the status: a 2xx means the palace already exists → `true`; a 404 means it
-/// is genuinely absent → POST `<base>/api/v1/palaces` with `{"name":"user"}` and
-/// return whether the create answered 2xx; any other status (5xx, etc.) →
-/// `false` without creating; a transport error → `false`.
-/// Test: `ensure_user_palace_creates_only_on_404` exercises the status branching
-/// against a stub server; the live assertion path runs against a running daemon.
-pub(super) async fn ensure_user_palace_with(client: &reqwest::Client, base: &str) -> bool {
-    let resp = match client
-        .get(format!("{base}/api/v1/palaces/{USER_PALACE}"))
-        .send()
-        .await
-    {
-        Ok(resp) => resp,
-        // Transport error (daemon unreachable): do not attempt a create.
-        Err(_) => return false,
-    };
-
-    let status = resp.status();
-    if status.is_success() {
-        // Palace already exists.
-        return true;
-    }
-    if status != reqwest::StatusCode::NOT_FOUND {
-        // Any non-404 (5xx, etc.): state is unknown — do NOT create.
-        return false;
-    }
-
-    // Genuine 404 → the palace is absent, so create it.
-    matches!(
-        client
-            .post(format!("{base}/api/v1/palaces"))
-            .json(&serde_json::json!({ "name": USER_PALACE }))
-            .send()
-            .await,
-        Ok(resp) if resp.status().is_success()
-    )
-}
-
 /// Run the backplane probes and print the startup banner to stderr.
 ///
 /// Why: §3.1 requires the banner to render before the interactive view opens.
@@ -359,16 +362,16 @@ pub(super) async fn ensure_user_palace_with(client: &reqwest::Client, base: &str
 /// What: probes memory + search concurrently, composes the banner with the
 /// crate `CARGO_PKG_VERSION` and `active_count`, and writes it to stderr. The
 /// composed banner ends with a single trailing newline (from `startup_line`), so
-/// `eprintln!` adds exactly one blank separator after it — not two. `memory_url`
+/// `eprintln!` adds exactly one blank separator after it — not two. `memory_socket`
 /// / `search_url` default to the canonical local addresses when `None`.
 /// Test: composition is unit-tested via [`compose_banner`]; this print-only glue
 /// is exercised by launching the TUI.
 pub async fn print_startup_banner(
-    memory_url: Option<&str>,
+    memory_socket: Option<&Path>,
     search_url: Option<&str>,
     active_count: Option<usize>,
 ) {
-    let (memory, search) = tokio::join!(probe_memory(memory_url), probe_search(search_url));
+    let (memory, search) = tokio::join!(probe_memory(memory_socket), probe_search(search_url));
     let banner = compose_banner(env!("CARGO_PKG_VERSION"), &memory, &search, active_count);
     eprintln!("{banner}");
 }

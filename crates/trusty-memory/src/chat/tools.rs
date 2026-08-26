@@ -6,12 +6,12 @@
 //! `chat.rs` (issue #607).
 //! What: `ChatBody`, `MAX_TOOL_ROUNDS`, `all_tools`, `execute_tool`, and every
 //! `execute_*` helper, moved verbatim. Visibility unchanged.
-//! Test: `all_tools_returns_expected_set`, `execute_tool_dispatches_known_tools`
-//! in `web::tests`.
+//! Test: `all_tools_returns_expected_set`,
+//! `execute_tool_dispatches_known_tools` in `tools_tests.rs`.
 
 use crate::kg_write::CachePolicy;
 use crate::service::helpers::{collect_palace_stats, list_palaces_blocking, open_palaces_blocking};
-use crate::web::{load_user_config, palace_info_from, DreamStatusPayload};
+use crate::service::{load_user_config, palace_info_from, DreamStatusPayload};
 use crate::AppState;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -27,15 +27,15 @@ use trusty_common::{ChatMessage, ToolDef};
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
-pub(crate) struct ChatBody {
+pub struct ChatBody {
     #[serde(default)]
-    pub(crate) palace_id: Option<String>,
-    pub(crate) message: String,
+    pub palace_id: Option<String>,
+    pub message: String,
     #[serde(default)]
-    pub(crate) history: Vec<ChatMessage>,
+    pub history: Vec<ChatMessage>,
     /// Optional existing chat-session id; when provided we load+append+save.
     #[serde(default)]
-    pub(crate) session_id: Option<String>,
+    pub session_id: Option<String>,
 }
 
 /// Hard cap on the number of `tool -> assistant` round trips per chat turn.

@@ -420,7 +420,7 @@ async fn run_and_record(
     if let Some(sink) = &memory_sink {
         pm_registry.register(Arc::new(RecallSessionTool::new(
             session_id.clone(),
-            sink.base_url().to_string(),
+            sink.socket().to_path_buf(),
             sink.palace().to_string(),
         )));
     }

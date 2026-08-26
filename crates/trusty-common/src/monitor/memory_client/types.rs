@@ -1,62 +1,35 @@
-//! Shared types and URL helpers for the trusty-memory client.
+//! Shared types and helpers for the trusty-memory monitor client.
 //!
-//! Why: the wire shapes, public domain types, and URL-resolution helpers are
-//! pure data — splitting them here keeps `client.rs` and `parsers.rs` free of
-//! constant / struct declarations and makes unit-testing URL logic trivial.
-//! What: constants, URL helpers, wire structs (`StatusWire`, `PalaceWire`),
-//! and the public projection types (`RecallHit`, `DreamStats`, `MemoryEvent`,
-//! `DrawerInfo`, `MemoryDetail`).
-//! Test: URL helpers are tested in `tests.rs`; type defaults/derives are
-//! implicitly exercised by the parser tests.
+//! Why: the wire shapes, public domain types, and socket resolution are pure
+//! data — splitting them here keeps `client.rs` and `parsers.rs` free of
+//! constant / struct declarations.
+//! What: constants, the socket-resolution re-export, wire structs
+//! (`StatusWire`, `PalaceWire`), and the public projection types (`RecallHit`,
+//! `DreamStats`, `MemoryEvent`, `DrawerInfo`, `MemoryDetail`).
+//! Test: parsers are tested in `tests.rs`; type defaults/derives are implicitly
+//! exercised by the parser tests.
 
 use std::time::Duration;
 
 use serde::Deserialize;
 
-/// Default trusty-memory daemon address used when discovery fails.
-///
-/// Why: trusty-memory binds a dynamic port, so the lock file is the primary
-/// discovery path; the default only applies when no daemon has ever started.
-/// What: a well-known local fallback base URL for trusty-memory.
-/// Test: `default_memory_url_is_local`.
-pub const DEFAULT_MEMORY_URL: &str = "http://127.0.0.1:7070";
-
-/// Per-request timeout for trusty-memory probes.
+/// Per-call timeout for trusty-memory probes.
 ///
 /// Why: a hung daemon must not stall the dashboard refresh tick.
 /// What: three seconds, matching `search_client`.
 /// Test: exercised implicitly by every `MemoryClient::new` call in tests.
 pub(super) const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Resolve the trusty-memory daemon base URL.
+/// Resolve the socket the trusty-memory daemon serves on.
 ///
-/// Why: trusty-memory's port is dynamic, so its address is read from the
-/// service lock file; the default applies only when discovery yields nothing.
-/// What: reads the `trusty-memory` daemon address; returns it `http://`-prefixed
-/// when present, otherwise [`DEFAULT_MEMORY_URL`].
-/// Test: `resolve_memory_url_returns_http_url`.
-pub fn resolve_memory_url() -> String {
-    match crate::read_daemon_addr("trusty-memory") {
-        Ok(Some(addr)) => normalize_url(&addr),
-        _ => DEFAULT_MEMORY_URL.to_string(),
-    }
-}
+/// Why (#6286): there is one such resolution in the workspace and it lives in
+/// [`crate::memory_rpc`]. This re-export keeps the monitor's call sites reading
+/// `memory_client::resolve_memory_socket` the way they read
+/// `search_client::resolve_search_url`, without a second copy of the rule.
+/// Test: `resolve_memory_socket_names_the_daemon_socket`.
+pub use crate::memory_rpc::resolve_memory_socket;
 
-/// Ensure a daemon address carries an `http://` scheme.
-///
-/// Why: the lock file stores a bare `host:port`; `reqwest` needs a full URL.
-/// What: returns `raw` unchanged when it already has a scheme, else prefixes
-/// `http://`.
-/// Test: `normalize_url_adds_scheme`.
-pub fn normalize_url(raw: &str) -> String {
-    if raw.starts_with("http://") || raw.starts_with("https://") {
-        raw.to_string()
-    } else {
-        format!("http://{raw}")
-    }
-}
-
-/// Wire shape of `GET /api/v1/status` from the trusty-memory daemon.
+/// Wire shape of the `memory.status` result.
 #[derive(Debug, Deserialize)]
 pub(super) struct StatusWire {
     #[serde(default)]
@@ -71,7 +44,7 @@ pub(super) struct StatusWire {
     pub(super) total_kg_triples: u64,
 }
 
-/// Wire shape of one palace entry from `GET /api/v1/palaces`.
+/// Wire shape of one palace, as `memory.palace_get` answers it.
 ///
 /// Why: the palace list response shape varies slightly between daemon
 /// versions; all fields are optional with defaults so a partial payload still
@@ -116,8 +89,8 @@ pub(super) struct PalaceWire {
     /// palace, so its counts are authoritative. Defaulting the absent case to
     /// `false` would make a current client show `—` for every palace against
     /// an older daemon.
-    /// Test: `parse_palaces_marks_uncached_rows_unknown`,
-    /// `parse_palaces_trusts_counts_when_cached_flag_absent`.
+    /// Test: `parse_palace_detail_marks_uncached_rows_unknown`,
+    /// `parse_palace_detail_trusts_counts_when_cached_flag_absent`.
     #[serde(default)]
     pub(super) cached: Option<bool>,
 }
@@ -138,7 +111,7 @@ pub struct RecallHit {
     pub score: f32,
 }
 
-/// Aggregate counts returned by a `POST /api/v1/dream/run` cycle.
+/// Aggregate counts returned by a `memory.dream_run` cycle.
 ///
 /// Why: the memory TUI shows what a dream cycle changed; a typed struct keeps
 /// the renderer free of raw JSON.
@@ -154,11 +127,13 @@ pub struct DreamStats {
     pub compacted: u64,
 }
 
-/// One live event from the trusty-memory `/sse` stream.
+/// One activity event from the trusty-memory daemon.
 ///
-/// Why: the memory TUI reacts to push events (dream cycles, drawer changes,
-/// palace creation) in its activity log; a typed enum lets the renderer format
-/// each distinctly without parsing raw JSON in the event loop.
+/// Why: the memory TUI shows dream cycles, drawer changes and palace creation
+/// in its activity log; a typed enum lets the renderer format each distinctly
+/// without parsing raw JSON in the event loop. The daemon pushed these over
+/// `/sse` until #6286 retired that listener; `MemoryClient::recent_events`
+/// polls the same bodies out of the activity log instead.
 /// What: mirrors the daemon's `DaemonEvent` — the `type`-tagged variants the
 /// TUI displays. Unknown / housekeeping frames (`connected`, `lag`) are
 /// dropped by [`super::parsers::parse_memory_event`].
@@ -225,7 +200,7 @@ pub struct DrawerInfo {
     pub tags: Vec<String>,
     /// Short whitespace-collapsed snippet of the drawer body (issue #202).
     ///
-    /// Populated by the daemon's `/api/v1/palaces/{id}/drawers` endpoint
+    /// Populated by the daemon's `memory.drawers_list` method
     /// (truncated to ~60 chars with `…`). The client falls back to
     /// truncating the full `content` field when the daemon predates the
     /// `snippet` wire field; `None` when neither is available.

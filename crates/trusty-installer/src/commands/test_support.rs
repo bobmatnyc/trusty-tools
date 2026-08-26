@@ -357,3 +357,102 @@ pub(crate) fn clear_data_dir_override(dir: &std::path::Path) {
     }
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A stand-in trusty-memory daemon on a temp Unix socket (#6286).
+///
+/// Why: `ensure`'s palace stage moved off loopback HTTP onto the socket
+/// ADR-0032 gave trusty-memory, so [`stub_once`] and [`stub_data_dir`] cannot
+/// drive it any more. This is the same vehicle for the new transport, and it
+/// lives here for the reason the HTTP one does: the alternative is a copy of the
+/// accept loop in every module that needs it.
+///
+/// What: [`stub_memory_socket`] binds a socket under a `TempDir`, mounts
+/// `handler` as the router's catch-all through the same
+/// [`trusty_common::uds::server`] pieces the real daemon uses, and serves until
+/// the returned [`StubMemoryDaemon`] drops. The handler answers a `result` value
+/// directly; `Err` is how a test makes the daemon refuse, which is the arm
+/// `create_palace`'s not-found fast-path branches on.
+///
+/// Test: `ensure::project_setup::tests::create_palace_*`.
+pub(crate) struct StubMemoryDaemon {
+    socket: std::path::PathBuf,
+    _dir: tempfile::TempDir,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl StubMemoryDaemon {
+    /// The path a client under test should dial.
+    pub(crate) fn socket(&self) -> &std::path::Path {
+        &self.socket
+    }
+}
+
+impl Drop for StubMemoryDaemon {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+/// What one stub call answers, as a boxed future.
+///
+/// Boxed rather than generic so a handler can capture state and await; the real
+/// daemon's answers are not pure functions of their arguments either.
+pub(crate) type StubMemoryFuture = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<serde_json::Value, trusty_common::uds::server::RpcError>,
+            > + Send,
+    >,
+>;
+
+/// The catch-all that hands every method to the test's closure.
+struct StubMemoryFallback<F> {
+    handler: F,
+}
+
+#[async_trait::async_trait]
+impl<F> trusty_common::uds::server::RpcFallback for StubMemoryFallback<F>
+where
+    F: Fn(&str, serde_json::Value) -> StubMemoryFuture + Send + Sync + 'static,
+{
+    async fn call(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, trusty_common::uds::server::RpcError> {
+        (self.handler)(method, params).await
+    }
+}
+
+/// Start a stub trusty-memory daemon answering every method through `handler`.
+///
+/// # Panics
+///
+/// When the socket cannot be bound — a test-only failure with no recovery.
+pub(crate) async fn stub_memory_socket<F>(handler: F) -> StubMemoryDaemon
+where
+    F: Fn(&str, serde_json::Value) -> StubMemoryFuture + Send + Sync + 'static,
+{
+    use trusty_common::uds::server::{serve_until, RpcRouter, RpcServeOptions};
+
+    let dir = tempfile::TempDir::new().expect("tempdir for the stub socket");
+    let socket = dir.path().join("trusty-memory.sock");
+    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind the stub socket");
+
+    let router = std::sync::Arc::new(RpcRouter::new().fallback(StubMemoryFallback { handler }));
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        serve_until(&listener, router, RpcServeOptions::default(), async {
+            let _ = rx.await;
+        })
+        .await;
+    });
+
+    StubMemoryDaemon {
+        socket,
+        _dir: dir,
+        shutdown: Some(tx),
+    }
+}

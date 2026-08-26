@@ -549,7 +549,7 @@ pub fn title_line(state: &MemoryTuiState) -> String {
         }
         _ => format!(
             "trusty-memory v{VERSION}  [{glyph}] {label}  {}",
-            state.base_url
+            state.daemon_addr
         ),
     }
 }

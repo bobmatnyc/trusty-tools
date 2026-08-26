@@ -57,39 +57,70 @@ name = "ghost-kb"
 /// trusty-memory drawers route. `bob-kb` / `owner-profile` exist; everything
 /// else 404s.
 async fn mock_daemon() -> String {
-    let app = Router::new()
-        .route(
-            "/indexes/{id}/status",
-            get(|Path(id): Path<String>| async move {
-                if id == "bob-kb" {
-                    (
-                        AxumStatus::OK,
-                        Json(serde_json::json!({
-                            "index_id": "bob-kb",
-                            "chunk_count": 552,
-                            "root_path": "/Users/masa/trusty-agents/bob-kb",
-                            "status": "ready",
-                        })),
-                    )
-                } else {
-                    (AxumStatus::NOT_FOUND, Json(serde_json::json!({})))
-                }
-            }),
-        )
-        .route(
-            "/api/v1/palaces/{id}/drawers",
-            get(|Path(id): Path<String>| async move {
-                if id == "owner-profile" {
-                    (AxumStatus::OK, Json(serde_json::json!({"drawers": []})))
-                } else {
-                    (AxumStatus::NOT_FOUND, Json(serde_json::json!({})))
-                }
-            }),
-        );
+    let app = Router::new().route(
+        "/indexes/{id}/status",
+        get(|Path(id): Path<String>| async move {
+            if id == "bob-kb" {
+                (
+                    AxumStatus::OK,
+                    Json(serde_json::json!({
+                        "index_id": "bob-kb",
+                        "chunk_count": 552,
+                        // Inert: nothing in this file asserts on `root_path`.
+                        // A neutral path keeps a developer's home directory out
+                        // of the fixture (#6286 review, finding 8).
+                        "root_path": "/tmp/trusty-agents/bob-kb",
+                        "status": "ready",
+                    })),
+                )
+            } else {
+                (AxumStatus::NOT_FOUND, Json(serde_json::json!({})))
+            }
+        }),
+    );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     format!("http://{addr}")
+}
+
+/// A stub trusty-memory answering the palace-existence probe (#6286).
+///
+/// `owner-profile` answers an empty drawer page; every other palace is refused
+/// not-found, which is what the daemon does for a palace that was never
+/// created.
+///
+/// It answers ONLY `memory.drawers_list` (#6286 review, finding 9). The mock
+/// used to ignore the method name, so `stores_at` could have been rewired onto
+/// any other method — `palace_create`, say, which a status probe must never
+/// call because it CREATES the palace it is asking about — and these tests
+/// would still have reported `palace_connected: true`.
+async fn mock_memory() -> crate::uds_mock::MockMemoryDaemon {
+    crate::uds_mock::spawn(|method: &str, params: serde_json::Value| {
+        let method = method.to_string();
+        let palace = params
+            .get("palace_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        Box::pin(async move {
+            if method != "memory.drawers_list" {
+                return Err(crate::uds_mock::RpcError::method_not_found(
+                    &method,
+                    &["memory.drawers_list"],
+                ));
+            }
+            if palace == "owner-profile" {
+                Ok(serde_json::json!({ "drawers": [] }))
+            } else {
+                Err(crate::uds_mock::RpcError::new(
+                    trusty_common::memory_rpc::CODE_NOT_FOUND,
+                    format!("palace not found: {palace}"),
+                ))
+            }
+        })
+    })
+    .await
 }
 
 async fn body_json(resp: axum::response::Response) -> serde_json::Value {
@@ -104,12 +135,13 @@ async fn stores_route_reports_connected_binding_with_stats() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("izzie.toml"), BOUND_FIXTURE).unwrap();
     let base = mock_daemon().await;
+    let memory = mock_memory().await;
 
     let resp = stores_at(
         &[dir.path().to_path_buf()],
         "izzie",
         Some(&base),
-        Some(&base),
+        Some(memory.socket()),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -129,12 +161,13 @@ async fn stores_route_reports_missing_index_with_reason() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("ghosty.toml"), MISSING_INDEX_FIXTURE).unwrap();
     let base = mock_daemon().await;
+    let memory = mock_memory().await;
 
     let resp = stores_at(
         &[dir.path().to_path_buf()],
         "ghosty",
         Some(&base),
-        Some(&base),
+        Some(memory.socket()),
     )
     .await;
     assert_eq!(

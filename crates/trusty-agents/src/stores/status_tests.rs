@@ -6,90 +6,108 @@
 //! health derivation, `failed_stages`, and their regression tests — mirrors
 //! the sibling `index_feed.rs` / `index_feed_tests.rs` split in this same
 //! directory.
-//! What: a mock trusty-search/-memory router covering connected, 404,
-//! corpus-open-failed, and unreachable; config-validation short-circuiting
-//! covered without any network at all.
+//! What: a mock trusty-search HTTP router and a mock trusty-memory socket,
+//! covering connected, missing, corpus-open-failed, and unreachable;
+//! config-validation short-circuiting covered without any network at all.
+//! The memory half is a socket since #6286 — a stub that kept answering HTTP
+//! would pass against a transport this code no longer speaks.
 //! Test: this file IS the test module (`stores::status::tests`).
 
 use super::*;
 use axum::{Json, Router, extract::Path, http::StatusCode, routing::get};
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
-/// Spin up a mock daemon exposing both the trusty-search status route and
-/// the trusty-memory drawers route, and return its base URL.
+use crate::uds_mock::{self, MockMemoryDaemon, RpcError};
+
+/// Spin up a mock trusty-search exposing the index status route, and return
+/// its base URL.
 ///
 /// Why: Testing against the developer's real daemons would make the suite
 /// depend on machine state; a mock keeps the probe logic (status codes,
 /// body parsing, reason strings) under test deterministically.
 async fn mock_daemon() -> String {
-    let app = Router::new()
-        .route(
-            "/indexes/{id}/status",
-            get(|Path(id): Path<String>| async move {
-                if id == "bob-kb" {
-                    (
-                        StatusCode::OK,
-                        Json(json!({
-                            "index_id": "bob-kb",
-                            "chunk_count": 552,
-                            "root_path": "/Users/masa/trusty-agents/bob-kb",
-                            "status": "ready",
-                            "stages": {
-                                "lexical": {"status": "ready"},
-                                "semantic": {"status": "ready"},
-                                "graph": {"status": "ready"},
-                            },
-                        })),
-                    )
-                } else if id == "cto-duetto" {
-                    // Issue #4115's exact real-world shape: reachable,
-                    // `status: "ready"`, `chunk_count: 0`, but every
-                    // stage failed to open — the false-green case.
-                    (
-                        StatusCode::OK,
-                        Json(json!({
-                            "index_id": "cto-duetto",
-                            "chunk_count": 0,
-                            "status": "ready",
-                            "stages": {
-                                "lexical": {"status": "failed", "failure": "corpus open failed"},
-                                "semantic": {"status": "failed", "failure": "corpus open failed"},
-                                "graph": {"status": "failed", "failure": "corpus open failed"},
-                            },
-                        })),
-                    )
-                } else {
-                    (
-                        StatusCode::NOT_FOUND,
-                        Json(json!({"error": "no such index"})),
-                    )
-                }
-            }),
-        )
-        .route(
-            "/api/v1/palaces/{id}/drawers",
-            get(|Path(id): Path<String>| async move {
-                if id == "owner-profile" {
-                    (StatusCode::OK, Json(json!({"drawers": []})))
-                } else if id == "unopenable-palace" {
-                    // #5592: trusty-memory answers 500 for a palace that exists
-                    // but could not be opened; before it, that was a 404.
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": "palace could not be loaded"})),
-                    )
-                } else {
-                    (StatusCode::NOT_FOUND, Json(json!({"error": "no palace"})))
-                }
-            }),
-        );
+    let app = Router::new().route(
+        "/indexes/{id}/status",
+        get(|Path(id): Path<String>| async move {
+            if id == "bob-kb" {
+                (
+                    StatusCode::OK,
+                    Json(json!({
+                        "index_id": "bob-kb",
+                        "chunk_count": 552,
+                        "root_path": "/Users/masa/trusty-agents/bob-kb",
+                        "status": "ready",
+                        "stages": {
+                            "lexical": {"status": "ready"},
+                            "semantic": {"status": "ready"},
+                            "graph": {"status": "ready"},
+                        },
+                    })),
+                )
+            } else if id == "cto-duetto" {
+                // Issue #4115's exact real-world shape: reachable,
+                // `status: "ready"`, `chunk_count: 0`, but every
+                // stage failed to open — the false-green case.
+                (
+                    StatusCode::OK,
+                    Json(json!({
+                        "index_id": "cto-duetto",
+                        "chunk_count": 0,
+                        "status": "ready",
+                        "stages": {
+                            "lexical": {"status": "failed", "failure": "corpus open failed"},
+                            "semantic": {"status": "failed", "failure": "corpus open failed"},
+                            "graph": {"status": "failed", "failure": "corpus open failed"},
+                        },
+                    })),
+                )
+            } else {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": "no such index"})),
+                )
+            }
+        }),
+    );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
     format!("http://{addr}")
+}
+
+/// Spin up a mock trusty-memory answering `memory.drawers_list` (#6286).
+///
+/// Why: the palace probe is the existence check `resolve_one` runs for a
+/// binding that names one, and it now dials a socket. Answering it here keeps
+/// the three outcomes the HTTP stub covered — present, absent, and a palace
+/// that exists but will not open — under test on the transport the code uses.
+///
+/// What: `owner-profile` answers an empty page; `unopenable-palace` is refused
+/// with an internal error (#5592: trusty-memory reports a palace it cannot open
+/// as a failure rather than as absent); every other palace is refused
+/// not-found.
+async fn mock_memory() -> MockMemoryDaemon {
+    uds_mock::spawn(|_method: &str, params: Value| {
+        let palace = params
+            .get("palace_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        Box::pin(async move {
+            match palace.as_str() {
+                "owner-profile" => Ok(json!({ "drawers": [] })),
+                "unopenable-palace" => Err(RpcError::internal("palace could not be loaded")),
+                other => Err(RpcError::new(
+                    trusty_common::memory_rpc::CODE_NOT_FOUND,
+                    format!("palace not found: {other}"),
+                )),
+            }
+        })
+    })
+    .await
 }
 
 fn stores_toml(raw: &str) -> StoresConfig {
@@ -104,6 +122,7 @@ fn stores_toml(raw: &str) -> StoresConfig {
 #[tokio::test]
 async fn resolves_connected_store_with_stats() {
     let base = mock_daemon().await;
+    let memory = mock_memory().await;
     let stores = stores_toml(
         r#"
 [[stores]]
@@ -113,7 +132,7 @@ index = "bob-kb"
 palace = "owner-profile"
 "#,
     );
-    let out = resolve_store_statuses("izzie", &stores, Some(&base), Some(&base)).await;
+    let out = resolve_store_statuses("izzie", &stores, Some(&base), Some(memory.socket())).await;
     assert_eq!(out.len(), 1);
     let s = &out[0];
     assert!(s.connected, "expected connected, got reason {:?}", s.reason);
@@ -189,8 +208,9 @@ fn failed_stages_reports_only_the_failed_lanes() {
 #[tokio::test]
 async fn reports_missing_index_as_not_connected() {
     let base = mock_daemon().await;
+    let memory = mock_memory().await;
     let stores = stores_toml("[[stores]]\nname = \"nope\"\n");
-    let out = resolve_store_statuses("izzie", &stores, Some(&base), Some(&base)).await;
+    let out = resolve_store_statuses("izzie", &stores, Some(&base), Some(memory.socket())).await;
     assert!(!out[0].connected);
     let reason = out[0].reason.as_deref().unwrap();
     assert!(reason.contains("not registered"), "reason was: {reason}");
@@ -203,10 +223,11 @@ async fn reports_missing_index_as_not_connected() {
 #[tokio::test]
 async fn reports_missing_palace_without_downgrading_index() {
     let base = mock_daemon().await;
+    let memory = mock_memory().await;
     let stores = stores_toml(
         "[[stores]]\nname = \"bob-kb\"\nindex = \"bob-kb\"\npalace = \"ghost-palace\"\n",
     );
-    let out = resolve_store_statuses("izzie", &stores, Some(&base), Some(&base)).await;
+    let out = resolve_store_statuses("izzie", &stores, Some(&base), Some(memory.socket())).await;
     assert!(
         out[0].connected,
         "index health must not depend on the palace"
@@ -227,17 +248,21 @@ async fn reports_missing_palace_without_downgrading_index() {
 /// not open. Telling an operator a palace "does not exist" sends them looking
 /// for a deleted palace when the real cause was a denied read or a jammed redb
 /// lock; the reason string has to carry the status through instead.
-/// What: points a store at the mock's 500 palace and asserts the reason names
-/// HTTP 500 and specifically does NOT claim absence — while the index stays
-/// connected, as in the sibling 404 test.
+/// What: points a store at the mock's unopenable palace and asserts the reason
+/// carries the daemon's own message and specifically does NOT claim absence —
+/// while the index stays connected, as in the sibling missing-palace test.
+/// #6286 changed what the daemon says, not what the distinction is: the HTTP
+/// 500 the reason used to name is now a coded JSON-RPC refusal, and the
+/// not-found code is what marks the absence case.
 /// Test: this test itself.
 #[tokio::test]
 async fn reports_unopenable_palace_as_a_server_error_not_an_absence() {
     let base = mock_daemon().await;
+    let memory = mock_memory().await;
     let stores = stores_toml(
         "[[stores]]\nname = \"bob-kb\"\nindex = \"bob-kb\"\npalace = \"unopenable-palace\"\n",
     );
-    let out = resolve_store_statuses("izzie", &stores, Some(&base), Some(&base)).await;
+    let out = resolve_store_statuses("izzie", &stores, Some(&base), Some(memory.socket())).await;
     assert!(
         out[0].connected,
         "index health must not depend on the palace"
@@ -248,7 +273,10 @@ async fn reports_unopenable_palace_as_a_server_error_not_an_absence() {
         !reason.contains("does not exist"),
         "a palace that could not be opened was reported as absent: {reason}"
     );
-    assert!(reason.contains("500"), "reason was: {reason}");
+    assert!(
+        reason.contains("palace could not be loaded"),
+        "the daemon's own reason must survive: {reason}"
+    );
 }
 
 #[tokio::test]

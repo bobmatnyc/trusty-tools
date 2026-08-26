@@ -265,7 +265,7 @@ pub(crate) async fn build_turn_context(
     focused: Option<&str>,
     recent_window: usize,
     enabled: bool,
-    base_url: &str,
+    memory_socket: &Path,
 ) -> TurnContext {
     if !enabled {
         return TurnContext {
@@ -275,12 +275,13 @@ pub(crate) async fn build_turn_context(
         };
     }
 
-    let labels = workstreams::list_workstream_labels_at(project_path, base_url).await;
+    let labels = workstreams::list_workstream_labels_at(project_path, memory_socket).await;
     let classification_block = classification_block(&labels);
 
     let focused_context_block = match focused {
         Some(label) => {
-            let block = assemble_focused_block(project_path, base_url, label, recent_window).await;
+            let block =
+                assemble_focused_block(project_path, memory_socket, label, recent_window).await;
             tracing::info!(
                 label = %label,
                 recent_window,
@@ -303,7 +304,7 @@ pub(crate) async fn build_turn_context(
 /// Assemble the focused-mode context block in DOC-54 §9.6.3's stable order.
 async fn assemble_focused_block(
     project_path: &Path,
-    base_url: &str,
+    memory_socket: &Path,
     label: &str,
     recent_window: usize,
 ) -> String {
@@ -314,9 +315,13 @@ async fn assemble_focused_block(
     let global_summary =
         "(global summary not yet wired in this slice — full memory remains queryable on demand)";
 
-    let ws_summary =
-        workstreams::drawers_by_tag_at(project_path, base_url, &workstream_summary_tag(label), 1)
-            .await;
+    let ws_summary = workstreams::drawers_by_tag_at(
+        project_path,
+        memory_socket,
+        &workstream_summary_tag(label),
+        1,
+    )
+    .await;
     let ws_summary_text = ws_summary
         .first()
         .map(|h| h.content.as_str())
@@ -324,7 +329,7 @@ async fn assemble_focused_block(
 
     let recent = workstreams::drawers_by_tag_at(
         project_path,
-        base_url,
+        memory_socket,
         &workstream_tag(label),
         recent_window,
     )
@@ -391,7 +396,7 @@ pub(crate) async fn finish_turn(
     user_input: &str,
     raw_response: String,
     ctx: &TurnContext,
-    base_url: &str,
+    memory_socket: &Path,
 ) -> Result<String> {
     let (mut display, classification) = parse_marker(&raw_response);
     let Some(classification) = classification else {
@@ -439,14 +444,14 @@ pub(crate) async fn finish_turn(
     let client_owned = client.clone();
     let persona_cfg_owned = persona_cfg.clone();
     let label = classification.label.clone();
-    let base_url = base_url.to_string();
+    let memory_socket = memory_socket.to_path_buf();
     tokio::spawn(async move {
         let content = format!(
             "### {persona_name_owned}\n\n**User:** {user_input_owned}\n\n**Assistant:** {display_for_persist}"
         );
         if let Err(e) = workstreams::create_tagged_drawer_at(
             &project_path_owned,
-            &base_url,
+            &memory_socket,
             &content,
             vec![workstream_tag(&label)],
         )
@@ -457,7 +462,7 @@ pub(crate) async fn finish_turn(
 
         if let Err(e) = maybe_summarize_workstream(
             &project_path_owned,
-            &base_url,
+            &memory_socket,
             &label,
             &client_owned,
             &persona_cfg_owned,
@@ -500,7 +505,7 @@ fn should_refresh_summary(enabled: bool, summarize_every: u32, turn_count: usize
 /// Lazy invalidation on manual re-tag is deferred (module doc).
 async fn maybe_summarize_workstream(
     project_path: &Path,
-    base_url: &str,
+    memory_socket: &Path,
     label: &str,
     client: &Client<OpenAIConfig>,
     persona_cfg: &AgentConfig,
@@ -511,7 +516,7 @@ async fn maybe_summarize_workstream(
     }
     let turns = workstreams::drawers_by_tag_at(
         project_path,
-        base_url,
+        memory_socket,
         &workstream_tag(label),
         SUMMARY_SCAN_LIMIT,
     )
@@ -554,7 +559,7 @@ async fn maybe_summarize_workstream(
 
     workstreams::create_tagged_drawer_at(
         project_path,
-        base_url,
+        memory_socket,
         &summary_text,
         vec![workstream_summary_tag(label)],
     )

@@ -3,7 +3,7 @@
 //! Why: keeping the async I/O — daemon polling, SSE subscription, recall
 //! requests, drawer fetches — in a dedicated module separates it from the
 //! pure state and rendering, making both easier to test independently.
-//! What: [`run_loop`] is the inner loop called by `run_with_url`; the other
+//! What: [`run_loop`] is the inner loop called by `run_with_socket`; the other
 //! functions are async helpers for specific operations (polling, recall,
 //! SSE event application, drawer fetches).
 //! Test: the pure pieces (state, log, rendering helpers) are unit-tested;
@@ -12,9 +12,10 @@
 use std::time::Instant;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use tokio::sync::mpsc;
 
-use crate::monitor::memory_client::{MemoryClient, MemoryEvent, RecallHit, resolve_memory_url};
+use crate::monitor::memory_client::{
+    ActivityFeed, MemoryClient, MemoryEvent, RecallHit, resolve_memory_socket,
+};
 use crate::monitor::memory_tui::MemoryFocus;
 use crate::monitor::memory_tui::MemoryTuiState;
 use crate::monitor::memory_tui::render::render;
@@ -33,16 +34,16 @@ const INPUT_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 ///
 /// Why: keeps the per-poll I/O out of the event loop so the loop can re-poll
 /// on demand as well as on its timer.
-/// What: re-resolves the URL when the daemon is offline, calls `fetch_all`, and
-/// updates the status, aggregate stats, palace list, and selection clamp.
+/// What: re-resolves the socket when the daemon is offline, calls `fetch_all`,
+/// and updates the status, aggregate stats, palace list, and selection clamp.
 /// Test: thin I/O glue; the pure clamp is unit-tested.
 pub(crate) async fn poll_daemon(state: &mut MemoryTuiState, client: &mut MemoryClient) {
-    if !state.daemon_status.is_online() {
-        let resolved = resolve_memory_url();
-        if resolved != client.base_url() {
-            client.set_base_url(resolved.clone());
-            state.base_url = resolved;
-        }
+    if !state.daemon_status.is_online()
+        && let Ok(resolved) = resolve_memory_socket()
+        && resolved != client.socket()
+    {
+        state.daemon_addr = resolved.display().to_string();
+        client.set_socket(resolved);
     }
     match client.fetch_all().await {
         Ok(data) => {
@@ -268,13 +269,144 @@ async fn fetch_drawer_detail(state: &mut MemoryTuiState, client: &MemoryClient) 
 
 /// The memory TUI event loop: poll, render, handle input, drain SSE events.
 ///
-/// Why: kept separate from `run_with_url` so terminal setup/teardown wraps it
+/// Why: kept separate from `run_with_socket` so terminal setup/teardown wraps it
 /// cleanly.
-/// What: polls the daemon immediately and spawns the `/sse` subscription task,
-/// then renders every frame while polling the keyboard every 50 ms; re-polls on
-/// the 2 s timer and drains SSE events via `try_recv`. `[d]` triggers a dream
+/// What: polls the daemon immediately, then renders every frame while polling
+/// the keyboard every 50 ms; on the 2 s timer it re-polls the status AND reads
+/// the activity rows past its cursor (#6286 — `/sse` is retired, so events
+/// arrive on the tick rather than as they happen). `[d]` triggers a dream
 /// cycle, `[Enter]` runs a recall; `Tab`, arrows, `?`, `q`/`Esc`, and `Ctrl-C`
 /// behave per [`KEY_HINT`].
+/// Carry the feed across one tick, reporting whether it held the log for the
+/// interval this tick's poll covers.
+///
+/// Why it returns the answer rather than the caller computing it (#6286 review,
+/// finding 1): this function both READS the feed's state and REPLACES the feed,
+/// and the reader must run first. When the caller captured the state itself,
+/// the capture sat above a death check that reassigns `feed` — and moving it
+/// below, or reading `feed` again after the re-open, silently produced a live
+/// feed and a discarded poll. Returning the captured value makes that ordering
+/// impossible to express wrongly: there is no post-re-open state to read,
+/// because the only answer the caller gets is the one taken before.
+///
+/// What, in order: capture whether the feed is live; take and render a lag
+/// notice from a feed that still is; on a feed that has stopped, report why and
+/// drop it; then re-open if there is nothing attached, so a restarted daemon
+/// re-attaches with no operator action.
+///
+/// Test: the ordering is structural — the return value cannot come from after
+/// the re-open. What the caller does with it is pinned by
+/// `poll_renders_the_death_window_even_though_the_feed_reopened`; the feed's own
+/// lag and death reporting by `monitor::memory_client::feed::tests`.
+async fn rotate_feed(
+    state: &mut MemoryTuiState,
+    client: &MemoryClient,
+    feed: &mut Option<ActivityFeed>,
+) -> bool {
+    let was_healthy = feed.as_ref().is_some_and(ActivityFeed::is_live);
+
+    // A lag notice arrives on a feed that is still working, so it is taken
+    // every tick rather than only when the stream dies. Taking clears it, so
+    // each notice renders once.
+    if was_healthy && let Some(hole) = feed.as_ref().and_then(ActivityFeed::take_last_error) {
+        state.log.push_raw(format!("activity stream: {hole}"));
+    }
+
+    if feed.as_ref().is_some_and(|f| !f.is_live()) {
+        let reason = feed
+            .as_ref()
+            .and_then(ActivityFeed::take_last_error)
+            .unwrap_or_else(|| "the activity stream ended".to_string());
+        state
+            .log
+            .push_raw(format!("activity stream lost ({reason}); polling"));
+        *feed = None;
+    }
+    if feed.is_none() {
+        *feed = open_activity_feed(state, client).await;
+    }
+
+    was_healthy
+}
+
+/// What the activity log does with one poll's events.
+///
+/// Why it is a type rather than a bool (#6286): the three outcomes are not two.
+/// Seeding and cursor-only both render nothing but for different reasons, and
+/// conflating them is how the first read's whole page of history nearly went
+/// into the log. Naming them also makes the handover testable without a
+/// terminal — see [`poll_disposition`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PollDisposition {
+    /// First read: seed the cursor, render nothing. Dumping a page of history
+    /// into the log the moment the TUI opens is a worse answer than an empty
+    /// log.
+    Seed,
+    /// The stream already delivered this interval's events. Advance the cursor
+    /// so a later fallback resumes rather than replaying.
+    CursorOnly,
+    /// The stream is not carrying the log for this interval. Render them.
+    Render,
+}
+
+/// Decide what this tick's poll does, given the feed's state at the START of
+/// the tick.
+///
+/// Why `feed_was_healthy` and not the feed's current state (#6286 review,
+/// finding 1): the tick re-opens a dead feed before the poll runs, so by then
+/// the feed is live again — and a re-subscribed `broadcast::Receiver` replays
+/// nothing. Judging on the post-re-open state discards exactly the events the
+/// fallback exists to catch, while the cursor advances past them. Every event
+/// emitted in the death window would then reach neither source.
+///
+/// What: `Seed` on the first read; `CursorOnly` when the feed carried the
+/// interval; `Render` otherwise. A feed that died mid-interval and re-opened on
+/// this tick yields `Render`, so its events are rendered from the poll. That
+/// can duplicate a row the stream had already delivered before it died, which
+/// is the accepted cost: a duplicate is visible and a gap is not.
+///
+/// Test: `poll_seeds_the_cursor_on_the_first_read`,
+/// `poll_advances_only_while_the_feed_carried_the_interval`,
+/// `poll_renders_the_death_window_even_though_the_feed_reopened`.
+fn poll_disposition(seeded_events: bool, feed_was_healthy: bool) -> PollDisposition {
+    if !seeded_events {
+        PollDisposition::Seed
+    } else if feed_was_healthy {
+        PollDisposition::CursorOnly
+    } else {
+        PollDisposition::Render
+    }
+}
+
+/// Open the live activity feed, saying so either way (#6286).
+///
+/// Why: this replaces a 2-second poll, and a silent failure to attach would
+/// leave the log looking like an idle daemon rather than a degraded TUI. Both
+/// outcomes go in the log so an operator reading it knows which source the
+/// events are coming from.
+/// What: `Some` on success; `None` when the daemon is not serving the method —
+/// which is what a daemon predating it, and one that is not running, both look
+/// like. The caller polls in that case.
+/// Test: the feed's own contract is covered by
+/// `monitor::memory_client::feed::tests`; this is the wiring.
+async fn open_activity_feed(
+    state: &mut MemoryTuiState,
+    client: &MemoryClient,
+) -> Option<ActivityFeed> {
+    match ActivityFeed::open(client.socket()).await {
+        Ok(feed) => {
+            state.log.push_raw("activity stream attached".to_string());
+            Some(feed)
+        }
+        Err(e) => {
+            state
+                .log
+                .push_raw(format!("activity stream unavailable ({e}); polling"));
+            None
+        }
+    }
+}
+
 /// Test: the pure pieces (state, log, rendering helpers) are unit-tested.
 pub(crate) async fn run_loop<B: ratatui::backend::Backend>(
     terminal: &mut ratatui::Terminal<B>,
@@ -284,12 +416,18 @@ pub(crate) async fn run_loop<B: ratatui::backend::Backend>(
     poll_daemon(state, client).await;
     let mut last_poll = Instant::now();
 
-    // Subscribe to the daemon's /sse stream on a background task.
-    let (sse_tx, mut sse_rx) = mpsc::channel::<MemoryEvent>(64);
-    let sse_client = client.clone();
-    tokio::spawn(async move {
-        sse_client.sse_stream(sse_tx).await;
-    });
+    // #6286: the activity log's two sources. The live stream is what `/sse`
+    // was; the poll is the fallback, kept because a daemon that predates
+    // `memory.activity_stream` — or one that restarts under this TUI — must
+    // leave the log working rather than blank.
+    let mut feed = open_activity_feed(state, client).await;
+
+    // The poll's cursor. `0` means "everything the first read finds is new";
+    // the first read therefore seeds it rather than replaying the whole page
+    // into the log. It advances on every poll whether or not the feed is live,
+    // so a fallback picks up where the stream left off instead of replaying.
+    let mut event_cursor: u64 = 0;
+    let mut seeded_events = false;
 
     // Issue #184: every time the palace selection changes, refresh the
     // drawer panel. Tracking the previously-shown scope avoids re-fetching
@@ -300,11 +438,6 @@ pub(crate) async fn run_loop<B: ratatui::backend::Backend>(
         terminal.draw(|f| render(f, state))?;
         // `terminal.draw` requires `state` mutably (the renderer scrolls the
         // palace list); the closure reborrows it for the rest of the loop.
-
-        // Drain any SSE events the subscription task produced since last frame.
-        while let Ok(event) = sse_rx.try_recv() {
-            apply_memory_event(state, event);
-        }
 
         let key = if event::poll(INPUT_POLL)? {
             match event::read()? {
@@ -488,8 +621,31 @@ pub(crate) async fn run_loop<B: ratatui::backend::Backend>(
             }
         }
 
+        // #6286: events the live stream pushed, taken every render tick rather
+        // than every poll tick — that latency is the whole reason the stream
+        // exists. Draining never blocks.
+        if let Some(live) = feed.as_mut() {
+            for event in live.drain() {
+                apply_memory_event(state, event);
+            }
+        }
+
         if last_poll.elapsed() >= REFRESH_INTERVAL {
             poll_daemon(state, client).await;
+
+            let feed_was_healthy = rotate_feed(state, client, &mut feed).await;
+
+            // The poll. It runs on every tick regardless, and
+            // `poll_disposition` decides what to do with what it found.
+            if let Ok((cursor, events)) = client.recent_events(event_cursor).await {
+                if poll_disposition(seeded_events, feed_was_healthy) == PollDisposition::Render {
+                    for event in events {
+                        apply_memory_event(state, event);
+                    }
+                }
+                seeded_events = true;
+                event_cursor = cursor;
+            }
             // Refresh the drawer page in lock-step with the daemon poll so
             // new drawers appear in the activity panel without needing a
             // key press (issue #184: "Real-time updates when new drawers
@@ -515,5 +671,68 @@ pub(crate) async fn run_loop<B: ratatui::backend::Backend>(
             state.close_drawer_detail();
             last_drawer_scope = current_scope;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PollDisposition, poll_disposition};
+
+    /// Why: the first read finds every row past a zero cursor, so rendering it
+    /// would dump the whole activity table into the log the moment the TUI
+    /// opens. It seeds the cursor instead — and it does so whether or not the
+    /// stream attached, because the reason is the cursor, not the feed.
+    /// Test: itself.
+    #[test]
+    fn poll_seeds_the_cursor_on_the_first_read() {
+        assert_eq!(poll_disposition(false, true), PollDisposition::Seed);
+        assert_eq!(poll_disposition(false, false), PollDisposition::Seed);
+    }
+
+    /// Why: a live stream already put this interval's events in the log. The
+    /// poll still runs, so the cursor keeps pace and a later fallback resumes
+    /// where the stream left off instead of replaying from wherever it last
+    /// polled.
+    /// Test: itself.
+    #[test]
+    fn poll_advances_only_while_the_feed_carried_the_interval() {
+        assert_eq!(poll_disposition(true, true), PollDisposition::CursorOnly);
+    }
+
+    /// Why (#6286 review, finding 1): this is the handover, and it is where the
+    /// gap was. The tick that notices a dead feed also RE-OPENS it, so by the
+    /// time the poll runs the feed is live again — and a re-subscribed
+    /// `broadcast::Receiver` replays nothing. Judged on the post-re-open state,
+    /// the disposition was `CursorOnly`: this tick's events were discarded and
+    /// the cursor advanced past them, so every event emitted while the stream
+    /// was down reached neither source.
+    ///
+    /// The fix is that the decision reads the feed's state at the START of the
+    /// tick, which is what this pins. A duplicate row on the death tick is the
+    /// accepted cost — a duplicate is visible, a gap is not.
+    /// Test: itself.
+    #[test]
+    fn poll_renders_the_death_window_even_though_the_feed_reopened() {
+        // `false` is `feed_was_healthy`, captured before the re-open. The feed
+        // is live again by the time the poll runs; the disposition must not
+        // care.
+        assert_eq!(poll_disposition(true, false), PollDisposition::Render);
+    }
+
+    /// Why: a TUI running with no stream at all — a daemon predating
+    /// `memory.activity_stream`, or one that is not running — has the poll as
+    /// its only source, and must render every tick after the first.
+    /// Test: itself.
+    #[test]
+    fn poll_renders_every_tick_when_no_stream_ever_attached() {
+        let mut seeded = false;
+        let mut rendered = 0;
+        for _ in 0..3 {
+            if poll_disposition(seeded, false) == PollDisposition::Render {
+                rendered += 1;
+            }
+            seeded = true;
+        }
+        assert_eq!(rendered, 2, "the first tick seeds, every one after renders");
     }
 }

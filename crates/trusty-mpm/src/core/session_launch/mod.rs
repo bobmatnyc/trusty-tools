@@ -1063,13 +1063,13 @@ fn prepare_session_inner(
     // repo, runtime error), the session still launches; catchup_context is None.
     // CUTOVER BRIDGE — remove post-migration (#1762)
     let catchup_context = if config.catchup.auto {
-        // Discovery-first (issue #2030): resolves TRUSTY_MEMORY_URL when set,
+        // #6286: the derived socket, else a path nothing serves — catch-up set,
         // else the daemon's actual discovered bound address, never a
         // hardcoded port.
-        let memory_url = trusty_common::memory_rpc::resolve_memory_base_url_or_unreachable();
+        let memory_socket = trusty_common::memory_rpc::resolve_memory_socket_or_unreachable();
         let opts = crate::core::catchup::CatchupOptions {
             project_dir: project_dir.to_path_buf(),
-            memory_url,
+            memory_socket,
             include_git: config.catchup.include_git,
             include_palace: config.catchup.include_palace,
             git_limit: config.catchup.git_limit,

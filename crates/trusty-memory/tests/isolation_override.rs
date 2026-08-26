@@ -17,7 +17,7 @@
 //! What: each test spawns `trusty-memory serve --foreground --http 127.0.0.1:0`
 //! with `TRUSTY_DATA_DIR_OVERRIDE` pointing at an isolated temp directory.
 //! Rather than sleeping a fixed duration the harness polls for the override
-//! data root's `http_addr` file (written synchronously by the daemon as part
+//! data root's socket (written synchronously by the daemon as part
 //! of `run_http_on`), giving up after a generous timeout. Once the file
 //! appears the daemon is killed. Post-conditions are then asserted against the
 //! real filesystem state.
@@ -46,9 +46,9 @@ fn env_lock() -> &'static Mutex<()> {
 // ---------------------------------------------------------------------------
 // Poll-with-timeout parameters for daemon boot detection.
 //
-// Why: the dotfile write and the http_addr file write complete synchronously
+// Why: the dotfile write and the socket write complete synchronously
 // inside `run_http_on` before the first connection is accepted, so polling
-// for the http_addr file is a reliable readiness signal. Polling eliminates
+// for the socket is a reliable readiness signal. Polling eliminates
 // both the flakiness of a fixed sleep on slow CI hardware and the wasted
 // time on fast machines (typical boot is < 500 ms).
 // ---------------------------------------------------------------------------
@@ -93,7 +93,7 @@ fn snapshot(path: &Path) -> Option<(SystemTime, String)> {
 
 /// Poll `path` until it exists or `BOOT_TIMEOUT` elapses.
 ///
-/// Why: the daemon writes its `http_addr` file synchronously during startup
+/// Why: the daemon writes its socket synchronously during startup
 /// (`run_http_on`), so waiting for that file to appear is a reliable,
 /// latency-efficient readiness signal — no fixed sleep needed.
 /// What: wakes every `POLL_INTERVAL` and calls `Path::exists`; returns `true`
@@ -113,14 +113,14 @@ fn wait_for_file(path: &Path) -> bool {
 }
 
 /// Spawn `trusty-memory serve --foreground --http 127.0.0.1:0` with an
-/// isolated data dir, wait for the override data root's `http_addr` file to
+/// isolated data dir, wait for the override data root's socket to
 /// appear (indicating the startup sequence completed), then kill the process.
 ///
 /// Why: `--foreground` prevents the binary from self-forking (plain `serve`
 /// daemonises and the parent exits 0, which races our kill). `--http
 /// 127.0.0.1:0` lets the OS pick a free port so concurrent test runs cannot
 /// collide. `TRUSTY_DATA_DIR_OVERRIDE` points at the temp dir so every data
-/// write (http_addr file, palaces) lands inside the isolated root.
+/// write (socket, palaces) lands inside the isolated root.
 ///
 /// Why poll instead of sleep: a fixed sleep is simultaneously flaky on slow
 /// CI (the daemon may not have finished its startup sequence) and wasteful on
@@ -146,8 +146,6 @@ fn boot_isolated(override_base: &Path) {
     let mut child = Command::new(&bin)
         .arg("serve")
         .arg("--foreground")
-        .arg("--http")
-        .arg("127.0.0.1:0")
         .env("TRUSTY_DATA_DIR_OVERRIDE", override_base)
         // Suppress the startup pin-scan eprintln! so test output is clean.
         .env("RUST_LOG", "error")
@@ -161,10 +159,12 @@ fn boot_isolated(override_base: &Path) {
         .expect("spawn trusty-memory binary");
 
     // Poll for the readiness file rather than sleeping a fixed duration.
-    // The daemon writes `<override_base>/trusty-memory/http_addr`
-    // synchronously during `run_http_on` — its appearance signals that
-    // the dotfile write and pin-scan have both already completed.
-    let readiness_file = override_base.join("trusty-memory").join("http_addr");
+    // The daemon binds `<override_base>/trusty-memory/trusty-memory.sock` at
+    // the end of startup — its appearance signals that the retired-file cleanup
+    // and the pin-scan have both already run.
+    let readiness_file = override_base
+        .join("trusty-memory")
+        .join("trusty-memory.sock");
     let ready = wait_for_file(&readiness_file);
 
     let _ = child.kill();
@@ -172,7 +172,7 @@ fn boot_isolated(override_base: &Path) {
 
     assert!(
         ready,
-        "trusty-memory did not write its http_addr file inside the override data root \
+        "trusty-memory did not bind its socket inside the override data root \
          within {:.0?}.\nExpected path: {}\nCheck that the binary starts correctly and \
          that TRUSTY_DATA_DIR_OVERRIDE is honoured.",
         BOOT_TIMEOUT,
@@ -184,19 +184,21 @@ fn boot_isolated(override_base: &Path) {
 // Tests
 // ---------------------------------------------------------------------------
 
-/// Why (issue #880 — dotfile leak): when `TRUSTY_DATA_DIR_OVERRIDE` is set
-/// the daemon must NOT write to `~/.trusty-memory/http_addr`. The real
-/// production daemon's discovery dotfile must remain untouched.
+/// Why (#880, and the same hazard under #6286): the dotfile sits at a fixed
+/// `$HOME` path that no data-dir override redirects, so an isolated instance
+/// touching it reaches the REAL daemon's state. #880 was about the WRITE, which
+/// is gone with the listener. What replaced it is a DELETE:
+/// `transport::uds::remove_retired_discovery_files` clears the retired file at
+/// every start, and without the override guard an isolated test daemon would
+/// delete a developer's own dotfile. This test covers whichever of the two the
+/// code currently does, because it asserts the file is unchanged rather than
+/// asserting no write specifically.
 ///
-/// What: snapshots the mtime and content of `~/.trusty-memory/http_addr`
-/// before booting an isolated daemon, boots it (waiting for the override
-/// data root's `http_addr` to appear to confirm startup completed), then
-/// asserts the dotfile is either still absent (was absent before) or has the
-/// identical mtime and content as before (no write occurred). Also asserts
-/// that the override data root's own `http_addr` file IS present (the
-/// isolated instance must write it inside the override dir).
-/// Test: this test. Skipped when `$HOME/.trusty-memory/http_addr` cannot be
-/// resolved (unusual locked-down environment).
+/// What: snapshots the dotfile's mtime and content, boots an isolated daemon
+/// (waiting for its socket, so the startup sequence has completed), and asserts
+/// the dotfile is still absent if it was absent, or byte- and mtime-identical if
+/// it was there.
+/// Test: this test. Skipped when `$HOME` cannot be resolved.
 #[test]
 fn isolated_instance_does_not_overwrite_dotfile() {
     // Acquire the process-wide env lock. This test does not itself mutate
@@ -219,9 +221,9 @@ fn isolated_instance_does_not_overwrite_dotfile() {
     let before = snapshot(&dotfile);
 
     // Boot an isolated daemon pointing at a fresh temp dir. `boot_isolated`
-    // polls until the override data root's http_addr appears, so by the
-    // time it returns the startup sequence (including any dotfile write
-    // attempt) has completed.
+    // polls until the override data root's socket appears, so by the time it
+    // returns the startup sequence — including the retired-file cleanup that
+    // must NOT reach the dotfile — has completed.
     let tmp = tempfile::tempdir().expect("tempdir");
     boot_isolated(tmp.path());
 
@@ -256,31 +258,25 @@ fn isolated_instance_does_not_overwrite_dotfile() {
                  the override instance must not write to the production dotfile."
             );
         }
-        // File existed before but vanished after — that's a separate bug,
-        // not the dotfile-overwrite we're guarding against. Flag it clearly.
+        // #6286: a dotfile that vanished IS the failure now. The retired-file
+        // cleanup deletes exactly this path, and an isolated instance that ran
+        // it unguarded would take a developer's real file with it.
         (Some((_mtime_before, content_before)), None) => {
-            // This would be odd — it means the dotfile was *deleted*. We do
-            // not gate on this case; it's out of scope for this test. Just
-            // note it for debugging.
-            eprintln!(
-                "NOTE: ~/.trusty-memory/http_addr was present before the test but missing \
-                 after (content was: {content_before:?}). This may indicate a concurrent \
-                 production daemon restart; the dotfile-leak guard itself is not triggered."
+            panic!(
+                "~/.trusty-memory/http_addr existed before the isolated boot and was \
+                 DELETED by it (content was: {content_before:?}). \
+                 `remove_retired_discovery_files` must skip the dotfile when \
+                 TRUSTY_DATA_DIR_OVERRIDE is active — the path is fixed under $HOME \
+                 and no override redirects it."
             );
         }
     }
 
-    // Separately, assert the override data root's http_addr file IS present.
-    // `boot_isolated` already polled for this file and would have panicked
-    // above if it were absent; this assertion is a belt-and-suspenders
-    // confirmation that the file persisted past the kill.
-    let override_addr_file = tmp.path().join("trusty-memory").join("http_addr");
-    assert!(
-        override_addr_file.exists(),
-        "isolated instance must write its http_addr file inside the override data root at \
-         {}; file not found",
-        override_addr_file.display()
-    );
+    // The socket itself is not asserted here: `boot_isolated` already polled for
+    // it and would have panicked, and the daemon UNLINKS it on a clean exit — so
+    // an assertion after the kill would be testing the signal that reached the
+    // child, not the isolation this test is about.
+    drop(tmp);
 }
 
 /// Why (issue #880 — pin-scan leak): when `TRUSTY_DATA_DIR_OVERRIDE` is set

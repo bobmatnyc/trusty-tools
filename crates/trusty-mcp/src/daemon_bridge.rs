@@ -1,6 +1,6 @@
 //! Shared "ensure daemon up" helper for MCP stdio bridge processes.
 //!
-//! Why: trusty-memory and trusty-search run an MCP stdio bridge that must
+//! Why: trusty-search runs an MCP stdio bridge that must
 //! guarantee the corresponding HTTP daemon is reachable before entering the
 //! JSON-RPC dispatch loop.  Each service had (or needed) the same
 //! probe-spawn-poll pattern implemented locally.  This module centralises that
@@ -58,7 +58,7 @@ pub const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Configuration for a service's MCP daemon-bridge startup guard.
 ///
-/// Why: each service (trusty-memory, trusty-search) has its own
+/// Why: each service has its own
 /// daemon binary, spawn arguments, and health path.  `DaemonBridgeConfig` captures
 /// those differences in a single struct so `ensure_daemon_up` can be a single
 /// parameterised function rather than three near-identical functions.
@@ -121,7 +121,7 @@ pub struct DaemonBridgeConfig {
     /// operator to run a nonexistent command against a nonexistent path. When
     /// `Some`, this text REPLACES the generic setup/plist advice in the error
     /// message; when `None`, the original generic wording is used unchanged so
-    /// existing callers (trusty-memory, trusty-search) are
+    /// existing callers are
     /// unaffected.
     /// What: appended verbatim after the "daemon is not reachable at {addr}"
     /// preamble instead of the generic `` `{name} start`/`{name} setup` ``

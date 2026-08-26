@@ -10,7 +10,8 @@
 //! ensure the target palace exists exactly once before the first write
 //! (#2424), and must apply its documented "drop newest" overflow policy —
 //! none of that is exercised anywhere else.
-//! What: the mock `/rpc` servers here reply with the REAL daemon's
+//! What: the mock daemons here run on a temp Unix socket (#6286 — the axum
+//! `/rpc` route they used to bind is retired) and reply with the REAL daemon's
 //! `tools/call` response shape (the tool result STRINGIFIED inside
 //! `result.content[0].text` — mirrors `transport/rpc.rs`'s `tools/call`
 //! arm), so the assertions cover both the request envelope
@@ -18,7 +19,7 @@
 //! response unwrap. `enqueue_drops_newest_when_queue_full` exercises the
 //! overflow policy directly against the raw channel (no networking, fully
 //! deterministic); `write_turn_is_fail_open_on_unreachable_daemon` proves an
-//! unreachable `base_url` never panics or hangs;
+//! unreachable socket never panics or hangs;
 //! `derive_palace_id_for_project_*` cover the palace-derivation fallback
 //! chain.
 //! Test: this file.
@@ -27,17 +28,15 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axum::extract::State;
-use axum::routing::post;
-use axum::{Json, Router};
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tokio::net::TcpListener;
 use tokio::sync::mpsc;
+
+use crate::uds_mock::{self, MockMemoryDaemon, RpcError};
 
 use super::*;
 
-/// One captured `/rpc` call: the JSON-RPC `method` and its `params`.
+/// One captured RPC call: the JSON-RPC `method` and its `params`.
 type Captured = Arc<Mutex<Vec<(String, Value)>>>;
 
 /// An observer that keeps every outcome it is handed, in arrival order.
@@ -73,46 +72,29 @@ async fn memory_warning_redaction_child() {
         return;
     }
 
-    async fn handle(Json(body): Json<Value>) -> Json<Value> {
-        let tool = body["params"]["name"].as_str().unwrap_or_default();
-        let response = match tool {
-            "chat_turn_append" => json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "error": {
-                    "code": -32603,
-                    "message": format!(
-                        "{CREDENTIAL_SENTINEL} {}",
-                        OVERSIZED_SENTINEL.repeat(512)
-                    )
-                }
-            }),
-            "memory_remember" => json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "result": wrapped_result(&json!({
-                    "status": "skipped",
-                    "reason": REASON_SENTINEL
-                }))
-            }),
-            _ => json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "result": wrapped_result(&json!({"ok": true}))
-            }),
-        };
-        Json(response)
+    fn handle(params: Value) -> Result<Value, RpcError> {
+        match tool_name(&params) {
+            "chat_turn_append" => Err(RpcError::internal(format!(
+                "{CREDENTIAL_SENTINEL} {}",
+                OVERSIZED_SENTINEL.repeat(512)
+            ))),
+            "memory_remember" => Ok(wrapped_result(&json!({
+                "status": "skipped",
+                "reason": REASON_SENTINEL
+            }))),
+            _ => Ok(wrapped_result(&json!({"ok": true}))),
+        }
     }
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
-    let addr = listener.local_addr().expect("mock address");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, Router::new().route("/rpc", post(handle))).await;
-    });
+    let daemon = uds_mock::spawn(move |_method, params| {
+        let response = handle(params);
+        Box::pin(async move { response })
+    })
+    .await;
 
     crate::logging::init_tracing_for_test();
     let outcome = write_turn(
-        &format!("http://{addr}"),
+        daemon.socket(),
         "test-palace",
         &QueuedTurn {
             sequence: 1,
@@ -183,54 +165,39 @@ enum PalaceState {
 /// calls with the correct `tools/call` method/params shape (#2424) — a mock
 /// server is the only way to assert that without a live trusty-memory
 /// daemon.
-/// What: binds an ephemeral port, spawns `axum::serve` detached (the test
-/// process exits with it), and returns the base URL plus the shared capture
-/// buffer. `palace_state` controls the `palace_info` reply: `Exists` always
-/// succeeds; `MissingUntilCreated` returns a JSON-RPC error (the daemon's
-/// "palace metadata missing" signal) until a `palace_create` lands, after
-/// which it succeeds — a stateful stand-in for the real registry.
-async fn spawn_capturing_mock(palace_state: PalaceState) -> (String, Captured) {
+/// What: binds a socket under a `TempDir`, serves until the returned daemon
+/// drops, and returns it plus the shared capture buffer. `palace_state`
+/// controls the `palace_info` reply: `Exists` always succeeds;
+/// `MissingUntilCreated` returns a JSON-RPC error (the daemon's "palace
+/// metadata missing" signal) until a `palace_create` lands, after which it
+/// succeeds — a stateful stand-in for the real registry.
+async fn spawn_capturing_mock(palace_state: PalaceState) -> (MockMemoryDaemon, Captured) {
     let captured: Captured = Arc::new(Mutex::new(Vec::new()));
     let store = Arc::clone(&captured);
     let created = Arc::new(Mutex::new(matches!(palace_state, PalaceState::Exists)));
 
-    async fn handle(
-        State((store, created)): State<(Captured, Arc<Mutex<bool>>)>,
-        Json(body): Json<Value>,
-    ) -> Json<Value> {
-        let method = body["method"].as_str().unwrap_or_default().to_string();
-        let params = body["params"].clone();
-        store
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push((method, params.clone()));
-        let name = tool_name(&params);
-        if name == "palace_create" {
-            *created.lock().unwrap_or_else(|e| e.into_inner()) = true;
-        }
-        if name == "palace_info" && !*created.lock().unwrap_or_else(|e| e.into_inner()) {
-            return Json(json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "error": {"code": -32603, "message": "palace metadata missing"}
-            }));
-        }
-        Json(json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "result": wrapped_result(&json!({"ok": true}))
-        }))
-    }
+    let daemon = uds_mock::spawn(move |method: &str, params: Value| {
+        let store = Arc::clone(&store);
+        let created = Arc::clone(&created);
+        let method = method.to_string();
+        Box::pin(async move {
+            store
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((method, params.clone()));
+            let name = tool_name(&params);
+            if name == "palace_create" {
+                *created.lock().unwrap_or_else(|e| e.into_inner()) = true;
+            }
+            if name == "palace_info" && !*created.lock().unwrap_or_else(|e| e.into_inner()) {
+                return Err(RpcError::internal("palace metadata missing"));
+            }
+            Ok(wrapped_result(&json!({"ok": true})))
+        })
+    })
+    .await;
 
-    let app = Router::new()
-        .route("/rpc", post(handle))
-        .with_state((store, created));
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
-    let addr = listener.local_addr().expect("addr");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    (format!("http://{addr}"), captured)
+    (daemon, captured)
 }
 
 /// Poll `captured` until it holds at least `n` entries or `timeout` elapses.
@@ -252,8 +219,12 @@ async fn wait_for_captures(captured: &Captured, n: usize, timeout: Duration) {
 /// envelope (#2424) with the documented inner arguments.
 #[tokio::test]
 async fn enqueue_drain_happy_path() {
-    let (base_url, captured) = spawn_capturing_mock(PalaceState::Exists).await;
-    let sink = TurnMemorySink::new(base_url, "test-palace".to_string(), PalaceCreation::Allowed);
+    let (daemon, captured) = spawn_capturing_mock(PalaceState::Exists).await;
+    let sink = TurnMemorySink::new(
+        daemon.socket().to_path_buf(),
+        "test-palace".to_string(),
+        PalaceCreation::Allowed,
+    );
 
     sink.enqueue("sess-1", "what is 2+2?", "4");
     // 3 calls: palace_info (ensure, #2424) + the two dual-write calls.
@@ -310,8 +281,12 @@ async fn enqueue_drain_happy_path() {
 /// later turns must reuse the cached ensure and add zero extra RPCs.
 #[tokio::test]
 async fn ensure_palace_creates_missing_palace_once() {
-    let (base_url, captured) = spawn_capturing_mock(PalaceState::MissingUntilCreated).await;
-    let sink = TurnMemorySink::new(base_url, "test-palace".to_string(), PalaceCreation::Allowed);
+    let (daemon, captured) = spawn_capturing_mock(PalaceState::MissingUntilCreated).await;
+    let sink = TurnMemorySink::new(
+        daemon.socket().to_path_buf(),
+        "test-palace".to_string(),
+        PalaceCreation::Allowed,
+    );
 
     sink.enqueue("sess-1", "p1", "r1");
     sink.enqueue("sess-1", "p2", "r2");
@@ -353,8 +328,12 @@ async fn ensure_palace_creates_missing_palace_once() {
 /// also cached, so a second turn adds no extra probe.
 #[tokio::test]
 async fn ensure_palace_skips_create_when_palace_exists() {
-    let (base_url, captured) = spawn_capturing_mock(PalaceState::Exists).await;
-    let sink = TurnMemorySink::new(base_url, "test-palace".to_string(), PalaceCreation::Allowed);
+    let (daemon, captured) = spawn_capturing_mock(PalaceState::Exists).await;
+    let sink = TurnMemorySink::new(
+        daemon.socket().to_path_buf(),
+        "test-palace".to_string(),
+        PalaceCreation::Allowed,
+    );
 
     sink.enqueue("sess-1", "p1", "r1");
     sink.enqueue("sess-1", "p2", "r2");
@@ -391,9 +370,9 @@ async fn ensure_palace_skips_create_when_palace_exists() {
 /// against a palace that does not exist.
 #[tokio::test]
 async fn forbidden_creation_never_creates_a_palace() {
-    let (base_url, captured) = spawn_capturing_mock(PalaceState::MissingUntilCreated).await;
+    let (daemon, captured) = spawn_capturing_mock(PalaceState::MissingUntilCreated).await;
     let sink = TurnMemorySink::new(
-        base_url,
+        daemon.socket().to_path_buf(),
         "t-tmpdeadbeef".to_string(),
         PalaceCreation::Forbidden,
     );
@@ -434,9 +413,9 @@ async fn forbidden_creation_never_creates_a_palace() {
 /// distinction the design rests on.
 #[tokio::test]
 async fn forbidden_creation_still_writes_to_an_existing_palace() {
-    let (base_url, captured) = spawn_capturing_mock(PalaceState::Exists).await;
+    let (daemon, captured) = spawn_capturing_mock(PalaceState::Exists).await;
     let sink = TurnMemorySink::new(
-        base_url,
+        daemon.socket().to_path_buf(),
         "already-there".to_string(),
         PalaceCreation::Forbidden,
     );
@@ -474,25 +453,21 @@ async fn forbidden_creation_still_writes_to_an_existing_palace() {
 /// `Durable` — a thinned recall surface is a degraded turn.
 #[tokio::test]
 async fn write_turn_warns_on_skipped_status() {
-    async fn handle_skipped(Json(body): Json<Value>) -> Json<Value> {
-        let inner = if body["params"]["name"].as_str() == Some("memory_remember") {
-            json!({"palace": "test-palace", "status": "skipped", "reason": "content gate"})
-        } else {
-            json!({"ok": true})
-        };
-        Json(json!({"jsonrpc": "2.0", "id": 1, "result": wrapped_result(&inner)}))
-    }
-
-    let app = Router::new().route("/rpc", post(handle_skipped));
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
-    let addr = listener.local_addr().expect("addr");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
+    let daemon = uds_mock::spawn(|_method: &str, params: Value| {
+        Box::pin(async move {
+            let inner = if tool_name(&params) == "memory_remember" {
+                json!({"palace": "test-palace", "status": "skipped", "reason": "content gate"})
+            } else {
+                json!({"ok": true})
+            };
+            Ok(wrapped_result(&inner))
+        })
+    })
+    .await;
 
     let observer = Arc::new(RecordingObserver::default());
     let sink = TurnMemorySink::new_observed(
-        format!("http://{addr}"),
+        daemon.socket().to_path_buf(),
         "test-palace".to_string(),
         PalaceCreation::Allowed,
         observer.clone(),
@@ -518,27 +493,18 @@ async fn write_turn_warns_on_skipped_status() {
 /// turn, reported under the half that failed first — not two, and not durable.
 #[tokio::test]
 async fn partial_dual_write_counts_once_as_failed_turn() {
-    async fn handle_partial(Json(body): Json<Value>) -> Json<Value> {
-        if body["params"]["name"].as_str() == Some("chat_turn_append") {
-            return Json(json!({
-                "jsonrpc": "2.0", "id": 1,
-                "error": {"code": -32603, "message": "sensitive raw response"}
-            }));
-        }
-        Json(json!({
-            "jsonrpc": "2.0", "id": 1,
-            "result": wrapped_result(&json!({"ok": true}))
-        }))
-    }
-    let app = Router::new().route("/rpc", post(handle_partial));
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
-    let addr = listener.local_addr().expect("addr");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
+    let daemon = uds_mock::spawn(|_method: &str, params: Value| {
+        Box::pin(async move {
+            if tool_name(&params) == "chat_turn_append" {
+                return Err(RpcError::internal("sensitive raw response"));
+            }
+            Ok(wrapped_result(&json!({"ok": true})))
+        })
+    })
+    .await;
 
     let outcome = write_turn(
-        &format!("http://{addr}"),
+        daemon.socket(),
         "test-palace",
         &QueuedTurn {
             sequence: 1,
@@ -557,31 +523,34 @@ async fn partial_dual_write_counts_once_as_failed_turn() {
     ));
 }
 
-/// [`TurnMemorySink::base_url`]/[`TurnMemorySink::palace`] must expose
-/// exactly the values passed at construction, so #2348's `recall_session`
-/// tool can reuse the same binding.
+/// [`TurnMemorySink::socket`]/[`TurnMemorySink::palace`] must expose exactly
+/// the values passed at construction, so #2348's `recall_session` tool can
+/// reuse the same binding.
 #[test]
-fn base_url_and_palace_expose_construction_args() {
+fn socket_and_palace_expose_construction_args() {
     let (tx, _rx) = mpsc::channel(1);
     let sink = TurnMemorySink {
         tx,
-        base_url: "http://example.test:1234".to_string(),
+        socket: std::path::PathBuf::from("/tmp/example-memory.sock"),
         palace: "a-palace".to_string(),
         creation: PalaceCreation::Allowed,
         observer: Arc::new(NoopMemoryDurabilityObserver),
         next_sequence: AtomicU64::new(1),
     };
-    assert_eq!(sink.base_url(), "http://example.test:1234");
+    assert_eq!(
+        sink.socket(),
+        std::path::Path::new("/tmp/example-memory.sock")
+    );
     assert_eq!(sink.palace(), "a-palace");
 }
 
-/// An unreachable `base_url` must never panic or hang the drain task — the
+/// An unreachable socket must never panic or hang the drain task — the
 /// core fail-open contract (#2345 acceptance criteria), which post-#2424
 /// also covers a failed palace ensure (probe AND create both unreachable).
 #[tokio::test]
 async fn write_turn_is_fail_open_on_unreachable_daemon() {
     let sink = TurnMemorySink::new(
-        "http://127.0.0.1:1".to_string(),
+        std::path::PathBuf::from("/nonexistent/trusty-memory.sock"),
         "p".to_string(),
         PalaceCreation::Allowed,
     );
@@ -603,7 +572,7 @@ fn enqueue_drops_newest_when_queue_full() {
     let (tx, mut rx) = mpsc::channel(1);
     let sink = TurnMemorySink {
         tx,
-        base_url: String::new(),
+        socket: std::path::PathBuf::new(),
         palace: String::new(),
         creation: PalaceCreation::Allowed,
         observer: Arc::new(NoopMemoryDurabilityObserver),
@@ -629,7 +598,7 @@ fn queue_full_and_closed_drain_are_immediate_failures() {
     let (tx, mut rx) = mpsc::channel(1);
     let sink = TurnMemorySink {
         tx,
-        base_url: String::new(),
+        socket: std::path::PathBuf::new(),
         palace: String::new(),
         creation: PalaceCreation::Allowed,
         observer: observer.clone(),

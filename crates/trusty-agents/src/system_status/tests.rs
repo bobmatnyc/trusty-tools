@@ -7,6 +7,13 @@
 //! environment with no daemons and no MCP config (the live-verify scenario:
 //! an empty, non-repo directory).
 
+// Why: `uds_daemon_with_no_socket_reports_up_false` holds
+// `crate::test_env::ENV_LOCK` across `.await` points by design — it serializes
+// against every other test that mutates process-wide env vars for the duration
+// of the body. Matches `daemons.rs`'s own test module, which allows the lint
+// for `unresponsive_daemon_times_out_rather_than_hanging` for the same reason.
+#![allow(clippy::await_holding_lock)]
+
 use super::*;
 
 /// Why: `gather` must never panic on an unknown/malformed agent name — the
@@ -94,4 +101,80 @@ fn runner_label_matches_toml_kebab_case_convention() {
     assert_eq!(runner_label(RunnerKind::Inline), "inline");
     assert_eq!(runner_label(RunnerKind::ClaudeCode), "claude-code");
     assert_eq!(runner_label(RunnerKind::InProcess), "in-process");
+}
+
+/// Hold `ENV_LOCK` and `TRUSTY_DATA_DIR_OVERRIDE` for a scope, restoring the
+/// previous value on drop.
+///
+/// Why: `std::env::set_var` is a process-wide mutation and `cargo test` runs
+/// this binary's tests in parallel, so a test that sets the override without
+/// the crate-wide lock races `daemons::tests::
+/// unresponsive_daemon_times_out_rather_than_hanging`, which sets the SAME var
+/// under that lock. Restoring in `Drop` rather than inline also means a failed
+/// assertion cannot leak a tempdir path into every sibling test in the binary.
+/// What: takes `crate::test_env::ENV_LOCK`, records the prior value, sets the
+/// new one, and puts the prior value back (or removes the var) on drop — the
+/// lock releases only after the restore.
+/// Test: `uds_daemon_with_no_socket_reports_up_false` is its only user.
+struct DataDirOverride {
+    prev: Option<std::ffi::OsString>,
+    // Dropped last (declaration order), so the lock outlives the restore.
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl DataDirOverride {
+    fn set(dir: &std::path::Path) -> Self {
+        let lock = crate::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var_os(trusty_common::DATA_DIR_OVERRIDE_ENV);
+        // SAFETY: ENV_LOCK is held for this guard's whole lifetime, so no
+        // sibling test reads or writes this var concurrently.
+        unsafe {
+            std::env::set_var(trusty_common::DATA_DIR_OVERRIDE_ENV, dir);
+        }
+        Self { prev, _lock: lock }
+    }
+}
+
+impl Drop for DataDirOverride {
+    fn drop(&mut self) {
+        // SAFETY: the lock is still held — it drops after this field.
+        unsafe {
+            match self.prev.take() {
+                Some(v) => std::env::set_var(trusty_common::DATA_DIR_OVERRIDE_ENV, v),
+                None => std::env::remove_var(trusty_common::DATA_DIR_OVERRIDE_ENV),
+            }
+        }
+    }
+}
+
+/// Why (#6286 review, finding 2): `probe_memory` and `probe_analyze` dialled an
+/// address ADR-0032 and #6287 stopped publishing, so both reported their daemon
+/// permanently down. The fix derives a socket instead — and a socket nothing is
+/// serving must STILL be a clean `up: false` rather than a hang or a panic,
+/// which is the contract the HTTP probe held.
+/// What: points the data directory at an empty tempdir, so the derived socket
+/// path exists nowhere, and asserts both probes report down promptly.
+/// Test: itself.
+#[tokio::test]
+async fn uds_daemon_with_no_socket_reports_up_false() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _override = DataDirOverride::set(tmp.path());
+
+    let started = std::time::Instant::now();
+    let memory = super::daemons::probe_memory().await;
+    let analyze = super::daemons::probe_analyze().await;
+
+    assert!(!memory.up, "nothing is serving the memory socket");
+    assert!(!analyze.up, "nothing is serving the analyze socket");
+    assert!(
+        memory.version.is_none() && analyze.version.is_none(),
+        "a down daemon reports no version"
+    );
+    assert!(
+        started.elapsed() < super::daemons::PROBE_TIMEOUT * 3,
+        "a refused dial must not wait out the budget twice over: {:?}",
+        started.elapsed()
+    );
 }

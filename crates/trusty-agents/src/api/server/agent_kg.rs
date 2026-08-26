@@ -1,24 +1,30 @@
 //! `GET /api/agents/:name/kg*` — a READ-ONLY proxy onto the agent's bound
 //! memory palace's Knowledge Graph (#4290).
 //!
-//! Why: trusty-memory already ships the entire palace-scoped KG read surface
-//! (`crates/trusty-memory/src/web/kg_routes.rs`: `/kg`, `/kg/subjects`,
-//! `/kg/subjects_with_counts`, `/kg/all`, `/kg/count`), but every one of those
-//! routes is keyed by PALACE id. The Knowledge-Graph browser in the agents GUI
-//! is keyed by AGENT — and the mapping between the two lives in this crate
-//! (`[[stores]].palace`, resolved by `StoresConfig::primary()`). Without this
-//! module a client would have to read `GET /api/agents/:name/stores`, dig the
-//! palace id out of the first binding, discover the trusty-memory daemon's
-//! address for itself, and then talk to a second origin — reimplementing
-//! per-agent palace resolution in TypeScript and coupling the GUI to a daemon
-//! it has no discovery path for. This is the plumbing that removes all of
-//! that: agent in, upstream KG JSON out.
+//! Why: trusty-memory ships the entire palace-scoped KG read surface
+//! (`memory.kg_subjects_with_counts`, `memory.kg_all`, `memory.kg_count`, and
+//! the `kg_query` tool), but every one of them is keyed by PALACE id. The
+//! Knowledge-Graph browser in the agents GUI is keyed by AGENT — and the
+//! mapping between the two lives in this crate (`[[stores]].palace`, resolved
+//! by `StoresConfig::primary()`). Without this module a client would have to
+//! read `GET /api/agents/:name/stores`, dig the palace id out of the first
+//! binding, find the trusty-memory socket for itself, and then speak framed
+//! JSON-RPC over a Unix socket from a browser — which it cannot do at all.
+//! This is the plumbing that removes that: agent in, KG JSON out.
 //!
-//! **This module holds no KG query logic of its own.** `MemoryService` /
-//! `kg_routes.rs` stays the single entry point for every KG read; the upstream
-//! body is passed through VERBATIM under `data` — never reshaped, re-ranked,
-//! truncated or re-sorted here — so the GUI and the MCP `kg_query` tool can
-//! never disagree about what the graph contains.
+//! **This module holds no KG query logic of its own.** `MemoryService` stays
+//! the single entry point for every KG read; the upstream body is passed
+//! through under `data` — never re-ranked, truncated or re-sorted here — so the
+//! GUI and the MCP `kg_query` tool can never disagree about what the graph
+//! contains.
+//!
+//! One method's answer is projected rather than passed whole, and only one:
+//! `/kg?subject=` maps onto the `kg_query` TOOL, which answers
+//! `{subject, triples, kg_triple_count, …}` where the retired route answered a
+//! bare `Vec<Triple>`. `data` carries `triples`, because this route's contract
+//! is that every array-shaped read has the same TYPE in `data` and a client
+//! branches only on `connected` (see the envelope below). The projection is
+//! named here rather than buried: `KgRead::project`.
 //!
 //! **Read-only by owner decision.** trusty-memory's `POST /kg` (assert) and
 //! `DELETE /kg/triples/{id}` (retract) are deliberately NOT proxied;
@@ -38,10 +44,18 @@
 //! name or a missing `subject`, `404` for an unknown agent, `500` only when
 //! the agent's own config file cannot be read off disk.
 //!
+//! **The upstream is a Unix socket, not an HTTP origin (#6286).** This module
+//! resolved `resolve_daemon_base_url("trusty-memory")`, which reads an
+//! `http_addr` file ADR-0032 stopped writing — so it was permanently `None` and
+//! every request took the degraded arm, rendering the GUI's KG pane empty with
+//! "daemon not discoverable" whether or not the daemon was up. The four reads
+//! map onto folded methods (`memory.kg_subjects_with_counts`, `memory.kg_all`,
+//! `memory.kg_count`) and the `kg_query` tool.
+//!
 //! What: four thin axum shims ([`agent_kg_subjects_route`],
 //! [`agent_kg_all_route`], [`agent_kg_query_route`], [`agent_kg_count_route`])
 //! over one testable core, [`kg_proxy_at`], which takes the agents-dir list
-//! and the trusty-memory base URL explicitly (the injected-dependency
+//! and the trusty-memory socket explicitly (the injected-dependency
 //! convention of `agent_stores::stores_at`). Response envelope, identical for
 //! all four routes:
 //!
@@ -88,13 +102,25 @@ pub(super) struct KgParams {
 
 /// One upstream KG read, resolved from the route that was hit.
 ///
-/// `suffix` is appended under `/api/v1/palaces/{palace}/`; `pairs` are the
-/// query parameters to forward verbatim; `empty` is the payload shape used for
-/// `data` on every degraded path (see the module doc's envelope).
+/// `method` is the name dialled on trusty-memory's socket; `params` are that
+/// method's own arguments minus the palace, which is filled in once the agent's
+/// binding resolves; `empty` is the payload shape used for `data` on every
+/// degraded path (see the module doc's envelope).
 pub(super) struct KgRead {
-    suffix: &'static str,
-    pairs: Vec<(&'static str, String)>,
+    method: &'static str,
+    params: serde_json::Map<String, Value>,
+    /// The key this method names the palace under.
+    ///
+    /// The folded methods take `palace_id`, flattened out of the former path
+    /// segment. `kg_query` is a TOOL and has always taken `palace`. Naming the
+    /// key per read is what lets both go through one call site.
+    palace_key: &'static str,
     empty: Value,
+    /// The field to lift out of the answer, when the method's shape is wider
+    /// than this route's `data` contract.
+    ///
+    /// `Some("triples")` for `kg_query` only — see the module doc.
+    project: Option<&'static str>,
 }
 
 impl KgRead {
@@ -102,29 +128,52 @@ impl KgRead {
     /// [`kg_proxy_at`] with an arbitrary read without a test-only shim on the
     /// production type.
     pub(super) fn new(
-        suffix: &'static str,
-        pairs: Vec<(&'static str, String)>,
+        method: &'static str,
+        palace_key: &'static str,
+        params: Vec<(&'static str, Value)>,
         empty: Value,
     ) -> Self {
         Self {
-            suffix,
-            pairs,
+            method,
+            params: params
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+            palace_key,
             empty,
+            project: None,
         }
+    }
+
+    /// Lift `field` out of the answer instead of passing the object whole.
+    pub(super) fn projecting(mut self, field: &'static str) -> Self {
+        self.project = Some(field);
+        self
+    }
+
+    /// The params to send, with the resolved palace filled in.
+    fn params_for(&self, palace: &str) -> Value {
+        let mut params = self.params.clone();
+        params.insert(
+            self.palace_key.to_string(),
+            Value::String(palace.to_string()),
+        );
+        Value::Object(params)
     }
 }
 
-/// `limit`/`offset` as forwardable query pairs, omitting whichever the caller
-/// did not send.
-fn page_pairs(p: &KgParams, with_offset: bool) -> Vec<(&'static str, String)> {
-    let mut pairs = Vec::new();
+/// `limit`/`offset` as forwardable params, omitting whichever the caller did
+/// not send so trusty-memory's own defaults and clamps stay the single source
+/// of truth.
+fn page_params(p: &KgParams, with_offset: bool) -> Vec<(&'static str, Value)> {
+    let mut params = Vec::new();
     if let Some(limit) = p.limit {
-        pairs.push(("limit", limit.to_string()));
+        params.push(("limit", Value::from(limit)));
     }
     if with_offset && let Some(offset) = p.offset {
-        pairs.push(("offset", offset.to_string()));
+        params.push(("offset", Value::from(offset)));
     }
-    pairs
+    params
 }
 
 /// `GET /api/agents/:name/kg/subjects?limit=N` — HTTP entry point.
@@ -140,7 +189,12 @@ pub(super) async fn agent_kg_subjects_route(
     AxumPath(name): AxumPath<String>,
     Query(p): Query<KgParams>,
 ) -> Response {
-    let read = KgRead::new("kg/subjects_with_counts", page_pairs(&p, false), json!([]));
+    let read = KgRead::new(
+        "memory.kg_subjects_with_counts",
+        "palace_id",
+        page_params(&p, false),
+        json!([]),
+    );
     proxy_with_discovered_memory(&name, read).await
 }
 
@@ -156,7 +210,12 @@ pub(super) async fn agent_kg_all_route(
     AxumPath(name): AxumPath<String>,
     Query(p): Query<KgParams>,
 ) -> Response {
-    let read = KgRead::new("kg/all", page_pairs(&p, true), json!([]));
+    let read = KgRead::new(
+        "memory.kg_all",
+        "palace_id",
+        page_params(&p, true),
+        json!([]),
+    );
     proxy_with_discovered_memory(&name, read).await
 }
 
@@ -168,7 +227,7 @@ pub(super) async fn agent_kg_all_route(
 /// REQUIRED (as upstream requires it) and its absence is a `400` with the same
 /// `{"error": …}` shape the sibling routes use for an invalid name — never a
 /// silent full-graph fetch.
-/// Test: `kg_query_route_forwards_subject`,
+/// Test: `kg_query_route_projects_the_triples_array`,
 /// `kg_query_route_requires_subject`.
 // #4290: per-agent entry onto trusty-memory's subject-scoped triple query.
 pub(super) async fn agent_kg_query_route(
@@ -183,7 +242,17 @@ pub(super) async fn agent_kg_query_route(
         )
             .into_response();
     };
-    let read = KgRead::new("kg", vec![("subject", subject)], json!([]));
+    // `kg_query` is a dispatcher tool, not a folded method — the branch that
+    // moved this daemon onto a socket deliberately did not fold what the
+    // dispatcher already routes. It answers `{subject, triples, …}` where the
+    // retired route answered a bare array, so `data` carries `triples`.
+    let read = KgRead::new(
+        "kg_query",
+        "palace",
+        vec![("subject", Value::String(subject))],
+        json!([]),
+    )
+    .projecting("triples");
     proxy_with_discovered_memory(&name, read).await
 }
 
@@ -201,28 +270,39 @@ pub(super) async fn agent_kg_count_route(
     State(_state): State<AppState>,
     AxumPath(name): AxumPath<String>,
 ) -> Response {
-    let read = KgRead::new("kg/count", Vec::new(), json!({ "active": 0 }));
+    let read = KgRead::new(
+        "memory.kg_count",
+        "palace_id",
+        Vec::new(),
+        json!({ "active": 0 }),
+    );
     proxy_with_discovered_memory(&name, read).await
 }
 
-/// Shared shim body: discover the trusty-memory daemon the same way
+/// Shared shim body: resolve the trusty-memory socket the same way
 /// `agent_stores_route` / `agent_knowledge_route` already do, then delegate.
+///
+/// An unresolvable data directory yields `None`, which the core reports as the
+/// daemon being undiscoverable — the same degraded arm a daemon that is not
+/// running takes, because from a browser pane's point of view they are the same
+/// empty state with a reason.
 async fn proxy_with_discovered_memory(name: &str, read: KgRead) -> Response {
     kg_proxy_at(
         &crate::agents::agents_dir_candidates(),
         name,
-        trusty_common::resolve_daemon_base_url("trusty-memory").as_deref(),
+        trusty_common::memory_rpc::resolve_memory_socket()
+            .ok()
+            .as_deref(),
         read,
     )
     .await
 }
 
-/// Core proxy logic against explicit agents dirs + a trusty-memory base URL.
+/// Core proxy logic against explicit agents dirs + a trusty-memory socket.
 ///
-/// Why: Same testability rationale as `agent_stores::stores_at` — the daemon
-/// URL is injected so tests can point at a mock server instead of the
-/// developer's live daemon, and the palace-resolution branch can be exercised
-/// with no network at all.
+/// Why: Same testability rationale as `agent_stores::stores_at` — the socket is
+/// injected so tests can point at a mock daemon instead of the developer's live
+/// one, and the palace-resolution branch can be exercised with no daemon at all.
 /// What: resolves the agent's palace from `StoresConfig::primary()`'s `palace`
 /// field, fetches the upstream KG read, and wraps the result in the module
 /// doc's envelope. `400` invalid name, `404` unknown agent, `500` only when
@@ -240,7 +320,7 @@ async fn proxy_with_discovered_memory(name: &str, read: KgRead) -> Response {
 pub(super) async fn kg_proxy_at(
     dirs: &[PathBuf],
     name: &str,
-    memory_base: Option<&str>,
+    memory_socket: Option<&std::path::Path>,
     read: KgRead,
 ) -> Response {
     if name.is_empty() || name.contains(['/', '\\']) || name == "." || name == ".." {
@@ -279,9 +359,9 @@ pub(super) async fn kg_proxy_at(
         );
     };
 
-    let result = match memory_base {
+    let result = match memory_socket {
         None => Err("trusty-memory daemon not discoverable (is it running?)".to_string()),
-        Some(base) => fetch_upstream(base, &palace, &read).await,
+        Some(socket) => fetch_upstream(socket, &palace, &read).await,
     };
     envelope(Some(palace), result, &read.empty, config_error)
 }
@@ -308,70 +388,60 @@ fn envelope(
     (StatusCode::OK, Json(body)).into_response()
 }
 
-/// Perform the upstream trusty-memory GET, collapsing every failure mode to a
+/// Perform the upstream trusty-memory call, collapsing every failure mode to a
 /// human-readable reason string.
 ///
-/// Why: mirrors `stores::status::probe_palace`'s vocabulary verbatim ("does
-/// not exist" / "returned HTTP N" / "unreachable") so a client that already
-/// renders a store card's `reason` can render this one with no new cases, and
-/// so the two surfaces cannot describe the same down daemon two ways.
-/// What: `Ok(body)` for a 2xx with parseable JSON; `Err(reason)` for a 404,
-/// any other non-2xx, a transport error, or an unreadable body. Bounded by
+/// Why: mirrors `stores::status::probe_palace`'s vocabulary ("does not exist" /
+/// "unreachable") so a client that already renders a store card's `reason` can
+/// render this one with no new cases, and so the two surfaces cannot describe
+/// the same down daemon two ways.
+/// What: `Ok(data)` when the daemon answers; `Err(reason)` for a not-found
+/// refusal, any other refusal, or a transport failure. A read declaring
+/// [`KgRead::project`] lifts that field out; a projected field the answer does
+/// not carry is a reason rather than a silent empty, because the two mean
+/// different things to a pane rendering "no triples". Bounded by
 /// [`PROBE_TIMEOUT`] — the same ceiling every other cross-daemon read in this
 /// crate uses.
 /// Test: `kg_route_degrades_when_memory_unreachable`,
 /// `kg_route_degrades_when_palace_missing`,
-/// `kg_route_degrades_on_unreadable_upstream_body`.
-async fn fetch_upstream(base: &str, palace: &str, read: &KgRead) -> Result<Value, String> {
-    let client = reqwest::Client::builder()
-        .timeout(PROBE_TIMEOUT)
-        .build()
-        .map_err(|e| format!("HTTP client unavailable: {e}"))?;
-    let url = upstream_url(base, palace, read)?;
-    let resp = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("trusty-memory unreachable at {base}: {e}"))?;
-    if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        return Err(format!("memory palace `{palace}` does not exist"));
-    }
-    if !resp.status().is_success() {
-        return Err(format!(
-            "trusty-memory returned HTTP {} for palace `{palace}`",
-            resp.status()
-        ));
-    }
-    resp.json::<Value>()
-        .await
-        .map_err(|e| format!("trusty-memory returned an unreadable KG body: {e}"))
+/// `kg_query_route_projects_the_triples_array`.
+async fn fetch_upstream(
+    socket: &std::path::Path,
+    palace: &str,
+    read: &KgRead,
+) -> Result<Value, String> {
+    let answer = trusty_common::memory_rpc::call_memory_tool_at_with_timeout(
+        socket,
+        read.method,
+        read.params_for(palace),
+        PROBE_TIMEOUT,
+    )
+    .await
+    .map_err(|e| describe_failure(&e, palace))?;
+
+    let Some(field) = read.project else {
+        return Ok(answer);
+    };
+    answer.get(field).cloned().ok_or_else(|| {
+        format!(
+            "trusty-memory answered {} without a `{field}` field",
+            read.method
+        )
+    })
 }
 
-/// The upstream URL for one read, with every dynamic segment percent-encoded.
+/// Turn a call failure into the reason a pane renders.
 ///
-/// Why: a palace id and a KG subject are operator/user-supplied strings that
-/// may contain spaces, `#`, `?` or `/`. String-formatting them into a URL
-/// would let a subject silently escape its query parameter (or a palace id
-/// invent extra path segments), so both go through `url`'s own encoders:
-/// `path_segments_mut` for the palace, `query_pairs_mut` for the parameters.
-/// Test: `upstream_url_percent_encodes_palace_and_subject`.
-fn upstream_url(base: &str, palace: &str, read: &KgRead) -> Result<reqwest::Url, String> {
-    let mut url = reqwest::Url::parse(base)
-        .map_err(|e| format!("invalid trusty-memory base URL `{base}`: {e}"))?;
-    {
-        let mut segments = url
-            .path_segments_mut()
-            .map_err(|()| format!("trusty-memory base URL `{base}` cannot carry a path"))?;
-        segments.clear().extend(["api", "v1", "palaces", palace]);
-        segments.extend(read.suffix.split('/'));
+/// A not-found refusal is the palace being absent, which is an ordinary state
+/// for an agent whose palace was never created; anything else is the daemon
+/// being unreachable or in trouble, and carries its own message so an operator
+/// reads the reason they were given.
+fn describe_failure(e: &anyhow::Error, palace: &str) -> String {
+    match e.downcast_ref::<trusty_common::memory_rpc::MemoryRpcError>() {
+        Some(rpc) if rpc.is_not_found() => format!("memory palace `{palace}` does not exist"),
+        Some(rpc) => format!("trusty-memory refused the read for palace `{palace}`: {rpc}"),
+        None => format!("trusty-memory unreachable: {e:#}"),
     }
-    if !read.pairs.is_empty() {
-        let mut query = url.query_pairs_mut();
-        for (key, value) in &read.pairs {
-            query.append_pair(key, value);
-        }
-    }
-    Ok(url)
 }
 
 /// Parse just the `[[stores]]` table out of a raw `agent.toml`.
@@ -395,49 +465,66 @@ fn parse_stores(raw: &str) -> (StoresConfig, Option<String>) {
 mod unit_tests {
     use super::*;
 
+    /// Why: the palace is filled in per read rather than baked into `params`,
+    /// and the two method families name it differently — `palace_id` for the
+    /// folded reads, `palace` for the `kg_query` tool. A read that sent the
+    /// wrong key would be refused as invalid params, which reads to a pane as
+    /// the daemon being unreachable.
+    /// Test: itself.
     #[test]
-    fn upstream_url_percent_encodes_palace_and_subject() {
-        let read = KgRead::new(
-            "kg",
-            vec![("subject", "Bob & Alice/2026?x".to_string())],
-            json!([]),
-        );
-        let url = upstream_url("http://127.0.0.1:7777", "owner profile/x", &read).unwrap();
-        assert_eq!(
-            url.path(),
-            "/api/v1/palaces/owner%20profile%2Fx/kg",
-            "a palace id must never invent extra path segments"
-        );
-        assert_eq!(
-            url.query().unwrap(),
-            "subject=Bob+%26+Alice%2F2026%3Fx",
-            "a subject must never escape its query parameter"
-        );
+    fn params_for_uses_each_methods_own_palace_key() {
+        let folded = KgRead::new("memory.kg_all", "palace_id", Vec::new(), json!([]));
+        assert_eq!(folded.params_for("cto")["palace_id"], "cto");
+        assert!(folded.params_for("cto").get("palace").is_none());
+
+        let tool = KgRead::new("kg_query", "palace", Vec::new(), json!([]));
+        assert_eq!(tool.params_for("cto")["palace"], "cto");
+        assert!(tool.params_for("cto").get("palace_id").is_none());
     }
 
+    /// Why: trusty-memory's own defaults and clamps are the single source of
+    /// truth, so a parameter the caller did not send must not be invented here.
+    /// Test: itself.
     #[test]
-    fn upstream_url_omits_absent_page_params() {
-        let read = KgRead::new("kg/all", page_pairs(&KgParams::default(), true), json!([]));
-        let url = upstream_url("http://127.0.0.1:7777/", "cto", &read).unwrap();
-        assert_eq!(url.path(), "/api/v1/palaces/cto/kg/all");
-        assert!(
-            url.query().is_none(),
-            "trusty-memory's own defaults must stay the single source of truth"
-        );
-    }
-
-    #[test]
-    fn page_pairs_forwards_only_what_the_caller_sent() {
+    fn page_params_forwards_only_what_the_caller_sent() {
         let p = KgParams {
             limit: Some(25),
             offset: Some(50),
             subject: None,
         };
         assert_eq!(
-            page_pairs(&p, true),
-            vec![("limit", "25".to_string()), ("offset", "50".to_string())]
+            page_params(&p, true),
+            vec![("limit", Value::from(25)), ("offset", Value::from(50))]
         );
-        assert_eq!(page_pairs(&p, false), vec![("limit", "25".to_string())]);
+        assert_eq!(page_params(&p, false), vec![("limit", Value::from(25))]);
+
+        let read = KgRead::new(
+            "memory.kg_all",
+            "palace_id",
+            page_params(&KgParams::default(), true),
+            json!([]),
+        );
+        let params = read.params_for("cto");
+        assert!(params.get("limit").is_none());
+        assert!(params.get("offset").is_none());
+    }
+
+    /// Why: a palace id and a KG subject are operator- and user-supplied
+    /// strings. Over HTTP they had to be percent-encoded or a subject could
+    /// escape its query parameter; as JSON params there is no such escape, and
+    /// this pins that the value arrives unmangled rather than re-encoded.
+    /// Test: itself.
+    #[test]
+    fn params_carry_awkward_values_unchanged() {
+        let read = KgRead::new(
+            "kg_query",
+            "palace",
+            vec![("subject", Value::String("Bob & Alice/2026?x".to_string()))],
+            json!([]),
+        );
+        let params = read.params_for("owner profile/x");
+        assert_eq!(params["palace"], "owner profile/x");
+        assert_eq!(params["subject"], "Bob & Alice/2026?x");
     }
 
     #[test]

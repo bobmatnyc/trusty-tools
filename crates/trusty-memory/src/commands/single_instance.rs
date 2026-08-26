@@ -1,25 +1,39 @@
 //! Single-instance guard for the trusty-memory daemon.
 //!
-//! Why: macOS launchd `KeepAlive { SuccessfulExit: false }` (i.e. `OnSuccess`)
-//! respawns the daemon whenever it exits with a non-zero code. When a second
-//! daemon instance fails to bind (EADDRINUSE — the first instance already owns
-//! port 7070 and/or the UDS socket), it exits non-zero, which launchd interprets
-//! as a crash and spawns yet another copy. The resulting zombie herd (69 observed
-//! in the wild) exhausts file descriptors on top of the existing fd-limit bug.
+//! Why: macOS launchd `KeepAlive { SuccessfulExit: false }` respawns the daemon
+//! whenever it exits with a non-zero code. A second instance that fails to bind
+//! exits non-zero, launchd reads that as a crash and spawns another copy, and
+//! the resulting zombie herd (69 observed in the wild) exhausts file
+//! descriptors on top of the existing fd-limit bug.
 //!
-//! The fix: before attempting to bind, probe the discovery files. If a healthy
-//! daemon is already responding to `/health`, exit **0** (success). Launchd
-//! treats exit-0 as "clean shutdown" and does NOT respawn (SuccessfulExit:false
-//! = restart only on non-zero). This collapses the zombie herd immediately on
-//! the next invocation without touching launchd config.
+//! The fix: before binding, probe the socket. If something is already serving
+//! it, exit **0**. Launchd treats exit-0 as a clean shutdown and does not
+//! respawn, which collapses the herd on the next invocation without touching
+//! the launchd config.
 //!
-//! What: exposes [`single_instance_check`] (async, for real daemon startups)
-//! and [`StartupAction`] (pure enum, for unit testing the decision logic).
+//! #6286 changed what is probed, not the decision. It used to read the
+//! `http_addr` discovery file and GET `/health` at whatever address that named
+//! — a file that goes stale after a SIGKILL, which is why the probe had to
+//! tolerate one pointing at a dead port. The socket path is derived rather than
+//! published, so there is nothing to be stale and the probe is a bare connect
+//! through `trusty_common::uds::socket_is_serving`.
 //!
-//! Test: `startup_action_*` unit tests cover every branch including the
-//! stale-socket-vs-live-socket distinction.
+//! What: [`single_instance_check`] (async, for real daemon startups) and
+//! [`StartupAction`] (a pure enum, so the decision is unit-testable without
+//! I/O).
+//!
+//! Test: `startup_action_*` for the decision, `single_instance_check_*` for the
+//! probe.
 
 use std::path::Path;
+use std::time::Duration;
+
+/// How long a liveness connect may take before the path is called dead.
+///
+/// A local socket accepts or refuses in microseconds; this is headroom for a
+/// loaded machine, not a latency budget. It matches trusty-analyze's
+/// `daemon_guard::PROBE_TIMEOUT` so the two daemons wait the same.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// What the daemon startup should do after the single-instance check.
 ///
@@ -29,19 +43,24 @@ use std::path::Path;
 /// Test: `startup_action_from_probe_result_*` tests in this module.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartupAction {
-    /// Proceed to bind the TCP port and start serving.
+    /// Proceed to bind the socket and start serving.
     Proceed,
     /// Another healthy instance is already running — exit 0 cleanly so
     /// launchd does not respawn.
     ExitAlreadyRunning,
-    /// A probe attempt failed with an unexpected error (not ECONNREFUSED /
-    /// "no such file") — propagate as a startup failure so the operator sees
-    /// a real error in the launchd log. Launchd will respawn (correctly, because
-    /// this is a genuine failure).
+    /// A probe attempt failed with an unexpected error — propagate as a startup
+    /// failure so the operator sees a real error in the launchd log. Launchd
+    /// respawns, correctly, because this is a genuine failure.
+    ///
+    /// Nothing constructs this today: `socket_is_serving` answers a bool, so
+    /// every failure it can have is "nothing is serving". The variant stays
+    /// because the caller in `main.rs` branches on it and a future probe that
+    /// can distinguish a permission error from an absence has somewhere to
+    /// report it.
     Fail(String),
 }
 
-/// Decide what to do based on the result of an HTTP health probe.
+/// Decide what to do based on the result of a liveness probe.
 ///
 /// Why: the single-instance check reduces to "did the health probe succeed?".
 /// Encoding the decision as a pure function (rather than embedding it in the
@@ -60,55 +79,45 @@ pub fn startup_action_from_probe_result(probe_ok: bool) -> StartupAction {
 
 /// Perform the single-instance check at daemon startup.
 ///
-/// Why: launchd's `KeepAlive { SuccessfulExit: false }` respawns any non-zero
-/// exit, so a second daemon instance that fails to bind causes an endless
-/// respawn storm. Exiting 0 (when another healthy instance is detected) short-
-/// circuits this because `SuccessfulExit: false` means "restart only on
-/// non-zero exits" — exit 0 is treated as a voluntary clean shutdown.
-/// What: reads the `http_addr` discovery file; if it contains a reachable
-/// address whose `/health` responds with HTTP 200, returns
-/// [`StartupAction::ExitAlreadyRunning`]. Otherwise returns
-/// [`StartupAction::Proceed`] so the caller continues with normal bind.
-/// Errors reading the addr file or the network call are silently treated as
-/// "not running" (returns `Proceed`) so a missing or stale file never blocks
-/// a cold start.
-/// Test: integration — run `trusty-memory serve --foreground` twice in the
-/// same session and observe the second exits 0 without trying to bind; the
-/// unit tests in this module cover the decision logic.
-pub async fn single_instance_check(addr_file: Option<&Path>) -> StartupAction {
-    let Some(path) = addr_file else {
-        // No addr file path available (no $HOME) — proceed with bind.
-        return StartupAction::Proceed;
-    };
-    let probe_ok = trusty_common::check_already_running(path, "/health")
-        .await
-        .is_some();
+/// Why: launchd respawns any non-zero exit, so a second instance that fails to
+/// bind causes an endless respawn storm. Exiting 0 when another healthy
+/// instance is detected short-circuits it.
+///
+/// What: a bare connect to `socket`. It deliberately does NOT call
+/// `memory.health`: the question is whether the endpoint is live, and a daemon
+/// that is up but degraded must not be reported absent and spawned on top of
+/// itself. An absent or dead socket returns [`StartupAction::Proceed`], so a
+/// cold start is never blocked.
+///
+/// Test: `single_instance_check_proceeds_when_nothing_is_serving`,
+/// `single_instance_check_exits_when_something_is_serving`.
+pub async fn single_instance_check(socket: &Path) -> StartupAction {
+    let probe_ok = trusty_common::uds::socket_is_serving(socket, PROBE_TIMEOUT).await;
     startup_action_from_probe_result(probe_ok)
 }
 
 /// Single-instance check with up to `max_retries` additional probes.
 ///
 /// Why (issue #1152, Tier 3): a single probe can miss a daemon that is
-/// mid-boot — it wrote the addr file but hasn't yet answered `/health`.
-/// Retrying with a short sleep lets a slow-boot daemon be detected and
-/// this caller exit 0 (stopping the launchd respawn storm) rather than
-/// proceeding to open redb, which would trigger `DatabaseAlreadyOpen`.
+/// mid-boot — it has not bound the socket yet. Retrying with a short sleep lets
+/// a slow-boot daemon be detected and this caller exit 0, rather than
+/// proceeding to open redb and triggering `DatabaseAlreadyOpen`.
 /// What: calls `single_instance_check` repeatedly up to `1 + max_retries`
 /// times, sleeping `delay_ms` between each call, stopping on the first
 /// non-`Proceed` result. Returns the final `StartupAction`.
 /// Test: covered by the unit tests for `startup_action_from_probe_result`;
 /// the retry path is exercised by the integration guard in `main.rs`.
 pub async fn single_instance_check_retried(
-    addr_file: Option<&std::path::Path>,
+    socket: &Path,
     max_retries: u8,
     delay_ms: u64,
 ) -> StartupAction {
-    let mut action = single_instance_check(addr_file).await;
+    let mut action = single_instance_check(socket).await;
     let mut retries = max_retries;
     while action == StartupAction::Proceed && retries > 0 {
         retries -= 1;
         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-        action = single_instance_check(addr_file).await;
+        action = single_instance_check(socket).await;
     }
     action
 }
@@ -145,54 +154,36 @@ mod tests {
         );
     }
 
-    /// Why: when there is no addr file path (no $HOME / TRUSTY_DATA_DIR_OVERRIDE),
-    /// the guard must not block a cold start — it must proceed.
-    /// What: calls `single_instance_check(None)` in a tokio context and asserts
-    /// the result is `Proceed`.
-    /// Test: itself (no real I/O — None short-circuits immediately).
+    /// Why: an absent socket means no daemon is running, and the guard must
+    /// let the cold start proceed. A guard that reported "already running" for
+    /// a path with nothing on it would stop the daemon ever starting.
+    /// Test: itself.
     #[tokio::test]
-    async fn single_instance_check_proceeds_when_no_path() {
-        let action = single_instance_check(None).await;
+    async fn single_instance_check_proceeds_when_nothing_is_serving() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let action = single_instance_check(&tmp.path().join("absent.sock")).await;
         assert_eq!(
             action,
             StartupAction::Proceed,
-            "no addr path → Proceed (cold start must not be blocked)"
+            "an absent socket must never block a cold start"
         );
     }
 
-    /// Why: a missing addr file means no daemon is running — the guard
-    /// must allow the cold start to proceed.
-    /// What: passes a path to a nonexistent file and asserts `Proceed`.
-    /// Test: itself (real fs stat, no network).
-    #[tokio::test]
-    async fn single_instance_check_proceeds_when_addr_file_missing() {
+    /// Why: this is the branch that collapses the launchd respawn herd. A live
+    /// socket must produce `ExitAlreadyRunning` so the second instance exits 0
+    /// rather than failing its bind and being respawned.
+    /// Test: itself.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn single_instance_check_exits_when_something_is_serving() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let missing = tmp.path().join("http_addr");
-        let action = single_instance_check(Some(&missing)).await;
-        assert_eq!(
-            action,
-            StartupAction::Proceed,
-            "missing addr file → Proceed"
-        );
-    }
+        let socket = tmp.path().join("sockets").join("trusty-memory.sock");
+        let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
+        tokio::spawn(async move { while listener.accept().await.is_ok() {} });
 
-    /// Why: a stale addr file (address written but no daemon listening) must
-    /// be treated as "not running" — the guard must allow the cold start.
-    /// What: writes a dead address to a tempfile and asserts `Proceed`
-    /// (the `check_already_running` helper cleans the stale file and returns
-    /// `None`, so `startup_action_from_probe_result(false)` = Proceed).
-    /// Test: itself (real fs + loopback TCP attempt, no daemon spawned).
-    #[tokio::test]
-    async fn single_instance_check_proceeds_when_addr_file_stale() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let addr_file = tmp.path().join("http_addr");
-        // Write a port that nothing is listening on.
-        std::fs::write(&addr_file, "127.0.0.1:19999\n").expect("write");
-        let action = single_instance_check(Some(&addr_file)).await;
         assert_eq!(
-            action,
-            StartupAction::Proceed,
-            "stale addr file (no listener) → Proceed"
+            single_instance_check(&socket).await,
+            StartupAction::ExitAlreadyRunning,
+            "a live socket must stop a second instance from binding"
         );
     }
 }

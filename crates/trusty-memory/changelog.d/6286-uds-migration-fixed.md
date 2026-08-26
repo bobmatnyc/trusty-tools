@@ -1,0 +1,3 @@
+Fixed
+- **The MCP stdio bridge would have started refusing requests that omitted `jsonrpc`.** `trusty_mcp::Request` serialises the field as `null` when a client omits it; `POST /rpc` never checked it, and `RpcRouter` refuses anything that is not exactly `"2.0"`. The bridge normalises it before forwarding, so a client that worked before the migration works after it
+- **A `tools/call` naming a streaming method is refused with a reason.** MCP stdio writes one response per request, so a token stream had no shape to arrive in — the two silent outcomes were returning the first token as the answer, or hanging

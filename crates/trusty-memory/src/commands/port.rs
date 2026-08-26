@@ -1,218 +1,156 @@
-//! Handler for `trusty-memory port` — report the daemon's listening port.
+//! Handler for `trusty-memory port` — report where the daemon can be reached.
 //!
-//! Why: operators and agents need to know which port the running trusty-memory
-//! daemon is listening on. The daemon selects a port dynamically from the
-//! 7070–7079 range (plus OS fallback) and writes it to `http_addr`; this
-//! command reads that file and exposes the live address as a first-class CLI
-//! surface (issue #526).
+//! Why: operators and agents need the daemon's address as a first-class CLI
+//! surface (#526). Until #6286 that address was a TCP port picked out of
+//! 7070–7079 and published in an `http_addr` file, and this command read that
+//! file. ADR-0032 retired both: there is no listener to hold a port, nothing
+//! writes the file, and `read_daemon_addr("trusty-memory")` therefore answers
+//! `None` on every machine forever — so the command exited 1 reporting "no
+//! daemon running" whether or not one was.
 //!
-//! What: reads the daemon's persisted address via
-//! `trusty_common::read_daemon_addr("trusty-memory")` and prints one of three
-//! formats to stdout:
-//!   - default: bare port number  →  `7070\n`
-//!   - `--addr`: `host:port`      →  `127.0.0.1:7070\n`
-//!   - `--json`: JSON object      →  `{"addr":"127.0.0.1","port":7070}\n`
+//! What: reports the Unix socket the daemon binds — derived by
+//! `trusty_common::daemon_socket_path`, the same call the daemon itself makes,
+//! so caller and daemon compute the same path with nothing published between
+//! them. Three formats, keeping the flags' audiences:
+//!   - default: the socket path  →  `/…/trusty-memory.sock\n`
+//!   - `--addr`: the same path, for a client that dials it
+//!   - `--json`: `{"socket":"/…/trusty-memory.sock","serving":true}\n`
 //!
-//! Every intentional port/JSON output goes to **stdout**. Error messages go to
-//! **stderr**. When no daemon is running the command exits non-zero so shell
-//! substitution (`$(trusty-memory port)`) fails cleanly.
+//! **There is no port to print, and the command does not invent one.** The
+//! `--port` shape a shell substitution used to interpolate into a URL has no
+//! honest value now; printing the socket is what a caller can actually use.
 //!
-//! Test: unit tests in this module cover all three output formats plus the
-//! missing-daemon error path using a fake address string.
+//! Every intentional output goes to **stdout**; errors go to **stderr**. The
+//! exit contract is unchanged: when nothing is serving the socket, the command
+//! exits non-zero so `$(trusty-memory port)` fails cleanly rather than
+//! interpolating a path to a dead endpoint.
+//!
+//! Test: `format_socket_output_renders_each_format`,
+//! `format_socket_output_escapes_an_awkward_path`. The exit arms call
+//! `process::exit` and are covered by the manual `trusty-memory port` run
+//! rather than in-process — a test cannot observe an exit it shares.
+
+use std::path::Path;
+use std::time::Duration;
 
 use anyhow::Result;
 
+/// How long to wait for the socket to prove it is being served.
+///
+/// A local dial either connects or is refused immediately; the budget only
+/// covers a loaded machine.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+
 /// Output format requested by the caller.
 ///
-/// Why: the three output shapes have distinct audiences — bare port for shell
-/// substitution, host:port for direct `curl`, JSON for scripted consumers.
-/// Encoding the choice as an enum keeps `handle_port` a thin dispatcher and
-/// makes each formatter independently testable.
-/// What: one variant per flag; `Default` is the bare-port case.
-/// Test: `format_port_output_*` unit tests exercise all three variants.
+/// Why: the shapes have distinct audiences — a bare path for shell
+/// substitution, and JSON for a scripted consumer that also wants the liveness
+/// verdict without re-probing.
+/// What: `Port` and `Addr` both render the socket path, because since #6286
+/// there is one address and it is not a port. They are kept distinct so the
+/// existing flags stay accepted rather than becoming an unknown-argument error
+/// in someone's script.
+/// Test: `format_socket_output_*`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PortFormat {
-    /// Bare port number (default).
+    /// The socket path (default).
     Port,
-    /// `host:port` string.
+    /// The socket path, for a caller that passes it to a client.
     Addr,
-    /// `{"addr":"…","port":…}` JSON object.
+    /// `{"socket":"…","serving":bool}` JSON object.
     Json,
 }
 
-/// Parse a `host:port` string and return the port as `u16`.
+/// Render the socket for output in the requested format.
 ///
-/// Why: `read_daemon_addr` returns the full `host:port` string; extracting the
-/// port number for the `Port` and `Json` output modes requires splitting on
-/// the last `:` (to handle IPv6 addresses where the host itself contains `:`).
-/// What: splits on the final `:`, parses the port, returns `None` on any parse
-/// failure so the caller can emit a helpful error rather than panicking.
-/// Test: `parse_port_from_addr_*` unit tests cover normal, IPv6, and malformed inputs.
-pub fn parse_port_from_addr(addr: &str) -> Option<u16> {
-    let colon = addr.rfind(':')?;
-    addr[colon + 1..].parse::<u16>().ok()
-}
-
-/// Format the daemon address for output based on the requested `PortFormat`.
-///
-/// Why: separating the formatting logic from the I/O lets unit tests assert
-/// the output string without spinning up a daemon or touching a lockfile.
-/// What: takes a validated `host:port` string plus the desired format and
-/// returns the string to print. Returns `None` when the port cannot be
-/// parsed from the address (which would indicate a corrupt address file).
-/// Test: `format_port_output_*` unit tests cover all three variants.
-pub fn format_output(addr: &str, format: PortFormat) -> Option<String> {
+/// Why: separating the formatting from the I/O lets a unit test assert the
+/// output without binding a socket.
+/// What: the path for `Port`/`Addr`; a JSON object carrying the path and the
+/// liveness verdict for `Json`. `serde_json` does the escaping, so a data
+/// directory containing a quote or a backslash cannot produce invalid JSON.
+/// Test: `format_socket_output_renders_each_format`.
+pub fn format_output(socket: &Path, serving: bool, format: PortFormat) -> String {
     match format {
-        PortFormat::Port => {
-            let port = parse_port_from_addr(addr)?;
-            Some(port.to_string())
-        }
-        PortFormat::Addr => Some(addr.to_string()),
-        PortFormat::Json => {
-            let port = parse_port_from_addr(addr)?;
-            let colon = addr.rfind(':')?;
-            let host = &addr[..colon];
-            Some(format!(r#"{{"addr":"{host}","port":{port}}}"#))
-        }
+        PortFormat::Port | PortFormat::Addr => socket.display().to_string(),
+        PortFormat::Json => serde_json::json!({
+            "socket": socket.display().to_string(),
+            "serving": serving,
+        })
+        .to_string(),
     }
 }
 
 /// Entry point for `trusty-memory port [--json | --addr]`.
 ///
-/// Why: exposes the daemon's listening port as a first-class CLI command so
-/// shell substitutions like `curl http://127.0.0.1:$(trusty-memory port)/health`
-/// work without guessing. Issue #526.
-/// What: reads the address from the `http_addr` discovery file via
-/// `trusty_common::read_daemon_addr("trusty-memory")`, formats it per the
-/// caller's flags, and prints to stdout. On any error (no daemon, missing file,
-/// corrupt address) the message goes to stderr and the function returns `Err`
-/// so `main` exits non-zero.
-/// Test: unit tests cover all format variants; the live path is exercised
-/// manually via `trusty-memory start && trusty-memory port`.
-pub fn handle_port(format: PortFormat) -> Result<()> {
-    let addr = match trusty_common::read_daemon_addr("trusty-memory") {
-        Ok(Some(a)) if !a.is_empty() => a,
-        Ok(Some(_)) | Ok(None) => {
-            eprintln!(
-                "trusty-memory: no daemon running (address file not found). \
-                 Start with `trusty-memory start`."
-            );
-            std::process::exit(1);
-        }
+/// Why: exposes the daemon's address so a caller does not have to re-derive the
+/// socket path from the data directory.
+///
+/// # Errors
+///
+/// Never returns `Err` — an unresolvable data directory and a socket nothing is
+/// serving both print to stderr and exit 1, which is what a shell substitution
+/// has to see.
+///
+/// Test: the formatting is covered by `format_socket_output_renders_each_format`;
+/// the exit arms are exercised manually (see the module doc).
+pub async fn handle_port(format: PortFormat) -> Result<()> {
+    let socket = match crate::transport::uds::socket_path() {
+        Ok(p) => p,
         Err(e) => {
-            eprintln!("trusty-memory: could not read daemon address: {e:#}");
+            eprintln!("trusty-memory: could not resolve the daemon socket path: {e:#}");
             std::process::exit(1);
         }
     };
 
-    match format_output(&addr, format) {
-        Some(out) => {
-            println!("{out}");
-            Ok(())
-        }
-        None => {
-            eprintln!(
-                "trusty-memory: daemon address file contains an unrecognised \
-                 address `{addr}` (expected host:port). \
-                 Re-start the daemon with `trusty-memory start`."
-            );
-            std::process::exit(1);
-        }
+    let serving = trusty_common::uds::socket_is_serving(&socket, PROBE_TIMEOUT).await;
+    if !serving {
+        eprintln!(
+            "trusty-memory: no daemon serving {}. Start it with `trusty-memory start`.",
+            socket.display()
+        );
+        std::process::exit(1);
     }
+
+    println!("{}", format_output(&socket, serving, format));
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
-    // ── format_output ──────────────────────────────────────────────────────
-
-    /// Default format emits the bare port number.
-    ///
-    /// Why: the primary use case is shell substitution; anything other than
-    /// a bare integer in stdout would break `curl http://…:$(trusty-memory port)/…`.
+    /// Why: the three flags are a documented CLI contract, and a caller piping
+    /// `--json` into `jq` needs the object shape to hold.
+    /// Test: itself.
     #[test]
-    fn format_port_output_default() {
+    fn format_socket_output_renders_each_format() {
+        let socket = PathBuf::from("/tmp/trusty/trusty-memory.sock");
         assert_eq!(
-            format_output("127.0.0.1:7070", PortFormat::Port),
-            Some("7070".to_string())
+            format_output(&socket, true, PortFormat::Port),
+            "/tmp/trusty/trusty-memory.sock"
         );
-    }
-
-    /// `--addr` format emits the full `host:port` string unchanged.
-    ///
-    /// Why: callers using `curl http://$(trusty-memory port --addr)/health`
-    /// need the host included.
-    #[test]
-    fn format_port_output_addr() {
         assert_eq!(
-            format_output("127.0.0.1:7070", PortFormat::Addr),
-            Some("127.0.0.1:7070".to_string())
+            format_output(&socket, true, PortFormat::Addr),
+            "/tmp/trusty/trusty-memory.sock"
         );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&format_output(&socket, false, PortFormat::Json))
+                .expect("--json must emit parseable JSON");
+        assert_eq!(parsed["socket"], "/tmp/trusty/trusty-memory.sock");
+        assert_eq!(parsed["serving"], false);
     }
 
-    /// `--json` format emits a JSON object with `addr` and `port` fields.
-    ///
-    /// Why: scripted consumers may want both fields in a structured payload
-    /// without shelling out twice or parsing the port themselves.
+    /// Why: a path is operator-supplied by way of `TRUSTY_DATA_DIR_OVERRIDE`,
+    /// and hand-formatting it into JSON would emit an unparseable object for a
+    /// directory containing a quote or a backslash.
+    /// Test: itself.
     #[test]
-    fn format_port_output_json() {
-        assert_eq!(
-            format_output("127.0.0.1:7070", PortFormat::Json),
-            Some(r#"{"addr":"127.0.0.1","port":7070}"#.to_string())
-        );
-    }
-
-    /// IPv6 addresses use the last `:` as the port separator.
-    ///
-    /// Why: on dual-stack hosts the daemon might bind `[::1]:7070`; `rfind`
-    /// correctly splits on the final `:` rather than the first.
-    #[test]
-    fn parse_port_ipv6() {
-        assert_eq!(parse_port_from_addr("[::1]:7070"), Some(7070));
-    }
-
-    /// A corrupt address (no `:`) returns `None` instead of panicking.
-    ///
-    /// Why: the caller converts `None` to a human-readable error rather than
-    /// crashing — this validates the safety net.
-    #[test]
-    fn format_port_output_malformed_returns_none() {
-        assert_eq!(format_output("not-an-addr", PortFormat::Port), None);
-        assert_eq!(format_output("", PortFormat::Port), None);
-    }
-
-    /// `--json` with a port that doesn't parse returns `None`.
-    ///
-    /// Why: same safety-net; a non-numeric port must not produce garbage JSON.
-    #[test]
-    fn format_port_output_json_malformed_returns_none() {
-        assert_eq!(format_output("127.0.0.1:notaport", PortFormat::Json), None);
-    }
-
-    // ── parse_port_from_addr ───────────────────────────────────────────────
-
-    /// Standard IPv4 address parses correctly.
-    #[test]
-    fn parse_port_standard() {
-        assert_eq!(parse_port_from_addr("127.0.0.1:7071"), Some(7071));
-    }
-
-    /// Port 0 is valid (OS-assigned).
-    #[test]
-    fn parse_port_zero() {
-        assert_eq!(parse_port_from_addr("127.0.0.1:0"), Some(0));
-    }
-
-    /// Missing colon returns `None`.
-    #[test]
-    fn parse_port_no_colon() {
-        assert_eq!(parse_port_from_addr("127.0.0.1"), None);
-    }
-
-    /// Port too large (>65535) returns `None`.
-    #[test]
-    fn parse_port_overflow() {
-        assert_eq!(parse_port_from_addr("127.0.0.1:99999"), None);
+    fn format_socket_output_escapes_an_awkward_path() {
+        let socket = PathBuf::from(r#"/tmp/a"b\c/trusty-memory.sock"#);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&format_output(&socket, true, PortFormat::Json))
+                .expect("an awkward path must still emit parseable JSON");
+        assert_eq!(parsed["socket"], r#"/tmp/a"b\c/trusty-memory.sock"#);
     }
 }

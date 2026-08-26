@@ -108,14 +108,13 @@ const DEGRADED: &str = "degraded";
 /// Test: `tests::fixed_ports_match_port_assignments_doc`.
 pub fn fixed_port_for(binary: &str) -> Option<u16> {
     match binary {
-        "trusty-memory" => Some(7070),
         "trusty-console" => Some(7788),
         "trusty-search" => Some(7878),
         "trusty-mpm" => Some(7880),
-        // #6277 / #6287: NO trusty-review or trusty-analyze row. Both serve a
-        // Unix socket rather than a TCP port (ADR-0032) — see
-        // [`uds_socket_for`]. Leaving 7891 or 7879 here would dial whatever
-        // happens to be on that port and report it as the daemon.
+        // #6277 / #6287 / #6286: NO trusty-review, trusty-analyze or
+        // trusty-memory row. None serves a TCP port any more (ADR-0032) — see
+        // [`uds_socket_for`]. Leaving 7891, 7879 or 7070 here would dial
+        // whatever happens to be on that port and report it as the daemon.
         _ => None,
     }
 }
@@ -123,7 +122,8 @@ pub fn fixed_port_for(binary: &str) -> Option<u16> {
 /// The Unix socket a member serves, for the daemons that no longer serve TCP.
 ///
 /// Why (#6277, ADR-0032): trusty-review was the first member to move its own
-/// transport onto UDS and trusty-analyze followed in #6287. A probe has to move
+/// transport onto UDS; trusty-analyze followed in #6287 and trusty-memory in
+/// #6286. A probe has to move
 /// with its daemon IN THE SAME CHANGE, or `tctl` dials a dead 7891 / 7879,
 /// reads `Refused`, and — because `Refused` is one of the two variants
 /// [`ProbeOutcome::is_confirmed_down`] accepts — kickstarts a daemon that is
@@ -144,7 +144,9 @@ pub fn fixed_port_for(binary: &str) -> Option<u16> {
 /// `tests::probe_uds_reads_the_health_envelope_off_a_result_frame`.
 pub fn uds_socket_for(binary: &str) -> Option<std::path::PathBuf> {
     match binary {
-        "trusty-review" | "trusty-analyze" => trusty_common::daemon_socket_path(binary).ok(),
+        "trusty-review" | "trusty-analyze" | "trusty-memory" => {
+            trusty_common::daemon_socket_path(binary).ok()
+        }
         _ => None,
     }
 }
@@ -174,6 +176,9 @@ fn uds_health_method(binary: &str) -> Option<&'static str> {
     match binary {
         "trusty-review" => Some("review.health"),
         "trusty-analyze" => Some("analyze.health"),
+        // #6286: `trusty_memory::transport::uds::METHOD_HEALTH`. It is the only
+        // folded method `tctl` needs, and the one trusty-console dials too.
+        "trusty-memory" => Some("memory.health"),
         _ => None,
     }
 }

@@ -45,6 +45,10 @@ pub mod services;
 /// What: agents, skills, hooks, session state, and the IPC envelope exchanged
 /// over the daemon's local socket / HTTP API.
 /// Test: serde round-trips and frontmatter parser covered by `cargo test -p trusty-mpm`.
+/// A stand-in trusty-memory daemon on a temp Unix socket, for tests (#6286).
+#[cfg(test)]
+pub(crate) mod uds_mock;
+
 pub mod core;
 
 /// Shared daemon HTTP client, command model, and executor.

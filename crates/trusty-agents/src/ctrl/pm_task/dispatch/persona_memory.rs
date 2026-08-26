@@ -59,6 +59,8 @@
 use std::time::Duration;
 
 use serde::Deserialize;
+use std::path::Path;
+
 use serde_json::json;
 
 use crate::stores::StoresConfig;
@@ -198,64 +200,57 @@ fn truncate_drawer(s: &str) -> String {
 /// Returns `Err` with a human-readable reason so the caller can surface it in
 /// the introspection block rather than silently degrading to "no memory".
 async fn fetch_drawers_by_tag(
-    client: &reqwest::Client,
-    base_url: &str,
+    socket: &Path,
     palace: &str,
     tag: &str,
     limit: usize,
 ) -> Result<Vec<DrawerRow>, String> {
-    let url = format!(
-        "{}/api/v1/palaces/{palace}/drawers",
-        base_url.trim_end_matches('/')
-    );
-    let resp = client
-        .get(&url)
-        .query(&[("tag", tag), ("limit", &limit.to_string())])
-        .send()
-        .await
-        .map_err(|e| format!("trusty-memory unreachable: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!(
-            "trusty-memory returned HTTP {} for palace `{palace}`",
-            resp.status()
-        ));
-    }
-    resp.json::<Vec<DrawerRow>>()
-        .await
-        .map_err(|e| format!("unreadable drawer list: {e}"))
+    let raw = memory_call(
+        socket,
+        "memory.drawers_list",
+        json!({ "palace_id": palace, "tag": tag, "limit": limit }),
+    )
+    .await?;
+    serde_json::from_value(raw).map_err(|e| format!("unreadable drawer list: {e}"))
 }
 
 /// Semantically recall `query` against `palace`.
 ///
-/// Note the query parameter is `q` — trusty-memory's REST `RecallQuery` uses
-/// `q`, while its RPC `memory_recall` tool uses `query`. Using the wrong one
-/// is a 400, not an empty result.
+/// The parameter is `query`, not the `q` the retired REST route took (#6286).
+/// The tool answers `{palace, query, results}` where the route answered a bare
+/// array, so the rows come out of `results`.
 async fn recall_drawers(
-    client: &reqwest::Client,
-    base_url: &str,
+    socket: &Path,
     palace: &str,
     query: &str,
     top_k: usize,
 ) -> Result<Vec<DrawerRow>, String> {
-    let url = format!(
-        "{}/api/v1/palaces/{palace}/recall",
-        base_url.trim_end_matches('/')
-    );
-    let resp = client
-        .get(&url)
-        .query(&[("q", query), ("top_k", &top_k.to_string())])
-        .send()
+    let raw = memory_call(
+        socket,
+        "memory_recall",
+        json!({ "palace": palace, "query": query, "top_k": top_k }),
+    )
+    .await?;
+    let results = raw
+        .get("results")
+        .cloned()
+        .ok_or_else(|| format!("recall from `{palace}` answered no results member"))?;
+    serde_json::from_value(results).map_err(|e| format!("unreadable recall response: {e}"))
+}
+
+/// One call on the trusty-memory daemon, with this module's error prose.
+///
+/// Why the reason strings are kept verbatim: they are rendered into the
+/// persona's introspection block, so "trusty-memory unreachable" has to stay
+/// distinguishable from a daemon that answered and refused.
+async fn memory_call(
+    socket: &Path,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    trusty_common::memory_rpc::call_memory_tool_at(socket, method, params)
         .await
-        .map_err(|e| format!("trusty-memory unreachable: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!(
-            "trusty-memory returned HTTP {} recalling from `{palace}`",
-            resp.status()
-        ));
-    }
-    resp.json::<Vec<DrawerRow>>()
-        .await
-        .map_err(|e| format!("unreadable recall response: {e}"))
+        .map_err(|e| format!("trusty-memory unreachable or refused: {e:#}"))
 }
 
 /// Probe the bound search index for its real chunk count.
@@ -298,7 +293,7 @@ async fn probe_index(
 /// Test: `build_persona_memory_*` (mock-daemon, `persona_memory_tests.rs`).
 pub(crate) async fn build_persona_memory(
     stores: &StoresConfig,
-    memory_base: Option<&str>,
+    memory_socket: Option<&Path>,
     search_base: Option<&str>,
     query: &str,
 ) -> PersonaMemory {
@@ -318,7 +313,7 @@ pub(crate) async fn build_persona_memory(
         index_connected,
     };
 
-    let (Some(palace), Some(base)) = (binding.palace.as_deref(), memory_base) else {
+    let (Some(palace), Some(socket)) = (binding.palace.as_deref(), memory_socket) else {
         // A store with no palace has no cross-conversation recall — that is a
         // configuration fact, not a failure, and the block says so.
         return PersonaMemory {
@@ -329,9 +324,8 @@ pub(crate) async fn build_persona_memory(
         };
     };
 
-    let identity_rows =
-        fetch_drawers_by_tag(&client, base, palace, IDENTITY_TAG, IDENTITY_LIMIT).await;
-    let recall_rows = recall_drawers(&client, base, palace, query, RECALL_TOP_K).await;
+    let identity_rows = fetch_drawers_by_tag(socket, palace, IDENTITY_TAG, IDENTITY_LIMIT).await;
+    let recall_rows = recall_drawers(socket, palace, query, RECALL_TOP_K).await;
 
     // Health follows whether recall — the load-bearing read — answered. A
     // missing identity tag is a content gap, not an outage.
@@ -498,22 +492,21 @@ pub(crate) fn render_memory_block(memory: &PersonaMemory) -> Option<String> {
 /// in front of it (mirrors `classification::finish_turn`, #3840 critic
 /// HIGH-4). Failures are logged and dropped: losing a persisted turn must
 /// never surface as a failed chat turn.
-/// What: no-op unless the agent binds a palace. Uses trusty-memory's RPC
-/// surface — `chat_turn_append` has no REST route, and RPC `chat_session_create`
-/// is the only path accepting a caller-supplied (hence resumable) session id.
+/// What: no-op unless the agent binds a palace. `chat_session_create` is the
+/// only path accepting a caller-supplied (hence resumable) session id.
 /// Test: `persist_turn_creates_session_then_appends` (mock-daemon),
 /// `persist_turn_surfaces_rpc_envelope_errors`,
 /// `spawn_persist_turn_is_noop_without_palace`.
 pub(crate) fn spawn_persist_turn(
     stores: &StoresConfig,
-    memory_base: Option<&str>,
+    memory_socket: Option<&Path>,
     agent_name: &str,
     user_input: &str,
     response: &str,
 ) {
-    let (Some(palace), Some(base)) = (
+    let (Some(palace), Some(socket)) = (
         stores.primary().and_then(|b| b.palace.clone()),
-        memory_base.map(str::to_string),
+        memory_socket.map(Path::to_path_buf),
     ) else {
         return;
     };
@@ -523,7 +516,7 @@ pub(crate) fn spawn_persist_turn(
     let reply = response.to_string();
 
     tokio::spawn(async move {
-        if let Err(e) = persist_turn(&base, &palace, &session_id, &prompt, &reply).await {
+        if let Err(e) = persist_turn(&socket, &palace, &session_id, &prompt, &reply).await {
             tracing::warn!(
                 agent = %agent,
                 palace = %palace,
@@ -537,14 +530,12 @@ pub(crate) fn spawn_persist_turn(
 /// Awaited body of [`spawn_persist_turn`], separated so tests can observe the
 /// write deterministically instead of racing a detached task.
 async fn persist_turn(
-    base_url: &str,
+    socket: &Path,
     palace: &str,
     session_id: &str,
     user_input: &str,
     response: &str,
 ) -> Result<(), String> {
-    let client = build_http_client().ok_or_else(|| "http client unavailable".to_string())?;
-
     // Idempotent: an existing session is returned unchanged, so this is safe
     // to issue on every turn and doubles as the resume path. No `title` is
     // sent — trusty-memory applies a title ONLY when it generates the session
@@ -552,8 +543,7 @@ async fn persist_turn(
     // dropped (live-verified: the session reads back `title: null`). The
     // agent-scoped `session_id` already identifies the thread.
     call_memory_tool(
-        &client,
-        base_url,
+        socket,
         "chat_session_create",
         json!({
             "palace": palace,
@@ -563,8 +553,7 @@ async fn persist_turn(
     .await?;
 
     call_memory_tool(
-        &client,
-        base_url,
+        socket,
         "chat_turn_append",
         json!({
             "palace": palace,
@@ -578,41 +567,23 @@ async fn persist_turn(
     Ok(())
 }
 
-/// Invoke a trusty-memory MCP tool over the daemon's JSON-RPC surface.
+/// Invoke a trusty-memory MCP tool through the `tools/call` envelope.
 ///
 /// The `chat_*` tools are absent from trusty-memory's direct-dispatch
 /// `TOOL_METHODS` allow-list, so they are only reachable wrapped in
-/// `tools/call`. `/rpc` always returns HTTP 200 — failures live in the
-/// envelope's `error` member, so the status code alone proves nothing.
+/// `tools/call`.
 async fn call_memory_tool(
-    client: &reqwest::Client,
-    base_url: &str,
+    socket: &Path,
     tool: &str,
     arguments: serde_json::Value,
 ) -> Result<(), String> {
-    let url = format!("{}/rpc", base_url.trim_end_matches('/'));
-    let body = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": { "name": tool, "arguments": arguments },
-    });
-    let resp = client
-        .post(&url)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("{tool}: trusty-memory unreachable: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("{tool}: HTTP {}", resp.status()));
-    }
-    let envelope: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("{tool}: unreadable response: {e}"))?;
-    if let Some(err) = envelope.get("error") {
-        return Err(format!("{tool}: rpc error: {err}"));
-    }
+    trusty_common::memory_rpc::call_memory_tool_at(
+        socket,
+        "tools/call",
+        json!({ "name": tool, "arguments": arguments }),
+    )
+    .await
+    .map_err(|e| format!("{tool}: {e:#}"))?;
     Ok(())
 }
 

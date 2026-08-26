@@ -156,20 +156,20 @@ fn serve_mode_explicit_stdio() {
 /// Why: `serve --http` (bare) selected HTTP before and must still.
 /// Test: itself.
 #[test]
-fn serve_mode_http_bare() {
+fn serve_mode_daemon_bare() {
     assert_eq!(
         mode_of(&["trusty-memory", "serve", "--http"]),
-        ServeMode::Http
+        ServeMode::Daemon
     );
 }
 
 /// Why: `serve --http ADDR` is how callers bind a specific port; unchanged.
 /// Test: itself.
 #[test]
-fn serve_mode_http_addr() {
+fn serve_mode_daemon_addr() {
     assert_eq!(
         mode_of(&["trusty-memory", "serve", "--http", "127.0.0.1:7070"]),
-        ServeMode::Http
+        ServeMode::Daemon
     );
 }
 
@@ -178,10 +178,10 @@ fn serve_mode_http_addr() {
 /// stdio process blocking on a null stdin instead of an HTTP server.
 /// Test: itself.
 #[test]
-fn serve_mode_foreground_is_http() {
+fn serve_mode_foreground_is_daemon() {
     assert_eq!(
         mode_of(&["trusty-memory", "serve", "--foreground"]),
-        ServeMode::Http,
+        ServeMode::Daemon,
         "`serve --foreground` is the launchd/`start` daemon path"
     );
 }

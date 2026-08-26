@@ -546,120 +546,66 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests for check_daemon_health addr-fallback robustness (#475)
+    // check_daemon_health against nothing (#475, reshaped by #6286)
     // -----------------------------------------------------------------------
 
-    /// Why: issue #475 — `check_daemon_health` must not report "daemon not
-    /// running" when the `http_addr` file is stale (contains an ephemeral or
-    /// dead port) while the daemon IS live on the default port 7070. This test
-    /// verifies the fallback path by writing a stale addr file pointing at a
-    /// dead port (far outside the 7070-7079 fallback range) and asserting
-    /// that the result is either:
-    ///   - `Fail` (stale addr + no listener found on 7070-7079): expected when
-    ///     no live daemon is running on those ports.
-    ///   - `Pass` (fallback found live daemon on 7070): valid if the live daemon
-    ///     happens to be on a fallback port during testing.
+    /// Why: #475 was about a STALE `http_addr` file — the check reported
+    /// "daemon not running" while a live daemon sat on a port the file did not
+    /// name, so it grew a fallback that walked 7070..=7079. #6286 removed both
+    /// the file and the port range: the socket path is derived, so caller and
+    /// daemon compute the same one and there is nothing to be stale. What
+    /// survives is the case underneath — nothing is serving — and it must
+    /// report a `Fail` whose message an operator can act on rather than
+    /// panicking or naming a start command that does not exist.
     ///
-    /// The test also asserts that on `Fail` the detail message is informative
-    /// (contains "unreachable" or "no daemon"). The real end-to-end fallback
-    /// (stale addr → fallback succeeds → Pass) is validated by the throwaway
-    /// daemon run documented in the session notes.
+    /// The two tests that used to sit here (`…_with_stale_addr_and_no_listener`
+    /// and `…_when_no_addr_file_and_no_listener`) differed only in whether they
+    /// pre-wrote a stale file. With no file in the design they are one test.
+    ///
+    /// `Pass` and `Unknown` stay acceptable outcomes: `TRUSTY_DATA_DIR_OVERRIDE`
+    /// redirects the derived path into a tempdir, but a developer machine can
+    /// still have a real daemon whose socket the override happens not to hide,
+    /// and #4001 made "live but progress unobservable" an honest `Unknown`
+    /// rather than a claimed pass.
     /// Test: itself.
     #[tokio::test]
-    async fn check_daemon_health_fails_cleanly_with_stale_addr_and_no_listener() {
-        // Serialise on the process-wide env-var lock so concurrent tests
-        // that also mutate TRUSTY_DATA_DIR_OVERRIDE do not interleave.
+    async fn check_daemon_health_fails_cleanly_with_no_listener() {
+        // Serialise on the process-wide env-var lock so concurrent tests that
+        // also mutate TRUSTY_DATA_DIR_OVERRIDE do not interleave.
         let _guard = super::super::env_test_lock().lock().await;
 
-        // TRUSTY_DATA_DIR_OVERRIDE sets the BASE dir; resolve_data_dir then
-        // appends "trusty-memory" to form the actual data dir. We create the
-        // full "trusty-memory" subdirectory so the http_addr file lands in the
-        // right place.
         let tmp = tempfile::tempdir().expect("tempdir");
-        let data_dir = tmp.path().join("trusty-memory");
-        std::fs::create_dir_all(&data_dir).expect("create data dir");
-        // Write a stale addr file pointing at a dead port (far outside 7070-7079).
-        std::fs::write(data_dir.join("http_addr"), "127.0.0.1:19876\n").expect("write stale addr");
+        // The override sets the BASE dir; `resolve_data_dir` appends
+        // "trusty-memory" to it.
+        std::fs::create_dir_all(tmp.path().join("trusty-memory")).expect("create data dir");
 
+        // SAFETY: serialised by env_test_lock above.
         unsafe {
             std::env::set_var("TRUSTY_DATA_DIR_OVERRIDE", tmp.path());
         }
-
         let result = check_daemon_health().await;
-
         unsafe {
             std::env::remove_var("TRUSTY_DATA_DIR_OVERRIDE");
         }
         drop(_guard);
 
-        // With a stale addr AND no daemon on 7070-7079 (except possibly the
-        // live daemon under test), result must be Fail, Pass, or — since
-        // issue #4001 — Unknown. Unknown is the honest answer when the
-        // fallback DOES find a live daemon that predates the worker-occupancy
-        // block: liveness is confirmed, but progress is unobservable, and this
-        // check may no longer claim a pass it cannot support.
         assert!(
             matches!(
                 result.status,
                 CheckStatus::Fail | CheckStatus::Pass | CheckStatus::Unknown
             ),
-            "unexpected status {:?}; expected Fail (stale addr, no listener), \
-             Pass (fallback found a live #4001-aware daemon), or Unknown \
-             (fallback found a live pre-#4001 daemon)",
+            "unexpected status {:?}",
             result.status,
         );
         if result.status == CheckStatus::Fail {
             let detail = result.detail.as_deref().unwrap_or("");
             assert!(
-                detail.contains("unreachable") || detail.contains("no daemon"),
-                "Fail detail must mention unreachable/no daemon: {detail:?}"
+                detail.contains("no daemon") || detail.contains("unreachable"),
+                "a Fail must say the daemon is not there: {detail:?}"
             );
-        }
-    }
-
-    /// Why: issue #475 — when the addr file is completely absent AND no daemon
-    /// is on 7070-7079, `check_daemon_health` must return `Fail` with a
-    /// message that does not panic or suggest an incorrect start command.
-    /// What: uses TRUSTY_DATA_DIR_OVERRIDE pointing at a fresh temp base dir
-    /// (no http_addr file) and asserts the result is Fail or Pass.
-    /// Test: itself.
-    #[tokio::test]
-    async fn check_daemon_health_fails_when_no_addr_file_and_no_listener() {
-        // Serialise on the process-wide env-var lock.
-        let _guard = super::super::env_test_lock().lock().await;
-
-        let tmp = tempfile::tempdir().expect("tempdir");
-        // Create the trusty-memory subdirectory but leave it empty (no http_addr).
-        let data_dir = tmp.path().join("trusty-memory");
-        std::fs::create_dir_all(&data_dir).expect("create data dir");
-
-        unsafe {
-            std::env::set_var("TRUSTY_DATA_DIR_OVERRIDE", tmp.path());
-        }
-
-        let result = check_daemon_health().await;
-
-        unsafe {
-            std::env::remove_var("TRUSTY_DATA_DIR_OVERRIDE");
-        }
-        drop(_guard);
-
-        // Fail (no daemon found anywhere), Pass (live #4001-aware daemon on
-        // 7070), or Unknown (live pre-#4001 daemon on 7070 — liveness
-        // confirmed, worker progress unobservable).
-        assert!(
-            matches!(
-                result.status,
-                CheckStatus::Fail | CheckStatus::Pass | CheckStatus::Unknown
-            ),
-            "unexpected status: {:?}",
-            result.status
-        );
-        if result.status == CheckStatus::Fail {
-            let detail = result.detail.as_deref().unwrap_or("");
             assert!(
-                detail.contains("no daemon") || detail.contains("no addr"),
-                "detail must hint at the absence: {detail:?}"
+                detail.contains("service start"),
+                "a Fail must name the command that fixes it: {detail:?}"
             );
         }
     }

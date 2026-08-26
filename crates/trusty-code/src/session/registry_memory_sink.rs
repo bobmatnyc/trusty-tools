@@ -50,7 +50,7 @@ impl SessionRegistry {
     /// `begin_execution`/`begin_pm_transcript`). On the FIRST call for a
     /// session, derives the palace id from `project_dir` via
     /// [`derive_palace_id_for_project`], resolves trusty-memory's base URL
-    /// via `trusty_common::memory_rpc::resolve_memory_base_url_or_unreachable`
+    /// via `trusty_common::memory_rpc::resolve_memory_socket_or_unreachable`
     /// (fail-open — the sink is built regardless of whether the daemon is
     /// currently reachable; every write attempt after that is independently
     /// fail-open, see `memory_sink::write_turn`), and stores the constructed
@@ -106,7 +106,7 @@ impl SessionRegistry {
     /// An ephemeral root still gets a full sink — only the CREATE is withheld.
     /// That distinction is deliberate: the sink is what registers #2348's
     /// `recall_session` tool and what `run_and_record` reuses for its
-    /// `base_url`/`palace`, so returning `None` here would silently change the
+    /// `socket`/`palace`, so returning `None` here would silently change the
     /// PM's tool surface for a temp-rooted run. With
     /// [`PalaceCreation::Forbidden`] the drain task still writes into a palace
     /// that ALREADY exists and merely declines to bring a new one into being —
@@ -147,7 +147,7 @@ impl SessionRegistry {
         let mut sessions = self.lock();
         let entry = sessions.get_mut(id)?;
         if entry.memory_sink.is_none() {
-            let base_url = trusty_common::memory_rpc::resolve_memory_base_url_or_unreachable();
+            let socket = trusty_common::memory_rpc::resolve_memory_socket_or_unreachable();
             // #4638: only a durable project root entitles the recorder to bring
             // a new palace into being — a temp root's id is unique per run.
             let creation = if trusty_common::bin_resolve::is_under_system_temp(project_dir) {
@@ -168,7 +168,7 @@ impl SessionRegistry {
                 session_id: id.to_string(),
             });
             entry.memory_sink = Some(Arc::new(TurnMemorySink::new_observed(
-                base_url, palace, creation, observer,
+                socket, palace, creation, observer,
             )));
         }
         entry.memory_sink.clone()

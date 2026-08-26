@@ -52,7 +52,7 @@ pub(crate) const EXIT_DEADLINE: Duration = Duration::from_secs(15);
 /// Polling interval for the daemon readiness file.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Maximum time to wait for the daemon to write its `http_addr` file.
+/// Maximum time to wait for the daemon to write its socket.
 ///
 /// Why: 30 s covers slow CI runners; typical daemon boot is < 1 s.
 const DAEMON_BOOT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -94,7 +94,7 @@ impl StdioChild {
     /// What: creates a tempdir, spawns `serve --foreground --http 127.0.0.1:0`
     /// (the daemon), polls for `{tempdir}/trusty-memory/http_addr`, then spawns
     /// `serve --stdio` (the bridge) pointing at the same tempdir. The bridge
-    /// discovers the daemon address from the http_addr file.
+    /// discovers the daemon address from the socket.
     /// Test: indirectly by every test in this file.
     pub(crate) async fn spawn(palace: Option<&str>) -> Self {
         let data_dir = tempfile::tempdir().expect("tempdir");
@@ -103,8 +103,6 @@ impl StdioChild {
         let daemon = std::process::Command::new(binary())
             .arg("serve")
             .arg("--foreground")
-            .arg("--http")
-            .arg("127.0.0.1:0")
             .env("TRUSTY_DATA_DIR_OVERRIDE", data_dir.path())
             .env("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1")
             .env("RUST_LOG", "warn")
@@ -115,7 +113,10 @@ impl StdioChild {
             .expect("spawn daemon");
 
         // Step 2: wait for the daemon's readiness signal.
-        let readiness_file = data_dir.path().join("trusty-memory").join("http_addr");
+        let readiness_file = data_dir
+            .path()
+            .join("trusty-memory")
+            .join("trusty-memory.sock");
         let deadline = std::time::Instant::now() + DAEMON_BOOT_TIMEOUT;
         loop {
             if readiness_file.exists() {
@@ -123,7 +124,7 @@ impl StdioChild {
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "daemon did not write http_addr within {:?}; expected at {}",
+                "daemon did not bind its socket within {:?}; expected at {}",
                 DAEMON_BOOT_TIMEOUT,
                 readiness_file.display()
             );

@@ -38,7 +38,7 @@ use crate::{hook_prompt_excerpt, HookType, InjectionKind};
 
 /// Connect + total request timeout. Kept short so a slow/dead daemon can
 /// never block a Claude Code session for more than a few seconds.
-const HTTP_TIMEOUT: Duration = Duration::from_millis(2500);
+const CALL_TIMEOUT: Duration = Duration::from_millis(2500);
 
 /// Server payload schema for one decoded message.
 ///
@@ -130,46 +130,35 @@ pub async fn handle_inbox_check(palace: Option<String>) -> Result<()> {
 /// Test: `inbox_check_returns_ok_without_daemon`,
 /// `inbox_check_logs_attempt_without_daemon` (unchanged paths).
 async fn run_inbox_fetch(trigger_prompt: &str, recipient: &str, start: Instant) -> String {
-    // Resolve daemon address — missing = exit silently (but still log).
-    let addr = match trusty_common::read_daemon_addr("trusty-memory") {
-        Ok(Some(addr)) => addr,
-        _ => {
+    // #6286: the socket path is derived, so there is no discovery file to be
+    // missing — an unresolvable data directory is the only failure, and it
+    // means what the missing file did. Exit silently, but still log.
+    let socket = match crate::transport::uds::socket_path() {
+        Ok(socket) => socket,
+        Err(_) => {
             log_entry(trigger_prompt, "", 0, recipient, start);
             return String::new();
         }
     };
-    let base = if addr.starts_with("http://") || addr.starts_with("https://") {
-        addr
-    } else {
-        format!("http://{addr}")
-    };
 
-    let client = match reqwest::Client::builder()
-        .timeout(HTTP_TIMEOUT)
-        .connect_timeout(HTTP_TIMEOUT)
-        .build()
+    // Fetch unread messages. Every failure below — daemon down, refusal, a
+    // body that will not decode — degrades to an empty injection: this runs in
+    // Claude Code's SessionStart hook and must never block a session.
+    let listed = match crate::client::call_at(
+        &socket,
+        "memory.messages_list",
+        serde_json::json!({ "palace": recipient, "unread_only": true }),
+        CALL_TIMEOUT,
+    )
+    .await
     {
-        Ok(c) => c,
+        Ok(listed) => listed,
         Err(_) => {
             log_entry(trigger_prompt, "", 0, recipient, start);
             return String::new();
         }
     };
-
-    // Fetch unread messages.
-    let list_url = format!("{base}/api/v1/messages?palace={recipient}&unread_only=true");
-    let resp = match client.get(&list_url).send().await {
-        Ok(r) => r,
-        Err(_) => {
-            log_entry(trigger_prompt, "", 0, recipient, start);
-            return String::new();
-        }
-    };
-    if !resp.status().is_success() {
-        log_entry(trigger_prompt, "", 0, recipient, start);
-        return String::new();
-    }
-    let messages: Vec<ServerMessage> = match resp.json().await {
+    let messages: Vec<ServerMessage> = match serde_json::from_value(listed) {
         Ok(v) => v,
         Err(_) => {
             log_entry(trigger_prompt, "", 0, recipient, start);
@@ -204,10 +193,14 @@ async fn run_inbox_fetch(trigger_prompt: &str, recipient: &str, start: Instant) 
     // Mark each delivered message read. Best-effort: a failed ack means the
     // next SessionStart will redeliver, which is safer than silently
     // dropping a message we never confirmed.
-    let mark_url = format!("{base}/api/v1/messages/mark_read");
     for m in &messages {
-        let body = serde_json::json!({"palace": recipient, "drawer_id": m.id});
-        let _ = client.post(&mark_url).json(&body).send().await;
+        let _ = crate::client::call_at(
+            &socket,
+            "memory.message_mark_read",
+            serde_json::json!({ "palace": recipient, "drawer_id": m.id }),
+            CALL_TIMEOUT,
+        )
+        .await;
     }
 
     log_entry(trigger_prompt, &injection, messages.len(), recipient, start);
@@ -392,8 +385,8 @@ mod tests {
     }
 
     /// Why: the hook is wired into every Claude Code session start; failing
-    /// it would block the session opening. Without a running daemon
-    /// `read_daemon_addr` returns `None`, and we must degrade silently.
+    /// it would block the session opening. Without a running daemon the
+    /// derived socket is not there to dial, and we must degrade silently.
     /// What: pin a tempdir as the data directory, then call the handler
     /// with an unreachable daemon and assert it returns `Ok(())`.
     #[tokio::test]

@@ -20,7 +20,7 @@ use state::backoff_delay;
 
 /// A state with two palaces and aggregate stats for rendering tests.
 fn sample_state() -> MemoryTuiState {
-    let mut state = MemoryTuiState::new("http://127.0.0.1:7070");
+    let mut state = MemoryTuiState::new("/tmp/trusty-memory.sock");
     state.daemon_status = DaemonStatus::Online {
         version: "0.1.54".into(),
         uptime_secs: 0,
@@ -56,8 +56,8 @@ fn sample_state() -> MemoryTuiState {
 
 #[test]
 fn test_new_state_defaults() {
-    let state = MemoryTuiState::new("http://127.0.0.1:7070");
-    assert_eq!(state.base_url, "http://127.0.0.1:7070");
+    let state = MemoryTuiState::new("/tmp/trusty-memory.sock");
+    assert_eq!(state.daemon_addr, "/tmp/trusty-memory.sock");
     assert!(matches!(state.daemon_status, DaemonStatus::Connecting));
     assert!(state.status.is_none());
     assert!(state.palaces.is_empty());
@@ -357,13 +357,13 @@ fn test_title_line() {
     assert!(title.contains("trusty-memory v0.1.54"));
     assert!(title.contains("online"));
 
-    let mut offline = MemoryTuiState::new("http://127.0.0.1:7070");
+    let mut offline = MemoryTuiState::new("/tmp/trusty-memory.sock");
     offline.daemon_status = DaemonStatus::Offline {
         last_error: "refused".into(),
     };
     let title = title_line(&offline);
     assert!(title.contains("offline"));
-    assert!(title.contains("http://127.0.0.1:7070"));
+    assert!(title.contains("/tmp/trusty-memory.sock"));
 }
 
 #[test]
@@ -379,7 +379,7 @@ fn test_palace_sort_key_cycle() {
 
 fn diverse_state() -> MemoryTuiState {
     use chrono::{TimeZone, Utc};
-    let mut state = MemoryTuiState::new("http://127.0.0.1:7070");
+    let mut state = MemoryTuiState::new("/tmp/trusty-memory.sock");
     state.palaces = vec![
         PalaceRow {
             id: "trusty-search".into(),

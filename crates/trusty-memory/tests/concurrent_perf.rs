@@ -1,187 +1,272 @@
 //! Concurrent performance test suite for the trusty-memory daemon.
 //!
-//! Why: The redb-locking design hinges on the daemon being able to handle
-//! concurrent HTTP traffic without contention, dropped responses, or runaway
-//! latency. The UDS transport and `trusty-memory-mcp-bridge` binary were
-//! removed in PR3 of the #914 stdio-cutover epic; the UDS-specific tests
-//! (`test_uds_concurrent`) and bridge test (`test_bridge_concurrent`) were
-//! removed alongside them. The remaining HTTP and sustained-load tests still
-//! provide meaningful concurrency coverage.
+//! Why: the socket design hinges on the daemon handling concurrent traffic
+//! without contention, dropped responses, or runaway latency. redb holds an
+//! exclusive write lock and the recall path shares an embedder mutex, so both
+//! are places where fan-out can turn into a stall that no single-threaded test
+//! would find.
 //!
-//! What: four `#[ignore]`-tagged integration tests that each measure a
-//! different facet of the live daemon's concurrent-performance envelope:
-//!   - HTTP concurrent reads (`test_http_concurrent_reads`)
-//!   - HTTP concurrent mixed reads + writes (`test_http_concurrent_rw`)
-//!   - HTTP burst test (`test_http_burst`)
-//!   - HTTP sustained-load stability (`test_http_sustained_load`)
+//! What (#6286): four `#[ignore]`-tagged tests, each measuring a different
+//! facet of the concurrency envelope:
+//!   - concurrent reads (`test_concurrent_reads`)
+//!   - concurrent mixed reads + writes (`test_concurrent_rw`)
+//!   - a burst (`test_burst`)
+//!   - sustained-load stability (`test_sustained_load`)
 //!
-//! Test: all tests are marked `#[ignore]` so they only run with
+//! **They stand up their own daemon on a temp socket.** They used to POST
+//! `/rpc` and `GET /health` at `http://127.0.0.1:7070` and panic when nothing
+//! answered — so after ADR-0032 retired that listener they could only fail, and
+//! `--include-ignored` was red by construction. Driving a daemon this file
+//! starts makes them deterministic, keeps them off the operator's real palaces,
+//! and means the numbers describe one machine's daemon rather than whatever was
+//! already running on it.
+//!
+//! `#[ignore]` stays: these run for tens of seconds and report a latency
+//! distribution, which is a measurement rather than a gate.
+//!
+//! Test: run them with
 //!   `cargo test -p trusty-memory --test concurrent_perf -- --include-ignored --nocapture`.
-//!   They require a live daemon listening on the canonical HTTP address.
-//!   The suite refuses to start (panic with a clear message) if
-//!   `GET /health` is unreachable; it does NOT
-//!   require `status: "ok"` because the daemon's `/health` self-probe is
-//!   racy under load (see `assert_daemon_alive` for full rationale).
 
 use futures::future::join_all;
 use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::oneshot;
+use trusty_common::uds::send_framed_request_capped;
+use trusty_common::uds::server::RpcResponse;
+use trusty_memory::AppState;
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Canonical HTTP endpoint exposed by the live daemon.
+/// Soft per-request timeout.
 ///
-/// Why: the daemon's startup pins this address in
-/// `<data_root>/http_addr`; tests against the live local daemon hit the
-/// same well-known port that Claude Code's `.mcp.json` references.
-/// Test: `assert_daemon_alive` validates the daemon is reachable here
-/// before any sub-test runs.
-const HTTP_BASE: &str = "http://127.0.0.1:7070";
+/// Why: a daemon under heavy contention may still complete a request, just
+/// slowly. 30s is generous enough that a stalled-but-recoverable request still
+/// counts as a success; past that, it is a real failure.
+/// Test: every call below, and the `stats.max < CALL_TIMEOUT` assertion each
+/// test ends with.
+const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Soft request timeout for HTTP calls.
+/// Per-request timeout for the 500-way simultaneous burst.
 ///
-/// Why: a daemon under heavy contention may still complete a request,
-/// just slowly. 30 s is generous enough that a stalled-but-recoverable
-/// request still counts as a success; longer than that, we want to
-/// flag it as a real failure.
-/// Test: used by every reqwest client constructor in this file.
-const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+/// Why it is not [`CALL_TIMEOUT`]: every write in the burst serialises behind
+/// redb's exclusive write lock, so the tail is the queue, not a stall. Measured
+/// against a daemon this file starts, the burst's p50 is ~40ms and its max sits
+/// exactly on whatever the budget is — 49 of 500 requests hit a 30s wall and
+/// were counted as DROPS by an assertion that is about drops, which is the
+/// timeout deciding the result instead of measuring it.
+///
+/// The burst's question is whether the daemon answers all 500 without losing
+/// any. 120s is the room that question needs; the latency distribution the test
+/// prints is where the queue depth is actually reported.
+const BURST_CALL_TIMEOUT: Duration = Duration::from_secs(120);
 
 // ---------------------------------------------------------------------------
-// Helpers
+// The daemon under test
 // ---------------------------------------------------------------------------
 
-/// Build a reqwest client suitable for the test suite.
+/// A daemon this suite started, on a socket only this suite dials.
 ///
-/// Why: every HTTP test wants the same timeout settings, pooled
-/// connection reuse, and HTTP/1.1 (the daemon does not speak HTTP/2).
-/// Centralising the builder prevents copy-paste drift.
-/// What: returns a configured `reqwest::Client`.
-/// Test: used by every HTTP test below.
-fn http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(HTTP_TIMEOUT)
-        .tcp_nodelay(true)
-        .pool_max_idle_per_host(64)
-        .build()
-        .expect("reqwest client build")
+/// Dropping it stops the accept loop. The data root and the socket directory
+/// are both leaked tempdirs — the process reaps them, and neither is anywhere
+/// near the operator's real data.
+struct PerfDaemon {
+    socket: PathBuf,
+    stop: Option<oneshot::Sender<()>>,
 }
 
-/// Send a JSON-RPC request to the live daemon over HTTP and return the
-/// parsed envelope.
-///
-/// Why: every HTTP-driven test needs the same `POST /rpc` dance; this
-/// helper keeps the call site minimal so the tests focus on the
-/// concurrency pattern under measurement.
-/// What: POSTs the JSON envelope, awaits the response, parses the
-/// body as JSON. Returns the parsed envelope plus the round-trip
-/// latency.
-/// Test: every HTTP test below.
-async fn http_rpc(client: &reqwest::Client, req: Value) -> Result<(Value, Duration), String> {
-    let url = format!("{HTTP_BASE}/rpc");
-    let started = Instant::now();
-    let resp = client
-        .post(&url)
-        .json(&req)
-        .send()
-        .await
-        .map_err(|e| format!("send: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("http status {}", resp.status()));
+impl Drop for PerfDaemon {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
     }
-    let body: Value = resp.json().await.map_err(|e| format!("parse: {e}"))?;
-    let elapsed = started.elapsed();
-    Ok((body, elapsed))
 }
 
-/// Pre-flight assert: the live daemon is reachable.
+/// Start a daemon and wait until its socket answers.
 ///
-/// Why: the suite is `#[ignore]` precisely because it requires the
-/// live daemon. If the operator forgot to start it, fail loudly with
-/// an instruction instead of timing out 100 concurrent requests.
-/// What: GETs `/health`, asserts HTTP 200 and a parseable body with
-/// a `version` field. Does NOT assert `status == "ok"` because the
-/// daemon's `/health` route runs an internal store/recall probe that
-/// is intentionally racy under load — a parallel test issuing 500
-/// concurrent requests can make the embedder + HNSW reindexing fall
-/// behind the probe's deadline and flip the status to "degraded"
-/// even though the daemon is still answering every external request
-/// correctly. Returns the daemon version string for log output.
-/// Test: called first by every test in this file.
-async fn assert_daemon_alive(client: &reqwest::Client) -> String {
-    let url = format!("{HTTP_BASE}/health");
-    let resp = client.get(&url).send().await.unwrap_or_else(|e| {
-        panic!(
-            "live daemon not reachable at {HTTP_BASE} ({e}); start it with `trusty-memory start`"
-        );
+/// Why the mock embedder: the real ONNX model is a HuggingFace download, and a
+/// perf test that spent its first minute fetching one would be measuring the
+/// network. `seed_shared_embedder_with_mock` is idempotent and process-wide.
+async fn start_daemon() -> PerfDaemon {
+    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+
+    let data = tempfile::tempdir().expect("tempdir for the data root");
+    let root = data.path().to_path_buf();
+    std::mem::forget(data);
+    // #88: bypass the project-slug gate — these palaces have no project root.
+    // SAFETY: every test in this process wants the same idempotent "1".
+    unsafe {
+        std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
+    }
+    let state = AppState::new(root);
+    // #911: flip past the warming preflight so handlers run.
+    state.set_ready();
+
+    let sockets = tempfile::tempdir().expect("tempdir for the socket");
+    let socket = sockets.path().join("trusty-memory.sock");
+    std::mem::forget(sockets);
+
+    let (stop, shutdown) = oneshot::channel::<()>();
+    let serve_socket = socket.clone();
+    tokio::spawn(async move {
+        let _ = trusty_memory::transport::uds::serve_with_shutdown(state, &serve_socket, async {
+            let _ = shutdown.await;
+        })
+        .await;
     });
-    assert!(
-        resp.status().is_success(),
-        "GET /health returned {}",
-        resp.status()
-    );
-    let body: Value = resp.json().await.expect("parse /health");
-    body["version"].as_str().unwrap_or("?").to_string()
+
+    for _ in 0..400 {
+        if trusty_common::uds::socket_is_serving(&socket, Duration::from_millis(50)).await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    PerfDaemon {
+        socket,
+        stop: Some(stop),
+    }
 }
 
-/// Stronger health probe: returns true iff `/health` returns 200 and
-/// has a `version` field. Does NOT require `status == "ok"` (see
-/// `assert_daemon_alive` for rationale).
+/// A cheap-to-clone handle the tasks dial with.
 ///
-/// Why: the sustained-load test needs to confirm the daemon is still
-/// responsive after the load run, without tripping on the racy
-/// store/recall self-probe.
-/// What: GETs `/health`, returns `Ok((rss_mb, raw_status))` on
-/// success or `Err(message)` otherwise.
-/// Test: used by `test_http_sustained_load` and
-/// `test_http_concurrent_rw`.
-async fn probe_health(client: &reqwest::Client) -> Result<(f64, String), String> {
-    let url = format!("{HTTP_BASE}/health");
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("send: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("status {}", resp.status()));
+/// Why it is not a pooled client: each call dials, exchanges one frame pair,
+/// and closes — there is no connection to pool, so cloning is a `PathBuf`
+/// clone and the fan-out is real rather than multiplexed over one socket.
+#[derive(Clone)]
+struct Client {
+    socket: PathBuf,
+    timeout: Duration,
+}
+
+impl Client {
+    fn new(socket: &Path) -> Self {
+        Self {
+            socket: socket.to_path_buf(),
+            timeout: CALL_TIMEOUT,
+        }
     }
-    let body: Value = resp.json().await.map_err(|e| format!("parse: {e}"))?;
-    let rss = body["rss_mb"].as_f64().unwrap_or(0.0);
-    let status = body["status"].as_str().unwrap_or("?").to_string();
-    Ok((rss, status))
+
+    /// The same client with a different per-call budget.
+    ///
+    /// Only the burst uses it — see [`BURST_CALL_TIMEOUT`].
+    fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// One JSON-RPC call, returning the envelope and the round-trip latency.
+    async fn rpc(&self, req: Value) -> Result<(Value, Duration), String> {
+        let started = Instant::now();
+        let response: RpcResponse = send_framed_request_capped(
+            &self.socket,
+            &req,
+            self.timeout,
+            trusty_memory::transport::uds::MAX_FRAME_BYTES,
+        )
+        .await
+        .map_err(|e| format!("call: {e}"))?;
+        let elapsed = started.elapsed();
+        // Re-assembled into the envelope shape the assertions read, so a test
+        // still branches on `body["error"]` the way it did over HTTP.
+        let mut body = json!({ "jsonrpc": "2.0", "id": response.id });
+        if let Some(result) = response.result {
+            body["result"] = result;
+        }
+        if let Some(error) = response.error {
+            body["error"] = json!({ "code": error.code, "message": error.message });
+        }
+        Ok((body, elapsed))
+    }
+
+    /// `memory.health`, returning `(rss_mb, status)`.
+    ///
+    /// Why the status is returned rather than asserted: the daemon's health
+    /// probe does a real store-and-recall round trip, which is intentionally
+    /// racy under load — 500 concurrent requests can push the embedder behind
+    /// its deadline and flip the status to `degraded` while every external
+    /// request is still answered correctly. The tests report it; they do not
+    /// gate on it.
+    async fn health(&self) -> Result<(f64, String), String> {
+        self.health_full()
+            .await
+            .map(|(rss, status, _)| (rss, status))
+    }
+
+    /// [`Self::health`] plus the daemon version.
+    ///
+    /// `params: {}` is not optional: `memory.health` takes a `HealthQuery`, and
+    /// a struct refuses `null` — omitting params is an invalid-params refusal
+    /// rather than a defaulted call. Every production caller sends `{}` for the
+    /// same reason.
+    async fn health_full(&self) -> Result<(f64, String, String), String> {
+        let (body, _) = self
+            .rpc(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "memory.health",
+                "params": {},
+            }))
+            .await?;
+        if body.get("error").is_some_and(|e| !e.is_null()) {
+            return Err(format!("health error: {}", body["error"]));
+        }
+        let result = &body["result"];
+        Ok((
+            result["rss_mb"].as_f64().unwrap_or(0.0),
+            result["status"].as_str().unwrap_or("?").to_string(),
+            result["version"].as_str().unwrap_or("?").to_string(),
+        ))
+    }
+
+    /// One `memory.health` call, timed — the read half of the read/write mix.
+    async fn health_timed(&self) -> Result<Duration, String> {
+        let started = Instant::now();
+        self.health().await?;
+        Ok(started.elapsed())
+    }
+}
+
+/// Start a daemon and hand back a client for it, plus its version.
+///
+/// The daemon must outlive the client, so the caller binds both.
+async fn perf_daemon() -> (PerfDaemon, Client, String) {
+    let daemon = start_daemon().await;
+    let client = Client::new(&daemon.socket);
+    let (_rss, _status, version) = client
+        .health_full()
+        .await
+        .expect("the daemon this test started must answer memory.health");
+    (daemon, client, version)
 }
 
 /// Provision an isolated test palace and seed it with one memory entry.
 ///
-/// Why: tests must not pollute real palaces. Creating a UUID-suffixed
-/// palace per test keeps the data scoped and lets the daemon's
-/// existing GC clean it up later. The seed entry guarantees
-/// `memory_recall` against this palace returns something useful so
-/// recall throughput measurements aren't dominated by an empty-index
-/// fast path.
-/// What: calls `palace_create` then `memory_remember` (with `force =
-/// true` to bypass the min-token gate). Returns the palace name.
-/// Test: every test that performs writes calls this first.
-async fn provision_palace(client: &reqwest::Client, tag: &str) -> String {
+/// Why: the seed guarantees `memory_recall` returns something, so recall
+/// throughput is not dominated by an empty-index fast path. The palace is
+/// UUID-suffixed even though the daemon is already private — two tests sharing
+/// a process would otherwise share a name.
+/// What: `palace_create` then `memory_remember` with `force: true` (the
+/// min-token gate would otherwise reject the fixture).
+async fn provision_palace(client: &Client, tag: &str) -> String {
     let palace = format!("perf-{tag}-{}", uuid::Uuid::new_v4());
     let create = json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "palace_create",
-        "params": {"name": palace}
+        "params": {"name": palace, "force": true}
     });
-    let (resp, _) = http_rpc(client, create).await.expect("palace_create");
+    let (resp, _) = client.rpc(create).await.expect("palace_create");
     assert!(
         resp.get("error").is_none_or(|e| e.is_null()),
         "palace_create failed: {resp:?}"
     );
 
-    // Seed entry — long enough to satisfy the min-token gate (which
-    // defaults to ~6 tokens) so a baseline recall returns content.
     let seed = json!({
         "jsonrpc": "2.0",
         "id": 2,
@@ -192,7 +277,7 @@ async fn provision_palace(client: &reqwest::Client, tag: &str) -> String {
             "force": true
         }
     });
-    let (resp, _) = http_rpc(client, seed).await.expect("seed memory_remember");
+    let (resp, _) = client.rpc(seed).await.expect("seed memory_remember");
     assert!(
         resp.get("error").is_none_or(|e| e.is_null()),
         "seed memory_remember failed: {resp:?}"
@@ -271,9 +356,8 @@ impl std::fmt::Display for LatencyStats {
 /// Test: this test.
 #[ignore]
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn test_http_concurrent_reads() {
-    let client = http_client();
-    let version = assert_daemon_alive(&client).await;
+async fn test_concurrent_reads() {
+    let (_daemon, client, version) = perf_daemon().await;
     let palace = provision_palace(&client, "http-reads").await;
 
     let n_tasks: usize = 50;
@@ -288,17 +372,7 @@ async fn test_http_concurrent_reads() {
             let mut errors: usize = 0;
             for j in 0..per_task {
                 let result = if j.is_multiple_of(2) {
-                    // GET /health
-                    let url = format!("{HTTP_BASE}/health");
-                    let t = Instant::now();
-                    match client.get(&url).send().await {
-                        Ok(r) if r.status().is_success() => {
-                            let _ = r.bytes().await;
-                            Ok(t.elapsed())
-                        }
-                        Ok(r) => Err(format!("status {}", r.status())),
-                        Err(e) => Err(format!("send: {e}")),
-                    }
+                    client.health_timed().await
                 } else {
                     // memory_recall
                     let req = json!({
@@ -307,7 +381,7 @@ async fn test_http_concurrent_reads() {
                         "method": "memory_recall",
                         "params": {"palace": palace, "query": "seed entry", "top_k": 5}
                     });
-                    match http_rpc(&client, req).await {
+                    match client.rpc(req).await {
                         Ok((body, d)) => {
                             if body.get("error").map(|e| !e.is_null()).unwrap_or(false) {
                                 Err(format!("rpc error: {}", body["error"]))
@@ -340,7 +414,7 @@ async fn test_http_concurrent_reads() {
     let stats = latency_stats(all_latencies);
 
     println!();
-    println!("=== test_http_concurrent_reads (daemon v{version}) ===");
+    println!("=== test_concurrent_reads (daemon v{version}) ===");
     println!("  tasks={n_tasks}  per_task={per_task}  total_ops={ops:.0}  errors={total_errors}");
     println!("  wall={total_elapsed:?}  throughput={throughput:.1} req/s");
     println!("  latency: {stats}");
@@ -354,8 +428,8 @@ async fn test_http_concurrent_reads() {
     // threshold belongs in the regression doc, not the test.
     assert_eq!(total_errors, 0, "expected 0 errors, got {total_errors}");
     assert!(
-        stats.max < HTTP_TIMEOUT,
-        "max latency {:?} exceeded HTTP timeout {HTTP_TIMEOUT:?}",
+        stats.max < CALL_TIMEOUT,
+        "max latency {:?} exceeded HTTP timeout {CALL_TIMEOUT:?}",
         stats.max
     );
 }
@@ -379,9 +453,8 @@ async fn test_http_concurrent_reads() {
 /// Test: this test.
 #[ignore]
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn test_http_concurrent_rw() {
-    let client = http_client();
-    let version = assert_daemon_alive(&client).await;
+async fn test_concurrent_rw() {
+    let (_daemon, client, version) = perf_daemon().await;
     let palace = provision_palace(&client, "http-rw").await;
 
     let n_writers: usize = 20;
@@ -413,7 +486,7 @@ async fn test_http_concurrent_rw() {
                         "force": true,
                     }
                 });
-                match http_rpc(&client, req).await {
+                match client.rpc(req).await {
                     Ok((body, d)) => {
                         if body.get("error").map(|e| !e.is_null()).unwrap_or(false) {
                             errors += 1;
@@ -451,7 +524,7 @@ async fn test_http_concurrent_rw() {
                     "method": "memory_recall",
                     "params": {"palace": palace, "query": "concurrent writer request", "top_k": 5}
                 });
-                match http_rpc(&client, req).await {
+                match client.rpc(req).await {
                     Ok((body, d)) => {
                         if body.get("error").map(|e| !e.is_null()).unwrap_or(false) {
                             errors += 1;
@@ -509,7 +582,7 @@ async fn test_http_concurrent_rw() {
     let read_success_rate = (read_latencies.len() as f64) / (total_reads as f64) * 100.0;
 
     println!();
-    println!("=== test_http_concurrent_rw (daemon v{version}) ===");
+    println!("=== test_concurrent_rw (daemon v{version}) ===");
     println!(
         "  writers={n_writers}×{per_task}={total_writes}  \
          readers={n_readers}×{per_task}={total_reads}  total={total_ops}"
@@ -560,10 +633,12 @@ async fn test_http_concurrent_rw() {
 /// Test: this test.
 #[ignore]
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn test_http_burst() {
-    let client = http_client();
-    let version = assert_daemon_alive(&client).await;
+async fn test_burst() {
+    let (_daemon, client, version) = perf_daemon().await;
     let palace = provision_palace(&client, "burst").await;
+    // See `BURST_CALL_TIMEOUT`: the ordinary budget turns queue depth into
+    // counted drops, and drops are what this test's assertion is about.
+    let client = client.with_timeout(BURST_CALL_TIMEOUT);
 
     let n: usize = 500;
     let mut futs = Vec::with_capacity(n);
@@ -591,7 +666,7 @@ async fn test_http_burst() {
                 "params": {"palace": palace, "query": "burst test entry", "top_k": 5}
             })
         };
-        futs.push(async move { http_rpc(&client, req).await });
+        futs.push(async move { client.rpc(req).await });
     }
 
     let started = Instant::now();
@@ -633,7 +708,7 @@ async fn test_http_burst() {
     };
 
     println!();
-    println!("=== test_http_burst (daemon v{version}) ===");
+    println!("=== test_burst (daemon v{version}) ===");
     println!("  n={n}  wall={total_elapsed:?}  throughput={throughput:.1} req/s");
     println!("  errors={errors} (transport={transport_errors} rpc={rpc_errors})  error_rate={error_rate:.2}%");
     for s in &sample_errors {
@@ -653,10 +728,9 @@ async fn test_http_burst() {
     );
     assert!(
         success_rate > 95.0,
-        "burst success rate {:.1}% below 95% — is #154 fix (PR #161) deployed?",
-        success_rate
+        "burst success rate {success_rate:.1}% below 95% — is #154 fix (PR #161) deployed?"
     );
-    let (_, status_after) = probe_health(&client).await.expect("post-burst health");
+    let (_, status_after) = client.health().await.expect("post-burst health");
     println!("  post-burst /health.status = {status_after}");
 }
 
@@ -681,21 +755,12 @@ async fn test_http_burst() {
 /// Test: this test.
 #[ignore]
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn test_http_sustained_load() {
-    let client = http_client();
-    let version = assert_daemon_alive(&client).await;
+async fn test_sustained_load() {
+    let (_daemon, client, version) = perf_daemon().await;
     let palace = provision_palace(&client, "sustained").await;
 
     // Capture initial RSS for delta reporting.
-    let initial_health: Value = client
-        .get(format!("{HTTP_BASE}/health"))
-        .send()
-        .await
-        .expect("initial /health")
-        .json()
-        .await
-        .expect("parse /health");
-    let initial_rss = initial_health["rss_mb"].as_f64().unwrap_or(0.0);
+    let (initial_rss, _) = client.health().await.expect("initial memory.health");
 
     let duration = Duration::from_secs(10);
     let n_clients: usize = 10;
@@ -732,7 +797,7 @@ async fn test_http_sustained_load() {
                         "params": {"palace": palace, "query": "sustained load client", "top_k": 5}
                     })
                 };
-                match http_rpc(&client, req).await {
+                match client.rpc(req).await {
                     Ok((body, _)) => {
                         if body.get("error").map(|e| !e.is_null()).unwrap_or(false) {
                             total_errors.fetch_add(1, Ordering::Relaxed);
@@ -772,7 +837,7 @@ async fn test_http_sustained_load() {
     // to drain, then assert the daemon is still *reachable* and
     // serving valid responses.
     tokio::time::sleep(Duration::from_secs(2)).await;
-    let (final_rss, final_status) = probe_health(&client).await.expect("final /health");
+    let (final_rss, final_status) = client.health().await.expect("final memory.health");
     // One concrete tool call confirms the daemon is still serving
     // RPC traffic — independent of /health's self-probe verdict.
     let liveness_req = json!({
@@ -781,14 +846,15 @@ async fn test_http_sustained_load() {
         "method": "palace_list",
         "params": {}
     });
-    let (live_body, _) = http_rpc(&client, liveness_req)
+    let (live_body, _) = client
+        .rpc(liveness_req)
         .await
         .expect("post-load liveness palace_list");
     let live_ok = live_body.get("error").is_none_or(|e| e.is_null())
         && live_body["result"]["palaces"].is_array();
 
     println!();
-    println!("=== test_http_sustained_load (daemon v{version}) ===");
+    println!("=== test_sustained_load (daemon v{version}) ===");
     println!("  clients={n_clients}  wall={wall:?}  ops={ops}  errors={errs}");
     println!("  throughput={throughput:.1} ops/s  error_rate={error_rate:.2}%");
     println!(

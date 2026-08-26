@@ -1,36 +1,61 @@
-//! HTTP fetch helpers for `prompt-context`.
+//! The three daemon calls `prompt-context` makes (#6286).
 //!
-//! Why: isolates the three network calls (global hot facts, per-palace recall,
-//! per-palace KG triples) so each can be read, tested, and extended without
-//! touching the orchestration logic in `mod.rs`.
-//! What: exports `fetch_global_prompt_context`, `fetch_palace_recall`, and
-//! `fetch_palace_kg_triples` — each a best-effort HTTP GET that degrades
-//! gracefully to empty/None on any failure.
-//! Test: all three are exercised by the integration tests in
-//! `prompt_context::tests` (e.g. `prompt_context_recalls_palace_drawers`).
+//! Why: isolates the network hops — global hot facts, per-palace recall,
+//! per-palace KG triples — so each can be read and extended without touching
+//! the orchestration in `mod.rs`.
+//!
+//! What changed with ADR-0032: these were three `GET`s against
+//! `/api/v1/kg/prompt-context`, `…/recall` and `…/kg/all`, built from a
+//! `reqwest::Client` and a base URL read out of the `http_addr` discovery file.
+//! They are now three [`crate::client::call_at`] frames against the daemon's
+//! socket. Two of the three were already tool names the dispatcher routed —
+//! `get_prompt_context` and `memory_recall` — so the REST routes were
+//! duplicates; the third is the folded `memory.kg_all`.
+//!
+//! **Every one still degrades to empty on any failure.** This runs inside
+//! Claude Code's `UserPromptSubmit` hook, so a degraded or absent daemon must
+//! cost the user nothing but the missing context. That is why each helper
+//! swallows its error rather than propagating it, and why the caller passes a
+//! sub-second budget.
+//!
+//! Test: `prompt_context_recalls_palace_drawers`,
+//! `prompt_context_empty_palace_falls_back_to_global`.
+
+use std::path::Path;
+use std::time::Duration;
+
+use serde_json::{json, Value};
 
 use super::filter::{RawTriple, RecalledDrawer};
-use super::{EMPTY_PLACEHOLDER, PALACE_KG_ALL_PATH, PALACE_RECALL_PATH, PROMPT_CONTEXT_PATH};
-use serde_json::Value;
+use super::EMPTY_PLACEHOLDER;
+
+/// How many triples to pull before filtering them in memory.
+///
+/// The filter is a substring scan over subjects, so 200 keeps it cheap while
+/// covering any palace whose ambient facts are worth injecting at all.
+const KG_TRIPLE_LIMIT: u64 = 200;
 
 /// Fetch the global prompt-context block (workspace hot facts).
 ///
-/// Why: keeps the legacy behaviour intact — workspace-level aliases and
-/// conventions continue to surface even when the palace itself is empty.
-/// What: `GET /api/v1/kg/prompt-context`; returns `Some(body)` only on a
-/// 2xx with a non-empty, non-placeholder body. Any failure → `None`.
-/// Test: indirectly via `prompt_context_recalls_palace_drawers` and
+/// Why: keeps workspace-level aliases and conventions surfacing even when the
+/// palace itself is empty.
+/// What: calls `get_prompt_context`; returns `Some` only for a non-empty,
+/// non-placeholder body. Any failure is `None`.
+/// Test: `prompt_context_recalls_palace_drawers`,
 /// `prompt_context_empty_palace_falls_back_to_global`.
 pub(super) async fn fetch_global_prompt_context(
-    client: &reqwest::Client,
-    base: &str,
+    socket: &Path,
+    timeout: Duration,
 ) -> Option<String> {
-    let url = format!("{base}{PROMPT_CONTEXT_PATH}");
-    let resp = client.get(&url).send().await.ok()?;
-    if !resp.status().is_success() {
-        return None;
-    }
-    let body = resp.text().await.ok()?;
+    let result = crate::client::call_at(socket, "get_prompt_context", json!({}), timeout)
+        .await
+        .ok()?;
+    // The tool answers a bare string when it has one; anything else is not a
+    // block to inject.
+    let body = match result {
+        Value::String(s) => s,
+        _ => return None,
+    };
     let trimmed = body.trim();
     if trimmed.is_empty() || trimmed == EMPTY_PLACEHOLDER {
         None
@@ -39,19 +64,18 @@ pub(super) async fn fetch_global_prompt_context(
     }
 }
 
-/// Fetch up to `top_k` recalled drawer entries from the palace.
+/// Fetch up to `top_k` recalled drawers from the palace.
 ///
-/// Why (issue #134): the entire value of automatic context injection is
-/// surfacing relevant memories; this is the real recall hop the prior
-/// implementation lacked. Uses the existing `recall_handler` endpoint so
-/// no new wire surface is introduced.
-/// What: `GET /api/v1/palaces/{slug}/recall?q=<prompt>&top_k=<k>`; parses
-/// the JSON array, returns `Vec<RecalledDrawer>`. Empty prompt or 4xx/5xx
-/// returns an empty vec. Failures are swallowed.
+/// Why (#134): surfacing relevant memories is the whole value of automatic
+/// context injection.
+/// What: calls `memory_recall`, which answers `{palace, query, results: [...]}`
+/// — the REST route this replaces returned the bare array, so the entries are
+/// read out of `results` here. An empty prompt, a refusal, or an unreachable
+/// daemon all yield an empty vec.
 /// Test: `prompt_context_recalls_palace_drawers`.
 pub(super) async fn fetch_palace_recall(
-    client: &reqwest::Client,
-    base: &str,
+    socket: &Path,
+    timeout: Duration,
     palace: &str,
     prompt: &str,
     top_k: usize,
@@ -59,31 +83,24 @@ pub(super) async fn fetch_palace_recall(
     if prompt.is_empty() {
         return Vec::new();
     }
-    let path = PALACE_RECALL_PATH.replace("{slug}", palace);
-    let url = format!("{base}{path}");
-    let resp = match client
-        .get(&url)
-        .query(&[("q", prompt.to_string()), ("top_k", top_k.to_string())])
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(_) => return Vec::new(),
-    };
-    if !resp.status().is_success() {
-        return Vec::new();
-    }
-    let body: Value = match resp.json().await {
-        Ok(b) => b,
-        Err(_) => return Vec::new(),
-    };
-    let Some(arr) = body.as_array() else {
+    let Ok(result) = crate::client::call_at(
+        socket,
+        "memory_recall",
+        json!({ "palace": palace, "query": prompt, "top_k": top_k }),
+        timeout,
+    )
+    .await
+    else {
         return Vec::new();
     };
-    arr.iter()
+    let Some(entries) = result.get("results").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
         .filter_map(RecalledDrawer::from_recall_entry)
-        // Drop the synthetic L0 identity drawer — it leaks the palace
-        // bootstrap message which is noise in the injection.
+        // Drop the synthetic L0 identity drawer — it leaks the palace bootstrap
+        // message, which is noise in the injection.
         .filter(|d| d.layer.unwrap_or(0) > 0)
         .take(top_k)
         .collect()
@@ -91,34 +108,29 @@ pub(super) async fn fetch_palace_recall(
 
 /// Fetch active KG triples from the palace.
 ///
-/// Why (issue #134): subject-anchored triples (`tga is_alias_for trusty-
-/// git-analytics`, `rust is-a language`) are exactly the kind of ambient
-/// facts the model benefits from when the prompt mentions one of those
-/// subjects. We fetch up to 200 to keep the in-memory filter cheap.
-/// What: `GET /api/v1/palaces/{slug}/kg/all?limit=200`; returns the raw
-/// triple array, empty on any failure.
-/// Test: `prompt_context_recalls_palace_drawers` (asserts KG section
-/// appears when prompt mentions a known subject).
+/// Why (#134): subject-anchored triples — `tga is_alias_for
+/// trusty-git-analytics`, `rust is-a language` — are exactly the ambient facts
+/// a model benefits from when the prompt names one of those subjects.
+/// What: calls the folded `memory.kg_all` with a [`KG_TRIPLE_LIMIT`] page;
+/// returns the raw triples, empty on any failure.
+/// Test: `prompt_context_recalls_palace_drawers`.
 pub(super) async fn fetch_palace_kg_triples(
-    client: &reqwest::Client,
-    base: &str,
+    socket: &Path,
+    timeout: Duration,
     palace: &str,
 ) -> Vec<RawTriple> {
-    let path = PALACE_KG_ALL_PATH.replace("{slug}", palace);
-    let url = format!("{base}{path}");
-    let resp = match client.get(&url).query(&[("limit", "200")]).send().await {
-        Ok(r) => r,
-        Err(_) => return Vec::new(),
-    };
-    if !resp.status().is_success() {
-        return Vec::new();
-    }
-    let body: Value = match resp.json().await {
-        Ok(b) => b,
-        Err(_) => return Vec::new(),
-    };
-    let Some(arr) = body.as_array() else {
+    let Ok(result) = crate::client::call_at(
+        socket,
+        "memory.kg_all",
+        json!({ "palace_id": palace, "limit": KG_TRIPLE_LIMIT }),
+        timeout,
+    )
+    .await
+    else {
         return Vec::new();
     };
-    arr.iter().filter_map(RawTriple::from_value).collect()
+    let Some(entries) = result.as_array() else {
+        return Vec::new();
+    };
+    entries.iter().filter_map(RawTriple::from_value).collect()
 }

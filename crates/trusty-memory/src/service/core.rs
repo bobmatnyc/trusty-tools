@@ -184,6 +184,60 @@ impl MemoryService {
         Ok(out)
     }
 
+    /// Every non-system palace with REAL counts, keeping per-palace failures.
+    ///
+    /// Why (#6286): [`Self::list_palaces`] answers placeholder zeros plus
+    /// `cached: false` for any palace not already resident, which is why the
+    /// monitor could not use it and fanned out one [`Self::get_palace`] per id
+    /// instead. That fan-out then dropped a palace whose call failed at
+    /// `debug!`, so the panel could show "12 palaces" over 9 rows and nothing
+    /// said why. This is the one call that answers what the fan-out was
+    /// assembling, and it reports a failure as a failure rather than as an
+    /// absence.
+    ///
+    /// What: one entry per non-system palace, in registry order. `Ok` carries
+    /// the same [`PalaceInfo`] `get_palace` builds — the palace is opened, so
+    /// the counts are measurements. `Err` carries the open failure's message.
+    /// A palace never silently vanishes and never becomes a row of zeros.
+    ///
+    /// **This opens every palace, and that is the point.** #4637 removed
+    /// exactly this from `list_palaces` because at 5,794 palaces a cold open per
+    /// row is ~90 minutes of blocking disk I/O. The cost is unchanged from the
+    /// N-call fan-out this replaces — the same opens, one round trip instead of
+    /// N — and after the first poll the registry is warm. A caller that wants
+    /// cheap approximate rows still has `list_palaces`.
+    ///
+    /// # Errors
+    ///
+    /// Only when the registry itself cannot be walked. A palace that will not
+    /// open is an `Err` entry, not an error for the whole call.
+    ///
+    /// Test: `rpc_palaces_list_reports_counts_per_palace`,
+    /// `rpc_palaces_list_reports_an_unreadable_palace_rather_than_dropping_it`.
+    pub async fn list_palaces_with_counts(
+        &self,
+    ) -> ServiceResult<Vec<(String, Result<PalaceInfo, String>)>> {
+        let palaces = list_palaces_blocking(&self.state)
+            .await
+            .map_err(|e| ServiceError::internal(format!("{e:#}")))?;
+        let mut out = Vec::with_capacity(palaces.len());
+        for p in palaces {
+            if is_reserved_system_palace(&p.id) {
+                continue;
+            }
+            let row = match self
+                .state
+                .registry
+                .open_palace(&self.state.data_root, &p.id)
+            {
+                Ok(handle) => Ok(palace_info_from(&p, Some(&handle))),
+                Err(e) => Err(format!("{e:#}")),
+            };
+            out.push((p.id.0.clone(), row));
+        }
+        Ok(out)
+    }
+
     /// Create a new palace and emit the corresponding activity event.
     ///
     /// Why: trims duplicated work between the HTTP handler and any future

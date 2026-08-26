@@ -1,6 +1,9 @@
 [package]
 name = "trusty-code"
-version = "0.3.1"
+# #6286: `TurnMemorySink` and `RecallSessionTool` take a socket path rather than
+# a base URL, and `memory_envelope::call_tool_wrapped` takes a `&Path`. Cargo's
+# 0.x rule puts a breaking change in the MINOR position.
+version = "0.4.0"
 edition = "2024"
 rust-version.workspace = true
 # license.workspace resolves to "MIT"; LICENSE is kept in-crate for correctness.

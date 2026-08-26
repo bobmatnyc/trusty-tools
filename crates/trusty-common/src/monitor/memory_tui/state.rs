@@ -340,7 +340,7 @@ impl DrawerListState {
 #[derive(Debug, Clone)]
 pub struct MemoryTuiState {
     /// The trusty-memory daemon base URL being monitored.
-    pub base_url: String,
+    pub daemon_addr: String,
     /// The daemon's current liveness state.
     pub daemon_status: DaemonStatus,
     /// The latest aggregate stats, or `None` before the first poll.
@@ -398,15 +398,15 @@ pub struct MemoryTuiState {
 }
 
 impl MemoryTuiState {
-    /// Build a fresh memory UI state targeting `base_url`.
+    /// Build a fresh memory UI state targeting `daemon_addr`.
     ///
     /// Why: the event loop seeds the state at startup before the first poll.
     /// What: stores the URL, sets the daemon `Connecting`, and starts with no
     /// stats, an empty palace list, empty log, empty query, and list focus.
     /// Test: `test_new_state_defaults`.
-    pub fn new(base_url: impl Into<String>) -> Self {
+    pub fn new(daemon_addr: impl Into<String>) -> Self {
         Self {
-            base_url: base_url.into(),
+            daemon_addr: daemon_addr.into(),
             daemon_status: DaemonStatus::Connecting,
             status: None,
             palaces: Vec::new(),

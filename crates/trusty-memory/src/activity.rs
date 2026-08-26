@@ -308,7 +308,8 @@ impl ActivityLog {
     /// What: identical to `append` except it skips the `fetch_add` and uses
     /// the supplied `id` directly. On the `Discard` variant, returns `Ok(0)`.
     /// Test: `appends_assign_monotonic_ids` (via `append`);
-    /// `web::tests::activity_endpoint_lists_recent_emits` (ordering path).
+    /// `rpc_activity_refuses_an_unparseable_since` reads the log back through
+    /// the folded `memory.activity` method the retired route used to serve.
     pub fn append_with_id(
         &self,
         id: u64,

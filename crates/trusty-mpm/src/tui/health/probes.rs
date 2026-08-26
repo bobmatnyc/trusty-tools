@@ -13,6 +13,8 @@
 
 use std::time::Duration;
 
+use serde_json::{Value, json};
+
 use crate::tui::health::format::format_relative_time;
 use crate::tui::health::types::{
     CollectionRow, Daemon, HealthClient, HealthWire, PanelData, PanelState,
@@ -45,10 +47,10 @@ impl HealthClient {
         }
     }
 
-    /// The base URL this client targets.
+    /// The address this client targets — a base URL for trusty-search, a
+    /// socket path for trusty-memory (#6286).
     ///
     /// Why: the offline panel renders the daemon address it failed to reach.
-    /// What: returns the stored base URL.
     /// Test: `health_client_stores_base_url`.
     pub fn base_url(&self) -> &str {
         &self.base
@@ -64,6 +66,21 @@ impl HealthClient {
     /// way becomes `Offline` carrying the error string.
     /// Test: live behaviour is covered by the daemon suites; the offline path
     /// is exercised by `poll_unreachable_daemon_is_offline`.
+    /// One RPC call on trusty-memory's socket (#6286).
+    ///
+    /// Why: this client's `base` is a socket path when `daemon` is
+    /// `Daemon::Memory`, and every memory leg below goes through here rather
+    /// than through `self.http`, which has nothing left to talk to.
+    async fn memory_call(&self, method: &str, params: serde_json::Value) -> anyhow::Result<Value> {
+        trusty_common::memory_rpc::call_memory_tool_at_with_timeout(
+            std::path::Path::new(&self.base),
+            method,
+            params,
+            REQUEST_TIMEOUT,
+        )
+        .await
+    }
+
     pub async fn poll(&self) -> PanelState {
         match self.fetch().await {
             Ok(data) => PanelState::Online(data),
@@ -77,24 +94,27 @@ impl HealthClient {
     ///
     /// Why: keeps [`Self::poll`]'s error-to-`Offline` mapping in one place
     /// while the happy path stays terse with `?`.
-    /// What: GETs `/health` and the daemon's list endpoints; for search the
+    /// What: reads the daemon's health and its list surface; for search the
     /// counts are index count + summed chunk counts, for memory they come from
-    /// `/api/v1/status`.
+    /// `memory.status`. Since #6286 the two use different transports — search
+    /// is still HTTP, memory is the socket.
     /// Test: covered indirectly by `poll`; the count projections are unit-tested
     /// via `project_search_counts` / `project_memory_counts`.
     async fn fetch(&self) -> anyhow::Result<PanelData> {
-        let health_path = match self.daemon {
-            Daemon::Search => "/health",
-            Daemon::Memory => "/health",
+        let health: HealthWire = match self.daemon {
+            Daemon::Search => {
+                self.http
+                    .get(format!("{}/health", self.base))
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json()
+                    .await?
+            }
+            Daemon::Memory => {
+                serde_json::from_value(self.memory_call("memory.health", json!({})).await?)?
+            }
         };
-        let health: HealthWire = self
-            .http
-            .get(format!("{}{health_path}", self.base))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
 
         let (count_a, count_b, count_c, count_d) = match self.daemon {
             Daemon::Search => self.search_counts().await,
@@ -152,15 +172,16 @@ impl HealthClient {
         (ids.len() as u64, total_chunks, 0, 0)
     }
 
-    /// Resolve the memory key counts from `/api/v1/status`.
+    /// Resolve the memory key counts from `memory.status`.
     ///
     /// Why: the memory panel shows palaces, vectors, drawers, and KG triples;
-    /// the status endpoint returns all four in one call.
-    /// What: GETs `/api/v1/status` and projects `palace_count`, `total_vectors`,
-    /// `total_drawers`, `total_kg_triples`. Any error yields all zeroes.
+    /// one method returns all four.
+    /// What: calls `memory.status` and projects `palace_count`,
+    /// `total_vectors`, `total_drawers`, `total_kg_triples`. Any error yields
+    /// all zeroes.
     /// Test: the JSON projection is unit-tested via `project_memory_counts`.
     async fn memory_counts(&self) -> (u64, u64, u64, u64) {
-        match self.get_json(format!("{}/api/v1/status", self.base)).await {
+        match self.memory_call("memory.status", json!({})).await {
             Ok(status) => project_memory_counts(&status),
             Err(_) => (0, 0, 0, 0),
         }
@@ -186,25 +207,31 @@ impl HealthClient {
     /// Fetch the most recent `n` log lines from the daemon.
     ///
     /// Why: the Logs tab (`[2]`) tails the daemon's in-memory log ring via
-    /// `GET /logs/tail?n=…`; both daemons share this endpoint (issue #35).
-    /// What: GETs `/logs/tail?n=…` and projects `lines` + `total`. A daemon
-    /// without this endpoint (older build) yields `Ok((vec![], 0))` rather
-    /// than an error so the tab degrades to a placeholder cleanly.
+    /// the daemon's in-memory log ring (issue #35). The two daemons no longer
+    /// share one endpoint: search still serves `GET /logs/tail?n=…`, memory
+    /// answers `memory.logs_tail` (#6286).
+    /// What: reads the daemon's log page and projects `lines` + `total`. A
+    /// daemon that cannot answer yields `Ok((vec![], 0))` rather than an error,
+    /// so the tab degrades to a placeholder cleanly.
     /// Test: live behaviour is covered by the daemon suites; the projection
     /// is unit-tested via `project_log_tail`.
     pub async fn logs_tail(&self, n: u32) -> anyhow::Result<(Vec<String>, u64)> {
-        let url = format!("{}/logs/tail?n={n}", self.base);
-        match self.http.get(url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                match resp.json::<serde_json::Value>().await {
-                    Ok(body) => Ok(project_log_tail(&body)),
-                    Err(_) => Ok((Vec::new(), 0)),
+        let raw = match self.daemon {
+            Daemon::Memory => self
+                .memory_call("memory.logs_tail", json!({ "n": n }))
+                .await
+                .unwrap_or(Value::Null),
+            Daemon::Search => {
+                let url = format!("{}/logs/tail?n={n}", self.base);
+                match self.http.get(url).send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        resp.json::<Value>().await.unwrap_or(Value::Null)
+                    }
+                    _ => Value::Null,
                 }
             }
-            // 404 or older daemon: no logs endpoint — degrade to empty.
-            Ok(_) => Ok((Vec::new(), 0)),
-            Err(e) => Err(anyhow::anyhow!("logs_tail: {e}")),
-        }
+        };
+        Ok(project_log_tail(&raw))
     }
 
     /// Fetch the search daemon's index list with chunk counts.
@@ -308,38 +335,49 @@ impl HealthClient {
     /// Why: the Collections list (left panel for the memory service) needs the
     /// per-palace name, vector count, and KG triple count so the operator can
     /// see at a glance which palaces hold the most memory and which carry a
-    /// knowledge graph. `/api/v1/status` only exposes aggregate totals; the
-    /// per-palace breakdown lives at `/api/v1/palaces`.
-    /// What: GETs `/api/v1/palaces` (a JSON array of `PalaceInfo`) and
-    /// projects each entry into a [`CollectionRow`]. Any error yields an empty
-    /// list.
-    /// Test: the projection is unit-tested via `project_palace_rows`.
+    /// knowledge graph. `memory.status` only exposes aggregate totals.
+    ///
+    /// What (#6286): one `memory.palaces_list` call. This fanned out
+    /// `memory.palace_get` per id, because nothing on the socket answered a
+    /// roster WITH counts — `palace_list` answers bare ids and the retired
+    /// `GET /api/v1/palaces` reported peek-based placeholder zeros for any
+    /// unresident palace (#4682). The fan-out also dropped a palace whose call
+    /// failed, silently; `memory.palaces_list` carries a per-palace error
+    /// instead, and [`project_palace_roster`] renders it.
+    ///
+    /// A whole-call failure still yields an empty list — the panel's other
+    /// rows are worth showing, and the daemon's own health line already says
+    /// it is unreachable.
+    /// Test: the projection is unit-tested via `project_palace_roster`.
     pub async fn memory_collections(&self) -> Vec<CollectionRow> {
-        let Ok(list) = self.get_json(format!("{}/api/v1/palaces", self.base)).await else {
+        let Ok(listed) = self.memory_call("memory.palaces_list", json!({})).await else {
             return Vec::new();
         };
-        project_palace_rows(&list)
+        project_palace_roster(&listed)
     }
 
     /// Request a graceful shutdown of the daemon via its `admin/stop` endpoint.
     ///
     /// Why: the `[X]` key stops the focused daemon without the operator
     /// resolving a PID; both daemons expose an unauthenticated stop route.
-    /// What: POSTs an empty body to the daemon's stop path (`/admin/stop` for
-    /// search, `/api/v1/admin/stop` for memory). A non-2xx response is an error.
+    /// What: `POST /admin/stop` for search, `memory.admin_stop` for memory
+    /// (#6286). A refusal on either is an error.
     /// Test: live behaviour is covered by the daemon suites; the dashboard
     /// records the outcome string in `last_action`.
     pub async fn stop(&self) -> anyhow::Result<()> {
-        let path = match self.daemon {
-            Daemon::Search => "/admin/stop",
-            Daemon::Memory => "/api/v1/admin/stop",
-        };
-        self.http
-            .post(format!("{}{path}", self.base))
-            .json(&serde_json::json!({}))
-            .send()
-            .await?
-            .error_for_status()?;
+        match self.daemon {
+            Daemon::Search => {
+                self.http
+                    .post(format!("{}/admin/stop", self.base))
+                    .json(&json!({}))
+                    .send()
+                    .await?
+                    .error_for_status()?;
+            }
+            Daemon::Memory => {
+                self.memory_call("memory.admin_stop", json!({})).await?;
+            }
+        }
         Ok(())
     }
 }
@@ -396,6 +434,48 @@ pub(crate) fn project_log_tail(body: &serde_json::Value) -> (Vec<String>, u64) {
     (lines, total)
 }
 
+/// Project a `memory.palaces_list` answer into left-panel rows (#6286).
+///
+/// Why: the roster's rows come in two shapes — a palace the daemon read, and a
+/// palace it could not. The second must be RENDERED rather than skipped: the
+/// fan-out this replaced dropped it at the call site, so the panel could list
+/// fewer palaces than the daemon has with nothing saying which or why.
+/// What: a readable row goes through [`project_palace_rows`], keeping its
+/// empty-palace filter. A row carrying `error` becomes a row with `ok: false`
+/// and the daemon's reason as its note, exempt from that filter — a palace
+/// whose counts could not be read must not be mistaken for one holding
+/// nothing.
+/// Test: `project_palace_roster_reads_counts`,
+/// `project_palace_roster_renders_a_failed_row`.
+pub(crate) fn project_palace_roster(answer: &serde_json::Value) -> Vec<CollectionRow> {
+    let Some(rows) = answer.get("palaces").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        if let Some(palace) = row.get("palace").filter(|v| v.is_object()) {
+            out.extend(project_palace_rows(&serde_json::Value::Array(vec![
+                palace.clone(),
+            ])));
+            continue;
+        }
+        let Some(error) = row.get("error").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let id = row
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_string();
+        out.push(CollectionRow {
+            id,
+            note: format!("counts unavailable: {error}"),
+            ok: false,
+            ..Default::default()
+        });
+    }
+    out
+}
 /// Project a memory daemon `/api/v1/palaces` payload into palace rows.
 ///
 /// Why: centralising the projection keeps the renderer terse and lets a unit

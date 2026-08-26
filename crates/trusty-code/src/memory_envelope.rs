@@ -78,7 +78,7 @@ pub fn parse_tools_call_envelope(envelope: &Value) -> Option<Value> {
 /// detection, #2363) has the SAME shape it had under the old direct
 /// dispatch, keeping the caller's success/skipped logic unchanged.
 /// What: builds the params via [`tools_call_params`], POSTs via
-/// `call_memory_tool_at(base_url, "tools/call", ..)`, and unwraps the
+/// `call_memory_tool_at(socket, "tools/call", ..)`, and unwraps the
 /// response via [`parse_tools_call_envelope`]. A JSON-RPC error (the shape
 /// trusty-memory returns when the inner tool itself fails — its dispatcher
 /// converts tool errors via `JsonRpcResponse::from_anyhow`) surfaces as
@@ -89,11 +89,11 @@ pub fn parse_tools_call_envelope(envelope: &Value) -> Option<Value> {
 /// end-to-end by `session::memory_sink::tests::*` and
 /// `tools::recall_session::tests::*`.
 pub async fn call_tool_wrapped(
-    base_url: &str,
+    socket: &std::path::Path,
     tool: &str,
     arguments: Value,
 ) -> anyhow::Result<Value> {
-    let envelope = call_memory_tool_at(base_url, "tools/call", tools_call_params(tool, arguments))
+    let envelope = call_memory_tool_at(socket, "tools/call", tools_call_params(tool, arguments))
         .await
         .with_context(|| format!("tools/call '{tool}'"))?;
     parse_tools_call_envelope(&envelope).ok_or_else(|| {
@@ -105,11 +105,9 @@ pub async fn call_tool_wrapped(
 
 #[cfg(test)]
 mod tests {
-    use axum::routing::post;
-    use axum::{Json, Router};
-    use tokio::net::TcpListener;
 
     use super::*;
+    use crate::uds_mock;
 
     #[test]
     fn tools_call_params_shape() {
@@ -139,29 +137,11 @@ mod tests {
         assert!(parse_tools_call_envelope(&envelope).is_none());
     }
 
-    /// Spin up a one-route mock `/rpc` server replying with `reply` wrapped
-    /// (or not) per the closure, and return its base URL.
-    async fn spawn_mock(result: Value) -> String {
-        async fn handle(
-            axum::extract::State(result): axum::extract::State<Value>,
-            Json(_body): Json<Value>,
-        ) -> Json<Value> {
-            Json(json!({"jsonrpc": "2.0", "id": 1, "result": result}))
-        }
-        let app = Router::new().route("/rpc", post(handle)).with_state(result);
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
-        let addr = listener.local_addr().expect("addr");
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-        format!("http://{addr}")
-    }
-
     #[tokio::test]
     async fn call_tool_wrapped_round_trips_against_mock() {
-        let inner = json!({"status": "stored", "drawer_id": "d1"}).to_string();
-        let base_url = spawn_mock(json!({"content": [{"type": "text", "text": inner}]})).await;
-        let result = call_tool_wrapped(&base_url, "memory_remember", json!({"palace": "p"}))
+        let inner = json!({"status": "stored", "drawer_id": "d1"});
+        let daemon = uds_mock::spawn(uds_mock::always(uds_mock::tools_call_envelope(&inner))).await;
+        let result = call_tool_wrapped(daemon.socket(), "memory_remember", json!({"palace": "p"}))
             .await
             .expect("wrapped call should succeed");
         assert_eq!(result["status"], "stored");
@@ -170,8 +150,11 @@ mod tests {
 
     #[tokio::test]
     async fn call_tool_wrapped_errs_on_malformed_envelope() {
-        let base_url = spawn_mock(json!({"content": [{"type": "text", "text": "not json"}]})).await;
-        let err = call_tool_wrapped(&base_url, "memory_remember", json!({"palace": "p"}))
+        let daemon = uds_mock::spawn(uds_mock::always(
+            json!({"content": [{"type": "text", "text": "not json"}]}),
+        ))
+        .await;
+        let err = call_tool_wrapped(daemon.socket(), "memory_remember", json!({"palace": "p"}))
             .await
             .expect_err("malformed envelope must surface as Err");
         assert!(err.to_string().contains("unexpected tools/call envelope"));

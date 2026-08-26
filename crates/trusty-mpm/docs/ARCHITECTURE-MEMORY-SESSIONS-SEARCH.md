@@ -12,27 +12,30 @@ behaviour.
 
 **The problem:** Early versions of trusty-mpm reached the trusty-memory daemon by
 hard-coding a fixed port (e.g., `127.0.0.1:7070`) or building an ad-hoc REST path
-(`/api/v1/palaces/{id}/drawers`). Because trusty-memory auto-port-walks from ~7070
-to 7079 when the preferred port is in use, a hand-rolled fixed-port connection
-silently failed even when the daemon was healthy — unless an operator manually
-exported `TRUSTY_MEMORY_URL` to override it. Call sites were scattered: each one
-reached memory differently, and the failure modes were opaque.
+(`/api/v1/palaces/{id}/drawers`). trusty-memory auto-port-walked from ~7070 to
+7079 when the preferred port was in use, so a hand-rolled fixed-port connection
+silently failed even against a healthy daemon — unless an operator exported
+`TRUSTY_MEMORY_URL` to override it. Call sites were scattered: each reached
+memory differently, and the failure modes were opaque. (Both the port walk and
+that variable are gone since #6286; the history is kept because it is why the
+shared helper exists.)
 
 **The solution:** All trusty-mpm code that reaches trusty-memory now uses a single
-shared helper in `trusty-common/src/mcp/memory_rpc.rs` (issue #2030):
+shared helper, `trusty-common/src/memory_rpc.rs` (issue #2030):
 
-1. **Discovery-based resolution:** [`trusty_common::read_daemon_addr("trusty-memory")`](../../../crates/trusty-common/src/daemon_addr.rs)
-   resolves the daemon's actual bound address from its discovery file, eliminating
-   port guessing entirely. This is the same mechanism trusty-search and trusty-analyze
-   use.
+1. **A derived socket, not a discovered address (#6286, ADR-0032):** the daemon
+   binds [`trusty_common::daemon_socket_path("trusty-memory")`](../../../crates/trusty-common/src/daemon_addr.rs)
+   and every consumer derives the same path. There is no port, no walk, no
+   discovery file, and nothing for a stale file to disagree with. This replaced
+   `read_daemon_addr("trusty-memory")`, which read an `http_addr` file the daemon
+   no longer writes.
 
-2. **JSON-RPC over POST /rpc:** Once the address is known, trusty-mpm POSTs a
-   JSON-RPC envelope (method, params, id) to `<base-url>/rpc` — the same dispatcher
-   that the MCP stdio server and UDS transport share inside the daemon. This is the
-   one "correct" RPC surface; REST paths specific to the monitor TUI or subprocess
-   bridges are never used by the daemon.
+2. **Framed JSON-RPC over the socket:** trusty-mpm writes one JSON-RPC envelope
+   (method, params, id) and reads one back — the same dispatcher the MCP stdio
+   bridge forwards to. This is the one "correct" RPC surface; the REST paths that
+   once served the monitor TUI and the subprocess bridges are gone.
 
-3. **Shared callsites:** [`trusty_common::call_memory_tool`](../../../crates/trusty-common/src/mcp/memory_rpc.rs)
+3. **Shared callsites:** [`trusty_common::memory_rpc::call_memory_tool`](../../../crates/trusty-common/src/memory_rpc.rs)
    wraps the discovery + RPC call so a session never guesses. The address can be
    overridden via `TRUSTY_MEMORY_URL` for CI/dev environments; env wins over
    discovery.

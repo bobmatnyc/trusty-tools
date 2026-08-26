@@ -1,173 +1,252 @@
-//! Discovery-based JSON-RPC access to the trusty-memory daemon (issue #2030).
+//! The one way anything outside trusty-memory calls the running daemon (#6286).
 //!
-//! Why: several call sites across trusty-mpm and trusty-common used to
-//! hand-roll a `reqwest` GET against a hardcoded fixed port and an ad-hoc
-//! REST path (`/api/v1/palaces/{id}/drawers`). That fixed port was simply
-//! wrong — trusty-memory auto-port-walks from ~7070-7079 — so those call
-//! sites silently reported "could not reach trusty-memory" even when the
-//! daemon was healthy, unless the operator manually exported
-//! `TRUSTY_MEMORY_URL`. This module is the one shared helper: resolve the
-//! daemon's *actual* bound address via discovery, then call its tools over
-//! the same `POST /rpc` JSON-RPC dispatcher the MCP stdio server and UDS
-//! transport share — never a REST path that doesn't exist in the
-//! multi-transport daemon, and never the REST-based `monitor::memory_client`
-//! (gated behind `monitor-tui`, which trusty-mpm does not enable) or the
-//! subprocess-oriented `stdio_mcp_client` / `daemon_bridge` (no generic call
-//! surface).
-//! What: [`memory_rpc::resolve_memory_base_url`] resolves the base URL (env
-//! override first, discovery fallback, `Err` when neither is available);
-//! [`memory_rpc::resolve_memory_base_url_or_unreachable`] is the fail-open
-//! convenience wrapper callers that must never error use.
-//! [`memory_rpc::call_memory_tool`] resolves the address and POSTs a
-//! JSON-RPC request for `method`/`params`, returning the envelope's
-//! `result`. [`memory_rpc::call_memory_tool_at`] is the same call against
-//! an explicit, already-resolved base URL (used by callers — e.g. catch-up's
-//! `CatchupOptions::memory_url` — that thread their own resolved/overridable
-//! address through, including tests that point at a controlled unreachable
-//! port).
-//! Test: `resolve_memory_base_url_prefers_env_override`,
-//! `resolve_memory_base_url_errs_when_undiscovered`,
-//! `resolve_memory_base_url_or_unreachable_falls_back`,
-//! `call_memory_tool_at_rejects_rpc_error`,
-//! `call_memory_tool_at_unreachable_daemon` (ignored — exercises the fail-open
-//! contract against a dead socket without needing a live daemon).
+//! Why: this module used to resolve an address — `TRUSTY_MEMORY_URL`, else the
+//! `http_addr` discovery file, else a guaranteed-dead placeholder — and POST a
+//! JSON-RPC envelope to `{base}/rpc`. ADR-0032 retired that listener: since
+//! #6286 trusty-memory binds one hardened Unix socket at the path
+//! [`crate::daemon_socket_path`] derives, writes no discovery file, and speaks
+//! the framed JSON-RPC envelope [`crate::uds`] defines. There is no address to
+//! discover, no port to walk, and nothing for a stale file to disagree with.
+//!
+//! What: [`crate::memory_rpc::call_memory_tool`] derives the socket, writes one frame, reads one
+//! back, and returns the envelope's `result`.
+//! [`crate::memory_rpc::call_memory_tool_at`] takes the
+//! socket explicitly, for a caller that resolved it once and threads it through
+//! (catch-up's `CatchupOptions::memory_socket`) or a test pointing at a daemon
+//! it started itself.
+//!
+//! **This module is now what the monitor TUI's client and trusty-agents'
+//! `TrustyMemoryClient` call too.** Both were independent REST clients against
+//! `/api/v1/*` routes, and the doc comment here used to say so and disclaim
+//! reusing them. #6286 folded both onto this function: the routes they targeted
+//! no longer exist, and re-deriving a second socket client for each would be
+//! the drift the workspace's common-entry-point rule exists to prevent.
+//!
+//! **This is the request/response half only.** `memory.chat` answers in many
+//! frames; a caller that wants it uses
+//! [`crate::uds::send_framed_stream_request_capped`] directly, because a stream
+//! is not something these signatures can return.
+//!
+//! Test: `call_memory_tool_at_reports_a_dead_socket_rather_than_hanging`,
+//! `resolve_memory_socket_honours_the_env_override`,
+//! `resolve_memory_socket_or_unreachable_falls_back`.
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
 
-/// Environment variable that lets an operator pin trusty-memory's base URL
-/// explicitly, bypassing discovery entirely.
-///
-/// Why: CI/dev environments may run trusty-memory on a non-standard host or
-/// port, or point at a remote daemon; an explicit override must always win
-/// over discovery.
-/// What: the literal env var name `TRUSTY_MEMORY_URL`.
-/// Test: `resolve_memory_base_url_prefers_env_override`.
-pub const TRUSTY_MEMORY_URL_ENV: &str = "TRUSTY_MEMORY_URL";
+use crate::uds::send_framed_request_capped;
+use crate::uds::server::RpcResponse;
 
-/// The app name trusty-memory registers its discovery file under (matches
-/// the daemon's own `resolve_data_dir("trusty-memory")` call).
+/// Environment variable that pins the daemon's socket path explicitly.
+///
+/// Why: it replaces `TRUSTY_MEMORY_URL`, which named a base URL there is no
+/// longer a listener for. The affordance it provided is still wanted — a test
+/// rig or a CI job points a client at a daemon it started on a temp path — and
+/// the alternative, `TRUSTY_DATA_DIR_OVERRIDE`, is process-global and would
+/// redirect every other trusty-* client in the same process along with this one.
+///
+/// What: the literal env var name `TRUSTY_MEMORY_SOCKET`, read as a path.
+/// Test: `resolve_memory_socket_honours_the_env_override`.
+pub const TRUSTY_MEMORY_SOCKET_ENV: &str = "TRUSTY_MEMORY_SOCKET";
+
+/// The app name trusty-memory derives its socket path under.
+///
+/// Matches the daemon's own `daemon_socket_path("trusty-memory")` call, which
+/// is why caller and daemon compute the same path with nothing published
+/// between them.
 const MEMORY_APP_NAME: &str = "trusty-memory";
 
-/// A reserved, never-listening loopback address used as a last-resort
-/// fallback so a fail-open caller's own HTTP call fails fast instead of
-/// hanging.
+/// Largest frame this client reads or writes, in bytes.
 ///
-/// Why: port 1 is a reserved/unassigned port that nothing listens on, so a
-/// connection attempt fails immediately rather than timing out.
-/// What: `http://127.0.0.1:1`.
-/// Test: `resolve_memory_base_url_or_unreachable_falls_back`.
-const UNREACHABLE_PLACEHOLDER: &str = "http://127.0.0.1:1";
+/// Why not [`crate::uds::MAX_FRAME_BYTES`] (8 MiB): the daemon's own budget is
+/// 32 MiB (`trusty_memory::transport::uds::MAX_FRAME_BYTES`), sized for whole-
+/// palace KG dumps and 500-row activity pages, and the budget is symmetric —
+/// a client that kept the shared default would refuse frames the daemon
+/// considers legal, which only moves which end reports the failure.
+///
+/// **This is a second copy of the daemon's figure, and deliberately so.**
+/// `trusty-common` is below `trusty-memory` in the dependency graph, so it
+/// cannot import the constant. `memory_rpc_frame_budget_matches_the_daemon` in
+/// `trusty-memory/tests/uds_consumer_contract.rs` is what keeps them equal.
+pub const MAX_FRAME_BYTES: u64 = 32 * 1024 * 1024;
 
-/// Resolve the trusty-memory daemon's base URL, discovery-first.
+/// Default budget for one call.
 ///
-/// Why: every caller that needs to reach trusty-memory (catch-up, identity
-/// seeding, the TUI health poller) must resolve the *actual* bound address —
-/// trusty-memory auto-port-walks — rather than guessing a fixed port.
-/// Centralising this means a future port-walk range change never requires
-/// touching call sites again.
-/// What: returns `Ok(url)` from [`TRUSTY_MEMORY_URL_ENV`] when set to a
-/// non-empty value (an explicit override always wins over discovery);
-/// otherwise reads `crate::daemon_addr::read_daemon_addr("trusty-memory")`
-/// and formats `http://{addr}`. Returns `Err` when neither source yields an
-/// address (the daemon has never started) or the discovery read fails.
-/// Test: `resolve_memory_base_url_prefers_env_override`,
-/// `resolve_memory_base_url_errs_when_undiscovered`.
-pub fn resolve_memory_base_url() -> Result<String> {
-    if let Ok(url) = std::env::var(TRUSTY_MEMORY_URL_ENV) {
-        let trimmed = url.trim();
-        if !trimmed.is_empty() {
-            return Ok(trimmed.to_string());
-        }
-    }
-    match crate::daemon_addr::read_daemon_addr(MEMORY_APP_NAME)? {
-        Some(addr) => Ok(format!("http://{addr}")),
-        None => Err(anyhow!(
-            "trusty-memory daemon address not discovered (is the daemon running?)"
-        )),
+/// Why 5 seconds: it is the timeout the retired `reqwest` client carried, kept
+/// so this migration changes the transport and not what a slow daemon looks
+/// like to a caller. A caller with different needs passes its own through
+/// [`call_memory_tool_at_with_timeout`] — the monitor TUI polls on a 3-second
+/// tick, and a bulk import wants far longer than either.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The JSON-RPC code trusty-memory answers when the thing asked for is absent.
+///
+/// Why it is duplicated here: `trusty-common` is below `trusty-memory` in the
+/// dependency graph, so `trusty_memory::transport::api_error::CODE_NOT_FOUND`
+/// cannot be imported. The value is pinned by
+/// `memory_rpc_not_found_code_matches_the_daemon` in
+/// `trusty-memory/tests/uds_consumer_contract.rs`.
+pub const CODE_NOT_FOUND: i64 = -32004;
+
+/// The daemon answered, and what it answered was an error.
+///
+/// Why a typed error rather than a formatted string: a caller sometimes has to
+/// tell one refusal from another. trusty-agents' memory backend reads a drawer
+/// out of a palace that may never have been created, and "no such palace" has
+/// to be a clean empty result while a transport failure or an internal error
+/// has to propagate — the same distinction its REST predecessor drew from a 404
+/// status. Carrying it in the error means [`call_memory_tool_at`] keeps its
+/// `Result<Value>` signature and only the callers that care pay for it, via
+/// `anyhow::Error::downcast_ref`.
+///
+/// Test: `call_memory_tool_at_reports_a_dead_socket_rather_than_hanging` covers
+/// the transport half; the code itself is pinned against the daemon by
+/// `memory_rpc_not_found_code_matches_the_daemon` in
+/// `trusty-memory/tests/uds_consumer_contract.rs`, and trusty-agents'
+/// `get_and_delete_are_clean_when_absent` covers the caller that reads it.
+#[derive(Debug, thiserror::Error)]
+#[error("{method} failed: {message} ({code})")]
+pub struct MemoryRpcError {
+    /// The method that was called.
+    pub method: String,
+    /// The daemon's own JSON-RPC error code.
+    pub code: i64,
+    /// The daemon's own message.
+    pub message: String,
+}
+
+impl MemoryRpcError {
+    /// Did the daemon say the thing asked for does not exist?
+    pub fn is_not_found(&self) -> bool {
+        self.code == CODE_NOT_FOUND
     }
 }
 
-/// Fail-open variant of [`resolve_memory_base_url`] for callers that must
-/// never propagate an error.
+/// A path nothing can be serving, for a caller that must never see an error.
 ///
-/// Why: catch-up, identity-seeding, and the TUI health poller are all
-/// designed to degrade gracefully when trusty-memory is unreachable rather
-/// than aborting their caller. Centralising the "give me *a* URL, even a
-/// dead one" fallback keeps that policy in one place instead of duplicated
-/// `unwrap_or_else` calls at every call site.
-/// What: delegates to [`resolve_memory_base_url`]; on `Err`, logs a warning
-/// to stderr and returns [`UNREACHABLE_PLACEHOLDER`] so the caller's own HTTP
-/// call fails fast rather than hanging or panicking.
-/// Test: `resolve_memory_base_url_or_unreachable_falls_back`.
-pub fn resolve_memory_base_url_or_unreachable() -> String {
-    resolve_memory_base_url().unwrap_or_else(|e| {
+/// Why a path under a directory that cannot exist rather than an empty one: a
+/// dial against it is refused by the kernel immediately, which is what makes
+/// the fail-open callers below fail fast instead of waiting out a budget.
+const UNREACHABLE_PLACEHOLDER: &str = "/nonexistent/trusty-memory/trusty-memory.sock";
+
+/// Resolve the socket the trusty-memory daemon binds.
+///
+/// # Errors
+///
+/// When the data directory cannot be resolved or created — an operator-fixable
+/// condition (permissions, a `TRUSTY_DATA_DIR_OVERRIDE` pointing somewhere
+/// unusable), distinct from "the daemon is not running", which this function
+/// cannot and does not report.
+///
+/// Test: `resolve_memory_socket_honours_the_env_override`.
+pub fn resolve_memory_socket() -> Result<PathBuf> {
+    if let Ok(raw) = std::env::var(TRUSTY_MEMORY_SOCKET_ENV) {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
+    }
+    crate::daemon_addr::daemon_socket_path(MEMORY_APP_NAME)
+}
+
+/// Fail-open variant of [`resolve_memory_socket`].
+///
+/// Why: catch-up, identity seeding, and the TUI health poller all degrade
+/// gracefully when trusty-memory is unreachable rather than aborting their
+/// caller. Keeping the "give me *a* path, even a dead one" policy here means it
+/// is one decision rather than an `unwrap_or_else` at every call site.
+///
+/// What: delegates to [`resolve_memory_socket`]; on `Err`, warns on stderr and
+/// returns [`UNREACHABLE_PLACEHOLDER`].
+///
+/// Test: `resolve_memory_socket_or_unreachable_falls_back`.
+pub fn resolve_memory_socket_or_unreachable() -> PathBuf {
+    resolve_memory_socket().unwrap_or_else(|e| {
         eprintln!("trusty-memory: {e}");
-        UNREACHABLE_PLACEHOLDER.to_string()
+        PathBuf::from(UNREACHABLE_PLACEHOLDER)
     })
 }
 
-/// Call a trusty-memory MCP tool over JSON-RPC, resolving the address first.
+/// Call one method on the running daemon and return its `result`.
 ///
-/// Why: the common case for a one-off call (no pre-resolved/overridable base
-/// threaded through by the caller) — resolve, then call.
-/// What: resolves the base URL via [`resolve_memory_base_url`], then
-/// delegates to [`call_memory_tool_at`].
-/// Test: covered via `call_memory_tool_at`'s tests (this is a thin wrapper).
+/// # Errors
+///
+/// When the socket cannot be resolved or dialled — which is what "the daemon is
+/// not running" looks like — or when the daemon answers with a JSON-RPC error,
+/// whose message and code are carried through so the caller reports the reason
+/// it was given rather than a generic failure.
 pub async fn call_memory_tool(method: &str, params: Value) -> Result<Value> {
-    let base = resolve_memory_base_url()?;
-    call_memory_tool_at(&base, method, params).await
+    let socket = resolve_memory_socket()?;
+    call_memory_tool_at(&socket, method, params).await
 }
 
-/// Call a trusty-memory MCP tool over JSON-RPC against an explicit base URL.
+/// [`call_memory_tool`] against an already-resolved socket.
 ///
-/// Why: some callers (catch-up's `CatchupOptions::memory_url`, which is
-/// resolved once up-front and threaded through for testability) already hold
-/// a resolved or intentionally-overridden base URL and must not re-resolve
-/// discovery on every call.
-/// What: POSTs `{"jsonrpc":"2.0","id":1,"method":method,"params":params}` to
-/// `{base_url}/rpc` — the same dispatcher the MCP stdio server and UDS
-/// transport share (`trusty_memory::transport::rpc::dispatch`). Rejects a
-/// non-2xx HTTP response and an `error` field in the JSON-RPC envelope as
-/// `Err`; otherwise returns the `result` value (`Value::Null` if absent).
-/// Test: `call_memory_tool_at_rejects_rpc_error`,
-/// `call_memory_tool_at_unreachable_daemon` (ignored).
-pub async fn call_memory_tool_at(base_url: &str, method: &str, params: Value) -> Result<Value> {
-    // #4392: trusty-memory answers on loopback, so the client must not honour an
-    // exported HTTP_PROXY.
-    let client = crate::http_client::loopback_client_builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .context("build reqwest client")?;
-    let body = json!({
+/// Why: catch-up resolves once into `CatchupOptions::memory_socket` and threads
+/// it through, and a test drives a daemon on a temp path. Re-resolving per call
+/// would make both impossible without mutating process-global state.
+///
+/// # Errors
+///
+/// As [`call_memory_tool`].
+///
+/// Test: `call_memory_tool_at_reports_a_dead_socket_rather_than_hanging`.
+pub async fn call_memory_tool_at(socket: &Path, method: &str, params: Value) -> Result<Value> {
+    call_memory_tool_at_with_timeout(socket, method, params, DEFAULT_TIMEOUT).await
+}
+
+/// [`call_memory_tool_at`] with an explicit budget.
+///
+/// # Errors
+///
+/// As [`call_memory_tool`].
+pub async fn call_memory_tool_at_with_timeout(
+    socket: &Path,
+    method: &str,
+    params: Value,
+    timeout: Duration,
+) -> Result<Value> {
+    let request = json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": method,
         "params": params,
     });
-    let url = format!("{}/rpc", base_url.trim_end_matches('/'));
-    let resp = client
-        .post(&url)
-        .json(&body)
-        .send()
-        .await
-        .with_context(|| format!("POST {url}"))?;
-    if !resp.status().is_success() {
-        return Err(anyhow!(
-            "trusty-memory returned {} for {method}",
-            resp.status()
-        ));
+
+    let response: RpcResponse =
+        send_framed_request_capped(socket, &request, timeout, MAX_FRAME_BYTES)
+            .await
+            .with_context(|| {
+                format!(
+                    "call {method} on the trusty-memory daemon at {}",
+                    socket.display()
+                )
+            })?;
+
+    match (response.result, response.error) {
+        (Some(result), _) => Ok(result),
+        (None, Some(e)) => Err(anyhow::Error::new(MemoryRpcError {
+            method: method.to_string(),
+            code: e.code,
+            message: e.message,
+        })),
+        // The daemon's own contract is that exactly one of the two is present.
+        (None, None) => Err(anyhow!(
+            "{method} answered with neither a result nor an error"
+        )),
     }
-    let envelope: Value = resp
-        .json()
-        .await
-        .with_context(|| format!("parse {method} JSON-RPC response"))?;
-    if let Some(err) = envelope.get("error").filter(|e| !e.is_null()) {
-        return Err(anyhow!("{method} RPC error: {err}"));
-    }
-    Ok(envelope.get("result").cloned().unwrap_or(Value::Null))
+}
+
+/// Is anything serving the daemon's socket?
+///
+/// Why a bare connect rather than a `memory.health` call: the question is
+/// whether the endpoint is live. A daemon that is up but degraded must not be
+/// reported absent and then spawned on top of itself.
+pub async fn memory_daemon_is_serving(socket: &Path, timeout: Duration) -> bool {
+    crate::uds::socket_is_serving(socket, timeout).await
 }
 
 #[cfg(test)]
@@ -179,132 +258,70 @@ mod tests {
     // lock would not prevent the race.
     use crate::data_dir::ENV_LOCK;
 
+    /// Why: the override is the only way a test rig or a CI job can point this
+    /// client at a daemon it started itself without redirecting every other
+    /// trusty-* client in the process through `TRUSTY_DATA_DIR_OVERRIDE`.
+    /// Test: itself.
     #[test]
-    fn resolve_memory_base_url_prefers_env_override() {
+    fn resolve_memory_socket_honours_the_env_override() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
-            std::env::set_var(TRUSTY_MEMORY_URL_ENV, "http://example.test:1234");
+            std::env::set_var(TRUSTY_MEMORY_SOCKET_ENV, "/tmp/example-memory.sock");
         }
-        let resolved = resolve_memory_base_url();
+        let resolved = resolve_memory_socket();
         unsafe {
-            std::env::remove_var(TRUSTY_MEMORY_URL_ENV);
+            std::env::remove_var(TRUSTY_MEMORY_SOCKET_ENV);
         }
-        assert_eq!(resolved.unwrap(), "http://example.test:1234");
+        assert_eq!(
+            resolved.expect("an override always resolves"),
+            PathBuf::from("/tmp/example-memory.sock")
+        );
     }
 
+    /// Why: `resolve_memory_socket` errs only when the data directory cannot be
+    /// resolved or created, and the fail-open callers must get a dead path
+    /// rather than an error they would have to handle.
+    /// What: points `TRUSTY_DATA_DIR_OVERRIDE` at a path under a file, which no
+    /// directory can be created beneath.
+    /// Test: itself.
     #[test]
-    fn resolve_memory_base_url_errs_when_undiscovered() {
+    fn resolve_memory_socket_or_unreachable_falls_back() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::NamedTempFile::new().expect("temp file");
         unsafe {
-            std::env::remove_var(TRUSTY_MEMORY_URL_ENV);
+            std::env::remove_var(TRUSTY_MEMORY_SOCKET_ENV);
+            std::env::set_var(
+                crate::data_dir::DATA_DIR_OVERRIDE_ENV,
+                tmp.path().join("under-a-file"),
+            );
         }
-        // Point the data-dir override at an empty temp dir so no `http_addr`
-        // file is found, simulating "daemon never started".
-        let tmp = std::env::temp_dir().join(format!(
-            "trusty-common-memory-rpc-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&tmp).unwrap();
-        unsafe {
-            std::env::set_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV, &tmp);
-        }
-        let resolved = resolve_memory_base_url();
+        let resolved = resolve_memory_socket_or_unreachable();
         unsafe {
             std::env::remove_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV);
         }
-        assert!(resolved.is_err(), "expected Err when undiscovered");
+        assert_eq!(resolved, PathBuf::from(UNREACHABLE_PLACEHOLDER));
     }
 
-    #[test]
-    fn resolve_memory_base_url_or_unreachable_falls_back() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::remove_var(TRUSTY_MEMORY_URL_ENV);
-        }
-        let tmp = std::env::temp_dir().join(format!(
-            "trusty-common-memory-rpc-test-fallback-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&tmp).unwrap();
-        unsafe {
-            std::env::set_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV, &tmp);
-        }
-        let resolved = resolve_memory_base_url_or_unreachable();
-        unsafe {
-            std::env::remove_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV);
-        }
-        assert_eq!(resolved, UNREACHABLE_PLACEHOLDER);
-    }
-
-    /// Spawn a one-shot mock `/rpc` server that always replies with `body`.
-    ///
-    /// Why: `call_memory_tool_at` is a thin, otherwise-untestable HTTP+JSON-RPC
-    /// wrapper; a minimal raw-TCP mock (mirroring the pattern already used by
-    /// `trusty-mpm`'s `spawn_palace_mock`) lets the envelope-error and
-    /// success-result branches be exercised without a live daemon.
-    async fn spawn_rpc_mock(body: &'static str) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        tokio::spawn(async move {
-            if let Ok((mut sock, _)) = listener.accept().await {
-                let mut buf = [0u8; 1024];
-                let _ = sock.read(&mut buf).await;
-                let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                let _ = sock.write_all(resp.as_bytes()).await;
-                let _ = sock.shutdown().await;
-            }
-        });
-        format!("http://{addr}")
-    }
-
+    /// Why: every fail-open caller degrades on "the daemon is not running", and
+    /// has to learn that promptly rather than by waiting out a timeout. A dial
+    /// against an absent socket is refused by the kernel, so the error must
+    /// arrive well inside the budget.
+    /// Test: itself.
     #[tokio::test]
-    async fn call_memory_tool_at_returns_result_on_success() {
-        let base =
-            spawn_rpc_mock(r#"{"jsonrpc":"2.0","id":1,"result":{"palace":"p","drawers":[]}}"#)
-                .await;
-        let result = call_memory_tool_at(&base, "memory_list", json!({"palace": "p"}))
-            .await
-            .unwrap();
-        assert_eq!(result["palace"], "p");
-    }
-
-    #[tokio::test]
-    async fn call_memory_tool_at_rejects_rpc_error() {
-        let base = spawn_rpc_mock(
-            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"missing 'palace'"}}"#,
-        )
-        .await;
-        let result = call_memory_tool_at(&base, "memory_list", json!({})).await;
-        assert!(result.is_err());
-    }
-
-    /// Live-transport test: mark `#[ignore]` so CI doesn't need a daemon.
-    /// Port 1 is reserved/unassigned, so the connection fails fast — this
-    /// just proves the function returns `Err` rather than hanging or panicking.
-    #[tokio::test]
-    #[ignore]
-    async fn call_memory_tool_at_unreachable_daemon() {
+    async fn call_memory_tool_at_reports_a_dead_socket_rather_than_hanging() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let started = std::time::Instant::now();
         let result = call_memory_tool_at(
-            "http://127.0.0.1:1",
+            &tmp.path().join("absent.sock"),
             "memory_list",
-            json!({ "palace": "test-palace", "limit": 5 }),
+            json!({ "palace": "p" }),
         )
         .await;
-        assert!(result.is_err());
+        assert!(result.is_err(), "an absent socket cannot answer");
+        assert!(
+            started.elapsed() < DEFAULT_TIMEOUT,
+            "a refused dial must not wait out the budget: {:?}",
+            started.elapsed()
+        );
     }
 }

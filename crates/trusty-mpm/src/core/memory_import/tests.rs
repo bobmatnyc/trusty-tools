@@ -257,14 +257,9 @@ struct StubState {
 
 type Stub = Arc<Mutex<StubState>>;
 
-async fn rpc(
-    axum::extract::State(state): axum::extract::State<Stub>,
-    axum::Json(body): axum::Json<Value>,
-) -> axum::Json<Value> {
-    let method = body.get("method").and_then(Value::as_str).unwrap_or("");
-    let params = body.get("params").cloned().unwrap_or(Value::Null);
+fn rpc(state: &Stub, method: &str, params: Value) -> Value {
     let mut st = state.lock().expect("stub lock");
-    let result = match method {
+    match method {
         "memory_list" => {
             st.lists.push(params.clone());
             let tag = params.get("tag").and_then(Value::as_str).unwrap_or("");
@@ -308,33 +303,29 @@ async fn rpc(
             json!({ "drawer_id": id, "status": "stored" })
         }
         other => json!({ "error": format!("unexpected method {other}") }),
-    };
-    axum::Json(json!({ "jsonrpc": "2.0", "id": 1, "result": result }))
+    }
 }
 
-/// Start the stub on an ephemeral loopback port; returns its base URL + state.
-async fn start_stub() -> (String, Stub) {
+/// Start the stub on a temp Unix socket (#6286); returns the daemon + state.
+async fn start_stub() -> (crate::uds_mock::MockMemoryDaemon, Stub) {
     let state: Stub = Arc::new(Mutex::new(StubState::default()));
-    let app = axum::Router::new()
-        .route("/rpc", axum::routing::post(rpc))
-        .with_state(state.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind stub");
-    let addr = listener.local_addr().expect("stub addr");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    (format!("http://{addr}"), state)
+    let served = Arc::clone(&state);
+    let daemon = crate::uds_mock::spawn(move |method: &str, params: Value| {
+        let state = Arc::clone(&served);
+        let method = method.to_string();
+        Box::pin(async move { Ok(rpc(&state, &method, params)) })
+    })
+    .await;
+    (daemon, state)
 }
 
-fn opts(dir: &std::path::Path, url: &str, dry_run: bool) -> ImportOptions {
+fn opts(dir: &std::path::Path, socket: &std::path::Path, dry_run: bool) -> ImportOptions {
     ImportOptions {
         dir: dir.to_path_buf(),
         palace: "stub".to_string(),
         dry_run,
         allow_secret_like: true,
-        memory_url: Some(url.to_string()),
+        memory_socket: Some(socket.to_path_buf()),
     }
 }
 
@@ -345,9 +336,11 @@ fn opts(dir: &std::path::Path, url: &str, dry_run: bool) -> ImportOptions {
 #[tokio::test]
 async fn dry_run_writes_nothing() {
     let dir = write_dir(&[("admin-merge-only-on-green.md", SAMPLE)]);
-    let (url, state) = start_stub().await;
+    let (daemon, state) = start_stub().await;
 
-    let report = run_import(&opts(dir.path(), &url, true)).await.unwrap();
+    let report = run_import(&opts(dir.path(), daemon.socket(), true))
+        .await
+        .unwrap();
 
     assert!(report.dry_run);
     assert_eq!(report.total, 1);
@@ -364,9 +357,11 @@ async fn dry_run_writes_nothing() {
 #[tokio::test]
 async fn import_is_idempotent() {
     let dir = write_dir(&[("admin-merge-only-on-green.md", SAMPLE)]);
-    let (url, state) = start_stub().await;
+    let (daemon, state) = start_stub().await;
 
-    let first = run_import(&opts(dir.path(), &url, false)).await.unwrap();
+    let first = run_import(&opts(dir.path(), daemon.socket(), false))
+        .await
+        .unwrap();
     assert_eq!(first.created, 1);
     assert_eq!(first.files[0].status, ImportStatus::Created);
     let drawer_id = first.files[0]
@@ -374,7 +369,9 @@ async fn import_is_idempotent() {
         .clone()
         .expect("drawer id reported");
 
-    let second = run_import(&opts(dir.path(), &url, false)).await.unwrap();
+    let second = run_import(&opts(dir.path(), daemon.socket(), false))
+        .await
+        .unwrap();
     assert_eq!(second.created, 0);
     assert_eq!(second.skipped, 1);
     assert_eq!(second.files[0].status, ImportStatus::Skipped);
@@ -393,8 +390,10 @@ async fn import_is_idempotent() {
 #[tokio::test]
 async fn write_payload_matches_the_established_mapping() {
     let dir = write_dir(&[("admin-merge-only-on-green.md", SAMPLE)]);
-    let (url, state) = start_stub().await;
-    run_import(&opts(dir.path(), &url, false)).await.unwrap();
+    let (daemon, state) = start_stub().await;
+    run_import(&opts(dir.path(), daemon.socket(), false))
+        .await
+        .unwrap();
 
     let writes = state.lock().unwrap().writes.clone();
     let sent = &writes[0];
@@ -420,9 +419,11 @@ async fn linking_drawer_does_not_block_its_target() {
         ("admin-merge-only-on-green.md", SAMPLE),
         ("gate-merge-commands-with-and.md", target),
     ]);
-    let (url, state) = start_stub().await;
+    let (daemon, state) = start_stub().await;
 
-    let report = run_import(&opts(dir.path(), &url, false)).await.unwrap();
+    let report = run_import(&opts(dir.path(), daemon.socket(), false))
+        .await
+        .unwrap();
 
     assert_eq!(report.created, 2, "{:#?}", report.files);
     assert_eq!(report.failed, 0);
@@ -436,9 +437,11 @@ async fn drifted_description_is_not_reimported() {
     // `description` made the drawer read as absent and the re-run wrote a
     // second one carrying the same slug tag.
     let dir = write_dir(&[("admin-merge-only-on-green.md", SAMPLE)]);
-    let (url, state) = start_stub().await;
+    let (daemon, state) = start_stub().await;
 
-    let first = run_import(&opts(dir.path(), &url, false)).await.unwrap();
+    let first = run_import(&opts(dir.path(), daemon.socket(), false))
+        .await
+        .unwrap();
     assert_eq!(first.created, 1);
     let drawer_id = first.files[0].drawer_id.clone().expect("drawer id");
 
@@ -452,7 +455,9 @@ async fn drifted_description_is_not_reimported() {
     );
     std::fs::write(dir.path().join("admin-merge-only-on-green.md"), &drifted).unwrap();
 
-    let second = run_import(&opts(dir.path(), &url, false)).await.unwrap();
+    let second = run_import(&opts(dir.path(), daemon.socket(), false))
+        .await
+        .unwrap();
 
     assert_eq!(second.created, 0, "{:#?}", second.files);
     assert_eq!(second.skipped, 1);
@@ -488,8 +493,10 @@ async fn drift_behind_a_referrer_is_not_reimported() {
         ("admin-merge-only-on-green.md", SAMPLE),
         ("gate-merge-commands-with-and.md", target),
     ]);
-    let (url, state) = start_stub().await;
-    let first = run_import(&opts(dir.path(), &url, false)).await.unwrap();
+    let (daemon, state) = start_stub().await;
+    let first = run_import(&opts(dir.path(), daemon.socket(), false))
+        .await
+        .unwrap();
     assert_eq!(first.created, 2, "{:#?}", first.files);
 
     let drifted = target.replace(
@@ -498,7 +505,9 @@ async fn drift_behind_a_referrer_is_not_reimported() {
     );
     std::fs::write(dir.path().join("gate-merge-commands-with-and.md"), &drifted).unwrap();
 
-    let second = run_import(&opts(dir.path(), &url, false)).await.unwrap();
+    let second = run_import(&opts(dir.path(), daemon.socket(), false))
+        .await
+        .unwrap();
 
     assert_eq!(second.created, 0, "{:#?}", second.files);
     assert_eq!(second.failed, 0, "{:#?}", second.files);
@@ -511,7 +520,7 @@ async fn truncated_candidate_set_fails_closed() {
     // `memory_list` has no cursor, so a full page means absence cannot be
     // proven — reporting the file beats writing a possible duplicate.
     let dir = write_dir(&[("admin-merge-only-on-green.md", SAMPLE)]);
-    let (url, state) = start_stub().await;
+    let (daemon, state) = start_stub().await;
     {
         let mut st = state.lock().unwrap();
         let ids: Vec<String> = (0..DEDUP_CANDIDATE_LIMIT + 3)
@@ -525,7 +534,9 @@ async fn truncated_candidate_set_fails_closed() {
             .insert("admin-merge-only-on-green".to_string(), ids);
     }
 
-    let report = run_import(&opts(dir.path(), &url, false)).await.unwrap();
+    let report = run_import(&opts(dir.path(), daemon.socket(), false))
+        .await
+        .unwrap();
 
     let st = state.lock().unwrap();
     assert_eq!(
@@ -554,7 +565,7 @@ async fn ambiguous_candidates_fail_closed() {
     // Two drawers carry the slug and neither links to it, so neither can be
     // ruled out as the file's own. Guessing either way risks a duplicate.
     let dir = write_dir(&[("admin-merge-only-on-green.md", SAMPLE)]);
-    let (url, state) = start_stub().await;
+    let (daemon, state) = start_stub().await;
     {
         let mut st = state.lock().unwrap();
         for id in ["twin-a", "twin-b"] {
@@ -569,7 +580,9 @@ async fn ambiguous_candidates_fail_closed() {
         );
     }
 
-    let report = run_import(&opts(dir.path(), &url, false)).await.unwrap();
+    let report = run_import(&opts(dir.path(), daemon.socket(), false))
+        .await
+        .unwrap();
 
     assert_eq!(report.failed, 1, "{:#?}", report.files);
     assert!(
@@ -590,9 +603,11 @@ async fn non_memory_files_are_skipped_and_non_markdown_ignored() {
         ("MEMORY.md", "# Memory Index\n\n- a list of links\n"),
         ("notes.txt", "not markdown at all"),
     ]);
-    let (url, state) = start_stub().await;
+    let (daemon, state) = start_stub().await;
 
-    let report = run_import(&opts(dir.path(), &url, false)).await.unwrap();
+    let report = run_import(&opts(dir.path(), daemon.socket(), false))
+        .await
+        .unwrap();
 
     assert_eq!(report.total, 1, "only the .md file is considered");
     assert_eq!(report.skipped, 1);
@@ -610,9 +625,11 @@ async fn unparseable_file_is_reported_not_fatal() {
         ),
         ("zzz-good.md", SAMPLE),
     ]);
-    let (url, _state) = start_stub().await;
+    let (daemon, _state) = start_stub().await;
 
-    let report = run_import(&opts(dir.path(), &url, false)).await.unwrap();
+    let report = run_import(&opts(dir.path(), daemon.socket(), false))
+        .await
+        .unwrap();
 
     assert_eq!(report.total, 2);
     assert_eq!(report.failed, 1);

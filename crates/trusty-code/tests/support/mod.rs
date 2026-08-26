@@ -32,6 +32,15 @@
 //! not a real unused-code issue.
 #![allow(dead_code)]
 
+/// A stand-in trusty-memory daemon on a temp Unix socket (#6286).
+pub mod uds_mock;
+
+// Only `recall_content_e2e` needs these, and every other `tests/*.rs` binary
+// compiles this file too — the same false positive `#![allow(dead_code)]`
+// above exists for.
+#[allow(unused_imports)]
+pub use uds_mock::{MockMemoryDaemon, spawn as spawn_mock_memory_daemon};
+
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -192,7 +201,8 @@ impl StdioSession {
     ///
     /// Why: `tests/recall_content_e2e.rs` needs to point the daemon's
     /// `recall_session` tool at a MOCK trusty-memory backend (via
-    /// `TRUSTY_MEMORY_URL`, `trusty_common::memory_rpc::TRUSTY_MEMORY_URL_ENV`)
+    /// `TRUSTY_MEMORY_SOCKET`,
+    /// `trusty_common::memory_rpc::TRUSTY_MEMORY_SOCKET_ENV`)
     /// rather than a real daemon — no prior e2e scenario in this crate needed
     /// to override an env var beyond the mock-LLM selector, so this is the
     /// general form that adds that capability without touching any other

@@ -948,14 +948,14 @@ impl<G: GitBackend> WorkspaceProvisioner<G> {
         // it is entirely fail-open: any daemon-unreachable/parse error is
         // logged and swallowed, never propagated here.
         if self.prepare {
-            // Discovery-first (issue #2030): resolves TRUSTY_MEMORY_URL when
+            // #6286: the derived socket, else a path nothing serves —
             // set, else the daemon's actual discovered bound address, never
             // a hardcoded port.
-            let memory_url = trusty_common::memory_rpc::resolve_memory_base_url_or_unreachable();
+            let memory_socket = trusty_common::memory_rpc::resolve_memory_socket_or_unreachable();
             match super::identity_seed::identity_seed_palace(&workspace_path, repo_url) {
                 Ok(palace_id) => {
                     super::identity_seed::seed_identity_prompt_fact_blocking(
-                        &memory_url,
+                        &memory_socket,
                         &palace_id,
                     );
                 }

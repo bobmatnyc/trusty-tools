@@ -30,20 +30,19 @@ use crate::monitor::tui_common::{
 };
 use crate::monitor::utils::DaemonStatus;
 
-/// Enter TUI mode and run the terminal event loop against `base_url`.
+/// Enter TUI mode and run the terminal event loop against `socket`.
 ///
-/// Why: separated from the daemon-URL resolution so a future CLI flag can
-/// override the resolved address, and so terminal setup/teardown lives in one
-/// place.
+/// Why: separated from the socket resolution so a future CLI flag can override
+/// the resolved path, and so terminal setup/teardown lives in one place.
 /// What: builds the client and state, enters raw mode + the alternate screen,
 /// runs the event loop, and unconditionally restores the terminal even on error.
 /// Test: terminal glue is exercised by launching the UI.
-pub async fn run_with_url(base_url: String) -> anyhow::Result<()> {
+pub async fn run_with_socket(socket: std::path::PathBuf) -> anyhow::Result<()> {
     use crate::monitor::memory_client::MemoryClient;
     use crate::monitor::memory_tui::event_loop::run_loop;
 
-    let mut client = MemoryClient::new(base_url.clone());
-    let mut state = MemoryTuiState::new(base_url);
+    let mut state = MemoryTuiState::new(socket.display().to_string());
+    let mut client = MemoryClient::new(socket);
 
     let mut terminal = enter_tui()?;
     let result = run_loop(&mut terminal, &mut state, &mut client).await;

@@ -40,47 +40,47 @@ use trusty_common::catchup::{CatchupOptions, run_catchup};
 /// propagating, so prompt assembly always succeeds even when the daemon is
 /// offline or the project has no git history.
 ///
-/// What: resolves `memory_url` via
-/// [`trusty_common::memory_rpc::resolve_memory_base_url_or_unreachable`] (env override
-/// `TRUSTY_MEMORY_URL` first, else the daemon's discovered bound address,
+/// What: resolves `memory_socket` via
+/// [`trusty_common::memory_rpc::resolve_memory_socket_or_unreachable`] (env override
+/// `TRUSTY_MEMORY_SOCKET` first, else the derived socket path,
 /// else a fail-fast placeholder — issue #2030), then delegates to
-/// [`pm_catchup_context_with_memory_url`].
+/// [`pm_catchup_context_with_socket`].
 /// Test: `catchup::tests::pm_catchup_context_does_not_panic_on_empty_repo`.
 pub async fn pm_catchup_context(project_dir: &Path) -> Option<String> {
-    let memory_url = trusty_common::memory_rpc::resolve_memory_base_url_or_unreachable();
-    pm_catchup_context_with_memory_url(project_dir, memory_url).await
+    let memory_socket = trusty_common::memory_rpc::resolve_memory_socket_or_unreachable();
+    pm_catchup_context_with_socket(project_dir, memory_socket).await
 }
 
 /// Same as [`pm_catchup_context`], but with the trusty-memory base URL passed
-/// in explicitly rather than resolved from the process-wide `TRUSTY_MEMORY_URL`
+/// in explicitly rather than resolved from the process-wide `TRUSTY_MEMORY_SOCKET`
 /// env var (issue #3003).
 ///
 /// Why: [`pm_catchup_context`]'s tests need a guaranteed-unreachable dial
 /// target so the fail-open path is exercised deterministically. The previous
-/// approach mutated the process-global `TRUSTY_MEMORY_URL` env var via
+/// approach mutated the process-global `TRUSTY_MEMORY_SOCKET` env var via
 /// `unsafe { std::env::set_var(..) }` with no cleanup and no cross-test lock —
 /// `cargo test`'s default parallelism runs every test in this crate's lib
 /// binary as threads of ONE process, so that leaked env value was observable
 /// by any concurrently-running test whose code path also calls
-/// [`trusty_common::memory_rpc::resolve_memory_base_url_or_unreachable`]
+/// [`trusty_common::memory_rpc::resolve_memory_socket_or_unreachable`]
 /// (e.g. `run_task::tests::*`, via `execute_run_task` -> `pm_catchup_context`),
 /// producing false-red flakes unrelated to the leaking test itself. Threading
-/// `memory_url` through as a parameter — the same pattern
+/// `memory_socket` through as a parameter — the same pattern
 /// [`crate::session::memory_sink::TurnMemorySink::with_capacity`] already uses
 /// for the identical reason — removes the shared mutable global entirely, so
 /// tests need no lock and no cleanup.
-/// What: builds `CatchupOptions` with `memory_url` and sane limits, calls
+/// What: builds `CatchupOptions` with `memory_socket` and sane limits, calls
 /// `run_catchup` with `advance_watermark = false`, and returns `Some(digest)`
 /// when the result is non-whitespace, else `None`.
 /// Test: `catchup::tests::pm_catchup_context_does_not_panic_on_empty_repo`,
 /// `catchup::tests::pm_catchup_context_does_not_panic_on_non_git_dir`.
-async fn pm_catchup_context_with_memory_url(
+async fn pm_catchup_context_with_socket(
     project_dir: &Path,
-    memory_url: String,
+    memory_socket: std::path::PathBuf,
 ) -> Option<String> {
     let opts = CatchupOptions {
         project_dir: project_dir.to_path_buf(),
-        memory_url,
+        memory_socket,
         include_git: true,
         include_palace: true,
         git_limit: 50,
@@ -133,26 +133,34 @@ mod tests {
             .output();
     }
 
-    /// A guaranteed-never-listening loopback address (port 1 is a reserved,
-    /// unassigned TCP port) so a connection attempt fails fast rather than
-    /// hanging or timing out — the same convention
-    /// `trusty_common::memory_rpc`'s own `UNREACHABLE_PLACEHOLDER` uses.
+    /// A socket path under a directory that cannot exist, so a dial is refused
+    /// by the kernel immediately rather than hanging or waiting out a budget —
+    /// the same literal `trusty_common::memory_rpc`'s own
+    /// `UNREACHABLE_PLACEHOLDER` and `run_task::tests::isolate_ambient_daemons`
+    /// use.
+    ///
+    /// It held `"http://127.0.0.1:1"` until #6286's review: that string named a
+    /// TCP port for a transport that no longer exists, and
+    /// [`pm_catchup_context_with_socket`] takes a `PathBuf`, so it coerced into
+    /// the CWD-RELATIVE path `http:/127.0.0.1:1`. The dial still failed, but by
+    /// accident of the working directory rather than by the guarantee the doc
+    /// comment claimed.
     ///
     /// Why (#3003): passed directly to
-    /// [`pm_catchup_context_with_memory_url`] instead of mutating the
-    /// process-global `TRUSTY_MEMORY_URL` env var, so this test needs no lock
+    /// [`pm_catchup_context_with_socket`] instead of mutating the
+    /// process-global `TRUSTY_MEMORY_SOCKET` env var, so this test needs no lock
     /// and cannot leak state into concurrently-running tests (e.g.
-    /// `run_task::tests::*`, which also resolves a trusty-memory URL via
+    /// `run_task::tests::*`, which also resolves a trusty-memory socket via
     /// `pm_catchup_context` inside `execute_run_task`).
-    const UNREACHABLE_MEMORY_URL: &str = "http://127.0.0.1:1";
+    const UNREACHABLE_MEMORY_SOCKET: &str = "/nonexistent/trusty-memory/trusty-memory.sock";
 
     /// Verifies that `pm_catchup_context` does not panic and returns either
     /// `Some` or `None` consistently when the memory daemon is unreachable.
     ///
     /// Why: tests can never assume a live trusty-memory daemon; this test
-    /// points at an unreachable port so the palace section degrades gracefully.
+    /// points at an unreachable socket so the palace section degrades gracefully.
     /// What: creates a temp dir with a git repo, calls
-    /// `pm_catchup_context_with_memory_url` with [`UNREACHABLE_MEMORY_URL`],
+    /// `pm_catchup_context_with_socket` with [`UNREACHABLE_MEMORY_SOCKET`],
     /// asserts no panic and that the returned value is well-formed.
     /// Test: this test.
     #[tokio::test]
@@ -161,8 +169,7 @@ mod tests {
         init_git_repo(&tmp);
 
         let result =
-            pm_catchup_context_with_memory_url(tmp.path(), UNREACHABLE_MEMORY_URL.to_string())
-                .await;
+            pm_catchup_context_with_socket(tmp.path(), UNREACHABLE_MEMORY_SOCKET.into()).await;
 
         // Result is either Some(non-empty) or None — never panics.
         match &result {
@@ -200,8 +207,8 @@ mod tests {
     ///
     /// Why: operators may invoke `tcode run-task` outside a git repo; the PM
     /// prompt must still be assembled without aborting.
-    /// What: calls `pm_catchup_context_with_memory_url` with
-    /// [`UNREACHABLE_MEMORY_URL`] on a plain temp dir (no git init) and
+    /// What: calls `pm_catchup_context_with_socket` with
+    /// [`UNREACHABLE_MEMORY_SOCKET`] on a plain temp dir (no git init) and
     /// asserts that the function returns without panicking.
     /// Test: this test.
     #[tokio::test]
@@ -210,7 +217,6 @@ mod tests {
 
         // Must not panic — fall through to None or Some(whitespace-only) path.
         let _result =
-            pm_catchup_context_with_memory_url(tmp.path(), UNREACHABLE_MEMORY_URL.to_string())
-                .await;
+            pm_catchup_context_with_socket(tmp.path(), UNREACHABLE_MEMORY_SOCKET.into()).await;
     }
 }

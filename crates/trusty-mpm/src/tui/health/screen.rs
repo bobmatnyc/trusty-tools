@@ -29,12 +29,12 @@ impl HealthScreen {
     /// What: stores both URLs, sets both panels to [`PanelState::Connecting`],
     /// and defaults focus to the search panel.
     /// Test: `new_screen_starts_connecting`.
-    pub fn new(search_url: impl Into<String>, memory_url: impl Into<String>) -> Self {
+    pub fn new(search_url: impl Into<String>, memory_socket: impl Into<String>) -> Self {
         Self {
             search: PanelState::Connecting,
             search_url: search_url.into(),
             memory: PanelState::Connecting,
-            memory_url: memory_url.into(),
+            memory_socket: memory_socket.into(),
             focus: Daemon::Search,
             tab: HealthTab::default(),
             search_collections: Vec::new(),
@@ -163,12 +163,12 @@ impl HealthScreen {
     /// The base URL of the currently-focused panel.
     ///
     /// Why: the `[X]` stop action targets the focused daemon.
-    /// What: returns the search or memory URL per [`Self::focus`].
+    /// What: returns the search URL or the memory socket path per [`Self::focus`].
     /// Test: `focused_url_follows_focus`.
     pub fn focused_url(&self) -> &str {
         match self.focus {
             Daemon::Search => &self.search_url,
-            Daemon::Memory => &self.memory_url,
+            Daemon::Memory => &self.memory_socket,
         }
     }
 }

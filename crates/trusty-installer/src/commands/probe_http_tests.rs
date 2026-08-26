@@ -525,7 +525,6 @@ async fn probe_ignores_http_proxy_env() {
 /// Test: This is the test.
 #[test]
 fn fixed_ports_match_port_assignments_doc() {
-    assert_eq!(fixed_port_for("trusty-memory"), Some(7070));
     assert_eq!(fixed_port_for("trusty-console"), Some(7788));
     assert_eq!(fixed_port_for("trusty-search"), Some(7878));
     assert_eq!(fixed_port_for("trusty-mpm"), Some(7880));
@@ -551,7 +550,7 @@ fn fixed_ports_match_port_assignments_doc() {
 /// Test: This is the test.
 #[test]
 fn uds_members_have_no_fixed_port() {
-    for binary in ["trusty-review", "trusty-analyze"] {
+    for binary in ["trusty-review", "trusty-analyze", "trusty-memory"] {
         assert_eq!(
             fixed_port_for(binary),
             None,
@@ -583,7 +582,7 @@ fn uds_members_have_no_fixed_port() {
 /// Test: This is the test.
 #[test]
 fn every_uds_member_has_a_health_method() {
-    for binary in ["trusty-review", "trusty-analyze"] {
+    for binary in ["trusty-review", "trusty-analyze", "trusty-memory"] {
         let method = super::uds_health_method(binary)
             .unwrap_or_else(|| panic!("{binary} serves a socket but names no health method"));
         let domain = binary.trim_start_matches("trusty-");
@@ -608,7 +607,7 @@ fn every_uds_member_has_a_health_method() {
 /// Test: This is the test.
 #[test]
 fn uds_socket_for_matches_the_shared_entry_point() {
-    for binary in ["trusty-review", "trusty-analyze"] {
+    for binary in ["trusty-review", "trusty-analyze", "trusty-memory"] {
         assert_eq!(
             uds_socket_for(binary),
             trusty_common::daemon_socket_path(binary).ok(),
@@ -737,21 +736,22 @@ async fn probe_uds_reports_refused_for_an_absent_socket() {
     );
 }
 
-/// Why: `http_addr` is the PRIMARY discovery path — it is what survives a
-/// `--port` override and auto-port-walking — so the resolver must read the real
-/// file written by `trusty_common::write_daemon_addr`, not a mock.
-/// What: plants an `http_addr` under a stubbed data dir and asserts both legs
-/// resolve as documented (recorded from the file, fixed from the table).
+/// Why: a member that still serves TCP is probed at the address it recorded,
+/// with its documented default as the second leg — a daemon that walked off its
+/// default is reachable through the first, and one that never recorded through
+/// the second. #6286 moved this test off trusty-memory, which serves a socket
+/// now; trusty-search is the remaining walker-shaped member.
+/// What: with a planted `http_addr`, both legs resolve.
 /// Test: This is the test.
 #[test]
 fn resolve_probe_bases_reads_http_addr() {
     let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = crate::commands::test_support::stub_data_dir("trusty-memory", "127.0.0.1:7071");
-    let (recorded, fixed) = resolve_probe_bases("trusty-memory", "trusty-memory");
+    let dir = crate::commands::test_support::stub_data_dir("trusty-search", "127.0.0.1:7999");
+    let (recorded, fixed) = resolve_probe_bases("trusty-search", "trusty-search");
     crate::commands::test_support::clear_data_dir_override(&dir);
 
-    assert_eq!(recorded.as_deref(), Some("http://127.0.0.1:7071"));
-    assert_eq!(fixed.as_deref(), Some("http://127.0.0.1:7070"));
+    assert_eq!(recorded.as_deref(), Some("http://127.0.0.1:7999"));
+    assert_eq!(fixed.as_deref(), Some("http://127.0.0.1:7878"));
 }
 
 /// Why: a member with neither a recorded address nor a documented default must

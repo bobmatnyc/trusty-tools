@@ -255,10 +255,10 @@ impl TrustyAgentsRepl {
                     let _ = writeln!(out, "Not focused on any task (showing all history).");
                 }
             }
-            let base_url = crate::memory::trusty_client::default_trusty_url();
+            let memory_socket = crate::memory::trusty_client::default_trusty_socket();
             let labels = crate::api::server::workstreams::list_workstream_labels_at(
                 &self.project_dir,
-                &base_url,
+                &memory_socket,
             )
             .await;
             if labels.is_empty() {

@@ -44,8 +44,9 @@ use crate::stores::{StoresConfig, resolve_store_statuses};
 
 /// `GET /api/agents/:name/stores` — HTTP entry point.
 ///
-/// Why/What: see the module doc. Daemon base URLs are discovered here (via
-/// the shared `http_addr` convention every trusty-* daemon writes) and
+/// Why/What: see the module doc. trusty-search's base URL comes from the
+/// `http_addr` convention it still writes; trusty-memory's socket is derived by
+/// the same `daemon_socket_path` call the daemon makes (#6286). Both are
 /// threaded into [`stores_at`] so tests can substitute a mock.
 /// Test: `super::tests::agent_stores::stores_route_reports_connected_binding_with_stats`.
 pub(super) async fn agent_stores_route(
@@ -56,7 +57,9 @@ pub(super) async fn agent_stores_route(
         &crate::agents::agents_dir_candidates(),
         &name,
         trusty_common::resolve_daemon_base_url("trusty-search").as_deref(),
-        trusty_common::resolve_daemon_base_url("trusty-memory").as_deref(),
+        trusty_common::memory_rpc::resolve_memory_socket()
+            .ok()
+            .as_deref(),
     )
     .await
 }
@@ -106,7 +109,7 @@ pub(super) async fn stores_at(
     dirs: &[PathBuf],
     name: &str,
     search_base: Option<&str>,
-    memory_base: Option<&str>,
+    memory_socket: Option<&std::path::Path>,
 ) -> Response {
     if !is_valid_agent_name(name) {
         return (
@@ -135,7 +138,7 @@ pub(super) async fn stores_at(
     };
 
     let (stores, tools, config_error) = parse_stores(&raw);
-    let statuses = resolve_store_statuses(name, &stores, search_base, memory_base).await;
+    let statuses = resolve_store_statuses(name, &stores, search_base, memory_socket).await;
     let mut body = serde_json::json!({
         "stores": statuses,
         "issues": stores.validate(),

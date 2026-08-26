@@ -241,7 +241,7 @@ pub struct PalaceRow {
     /// `false`, so a hand-built row (and any daemon predating the `cached`
     /// flag) is treated as reporting real counts.
     /// Test: `palace_row_counts_are_unknown_when_not_cached`,
-    /// `parse_palaces_marks_uncached_rows_unknown`.
+    /// `parse_palace_detail_marks_uncached_rows_unknown`.
     pub counts_unknown: bool,
 }
 

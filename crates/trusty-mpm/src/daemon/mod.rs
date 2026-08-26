@@ -105,10 +105,8 @@ pub async fn serve_http(
     // Discover the trusty sidecar addresses and record them in shared state.
     let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
     let addrs = discover::discover_all(&home).await;
-    info!(
-        "trusty-memory at {}, trusty-search at {}",
-        addrs.memory, addrs.search
-    );
+    // #6286: trusty-memory has no address to log — it serves a derived socket.
+    info!("trusty-search at {}", addrs.search);
     state.set_trusty_addrs(addrs);
 
     // Auto-discover existing Claude Code sessions — both tmux panes and native

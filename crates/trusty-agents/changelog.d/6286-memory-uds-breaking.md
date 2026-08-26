@@ -1,0 +1,3 @@
+Breaking
+- **The trusty-memory backend dials a Unix socket instead of an HTTP base URL** (#6286, ADR-0032). `default_trusty_url` is `default_trusty_socket`, `TrustyMemoryClient::new` and `MemoryBackend::auto_detect_with_url` (now `auto_detect_at`) take a socket path, and the daemon's health probe is `memory.health` — the same method `trusty-console` and `tctl` dial
+- The workstream helpers (`list_workstreams_at`, `workstream_history_at`, `list_workstream_labels_at`, `drawers_by_tag_at`, `create_tagged_drawer_at`) and the persona-memory helpers (`build_persona_memory`, `spawn_persist_turn`) take a `&Path` socket rather than a `&str` base URL

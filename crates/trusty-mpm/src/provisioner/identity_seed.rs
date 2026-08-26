@@ -25,8 +25,6 @@
 //! Test: `identity_fact_present_detects_existing_fact`,
 //! `identity_fact_present_false_when_absent`, `seed_is_fail_open_on_unreachable_daemon`.
 
-use std::time::Duration;
-
 use serde::Deserialize;
 
 /// Subject the identity prompt-fact is asserted against.
@@ -88,82 +86,64 @@ fn identity_fact_present(triples: &[RawTriple]) -> bool {
 /// Why: the async body of the auto-seed step; kept separate from the blocking
 /// wrapper so the HTTP round-trips can be tested directly with `#[tokio::test]`.
 /// What: builds a short-timeout `reqwest::Client`, issues
-/// `GET {memory_url}/api/v1/palaces/{palace_id}/kg?subject=trusty-mpm` as the
+/// `kg_query` scoped to the `trusty-mpm` subject as the
 /// idempotency guard, and — only when [`identity_fact_present`] returns false —
-/// issues `POST {memory_url}/api/v1/palaces/{palace_id}/kg` with the identity
+/// issues `kg_assert` with the identity
 /// triple. Any client-build failure, connection error, non-2xx response, or
 /// JSON-parse failure at any step is logged to stderr via `tracing::warn!` and
 /// swallowed: this function never returns an error and never panics, so it can
 /// never block or fail workspace provisioning.
 /// Test: `seed_is_fail_open_on_unreachable_daemon`.
-async fn seed_identity_prompt_fact(memory_url: &str, palace_id: &str) {
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
+async fn seed_identity_prompt_fact(socket: &std::path::Path, palace_id: &str) {
+    let existing = match trusty_common::memory_rpc::call_memory_tool_at(
+        socket,
+        "kg_query",
+        serde_json::json!({ "palace": palace_id, "subject": IDENTITY_SUBJECT }),
+    )
+    .await
     {
-        Ok(c) => c,
+        Ok(v) => v,
         Err(e) => {
-            tracing::warn!("identity-seed: could not build HTTP client: {e}");
+            tracing::warn!(
+                "identity-seed: could not reach trusty-memory at {}: {e:#}",
+                socket.display()
+            );
             return;
         }
     };
 
-    let base = memory_url.trim_end_matches('/');
-    let query_url = format!("{base}/api/v1/palaces/{palace_id}/kg");
-    let resp = match client
-        .get(&query_url)
-        .query(&[("subject", IDENTITY_SUBJECT)])
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("identity-seed: could not reach trusty-memory at {memory_url}: {e}");
-            return;
-        }
-    };
-    if !resp.status().is_success() {
-        tracing::warn!(
-            "identity-seed: trusty-memory returned {} for identity kg_query",
-            resp.status()
-        );
-        return;
-    }
-    let triples: Vec<RawTriple> = match resp.json().await {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!("identity-seed: could not parse kg_query response: {e}");
-            return;
-        }
-    };
+    // `kg_query` answers `{triples: [...]}`; the retired route answered the
+    // array bare.
+    let triples: Vec<RawTriple> = existing
+        .get("triples")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .unwrap_or_default()
+        .unwrap_or_default();
 
     if identity_fact_present(&triples) {
         tracing::debug!("identity-seed: identity prompt-fact already present, skipping assert");
         return;
     }
 
-    let assert_url = format!("{base}/api/v1/palaces/{palace_id}/kg");
-    let body = serde_json::json!({
-        "subject": IDENTITY_SUBJECT,
-        "predicate": IDENTITY_PREDICATE,
-        "object": IDENTITY_OBJECT,
-        "provenance": IDENTITY_PROVENANCE,
-    });
-    match client.post(&assert_url).json(&body).send().await {
-        Ok(r) if r.status().is_success() => {
-            tracing::info!(
-                "identity-seed: seeded trusty-mpm identity prompt-fact into palace {palace_id}"
-            );
-        }
-        Ok(r) => {
-            tracing::warn!(
-                "identity-seed: trusty-memory returned {} for identity kg_assert",
-                r.status()
-            );
-        }
-        Err(e) => {
-            tracing::warn!("identity-seed: could not reach trusty-memory at {memory_url}: {e}");
-        }
+    match trusty_common::memory_rpc::call_memory_tool_at(
+        socket,
+        "kg_assert",
+        serde_json::json!({
+            "palace": palace_id,
+            "subject": IDENTITY_SUBJECT,
+            "predicate": IDENTITY_PREDICATE,
+            "object": IDENTITY_OBJECT,
+            "provenance": IDENTITY_PROVENANCE,
+        }),
+    )
+    .await
+    {
+        Ok(_) => tracing::info!(
+            "identity-seed: seeded trusty-mpm identity prompt-fact into palace {palace_id}"
+        ),
+        Err(e) => tracing::warn!("identity-seed: identity kg_assert failed: {e:#}"),
     }
 }
 
@@ -184,15 +164,15 @@ async fn seed_identity_prompt_fact(memory_url: &str, palace_id: &str) {
 /// directly under `#[tokio::test]`); the thread-spawn wrapper itself has no
 /// independent behaviour to assert beyond "does not panic", which every test
 /// in this module already exercises by construction.
-pub fn seed_identity_prompt_fact_blocking(memory_url: &str, palace_id: &str) {
-    let memory_url = memory_url.to_string();
+pub fn seed_identity_prompt_fact_blocking(socket: &std::path::Path, palace_id: &str) {
+    let socket = socket.to_path_buf();
     let palace_id = palace_id.to_string();
     let joined = std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build();
         match rt {
-            Ok(rt) => rt.block_on(seed_identity_prompt_fact(&memory_url, &palace_id)),
+            Ok(rt) => rt.block_on(seed_identity_prompt_fact(&socket, &palace_id)),
             Err(e) => {
                 tracing::warn!("identity-seed: could not build tokio runtime: {e}");
             }
@@ -278,7 +258,11 @@ mod tests {
     async fn seed_is_fail_open_on_unreachable_daemon() {
         // Port 1 is a reserved/unassigned port that nothing listens on, so the
         // connection fails fast without needing a real daemon or a mock server.
-        seed_identity_prompt_fact("http://127.0.0.1:1", "test-palace").await;
+        seed_identity_prompt_fact(
+            std::path::Path::new("/nonexistent/trusty-memory.sock"),
+            "test-palace",
+        )
+        .await;
         // Reaching this line without panicking/hanging proves fail-open.
     }
 
@@ -286,6 +270,9 @@ mod tests {
     /// must return promptly without panicking even when the daemon is unreachable.
     #[test]
     fn seed_blocking_is_fail_open_on_unreachable_daemon() {
-        seed_identity_prompt_fact_blocking("http://127.0.0.1:1", "test-palace");
+        seed_identity_prompt_fact_blocking(
+            std::path::Path::new("/nonexistent/trusty-memory.sock"),
+            "test-palace",
+        );
     }
 }

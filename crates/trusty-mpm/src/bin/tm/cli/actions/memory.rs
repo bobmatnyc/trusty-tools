@@ -43,8 +43,9 @@ pub(crate) enum MemoryAction {
         /// (a localhost URL, a token-shaped identifier) instead of failing them.
         #[arg(long)]
         allow_secret_like: bool,
-        /// trusty-memory base URL. Defaults to daemon discovery.
+        /// trusty-memory socket path. Defaults to the derived one (#6286 —
+        /// the daemon has no port and publishes no address).
         #[arg(long)]
-        memory_url: Option<String>,
+        memory_socket: Option<std::path::PathBuf>,
     },
 }

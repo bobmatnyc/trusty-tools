@@ -36,10 +36,7 @@ use trusty_memory::commands::send_message::handle_send_message;
 use trusty_memory::commands::service::{handle_service, ServiceAction};
 use trusty_memory::commands::upgrade::handle_upgrade;
 use trusty_memory::commands::{setup::handle_setup, start::handle_start, stop::handle_stop};
-use trusty_memory::{
-    foreground::run_http_foreground, resolve_palace_registry_dir, run_http, run_http_dynamic,
-    AppState,
-};
+use trusty_memory::{resolve_palace_registry_dir, serve, AppState};
 
 /// Top-level CLI for `trusty-memory`.
 #[derive(Debug, Parser)]
@@ -101,11 +98,13 @@ enum Command {
     /// detached background daemon and returns immediately. Pass `--foreground`
     /// to keep it in the foreground (used by `start`, launchd, and systemd).
     Serve {
-        /// Select HTTP mode explicitly with an optional bind address.
+        /// Accepted and IGNORED since #6286 — the daemon binds a Unix socket.
         ///
-        /// `--http` (bare): dynamic port, self-spawning detached daemon.
-        /// `--http 127.0.0.1:7070`: bind that exact address.
-        /// Absent: MCP stdio mode (#5267) — this flag is what selects HTTP.
+        /// Why it is still parsed: a launchd plist installed before ADR-0032
+        /// passes `--http`, and under `KeepAlive` a clap usage error would
+        /// crash-loop the daemon instead of starting it. The flag now means
+        /// only "run the daemon rather than MCP stdio", and any address given
+        /// is discarded with a warning.
         #[arg(
             long,
             value_name = "ADDR",
@@ -115,7 +114,7 @@ enum Command {
         )]
         http: Option<Option<SocketAddr>>,
 
-        /// Run the HTTP daemon in the foreground (do not self-spawn).
+        /// Run the daemon in the foreground (do not self-spawn).
         ///
         /// Why: `serve` defaults to background mode so the trusty-* daemons
         /// share a `start` / `serve` UX. Long-running supervisors (launchd,
@@ -127,8 +126,8 @@ enum Command {
         /// Run a direct stdio JSON-RPC MCP server (issue #914).
         ///
         /// Why: reinstates `serve --stdio` as a safe, deadlock-free code
-        /// path.  When set, no axum HTTP server and no UDS listener are
-        /// bound — stdout is the exclusive JSON-RPC channel.  All
+        /// path. When set this process binds nothing and forwards to the
+        /// daemon's socket — stdout is the exclusive JSON-RPC channel. All
         /// non-protocol output (update checks, banners) is suppressed.
         /// Every request resolves within a deadline so the MCP client
         /// never hangs.
@@ -698,7 +697,7 @@ async fn main() -> Result<()> {
             // Flatten Option<Option<SocketAddr>> → Option<SocketAddr>.
             // --http (bare) → Some(None) → flatten → None → dynamic port.
             // --http ADDR   → Some(Some(addr)) → flatten → Some(addr).
-            ServeMode::Http => {
+            ServeMode::Daemon => {
                 run_serve(http.flatten(), foreground, palace, log_buffer, error_store).await
             }
         },
@@ -783,7 +782,7 @@ async fn main() -> Result<()> {
             } else {
                 trusty_memory::commands::port::PortFormat::Port
             };
-            trusty_memory::commands::port::handle_port(format)
+            trusty_memory::commands::port::handle_port(format).await
         }
         Command::Upgrade { check, yes } => handle_upgrade(check, yes).await,
         Command::Config(cmd) => cmd.run().await,
@@ -794,19 +793,31 @@ async fn main() -> Result<()> {
 ///
 /// Why: keeps `main` focused on parsing while putting the daemon-address
 /// discovery and dashboard launch in one place.
-/// What: `Web` delegates to `daemon_guard::open_web_dashboard` which
-/// auto-starts the daemon when not running, then opens the browser.
-/// `Tui` launches the trusty-memory-specific
+/// What: `Tui` launches the trusty-memory-specific
 /// `trusty_common::monitor::memory_tui` ratatui dashboard; `Status` and
 /// `Palaces` print scriptable health and per-palace stats via the
 /// `commands::monitor` handlers.
-/// Test: not unit-tested (process-level entry point); `cargo run -p
-/// trusty-memory -- monitor web` with no daemon auto-starts it then opens
-/// the browser.
+///
+/// `Web` no longer opens anything (#6286). It used to start the daemon and
+/// point a browser at `http://<addr>/ui`, which was this crate serving its own
+/// SPA — the surface ADR-0032 retired. The dashboard mounts on
+/// `trusty-console`, and until it does, saying so beats opening a URL nothing
+/// answers. The subcommand stays rather than being removed so a muscle-memory
+/// invocation gets the redirect instead of a clap usage error.
+/// Test: not unit-tested (process-level entry point).
 async fn run_monitor(target: MonitorTarget) -> Result<()> {
     use trusty_memory::commands::monitor;
     match target {
-        MonitorTarget::Web => trusty_memory::commands::daemon_guard::open_web_dashboard().await,
+        MonitorTarget::Web => {
+            eprintln!(
+                "trusty-memory no longer serves a browser dashboard: ADR-0032 leaves \
+                 trusty-console as the only HTTP surface, and the memory dashboard \
+                 mounts there.\n\
+                 Run `trusty-console` and open its memory page, or use \
+                 `trusty-memory monitor tui` for the terminal dashboard."
+            );
+            Ok(())
+        }
         MonitorTarget::Tui => trusty_common::monitor::memory_tui::run().await,
         MonitorTarget::Status { json } => monitor::handle_status(json).await,
         MonitorTarget::Palaces { id, json } => monitor::handle_palaces(id, json).await,
@@ -847,8 +858,8 @@ enum ServeMode {
     /// MCP stdio JSON-RPC. `notify` is set only for the bare form, whose
     /// meaning changed and whose user may therefore be surprised.
     Stdio { notify: bool },
-    /// The axum HTTP/SSE daemon.
-    Http,
+    /// The resident daemon, serving its Unix socket.
+    Daemon,
 }
 
 /// Decide the `serve` transport from its flags (#5267).
@@ -859,17 +870,19 @@ enum ServeMode {
 /// launchd plist, `handle_start`, and the existing integration tests working
 /// untouched.
 /// What: `--stdio` → stdio. `--http` (with or without an address) or
-/// `--foreground` → HTTP. Nothing → stdio, with the notice flag set. `--palace`
-/// is not a transport flag and does not affect the choice.
+/// `--foreground` → the daemon. Nothing → stdio, with the notice flag set.
+/// `--palace` is not a transport flag and does not affect the choice. `--http`
+/// no longer names a transport — it survives only so a pre-#6286 launchd plist
+/// still selects the daemon rather than failing clap.
 /// Test: `serve_mode_bare_is_stdio` (fails before #5267),
-/// `serve_mode_explicit_stdio`, `serve_mode_http_bare`, `serve_mode_http_addr`,
-/// `serve_mode_foreground_is_http`, `serve_mode_palace_only_is_stdio`.
+/// `serve_mode_explicit_stdio`, `serve_mode_daemon_bare`, `serve_mode_daemon_addr`,
+/// `serve_mode_foreground_is_daemon`, `serve_mode_palace_only_is_stdio`.
 fn serve_mode(http: &Option<Option<SocketAddr>>, foreground: bool, stdio: bool) -> ServeMode {
     if stdio {
         return ServeMode::Stdio { notify: false };
     }
     if http.is_some() || foreground {
-        return ServeMode::Http;
+        return ServeMode::Daemon;
     }
     ServeMode::Stdio { notify: true }
 }
@@ -893,24 +906,25 @@ fn warn_bare_serve_is_stdio() {
     if std::io::stdin().is_terminal() {
         eprintln!(
             "trusty-memory: `serve` speaks MCP over stdio and is waiting on stdin. \
-             To run the HTTP daemon, use `trusty-memory start`."
+             To run the daemon, use `trusty-memory start`."
         );
     }
 }
 
-/// Dispatch `serve` (HTTP path) to the HTTP server.
+/// Dispatch `serve` to the resident daemon.
 ///
-/// Why: keeps `main` focused on parsing while `AppState` construction lives
-/// in one place. The direct `--stdio` path (`serve --stdio`, PR1 #919) is
-/// handled by `run_serve_stdio` above; the HTTP path runs the full axum daemon.
+/// Why: keeps `main` focused on parsing while `AppState` construction lives in
+/// one place. The `--stdio` path (PR1 #919) is `run_serve_stdio` above; this is
+/// the process that owns redb and answers the socket.
 /// What: resolves the palace registry directory (descending into the legacy
 /// `palaces/` subdirectory when present — see `resolve_palace_registry_dir`),
 /// builds an `AppState` rooted there, applies the `--palace` default if any,
-/// re-hydrates every persisted palace, wires the issue-#35 `LogBuffer` so
-/// `GET /api/v1/logs/tail` serves captured logs, and installs the Phase 1
-/// bug-capture `ErrorStore` (bug-reporting #478) so Phase 2 can query errors.
-/// Test: not unit-tested (process-level entry point); exercised manually via
-/// `cargo run -p trusty-memory -- serve` and the parent integration tests.
+/// re-hydrates every persisted palace, wires the #35 `LogBuffer` so
+/// `memory.logs_tail` serves captured logs, installs the Phase 1 bug-capture
+/// `ErrorStore` (#478), and hands the state to `transport::uds::serve`.
+/// Test: not unit-tested (process-level entry point); exercised by
+/// `transport::uds::tests` against the same `serve_with_shutdown` body, and
+/// manually via `cargo run -p trusty-memory -- serve --foreground`.
 async fn run_serve(
     http: Option<SocketAddr>,
     foreground: bool,
@@ -930,18 +944,31 @@ async fn run_serve(
         return trusty_memory::commands::start::handle_start().await;
     }
 
-    // Single-instance guard (Fix B): if another healthy daemon is already
-    // running (detected via the http_addr discovery file + /health probe),
-    // exit 0. launchd's `KeepAlive { SuccessfulExit: false }` only respawns
-    // on *non-zero* exits, so exit 0 stops the respawn storm cleanly.
-    // This check runs on every `serve --foreground` invocation — both those
-    // spawned by launchd and those spawned manually — so the guard is always
-    // active regardless of how the daemon was launched.
+    // #6286: an address passed to `--http` is discarded. Warning rather than
+    // failing is what keeps a pre-ADR-0032 launchd plist starting the daemon
+    // instead of crash-looping on a flag that no longer means anything.
+    if let Some(addr) = http {
+        tracing::warn!("--http {addr} is ignored since #6286; the daemon serves a Unix socket");
+        eprintln!(
+            "trusty-memory: --http {addr} is ignored — the daemon serves \
+             {} (ADR-0032)",
+            trusty_memory::socket_path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "its Unix socket".to_string())
+        );
+    }
+
+    let socket = trusty_memory::socket_path()?;
+
+    // Single-instance guard: if another healthy daemon is already serving the
+    // socket, exit 0. launchd's `KeepAlive { SuccessfulExit: false }` respawns
+    // only on NON-zero exits, so exit 0 stops the respawn storm cleanly. This
+    // runs on every `serve --foreground` — launchd-spawned and manual alike —
+    // so the guard is always active regardless of how the daemon was launched.
     {
         use trusty_memory::commands::single_instance as si;
-        let addr_file = trusty_memory::http_addr_path();
-        // Issue #1152, Tier 3: 3 probes × 200 ms catches a mid-boot daemon.
-        let action = si::single_instance_check_retried(addr_file.as_deref(), 2, 200).await;
+        // #1152, Tier 3: 3 probes × 200 ms catches a mid-boot daemon.
+        let action = si::single_instance_check_retried(&socket, 2, 200).await;
         match action {
             si::StartupAction::Proceed => {}
             si::StartupAction::ExitAlreadyRunning => {
@@ -1019,13 +1046,10 @@ async fn run_serve(
         .with_bm25_lane_from_env()
         .with_multi_tenant_mode_from_env();
     spawn_startup_tasks(&state);
-    if let Some(addr) = http {
-        run_http(state, addr).await
-    } else if foreground {
-        run_http_foreground(state).await
-    } else {
-        run_http_dynamic(state).await
-    }
+    // `foreground` is already spent: the background branch returned via
+    // `handle_start` above, so anything reaching here runs inline.
+    let _ = foreground;
+    serve(state, &socket).await
 }
 
 // #4678: moved out of this file to keep it under the 500 SLOC cap.

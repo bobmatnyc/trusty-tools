@@ -14,10 +14,16 @@ use super::*;
 use async_openai::{Client, config::OpenAIConfig};
 use std::time::Duration;
 
-/// Unreachable-but-well-formed URL for hermetic tests that must never
-/// actually touch the network (paired with a project root that resolves to
-/// `None`, so nothing in the call path attempts a connection at all).
-const DEAD_URL: &str = "http://127.0.0.1:1";
+/// A socket path nothing can be serving, for hermetic tests that must never
+/// reach a daemon (paired with a project root that resolves to `None`, so
+/// nothing in the call path attempts a connection at all).
+///
+/// #6286: this was a reserved-port URL; a path under a directory that cannot
+/// exist is the socket equivalent, and unlike a port it cannot be taken by
+/// something else on the machine.
+fn dead_socket() -> &'static std::path::Path {
+    std::path::Path::new("/nonexistent/trusty-memory/trusty-memory.sock")
+}
 
 fn test_client() -> Client<OpenAIConfig> {
     Client::with_config(OpenAIConfig::new())
@@ -258,7 +264,7 @@ fn bleed_nudge_some_when_different() {
 #[tokio::test]
 async fn build_turn_context_unfocused_has_no_context_block() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let ctx = build_turn_context(tmp.path(), None, 12, true, DEAD_URL).await;
+    let ctx = build_turn_context(tmp.path(), None, 12, true, dead_socket()).await;
     assert!(ctx.focused_context_block.is_none());
     assert!(ctx.focused_label.is_none());
     assert!(ctx.classification_block.contains("(none yet)"));
@@ -267,7 +273,7 @@ async fn build_turn_context_unfocused_has_no_context_block() {
 #[tokio::test]
 async fn build_turn_context_focused_assembles_stable_order() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let ctx = build_turn_context(tmp.path(), Some("feat-x"), 12, true, DEAD_URL).await;
+    let ctx = build_turn_context(tmp.path(), Some("feat-x"), 12, true, dead_socket()).await;
     assert_eq!(ctx.focused_label.as_deref(), Some("feat-x"));
     let block = ctx.focused_context_block.expect("focused block present");
     let global_pos = block
@@ -291,7 +297,7 @@ async fn build_turn_context_focused_assembles_stable_order() {
 #[tokio::test]
 async fn build_turn_context_disabled_is_a_real_no_op() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let ctx = build_turn_context(tmp.path(), Some("feat-x"), 12, false, DEAD_URL).await;
+    let ctx = build_turn_context(tmp.path(), Some("feat-x"), 12, false, dead_socket()).await;
     assert_eq!(
         ctx.classification_block, "",
         "no classification block when disabled"
@@ -311,7 +317,7 @@ async fn finish_turn_no_marker_returns_unchanged() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let client = test_client();
     let cfg = test_persona_cfg();
-    let ctx = build_turn_context(tmp.path(), None, 12, true, DEAD_URL).await;
+    let ctx = build_turn_context(tmp.path(), None, 12, true, dead_socket()).await;
     let raw = "Plain response, no classification marker.".to_string();
     let out = finish_turn(
         tmp.path(),
@@ -321,7 +327,7 @@ async fn finish_turn_no_marker_returns_unchanged() {
         "hi",
         raw.clone(),
         &ctx,
-        DEAD_URL,
+        dead_socket(),
     )
     .await
     .expect("finish_turn must not error even without a marker");
@@ -338,7 +344,7 @@ async fn finish_turn_with_marker_and_no_project_root_still_returns_display_text(
     let tmp = tempfile::tempdir().expect("tempdir");
     let client = test_client();
     let cfg = test_persona_cfg();
-    let ctx = build_turn_context(tmp.path(), None, 12, true, DEAD_URL).await;
+    let ctx = build_turn_context(tmp.path(), None, 12, true, dead_socket()).await;
     let raw = "Here you go.\n\n[[task: feat-x]]".to_string();
     let out = finish_turn(
         tmp.path(),
@@ -348,7 +354,7 @@ async fn finish_turn_with_marker_and_no_project_root_still_returns_display_text(
         "hi",
         raw,
         &ctx,
-        DEAD_URL,
+        dead_socket(),
     )
     .await
     .expect("finish_turn must fail open on a persistence error");
@@ -360,7 +366,7 @@ async fn finish_turn_bleed_nudge_appended_when_focused_mismatch() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let client = test_client();
     let cfg = test_persona_cfg();
-    let ctx = build_turn_context(tmp.path(), Some("feat-a"), 12, true, DEAD_URL).await;
+    let ctx = build_turn_context(tmp.path(), Some("feat-a"), 12, true, dead_socket()).await;
     let raw = "Doing something else.\n\n[[task: feat-b]]".to_string();
     let out = finish_turn(
         tmp.path(),
@@ -370,7 +376,7 @@ async fn finish_turn_bleed_nudge_appended_when_focused_mismatch() {
         "hi",
         raw,
         &ctx,
-        DEAD_URL,
+        dead_socket(),
     )
     .await
     .expect("finish_turn must not error");
@@ -387,27 +393,18 @@ async fn finish_turn_bleed_nudge_appended_when_focused_mismatch() {
 /// below: zero drawers land, in contrast to the enabled case.
 #[tokio::test]
 async fn finish_turn_disabled_does_not_persist() {
-    let (addr, state) = mock_daemon::spawn().await;
-    let base_url = format!("http://{addr}");
+    let (_addr, memory, state) = mock_daemon::spawn().await;
+    let socket = memory.socket();
     let tmp = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir(tmp.path().join(".git")).expect("mkdir .git");
 
     let client = test_client();
     let cfg = test_persona_cfg_disabled();
-    let ctx = build_turn_context(tmp.path(), None, 12, cfg.workstreams.enabled, &base_url).await;
+    let ctx = build_turn_context(tmp.path(), None, 12, cfg.workstreams.enabled, socket).await;
     let raw = "Here you go.\n\n[[task: feat-x]]".to_string();
-    let out = finish_turn(
-        tmp.path(),
-        "izzie",
-        &client,
-        &cfg,
-        "hi",
-        raw,
-        &ctx,
-        &base_url,
-    )
-    .await
-    .expect("finish_turn must not error");
+    let out = finish_turn(tmp.path(), "izzie", &client, &cfg, "hi", raw, &ctx, socket)
+        .await
+        .expect("finish_turn must not error");
     assert_eq!(out, "Here you go.", "marker still stripped from display");
 
     // Give a would-be background task every chance to run; there must be
@@ -430,27 +427,18 @@ async fn finish_turn_disabled_does_not_persist() {
 /// functional gating is what matters for the demo's data-integrity concern.
 #[tokio::test]
 async fn finish_turn_persists_via_detached_task() {
-    let (addr, state) = mock_daemon::spawn().await;
-    let base_url = format!("http://{addr}");
+    let (_addr, memory, state) = mock_daemon::spawn().await;
+    let socket = memory.socket();
     let tmp = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir(tmp.path().join(".git")).expect("mkdir .git");
 
     let client = test_client();
     let cfg = test_persona_cfg();
-    let ctx = build_turn_context(tmp.path(), None, 12, true, &base_url).await;
+    let ctx = build_turn_context(tmp.path(), None, 12, true, socket).await;
     let raw = "Here you go.\n\n[[task: feat-x]]".to_string();
-    let out = finish_turn(
-        tmp.path(),
-        "izzie",
-        &client,
-        &cfg,
-        "hi",
-        raw,
-        &ctx,
-        &base_url,
-    )
-    .await
-    .expect("finish_turn must not error");
+    let out = finish_turn(tmp.path(), "izzie", &client, &cfg, "hi", raw, &ctx, socket)
+        .await
+        .expect("finish_turn must not error");
     assert_eq!(out, "Here you go.");
 
     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -487,8 +475,9 @@ async fn finish_turn_persists_via_detached_task() {
 /// Test: this IS the test.
 #[tokio::test]
 async fn maybe_summarize_workstream_emits_exactly_one_compression_event() {
-    let (addr, state) = mock_daemon::spawn().await;
-    let base_url = format!("http://{addr}");
+    let (addr, memory, state) = mock_daemon::spawn().await;
+    let chat_base = format!("http://{addr}");
+    let socket = memory.socket();
     state.seed_drawers(
         "ws:feat-x",
         &["Did substantial work on feat-x: wired the new endpoint, added tests, updated docs."],
@@ -498,12 +487,12 @@ async fn maybe_summarize_workstream_emits_exactly_one_compression_event() {
     let tmp = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir(tmp.path().join(".git")).expect("mkdir .git");
 
-    let client = test_client_with_base(&base_url);
+    let client = test_client_with_base(&chat_base);
     let mut cfg = test_persona_cfg();
     cfg.workstreams.enabled = true;
     cfg.workstreams.summarize_every = 1;
 
-    maybe_summarize_workstream(tmp.path(), &base_url, "feat-x", &client, &cfg)
+    maybe_summarize_workstream(tmp.path(), socket, "feat-x", &client, &cfg)
         .await
         .expect("summary refresh should succeed against the mock daemon");
 
@@ -539,8 +528,9 @@ async fn maybe_summarize_workstream_emits_exactly_one_compression_event() {
 /// fail.
 #[tokio::test]
 async fn maybe_summarize_workstream_survives_unwritable_sink() {
-    let (addr, state) = mock_daemon::spawn().await;
-    let base_url = format!("http://{addr}");
+    let (addr, memory, state) = mock_daemon::spawn().await;
+    let chat_base = format!("http://{addr}");
+    let socket = memory.socket();
     state.seed_drawers(
         "ws:feat-y",
         &["Substantial progress on feat-y: schema migration landed, backfill running."],
@@ -551,12 +541,12 @@ async fn maybe_summarize_workstream_survives_unwritable_sink() {
     std::fs::create_dir(tmp.path().join(".git")).expect("mkdir .git");
     std::fs::write(tmp.path().join(".trusty-agents"), b"blocked").expect("block the sink dir");
 
-    let client = test_client_with_base(&base_url);
+    let client = test_client_with_base(&chat_base);
     let mut cfg = test_persona_cfg();
     cfg.workstreams.enabled = true;
     cfg.workstreams.summarize_every = 1;
 
-    maybe_summarize_workstream(tmp.path(), &base_url, "feat-y", &client, &cfg)
+    maybe_summarize_workstream(tmp.path(), socket, "feat-y", &client, &cfg)
         .await
         .expect("summary refresh must still succeed despite an unwritable telemetry sink");
 
@@ -605,29 +595,29 @@ fn should_refresh_summary_true_on_cadence_boundary() {
 }
 
 // -----------------------------------------------------------------
-// Minimal mock HTTP daemon covering only what `finish_turn`'s detached
-// persistence task exercises (`POST /api/v1/palaces`,
-// `POST /api/v1/palaces/{id}/drawers`) — mirrors
-// `api::server::workstreams::tests::mock_daemon` rather than reusing it
-// (private to that module/file), narrowed further since these tests never
-// need to read drawers back through the real HTTP surface — the captured
-// `MockState` is inspected directly instead.
+// Minimal mock covering what `finish_turn`'s detached persistence task and
+// `maybe_summarize_workstream` exercise. Two listeners, because the two things
+// under test no longer share a transport (#6286): trusty-memory's
+// `palace_create` / `memory.drawer_create` / `memory.drawers_list` over a Unix
+// socket, and the OpenAI-compatible `/chat/completions` over HTTP, which is a
+// third-party contract ADR-0032 does not touch. One `MockState` is shared by
+// both so a test still inspects one place.
 // -----------------------------------------------------------------
 mod mock_daemon {
-    use axum::extract::{Path as AxumPath, Query, State};
+    use crate::uds_mock::{self, MockMemoryDaemon, RpcError};
+    use axum::extract::State;
     use axum::routing::post;
     use axum::{Json, Router};
-    use std::collections::HashMap;
     use std::net::SocketAddr;
     use std::sync::{Arc, Mutex as StdMutex};
 
     #[derive(Default)]
     pub(super) struct MockState {
         tags: StdMutex<Vec<Vec<String>>>,
-        // #3867: drawers returned by the GET .../drawers listing endpoint,
-        // seeded by `seed_drawers` before a `maybe_summarize_workstream`
-        // call — separate from `tags` (which only records what got WRITTEN
-        // via `create_drawer`) since the summary test needs to seed what
+        // #3867: drawers returned by the `memory.drawers_list` listing, seeded
+        // by `seed_drawers` before a `maybe_summarize_workstream` call —
+        // separate from `tags` (which only records what got WRITTEN via
+        // `memory.drawer_create`) since the summary test needs to seed what
         // gets READ back as the pre-summary turn window.
         seeded_drawers: StdMutex<Vec<serde_json::Value>>,
         // #3867: canned assistant content the mock `/chat/completions`
@@ -673,37 +663,6 @@ mod mock_daemon {
         }
     }
 
-    async fn create_palace(Json(_body): Json<serde_json::Value>) -> Json<serde_json::Value> {
-        Json(serde_json::json!({"ok": true}))
-    }
-
-    #[derive(serde::Deserialize)]
-    struct CreateDrawerBody {
-        #[serde(default)]
-        tags: Vec<String>,
-    }
-
-    async fn create_drawer(
-        State(state): State<Arc<MockState>>,
-        AxumPath(_palace_id): AxumPath<String>,
-        Json(body): Json<CreateDrawerBody>,
-    ) -> Json<serde_json::Value> {
-        state.tags.lock().unwrap().push(body.tags);
-        Json(serde_json::json!({"ok": true}))
-    }
-
-    /// GET `/api/v1/palaces/{id}/drawers` — `workstreams::drawers_by_tag_at`'s
-    /// read path (#3867). Query params (`tag`/`sort`/`limit`) are accepted
-    /// but ignored — tests seed exactly the rows a given call needs via
-    /// `MockState::seed_drawers`, so no server-side filtering is required.
-    async fn list_drawers(
-        State(state): State<Arc<MockState>>,
-        AxumPath(_palace_id): AxumPath<String>,
-        Query(_params): Query<HashMap<String, String>>,
-    ) -> Json<Vec<serde_json::Value>> {
-        Json(state.seeded_drawers.lock().unwrap().clone())
-    }
-
     /// POST `/chat/completions` — stands in for the OpenAI-compatible
     /// endpoint `llm::chat_adapter_aware`/`create_chat_completion_lenient`
     /// hits (`OpenAIConfig::url("/chat/completions")`, matching the
@@ -728,14 +687,45 @@ mod mock_daemon {
         }))
     }
 
-    pub(super) async fn spawn() -> (SocketAddr, Arc<MockState>) {
+    /// The memory half, on a Unix socket.
+    ///
+    /// `memory.drawers_list` ignores its filters — tests seed exactly the rows
+    /// a given call needs via `MockState::seed_drawers`, so no server-side
+    /// filtering is required.
+    async fn spawn_memory(state: Arc<MockState>) -> MockMemoryDaemon {
+        uds_mock::spawn(move |method: &str, params: serde_json::Value| {
+            let state = Arc::clone(&state);
+            let method = method.to_string();
+            Box::pin(async move {
+                match method.as_str() {
+                    "palace_create" => Ok(serde_json::json!({"ok": true})),
+                    "memory.drawer_create" => {
+                        let tags: Vec<String> = params["tags"]
+                            .as_array()
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|v| v.as_str().map(str::to_string))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        state.tags.lock().unwrap().push(tags);
+                        Ok(serde_json::json!({"ok": true}))
+                    }
+                    "memory.drawers_list" => Ok(serde_json::Value::Array(
+                        state.seeded_drawers.lock().unwrap().clone(),
+                    )),
+                    other => Err(RpcError::method_not_found(other, &[])),
+                }
+            })
+        })
+        .await
+    }
+
+    pub(super) async fn spawn() -> (SocketAddr, MockMemoryDaemon, Arc<MockState>) {
         let state = Arc::new(MockState::default());
+        let memory = spawn_memory(Arc::clone(&state)).await;
+
         let app = Router::new()
-            .route("/api/v1/palaces", post(create_palace))
-            .route(
-                "/api/v1/palaces/{id}/drawers",
-                post(create_drawer).get(list_drawers),
-            )
             .route("/chat/completions", post(chat_completions))
             .with_state(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -744,6 +734,6 @@ mod mock_daemon {
             axum::serve(listener, app).await.unwrap();
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        (addr, state)
+        (addr, memory, state)
     }
 }

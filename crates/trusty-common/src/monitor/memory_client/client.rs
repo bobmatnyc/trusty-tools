@@ -1,96 +1,99 @@
-//! Typed HTTP client for the trusty-memory daemon.
+//! Typed client for the trusty-memory daemon, over its Unix socket.
 //!
-//! Why: the dashboard polls trusty-memory every refresh tick; a reusable client
-//! keeps the probe cheap and the call sites tidy.
-//! What: [`MemoryClient`] wraps a base URL and a pooled `reqwest::Client`; a
-//! `fetch_all` helper folds the status and palace calls into [`MemoryData`].
-//! Test: `cargo test -p trusty-common --features monitor-tui` covers URL
-//! resolution and base-URL storage; live endpoints are covered by the
-//! trusty-memory daemon's own suite.
+//! Why: the dashboard polls trusty-memory every refresh tick. Until #6286 it
+//! did so with its own pooled `reqwest::Client` against `/api/v1/*` — a second
+//! independent client that [`crate::memory_rpc`]'s module doc named and
+//! explicitly declined to reuse. Those routes are gone, so the choice is no
+//! longer between two clients but between one and a new one.
+//! What: [`MemoryClient`] holds a socket path and a per-call budget; every
+//! method is one [`crate::memory_rpc::call_memory_tool_at_with_timeout`] plus
+//! the projection that used to run on the HTTP body. `fetch_all` folds the
+//! status and palace calls into [`MemoryData`].
+//! Test: `cargo test -p trusty-common --features monitor-tui` — see `tests.rs`.
 
-use std::time::Duration;
+use std::path::{Path, PathBuf};
 
+use serde_json::{Value, json};
+
+use crate::memory_rpc::call_memory_tool_at_with_timeout;
 use crate::monitor::dashboard::{MemoryData, PalaceRow};
 
 use super::parsers::{
     parse_drawers, parse_dream_stats, parse_memory_details, parse_memory_event,
-    parse_palace_detail, parse_palaces, parse_recall_hits,
+    parse_palace_detail, parse_recall_hits,
 };
 use super::types::{DrawerInfo, DreamStats, MemoryDetail, MemoryEvent, REQUEST_TIMEOUT, RecallHit};
 
-/// Typed HTTP client for the trusty-memory daemon.
+/// How many activity rows one [`MemoryClient::recent_events`] poll reads.
 ///
-/// Why: the dashboard polls trusty-memory every refresh tick; a reusable client
-/// keeps the probe cheap and the call sites tidy.
-/// What: holds a mutable base URL plus a shared `reqwest::Client`; exposes the
-/// read endpoints the memory panel renders.
-/// Test: `memory_client_stores_base_url`.
+/// Why: the retired `/sse` stream pushed each event as it happened, so the TUI
+/// never had to bound anything. Polling does, and the bound has to exceed what
+/// the daemon can produce between two ticks or events are dropped silently.
+/// 100 rows against a 2-second tick is far past any observed rate.
+const EVENT_PAGE: usize = 100;
+
+/// Typed client for the trusty-memory daemon.
+///
+/// Why: the dashboard polls trusty-memory every refresh tick; keeping the
+/// socket path and the budget together keeps the call sites tidy.
+/// What: holds a mutable socket path plus the per-call timeout; exposes the
+/// read methods the memory panel renders. Cloning is cheap — there is no
+/// connection pool to share, because each call dials, exchanges one frame pair,
+/// and closes.
+/// Test: `memory_client_stores_its_socket`.
 #[derive(Debug, Clone)]
 pub struct MemoryClient {
-    pub(super) base: String,
-    http: reqwest::Client,
+    pub(super) socket: PathBuf,
 }
 
 impl MemoryClient {
-    /// Build a client targeting `base` (e.g. `http://127.0.0.1:7070`).
+    /// Build a client dialling `socket`.
     ///
-    /// Why: the dashboard is pointed at an address resolved from the lock file.
-    /// What: stores the base URL and a pooled `reqwest::Client` with a request
-    /// timeout.
-    /// Test: `memory_client_stores_base_url`.
-    pub fn new(base: impl Into<String>) -> Self {
-        // #4392: the daemon answers on loopback, so the client must not honour
-        // an exported HTTP_PROXY.
-        let http = crate::http_client::loopback_client_builder()
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .unwrap_or_default();
+    /// Test: `memory_client_stores_its_socket`.
+    pub fn new(socket: impl Into<PathBuf>) -> Self {
         Self {
-            base: base.into(),
-            http,
+            socket: socket.into(),
         }
     }
 
-    /// The base URL this client targets.
+    /// The socket this client dials.
     ///
-    /// Why: the dashboard renders the daemon address and re-resolution compares
-    /// against the current target.
-    /// What: returns the stored base URL.
-    /// Test: `memory_client_stores_base_url`.
-    pub fn base_url(&self) -> &str {
-        &self.base
+    /// Test: `memory_client_stores_its_socket`.
+    pub fn socket(&self) -> &Path {
+        &self.socket
     }
 
-    /// Re-point this client at a freshly resolved daemon URL.
+    /// Re-point this client at a freshly resolved socket.
     ///
-    /// Why: trusty-memory rebinds a fresh dynamic port on every restart, so a
-    /// long-lived dashboard must follow it.
-    /// What: overwrites the base URL, keeping the pooled client.
+    /// Why: the path is derived rather than published since #6286, so it does
+    /// not change under a running dashboard the way a dynamic port did. The
+    /// setter stays because a `TRUSTY_DATA_DIR_OVERRIDE` or
+    /// `TRUSTY_MEMORY_SOCKET` change between ticks still moves it, and the
+    /// poller re-resolves each time.
     /// Test: `memory_client_repoints`.
-    pub fn set_base_url(&mut self, base: impl Into<String>) {
-        self.base = base.into();
+    pub fn set_socket(&mut self, socket: impl Into<PathBuf>) {
+        self.socket = socket.into();
+    }
+
+    /// One RPC call on this client's socket, bounded by [`REQUEST_TIMEOUT`].
+    async fn call(&self, method: &str, params: serde_json::Value) -> anyhow::Result<Value> {
+        call_memory_tool_at_with_timeout(&self.socket, method, params, REQUEST_TIMEOUT).await
     }
 
     /// Fetch every panel field from the trusty-memory daemon.
     ///
     /// Why: the dashboard wants one fallible call that yields a complete
     /// [`MemoryData`] or an error it can render as the offline state.
-    /// What: GETs `/api/v1/status`, then `/api/v1/palaces`, folding both into
-    /// [`MemoryData`]. A failed palace-list probe yields an empty list rather
-    /// than failing the whole poll, since the aggregate counts still render.
+    /// What: calls `memory.status`, then [`Self::palaces`], folding both into
+    /// [`MemoryData`]. A failed palace probe yields an empty list rather than
+    /// failing the whole poll, since the aggregate counts still render.
     /// Test: live behaviour is covered by the trusty-memory daemon suite; the
     /// dashboard's offline path is unit-tested in `dashboard.rs`.
     pub async fn fetch_all(&self) -> anyhow::Result<MemoryData> {
         use super::types::StatusWire;
 
-        let status: StatusWire = self
-            .http
-            .get(format!("{}/api/v1/status", self.base))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        let raw = self.call("memory.status", json!({})).await?;
+        let status: StatusWire = serde_json::from_value(raw)?;
 
         let palaces = match self.palaces().await {
             Ok(rows) => rows,
@@ -113,255 +116,242 @@ impl MemoryClient {
     /// Probe whether the trusty-memory daemon is reachable.
     ///
     /// Why: the memory panel shows an offline badge when the daemon is down;
-    /// the cheap `/health` probe decides reachability before the heavier
+    /// the cheap `memory.health` call decides reachability before the heavier
     /// status calls run.
-    /// What: GETs `/health`, returns `true` on any 2xx response.
+    /// What: one `memory.health` call; any error is `false`.
     /// Test: covered by the trusty-memory daemon suite.
     pub async fn is_healthy(&self) -> bool {
-        matches!(
-            self.http.get(format!("{}/health", self.base)).send().await,
-            Ok(r) if r.status().is_success()
-        )
+        self.call("memory.health", json!({})).await.is_ok()
     }
 
-    /// Fetch the palace list from `GET /api/v1/palaces`.
+    /// Fetch the palace list with live counts.
     ///
-    /// Why: the memory panel renders one row per palace with its vector count.
-    /// What: GETs the palace list and projects each entry to a [`PalaceRow`].
-    /// The endpoint may return either a bare array or an object with a
-    /// `palaces` field; both shapes are accepted.
-    /// Test: `palace_list_accepts_array_and_object_shapes`.
+    /// Why (#6286): the retired `GET /api/v1/palaces` returned one row per
+    /// palace WITH its counts, and the first pass at this migration had nothing
+    /// on the socket that did — `palace_list` answers bare ids and
+    /// `memory.palace_get` answers one palace — so it fanned out one
+    /// `palace_get` per id. That fan-out then dropped a palace whose call
+    /// failed at `debug!`, which is how the panel could show "12 palaces" over
+    /// nine rows with nothing saying why.
+    ///
+    /// `memory.palaces_list` is the one call that answers what the fan-out was
+    /// assembling: the same opens, one round trip instead of N, and a row that
+    /// carries its own failure. A palace that could not be read is now a row
+    /// saying so rather than a silent omission.
+    ///
+    /// What: one `memory.palaces_list` call; every row's `palace` object goes
+    /// through [`parse_palace_detail`], and a row carrying `error` becomes a
+    /// [`PalaceRow`] marked [`PalaceRow::counts_unknown`] with the daemon's
+    /// reason on it. A row that is neither is a warn and a skip — the only
+    /// remaining drop, and it means the daemon answered a shape this client
+    /// does not know.
+    /// Test: `palaces_project_a_failed_row_rather_than_dropping_it`,
+    /// `palaces_project_a_readable_row`.
     async fn palaces(&self) -> anyhow::Result<Vec<PalaceRow>> {
-        let raw: serde_json::Value = self
-            .http
-            .get(format!("{}/api/v1/palaces", self.base))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        Ok(parse_palaces(&raw))
+        let listed = self.call("memory.palaces_list", json!({})).await?;
+        Ok(project_palaces(&listed))
     }
 
-    /// Fetch one palace's live counts from `GET /api/v1/palaces/{id}`.
+    /// Fetch one palace's live counts.
     ///
-    /// Why (issue #4682): the bulk list route builds rows from
-    /// `PalaceRegistry::peek` since #4640, so an unresident palace comes back
-    /// with `cached: false` and placeholder zeros. Any caller that wants real
-    /// counts for ONE palace must ask this route, which opens it (~0.15 s
-    /// measured against a live daemon); filtering the bulk list instead makes
-    /// the answer depend on LRU residency.
-    /// What: GETs the single-palace route and projects the response with
-    /// [`parse_palace_detail`]. A 404 or any other non-2xx yields an error; a
-    /// 2xx body that is not a palace object yields an error rather than a row
-    /// of silent zeros.
-    /// Test: `fetch_palace_url_is_the_single_palace_route`; live behaviour is
-    /// covered by the trusty-memory daemon suite.
+    /// Why (#4682): the counts have to be measurements, not the placeholder
+    /// zeros a peek-based listing reports for an unresident palace.
+    /// What: `memory.palace_get`, projected by [`parse_palace_detail`]. A body
+    /// that is not a palace object is an error rather than a row of silent
+    /// zeros.
+    /// Test: live behaviour is covered by the trusty-memory daemon suite.
     pub async fn fetch_palace(&self, palace_id: &str) -> anyhow::Result<PalaceRow> {
-        let raw: serde_json::Value = self
-            .http
-            .get(self.palace_url(palace_id))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
+        let raw = self
+            .call("memory.palace_get", json!({ "palace_id": palace_id }))
             .await?;
         parse_palace_detail(&raw)
             .ok_or_else(|| anyhow::anyhow!("unexpected palace payload for '{palace_id}'"))
     }
 
-    /// Build the `GET /api/v1/palaces/{id}` URL for `palace_id`.
-    ///
-    /// Why: keeps the percent-encoding decision in one place and lets the URL
-    /// be asserted without a daemon.
-    /// What: joins the base URL with the single-palace route.
-    /// Test: `fetch_palace_url_is_the_single_palace_route`.
-    pub(super) fn palace_url(&self, palace_id: &str) -> String {
-        format!("{}/api/v1/palaces/{}", self.base, palace_id)
-    }
-
-    /// Recall memories matching `query` from `GET /api/v1/recall`.
+    /// Recall memories matching `query` across every palace.
     ///
     /// Why: the memory TUI's input bar runs a cross-palace recall and folds the
     /// hits into the activity log; this is the transport for that action.
-    /// What: GETs `/api/v1/recall?q=<query>&top_k=<top_k>`, then projects each
-    /// result object into a [`RecallHit`]. A non-2xx response or malformed
-    /// payload yields an error.
-    /// Test: live behaviour is covered by the trusty-memory daemon suite; the
-    /// projection is unit-tested via `parse_recall_hits`.
+    /// What: `memory_recall_all`, whose `results` array [`parse_recall_hits`]
+    /// projects. The retired `GET /api/v1/recall` answered the array bare; the
+    /// tool wraps it alongside the echoed query.
+    /// Test: the projection is unit-tested via `parse_recall_hits`.
     pub async fn recall(&self, query: &str, top_k: usize) -> anyhow::Result<Vec<RecallHit>> {
-        let raw: serde_json::Value = self
-            .http
-            .get(format!("{}/api/v1/recall", self.base))
-            .query(&[("q", query), ("top_k", &top_k.to_string())])
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
+        let raw = self
+            .call("memory_recall_all", json!({ "q": query, "top_k": top_k }))
             .await?;
-        Ok(parse_recall_hits(&raw))
+        Ok(parse_recall_hits(
+            raw.get("results").unwrap_or(&Value::Null),
+        ))
     }
 
     /// List drawers in `palace_id`, newest first, with offset pagination.
     ///
     /// Why: the TUI activity panel (#184) shows a paged drawer list for the
-    /// selected palace. The daemon's `/api/v1/palaces/{id}/drawers` endpoint
-    /// (extended in the same change-set) supports `sort=created_desc` and an
-    /// `offset` so the panel can walk through arbitrarily many drawers
-    /// without re-sorting on the client.
-    /// What: GETs `…/drawers?limit=<limit>&offset=<offset>&sort=created_desc`
-    /// and projects each entry into a [`DrawerInfo`] via [`parse_drawers`]. A
-    /// non-2xx response yields an error; an empty body yields an empty list.
-    /// Test: live behaviour covered by the trusty-memory daemon suite; the
-    /// projection is unit-tested via [`parse_drawers`].
+    /// selected palace.
+    /// What: `memory.drawers_list` with the same `limit` / `offset` /
+    /// `sort=created_desc` the query string carried, projected by
+    /// [`parse_drawers`].
+    /// Test: the projection is unit-tested via [`parse_drawers`].
     pub async fn list_drawers(
         &self,
         palace_id: &str,
         limit: usize,
         offset: usize,
     ) -> anyhow::Result<Vec<DrawerInfo>> {
-        let raw: serde_json::Value = self
-            .http
-            .get(format!(
-                "{}/api/v1/palaces/{}/drawers",
-                self.base, palace_id,
-            ))
-            .query(&[
-                ("limit", limit.to_string()),
-                ("offset", offset.to_string()),
-                ("sort", "created_desc".to_string()),
-            ])
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
+        let raw = self
+            .call(
+                "memory.drawers_list",
+                json!({
+                    "palace_id": palace_id,
+                    "limit": limit,
+                    "offset": offset,
+                    "sort": "created_desc",
+                }),
+            )
             .await?;
         Ok(parse_drawers(&raw))
     }
 
-    /// Fetch a single drawer's full content / tags by id (issue #215).
+    /// Fetch drawers with their full bodies for the detail modal (#215).
     ///
-    /// Why: the TUI drawer-detail modal needs the verbatim drawer body —
-    /// the activity panel only carries the snippet. Each drawer in
-    /// trusty-memory is itself the "memory" unit, so "detail" means
-    /// fetching the same drawer payload the list endpoint returns but
-    /// projected to the fields the modal renders. The endpoint reuses
-    /// the existing `/api/v1/palaces/{id}/drawers` route — there is no
-    /// dedicated single-drawer GET — and we filter the result client-side
-    /// to the requested `drawer_id` so the wire shape stays stable.
-    /// What: GETs `…/drawers?limit=<limit>&sort=created_desc`, then projects
-    /// each entry into a [`MemoryDetail`]. The caller is expected to pass
-    /// a reasonable `limit` (e.g. 50). Returns the full list — the caller
-    /// can find the row they want by id, or render them all if the modal
-    /// scrolls through every memory in the drawer's neighborhood. A
-    /// non-2xx response yields an error; an unrecognised body yields an
-    /// empty list.
-    /// Test: live behaviour covered by the trusty-memory daemon suite; the
-    /// projection is unit-tested via [`parse_memory_details`].
+    /// Why: the activity panel's row carries a truncated snippet; the modal that
+    /// opens on `Enter` needs the verbatim body.
+    /// What: the same `memory.drawers_list` call, projected by
+    /// [`parse_memory_details`] instead. There is no single-drawer read, so the
+    /// caller passes a reasonable `limit` and finds its row by id.
+    /// Test: the projection is unit-tested via [`parse_memory_details`].
     pub async fn fetch_drawer_detail(
         &self,
         palace_id: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<MemoryDetail>> {
-        let raw: serde_json::Value = self
-            .http
-            .get(format!(
-                "{}/api/v1/palaces/{}/drawers",
-                self.base, palace_id,
-            ))
-            .query(&[
-                ("limit", limit.to_string()),
-                ("sort", "created_desc".to_string()),
-            ])
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
+        let raw = self
+            .call(
+                "memory.drawers_list",
+                json!({
+                    "palace_id": palace_id,
+                    "limit": limit,
+                    "sort": "created_desc",
+                }),
+            )
             .await?;
         Ok(parse_memory_details(&raw))
     }
 
-    /// Trigger a dream cycle via `POST /api/v1/dream/run`.
+    /// Trigger a dream cycle across every palace.
     ///
     /// Why: the memory TUI's `[d]` key runs a dream cycle (merge / prune /
-    /// compact) across every palace and shows the resulting counts.
-    /// What: POSTs an empty body to `/api/v1/dream/run` and projects the
-    /// response into a [`DreamStats`]. A non-2xx response yields an error.
-    /// Test: live behaviour is covered by the trusty-memory daemon suite; the
-    /// projection is unit-tested via `parse_dream_stats`.
+    /// compact) and shows the resulting counts.
+    /// What: `memory.dream_run`, projected by [`parse_dream_stats`].
+    /// Test: the projection is unit-tested via `parse_dream_stats`.
     pub async fn dream_run(&self) -> anyhow::Result<DreamStats> {
-        let raw: serde_json::Value = self
-            .http
-            .post(format!("{}/api/v1/dream/run", self.base))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        let raw = self.call("memory.dream_run", json!({})).await?;
         Ok(parse_dream_stats(&raw))
     }
 
-    /// Subscribe to the daemon's `/sse` stream and forward events into `tx`.
+    /// Read activity rows newer than `after_id` (#6286).
     ///
-    /// Why: the memory TUI subscribes once at startup so palace / drawer /
-    /// dream events appear in the activity log without polling; the background
-    /// task drives this while the synchronous event loop drains `tx`.
-    /// What: GETs `/sse`, parses each `data:` frame's `type`-tagged JSON into a
-    /// [`MemoryEvent`], and sends each through `tx`. Returns quietly when the
-    /// stream ends, the receiver is dropped, or a transport error occurs — the
-    /// caller treats SSE as best-effort and keeps polling regardless.
-    /// Test: event parsing is unit-tested via `parse_memory_event`.
-    pub async fn sse_stream(&self, tx: tokio::sync::mpsc::Sender<MemoryEvent>) {
-        let _ = self.sse_stream_inner(&tx).await;
+    /// Why: this replaces the `/sse` subscription. That stream's only
+    /// subscribers were trusty-memory's own SPA and this client, and ADR-0032
+    /// left no HTTP listener to carry it — so the TUI polls the same events out
+    /// of the activity log the stream was fed from.
+    ///
+    /// **The push-to-poll swap is a behaviour change, not a transport swap.**
+    /// An event now appears on the next tick rather than immediately, and an
+    /// event evicted from the activity log between two ticks is never seen. The
+    /// [`EVENT_PAGE`] window is what bounds the second case.
+    ///
+    /// What: `memory.activity` for the newest [`EVENT_PAGE`] rows, keeps those
+    /// with an id above `after_id`, reverses them into chronological order, and
+    /// maps each row's `payload` through [`parse_memory_event`] — which is the
+    /// same `type`-tagged `DaemonEvent` body the SSE frames carried. Returns the
+    /// highest id seen so the caller can advance its cursor.
+    /// Test: `recent_events_keeps_only_rows_past_the_cursor`.
+    pub async fn recent_events(&self, after_id: u64) -> anyhow::Result<(u64, Vec<MemoryEvent>)> {
+        let raw = self
+            .call("memory.activity", json!({ "limit": EVENT_PAGE }))
+            .await?;
+        Ok(project_events(&raw, after_id))
     }
+}
 
-    /// Inner body of [`Self::sse_stream`] returning a `Result` for `?`.
-    ///
-    /// Why: keeps the public method's best-effort error swallowing in one
-    /// place while the happy path uses `?`.
-    /// What: opens the SSE stream and forwards parsed [`MemoryEvent`]s; returns
-    /// the first transport error.
-    /// Test: covered indirectly by `sse_stream` and the daemon suite.
-    async fn sse_stream_inner(
-        &self,
-        tx: &tokio::sync::mpsc::Sender<MemoryEvent>,
-    ) -> anyhow::Result<()> {
-        use futures_util::StreamExt;
-
-        // SSE is long-lived — bound only the connect phase, not the read.
-        // #4392: loopback target, so proxies stay off here too.
-        let sse = crate::http_client::loopback_client_builder()
-            .connect_timeout(Duration::from_secs(5))
-            .build()?;
-        let resp = sse
-            .get(format!("{}/sse", self.base))
-            .send()
-            .await?
-            .error_for_status()?;
-
-        let mut bytes = resp.bytes_stream();
-        let mut buf = String::new();
-        while let Some(chunk) = bytes.next().await {
-            let chunk = chunk?;
-            buf.push_str(&String::from_utf8_lossy(&chunk));
-            while let Some(nl) = buf.find('\n') {
-                let line = buf[..nl].trim_end_matches('\r').to_string();
-                buf.drain(..=nl);
-                let Some(payload) = line.strip_prefix("data:") else {
-                    continue;
-                };
-                let payload = payload.trim();
-                if payload.is_empty() {
-                    continue;
-                }
-                if let Ok(value) = serde_json::from_str::<serde_json::Value>(payload)
-                    && let Some(event) = parse_memory_event(&value)
-                    && tx.send(event).await.is_err()
-                {
-                    return Ok(()); // receiver gone — stop quietly.
-                }
-            }
+/// [`MemoryClient::palaces`]' body, over an already-fetched roster.
+///
+/// Why: separated so the failed-row projection is testable without a daemon.
+/// It is the half that silently lost palaces before #6286, and a projection
+/// that quietly dropped a row again would be invisible in exactly the same way.
+/// Test: `palaces_project_a_readable_row`,
+/// `palaces_project_a_failed_row_rather_than_dropping_it`.
+pub(super) fn project_palaces(raw: &Value) -> Vec<PalaceRow> {
+    let Some(rows) = raw.get("palaces").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id = row
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if let Some(detail) = row.get("palace").and_then(parse_palace_detail) {
+            out.push(detail);
+            continue;
         }
-        Ok(())
+        if let Some(error) = row.get("error").and_then(Value::as_str) {
+            // A row the daemon could not read is rendered, not dropped: the
+            // panel's palace count and its row count have to agree, and a
+            // reader has to be able to see which palace is missing its numbers.
+            tracing::warn!(palace = %id, "palace counts unavailable: {error}");
+            out.push(PalaceRow {
+                id: id.clone(),
+                name: id,
+                vector_count: 0,
+                drawer_count: 0,
+                last_write_at: None,
+                description: Some(error.to_string()),
+                kg_triple_count: 0,
+                node_count: 0,
+                edge_count: 0,
+                community_count: 0,
+                is_compacting: false,
+                // #4682's rule: zero here means unknown, never empty.
+                counts_unknown: true,
+            });
+            continue;
+        }
+        tracing::warn!(palace = %id, "palace row carried neither counts nor a reason");
     }
+    out
+}
+
+/// [`MemoryClient::recent_events`]' body, over an already-fetched page.
+///
+/// Why: separated so the cursor arithmetic and the ordering are testable
+/// without a daemon — the only part of the SSE replacement that can be wrong
+/// silently.
+/// Test: `recent_events_keeps_only_rows_past_the_cursor`.
+pub(super) fn project_events(raw: &Value, after_id: u64) -> (u64, Vec<MemoryEvent>) {
+    let Some(entries) = raw.get("entries").and_then(|v| v.as_array()) else {
+        return (after_id, Vec::new());
+    };
+    let mut highest = after_id;
+    let mut events = Vec::new();
+    // The daemon answers newest-first; the log renders oldest-first.
+    for entry in entries.iter().rev() {
+        let id = entry
+            .get("id")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        if id <= after_id {
+            continue;
+        }
+        highest = highest.max(id);
+        if let Some(payload) = entry.get("payload")
+            && let Some(event) = parse_memory_event(payload)
+        {
+            events.push(event);
+        }
+    }
+    (highest, events)
 }
