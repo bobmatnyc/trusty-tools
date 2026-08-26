@@ -33,6 +33,9 @@ pub mod aliases;
 pub mod azdo;
 // #5770: hand-written `Debug` for every config section holding a credential.
 mod credential_debug;
+// #5775: hand-written `Serialize` for the same sections — the derived one wrote
+// the same credentials to disk rather than to a log.
+mod credential_serialize;
 pub mod database_path;
 pub mod validator;
 
@@ -497,7 +500,9 @@ pub struct OutputConfig {
 // #5770: `Debug` is hand-written in `credential_debug`, not derived — the
 // derived one printed `openrouter_api_key` in the clear, and `Config` embeds
 // this section while deriving `Debug`.
-#[derive(Clone, Serialize, Deserialize)]
+// #5775: `Serialize` is hand-written in `credential_serialize` for the same
+// field, which `Config` likewise wrote out in the clear.
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClassificationConfig {
     /// Supplemental rule files to load and merge in order (#445 batch C).
@@ -837,7 +842,9 @@ impl Default for ReachabilityConfig {
 /// Linear project management integration settings.
 // #5770: `Debug` is hand-written in `credential_debug`, not derived — the
 // derived one printed `api_key` in the clear.
-#[derive(Clone, Default, Serialize, Deserialize)]
+// #5775: `Serialize` is hand-written in `credential_serialize` for the same
+// field.
+#[derive(Clone, Default, Deserialize)]
 pub struct LinearConfig {
     /// Linear API key (personal or workspace).
     ///
@@ -1019,7 +1026,9 @@ fn default_failure_window_hours() -> u32 {
 /// with `..Default::default()`.
 // #5770: `Debug` is hand-written in `credential_debug`, not derived — the
 // derived one printed `token` in the clear.
-#[derive(Clone, Default, Serialize, Deserialize)]
+// #5775: `Serialize` is hand-written in `credential_serialize` for the same
+// field.
+#[derive(Clone, Default, Deserialize)]
 #[non_exhaustive]
 pub struct GithubConfig {
     /// Personal access token (often sourced from `GITHUB_TOKEN`).
@@ -1173,7 +1182,8 @@ fn default_review_fetch_concurrency() -> u32 {
 /// either source as satisfying the requirement.
 // #5770: `Debug` is hand-written in `credential_debug`, not derived — the
 // derived one printed `app_password` and `token` in the clear.
-#[derive(Clone, Default, Serialize, Deserialize)]
+// #5775: `Serialize` is hand-written in `credential_serialize` for both fields.
+#[derive(Clone, Default, Deserialize)]
 pub struct BitbucketConfig {
     /// Bitbucket account / workspace member username (required for Basic auth).
     #[serde(default)]
@@ -1221,7 +1231,9 @@ pub struct BitbucketConfig {
 /// reasoning as [`GithubConfig`].
 // #5770: `Debug` is hand-written in `credential_debug`, not derived — the
 // derived one printed `token` in the clear.
-#[derive(Clone, Default, Serialize, Deserialize)]
+// #5775: `Serialize` is hand-written in `credential_serialize` for the same
+// field.
+#[derive(Clone, Default, Deserialize)]
 #[non_exhaustive]
 pub struct JiraConfig {
     /// Base URL of the JIRA instance.

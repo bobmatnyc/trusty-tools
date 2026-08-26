@@ -18,7 +18,7 @@
 //! Lives under `pm.azure_devops` in YAML (clean namespace; avoids the
 //! `jira` / `jira_integration` dual-stack of the Python predecessor).
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::core::errors::TgaError;
 
@@ -28,7 +28,9 @@ use crate::core::errors::TgaError;
 /// rejects non-cloud URLs at load time. Phase 2 will add OAuth and work-item fetching.
 // #5770: `Debug` is hand-written in `super::credential_debug`, not derived —
 // the derived one printed `pat` in the clear.
-#[derive(Clone, Serialize, Deserialize)]
+// #5775: `Serialize` is hand-written in `super::credential_serialize` for the
+// same field.
+#[derive(Clone, Deserialize)]
 pub struct AzureDevOpsConfig {
     /// Azure DevOps organisation URL. Must be `https://dev.azure.com/{org}` or
     /// `https://{org}.visualstudio.com`. On-prem TFS/ADO Server URLs are rejected.

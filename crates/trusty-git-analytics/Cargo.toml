@@ -26,7 +26,12 @@ name = "tga"
 # the `tga` binary; trusty-audit resolves it by version at runtime, not through
 # a Cargo edge), so the gate has nobody to protect here. The exception is
 # recorded as a `tga` row in scripts/semver-checks-crate-exclusions.tsv.
-version = "4.0.0"
+#
+# 4.0.0 → 4.0.1 (#5775): six config credentials stop serializing in the clear.
+# PATCH — the derives change but the API surface does not: the same six structs
+# still implement `Serialize` over the same fields, with the same names and the
+# same types. What changes is the value written for a credential.
+version = "4.0.1"
 publish = true
 edition = "2021"
 # Aligned with the workspace MSRV (1.94) per #254. Required for
