@@ -19,7 +19,7 @@
 //!      (`GET /api/v1/palaces/{slug}/kg/all?limit=200`).
 //!
 //! Failures on any branch are isolated — each fetch is bounded by
-//! `HTTP_TIMEOUT` and individual errors are skipped without failing the
+//! `CALL_TIMEOUT` and individual errors are skipped without failing the
 //! hook. When every section is empty the command prints **nothing** (#5819):
 //! this runs on every prompt of every session, so an injection that has no
 //! content to carry must cost no tokens to say so.
@@ -66,18 +66,9 @@ use trusty_common::memory_core::retrieval::DEFAULT_RELEVANCE_FLOOR;
 
 pub use query::ENV_QUERY_TOKEN_BUDGET;
 
-/// HTTP path for the global hot-facts block.
-pub(super) const PROMPT_CONTEXT_PATH: &str = "/api/v1/kg/prompt-context";
-
-/// HTTP path template for per-palace recall. Substitute `{slug}`.
-pub(super) const PALACE_RECALL_PATH: &str = "/api/v1/palaces/{slug}/recall";
-
-/// HTTP path template for per-palace KG list. Substitute `{slug}`.
-pub(super) const PALACE_KG_ALL_PATH: &str = "/api/v1/palaces/{slug}/kg/all";
-
 /// Connect + total request timeout. Kept short so a slow/dead daemon can
 /// never block a Claude Code prompt for more than a couple seconds.
-pub(super) const HTTP_TIMEOUT: Duration = Duration::from_millis(2500);
+pub(super) const CALL_TIMEOUT: Duration = Duration::from_millis(2500);
 
 /// Deadline for reading the `UserPromptSubmit` stdin payload (issue #2043).
 ///
@@ -106,7 +97,7 @@ const STDIN_READ_DEADLINE: Duration = Duration::from_millis(300);
 /// own beyond the sum of individual HTTP timeouts — the global fetch was
 /// awaited sequentially before the per-palace `tokio::join!`, so a
 /// degraded (not dead — dead fails fast) daemon could burn close to
-/// 2× [`HTTP_TIMEOUT`] before compose even started. This deadline is the
+/// 2× [`CALL_TIMEOUT`] before compose even started. This deadline is the
 /// hard backstop: if fetching + composing is not done in time, the hook
 /// fails open with whatever body it has (empty, if nothing finished).
 /// What: passed to [`tokio::time::timeout`] around `build_injection_body`
@@ -258,7 +249,7 @@ pub(super) const EMPTY_PLACEHOLDER: &str = "No prompt facts stored yet.";
 ///   2. Resolve the palace slug from the stdin `cwd` (fall back to process
 ///      cwd).
 ///   3. Fetch the global prompt-context block + per-palace recall + per-
-///      palace KG triples (each best-effort, bounded by [`HTTP_TIMEOUT`]).
+///      palace KG triples (each best-effort, bounded by [`CALL_TIMEOUT`]).
 ///   4. Compose a single Markdown injection capped at
 ///      [`INJECTION_BYTE_CAP`] bytes and print it.
 ///   5. Log a [`PromptLogEntry`] for the hook event (failure-isolated).
@@ -424,32 +415,13 @@ pub(crate) async fn build_injection_body(trigger_payload: &str) -> String {
     let start = Instant::now();
     let user_prompt = parse_user_prompt(trigger_payload);
 
-    // 1. Discover the running daemon. Missing file → daemon not running →
-    //    return empty so the caller exits silently with no stdout output.
-    let addr = match trusty_common::read_daemon_addr("trusty-memory") {
-        Ok(Some(addr)) => addr,
-        Ok(None) | Err(_) => {
-            log_entry(trigger_payload, "", 0, start, None);
-            return String::new();
-        }
-    };
-
-    // The shared helper persists the bare `host:port`. The web daemon binds
-    // HTTP, so prepend the scheme when callers haven't already.
-    let base = if addr.starts_with("http://") || addr.starts_with("https://") {
-        addr
-    } else {
-        format!("http://{addr}")
-    };
-
-    // 2. Tightly-bounded HTTP client. Any failure → return empty silently so
-    //    the Claude Code prompt is never blocked by a degraded daemon.
-    let client = match reqwest::Client::builder()
-        .timeout(HTTP_TIMEOUT)
-        .connect_timeout(HTTP_TIMEOUT)
-        .build()
-    {
-        Ok(c) => c,
+    // 1. Resolve the daemon's socket. #6286 removed the `http_addr` discovery
+    //    file this used to read: the path is DERIVED, so an unresolvable data
+    //    directory is the only way this fails, and it means the same thing the
+    //    missing file did — nothing to call. Return empty so the caller exits
+    //    silently with no stdout output.
+    let socket = match crate::transport::uds::socket_path() {
+        Ok(socket) => socket,
         Err(_) => {
             log_entry(trigger_payload, "", 0, start, None);
             return String::new();
@@ -466,13 +438,15 @@ pub(crate) async fn build_injection_body(trigger_payload: &str) -> String {
 
     // 4. Fan out the fetches. Each is best-effort; failures are skipped.
     //
-    // Issue #2043: all three HTTP calls now race concurrently via a single
+    // Issue #2043: all three calls race concurrently via a single
     // `tokio::join!` instead of awaiting the global fetch sequentially
     // before starting the palace-scoped pair. The prior sequential shape
-    // could cost up to ~2× HTTP_TIMEOUT worst-case (global, then the
+    // could cost up to ~2× CALL_TIMEOUT worst-case (global, then the
     // slower of drawers/kg); joining all three caps the fetch phase at
-    // ~1× HTTP_TIMEOUT regardless of palace_slug.
-    let global_fut = fetch_global_prompt_context(&client, &base);
+    // ~1× CALL_TIMEOUT regardless of palace_slug. Each call opens its own
+    // connection, which is what makes the join real — the socket server
+    // spawns a task per connection.
+    let global_fut = fetch_global_prompt_context(&socket, CALL_TIMEOUT);
     let mut query_shape: Option<RecallQueryShape> = None;
     let (global_facts, drawers, withheld, kg_triples) = match &palace_slug {
         Some(slug) => {
@@ -486,8 +460,8 @@ pub(crate) async fn build_injection_body(trigger_payload: &str) -> String {
             let shaped = shape_recall_query(&user_prompt, configured_query_budget());
             warn_if_reshaped(&shaped.shape);
             query_shape = Some(shaped.shape);
-            let drawers_fut = fetch_palace_recall(&client, &base, slug, &shaped.text, top_k);
-            let kg_fut = fetch_palace_kg_triples(&client, &base, slug);
+            let drawers_fut = fetch_palace_recall(&socket, CALL_TIMEOUT, slug, &shaped.text, top_k);
+            let kg_fut = fetch_palace_kg_triples(&socket, CALL_TIMEOUT, slug);
             let (global_facts, drawers, kg_all) = tokio::join!(global_fut, drawers_fut, kg_fut);
             // Issue #139: drop low-signal drawers (e.g. `claude-session` /
             // `user-prompt` auto-captures) before composition. When this

@@ -1,244 +1,163 @@
-//! Auto-start the trusty-memory daemon when a CLI command requires it.
+//! Start the daemon when a command needs it, at most once across processes.
 //!
-//! Why: `trusty-memory monitor web` and any future human-facing commands
-//! that open the UI silently fail or emit a confusing connection error when
-//! the daemon isn't running. This guard probes `/health`; if the
-//! daemon is down it spawns a detached `<exe> serve --foreground` child and
-//! polls until ready or a 30-second budget is exhausted. Users see a single
-//! informational line and the command Just Works.
+//! Why (#6286, ADR-0032): this used to resolve a base URL out of the `http_addr`
+//! discovery file and probe `GET /health`, and `start.rs` and the stdio bridge
+//! both drove `trusty_mcp::ensure_daemon_up_single_flight` with a
+//! `DaemonBridgeConfig` carrying a `health_path` and a `base_url_fn`. That
+//! module's own docs record that it is built around a health URL, and this
+//! daemon no longer has one. trusty-analyze hit the same wall in #6287 and
+//! answered it with a local loop rather than extending the shared bridge
+//! mid-migration; this is that answer, plus the exclusion trusty-analyze did not
+//! need.
 //!
-//! What: thin shim over `trusty_common::daemon_guard` (issue #985).
-//! `ensure_daemon_running` delegates the spinner/probe/timeout loop to the
-//! shared implementation; only the trusty-memory–specific knobs (health path
-//! `/health`, spawn args, base-URL resolver) live here.
+//! What: [`probe`] is a bare connect. [`ensure_daemon_running`] adds the
+//! spawn-and-wait, serialised through [`StartLock`] so N concurrent stdio
+//! bridges converge on ONE daemon — the #5267 contract, kept intact. The lock
+//! is what makes this "ensure it exists" rather than the auto-spawn #1152
+//! removed, where every bridge started its own and they raced for redb's write
+//! lock.
 //!
-//! Test: `probe_health_returns_false_on_connection_refused`,
-//! `probe_health_returns_false_on_bad_url`, and
-//! `daemon_base_url_always_has_http_scheme` cover the shim layer;
-//! `trusty_common::daemon_guard` tests cover the shared spin loop.
+//! **The lock is held across the readiness wait deliberately.** Releasing it at
+//! spawn time reopens the race: a second caller would acquire, re-probe a daemon
+//! that has not bound yet, and start another.
 //!
-//! Note: only call this from commands that *require* the daemon (e.g.
-//! `monitor web`). Commands like `start`, `stop`, `serve`, `service`, and
-//! `setup` deliberately do not call this guard.
+//! Test: `probe_returns_false_for_an_absent_socket`,
+//! `ensure_daemon_running_returns_early_when_something_is_serving`.
 
-use anyhow::{anyhow, Result};
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+use anyhow::{anyhow, Context as _, Result};
 use colored::Colorize;
-use trusty_common::daemon_guard::{probe_once, spin_until_ready, DaemonGuardConfig};
+use trusty_mcp::StartLock;
 
-/// Build the daemon's health-probe URL for `base`.
+/// How long a liveness connect may take before the path is called dead.
 ///
-/// Why: the probe path has to agree with what the router actually registers —
-/// `GET /health` (`web::router`). Deriving it in one place keeps `probe_health`
-/// and `ensure_daemon_running` from drifting apart, which is exactly how #4635
-/// happened.
-/// What: appends the `/health` route to an already-scheme-qualified base URL.
-/// Test: `health_url_targets_the_registered_health_route`.
-// #4635: probe /health — /api/v1/health is not a registered route.
-fn health_url(base: &str) -> String {
-    format!("{base}/health")
+/// A local socket accepts or refuses in microseconds; this is headroom for a
+/// loaded machine, not a latency budget.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// How long to wait for a freshly-spawned daemon to answer.
+///
+/// Generous because a cold start hydrates every palace before it binds.
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How often to re-probe while waiting.
+const POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Is anything serving `socket`?
+///
+/// Why a bare connect rather than a `memory.health` call: the question is
+/// whether the endpoint is live. A daemon that is up but degraded — its
+/// embedder still warming, say — must not be reported absent and then spawned
+/// on top of itself.
+///
+/// Test: `probe_returns_false_for_an_absent_socket`.
+pub async fn probe(socket: &Path) -> bool {
+    trusty_common::uds::socket_is_serving(socket, PROBE_TIMEOUT).await
 }
 
-/// Probe `GET {base}/health`. Returns `true` on any 2xx response.
+/// Spawn the daemon detached, returning the child PID.
 ///
-/// Why: trusty-memory's health endpoint lives at `/health` — callers must use
-/// this helper rather than constructing the URL themselves.
-/// What: delegates to `trusty_common::daemon_guard::probe_once`.
-/// Test: `probe_health_succeeds_against_the_registered_health_route`,
-/// `probe_health_returns_false_on_connection_refused`,
-/// `probe_health_returns_false_on_bad_url`.
-pub async fn probe_health(base: &str) -> bool {
-    probe_once(&health_url(base)).await
-}
-
-/// Spawn `<this exe> serve --foreground` as a detached background process.
-///
-/// Why: we want the daemon to outlive this CLI invocation. `--foreground`
-/// prevents recursive self-spawning. Stdio is fully null-ed so the daemon
-/// survives terminal close / SIGHUP.
-/// What: delegates to `trusty_common::daemon_guard::spawn_current_exe`.
-/// Test: covered indirectly by `ensure_daemon_running` live test path.
+/// `--foreground` is what stops the child self-spawning again; no `--http` is
+/// passed, and there is nothing for it to mean since #6286. Stdio is null-ed so
+/// the daemon survives a terminal close.
 fn spawn_daemon() -> Result<u32> {
     trusty_common::daemon_guard::spawn_current_exe(&["serve", "--foreground"])
         .map_err(|e| anyhow!("trusty-memory daemon spawn failed: {e}"))
 }
 
-/// Resolve the trusty-memory daemon's base URL from the address-discovery file.
+/// Ensure something is serving `socket`, starting the daemon at most once
+/// across every process that asks.
 ///
-/// Why: trusty-memory selects a dynamic port from 7070–7079 and writes it to
-/// `{data_dir}/http_addr`. Reading that file is the canonical discovery path.
-/// What: delegates to `trusty_common::read_daemon_addr("trusty-memory")` and
-/// normalises the bare `host:port` string to a full `http://` URL; falls back
-/// to `http://127.0.0.1:7070` when no file is found.
-/// Test: `daemon_base_url_always_has_http_scheme`.
-pub fn daemon_base_url() -> String {
-    match trusty_common::read_daemon_addr("trusty-memory") {
-        Ok(Some(addr)) if !addr.is_empty() => {
-            if addr.starts_with("http://") || addr.starts_with("https://") {
-                addr
-            } else {
-                format!("http://{addr}")
-            }
-        }
-        _ => "http://127.0.0.1:7070".to_string(),
+/// What, in order: (1) probe with no lock held, so the overwhelmingly common
+/// "already up" case pays nothing and touches no filesystem; (2) on a miss,
+/// block on `lock_path`; (3) RE-probe under the lock, because whoever held it
+/// before us most likely just started the daemon and we must not start another;
+/// (4) only then spawn; (5) poll to readiness with the lock still held.
+///
+/// Fails closed: a daemon that never answers is an `Err`, never an `Ok` the
+/// caller discovers downstream as an empty result.
+///
+/// # Errors
+///
+/// When the lock cannot be taken, the spawn fails, or nothing answers inside
+/// [`STARTUP_TIMEOUT`].
+///
+/// Test: `ensure_daemon_running_returns_early_when_something_is_serving`.
+pub async fn ensure_daemon_running(socket: &Path, lock_path: &Path) -> Result<()> {
+    if probe(socket).await {
+        return Ok(());
     }
-}
 
-/// Ensure the trusty-memory daemon is running and healthy.
-///
-/// Why: `monitor web` should never tell the user "daemon not running — start
-/// it yourself". Auto-starting matches the UX in `trusty-search` and
-/// `trusty-analyze`.
-/// What: fast-path probes `/health`; on miss, spawns
-/// `<exe> serve --foreground`, then delegates the spinner/poll/timeout loop
-/// to `trusty_common::daemon_guard::spin_until_ready` (30s budget).
-/// Test: `probe_health_returns_false_on_connection_refused` covers the probe;
-/// the full auto-start path is exercised manually via
-/// `trusty-memory monitor web` with no daemon running.
-pub async fn ensure_daemon_running(base: &str) -> Result<()> {
-    if probe_health(base).await {
+    // Blocking `flock` goes on a blocking-safe thread; the guard is `Send` and
+    // is held across the awaits below on purpose.
+    let lock_path_owned = lock_path.to_path_buf();
+    let _lock = tokio::task::spawn_blocking(move || StartLock::acquire_blocking(&lock_path_owned))
+        .await
+        .context("start-lock acquisition task panicked")??;
+
+    if probe(socket).await {
         return Ok(());
     }
 
     eprintln!("{} Starting trusty-memory daemon…", "◉".cyan());
     spawn_daemon()?;
 
-    let cfg = DaemonGuardConfig {
-        // #4635: probe /health — /api/v1/health is not a registered route.
-        health_url: health_url(base),
-        service_name: "trusty-memory".to_string(),
-        startup_timeout: std::time::Duration::from_secs(30),
-        poll_interval: std::time::Duration::from_millis(500),
-        timeout_hint: "try `trusty-memory start` manually to see the error".to_string(),
-    };
-    spin_until_ready(&cfg).await
-}
-
-/// Open the trusty-memory web dashboard in the default system browser.
-///
-/// Why: operators and agents should never have to run `trusty-memory start`
-/// before `trusty-memory monitor web`. This is the single entry point for
-/// the `monitor web` subcommand, mirroring the UX in `trusty-analyze` and
-/// `trusty-search`.
-/// What: resolves the daemon base URL from the discovery file; calls
-/// `ensure_daemon_running` which probes `/health` and auto-spawns as
-/// needed; re-resolves the live URL after boot; opens `http://<addr>/ui`.
-/// Browser-open failure degrades to printing the URL.
-/// Test: `cargo run -p trusty-memory -- monitor web` with no daemon running.
-pub async fn open_web_dashboard() -> Result<()> {
-    let base = daemon_base_url();
-    ensure_daemon_running(&base).await?;
-    let live_base = daemon_base_url();
-    let url = format!("{live_base}/ui");
-    eprintln!("{} Opening {} …", "◉".green(), url.cyan());
-    if let Err(e) = open::that(&url) {
-        eprintln!(
-            "{} could not launch browser ({e}). Open this URL manually: {}",
-            "⚠".yellow(),
-            url
-        );
+    let deadline = Instant::now() + STARTUP_TIMEOUT;
+    while Instant::now() < deadline {
+        tokio::time::sleep(POLL_INTERVAL).await;
+        if probe(socket).await {
+            return Ok(());
+        }
     }
-    Ok(())
+    Err(anyhow!(
+        "trusty-memory did not start serving {} within {}s — run \
+         `trusty-memory serve --foreground` in the foreground to see the error",
+        socket.display(),
+        STARTUP_TIMEOUT.as_secs()
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, Instant};
 
-    /// Why: #4635 — the guard probed `/api/v1/health`, which `web::router` never
-    /// registers, so `monitor web` reported a healthy daemon as down. Pin the
-    /// path against the route the router actually serves.
-    /// What: asserts the probe URL is `{base}/health`.
-    /// Test: this test.
-    #[test]
-    fn health_url_targets_the_registered_health_route() {
-        assert_eq!(
-            health_url("http://127.0.0.1:7070"),
-            "http://127.0.0.1:7070/health"
-        );
-    }
-
-    /// Why: the string assertion above cannot catch a router/probe disagreement
-    /// on its own — #4635 needed a wire-level check that the path the guard
-    /// requests is the path a trusty-memory daemon answers.
-    /// What: binds a stub server that mirrors `web::router`'s health surface —
-    /// 200 on `GET /health`, 404 on everything else, including `/api/v1/health`
-    /// — then asserts `probe_health` resolves it as up. Fails against the
-    /// pre-#4635 `/api/v1/health` probe path.
-    /// Test: this test.
+    /// Why: an absent socket must not read as live — a caller that skipped the
+    /// spawn would then fail on its first real call, having been told the
+    /// daemon was there.
+    /// Test: itself.
     #[tokio::test]
-    async fn probe_health_succeeds_against_the_registered_health_route() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind stub health server");
-        let addr = listener.local_addr().expect("stub server local addr");
-
-        tokio::spawn(async move {
-            let (mut sock, _) = match listener.accept().await {
-                Ok(pair) => pair,
-                Err(_) => return,
-            };
-            let mut buf = [0u8; 1024];
-            let n = sock.read(&mut buf).await.unwrap_or(0);
-            let req = String::from_utf8_lossy(&buf[..n]);
-            // Only `/health` is a registered route; anything else 404s, exactly
-            // as the live daemon does for `/api/v1/health`.
-            let resp = if req.starts_with("GET /health ") {
-                "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok"
-            } else {
-                "HTTP/1.1 404 Not Found\r\ncontent-length: 9\r\nconnection: close\r\n\r\nnot found"
-            };
-            let _ = sock.write_all(resp.as_bytes()).await;
-            let _ = sock.flush().await;
-        });
-
-        let base = format!("http://{addr}");
-        assert!(
-            probe_health(&base).await,
-            "probe_health must resolve a daemon serving GET /health as up"
-        );
-    }
-
-    /// Why: `probe_health` against an unbound localhost port must return `false`
-    /// (connection refused) within a reasonable wall-clock bound, never panic.
-    /// What: probes port 65535 which is never bound in the test environment;
-    /// asserts the result is false and the call completes within 6 seconds.
-    /// Test: this test.
-    #[tokio::test]
-    async fn probe_health_returns_false_on_connection_refused() {
-        let base = "http://127.0.0.1:65535";
+    async fn probe_returns_false_for_an_absent_socket() {
+        let tmp = tempfile::tempdir().expect("tempdir");
         let started = Instant::now();
-        let ok = probe_health(base).await;
-        assert!(!ok, "probe should fail against an unbound port");
+        assert!(!probe(&tmp.path().join("absent.sock")).await);
         assert!(
-            started.elapsed() < Duration::from_secs(6),
-            "probe took too long: {:?}",
+            started.elapsed() < Duration::from_secs(3),
+            "a refused dial must not wait out the budget: {:?}",
             started.elapsed()
         );
     }
 
-    /// Why: a malformed URL must not panic — `reqwest` returns an error and
-    /// `probe_health` must convert it to `false`.
-    /// What: passes a non-URL string; asserts `false` is returned.
-    /// Test: this test.
-    #[tokio::test]
-    async fn probe_health_returns_false_on_bad_url() {
-        let ok = probe_health("not-a-valid-url").await;
-        assert!(!ok);
-    }
+    /// Why: the fast path must return without taking the lock or spawning —
+    /// a second daemon would fight the first for redb's write lock, which is
+    /// the #1152 outage.
+    /// Test: itself.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ensure_daemon_running_returns_early_when_something_is_serving() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let socket = tmp.path().join("sockets").join("trusty-memory.sock");
+        let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
+        tokio::spawn(async move { while listener.accept().await.is_ok() {} });
 
-    /// Why: `daemon_base_url()` must always return a string starting with
-    /// `http://` so callers can append paths without scheme detection.
-    /// What: calls `daemon_base_url()` and asserts the scheme prefix.
-    /// Test: this test.
-    #[test]
-    fn daemon_base_url_always_has_http_scheme() {
-        let url = daemon_base_url();
+        let started = Instant::now();
+        ensure_daemon_running(&socket, &tmp.path().join("start.lock"))
+            .await
+            .expect("a live socket must satisfy the guard");
         assert!(
-            url.starts_with("http://") || url.starts_with("https://"),
-            "daemon_base_url must start with http(s)://; got: {url}"
+            started.elapsed() < Duration::from_secs(3),
+            "the fast path must not wait: {:?}",
+            started.elapsed()
         );
     }
 }

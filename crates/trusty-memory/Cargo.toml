@@ -34,12 +34,12 @@ crate-type = ["rlib"]
 # Test: `cargo run -p trusty-memory -- --help` lists `serve` and `migrate`.
 name = "trusty-memory"
 path = "src/main.rs"
-# Why: `serve` / `start` boot the axum HTTP/SSE daemon, so the binary needs
-#      the `axum-server` feature compiled in. Listing it here keeps
-#      `--no-default-features` library builds (e.g. trusty-agents in-process linker
-#      that only wants `MemoryMcpService`) from accidentally trying to build
-#      this binary without axum and failing to link `run_http_*`.
-required-features = ["axum-server"]
+# Why: `serve` / `start` bind the daemon's socket, so the binary needs the
+#      `daemon` feature compiled in. Listing it here keeps a
+#      `--no-default-features` library build (the trusty-agents in-process
+#      linker, which wants only `MemoryMcpService`) from trying to build this
+#      binary without the serving surface and failing to link `serve`.
+required-features = ["daemon"]
 
 # Why (#5329): the `trusty-bm25-daemon` `[[bin]]` shim was REMOVED. BM25 no
 # longer runs as a subprocess — `bm25_lane::Bm25Lane` owns the same
@@ -71,19 +71,16 @@ path = "src/bin/mcp_bridge.rs"
 # console separately (`cargo install trusty-console`) or via `trusty-installer` (#1316).
 
 [dependencies]
-# Why: `axum-server` is gated on this crate's own `axum-server` feature so
-#      downstream library consumers (e.g. `trusty-agents` linking
-#      `trusty_memory::MemoryMcpService`) can drop the axum/tower-http
-#      surface entirely by setting `default-features = false`. The default
-#      build for the binary path keeps `axum-server` on (see [features]
-#      below), so existing `cargo install` / `cargo build` flows are
-#      unaffected.
 # `bm25` (#5329) replaces the retired `bm25-client`: the lexical lane now links
 # the index itself rather than a UDS client for a subprocess that holds it.
 # `uds-supervisor` is NOT dropped — trusty-console and trusty-agents still
 # depend on the shared `UdsServiceSupervisor` for trusty-review / trusty-analyze.
 trusty-mcp = { workspace = true }  # JSON-RPC / MCP primitives (ADR-0040, #5803)
-trusty-common = { path = "../trusty-common", version = "0.44", default-features = false, features = ["memory-core", "monitor-tui", "bm25", "cli-help", "update-check", "bug-capture", "console-metrics", "config-cli", "crate-config", "palace-resolve", "codex-config"] }
+# `uds` (#6286) is what this crate now serves on: `trusty_common::uds::server`
+# supplies the bind, the peer check, the framing and the accept loop, and
+# `uds::stream_client` the reader `memory.chat` needs. It replaces
+# `axum-server`, which was here for the retired HTTP listener.
+trusty-common = { path = "../trusty-common", version = "0.44", default-features = false, features = ["memory-core", "monitor-tui", "bm25", "cli-help", "update-check", "bug-capture", "console-metrics", "config-cli", "crate-config", "palace-resolve", "codex-config", "uds"] }
 # `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
 # Why (issue #1318): the `trusty-console` dependency was REMOVED. The console
 # is no longer bundled into trusty-memory (single-owner-per-binary); the
@@ -97,13 +94,10 @@ anyhow = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-# Why (issue #226): axum + tower-http are HTTP-server only. Gating them behind
-#      the `axum-server` feature mirrors the rule already enforced in
-#      `trusty-common` and lets `trusty-agents` (which only links
-#      `MemoryMcpService` for in-process `rpc.discover` merging) build a
-#      slimmer dependency tree by setting `default-features = false`.
-axum = { workspace = true, optional = true }
-tower-http = { workspace = true, optional = true }
+# Why axum and tower-http are gone (#6286): they were here for the HTTP/SSE
+#      listener ADR-0032 retired. Nothing in this crate constructs a `Router`,
+#      a `Response`, or a middleware layer any more — the daemon serves one
+#      Unix socket through `trusty_common::uds::server`.
 clap = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
@@ -179,16 +173,18 @@ trusty-common = { path = "../trusty-common", version = "0.44", default-features 
 chrono = { workspace = true }
 
 [features]
-# Why (issue #226): library consumers that only need `MemoryMcpService` for
-#      in-process MCP discovery (e.g. `trusty-agents`) should not be forced to
-#      compile the axum + tower-http HTTP/SSE surface. Mirrors the
-#      `trusty-common` pattern where `axum-server` gates the same crates.
-# Defaults to `axum-server` so the `trusty-memory` binary — and the standard
-# `cargo install trusty-memory` / `cargo test -p trusty-memory` flows — keep
-# building exactly as before. Consumers that
-# want the slim library surface override with `default-features = false`.
-default = ["axum-server"]
-# Enables the axum HTTP/SSE daemon surface (`web`, `chat`, `run_http_*`,
-# `sse_handler`, `bind_dynamic_port`, etc.). Pulls in `axum`, `tower-http`,
-# and the matching `trusty-common/axum-server` feature flag.
-axum-server = ["dep:axum", "dep:tower-http", "trusty-common/axum-server"]
+# Why (issue #226, renamed #6286): a library consumer that only needs
+#      `MemoryMcpService` for in-process MCP discovery — `trusty-agents` is the
+#      one — should not compile the daemon's serving surface. The gate is
+#      unchanged in purpose and its name is not: `axum-server` described a
+#      dependency this crate no longer has, and there is no listener left for
+#      the old name to be about.
+#
+# Defaults to `daemon` so `cargo install trusty-memory` and
+# `cargo test -p trusty-memory` build the binary exactly as before; a slim
+# consumer overrides with `default-features = false`, which is what
+# trusty-agents already does and which needs no edit there.
+default = ["daemon"]
+# The socket-serving surface: `transport::uds`, `transport::methods`, `chat`,
+# and the `serve` / `start` commands that drive them.
+daemon = []

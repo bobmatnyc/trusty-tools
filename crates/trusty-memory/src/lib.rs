@@ -1,19 +1,23 @@
-//! MCP server (HTTP/SSE + stdio) for trusty-memory.
+//! The trusty-memory daemon: one resident process, one Unix socket.
 //!
-//! Why: Claude Code and other MCP-aware clients integrate with trusty-memory
-//! through the standardized Model Context Protocol; we expose memory + KG
-//! tools so they can be called by name. The canonical stdio integration is
-//! `trusty-memory serve --stdio` (PR1 #919 of the #914 cutover epic), a
-//! self-contained direct MCP server that binds no HTTP port or UDS socket.
-//! The former `trusty-memory-mcp-bridge` binary and Unix-domain-socket
-//! transport were removed in PR3 (#914) once `serve --stdio` made them dead
-//! code.
-//! What: Provides `run_http` / `run_http_dynamic` / `run_http_on` (axum
-//! HTTP/SSE + REST + UI) plus an `AppState` that carries the shared
-//! `PalaceRegistry`, on-disk data root, and a lazily-initialized embedder.
-//! Test: `cargo test -p trusty-memory` validates handshake + dispatch via
-//! the in-process `handle_message` unit tests and the
-//! `tests/serve_stdio_e2e.rs` end-to-end harness.
+//! Why: Claude Code and other MCP-aware clients reach trusty-memory through the
+//! Model Context Protocol, and the daemon owns redb's exclusive write lock, so
+//! every client has to go through it rather than open the store itself (#1078).
+//! `trusty-memory serve --stdio` is the canonical integration: it forwards each
+//! JSON-RPC request to the running daemon and never opens redb.
+//!
+//! #6286 (ADR-0032) retired the HTTP half. The daemon bound
+//! `127.0.0.1:7070`, walked to `:7079` when that was taken, published the
+//! winner in an `http_addr` discovery file, and served forty axum routes plus
+//! an `/sse` broadcast. It now serves `trusty_common::daemon_socket_path`'s
+//! hardened Unix socket and nothing else; `trusty-console` is the workspace's
+//! only HTTP surface.
+//!
+//! What: [`transport::uds::serve`] is the daemon body, and [`AppState`] carries
+//! the shared `PalaceRegistry`, the on-disk data root and a lazily-initialised
+//! embedder.
+//! Test: `cargo test -p trusty-memory` — `transport::uds::tests` for the wire,
+//! `tests/serve_stdio_e2e.rs` for the bridge end to end.
 
 // docs.rs builds a release's documentation once, from the uploaded tarball,
 // so a broken intra-doc link is baked into that version forever and only a new
@@ -89,19 +93,18 @@ pub mod dream_scheduler;
 pub mod fd_metrics;
 pub mod idle_evict;
 pub mod worker_liveness;
-// Why (issue #226): `chat` and `web` are pure axum HTTP/SSE handler
-//      surfaces. Gating them behind the `axum-server` feature is what lets
-//      library consumers (e.g. `trusty-agents` linking only `MemoryMcpService`)
-//      drop axum + tower-http entirely from their build graph.
-#[cfg(feature = "axum-server")]
+// Why (issue #226): `chat` drives an LLM provider and a tool loop that only
+//      the daemon serves. Gating it behind `daemon` is what lets a library
+//      consumer linking only `MemoryMcpService` — trusty-agents — keep it out
+//      of its build graph.
+#[cfg(feature = "daemon")]
 pub mod chat;
+pub mod client;
 pub mod commands;
 pub mod console_metrics;
 pub mod discovery;
 mod events;
-pub mod foreground;
 pub mod hook_emit;
-mod http_server;
 pub mod kg_extract;
 // #5524: the single entry point every caller-supplied KG assert routes through.
 pub mod kg_write;
@@ -117,8 +120,7 @@ pub mod session_store_cache;
 pub mod startup_scan;
 pub mod tools;
 pub mod transport;
-#[cfg(feature = "axum-server")]
-pub mod web;
+pub mod ui_assets;
 pub mod wordnet_pos;
 
 pub use activity::{ActivityEntry, ActivityFilter, ActivityLog, ActivitySource};
@@ -135,19 +137,33 @@ pub(crate) use events::open_activity_log_with_fallback;
 pub(crate) use events::open_activity_log_with_fallback_in;
 pub use events::{DaemonEvent, HookType, InjectionKind};
 
-// Re-export the HTTP-serving surface so the crate's public API is unchanged
-// after the #1195 split (`trusty_memory::run_http_on`, etc.). The address-file
-// helpers stay crate-internal but are re-exported for `lib_tests`' `super::*`.
-pub use http_server::{
-    bind_dynamic_port, http_addr_path, is_data_dir_override_active, DEFAULT_HTTP_PORT,
-};
-#[cfg(feature = "axum-server")]
-pub use http_server::{run_http, run_http_dynamic, run_http_on};
-// These crate-internal HTTP helpers are consumed only by test modules
-// (`lib_tests`, `web::tests`), so gate the re-export on `cfg(test)` to avoid an
-// unused-import warning in the normal (non-test) build.
-#[cfg(all(test, feature = "axum-server"))]
-pub(crate) use http_server::{dotfile_http_addr_path, write_http_addr_file};
+// The daemon's serving surface. `run_http`, `run_http_dynamic`, `run_http_on`,
+// `bind_dynamic_port`, `http_addr_path` and `DEFAULT_HTTP_PORT` went with the
+// listener (#6286); `serve` and `socket_path` are what replace them.
+pub use transport::uds::{serve, socket_path};
+
+/// Return `true` when a non-default data directory is in effect.
+///
+/// Why (#880): a daemon running against an isolated data root must not run the
+/// startup pin-scan, which reads project pin files from the REAL user
+/// environment (`~/Projects`, `~/Developer`, …) and would import palaces from
+/// it into the isolated root, defeating the isolation. It used to suppress a
+/// second side-effect too — the legacy `~/.trusty-memory/http_addr` dotfile
+/// write — which #6286 removed along with the file.
+///
+/// What: reads `TRUSTY_DATA_DIR_OVERRIDE`. Empty or whitespace-only counts as
+/// unset, the same rule `resolve_data_dir` applies, so a blank env var does not
+/// silently isolate a production instance.
+/// Test: `is_data_dir_override_active_when_set`,
+/// `is_data_dir_override_inactive_when_unset`,
+/// `is_data_dir_override_inactive_when_blank`.
+#[inline]
+pub fn is_data_dir_override_active() -> bool {
+    matches!(
+        std::env::var(trusty_common::DATA_DIR_OVERRIDE_ENV),
+        Ok(v) if !v.trim().is_empty()
+    )
+}
 
 /// Maximum bytes retained in the trigger-prompt excerpt embedded on a
 /// `HookFired` event.
@@ -1125,10 +1141,10 @@ impl AppState {
         self.chat_provider
             .get_or_init(|| async {
                 // Why (issue #226): `service::load_user_config` is the
-                //      axum-free home of the loader; the `web::load_user_config`
+                //      canonical home of the loader; the former
                 //      re-export only exists for the HTTP handlers. Going
                 //      direct to `service` keeps this method usable when
-                //      the `axum-server` feature is disabled.
+                //      the `daemon` feature is disabled.
                 let cfg = crate::service::load_user_config().unwrap_or_default();
                 if cfg.local_model.enabled {
                     if let Some(mut p) =

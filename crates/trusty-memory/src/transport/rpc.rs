@@ -5,13 +5,17 @@
 //! Why: The daemon used to expose its tool surface exclusively through
 //! axum-bound REST routes (browser UI, hook CLIs) and a broken stdio MCP
 //! mode whose redb opens collided with the running HTTP daemon's
-//! exclusive locks. The fix is to keep the daemon as the single
-//! redb-owning process and expose its surface through *multiple*
-//! transports — HTTP `POST /rpc` for browser clients, a Unix domain
-//! socket for low-overhead local clients (and the MCP stdio bridge).
-//! This module is the shared spine: every transport parses bytes into a
-//! [`JsonRpcRequest`], hands it to [`dispatch`], and writes a
-//! [`JsonRpcResponse`] back on the wire.
+//! exclusive locks. The fix was to keep the daemon as the single
+//! redb-owning process and expose its surface through a transport-agnostic
+//! dispatcher any listener could drive.
+//!
+//! There is now exactly one listener (#6286, ADR-0032): the hardened Unix
+//! socket in [`crate::transport::uds`], which mounts this function whole as its
+//! `RpcFallback` rather than restating the table below. The stdio bridge
+//! forwards to that same socket. `POST /rpc` — the axum route this module was
+//! first written for — is gone with the rest of the HTTP surface, and the
+//! "Unix domain socket for low-overhead local clients" this comment used to
+//! anticipate is no longer a plan but the whole of it.
 //! What:
 //!   - [`JsonRpcRequest`] / [`JsonRpcResponse`] / [`JsonRpcError`]: the
 //!     envelope types matching the JSON-RPC 2.0 spec
@@ -208,6 +212,43 @@ const TOOL_METHODS: &[&str] = &[
     "palace_unalias",
     "remove_prompt_fact",
 ];
+
+/// The protocol arms [`dispatch`] answers before it reaches [`TOOL_METHODS`].
+///
+/// Listed rather than only matched so [`method_names`] can report the whole
+/// surface. `notifications/cancelled` shares an arm with
+/// `notifications/initialized` and is counted separately here because a caller
+/// may send either.
+const PROTOCOL_METHODS: &[&str] = &[
+    "initialize",
+    "notifications/initialized",
+    "notifications/cancelled",
+    "ping",
+    "rpc.discover",
+    "tools/list",
+    "tools/call",
+    "hook_fired",
+];
+
+/// Every method name [`dispatch`] routes.
+///
+/// Why: the UDS router mounts this dispatcher as a catch-all, so
+/// `RpcRouter::method_names` reports only the folded methods and cannot see
+/// these — which is the point of the seam and also the reason nothing else
+/// could say how large the other half is. `memory.health` and the start-up log
+/// print this count, which turns "the fallback is mounted" from an assumption
+/// into something an operator reads.
+///
+/// It counts NAMES this function routes, not tools reachable: 47 tool names sit
+/// behind the single `tools/call` envelope and are enumerated by `tools/list`.
+///
+/// Test: `method_names_covers_every_dispatched_arm`.
+pub fn method_names() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = PROTOCOL_METHODS.to_vec();
+    names.extend_from_slice(TOOL_METHODS);
+    names.sort_unstable();
+    names
+}
 
 /// Hook-event payload (mirrors [`crate::hook_emit::HookEventPayload`]).
 ///

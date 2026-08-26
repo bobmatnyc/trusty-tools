@@ -1,43 +1,65 @@
-//! The SSE-streaming chat handler (`chat_handler`).
+//! The streaming chat handler (`chat_stream`).
 //!
 //! Why: the OpenRouter/Ollama tool-calling loop is by far the largest single
-//! concern in the chat HTTP surface; isolating it keeps the other handlers
-//! readable (split out of the former monolithic `chat.rs`, issue #607).
-//! What: the `chat_handler` axum handler, moved verbatim. Tool-loop building
-//! blocks (`all_tools`, `execute_tool`, `MAX_TOOL_ROUNDS`, `ChatBody`) are
-//! pulled in from the sibling `tools` submodule.
-//! Test: behaviour exercised end-to-end via the chat SSE integration paths.
+//! concern in the chat surface; isolating it keeps the other handlers readable
+//! (split out of the former monolithic `chat.rs`, issue #607).
+//!
+//! Why it streams at all (#6286): this handler used to answer
+//! `POST /api/v1/chat` with `Content-Type: text/event-stream`, pushing LLM
+//! tokens off a `ReceiverStream` as the model produced them. ADR-0032 retired
+//! that listener, and a one-frame-per-connection JSON-RPC call cannot carry a
+//! token stream — so `trusty_common::uds::server`'s multi-frame extension
+//! landed for exactly this method rather than chat degrading to a single
+//! buffered blob. The producer shape is unchanged: a background task fills an
+//! `mpsc::Sender` and this function hands back the receiver.
+//!
+//! What: [`chat_stream`], registered as `memory.chat` with
+//! `RpcRouter::typed_stream`. Each `data: {…}` line the SSE version wrote is
+//! now one `"stream":"item"` frame carrying the same object — `{session_id}`,
+//! `{delta}`, `{tool_call}`, `{tool_result}`. `data: [DONE]` becomes the
+//! stream's terminal `end` frame.
+//!
+//! **A mid-stream provider failure is the terminal ERROR frame, not an item.**
+//! The SSE version wrote `data: {"error": …}` and then ended normally, which a
+//! reader could not tell from a completed answer — the Fail-Open branch
+//! `rpc_chat_reports_a_provider_failure_as_the_terminal_error_frame` closes.
+//!
+//! Tool-loop building blocks (`all_tools`, `execute_tool`, `MAX_TOOL_ROUNDS`,
+//! `ChatBody`) come from the sibling `tools` submodule.
+//! Test: `crate::transport::uds::tests` — `rpc_chat_*`.
 
-use crate::web::load_user_config;
+use crate::service::load_user_config;
 use crate::AppState;
-use axum::{
-    body::Body,
-    extract::State,
-    http::StatusCode,
-    response::{IntoResponse, Response},
-    Json,
-};
 use serde_json::{json, Value};
+use tokio::sync::mpsc;
 use trusty_common::memory_core::palace::PalaceId;
 use trusty_common::memory_core::retrieval::recall_with_default_embedder;
 use trusty_common::memory_core::PalaceRegistry;
+use trusty_common::uds::server::{RpcError, RpcStreamItems};
 use trusty_common::{ChatEvent, ChatMessage};
 
 // ---------------------------------------------------------------------------
 
 use super::tools::{all_tools, execute_get_dream_status, execute_tool, ChatBody, MAX_TOOL_ROUNDS};
 
-pub(crate) async fn chat_handler(
-    State(state): State<AppState>,
-    Json(body): Json<ChatBody>,
-) -> Response {
+/// Open a `memory.chat` stream (#6286).
+///
+/// # Errors
+///
+/// Before any item is produced: no chat provider is configured, or the
+/// palace's session store will not open. Both become the stream's terminal
+/// error frame with zero items ahead of it, which is what an `Err` from
+/// `RpcStreamMethod::call` means.
+///
+/// Test: `rpc_chat_streams_tokens_and_ends`,
+/// `rpc_chat_reports_a_missing_provider_before_opening`.
+pub async fn chat_stream(state: &AppState, body: ChatBody) -> Result<RpcStreamItems, RpcError> {
+    let state = state.clone();
     // Select the active provider (Ollama auto-detect, else OpenRouter).
     let Some(provider) = state.chat_provider().await else {
-        return (
-            StatusCode::PRECONDITION_FAILED,
+        return Err(RpcError::internal(
             "No chat provider configured (no local Ollama detected and no OpenRouter key set)",
-        )
-            .into_response();
+        ));
     };
 
     // Resolve palace id (explicit > default).
@@ -53,11 +75,7 @@ pub(crate) async fn chat_handler(
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(palace = %palace_id, "session_store open failed: {e:#}");
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("session store: {e:#}"),
-                )
-                    .into_response();
+                return Err(RpcError::internal(format!("session store: {e:#}")));
             }
         };
         match body.session_id.clone() {
@@ -261,8 +279,10 @@ pub(crate) async fn chat_handler(
     messages.extend(history.iter().cloned());
 
     let tools = all_tools();
-    let (sse_tx, sse_rx) =
-        tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(64);
+    // Same capacity the SSE channel had: enough that a fast model does not
+    // block on a reader one frame behind, small enough that a reader which
+    // stopped reading stops the producer rather than buffering forever.
+    let (frames, items) = mpsc::channel::<Result<Value, RpcError>>(64);
 
     // Capture session-persistence inputs.
     let session_store = if !palace_id.is_empty() && session_id.is_some() {
@@ -279,12 +299,7 @@ pub(crate) async fn chat_handler(
         // Emit a leading session_id frame so the SPA can correlate this stream
         // with a persisted session row.
         if let Some(sid) = persist_session_id.as_deref() {
-            let frame = format!("data: {}\n\n", json!({ "session_id": sid }));
-            if sse_tx
-                .send(Ok(axum::body::Bytes::from(frame)))
-                .await
-                .is_err()
-            {
+            if frames.send(Ok(json!({ "session_id": sid }))).await.is_err() {
                 return;
             }
         }
@@ -310,25 +325,21 @@ pub(crate) async fn chat_handler(
                 match event {
                     ChatEvent::Delta(text) => {
                         round_assistant_text.push_str(&text);
-                        let frame = format!("data: {}\n\n", json!({ "delta": text }));
-                        if sse_tx
-                            .send(Ok(axum::body::Bytes::from(frame)))
-                            .await
-                            .is_err()
-                        {
+                        // A send failure is the client having hung up: the
+                        // connection handler drops the receiver on a write
+                        // error, which is how the producer learns to stop.
+                        if frames.send(Ok(json!({ "delta": text }))).await.is_err() {
                             return;
                         }
                     }
                     ChatEvent::ToolCall(tc) => {
-                        let frame = format!(
-                            "data: {}\n\n",
-                            json!({ "tool_call": {
+                        let _ = frames
+                            .send(Ok(json!({ "tool_call": {
                                 "id": tc.id,
                                 "name": tc.name,
                                 "arguments": tc.arguments,
-                            }})
-                        );
-                        let _ = sse_tx.send(Ok(axum::body::Bytes::from(frame))).await;
+                            }})))
+                            .await;
                         tool_calls_this_round.push(tc);
                     }
                     ChatEvent::Done => break,
@@ -386,15 +397,13 @@ pub(crate) async fn chat_handler(
             for tc in &tool_calls_this_round {
                 let result = execute_tool(&tc.name, &tc.arguments, &loop_state).await;
                 let result_str = result.to_string();
-                let frame = format!(
-                    "data: {}\n\n",
-                    json!({ "tool_result": {
+                let _ = frames
+                    .send(Ok(json!({ "tool_result": {
                         "id": tc.id,
                         "name": tc.name,
                         "content": &result_str,
-                    }})
-                );
-                let _ = sse_tx.send(Ok(axum::body::Bytes::from(frame))).await;
+                    }})))
+                    .await;
                 messages.push(ChatMessage {
                     role: "tool".to_string(),
                     content: result_str,
@@ -438,24 +447,16 @@ pub(crate) async fn chat_handler(
             }
         }
 
-        match stream_err {
-            None => {
-                let _ = sse_tx
-                    .send(Ok(axum::body::Bytes::from("data: [DONE]\n\n")))
-                    .await;
-            }
-            Some(e) => {
-                let out = format!("data: {}\n\n", json!({ "error": e }));
-                let _ = sse_tx.send(Ok(axum::body::Bytes::from(out))).await;
-            }
+        // The conversation is persisted above whether or not the provider
+        // failed, so a partial answer is not lost. What differs is how the
+        // stream ENDS: a failure is the terminal error frame, so a reader
+        // cannot mistake a cut-off answer for a finished one. Dropping
+        // `frames` without sending is the success path — `write_stream` reads
+        // the closed channel as the `end` frame.
+        if let Some(e) = stream_err {
+            let _ = frames.send(Err(RpcError::internal(e))).await;
         }
     });
 
-    let stream = tokio_stream::wrappers::ReceiverStream::new(sse_rx);
-
-    Response::builder()
-        .header("Content-Type", "text/event-stream")
-        .header("Cache-Control", "no-cache")
-        .body(Body::from_stream(stream))
-        .expect("static SSE response builds")
+    Ok(items)
 }

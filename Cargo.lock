@@ -11661,7 +11661,6 @@ version = "0.24.1"
 dependencies = [
  "anyhow",
  "async-trait",
- "axum",
  "base64 0.22.1",
  "chrono",
  "clap",
@@ -11691,7 +11690,6 @@ dependencies = [
  "tokio-stream",
  "toml 0.8.23",
  "tower",
- "tower-http",
  "tracing",
  "trusty-common",
  "trusty-mcp",

@@ -144,149 +144,90 @@ pub fn plist_contains_fastembed_cache_path(path: &Path) -> std::io::Result<bool>
     Ok(contents.contains("FASTEMBED_CACHE_PATH"))
 }
 
-/// Verify the HTTP daemon responds to `GET /health`.
+/// Is the daemon reachable, and is it doing work?
 ///
-/// Why (issue #475): the most direct test of "is the daemon running and
-/// accepting requests". The `http_addr` discovery file can be stale after an
-/// unclean shutdown (SIGKILL, power loss) — the daemon writes the file on
-/// bind but the cleanup in `run_http_on` only runs on clean exit. A stale
-/// file with an ephemeral or wrong port must not produce a false "daemon not
-/// running" result when the daemon IS live on the default port.
-/// What: reads the daemon address from `trusty_common::read_daemon_addr`;
-/// if the recorded address is absent or responds with anything other than
-/// HTTP 2xx, falls back to probing the well-known default port range
-/// (`DEFAULT_HTTP_PORT` 7070..=7079) before reporting failure. `Pass` on
-/// any 2xx from either probe, `Fail` on all connection errors or non-2xx.
-/// Test: `check_daemon_health_fails_cleanly_with_stale_addr_and_no_listener`.
+/// Why the shape changed (#6286, ADR-0032): this used to read the `http_addr`
+/// discovery file, GET `/health` at whatever it recorded, and — because that
+/// file goes stale after a SIGKILL, which leaves it written but never cleaned —
+/// fall back to walking ports 7070..=7079 so a live daemon on the default port
+/// was not reported dead (#475). None of that applies to a socket. The path is
+/// DERIVED rather than published, so there is no file to be stale and nothing
+/// to walk: the daemon binds `trusty_common::daemon_socket_path` and every
+/// consumer computes the same one.
+///
+/// What survives is the part that was never about the transport: a connection
+/// proves a LISTENER is alive and nothing more, so this reads the daemon's own
+/// account of its worker pool before calling it a pass — the #4001 fix, and the
+/// reason #3992 stayed green for the length of an incident.
+///
+/// A timeout is still held apart from a refusal (#4005). A refused connection
+/// proves nothing is serving; a timeout proves only that the daemon did not
+/// answer inside OUR budget, which a busy-but-healthy daemon can miss. Only the
+/// first justifies telling an operator to start the daemon.
+///
+/// Test: `check_daemon_health_fails_cleanly_with_no_listener`.
 pub async fn check_daemon_health() -> CheckResult {
-    let label = "HTTP daemon".to_string();
+    let label = "daemon socket".to_string();
 
-    // Build a reusable reqwest client for the probes below.
-    let client = match reqwest::Client::builder().timeout(PROBE_TIMEOUT).build() {
-        Ok(c) => c,
-        Err(e) => return CheckResult::fail(label, format!("could not build HTTP client: {e}")),
-    };
-
-    // Issue #4005: set when any probe times out (as opposed to being refused).
-    // A timeout means we learned nothing; a refusal means nothing is there.
-    let mut timed_out = false;
-
-    // Primary probe: use the recorded addr file when present.
-    let recorded_url = match trusty_common::read_daemon_addr("trusty-memory") {
-        Ok(Some(addr)) => {
-            // `read_daemon_addr` returns a bare `host:port`; prepend scheme.
-            let base = if addr.starts_with("http://") || addr.starts_with("https://") {
-                addr.clone()
-            } else {
-                format!("http://{addr}")
-            };
-            Some(base)
-        }
-        Ok(None) => None,
+    let socket = match crate::transport::uds::socket_path() {
+        Ok(path) => path,
         Err(e) => {
-            // Filesystem error reading the addr file — skip primary probe.
-            tracing::debug!("doctor: could not read daemon addr file: {e:#}");
-            None
+            return CheckResult::fail(
+                label,
+                format!("could not resolve the trusty-memory data directory: {e:#}"),
+            )
         }
     };
 
-    if let Some(ref base) = recorded_url {
-        let url = format!("{base}/health");
-        match client.get(&url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                let status = resp.status();
-                // Issue #4001: a 2xx proves the LISTENER is alive, nothing
-                // more. Read what the daemon actually reported about its
-                // worker pool before calling this a pass — during #3992 this
-                // exact branch returned Pass while every worker was parked.
-                let body = resp.json::<serde_json::Value>().await.ok();
-                return interpret_health_body(label, &url, status.as_u16(), body.as_ref());
-            }
-            Ok(resp) => {
-                // Non-2xx from the recorded addr: continue to fallback.
-                tracing::debug!(
-                    "doctor: recorded addr {url} returned {}; trying fallback ports",
-                    resp.status()
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": crate::transport::uds::METHOD_HEALTH,
+        "params": {},
+    });
+
+    let response: trusty_common::uds::server::RpcResponse =
+        match trusty_common::uds::send_framed_request(&socket, &request, PROBE_TIMEOUT).await {
+            Ok(response) => response,
+            Err(trusty_common::uds::UdsRpcError::Timeout { .. }) => {
+                return CheckResult::unknown(
+                    label,
+                    format!(
+                        "{} did not answer {} within {}s. The connection was not refused, so \
+                         the daemon may be alive and slow — health could not be determined. \
+                         Re-run when load subsides rather than restarting anything.",
+                        socket.display(),
+                        crate::transport::uds::METHOD_HEALTH,
+                        PROBE_TIMEOUT.as_secs(),
+                    ),
                 );
             }
             Err(e) => {
-                // Issue #4005: a TIMEOUT is not the same as a refusal. A
-                // refused connection proves nothing is listening; a timeout
-                // proves only that the daemon did not answer within OUR
-                // budget, which a busy-but-healthy daemon can miss. Remember
-                // which one happened so the terminal verdict below can be
-                // honest rather than defaulting to "unreachable".
-                if e.is_timeout() {
-                    timed_out = true;
-                }
-                tracing::debug!(
-                    "doctor: recorded addr {url} did not answer ({e}); trying fallback ports"
+                return CheckResult::fail(
+                    label,
+                    format!(
+                        "nothing is serving {} ({e}) — start with \
+                         `trusty-memory service start`",
+                        socket.display()
+                    ),
                 );
             }
-        }
-    }
+        };
 
-    // Fallback probe (issue #475): when the addr file is absent or its
-    // recorded address does not respond, walk the well-known port range
-    // 7070..=7079 so a daemon on the default port is not missed. This is
-    // the same range `bind_dynamic_port` prefers, so the fallback succeeds
-    // in the common case where the daemon self-assigned port 7070 but the
-    // addr file was left stale from a previous ephemeral-port run.
-    for port in crate::DEFAULT_HTTP_PORT..=crate::DEFAULT_HTTP_PORT.saturating_add(9) {
-        let url = format!("http://127.0.0.1:{port}/health");
-        match client.get(&url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                let status = resp.status();
-                let origin = if recorded_url.is_some() {
-                    "addr file was stale — daemon is live on fallback port"
-                } else {
-                    "no addr file; found daemon on default port"
-                };
-                let body = resp.json::<serde_json::Value>().await.ok();
-                let note_url = format!("{url} ({origin} {port})");
-                return interpret_health_body(label, &note_url, status.as_u16(), body.as_ref());
-            }
-            Err(e) if e.is_timeout() => {
-                timed_out = true;
-                continue;
-            }
-            _ => continue,
-        }
-    }
-
-    // Every probe came back empty. Issue #4005: distinguish "nothing is
-    // listening anywhere" (a real, actionable failure) from "something was
-    // listening but never answered in time" (we simply do not know). Only the
-    // former justifies telling the operator to start the daemon — the latter
-    // used to produce that same advice and send them down the wrong path while
-    // a perfectly healthy daemon served MCP traffic beside them.
-    if timed_out {
-        return CheckResult::unknown(
+    let url = socket.display().to_string();
+    match (response.result, response.error) {
+        (Some(body), _) => interpret_health_body(label, &url, 200, Some(&body)),
+        (None, Some(e)) => CheckResult::fail(
             label,
             format!(
-                "no /health response within {}s on the recorded address or ports 7070-7079, \
-                 but at least one probe TIMED OUT rather than being refused — the daemon may be \
-                 alive and slow. Could not determine health. Re-run when load subsides, or check \
-                 the MCP surface directly before restarting anything.",
-                PROBE_TIMEOUT.as_secs()
+                "{} refused the health call: {} ({})",
+                url, e.message, e.code
             ),
-        );
-    }
-
-    if recorded_url.is_some() {
-        CheckResult::fail(
+        ),
+        (None, None) => CheckResult::unknown(
             label,
-            "recorded address unreachable (connection refused) and no daemon found on default \
-             ports 7070-7079 — start with `trusty-memory service start`"
-                .to_string(),
-        )
-    } else {
-        CheckResult::fail(
-            label,
-            "no daemon address recorded and no daemon found on default ports 7070-7079 \
-             — start with `trusty-memory service start`"
-                .to_string(),
-        )
+            format!("{url} answered with neither a result nor an error"),
+        ),
     }
 }
 

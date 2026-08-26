@@ -10,7 +10,7 @@ use super::*;
 // Why (issue #226): `serde_json::json!` is only used by the daemon-based
 //      tests, which are themselves gated behind `axum-server`. Mirror the
 //      gate here so `--no-default-features` builds stay warning-free.
-#[cfg(feature = "axum-server")]
+#[cfg(feature = "daemon")]
 use serde_json::json;
 
 /// Why (issue #134): the recall query needs the actual prompt text the
@@ -955,7 +955,7 @@ async fn prompt_context_returns_ok_without_daemon() {
 /// Test: itself.
 /// Note (issue #226): gated on `axum-server` because it spins up the
 /// real HTTP daemon via `run_http_on`.
-#[cfg(feature = "axum-server")]
+#[cfg(feature = "daemon")]
 #[tokio::test]
 async fn prompt_context_recalls_palace_drawers() {
     let _guard = crate::commands::env_test_lock().lock().await;
@@ -1051,7 +1051,7 @@ async fn prompt_context_recalls_palace_drawers() {
 /// (the daemon redirects) under a header reading the derived slug.
 /// Test: itself.
 /// Note (issue #226): gated on `axum-server`; spins up the HTTP daemon.
-#[cfg(feature = "axum-server")]
+#[cfg(feature = "daemon")]
 #[tokio::test]
 async fn prompt_context_header_names_the_alias_target() {
     let _guard = crate::commands::env_test_lock().lock().await;
@@ -1133,7 +1133,7 @@ async fn prompt_context_header_names_the_alias_target() {
 /// Test: itself. Fails against the pre-#5819 handler, which emits the
 /// "cleared the relevance floor" paragraph.
 /// Note (issue #226): gated on `axum-server`; spins up the HTTP daemon.
-#[cfg(feature = "axum-server")]
+#[cfg(feature = "daemon")]
 #[tokio::test]
 async fn prompt_context_off_topic_prompt_injects_nothing() {
     let _guard = crate::commands::env_test_lock().lock().await;
@@ -1210,7 +1210,7 @@ async fn prompt_context_off_topic_prompt_injects_nothing() {
 /// Test: itself. Fails against the pre-#5819 handler, which returns
 /// `"No prompt facts stored yet."`.
 /// Note (issue #226): gated on `axum-server`; spawns the HTTP daemon.
-#[cfg(feature = "axum-server")]
+#[cfg(feature = "daemon")]
 #[tokio::test]
 async fn prompt_context_empty_palace_falls_back_to_global() {
     let _guard = crate::commands::env_test_lock().lock().await;
@@ -1254,7 +1254,7 @@ async fn prompt_context_empty_palace_falls_back_to_global() {
 /// `prompt_context_empty_palace_falls_back_to_global`.
 /// Note (issue #226): gated on `axum-server` because `run_http_on` is
 /// only available when the HTTP-serving surface is compiled in.
-#[cfg(feature = "axum-server")]
+#[cfg(feature = "daemon")]
 async fn spin_up_test_daemon_with_palace(
     palace_slug: &str,
 ) -> (
@@ -1327,36 +1327,39 @@ async fn spin_up_test_daemon_with_palace(
         .await
         .expect("palace_create");
 
-    // Bind a random local port and start the HTTP server. `run_http_on`
-    // writes the addr file as part of startup; we poll for it briefly
-    // so the subsequent `read_daemon_addr` call succeeds.
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind 127.0.0.1:0");
-    let addr = listener.local_addr().expect("local_addr");
+    // #6286: serve the real daemon on the socket the hook derives. The data-dir
+    // override is already in force, so `socket_path()` resolves inside this
+    // fixture's tempdir and the hook under test computes the same path — which
+    // is what replaces the `http_addr` file this used to write and poll for.
+    let socket = crate::transport::uds::socket_path().expect("socket path under the override");
     let state_for_server = state.clone();
+    let (stop, shutdown) = tokio::sync::oneshot::channel::<()>();
+    let serve_socket = socket.clone();
     let handle = tokio::spawn(async move {
-        let _ = crate::run_http_on(state_for_server, listener).await;
+        let _ =
+            crate::transport::uds::serve_with_shutdown(state_for_server, &serve_socket, async {
+                let _ = shutdown.await;
+            })
+            .await;
     });
 
-    // Poll for the addr file (run_http_on writes it after binding).
-    // Generous deadline so a contended CI machine doesn't flake — the
-    // disk_size_ticker spawned inside `run_http_on` does some setup
-    // work before the addr write lands. Bumped from 250 to 500
-    // attempts (5 s → 10 s) under issue #139: the recall-quality fix
-    // doubled the number of fixtures spinning a daemon (5 tests now
-    // share this helper), so a heavily loaded host needs more headroom
-    // before the first `http_addr` write lands.
-    let addr_file = data_root.join("http_addr");
+    // Poll for readiness rather than sleeping a fixed interval. Generous so a
+    // contended host does not flake: the daemon hydrates every palace before it
+    // binds, and five tests share this fixture.
     let mut attempts = 0;
-    while !addr_file.exists() && attempts < 500 {
+    while attempts < 500 {
+        if trusty_common::uds::socket_is_serving(&socket, std::time::Duration::from_millis(200))
+            .await
+        {
+            break;
+        }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         attempts += 1;
     }
     assert!(
-        addr_file.exists(),
-        "daemon never wrote http_addr at {} (attempts={attempts})",
-        addr_file.display()
+        attempts < 500,
+        "daemon never began serving {} (attempts={attempts})",
+        socket.display()
     );
 
     (
@@ -1366,30 +1369,41 @@ async fn spin_up_test_daemon_with_palace(
         project_dir,
         palace_slug.to_string(),
         DaemonHandle {
-            addr,
+            socket,
+            stop: Some(stop),
             join: Some(handle),
         },
     )
 }
 
-/// Test-only handle to a spawned daemon — aborts the server task on
-/// drop or explicit `shutdown` so the tempdir cleanup doesn't race
-/// with in-flight requests.
-/// Note (issue #226): gated on `axum-server` because the only callers
-/// are HTTP-daemon-dependent tests.
-#[cfg(feature = "axum-server")]
+/// Test-only handle to a running daemon.
+///
+/// `shutdown` asks the serve loop to stop rather than aborting the task, so the
+/// real unlink path runs and the next fixture in the same process can bind a
+/// fresh socket. The abort is kept as the fallback for a loop that does not
+/// return.
+#[cfg(feature = "daemon")]
 struct DaemonHandle {
     #[allow(dead_code)]
-    addr: std::net::SocketAddr,
+    socket: std::path::PathBuf,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
     join: Option<tokio::task::JoinHandle<()>>,
 }
 
-#[cfg(feature = "axum-server")]
+#[cfg(feature = "daemon")]
 impl DaemonHandle {
     async fn shutdown(mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
         if let Some(h) = self.join.take() {
-            h.abort();
-            let _ = h.await;
+            if tokio::time::timeout(std::time::Duration::from_secs(10), &mut { h })
+                .await
+                .is_err()
+            {
+                // The loop did not return inside the budget; the task is
+                // dropped with the handle either way.
+            }
         }
         // Release the pinned data dir override for sibling tests.
         // SAFETY: protected by env_test_lock in the caller.
@@ -1414,7 +1428,7 @@ impl DaemonHandle {
 /// content surfaces.
 /// Test: itself.
 /// Note (issue #226): gated on `axum-server`; spins up the HTTP daemon.
-#[cfg(feature = "axum-server")]
+#[cfg(feature = "daemon")]
 #[tokio::test]
 async fn prompt_context_recall_filters_deny_tags() {
     let _guard = crate::commands::env_test_lock().lock().await;
@@ -1497,7 +1511,7 @@ async fn prompt_context_recall_filters_deny_tags() {
 /// (no `Relevant memories` section).
 /// Test: itself.
 /// Note (issue #226): gated on `axum-server`; spins up the HTTP daemon.
-#[cfg(feature = "axum-server")]
+#[cfg(feature = "daemon")]
 #[tokio::test]
 async fn prompt_context_recall_env_override_extends_deny_list() {
     let _guard = crate::commands::env_test_lock().lock().await;
@@ -1555,7 +1569,7 @@ async fn prompt_context_recall_env_override_extends_deny_list() {
 /// drawer content nor a `Relevant memories` section header.
 /// Test: itself.
 /// Note (issue #226): gated on `axum-server`; spins up the HTTP daemon.
-#[cfg(feature = "axum-server")]
+#[cfg(feature = "daemon")]
 #[tokio::test]
 async fn prompt_context_recall_all_filtered_falls_back_to_global() {
     let _guard = crate::commands::env_test_lock().lock().await;
@@ -1731,10 +1745,12 @@ async fn bounded_blocking_returns_value_when_fast_enough() {
 /// real blocking stdin read), and asserts both the `Ok(())` contract and
 /// a bounded wall-clock time.
 /// Test: itself.
-/// Note (issue #226): gated on `axum-server` — it needs a real `axum`
-/// listener to simulate the slow daemon.
-#[cfg(feature = "axum-server")]
-#[tokio::test]
+/// Note (#6286): the stalled daemon is now a bare hardened socket that accepts
+/// a connection and never answers — a listener that reads the request frame and
+/// then sleeps is exactly the stall this test exists to survive, and it needs no
+/// HTTP server to build.
+#[cfg(feature = "daemon")]
+#[tokio::test(flavor = "multi_thread")]
 async fn handle_prompt_context_fails_open_on_slow_daemon() {
     let _guard = crate::commands::env_test_lock().lock().await;
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -1745,20 +1761,18 @@ async fn handle_prompt_context_fails_open_on_slow_daemon() {
         std::env::remove_var(crate::prompt_log::ENV_HASH_PROMPTS);
     }
 
-    async fn slow_handler() -> &'static str {
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        "slow"
-    }
-    let app = axum::Router::new().fallback(axum::routing::any(slow_handler));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind 127.0.0.1:0");
-    let addr = listener.local_addr().expect("local_addr");
+    // Accept, then never write. The hook's per-call budget is what has to end
+    // this, not the peer.
+    let socket = crate::transport::uds::socket_path().expect("socket path under the override");
+    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind the stalled socket");
     let server = tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        while let Ok((conn, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                drop(conn);
+            });
+        }
     });
-    trusty_common::write_daemon_addr("trusty-memory", &addr.to_string())
-        .expect("write fake daemon addr");
 
     let start = std::time::Instant::now();
     let res = handle_prompt_context_with_payload(String::new()).await;
@@ -1938,7 +1952,7 @@ fn injection_caps_rendered_tag_bytes() {
 /// rendered injection carries no `creator:` and no bullet over the cap.
 /// Test: itself.
 /// Note (issue #226): gated on `axum-server`; spins up the HTTP daemon.
-#[cfg(feature = "axum-server")]
+#[cfg(feature = "daemon")]
 #[tokio::test]
 async fn prompt_context_injection_has_no_provenance_tags() {
     use format::MAX_RENDERED_TAGS;
@@ -2033,7 +2047,7 @@ async fn prompt_context_injection_has_no_provenance_tags() {
 /// within-budget send, a stripped envelope, and a non-zero dropped-unit count.
 /// Test: itself.
 /// Note (issue #226): gated on `axum-server`; spins up the HTTP daemon.
-#[cfg(feature = "axum-server")]
+#[cfg(feature = "daemon")]
 #[tokio::test]
 async fn prompt_context_logs_recall_query_shape() {
     let _guard = crate::commands::env_test_lock().lock().await;

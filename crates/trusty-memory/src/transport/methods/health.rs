@@ -1,4 +1,4 @@
-//! `GET /health` handler — liveness probe with optional store/recall smoke test.
+//! `memory.health` — liveness probe with an optional store/recall smoke test.
 //!
 //! Why: Provides an unauthenticated round-trip check for operator and
 //! orchestrator polling. Issues #35, #71, and #185 progressively enriched
@@ -10,18 +10,15 @@
 //! redb v2→v3 migration wipes the vector store) so the palace re-populates
 //! itself on the next deep-probe request without operator intervention.
 //! Issue #6217 routes `PalaceHandle::drawer_load_degraded` out through the
-//! payload so a partial drawer corpus is readable over HTTP, not only in logs.
-//! What: `health()` axum handler, `HealthQuery` params struct,
-//! `HealthResponse` wire struct, `HealthProbeError`,
+//! payload so a partial drawer corpus is readable by a caller, not only in
+//! logs.
+//! Issue #6286 moved this off axum: the handler takes `(&AppState,
+//! HealthQuery)` and the `?probe=true` query string is now a `params` field.
+//! What: `health()`, `HealthQuery`, `HealthResponse`, `HealthProbeError`,
 //! `ensure_health_probe_palace`, `run_health_round_trip`, and the testable
 //! `run_health_round_trip_inner` helper.
-//! Test: `health_endpoint_*` and `health_probe_*` tests in
-//! `web::tests::health_tests`.
+//! Test: `rpc_health_*` in `crate::transport::uds::tests`.
 
-use axum::{
-    extract::{Query, State},
-    Json,
-};
 use trusty_common::memory_core::palace::{Palace, PalaceId, RoomType};
 use trusty_common::memory_core::retrieval::recall_with_default_embedder;
 use uuid::Uuid;
@@ -57,7 +54,8 @@ pub(crate) const PROBE_SENTINEL_PREFIX: &str = "__trusty_memory_health_sentinel_
 
 use crate::AppState;
 
-use super::HEALTH_PROBE_PALACE;
+use super::{to_value, HEALTH_PROBE_PALACE};
+use crate::transport::api_error::ApiError;
 
 /// Query parameters for `GET /health`.
 ///
@@ -72,7 +70,7 @@ use super::HEALTH_PROBE_PALACE;
 /// Test: `health_endpoint_cheap_by_default` and
 /// `health_endpoint_probe_param_triggers_round_trip`.
 #[derive(serde::Deserialize)]
-pub(super) struct HealthQuery {
+pub struct HealthQuery {
     /// When `true`, run the full remember/recall/forget round-trip.
     #[serde(default)]
     probe: bool,
@@ -102,48 +100,48 @@ impl HealthQuery {
 /// `health_endpoint_includes_resource_fields`, and
 /// `health_endpoint_includes_fd_gauge` in this module's tests.
 #[derive(serde::Serialize)]
-pub(super) struct HealthResponse {
+pub struct HealthResponse {
     /// `"ok"` when the round-trip smoke test succeeds (or no palace exists
     /// yet), `"degraded"` when store/recall is broken (issue #71). Owned
     /// `String` so the handler can report different statuses without
     /// requiring static lifetimes.
-    pub(super) status: String,
+    pub status: String,
     /// Populated only when `status == "degraded"` (issue #71). Carries a
     /// short phrase identifying which round-trip stage failed so operators
     /// can triage quickly (e.g. `"store failed: ..."`).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) detail: Option<String>,
-    pub(super) version: &'static str,
+    pub detail: Option<String>,
+    pub version: &'static str,
     /// Current process Resident Set Size in megabytes (issue #35). Sampled
     /// via the shared `SysMetrics` on each health request.
-    pub(super) rss_mb: u64,
+    pub rss_mb: u64,
     /// On-disk footprint of the daemon's `data_root` in bytes (issue #35):
     /// the sum of every palace file. Refreshed by a background task every
     /// 10 s; `0` until the first walk completes.
-    pub(super) disk_bytes: u64,
+    pub disk_bytes: u64,
     /// Current process CPU usage as a percentage (issue #35), where `100.0`
     /// means one fully-saturated core. The first reading after daemon start
     /// may be `0.0` until a delta window exists.
-    pub(super) cpu_pct: f32,
+    pub cpu_pct: f32,
     /// Seconds elapsed since the daemon started (issue #35).
-    pub(super) uptime_secs: u64,
-    /// Bound `host:port` of the HTTP listener. Why: dynamic port selection
-    /// (7070..=7079 + OS fallback) means clients cannot assume `7070`; this
-    /// field advertises the real port without forcing them to read
-    /// `~/.trusty-memory/http_addr`. `None` when the daemon was constructed
-    /// without ever binding (tests that drive the router with `TestServer`).
+    pub uptime_secs: u64,
+    /// The socket this daemon serves, as both it and its consumers resolve it
+    /// (#6286). It replaced `addr`, which advertised a dynamically-chosen TCP
+    /// port because a client could not assume 7070. A socket path is derived
+    /// rather than chosen, so this field is confirmation rather than
+    /// discovery. `None` only when the data directory cannot be resolved.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) addr: Option<String>,
+    pub socket: Option<String>,
     /// Number of file descriptors currently open by this process (fd-exhaustion
     /// gauge). `None` when the platform does not expose this cheaply (rare).
     /// Sampled on every `/health` call via [`crate::fd_metrics::count_open_fds`].
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) open_fds: Option<u64>,
+    pub open_fds: Option<u64>,
     /// Soft `RLIMIT_NOFILE` ceiling for this process (fd-exhaustion gauge).
     /// `None` when `getrlimit` fails or returns `RLIM_INFINITY` (unlimited).
     /// Together with `open_fds`, lets operators see "244 / 256" before EMFILE.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) fd_soft_limit: Option<u64>,
+    pub fd_soft_limit: Option<u64>,
     /// Newer crates.io version available, if any (issue #537).
     ///
     /// Why: surfaces update availability without polling crates.io on every
@@ -152,7 +150,7 @@ pub(super) struct HealthResponse {
     /// What: `null`/absent = up to date or check not completed; `"x.y.z"` =
     /// the available newer version.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) update_available: Option<String>,
+    pub update_available: Option<String>,
     /// Daemon readiness state (issues #910 / #911).
     ///
     /// Why: operators and monitoring scripts need to distinguish "the daemon
@@ -162,7 +160,7 @@ pub(super) struct HealthResponse {
     /// `memory_recall` calls were returning warming errors.
     /// What: `"warming"` until the embedder init succeeds; `"ready"` once
     /// `spawn_startup_tasks` flips `AppState::daemon_readiness`.
-    pub(super) daemon_state: String,
+    pub daemon_state: String,
     /// Live worker-pool occupancy (issue #4001).
     ///
     /// Why: this is the field that makes `/health` report what it OBSERVED
@@ -171,7 +169,7 @@ pub(super) struct HealthResponse {
     /// way to tell a busy-but-healthy daemon from one whose every worker is
     /// parked, which is why #3992 read as HEALTHY for the whole incident.
     /// What: see [`WorkerHealth`].
-    pub(super) worker: WorkerHealth,
+    pub worker: WorkerHealth,
     /// Palaces that exist on disk but which startup hydration could not open,
     /// each with the reason (issue #4911).
     ///
@@ -187,7 +185,7 @@ pub(super) struct HealthResponse {
     /// Test: `health_reports_unopenable_palaces`,
     /// `health_omits_unopenable_palaces_when_none`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub(super) unopenable_palaces: Vec<UnopenablePalace>,
+    pub unopenable_palaces: Vec<UnopenablePalace>,
     /// Ids of currently-open palaces serving a partial drawer corpus
     /// (issue #6217).
     ///
@@ -212,7 +210,7 @@ pub(super) struct HealthResponse {
     /// `health_drawer_degraded_names_only_the_degraded_palace`,
     /// `health_drawer_degraded_check_opens_no_palace`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub(super) drawer_degraded_palaces: Vec<String>,
+    pub drawer_degraded_palaces: Vec<String>,
 }
 
 /// One palace the daemon has on disk but could not open (issue #4911).
@@ -224,11 +222,11 @@ pub(super) struct HealthResponse {
 /// recorded.
 /// Test: `health_reports_unopenable_palaces`.
 #[derive(serde::Serialize)]
-pub(super) struct UnopenablePalace {
+pub struct UnopenablePalace {
     /// The palace id as it appears on disk and in `palace_list`.
-    pub(super) id: String,
+    pub id: String,
     /// The formatted error from the failed open.
-    pub(super) reason: String,
+    pub reason: String,
 }
 
 /// Worker-pool occupancy block of the `/health` payload (issue #4001).
@@ -241,18 +239,18 @@ pub(super) struct UnopenablePalace {
 /// idle), and the threshold-crossed verdict.
 /// Test: `health_reports_idle_worker_pool`, `health_reports_wedged_worker_pool`.
 #[derive(serde::Serialize)]
-pub(super) struct WorkerHealth {
+pub struct WorkerHealth {
     /// Operations currently inside the palace open path.
-    pub(super) in_flight: usize,
+    pub in_flight: usize,
     /// Seconds the oldest outstanding operation has been running. Absent when
     /// nothing is in flight — an idle pool has no age to report, and reporting
     /// `0` would be indistinguishable from "a request just started".
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) oldest_age_secs: Option<u64>,
+    pub oldest_age_secs: Option<u64>,
     /// True when `oldest_age_secs` exceeds
     /// [`crate::worker_liveness::wedge_threshold`] — i.e. an operation has
     /// blown past the bound that was supposed to release it.
-    pub(super) wedged: bool,
+    pub wedged: bool,
 }
 
 /// `GET /health[?probe=true]` — unauthenticated liveness probe with optional
@@ -296,17 +294,16 @@ pub(super) struct WorkerHealth {
 /// `health_probe_cleans_up_on_recall_miss`,
 /// `health_reports_drawer_degraded_palace`,
 /// `health_drawer_degraded_check_opens_no_palace`.
-pub(super) async fn health(
-    State(state): State<AppState>,
-    Query(query): Query<HealthQuery>,
-) -> Json<HealthResponse> {
+pub async fn health(state: &AppState, query: HealthQuery) -> Result<serde_json::Value, ApiError> {
     let (rss_mb, cpu_pct) = {
         let mut metrics = state.sys_metrics.lock().await;
         metrics.sample()
     };
     let disk_bytes = state.disk_bytes.load(std::sync::atomic::Ordering::Relaxed);
     let uptime_secs = state.started_at.elapsed().as_secs();
-    let addr = state.bound_addr.get().map(|a| a.to_string());
+    let socket = crate::transport::uds::socket_path()
+        .ok()
+        .map(|p| p.display().to_string());
 
     // fd-exhaustion gauge: sample best-effort; failures return None (not an
     // error so we do not have to import the fd_metrics crate in every test
@@ -429,7 +426,7 @@ pub(super) async fn health(
         );
     }
 
-    Json(HealthResponse {
+    to_value(HealthResponse {
         status,
         detail,
         version: env!("CARGO_PKG_VERSION"),
@@ -437,7 +434,7 @@ pub(super) async fn health(
         disk_bytes,
         cpu_pct,
         uptime_secs,
-        addr,
+        socket,
         open_fds,
         fd_soft_limit,
         update_available,

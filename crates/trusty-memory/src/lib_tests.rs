@@ -884,68 +884,13 @@ async fn initialize_without_default_palace_omits_field() {
     assert!(init["result"]["serverInfo"]["default_palace"].is_null());
 }
 
-/// Why: every `~/.trusty-memory/http_addr` consumer (CLI, dashboard,
-/// future trusty-mpm wiring) must agree on the path. A regression that
-/// moves this file breaks every client relying on `read_daemon_addr`.
-/// What: under a stubbed data dir, the path ends in
-/// `trusty-memory/http_addr` — matching `trusty_common::read_daemon_addr`'s
-/// expected location.
-#[tokio::test]
-async fn http_addr_path_uses_resolve_data_dir() {
-    // Hold the env_test_lock so this test does not race with
-    // `prompt_context::tests::*` which spin a real daemon under
-    // the same env override and would otherwise observe a
-    // half-mutated $TRUSTY_DATA_DIR_OVERRIDE.
-    let _guard = crate::commands::env_test_lock().lock().await;
-    let tmp = tempfile::tempdir().unwrap();
-    // SAFETY: test-only env mutation serialised by env_test_lock.
-    unsafe {
-        std::env::set_var(trusty_common::DATA_DIR_OVERRIDE_ENV, tmp.path());
-    }
-    let result = http_addr_path();
-    unsafe {
-        std::env::remove_var(trusty_common::DATA_DIR_OVERRIDE_ENV);
-    }
-    let p = result.expect("http_addr_path must return Some when data dir is resolvable");
-    assert!(
-        p.ends_with("trusty-memory/http_addr"),
-        "unexpected http_addr path: {}",
-        p.display()
-    );
-}
-
-/// Why: write+read round-trip pins the disk format: a single line of
-/// `host:port\n`. Clients (cat, sh `$(cat ...)`) trim whitespace, so the
-/// trailing newline is invisible — but anything else (extra whitespace,
-/// multi-line) would break callers.
-/// Note (issue #226): `write_http_addr_file` is part of the HTTP-serving
-/// surface gated behind `axum-server`; the test follows the same gate.
-#[cfg(feature = "axum-server")]
-#[test]
-fn http_addr_file_round_trip_via_helpers() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("http_addr");
-    let addr: SocketAddr = "127.0.0.1:7073".parse().unwrap();
-    write_http_addr_file(&path, &addr).unwrap();
-    let raw = std::fs::read_to_string(&path).unwrap();
-    assert_eq!(raw.trim(), "127.0.0.1:7073");
-    // The trailing newline keeps `cat` and editors happy.
-    assert!(raw.ends_with('\n'));
-}
-
-/// Why: dynamic binding must succeed even when the preferred port is
-/// already in use. Walking 7070..=7079 + OS fallback guarantees the
-/// daemon never fails to come up just because another process holds 7070.
-/// What: pre-bind 7070 (best-effort — skip the test if it's already
-/// busy on the host), then call `bind_dynamic_port` and assert we got
-/// *some* listener back.
-#[tokio::test]
-async fn bind_dynamic_port_returns_listener() {
-    let listener = bind_dynamic_port().await.expect("bind_dynamic_port");
-    let addr = listener.local_addr().expect("local_addr");
-    assert_eq!(addr.ip().to_string(), "127.0.0.1");
-    assert!(addr.port() > 0, "port must be non-zero after bind");
-}
+// #6286: the three tests that used to sit here — `http_addr_path`'s location,
+// `write_http_addr_file`'s one-line-plus-newline disk format, and
+// `bind_dynamic_port` walking 7070..=7079 — all covered the discovery file and
+// the port walk ADR-0032 retired. There is no file and no port to pin: the
+// socket path is derived by `trusty_common::daemon_socket_path`, and
+// `socket_path_is_named_for_this_daemon` in `transport::uds::tests` is what
+// keeps every side computing the same one.
 
 /// Why: Issue #42 — prompt-facts are now served by the per-message
 /// `get_prompt_context` tool rather than the MCP prompts surface, so the
@@ -1407,55 +1352,8 @@ async fn open_palace_lazy_reopens_hydration_skipped_palace() {
     assert_eq!(handle.id.as_str(), "hydration-skip");
 }
 
-// -------------------------------------------------------------------------
-// Issue #498 — dotfile http_addr path uses $HOME/.trusty-memory/http_addr
-// -------------------------------------------------------------------------
-
-/// Why (issue #498): claude-mpm's `migrate_trusty_autodetect` reads
-/// `~/.trusty-memory/http_addr` to discover the daemon's port. On macOS
-/// the OS-standard data dir differs from the dotfile path, so the daemon
-/// was writing to the wrong location and claude-mpm always fell back to the
-/// hardcoded port `7070`. This test confirms `dotfile_http_addr_path()`
-/// returns a path rooted at `$HOME/.trusty-memory/http_addr`.
-/// What: under a known HOME, calls `dotfile_http_addr_path` and asserts the
-/// returned path ends in `.trusty-memory/http_addr`.
-/// Test: this test.
-#[cfg(feature = "axum-server")]
-#[test]
-fn dotfile_http_addr_path_uses_home_dir() {
-    // `dirs::home_dir()` is not redirectable via env on macOS, but we can
-    // at least assert that when it returns Some, the suffix is correct.
-    if let Some(p) = dotfile_http_addr_path() {
-        assert!(
-            p.ends_with(".trusty-memory/http_addr"),
-            "dotfile path must end in .trusty-memory/http_addr; got {}",
-            p.display()
-        );
-    }
-    // If home_dir() returns None (locked-down env), the function returns None —
-    // that's acceptable; we just skip the assertion.
-}
-
-/// Why (issue #498): the daemon must write to the dotfile path so that
-/// claude-mpm's `_resolve_base_url` finds the running port. This round-trip
-/// test exercises `write_http_addr_file` at a dotfile-shaped path and
-/// confirms the content is readable after the atomic rename.
-/// What: picks a tempdir as a stand-in for $HOME, writes an addr to
-/// `.trusty-memory/http_addr`, and reads it back.
-/// Test: this test.
-#[cfg(feature = "axum-server")]
-#[test]
-fn dotfile_http_addr_write_read_round_trip() {
-    let home = tempfile::tempdir().unwrap();
-    let dotfile_dir = home.path().join(".trusty-memory");
-    let path = dotfile_dir.join("http_addr");
-    let addr: SocketAddr = "127.0.0.1:7099".parse().unwrap();
-    write_http_addr_file(&path, &addr).expect("write_http_addr_file to dotfile path");
-    let raw = std::fs::read_to_string(&path).unwrap();
-    assert_eq!(
-        raw.trim(),
-        "127.0.0.1:7099",
-        "dotfile round-trip content mismatch"
-    );
-    assert!(raw.ends_with('\n'), "dotfile must end with a newline");
-}
+// #6286: the two #498 dotfile tests are gone with the file. #498 added
+// `~/.trusty-memory/http_addr` because claude-mpm read the dotfile path while
+// the daemon wrote the OS-standard one; ADR-0032 removed both writes, and
+// `transport::uds::remove_retired_discovery_files` deletes whichever of them a
+// machine still carries.
