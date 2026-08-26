@@ -288,12 +288,23 @@ pub fn build_router(state: AnalyzerAppState) -> RpcRouter {
         crate::core::DeepAnalysisReport,
         deep::deep_analyze_handler
     );
-    let router = bind!(
-        router,
+    // `analyze.facts_list` is the one method whose every field is optional, so
+    // it is the one method a caller can legitimately invoke with no `params` at
+    // all — which arrives as `null`. A struct refuses `null` (that is why
+    // [`NoParams`] exists), and `Option<T>` is what accepts both it and a real
+    // filter object. The other nineteen methods all require `index_id`, so
+    // `null` is correctly a decode failure there.
+    let facts_state = state.clone();
+    let router = router.typed::<Option<facts::FactQueryRequest>, serde_json::Value, _, _>(
         "analyze.facts_list",
-        facts::FactQueryRequest,
-        serde_json::Value,
-        facts::list_facts
+        move |req| {
+            let state = facts_state.clone();
+            async move {
+                facts::list_facts(&state, req.unwrap_or_default())
+                    .await
+                    .map_err(Into::into)
+            }
+        },
     );
     let router = bind!(
         router,

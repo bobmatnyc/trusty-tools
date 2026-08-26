@@ -92,9 +92,12 @@ async fn review_diff_requires_index_id() {
 
 #[tokio::test]
 async fn review_diff_with_args_attempts_post_to_review() {
-    // Daemon unreachable — a Transport error mentioning /review proves the
-    // handler built the right URL (with index_id) and method.
-    let server = AnalyzerMcpServer::new("http://127.0.0.1:1");
+    // Daemon unreachable — a Transport error naming `analyze.review` proves the
+    // handler picked the right method. #6287: the assertion used to look for
+    // `/review` and `index_id=my-idx` in a URL; the index now travels inside
+    // `params`, which the error does not echo, so the method name is what is
+    // left to check and it is the half that could actually be wrong.
+    let server = AnalyzerMcpServer::new("/nonexistent/trusty-analyze.sock");
     let err = server
         .handle_review_diff(&serde_json::json!({
             "diff": "+++ b/x.rs\n",
@@ -104,8 +107,7 @@ async fn review_diff_with_args_attempts_post_to_review() {
         .expect_err("daemon unreachable");
     match err {
         DispatchError::Transport(msg) => {
-            assert!(msg.contains("/review"), "got {msg}");
-            assert!(msg.contains("index_id=my-idx"), "got {msg}");
+            assert!(msg.contains("analyze.review"), "got {msg}");
         }
         other => panic!("expected Transport, got {other:?}"),
     }
@@ -154,9 +156,9 @@ async fn review_github_pr_requires_pr_number() {
 
 #[tokio::test]
 async fn review_github_pr_posts_to_endpoint() {
-    // Daemon unreachable — a Transport error referencing /review/github-pr
-    // proves the handler built the right URL after parsing all params.
-    let server = AnalyzerMcpServer::new("http://127.0.0.1:1");
+    // Daemon unreachable — a Transport error naming `analyze.review_github_pr`
+    // proves the handler picked the right method after parsing all params.
+    let server = AnalyzerMcpServer::new("/nonexistent/trusty-analyze.sock");
     let err = server
         .handle_review_github_pr(&serde_json::json!({
             "owner": "o", "repo": "r", "pr": 7, "index_id": "i"
@@ -165,7 +167,7 @@ async fn review_github_pr_posts_to_endpoint() {
         .expect_err("daemon unreachable");
     match err {
         DispatchError::Transport(msg) => {
-            assert!(msg.contains("/review/github-pr"), "got {msg}");
+            assert!(msg.contains("analyze.review_github_pr"), "got {msg}");
         }
         other => panic!("expected Transport, got {other:?}"),
     }
@@ -198,17 +200,17 @@ async fn deep_analysis_requires_index_id() {
 }
 
 #[tokio::test]
-async fn deep_analysis_posts_to_endpoint() {
-    // Daemon unreachable — a Transport error referencing /analyze/deep
-    // proves the handler built the right URL after parsing index_id.
-    let server = AnalyzerMcpServer::new("http://127.0.0.1:1");
+async fn deep_analysis_calls_the_daemon_method() {
+    // Daemon unreachable — a Transport error naming `analyze.deep_analysis`
+    // proves the handler picked the right method after parsing index_id.
+    let server = AnalyzerMcpServer::new("/nonexistent/trusty-analyze.sock");
     let err = server
         .handle_deep_analysis(&serde_json::json!({ "index_id": "i", "model": "m" }))
         .await
         .expect_err("daemon unreachable");
     match err {
         DispatchError::Transport(msg) => {
-            assert!(msg.contains("/analyze/deep"), "got {msg}");
+            assert!(msg.contains("analyze.deep_analysis"), "got {msg}");
         }
         other => panic!("expected Transport, got {other:?}"),
     }
@@ -250,11 +252,11 @@ async fn unknown_tool_returns_method_not_found() {
 }
 
 #[tokio::test]
-async fn handle_analyzer_health_calls_health_endpoint() {
-    // Direct handler invocation, bypassing dispatch. Daemon is unreachable,
-    // so we expect a Transport error referencing /health, which proves the
-    // handler constructed the right URL without us going through tools/call.
-    let server = AnalyzerMcpServer::new("http://127.0.0.1:1");
+async fn handle_analyzer_health_calls_the_health_method() {
+    // Direct handler invocation, bypassing dispatch. Daemon is unreachable, so
+    // we expect a Transport error naming `analyze.health` — which proves the
+    // handler picked the right method without going through tools/call.
+    let server = AnalyzerMcpServer::new("/nonexistent/trusty-analyze.sock");
     let err = server
         .handle_analyzer_health(&Value::Null)
         .await
@@ -262,8 +264,8 @@ async fn handle_analyzer_health_calls_health_endpoint() {
     match err {
         DispatchError::Transport(msg) => {
             assert!(
-                msg.contains("/health"),
-                "expected transport error to mention /health, got: {msg}"
+                msg.contains("analyze.health"),
+                "expected the transport error to name the method, got: {msg}"
             );
         }
         other => panic!("expected DispatchError::Transport, got {other:?}"),

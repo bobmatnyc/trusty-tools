@@ -1,12 +1,12 @@
 //! Unit tests for pure helper functions in `mcp/mod.rs`.
 //!
 //! Why: Extracted from `mod.rs` to keep that file within its frozen line-cap
-//! budget (#610). Tests for `index_id_or_default`, `build_query`, and the
+//! budget (#610). Tests for `index_id_or_default`, `optional_params`, and the
 //! MCP client timeout constant live here.
 //! What: Pure-logic tests; no I/O, no tokio runtime needed.
 //! Test: `cargo test -p trusty-analyze`.
 
-use super::{build_query, index_id_or_default};
+use super::{index_id_or_default, optional_params};
 
 #[test]
 fn index_id_or_default_prefers_index_then_alias_then_default() {
@@ -20,51 +20,56 @@ fn index_id_or_default_prefers_index_then_alias_then_default() {
     assert_eq!(index_id_or_default(&empty), "default");
 }
 
-#[test]
-fn build_query_skips_missing_keys() {
-    let args = serde_json::json!({ "subject": "fn auth", "object": "JWT" });
-    let q = build_query(&args, &["subject", "predicate", "object"]);
-    // urlencoded space → %20
-    assert!(q.starts_with('?'), "expected leading '?', got {q}");
-    assert!(q.contains("subject=fn%20auth"), "got {q}");
-    assert!(q.contains("object=JWT"), "got {q}");
-    assert!(!q.contains("predicate"), "got {q}");
-}
-
-/// Why: `find_smells`/`run_diagnostics` gained numeric (`limit`, `offset`) and
-/// boolean (`omit_content`) params (#917/#918). `build_query` must encode these
-/// correctly so the HTTP call to the analyzer daemon carries the right params.
-/// What: passes number and bool values in args; asserts they appear as plain
-/// decimal/string in the query string (no URL-encoding needed for these types).
+/// Why: the daemon's request structs give every optional field a serde default,
+/// so forwarding a key the caller did not supply would override that default
+/// with a guess. Absence has to survive the hop.
+/// What: two of three keys present; the third is absent from the params object
+/// entirely, not present-and-null.
 /// Test: this test.
 #[test]
-fn build_query_handles_numeric_and_bool() {
+fn optional_params_copies_only_present_keys() {
+    let args = serde_json::json!({ "subject": "fn auth", "object": "JWT" });
+    let p = optional_params(&args, &["subject", "predicate", "object"]);
+    assert_eq!(p.get("subject").and_then(|v| v.as_str()), Some("fn auth"));
+    assert_eq!(p.get("object").and_then(|v| v.as_str()), Some("JWT"));
+    assert!(
+        !p.contains_key("predicate"),
+        "an unsupplied filter must not be sent at all: {p:?}"
+    );
+}
+
+/// Why (#6287): `build_query`, which this replaced, coerced every value through
+/// a string/u64/bool ladder — so `omit_content: false` travelled as the STRING
+/// `"false"` and the daemon's `bool` field only accepted it because a query
+/// string has no types. A JSON `params` object does, and copying the value
+/// verbatim is what keeps the daemon's own `Deserialize` the single arbiter of
+/// what a well-typed argument is.
+/// What: a number stays a number and a bool stays a bool.
+/// Test: this test.
+#[test]
+fn optional_params_preserves_value_types() {
     let args = serde_json::json!({
         "limit": 100u64,
         "offset": 50u64,
         "omit_content": false,
     });
-    let q = build_query(&args, &["limit", "offset", "omit_content"]);
-    assert!(q.starts_with('?'), "expected leading '?', got {q}");
-    assert!(q.contains("limit=100"), "got {q}");
-    assert!(q.contains("offset=50"), "got {q}");
-    assert!(q.contains("omit_content=false"), "got {q}");
+    let p = optional_params(&args, &["limit", "offset", "omit_content"]);
+    assert_eq!(p.get("limit").and_then(|v| v.as_u64()), Some(100));
+    assert_eq!(p.get("offset").and_then(|v| v.as_u64()), Some(50));
+    assert_eq!(p.get("omit_content").and_then(|v| v.as_bool()), Some(false));
 }
 
-/// Why: integer-valued `limit` and `offset` come from JSON clients as JSON
-/// numbers, which `serde_json` parses as `u64` (when they fit). Removing the
-/// `as_f64` fallback must not break this common case.
-/// What: passes `limit` as a JSON integer (`200u64`) and asserts the query
-/// string contains `limit=200`, proving `as_u64` still handles the happy path.
+/// Why: an MCP client that spells an unset optional argument as an explicit
+/// `null` means the same thing as omitting it. Forwarding the `null` would fail
+/// the decode on a `#[serde(default)]` scalar like `limit`, turning a
+/// well-formed tool call into `invalid_params`.
+/// What: an explicitly-null key is dropped.
 /// Test: this test.
 #[test]
-fn build_query_integer_limit_parses_correctly() {
-    let args = serde_json::json!({ "limit": 200u64 });
-    let q = build_query(&args, &["limit"]);
-    assert_eq!(
-        q, "?limit=200",
-        "integer limit must serialise as plain decimal"
-    );
+fn optional_params_omits_an_explicit_null() {
+    let args = serde_json::json!({ "limit": serde_json::Value::Null });
+    let p = optional_params(&args, &["limit"]);
+    assert!(p.is_empty(), "an explicit null means absent: {p:?}");
 }
 
 /// Why: the MCP client timeout has two floors and used to clear only one.

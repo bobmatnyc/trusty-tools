@@ -418,6 +418,13 @@ mod tests {
         assert!(CLAUDE_MPM_AGENT.contains("name: trusty-analyzer"));
         assert!(CLAUDE_MPM_AGENT.contains("review_github_pr"));
         assert!(CLAUDE_MPM_SKILL.contains("# trusty-analyzer skill"));
-        assert!(CLAUDE_MPM_SKILL.contains("POST /review/github-pr"));
+        // #6287: the skill named `POST /review/github-pr` until the daemon
+        // moved to JSON-RPC over a socket. It names the method now, so an agent
+        // reading it is told something that exists.
+        assert!(CLAUDE_MPM_SKILL.contains("analyze.review_github_pr"));
+        assert!(
+            !CLAUDE_MPM_SKILL.contains("http://127.0.0.1:7879"),
+            "the skill must not send an agent at a port this daemon no longer binds"
+        );
     }
 }
