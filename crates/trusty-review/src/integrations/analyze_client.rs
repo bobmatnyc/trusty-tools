@@ -169,7 +169,7 @@ pub trait AnalyzeClient: Send + Sync {
     /// What: calls `GET /health` (checks `status == ok && search_reachable`)
     /// AND `GET /indexes` (checks at least one index exists).  Returns `false`
     /// (not an error) on any transport failure — analyze is optional.
-    /// Test: `two_step_probe_returns_false_on_transport_error`.
+    /// Test: `subprocess_client_has_analysis_returns_false_on_error`.
     async fn has_analysis(&self, index_id: &str) -> bool;
 
     /// Fetch complexity hotspots for an index.

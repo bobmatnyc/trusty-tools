@@ -30,7 +30,7 @@ pub use bow::BowEmbedder;
 /// is not `bow` — notably the removed `neural` — fails, so a caller asking for
 /// a backend that no longer exists gets an explicit 400 rather than hashed
 /// vectors silently labelled as semantic ones.
-/// Test: `embedder_kind_has_only_bow`, `clusters_reject_removed_neural_method`.
+/// Test: `embedder_kind_has_only_bow`, `rpc_clusters_reject_removed_neural_method`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EmbedderKind {

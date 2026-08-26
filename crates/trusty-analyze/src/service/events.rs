@@ -14,7 +14,7 @@
 //! HTTP surface to stream from; a push channel with no transport is state
 //! nothing can observe. The dashboard mounts on `trusty-console` instead.
 //!
-//! Test: `service::rpc_tests` drives every handler over a real socket.
+//! Test: `rpc_tests.rs` drives every handler over a real socket.
 
 use std::sync::Arc;
 
@@ -50,8 +50,8 @@ pub struct AnalyzerAppState {
     /// What: redb-backed store keyed by index id. `get` returns `Option`,
     /// which is how `GET /indexes/{id}/scip` distinguishes "nobody ingested"
     /// (404) from "ingested, zero symbols" (200 with `nodes: 0`).
-    /// Test: `scip_overlay_survives_state_rebuild`,
-    /// `scip_overlay_status_404_when_never_ingested`.
+    /// Test: `rpc_scip_overlay_survives_state_rebuild`,
+    /// `rpc_scip_status_reports_not_found_when_never_ingested`.
     pub scip_overlays: ScipOverlayStore,
     /// Runtime-configurable thresholds for code-smell detection.
     ///

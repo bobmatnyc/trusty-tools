@@ -59,7 +59,7 @@ pub struct GraphResponse {
 /// maps both the join error and the store error to an internal error. A read
 /// failure is never degraded to "no overlay": that would reintroduce the
 /// indistinguishable emptiness of #5049.
-/// Test: `scip_overlay_survives_state_rebuild`,
+/// Test: `rpc_scip_overlay_survives_state_rebuild`,
 /// `rpc_graph_marks_scip_overlay_present_after_ingest`.
 async fn read_overlay(
     state: &AnalyzerAppState,
@@ -186,8 +186,8 @@ pub struct ClustersRequest {
 /// treated as `bow`.
 /// What: `None` yields the default; `"bow"` yields `Bow`; anything else is an
 /// `invalid_params` error naming the offending value.
-/// Test: `clusters_reject_removed_neural_method`,
-/// `clusters_return_bow_vectors_for_a_live_corpus`.
+/// Test: `rpc_clusters_reject_removed_neural_method`,
+/// `rpc_clusters_return_bow_vectors_for_a_live_corpus`.
 fn resolve_method(method: Option<&str>) -> Result<EmbedderKind, ApiError> {
     match method {
         None => Ok(EmbedderKind::default()),
@@ -247,8 +247,8 @@ fn cluster_items_from(r: ClusterResult) -> Vec<ClusterResponseItem> {
 /// to fall back from — so the error-swallowing fallback that used to sit here
 /// is gone too: there is no failure left for it to hide.
 ///
-/// Test: `clusters_return_bow_vectors_for_a_live_corpus`,
-/// `clusters_reject_removed_neural_method`, and the wiring in
+/// Test: `rpc_clusters_return_bow_vectors_for_a_live_corpus`,
+/// `rpc_clusters_reject_removed_neural_method`, and the wiring in
 /// `rpc_clusters_report_an_unreachable_search_daemon`.
 pub async fn clusters_for_index(
     state: &AnalyzerAppState,
@@ -423,7 +423,7 @@ pub struct ScipOverlayStatus {
 /// node/edge counts and ingest timestamp, or `not_found` when no overlay row
 /// exists.
 /// Test: `rpc_scip_status_reports_not_found_when_never_ingested` and
-/// `scip_overlay_survives_state_rebuild`.
+/// `rpc_scip_overlay_survives_state_rebuild`.
 pub async fn scip_overlay_status(
     state: &AnalyzerAppState,
     req: super::analysis::IndexRequest,

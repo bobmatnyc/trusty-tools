@@ -18,7 +18,7 @@
 //! `/sse` push stream, which had the UI as its only subscriber; and the
 //! `http_addr` discovery file, which a derived socket path makes unnecessary.
 //!
-//! Test: `service::rpc_tests` drives every method over a real socket with a
+//! Test: `rpc_tests.rs` drives every method over a real socket with a
 //! stub search client.
 
 mod diagnostics_dispatch;
