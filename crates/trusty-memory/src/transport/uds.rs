@@ -116,9 +116,14 @@ pub const FOLDED_METHODS: &[&str] = &[
     "memory.message_mark_read",
 ];
 
-/// The streaming method, registered separately because streaming and unary
+/// The streaming methods, registered separately because streaming and unary
 /// names live in separate tables (#6286).
-pub const STREAM_METHODS: &[&str] = &["memory.chat"];
+///
+/// `memory.chat` pushes LLM tokens as the model produces them.
+/// `memory.activity_stream` is what `/sse` was — every daemon event as it
+/// happens, rather than the 2-second poll the first migration pass left the
+/// monitor with.
+pub const STREAM_METHODS: &[&str] = &["memory.chat", "memory.activity_stream"];
 
 /// Largest frame this service reads or writes, in bytes.
 ///
@@ -358,6 +363,15 @@ pub fn build_router(state: AppState) -> RpcRouter {
     let router = router.typed_stream::<crate::chat::ChatBody, _, _>("memory.chat", move |body| {
         let state = chat_state.clone();
         async move { crate::chat::chat_stream(&state, body).await }
+    });
+
+    // `NoParams` rather than a unit struct for the reason `NoParams` exists:
+    // `params` is `Value::Null` on a well-formed call to a no-argument method,
+    // and a plain unit struct refuses `null`.
+    let activity_state = state.clone();
+    let router = router.typed_stream::<NoParams, _, _>("memory.activity_stream", move |_params| {
+        let state = activity_state.clone();
+        async move { activity::activity_stream(&state).await }
     });
 
     router.fallback(DispatchFallback { state })

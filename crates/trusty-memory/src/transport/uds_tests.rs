@@ -158,8 +158,17 @@ async fn rpc_router_registers_every_documented_method() {
         registered, documented,
         "FOLDED_METHODS must equal what build_router registers"
     );
+    // Sorted for the same reason `documented` is: the router keeps its names in
+    // a `BTreeMap`, so it reports them in name order rather than registration
+    // order, and pinning the constant's declaration order would only make the
+    // next addition fail on where it was written.
     let streams: Vec<&str> = router.stream_names().collect();
-    assert_eq!(streams, STREAM_METHODS.to_vec());
+    let mut documented_streams = STREAM_METHODS.to_vec();
+    documented_streams.sort_unstable();
+    assert_eq!(
+        streams, documented_streams,
+        "STREAM_METHODS must equal what build_router registers"
+    );
 }
 
 /// Why: a folded name that collided with a dispatcher name would shadow it —
@@ -908,6 +917,129 @@ async fn rpc_chat_reports_a_provider_failure_as_the_terminal_error_frame() {
         stream.next_frame().await.is_none(),
         "the failure is reported once, then the stream is done"
     );
+    daemon.shutdown().await;
+}
+
+/// Why (#6286): `memory.activity_stream` is what `/sse` was, and the whole
+/// point is that a reader learns of an event WITHOUT asking. A test that polled
+/// would pass against the 2-second `memory.activity` tick this replaces and
+/// prove nothing.
+/// What: opens the stream, then triggers an event through a separate call, and
+/// asserts the frame arrives on the already-open stream with the same
+/// `type`-tagged body the SSE `data:` lines carried.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn rpc_activity_stream_delivers_an_event_without_polling() {
+    let state = test_state();
+    let palace = seed_palace(&state, "stream-palace");
+    let daemon = Daemon::start(state).await;
+
+    let mut stream = send_framed_stream_request_capped::<_, Value>(
+        daemon.socket(),
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "memory.activity_stream",
+            "stream": true,
+        }),
+        CALL_TIMEOUT,
+        MAX_FRAME_BYTES,
+    )
+    .await
+    .expect("the stream opens");
+
+    // A second connection, so the event is genuinely pushed onto the first
+    // rather than being a reply to anything it sent.
+    daemon
+        .ok(
+            "memory.drawer_create",
+            json!({
+                "palace_id": palace,
+                "content": "an event the stream has to carry",
+                "force": true,
+            }),
+        )
+        .await;
+
+    let frame = tokio::time::timeout(CALL_TIMEOUT, stream.next_frame())
+        .await
+        .expect("an emitted event must reach an open stream promptly")
+        .expect("the stream carries the event rather than ending")
+        .expect("the frame is an item, not a terminal error");
+    assert_eq!(
+        frame["type"], "drawer_added",
+        "the frame body is the `type`-tagged DaemonEvent: {frame}"
+    );
+    assert_eq!(frame["palace_id"], palace.as_str());
+
+    daemon.shutdown().await;
+}
+
+/// Why (#6286): `/sse` began at the subscription and this does too, which is a
+/// contract a reader has to be able to rely on. A stream that replayed history
+/// would make the monitor's log show the whole activity table every time the
+/// TUI opened; one that a reader WRONGLY assumes replays shows an empty pane
+/// and reads as an idle daemon. Either way the answer has to be pinned.
+/// What: emits an event BEFORE opening the stream, then opens it and asserts
+/// nothing arrives — while a later event does.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn rpc_activity_stream_does_not_replay_history() {
+    let state = test_state();
+    let palace = seed_palace(&state, "replay-palace");
+    let daemon = Daemon::start(state).await;
+
+    daemon
+        .ok(
+            "memory.drawer_create",
+            json!({
+                "palace_id": palace,
+                "content": "an event from before the stream opened",
+                "force": true,
+            }),
+        )
+        .await;
+
+    let mut stream = send_framed_stream_request_capped::<_, Value>(
+        daemon.socket(),
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "memory.activity_stream",
+            "stream": true,
+        }),
+        CALL_TIMEOUT,
+        MAX_FRAME_BYTES,
+    )
+    .await
+    .expect("the stream opens");
+
+    // Nothing to read: the prior event is history, and history is what
+    // `memory.activity` is for.
+    let quiet = tokio::time::timeout(Duration::from_millis(300), stream.next_frame()).await;
+    assert!(
+        quiet.is_err(),
+        "a freshly opened stream must not replay: {quiet:?}"
+    );
+
+    // And the stream is live rather than merely silent.
+    daemon
+        .ok(
+            "memory.drawer_create",
+            json!({
+                "palace_id": palace,
+                "content": "an event from after the stream opened",
+                "force": true,
+            }),
+        )
+        .await;
+    let frame = tokio::time::timeout(CALL_TIMEOUT, stream.next_frame())
+        .await
+        .expect("a later event still arrives")
+        .expect("the stream is open")
+        .expect("the frame is an item");
+    assert_eq!(frame["type"], "drawer_added");
+
     daemon.shutdown().await;
 }
 

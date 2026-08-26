@@ -13,7 +13,9 @@ use std::time::Instant;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 
-use crate::monitor::memory_client::{MemoryClient, MemoryEvent, RecallHit, resolve_memory_socket};
+use crate::monitor::memory_client::{
+    ActivityFeed, MemoryClient, MemoryEvent, RecallHit, resolve_memory_socket,
+};
 use crate::monitor::memory_tui::MemoryFocus;
 use crate::monitor::memory_tui::MemoryTuiState;
 use crate::monitor::memory_tui::render::render;
@@ -275,6 +277,35 @@ async fn fetch_drawer_detail(state: &mut MemoryTuiState, client: &MemoryClient) 
 /// arrive on the tick rather than as they happen). `[d]` triggers a dream
 /// cycle, `[Enter]` runs a recall; `Tab`, arrows, `?`, `q`/`Esc`, and `Ctrl-C`
 /// behave per [`KEY_HINT`].
+/// Open the live activity feed, saying so either way (#6286).
+///
+/// Why: this replaces a 2-second poll, and a silent failure to attach would
+/// leave the log looking like an idle daemon rather than a degraded TUI. Both
+/// outcomes go in the log so an operator reading it knows which source the
+/// events are coming from.
+/// What: `Some` on success; `None` when the daemon is not serving the method —
+/// which is what a daemon predating it, and one that is not running, both look
+/// like. The caller polls in that case.
+/// Test: the feed's own contract is covered by
+/// `monitor::memory_client::feed::tests`; this is the wiring.
+async fn open_activity_feed(
+    state: &mut MemoryTuiState,
+    client: &MemoryClient,
+) -> Option<ActivityFeed> {
+    match ActivityFeed::open(client.socket()).await {
+        Ok(feed) => {
+            state.log.push_raw("activity stream attached".to_string());
+            Some(feed)
+        }
+        Err(e) => {
+            state
+                .log
+                .push_raw(format!("activity stream unavailable ({e}); polling"));
+            None
+        }
+    }
+}
+
 /// Test: the pure pieces (state, log, rendering helpers) are unit-tested.
 pub(crate) async fn run_loop<B: ratatui::backend::Backend>(
     terminal: &mut ratatui::Terminal<B>,
@@ -284,9 +315,16 @@ pub(crate) async fn run_loop<B: ratatui::backend::Backend>(
     poll_daemon(state, client).await;
     let mut last_poll = Instant::now();
 
-    // #6286: the activity cursor. `0` means "everything the first read finds is
-    // new"; the first read therefore seeds it rather than replaying the whole
-    // page into the log.
+    // #6286: the activity log's two sources. The live stream is what `/sse`
+    // was; the poll is the fallback, kept because a daemon that predates
+    // `memory.activity_stream` — or one that restarts under this TUI — must
+    // leave the log working rather than blank.
+    let mut feed = open_activity_feed(state, client).await;
+
+    // The poll's cursor. `0` means "everything the first read finds is new";
+    // the first read therefore seeds it rather than replaying the whole page
+    // into the log. It advances on every poll whether or not the feed is live,
+    // so a fallback picks up where the stream left off instead of replaying.
     let mut event_cursor: u64 = 0;
     let mut seeded_events = false;
 
@@ -482,13 +520,43 @@ pub(crate) async fn run_loop<B: ratatui::backend::Backend>(
             }
         }
 
+        // #6286: events the live stream pushed, taken every render tick rather
+        // than every poll tick — that latency is the whole reason the stream
+        // exists. Draining never blocks.
+        if let Some(live) = feed.as_mut() {
+            for event in live.drain() {
+                apply_memory_event(state, event);
+            }
+        }
+
         if last_poll.elapsed() >= REFRESH_INTERVAL {
             poll_daemon(state, client).await;
-            // #6286: the events `/sse` used to push. The first read only seeds
-            // the cursor — replaying a whole page of history into the log the
-            // moment the TUI opens would be a worse answer than an empty log.
+
+            // A stream that has stopped is reported once and then retried on
+            // the next tick, so a daemon restart re-attaches without the
+            // operator doing anything.
+            if feed.as_ref().is_some_and(|f| !f.is_live()) {
+                let reason = feed
+                    .as_ref()
+                    .and_then(ActivityFeed::last_error)
+                    .unwrap_or_else(|| "the activity stream ended".to_string());
+                state
+                    .log
+                    .push_raw(format!("activity stream lost ({reason}); polling"));
+                feed = None;
+            }
+            if feed.is_none() {
+                feed = open_activity_feed(state, client).await;
+            }
+
+            // The poll. It runs on every tick regardless: while the feed is
+            // live it only advances the cursor, so a later fallback resumes
+            // rather than replaying. The first read seeds the cursor for the
+            // same reason — dumping a page of history into the log the moment
+            // the TUI opens would be a worse answer than an empty log.
             if let Ok((cursor, events)) = client.recent_events(event_cursor).await {
-                if seeded_events {
+                let live = feed.as_ref().is_some_and(ActivityFeed::is_live);
+                if seeded_events && !live {
                     for event in events {
                         apply_memory_event(state, event);
                     }

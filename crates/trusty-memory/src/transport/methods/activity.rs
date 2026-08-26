@@ -1,14 +1,26 @@
-//! The paginated activity history (#6286).
+//! The activity history, and the live feed that replaces `/sse` (#6286).
 //!
 //! Why: `GET /api/v1/activity` seeded the console's activity feed on mount;
 //! without it the pane rendered empty until the next live event. The hook
 //! ingestion route it shared a file with is NOT folded — `hook_fired` was
 //! already a dispatcher method, and the route was its duplicate.
-//! What: `memory.activity`, with the same filters and the same clamp.
+//!
+//! [`activity_stream`] is what `/sse` was. The first pass at this migration
+//! retired that listener with nothing in its place, so the monitor TUI polled
+//! `memory.activity` on a 2-second tick — an event appeared up to two seconds
+//! late, and one evicted from the log between two ticks was never seen at all.
+//! This streams from the SAME `broadcast::Sender<DaemonEvent>` the SSE handler
+//! subscribed to, so an event reaches a reader as it is emitted.
+//!
+//! What: `memory.activity` (a page, with the same filters and the same clamp)
+//! and `memory.activity_stream` (every event from now on, as it happens).
 //! Test: `super::super::uds::tests` — `rpc_activity_*`.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::mpsc;
+use trusty_common::uds::server::{RpcError, RpcStreamItems};
 
 use crate::transport::api_error::ApiError;
 use crate::{ActivityFilter, ActivitySource, AppState};
@@ -131,4 +143,81 @@ pub async fn activity(state: &AppState, params: ActivityParams) -> Result<Value,
         "limit": limit,
         "offset": offset,
     }))
+}
+
+/// How many events the daemon buffers for one slow reader.
+///
+/// Why: the producer is a broadcast subscriber and the consumer is a socket
+/// write, so a reader that stalls has to be bounded somewhere. 256 is four
+/// times the broadcast channel's own capacity, which means the broadcast
+/// channel's lag guard fires first for a reader that stops draining — and lag
+/// is a frame this method can report, where a full mpsc would only block.
+const STREAM_BUFFER: usize = 256;
+
+/// `memory.activity_stream` — every event from now on, as it happens (#6286).
+///
+/// Why: this is what `/sse` was. Polling `memory.activity` on a tick — the
+/// stopgap the first migration pass left the TUI with — shows an event up to
+/// one tick late and never shows one evicted from the log between two ticks.
+///
+/// What: subscribes to the same `broadcast::Sender<DaemonEvent>` the SSE
+/// handler used and forwards each event as one `"stream":"item"` frame,
+/// carrying the same `type`-tagged body the SSE `data:` lines carried.
+///
+/// **History is NOT replayed.** The stream begins at the subscription, exactly
+/// as `/sse` did; a reader that wants what came before asks `memory.activity`.
+/// Saying so is the whole contract: a caller that assumed a replay would show
+/// an empty pane and conclude the daemon is idle.
+///
+/// **A lagged reader gets a frame, not a silent gap.** A `broadcast` receiver
+/// that falls behind drops the events it missed. Reporting that as
+/// `{"lagged": N}` is what lets a reader say so rather than render a
+/// continuous-looking feed with a hole in it.
+///
+/// The stream ends when the daemon shuts down (the broadcast sender is
+/// dropped) or when the reader disconnects, which closes the mpsc and stops
+/// the task.
+///
+/// # Errors
+///
+/// Never before the first item: the subscription cannot fail. A failure to
+/// serialise one event becomes that event's terminal error frame.
+///
+/// Test: `rpc_activity_stream_delivers_an_event_without_polling`,
+/// `rpc_activity_stream_does_not_replay_history`.
+pub async fn activity_stream(state: &AppState) -> Result<RpcStreamItems, RpcError> {
+    let mut events = state.events.subscribe();
+    let (tx, items) = mpsc::channel(STREAM_BUFFER);
+
+    tokio::spawn(async move {
+        loop {
+            let frame = match events.recv().await {
+                Ok(event) => match serde_json::to_value(&event) {
+                    Ok(value) => Ok(value),
+                    Err(e) => Err(RpcError::internal(format!("serialize activity event: {e}"))),
+                },
+                // The reader missed `n` events. Telling it beats a gap it
+                // cannot see.
+                Err(RecvError::Lagged(n)) => {
+                    tracing::warn!(
+                        target: "trusty_memory::activity_stream",
+                        "an activity_stream reader lagged {n} events"
+                    );
+                    Ok(serde_json::json!({ "type": "lagged", "lagged": n }))
+                }
+                // The daemon is shutting down.
+                Err(RecvError::Closed) => break,
+            };
+            let terminal = frame.is_err();
+            if tx.send(frame).await.is_err() {
+                // The reader disconnected.
+                break;
+            }
+            if terminal {
+                break;
+            }
+        }
+    });
+
+    Ok(items)
 }
