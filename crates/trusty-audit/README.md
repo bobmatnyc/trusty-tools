@@ -231,10 +231,11 @@ rather than silently running the older binary.
 **What the run does not pin.** `tga` runs from its absolute path, and the report
 renderer, the search binary and the analyze binary are named to the child
 through `TRUSTY_REVIEW_BIN`, `TRUSTY_SEARCH_BIN` and `TRUSTY_ANALYZE_BIN`, so
-none of them can come from your `PATH`. What stays unpinned is the analyze
-daemon's ADDRESS: `trusty-review report --analyze` reads metrics over HTTP from a
-URL (default `http://127.0.0.1:7879`, overridable with `TRUSTY_ANALYZE_URL`), so
-whatever is listening there is what answers.
+none of them can come from your `PATH`. What stays unpinned is which analyze
+daemon answers: `trusty-review report --analyze` reads metrics as JSON-RPC over
+a Unix socket derived from the data directory (overridable with
+`TRUSTY_ANALYZE_SOCKET`, #6287), so whatever is serving that path is what
+answers.
 
 **The code-analysis leg (#6081, #6082).** After each repository is audited, this
 client indexes its checkout in `trusty-search` and measures it with

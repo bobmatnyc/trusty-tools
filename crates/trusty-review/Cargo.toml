@@ -43,7 +43,7 @@ name        = "trusty-review"
 # `src/**`, so the pre-merge guard requires the next free position. The public
 # surface only grows: `LlmRequest::effective_model` and
 # `OpenRouterProvider::with_base_url` are added, nothing changes shape or moves.
-version     = "0.27.0"
+version     = "0.28.0"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true

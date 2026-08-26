@@ -114,7 +114,7 @@ authors = ["Bob Matsuoka <bob@matsuoka.com>"]
 # ── Internal crates (path deps so the monorepo builds without publish cycles) ──
 # trusty-code: per-project Claude-Code-compatible MPM orchestration harness (#587).
 # First published to crates.io at version 0.1.0.
-trusty-code = { path = "crates/trusty-code", version = "0.3.0" }
+trusty-code = { path = "crates/trusty-code", version = "0.3.1" }
 # trusty-tui: engine-agnostic terminal-UI seam (`TuiEngine` trait + `ReplEvent`)
 # shared by trusty-code's `tcode tui` and trusty-agents' tagent REPL (DOC-50,
 # epic #3411). Not yet published (Slice 1, #3425).
@@ -123,7 +123,7 @@ trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.6.0"
 trusty-common = { path = "crates/trusty-common", version = "0.44" }
 # Shared JSON-RPC 2.0 / MCP protocol primitives, extracted from
 # `trusty_common::mcp` by ADR-0040 (#5803).
-trusty-mcp = { path = "crates/trusty-mcp", version = "0.1.0" }
+trusty-mcp = { path = "crates/trusty-mcp", version = "0.1.1" }
 # trusty-embedderd: embedding daemon — referenced by trusty-search so
 # `cargo install trusty-search` produces both binaries from one command.
 # Why: `default-features = false` HERE, not only on the member entry (mirrors
@@ -159,20 +159,20 @@ trusty-mpm = { path = "crates/trusty-mpm", version = "1.0.0" }
 #      this line existed. Both consumers name what they need: trusty-analyze's
 #      `review` feature pulls `trusty-review/mcp`; trusty-mpm's dev-dependency
 #      only touches `integrations`, which is unconditional.
-trusty-review = { path = "crates/trusty-review", version = "0.27", default-features = false }
+trusty-review = { path = "crates/trusty-review", version = "0.28", default-features = false }
 # trusty-console: web dashboard for trusty services. As of #1318 the standalone
 # `trusty-console` crate is the SOLE producer of the `trusty-console` binary
 # (de-bundled from the host crates for single-owner-per-binary). It is still a
 # published library crate; the path entry remains so any local lib consumers
 # resolve in-tree.
-trusty-console = { path = "crates/trusty-console", version = "0.6.0" }
+trusty-console = { path = "crates/trusty-console", version = "0.7.0" }
 # trusty-progress: shared rustup/cargo-style progress + status display (#1315).
 # Consumed by trusty-installer for install/upgrade component rows; published library crate.
 trusty-progress = { path = "crates/trusty-progress", version = "0.3.0" }
 # trusty-installer: consumed as a LIBRARY by trusty-audit for the pinned,
 # fail-closed prebuilt download entry point (#5491, #5495). trusty-audit is
 # `publish = false`, so this entry exists for in-tree resolution.
-trusty-installer = { path = "crates/trusty-installer", version = "0.11" }
+trusty-installer = { path = "crates/trusty-installer", version = "0.12" }
 # trusty-audit: consumed as a LIBRARY by the auditor client's Tauri shell
 # (`trusty-audit-ui`, #5477 phase 1), which calls `Session::execute` in-process
 # rather than serving HTTP or shelling out to the `taudit` binary — DOC-68 §11

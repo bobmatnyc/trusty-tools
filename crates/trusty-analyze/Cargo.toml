@@ -1,6 +1,6 @@
 [package]
 name        = "trusty-analyze"
-version     = "0.11.0"
+version     = "0.12.0"
 edition     = "2021"
 license.workspace    = true
 authors.workspace    = true
@@ -23,12 +23,16 @@ exclude     = [
 [[bin]]
 name = "trusty-analyze"
 path = "src/main.rs"
-# Why (issue #249): the `trusty-analyze` binary boots the axum HTTP daemon and
-# the axum-backed MCP HTTP/SSE transport, so it needs the `http-server` feature
-# compiled in. Listing it here keeps `--no-default-features` library builds
-# (e.g. consumers that only want the CLI types or the pure dispatcher) from
-# accidentally trying to build this binary without axum and failing to link
-# the `service` and `mcp::sse` modules.
+# Why (issue #249): the `trusty-analyze` binary boots the daemon, which lives in
+# the `service` module, so it needs the `http-server` feature compiled in.
+# Listing it here keeps `--no-default-features` library builds (e.g. consumers
+# that only want the CLI types or the pure dispatcher) from accidentally trying
+# to build this binary and failing to link `service`.
+#
+# #6287 (ADR-0032): the feature name outlived what it named. The daemon serves a
+# Unix socket now and `mcp::sse` is deleted; axum remains only as the CLIENT
+# stack this crate uses to reach trusty-search, which is still HTTP. Renaming
+# the feature is a separate breaking change, not one to fold in here.
 required-features = ["http-server"]
 
 # Why (issue #1318): the `trusty-console` `[[bin]]` shim was REMOVED here.
@@ -49,8 +53,9 @@ tokio              = { workspace = true }
 #      consumers can drop the HTTP stack entirely with `default-features = false`.
 axum               = { workspace = true, optional = true }
 # Why (#6018): `timeout` is additive on top of the workspace feature set
-# (cors, trace, compression-gzip). `service/routes.rs` layers a blanket
-# `TimeoutLayer` so no handler can hold a connection open indefinitely.
+# (cors, trace, compression-gzip). It backed the blanket `TimeoutLayer` on the
+# retired axum router; since #6287 the per-request bound is the socket server's
+# own `read_timeout` plus each handler's deadline.
 tower-http         = { workspace = true, optional = true, features = ["timeout"] }
 reqwest            = { workspace = true, features = ["http2"] }
 futures-util       = { workspace = true }

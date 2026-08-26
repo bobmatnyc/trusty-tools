@@ -39,10 +39,11 @@
 //!
 //! ## What it deliberately does not do
 //!
-//! It starts no daemon of its own and adds no configuration. The two addresses
+//! It starts no daemon of its own and adds no configuration. The two endpoints
 //! come from where every other client of those daemons reads them — the
-//! trusty-search discovery files via [`trusty_common::daemon_guard`], and
-//! `TRUSTY_ANALYZE_URL` for trusty-analyze — and the two binaries from the
+//! trusty-search discovery files via [`trusty_common::daemon_guard`], and the
+//! derived socket path (or `TRUSTY_ANALYZE_SOCKET`) for trusty-analyze, which
+//! is a path rather than a URL since #6287 — and the two binaries from the
 //! engagement's pinned copies, falling back to the same `TRUSTY_SEARCH_BIN` /
 //! `TRUSTY_ANALYZE_BIN` overrides `tga audit` honours.
 //!
