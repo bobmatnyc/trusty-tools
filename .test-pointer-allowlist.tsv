@@ -717,9 +717,6 @@ crates/trusty-review/src/service/handlers.rs	health_returns_ok_json
 crates/trusty-review/src/service/handlers.rs	new_for_test
 crates/trusty-review/src/service/handlers.rs	status_returns_json_with_in_flight
 crates/trusty-review/src/service/inference_probe.rs	probe_default_starts_unknown
-crates/trusty-review/src/service/mod.rs	health_returns_ok_json
-crates/trusty-review/src/service/mod.rs	router_builds_without_panic
-crates/trusty-review/src/service/mod.rs	serve_help_shows_default_port
 crates/trusty-search/src/allowlist/mod.rs	denylist_allows_path_with_sensitive_word_in_name
 crates/trusty-search/src/allowlist/mod.rs	upsert_appends_new
 crates/trusty-search/src/commands/hook.rs	hook_scripts_all_exit_zero
@@ -893,7 +890,6 @@ crates/trusty-mpm/src/daemon/managed_routes/front_gate.rs	production_gate_*
 crates/trusty-mpm/src/daemon/orphan_gc.rs	process_tree_probe_self_has_no_managed_child
 crates/trusty-mpm/src/daemon/state/sessions.rs	gather_tracked_names_degraded_on_store_error
 crates/trusty-mpm/src/tui/project_ctl/state/mod.rs	activity_failure_streak_*
-crates/trusty-review/src/commands/port.rs	parse_port_from_addr_*
 crates/trusty-review/src/config/mapreduce.rs	select_review_mode_*
 crates/trusty-search/src/commands/index_cwd_resolve.rs	cwd_resolve_matches_*
 crates/trusty-search/src/commands/port.rs	parse_port_from_addr_*

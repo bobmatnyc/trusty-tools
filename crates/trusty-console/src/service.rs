@@ -314,6 +314,10 @@ mod tests {
     #[test]
     fn default_port_does_not_collide_with_known_siblings() {
         // (binary, port, source-of-truth pointer)
+        //
+        // #6277: trusty-review has NO ROW. It no longer binds a TCP port — it
+        // serves a Unix socket (ADR-0032), so 7891 is not reserved by anything
+        // and listing it would forbid a future daemon from a free port.
         let known_siblings: &[(&str, u16, &str)] = &[
             (
                 "trusty-memory",
@@ -329,11 +333,6 @@ mod tests {
                 "trusty-analyze",
                 7879,
                 "trusty-analyze/src/service/events.rs::DEFAULT_PORT",
-            ),
-            (
-                "trusty-review",
-                7891,
-                "trusty-review/src/service/mod.rs::DEFAULT_PORT",
             ),
             (
                 "trusty-mpm",

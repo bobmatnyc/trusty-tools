@@ -42,7 +42,12 @@ const REAL_ANALYZE: &str = r#"{"status":"ok","version":"0.7.4","search_reachable
 /// trusty-mpm, port 7880 — the only payload with NO `version` field.
 const REAL_MPM: &str = r#"{"status":"ok","catalog_stale":true,"catalog_unknown":false,"catalog_changes":["agent dart-engineer: new"],"supervised":false}"#;
 
-/// trusty-review, port 7891 — answers 200 + `degraded` when search is down.
+/// trusty-review — the `result` half of a `review.health` frame since #6277.
+///
+/// The BODY is unchanged by the transport swap; only what carries it moved. It
+/// stays in this table because the #4246 acceptance property is about the body:
+/// this payload must never classify as `down`, whether it arrives in an HTTP
+/// response or in a JSON-RPC result.
 const REAL_REVIEW: &str = r#"{"status":"ok","version":"0.10.1","dry_run":true,"reviewer_model":"us.anthropic.claude-sonnet-4-6","inference":"ok","deps":{"trusty_search":{"required":true,"reachable":true,"state":"ok"}}}"#;
 
 /// Every real payload, paired with the daemon it came from.
@@ -515,8 +520,8 @@ async fn probe_ignores_http_proxy_env() {
 /// single cross-cutting inventory and has already been the subject of three
 /// collision incidents. Pin every value so a silent drift is a test failure
 /// rather than a probe pointed at another daemon.
-/// What: asserts the six stable-set daemon ports and that a non-member resolves
-/// to `None` (so no address is ever guessed).
+/// What: asserts the five remaining stable-set daemon ports and that a
+/// non-member resolves to `None` (so no address is ever guessed).
 /// Test: This is the test.
 #[test]
 fn fixed_ports_match_port_assignments_doc() {
@@ -525,13 +530,176 @@ fn fixed_ports_match_port_assignments_doc() {
     assert_eq!(fixed_port_for("trusty-search"), Some(7878));
     assert_eq!(fixed_port_for("trusty-analyze"), Some(7879));
     assert_eq!(fixed_port_for("trusty-mpm"), Some(7880));
-    assert_eq!(fixed_port_for("trusty-review"), Some(7891));
     // Never guess: `tga` is not a daemon, and `trusty-installer` binds nothing.
     assert_eq!(fixed_port_for("tga"), None);
     assert_eq!(fixed_port_for("trusty-installer"), None);
     // 7881 (mpm supervisor metrics) and 7882 (tcode) belong to other processes
     // and must not be probed as stable-set members.
     assert!(!matches!(fixed_port_for("trusty-code"), Some(7882)));
+}
+
+/// REGRESSION (#6277): a member that serves a Unix socket must have NO fixed
+/// port, and must resolve a socket instead.
+///
+/// Why: leaving `trusty-review => Some(7891)` behind would make `tctl` dial a
+/// port the daemon no longer binds. That leg answers `Refused`, `Refused` is one
+/// of the two variants `is_confirmed_down` accepts, and `verify_tail` turns a
+/// confirmed-down into `launchctl kickstart -k` — so every `tctl install` would
+/// hard-restart a healthy review daemon. That is #4246 verbatim, and it is why
+/// the transport swap and its consumers had to land together.
+/// What: asserts the two resolvers are mutually exclusive for trusty-review and
+/// that an HTTP member resolves no socket.
+/// Test: This is the test.
+#[test]
+fn uds_members_have_no_fixed_port() {
+    assert_eq!(
+        fixed_port_for("trusty-review"),
+        None,
+        "a UDS member must not resolve a TCP port — dialling one reads Refused \
+         and kickstarts a healthy daemon (#4246)"
+    );
+    assert!(
+        uds_socket_for("trusty-review").is_some(),
+        "trusty-review must resolve a socket, or its probe has no transport at all"
+    );
+    assert!(
+        uds_socket_for("trusty-search").is_none(),
+        "an HTTP member must not resolve a socket"
+    );
+}
+
+/// Why: the socket path is a cross-crate contract — the daemon binds what
+/// `trusty_common::daemon_socket_path` returns and this must dial the same
+/// thing. Re-deriving it here (a literal, a different filename) is the drift
+/// that produces a daemon that is up and a probe that says down.
+/// What: asserts the resolver returns exactly the shared entry point's answer.
+/// Test: This is the test.
+#[test]
+fn uds_socket_for_matches_the_shared_entry_point() {
+    assert_eq!(
+        uds_socket_for("trusty-review"),
+        trusty_common::daemon_socket_path("trusty-review").ok()
+    );
+}
+
+/// Why (#6277): a socket carries no HTTP status code, so `classify_response`'s
+/// non-2xx arm has no analogue and an error frame needs its own verdict. What
+/// must NOT happen is the error being read as evidence the daemon is dead: it
+/// accepted the connection, read the frame, and chose to refuse — the strongest
+/// available evidence that it is alive.
+/// What: an `error` frame classifies as `RpcError` carrying the code, renders
+/// `down` for display, and is NOT confirmed-down.
+/// Test: This is the test.
+#[test]
+fn classify_rpc_response_reports_an_error_frame_as_answered_not_down() {
+    let frame = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "error": {"code": -32601, "message": "unknown method"},
+    });
+    let outcome = classify_rpc_response(&frame);
+    assert!(
+        matches!(outcome, ProbeOutcome::RpcError { code: -32601, .. }),
+        "got {outcome:?}"
+    );
+    assert_eq!(outcome.health_string(), "down");
+    assert!(
+        !outcome.is_confirmed_down(),
+        "a daemon that answered must never authorise a kickstart (#4246)"
+    );
+}
+
+/// Why: the envelope check is what stops a squatter on the socket path reading
+/// as trusty-review. It is the same rule `classify_response` applies to an HTTP
+/// body, and it has to survive the transport swap.
+/// What: a `result` with no string `status` is `BadEnvelope`, not `Serving`.
+/// Test: This is the test.
+#[test]
+fn classify_rpc_response_rejects_a_non_trusty_result() {
+    let frame = serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": {"hello": "world"}});
+    let outcome = classify_rpc_response(&frame);
+    assert!(
+        matches!(outcome, ProbeOutcome::BadEnvelope { .. }),
+        "got {outcome:?}"
+    );
+    assert!(!outcome.is_confirmed_down());
+}
+
+/// Why (#6277): JSON-RPC 2.0 §5 says a response carries EXACTLY one of `result`
+/// and `error`. A frame with both is malformed, and an earlier version of
+/// `classify_rpc_response` silently took the error branch — reporting a specific
+/// coded reason read off a frame whose shape already proves the sender is not
+/// speaking the protocol. A squatter that emits both would have been described
+/// with far more confidence than it earned.
+/// What: a both-present frame is `BadEnvelope`, and — like every other answered
+/// outcome — is not confirmed-down.
+/// Test: This is the test.
+#[test]
+fn classify_rpc_response_rejects_a_frame_carrying_both_result_and_error() {
+    let frame = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {"status": "ok", "version": "9.9.9"},
+        "error": {"code": -32603, "message": "handler failed"},
+    });
+    let outcome = classify_rpc_response(&frame);
+    assert!(
+        matches!(outcome, ProbeOutcome::BadEnvelope { .. }),
+        "a frame carrying both halves is malformed, not a health answer and not \
+         a coded refusal; got {outcome:?}"
+    );
+    assert!(!outcome.is_confirmed_down());
+}
+
+/// Why: the whole point of the UDS leg — a real socket answering a real
+/// `review.health` frame must reach `Serving` with the version the status table
+/// renders, through the SAME `effective_status` the HTTP legs use.
+/// What: binds a socket, answers one frame with the captured real payload, and
+/// asserts the probe reads it.
+/// Test: This is the test.
+#[tokio::test]
+async fn probe_uds_reads_the_health_envelope_off_a_result_frame() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let socket = tmp.path().join("sockets").join("review.sock");
+    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
+
+    tokio::spawn(async move {
+        let Ok((mut conn, _)) = listener.accept().await else {
+            return;
+        };
+        let mut sink = Vec::new();
+        let _ = conn.read_to_end(&mut sink).await;
+        let reply = format!("{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{REAL_REVIEW}}}\n");
+        let _ = conn.write_all(reply.as_bytes()).await;
+        let _ = conn.flush().await;
+    });
+
+    let outcome = super::probe_socket(&socket).await;
+    match outcome {
+        ProbeOutcome::Serving { status, version } => {
+            assert_eq!(status, "ok");
+            assert_eq!(version.as_deref(), Some("0.10.1"));
+        }
+        other => panic!("a live socket must be Serving, got {other:?}"),
+    }
+}
+
+/// REGRESSION (#6277): an absent socket is `Refused`, matching what a closed TCP
+/// port produces, so `verify_tail`'s existing gate behaves identically across
+/// the two transports.
+/// What: probes a path nothing has ever bound.
+/// Test: This is the test.
+#[tokio::test]
+async fn probe_uds_reports_refused_for_an_absent_socket() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let outcome = super::probe_socket(&tmp.path().join("absent.sock")).await;
+    assert_eq!(outcome, ProbeOutcome::Refused, "got {outcome:?}");
+    assert!(
+        outcome.is_confirmed_down(),
+        "nothing accepted the connection, which IS the evidence a repair needs"
+    );
 }
 
 /// Why: `http_addr` is the PRIMARY discovery path — it is what survives a
@@ -732,6 +900,16 @@ fn down_health_string_is_not_a_kickstart_licence() {
         ProbeOutcome::Refused,
         ProbeOutcome::Timeout,
         ProbeOutcome::HttpError { status: 502 },
+        // #6277: the UDS analogue of `HttpError`, and it renders `down` for the
+        // same reason — a daemon that refused with a code is not healthy, and
+        // the only non-`down` words available (`unknown`, `stale`) are tolerated
+        // by `VerifyTailReport::build` and `status`'s exit code, so either would
+        // print VERIFIED for a stack with a refusing daemon in it. The safety
+        // comes from `is_confirmed_down`, which this test's partition pins.
+        ProbeOutcome::RpcError {
+            code: -32601,
+            message: "unknown method".to_owned(),
+        },
         ProbeOutcome::BadEnvelope {
             got: "<html>squatter</html>".to_owned(),
         },
@@ -776,6 +954,13 @@ fn only_transport_failures_are_confirmed_down() {
         ProbeOutcome::Unprobeable,
         ProbeOutcome::NoAddress,
         ProbeOutcome::HttpError { status: 503 },
+        // #6277: a JSON-RPC error frame means the daemon accepted the
+        // connection, read the frame, and chose to refuse — the strongest
+        // available evidence it is ALIVE, so it must never authorise a repair.
+        ProbeOutcome::RpcError {
+            code: -32603,
+            message: "handler failed".to_owned(),
+        },
         ProbeOutcome::BadEnvelope {
             got: "clap: unexpected argument '--json'".to_owned(),
         },

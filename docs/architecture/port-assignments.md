@@ -55,24 +55,24 @@ else's guard test too).
 | 7881 | `trusty-mpm` **supervisor** metrics/health listener — a distinct process from the 7880 daemon above | `trusty-mpm/src/supervisor/config.rs::DEFAULT_METRICS_ADDR` | Yes |
 | 7882 | `trusty-code` (`tcode serve --http`) | `trusty-code/src/serve/mod.rs::DEFAULT_HTTP_PORT` (mirrored by `trusty-code-gui/src/state.rs::DEFAULT_DAEMON_URL`) | No (#3364 follow-up) |
 | 7890 | `trusty-embedderd` `--http` mode (manual/dev-run only; auto-spawn always uses `--stdio`/UDS) | `trusty-embedderd/src/lib.rs::Args::http_addr` | No |
-| 7891 | `trusty-review` | `trusty-review/src/service/mod.rs::DEFAULT_PORT` | Yes |
 | 8080 | `trusty-agents` API server | `trusty-agents/src/runtime/mode_dispatch.rs` / `trusty-agents/src/service/mod.rs::DEFAULT_SERVICE_PORT` | No |
 
 ## Next Free Port
 
 The next unclaimed value in the `78xx`/`79xx` block used by this workspace
-is **7892** (immediately after `trusty-review`'s `7891`). Prefer sequential
-allocation in that block over reusing a gap, so this table stays easy to
-scan. Whatever you pick:
+is **7892**. `7891` is also free again — #6277 moved `trusty-review` off TCP
+onto a Unix socket — but prefer sequential allocation over reusing a released
+value, so a stale reference to `7891` in an old log or script cannot resolve to
+a different daemon. Whatever you pick:
 
 1. Check this table for the exact value.
 2. `grep -rn "78[0-9][0-9]\|79[0-9][0-9]" --include="*.rs"` across the
    workspace as a second check — this table can drift; the grep cannot lie.
 3. Add your new default to every existing `known_siblings` guard test
-   (`trusty-console/src/service.rs`, `trusty-review/src/service/mod.rs`,
-   `trusty-code/src/serve/mod.rs`) so siblings reject it if it ever
-   collides with them in the future, and add your own equivalent guard test
-   pointing back at all of the above.
+   (`trusty-console/src/service.rs`, `trusty-code/src/serve/mod.rs`) so
+   siblings reject it if it ever collides with them in the future, and add
+   your own equivalent guard test pointing back at all of the above.
+   `trusty-review` no longer has one — #6277 removed its `DEFAULT_PORT`.
 4. Add a row to the table above.
 
 ## Incident History
@@ -87,6 +87,14 @@ scan. Whatever you pick:
   manual/dev-run opt-in rather than a `tctl`-managed daemon. Fixed by moving
   to 7891 and extending the known-siblings table to cover manual listeners
   too, not just launchd-managed ones.
+- **#6277** — `trusty-review` left this table entirely. ADR-0032 makes UDS the
+  inter-service transport and `trusty-console` the only HTTP surface, so the
+  review daemon binds `<data dir>/trusty-review.sock`
+  (`trusty_common::daemon_socket_path`) and has no `DEFAULT_PORT` to collide
+  with anything. Its consumers — the console's `ReviewConnector` and `tctl`'s
+  health probe — dial that socket, and moved in the same change: a probe left
+  on 7891 would read `Refused` for a healthy daemon and kickstart it, which is
+  the #4246 class.
 - **#3364** — `trusty-code`'s default HTTP port (7881) collided with
   `trusty-mpm`'s supervisor metrics listener (`DEFAULT_METRICS_ADDR`, also
   7881) — two defaults picked independently, on the same port, with no

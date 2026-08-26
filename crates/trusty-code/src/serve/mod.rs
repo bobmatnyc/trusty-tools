@@ -71,8 +71,9 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 /// Why: the trusty-* family reserves a block of fixed local ports so
 /// operators/tooling can find a daemon without a discovery file
 /// (`trusty-memory` 7070, `trusty-search` 7878, `trusty-analyze` 7879,
-/// `trusty-mpm` daemon 7880, `trusty-review` 7891, `trusty-embedderd`
-/// `--http` mode 7890). This constant previously reused `7881`, which turned
+/// `trusty-mpm` daemon 7880, `trusty-embedderd` `--http` mode 7890).
+/// `trusty-review` used to hold 7891 and no longer does — #6277 moved it to a
+/// Unix socket. This constant previously reused `7881`, which turned
 /// out to collide with `trusty-mpm`'s supervisor metrics listener
 /// (`trusty_mpm::supervisor::config::DEFAULT_METRICS_ADDR`,
 /// `crates/trusty-mpm/src/supervisor/config.rs`) — the two defaults were
@@ -466,11 +467,8 @@ mod tests {
                 7890,
                 "trusty-embedderd/src/lib.rs::Args::http_addr (--http default_value, manual/dev-run only)",
             ),
-            (
-                "trusty-review",
-                7891,
-                "trusty-review/src/service/mod.rs::DEFAULT_PORT",
-            ),
+            // #6277: no trusty-review row. It serves a Unix socket rather
+            // than a TCP port (ADR-0032), so 7891 is free.
             (
                 "trusty-agents",
                 8080,

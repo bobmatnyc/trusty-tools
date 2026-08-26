@@ -11488,7 +11488,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-console"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -11591,7 +11591,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-installer"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -11791,7 +11791,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-review"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11799,7 +11799,6 @@ dependencies = [
  "aws-sdk-bedrockruntime",
  "aws-smithy-types",
  "aws-types",
- "axum",
  "base64 0.22.1",
  "chrono",
  "clap",
@@ -11818,11 +11817,11 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "toml 0.8.23",
- "tower",
- "tower-http",
  "tracing",
  "tracing-subscriber",
  "trusty-common",
+ "trusty-console",
+ "trusty-installer",
  "trusty-mcp",
 ]
 

@@ -21,9 +21,9 @@
 pub mod calibrate;
 pub mod compare;
 pub(crate) mod diff_source;
-pub mod port;
 pub mod run;
 #[cfg(feature = "http-server")]
 pub mod serve;
 #[cfg(feature = "http-server")]
 pub mod service;
+pub mod socket;

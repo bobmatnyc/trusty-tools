@@ -207,7 +207,7 @@ pub(crate) async fn stub_hang() -> String {
 /// Why: port 1 (`tcpmux`) is in the privileged range, so an unprivileged process
 /// — which is what `cargo test` is, locally and on CI — cannot bind it even by
 /// accident (`bind` fails `EACCES`). No trusty daemon is anywhere near it either:
-/// the stable set lives in `7070..=7891` (`docs/architecture/port-assignments.md`),
+/// the stable set lives in `7070..=8080` (`docs/architecture/port-assignments.md`),
 /// so this cannot repeat the collision class that made hardcoding a port
 /// unattractive in the first place. A closed loopback port answers `connect` with
 /// an immediate RST, so the refusal is both certain and sub-millisecond.

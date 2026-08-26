@@ -1,21 +1,23 @@
-//! Handler for the `serve` subcommand (HTTP and MCP stdio modes).
+//! Handler for the `serve` subcommand (UDS daemon and MCP stdio modes).
 //!
 //! Why: extracted from `main.rs` to keep that file under the 500-line cap (#610).
-//! The `--stdio` flag runs the MCP stdio JSON-RPC loop; without it the standard
-//! axum HTTP daemon starts on the configured port.
+//! The `--stdio` flag runs the MCP stdio JSON-RPC loop; without it the daemon
+//! binds its Unix socket. #6277 (ADR-0032) replaced the TCP loopback HTTP
+//! listener with that socket; `--stdio` is untouched.
 //!
 //! What: for `--stdio`, spawns `build_app_state` in a background task and calls
 //! `mcp::run_deferred` immediately so the MCP `initialize` handshake is answered
-//! before any network or credential calls are made (issue #1739).  For HTTP mode,
-//! builds `AppState` synchronously then calls `serve_http`.
+//! before any network or credential calls are made (issue #1739).  For daemon
+//! mode, builds `AppState` synchronously then calls `service::serve`.
 //!
 //! Test: `cargo run -p trusty-review --features http-server -- serve --help`
-//! must exit 0; endpoint tests live in `service::handlers` and
-//! `service::webhook`; MCP dispatch covered by `mcp::tests`.
+//! must exit 0; wire tests live in `service::rpc`; MCP dispatch covered by
+//! `mcp::tests`.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use tracing::{error, info};
 
 use trusty_review::{
@@ -26,7 +28,7 @@ use trusty_review::{
     llm::build_provider,
     mcp::DeferredStateValue,
     pipeline::enforce_verifier_liveness,
-    service::{AppState, DEFAULT_PORT, serve as serve_http},
+    service::{AppState, serve as serve_uds, socket_path},
     store::DedupNeed,
 };
 
@@ -36,29 +38,49 @@ use crate::cli_verify;
 
 /// Arguments for the `serve` subcommand.
 ///
-/// Why: collects the port, bind address, and mode flags so the server can be
-/// configured purely from CLI flags without requiring env-var wrangling.
-/// What: `--port` sets the listen port (default 7891); `--stdio` activates the
-/// MCP JSON-RPC stdio loop instead of binding TCP.
+/// Why: collects the socket path and mode flag so the server can be configured
+/// purely from CLI flags without env-var wrangling.
+/// What: `--socket` overrides the socket path; `--stdio` activates the MCP
+/// JSON-RPC stdio loop instead of binding it.
+///
+/// #6277: `--port` and `--bind` are gone with the TCP transport they configured.
+/// A UDS daemon has no port, so keeping the flags to ignore them would leave an
+/// operator believing they had moved a listener that never moved.
 /// Test: `cargo run -p trusty-review --features http-server -- serve --help`.
 #[derive(Debug, clap::Parser)]
 pub struct ServeArgs {
-    /// HTTP listen port.
-    /// Default: 7891 — distinct from every known sibling default: trusty-memory
-    /// :7070, trusty-search :7878, trusty-analyze :7879, trusty-console :7788,
-    /// trusty-mpm (`tm`) :7880 (the collision a live host reproduced — #2566
-    /// review), AND trusty-embedderd's `--http` mode :7890 (#2573 — see
-    /// `service::DEFAULT_PORT`'s doc for both incidents).
+    /// Unix socket to bind.
+    ///
+    /// Defaults to `<data dir>/trusty-review.sock` — the same path
+    /// `trusty_common::daemon_socket_path("trusty-review")` hands every
+    /// consumer. Override it and nothing will find this daemon; the flag exists
+    /// for tests and for running a second instance deliberately.
     /// Ignored when --stdio is set.
-    #[arg(long, default_value_t = DEFAULT_PORT, value_name = "PORT")]
-    pub port: u16,
+    #[arg(long, value_name = "PATH")]
+    pub socket: Option<PathBuf>,
 
-    /// Bind address (default: 127.0.0.1).
-    /// Ignored when --stdio is set.
-    #[arg(long, default_value = "127.0.0.1", value_name = "ADDR")]
-    pub bind: String,
+    /// Retired with the TCP listener (#6277). Accepted and ignored.
+    ///
+    /// Why this is not simply deleted: the launchd plist on every machine that
+    /// installed trusty-review before this change still passes
+    /// `--port 7891`. Upgrading the BINARY does not rewrite the plist — only
+    /// `trusty-review service install` does — so a bare `cargo install` would
+    /// leave clap exiting 2 on an unexpected argument, and `KeepAlive::Always`
+    /// with a 10-second throttle turns that into a permanent crash loop with
+    /// nothing in the logs but a usage message. Accepting the flag and warning
+    /// keeps the daemon serving through the upgrade window, which is the whole
+    /// point of a deprecation shim.
+    ///
+    /// Hidden from `--help` so it is never presented as a live option.
+    #[arg(long, value_name = "PORT", hide = true)]
+    pub port: Option<u16>,
 
-    /// Run as a JSON-RPC 2.0 / MCP stdio service instead of binding TCP.
+    /// Retired with the TCP listener (#6277). Accepted and ignored — see
+    /// [`ServeArgs::port`].
+    #[arg(long, value_name = "ADDR", hide = true)]
+    pub bind: Option<String>,
+
+    /// Run as a JSON-RPC 2.0 / MCP stdio service instead of binding the socket.
     ///
     /// In this mode stdout is the JSON-RPC transport; all logs go to stderr.
     /// Wire into Claude Code via .mcp.json:
@@ -73,14 +95,14 @@ pub struct ServeArgs {
 
 /// Execute the `serve` subcommand.
 ///
-/// Why: the HTTP and MCP stdio daemon modes share the same dependency-building
+/// Why: the daemon and MCP stdio modes share the same dependency-building
 /// logic; only the final transport and startup sequencing differ.  For stdio
 /// (issue #1739) `AppState` is built in the background so the MCP `initialize`
 /// handshake is answered in <1 ms regardless of provider or credential state.
-/// For HTTP, `AppState` is built synchronously (no strict deadline).
+/// For the daemon, `AppState` is built synchronously (no strict deadline).
 /// What: for `--stdio`, spawns `build_app_state` as a background tokio task,
 /// then calls `mcp::run_deferred` with the watch receiver immediately.  For
-/// HTTP mode, builds `AppState` then calls `serve_http`.  All logs go to
+/// daemon mode, builds `AppState` then binds the socket.  All logs go to
 /// stderr; stdout stays clean.
 /// Test: see module doc; MCP deferred path is smoke-tested with broken Bedrock
 /// creds (initialize must respond in <1.5 s without the env-var workaround).
@@ -116,26 +138,67 @@ pub async fn cmd_serve(config: ReviewConfig, args: ServeArgs) -> Result<()> {
         return trusty_review::mcp::run_deferred(state_rx).await;
     }
 
-    // ── HTTP mode: synchronous build (no strict startup deadline) ────────────
+    // ── Daemon mode: synchronous build (no strict startup deadline) ──────────
     // #5064: the webhook handler runs `allow_posting: true`, so this mode must
     // not start without the dedup store — a missing claim gate means duplicate
     // comments on a redelivered webhook.
     let state = build_app_state(config.clone(), DedupNeed::Required).await?;
 
-    use std::net::SocketAddr;
-    let addr: SocketAddr = format!("{}:{}", args.bind, args.port)
-        .parse()
-        .with_context(|| format!("invalid bind address {}:{}", args.bind, args.port))?;
+    warn_about_retired_transport_flags(args.port, args.bind.as_deref());
+
+    let socket = match args.socket {
+        Some(p) => p,
+        None => socket_path()?,
+    };
 
     info!(
-        port = args.port,
-        bind = %args.bind,
+        socket = %socket.display(),
         reviewer_model = %config.role_models.reviewer.model,
         dry_run = config.dry_run,
         "trusty-review serve starting"
     );
 
-    serve_http(state, addr).await
+    serve_uds(state, &socket).await
+}
+
+/// Tell an operator their launchd plist is stale, and how to fix it (#6277).
+///
+/// Why: the daemon serves correctly with these flags ignored, so nothing forces
+/// the operator to notice that the unit is still describing a TCP listener that
+/// no longer exists. A warning at every start is what turns a silent
+/// compatibility shim into a migration that finishes — and it names the command
+/// rather than describing it, because the operator reading a launchd log wants
+/// something to paste.
+///
+/// What: one WARN per retired flag that was passed, to stderr (stdout stays
+/// clean). Silent when neither is present, which is every correctly-installed
+/// host.
+///
+/// Test: `retired_transport_flags_are_accepted_and_ignored`.
+fn warn_about_retired_transport_flags(port: Option<u16>, bind: Option<&str>) {
+    if port.is_none() && bind.is_none() {
+        return;
+    }
+    if let Some(port) = port {
+        tracing::warn!(
+            port,
+            "--port is retired and ignored: trusty-review serves a Unix socket \
+             since #6277 (ADR-0032), not a TCP port"
+        );
+    }
+    if let Some(bind) = bind {
+        tracing::warn!(
+            bind,
+            "--bind is retired and ignored: trusty-review serves a Unix socket \
+             since #6277 (ADR-0032)"
+        );
+    }
+    eprintln!(
+        "trusty-review: WARNING — this process was started with retired TCP \
+         flags, so its launchd unit predates the Unix-socket migration (#6277). \
+         The daemon is serving normally; rewrite the unit with:\n    \
+         trusty-review service install"
+    );
 }
 
 // ─── dep builder ─────────────────────────────────────────────────────────────
@@ -192,4 +255,70 @@ async fn build_app_state(mut config: ReviewConfig, dedup_need: DedupNeed) -> Res
         Some(Arc::new(analyze)),
         dedup,
     ))
+}
+
+// ─── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::{CommandFactory as _, Parser as _};
+
+    /// REGRESSION (#6277): the argv an un-reinstalled launchd plist passes must
+    /// still PARSE.
+    ///
+    /// Why: `service install` writes `["serve", "--socket", <path>]`, but
+    /// upgrading the binary does not rewrite the plist — only rerunning that
+    /// command does. Every host installed before this change still passes
+    /// `--port 7891`. Without the deprecation shim clap exits 2 on an unexpected
+    /// argument, and `KeepAlive::Always` with a 10-second throttle turns that
+    /// into a permanent crash loop whose only symptom is a usage message in the
+    /// launchd log. This test is what keeps the shim from being tidied away by
+    /// someone who sees two fields nothing reads.
+    /// What: parses the pre-#6277 argv and asserts it succeeds, that the retired
+    /// values land in their fields (so the warning can name them), and that a
+    /// retired `--port` never stands in for a socket path.
+    /// Test: this is the test.
+    #[test]
+    fn retired_transport_flags_are_accepted_and_ignored() {
+        let args = ServeArgs::try_parse_from(["serve", "--port", "7891"])
+            .expect("the pre-#6277 launchd argv must still parse, or the daemon crash-loops");
+        assert_eq!(args.port, Some(7891));
+        assert!(
+            args.socket.is_none(),
+            "a retired --port must not stand in for a socket path"
+        );
+
+        let both = ServeArgs::try_parse_from(["serve", "--port", "7891", "--bind", "127.0.0.1"])
+            .expect("the full pre-#6277 argv must parse");
+        assert_eq!(both.port, Some(7891));
+        assert_eq!(both.bind.as_deref(), Some("127.0.0.1"));
+
+        // The warning path must not panic on any combination it can be handed.
+        warn_about_retired_transport_flags(both.port, both.bind.as_deref());
+        warn_about_retired_transport_flags(None, None);
+    }
+
+    /// Why: the retired flags are a migration shim, not an option anyone should
+    /// discover and start using. `hide = true` keeps them out of `--help`, and a
+    /// future edit that drops the attribute would quietly re-advertise a TCP
+    /// listener that does not exist.
+    /// What: renders the subcommand help and asserts neither flag appears, while
+    /// the live `--socket` does.
+    /// Test: this is the test.
+    #[test]
+    fn retired_transport_flags_are_hidden_from_help() {
+        let help = ServeArgs::command().render_help().to_string();
+        assert!(
+            help.contains("--socket"),
+            "the live flag must be discoverable: {help}"
+        );
+        for retired in ["--port", "--bind"] {
+            assert!(
+                !help.contains(retired),
+                "{retired} is accepted for compatibility only and must not be \
+                 advertised: {help}"
+            );
+        }
+    }
 }

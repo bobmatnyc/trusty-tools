@@ -323,12 +323,23 @@ pub fn walk_range_for(binary: &str) -> Option<std::ops::RangeInclusive<u16>> {
 /// What: a single-element vec holding the recorded port when one is recorded
 /// and parseable (authoritative — no walking, that IS the bound port); else the
 /// member's walk range when it has one; else its single documented default;
-/// else empty. Empty is only reachable for a member that is not a stable-set
-/// daemon at all — pinned by `every_launchd_member_has_a_guardable_port`.
+/// else empty. Empty is reachable for a member that is not a stable-set daemon
+/// at all, and — since #6277 — for a member that binds a Unix socket rather
+/// than a port. Both are pinned by `every_launchd_member_is_guardable`.
 /// Test: `resolve_guard_ports_falls_back_to_the_documented_table`,
 /// `resolve_guard_ports_returns_the_whole_walk_range_for_a_fresh_walker`,
-/// `every_launchd_member_has_a_guardable_port`.
+/// `every_launchd_member_is_guardable`.
 pub fn resolve_guard_ports(binary: &str) -> Vec<u16> {
+    // #6277: a member that binds a Unix socket has NO port, and must not
+    // inherit one from a leftover `http_addr`. On any machine that ran
+    // trusty-review before the transport swap that file is still on disk with
+    // `127.0.0.1:7891` in it, and reading it here would make the guard refuse a
+    // bootstrap because some unrelated process holds a port this daemon will
+    // never bind. Checked BEFORE the recorded-address read, because that read is
+    // the one that resurrects the stale value.
+    if super::probe_http::uds_socket_for(binary).is_some() {
+        return Vec::new();
+    }
     if let Ok(Some(addr)) = trusty_common::read_daemon_addr(binary) {
         if let Some(port) = super::port::parse_port_from_addr(&addr) {
             return vec![port];
@@ -530,8 +541,12 @@ fn port_is_bindable(port: u16) -> PortHolder {
 /// What: resolves the member's candidate ports and its launchd label, then
 /// defers to [`guard_bootstrap_label`]. A member with no port at all is
 /// vacuously fine — there is no port claim to contradict — which is distinct
-/// from an unreadable probe and is unreachable for the launchd-managed members
-/// (`every_launchd_member_has_a_guardable_port` pins that).
+/// from an unreadable probe. Since #6277 that branch IS reachable for a
+/// launchd member: trusty-review binds a Unix socket, and the collision it can
+/// actually have is over that path, which `bind_singleton_hardened` arbitrates
+/// at bind time by probing before it takes anything over.
+/// `every_launchd_member_is_guardable` pins that every launchd member has one
+/// or the other.
 ///
 /// Test: side-effecting (subprocess + bind); the policy is `decide_*` /
 /// `decide_over_range_*` and the call-site wiring is

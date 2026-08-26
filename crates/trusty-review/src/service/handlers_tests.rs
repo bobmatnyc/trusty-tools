@@ -3,16 +3,14 @@
 //! Why: split from `handlers.rs` to keep that file under the 500-line cap
 //! while preserving full test coverage for all route handlers.
 //! What: exercises `resolve_diff_source`, `handle_health`, `handle_status`,
-//! and `handle_review` via direct handler invocation.
+//! and `handle_review` by calling each directly over `&AppState` — since #6277
+//! they are plain async functions with no transport in the way.
 //! Test: this is the test module; each `#[test]` / `#[tokio::test]` function
 //! is a self-contained unit test.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse as _};
-
-use axum::body::to_bytes;
 
 use crate::{
     integrations::{
@@ -426,31 +424,40 @@ fn resolve_diff_source_local_diff_text() {
 }
 
 #[tokio::test]
-async fn health_handler_returns_ok() {
+async fn health_handler_returns_a_status_word() {
     let state = test_state();
-    let response = handle_health(State(state)).await;
-    let resp: axum::response::Response = response.into_response();
-    assert_eq!(resp.status(), StatusCode::OK);
+    let health = handle_health(&state).await;
+    assert_eq!(health.status, "ok");
 }
 
+/// Why: an unreachable required dependency degrades the STATUS FIELD; it does
+/// not turn the answer into a failure. Over HTTP that was "200 with a degraded
+/// body, never a 5xx" (spec REV-706); over UDS it is "a result frame, never an
+/// error frame". `tctl`'s probe reads the body either way and only a transport
+/// failure may authorise a restart (#4246), so collapsing this into an error
+/// would hand it grounds to kickstart a daemon that is up.
+/// Test: this is the test.
 #[tokio::test]
-async fn health_handler_with_failing_search_still_200() {
-    // Even when search is unreachable, /health returns 200 (degraded state
-    // is in the body, not via 5xx — spec REV-706).
+async fn health_handler_with_failing_search_reports_degraded_not_a_failure() {
     let state = test_state_with_failing_search();
-    let response = handle_health(State(state)).await;
-    let resp: axum::response::Response = response.into_response();
-    assert_eq!(resp.status(), StatusCode::OK);
+    let health = handle_health(&state).await;
+    assert_eq!(health.status, "degraded");
+    assert!(!health.deps.trusty_search.reachable);
 }
 
 #[tokio::test]
 async fn status_handler_returns_zero_in_flight() {
     let state = test_state();
-    let response = handle_status(State(state)).await;
-    let resp: axum::response::Response = response.into_response();
-    assert_eq!(resp.status(), StatusCode::OK);
+    let status = handle_status(&state).await;
+    assert_eq!(status.in_flight, 0);
+    assert_eq!(status.last_error, None);
 }
 
+/// Why: a request naming neither a GitHub PR nor a local diff must come back as
+/// a structured refusal with a reason. Over HTTP that was a 400 carrying an
+/// `error` string; #6277 makes it an `invalid_params` frame carrying the same
+/// message, so a caller still learns which field it left out.
+/// Test: this is the test.
 #[tokio::test]
 async fn review_handler_bad_request_missing_fields() {
     let state = test_state();
@@ -461,9 +468,15 @@ async fn review_handler_bad_request_missing_fields() {
         local_diff_text: None,
         ..Default::default()
     };
-    let response = handle_review(State(state), Json(req)).await;
-    let resp: axum::response::Response = response.into_response();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let err = handle_review(&state, req)
+        .await
+        .expect_err("a request naming no diff source must be refused");
+    assert_eq!(err.code, trusty_common::uds::server::CODE_INVALID_PARAMS);
+    assert!(
+        err.message.contains("owner"),
+        "the refusal must name the missing field: {}",
+        err.message
+    );
 }
 
 // ── in_flight counter leak (#5020) ────────────────────────────────────────────
@@ -543,7 +556,7 @@ async fn review_handler_decrements_in_flight_when_client_disconnects() {
         local_diff_text: Some("+fn hello() {}\n".to_string()),
         ..Default::default()
     };
-    let mut fut = Box::pin(handle_review(State(state.clone()), Json(req)));
+    let mut fut = Box::pin(handle_review(&state, req));
 
     // Drive the handler only until the review is provably suspended inside the
     // pipeline — no sleep, no timeout guess.
@@ -558,7 +571,8 @@ async fn review_handler_decrements_in_flight_when_client_disconnects() {
         "the counter must be raised while a review is running"
     );
 
-    // The client hangs up: axum drops the handler future mid-`await`.
+    // The client hangs up: the connection task drops the handler future
+    // mid-`await` (#6277: the accept loop, where axum used to be).
     drop(fut);
 
     assert_eq!(
@@ -580,11 +594,8 @@ async fn review_handler_decrements_in_flight_when_client_disconnects() {
 #[tokio::test]
 async fn health_inference_ok_when_llm_succeeds() {
     let state = test_state();
-    let response = handle_health(State(state)).await;
-    let resp: axum::response::Response = response.into_response();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let body_bytes = to_bytes(resp.into_body(), 65536).await.expect("body bytes");
+    let health = handle_health(&state).await;
+    let body_bytes = serde_json::to_vec(&health).expect("serialize health");
     let body: serde_json::Value = serde_json::from_slice(&body_bytes).expect("valid JSON");
 
     assert_eq!(
@@ -629,15 +640,8 @@ async fn health_inference_auth_error_sets_degraded() {
         Arc::new(FakeSearch),
         None,
     );
-    let response = handle_health(State(state)).await;
-    let resp: axum::response::Response = response.into_response();
-    assert_eq!(
-        resp.status(),
-        StatusCode::OK,
-        "HTTP status must be 200 even when degraded (spec REV-706)"
-    );
-
-    let body_bytes = to_bytes(resp.into_body(), 65536).await.expect("body bytes");
+    let health = handle_health(&state).await;
+    let body_bytes = serde_json::to_vec(&health).expect("serialize health");
     let body: serde_json::Value = serde_json::from_slice(&body_bytes).expect("valid JSON");
 
     assert_eq!(
@@ -727,22 +731,19 @@ async fn health_stalled_dep_returns_timeout_state_within_bound() {
     );
 
     let start = std::time::Instant::now();
-    let response = handle_health(State(state)).await;
+    let health = handle_health(&state).await;
     let elapsed = start.elapsed();
 
     unsafe { std::env::remove_var("TRUSTY_REVIEW_DEP_PROBE_TIMEOUT_SECS") };
 
     assert!(
         elapsed < std::time::Duration::from_secs(5),
-        "/health must return within the bound even when trusty-search stalls \
+        "health must return within the bound even when trusty-search stalls \
          (took {elapsed:?}); the whole point of #3658 is that it must NOT wait \
-         out the client's 30 s HTTP timeout"
+         out the client's own transport timeout"
     );
 
-    let resp: axum::response::Response = response.into_response();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body_bytes = to_bytes(resp.into_body(), 65536).await.expect("body bytes");
-    let body: serde_json::Value = serde_json::from_slice(&body_bytes).expect("valid JSON");
+    let body: serde_json::Value = serde_json::to_value(&health).expect("serialize health");
 
     assert_eq!(
         body["deps"]["trusty_search"]["state"], "timeout",
@@ -1010,10 +1011,8 @@ async fn health_unhealthy_search_response_reports_state_unreachable() {
         Arc::new(UnhealthySearch),
         None,
     );
-    let response = handle_health(State(state)).await;
-    let resp: axum::response::Response = response.into_response();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body_bytes = to_bytes(resp.into_body(), 65536).await.expect("body bytes");
+    let health = handle_health(&state).await;
+    let body_bytes = serde_json::to_vec(&health).expect("serialize health");
     let body: serde_json::Value = serde_json::from_slice(&body_bytes).expect("valid JSON");
 
     assert_eq!(
@@ -1051,10 +1050,8 @@ async fn health_degraded_but_serving_stays_ok() {
         Arc::new(DegradedButServingSearch),
         None,
     );
-    let response = handle_health(State(state)).await;
-    let resp: axum::response::Response = response.into_response();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body_bytes = to_bytes(resp.into_body(), 65536).await.expect("body bytes");
+    let health = handle_health(&state).await;
+    let body_bytes = serde_json::to_vec(&health).expect("serialize health");
     let body: serde_json::Value = serde_json::from_slice(&body_bytes).expect("valid JSON");
 
     assert_eq!(

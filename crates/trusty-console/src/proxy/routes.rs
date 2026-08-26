@@ -54,6 +54,12 @@ fn full_id(service_key: &str) -> Option<&'static str> {
         "search" => Some("trusty-search"),
         "memory" => Some("trusty-memory"),
         "analyze" => Some("trusty-analyze"),
+        // #6277: INERT since trusty-review moved to UDS (ADR-0032). The proxy
+        // resolves a target's base URL from its `http_addr` file, which this
+        // daemon no longer writes, so `/api/review/*` resolves nothing and the
+        // row grants no reachability. Kept rather than deleted because
+        // ADR-0035's console-side aggregator is where review's surface comes
+        // back, and that work re-uses this key.
         "review" => Some("trusty-review"),
         // #1849 Phase 1: mpm added to the proxy allowlist so the console can
         // forward requests to the live trusty-mpm HTTP daemon via its base URL
@@ -534,6 +540,8 @@ mod tests {
         assert_eq!(full_id("search"), Some("trusty-search"));
         assert_eq!(full_id("memory"), Some("trusty-memory"));
         assert_eq!(full_id("analyze"), Some("trusty-analyze"));
+        // #6277: still allowlisted, but inert — trusty-review serves UDS and
+        // writes no `http_addr` for the proxy to resolve. See `full_id`.
         assert_eq!(full_id("review"), Some("trusty-review"));
         // #1849 Phase 1: mpm must be in the allowlist.
         assert_eq!(full_id("mpm"), Some("trusty-mpm"));

@@ -1,14 +1,20 @@
-//! Axum route handlers for trusty-review's HTTP service.
+//! The three operations trusty-review serves, as plain async functions.
 //!
-//! Why: the handlers live in a dedicated file so each route is easy to locate,
-//! test, and evolve independently without growing `service/mod.rs` past the
-//! 500-line cap.
+//! Why: the handlers live in a dedicated file so each is easy to locate, test,
+//! and evolve independently without growing `service/mod.rs` past the 500-line
+//! cap.
 //!
-//! What: implements GET /health, GET /status, and POST /review — the whole
-//! HTTP surface since #5181 retired `POST /pr/github/webhook`.
+//! #6277 (ADR-0032) moved the transport from TCP HTTP to a hardened Unix
+//! socket, and these functions lost their axum extractors in the process. They
+//! take `&AppState` and their own request type and return their own response
+//! type, so the wire shape lives entirely in `service::rpc` and a test can call
+//! an operation without standing up either transport.
 //!
-//! Test: each handler is exercised via `tower::ServiceExt::oneshot` in the
-//! `tests` module below.
+//! What: `handle_health`, `handle_status`, and `handle_review` — the whole
+//! surface since #5181 retired `POST /pr/github/webhook`.
+//!
+//! Test: `handlers_tests.rs` and `handlers_status_tests.rs` call each function
+//! directly; `service::rpc`'s tests cover the wire framing around them.
 
 use std::sync::{
     Arc,
@@ -16,9 +22,9 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
+use trusty_common::uds::server::RpcError;
 
 use crate::{
     config::{InvocationSurface, ReviewConfig},
@@ -27,6 +33,7 @@ use crate::{
         search_client::SearchClient,
     },
     llm::LlmProvider,
+    models::ReviewResult,
     pipeline::{DiffSource, ReviewDeps, ReviewInput, TriggerDecision, run_review},
     service::inference_probe::{InferenceProbe, InferenceStatus},
     store::{DedupStore, InFlightCountGuard, InFlightRegistry},
@@ -511,33 +518,39 @@ pub async fn probe_deps(state: &AppState) -> DepStatus {
 
 // ─── Route handlers ───────────────────────────────────────────────────────────
 
-/// GET /health — liveness, dependency reachability, and inference probe.
+/// `health` — liveness, dependency reachability, and inference probe.
 ///
-/// Why: required by load balancers and orchestrators to determine whether this
-/// instance is ready to handle traffic.  MPM uses the `inference` field to
-/// gate whether to attempt a `review_pr` call (closes #719).
+/// Why: `trusty-console`'s `ReviewConnector` and `tctl`'s health probe both ask
+/// this question to decide whether the daemon is up, and `tctl` gates a
+/// destructive `launchctl kickstart -k` on the answer (#4246).  MPM uses the
+/// `inference` field to gate whether to attempt a `review_pr` call (#719).
 /// What: performs bounded, concurrent health probes against trusty-search and
 /// trusty-analyze via `probe_deps` (each capped at `dep_probe_timeout()`,
 /// default 2 s, decoupled from any client's own HTTP timeout — #3658); runs
 /// the cached inference-reachability probe (10 s TTL, timeout configurable via
 /// `TRUSTY_REVIEW_HEALTH_TIMEOUT_SECS`, default 10 s — see #739) against the
-/// configured LLM provider; returns JSON with dep status, reviewer model, and
-/// inference result.  HTTP 200 always (degraded state is noted in the body,
-/// not via 5xx, to avoid false-positive load-balancer evictions).  When
-/// inference is `"unreachable"` or `"auth_error"` OR a required dep is
-/// unreachable, `status` becomes `"degraded"`.  An inference probe timeout
-/// returns `"unknown"` (not `"degraded"`) so a slow Bedrock cold-start does not
-/// falsely degrade status (#739); a dep probe timeout reports
+/// configured LLM provider; returns dep status, reviewer model, and inference
+/// result.
+///
+/// **Never fails.** A degraded state is reported in the `status` field, not as
+/// an error frame — the same reason this used to answer HTTP 200 even when
+/// degraded.  `tctl`'s probe reads the body and treats a coded error as
+/// "answered, not usable" (never as grounds for a restart), so returning an
+/// error here for a degraded dependency would lose the distinction the body
+/// carries.  When inference is `"unreachable"` or `"auth_error"` OR a required
+/// dep is unreachable, `status` becomes `"degraded"`.  An inference probe
+/// timeout returns `"unknown"` (not `"degraded"`) so a slow Bedrock cold-start
+/// does not falsely degrade status (#739); a dep probe timeout reports
 /// `deps.trusty_search.state: "timeout"` with `reachable: false` (#3658).
 /// Test: `health_inference_ok_when_llm_ok`,
 /// `health_inference_auth_error_sets_degraded`,
 /// `health_required_dep_down_sets_degraded`,
 /// `health_optional_dep_down_stays_ok`,
 /// `health_stalled_dep_returns_timeout_state_within_bound`.
-pub async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn handle_health(state: &AppState) -> HealthResponse {
     // Bounded, concurrent dep probes (#3658) — total latency capped at
     // `dep_probe_timeout()` regardless of dep count or individual slowness.
-    let deps = probe_deps(&state).await;
+    let deps = probe_deps(state).await;
 
     // Cached inference-reachability probe (#719).
     let reviewer_model = state.config.role_models.reviewer.model.clone();
@@ -549,26 +562,24 @@ pub async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
     // #722: status is "degraded" when inference fails OR any required dep is down.
     let status = compute_status(inference, &deps);
 
-    let body = HealthResponse {
+    HealthResponse {
         status,
         version: env!("CARGO_PKG_VERSION"),
         dry_run: state.config.dry_run,
         reviewer_model,
         inference,
         deps,
-    };
-
-    (StatusCode::OK, Json(body))
+    }
 }
 
-/// GET /status — in-flight review count and last error.
+/// `status` — in-flight review count and last error.
 ///
-/// Why: operators need a lightweight operational view distinct from /health
+/// Why: operators need a lightweight operational view distinct from `health`
 /// (which focuses on dep reachability) so they can monitor pipeline throughput
 /// and catch silent failures from background review tasks.
 /// What: reads `in_flight` atomically and acquires the `last_error` mutex.
 /// Test: `status_returns_json_with_in_flight`.
-pub async fn handle_status(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn handle_status(state: &AppState) -> StatusResponse {
     let in_flight = state.in_flight.load(Ordering::Relaxed);
     let last_error = state
         .last_error
@@ -576,44 +587,39 @@ pub async fn handle_status(State(state): State<AppState>) -> impl IntoResponse {
         .unwrap_or_else(|p| p.into_inner())
         .clone();
 
-    (
-        StatusCode::OK,
-        Json(StatusResponse {
-            in_flight,
-            last_error,
-        }),
-    )
+    StatusResponse {
+        in_flight,
+        last_error,
+    }
 }
 
-/// POST /review — synchronous pipeline run, returns ReviewResult JSON.
+/// `review` — synchronous pipeline run, returns a [`ReviewResult`].
 ///
-/// Why: the primary local-service endpoint lets CI pipelines, editor
+/// Why: the primary local-service operation lets CI pipelines, editor
 /// integrations, and scripts trigger a review on a live PR or a raw diff
 /// without spawning a CLI process.  Runs SYNCHRONOUSLY so the caller blocks
 /// until the verdict is ready (design intent: sub-10s for a normal PR).
-/// What: parses the request body, resolves the DiffSource, calls `run_review`,
-/// and returns the `ReviewResult` as JSON.  Always dry-run (push firewall
-/// remains in force).  Does NOT post to GitHub.  The `in_flight` counter is
-/// held by an RAII guard so a dropped future still releases it (#5020).
+/// What: resolves the `DiffSource` from the request, calls `run_review`, and
+/// returns the `ReviewResult`.  Always dry-run (push firewall remains in
+/// force).  Does NOT post to GitHub.  The `in_flight` counter is held by an
+/// RAII guard so a dropped future still releases it (#5020).
+///
+/// # Errors
+///
+/// [`RpcError::invalid_params`] when the request names neither a GitHub PR nor
+/// a local diff, or when the local diff cannot be staged to a tempfile. #6277:
+/// that is the same code `RpcRouter`'s own decode failure carries, so a caller
+/// sees one error shape for "this request was not usable" regardless of whether
+/// serde or this function refused it — which is what the axum `Json` extractor's
+/// 400 did for the two cases before the transport moved.
+///
 /// Test: `review_handler_bad_request_missing_fields`,
 /// `review_handler_decrements_in_flight_when_client_disconnects`.
-pub async fn handle_review(
-    State(state): State<AppState>,
-    Json(req): Json<ReviewRequest>,
-) -> impl IntoResponse {
-    debug!("POST /review received");
+pub async fn handle_review(state: &AppState, req: ReviewRequest) -> Result<ReviewResult, RpcError> {
+    debug!("review request received");
 
     // Resolve the diff source from the request.
-    let diff_source = match resolve_diff_source(&req) {
-        Ok(s) => s,
-        Err(msg) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": msg })),
-            )
-                .into_response();
-        }
-    };
+    let diff_source = resolve_diff_source(&req).map_err(RpcError::invalid_params)?;
 
     let reviewer_model = state.config.role_models.reviewer.model.clone();
 
@@ -622,16 +628,16 @@ pub async fn handle_review(
         verifier: state.verifier.clone(),
         search: Arc::clone(&state.search),
         analyze: state.analyze.clone(),
-        // POST /review is a synchronous inspection endpoint — no dedup needed.
+        // `review` is a synchronous inspection operation — no dedup needed.
         dedup: None,
     };
 
     let input = ReviewInput {
         diff_source,
         reviewer_model,
-        write_log: false, // HTTP callers don't write logs by default.
+        write_log: false, // service callers don't write logs by default.
         print_result: false,
-        // POST /review never posts to GitHub — it always returns the result to
+        // `review` never posts to GitHub — it always returns the result to
         // the caller (push firewall + dry-run remain in force).
         trigger: TriggerDecision::ForceDryRun,
         run_mode: RunMode::Serve,
@@ -644,7 +650,7 @@ pub async fn handle_review(
             pr_discussion: req.pr_discussion.clone(),
             referenced_code: req.referenced_code.clone(),
         },
-        // POST /review is out of scope for the interactive-degrade default
+        // `review` is out of scope for the interactive-degrade default
         // (unaffected by the search-unreachable semantics fix) — keeps the
         // strict `Hosted` default, unchanged behaviour.
         surface: InvocationSurface::default(),
@@ -660,10 +666,10 @@ pub async fn handle_review(
         verdict = %result.verdict,
         findings = result.findings.len(),
         model = %result.model,
-        "POST /review complete"
+        "review complete"
     );
 
-    (StatusCode::OK, Json(result)).into_response()
+    Ok(result)
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────

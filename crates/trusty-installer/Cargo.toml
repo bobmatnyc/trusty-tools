@@ -1,6 +1,6 @@
 [package]
 name = "trusty-installer"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2021"
 description = "Thin control plane for the claude-mpm stack: install, upgrade, restart, health, and config coordination across all trusty-* tools."
 readme = "README.md"
@@ -73,7 +73,11 @@ tracing-subscriber = { workspace = true }
 # The `update-check` feature gates the `trusty_common::update` module exposing
 # those primitives (it adds zero new transitive deps; the flag controls module
 # compilation only).
-trusty-common = { workspace = true, features = ["update-check", "config-cli"] }
+# `uds` (#6277): `tctl`'s health probe dials trusty-review's Unix socket
+# through `trusty_common::uds::send_framed_request` and resolves its path
+# through `daemon_socket_path`. ADR-0032 moves each service's own transport
+# onto UDS, so the probe needs the shared client rather than a hand-rolled one.
+trusty-common = { workspace = true, features = ["update-check", "config-cli", "uds"] }
 # Rustup/cargo-style progress display (#1315): Narrator `info:` lines + the
 # right-aligned ComponentTracker table for install/upgrade rows.
 trusty-progress = { workspace = true }

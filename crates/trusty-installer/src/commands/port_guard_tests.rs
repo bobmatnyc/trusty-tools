@@ -720,12 +720,10 @@ fn resolve_guard_ports_prefers_a_recorded_address_over_the_walk_range() {
 #[test]
 fn walk_range_matches_the_daemons_documented_behaviour() {
     assert_eq!(walk_range_for("trusty-memory"), Some(7070..=7079));
-    for pinned in [
-        "trusty-search",
-        "trusty-analyze",
-        "trusty-review",
-        "trusty-console",
-    ] {
+    // #6277: trusty-review is absent — it binds no TCP port at all now, so it is
+    // neither a walker nor pinned to one. `every_launchd_member_is_guardable`
+    // covers it on the socket key instead.
+    for pinned in ["trusty-search", "trusty-analyze", "trusty-console"] {
         assert_eq!(
             walk_range_for(pinned),
             None,
@@ -736,22 +734,41 @@ fn walk_range_matches_the_daemons_documented_behaviour() {
 }
 
 /// Why: `guard_bootstrap` treats "this member has no port" as vacuously fine.
-/// That is only sound if no launchd-managed member can ever land there — else
-/// the vacuous branch becomes a silent hole exactly where the guard matters.
-/// This test closes the hole structurally: add a launchd member without a port
-/// table entry and it fails.
-/// What: every stable-set member whose manage strategy is `Launchd` resolves to
-/// `Some(port)`.
+/// That is only sound if every launchd-managed member has SOMETHING the guard
+/// can check — else the vacuous branch becomes a silent hole exactly where the
+/// guard matters. This test closes the hole structurally: add a launchd member
+/// that resolves neither a port nor a socket and it fails.
+///
+/// #6277 split the check in two. A member that binds TCP must resolve a port,
+/// as before. A member that binds a Unix socket (trusty-review, ADR-0032) must
+/// resolve a socket and must NOT resolve a port — a port entry left behind for
+/// such a member would make the guard refuse a bootstrap because an unrelated
+/// process holds a number the daemon never binds. The endpoint a UDS member can
+/// actually collide on is its socket path, and `bind_singleton_hardened` is what
+/// arbitrates that: it probes before taking over, so a live owner is never
+/// clobbered and a corpse never wedges the successor.
+///
+/// What: every `Launchd` member resolves exactly one of the two, never neither
+/// and never both.
 /// Test: This is the test.
 #[test]
-fn every_launchd_member_has_a_guardable_port() {
+fn every_launchd_member_is_guardable() {
     for m in stable_set() {
         if m.manage != ManageStrategy::Launchd {
             continue;
         }
+        let ports = resolve_guard_ports(&m.binary);
+        let socket = super::super::probe_http::uds_socket_for(&m.binary);
         assert!(
-            !resolve_guard_ports(&m.binary).is_empty(),
-            "launchd member {} has no port the #4470 guard can check",
+            !ports.is_empty() || socket.is_some(),
+            "launchd member {} resolves neither a port nor a socket, so the \
+             #4470 guard has nothing to check",
+            m.binary
+        );
+        assert!(
+            ports.is_empty() || socket.is_none(),
+            "launchd member {} resolves BOTH a port and a socket — the guard \
+             would refuse a bootstrap over a port this daemon never binds",
             m.binary
         );
     }
