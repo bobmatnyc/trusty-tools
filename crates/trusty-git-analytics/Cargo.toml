@@ -71,7 +71,7 @@ path = "src/main.rs"
 # edge to trusty-review. `config-cli` already implied it transitively; naming it
 # here makes the dependency the profile transport relies on explicit rather than
 # a side effect of the `config` subcommand staying mounted.
-trusty-common = { workspace = true, features = ["cli-help", "update-check", "config-cli", "inference-client", "monitor-tui"] }
+trusty-common = { workspace = true, features = ["cli-help", "update-check", "config-cli", "inference-client", "monitor-tui", "uds"] }
 # Async runtime
 tokio = { workspace = true }
 # IANA timezone database: JQL date literals are evaluated in the JIRA

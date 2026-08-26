@@ -132,6 +132,25 @@ fn wrapper_for(dir: &Path, binary: &Path, search_url: &str, pid_file: &Path) -> 
     path.to_str().expect("a UTF-8 temp path").to_string()
 }
 
+/// The socket the real daemon will bind when run under `TRUSTY_DATA_DIR_OVERRIDE
+/// = dir`.
+///
+/// Why (#6287): the guard resolves its default through
+/// `trusty_common::daemon_socket_path`, which reads the override from the
+/// CALLING process's environment — and this test process must not set it, since
+/// it is global and this crate runs tests in parallel. Re-deriving the same
+/// layout here from `dir` is what keeps the guard pointed at the socket
+/// [`wrapper_for`]'s exported override makes the daemon bind, without either
+/// side touching the environment.
+///
+/// The layout is `resolve_data_dir`'s: `${override}/<app_name>/<app_name>.sock`.
+/// A drift there fails
+/// `the_real_analyze_binary_satisfies_the_preflight_end_to_end`, which is the
+/// only test that runs both halves against the real binary.
+fn daemon_socket_under(dir: &Path) -> PathBuf {
+    dir.join("trusty-analyze").join("trusty-analyze.sock")
+}
+
 /// Kills the daemon named by the pid file on drop, so a panicking assertion
 /// cannot leave a real `trusty-analyze` running on the machine.
 struct KillOnDrop(PathBuf);
@@ -174,7 +193,7 @@ async fn the_real_analyze_binary_refuses_the_audit_when_trusty_search_is_down() 
     let wrapper = wrapper_for(dir.path(), &binary, &dead_search, &pid_file);
 
     let guard = AnalyzeGuard {
-        url: format!("http://127.0.0.1:{}", super::tests::free_port()),
+        socket: daemon_socket_under(dir.path()),
         binary: wrapper,
         startup_timeout: Duration::from_secs(5),
         poll_interval: Duration::from_millis(200),
@@ -184,7 +203,7 @@ async fn the_real_analyze_binary_refuses_the_audit_when_trusty_search_is_down() 
         .expect_err("the real binary cannot serve without trusty-search");
 
     assert!(
-        err.cause.contains("did not become ready"),
+        err.cause.contains("did not answer healthy"),
         "the spawn succeeded and the readiness poll is what refused; got: {}",
         err.cause
     );
@@ -197,10 +216,11 @@ async fn the_real_analyze_binary_refuses_the_audit_when_trusty_search_is_down() 
 /// The success arm, end to end: with its dependency satisfied, the real binary
 /// answers on the port the guard chose and the preflight passes.
 ///
-/// This is the half no stub can stand in for. It checks that `serve --port
-/// <port>` is still the argument vector the binary accepts, that it binds THAT
-/// port rather than its own default, and that its `/health` answers 2xx — the
-/// three facts `serve_args`, `port_of` and `probe_once` each assume separately.
+/// This is the half no stub can stand in for. It checks that `serve` is still
+/// the argument vector the binary accepts, that it binds the socket its data
+/// directory derives, and that `analyze.health` answers `status: "ok"` — the
+/// three facts `serve_args`, [`daemon_socket_under`] and `daemon_is_healthy`
+/// each assume separately.
 ///
 /// Needs a running trusty-search as well as the built binary; see
 /// [`reachable_trusty_search`] for why that one cannot be stubbed away.
@@ -214,9 +234,8 @@ async fn the_real_analyze_binary_satisfies_the_preflight_end_to_end() {
     let _reaper = KillOnDrop(pid_file.clone());
     let wrapper = wrapper_for(dir.path(), &binary, &search, &pid_file);
 
-    let port = super::tests::free_port();
     let guard = AnalyzeGuard {
-        url: format!("http://127.0.0.1:{port}"),
+        socket: daemon_socket_under(dir.path()),
         binary: wrapper,
         // Generous: a debug-profile daemon opening two redb stores on a cold
         // filesystem is slower than anything the stub tests model.

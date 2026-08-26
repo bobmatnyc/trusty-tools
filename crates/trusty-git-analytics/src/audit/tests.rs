@@ -1228,14 +1228,66 @@ fn stub_binary(dir: &std::path::Path, name: &str, script: &str) -> String {
     stub.to_str().expect("a UTF-8 temp path").to_string()
 }
 
-/// A guard pointed at `port`, with budgets short enough for a unit test.
-fn guard_on(port: u16, binary: &str) -> crate::audit::AnalyzeGuard {
+/// A stand-in `trusty-analyze` socket, answering `analyze.health` per `verdict`.
+///
+/// Why (#6287): the analyze guard dials a Unix socket now, so the TCP stubs
+/// above cannot stand in for it. `verdict` is re-evaluated on every accepted
+/// connection — the guard's readiness poll asks repeatedly, and what the tests
+/// pin is which answers it accepted, so a closure is what lets a stub go from
+/// degraded to ok mid-run without a counter the test has to reason about.
+///
+/// What: binds a hardened socket under `dir`, reads each request frame to EOF,
+/// and answers one JSON-RPC result frame whose `status` is `"ok"` or
+/// `"degraded"`. `"degraded"` is not an arbitrary sad path: it is exactly what
+/// the real daemon reports whenever trusty-search is unreachable, and
+/// `daemon_is_healthy` counts only `"ok"` — so a degraded daemon reads to the
+/// guard as no daemon.
+///
+/// Returns the socket path. The listener task lives as long as the process; the
+/// socket file dies with `dir`.
+fn serve_analyze_health(
+    dir: &std::path::Path,
+    verdict: impl Fn() -> bool + Send + Sync + 'static,
+) -> std::path::PathBuf {
+    let socket = dir.join("sockets").join("trusty-analyze.sock");
+    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind the stub socket");
+    tokio::spawn(async move {
+        let verdict = std::sync::Arc::new(verdict);
+        while let Ok((mut conn, _)) = listener.accept().await {
+            let verdict = std::sync::Arc::clone(&verdict);
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+                let mut sink = Vec::new();
+                let _ = conn.read_to_end(&mut sink).await;
+                let status = if verdict() { "ok" } else { "degraded" };
+                let reply = format!(
+                    "{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\
+                     {{\"status\":\"{status}\",\"version\":\"0.0.0\",\
+                     \"search_reachable\":{}}}}}\n",
+                    verdict()
+                );
+                let _ = conn.write_all(reply.as_bytes()).await;
+                let _ = conn.flush().await;
+            });
+        }
+    });
+    socket
+}
+
+/// A guard pointed at `socket`, with budgets short enough for a unit test.
+fn guard_on(socket: std::path::PathBuf, binary: &str) -> crate::audit::AnalyzeGuard {
     crate::audit::AnalyzeGuard {
-        url: format!("http://127.0.0.1:{port}"),
+        socket,
         binary: binary.to_string(),
         startup_timeout: std::time::Duration::from_millis(400),
         poll_interval: std::time::Duration::from_millis(50),
     }
+}
+
+/// A path in `dir` that nothing has bound — the analyze equivalent of a free
+/// port.
+fn absent_socket(dir: &std::path::Path) -> std::path::PathBuf {
+    dir.join("absent.sock")
 }
 
 /// Both overrides win when set, and an empty one is not a setting.
@@ -1245,8 +1297,8 @@ fn guard_on(port: u16, binary: &str) -> crate::audit::AnalyzeGuard {
 /// resolve to the PATH lookup rather than to an unspawnable empty program name.
 #[test]
 fn analyze_resolution_prefers_the_env_overrides() {
-    use crate::audit::analyze::{binary_from_override, url_from_override};
-    use crate::audit::{DEFAULT_ANALYZE_BIN, DEFAULT_ANALYZE_URL};
+    use crate::audit::analyze::{binary_from_override, socket_from_override};
+    use crate::audit::{default_analyze_socket, DEFAULT_ANALYZE_BIN};
 
     assert_eq!(
         binary_from_override(Some("/pinned/trusty-analyze")),
@@ -1256,27 +1308,15 @@ fn analyze_resolution_prefers_the_env_overrides() {
     assert_eq!(binary_from_override(Some("")), DEFAULT_ANALYZE_BIN);
 
     assert_eq!(
-        url_from_override(Some("http://127.0.0.1:9999")),
-        "http://127.0.0.1:9999"
+        socket_from_override(Some("/tmp/pinned-analyze.sock")).expect("an override cannot fail"),
+        std::path::PathBuf::from("/tmp/pinned-analyze.sock")
     );
-    assert_eq!(url_from_override(None), DEFAULT_ANALYZE_URL);
-    assert_eq!(url_from_override(Some("")), DEFAULT_ANALYZE_URL);
-}
-
-/// `serve` takes `--port`, not a URL, so an operator who moved the daemon must
-/// get a daemon on the port they named — spawning on 7879 and then probing the
-/// override would burn the whole budget and refuse a correct configuration.
-#[test]
-fn the_spawn_port_comes_from_the_configured_url() {
-    use crate::audit::analyze::port_of;
-    use crate::audit::DEFAULT_ANALYZE_PORT;
-
-    assert_eq!(port_of("http://127.0.0.1:9312"), 9312);
-    assert_eq!(port_of("http://localhost:9312/"), 9312);
-    assert_eq!(port_of("https://localhost:9312"), 9312);
-    // No port, and unreadable ports, fall back rather than failing the run.
-    assert_eq!(port_of("http://localhost"), DEFAULT_ANALYZE_PORT);
-    assert_eq!(port_of("http://localhost:not-a-port"), DEFAULT_ANALYZE_PORT);
+    // #6287: the fallback is DERIVED, so both the guard and the daemon reach it
+    // through the same call — which is what removed the hand-synced
+    // `DEFAULT_ANALYZE_URL` constant this used to compare against.
+    let derived = default_analyze_socket().expect("resolve the default socket");
+    assert_eq!(socket_from_override(None).expect("fallback"), derived);
+    assert_eq!(socket_from_override(Some("")).expect("fallback"), derived);
 }
 
 /// A daemon that is already up is left alone.
@@ -1285,10 +1325,11 @@ fn the_spawn_port_comes_from_the_configured_url() {
 /// run — passing is therefore proof the fast path returned without spawning
 /// anything, which is what keeps `tga audit` from starting a second daemon
 /// beside an operator's own.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn a_reachable_analyze_daemon_is_not_restarted() {
-    let port = serve_healthy().await;
-    let guard = guard_on(port, "/nonexistent/trusty-analyze");
+    let dir = tempfile::tempdir().expect("create a temp dir");
+    let socket = serve_analyze_health(dir.path(), || true);
+    let guard = guard_on(socket, "/nonexistent/trusty-analyze");
     crate::audit::ensure_analyze_daemon_with(&guard)
         .await
         .expect("a healthy daemon must satisfy the preflight without a spawn");
@@ -1302,7 +1343,8 @@ async fn a_reachable_analyze_daemon_is_not_restarted() {
 /// completion and delivered a report with three empty sections.
 #[tokio::test]
 async fn an_unspawnable_analyze_binary_refuses_the_audit() {
-    let guard = guard_on(free_port(), "/nonexistent/trusty-analyze");
+    let dir = tempfile::tempdir().expect("create a temp dir");
+    let guard = guard_on(absent_socket(dir.path()), "/nonexistent/trusty-analyze");
     let err = crate::audit::ensure_analyze_daemon_with(&guard)
         .await
         .expect_err("a binary that cannot be spawned must stop the audit");
@@ -1320,11 +1362,15 @@ async fn an_unspawnable_analyze_binary_refuses_the_audit() {
 /// The argument vector is the tga→trusty-analyze contract, asserted without
 /// spawning anything — the same pure-function split `report_args` uses on the
 /// renderer side.
+///
+/// #6287: a bare `serve`, with no `--socket`. The daemon derives its socket path
+/// from the data directory, so passing one would start a daemon on a path the
+/// renderer does not dial.
 #[test]
-fn the_spawn_arguments_are_serve_on_the_configured_port() {
+fn the_spawn_arguments_are_a_bare_serve() {
     use crate::audit::analyze::serve_args;
 
-    assert_eq!(serve_args(9312), vec!["serve", "--port", "9312"]);
+    assert_eq!(serve_args(), vec!["serve"]);
 }
 
 /// #5670, the readiness arm: a spawn that succeeds is not a daemon.
@@ -1340,7 +1386,7 @@ async fn an_analyze_daemon_that_never_comes_up_refuses_the_audit() {
     let dir = tempfile::tempdir().expect("create a temp dir");
     let stub = stub_binary(dir.path(), "trusty-analyze-stub", "#!/bin/sh\nexit 1\n");
 
-    let guard = guard_on(free_port(), &stub);
+    let guard = guard_on(absent_socket(dir.path()), &stub);
     let err = crate::audit::ensure_analyze_daemon_with(&guard)
         .await
         .expect_err("a daemon that exits at once must stop the audit");
@@ -1348,7 +1394,7 @@ async fn an_analyze_daemon_that_never_comes_up_refuses_the_audit() {
     // The spawn itself succeeded — this is the readiness verdict, not a spawn
     // failure wearing the same error type.
     assert!(
-        err.cause.contains("did not become ready"),
+        err.cause.contains("did not answer healthy"),
         "expected the readiness arm, got: {}",
         err.cause
     );
@@ -1364,32 +1410,39 @@ async fn an_analyze_daemon_that_never_comes_up_refuses_the_audit() {
 /// is down does not satisfy the preflight either.
 ///
 /// This is the arm that decides how far #5670 actually reaches. `trusty-analyze`
-/// answers its own `/health` with 503 `degraded` whenever trusty-search is
-/// unreachable, and `probe_once` counts only a 2xx — so the guard's probe
-/// re-reads trusty-search's LIVE status on every `tga audit` run, not only when
-/// it has to spawn. An operator whose analyze daemon has been up for days and
-/// whose trusty-search died an hour ago is refused, with the same message.
+/// reports `status: "degraded"` whenever trusty-search is unreachable, and
+/// `daemon_is_healthy` counts only `"ok"` — so the guard's probe re-reads
+/// trusty-search's LIVE status on every `tga audit` run, not only when it has to
+/// spawn. An operator whose analyze daemon has been up for days and whose
+/// trusty-search died an hour ago is refused, with the same message.
 ///
-/// The stub daemon here answers 503 forever, standing in for that daemon; the
-/// spawned replacement exits at once, as the real binary does at its own search
-/// check. The refusal must therefore come from the readiness poll — proof the
-/// guard kept probing the live 503 rather than accepting the bound port.
+/// #6287 is where this arm could most easily have been lost. The verdict used to
+/// be free — the daemon answered HTTP 503 and `probe_once` counted only a 2xx —
+/// and a JSON-RPC health call answers with a RESULT frame either way. A probe
+/// that merely checked "did it answer" would now pass a degraded daemon, so the
+/// check reads `status` explicitly and this is what says so.
+///
+/// The stub daemon here answers degraded forever, standing in for that daemon;
+/// the spawned replacement exits at once, as the real binary does at its own
+/// search check. The refusal must therefore come from the readiness poll — proof
+/// the guard kept reading the live verdict rather than accepting the bound
+/// socket.
 #[cfg(unix)]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn a_degraded_analyze_daemon_refuses_the_audit() {
     let dir = tempfile::tempdir().expect("create a temp dir");
     let stub = stub_binary(dir.path(), "trusty-analyze-stub", "#!/bin/sh\nexit 1\n");
 
-    // usize::MAX degraded replies: it never recovers, exactly like an analyze
-    // daemon sitting on top of a dead trusty-search.
-    let port = serve_health(usize::MAX).await;
-    let guard = guard_on(port, &stub);
+    // Degraded forever: it never recovers, exactly like an analyze daemon
+    // sitting on top of a dead trusty-search.
+    let socket = serve_analyze_health(dir.path(), || false);
+    let guard = guard_on(socket, &stub);
     let err = crate::audit::ensure_analyze_daemon_with(&guard)
         .await
-        .expect_err("a daemon answering 503 must stop the audit");
+        .expect_err("a daemon answering degraded must stop the audit");
 
     assert!(
-        err.cause.contains("did not become ready"),
+        err.cause.contains("did not answer healthy"),
         "expected the readiness arm against a live-but-degraded daemon, got: {}",
         err.cause
     );
@@ -1434,8 +1487,16 @@ async fn two_concurrent_guards_both_resolve_against_one_slow_daemon() {
     // readiness is caused by the spawns instead of racing them. Each guard's own
     // spawn follows its own opening probe, so the second probe sees at most one
     // line and misses — both calls spawn by construction, not by timing luck.
-    let port = serve_health_after_spawns(spawn_log.clone(), 2).await;
-    let mut guard = guard_on(port, &stub);
+    let gate = spawn_log.clone();
+    let socket = serve_analyze_health(dir.path(), move || {
+        std::fs::read_to_string(&gate)
+            .unwrap_or_default()
+            .lines()
+            .count()
+            >= 2
+    });
+    let expected_socket = socket.clone();
+    let mut guard = guard_on(socket, &stub);
     // A ceiling, not a schedule. The happy path ends when the second stub
     // appends, however many seconds a loaded host takes to schedule it; this
     // only bounds a genuinely stuck run.
@@ -1450,7 +1511,7 @@ async fn two_concurrent_guards_both_resolve_against_one_slow_daemon() {
 
     // The guard both calls borrowed is unchanged: it is read-only input, and a
     // reader that mutated it would have had to do so through a shared `&`.
-    assert_eq!(guard.url, format!("http://127.0.0.1:{port}"));
+    assert_eq!(guard.socket, expected_socket);
     assert_eq!(guard.binary, stub);
 
     // Both calls returned, and neither could have without the daemon going
@@ -1468,8 +1529,8 @@ async fn two_concurrent_guards_both_resolve_against_one_slow_daemon() {
     for line in &spawned {
         assert_eq!(
             line.trim(),
-            format!("serve --port {port}"),
-            "every spawn carries the configured port"
+            "serve",
+            "#6287: every spawn is a bare `serve` — the daemon derives its own socket"
         );
     }
 }
@@ -2119,7 +2180,12 @@ async fn degraded_stack(
 
     let mut search = search_guard_on(serve_health_gated_on(flag.clone()).await, &search_stub);
     search.startup_timeout = FORK_BUDGET;
-    let mut analyze = guard_on(serve_health_gated_on(flag.clone()).await, &analyze_stub);
+    // #6287: the analyze half is a socket now — same gate, different transport.
+    let gate = flag.clone();
+    let mut analyze = guard_on(
+        serve_analyze_health(dir, move || gate.exists()),
+        &analyze_stub,
+    );
     analyze.startup_timeout = ANALYZE_BUDGET;
 
     (search, analyze, flag)
@@ -2174,8 +2240,9 @@ async fn the_search_guard_recovers_a_stale_degraded_analyze_daemon() {
         .await
         .expect_err("running the analyze guard first must refuse the audit");
     assert!(
-        err.cause.contains("did not become ready"),
-        "the analyze preflight must fail at its readiness poll against the live 503, got: {}",
+        err.cause.contains("did not answer healthy"),
+        "the analyze preflight must fail at its readiness poll against the live degraded \
+         answer, got: {}",
         err.cause
     );
     // This, not the budget, is why the refusal is correct: no code path created the
