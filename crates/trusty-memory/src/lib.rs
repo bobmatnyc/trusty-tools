@@ -1151,10 +1151,10 @@ impl AppState {
     /// concurrent requests without re-probing on every chat call.
     /// What: On first use loads `~/.trusty-memory/config.toml`, prefers an
     /// auto-detected Ollama instance (when `local_model.enabled`), and falls
-    /// back to OpenRouter when an API key is set. Returns `Ok(None)` when
-    /// neither is available so the caller can emit a 412.
-    /// Test: `web::tests::providers_endpoint_returns_payload` covers the
-    /// detection path indirectly through `/api/v1/chat/providers`.
+    /// back to OpenRouter when an API key is set. Returns `None` when neither
+    /// is available, so `memory.chat` can refuse before opening a stream.
+    /// Test: `rpc_chat_providers_answers_both_upstreams` covers the detection
+    /// path indirectly through `memory.chat_providers`.
     pub async fn chat_provider(&self) -> Option<Arc<dyn ChatProvider>> {
         self.chat_provider
             .get_or_init(|| async {

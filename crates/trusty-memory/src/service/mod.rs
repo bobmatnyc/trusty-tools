@@ -21,6 +21,18 @@ pub mod helpers;
 pub mod types;
 pub mod user_config;
 
+// #6286: the assertions the retired `web::tests` suite carried, ported to
+// direct `MemoryService` calls. Split by the module each one covers.
+#[cfg(test)]
+#[path = "core_kg_tests.rs"]
+mod core_kg_tests;
+#[cfg(test)]
+#[path = "core_tests.rs"]
+mod core_tests;
+#[cfg(test)]
+#[path = "helpers_tests.rs"]
+mod helpers_tests;
+
 // Re-export the full public surface so external call sites
 // (`crate::service::X`) keep resolving exactly as they did against the former
 // monolithic module. `load_user_config`, `dream_config_from_user_config`, and

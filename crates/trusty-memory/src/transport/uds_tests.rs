@@ -642,6 +642,96 @@ async fn rpc_messages_send_list_and_mark_read_round_trip() {
     daemon.shutdown().await;
 }
 
+/// Why (DOC-53 §4.3, the code-critic BLOCK round): the bug this exists to catch
+/// is daemon-vs-caller mis-attribution. ONE shared daemon serves every
+/// concurrently-attached session, so it must stamp each write with the identity
+/// THAT REQUEST carried — never a value derived from the daemon process, which
+/// would be identical for every caller and silently collapse two sessions'
+/// attribution into one.
+///
+/// An in-process `dispatch_tool` call cannot show this: it never crosses the
+/// shared surface a bridge-mediated caller uses. This used to drive `POST /rpc`
+/// for that reason; #6286 makes the socket that surface, so it dials twice with
+/// two `tools/call` envelopes carrying different `arguments.workstream` — the
+/// exact shape the stdio bridge forwards.
+///
+/// `force: true` bypasses the rolling near-duplicate gate (#220): without it the
+/// two writes, differing only in a marker word, would be similar enough for the
+/// SECOND to be skipped — which would make this pass for the wrong reason.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_writes_carry_distinct_ws_tags_per_caller_over_rpc() {
+    let state = test_state();
+    let palace = seed_palace(&state, "cred-multi-caller");
+    let daemon = Daemon::start(state).await;
+
+    for (workstream, marker) in [("ws-alpha", "alpha"), ("ws-beta", "beta")] {
+        let answered = daemon
+            .ok(
+                "tools/call",
+                json!({
+                    "name": "memory_remember",
+                    "arguments": {
+                        "palace": palace,
+                        "text": format!(
+                            "distinct-caller regression content marker {marker} with enough tokens"
+                        ),
+                        "room": "General",
+                        "workstream": workstream,
+                        "force": true,
+                    }
+                }),
+            )
+            .await;
+        // A skipped write would leave one drawer and fail the count below with a
+        // misleading message, so the envelope is checked where it is produced.
+        let text = answered["content"][0]["text"].as_str().unwrap_or_default();
+        let inner: Value = serde_json::from_str(text).unwrap_or_default();
+        assert_eq!(
+            inner["status"], "stored",
+            "expected a stored (not skipped) envelope for {workstream}; got {inner:?}"
+        );
+    }
+
+    let listed = daemon
+        .ok(
+            "memory.drawers_list",
+            json!({ "palace_id": palace, "limit": 10 }),
+        )
+        .await;
+    let drawers = listed.as_array().expect("drawers array");
+    assert_eq!(drawers.len(), 2, "expected two drawers, got {drawers:?}");
+
+    for drawer in drawers {
+        let content = drawer["content"].as_str().unwrap_or_default();
+        let tags: Vec<&str> = drawer["tags"]
+            .as_array()
+            .expect("tags array")
+            .iter()
+            .filter_map(|t| t.as_str())
+            .collect();
+        let (own, other) = if content.contains("marker alpha") {
+            ("ws-alpha", "ws-beta")
+        } else if content.contains("marker beta") {
+            ("ws-beta", "ws-alpha")
+        } else {
+            panic!("drawer content did not match either marker: {content:?}");
+        };
+        assert!(
+            tags.contains(&format!("ws:{own}").as_str())
+                && tags.contains(&format!("creator:workstream={own}").as_str()),
+            "the {own} drawer must carry its own ws tags; got {tags:?}"
+        );
+        assert!(
+            !tags.contains(&format!("ws:{other}").as_str())
+                && !tags.contains(&format!("creator:workstream={other}").as_str()),
+            "the {own} drawer must NOT leak the {other} caller's ws tags \
+             (daemon-vs-caller mis-attribution); got {tags:?}"
+        );
+    }
+    daemon.shutdown().await;
+}
+
 // ---------------------------------------------------------------------------
 // Streaming
 // ---------------------------------------------------------------------------

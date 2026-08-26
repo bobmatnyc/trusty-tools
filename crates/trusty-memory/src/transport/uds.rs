@@ -196,10 +196,11 @@ pub fn dispatcher_method_count() -> usize {
 /// What: each folded method is registered with [`RpcRouter::typed`], so the
 /// handler sees its own params type and a decode failure becomes a coded
 /// `invalid_params` frame rather than a dropped connection. Every handler's
-/// [`ApiError`] converts through `From<ApiError> for RpcError`
-/// (`transport::api_error`), which is where the failure-kind-to-code mapping
-/// lives. `memory.chat` goes in through [`RpcRouter::typed_stream`], and
-/// [`RpcRouter::fallback`] carries the rest.
+/// [`ApiError`] converts through `From<ApiError> for RpcError`, which is where
+/// the failure-kind-to-code mapping lives. `memory.chat` goes in through
+/// [`RpcRouter::typed_stream`], and [`RpcRouter::fallback`] carries the rest.
+///
+/// [`ApiError`]: crate::transport::api_error::ApiError
 ///
 /// A registered name WINS over the fallback, so a folded method never shadows
 /// or is shadowed by a dispatcher one — the `memory.` prefix keeps the two sets
