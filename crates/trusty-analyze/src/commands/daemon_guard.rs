@@ -1,67 +1,90 @@
 //! Auto-start the trusty-analyze daemon when a CLI command needs it.
 //!
-//! Why: the `dashboard` command (and any other command that requires a running
-//! daemon) previously failed with a static "is not running" error. This guard
-//! probes `/health` on the configured port, spawns the daemon in the background
-//! when absent, then polls until ready. Users get a single informational spinner
-//! line and the command they typed Just Works.
+//! Why: a command that requires the daemon used to fail with a static "is not
+//! running" error. This guard probes the socket, spawns the daemon in the
+//! background when nothing answers, then polls until it does. Users get a
+//! single informational line and the command they typed Just Works.
 //!
-//! What: thin shim over `trusty_common::daemon_guard` (issue #985).
-//! `ensure_daemon_running` delegates the spinner/probe/timeout loop to the
-//! shared implementation; only the trusty-analyze–specific knobs (port-based
-//! health URL construction, spawn args `serve --port <port>`, PID-file check)
-//! live here.
+//! What: [`probe_health`] is a bare connect, [`ensure_daemon_running`] adds the
+//! spawn-and-wait loop.
 //!
-//! Test: `probe_health_returns_false_on_connection_refused`,
-//! `ensure_daemon_running_returns_ok_when_already_healthy`, and
-//! `probe_health_returns_false_quickly_for_free_port` cover the shim layer;
-//! `trusty_common::daemon_guard` tests cover the shared spin loop.
+//! #6287 stopped delegating to `trusty_common::daemon_guard::spin_until_ready`
+//! and `trusty_mcp::ensure_daemon_up`. Both are built around a health URL —
+//! `DaemonGuardConfig` carries `health_url: String` and `DaemonBridgeConfig`
+//! carries `health_path` plus a `base_url_fn` — and this daemon no longer has
+//! one. Extending either to speak UDS is worth doing when a second service
+//! needs it (`trusty-review` does not: its MCP surface runs in-process and
+//! never bridges to a daemon); until then, a fifteen-line loop here is smaller
+//! than the abstraction, and `trusty_common::uds::socket_is_serving` is the
+//! shared entry point that actually matters.
+//!
+//! Test: `probe_health_returns_false_for_an_absent_socket`,
+//! `ensure_daemon_running_returns_ok_when_something_is_already_serving`.
 //!
 //! Note: only call this from commands that *require* the daemon. Commands like
 //! `start`, `stop`, `serve`, `service`, and `completions` deliberately do not
 //! call this guard.
 
-use std::time::Duration;
+use std::path::Path;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use colored::Colorize;
-use trusty_common::daemon_guard::{probe_once, spin_until_ready, DaemonGuardConfig};
 
-/// Probe `GET http://127.0.0.1:{port}/health`. Returns `true` on any 2xx response.
+/// How long a liveness connect may take before it is called dead.
 ///
-/// Why: caller code across trusty-analyze uses the port-based signature; this
-/// wrapper keeps that API stable while delegating to the shared
-/// `trusty_common::daemon_guard::probe_once`.
-/// What: constructs the full URL then calls `probe_once`.
-/// Test: `probe_health_returns_false_on_connection_refused` below.
-pub async fn probe_health(port: u16) -> bool {
-    probe_once(&format!("http://127.0.0.1:{port}/health")).await
+/// A local socket accepts or refuses in microseconds; this is headroom for a
+/// loaded machine, not a latency budget.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// How long to wait for a freshly-spawned daemon to answer.
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How often to re-probe while waiting.
+const POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Is anything serving `socket`?
+///
+/// Why: a bare connect rather than an `analyze.health` call, because the
+/// question here is "is the endpoint live". A daemon that is up but degraded —
+/// trusty-search down, say — must not be reported as absent and re-spawned on
+/// top of itself.
+/// What: delegates to [`trusty_common::uds::socket_is_serving`], the shared
+/// probe every trusty-* consumer uses.
+/// Test: `probe_health_returns_false_for_an_absent_socket`.
+pub async fn probe_health(socket: &Path) -> bool {
+    trusty_common::uds::socket_is_serving(socket, PROBE_TIMEOUT).await
 }
 
-/// Spawn the daemon in the background on `port`, returning the child PID.
+/// Spawn the daemon in the background, returning the child PID.
 ///
-/// Why: invokes `<current_exe> serve --port <port>` with all stdio null-ed so
-/// the daemon outlives the parent process and does not pollute the terminal.
-/// What: delegates to `trusty_common::daemon_guard::spawn_current_exe`.
+/// Why: invokes `<current_exe> serve` with all stdio null-ed so the daemon
+/// outlives the parent process and does not pollute the terminal.
+/// What: delegates to `trusty_common::daemon_guard::spawn_current_exe`. No
+/// `--socket` is passed: the default path is what every consumer dials, so a
+/// spawn that overrode it would start a daemon nothing could find.
 /// Test: `handle_start` in `daemon.rs` exercises the same spawn pattern.
-fn spawn_daemon(port: u16) -> Result<u32> {
-    let port_str = port.to_string();
-    trusty_common::daemon_guard::spawn_current_exe(&["serve", "--port", &port_str])
+fn spawn_daemon() -> Result<u32> {
+    trusty_common::daemon_guard::spawn_current_exe(&["serve"])
         .map_err(|e| anyhow!("trusty-analyze daemon spawn failed: {e}"))
 }
 
-/// Ensure the trusty-analyze daemon is running on `port`.
+/// Ensure something is serving `socket`, spawning the daemon if not.
 ///
 /// Why: gives any daemon-requiring command a single shared "boot if absent"
 /// path so the user never has to run `trusty-analyze start` first.
-/// What: fast-path probes `/health`; on miss, checks the PID file to avoid
-/// double-spawning a booting daemon, then spawns (or just waits), and
-/// delegates the spinner/poll/timeout loop to
-/// `trusty_common::daemon_guard::spin_until_ready` (30s budget).
-/// Test: `ensure_daemon_running_returns_ok_when_already_healthy` below.
-pub async fn ensure_daemon_running(port: u16) -> Result<()> {
+/// What: fast-path probes the socket; on miss, checks the PID file to avoid
+/// double-spawning a booting daemon, then spawns (or just waits), and polls for
+/// up to [`STARTUP_TIMEOUT`].
+///
+/// # Errors
+///
+/// When the spawn fails, or when nothing answers inside the budget.
+///
+/// Test: `ensure_daemon_running_returns_ok_when_something_is_already_serving`.
+pub async fn ensure_daemon_running(socket: &Path) -> Result<()> {
     // Fast path: daemon is already up.
-    if probe_health(port).await {
+    if probe_health(socket).await {
         return Ok(());
     }
 
@@ -76,141 +99,71 @@ pub async fn ensure_daemon_running(port: u16) -> Result<()> {
         .is_some();
 
     if already_running {
-        eprint!(
+        eprintln!(
             "{} trusty-analyze daemon already starting, waiting for it to become ready…",
             "◉".cyan()
         );
-        let _ = std::io::Write::flush(&mut std::io::stderr());
     } else {
         eprintln!("{} Starting trusty-analyze daemon…", "◉".cyan());
-        spawn_daemon(port)?;
+        spawn_daemon()?;
     }
 
-    let cfg = DaemonGuardConfig {
-        health_url: format!("http://127.0.0.1:{port}/health"),
-        service_name: "trusty-analyze".to_string(),
-        startup_timeout: Duration::from_secs(30),
-        poll_interval: Duration::from_millis(500),
-        timeout_hint: format!("try `trusty-analyze serve --port {port}` manually to see the error"),
-    };
-    spin_until_ready(&cfg).await
-}
-
-/// Ensure the trusty-analyze daemon is reachable for the MCP stdio bridge.
-///
-/// Why: the `mcp` subcommand acts as a stdio bridge that forwards every tool
-/// call to the daemon's REST API. If the daemon is down, every tool call
-/// fails with a connection error. Auto-starting matches the pattern
-/// established by trusty-memory and trusty-search (issue #1078).
-/// What: uses the shared `trusty_mcp::DaemonBridgeConfig` to probe
-/// the health endpoint derived from `analyzer_url`. On miss, spawns
-/// `<current_exe> serve --port <port>` detached and polls until ready (30s
-/// budget). Returns the live base URL so the caller can construct the
-/// `AnalyzerMcpServer` with the confirmed-reachable address.
-/// Test: covered by the `trusty_mcp::daemon_bridge` unit tests; the
-/// live path is exercised by `cargo run -- mcp` with no daemon running.
-pub async fn ensure_mcp_daemon_up(analyzer_url: &str) -> anyhow::Result<String> {
-    use trusty_mcp::DaemonBridgeConfig;
-
-    let base_url = analyzer_url.to_string();
-    let base_url_clone = base_url.clone();
-    let config = DaemonBridgeConfig {
-        service_name: "trusty-analyze".to_string(),
-        spawn_args: {
-            let port = analyzer_url
-                .trim_start_matches("http://")
-                .trim_start_matches("https://")
-                .rsplit(':')
-                .next()
-                .and_then(|s| s.parse::<u16>().ok())
-                .unwrap_or(trusty_analyze::service::DEFAULT_PORT);
-            vec!["serve".to_string(), "--port".to_string(), port.to_string()]
-        },
-        health_path: "/health".to_string(),
-        base_url_fn: Box::new(
-            move || match trusty_common::read_daemon_addr("trusty-analyze") {
-                Ok(Some(addr)) if !addr.is_empty() => {
-                    if addr.starts_with("http://") || addr.starts_with("https://") {
-                        addr
-                    } else {
-                        format!("http://{addr}")
-                    }
-                }
-                _ => base_url_clone.clone(),
-            },
-        ),
-        startup_timeout: None,
-        poll_interval: None,
-        no_spawn: false,     // trusty-analyze bridge may auto-start its sidecar
-        no_spawn_hint: None, // unused: no_spawn is false
-    };
-    trusty_mcp::ensure_daemon_up(&config).await
+    let deadline = Instant::now() + STARTUP_TIMEOUT;
+    while Instant::now() < deadline {
+        tokio::time::sleep(POLL_INTERVAL).await;
+        if probe_health(socket).await {
+            return Ok(());
+        }
+    }
+    Err(anyhow!(
+        "trusty-analyze did not start serving {} within {}s — run \
+         `trusty-analyze serve` in the foreground to see the error",
+        socket.display(),
+        STARTUP_TIMEOUT.as_secs()
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, Instant};
 
-    /// Why: a down port must not return true — if it did, callers would skip
-    /// the spawn and poll loop.
-    /// What: picks an ephemeral port known to be free by binding+dropping,
-    /// then asserts `probe_health` returns false.
+    /// Why: an absent socket must not return true — if it did, callers would
+    /// skip the spawn and then fail on the first real call.
+    /// What: probes a path inside an empty temp dir.
     /// Test: this function.
     #[tokio::test]
-    async fn probe_health_returns_false_on_connection_refused() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
+    async fn probe_health_returns_false_for_an_absent_socket() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
         let started = Instant::now();
-        let ok = probe_health(port).await;
-        assert!(!ok, "probe should fail against an unbound port");
+        assert!(!probe_health(&tmp.path().join("absent.sock")).await);
         assert!(
-            started.elapsed() < Duration::from_secs(6),
+            started.elapsed() < Duration::from_secs(3),
             "probe took too long: {:?}",
             started.elapsed()
         );
     }
 
-    /// Why: already-healthy path must return early without spawning anything.
-    /// What: binds a real TCP listener that answers "HTTP/1.1 200" to simulate
-    /// the daemon's `/health`, then calls `ensure_daemon_running`.
-    /// Test: `ensure_daemon_running` returns `Ok(())` quickly.
-    #[tokio::test]
-    async fn ensure_daemon_running_returns_ok_when_already_healthy() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        tokio::spawn(async move {
-            loop {
-                if let Ok((mut stream, _)) = listener.accept().await {
-                    tokio::spawn(async move {
-                        use tokio::io::AsyncWriteExt;
-                        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
-                        let _ = stream.write_all(response).await;
-                    });
-                }
-            }
-        });
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        let result = ensure_daemon_running(port).await;
-        assert!(
-            result.is_ok(),
-            "should succeed when daemon is already healthy"
-        );
-    }
-
-    /// Why: `probe_health` must return false quickly for a definitely-free port.
-    /// What: asserts `probe_health` returns false for port 1 (reserved).
+    /// Why: the already-healthy path must return early without spawning
+    /// anything — a second daemon would fight the first for the socket.
+    /// What: binds a real hardened socket and accepts connections, then calls
+    /// `ensure_daemon_running` and asserts it returns promptly.
     /// Test: this function.
-    #[tokio::test]
-    async fn probe_health_returns_false_quickly_for_free_port() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ensure_daemon_running_returns_ok_when_something_is_already_serving() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let socket = tmp.path().join("sockets").join("analyze.sock");
+        let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
+        tokio::spawn(async move {
+            while listener.accept().await.is_ok() {}
+        });
+
         let started = Instant::now();
-        let ok = probe_health(1).await;
-        assert!(!ok);
+        ensure_daemon_running(&socket)
+            .await
+            .expect("a live socket must satisfy the guard");
         assert!(
-            started.elapsed() < Duration::from_secs(6),
-            "probe should be fast: {:?}",
+            started.elapsed() < Duration::from_secs(3),
+            "the fast path must not wait: {:?}",
             started.elapsed()
         );
     }

@@ -4,13 +4,17 @@
 //! analyzer daemon without forcing them to learn launchd/systemd. Mirrors the
 //! UX of `trusty-search` and `trusty-memory`.
 //! What: spawns the binary itself in the background (writing a PID file under
-//! `~/.trusty-analyze/`), sends SIGTERM on stop, TCP-probes the port for
-//! status, and runs a small battery of sanity checks for doctor.
+//! `~/.trusty-analyze/`), sends SIGTERM on stop, probes the daemon's Unix
+//! socket for status, and runs a small battery of sanity checks for doctor.
+//!
+//! #6287: every `port: u16` parameter became a `socket: &Path`, and the TCP
+//! connect became `trusty_common::uds::socket_is_serving`. `status` reads the
+//! version through an `analyze.health` call rather than a `GET /health`.
+//!
 //! Test: integration coverage lives in tests against the binary; this module
 //! is exercised manually via `trusty-analyze start` / `stop` / `status` /
 //! `doctor` and via the unit tests below.
 
-use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -79,15 +83,43 @@ fn read_pid(path: &Path) -> Option<u32> {
     raw.trim().parse::<u32>().ok()
 }
 
-/// Probe whether the analyzer daemon's HTTP port is accepting connections.
+/// How long a liveness connect may take before the socket is called dead.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Probe whether anything is serving the daemon's socket.
 ///
-/// Why: TCP probing is the lightest-weight signal that the daemon is up; it
-/// doesn't require HTTP framing or response parsing.
-/// What: connects to `127.0.0.1:<port>` with a 500 ms timeout.
-/// Test: returns `false` against a free port.
-fn port_reachable(port: u16) -> bool {
-    let addr: SocketAddr = ([127, 0, 0, 1], port).into();
-    TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok()
+/// Why: a bare connect is the lightest-weight signal that the daemon is up, and
+/// it does not require the daemon's dependencies to be healthy — a degraded
+/// daemon is still a running one, which `stop` and `status` both need to know.
+/// What: delegates to the shared [`trusty_common::uds::socket_is_serving`].
+///
+/// Synchronous, because `handle_start` and `handle_stop` are — and the runtime
+/// it needs runs on a DEDICATED THREAD rather than through `Handle::block_on`.
+/// `main` is `#[tokio::main]`, so every caller here is already inside a runtime,
+/// and building a second one on that thread and blocking on it panics. Doing it
+/// on its own thread makes the call safe from any caller regardless of what it
+/// is running on — the same reason `trusty-console`'s `probe_health` and
+/// `trusty-installer`'s `probe_member_http_blocking` are written this way.
+/// Test: `socket_serving_returns_false_for_an_absent_socket`.
+fn socket_serving(socket: &Path) -> bool {
+    let socket = socket.to_path_buf();
+    std::thread::Builder::new()
+        .name("analyze-socket-probe".to_owned())
+        .spawn(move || {
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return false;
+            };
+            rt.block_on(trusty_common::uds::socket_is_serving(
+                &socket,
+                PROBE_TIMEOUT,
+            ))
+        })
+        .ok()
+        .and_then(|h| h.join().ok())
+        .unwrap_or(false)
 }
 
 /// Spawn the daemon in the background and write its PID.
@@ -97,16 +129,17 @@ fn port_reachable(port: u16) -> bool {
 /// executable and immediately returning.
 /// What: if a PID file exists with a live PID we exit early; otherwise we
 /// `Command::spawn` the current exe with `serve`, write the child PID to
-/// `~/.trusty-analyze/daemon.pid`, and print the dashboard URL.
+/// `~/.trusty-analyze/daemon.pid`, and print the socket path.
 /// Test: run `trusty-analyze start` twice — the second invocation reports
 /// "already running" and exits 0.
-pub fn handle_start(port: u16) -> Result<()> {
+pub fn handle_start(socket: &Path) -> Result<()> {
     let pid_path = pid_file_path()?;
     if let Some(pid) = read_pid(&pid_path) {
-        if port_reachable(port) {
+        if socket_serving(socket) {
             println!(
-                "{} trusty-analyze already running (pid {pid}, port {port})",
-                "✓".green()
+                "{} trusty-analyze already running (pid {pid}, socket {})",
+                "✓".green(),
+                socket.display()
             );
             return Ok(());
         }
@@ -114,11 +147,11 @@ pub fn handle_start(port: u16) -> Result<()> {
         let _ = std::fs::remove_file(&pid_path);
     }
 
+    // #6287: no `--socket` is passed. The default path is what every consumer
+    // dials, so a spawn that overrode it would start a daemon nothing finds.
     let exe = std::env::current_exe().context("resolve current executable")?;
     let child = std::process::Command::new(&exe)
         .arg("serve")
-        .arg("--port")
-        .arg(port.to_string())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .stdin(std::process::Stdio::null())
@@ -129,13 +162,10 @@ pub fn handle_start(port: u16) -> Result<()> {
         .with_context(|| format!("write pid file {}", pid_path.display()))?;
 
     println!(
-        "{} trusty-analyze started (pid {}, port {port})",
+        "{} trusty-analyze started (pid {}, socket {})",
         "✓".green(),
-        child.id()
-    );
-    println!(
-        "  Dashboard: {}",
-        format!("http://127.0.0.1:{port}/ui").cyan()
+        child.id(),
+        socket.display()
     );
     Ok(())
 }
@@ -145,9 +175,9 @@ pub fn handle_start(port: u16) -> Result<()> {
 /// Why: pairs with `start` — a single command users can run to tear the
 /// background daemon down cleanly.
 /// What: reads the PID file, invokes `kill -TERM`, polls up to 5 s for the
-/// process to release the port, then removes the PID file.
+/// socket to stop answering, then removes the PID file.
 /// Test: with a running daemon → "stopped" message within a few seconds.
-pub fn handle_stop(port: u16) -> Result<()> {
+pub fn handle_stop(socket: &Path) -> Result<()> {
     let pid_path = pid_file_path()?;
     let Some(pid) = read_pid(&pid_path) else {
         eprintln!(
@@ -175,15 +205,16 @@ pub fn handle_stop(port: u16) -> Result<()> {
 
     for _ in 0..50 {
         std::thread::sleep(Duration::from_millis(100));
-        if !port_reachable(port) {
+        if !socket_serving(socket) {
             let _ = std::fs::remove_file(&pid_path);
             println!("{} trusty-analyze stopped", "✓".green());
             return Ok(());
         }
     }
     println!(
-        "{} Daemon did not release port {port} within 5 s; PID file left in place",
-        "⚠".yellow()
+        "{} Daemon is still answering {} after 5 s; PID file left in place",
+        "⚠".yellow(),
+        socket.display()
     );
     Ok(())
 }
@@ -192,20 +223,20 @@ pub fn handle_stop(port: u16) -> Result<()> {
 ///
 /// Why: `health` already reports trusty-search status; this command focuses
 /// on the analyzer itself with more detail (PID, version) for the user.
-/// What: TCP-probes the analyzer port, reads the PID file, and queries
-/// `/health` for the version string if the daemon answers.
+/// What: probes the socket, reads the PID file, and calls `analyze.health` for
+/// the version string if the daemon answers.
 /// Test: with the daemon down, prints "DOWN" and exits 0 (informational).
-pub async fn handle_status(port: u16) -> Result<()> {
+pub async fn handle_status(socket: &Path) -> Result<()> {
     let pid_path = pid_file_path()?;
     let pid = read_pid(&pid_path);
-    let reachable = port_reachable(port);
+    let reachable = trusty_common::uds::socket_is_serving(socket, PROBE_TIMEOUT).await;
 
     if reachable {
         println!("{} trusty-analyze: {}", "✓".green(), "RUNNING".green());
     } else {
         println!("{} trusty-analyze: {}", "✗".red(), "DOWN".red());
     }
-    println!("  Port:     {port}");
+    println!("  Socket:   {}", socket.display());
     if let Some(pid) = pid {
         println!("  PID:      {pid} (from {})", pid_path.display());
     } else {
@@ -213,51 +244,72 @@ pub async fn handle_status(port: u16) -> Result<()> {
     }
 
     if reachable {
-        let url = format!("http://127.0.0.1:{port}/health");
-        // #4392: loopback target — an exported HTTP_PROXY would otherwise
-        // report a healthy daemon as DOWN.
-        let client = trusty_common::http_client::loopback_client_builder()
-            .build()
-            .context("build health-probe client")?;
-        match client
-            .get(&url)
-            .timeout(Duration::from_secs(2))
-            .send()
-            .await
-        {
-            Ok(resp) if resp.status().is_success() => {
-                if let Ok(body) = resp.json::<serde_json::Value>().await {
-                    if let Some(v) = body.get("version").and_then(|v| v.as_str()) {
-                        println!("  Version:  {v}");
+        match health_envelope(socket).await {
+            Ok(body) => {
+                if let Some(v) = body.get("version").and_then(|v| v.as_str()) {
+                    println!("  Version:  {v}");
+                }
+                // #6287: `analyze.health` answers with a RESULT frame even when
+                // trusty-search is down, so a degraded daemon reports its
+                // dependency here instead of looking like a failed probe.
+                if let Some(status) = body.get("status").and_then(|v| v.as_str()) {
+                    if status != "ok" {
+                        println!("  Health:   {} (trusty-search unreachable)", status.yellow());
                     }
                 }
             }
-            Ok(resp) => println!("  Health:   HTTP {}", resp.status()),
-            Err(e) => println!("  Health:   probe failed: {e}"),
+            Err(e) => println!("  Health:   probe failed: {e:#}"),
         }
     }
     Ok(())
+}
+
+/// One `analyze.health` call, returning the raw `result` value.
+///
+/// Why: `status` and `doctor` both want the version off a live daemon, and both
+/// need the same "answered but with an error" handling.
+///
+/// # Errors
+///
+/// When the socket cannot be dialled, or the daemon answers with an error frame.
+async fn health_envelope(socket: &Path) -> Result<serde_json::Value> {
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": trusty_analyze::service::METHOD_HEALTH,
+    });
+    let response: trusty_common::uds::server::RpcResponse =
+        trusty_common::uds::send_framed_request(socket, &request, Duration::from_secs(5))
+            .await
+            .with_context(|| format!("analyze.health over {}", socket.display()))?;
+    if let Some(error) = response.error {
+        anyhow::bail!("analyze.health returned {}: {}", error.code, error.message);
+    }
+    response
+        .result
+        .ok_or_else(|| anyhow::anyhow!("analyze.health answered with neither result nor error"))
 }
 
 /// Diagnose common configuration issues and print a ✓/✗ summary.
 ///
 /// Why: gives users a fast self-service path to "why isn't this working?"
 /// without needing to read tracing logs.
-/// What: checks (1) daemon reachable on the configured port, (2) data dir
+/// What: checks (1) something is serving the daemon socket, (2) data dir
 /// exists and is writable, (3) the facts-store path is openable.
 /// Test: run `trusty-analyze doctor` with the daemon down — should print the
 /// missing-daemon ✗ line and exit non-zero.
-pub async fn handle_doctor(port: u16, facts_path: &Path) -> Result<()> {
+pub async fn handle_doctor(socket: &Path, facts_path: &Path) -> Result<()> {
     let mut ok = true;
     println!("trusty-analyze doctor:");
 
     // 1. Daemon reachability.
-    if port_reachable(port) {
-        println!("  {} daemon reachable on port {port}", "✓".green());
+    if trusty_common::uds::socket_is_serving(socket, PROBE_TIMEOUT).await {
+        println!("  {} daemon serving {}", "✓".green(), socket.display());
     } else {
         println!(
-            "  {} daemon not reachable on port {port} (start it with `trusty-analyze start`)",
-            "✗".red()
+            "  {} nothing is serving {} (start it with `trusty-analyze start`)",
+            "✗".red(),
+            socket.display()
         );
         ok = false;
     }
@@ -361,15 +413,15 @@ mod tests {
         assert_eq!(read_pid(&path), Some(12345));
     }
 
-    /// Why: probing a definitely-free port must return false quickly.
-    /// What: picks an unused port by binding+dropping a listener, then asserts
-    /// `port_reachable` is false.
+    /// Why (#6287): probing a path nothing binds must return false quickly, and
+    /// must do so from inside a tokio runtime — `main` is `#[tokio::main]`, so
+    /// every real caller is. A `Handle::block_on` implementation would panic
+    /// here rather than answer.
+    /// What: calls `socket_serving` from an async test against an absent path.
     /// Test: this function.
-    #[test]
-    fn port_reachable_returns_false_for_free_port() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        assert!(!port_reachable(port));
+    #[tokio::test]
+    async fn socket_serving_returns_false_for_an_absent_socket() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!socket_serving(&tmp.path().join("absent.sock")));
     }
 }

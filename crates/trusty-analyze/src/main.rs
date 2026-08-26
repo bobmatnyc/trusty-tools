@@ -1,10 +1,11 @@
 //! `trusty-analyze` CLI: sidecar daemon + ad-hoc analysis commands.
 //!
 //! Subcommands:
-//! - `serve`        run HTTP daemon (and, with `--mcp`, an MCP stdio loop)
+//! - `serve`        bind the daemon socket (and, with `--mcp`, an MCP stdio loop)
 //! - `analyze`      one-shot complexity hotspot report for an index
 //! - `facts list|add|delete`
 //! - `health`       probe both daemons
+//! - `socket`       print the daemon's socket path and whether it is live
 
 // docs.rs builds a release's documentation once, from the uploaded tarball,
 // so a broken intra-doc link is baked into that version forever and only a new
@@ -19,7 +20,6 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use trusty_analyze::core::{facts::new_fact, AnalyzerRegistry, FactStore, TrustySearchClient};
 use trusty_analyze::mcp::AnalyzerMcpServer;
-use trusty_analyze::service::DEFAULT_PORT;
 
 mod commands;
 
@@ -28,10 +28,10 @@ mod commands;
 mod main_tests;
 use commands::daemon as daemon_cmds;
 use commands::daemon_guard::ensure_daemon_running;
-use commands::port::{handle_port, PortFormat};
 use commands::run::{run_deep, run_review_pr, run_serve, OutputFormat};
 use commands::service::{run_service_action, ServiceAction as ServiceActionEnum};
 use commands::setup::{run_setup, SetupTarget};
+use commands::socket::{handle_socket, SocketFormat};
 
 /// Bundled declarative help config (issue #216). Loaded once per process.
 ///
@@ -73,21 +73,37 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
-    /// Run the HTTP sidecar daemon.
+    /// Run the sidecar daemon on its Unix socket.
     Serve {
         /// Run in foreground (used by launchd service).
         #[arg(long, help = "Run in foreground (used by launchd service)")]
         foreground: bool,
-        /// Starting port (auto-detect upward if busy). Defaults to 7879.
-        #[arg(long, default_value_t = DEFAULT_PORT)]
-        port: u16,
+        /// Unix socket to bind.
+        ///
+        /// Defaults to `<data dir>/trusty-analyze.sock` — the same path
+        /// `trusty_common::daemon_socket_path("trusty-analyze")` hands every
+        /// consumer. Override it and nothing will find this daemon; the flag
+        /// exists for tests and for running a second instance deliberately.
+        #[arg(long, value_name = "PATH")]
+        socket: Option<PathBuf>,
+        /// Retired with the TCP listener (#6287). Accepted and ignored.
+        ///
+        /// Why this is not simply deleted: the launchd plist on every machine
+        /// that installed trusty-analyze before this change still passes
+        /// `--port 7879`. Upgrading the BINARY does not rewrite the plist —
+        /// only `trusty-analyze service install` does — so a bare `cargo
+        /// install` would leave clap exiting 2 on an unexpected argument, and
+        /// `KeepAlive::Always` turns that into a permanent crash loop with
+        /// nothing in the logs but a usage message.
+        #[arg(long, value_name = "PORT", hide = true)]
+        port: Option<u16>,
         /// Also run an MCP stdio loop on this process. Useful only when invoked
         /// as a subprocess by an MCP client.
         #[arg(long)]
         mcp: bool,
-        /// Start MCP HTTP/SSE server on this port (in addition to or instead of stdio).
-        /// Exposes `POST /mcp` and `GET /mcp/sse`.
-        #[arg(long)]
+        /// Retired with the MCP HTTP/SSE transport (#6287). Accepted and
+        /// ignored, for the reason [`Cmd::Serve::port`] records.
+        #[arg(long, value_name = "PORT", hide = true)]
         mcp_port: Option<u16>,
         /// Deprecated no-op, kept so existing launchd plists and shell
         /// wrappers that pass it keep starting.
@@ -155,9 +171,6 @@ enum Cmd {
         /// Output format: json (default) or text.
         #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
         format: OutputFormat,
-        /// Port the analyzer daemon is bound to.
-        #[arg(long, default_value_t = DEFAULT_PORT, env = "TRUSTY_ANALYZER_PORT")]
-        port: u16,
     },
     /// Facts subcommands.
     Facts {
@@ -166,39 +179,28 @@ enum Cmd {
     },
     /// Probe both daemons.
     Health,
-    /// Report the daemon's listening port.
+    /// Report the Unix socket the daemon serves on.
     ///
-    /// Reads the discovery file written on bind. Falls back to 7879 when
-    /// no daemon is running. Useful for shell substitution:
-    /// `curl http://127.0.0.1:$(trusty-analyze port)/health`
-    Port {
-        /// Print `host:port` instead of the bare port number.
-        #[arg(long, conflicts_with = "json")]
-        addr: bool,
-        /// Print `{"addr":"…","port":…}` JSON instead of the bare port.
-        #[arg(long, conflicts_with = "addr")]
+    /// #6287 replaced `trusty-analyze port` and its `http_addr` discovery file:
+    /// the daemon binds a socket whose path is derived from the data directory,
+    /// so there is no port to report and no file that can go stale.
+    ///
+    ///   trusty-analyze socket          → bare path: /…/trusty-analyze.sock
+    ///   trusty-analyze socket --json   → JSON:      {"socket":"…","serving":true}
+    ///
+    /// Exits non-zero when nothing is answering on the socket, so shell
+    /// substitution (`$(trusty-analyze socket)`) fails safely.
+    Socket {
+        /// Print a JSON object `{"socket":"…","serving":…}`.
+        #[arg(long)]
         json: bool,
     },
     /// Run an MCP stdio server pointed at the analyzer daemon.
     Mcp {
-        /// Base URL of the analyzer daemon. Defaults to http://127.0.0.1:7879.
-        #[arg(long, default_value = "http://127.0.0.1:7879")]
-        analyzer_url: String,
-    },
-    /// Open the analyzer dashboard UI in the default browser.
-    ///
-    /// Why: gives users a one-command path to the embedded UI without having
-    /// to remember the port or URL. Probes the daemon first so we fail loudly
-    /// with a useful message when the daemon isn't running.
-    /// What: TCP-probes `127.0.0.1:<port>`, opens `http://127.0.0.1:<port>/ui`
-    /// on success, prints a hint on failure.
-    /// Test: run with the daemon down — should print the "not running" hint
-    /// and exit non-zero. With the daemon up, should open the browser.
-    #[command(alias = "dash")]
-    Dashboard {
-        /// Port the analyzer daemon is bound to.
-        #[arg(long, default_value_t = DEFAULT_PORT, env = "TRUSTY_ANALYZER_PORT")]
-        port: u16,
+        /// Unix socket the analyzer daemon serves on. Defaults to the derived
+        /// path — see `trusty-analyze socket`.
+        #[arg(long, value_name = "PATH")]
+        socket: Option<PathBuf>,
     },
     /// Start the daemon in the background.
     ///
@@ -209,48 +211,32 @@ enum Cmd {
     /// stdio. Idempotent: a live PID + reachable port is treated as success.
     /// Test: `trusty-analyze start` followed by `trusty-analyze status` should
     /// report RUNNING; `trusty-analyze stop` should clean up.
-    Start {
-        /// Port to listen on (default: 7879).
-        #[arg(long, default_value_t = DEFAULT_PORT, env = "TRUSTY_ANALYZER_PORT")]
-        port: u16,
-    },
+    Start,
     /// Stop the running daemon.
     ///
     /// Why: pairs with `start` — sends SIGTERM to the PID recorded at start
-    /// time, then waits briefly for the port to close.
+    /// time, then waits briefly for the socket to stop answering.
     /// What: reads `~/.trusty-analyze/daemon.pid`, invokes `kill -TERM`, polls
-    /// the port for up to 5 s, and removes the PID file on success.
+    /// the socket for up to 5 s, and removes the PID file on success.
     /// Test: with a running daemon → exits 0 with "stopped" message.
-    Stop {
-        /// Port the daemon is bound to.
-        #[arg(long, default_value_t = DEFAULT_PORT, env = "TRUSTY_ANALYZER_PORT")]
-        port: u16,
-    },
-    /// Show daemon status (running/down, port, version).
+    Stop,
+    /// Show daemon status (running/down, socket, version).
     ///
     /// Why: more detailed than `health` — focuses on the analyzer daemon
     /// itself (PID, version) rather than the trusty-search pairing.
-    /// What: TCP-probes the configured port, reads the PID file, and queries
-    /// `/health` for a version string when the daemon answers.
+    /// What: probes the socket, reads the PID file, and calls `analyze.health`
+    /// for a version string when the daemon answers.
     /// Test: with the daemon down → prints DOWN and exits 0.
     #[command(alias = "st")]
-    Status {
-        /// Port the daemon is bound to.
-        #[arg(long, default_value_t = DEFAULT_PORT, env = "TRUSTY_ANALYZER_PORT")]
-        port: u16,
-    },
+    Status,
     /// Diagnose configuration and environment issues.
     ///
     /// Why: gives users a self-service "why isn't this working?" path with a
     /// ✓ / ✗ summary per check.
-    /// What: verifies the daemon is reachable, the data dir is writable, and
+    /// What: verifies the daemon is serving, the data dir is writable, and
     /// the facts-store path can be opened. Exits non-zero on any failure.
     /// Test: with the daemon down → ✗ for daemon, exits 1.
-    Doctor {
-        /// Port the daemon is bound to.
-        #[arg(long, default_value_t = DEFAULT_PORT, env = "TRUSTY_ANALYZER_PORT")]
-        port: u16,
-    },
+    Doctor,
     /// Generate shell completion script.
     ///
     /// Why: shell completion massively improves discoverability for a CLI
@@ -432,12 +418,25 @@ async fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Serve {
             foreground: _,
+            socket,
             port,
             mcp,
             mcp_port,
             // #5067: accepted for backward compatibility, deliberately unused.
             fastembed_cache: _,
-        } => run_serve(search, facts_path, port, mcp, mcp_port).await,
+        } => {
+            // #6287: warn rather than fail so a stale launchd plist still starts
+            // the daemon. Silence would leave an operator believing they had
+            // moved a listener that no longer exists.
+            if port.is_some() || mcp_port.is_some() {
+                tracing::warn!(
+                    "--port / --mcp-port are retired (#6287): trusty-analyze serves a Unix \
+                     socket. Run `trusty-analyze service install` to refresh the launchd plist, \
+                     and `trusty-analyze socket` to see the path."
+                );
+            }
+            run_serve(search, facts_path, socket, mcp).await
+        }
         Cmd::Analyze { index_id, top_k } => {
             let chunks = search
                 .get_chunks(&index_id)
@@ -540,8 +539,10 @@ async fn main() -> Result<()> {
             index_id,
             model,
             format,
-            port,
-        } => run_deep(index_id, model, format, port).await,
+        } => {
+            let socket = trusty_analyze::service::socket_path()?;
+            run_deep(index_id, model, format, &socket).await
+        }
         Cmd::Facts { op } => {
             let facts = FactStore::open(&facts_path)?;
             match op {
@@ -585,52 +586,40 @@ async fn main() -> Result<()> {
                 search.base_url(),
                 if search_ok { "OK" } else { "DOWN" }
             );
-            // The analyzer's own health is queried via HTTP if it's running.
-            let analyzer_url = format!("http://127.0.0.1:{}", DEFAULT_PORT);
-            // #4392: loopback target — an exported HTTP_PROXY would otherwise
-            // report a healthy analyzer as DOWN.
-            let client = trusty_common::http_client::loopback_client()?;
-            let analyzer_ok = client
-                .get(format!("{analyzer_url}/health"))
-                .send()
-                .await
-                .map(|r| r.status().is_success())
-                .unwrap_or(false);
+            // #6287: the analyzer's own health comes off its socket. The #4392
+            // HTTP_PROXY hazard is gone with the HTTP client — a Unix socket
+            // has no proxy to be routed through.
+            let socket = trusty_analyze::service::socket_path()?;
+            let analyzer_ok =
+                trusty_common::uds::socket_is_serving(&socket, std::time::Duration::from_secs(2))
+                    .await;
             println!(
-                "trusty-analyzer ({analyzer_url}): {}",
+                "trusty-analyzer ({}): {}",
+                socket.display(),
                 if analyzer_ok { "OK" } else { "DOWN" }
             );
             Ok(())
         }
-        Cmd::Port { addr, json } => handle_port(if json {
-            PortFormat::Json
-        } else if addr {
-            PortFormat::Addr
-        } else {
-            PortFormat::Port
-        }),
-        Cmd::Mcp { analyzer_url } => {
-            let url = commands::daemon_guard::ensure_mcp_daemon_up(&analyzer_url).await?;
-            trusty_analyze::mcp::stdio::run(AnalyzerMcpServer::new(url)).await
+        Cmd::Socket { json } => {
+            handle_socket(if json {
+                SocketFormat::Json
+            } else {
+                SocketFormat::Path
+            })
+            .await
         }
-        Cmd::Dashboard { port } => {
-            // Auto-start the daemon when it is not yet reachable.
-            // Why: `dashboard` is a convenience command — the user should
-            // never have to manually run `trusty-analyze serve` first. Mirrors
-            // the trusty-search `daemon_guard::ensure_daemon_running` pattern.
-            // What: `ensure_daemon_running` probes `/health`, spawns the
-            // daemon in the background when absent, polls until ready (30s
-            // budget with a spinner), then returns. On success we open the UI.
-            // Test: with no daemon running, this path spawns the daemon and
-            // opens the browser. With a running daemon, the probe returns
-            // immediately and no spawn occurs.
-            ensure_daemon_running(port).await?;
-            let url = format!("http://127.0.0.1:{port}/ui");
-            println!("Opening {url}");
-            if let Err(e) = open::that(&url) {
-                eprintln!("could not launch browser ({e}). Open this URL manually: {url}");
-            }
-            Ok(())
+        Cmd::Mcp { socket } => {
+            // Auto-start the daemon when nothing is serving. Why: the `mcp`
+            // subcommand is a stdio bridge that forwards every tool call to the
+            // daemon; with the daemon down, every tool call fails with a
+            // transport error. Auto-starting matches trusty-memory and
+            // trusty-search (issue #1078).
+            let socket = match socket {
+                Some(p) => p,
+                None => trusty_analyze::service::socket_path()?,
+            };
+            ensure_daemon_running(&socket).await?;
+            trusty_analyze::mcp::stdio::run(AnalyzerMcpServer::new(socket)).await
         }
         Cmd::Service { action } => {
             let action = match action {
@@ -641,10 +630,12 @@ async fn main() -> Result<()> {
             };
             run_service_action(action)
         }
-        Cmd::Start { port } => daemon_cmds::handle_start(port),
-        Cmd::Stop { port } => daemon_cmds::handle_stop(port),
-        Cmd::Status { port } => daemon_cmds::handle_status(port).await,
-        Cmd::Doctor { port } => daemon_cmds::handle_doctor(port, &facts_path).await,
+        Cmd::Start => daemon_cmds::handle_start(&trusty_analyze::service::socket_path()?),
+        Cmd::Stop => daemon_cmds::handle_stop(&trusty_analyze::service::socket_path()?),
+        Cmd::Status => daemon_cmds::handle_status(&trusty_analyze::service::socket_path()?).await,
+        Cmd::Doctor => {
+            daemon_cmds::handle_doctor(&trusty_analyze::service::socket_path()?, &facts_path).await
+        }
         Cmd::Completions { shell } => {
             // Why: clap_complete renders a script for the requested shell from
             // our derived `Cli` definition — keeps completion in sync with the
