@@ -39,6 +39,28 @@ pub struct VectorHit {
     pub score: f32,
 }
 
+/// How a staged→live HNSW snapshot swap resolved (issue #6299).
+///
+/// Why: during a reindex every periodic checkpoint is written to a staging
+/// file, and `UsearchStore::save` records the file it wrote as the store's
+/// snapshot source. Resolving the swap makes that file vanish under the
+/// store — renamed onto the live path, or deleted — so the store must be told
+/// which of the two happened before it next tries to open the path it
+/// recorded. The two outcomes need different repairs: after a commit the
+/// bytes still exist under the live name, after an abort they are gone and
+/// the live snapshot is the pre-reindex one.
+/// What: the discriminator passed to [`VectorStore::resolve_staged_snapshot`].
+/// Test: `service::reindex::hnsw_swap_tests::write_after_commit_swap_succeeds_when_store_was_demoted_to_staging_view`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StagedSwapOutcome {
+    /// The staging file was renamed over the live path; the bytes the store
+    /// may still be mapping are now the live snapshot.
+    Committed,
+    /// The staging file was deleted; the live snapshot is whatever it was
+    /// before the reindex started.
+    Aborted,
+}
+
 /// Abstract vector store interface. Concrete impls (in-process HNSW today,
 /// possibly remote tomorrow) plug in here so the rest of the indexer never
 /// imports `usearch` directly.
@@ -172,6 +194,33 @@ pub trait VectorStore: Send + Sync {
     /// in `store::tests`.
     async fn demote_to_view(&self) -> Result<bool> {
         Ok(false)
+    }
+
+    /// Re-point a store that recorded `staged` as its snapshot source at
+    /// `live`, once a staged→live swap has resolved (issue #6299).
+    ///
+    /// Why: `UsearchStore::save` records the path it wrote, so every reindex
+    /// checkpoint retargets the store at the staging file; an idle or
+    /// memory-pressure demotion then re-views the store FROM that staging
+    /// file. `service::reindex::hnsw_swap` renames or deletes it moments
+    /// later, leaving the store holding a path that no longer exists — and
+    /// the next write's `promote_view_to_mutable` failed `No such file or
+    /// directory` on every attempt, permanently, because a failed promote
+    /// never clears `is_view`. Three production indexes wedged this way.
+    /// Telling the store how the swap resolved is what keeps `hnsw_path` and
+    /// `is_view` truthful across it.
+    /// What: default = no-op (mock / BM25-only stores record no path).
+    /// `UsearchStore` overrides: a store that recorded some OTHER path is
+    /// left alone; one that recorded `staged` is re-pointed at `live` after a
+    /// commit, and restored from the live snapshot after an abort.
+    /// Test: `UsearchStore` — `store::tests::test_resolve_staged_snapshot_*`.
+    async fn resolve_staged_snapshot(
+        &self,
+        _staged: &Path,
+        _live: &Path,
+        _outcome: StagedSwapOutcome,
+    ) -> Result<()> {
+        Ok(())
     }
 
     /// Returns `true` when `id` already has a stored vector.

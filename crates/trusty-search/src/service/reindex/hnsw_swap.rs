@@ -51,9 +51,20 @@
 //!    periodic-persist task that outlived the reindex's batch loop could
 //!    still observe the flag flip and write partial state straight to live.
 //!
+//! Issue #6299 — resolving the swap must also repair the LIVE STORE, not just
+//! the files. Each checkpoint save records the staging file as the store's
+//! snapshot source (`UsearchStore::save`), and an idle or memory-pressure
+//! demotion can re-view the store from it; renaming or deleting that file
+//! without telling the store left it holding a path that no longer exists, so
+//! `promote_view_to_mutable` failed `No such file or directory` on every
+//! later write — permanently, because a failed promote never clears
+//! `is_view`. Both resolutions now call [`resolve_store_snapshot_path`] once
+//! the on-disk side has settled.
+//!
 //! Test: `tests` submodule below.
 
 use crate::core::registry::{IndexHandle, IndexId};
+use crate::core::store::StagedSwapOutcome;
 use std::path::{Path, PathBuf};
 
 /// The (live, staging) HNSW snapshot path pair for one index.
@@ -302,6 +313,12 @@ pub(super) async fn commit_staged_hnsw_swap(
                 paths.live.display(),
                 index_id_for_task
             );
+            // #6299: the staging file the live store recorded (and may be
+            // mmap-viewing) now only exists under the live name. Only on a
+            // SUCCESSFUL rename — a failed one leaves staging in place, and
+            // re-pointing at `live` would then name a stale snapshot.
+            resolve_store_snapshot_path(handle, index_id, paths, StagedSwapOutcome::Committed)
+                .await;
         }
         Ok(Err(e)) => tracing::warn!(
             "staged hnsw swap: rename failed for '{}' ({e}) — live snapshot left at its \
@@ -388,7 +405,11 @@ pub(super) async fn abort_staged_hnsw_swap(
     })
     .await;
     match removed {
-        Ok(Ok(())) => {}
+        // #6299: the staging file the live store recorded (and may be
+        // mmap-viewing) is gone; the live snapshot is authoritative again.
+        Ok(Ok(())) => {
+            resolve_store_snapshot_path(handle, index_id, paths, StagedSwapOutcome::Aborted).await;
+        }
         Ok(Err(e)) => tracing::warn!(
             "staged hnsw swap: could not delete staging hnsw snapshot for '{}': {e} — will be \
              overwritten by the next reindex attempt",
@@ -403,6 +424,45 @@ pub(super) async fn abort_staged_hnsw_swap(
     // Round-2 CRITICAL 2: only clear the flag once staging cleanup has fully
     // resolved — never before.
     handle.indexer.read().await.end_reindex_staging();
+}
+
+/// Tell the live vector store how the swap resolved, so a store that recorded
+/// (or is mmap-viewing) the staging file stops naming a path that no longer
+/// exists (issue #6299).
+///
+/// Why: every periodic checkpoint during a reindex writes to the staging file,
+/// and `UsearchStore::save` records the file it wrote as the store's snapshot
+/// source; an idle or memory-pressure demotion then re-views the store FROM
+/// that file. Resolving the swap makes it vanish, and until this call the live
+/// store was never told — so the next write's `promote_view_to_mutable` failed
+/// `No such file or directory` on every attempt for the life of the daemon.
+/// Three production indexes wedged that way.
+/// What: forwards to `CodeIndexer::resolve_staged_hnsw_swap` under the same
+/// read lock the rest of this module uses. Best-effort: a failure here is
+/// logged, never propagated — the swap itself has already resolved on disk.
+/// Test: `tests::write_after_commit_swap_succeeds_when_store_was_demoted_to_staging_view`,
+/// `tests::write_after_abort_swap_succeeds_when_store_was_demoted_to_staging_view`.
+async fn resolve_store_snapshot_path(
+    handle: &IndexHandle,
+    index_id: &IndexId,
+    paths: &HnswSwapPaths,
+    outcome: StagedSwapOutcome,
+) {
+    let resolved = handle
+        .indexer
+        .read()
+        .await
+        .resolve_staged_hnsw_swap(&paths.staging, &paths.live, outcome)
+        .await;
+    if let Err(e) = resolved {
+        tracing::warn!(
+            "staged hnsw swap: could not repair the live store's snapshot path for '{}' after \
+             a {:?} swap ({e}) — a later write may have to rebuild the graph in memory \
+             (issue #6299)",
+            index_id.0,
+            outcome,
+        );
+    }
 }
 
 /// Remove `path` if present, treating `NotFound` as success.
