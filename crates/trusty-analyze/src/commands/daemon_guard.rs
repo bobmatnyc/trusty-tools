@@ -153,9 +153,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let socket = tmp.path().join("sockets").join("analyze.sock");
         let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
-        tokio::spawn(async move {
-            while listener.accept().await.is_ok() {}
-        });
+        tokio::spawn(async move { while listener.accept().await.is_ok() {} });
 
         let started = Instant::now();
         ensure_daemon_running(&socket)

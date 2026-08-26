@@ -254,7 +254,10 @@ pub async fn handle_status(socket: &Path) -> Result<()> {
                 // dependency here instead of looking like a failed probe.
                 if let Some(status) = body.get("status").and_then(|v| v.as_str()) {
                     if status != "ok" {
-                        println!("  Health:   {} (trusty-search unreachable)", status.yellow());
+                        println!(
+                            "  Health:   {} (trusty-search unreachable)",
+                            status.yellow()
+                        );
                     }
                 }
             }

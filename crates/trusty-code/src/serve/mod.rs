@@ -439,11 +439,10 @@ mod tests {
                 7878,
                 "trusty-search/src/service/constants.rs::DEFAULT_PORT",
             ),
-            (
-                "trusty-analyze",
-                7879,
-                "trusty-analyze/src/service/events.rs::DEFAULT_PORT",
-            ),
+            // #6287: trusty-analyze has NO ROW. It no longer binds a TCP port —
+            // it serves a Unix socket (ADR-0032), so 7879 is not reserved by
+            // anything and listing it would forbid a future daemon from a free
+            // port.
             (
                 "trusty-mpm",
                 7880,

@@ -64,11 +64,7 @@ impl AnalyzerMcpServer {
     ///
     /// A response carrying neither `result` nor `error` is a malformed frame,
     /// not an empty answer, and reports as such rather than decoding to `null`.
-    pub(super) async fn call(
-        &self,
-        method: &str,
-        params: Value,
-    ) -> Result<Value, DispatchError> {
+    pub(super) async fn call(&self, method: &str, params: Value) -> Result<Value, DispatchError> {
         let request = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -83,10 +79,7 @@ impl AnalyzerMcpServer {
         )
         .await
         .map_err(|e| {
-            DispatchError::Transport(format!(
-                "{method} over {}: {e}",
-                self.socket.display()
-            ))
+            DispatchError::Transport(format!("{method} over {}: {e}", self.socket.display()))
         })?;
 
         if let Some(error) = response.error {

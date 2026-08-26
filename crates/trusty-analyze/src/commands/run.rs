@@ -174,11 +174,7 @@ pub async fn run_deep(
         .await
         .with_context(|| format!("analyze.deep_analysis over {}", socket.display()))?;
     if let Some(error) = response.error {
-        anyhow::bail!(
-            "deep analysis failed ({}): {}",
-            error.code,
-            error.message
-        );
+        anyhow::bail!("deep analysis failed ({}): {}", error.code, error.message);
     }
     let result = response
         .result

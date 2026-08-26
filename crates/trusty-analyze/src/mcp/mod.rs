@@ -380,7 +380,10 @@ impl AnalyzerMcpServer {
     async fn handle_find_smells(&self, args: &Value) -> Result<Value, DispatchError> {
         self.call(
             "analyze.smells",
-            with_index(args, optional_params(args, &["limit", "offset", "omit_content"])),
+            with_index(
+                args,
+                optional_params(args, &["limit", "offset", "omit_content"]),
+            ),
         )
         .await
     }
@@ -461,7 +464,8 @@ impl AnalyzerMcpServer {
         let k = args.get("k").and_then(Value::as_u64).unwrap_or(8);
         let mut params = optional_params(args, &["method"]);
         params.insert("k".into(), Value::from(k));
-        self.call("analyze.clusters", with_index(args, params)).await
+        self.call("analyze.clusters", with_index(args, params))
+            .await
     }
 
     async fn handle_analyzer_health(&self, _args: &Value) -> Result<Value, DispatchError> {

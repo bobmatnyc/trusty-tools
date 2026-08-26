@@ -56,10 +56,7 @@ pub(super) fn index_id_or_default(args: &Value) -> &str {
 /// Test: `optional_params_copies_only_present_keys`,
 /// `optional_params_preserves_value_types`,
 /// `optional_params_omits_an_explicit_null`.
-pub(super) fn optional_params(
-    args: &Value,
-    keys: &[&str],
-) -> serde_json::Map<String, Value> {
+pub(super) fn optional_params(args: &Value, keys: &[&str]) -> serde_json::Map<String, Value> {
     let mut out = serde_json::Map::new();
     for key in keys {
         match args.get(*key) {

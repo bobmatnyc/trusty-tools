@@ -21,9 +21,7 @@ use std::sync::Arc;
 use crate::core::{AnalyzerRegistry, FactStore, ScipOverlayStore, TrustySearchClient};
 use crate::embedder::{BowEmbedder, Embedder};
 use crate::types::SmellThresholds;
-use trusty_common::uds::server::{
-    CODE_INTERNAL_ERROR, CODE_INVALID_PARAMS, RpcError,
-};
+use trusty_common::uds::server::{RpcError, CODE_INTERNAL_ERROR, CODE_INVALID_PARAMS};
 
 /// Shared state for every handler. Cheap to clone (everything is `Arc`-ish).
 #[derive(Clone)]
@@ -300,9 +298,9 @@ impl From<ApiError> for RpcError {
         let code = match e.kind {
             ApiErrorKind::BadRequest => CODE_INVALID_PARAMS,
             ApiErrorKind::NotFound => CODE_NOT_FOUND,
-            ApiErrorKind::Internal
-            | ApiErrorKind::BadGateway
-            | ApiErrorKind::GatewayTimeout => CODE_INTERNAL_ERROR,
+            ApiErrorKind::Internal | ApiErrorKind::BadGateway | ApiErrorKind::GatewayTimeout => {
+                CODE_INTERNAL_ERROR
+            }
         };
         RpcError::new(code, e.message)
     }

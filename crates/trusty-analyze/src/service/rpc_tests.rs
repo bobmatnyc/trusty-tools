@@ -71,7 +71,11 @@ pub(crate) fn state_in_with_search(dir: &Path, search_base: &str) -> AnalyzerApp
 /// behaviour is assertable without binding anything. The socket half is covered
 /// separately, by the tests that need it.
 /// What: builds a well-formed request frame, dispatches, returns the response.
-async fn dispatch(state: &AnalyzerAppState, method: &str, params: serde_json::Value) -> RpcResponse {
+async fn dispatch(
+    state: &AnalyzerAppState,
+    method: &str,
+    params: serde_json::Value,
+) -> RpcResponse {
     let frame = serde_json::to_vec(&serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -83,7 +87,11 @@ async fn dispatch(state: &AnalyzerAppState, method: &str, params: serde_json::Va
 }
 
 /// [`dispatch`], unwrapping the success half.
-async fn ok(state: &AnalyzerAppState, method: &str, params: serde_json::Value) -> serde_json::Value {
+async fn ok(
+    state: &AnalyzerAppState,
+    method: &str,
+    params: serde_json::Value,
+) -> serde_json::Value {
     let response = dispatch(state, method, params).await;
     assert!(
         response.error.is_none(),
@@ -755,7 +763,10 @@ async fn spawn_paged_chunk_search(first_page: serde_json::Value) -> String {
             move |axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>| {
                 let body = first_page.clone();
                 async move {
-                    let first = q.get("after").map(|c: &String| c.is_empty()).unwrap_or(true);
+                    let first = q
+                        .get("after")
+                        .map(|c: &String| c.is_empty())
+                        .unwrap_or(true);
                     axum::response::Json(if first {
                         body
                     } else {
