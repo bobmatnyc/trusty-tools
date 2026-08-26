@@ -37,9 +37,11 @@ pub mod null_search_client;
 pub mod search_client;
 pub mod subprocess_analyze_client;
 
+// #6287: no `HttpAnalyzeClient` — ADR-0032 moved trusty-analyze onto a Unix
+// socket and its one caller now builds a `SubprocessAnalyzeClient`.
 pub use analyze_client::{
     AnalyzeClient, AnalyzeClientError, AnalyzeHealthResponse, AnalyzeIndexInfo, ComplexityHotspot,
-    HttpAnalyzeClient, Smell,
+    Smell,
 };
 pub use apex_context::{ApexContextResult, fetch_apex_context};
 pub use context::{

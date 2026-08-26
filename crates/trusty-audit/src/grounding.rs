@@ -39,10 +39,11 @@
 //!
 //! ## What it deliberately does not do
 //!
-//! It starts no daemon of its own and adds no configuration. The two addresses
+//! It starts no daemon of its own and adds no configuration. The two endpoints
 //! come from where every other client of those daemons reads them — the
-//! trusty-search discovery files via [`trusty_common::daemon_guard`], and
-//! `TRUSTY_ANALYZE_URL` for trusty-analyze — and the two binaries from the
+//! trusty-search discovery files via [`trusty_common::daemon_guard`], and the
+//! derived socket path (or `TRUSTY_ANALYZE_SOCKET`) for trusty-analyze, which
+//! is a path rather than a URL since #6287 — and the two binaries from the
 //! engagement's pinned copies, falling back to the same `TRUSTY_SEARCH_BIN` /
 //! `TRUSTY_ANALYZE_BIN` overrides `tga audit` honours.
 //!
@@ -83,11 +84,11 @@ pub struct Tools {
     pub search_url: String,
     /// The `trusty-analyze` binary to spawn when its daemon is absent.
     pub analyze: PathBuf,
-    /// Base address of the trusty-analyze daemon, e.g. `http://127.0.0.1:7879`.
-    pub analyze_url: String,
-    /// Wall-clock budget for a freshly-spawned daemon to BIND its port.
+    /// The trusty-analyze daemon's Unix socket (#6287, ADR-0032).
+    pub analyze_socket: PathBuf,
+    /// Wall-clock budget for a freshly-spawned daemon to bind its port or socket.
     pub bind_timeout: Duration,
-    /// Wall-clock budget for a listening daemon to answer `/health`.
+    /// Wall-clock budget for a listening daemon to report itself healthy.
     pub startup_timeout: Duration,
     /// Interval between readiness probes.
     pub poll_interval: Duration,
@@ -109,7 +110,7 @@ impl Tools {
             search,
             search_url: daemons::search_base_url(),
             analyze,
-            analyze_url: daemons::analyze_base_url(),
+            analyze_socket: daemons::analyze_socket(),
             bind_timeout: daemons::BIND_TIMEOUT,
             startup_timeout: daemons::STARTUP_TIMEOUT,
             poll_interval: trusty_common::daemon_guard::DEFAULT_POLL_INTERVAL,
@@ -327,7 +328,7 @@ async fn complexity(
         ));
         return Vec::new();
     }
-    match hotspots::fetch(&tools.analyze_url, index_id, checkout).await {
+    match hotspots::fetch(&tools.analyze_socket, index_id, checkout).await {
         Ok(ranked) if ranked.is_empty() => {
             gaps.push(format!(
                 "{display}: trusty-analyze measured no complexity hotspot for it, so its ranking \

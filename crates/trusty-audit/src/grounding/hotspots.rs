@@ -7,8 +7,9 @@
 //! indexed corpus — and turning it into a ranked path list is the whole of the
 //! intelligence the owner ruled belongs in this crate.
 //!
-//! What: [`fetch`], and the two pure halves it is made of — [`hotspots_url`] and
-//! [`rank`] — so the shape of the answer can be asserted without a daemon.
+//! What: [`fetch`], and the two pure halves it is made of —
+//! [`hotspots_params`] and [`rank`] — so the shape of the answer can be
+//! asserted without a daemon.
 //!
 //! ## Chunks in, files out
 //!
@@ -22,10 +23,10 @@
 //! count is what lets trusty-review point the analysis at the function instead
 //! of the file (#6146).
 //!
-//! The client is [`trusty_common::http_client::loopback_client_builder`], not a
-//! bare `reqwest::Client::new()`: the target is a loopback daemon, and a client
-//! that honoured an exported `HTTP_PROXY` would send a recipient's index id to
-//! their corporate proxy (#4392).
+//! #6287 (ADR-0032) moved the daemon onto a Unix socket, which retires the
+//! `HTTP_PROXY` hazard #4392 added a loopback-pinned client for: a socket has no
+//! proxy to be routed through, so a recipient's index id cannot leave the
+//! machine by that path at all.
 //!
 //! Test: `hotspot_tests`, and `super::grounding_tests` for the live arms.
 
@@ -120,12 +121,21 @@ pub struct RankedFile {
     pub hotspot: Option<FunctionHotspot>,
 }
 
-/// The endpoint for one index, on one base address.
-fn hotspots_url(base: &str, index_id: &str) -> String {
-    format!(
-        "{}/indexes/{index_id}/complexity_hotspots?top_n={HOTSPOT_CHUNKS}",
-        base.trim_end_matches('/')
-    )
+/// The method `trusty-analyze` ranks chunks on.
+///
+/// Duplicated as a literal rather than imported: this crate's whole discipline
+/// is running PINNED binaries, and a Cargo edge on a workspace-version
+/// `trusty-analyze` would defeat that.
+/// `trusty_analyze::service::rpc::METHODS` is the definition.
+const HOTSPOTS_METHOD: &str = "analyze.complexity_hotspots";
+
+/// The params for one index's ranking.
+///
+/// #6287: this was a URL builder's job — a path segment plus a query string. A
+/// JSON-RPC frame carries one `params` object, which is what removes the
+/// trailing-slash tolerance that builder needed.
+fn hotspots_params(index_id: &str) -> serde_json::Value {
+    serde_json::json!({ "index_id": index_id, "top_n": HOTSPOT_CHUNKS })
 }
 
 /// Collapse a chunk ranking into a ranked, repo-relative, capped file list.
@@ -187,25 +197,35 @@ fn rank(hotspots: &[Hotspot], checkout: &Path) -> Vec<RankedFile> {
 /// Test: `super::grounding_tests::{an_unreachable_hotspots_endpoint_is_a_named_gap,
 /// an_empty_hotspot_list_is_a_named_gap,
 /// hotspots_become_ranked_inspect_priority_in_the_manifest}`.
-pub async fn fetch(base: &str, index_id: &str, checkout: &Path) -> Result<Vec<RankedFile>, String> {
-    let url = hotspots_url(base, index_id);
-    let client = trusty_common::http_client::loopback_client_builder()
-        .timeout(REQUEST_BUDGET)
-        .build()
-        .map_err(|e| format!("no HTTP client could be built for {base} ({e})"))?;
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("trusty-analyze did not answer {url} ({e})"))?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(format!("trusty-analyze answered {status} for {url}"));
+pub async fn fetch(
+    socket: &Path,
+    index_id: &str,
+    checkout: &Path,
+) -> Result<Vec<RankedFile>, String> {
+    let at = socket.display();
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": HOTSPOTS_METHOD,
+        "params": hotspots_params(index_id),
+    });
+    let response: trusty_common::uds::server::RpcResponse =
+        trusty_common::uds::send_framed_request(socket, &request, REQUEST_BUDGET)
+            .await
+            .map_err(|e| {
+                format!("trusty-analyze did not answer {HOTSPOTS_METHOD} on {at} ({e})")
+            })?;
+    if let Some(error) = response.error {
+        return Err(format!(
+            "trusty-analyze refused {HOTSPOTS_METHOD} on {at} ({}: {})",
+            error.code, error.message
+        ));
     }
-    let envelope: HotspotEnvelope = response
-        .json()
-        .await
-        .map_err(|e| format!("trusty-analyze answered {url} with an unreadable body ({e})"))?;
+    let result = response.result.ok_or_else(|| {
+        format!("trusty-analyze answered {at} with neither a result nor an error")
+    })?;
+    let envelope: HotspotEnvelope = serde_json::from_value(result)
+        .map_err(|e| format!("trusty-analyze answered {at} with an unreadable body ({e})"))?;
     Ok(rank(&envelope.hotspots, checkout))
 }
 
@@ -240,12 +260,10 @@ mod hotspot_tests {
     }
 
     #[test]
-    fn the_url_names_the_index_and_the_chunk_count() {
+    fn the_params_name_the_index_and_the_chunk_count() {
         assert_eq!(
-            hotspots_url("http://127.0.0.1:7879/", "acme-api"),
-            format!(
-                "http://127.0.0.1:7879/indexes/acme-api/complexity_hotspots?top_n={HOTSPOT_CHUNKS}"
-            )
+            hotspots_params("acme-api"),
+            serde_json::json!({ "index_id": "acme-api", "top_n": HOTSPOT_CHUNKS })
         );
     }
 

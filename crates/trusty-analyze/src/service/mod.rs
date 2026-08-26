@@ -1,4 +1,4 @@
-//! Sidecar HTTP daemon for trusty-analyzer.
+//! Sidecar analysis daemon for trusty-analyzer.
 //!
 //! Why: Keeps analysis isolated from trusty-search. The daemon fetches chunks
 //! from the search daemon over HTTP (`TrustySearchClient::get_chunks`) and
@@ -8,45 +8,29 @@
 //!
 //! What: Thin coordinator module. Declares the submodules and re-exports the
 //! public surface so callers import from `service` rather than the internal
-//! submodules. The full HTTP surface is:
-//! - `GET  /health`
-//! - `GET  /sse`                                SSE push stream
-//! - `GET  /indexes`                            proxy to trusty-search
-//! - `GET  /indexes/{id}/complexity_hotspots`   top-N by cyclomatic
-//! - `GET  /indexes/{id}/smells`                chunks with at least one smell
-//! - `GET  /indexes/{id}/quality`               aggregate report
-//! - `GET  /indexes/{id}/diagnostics`           external linter results
-//! - `GET  /indexes/{id}/graph`                 KG graph
-//! - `GET  /indexes/{id}/entities`              flat KG node list
-//! - `GET  /indexes/{id}/clusters`              k-means concept clusters
-//! - `GET  /indexes/{id}/ner`                   named-entity extraction
-//! - `POST /indexes/{id}/scip`                  SCIP protobuf ingest
-//! - `POST /review`                             diff review
-//! - `POST /review/github-pr`                   GitHub PR review
-//! - `POST /analyze/deep`                       LLM narrative pass
-//! - `GET  /facts`                              list / filter facts
-//! - `POST /facts`                              upsert a fact
-//! - `DELETE /facts/{id}`                       delete a fact
+//! submodules. The served surface is twenty JSON-RPC methods over a hardened
+//! Unix socket — see [`rpc::METHODS`], which is the list, rather than a copy of
+//! it here that would go stale.
 //!
-//! Test: `cargo test -p trusty-analyze` boots the router with a stub
-//! search client and exercises every route end-to-end.
+//! #6287 (ADR-0032) replaced the axum HTTP surface this module used to
+//! describe. Three things went with it and are not coming back here: the
+//! embedded admin UI (`/ui`), which mounts on `trusty-console` instead; the
+//! `/sse` push stream, which had the UI as its only subscriber; and the
+//! `http_addr` discovery file, which a derived socket path makes unnecessary.
+//!
+//! Test: `rpc_tests.rs` drives every method over a real socket with a
+//! stub search client.
 
 mod diagnostics_dispatch;
-mod ui;
 
 pub mod events;
 pub(crate) mod handlers;
-pub mod routes;
-
-#[cfg(test)]
-mod tests;
-#[cfg(test)]
-mod tests_review;
+pub mod rpc;
 
 // Re-export the public API so callers can write `use crate::service::…`
 // without knowing which submodule owns each item.
-pub use events::{AnalyzerAppState, AnalyzerEvent, DEFAULT_PORT};
-pub use routes::{build_router, serve};
+pub use events::AnalyzerAppState;
+pub use rpc::{build_router, serve, socket_path, METHODS, METHOD_HEALTH};
 
 /// Re-export so the binary can construct facts via the same path.
 pub use crate::types::FactRecord as PublicFactRecord;

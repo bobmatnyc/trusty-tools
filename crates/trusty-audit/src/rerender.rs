@@ -1767,7 +1767,9 @@ mod rerender_tests {
             // Port 1 is privileged: a connect there is refused immediately.
             search_url: "http://127.0.0.1:1".to_owned(),
             analyze: PathBuf::from("/nonexistent/trusty-analyze"),
-            analyze_url: "http://127.0.0.1:1".to_owned(),
+            // #6287: a path nothing has ever bound — the socket equivalent of
+            // port 1, refused immediately.
+            analyze_socket: PathBuf::from("/nonexistent/trusty-analyze.sock"),
             bind_timeout: std::time::Duration::from_millis(50),
             startup_timeout: std::time::Duration::from_millis(100),
             poll_interval: std::time::Duration::from_millis(20),

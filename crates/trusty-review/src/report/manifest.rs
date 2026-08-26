@@ -215,16 +215,22 @@ pub struct ReportSection {
     /// Test: `manifest_tests.rs::parse_ticketing_path`.
     #[serde(default)]
     pub ticketing: Option<PathBuf>,
-    /// Optional base URL of the trusty-analyze daemon for the `--analyze` live
-    /// deterministic-metrics fetch (epic #2445).
+    /// Optional Unix socket of the trusty-analyze daemon for the `--analyze`
+    /// live deterministic-metrics fetch (epic #2445).
     ///
     /// Why: `--analyze` populates the complexity chart + finding bands from the
-    /// analyze daemon; the URL is deployment-specific.  Precedence: this manifest
-    /// key wins when set; otherwise `ReviewConfig.analyzer_url` (env
-    /// `PR_INTELLIGENCE_ANALYZER_URL`, itself defaulting to
-    /// [`crate::config::DEFAULT_ANALYZER_URL`]) applies.
+    /// analyze daemon; the socket is deployment-specific. Precedence: this
+    /// manifest key wins when set; otherwise `ReviewConfig.analyzer_socket` (env
+    /// `PR_INTELLIGENCE_ANALYZER_SOCKET`, itself defaulting to
+    /// [`crate::config::default_analyzer_socket`]) applies.
+    ///
+    /// #6287 renamed this from `analyze_url` along with the transport. A
+    /// manifest written before that carries the old key, which serde ignores —
+    /// so the fetch falls back to the derived socket, which is where the daemon
+    /// actually is. That is the right outcome: honouring a stale `http://…`
+    /// value would dial a port nothing binds.
     #[serde(default)]
-    pub analyze_url: Option<String>,
+    pub analyze_socket: Option<String>,
 }
 
 /// The weight the FIRST unweighted `inspect_priority` entry receives (#6078).

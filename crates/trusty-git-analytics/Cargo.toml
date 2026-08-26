@@ -26,7 +26,7 @@ name = "tga"
 # the `tga` binary; trusty-audit resolves it by version at runtime, not through
 # a Cargo edge), so the gate has nobody to protect here. The exception is
 # recorded as a `tga` row in scripts/semver-checks-crate-exclusions.tsv.
-version = "3.3.3"
+version = "4.0.0"
 publish = true
 edition = "2021"
 # Aligned with the workspace MSRV (1.94) per #254. Required for
@@ -71,7 +71,7 @@ path = "src/main.rs"
 # edge to trusty-review. `config-cli` already implied it transitively; naming it
 # here makes the dependency the profile transport relies on explicit rather than
 # a side effect of the `config` subcommand staying mounted.
-trusty-common = { workspace = true, features = ["cli-help", "update-check", "config-cli", "inference-client", "monitor-tui"] }
+trusty-common = { workspace = true, features = ["cli-help", "update-check", "config-cli", "inference-client", "monitor-tui", "uds"] }
 # Async runtime
 tokio = { workspace = true }
 # IANA timezone database: JQL date literals are evaluated in the JIRA

@@ -1,36 +1,31 @@
-//! Route handlers for the FactStore CRUD endpoints.
+//! RPC handlers for the FactStore CRUD methods.
 //!
 //! Why: Extracted from `service/mod.rs` to isolate the knowledge-triple
 //! management surface (list, upsert, delete facts) into a focused module.
 //!
-//! What: Three async handlers over `GET /facts`, `POST /facts`, and
-//! `DELETE /facts/{id}`, all off-loading blocking redb I/O to
-//! `tokio::task::spawn_blocking` so the async runtime stays responsive.
+//! What: three async handlers behind `analyze.facts_list`,
+//! `analyze.facts_upsert` and `analyze.facts_delete`, all off-loading blocking
+//! redb I/O to `tokio::task::spawn_blocking` so the async runtime stays
+//! responsive.
 //!
-//! Test: `upsert_then_list_facts_round_trip` in `service/tests.rs`.
+//! Test: `rpc_upsert_then_list_facts_round_trip` in `service/rpc_tests.rs`.
 
-use std::sync::Arc;
-
-use axum::{
-    extract::{Path, Query, State},
-    response::Json,
-};
 use serde::Deserialize;
 
 use crate::core::facts::new_fact;
-use crate::service::events::{AnalyzerAppState, AnalyzerEvent, ApiError};
+use crate::service::events::{AnalyzerAppState, ApiError};
 
-#[derive(Deserialize)]
-pub struct FactQueryParams {
+#[derive(Debug, Default, Deserialize)]
+pub struct FactQueryRequest {
     pub subject: Option<String>,
     pub predicate: Option<String>,
     pub object: Option<String>,
 }
 
 pub async fn list_facts(
-    State(state): State<Arc<AnalyzerAppState>>,
-    Query(p): Query<FactQueryParams>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+    state: &AnalyzerAppState,
+    p: FactQueryRequest,
+) -> Result<serde_json::Value, ApiError> {
     // Why: `FactStore::query` opens a synchronous redb read transaction. Even
     // though reads use `begin_read()`, redb serialises read-transaction
     // *acquisition* against any in-flight write commit; calling it directly
@@ -40,9 +35,9 @@ pub async fn list_facts(
     // What: move the blocking redb call onto the blocking pool via
     // `spawn_blocking` so the async worker stays responsive and concurrent
     // requests don't pile up behind a single slow read.
-    // Test: covered by the existing `upsert_then_list_facts_round_trip` (the
-    // round-trip still works); the latency improvement is observable under
-    // concurrent load (not asserted in unit tests).
+    // Test: covered by the existing `rpc_upsert_then_list_facts_round_trip`
+    // (the round-trip still works); the latency improvement is observable
+    // under concurrent load (not asserted in unit tests).
     let facts = state.facts.clone();
     let hits = tokio::task::spawn_blocking(move || {
         facts.query(
@@ -55,10 +50,10 @@ pub async fn list_facts(
     .map_err(|e| ApiError::internal(format!("query facts task panicked: {e}")))?
     .map_err(|e| ApiError::internal(format!("query facts: {e:#}")))?;
     let count = hits.len();
-    Ok(Json(serde_json::json!({ "facts": hits, "count": count })))
+    Ok(serde_json::json!({ "facts": hits, "count": count }))
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct UpsertFactRequest {
     pub subject: String,
     pub predicate: String,
@@ -75,11 +70,9 @@ fn default_confidence() -> f32 {
 }
 
 pub async fn upsert_fact(
-    State(state): State<Arc<AnalyzerAppState>>,
-    Json(req): Json<UpsertFactRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let subject = req.subject.clone();
-    let predicate = req.predicate.clone();
+    state: &AnalyzerAppState,
+    req: UpsertFactRequest,
+) -> Result<serde_json::Value, ApiError> {
     let mut fact = new_fact(req.subject, req.predicate, req.object, req.index_id);
     fact.confidence = req.confidence.clamp(0.0, 1.0);
     fact.provenance = req.provenance;
@@ -91,20 +84,26 @@ pub async fn upsert_fact(
     // the async runtime responsive.
     // What: clone the Arc-backed store, run the upsert under `spawn_blocking`,
     // and re-raise both join errors and store errors as 500s.
-    // Test: covered by `upsert_then_list_facts_round_trip`.
+    // Test: covered by `rpc_upsert_then_list_facts_round_trip`.
     let facts = state.facts.clone();
     tokio::task::spawn_blocking(move || facts.upsert(fact))
         .await
         .map_err(|e| ApiError::internal(format!("upsert fact task panicked: {e}")))?
         .map_err(|e| ApiError::internal(format!("upsert fact: {e:#}")))?;
-    state.emit(AnalyzerEvent::FactUpserted { subject, predicate });
-    Ok(Json(serde_json::json!({ "id": id, "upserted": true })))
+    Ok(serde_json::json!({ "id": id, "upserted": true }))
+}
+
+/// Params for `analyze.facts_delete`.
+#[derive(Debug, Deserialize)]
+pub struct DeleteFactRequest {
+    pub id: u64,
 }
 
 pub async fn delete_fact(
-    State(state): State<Arc<AnalyzerAppState>>,
-    Path(id): Path<u64>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+    state: &AnalyzerAppState,
+    req: DeleteFactRequest,
+) -> Result<serde_json::Value, ApiError> {
+    let id = req.id;
     // Why: same blocking-redb concern as `upsert_fact` — `Database::delete`
     // opens a write transaction and fsyncs on commit. Running it directly
     // on the async runtime worker risked starving other handlers.
@@ -115,8 +114,5 @@ pub async fn delete_fact(
         .await
         .map_err(|e| ApiError::internal(format!("delete fact task panicked: {e}")))?
         .map_err(|e| ApiError::internal(format!("delete fact: {e:#}")))?;
-    if removed {
-        state.emit(AnalyzerEvent::FactDeleted { id: id.to_string() });
-    }
-    Ok(Json(serde_json::json!({ "id": id, "removed": removed })))
+    Ok(serde_json::json!({ "id": id, "removed": removed }))
 }

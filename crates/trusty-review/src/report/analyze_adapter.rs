@@ -26,7 +26,7 @@
 //! per-endpoint budgets and independence (`a_failing_endpoint_keeps_what_the_
 //! others_returned`, `a_fetch_where_no_endpoint_answered_falls_back_to_scan`).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -44,16 +44,15 @@ pub use super::analyze_endpoints::{
 
 // ─── Tunables ──────────────────────────────────────────────────────────────
 
-/// How many extra attempts a retryable transport failure earns.
+/// Largest response frame the adapter will buffer, in bytes.
 ///
-/// Why (#6038): the adapter issues four GETs back to back, and reqwest keeps
-/// them on one HTTP/1.1 keep-alive connection. The daemon closing that
-/// connection races the client's next write, so a GET can be committed to a
-/// socket that is already going away — which surfaced as
-/// `error sending request` and degraded every `--analyze` render to scan. The
-/// bound is one: a peer that closes the replacement connection too is not
-/// answering, and the report falls back to scan either way.
-const TRANSPORT_RETRIES: u32 = 1;
+/// Why: `analyze.diagnostics` returns up to 500 `ToolDiagnostic` rows per page
+/// and `analyze.refactor_suggestions` a ranked list, both of which can outgrow
+/// `trusty_common::uds::MAX_FRAME_BYTES`'s 8 MiB control-plane default on a
+/// large repository. 32 MiB matches what the daemon accepts on the request side
+/// (`service::rpc::MAX_FRAME_BYTES`), so neither end refuses what the other
+/// would send.
+const MAX_RESPONSE_FRAME_BYTES: u64 = 32 * 1024 * 1024;
 
 // ─── Error type ────────────────────────────────────────────────────────────
 
@@ -80,22 +79,22 @@ pub enum AnalyzeAdapterError {
     #[error("trusty-analyze request timed out: {0}")]
     Timeout(String),
 
-    /// trusty-analyze returned a non-2xx status.
-    #[error("trusty-analyze API returned {status}: {body}")]
-    Api {
-        /// HTTP status code.
-        status: u16,
-        /// Response body (may be truncated).
-        body: String,
+    /// trusty-analyze answered with a JSON-RPC error frame.
+    ///
+    /// #6287: this was `Api { status: u16, body: String }` over HTTP. `code` is
+    /// the JSON-RPC code, which carries the same distinction the status did —
+    /// [`classify_failure`] reads it to tell a refusal from an outage.
+    #[error("trusty-analyze returned error {code}: {message}")]
+    Rpc {
+        /// JSON-RPC error code.
+        code: i64,
+        /// The daemon's own message.
+        message: String,
     },
 
     /// Response JSON could not be parsed against the expected envelope.
     #[error("trusty-analyze response parse error: {0}")]
     Parse(String),
-
-    /// reqwest client construction failed (TLS backend unavailable).
-    #[error("failed to build HTTP client: {0}")]
-    ClientInit(String),
 }
 
 type AdapterResult<T> = std::result::Result<T, AnalyzeAdapterError>;
@@ -104,40 +103,39 @@ type AdapterResult<T> = std::result::Result<T, AnalyzeAdapterError>;
 ///
 /// Why: the Gaps & Caveats line names which endpoint failed and why, and "why"
 /// must come from the error class rather than from string-matching a message
-/// that can quote a URL. A 408/504 is the daemon reporting its OWN deadline was
-/// hit, so it lands in the same category as a client-side timeout — both mean
-/// the analysis ran out of time, not that nothing was listening.
-/// Test: `a_request_that_outlives_its_budget_is_a_timeout_not_a_transport_error`.
+/// that can quote a path. The daemon's timeout error is the daemon reporting its
+/// OWN deadline was hit, so it lands in the same category as a client-side
+/// timeout — both mean the analysis ran out of time, not that nothing was
+/// listening.
+///
+/// #6287: the HTTP 408/504 arm became [`CODE_DEADLINE_EXCEEDED`], the code
+/// trusty-analyze's `service::events` assigns its `gateway_timeout` error for
+/// exactly this reason. Matching a code rather than a message keeps the rule
+/// above intact — a message can quote a path and can be reworded; a code cannot.
+/// Test: `a_request_that_outlives_its_budget_is_a_timeout_not_a_transport_error`,
+/// `a_daemon_side_deadline_is_a_timeout_not_a_rejection`.
 fn classify_failure(e: &AnalyzeAdapterError) -> EndpointFailure {
     match e {
         AnalyzeAdapterError::Timeout(_) => EndpointFailure::TimedOut,
-        AnalyzeAdapterError::Api { status, .. } if *status == 408 || *status == 504 => {
+        AnalyzeAdapterError::Rpc { code, .. } if *code == CODE_DEADLINE_EXCEEDED => {
             EndpointFailure::TimedOut
         }
-        AnalyzeAdapterError::Api { .. } | AnalyzeAdapterError::Parse(_) => {
+        AnalyzeAdapterError::Rpc { .. } | AnalyzeAdapterError::Parse(_) => {
             EndpointFailure::Rejected
         }
-        AnalyzeAdapterError::Transport(_) | AnalyzeAdapterError::ClientInit(_) => {
-            EndpointFailure::Unanswered
-        }
+        AnalyzeAdapterError::Transport(_) => EndpointFailure::Unanswered,
     }
 }
 
-/// Does this transport failure describe a connection that went away mid-request?
+/// The code trusty-analyze reports when a handler exhausted its own deadline.
 ///
-/// Why (#6038): only that class earns a retry. A connect refusal means nothing
-/// is listening, and a timeout means the daemon outlived the endpoint's own
-/// [`AnalyzeEndpoint::budget`] — re-running either just doubles the wall-clock
-/// cost of a fetch that fails open anyway. What is left is the case the client
-/// cannot avoid: a keep-alive connection the daemon closed after the request
-/// was already committed to it.
-/// What: true for a send/body failure that is neither a timeout nor a connect
-/// error.
-/// Test: `transport_failure_on_a_reused_connection_retries_once` (retried) and
-/// `fetch_returns_none_on_unreachable_daemon` (a refused connect is not).
-fn is_retryable_transport(e: &reqwest::Error) -> bool {
-    !e.is_timeout() && !e.is_connect() && !e.is_builder()
-}
+/// Duplicated as a literal rather than imported: this crate has no Cargo edge on
+/// trusty-analyze, and adding one to share an `i64` would pull a tree-sitter
+/// engine into every `trusty-review report` build.
+/// `trusty_analyze::service::events::CODE_DEADLINE_EXCEEDED` is the definition;
+/// `a_daemon_side_deadline_is_a_timeout_not_a_rejection` is what keeps them
+/// equal on this side.
+const CODE_DEADLINE_EXCEEDED: i64 = -32005;
 
 // ─── Wire types (trusty-analyze JSON, minimal shapes) ────────────────────────
 
@@ -443,129 +441,107 @@ pub enum AnalyzeFetch {
 
 /// Live HTTP implementation of [`AnalyzeMetricsSource`] over the analyze daemon.
 ///
-/// Why: the real `--analyze` path talks to `:7879` over plain HTTP/1.1 (both
-/// processes are on loopback).
-/// What: holds the base URL and a reqwest client; `fetch` probes readiness then
-/// pulls the three datasets and maps them.
+/// Why: the real `--analyze` path dials trusty-analyze's Unix socket (#6287,
+/// ADR-0032); both processes are on the same machine by construction.
+/// What: holds the socket path; `fetch` probes readiness then pulls the three
+/// datasets and maps them.
 /// Test: `http_source_maps_from_mock` (in the crate's e2e) drives a real
-/// in-process HTTP mock; unit tests here cover the fail-open conversions.
+/// in-process stub daemon; unit tests here cover the fail-open conversions.
 pub struct HttpAnalyzeMetricsSource {
-    base_url: String,
-    http: reqwest::Client,
+    socket: PathBuf,
 }
 
 impl HttpAnalyzeMetricsSource {
-    /// Construct a source pointed at `base_url` (e.g. `http://127.0.0.1:7879`).
+    /// Construct a source pointed at the daemon's socket.
     ///
-    /// Why: the CLI resolves the URL from a manifest key / config / default and
-    /// hands it here.
-    /// What: trims a trailing slash and builds the shared loopback client. Every
-    /// request sets its own timeout from [`AnalyzeEndpoint::budget`]; the
-    /// client-level default is the longest of them, so a future call site that
-    /// forgets to set one inherits a generous budget rather than a truncating
-    /// one.
-    /// Test: `new_trims_trailing_slash`.
-    pub fn new(base_url: impl Into<String>) -> AdapterResult<Self> {
-        let mut base = base_url.into();
-        if base.ends_with('/') {
-            base.pop();
-        }
-        // #6038: the shared loopback constructor, not a bare builder — it is
-        // what applies `.no_proxy()`, so an exported HTTP_PROXY no longer
-        // diverts a 127.0.0.1 fetch to a proxy that never answers (#4392).
-        let http = trusty_common::http_client::loopback_client_builder()
-            .timeout(AnalyzeEndpoint::Diagnostics.budget())
-            .connect_timeout(Duration::from_secs(3))
-            .build()
-            .map_err(|e| AnalyzeAdapterError::ClientInit(e.to_string()))?;
+    /// Why: the CLI resolves the path from a manifest key / config / the derived
+    /// default and hands it here.
+    ///
+    /// #6287: infallible now, where the HTTP version could fail building a
+    /// reqwest client. `AdapterResult` is kept so every call site is unchanged;
+    /// there is simply no `Err` arm left to take. The per-request budget moved
+    /// with it — `send_framed_request_capped` takes the timeout per call, so
+    /// there is no client-level default to set and no way for a call site to
+    /// forget one.
+    ///
+    /// # Errors
+    ///
+    /// Never, since #6287. The signature is retained for call-site stability.
+    ///
+    /// Test: `new_accepts_a_socket_path`.
+    pub fn new(socket: impl Into<PathBuf>) -> AdapterResult<Self> {
         Ok(Self {
-            base_url: base,
-            http,
+            socket: socket.into(),
         })
     }
 
-    /// One attempt: send the GET and read the whole body.
+    /// Call one endpoint and deserialize its `result` into `T`, mapping every
+    /// failure mode to a typed [`AnalyzeAdapterError`].
     ///
-    /// Why: separated from [`Self::get_json`] so the retry in that function can
-    /// re-run send AND body-read together — a connection torn down part-way
-    /// through the response fails at the read, not at the send.
-    /// What: returns the status and the body text, or the raw `reqwest::Error`
-    /// so the caller can classify it.
-    /// Test: exercised by every `get_json` test.
-    async fn send_once(
-        &self,
-        url: &str,
-        budget: Duration,
-    ) -> reqwest::Result<(reqwest::StatusCode, String)> {
-        let resp = self.http.get(url).timeout(budget).send().await?;
-        let status = resp.status();
-        let body = resp.text().await?;
-        Ok((status, body))
-    }
-
-    /// GET `path` and deserialize the JSON body into `T`, mapping every failure
-    /// mode to a typed [`AnalyzeAdapterError`].
+    /// #6287 removed the retry #6038 added. That retry existed for one cause: a
+    /// pooled HTTP/1.1 keep-alive connection the daemon closed after a request
+    /// was already committed to it, which RFC 9112 §9.3 puts recovery for on the
+    /// client. `send_framed_request_capped` dials per call, so there is no
+    /// pooled connection to lose and nothing left for a retry to recover — a
+    /// dial that fails now means nothing is listening, which retrying cannot
+    /// change.
     ///
-    /// Why (#6038): a transport failure on a POOLED connection is not evidence
-    /// the daemon is down — HTTP/1.1 keep-alive makes "the server closed a
-    /// connection the client still held" an unavoidable race, and RFC 9112 §9.3
-    /// puts recovery on the client. A GET is idempotent, so one retry on a
-    /// fresh connection is safe and is the difference between a populated
-    /// `--analyze` report and a silent fall back to scan.
-    /// What: retries [`Self::send_once`] at most [`TRANSPORT_RETRIES`] times
-    /// when [`is_retryable_transport`] classifies the failure as a lost
-    /// connection; reqwest discards the errored connection, so the retry
-    /// necessarily dials a new one. Non-2xx and parse failures are terminal.
-    /// `budget` is the endpoint's own timeout, applied per request: the daemon
-    /// answers a diagnostics call in minutes and a histogram call in seconds,
-    /// and one client-wide timeout cannot be right for both.
-    /// Test: `transport_failure_on_a_reused_connection_retries_once`,
-    /// `a_connection_that_keeps_dying_is_retried_exactly_once`,
-    /// `a_request_that_outlives_its_budget_is_a_timeout_not_a_transport_error`.
-    async fn get_json<T: serde::de::DeserializeOwned>(
+    /// What: one framed exchange under `budget` — the endpoint's own timeout,
+    /// because the daemon answers a diagnostics call in minutes and a histogram
+    /// call in seconds and one budget cannot be right for both — then the
+    /// JSON-RPC envelope check.
+    /// Test: `a_request_that_outlives_its_budget_is_a_timeout_not_a_transport_error`,
+    /// `fetch_returns_none_on_unreachable_daemon`.
+    async fn call<T: serde::de::DeserializeOwned>(
         &self,
-        path: &str,
+        endpoint: AnalyzeEndpoint,
+        index_id: &str,
         budget: Duration,
     ) -> AdapterResult<T> {
-        let url = format!("{}{path}", self.base_url);
-        let mut retries = 0;
-        let (status, body) = loop {
-            match self.send_once(&url, budget).await {
-                Ok(answer) => break answer,
-                Err(e) if retries < TRANSPORT_RETRIES && is_retryable_transport(&e) => {
-                    retries += 1;
-                    tracing::debug!(
-                        %url,
-                        error = %e,
-                        "--analyze: pooled connection lost; retrying on a fresh one"
-                    );
+        let method = endpoint.method();
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": endpoint.params(index_id),
+        });
+        let response: trusty_common::uds::server::RpcResponse =
+            trusty_common::uds::send_framed_request_capped(
+                &self.socket,
+                &request,
+                budget,
+                MAX_RESPONSE_FRAME_BYTES,
+            )
+            .await
+            .map_err(|e| match e {
+                trusty_common::uds::UdsRpcError::Timeout { .. } => {
+                    AnalyzeAdapterError::Timeout(format!("{method} exceeded {budget:?}"))
                 }
-                Err(e) if e.is_timeout() => {
-                    return Err(AnalyzeAdapterError::Timeout(format!(
-                        "GET {url} exceeded {budget:?}"
-                    )));
-                }
-                Err(e) => return Err(AnalyzeAdapterError::Transport(format!("GET {url}: {e}"))),
-            }
-        };
-        if !status.is_success() {
-            return Err(AnalyzeAdapterError::Api {
-                status: status.as_u16(),
-                body,
+                other => AnalyzeAdapterError::Transport(format!(
+                    "{method} over {}: {other}",
+                    self.socket.display()
+                )),
+            })?;
+        if let Some(error) = response.error {
+            return Err(AnalyzeAdapterError::Rpc {
+                code: error.code,
+                message: error.message,
             });
         }
-        serde_json::from_str(&body).map_err(|e| AnalyzeAdapterError::Parse(format!("{path}: {e}")))
+        let result = response.result.ok_or_else(|| {
+            AnalyzeAdapterError::Parse(format!("{method}: neither a result nor an error"))
+        })?;
+        serde_json::from_value(result)
+            .map_err(|e| AnalyzeAdapterError::Parse(format!("{method}: {e}")))
     }
 
-    /// Confirm `index_id` is served by the daemon (`GET /indexes`).
+    /// Confirm `index_id` is served by the daemon (`analyze.list_indexes`).
     ///
     /// Why: distinguishes "repo not indexed" (a fail-open skip with a clear
     /// warning) from a transport error, per the indexing prerequisite (#2448).
     async fn index_served(&self, index_id: &str) -> AdapterResult<bool> {
         let endpoint = AnalyzeEndpoint::IndexList;
-        let indexes: Vec<IndexInfo> = self
-            .get_json(&endpoint.path(index_id), endpoint.budget())
-            .await?;
+        let indexes: Vec<IndexInfo> = self.call(endpoint, index_id, endpoint.budget()).await?;
         Ok(indexes.iter().any(|i| i.id == index_id))
     }
 
@@ -591,10 +567,7 @@ impl HttpAnalyzeMetricsSource {
         endpoint: AnalyzeEndpoint,
         caveats: &mut Vec<AnalyzeCaveat>,
     ) -> Option<T> {
-        match self
-            .get_json(&endpoint.path(index_id), endpoint.budget())
-            .await
-        {
+        match self.call(endpoint, index_id, endpoint.budget()).await {
             Ok(v) => Some(v),
             Err(e) => {
                 let reason = classify_failure(&e);

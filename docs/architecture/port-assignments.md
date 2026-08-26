@@ -50,7 +50,6 @@ else's guard test too).
 | 7700 | `trusty-common` symgraph HTTP server (optional library feature, not a standalone daemon) | `trusty-common/src/symgraph/server.rs::DEFAULT_PORT` | No |
 | 7788 | `trusty-console` | `trusty-console/src/lib.rs::DEFAULT_PORT` | Yes |
 | 7878 | `trusty-search` | `trusty-search/src/service/constants.rs::DEFAULT_PORT` | Yes |
-| 7879 | `trusty-analyze` | `trusty-analyze/src/service/events.rs::DEFAULT_PORT` | Yes |
 | 7880 | `trusty-mpm` daemon (`trusty-mpmd` / `tm`) | `trusty-mpm/src/core/discovery.rs::DEFAULT_DAEMON_ADDR` | No |
 | 7881 | `trusty-mpm` **supervisor** metrics/health listener — a distinct process from the 7880 daemon above | `trusty-mpm/src/supervisor/config.rs::DEFAULT_METRICS_ADDR` | Yes |
 | 7882 | `trusty-code` (`tcode serve --http`) | `trusty-code/src/serve/mod.rs::DEFAULT_HTTP_PORT` (mirrored by `trusty-code-gui/src/state.rs::DEFAULT_DAEMON_URL`) | No (#3364 follow-up) |
@@ -60,9 +59,10 @@ else's guard test too).
 ## Next Free Port
 
 The next unclaimed value in the `78xx`/`79xx` block used by this workspace
-is **7892**. `7891` is also free again — #6277 moved `trusty-review` off TCP
-onto a Unix socket — but prefer sequential allocation over reusing a released
-value, so a stale reference to `7891` in an old log or script cannot resolve to
+is **7892**. `7891` and `7879` are also free again — #6277 moved
+`trusty-review` off TCP onto a Unix socket and #6287 did the same for
+`trusty-analyze` — but prefer sequential allocation over reusing a released
+value, so a stale reference to either in an old log or script cannot resolve to
 a different daemon. Whatever you pick:
 
 1. Check this table for the exact value.
@@ -72,7 +72,9 @@ a different daemon. Whatever you pick:
    (`trusty-console/src/service.rs`, `trusty-code/src/serve/mod.rs`) so
    siblings reject it if it ever collides with them in the future, and add
    your own equivalent guard test pointing back at all of the above.
-   `trusty-review` no longer has one — #6277 removed its `DEFAULT_PORT`.
+   Neither `trusty-review` nor `trusty-analyze` has one — #6277 and #6287
+   removed their `DEFAULT_PORT`s, and #6287 dropped `trusty-analyze`'s 7879
+   row from the console's and `trusty-code`'s guard tables in the same change.
 4. Add a row to the table above.
 
 ## Incident History
@@ -95,6 +97,15 @@ a different daemon. Whatever you pick:
   health probe — dial that socket, and moved in the same change: a probe left
   on 7891 would read `Refused` for a healthy daemon and kickstart it, which is
   the #4246 class.
+- **#6287** — `trusty-analyze` left this table the same way, on the same
+  reasoning: it binds `<data dir>/trusty-analyze/trusty-analyze.sock` and has
+  no `DEFAULT_PORT`. Four consumers dialled 7879 rather than two, so all four
+  moved in the same change — the console's `AnalyzeConnector`, `tctl`'s health
+  probe, `tga`'s audit guard, and `trusty-audit`'s grounding guard — and
+  `trusty-analyze/tests/uds_consumer_contract.rs` stands the daemon up and asks
+  each of them what it sees. The 7879 rows in `trusty-console`'s and
+  `trusty-code`'s `known_siblings` guards went with it: a guard naming a port
+  nothing binds refuses a value that is free.
 - **#3364** — `trusty-code`'s default HTTP port (7881) collided with
   `trusty-mpm`'s supervisor metrics listener (`DEFAULT_METRICS_ADDR`, also
   7881) — two defaults picked independently, on the same port, with no

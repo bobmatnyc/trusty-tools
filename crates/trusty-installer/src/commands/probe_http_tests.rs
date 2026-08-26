@@ -528,7 +528,6 @@ fn fixed_ports_match_port_assignments_doc() {
     assert_eq!(fixed_port_for("trusty-memory"), Some(7070));
     assert_eq!(fixed_port_for("trusty-console"), Some(7788));
     assert_eq!(fixed_port_for("trusty-search"), Some(7878));
-    assert_eq!(fixed_port_for("trusty-analyze"), Some(7879));
     assert_eq!(fixed_port_for("trusty-mpm"), Some(7880));
     // Never guess: `tga` is not a daemon, and `trusty-installer` binds nothing.
     assert_eq!(fixed_port_for("tga"), None);
@@ -552,19 +551,52 @@ fn fixed_ports_match_port_assignments_doc() {
 /// Test: This is the test.
 #[test]
 fn uds_members_have_no_fixed_port() {
-    assert_eq!(
-        fixed_port_for("trusty-review"),
-        None,
-        "a UDS member must not resolve a TCP port — dialling one reads Refused \
-         and kickstarts a healthy daemon (#4246)"
-    );
-    assert!(
-        uds_socket_for("trusty-review").is_some(),
-        "trusty-review must resolve a socket, or its probe has no transport at all"
-    );
+    for binary in ["trusty-review", "trusty-analyze"] {
+        assert_eq!(
+            fixed_port_for(binary),
+            None,
+            "{binary} is a UDS member and must not resolve a TCP port — dialling \
+             one reads Refused and kickstarts a healthy daemon (#4246)"
+        );
+        assert!(
+            uds_socket_for(binary).is_some(),
+            "{binary} must resolve a socket, or its probe has no transport at all"
+        );
+    }
     assert!(
         uds_socket_for("trusty-search").is_none(),
         "an HTTP member must not resolve a socket"
+    );
+}
+
+/// REGRESSION (#6287): every member with a socket must also name a health
+/// method.
+///
+/// Why: the method was one constant, `"review.health"`, while trusty-review was
+/// the only UDS member. trusty-analyze answers `analyze.health`, so a second
+/// member made that constant wrong for one of them — and a probe asking the
+/// wrong method gets `method_not_found`, which `classify_rpc_response` reads as
+/// a daemon answering badly rather than as a probe asking wrongly. The two match
+/// arms have to cover the same set, and this is what says so.
+/// What: for every binary `uds_socket_for` answers, `uds_health_method` answers
+/// too, with a method under that binary's own domain prefix.
+/// Test: This is the test.
+#[test]
+fn every_uds_member_has_a_health_method() {
+    for binary in ["trusty-review", "trusty-analyze"] {
+        let method = super::uds_health_method(binary)
+            .unwrap_or_else(|| panic!("{binary} serves a socket but names no health method"));
+        let domain = binary.trim_start_matches("trusty-");
+        assert_eq!(
+            method,
+            format!("{domain}.health"),
+            "a health method must sit under its own daemon's domain prefix"
+        );
+    }
+    assert_eq!(
+        super::uds_health_method("trusty-search"),
+        None,
+        "an HTTP member must not name a UDS method"
     );
 }
 
@@ -576,10 +608,13 @@ fn uds_members_have_no_fixed_port() {
 /// Test: This is the test.
 #[test]
 fn uds_socket_for_matches_the_shared_entry_point() {
-    assert_eq!(
-        uds_socket_for("trusty-review"),
-        trusty_common::daemon_socket_path("trusty-review").ok()
-    );
+    for binary in ["trusty-review", "trusty-analyze"] {
+        assert_eq!(
+            uds_socket_for(binary),
+            trusty_common::daemon_socket_path(binary).ok(),
+            "{binary}'s probe must dial exactly what its daemon binds"
+        );
+    }
 }
 
 /// Why (#6277): a socket carries no HTTP status code, so `classify_response`'s
@@ -676,7 +711,7 @@ async fn probe_uds_reads_the_health_envelope_off_a_result_frame() {
         let _ = conn.flush().await;
     });
 
-    let outcome = super::probe_socket(&socket).await;
+    let outcome = super::probe_socket(&socket, "review.health").await;
     match outcome {
         ProbeOutcome::Serving { status, version } => {
             assert_eq!(status, "ok");
@@ -694,7 +729,7 @@ async fn probe_uds_reads_the_health_envelope_off_a_result_frame() {
 #[tokio::test]
 async fn probe_uds_reports_refused_for_an_absent_socket() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
-    let outcome = super::probe_socket(&tmp.path().join("absent.sock")).await;
+    let outcome = super::probe_socket(&tmp.path().join("absent.sock"), "review.health").await;
     assert_eq!(outcome, ProbeOutcome::Refused, "got {outcome:?}");
     assert!(
         outcome.is_confirmed_down(),

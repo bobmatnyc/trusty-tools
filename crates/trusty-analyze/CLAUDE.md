@@ -1,8 +1,19 @@
 # trusty-analyze
 
 Sidecar code-analysis daemon for trusty-search. Reads chunk corpora from
-trusty-search via HTTP, runs static analysis, and exposes results on port 7879
-via HTTP API and MCP stdio server.
+trusty-search via HTTP, runs static analysis, and serves results as JSON-RPC
+over `<data dir>/trusty-analyze/trusty-analyze.sock` and via an MCP stdio
+server.
+
+🔴 **#6287 (ADR-0032) retired this daemon's HTTP surface.** It bound
+`127.0.0.1:7879` and served an axum router, an `/sse` broadcast, and a second
+`--mcp-port` HTTP/SSE listener. All three are gone: the router became
+`service::rpc`'s JSON-RPC dispatcher over a Unix socket, `/sse`'s only
+subscriber was the daemon's own SPA, and `--mcp-port` had no in-repo consumer
+at all. Four crates dialled 7879 and all four moved in the same change;
+`tests/uds_consumer_contract.rs` is what keeps them in step. Sections below
+that still describe HTTP routes are historical — `service::rpc::METHODS` is
+the live surface.
 
 > **Coordination:** Shared library patterns, consistent conventions, and CI/CD configuration for this project are managed by [trusty-common](../trusty-common). See that repo's CLAUDE.md for cross-project guidelines.
 
@@ -39,7 +50,8 @@ certain design decisions were made.
 ### Generation 3: trusty-analyze (Rust, analysis sidecar daemon) — this project
 
 - Sidecar to trusty-search: fetches chunk corpus via `GET /indexes/:id/chunks`,
-  runs analysis, serves results on port 7879
+  runs analysis, serves results over its own Unix socket (port 7879 until
+  #6287)
 - Shared types come from the `trusty-common` sibling crate in the `trusty-tools`
   workspace (path dep), which is also consumed by trusty-search
 - Planned Phase 2: dynamic analysis (runtime call graphs, test coverage,
@@ -77,8 +89,9 @@ certain design decisions were made.
   persisted in redb
 - **SCIP protobuf ingest**: LSP-quality symbol data import
 - **NER extraction**: named entities from doc comments (optional ONNX, feature-gated)
-- **Full HTTP API + MCP stdio server**: all endpoints have MCP tool equivalents
-  (parity rule — no endpoint without a tool, no tool without an endpoint)
+- **Full JSON-RPC surface over UDS + MCP stdio server**: every method has an MCP
+  tool equivalent (parity rule — no method without a tool, no tool without a
+  method)
 
 ### Phase 2 — Language-Specific Static Enrichment (planned)
 
@@ -262,15 +275,15 @@ C, C++
 ## Architecture
 
 ```
-trusty-search daemon (port 7878)          trusty-analyze daemon (port 7879)
+trusty-search daemon (port 7878)          trusty-analyze (trusty-analyze.sock)
   GET /indexes/:id/chunks  ─────────────► src/core/  (analysis engines)
   (bulk corpus export)                      complexity.rs   — cyclomatic/cognitive
                                             blame.rs        — git temporal decay
                                             quality.rs      — grade aggregation
                                             facts.rs        — FactStore (redb)
                                             client.rs       — HTTP client to trusty-search
-                                          src/service/  (axum HTTP API)
-                                          src/mcp/      (MCP stdio + SSE)
+                                          src/service/  (JSON-RPC over UDS)
+                                          src/mcp/      (MCP stdio)
 ```
 
 ### trusty-common — Shared Type Crate
@@ -320,7 +333,7 @@ pub struct FactRecord { subject, predicate, object, provenance, ... }
 5. Grade          weighted formula         →  ComplexityGrade A–F per file
 6. Cluster        k-means (linfa)          →  concept groups
 7. Facts          upsert to redb           →  FactRecord store
-8. Serve          axum HTTP + MCP stdio    →  query results
+8. Serve          JSON-RPC/UDS + MCP stdio →  query results
 ```
 
 ---
@@ -353,8 +366,8 @@ crates/trusty-analyze/
 │   │                                   go, typescript, javascript, c, cpp, csharp,
 │   │                                   kotlin, php, ruby, scala, swift)
 │   ├── embedder/                       BoW concept-clustering embedder
-│   ├── service/                        axum HTTP API (port 7879) + embedded UI
-│   ├── mcp/                            MCP server: stdio + HTTP/SSE transports
+│   ├── service/                        JSON-RPC over UDS (rpc.rs + handlers/)
+│   ├── mcp/                            MCP server: stdio only since #6287
 │   └── commands/                       per-subcommand handlers (daemon/service/setup)
 ```
 
@@ -363,49 +376,50 @@ Documentation lives at the workspace top level under
 
 ---
 
-## HTTP API
+## RPC Surface
 
-Port 7879. All responses JSON. trusty-search must be running on port 7878.
+JSON-RPC 2.0 over `<data dir>/trusty-analyze/trusty-analyze.sock`, one
+newline-terminated frame per request, 32 MiB request budget. trusty-search must
+be running on port 7878. `service::rpc::METHODS` is the authoritative list and
+`rpc_router_registers_every_documented_method` keeps it equal to what
+`build_router` registers.
 
 ```
-GET  /health
-     → { status: "ok", search_reachable: bool }
-
-GET  /indexes
-     → proxied from trusty-search GET /indexes
-
-GET  /indexes/:id/complexity_hotspots[?top_k=N]
-     → top-N chunks ranked by cyclomatic complexity
-
-GET  /indexes/:id/smells[?category=<name>]
-     → chunks with detected code smells, optionally filtered by category
-
-GET  /indexes/:id/quality
-     → { avg_cyclomatic, pct_grade_a, smell_count, grade: "A"|"B"|"C"|"D"|"F" }
-
-GET  /facts[?subject=<s>&predicate=<p>]
-     → Vec<FactRecord>
-
-POST /facts
-     body: { subject, predicate, object, provenance? }
-     → { id: <uuid> }
-
-DELETE /facts/:id
-     → 204 No Content
-
-POST /indexes/:id/scip
-     body: SCIP protobuf (application/octet-stream)
-     → { symbols_ingested: N }
-
-GET  /indexes/:id/clusters?k=N&method=bow
-     → Vec<ConceptCluster> (label, chunk_ids, centroid_terms)
+analyze.health                  → { status: "ok"|"degraded", version, search_reachable }
+analyze.list_indexes            → proxied from trusty-search GET /indexes
+analyze.complexity_hotspots     { index_id, top_n? }
+analyze.complexity_distribution { index_id }  → full A–F histogram + counted total
+analyze.smells                  { index_id, category? }
+analyze.refactor_suggestions    { index_id, file?, min_severity?, top_k? }
+analyze.quality                 { index_id }  → { avg_cyclomatic, pct_grade_a, … }
+analyze.diagnostics             { index_id, language?, tools?, limit?, offset? }
+analyze.graph                   { index_id, language? }
+analyze.entities                { index_id, kind?, language? }
+analyze.clusters                { index_id, k?, method? }
+analyze.ner                     { index_id, top_k? }
+analyze.scip_ingest             { index_id, scip_base64 }
+analyze.scip_status             { index_id }  → -32004 when never ingested (#5049)
+analyze.review                  { index_id, diff }
+analyze.review_github_pr        { owner, repo, pr, index_id, post_comment? }
+analyze.deep_analysis           { index_id, model? }
+analyze.facts_list              { subject?, predicate?, object? }
+analyze.facts_upsert            { subject, predicate, object, index_id, … }
+analyze.facts_delete            { id }
 ```
+
+Two error codes carry meaning beyond the JSON-RPC standard set, both in the
+implementation-defined `-32000..=-32099` band:
+
+| Code | Constant | Meaning |
+|---|---|---|
+| `-32004` | `service::events::CODE_NOT_FOUND` | The request is well formed and names something absent — `analyze.scip_status` for an index nobody ingested (#5049). |
+| `-32005` | `service::events::CODE_DEADLINE_EXCEEDED` | The handler exhausted its own deadline. `trusty-review` reads this to print "ran out of time" rather than "could not be reached". |
 
 ---
 
 ## MCP Tools
 
-Parity rule: every HTTP endpoint has an MCP tool equivalent.
+Parity rule: every RPC method has an MCP tool equivalent.
 
 <!-- BEGIN GENERATED: mcp-tools -->
 The MCP server registers **20 tools** with default features, **23 tools** with `--features review`. Authoritative source: `trusty_analyze::mcp::tool_descriptors + trusty_analyze::mcp::descriptors::review_tool_descriptors` —
@@ -438,19 +452,20 @@ this table is generated from it, not maintained by hand.
 | `upsert_fact` | always | `subject`, `predicate`, `object`, `index_id`, `confidence?`, `provenance?` | Insert or update a canonical fact triple |
 <!-- END GENERATED: mcp-tools -->
 
-### Transports
+### Transport
 
-The MCP server supports two transports:
+**stdio only**: `trusty-analyze serve --mcp` — JSON-RPC 2.0 over stdin/stdout,
+used by Claude Code and other clients that spawn the server as a subprocess.
 
-- **stdio**: `trusty-analyze serve --mcp` — JSON-RPC 2.0 over stdin/stdout,
-  used by Claude Code and other clients that spawn the server as a subprocess.
-- **HTTP/SSE**: `trusty-analyze serve --mcp-port 7880` — exposes
-  `POST /mcp` for synchronous JSON-RPC and `GET /mcp/sse` for a long-lived
-  Server-Sent Events stream with 15s keep-alive pings. Useful for remote
-  integrations and browser-based clients.
+#6287 deleted the `--mcp-port` HTTP/SSE transport (`POST /mcp` plus a
+`GET /mcp/sse` stream). Nothing in this repository consumed it, and ADR-0032
+forbids a second HTTP surface; the original scoping missed that it was one.
 
-Both transports share the same dispatcher (`AnalyzerMcpServer::dispatch`) and
-expose identical tool surfaces.
+The dispatcher itself is an RPC CLIENT of this daemon's own socket
+(`mcp/rpc_client.rs`), which is why it names each `analyze.*` method by literal
+— `service` sits behind the `http-server` feature and the dispatcher does not.
+`mcp_names_the_methods_the_router_registers` keeps those literals equal to what
+`build_router` registers.
 
 ### Claude Code Integration
 
@@ -558,8 +573,11 @@ cargo check --workspace
 
 ```bash
 TRUSTY_SEARCH_URL=http://127.0.0.1:7878   # default; override for non-standard port
-TRUSTY_ANALYZER_PORT=7879                  # default listen port
+TRUSTY_ANALYZE_SOCKET=/path/to.sock        # trusty-audit's guard override; the
+                                           # default is derived from the data dir
 RUST_LOG=debug                             # enable debug tracing
+
+# TRUSTY_ANALYZER_PORT was removed with the listener (#6287).
 ```
 
 ---
@@ -588,8 +606,8 @@ pin tree-sitter or other shared crates locally if they already live there.
 
 ## Project Status
 
-**Phase**: Phase 1 + Phase 2 complete. Full static analysis pipeline, HTTP API,
-MCP server, SCIP ingest, BoW concept clustering, and language-specific
+**Phase**: Phase 1 + Phase 2 complete. Full static analysis pipeline, RPC
+surface, MCP server, SCIP ingest, BoW concept clustering, and language-specific
 tree-sitter adapters are all functional.
 
 **Working:**
@@ -598,15 +616,15 @@ tree-sitter adapters are all functional.
 - `src/core/` fully wired: `client.rs`, `complexity.rs`, `complexity_ts.rs`,
   `blame.rs`, `quality.rs`, `facts.rs`, `concept_cluster.rs`, `linker.rs`,
   `explain.rs`, `github.rs`
-- axum HTTP sidecar (`src/service/`) on port 7879
-- MCP stdio + HTTP/SSE server (`src/mcp/`) — see [MCP Tools](#mcp-tools)
+- JSON-RPC sidecar (`src/service/`) on `trusty-analyze.sock` (#6287)
+- MCP stdio server (`src/mcp/`) — see [MCP Tools](#mcp-tools)
 - CLI subcommands: `serve`, `analyze`, `facts list/upsert`, `health`
 - Daemon PID lockfile (fs4), graceful shutdown, `--search-url` flag
 - `LanguageAnalyzer` trait + 15 tree-sitter adapters, all implemented:
   rust, python, java, go, typescript, javascript, c, cpp, csharp, kotlin,
   php, ruby, scala, swift (see `src/lang/adapters/`)
 - CALLS edges + cross-chunk entity linker (`#47` complete)
-- k-means concept clustering (BoW) + `/indexes/:id/clusters` endpoint
+- k-means concept clustering (BoW) + the `analyze.clusters` method
 - SCIP protobuf ingest → knowledge graph (`#47` complete)
 - Integration self-analysis suite
 

@@ -1,23 +1,29 @@
-//! HTTP route handler submodules.
+//! RPC handler submodules.
 //!
 //! Why: Groups handlers by feature area so each file stays well under the
 //! 500-line cap and readers can find handlers by domain without scanning the
 //! entire service module.
 //!
-//! What: Re-exports the five handler modules:
+//! What: Re-exports the six handler modules:
+//! - `system` — `analyze.health`, `analyze.list_indexes`
 //! - `analysis` — complexity hotspots, smells, quality, refactor, diagnostics
 //! - `graph` — KG graph/entities, clustering, NER, SCIP ingest
 //! - `facts` — CRUD for the FactStore knowledge triples
-//! - `review` — diff review, GitHub PR review, webhooks
-//! - `deep` — LLM deep-analysis pass (`POST /analyze/deep`)
+//! - `review` — diff review, GitHub PR review
+//! - `deep` — LLM deep-analysis pass (`analyze.deep_analysis`)
 //!
-//! Test: All handler tests live in `service/tests.rs` and `service/tests_review.rs`.
+//! Every handler takes `(&AnalyzerAppState, Request)` and returns
+//! `Result<Response, ApiError>`; `service::rpc` is what maps them onto method
+//! names and onto the wire.
+//!
+//! Test: All handler tests live in `service/rpc_tests.rs`.
 
 pub mod analysis;
 pub mod deep;
 pub mod facts;
 pub mod graph;
 pub mod review;
+pub mod system;
 
 /// Map a file path to a language tag by its extension.
 ///

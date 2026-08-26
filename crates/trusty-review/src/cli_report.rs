@@ -115,8 +115,8 @@ pub struct ReportArgs {
     /// and only when the repo is already indexed in trusty-search/trusty-analyze.
     /// Fully fail-open — an unindexed repo or an unreachable daemon logs a
     /// warning and falls through to the built-in scan; it never aborts the report.
-    /// Daemon URL precedence: manifest `[report].analyze_url` > env
-    /// `PR_INTELLIGENCE_ANALYZER_URL` > default `http://127.0.0.1:7879`.
+    /// Daemon socket precedence: manifest `[report].analyze_socket` > env
+    /// `PR_INTELLIGENCE_ANALYZER_SOCKET` > the derived default (#6287).
     #[arg(long)]
     pub analyze: bool,
 }
@@ -225,13 +225,16 @@ pub async fn cmd_report(config_path: Option<&Path>, args: ReportArgs) -> Result<
     // the live metrics).  Fully fail-open — populates only local-path repos that
     // declared no metrics, and only when their index is served.
     if args.analyze {
-        let analyze_url = manifest
+        let analyze_socket = manifest
             .report
-            .analyze_url
+            .analyze_socket
             .clone()
-            .unwrap_or_else(|| config.analyzer_url.clone());
-        eprintln!("[trusty-review report] --analyze: fetching from {analyze_url}");
-        match trusty_review::report::HttpAnalyzeMetricsSource::new(analyze_url) {
+            .map_or_else(|| config.analyzer_socket.clone(), std::path::PathBuf::from);
+        eprintln!(
+            "[trusty-review report] --analyze: fetching over {}",
+            analyze_socket.display()
+        );
+        match trusty_review::report::HttpAnalyzeMetricsSource::new(analyze_socket) {
             Ok(source) => {
                 // #5239: every repo the fetch could not populate is named in the
                 // report, not only warned about on stderr — a dimension missing

@@ -100,7 +100,6 @@ pub async fn preflight_context(
     surface: InvocationSurface,
 ) -> GateOutcome {
     let search_url = &config.search_url;
-    let analyzer_url = &config.analyzer_url;
     let index = &config.search_index;
     let require_search = config.context.effective_require_search(surface);
 
@@ -199,18 +198,21 @@ pub async fn preflight_context(
         if config.context.require_analyze {
             // #4440: the old text told every operator to `trusty-analyze serve`.
             // That advice is irrelevant in the DEFAULT subprocess mode used by
-            // `serve`/MCP and `run`, where no analyze daemon exists at all and
-            // `analyzer_url` is never contacted — it sent people hunting for a
-            // daemon they were never supposed to be running. Name the actual
-            // preconditions of each mode instead.
+            // `serve`/MCP and `run`, where no analyze daemon exists at all — it
+            // sent people hunting for a daemon they were never supposed to be
+            // running. Name the actual preconditions of each mode instead.
+            //
+            // #6287: the daemon ADDRESS is gone from the text too. Since
+            // `build_review_state` moved onto the subprocess client, no
+            // trusty-review path on this gate contacts an analyze daemon at all,
+            // and the one path that still does — `report --analyze` — dials a
+            // socket whose path it prints for itself.
             return GateOutcome::Skip(format!(
                 "trusty-analyze static-analysis context is unavailable for index `{index}` — \
-                 refusing to review without it. In the default subprocess mode (`serve`/MCP and \
-                 `run`) no analyze daemon is used: the preconditions are a trusty-search at \
-                 {search_url} that is SERVING (a `degraded` warm boot still counts as serving) \
-                 and a runnable `trusty-analyze` binary on PATH (override with \
-                 TRUSTY_ANALYZE_BIN). Only when trusty-review is wired to an analyze daemon do \
-                 you need to start `trusty-analyze serve` at {analyzer_url}. (Set \
+                 refusing to review without it. No analyze daemon is used: to fix this, start \
+                 trusty-search at {search_url} and confirm it is SERVING (a `degraded` warm \
+                 boot still counts as serving), then put a runnable `trusty-analyze` binary on \
+                 PATH (override with TRUSTY_ANALYZE_BIN). (Set \
                  TRUSTY_REVIEW_REQUIRE_ANALYZE=false or [context] require_analyze=false to opt \
                  into a degraded, non-authoritative review.)"
             ));
@@ -218,10 +220,10 @@ pub async fn preflight_context(
         info!(
             "trusty-analyze unavailable but require_analyze=false — proceeding DEGRADED (non-authoritative)"
         );
-        return GateOutcome::Degraded(format!(
-            "trusty-analyze unavailable at {analyzer_url}; review produced WITHOUT \
-             static-analysis context"
-        ));
+        return GateOutcome::Degraded(
+            "trusty-analyze unavailable; review produced WITHOUT static-analysis context"
+                .to_string(),
+        );
     }
 
     // ── trusty-search serving-but-degraded (#4079) ─────────────────────────

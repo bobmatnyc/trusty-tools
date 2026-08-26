@@ -2,14 +2,16 @@
 //!
 //! # What it does
 //!
-//! `trusty-analyze` is an HTTP daemon and MCP server that fetches indexed code
+//! `trusty-analyze` is a daemon and MCP server that fetches indexed code
 //! corpora from a running [trusty-search](https://github.com/bobmatnyc/trusty-tools)
-//! instance, performs static analysis, and exposes results on port 7879. It
-//! supports cyclomatic / cognitive complexity, code-smell detection, quality-grade
+//! instance, performs static analysis, and serves results as JSON-RPC over a
+//! Unix socket at `<data dir>/trusty-analyze/trusty-analyze.sock` (#6287,
+//! ADR-0032 — it bound `127.0.0.1:7879` before). It supports cyclomatic /
+//! cognitive complexity, code-smell detection, quality-grade
 //! aggregation (A–F), git-blame temporal decay, k-means concept clustering
 //! (hashed bag-of-words), a facts store (redb), SCIP protobuf
 //! ingest for LSP-quality symbol data, and an optional deep-analysis LLM pass
-//! (OpenRouter or AWS Bedrock). Every HTTP endpoint has an MCP tool equivalent.
+//! (OpenRouter or AWS Bedrock). Every RPC method has an MCP tool equivalent.
 //!
 //! # Prerequisites — REQUIRED before starting
 //!

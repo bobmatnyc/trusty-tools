@@ -11,29 +11,26 @@
 //! - `synthesise_review_from_chunks` — pure aggregation fn (unit-testable)
 //! - `lookup_frameworks` — reads framework facts from FactStore
 //!
-//! Test: `deep_endpoint_requires_index_id`, `deep_endpoint_requires_api_key`,
+//! Test: `rpc_deep_requires_an_index_id`, `rpc_deep_requires_an_api_key`,
 //! `synthesise_review_from_chunks_groups_by_file`,
 //! `synthesise_review_from_chunks_empty_corpus_is_grade_a`,
-//! `lookup_frameworks_reads_stored_facts` (all in `service/tests_review.rs`).
+//! `lookup_frameworks_reads_stored_facts` (all in `service/rpc_tests.rs`).
 
-use std::sync::Arc;
-
-use axum::{extract::State, response::Json};
 use serde::Deserialize;
 
 use crate::service::events::{AnalyzerAppState, ApiError};
 
-/// Request body for `POST /analyze/deep`.
+/// Params for `analyze.deep_analysis`.
 ///
-/// Why: deep analysis is opt-in and parameterised, so the endpoint takes a
-/// JSON body rather than a query string. Callers either pass a pre-computed
-/// [`crate::core::ReviewReport`] (to avoid the re-review cost) or omit it,
-/// in which case the endpoint synthesises a report by aggregating the index's
-/// chunk corpus with the same complexity / smell math used by `/review`.
+/// Why: deep analysis is opt-in and parameterised. Callers either pass a
+/// pre-computed [`crate::core::ReviewReport`] (to avoid the re-review cost) or
+/// omit it, in which case the handler synthesises a report by aggregating the
+/// index's chunk corpus with the same complexity / smell math `analyze.review`
+/// uses.
 /// What: `index_id` is required; `report` is optional; `model` overrides the
 /// daemon-default LLM model.
-/// Test: `deep_endpoint_requires_index_id` covers the missing-field 400 path;
-/// `deep_endpoint_requires_api_key` covers the no-key 400 path.
+/// Test: `rpc_deep_requires_an_index_id` covers the missing-field path;
+/// `rpc_deep_requires_an_api_key` covers the no-key path.
 #[derive(Debug, Deserialize)]
 pub struct DeepAnalyzeRequest {
     pub index_id: String,
@@ -45,20 +42,21 @@ pub struct DeepAnalyzeRequest {
 
 /// Why: turns a deterministic [`crate::core::ReviewReport`] into a
 /// [`crate::core::DeepAnalysisReport`] by running an OpenRouter chat call. The
-/// LLM pass is deliberately separated from `/review` so the deterministic
-/// surface stays cheap, reproducible, and free of network/AI dependencies.
-/// What: requires `index_id` in the JSON body; either uses the provided
-/// `report` or builds one from the index's chunk corpus (no diff: the
-/// synthesised report treats the whole indexed corpus as one big "file" set
-/// for grading purposes). Reads frameworks from the analyzer's `FactStore`
-/// (predicate `"uses_framework"`), calls `deep_analysis`, and returns the
-/// wrapper report. Requires `OPENROUTER_API_KEY` to be configured at startup
-/// — returns 400 with `MissingApiKey` otherwise.
-/// Test: `deep_endpoint_requires_api_key`, `deep_endpoint_requires_index_id`.
+/// LLM pass is deliberately separated from `analyze.review` so the
+/// deterministic surface stays cheap, reproducible, and free of network/AI
+/// dependencies.
+/// What: requires `index_id`; either uses the provided `report` or builds one
+/// from the index's chunk corpus (no diff: the synthesised report treats the
+/// whole indexed corpus as one big "file" set for grading purposes). Reads
+/// frameworks from the analyzer's `FactStore` (predicate `"uses_framework"`),
+/// calls `deep_analysis`, and returns the wrapper report. Requires
+/// `OPENROUTER_API_KEY` to be configured at startup — reports `invalid_params`
+/// with `MissingApiKey` otherwise.
+/// Test: `rpc_deep_requires_an_api_key`, `rpc_deep_requires_an_index_id`.
 pub async fn deep_analyze_handler(
-    State(state): State<Arc<AnalyzerAppState>>,
-    Json(req): Json<DeepAnalyzeRequest>,
-) -> Result<Json<crate::core::DeepAnalysisReport>, ApiError> {
+    state: &AnalyzerAppState,
+    req: DeepAnalyzeRequest,
+) -> Result<crate::core::DeepAnalysisReport, ApiError> {
     if req.index_id.trim().is_empty() {
         return Err(ApiError::bad_request("missing required 'index_id' field"));
     }
@@ -96,11 +94,11 @@ pub async fn deep_analyze_handler(
     // identically to the diff-based path.
     let report = match req.report {
         Some(r) => r,
-        None => synthesise_review_from_index(&state, &req.index_id).await?,
+        None => synthesise_review_from_index(state, &req.index_id).await?,
     };
 
     // Pull detected frameworks from the FactStore (recorded by `record_frameworks`).
-    let frameworks = lookup_frameworks(&state, &req.index_id);
+    let frameworks = lookup_frameworks(state, &req.index_id);
 
     let model_override = req.model.as_deref();
     let report = crate::core::deep_analysis(
@@ -116,13 +114,13 @@ pub async fn deep_analyze_handler(
         crate::core::DeepAnalysisError::BedrockAuth => ApiError::bad_request(format!("{e}")),
         crate::core::DeepAnalysisError::Chat(_) => ApiError::bad_gateway(format!("{e}")),
     })?;
-    Ok(Json(report))
+    Ok(report)
 }
 
 /// Build a [`crate::core::ReviewReport`] from an index's chunk corpus without
 /// any diff input.
 ///
-/// Why: `POST /analyze/deep` accepts an optional `report` field — when the
+/// Why: `analyze.deep_analysis` accepts an optional `report` field — when the
 /// caller omits it, we still need a deterministic report shape to feed the
 /// LLM. Synthesising one from the indexed corpus gives the LLM the same
 /// metrics it would see for a diff that touched every file in the index.

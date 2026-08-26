@@ -130,24 +130,28 @@ fn claude_md_mcp_tool_section_is_generated() {
     assert_region(&path, REGION, &section(), REGEN);
 }
 
-/// Why: `README.md` keeps a hand-written "HTTP equivalents" table outside the
-/// markers, because the route a tool forwards to lives in the dispatcher's
+/// Why: `README.md` keeps a hand-written tool-to-method table outside the
+/// markers, because the method a tool forwards to lives in the dispatcher's
 /// match arms and is not derivable from the descriptors. Hand-written means it
 /// can drift — which is the defect this whole mechanism exists to remove. It
 /// cannot be generated, but it can be constrained: every name it lists must be
 /// a real tool.
+///
+/// #6287 renamed the section from "HTTP equivalents" to "RPC equivalents"
+/// along with the transport. The test name is unchanged so its history stays
+/// findable.
 /// What: scrapes the leading `` `tool` `` cell of each row in that table and
 /// asserts the tool exists. Deliberately one-directional — a tool with no
-/// distinct HTTP route is free to be absent from the table.
+/// distinct RPC method is free to be absent from the table.
 /// Test: this test.
 #[test]
 fn http_equivalents_name_only_real_tools() {
     let readme = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md"))
         .expect("README.md");
     let table = readme
-        .split("### HTTP equivalents")
+        .split("### RPC equivalents")
         .nth(1)
-        .expect("README.md lost its `### HTTP equivalents` section")
+        .expect("README.md lost its `### RPC equivalents` section")
         .split("\n## ")
         .next()
         .expect("section body");
@@ -166,7 +170,7 @@ fn http_equivalents_name_only_real_tools() {
             .expect("tool name cell");
         assert!(
             known.contains(&name.to_string()),
-            "HTTP-equivalents table names `{name}`, which is not a registered tool"
+            "the RPC-equivalents table names `{name}`, which is not a registered tool"
         );
         checked += 1;
     }

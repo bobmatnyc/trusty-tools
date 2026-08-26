@@ -1,11 +1,19 @@
 //! Shared "ensure daemon up" helper for MCP stdio bridge processes.
 //!
-//! Why: trusty-memory, trusty-search, and trusty-analyze all run an MCP stdio
-//! bridge that must guarantee the corresponding HTTP daemon is reachable before
-//! entering the JSON-RPC dispatch loop.  Each service had (or needed) the same
+//! Why: trusty-memory and trusty-search run an MCP stdio bridge that must
+//! guarantee the corresponding HTTP daemon is reachable before entering the
+//! JSON-RPC dispatch loop.  Each service had (or needed) the same
 //! probe-spawn-poll pattern implemented locally.  This module centralises that
-//! pattern so the three services share one tested implementation instead of
-//! three diverging copies.
+//! pattern so they share one tested implementation instead of diverging copies.
+//!
+//! #6287: trusty-analyze was a third caller until it moved onto a Unix socket
+//! (ADR-0032). This whole module is built around a health URL —
+//! `DaemonBridgeConfig` carries `health_path` plus a `base_url_fn`, and
+//! `probe_once` issues an HTTP GET — so a UDS member has nothing here to
+//! configure. Extending it to speak UDS is worth doing when a second UDS member
+//! needs a bridge; trusty-review does not (its MCP surface runs in-process and
+//! never bridges to a daemon), so trusty-analyze keeps a small local loop in
+//! `commands/daemon_guard.rs` instead.
 //!
 //! What: `DaemonBridgeConfig` carries all service-specific knobs; `ensure_daemon_up`
 //! probes the daemon's health endpoint, auto-starts it when absent, and polls
@@ -50,7 +58,7 @@ pub const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Configuration for a service's MCP daemon-bridge startup guard.
 ///
-/// Why: each service (trusty-memory, trusty-search, trusty-analyze) has its own
+/// Why: each service (trusty-memory, trusty-search) has its own
 /// daemon binary, spawn arguments, and health path.  `DaemonBridgeConfig` captures
 /// those differences in a single struct so `ensure_daemon_up` can be a single
 /// parameterised function rather than three near-identical functions.
@@ -94,7 +102,7 @@ pub struct DaemonBridgeConfig {
     /// single-writer lock and starving the real launchd daemon at :7070.
     /// Setting `no_spawn = true` in the trusty-memory bridge config converts the
     /// spawn-on-miss path into a clear `Err` that tells the user how to start the
-    /// daemon properly.  Other callers (trusty-search, trusty-analyze) that still
+    /// daemon properly.  Other callers (trusty-search) that still
     /// need auto-spawn keep the default `false`.
     /// What: when `true` and the fast-path health probe fails, `ensure_daemon_up`
     /// returns `Err` immediately with a human-readable message rather than
@@ -113,7 +121,7 @@ pub struct DaemonBridgeConfig {
     /// operator to run a nonexistent command against a nonexistent path. When
     /// `Some`, this text REPLACES the generic setup/plist advice in the error
     /// message; when `None`, the original generic wording is used unchanged so
-    /// existing callers (trusty-memory, trusty-search, trusty-analyze) are
+    /// existing callers (trusty-memory, trusty-search) are
     /// unaffected.
     /// What: appended verbatim after the "daemon is not reachable at {addr}"
     /// preamble instead of the generic `` `{name} start`/`{name} setup` ``
@@ -485,7 +493,7 @@ mod tests {
     /// Why (#2491 review): when `no_spawn_hint` is left `None` (every caller
     /// except trusty-mpm), the original generic setup/plist wording must still
     /// appear — the new field must not change existing behaviour for
-    /// trusty-memory, trusty-search, or trusty-analyze.
+    /// trusty-memory or trusty-search.
     /// What: reuses `no_spawn_returns_err_without_spawning`'s config shape with
     /// `no_spawn_hint: None` and asserts the generic wording is present.
     /// Test: this test.

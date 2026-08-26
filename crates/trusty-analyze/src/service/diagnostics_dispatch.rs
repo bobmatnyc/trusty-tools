@@ -11,11 +11,10 @@
 //! buckets, dispatches each correctly, and honours a per-request wall-clock
 //! deadline between subprocess spawns so a large corpus returns a partial
 //! result instead of running unbounded (#6018).
-//! Test: `run_diagnostics_blocking_skips_unknown_languages`,
-//! `run_diagnostics_blocking_respects_language_filter`, and
-//! `run_diagnostics_blocking_project_scoped_skips_when_no_root` in
-//! `service/mod.rs` exercise this via the public interface;
-//! `dispatch_stops_at_deadline_and_reports_cutoff` covers the deadline branch.
+//! Test: `run_diagnostics_blocking_with_registry_two_files_same_basename` and
+//! `rpc_diagnostics_returns_empty_when_no_tools` exercise this via the public
+//! interface; `dispatch_stops_at_deadline_and_reports_cutoff` covers the
+//! deadline branch.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
@@ -142,8 +141,8 @@ pub(crate) fn abs_to_rel<'a>(
 /// `global_registry()`. `deadline` is the wall-clock instant after which the
 /// dispatch stops starting new work and returns a partial report; `None`
 /// disables the budget (#6018).
-/// Test: `run_diagnostics_blocking_skips_unknown_languages`,
-/// `run_diagnostics_blocking_respects_language_filter`.
+/// Test: `run_diagnostics_blocking_with_registry_two_files_same_basename`
+/// exercises the shared dispatch path this delegates to.
 pub fn run_diagnostics_blocking(
     by_file: HashMap<String, String>,
     language_filter: Option<String>,
@@ -195,9 +194,7 @@ pub fn run_diagnostics_blocking(
 ///   6. Returns a `DiagnosticsReport` with `tools_run`, `tools_unavailable`,
 ///      `diagnostics`, and `cutoff` populated.
 ///
-/// Test: `run_diagnostics_blocking_project_scoped_skips_when_no_root` uses
-/// this directly with a `FakeProjectScopedTool` registry.
-/// `run_diagnostics_blocking_with_registry_two_files_same_basename` (below)
+/// Test: `run_diagnostics_blocking_with_registry_two_files_same_basename`
 /// proves the per-file subdir isolation prevents basename collisions.
 /// `report_marks_unavailable_tool` proves that tools absent from PATH are
 /// reported under `tools_unavailable`.

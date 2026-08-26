@@ -1,4 +1,4 @@
-//! Route handlers for diff review and GitHub PR review.
+//! RPC handlers for diff review and GitHub PR review.
 //!
 //! Why: Extracted from `service/mod.rs` to keep the review surface isolated.
 //! These handlers share a common theme: they accept external content (a diff or
@@ -15,63 +15,60 @@
 //! pipeline those deliveries run is `webhook_drain::run_pr_analysis`, which this
 //! module used to call.
 //!
-//! Test: `review_endpoint_requires_index_id`, `review_endpoint_surfaces_search_failure_as_502`,
-//! `review_endpoint_rejects_malformed_diff`, and
-//! `retired_webhook_route_is_not_registered` in `service/tests_review.rs`.
+//! Test: `rpc_review_requires_a_non_empty_index_id`,
+//! `rpc_review_reports_an_unreachable_search_daemon`,
+//! `rpc_review_rejects_a_malformed_diff` in `service/rpc_tests.rs`.
 
-use std::sync::Arc;
-
-use anyhow::Result;
-use axum::{
-    body::Bytes,
-    extract::{Query, State},
-    response::Json,
-};
 use serde::Deserialize;
 
 use crate::service::events::{AnalyzerAppState, ApiError};
 
-#[derive(Deserialize)]
-pub struct ReviewQueryParams {
+/// Params for `analyze.review`.
+///
+/// Why (#6287): the diff used to be the raw `POST /review` body with the index
+/// in the query string. A JSON-RPC frame carries one `params` object, so both
+/// arrive as fields — and the diff is a JSON string, which is what removes the
+/// UTF-8 validity check the byte body needed.
+/// What: `index_id` names the corpus to cross-reference; `diff` is the unified
+/// diff text.
+#[derive(Debug, Deserialize)]
+pub struct ReviewRequest {
     /// Index ID to cross-reference the diff against in trusty-search. Required:
     /// review pulls the index's chunk corpus so the report reflects already-
     /// computed complexity for the touched files.
-    pub index_id: Option<String>,
+    pub index_id: String,
+    /// The unified diff to review.
+    pub diff: String,
 }
 
-/// Why: PR review is most valuable before code lands; this endpoint lets CI
-/// and tooling POST a raw unified diff and get a structured quality report.
-/// Like every other analysis route, `/review` is backed by trusty-search — it
-/// fetches the named index's chunk corpus so the report can surface
+/// Why: PR review is most valuable before code lands; this method lets CI
+/// and tooling hand over a raw unified diff and get a structured quality
+/// report. Like every other analysis method, review is backed by trusty-search
+/// — it fetches the named index's chunk corpus so the report can surface
 /// trusty-search's already-computed complexity for the files the diff touches.
-/// What: reads the request body as a unified diff (`text/x-patch`), requires a
-/// `?index_id=` query param (400 if missing), fetches the index corpus via the
+/// What: requires a non-empty `index_id`, fetches the index corpus via the
 /// shared `TrustySearchClient`, runs `analyze_diff_with_client`, and returns
-/// the `ReviewReport` as JSON. This endpoint is deliberately deterministic and
-/// LLM-free — opt into the LLM narrative via `POST /analyze/deep`.
-/// Test: `review_endpoint_requires_index_id` checks the 400 path;
-/// `review_endpoint_rejects_malformed_diff` checks malformed-diff handling.
+/// the `ReviewReport`. Deliberately deterministic and LLM-free — opt into the
+/// LLM narrative via `analyze.deep_analysis`.
+/// Test: `rpc_review_requires_a_non_empty_index_id`,
+/// `rpc_review_rejects_a_malformed_diff`.
 pub async fn review_diff_handler(
-    State(state): State<Arc<AnalyzerAppState>>,
-    Query(params): Query<ReviewQueryParams>,
-    body: Bytes,
-) -> Result<Json<crate::core::ReviewReport>, ApiError> {
-    let index_id = params
-        .index_id
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| ApiError::bad_request("missing required 'index_id' query parameter"))?;
-    let diff = std::str::from_utf8(&body)
-        .map_err(|e| ApiError::bad_request(format!("diff body is not valid UTF-8: {e}")))?;
-    let report = crate::core::analyze_diff_with_client(diff, &state.search, index_id)
+    state: &AnalyzerAppState,
+    req: ReviewRequest,
+) -> Result<crate::core::ReviewReport, ApiError> {
+    // #6287: an empty string decodes fine but names no corpus, so the check the
+    // `Option<String>` query param used to make is still owed.
+    if req.index_id.is_empty() {
+        return Err(ApiError::bad_request("missing required 'index_id' field"));
+    }
+    crate::core::analyze_diff_with_client(&req.diff, &state.search, &req.index_id)
         .await
         .map_err(|e| match e {
             crate::core::ReviewError::MalformedHunkHeader(_) => {
                 ApiError::bad_request(format!("invalid diff: {e}"))
             }
             crate::core::ReviewError::Search(_) => ApiError::bad_gateway(format!("{e}")),
-        })?;
-    Ok(Json(report))
+        })
 }
 
 /// Why: lets CI and tooling analyze a GitHub PR by number without having to
@@ -81,20 +78,21 @@ pub async fn review_diff_handler(
 /// PR's unified diff from the GitHub API, runs `analyze_diff_with_client`
 /// against the request's `index_id`, posts a markdown comment when
 /// `post_comment` is true, and returns the `ReviewReport` JSON.
-/// Test: `github_pr_endpoint_requires_token` checks the missing-token 400 path.
+/// Test: `rpc_github_pr_requires_a_token` checks the missing-token path.
 pub async fn review_github_pr_handler(
-    State(state): State<Arc<AnalyzerAppState>>,
-    Json(req): Json<crate::core::GithubPrRequest>,
-) -> Result<Json<crate::core::ReviewReport>, ApiError> {
+    state: &AnalyzerAppState,
+    req: crate::core::GithubPrRequest,
+) -> Result<crate::core::ReviewReport, ApiError> {
     let token = std::env::var(trusty_common::env_vars::ENV_GITHUB_TOKEN).map_err(|_| {
         ApiError::bad_request("GITHUB_TOKEN environment variable is not set on the daemon")
     })?;
     // Why: GitHub API calls can take several seconds on large diffs; without
-    // timeouts the handler thread hangs indefinitely, exhausting the axum
-    // worker pool under concurrent PR review requests.
+    // timeouts the handler task hangs indefinitely, and the socket read timeout
+    // does not cover a handler (`RpcServeOptions::read_timeout` bounds the
+    // request read only), so nothing else would ever cut it off.
     // What: 30 s per-request + 5 s connect timeout, matching the pattern used
     // by `TrustySearchClient` in `src/core/client.rs`.
-    // Test: `github_pr_endpoint_requires_token` exercises this code path.
+    // Test: `rpc_github_pr_requires_a_token` exercises this code path.
     let client = reqwest::ClientBuilder::new()
         .timeout(std::time::Duration::from_secs(30))
         .connect_timeout(std::time::Duration::from_secs(5))
@@ -117,5 +115,5 @@ pub async fn review_github_pr_handler(
             .await
             .map_err(|e| ApiError::bad_gateway(format!("post PR comment: {e}")))?;
     }
-    Ok(Json(report))
+    Ok(report)
 }

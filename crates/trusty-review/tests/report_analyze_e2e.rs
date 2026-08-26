@@ -5,15 +5,19 @@
 //! STUBBED analyze responder (never a real daemon), populates the
 //! complexity-distribution chart AND the RED/AMBER finding bands; and a fetch
 //! failure falls through cleanly to scan-only output without aborting.
-//! What: stands up a tiny in-process HTTP/1.1 mock that serves the four analyze
-//! endpoints from fixture JSON, builds a model over a real local checkout,
-//! runs `enrich_with_analyze`, and asserts the rendered markdown.
+//! What: stands up a tiny in-process JSON-RPC mock on a Unix socket that serves
+//! the four analyze methods from fixture JSON, builds a model over a real local
+//! checkout, runs `enrich_with_analyze`, and asserts the rendered markdown.
+//!
+//! #6287 (ADR-0032): the mock was an HTTP/1.1 listener on loopback. trusty-analyze
+//! serves JSON-RPC over a Unix socket now, so the mock speaks that instead —
+//! the fixture bodies and every assertion below are unchanged.
 //! Test: this file (only compiled with the default `report` feature).
 #![cfg(feature = "report")]
 
-use std::io::{Read as _, Write as _};
-use std::net::TcpListener;
+use std::path::PathBuf;
 
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use trusty_review::report::{
     HttpAnalyzeMetricsSource, Reporter, TemplateLoader, enrich_with_analyze, load_manifest,
     model::ReportModel,
@@ -28,12 +32,12 @@ use trusty_review::report::{
 /// id to serve rather than knowing one at compile time.
 const REPO_DIR: &str = "acme-core";
 
-/// Body for `GET /indexes` — one served index (analyze shape: array of objects).
+/// Body for `analyze.list_indexes` — one served index (array of objects).
 fn indexes_body(index_id: &str) -> String {
     format!(r#"[{{"id":"{index_id}","root_path":null}}]"#)
 }
 
-/// Body for `/complexity_distribution` — the whole-corpus A-F histogram (#5320).
+/// Body for `analyze.complexity_distribution` — the whole-corpus A-F histogram (#5320).
 fn distribution_body() -> String {
     r#"{"index_id":"acme-core","total":3,"skipped_non_code":1,"buckets":[
         {"grade":"A","label":"A: simple (0-5)","count":1},
@@ -45,7 +49,7 @@ fn distribution_body() -> String {
     .to_string()
 }
 
-/// Body for `/diagnostics` — one error (RED) + one hint (dropped GREEN).
+/// Body for `analyze.diagnostics` — one error (RED) + one hint (dropped GREEN).
 fn diagnostics_body() -> String {
     r#"{"index_id":"acme-core","total":2,"tools_run":["clippy"],"diagnostics":[
         {"tool":"clippy","file":"src/a.rs","line":1,"col":1,"severity":"error","code":"E0001","message":"boom"},
@@ -54,7 +58,7 @@ fn diagnostics_body() -> String {
     .to_string()
 }
 
-/// Body for `/refactor-suggestions` — one high (AMBER) suggestion.
+/// Body for `analyze.refactor_suggestions` — one high (AMBER) suggestion.
 fn refactor_body() -> String {
     r#"{"index_id":"acme-core","count":1,"suggestions":[
         {"chunk_id":"a:1:9","file":"src/a.rs","line_start":1,"line_end":9,"function_name":"a","refactor_type":"extract_method","severity":"high","rationale":"x","suggested_action":"y","complexity_before":25,"complexity_after":8,"smells":[]}
@@ -62,50 +66,51 @@ fn refactor_body() -> String {
     .to_string()
 }
 
-/// Route the request path to the right fixture body.
-fn body_for(path: &str, index_id: &str) -> String {
-    if path.starts_with("/indexes/") && path.contains("/complexity_distribution") {
+/// Route the requested JSON-RPC method to the right fixture body.
+fn body_for(request: &str, index_id: &str) -> String {
+    if request.contains("analyze.complexity_distribution") {
         distribution_body()
-    } else if path.contains("/diagnostics") {
+    } else if request.contains("analyze.diagnostics") {
         diagnostics_body()
-    } else if path.contains("/refactor-suggestions") {
+    } else if request.contains("analyze.refactor_suggestions") {
         refactor_body()
-    } else if path == "/indexes" || path.starts_with("/indexes?") {
+    } else if request.contains("analyze.list_indexes") {
         indexes_body(index_id)
     } else {
         "{}".to_string()
     }
 }
 
-/// Spawn a blocking HTTP/1.1 mock serving the analyze endpoints; returns its
-/// base URL. The listener thread runs for the process lifetime (daemonised).
-fn spawn_mock(index_id: String) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
-    let addr = listener.local_addr().expect("addr");
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { continue };
-            let mut buf = [0u8; 4096];
-            let n = stream.read(&mut buf).unwrap_or(0);
-            let req = String::from_utf8_lossy(&buf[..n]);
-            // Request line: `GET <path> HTTP/1.1`.
-            let path = req
-                .lines()
-                .next()
-                .and_then(|l| l.split_whitespace().nth(1))
-                .unwrap_or("/")
-                .to_string();
-            let body = body_for(&path, &index_id);
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            let _ = stream.write_all(resp.as_bytes());
-            let _ = stream.flush();
+/// Spawn a JSON-RPC mock on a Unix socket; returns the socket path.
+///
+/// The `TempDir` holding the socket is returned with it, because dropping it
+/// unlinks the socket out from under the accept loop.
+fn spawn_mock(index_id: String, dir: &std::path::Path) -> PathBuf {
+    let socket = dir.join("analyze.sock");
+    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind the mock socket");
+    tokio::spawn(async move {
+        while let Ok((mut conn, _)) = listener.accept().await {
+            let index_id = index_id.clone();
+            tokio::spawn(async move {
+                // The client half-closes after one frame, so reading to EOF is
+                // the whole request.
+                let mut sink = Vec::new();
+                let _ = conn.read_to_end(&mut sink).await;
+                let request = String::from_utf8_lossy(&sink).into_owned();
+                // Compacted, not interpolated raw: the fixtures are
+                // pretty-printed and a frame is newline-terminated, so
+                // embedding one verbatim would end the frame at its first line
+                // break.
+                let value: serde_json::Value =
+                    serde_json::from_str(&body_for(&request, &index_id)).expect("a valid fixture");
+                let reply = format!(r#"{{"jsonrpc":"2.0","id":1,"result":{value}}}"#);
+                let _ = conn.write_all(reply.as_bytes()).await;
+                let _ = conn.write_all(b"\n").await;
+                let _ = conn.flush().await;
+            });
         }
     });
-    format!("http://{addr}")
+    socket
 }
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -154,7 +159,7 @@ async fn analyze_populates_complexity_and_findings() {
         index_id.starts_with("acme-core-"),
         "readable, and per-checkout: {index_id}"
     );
-    let base_url = spawn_mock(index_id);
+    let socket = spawn_mock(index_id, tmp.path());
 
     let manifest = load_manifest(&manifest_path).expect("manifest loads");
     let template = TemplateLoader::new()
@@ -166,7 +171,7 @@ async fn analyze_populates_complexity_and_findings() {
     // Precondition: no declared metrics — the chart/findings are empty pre-fetch.
     assert!(model.repositories[0].metrics.is_none());
 
-    let source = HttpAnalyzeMetricsSource::new(base_url).expect("client");
+    let source = HttpAnalyzeMetricsSource::new(socket).expect("client");
     enrich_with_analyze(&mut model, &source).await;
 
     // The live fetch populated metrics.
@@ -221,8 +226,8 @@ async fn analyze_populates_complexity_and_findings() {
 }
 
 /// Why: a fetch failure must fall through cleanly to scan-only output, never
-/// abort. What: points the source at a dead port; asserts metrics stays None
-/// and the report still renders. Test: this test itself.
+/// abort. What: points the source at a socket nothing bound; asserts metrics
+/// stays None and the report still renders. Test: this test itself.
 #[tokio::test]
 async fn analyze_fetch_failure_falls_through_to_scan() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
@@ -234,8 +239,9 @@ async fn analyze_fetch_failure_falls_through_to_scan() {
     let mut model =
         ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None).expect("build");
 
-    // Port 1 is never listening — the probe fails, fetch is fail-open.
-    let source = HttpAnalyzeMetricsSource::new("http://127.0.0.1:1").expect("client");
+    // Nothing ever bound this path — the probe fails, fetch is fail-open.
+    let source =
+        HttpAnalyzeMetricsSource::new(tmp.path().join("absent-analyze.sock")).expect("client");
     enrich_with_analyze(&mut model, &source).await;
 
     assert!(

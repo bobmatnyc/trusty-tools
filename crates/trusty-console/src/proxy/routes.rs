@@ -53,13 +53,18 @@ fn full_id(service_key: &str) -> Option<&'static str> {
     match service_key {
         "search" => Some("trusty-search"),
         "memory" => Some("trusty-memory"),
-        "analyze" => Some("trusty-analyze"),
-        // #6277: INERT since trusty-review moved to UDS (ADR-0032). The proxy
-        // resolves a target's base URL from its `http_addr` file, which this
-        // daemon no longer writes, so `/api/review/*` resolves nothing and the
-        // row grants no reachability. Kept rather than deleted because
-        // ADR-0035's console-side aggregator is where review's surface comes
-        // back, and that work re-uses this key.
+        // #6287: NO `analyze` row. trusty-analyze moved to UDS (ADR-0032) and
+        // this proxy resolves a target's base URL from its `http_addr` file,
+        // which the daemon no longer writes — so the row could only resolve
+        // nothing, or worse, resolve a STALE file left by the pre-migration
+        // daemon and forward `/api/analyze/*` to whatever now holds 7879.
+        //
+        // #6277: INERT since trusty-review moved to UDS (ADR-0032), for the
+        // same reason. Kept rather than deleted because ADR-0035's console-side
+        // aggregator is where review's surface comes back and that work re-uses
+        // this key; the analyze row is deleted instead because its
+        // `http_addr` file predates the migration on every existing machine and
+        // an inert row that can resolve a stale address is not inert.
         "review" => Some("trusty-review"),
         // #1849 Phase 1: mpm added to the proxy allowlist so the console can
         // forward requests to the live trusty-mpm HTTP daemon via its base URL
@@ -539,7 +544,10 @@ mod tests {
     fn test_service_key_mapping() {
         assert_eq!(full_id("search"), Some("trusty-search"));
         assert_eq!(full_id("memory"), Some("trusty-memory"));
-        assert_eq!(full_id("analyze"), Some("trusty-analyze"));
+        // #6287: `analyze` is no longer allowlisted. An allowlisted key whose
+        // target serves UDS resolves its base URL from a stale `http_addr`
+        // file, which forwards `/api/analyze/*` to whatever now holds 7879.
+        assert_eq!(full_id("analyze"), None);
         // #6277: still allowlisted, but inert — trusty-review serves UDS and
         // writes no `http_addr` for the proxy to resolve. See `full_id`.
         assert_eq!(full_id("review"), Some("trusty-review"));

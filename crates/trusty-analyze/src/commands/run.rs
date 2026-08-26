@@ -3,13 +3,15 @@
 //! Why: the `serve`, `deep`, and `review-pr` handler bodies are the largest
 //! arms of the `main()` dispatcher; lifting them here keeps `main.rs` under the
 //! 500-SLOC production cap (see #1195) while `main` stays a thin router.
-//! What: `run_serve` boots the HTTP/MCP daemon, `run_deep` proxies the deep
-//! analysis endpoint, and `run_review_pr` fetches + reviews a GitHub PR diff.
+//! What: `run_serve` boots the daemon (and, with `--mcp`, an MCP stdio loop),
+//! `run_deep` proxies the deep-analysis method, and `run_review_pr` fetches +
+//! reviews a GitHub PR diff.
 //! Test: exercised end-to-end via the CLI (`trusty-analyze serve|deep|review-pr`);
 //! error paths (daemon down, missing token) are covered by the existing manual
-//! smoke tests documented on each `Cmd` variant.
+//! smoke tests documented on each `Cmd` variant, plus
+//! `run_deep_reports_an_absent_socket` below.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::ValueEnum;
@@ -29,14 +31,19 @@ pub enum OutputFormat {
     Text,
 }
 
-/// Boot the HTTP sidecar daemon, optionally alongside MCP stdio / SSE loops.
+/// Boot the sidecar daemon, optionally alongside an MCP stdio loop.
 ///
 /// Why: `serve` is the process entry point for the daemon and the single most
 /// complex CLI arm; keeping it in one focused function documents the startup
-/// sequence (search dependency check → stores → optional MCP servers).
+/// sequence (search dependency check → stores → socket).
 /// What: probes trusty-search, opens the facts and SCIP overlay stores, warns
-/// on a missing OpenRouter key, optionally starts the MCP HTTP/SSE server, then
-/// serves the HTTP daemon (with an inline MCP stdio loop when `mcp` is set).
+/// on a missing OpenRouter key, then binds the socket (with an inline MCP stdio
+/// loop when `mcp` is set).
+///
+/// #6287: `--mcp-port`, and the axum MCP HTTP/SSE server it started, are gone.
+/// ADR-0032 leaves `trusty-console` as the workspace's only HTTP surface, so a
+/// remote MCP client reaches this dispatcher through the console rather than
+/// through a second port this process binds.
 ///
 /// Why (#5067): there is no embedder-load step here any more. It used to sit
 /// between the store opens and the MCP servers, constructing a fastembed model
@@ -46,13 +53,12 @@ pub enum OutputFormat {
 /// nor network — so boot performs no fallible initialization to report.
 ///
 /// Test: run `trusty-analyze serve` without trusty-search running and verify
-/// exit code 1; with it running the daemon binds and answers `/health`.
+/// exit code 1; with it running the daemon binds and answers `analyze.health`.
 pub async fn run_serve(
     search: TrustySearchClient,
     facts_path: PathBuf,
-    port: u16,
+    socket: Option<PathBuf>,
     mcp: bool,
-    mcp_port: Option<u16>,
 ) -> Result<()> {
     // Hard dependency: refuse to start if trusty-search is unreachable.
     // Why: there is no standalone/offline mode — every analysis operation
@@ -97,77 +103,84 @@ pub async fn run_serve(
         );
     }
 
-    // Optionally start the MCP HTTP/SSE server on a separate port.
-    // Why: some MCP clients (and remote integrations) prefer HTTP/SSE
-    // over stdio. Spawned independently of the analyzer's own HTTP
-    // daemon so the two ports stay decoupled.
-    // What: binds `--mcp-port` and serves `POST /mcp` + `GET /mcp/sse`
-    // pointing the dispatcher at `http://127.0.0.1:<port>`.
-    // Test: pass `--mcp-port 7880`, then `curl -X POST
-    // http://127.0.0.1:7880/mcp -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`.
-    if let Some(mcp_port) = mcp_port {
-        let mcp_srv = AnalyzerMcpServer::new(format!("http://127.0.0.1:{port}"));
-        let mcp_listener = tokio::net::TcpListener::bind(("127.0.0.1", mcp_port)).await?;
-        tracing::info!("MCP HTTP/SSE server listening on port {mcp_port}");
-        tokio::spawn(async move {
-            axum::serve(mcp_listener, trusty_analyze::mcp::sse::router(mcp_srv))
-                .await
-                .ok();
-        });
-    }
+    // #6287: the socket path is DERIVED, not published. `--socket` exists for
+    // tests and for deliberately running a second instance; a consumer resolves
+    // the default through the same `daemon_socket_path` call the daemon uses,
+    // so overriding it here means nothing will find this daemon.
+    let socket = match socket {
+        Some(p) => p,
+        None => trusty_analyze::service::socket_path()?,
+    };
 
     if mcp {
-        // Run both: HTTP daemon in a task, MCP stdio in the foreground.
-        let port_for_url = port;
-        let http = tokio::spawn(async move {
-            if let Err(e) = serve(state, port).await {
-                tracing::error!("HTTP daemon exited: {e:#}");
+        // Run both: the daemon in a task, MCP stdio in the foreground. The
+        // dispatcher dials the socket this process is about to bind, so it is
+        // pointed at the same path rather than at a second transport.
+        let socket_for_daemon = socket.clone();
+        let daemon = tokio::spawn(async move {
+            if let Err(e) = serve(state, &socket_for_daemon).await {
+                tracing::error!("trusty-analyze daemon exited: {e:#}");
             }
         });
-        let mcp_server = AnalyzerMcpServer::new(format!("http://127.0.0.1:{port_for_url}"));
-        trusty_analyze::mcp::stdio::run(mcp_server).await?;
-        http.abort();
-        Ok(())
+        let result = trusty_analyze::mcp::stdio::run(AnalyzerMcpServer::new(socket)).await;
+        daemon.abort();
+        result
     } else {
-        serve(state, port).await
+        serve(state, &socket).await
     }
 }
 
 /// Handle `trusty-analyze deep <index_id>`.
 ///
-/// Why: deep analysis is a thin wrapper over `POST /analyze/deep`. Keeping it
-/// HTTP-only (rather than re-implementing in-process) means the CLI uses the
-/// same code path as MCP clients and external tooling.
-/// What: POSTs `{ "index_id": ..., "model": ... }` to the daemon and prints
-/// the [`DeepAnalysisReport`] as JSON or text.
-/// Test: with the daemon down → exits non-zero with a clear error.
+/// Why: deep analysis is a thin wrapper over the daemon's
+/// `analyze.deep_analysis` method. Keeping it a client call (rather than
+/// re-implementing in-process) means the CLI uses the same code path as MCP
+/// clients and external tooling.
+/// What: sends `{ "index_id": ..., "model": ... }` over the socket and prints
+/// the [`trusty_analyze::core::DeepAnalysisReport`] as JSON or text.
+///
+/// #6287: this used to be a `reqwest` POST to `http://127.0.0.1:<port>`. The
+/// timeout is now the shared MCP-client budget rather than reqwest's default,
+/// which was unbounded — an LLM call that never returned held this CLI forever.
+///
+/// # Errors
+///
+/// When the socket cannot be dialled, when the daemon answers with a JSON-RPC
+/// error, or when the report does not decode.
+///
+/// Test: `run_deep_reports_an_absent_socket`.
 pub async fn run_deep(
     index_id: String,
     model: Option<String>,
     format: OutputFormat,
-    port: u16,
+    socket: &Path,
 ) -> Result<()> {
-    let url = format!("http://127.0.0.1:{port}/analyze/deep");
-    let mut body = serde_json::json!({ "index_id": index_id });
+    let mut params = serde_json::json!({ "index_id": index_id });
     if let Some(m) = model.as_deref() {
-        body["model"] = serde_json::Value::String(m.to_string());
+        params["model"] = serde_json::Value::String(m.to_string());
     }
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(&url)
-        .json(&body)
-        .send()
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "analyze.deep_analysis",
+        "params": params,
+    });
+    let response: trusty_common::uds::server::RpcResponse =
+        trusty_common::uds::send_framed_request(
+            socket,
+            &request,
+            trusty_analyze::core::mcp_client_timeout(),
+        )
         .await
-        .with_context(|| format!("POST {url}"))?;
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("deep analysis request failed: HTTP {status}: {body}");
+        .with_context(|| format!("analyze.deep_analysis over {}", socket.display()))?;
+    if let Some(error) = response.error {
+        anyhow::bail!("deep analysis failed ({}): {}", error.code, error.message);
     }
-    let report: trusty_analyze::core::DeepAnalysisReport = resp
-        .json()
-        .await
-        .with_context(|| format!("decode response from {url}"))?;
+    let result = response
+        .result
+        .ok_or_else(|| anyhow::anyhow!("deep analysis answered with neither result nor error"))?;
+    let report: trusty_analyze::core::DeepAnalysisReport =
+        serde_json::from_value(result).context("decode the deep-analysis report")?;
     match format {
         OutputFormat::Json => {
             println!(
@@ -250,4 +263,36 @@ pub async fn run_review_pr(
         println!("Posted review comment to {owner}/{repo_name}#{pr}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Why (#6287): `trusty-analyze deep` dialled `http://127.0.0.1:<port>`, so
+    /// after the daemon moved to a socket it would have failed with a
+    /// connection-refused against a port nothing binds — or worse, reached an
+    /// unrelated process that had taken 7879. This is what proves the CLI dials
+    /// the socket: it fails naming the socket path, which the HTTP version
+    /// could not do.
+    /// What: points `run_deep` at a path in an empty temp dir and asserts the
+    /// error names it.
+    /// Test: this is the test.
+    #[tokio::test]
+    async fn run_deep_reports_an_absent_socket() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let socket = tmp.path().join("absent.sock");
+        let err = run_deep("idx".into(), None, OutputFormat::Json, &socket)
+            .await
+            .expect_err("an absent socket cannot answer");
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains(&socket.display().to_string()),
+            "the error must name the socket it could not reach: {rendered}"
+        );
+        assert!(
+            rendered.contains("analyze.deep_analysis"),
+            "the error must name the method: {rendered}"
+        );
+    }
 }

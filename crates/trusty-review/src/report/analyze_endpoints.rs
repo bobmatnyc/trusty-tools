@@ -92,34 +92,51 @@ pub fn diagnostics_budget_for(deadline: Duration) -> Duration {
 /// Why: the path, the budget, and the sentence a reader sees when it fails are
 /// three facts about the same endpoint, and keeping them apart is how the
 /// budget drifted from the cost in the first place.
-/// What: `path` builds the request path, `as_str` names the endpoint in the
-/// report, `consequence` says what its absence costs the report, and `budget`
-/// gives the per-request timeout.
+/// What: `method` and `params` build the request, `as_str` names the endpoint
+/// in the report, `consequence` says what its absence costs the report, and
+/// `budget` gives the per-request timeout.
 /// Test: `diagnostics_budget_outlives_the_daemon_deadline_ladder`,
 /// `caveat_labels_are_stable`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[non_exhaustive]
 pub enum AnalyzeEndpoint {
-    /// `GET /indexes` — the readiness probe.
+    /// `analyze.list_indexes` — the readiness probe.
     IndexList,
-    /// `GET /indexes/{id}/complexity_distribution` — the §7 histogram.
+    /// `analyze.complexity_distribution` — the §7 histogram.
     ComplexityDistribution,
-    /// `GET /indexes/{id}/diagnostics` — the external static-analysis pass.
+    /// `analyze.diagnostics` — the external static-analysis pass.
     Diagnostics,
-    /// `GET /indexes/{id}/refactor-suggestions` — maintainability findings.
+    /// `analyze.refactor_suggestions` — maintainability findings.
     RefactorSuggestions,
 }
 
 impl AnalyzeEndpoint {
-    /// The request path for this endpoint against `index_id`.
-    pub fn path(self, index_id: &str) -> String {
+    /// The daemon method this endpoint calls.
+    ///
+    /// #6287 (ADR-0032): these were URL paths. trusty-analyze serves JSON-RPC
+    /// over a Unix socket now, so an endpoint is a method name plus a params
+    /// object — see [`Self::params`].
+    ///
+    /// The names are literals rather than imports from
+    /// `trusty_analyze::service::rpc::METHODS`: this crate has no Cargo edge on
+    /// the analysis daemon, and adding one to share four `&str`s would pull a
+    /// tree-sitter engine into every `trusty-review report` build.
+    pub fn method(self) -> &'static str {
         match self {
-            Self::IndexList => "/indexes".to_string(),
-            Self::ComplexityDistribution => {
-                format!("/indexes/{index_id}/complexity_distribution")
-            }
-            Self::Diagnostics => format!("/indexes/{index_id}/diagnostics"),
-            Self::RefactorSuggestions => format!("/indexes/{index_id}/refactor-suggestions"),
+            Self::IndexList => "analyze.list_indexes",
+            Self::ComplexityDistribution => "analyze.complexity_distribution",
+            Self::Diagnostics => "analyze.diagnostics",
+            Self::RefactorSuggestions => "analyze.refactor_suggestions",
+        }
+    }
+
+    /// The params for this endpoint against `index_id`.
+    ///
+    /// `IndexList` takes none — it lists every index, and the caller filters.
+    pub fn params(self, index_id: &str) -> serde_json::Value {
+        match self {
+            Self::IndexList => serde_json::Value::Null,
+            _ => serde_json::json!({ "index_id": index_id }),
         }
     }
 

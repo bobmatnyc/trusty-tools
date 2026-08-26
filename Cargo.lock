@@ -6519,7 +6519,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 1.3.1",
+ "proc-macro-crate 2.0.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -10262,7 +10262,7 @@ dependencies = [
 
 [[package]]
 name = "tga"
-version = "3.3.3"
+version = "4.0.0"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -11239,7 +11239,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-analyze"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11266,7 +11266,9 @@ dependencies = [
  "scip",
  "serde",
  "serde_json",
+ "serial_test",
  "tempfile",
+ "tga",
  "thiserror 1.0.69",
  "tokenizers 0.21.4",
  "tokio",
@@ -11290,7 +11292,10 @@ dependencies = [
  "tree-sitter-scala 0.24.1",
  "tree-sitter-swift",
  "tree-sitter-typescript",
+ "trusty-audit",
  "trusty-common",
+ "trusty-console",
+ "trusty-installer",
  "trusty-mcp",
  "trusty-review",
  "which 6.0.3",
@@ -11299,7 +11304,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-audit"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -11358,7 +11363,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-code"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11488,7 +11493,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-console"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -11591,7 +11596,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-installer"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -11638,7 +11643,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -11791,7 +11796,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-review"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "anyhow",
  "async-trait",

@@ -1,12 +1,20 @@
 //! Pure parameter/response helpers for the MCP dispatcher.
 //!
-//! Why: param extraction, query-string assembly, URL encoding, and MCP
-//! result-envelope wrapping are self-contained pure functions; lifting them out
-//! keeps `mcp/mod.rs` under the 500-SLOC production cap (see #1195).
-//! What: `require_str` / `index_id_or_default` read args, `build_query` /
-//! `urlencode` assemble query strings, and `wrap_*` build MCP content
-//! envelopes.
-//! Test: `helpers_tests.rs` covers `build_query` / `index_id_or_default` /
+//! Why: param extraction, params assembly, and MCP result-envelope wrapping are
+//! self-contained pure functions; lifting them out keeps `mcp/mod.rs` under the
+//! 500-SLOC production cap (see #1195).
+//! What: `require_str` / `index_id_or_default` read args, [`optional_params`]
+//! forwards whichever optional arguments a tool call carried, and `wrap_*`
+//! build MCP content envelopes.
+//!
+//! #6287 replaced `build_query` and `urlencode` with [`optional_params`]. Those
+//! two existed to put optional arguments into a URL query string; the daemon
+//! takes one JSON `params` object now, so an argument is copied across as the
+//! JSON value it already was — which also removes the string/u64/bool coercion
+//! ladder `build_query` needed, and with it the class of bug where a float
+//! `3.9` silently became `3`.
+//!
+//! Test: `helpers_tests.rs` covers `optional_params` / `index_id_or_default` /
 //! the timeout constant; the `wrap_*` helpers are exercised via dispatch tests.
 
 use super::DispatchError;
@@ -32,51 +40,30 @@ pub(super) fn index_id_or_default(args: &Value) -> &str {
         .unwrap_or("default")
 }
 
-/// Build a `?key=val&...` query string from whichever of `keys` is present
-/// in `args`. Handles string, integer (u64), and bool values; skips keys
-/// that are absent or of an unsupported type. Returns an empty string if no
-/// keys were found.
+/// Start a params object from whichever of `keys` the tool call carried.
 ///
-/// Why: `find_smells` and `run_diagnostics` gained `limit` (number), `offset`
-/// (number), and `omit_content` (bool) params (#917/#918); extending this
-/// helper avoids duplicating query-string assembly in each handler.
-/// What: tries `as_str` first, then `as_u64`, then `as_bool`; uses the first
-/// match. The former `as_f64` fallback was removed because JSON integers are
-/// already covered by `as_u64`, and float→u64 truncation (e.g. `3.9 → 3`) is
-/// silently wrong. Non-string values are formatted without URL encoding because
-/// they never contain reserved characters.
-/// Test: `build_query_handles_numeric_and_bool` and
-/// `build_query_integer_limit_parses_correctly` in `helpers_tests.rs`.
-pub(super) fn build_query(args: &Value, keys: &[&str]) -> String {
-    let mut q = String::new();
+/// Why (#6287): `find_smells` and `run_diagnostics` accept optional `limit` /
+/// `offset` / `omit_content` (#917/#918), and the daemon's request structs give
+/// every one of those a serde default. Sending a key the caller did not supply
+/// would override that default with a guess, so absence has to be preserved
+/// rather than filled in.
+/// What: copies each present key's JSON value across verbatim — no coercion,
+/// which is what makes the daemon's own `Deserialize` the single arbiter of
+/// what a well-typed argument is. A key that is absent, or explicitly `null`,
+/// is left out entirely; `null` decodes as "absent" for an `Option` field but
+/// as a hard error for a `#[serde(default)]` scalar, and the caller meant the
+/// former.
+/// Test: `optional_params_copies_only_present_keys`,
+/// `optional_params_preserves_value_types`,
+/// `optional_params_omits_an_explicit_null`.
+pub(super) fn optional_params(args: &Value, keys: &[&str]) -> serde_json::Map<String, Value> {
+    let mut out = serde_json::Map::new();
     for key in keys {
-        let node = args.get(*key);
-        let val: Option<String> = node
-            .and_then(Value::as_str)
-            .map(urlencode)
-            .or_else(|| node.and_then(Value::as_u64).map(|n| n.to_string()))
-            .or_else(|| node.and_then(Value::as_bool).map(|b| b.to_string()));
-        if let Some(v) = val {
-            let sep = if q.is_empty() { '?' } else { '&' };
-            q.push(sep);
-            q.push_str(key);
-            q.push('=');
-            q.push_str(&v);
-        }
-    }
-    q
-}
-
-/// Minimal URL encoding for the bits we pass through to `/facts?subject=...`.
-/// Avoids pulling a full url crate into the MCP server.
-pub(super) fn urlencode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
+        match args.get(*key) {
+            Some(Value::Null) | None => {}
+            Some(v) => {
+                out.insert((*key).to_string(), v.clone());
             }
-            _ => out.push_str(&format!("%{b:02X}")),
         }
     }
     out

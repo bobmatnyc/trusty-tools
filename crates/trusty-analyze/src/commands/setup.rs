@@ -11,7 +11,6 @@
 //! plumbing; the JSON merge logic itself lives in (and is tested by)
 //! `trusty_common::claude_config`.
 
-use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -19,7 +18,6 @@ use anyhow::{Context, Result};
 use clap::Subcommand;
 use colored::Colorize;
 
-use trusty_analyze::service::DEFAULT_PORT;
 use trusty_common::claude_config::{
     default_settings_max_depth, discover_claude_settings, mcp_server_entry, patch_mcp_server,
 };
@@ -194,37 +192,43 @@ description: >
   pre-merge review, complexity hotspot investigation, fact extraction.
 tools:
   - name: analyzer_health
-    endpoint: GET http://127.0.0.1:7879/health
+    method: analyze.health
   - name: complexity_hotspots
-    endpoint: GET http://127.0.0.1:7879/indexes/{index_id}/complexity_hotspots
+    method: analyze.complexity_hotspots
   - name: find_smells
-    endpoint: GET http://127.0.0.1:7879/indexes/{index_id}/smells
+    method: analyze.smells
   - name: analyze_quality
-    endpoint: GET http://127.0.0.1:7879/indexes/{index_id}/quality
+    method: analyze.quality
   - name: run_diagnostics
-    endpoint: GET http://127.0.0.1:7879/indexes/{index_id}/diagnostics
+    method: analyze.diagnostics
   - name: review_diff
-    endpoint: POST http://127.0.0.1:7879/review
+    method: analyze.review
   - name: review_github_pr
-    endpoint: POST http://127.0.0.1:7879/review/github-pr
+    method: analyze.review_github_pr
 ---
 "#;
 
 /// claude-mpm skill body written to `.claude/skills/trusty-analyzer.md`.
+///
+/// #6287: this named HTTP endpoints on port 7879. The daemon serves JSON-RPC
+/// over a Unix socket now, so the skill names methods — and the MCP tool names
+/// beside them, which are what an agent actually calls.
 const CLAUDE_MPM_SKILL: &str = r#"# trusty-analyzer skill
 
-Use the trusty-analyze HTTP API (port 7879) for code analysis:
+Use the trusty-analyze MCP tools for code analysis. Each forwards to one
+JSON-RPC method on the daemon's Unix socket (`trusty-analyze socket` prints
+the path):
 
-- `GET /health` — check daemon status
-- `GET /indexes/:id/complexity_hotspots` — top complex functions
-- `GET /indexes/:id/smells` — code smell detection
-- `GET /indexes/:id/quality` — overall grade A–F
-- `GET /indexes/:id/diagnostics` — multi-tool linter output
-- `POST /review` — analyze a git diff (body: unified diff text)
-- `POST /review/github-pr` — analyze a GitHub PR by number
+- `analyzer_health` → `analyze.health` — check daemon status
+- `complexity_hotspots` → `analyze.complexity_hotspots` — top complex functions
+- `find_smells` → `analyze.smells` — code smell detection
+- `analyze_quality` → `analyze.quality` — overall grade A–F
+- `run_diagnostics` → `analyze.diagnostics` — multi-tool linter output
+- `review_diff` → `analyze.review` — analyze a git diff
+- `review_github_pr` → `analyze.review_github_pr` — analyze a GitHub PR by number
 
-Ensure trusty-search is running on port 7878 and trusty-analyze on 7879.
-Run `trusty-analyze status` to confirm.
+Ensure trusty-search is running on port 7878 and trusty-analyze is serving its
+socket. Run `trusty-analyze status` to confirm.
 "#;
 
 /// Register trusty-analyze as a claude-mpm agent and skill.
@@ -275,26 +279,23 @@ fn write_file_with_parents(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
-/// TCP-probe whether the analyzer daemon's port is accepting connections.
-fn port_reachable(port: u16) -> bool {
-    let addr: SocketAddr = ([127, 0, 0, 1], port).into();
-    TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok()
+/// Is anything serving the analyzer daemon's socket?
+async fn daemon_serving() -> Result<bool> {
+    let socket = trusty_analyze::service::socket_path()?;
+    Ok(trusty_common::uds::socket_is_serving(&socket, Duration::from_millis(500)).await)
 }
 
 /// Install and start the background daemon (idempotent).
 ///
 /// Why: gives users a one-command "make the daemon run forever" path.
-/// What: if the port already answers, returns early. Otherwise installs the
-/// launchd service (when not already installed) and polls `/health` for up to
+/// What: if the socket already answers, returns early. Otherwise installs the
+/// launchd service (when not already installed) and polls the socket for up to
 /// 10 s.
 /// Test: on a machine with the daemon already up, prints "already running" and
 /// exits 0; the launchd path is macOS-only and verified manually.
 async fn setup_daemon() -> Result<()> {
-    if port_reachable(DEFAULT_PORT) {
-        println!(
-            "{} daemon already running on port {DEFAULT_PORT}",
-            "✓".green()
-        );
+    if daemon_serving().await? {
+        println!("{} daemon already running", "✓".green());
         return Ok(());
     }
 
@@ -306,7 +307,7 @@ async fn setup_daemon() -> Result<()> {
         if !plist.exists() {
             service_install()?;
         } else {
-            // Plist exists but the port is down — (re)load it.
+            // Plist exists but nothing is serving — (re)load it.
             let status = std::process::Command::new("launchctl")
                 .arg("load")
                 .arg(&plist)
@@ -317,25 +318,13 @@ async fn setup_daemon() -> Result<()> {
             }
         }
 
-        // Poll /health for up to 10 s.
-        // #4392: loopback target — an exported HTTP_PROXY would otherwise make
-        // this poll time out against a daemon that started correctly.
-        let client = trusty_common::http_client::loopback_client_builder()
-            .build()
-            .context("build health-poll client")?;
-        let url = format!("http://127.0.0.1:{DEFAULT_PORT}/health");
+        // Poll the socket for up to 10 s. #4392's HTTP_PROXY hazard is gone
+        // with the HTTP client: a Unix socket has no proxy to be routed through.
         for _ in 0..20 {
             tokio::time::sleep(Duration::from_millis(500)).await;
-            if let Ok(resp) = client
-                .get(&url)
-                .timeout(Duration::from_secs(2))
-                .send()
-                .await
-            {
-                if resp.status().is_success() {
-                    println!("{} daemon installed and healthy", "✓".green());
-                    return Ok(());
-                }
+            if daemon_serving().await? {
+                println!("{} daemon installed and serving", "✓".green());
+                return Ok(());
             }
         }
         println!(
@@ -429,6 +418,13 @@ mod tests {
         assert!(CLAUDE_MPM_AGENT.contains("name: trusty-analyzer"));
         assert!(CLAUDE_MPM_AGENT.contains("review_github_pr"));
         assert!(CLAUDE_MPM_SKILL.contains("# trusty-analyzer skill"));
-        assert!(CLAUDE_MPM_SKILL.contains("POST /review/github-pr"));
+        // #6287: the skill named `POST /review/github-pr` until the daemon
+        // moved to JSON-RPC over a socket. It names the method now, so an agent
+        // reading it is told something that exists.
+        assert!(CLAUDE_MPM_SKILL.contains("analyze.review_github_pr"));
+        assert!(
+            !CLAUDE_MPM_SKILL.contains("http://127.0.0.1:7879"),
+            "the skill must not send an agent at a port this daemon no longer binds"
+        );
     }
 }

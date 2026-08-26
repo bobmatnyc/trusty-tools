@@ -164,35 +164,38 @@ fn config_search_url_default() {
     );
 }
 
-#[test]
-fn config_analyzer_url_default() {
-    let config = ReviewConfig::from_env_and_file(None, None);
-    assert!(
-        config.analyzer_url.starts_with("http"),
-        "analyzer_url must start with http: {}",
-        config.analyzer_url
-    );
-}
-
-/// Why (#6038): the default named `localhost`, which macOS resolves `::1`
-/// first, while `trusty-analyze serve` binds `127.0.0.1` only — so a stock
-/// `--analyze` run could not reach a healthy daemon and every report degraded
-/// to scan until the operator exported the variable by hand. The default must
-/// name an address, not a hostname whose resolution decides whether the fetch
-/// works.
-/// What: asserts the constant is the literal IPv4 loopback, and that an
-/// unset `PR_INTELLIGENCE_ANALYZER_URL` loads exactly it.
+/// Why (#6287, ADR-0032): the default is no longer a written-down address but a
+/// DERIVED path, and the whole point of deriving it is that this crate and the
+/// daemon cannot disagree about it. Asserting a literal here would put the
+/// hand-synced constant straight back — so this asserts the AGREEMENT instead:
+/// the config default is exactly what `trusty_common::daemon_socket_path`
+/// answers for `trusty-analyze`, which is the call the daemon binds through.
+///
+/// Its predecessor, `analyzer_url_defaults_to_the_literal_loopback_address`,
+/// pinned the #6038 fix — a `localhost` default that macOS resolved to `::1`
+/// while the daemon bound `127.0.0.1` only. Deriving the path removes that whole
+/// class of bug rather than re-pinning it: there is no address left to spell
+/// two ways.
+/// What: asserts the derived default, and that an unset
+/// `PR_INTELLIGENCE_ANALYZER_SOCKET` loads exactly it.
 /// Test: This is the test.
 #[test]
-fn analyzer_url_defaults_to_the_literal_loopback_address() {
+fn analyzer_socket_defaults_to_the_derived_path() {
+    let derived = trusty_common::daemon_socket_path("trusty-analyze")
+        .expect("the data directory resolves on a test machine");
     assert_eq!(
-        crate::config::DEFAULT_ANALYZER_URL,
-        "http://127.0.0.1:7879",
-        "the default must not depend on hostname resolution"
+        crate::config::default_analyzer_socket(),
+        derived,
+        "the default must be the shared derivation, not a second copy of it"
     );
-    if std::env::var("PR_INTELLIGENCE_ANALYZER_URL").is_err() {
+    assert!(
+        derived.ends_with("trusty-analyze.sock"),
+        "the derived path must name the daemon's socket: {}",
+        derived.display()
+    );
+    if std::env::var("PR_INTELLIGENCE_ANALYZER_SOCKET").is_err() {
         let config = ReviewConfig::from_env_and_file(None, None);
-        assert_eq!(config.analyzer_url, crate::config::DEFAULT_ANALYZER_URL);
+        assert_eq!(config.analyzer_socket, derived);
     }
 }
 
