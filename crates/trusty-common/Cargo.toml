@@ -10,7 +10,11 @@ name = "trusty-common"
 # 0.44.0 (#6277): minor — the new public `uds::server` module is additive, and
 # nothing existing was removed or changed. Under Cargo's 0.x rule a MINOR bump
 # is what a published crate owes a new public module.
-version = "0.44.0"
+# 0.44.1 (#6286): patch — `uds::server` gains the `RpcFallback` trait and
+# `RpcRouter::fallback`. Both are additions inside an existing module: no public
+# item was removed or changed, and no existing trait gained a method, so nothing
+# here breaks a consumer.
+version = "0.44.1"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

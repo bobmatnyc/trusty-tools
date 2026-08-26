@@ -13,7 +13,9 @@
 //! [`RpcRouter::dispatch`] parses one frame, checks the envelope, looks up the
 //! method, and returns the response frame to write — every failure as a coded
 //! JSON-RPC error rather than a dropped connection, so a drifted client reads
-//! the reason instead of a transport failure.
+//! the reason instead of a transport failure. [`RpcFallback`] is the catch-all
+//! a service with its own generic dispatcher mounts instead of naming every
+//! method (#6286).
 //!
 //! Dispatch is `async` and takes `&self`, so one router serves every connection
 //! concurrently; nothing here holds a lock across a handler call.
@@ -44,6 +46,40 @@ use super::wire::{
 pub trait RpcMethod: Send + Sync + 'static {
     /// Run this method against one decoded `params` payload.
     async fn call(&self, params: serde_json::Value) -> Result<serde_json::Value, RpcError>;
+}
+
+/// The catch-all consulted when no registered method matches (#6286).
+///
+/// Why: a daemon that already owns a transport-agnostic dispatcher over
+/// `(method, params)` — `trusty-memory`'s `transport::rpc::dispatch` is the
+/// case this exists for — would otherwise have to re-register its ~75 methods
+/// one at a time to mount on an [`RpcRouter`]. Registering the same table twice
+/// is exactly the silent-drift risk the workspace's common-entry-point rule
+/// exists to prevent, so the router grows a pass-through instead.
+/// What: takes the method NAME as well as the params, because the fallback is
+/// the thing that has to decide what the name means. Object-safe, so a router
+/// holds it behind `Arc<dyn RpcFallback>` alongside its typed methods.
+///
+/// A fallback never sees a method the router itself serves: [`dispatch`]
+/// consults it only after the [`BTreeMap`] lookup misses, so a name registered
+/// with [`RpcRouter::method`] wins and a service can override one method of its
+/// own dispatcher by registering it. An error the fallback returns becomes the
+/// response's error half verbatim, the same as [`RpcMethod`]'s — a fallback
+/// that refuses answers with a reason rather than dropping the connection.
+///
+/// [`dispatch`]: RpcRouter::dispatch
+///
+/// Test: `dispatch_routes_an_unregistered_method_to_the_fallback`,
+/// `dispatch_prefers_a_registered_method_over_the_fallback`,
+/// `dispatch_maps_a_fallback_error_to_an_rpc_error_response`.
+#[async_trait]
+pub trait RpcFallback: Send + Sync + 'static {
+    /// Run `method` against one decoded `params` payload.
+    async fn call(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, RpcError>;
 }
 
 /// Adapter behind [`typed_method`]; `PhantomData<fn(Req) -> Resp>` keeps the
@@ -112,12 +148,16 @@ where
 #[derive(Default)]
 pub struct RpcRouter {
     methods: BTreeMap<String, Arc<dyn RpcMethod>>,
+    fallback: Option<Arc<dyn RpcFallback>>,
 }
 
 impl std::fmt::Debug for RpcRouter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `method_names` alone reads as "serves nothing" for a router that is
+        // all fallback, so the flag is part of what this value is.
         f.debug_struct("RpcRouter")
             .field("methods", &self.method_names().collect::<Vec<_>>())
+            .field("fallback", &self.fallback.is_some())
             .finish()
     }
 }
@@ -149,7 +189,28 @@ impl RpcRouter {
         self.method(name, typed_method::<Req, Resp, F, Fut>(call))
     }
 
+    /// Serve every unregistered method through `fallback`, replacing any
+    /// previous one (#6286).
+    ///
+    /// Why: mounts a service's own generic dispatcher without restating its
+    /// method table here — see [`RpcFallback`] for what that buys and why the
+    /// name is passed through.
+    /// What: a router with a fallback answers
+    /// [`RpcError::method_not_found`] for nothing; every name the [`BTreeMap`]
+    /// misses goes to `fallback` instead. Registered methods still win.
+    /// Test: `dispatch_routes_an_unregistered_method_to_the_fallback`,
+    /// `dispatch_prefers_a_registered_method_over_the_fallback`.
+    pub fn fallback(mut self, fallback: impl RpcFallback) -> Self {
+        self.fallback = Some(Arc::new(fallback));
+        self
+    }
+
     /// The registered method names, in sorted order.
+    ///
+    /// Names a [`fallback`] serves are not listed — the router does not know
+    /// them, which is the point of the seam.
+    ///
+    /// [`fallback`]: RpcRouter::fallback
     pub fn method_names(&self) -> impl Iterator<Item = &str> {
         self.methods.keys().map(String::as_str)
     }
@@ -157,20 +218,28 @@ impl RpcRouter {
     /// Decide the response for one request frame.
     ///
     /// What, in order: parse the frame; refuse a `jsonrpc` that is not
-    /// [`JSONRPC_VERSION`]; refuse a method no handler is registered for; then
-    /// run the handler. A parse failure answers with a `null` id because there
-    /// was no readable id to echo — every other arm echoes the request's.
+    /// [`JSONRPC_VERSION`]; look the method up; run the handler. A name no
+    /// handler is registered for goes to the [`fallback`] if one is mounted and
+    /// is refused with [`RpcError::method_not_found`] otherwise. A parse failure
+    /// answers with a `null` id because there was no readable id to echo —
+    /// every other arm echoes the request's.
     ///
     /// Never returns `Err`: a failure to serve is itself a response frame, so
     /// the caller always has something to write back. Hanging up instead would
-    /// give the client a transport error where a reason exists.
+    /// give the client a transport error where a reason exists. A fallback's
+    /// error is no exception — it becomes this frame's error half verbatim.
     ///
     /// Test: `dispatch_routes_to_the_registered_handler`,
     /// `dispatch_reports_method_not_found_for_an_unregistered_method`,
     /// `dispatch_rejects_an_unparseable_frame`,
     /// `dispatch_rejects_a_wrong_jsonrpc_version`,
     /// `dispatch_reports_invalid_params_for_an_undecodable_payload`,
-    /// `dispatch_propagates_a_handler_error_verbatim`.
+    /// `dispatch_propagates_a_handler_error_verbatim`,
+    /// `dispatch_routes_an_unregistered_method_to_the_fallback`,
+    /// `dispatch_prefers_a_registered_method_over_the_fallback`,
+    /// `dispatch_maps_a_fallback_error_to_an_rpc_error_response`.
+    ///
+    /// [`fallback`]: RpcRouter::fallback
     pub async fn dispatch(&self, frame: &[u8]) -> RpcResponse {
         let request: RpcRequest = match serde_json::from_slice(frame) {
             Ok(r) => r,
@@ -196,11 +265,7 @@ impl RpcRouter {
         }
 
         let Some(handler) = self.methods.get(&request.method) else {
-            let known: Vec<&str> = self.method_names().collect();
-            return RpcResponse::failure(
-                request.id,
-                RpcError::method_not_found(&request.method, &known),
-            );
+            return self.dispatch_unregistered(request).await;
         };
 
         // Cloned out of the map before the await so the borrow of `self.methods`
@@ -210,6 +275,40 @@ impl RpcRouter {
         match handler.call(request.params).await {
             Ok(result) => RpcResponse::success(request.id, result),
             Err(error) => RpcResponse::failure(request.id, error),
+        }
+    }
+
+    /// The method-lookup miss: hand the request to the fallback, or refuse it.
+    ///
+    /// Split out of [`dispatch`] so the `let … else` arm stays one line and the
+    /// two answers a miss can have sit next to each other.
+    ///
+    /// Test: `dispatch_routes_an_unregistered_method_to_the_fallback`,
+    /// `dispatch_maps_a_fallback_error_to_an_rpc_error_response`,
+    /// `dispatch_reports_method_not_found_for_an_unregistered_method`.
+    ///
+    /// [`dispatch`]: RpcRouter::dispatch
+    async fn dispatch_unregistered(&self, request: RpcRequest) -> RpcResponse {
+        let Some(fallback) = self.fallback.as_ref() else {
+            let known: Vec<&str> = self.method_names().collect();
+            return RpcResponse::failure(
+                request.id,
+                RpcError::method_not_found(&request.method, &known),
+            );
+        };
+
+        // Cloned out before the await for the same reason the method arm does
+        // it: nothing borrowed from `self` is held across a handler call.
+        let fallback = Arc::clone(fallback);
+        let RpcRequest {
+            id, method, params, ..
+        } = request;
+        match fallback.call(&method, params).await {
+            Ok(result) => RpcResponse::success(id, result),
+            // The fallback owns its own refusal codes, so its error crosses the
+            // wire unrewritten — a downgrade to a generic internal error would
+            // cost the caller the reason it was given.
+            Err(error) => RpcResponse::failure(id, error),
         }
     }
 }
