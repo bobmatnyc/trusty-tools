@@ -1,0 +1,3 @@
+Changed
+- The monitor TUI's activity log polls `memory.activity` on its 2-second tick instead of subscribing to the daemon's `/sse` stream, which #6286 retired. An event appears on the next tick rather than as it happens, and the first read seeds the cursor rather than replaying history into the log (`MemoryClient::recent_events`)
+- The monitor's palace table asks `palace_list` for the ids and then `memory.palace_get` per palace, because no method answers the bulk list with counts. The rows are real measurements rather than the placeholder zeros the peek-based route reported for an unresident palace (#4682); the first poll pays one cold open per palace

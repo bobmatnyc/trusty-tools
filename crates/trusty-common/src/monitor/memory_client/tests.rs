@@ -1,105 +1,115 @@
 //! Unit tests for the trusty-memory client module.
 //!
-//! Why: live endpoints are covered by the trusty-memory daemon suite;
-//! these tests cover URL helpers and all JSON-projection functions
-//! without requiring a running daemon.
-//! What: unit tests for `normalize_url`, `resolve_memory_url`,
-//! `MemoryClient` construction, and all `parse_*` / `creator_label`
-//! functions.
+//! Why: live behaviour is covered by the trusty-memory daemon suite; these
+//! tests cover socket resolution, the activity-poll cursor, and every
+//! JSON-projection function without requiring a running daemon.
+//! What: unit tests for `resolve_memory_socket`, `MemoryClient` construction,
+//! `project_events`, and all `parse_*` / `creator_label` functions.
 //! Test: this file is the test coverage.
 
 #[cfg(test)]
 #[allow(clippy::module_inception)]
 mod tests {
     use super::super::client::MemoryClient;
+    use super::super::client::project_events;
     use super::super::parsers::{
         creator_label, parse_drawers, parse_dream_stats, parse_memory_details, parse_memory_event,
-        parse_palace_detail, parse_palaces, parse_recall_hits,
+        parse_palace_detail, parse_recall_hits,
     };
-    use super::super::types::{DEFAULT_MEMORY_URL, normalize_url, resolve_memory_url};
+    use super::super::types::resolve_memory_socket;
     use super::super::types::{
         DRAWER_SNIPPET_FALLBACK_MAX, DreamStats, MemoryEvent, NO_CREATOR_LABEL,
     };
 
+    /// Why (#6286): the client dials a derived socket rather than a base URL,
+    /// and the poller re-resolves it every tick, so both the stored path and
+    /// the setter have to hold what they were given.
+    /// Test: this test.
     #[test]
-    fn default_memory_url_is_local() {
-        assert!(DEFAULT_MEMORY_URL.starts_with("http://127.0.0.1"));
+    fn memory_client_stores_its_socket() {
+        let client = MemoryClient::new("/tmp/a.sock");
+        assert_eq!(client.socket(), std::path::Path::new("/tmp/a.sock"));
     }
 
+    /// Why: a `TRUSTY_MEMORY_SOCKET` or data-dir change between ticks moves the
+    /// path under a running dashboard.
+    /// Test: this test.
     #[test]
-    fn normalize_url_adds_scheme() {
-        assert_eq!(normalize_url("127.0.0.1:7070"), "http://127.0.0.1:7070");
-        assert_eq!(
-            normalize_url("http://127.0.0.1:7070"),
-            "http://127.0.0.1:7070"
+    fn memory_client_repoints() {
+        let mut client = MemoryClient::new("/tmp/a.sock");
+        client.set_socket("/tmp/b.sock");
+        assert_eq!(client.socket(), std::path::Path::new("/tmp/b.sock"));
+    }
+
+    /// Why (#6286): the monitor and the daemon must derive the SAME path, and
+    /// nothing publishes it — so a resolution that answered a bare filename or
+    /// an empty path would fail only at dial time.
+    /// What: asserts the resolved path is absolute and names the daemon.
+    /// Test: this test.
+    #[test]
+    fn resolve_memory_socket_names_the_daemon_socket() {
+        let socket = resolve_memory_socket().expect("resolve the socket path");
+        assert!(socket.is_absolute(), "got {}", socket.display());
+        assert!(
+            socket.to_string_lossy().contains("trusty-memory"),
+            "got {}",
+            socket.display()
         );
     }
 
+    /// Why (#6286): the activity poll replaced the `/sse` subscription, and the
+    /// cursor is the only part that can be wrong silently — a cursor that fails
+    /// to advance replays every event on every tick, and one that advances past
+    /// unread rows drops them. Ordering matters too: the daemon answers
+    /// newest-first and the activity log renders oldest-first.
+    /// What: feeds a two-row page against a cursor below both, then re-feeds it
+    /// against the returned cursor.
+    /// Test: this test.
     #[test]
-    fn memory_client_stores_base_url() {
-        let client = MemoryClient::new("http://127.0.0.1:7070");
-        assert_eq!(client.base_url(), "http://127.0.0.1:7070");
-    }
-
-    #[test]
-    fn memory_client_repoints() {
-        let mut client = MemoryClient::new("http://127.0.0.1:7070");
-        client.set_base_url("http://127.0.0.1:8080");
-        assert_eq!(client.base_url(), "http://127.0.0.1:8080");
-    }
-
-    #[test]
-    fn resolve_memory_url_returns_http_url() {
-        let url = resolve_memory_url();
-        assert!(url.starts_with("http://") || url.starts_with("https://"));
-    }
-
-    #[test]
-    fn palace_list_accepts_array_and_object_shapes() {
-        // Bare-array shape.
-        let arr = serde_json::json!([
-            {"id": "p1", "name": "default", "vector_count": 8400},
-            {"id": "p2", "name": "work", "vectors": 0},
-        ]);
-        let rows = parse_palaces(&arr);
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].id, "p1");
-        assert_eq!(rows[0].vector_count, 8400);
-        // The `vectors` alias is honoured.
-        assert_eq!(rows[1].name, "work");
-
-        // Object-wrapped shape.
-        let obj = serde_json::json!({
-            "palaces": [{"id": "p3", "name": "notes", "total_vectors": 12}],
+    fn recent_events_keeps_only_rows_past_the_cursor() {
+        let page = serde_json::json!({
+            "entries": [
+                {"id": 9, "payload": {"type": "palace_created", "name": "newer"}},
+                {"id": 8, "payload": {"type": "palace_created", "name": "older"}},
+            ],
+            "total": 2, "limit": 100, "offset": 0,
         });
-        let rows = parse_palaces(&obj);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].vector_count, 12);
 
-        // An unexpected shape yields no rows rather than panicking.
-        assert!(parse_palaces(&serde_json::json!("nonsense")).is_empty());
+        let (cursor, events) = project_events(&page, 7);
+        assert_eq!(cursor, 9);
+        assert_eq!(
+            events,
+            vec![
+                MemoryEvent::PalaceCreated {
+                    name: "older".to_string()
+                },
+                MemoryEvent::PalaceCreated {
+                    name: "newer".to_string()
+                },
+            ],
+            "oldest first, both rows past the cursor"
+        );
+
+        let (cursor, events) = project_events(&page, cursor);
+        assert_eq!(cursor, 9, "an unchanged page must not move the cursor");
+        assert!(events.is_empty(), "nothing past the cursor replays");
     }
 
-    /// Why (issue #4682): since #4640 the bulk list route returns `cached:
-    /// false` plus all-zero counts for any palace whose handle is not
-    /// resident — 2,180 of 2,183 rows on a live daemon. Projecting those zeros
-    /// as measurements is what made the /ui header read `0 drawers` above a
-    /// "Drawers (1)" list.
+    /// Why (issue #4682): `cached: false` rows carry placeholder zeros — 2,180
+    /// of 2,183 rows on a live daemon — and projecting those as measurements is
+    /// what made the header read `0 drawers` above a "Drawers (1)" list. #6286
+    /// moved the assertion from the retired bulk-list projection onto the
+    /// single-palace one, which is the only shape the socket answers.
     /// What: asserts an uncached row is flagged `counts_unknown` and every
     /// accessor returns `None`, while a `cached: true` row keeps real counts.
     /// Test: this test.
     #[test]
-    fn parse_palaces_marks_uncached_rows_unknown() {
-        let raw = serde_json::json!([
-            {"id": "cold", "name": "cold", "vector_count": 0, "drawer_count": 0,
-             "kg_triple_count": 0, "node_count": 0, "edge_count": 0, "cached": false},
-            {"id": "warm", "name": "warm", "vector_count": 912, "drawer_count": 38,
-             "kg_triple_count": 122, "node_count": 9, "edge_count": 8, "cached": true},
-        ]);
-        let rows = parse_palaces(&raw);
-        assert_eq!(rows.len(), 2);
-
-        let cold = &rows[0];
+    fn parse_palace_detail_marks_uncached_rows_unknown() {
+        let cold = parse_palace_detail(&serde_json::json!({
+            "id": "cold", "name": "cold", "vector_count": 0, "drawer_count": 0,
+            "kg_triple_count": 0, "node_count": 0, "edge_count": 0, "cached": false
+        }))
+        .expect("projects");
         assert!(cold.counts_unknown, "cached:false marks the counts unknown");
         assert_eq!(cold.vectors(), None, "a placeholder 0 must not read as 0");
         assert_eq!(cold.drawers(), None);
@@ -107,7 +117,11 @@ mod tests {
         assert_eq!(cold.nodes(), None);
         assert_eq!(cold.edges(), None);
 
-        let warm = &rows[1];
+        let warm = parse_palace_detail(&serde_json::json!({
+            "id": "warm", "name": "warm", "vector_count": 912, "drawer_count": 38,
+            "kg_triple_count": 122, "node_count": 9, "edge_count": 8, "cached": true
+        }))
+        .expect("projects");
         assert!(!warm.counts_unknown);
         assert_eq!(warm.vectors(), Some(912));
         assert_eq!(warm.drawers(), Some(38));
@@ -123,17 +137,19 @@ mod tests {
     /// than unknown.
     /// Test: this test.
     #[test]
-    fn parse_palaces_trusts_counts_when_cached_flag_absent() {
-        let legacy = serde_json::json!([{"id": "p1", "name": "p1", "vector_count": 8400}]);
-        let rows = parse_palaces(&legacy);
-        assert!(!rows[0].counts_unknown, "absent flag != not loaded");
-        assert_eq!(rows[0].vectors(), Some(8400));
+    fn parse_palace_detail_trusts_counts_when_cached_flag_absent() {
+        let legacy =
+            parse_palace_detail(&serde_json::json!({"id": "p1", "name": "p1", "vector_count": 8400}))
+                .expect("projects");
+        assert!(!legacy.counts_unknown, "absent flag != not loaded");
+        assert_eq!(legacy.vectors(), Some(8400));
 
-        let empty_but_loaded =
-            serde_json::json!([{"id": "p2", "name": "p2", "vector_count": 0, "cached": true}]);
-        let rows = parse_palaces(&empty_but_loaded);
+        let empty_but_loaded = parse_palace_detail(
+            &serde_json::json!({"id": "p2", "name": "p2", "vector_count": 0, "cached": true}),
+        )
+        .expect("projects");
         assert_eq!(
-            rows[0].vectors(),
+            empty_but_loaded.vectors(),
             Some(0),
             "an empty loaded palace is a known zero, not unknown"
         );
@@ -166,20 +182,6 @@ mod tests {
         assert!(parse_palace_detail(&serde_json::json!([])).is_none());
         assert!(parse_palace_detail(&serde_json::json!("nonsense")).is_none());
         assert!(parse_palace_detail(&serde_json::Value::Null).is_none());
-    }
-
-    /// Why (issue #4682): the single-palace route is the whole point of the
-    /// fix; asserting the URL keeps a future refactor from quietly pointing it
-    /// back at the bulk list.
-    /// What: asserts the built URL is `<base>/api/v1/palaces/<id>`.
-    /// Test: this test.
-    #[test]
-    fn fetch_palace_url_is_the_single_palace_route() {
-        let client = MemoryClient::new("http://127.0.0.1:7070");
-        assert_eq!(
-            client.palace_url("t-tmpugxp9v"),
-            "http://127.0.0.1:7070/api/v1/palaces/t-tmpugxp9v"
-        );
     }
 
     #[test]

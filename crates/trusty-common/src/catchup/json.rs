@@ -303,7 +303,7 @@ pub async fn generate_catchup_json(opts: &CatchupOptions) -> CatchupJson {
 
     let recent_memory = if let (true, Some(palace_id)) = (opts.include_palace, palace_id.as_deref())
     {
-        match fetch_recent_palace_drawers(&opts.memory_url, palace_id, opts.drawer_limit, watermark)
+        match fetch_recent_palace_drawers(&opts.memory_socket, palace_id, opts.drawer_limit, watermark)
             .await
         {
             Some(drawers) => drawers
@@ -388,7 +388,7 @@ mod tests {
 
         let opts = CatchupOptions {
             project_dir: tmp.path().to_path_buf(),
-            memory_url: "http://127.0.0.1:19999".to_string(),
+            memory_socket: std::path::PathBuf::from("/nonexistent/catchup-test.sock"),
             include_git: true,
             include_palace: true,
             git_limit: 50,
@@ -433,7 +433,7 @@ mod tests {
 
         let opts = CatchupOptions {
             project_dir: tmp.path().to_path_buf(),
-            memory_url: "http://127.0.0.1:19999".to_string(),
+            memory_socket: std::path::PathBuf::from("/nonexistent/catchup-test.sock"),
             include_git: true,
             include_palace: false,
             git_limit: 50,
@@ -498,7 +498,7 @@ mod tests {
 
         let opts = CatchupOptions {
             project_dir: tmp.path().to_path_buf(),
-            memory_url: "http://127.0.0.1:19999".to_string(),
+            memory_socket: std::path::PathBuf::from("/nonexistent/catchup-test.sock"),
             include_git: false,
             include_palace: false,
             git_limit: 50,
@@ -557,7 +557,7 @@ mod tests {
 
         let opts = CatchupOptions {
             project_dir: tmp.path().to_path_buf(),
-            memory_url: "http://127.0.0.1:19999".to_string(),
+            memory_socket: std::path::PathBuf::from("/nonexistent/catchup-test.sock"),
             include_git: false,
             include_palace: false,
             git_limit: 50,

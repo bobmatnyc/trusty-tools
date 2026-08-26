@@ -40,7 +40,7 @@ pub use activity::{
     palace_activity_state, spinner_tick,
 };
 pub use event_loop::apply_memory_event;
-pub use render::{render, run_with_url};
+pub use render::{render, run_with_socket};
 pub use state::{
     DRAWER_PAGE_SIZE, DREAM_BACKOFF_INITIAL, DREAM_BACKOFF_MAX, DrawerListState, DreamBackoff,
     MemoryFocus, MemoryTuiState, RECALL_TOP_K,
@@ -57,13 +57,13 @@ pub use view::{
 ///
 /// Why: the single entry point the `monitor tui` subcommand of `trusty-memory`
 /// calls.
-/// What: resolves the daemon URL from the service lock file and delegates to
-/// [`run_with_url`].
+/// What: derives the daemon's socket path and delegates to
+/// [`run_with_socket`].
 /// Test: the pure pieces are unit-tested; this thin glue is exercised by
 /// launching the UI.
 pub async fn run() -> anyhow::Result<()> {
-    use crate::monitor::memory_client::resolve_memory_url;
-    run_with_url(resolve_memory_url()).await
+    use crate::monitor::memory_client::resolve_memory_socket;
+    run_with_socket(resolve_memory_socket()?).await
 }
 
 #[cfg(test)]

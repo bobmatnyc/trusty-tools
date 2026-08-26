@@ -20,7 +20,12 @@ name = "trusty-common"
 # `RpcRouter` methods. `RpcRequest` is deliberately untouched — the `"stream"`
 # opt-in is read through a private probe struct rather than a new public field,
 # which would have made an additive feature a 0.x break.
-version = "0.44.2"
+# #6286 replaces `memory_rpc`'s whole public surface: `resolve_memory_base_url`,
+# `resolve_memory_base_url_or_unreachable`, `TRUSTY_MEMORY_URL_ENV` and
+# `call_memory_tool_at`'s `&str` base-URL parameter are gone, and
+# `CatchupOptions::memory_url` becomes `memory_socket: PathBuf`. Cargo's 0.x rule
+# puts a breaking change in the MINOR position.
+version = "0.45.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -327,9 +332,10 @@ catchup = ["dep:rusqlite", "memory-rpc", "palace-resolve"]
 # Enables the `server` module: standard axum middleware stack (CORS, trace,
 # gzip) and a fast-fail reqwest client for daemon-to-daemon calls.
 axum-server = ["dep:axum", "dep:tower-http"]
-# Enables the `memory_rpc` module: discovery-based JSON-RPC client for the
-# trusty-memory daemon. Pulls in no extra deps — `reqwest`, `serde_json` and
-# `anyhow` are already unconditional here.
+# Enables the `memory_rpc` module: the one JSON-RPC client for the
+# trusty-memory daemon's Unix socket. Implies `uds` (#6286) — the daemon retired
+# its HTTP listener, so the framing and the envelope now come from that module
+# rather than from `reqwest`.
 #
 # This is what remains of the former `mcp` feature. ADR-0040 (#5803) moved the
 # protocol primitives — `Request`, `Response`, `error_codes`,
@@ -337,7 +343,7 @@ axum-server = ["dep:axum", "dep:tower-http"]
 # `ensure_daemon_up`, `ensure_daemon_up_single_flight` — into the `trusty-mcp`
 # crate. A consumer that wants those depends on `trusty-mcp` directly; there is
 # deliberately no re-export here, so `trusty_common::mcp` no longer exists.
-memory-rpc = []
+memory-rpc = ["uds"]
 # Enables the `search_index` module: the shared best-effort "ensure this project
 # is indexed by trusty-search" entry point (issues #1373 / #1908), used by
 # trusty-mpm at session launch and trusty-code at task start. Adds no new
@@ -533,10 +539,12 @@ memory-core = [
 # Enables the `monitor` module: the unified ratatui dashboard for the
 # trusty-search and trusty-memory daemons (formerly the `trusty-monitor-tui`
 # crate, and before that the standalone `trusty-monitor` binary). Pulls in
-# ratatui + crossterm; the daemon HTTP clients reuse the `reqwest` already
-# required. Consumed via `trusty_common::monitor::run()` by the
-# `monitor tui` subcommand of `trusty-search` and `trusty-memory`.
-monitor-tui = ["dep:ratatui", "dep:crossterm"]
+# ratatui + crossterm; the search client reuses the `reqwest` already required.
+# Implies `memory-rpc` since #6286: the memory half of the dashboard dials the
+# daemon's Unix socket through `memory_rpc` rather than owning a second client.
+# Consumed via `trusty_common::monitor::run()` by the `monitor tui` subcommand
+# of `trusty-search` and `trusty-memory`.
+monitor-tui = ["dep:ratatui", "dep:crossterm", "memory-rpc"]
 # Enables the `embedder_client` module: HTTP client trait + wire types +
 # InProcessEmbedderClient + RemoteEmbedderClient for the `trusty-embedderd`
 # standalone process (issue #110 Phase 1). Formerly the `trusty-embedder-client`

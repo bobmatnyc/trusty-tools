@@ -4,7 +4,7 @@
 //! free of projection noise and makes every parser independently unit-testable
 //! without a live daemon.
 //! What: free functions that accept raw `serde_json::Value` payloads from the
-//! memory daemon's REST endpoints and return typed domain values.
+//! memory daemon's JSON-RPC results and return typed domain values.
 //! Test: each parser has a dedicated test in `tests.rs`.
 
 use crate::monitor::dashboard::PalaceRow;
@@ -112,33 +112,7 @@ pub fn parse_memory_event(value: &serde_json::Value) -> Option<MemoryEvent> {
     }
 }
 
-/// Project a palace-list JSON payload into [`PalaceRow`]s.
-///
-/// Why: the trusty-memory palace endpoint has shipped both a bare-array shape
-/// and an object-wrapped shape across versions; centralising the parsing keeps
-/// the client resilient to either and makes it unit-testable without a daemon.
-/// What: accepts a JSON array of palace objects, or an object carrying a
-/// `palaces` array, and returns the projected rows; any other shape yields an
-/// empty list.
-/// Test: `palace_list_accepts_array_and_object_shapes`,
-/// `parse_palaces_marks_uncached_rows_unknown`.
-pub fn parse_palaces(raw: &serde_json::Value) -> Vec<PalaceRow> {
-    let array = match raw {
-        serde_json::Value::Array(items) => items.clone(),
-        serde_json::Value::Object(obj) => match obj.get("palaces") {
-            Some(serde_json::Value::Array(items)) => items.clone(),
-            _ => Vec::new(),
-        },
-        _ => Vec::new(),
-    };
-    array
-        .into_iter()
-        .filter_map(|v| serde_json::from_value::<PalaceWire>(v).ok())
-        .map(row_from_wire)
-        .collect()
-}
-
-/// Project a single palace object (`GET /api/v1/palaces/{id}`) into a [`PalaceRow`].
+/// Project a single palace object (`memory.palace_get`) into a [`PalaceRow`].
 ///
 /// Why (issue #4682): the single-palace route opens the palace, so its counts
 /// are live — unlike the peek-based list route, whose zeros mean "unknown".
@@ -159,13 +133,13 @@ pub fn parse_palace_detail(raw: &serde_json::Value) -> Option<PalaceRow> {
 
 /// Project one deserialized wire row into a [`PalaceRow`].
 ///
-/// Why: shared by [`parse_palaces`] and [`parse_palace_detail`] so the
+/// Why: shared by [`parse_palace_detail`] and its callers so the
 /// unknown-counts rule (#4682) is applied identically on both routes.
 /// What: copies the fields across and sets `counts_unknown` when the daemon
 /// explicitly reported `cached: false`. An absent flag means a daemon that
 /// predates #4640 and always opened every palace, so its counts are trusted.
-/// Test: `parse_palaces_marks_uncached_rows_unknown`,
-/// `parse_palaces_trusts_counts_when_cached_flag_absent`.
+/// Test: `parse_palace_detail_marks_uncached_rows_unknown`,
+/// `parse_palace_detail_trusts_counts_when_cached_flag_absent`.
 fn row_from_wire(p: PalaceWire) -> PalaceRow {
     PalaceRow {
         id: p.id,

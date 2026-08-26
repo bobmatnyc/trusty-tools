@@ -46,8 +46,9 @@ use self::{
 pub struct CatchupOptions {
     /// The project directory to scan (git repo root).
     pub project_dir: PathBuf,
-    /// Base URL of the trusty-memory daemon.
-    pub memory_url: String,
+    /// Socket the trusty-memory daemon serves on (#6286 — it was a base URL
+    /// until the daemon retired its HTTP listener).
+    pub memory_socket: PathBuf,
     /// Whether to include git commit history.
     pub include_git: bool,
     /// Whether to include palace drawer inspection.
@@ -64,11 +65,10 @@ impl Default for CatchupOptions {
     fn default() -> Self {
         Self {
             project_dir: PathBuf::from("."),
-            // Discovery-first (issue #2030): resolves TRUSTY_MEMORY_URL when
-            // set, else the daemon's actual discovered bound address, else a
-            // guaranteed-unreachable placeholder that fails fast rather than
-            // guessing a fixed (and likely wrong) port.
-            memory_url: crate::memory_rpc::resolve_memory_base_url_or_unreachable(),
+            // #6286: the derived socket path, else a guaranteed-unreachable one
+            // that fails fast — catch-up degrades on an absent daemon rather
+            // than aborting.
+            memory_socket: crate::memory_rpc::resolve_memory_socket_or_unreachable(),
             include_git: true,
             include_palace: true,
             git_limit: 50,
@@ -251,7 +251,7 @@ pub async fn generate_catchup_context(opts: &CatchupOptions) -> String {
         // outcomes must render distinct messages rather than the same
         // "No recent palace activity" line.
         match fetch_recent_palace_drawers(
-            &opts.memory_url,
+            &opts.memory_socket,
             &palace_id,
             opts.drawer_limit,
             watermark,
@@ -402,7 +402,7 @@ mod tests {
         let opts = CatchupOptions {
             project_dir: tmp.path().to_path_buf(),
             // Use a port nobody listens on → fail-open for palace section.
-            memory_url: "http://127.0.0.1:19999".to_string(),
+            memory_socket: PathBuf::from("/nonexistent/catchup-test.sock"),
             include_git: true,
             include_palace: true,
             git_limit: 50,
@@ -427,7 +427,7 @@ mod tests {
         // Should contain the commit we made.
         assert!(context.contains("init"), "commit message should appear");
         // Palace section should gracefully note the daemon is unreachable
-        // (memory_url points at a port nobody listens on) rather than
+        // (memory_socket points at a path nothing serves) rather than
         // conflating it with a genuinely empty result (issue #2030, item 5).
         assert!(
             context.contains("trusty-memory unreachable"),
@@ -442,7 +442,7 @@ mod tests {
 
         let opts = CatchupOptions {
             project_dir: tmp.path().to_path_buf(),
-            memory_url: "http://127.0.0.1:19999".to_string(),
+            memory_socket: PathBuf::from("/nonexistent/catchup-test.sock"),
             include_git: true,
             include_palace: false,
             git_limit: 10,
@@ -462,7 +462,7 @@ mod tests {
 
         let opts = CatchupOptions {
             project_dir: tmp.path().to_path_buf(),
-            memory_url: "http://127.0.0.1:19999".to_string(),
+            memory_socket: PathBuf::from("/nonexistent/catchup-test.sock"),
             include_git: true,
             include_palace: false,
             git_limit: 10,
@@ -486,7 +486,7 @@ mod tests {
 
         let opts = CatchupOptions {
             project_dir: tmp.path().to_path_buf(),
-            memory_url: "http://127.0.0.1:19999".to_string(),
+            memory_socket: PathBuf::from("/nonexistent/catchup-test.sock"),
             include_git: true,
             include_palace: false,
             git_limit: 10,
@@ -685,7 +685,7 @@ mod tests {
     fn opts_for(dir: &Path) -> CatchupOptions {
         CatchupOptions {
             project_dir: dir.to_path_buf(),
-            memory_url: "http://127.0.0.1:19999".to_string(),
+            memory_socket: PathBuf::from("/nonexistent/catchup-test.sock"),
             include_git: true,
             include_palace: false,
             git_limit: 10,

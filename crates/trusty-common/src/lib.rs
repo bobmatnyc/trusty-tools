@@ -229,15 +229,16 @@ pub mod spawn_retry;
 #[cfg(feature = "axum-server")]
 pub mod server;
 
-/// Discovery-based JSON-RPC client for the trusty-memory daemon (issue #2030).
+/// The one client for the trusty-memory daemon's Unix socket (#2030, #6286).
 ///
-/// Why: every trusty-mpm / trusty-code / trusty-common call site that talks to
-/// trusty-memory needs the same "resolve the daemon's address, then POST /rpc"
-/// pair, and hardcoding a port is what this module exists to retire.
-/// What: gated behind the `memory-rpc` feature. It resolves the address
-/// through [`daemon_addr::read_daemon_addr`], which is why ADR-0040 (#5803)
-/// left it here when the protocol primitives moved to the `trusty-mcp` crate —
-/// it was `trusty_common::memory_rpc` before that move.
+/// Why: every trusty-mpm / trusty-code / trusty-agents / monitor-TUI call site
+/// that talks to trusty-memory needs the same "derive the socket, send one
+/// JSON-RPC frame" pair. Three independent clients existed before #6286; this
+/// is what they folded onto.
+/// What: gated behind the `memory-rpc` feature, which implies `uds`. The socket
+/// path comes from [`daemon_addr::daemon_socket_path`], the same call the
+/// daemon makes — which is why ADR-0040 (#5803) left this module here when the
+/// protocol primitives moved to the `trusty-mcp` crate.
 /// Test: `cargo test -p trusty-common --features memory-rpc`.
 #[cfg(feature = "memory-rpc")]
 pub mod memory_rpc;

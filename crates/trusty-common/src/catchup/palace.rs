@@ -3,9 +3,9 @@
 //! Why: surfaces recent memory palace activity as one of three catch-up sources
 //! so the operator is reminded of context stored in trusty-memory during the gap.
 //! What: [`fetch_recent_palace_drawers`] calls the `memory_list` MCP tool via
-//! [`crate::memory_rpc::call_memory_tool_at`] (discovery + JSON-RPC,
-//! issue #2030 — `memory_url` is already resolved by the caller, e.g.
-//! `crate::memory_rpc::resolve_memory_base_url`) and returns parsed
+//! [`crate::memory_rpc::call_memory_tool_at`] over the daemon's Unix socket
+//! (#6286 — `memory_socket` is already resolved by the caller, e.g. by
+//! `crate::memory_rpc::resolve_memory_socket`) and returns parsed
 //! [`DrawerSummary`] values. `memory_list` itself sorts by importance DESC, so
 //! this re-sorts client-side by `created_at` DESC to match the old
 //! `sort=created_desc` REST contract callers depend on. Fail-open: if the
@@ -105,26 +105,29 @@ fn parse_memory_list_result(result: Value) -> anyhow::Result<Vec<DrawerSummary>>
 /// render a distinct "unreachable" message instead of conflating it with a
 /// genuinely empty result (issue #2030, item 5).
 /// What: calls `memory_list` via
-/// [`crate::memory_rpc::call_memory_tool_at`] against `memory_url`
+/// [`crate::memory_rpc::call_memory_tool_at`] against `memory_socket`
 /// (already resolved by the caller). On success, parses + sorts via
 /// [`parse_memory_list_result`] and — when `since` is `Some` — filters
 /// client-side to drawers created after that timestamp. Returns
 /// `Some(drawers)` on success (possibly empty) or `None` on any
-/// transport/HTTP/RPC/parse error (after logging a warning to stderr).
+/// transport/RPC/parse error (after logging a warning to stderr).
 /// Test: `drawer_since_filter`, `drawer_empty_array`,
 /// `live_drawer_fetch` (ignored; requires running daemon).
 pub async fn fetch_recent_palace_drawers(
-    memory_url: &str,
+    memory_socket: &std::path::Path,
     palace_id: &str,
     limit: usize,
     since: Option<DateTime<Utc>>,
 ) -> Option<Vec<DrawerSummary>> {
     let params = json!({ "palace": palace_id, "limit": limit });
     let result =
-        match crate::memory_rpc::call_memory_tool_at(memory_url, "memory_list", params).await {
+        match crate::memory_rpc::call_memory_tool_at(memory_socket, "memory_list", params).await {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("catchup: could not reach trusty-memory at {memory_url}: {e}");
+                eprintln!(
+                    "catchup: could not reach trusty-memory at {}: {e}",
+                    memory_socket.display()
+                );
                 return None;
             }
         };
@@ -226,14 +229,19 @@ mod tests {
     }
 
     /// Live-daemon test: mark #[ignore] so CI doesn't require the daemon running.
-    /// Uses an unreachable port (never bound) rather than any hardcoded daemon
-    /// default — the point of the test is only "does not panic", exercising the
-    /// fail-open `None` path.
+    /// Uses a socket path nothing binds rather than any resolved daemon path —
+    /// the point of the test is only "does not panic", exercising the fail-open
+    /// `None` path.
     #[tokio::test]
     #[ignore]
     async fn live_drawer_fetch() {
-        let drawers =
-            fetch_recent_palace_drawers("http://127.0.0.1:19999", "test-palace", 5, None).await;
+        let drawers = fetch_recent_palace_drawers(
+            std::path::Path::new("/nonexistent/trusty-memory.sock"),
+            "test-palace",
+            5,
+            None,
+        )
+        .await;
         // Just verify it returns without panicking.
         let _ = drawers;
     }

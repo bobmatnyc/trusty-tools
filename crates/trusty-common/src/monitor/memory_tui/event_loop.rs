@@ -3,7 +3,7 @@
 //! Why: keeping the async I/O — daemon polling, SSE subscription, recall
 //! requests, drawer fetches — in a dedicated module separates it from the
 //! pure state and rendering, making both easier to test independently.
-//! What: [`run_loop`] is the inner loop called by `run_with_url`; the other
+//! What: [`run_loop`] is the inner loop called by `run_with_socket`; the other
 //! functions are async helpers for specific operations (polling, recall,
 //! SSE event application, drawer fetches).
 //! Test: the pure pieces (state, log, rendering helpers) are unit-tested;
@@ -12,9 +12,8 @@
 use std::time::Instant;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use tokio::sync::mpsc;
 
-use crate::monitor::memory_client::{MemoryClient, MemoryEvent, RecallHit, resolve_memory_url};
+use crate::monitor::memory_client::{MemoryClient, MemoryEvent, RecallHit, resolve_memory_socket};
 use crate::monitor::memory_tui::MemoryFocus;
 use crate::monitor::memory_tui::MemoryTuiState;
 use crate::monitor::memory_tui::render::render;
@@ -33,15 +32,16 @@ const INPUT_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 ///
 /// Why: keeps the per-poll I/O out of the event loop so the loop can re-poll
 /// on demand as well as on its timer.
-/// What: re-resolves the URL when the daemon is offline, calls `fetch_all`, and
-/// updates the status, aggregate stats, palace list, and selection clamp.
+/// What: re-resolves the socket when the daemon is offline, calls `fetch_all`,
+/// and updates the status, aggregate stats, palace list, and selection clamp.
 /// Test: thin I/O glue; the pure clamp is unit-tested.
 pub(crate) async fn poll_daemon(state: &mut MemoryTuiState, client: &mut MemoryClient) {
     if !state.daemon_status.is_online() {
-        let resolved = resolve_memory_url();
-        if resolved != client.base_url() {
-            client.set_base_url(resolved.clone());
-            state.base_url = resolved;
+        if let Ok(resolved) = resolve_memory_socket()
+            && resolved != client.socket()
+        {
+            state.daemon_addr = resolved.display().to_string();
+            client.set_socket(resolved);
         }
     }
     match client.fetch_all().await {
@@ -268,11 +268,12 @@ async fn fetch_drawer_detail(state: &mut MemoryTuiState, client: &MemoryClient) 
 
 /// The memory TUI event loop: poll, render, handle input, drain SSE events.
 ///
-/// Why: kept separate from `run_with_url` so terminal setup/teardown wraps it
+/// Why: kept separate from `run_with_socket` so terminal setup/teardown wraps it
 /// cleanly.
-/// What: polls the daemon immediately and spawns the `/sse` subscription task,
-/// then renders every frame while polling the keyboard every 50 ms; re-polls on
-/// the 2 s timer and drains SSE events via `try_recv`. `[d]` triggers a dream
+/// What: polls the daemon immediately, then renders every frame while polling
+/// the keyboard every 50 ms; on the 2 s timer it re-polls the status AND reads
+/// the activity rows past its cursor (#6286 — `/sse` is retired, so events
+/// arrive on the tick rather than as they happen). `[d]` triggers a dream
 /// cycle, `[Enter]` runs a recall; `Tab`, arrows, `?`, `q`/`Esc`, and `Ctrl-C`
 /// behave per [`KEY_HINT`].
 /// Test: the pure pieces (state, log, rendering helpers) are unit-tested.
@@ -284,12 +285,11 @@ pub(crate) async fn run_loop<B: ratatui::backend::Backend>(
     poll_daemon(state, client).await;
     let mut last_poll = Instant::now();
 
-    // Subscribe to the daemon's /sse stream on a background task.
-    let (sse_tx, mut sse_rx) = mpsc::channel::<MemoryEvent>(64);
-    let sse_client = client.clone();
-    tokio::spawn(async move {
-        sse_client.sse_stream(sse_tx).await;
-    });
+    // #6286: the activity cursor. `0` means "everything the first read finds is
+    // new"; the first read therefore seeds it rather than replaying the whole
+    // page into the log.
+    let mut event_cursor: u64 = 0;
+    let mut seeded_events = false;
 
     // Issue #184: every time the palace selection changes, refresh the
     // drawer panel. Tracking the previously-shown scope avoids re-fetching
@@ -301,10 +301,6 @@ pub(crate) async fn run_loop<B: ratatui::backend::Backend>(
         // `terminal.draw` requires `state` mutably (the renderer scrolls the
         // palace list); the closure reborrows it for the rest of the loop.
 
-        // Drain any SSE events the subscription task produced since last frame.
-        while let Ok(event) = sse_rx.try_recv() {
-            apply_memory_event(state, event);
-        }
 
         let key = if event::poll(INPUT_POLL)? {
             match event::read()? {
@@ -490,6 +486,18 @@ pub(crate) async fn run_loop<B: ratatui::backend::Backend>(
 
         if last_poll.elapsed() >= REFRESH_INTERVAL {
             poll_daemon(state, client).await;
+            // #6286: the events `/sse` used to push. The first read only seeds
+            // the cursor — replaying a whole page of history into the log the
+            // moment the TUI opens would be a worse answer than an empty log.
+            if let Ok((cursor, events)) = client.recent_events(event_cursor).await {
+                if seeded_events {
+                    for event in events {
+                        apply_memory_event(state, event);
+                    }
+                }
+                seeded_events = true;
+                event_cursor = cursor;
+            }
             // Refresh the drawer page in lock-step with the daemon poll so
             // new drawers appear in the activity panel without needing a
             // key press (issue #184: "Real-time updates when new drawers
