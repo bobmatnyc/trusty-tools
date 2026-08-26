@@ -212,8 +212,8 @@ impl MemoryService {
     /// Only when the registry itself cannot be walked. A palace that will not
     /// open is an `Err` entry, not an error for the whole call.
     ///
-    /// Test: `palaces_list_reports_counts_per_palace`,
-    /// `palaces_list_reports_an_unreadable_palace_rather_than_dropping_it`.
+    /// Test: `rpc_palaces_list_reports_counts_per_palace`,
+    /// `rpc_palaces_list_reports_an_unreadable_palace_rather_than_dropping_it`.
     pub async fn list_palaces_with_counts(
         &self,
     ) -> ServiceResult<Vec<(String, Result<PalaceInfo, String>)>> {

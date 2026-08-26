@@ -227,7 +227,7 @@ pub(super) async fn agent_kg_all_route(
 /// REQUIRED (as upstream requires it) and its absence is a `400` with the same
 /// `{"error": …}` shape the sibling routes use for an invalid name — never a
 /// silent full-graph fetch.
-/// Test: `kg_query_route_forwards_subject`,
+/// Test: `kg_query_route_projects_the_triples_array`,
 /// `kg_query_route_requires_subject`.
 // #4290: per-agent entry onto trusty-memory's subject-scoped triple query.
 pub(super) async fn agent_kg_query_route(

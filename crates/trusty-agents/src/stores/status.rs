@@ -422,7 +422,7 @@ fn failed_stages(body: &serde_json::Value) -> Vec<String> {
 /// distinction the 404 status carried — and everything else is the daemon being
 /// unreachable or in trouble, carrying its own message.
 /// Test: `reports_missing_palace_without_downgrading_index`,
-/// `reports_undiscoverable_memory_daemon`.
+/// `reports_unopenable_palace_as_a_server_error_not_an_absence`.
 async fn probe_palace(
     memory_socket: Option<&std::path::Path>,
     palace: &str,
