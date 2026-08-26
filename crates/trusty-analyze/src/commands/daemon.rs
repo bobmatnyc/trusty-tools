@@ -122,17 +122,50 @@ fn socket_serving(socket: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// The exact argument vector `start` hands the child.
+///
+/// Why: a bare `serve` is the whole contract — the child derives its socket
+/// from the data directory, so passing `--socket` would start a daemon on a
+/// path this parent never probed. Building it in a pure function is what lets
+/// a test assert that without spawning anything, the same way `tga`'s
+/// `audit::analyze::serve_args` does.
+/// Test: `start_spawns_a_bare_serve_so_the_child_derives_the_same_socket`.
+fn serve_args() -> [&'static str; 1] {
+    ["serve"]
+}
+
 /// Spawn the daemon in the background and write its PID.
 ///
 /// Why: gives users a one-command "boot the daemon" path without forcing them
 /// onto launchd. Background detach is done by spawning `serve` on the same
 /// executable and immediately returning.
-/// What: if a PID file exists with a live PID we exit early; otherwise we
-/// `Command::spawn` the current exe with `serve`, write the child PID to
-/// `~/.trusty-analyze/daemon.pid`, and print the socket path.
-/// Test: run `trusty-analyze start` twice — the second invocation reports
-/// "already running" and exits 0.
-pub fn handle_start(socket: &Path) -> Result<()> {
+///
+/// #6287: this took a `socket: &Path` and ignored it when spawning, because the
+/// child derives its own path. A caller that passed anything but the derived
+/// default would have probed one socket and served another, and the "started"
+/// line would have named the socket that was probed rather than the one now
+/// being served. The parameter is gone rather than forwarded: there is one
+/// correct path, and resolving it here is what makes the probe, the spawn and
+/// the message read the same value. [`handle_stop`], [`handle_status`] and
+/// [`handle_doctor`] keep theirs — they only observe a socket, never start one.
+///
+/// What: resolves the derived socket, exits early if a PID file names a live
+/// daemon answering on it, otherwise spawns the current exe with
+/// [`serve_args`], writes the child PID to `~/.trusty-analyze/daemon.pid`, and
+/// prints that same path.
+///
+/// # Errors
+///
+/// When the socket path or the data directory cannot be resolved, or the spawn
+/// fails.
+///
+/// Test: `start_spawns_a_bare_serve_so_the_child_derives_the_same_socket`; run
+/// `trusty-analyze start` twice — the second reports "already running", exit 0.
+pub fn handle_start() -> Result<()> {
+    // The one resolution this function acts on: probed below, served by the
+    // child through the same derivation, and printed at the end.
+    let socket = trusty_analyze::service::socket_path()?;
+    let socket = socket.as_path();
     let pid_path = pid_file_path()?;
     if let Some(pid) = read_pid(&pid_path) {
         if socket_serving(socket) {
@@ -147,11 +180,10 @@ pub fn handle_start(socket: &Path) -> Result<()> {
         let _ = std::fs::remove_file(&pid_path);
     }
 
-    // #6287: no `--socket` is passed. The default path is what every consumer
-    // dials, so a spawn that overrode it would start a daemon nothing finds.
+    // #6287: no `--socket` is passed — see `serve_args`.
     let exe = std::env::current_exe().context("resolve current executable")?;
     let child = std::process::Command::new(&exe)
-        .arg("serve")
+        .args(serve_args())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .stdin(std::process::Stdio::null())
@@ -382,6 +414,25 @@ pub async fn handle_doctor(socket: &Path, facts_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// REGRESSION (#6287): `start` must hand the child a bare `serve`.
+    ///
+    /// Why: the parent resolves the socket, probes it, and prints it; the child
+    /// re-derives the same path from the data directory. A `--socket` in this
+    /// argv would break that agreement silently — the parent would report one
+    /// path while the daemon served another, and every consumer dials the
+    /// derived one. That is the shape `handle_start` dropping its parameter
+    /// exists to prevent, and this is what keeps the spawn honest.
+    /// Test: this is the test.
+    #[test]
+    fn start_spawns_a_bare_serve_so_the_child_derives_the_same_socket() {
+        assert_eq!(serve_args(), ["serve"]);
+        assert!(
+            !serve_args().iter().any(|a| a.contains("--socket")),
+            "a socket override would serve a path the parent never probed: {:?}",
+            serve_args()
+        );
+    }
 
     /// Why: a missing PID file is the normal "daemon not running" case and
     /// must not panic.

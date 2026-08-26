@@ -24,3 +24,7 @@ Breaking
   all and was a second ADR-0032-forbidden HTTP surface.
 - The embedded UI is not served by this daemon any more. `ui/dist` stays
   tracked; the console-hosted mount is follow-up work.
+- `commands::daemon::handle_start` no longer takes a `socket` parameter. It
+  probed the socket it was handed but always spawned a child that derived its
+  own, so a non-default path would have been probed and reported while a
+  different one was served. It resolves the single path itself now.

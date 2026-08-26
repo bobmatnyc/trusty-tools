@@ -630,7 +630,9 @@ async fn main() -> Result<()> {
             };
             run_service_action(action)
         }
-        Cmd::Start => daemon_cmds::handle_start(&trusty_analyze::service::socket_path()?),
+        // #6287: no socket argument — `handle_start` resolves the one path it
+        // both probes and spawns for. See its doc comment.
+        Cmd::Start => daemon_cmds::handle_start(),
         Cmd::Stop => daemon_cmds::handle_stop(&trusty_analyze::service::socket_path()?),
         Cmd::Status => daemon_cmds::handle_status(&trusty_analyze::service::socket_path()?).await,
         Cmd::Doctor => {
