@@ -50,16 +50,21 @@ use tracing::warn;
 // ─── Service defaults ─────────────────────────────────────────────────────────
 
 /// Where `--analyze` looks for the trusty-analyze daemon when
-/// `PR_INTELLIGENCE_ANALYZER_URL` is unset.
+/// `PR_INTELLIGENCE_ANALYZER_SOCKET` is unset.
 ///
-/// Why (#6038): the literal address, not `localhost`. `trusty-analyze serve`
-/// binds `127.0.0.1` only (ADR-0018, and `service/routes.rs::LOOPBACK_BIND`),
-/// while macOS resolves `localhost` to `::1` first — so the default URL named a
-/// socket that does not exist, the first connect was refused, and the operator
-/// had to export the variable by hand to get a populated report.
-/// What: `http://127.0.0.1:7879`. The env-var override is unchanged.
-/// Test: `config::tests::analyzer_url_defaults_to_the_literal_loopback_address`.
-pub const DEFAULT_ANALYZER_URL: &str = "http://127.0.0.1:7879";
+/// Why (#6287, ADR-0032): the daemon serves a Unix socket now, and the path is
+/// DERIVED — it and every consumer resolve it through the same
+/// `trusty_common::daemon_socket_path` call. That removes the whole class of
+/// bug #6038 fixed here: a hand-written default address cannot disagree with
+/// what the daemon binds when neither side writes one down.
+/// What: `<data dir>/trusty-analyze/trusty-analyze.sock`, or an empty path when
+/// the data directory cannot be resolved — which `--analyze` then reports as an
+/// unreachable daemon rather than guessing.
+/// Test: `config::tests::analyzer_socket_defaults_to_the_derived_path`.
+#[must_use]
+pub fn default_analyzer_socket() -> std::path::PathBuf {
+    trusty_common::daemon_socket_path("trusty-analyze").unwrap_or_default()
+}
 
 // ─── Provider identifier ──────────────────────────────────────────────────────
 
@@ -239,9 +244,9 @@ pub struct ReviewConfig {
     // ── Service dependencies ───────────────────────────────────────────────
     /// trusty-search base URL (`TRUSTY_SEARCH_URL`, default `http://localhost:7878`).
     pub search_url: String,
-    /// trusty-analyze base URL (`PR_INTELLIGENCE_ANALYZER_URL`, default
-    /// [`DEFAULT_ANALYZER_URL`]).
-    pub analyzer_url: String,
+    /// trusty-analyze's Unix socket (`PR_INTELLIGENCE_ANALYZER_SOCKET`, default
+    /// [`default_analyzer_socket`]).
+    pub analyzer_socket: std::path::PathBuf,
     /// Default trusty-search index (`TRUSTY_SEARCH_INDEX`, default `main`).
     ///
     /// When `TRUSTY_SEARCH_INDEX` is not set, this starts as `"main"` and is
@@ -491,8 +496,10 @@ impl ReviewConfig {
             fireworks_api_key: std::env::var("FIREWORKS_API_KEY").unwrap_or_default(),
             search_url: std::env::var("TRUSTY_SEARCH_URL")
                 .unwrap_or_else(|_| "http://localhost:7878".to_string()),
-            analyzer_url: std::env::var("PR_INTELLIGENCE_ANALYZER_URL")
-                .unwrap_or_else(|_| DEFAULT_ANALYZER_URL.to_string()),
+            analyzer_socket: std::env::var("PR_INTELLIGENCE_ANALYZER_SOCKET")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map_or_else(default_analyzer_socket, std::path::PathBuf::from),
             search_index: std::env::var("TRUSTY_SEARCH_INDEX")
                 .unwrap_or_else(|_| "main".to_string()),
             search_index_explicit: std::env::var("TRUSTY_SEARCH_INDEX").is_ok(),

@@ -196,6 +196,25 @@ impl AnalyzerAppState {
 /// Test: `rpc_scip_status_reports_not_found_when_never_ingested`.
 pub const CODE_NOT_FOUND: i64 = -32004;
 
+/// JSON-RPC code for "the handler ran out of time".
+///
+/// Why (#6287, preserving #6034/#6041): `analyze.diagnostics` is the one method
+/// that can legitimately exhaust its own deadline, and what a caller does about
+/// that is not what it does about an outage — one says raise the budget or
+/// narrow the request, the other says start the daemon. Under HTTP the two were
+/// 504 and 502, and `trusty-review`'s `report::analyze_adapter::classify_failure`
+/// reads that split to choose `EndpointFailure::TimedOut` over `Unanswered`,
+/// which decides which sentence the report's Gaps & Caveats section prints.
+/// Folding this into `internal_error` would make the two indistinguishable on
+/// the wire and silently drop that sentence — and matching the message text
+/// instead would put the distinction back into prose a client has to
+/// pattern-match, which is what the adapter's own doc forbids.
+/// What: `-32005`, the next code after [`CODE_NOT_FOUND`] in JSON-RPC's
+/// `-32000..=-32099` implementation-defined server-error band.
+/// Test: `rpc_diagnostics_reports_deadline_exceeded_distinctly`, and
+/// trusty-review's `a_daemon_side_deadline_is_a_timeout_not_a_rejection`.
+pub const CODE_DEADLINE_EXCEEDED: i64 = -32005;
+
 /// What kind of failure a handler is reporting.
 ///
 /// Why (#6287): this was an `axum::http::StatusCode`, which described how the
@@ -285,11 +304,11 @@ impl ApiError {
 /// every handler would spell the same mapping itself.
 /// What: `BadRequest` is the caller's fault and reports `invalid_params`;
 /// `NotFound` gets [`CODE_NOT_FOUND`] so #5049's distinction survives the
-/// transport change; everything else — an upstream that is down, a deadline
-/// that expired, a panic-adjacent internal failure — is `internal_error`,
-/// because none of them is something the caller could have sent differently.
-/// The message is carried verbatim: it is the only place a diagnostics cutoff
-/// or an unreachable trusty-search names itself.
+/// transport change; `GatewayTimeout` gets [`CODE_DEADLINE_EXCEEDED`] so
+/// #6034/#6041's does; an upstream that is down and a panic-adjacent internal
+/// failure are `internal_error`, because neither is something the caller could
+/// have sent differently. The message is carried verbatim: it is the only place
+/// a diagnostics cutoff or an unreachable trusty-search names itself.
 /// Test: `rpc_reports_invalid_params_for_a_request_naming_no_index`,
 /// `rpc_scip_status_reports_not_found_when_never_ingested`,
 /// `rpc_reports_internal_error_when_search_is_unreachable`.
@@ -298,9 +317,8 @@ impl From<ApiError> for RpcError {
         let code = match e.kind {
             ApiErrorKind::BadRequest => CODE_INVALID_PARAMS,
             ApiErrorKind::NotFound => CODE_NOT_FOUND,
-            ApiErrorKind::Internal | ApiErrorKind::BadGateway | ApiErrorKind::GatewayTimeout => {
-                CODE_INTERNAL_ERROR
-            }
+            ApiErrorKind::GatewayTimeout => CODE_DEADLINE_EXCEEDED,
+            ApiErrorKind::Internal | ApiErrorKind::BadGateway => CODE_INTERNAL_ERROR,
         };
         RpcError::new(code, e.message)
     }

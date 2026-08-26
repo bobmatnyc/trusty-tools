@@ -131,9 +131,9 @@ const HOTSPOTS_METHOD: &str = "analyze.complexity_hotspots";
 
 /// The params for one index's ranking.
 ///
-/// #6287: this was [`hotspots_url`]'s job — a path segment plus a query string.
-/// A JSON-RPC frame carries one `params` object, which is what removes the
-/// trailing-slash tolerance the URL builder needed.
+/// #6287: this was a URL builder's job — a path segment plus a query string. A
+/// JSON-RPC frame carries one `params` object, which is what removes the
+/// trailing-slash tolerance that builder needed.
 fn hotspots_params(index_id: &str) -> serde_json::Value {
     serde_json::json!({ "index_id": index_id, "top_n": HOTSPOT_CHUNKS })
 }

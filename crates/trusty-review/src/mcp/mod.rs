@@ -35,7 +35,9 @@ use tracing::{debug, info, warn};
 use trusty_mcp::{Request, Response, error_codes, initialize_response, run_stdio_loop};
 
 use crate::config::ReviewConfig;
-use crate::integrations::{analyze_client::HttpAnalyzeClient, search_client::HttpSearchClient};
+use crate::integrations::{
+    search_client::HttpSearchClient, subprocess_analyze_client::SubprocessAnalyzeClient,
+};
 use crate::llm::build_provider;
 use crate::mcp::tools::{ToolError, call_tool, tool_descriptors, wrap_tool_error};
 use crate::service::AppState;
@@ -255,12 +257,18 @@ pub async fn build_review_state() -> Result<AppState> {
 
     let search = HttpSearchClient::from_config(&config)
         .map_err(|e| anyhow::anyhow!("failed to build search HTTP client: {e}"))?;
-    let analyze = HttpAnalyzeClient::from_config(&config)
-        .map_err(|e| anyhow::anyhow!("failed to build analyze HTTP client: {e}"))?;
+    // #6287: `SubprocessAnalyzeClient`, not the deleted `HttpAnalyzeClient`.
+    // That client dialled `:7879` for `/health`, `/indexes` and
+    // `/indexes/{id}/complexity_hotspots`, none of which trusty-analyze serves
+    // any more (ADR-0032). The subprocess client needs no daemon at all — it
+    // spawns `trusty-analyze review` per call — so this is the same swap
+    // `webhook_drain` already made, not a new dependency.
+    let analyze = SubprocessAnalyzeClient::from_config(&config)
+        .map_err(|e| anyhow::anyhow!("failed to build analyze subprocess client: {e}"))?;
 
     info!(
         reviewer_model = %config.role_models.reviewer.model,
-        analyzer_url = %config.analyzer_url,
+        analyze_binary = %analyze.binary(),
         search_url = %config.search_url,
         "trusty-review embedded AppState built"
     );

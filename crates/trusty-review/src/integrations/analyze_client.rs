@@ -1,25 +1,19 @@
-//! HTTP client over trusty-analyze (`:7879`) — OPTIONAL dependency.
+//! The `AnalyzeClient` seam over trusty-analyze — OPTIONAL dependency.
 //!
 //! Why: trusty-analyze provides static analysis context (complexity hotspots,
 //! code smells) that enriches the review.  It is OPTIONAL: if unavailable the
 //! pipeline proceeds with empty static-analysis context and the service-
 //! unavailable Slack notice is NOT raised.  (spec REV-012, REV-440, REV-442)
 //!
-//! What: defines `AnalyzeClient` trait and `HttpAnalyzeClient`.  The two-step
-//! readiness probe (`has_analysis`) calls `GET /health` AND `GET /indexes` —
-//! NEVER `GET /indexes/{id}/quality` which is O(corpus) and always times out.
-//! (spec REV-441, lesson §12.3)
+//! What: defines the `AnalyzeClient` trait and its response types.
 //!
-//! Routes verified from `crates/trusty-analyze/src/service/mod.rs`:
-//!   GET  /health
-//!   GET  /indexes
-//!   GET  /indexes/{id}/complexity_hotspots[?top_k=N]
-//!   GET  /indexes/{id}/smells[?category=<name>]
-//!   (GET /indexes/{id}/quality  — NEVER a readiness probe; O(corpus))
+//! #6287 (ADR-0032) removed `HttpAnalyzeClient`, the daemon-dialling
+//! implementation this module was named for — see the note where it stood. The
+//! two implementations left are `SubprocessAnalyzeClient` (spawns
+//! `trusty-analyze review` per call, no daemon) and `NullAnalyzeClient`.
 //!
-//! Test: `two_step_probe_never_calls_quality` documents the invariant;
-//! `analyze_client_graceful_degradation` verifies transport errors return
-//! empty defaults rather than propagating.
+//! Test: `analyze_error_display` and the response-type tests below; the
+//! graceful-degradation contract is exercised through each implementation.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -200,235 +194,23 @@ pub trait AnalyzeClient: Send + Sync {
     async fn smells(&self, index_id: &str) -> Result<Vec<Smell>, AnalyzeClientError>;
 }
 
-// ─── HTTP implementation ──────────────────────────────────────────────────────
-
-/// HTTP implementation of `AnalyzeClient` over a running trusty-analyze daemon.
-///
-/// Why: the default transport for all production and staging deployments.
-/// What: targets `PR_INTELLIGENCE_ANALYZER_URL` (default
-/// `http://127.0.0.1:7879`).  All methods use a 5s timeout for probe calls and
-/// a 180s timeout for analysis calls (matching spec REV-440 table).
-/// Test: `http_analyze_client_url_is_configurable`.
-pub struct HttpAnalyzeClient {
-    /// Base URL of the trusty-analyze daemon (no trailing slash).
-    base_url: String,
-    /// Short-timeout client for health / index probes (5s).
-    probe_http: reqwest::Client,
-    /// Long-timeout client for analysis calls (180s).
-    analysis_http: reqwest::Client,
-}
-
-impl HttpAnalyzeClient {
-    /// Construct from an explicit base URL.
-    ///
-    /// Why: allows tests to point the client at any URL without going through
-    /// the config system.
-    /// What: builds two reqwest clients — `probe_http` (5s timeout) and
-    /// `analysis_http` (180s timeout) — matching the timeout table in spec
-    /// REV-440.  Returns `Err(ClientInit)` if the TLS backend cannot be
-    /// initialised — surfaces the failure to the caller rather than panicking
-    /// at daemon startup (closes #953).
-    /// Test: `http_analyze_client_url_is_configurable`.
-    pub fn new(base_url: impl Into<String>) -> Result<Self, AnalyzeClientError> {
-        let raw = base_url.into();
-        let base_url = raw.trim_end_matches('/').to_string();
-        // #6038: both clients talk to the loopback analyze daemon, so both go
-        // through the shared constructor that applies `.no_proxy()` (#4392) —
-        // a bare builder here sends 127.0.0.1 to an exported HTTP_PROXY.
-        let probe_http = trusty_common::http_client::loopback_client_builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .build()
-            .map_err(|e| AnalyzeClientError::ClientInit(e.to_string()))?;
-        let analysis_http = trusty_common::http_client::loopback_client_builder()
-            .timeout(std::time::Duration::from_secs(180))
-            .build()
-            .map_err(|e| AnalyzeClientError::ClientInit(e.to_string()))?;
-        Ok(Self {
-            base_url,
-            probe_http,
-            analysis_http,
-        })
-    }
-
-    /// Construct from a `ReviewConfig`, reading `analyzer_url`.
-    ///
-    /// Why: the pipeline constructs the client from its injected config.
-    /// What: calls `Self::new(config.analyzer_url.clone())` and propagates any
-    /// TLS-backend init failure as `Err`.
-    /// Test: `http_analyze_client_from_config`.
-    pub fn from_config(config: &crate::config::ReviewConfig) -> Result<Self, AnalyzeClientError> {
-        Self::new(config.analyzer_url.clone())
-    }
-
-    /// Return the base URL this client targets.
-    ///
-    /// Why: tests need to assert the URL is constructed correctly.
-    /// What: returns a reference to the stored base URL string.
-    /// Test: `http_analyze_client_url_is_configurable`.
-    pub fn base_url(&self) -> &str {
-        &self.base_url
-    }
-}
-
-#[async_trait]
-impl AnalyzeClient for HttpAnalyzeClient {
-    async fn health(&self) -> Result<AnalyzeHealthResponse, AnalyzeClientError> {
-        let url = format!("{}/health", self.base_url);
-        let resp = self
-            .probe_http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| AnalyzeClientError::Unavailable(format!("GET {url}: {e}")))?;
-
-        let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| AnalyzeClientError::Transport(format!("read body of {url}: {e}")))?;
-
-        if !status.is_success() {
-            return Err(AnalyzeClientError::Unavailable(format!(
-                "GET {url} returned {status}: {body}"
-            )));
-        }
-
-        serde_json::from_str(&body)
-            .map_err(|e| AnalyzeClientError::Parse(format!("health response: {e}")))
-    }
-
-    /// Two-step readiness probe (spec REV-441).
-    ///
-    /// Why: both `/health` and `/indexes` must succeed before marking analyze
-    /// available.  NEVER calls `/quality` — it is O(corpus).  (lesson §12.3)
-    /// What: calls `health()` first; if that fails or `search_reachable` is
-    /// false, returns `false` immediately.  Otherwise calls `GET /indexes` and
-    /// checks the index_id is present.
-    /// Test: `two_step_probe_returns_false_on_transport_error`.
-    async fn has_analysis(&self, index_id: &str) -> bool {
-        // Step 1: health check.
-        let health = match self.health().await {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::debug!("trusty-analyze health check failed (optional): {e}");
-                return false;
-            }
-        };
-        if !health.is_healthy() {
-            tracing::debug!(
-                status = %health.status,
-                search_reachable = health.search_reachable,
-                "trusty-analyze health indicates not ready"
-            );
-            return false;
-        }
-
-        // Step 2: list indexes and verify the target index exists.
-        let url = format!("{}/indexes", self.base_url);
-        let indexes_resp = match self.probe_http.get(&url).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::debug!("trusty-analyze GET /indexes failed (optional): {e}");
-                return false;
-            }
-        };
-
-        if !indexes_resp.status().is_success() {
-            tracing::debug!(
-                status = %indexes_resp.status(),
-                "trusty-analyze GET /indexes returned non-2xx"
-            );
-            return false;
-        }
-
-        let body = match indexes_resp.text().await {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::debug!("trusty-analyze read /indexes body failed: {e}");
-                return false;
-            }
-        };
-
-        let indexes: Vec<AnalyzeIndexInfo> = match serde_json::from_str(&body) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::debug!("trusty-analyze /indexes parse failed: {e}");
-                return false;
-            }
-        };
-
-        // Check the target index exists.
-        let found = indexes.iter().any(|i| i.id == index_id);
-        if !found {
-            tracing::debug!(
-                index_id,
-                "trusty-analyze has no matching index — analyze context unavailable"
-            );
-        }
-        found
-    }
-
-    async fn complexity_hotspots(
-        &self,
-        index_id: &str,
-        top_k: Option<u32>,
-    ) -> Result<Vec<ComplexityHotspot>, AnalyzeClientError> {
-        let mut url = format!("{}/indexes/{index_id}/complexity_hotspots", self.base_url);
-        if let Some(k) = top_k {
-            url.push_str(&format!("?top_k={k}"));
-        }
-
-        let resp = self
-            .analysis_http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| AnalyzeClientError::Transport(format!("GET {url}: {e}")))?;
-
-        let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| AnalyzeClientError::Transport(format!("read body of {url}: {e}")))?;
-
-        if !status.is_success() {
-            return Err(AnalyzeClientError::Api {
-                status: status.as_u16(),
-                body,
-            });
-        }
-
-        serde_json::from_str(&body)
-            .map_err(|e| AnalyzeClientError::Parse(format!("complexity_hotspots response: {e}")))
-    }
-
-    async fn smells(&self, index_id: &str) -> Result<Vec<Smell>, AnalyzeClientError> {
-        let url = format!("{}/indexes/{index_id}/smells", self.base_url);
-
-        let resp = self
-            .analysis_http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| AnalyzeClientError::Transport(format!("GET {url}: {e}")))?;
-
-        let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| AnalyzeClientError::Transport(format!("read body of {url}: {e}")))?;
-
-        if !status.is_success() {
-            return Err(AnalyzeClientError::Api {
-                status: status.as_u16(),
-                body,
-            });
-        }
-
-        serde_json::from_str(&body)
-            .map_err(|e| AnalyzeClientError::Parse(format!("smells response: {e}")))
-    }
-}
+// ─── HTTP implementation: REMOVED (#6287) ────────────────────────────────────
+//
+// `HttpAnalyzeClient` lived here and dialled the trusty-analyze daemon over
+// TCP loopback HTTP — `/health`, `/indexes`, `/indexes/{id}/complexity_hotspots`
+// and `/indexes/{id}/smells`. ADR-0032 moved that daemon onto a Unix socket
+// serving JSON-RPC, so none of those paths exist any more.
+//
+// It is DELETED rather than migrated because it had one caller left —
+// `mcp::build_review_state` — and that caller now builds a
+// `SubprocessAnalyzeClient`, which needs no daemon at all: it spawns
+// `trusty-analyze review` per call. `webhook_drain` had already made the same
+// swap. Porting a client nothing would construct would have been carrying a
+// second transport for no consumer.
+//
+// The trait above and its response types stay: they are the seam
+// `SubprocessAnalyzeClient`, `NullAnalyzeClient` and every pipeline test
+// implement.
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────
 
