@@ -91,12 +91,22 @@ pub const METHODS: &[&str] = &[
 /// inside the frame the budget governs the reading of), so it has to cover the
 /// largest of the twenty.
 ///
-/// **Measured, not guessed.** `scip index` over this workspace's own
-/// `trusty-common` crate produces a 4.6 MB protobuf, which is 6.2 MB base64 —
-/// past the 8 MiB default only when a repository is roughly 30% larger than that
-/// one, which is an ordinary size. 32 MiB gives that case room without inviting
-/// a peer to hold 32 MiB of buffer for free: the read is still bounded, and a
+/// **This figure is inherited, not measured.** It is `trusty-review`'s, adopted
+/// because both services face the same shape of problem — caller-supplied bulk
+/// that nothing bounds before the frame arrives. No SCIP index has been measured
+/// against it: doing so needs a real language indexer (`scip-rust`,
+/// `scip-typescript`) run over a large repository, which was out of scope here.
+///
+/// What is known without measuring: base64 costs 4 bytes per 3, so the frame is
+/// ~1.34x the protobuf, and 32 MiB therefore admits a ~24 MB SCIP index. If a
+/// real index turns out to exceed that, the symptom is a refused
+/// `analyze.scip_ingest` naming the budget — a visible failure, not a silent
+/// truncation — and raising it means raising the client's response budget
+/// (`mcp::rpc_client::MAX_RESPONSE_FRAME_BYTES`) in the same change.
+///
+/// 32 MiB is still a bound, not an absence of one: the read is capped, and a
 /// frame past the budget is refused rather than buffered.
+/// Test: `rpc_refuses_a_request_past_its_own_budget`.
 ///
 /// **Which end this figure binds, precisely.** Each end caps only what it READS,
 /// and neither caps what it writes:
