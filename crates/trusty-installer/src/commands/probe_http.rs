@@ -111,23 +111,24 @@ pub fn fixed_port_for(binary: &str) -> Option<u16> {
         "trusty-memory" => Some(7070),
         "trusty-console" => Some(7788),
         "trusty-search" => Some(7878),
-        "trusty-analyze" => Some(7879),
         "trusty-mpm" => Some(7880),
-        // #6277: NO trusty-review row. It serves a Unix socket rather than a
-        // TCP port (ADR-0032) — see [`uds_socket_for`]. Leaving 7891 here would
-        // dial whatever happens to be on that port and report it as review.
+        // #6277 / #6287: NO trusty-review or trusty-analyze row. Both serve a
+        // Unix socket rather than a TCP port (ADR-0032) — see
+        // [`uds_socket_for`]. Leaving 7891 or 7879 here would dial whatever
+        // happens to be on that port and report it as the daemon.
         _ => None,
     }
 }
 
 /// The Unix socket a member serves, for the daemons that no longer serve TCP.
 ///
-/// Why (#6277, ADR-0032): trusty-review is the first member to move its own
-/// transport onto UDS. Its probe has to move with it IN THE SAME CHANGE, or
-/// `tctl` dials a dead 7891, reads `Refused`, and — because `Refused` is one of
-/// the two variants [`ProbeOutcome::is_confirmed_down`] accepts — kickstarts a
-/// daemon that is running perfectly. That is #4246 exactly, which is why the
-/// design review made the daemon swap and its consumers one PR.
+/// Why (#6277, ADR-0032): trusty-review was the first member to move its own
+/// transport onto UDS and trusty-analyze followed in #6287. A probe has to move
+/// with its daemon IN THE SAME CHANGE, or `tctl` dials a dead 7891 / 7879,
+/// reads `Refused`, and — because `Refused` is one of the two variants
+/// [`ProbeOutcome::is_confirmed_down`] accepts — kickstarts a daemon that is
+/// running perfectly. That is #4246 exactly, which is why the design review
+/// made each daemon swap and its consumers one PR.
 ///
 /// What: the path from `trusty_common::daemon_socket_path`, the same call the
 /// daemon binds through, for members that serve UDS; `None` for every member
@@ -143,19 +144,39 @@ pub fn fixed_port_for(binary: &str) -> Option<u16> {
 /// `tests::probe_uds_reads_the_health_envelope_off_a_result_frame`.
 pub fn uds_socket_for(binary: &str) -> Option<std::path::PathBuf> {
     match binary {
-        "trusty-review" => trusty_common::daemon_socket_path(binary).ok(),
+        "trusty-review" | "trusty-analyze" => trusty_common::daemon_socket_path(binary).ok(),
         _ => None,
     }
 }
 
 /// The method a UDS member answers a health probe on.
 ///
-/// Duplicated as a literal rather than imported: `trusty-installer` has no Cargo
-/// edge on `trusty-review`, and adding one to share a `&str` would pull an
-/// LLM-pipeline crate into `tctl`'s build. `trusty_review::service::METHOD_HEALTH`
-/// is the definition; `trusty-review/tests/uds_consumer_contract.rs` is what
-/// keeps the two equal.
-const UDS_HEALTH_METHOD: &str = "review.health";
+/// Why this is a per-binary function and not one constant (#6287): it WAS one
+/// constant, `"review.health"`, because trusty-review was the only UDS member.
+/// Each daemon names its health method under its own `<domain>.` prefix, so a
+/// second member made the single constant wrong for one of them — and the way
+/// that wrongness surfaces is `method_not_found`, which
+/// [`classify_rpc_response`] reads as a daemon answering badly rather than as a
+/// probe asking wrongly.
+///
+/// Duplicated as literals rather than imported: `trusty-installer` has no Cargo
+/// edge on either daemon, and adding one to share a `&str` would pull an
+/// LLM-pipeline crate and an analysis engine into `tctl`'s build.
+/// `trusty_review::service::METHOD_HEALTH` and
+/// `trusty_analyze::service::METHOD_HEALTH` are the definitions; each crate's
+/// `uds_consumer_contract` test is what keeps them equal.
+///
+/// # Panics
+///
+/// Never for a binary [`uds_socket_for`] returned a socket for — the two match
+/// arms are kept in step by `tests::every_uds_member_has_a_health_method`.
+fn uds_health_method(binary: &str) -> Option<&'static str> {
+    match binary {
+        "trusty-review" => Some("review.health"),
+        "trusty-analyze" => Some("analyze.health"),
+        _ => None,
+    }
+}
 
 /// The typed result of probing one member's health (#4246).
 ///
@@ -675,16 +696,16 @@ pub fn classify_rpc_response(frame: &serde_json::Value) -> ProbeOutcome {
 /// accepted the connection, so a process is alive on that socket and restarting
 /// it would be a guess.
 ///
-/// What: one `send_framed_request` at [`REQUEST_TIMEOUT`], then
+/// What: one `send_framed_request` for `method` at [`REQUEST_TIMEOUT`], then
 /// [`classify_rpc_response`].
 ///
 /// Test: `tests::probe_uds_reads_the_health_envelope_off_a_result_frame`,
 /// `tests::probe_uds_reports_refused_for_an_absent_socket`.
-async fn probe_socket(socket: &std::path::Path) -> ProbeOutcome {
+async fn probe_socket(socket: &std::path::Path, method: &str) -> ProbeOutcome {
     let request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
-        "method": UDS_HEALTH_METHOD,
+        "method": method,
     });
     match trusty_common::uds::send_framed_request::<_, serde_json::Value>(
         socket,
@@ -777,7 +798,18 @@ pub async fn probe_bases(
 /// `tests::probe_uds_reads_the_health_envelope_off_a_result_frame`.
 pub async fn probe_daemon_http(app: &str, binary: &str) -> ProbeOutcome {
     if let Some(socket) = uds_socket_for(binary) {
-        return probe_socket(&socket).await;
+        // #6287: the method is per-binary. `uds_socket_for` and
+        // `uds_health_method` cover the same set, which
+        // `every_uds_member_has_a_health_method` is what enforces — so this
+        // fallback is unreachable in practice, and it reports a probe failure
+        // rather than guessing a method whose absence would read as a broken
+        // daemon.
+        let Some(method) = uds_health_method(binary) else {
+            return ProbeOutcome::ProbeFailed {
+                detail: format!("{binary} serves a socket but names no health method"),
+            };
+        };
+        return probe_socket(&socket, method).await;
     }
 
     let client = match build_probe_client() {
