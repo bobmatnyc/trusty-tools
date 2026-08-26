@@ -11,6 +11,11 @@
 //! the value.
 //! Test: the `debug_never_renders_*` tests in this module's `tests`.
 //!
+//! The `Serialize` half of the same question lives in
+//! [`super::credential_serialize`] (#5775) and shares this module's [`REDACTED`]
+//! constant and its two mask helpers. Read both to answer "which config fields
+//! are credentials, and is every one of them masked in every rendering path".
+//!
 //! # Why every impl destructures instead of reading `self.field`
 //!
 //! Reading fields by name and calling `.finish()` compiles fine when a field is
@@ -41,14 +46,16 @@ use crate::classify::classifier::ClassificationEngineConfig;
 /// head, such as [`trusty_common::credentials::redact_secret`], would disclose
 /// four characters of real entropy for any credential whose shape is not the
 /// provider's documented one. Settled on #5733.
-const REDACTED: &str = "<redacted>";
+pub(super) const REDACTED: &str = "<redacted>";
 
 /// Mask a credential that is always present.
 ///
 /// Every masked field routes through here, including the optional ones via
 /// [`mask`], so a change to the masking rule has exactly one site — which is
-/// also what lets one mutation exercise all six impls in the tests.
-fn mask_required(_value: &str) -> &'static str {
+/// also what lets one mutation exercise all six impls in the tests. Shared with
+/// [`super::credential_serialize`] since #5775, so `Debug` and `Serialize`
+/// cannot drift to two different masks.
+pub(super) fn mask_required(_value: &str) -> &'static str {
     REDACTED
 }
 
@@ -56,7 +63,7 @@ fn mask_required(_value: &str) -> &'static str {
 ///
 /// `None` stays `None`: absence is not a secret, and "is a credential configured
 /// at all" is the first question anyone debug-formats a config to answer.
-fn mask(value: Option<&String>) -> Option<&'static str> {
+pub(super) fn mask(value: Option<&String>) -> Option<&'static str> {
     value.map(|v| mask_required(v))
 }
 
