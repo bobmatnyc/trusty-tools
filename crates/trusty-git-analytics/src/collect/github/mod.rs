@@ -1,5 +1,6 @@
 //! GitHub REST API client for pull-request metadata.
 
+pub mod budget;
 pub mod client;
 pub mod issue_writer;
 pub mod org_discovery;

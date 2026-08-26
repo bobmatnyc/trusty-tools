@@ -31,9 +31,11 @@ use std::future::Future;
 use std::sync::Mutex;
 
 use futures::stream::StreamExt;
+use tracing::warn;
 
 use super::{confluence, datadog, github_issues, jira, linear, shortcut};
 use super::{Cache, ExternalSignal, ExternalSourceResolver, GitHubRef, SourceState};
+use crate::collect::github::budget::FetchBudget;
 
 impl ExternalSourceResolver {
     /// Pre-resolve every ticket key referenced across `messages`, for every
@@ -51,7 +53,14 @@ impl ExternalSourceResolver {
     pub async fn warm_cache(&self, messages: &[String], concurrency: usize) {
         let concurrency = concurrency.max(1);
         for state in &self.sources {
-            warm_source(&self.client, state, messages, concurrency).await;
+            warm_source(
+                &self.client,
+                state,
+                messages,
+                concurrency,
+                self.github_budget(),
+            )
+            .await;
         }
     }
 }
@@ -70,6 +79,7 @@ async fn warm_source(
     state: &SourceState,
     messages: &[String],
     concurrency: usize,
+    github_budget: &FetchBudget,
 ) {
     match state {
         SourceState::Jira {
@@ -104,7 +114,7 @@ async fn warm_source(
                         base_url_override,
                     )
                     .await;
-                    result.remove(&k).flatten()
+                    result.remove(&k)
                 },
             )
             .await;
@@ -141,9 +151,13 @@ async fn warm_source(
                         config,
                         std::slice::from_ref(&r),
                         api_base_override,
+                        github_budget,
                     )
                     .await;
-                    result.remove(&key).flatten()
+                    if let Some(reason) = &result.stopped_early {
+                        warn!(key = %key, reason = %reason, "GitHub warm lookup was cut short");
+                    }
+                    result.signals.remove(&key)
                 },
             )
             .await;
@@ -175,7 +189,7 @@ async fn warm_source(
                         api_base_override,
                     )
                     .await;
-                    result.remove(&k).flatten()
+                    result.remove(&k)
                 },
             )
             .await;
@@ -207,7 +221,7 @@ async fn warm_source(
                         api_base_override,
                     )
                     .await;
-                    result.remove(&key).flatten()
+                    result.remove(&key)
                 },
             )
             .await;
@@ -239,7 +253,7 @@ async fn warm_source(
                         api_base_override,
                     )
                     .await;
-                    result.remove(&key).flatten()
+                    result.remove(&key)
                 },
             )
             .await;
@@ -270,7 +284,7 @@ async fn warm_source(
                         api_base_override,
                     )
                     .await;
-                    result.remove(&s).flatten()
+                    result.remove(&s)
                 },
             )
             .await;
@@ -300,7 +314,11 @@ async fn warm_generic<T, K, F, Fut>(
 ) where
     K: Fn(&T) -> String,
     F: Fn(T) -> Fut,
-    Fut: Future<Output = Option<ExternalSignal>>,
+    // #6084: the outer `Option` is "did we get an answer at all". A fetch that
+    // was rate-limited or never attempted yields `None` and is left out of the
+    // cache; caching it would record "this ticket has no signal" on the
+    // strength of a request the server refused.
+    Fut: Future<Output = Option<Option<ExternalSignal>>>,
 {
     if items.is_empty() {
         return;
@@ -318,7 +336,7 @@ async fn warm_generic<T, K, F, Fut>(
 
     let key_of = &key_of;
     let fetch_one = &fetch_one;
-    let fetched: Vec<(String, Option<ExternalSignal>)> =
+    let fetched: Vec<(String, Option<Option<ExternalSignal>>)> =
         futures::stream::iter(misses.into_iter().map(|item| async move {
             let key = key_of(&item);
             let signal = fetch_one(item).await;
@@ -330,7 +348,10 @@ async fn warm_generic<T, K, F, Fut>(
 
     let mut guard = cache.lock().expect("cache lock");
     for (k, sig) in fetched {
-        guard.insert(k, sig);
+        // Only a key we actually got an answer for is cached (#6084).
+        if let Some(sig) = sig {
+            guard.insert(k, sig);
+        }
     }
 }
 

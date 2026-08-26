@@ -660,3 +660,131 @@ mod fetch_issue_tests {
         // drops at the end of this test — a second probe call panics there.
     }
 }
+
+// ─── Bounded pagination and rate-limit termination (#6084) ────────────────────
+
+mod bounded_fetch_tests {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+    use crate::collect::github::budget::MAX_PAGES;
+    use crate::collect::github::client::PAGE_SIZE;
+    use crate::collect::pr_provider::PrProvider;
+
+    fn client_at(base: &str) -> GitHubClient {
+        GitHubClient::new(&gh(Some("acme/widgets"), None))
+            .expect("client builds")
+            .with_api_base(base)
+    }
+
+    /// One full page of issues — the answer that keeps a pre-fix walk going.
+    fn full_page() -> serde_json::Value {
+        let items: Vec<serde_json::Value> = (0..PAGE_SIZE)
+            .map(|i| {
+                serde_json::json!({
+                    "number": i + 1,
+                    "title": "t",
+                    "state": "open",
+                    "html_url": "https://example.invalid/1",
+                })
+            })
+            .collect();
+        serde_json::Value::Array(items)
+    }
+
+    /// Why: every listing here looped until the server returned a short page,
+    /// which trusts the server to end the walk. A server that always answers
+    /// with a full page never does — this test does not terminate against the
+    /// pre-fix code.
+    /// What: asserts the walk stops at exactly [`MAX_PAGES`] requests and that
+    /// the shortened result is reported rather than presented as complete.
+    #[tokio::test]
+    async fn a_listing_that_never_ends_stops_at_the_page_cap_and_says_so() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widgets/issues"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(full_page()))
+            .mount(&server)
+            .await;
+
+        let client = client_at(&server.uri());
+        let issues = client.list_issues("all", None).await.expect("walk returns");
+
+        assert_eq!(issues.len(), (MAX_PAGES * PAGE_SIZE) as usize);
+        let requests = server
+            .received_requests()
+            .await
+            .map(|r| r.len())
+            .unwrap_or_default();
+        assert_eq!(requests, MAX_PAGES as usize, "the walk must be finite");
+
+        let notices = client.fetch_notices();
+        assert_eq!(notices.len(), 1, "a trimmed walk must be reported");
+        assert!(
+            notices[0].contains("PARTIAL"),
+            "the notice must say the result is incomplete, got: {}",
+            notices[0]
+        );
+    }
+
+    /// Why: the notice has to reach the pipeline through the trait the
+    /// collector actually drives, not only through the concrete client.
+    #[tokio::test]
+    async fn truncation_notices_reach_the_provider_trait() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widgets/issues"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(full_page()))
+            .mount(&server)
+            .await;
+
+        let client = client_at(&server.uri());
+        assert!(PrProvider::fetch_notices(&client).is_empty());
+        let _ = client.list_issues("all", None).await.expect("walk returns");
+        assert_eq!(PrProvider::fetch_notices(&client).len(), 1);
+    }
+
+    /// Why: on the live repro each of 2625 pull requests paid four rejected
+    /// requests, because a rate limit that outlived one call had no way to stop
+    /// the next. Once this client's budget latches, every remaining call must
+    /// terminate without sending anything.
+    #[tokio::test]
+    async fn a_rate_limit_terminates_the_client_instead_of_repeating_per_item() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "0"))
+            .mount(&server)
+            .await;
+
+        let client = client_at(&server.uri());
+        let first = client
+            .fetch_pr_reviews_for_repo("acme", "widgets", 1)
+            .await
+            .expect_err("a permanent rate limit must not read as `no reviews`");
+        assert!(matches!(first, CollectError::Throttled { status: 429, .. }));
+        assert!(client.throttled());
+
+        let before = server
+            .received_requests()
+            .await
+            .map(|r| r.len())
+            .unwrap_or_default();
+        for pr in 2..=50u64 {
+            let e = client
+                .fetch_pr_reviews_for_repo("acme", "widgets", pr)
+                .await
+                .expect_err("every later PR must fail fast");
+            assert!(matches!(e, CollectError::Throttled { .. }));
+        }
+        let after = server
+            .received_requests()
+            .await
+            .map(|r| r.len())
+            .unwrap_or_default();
+        assert_eq!(
+            before, after,
+            "49 further PRs must cost zero requests once the breaker has latched"
+        );
+    }
+}

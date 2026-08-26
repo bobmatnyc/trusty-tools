@@ -20,6 +20,7 @@
 
 use tracing::{debug, warn};
 
+use super::budget::{FetchBudget, MAX_PAGES};
 use super::client::{GITHUB_API_BASE, PAGE_SIZE};
 use super::retry::retry_get;
 use crate::collect::errors::{CollectError, Result};
@@ -58,6 +59,31 @@ pub async fn discover_org_repos(
     client: &reqwest::Client,
     org: &str,
 ) -> Result<Vec<(String, String)>> {
+    discover_org_repos_within(client, org, &FetchBudget::new()).await
+}
+
+/// [`discover_org_repos`] against a caller-supplied budget.
+///
+/// Why (#6084): the multi-org pass walks one org after another, and a rate
+/// limit hit on the first org applies to every org after it. Sharing one
+/// budget across the whole pass is what stops the second org from re-running
+/// the storm the first one just terminated on.
+/// What: identical to [`discover_org_repos`], except the run-wide bound is
+/// passed in rather than created per call, and the page walk stops at
+/// [`MAX_PAGES`].
+/// Test: `crate::collect::github::retry_tests` covers the budget behaviour
+/// this shares with every other GitHub call.
+///
+/// # Errors
+///
+/// Same as [`discover_org_repos`], plus
+/// [`CollectError::Throttled`](crate::collect::errors::CollectError::Throttled)
+/// once the shared budget is exhausted.
+pub(crate) async fn discover_org_repos_within(
+    client: &reqwest::Client,
+    org: &str,
+    budget: &FetchBudget,
+) -> Result<Vec<(String, String)>> {
     let mut out = Vec::new();
     let mut page = 1u32;
     loop {
@@ -66,7 +92,7 @@ pub async fn discover_org_repos(
         debug!(url = %url, "GET (org repo discovery)");
         // Route through the shared retry helper so transient 5xx/429 are
         // retried with the same backoff as the main PR client.
-        let resp = retry_get(client, &url).await?;
+        let resp = retry_get(client, &url, budget).await?;
 
         // Respect rate-limit hints (same pattern as the main client).
         if let Some(rem) = resp
@@ -108,6 +134,15 @@ pub async fn discover_org_repos(
             break;
         }
         page += 1;
+        if page > MAX_PAGES {
+            warn!(org = %org, pages = MAX_PAGES, "org repo discovery hit the page cap");
+            budget.note_truncation(format!(
+                "GitHub org repo discovery for {org} stopped at the {MAX_PAGES}-page cap \
+                 ({} repositories); the repository set is PARTIAL",
+                MAX_PAGES * PAGE_SIZE
+            ));
+            break;
+        }
     }
     debug!(org = %org, count = out.len(), "org repo discovery complete");
     Ok(out)

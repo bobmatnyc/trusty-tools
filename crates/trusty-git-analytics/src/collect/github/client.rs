@@ -7,6 +7,7 @@ use tracing::{debug, warn};
 use async_trait::async_trait;
 
 use crate::collect::errors::{CollectError, Result};
+use crate::collect::github::budget::{FetchBudget, MAX_PAGES};
 use crate::collect::github::repo_resolver::{build_http_client, parse_slug};
 use crate::collect::github::retry::retry_get;
 use crate::collect::github::types::{ApiPull, GitHubIssue, GitHubPrCommit, GitHubReview};
@@ -50,6 +51,10 @@ pub struct GitHubClient {
     /// client's credential (or lack of one) can see the primary repo — see
     /// [`Self::ensure_repo_visible`].
     repo_visible: tokio::sync::OnceCell<bool>,
+    /// #6084: the run-wide bound every call this client makes charges against.
+    /// One budget per client means the whole PR sweep — every page of every
+    /// repo, every review, every issue — shares one ceiling and one breaker.
+    budget: FetchBudget,
 }
 
 /// Compute the JSON-encoded `commit_shas` value for a PR row.
@@ -99,6 +104,7 @@ impl GitHubClient {
             repos: vec![(owner, repo)],
             api_base: GITHUB_API_BASE.to_string(),
             repo_visible: tokio::sync::OnceCell::new(),
+            budget: FetchBudget::new(),
         })
     }
 
@@ -136,6 +142,7 @@ impl GitHubClient {
             repos,
             api_base: GITHUB_API_BASE.to_string(),
             repo_visible: tokio::sync::OnceCell::new(),
+            budget: FetchBudget::new(),
         })
     }
 
@@ -163,6 +170,7 @@ impl GitHubClient {
             repos: Vec::new(),
             api_base: GITHUB_API_BASE.to_string(),
             repo_visible: tokio::sync::OnceCell::new(),
+            budget: FetchBudget::new(),
         })
     }
 
@@ -284,6 +292,9 @@ impl GitHubClient {
                 break;
             }
             page += 1;
+            if self.page_cap_reached("pulls", &format!("{owner}/{repo}"), page) {
+                break;
+            }
         }
         Ok(out)
     }
@@ -450,10 +461,57 @@ impl GitHubClient {
     /// Why: GitHub occasionally returns 502/504 under load and 429 when the
     /// per-token rate limit drains; a tiny retry loop avoids surfacing those
     /// as pipeline failures.
-    /// What: delegates to the free [`retry_get`] helper, passing `self.client`.
+    /// What: delegates to the free [`retry_get`] helper, passing `self.client`
+    /// and this client's shared [`FetchBudget`] so every call on it charges
+    /// against one run-wide ceiling (#6084).
     /// Test: covered indirectly by callers and by `wiremock` integration tests.
     async fn retry_request(&self, url: &str) -> Result<reqwest::Response> {
-        retry_get(&self.client, url).await
+        retry_get(&self.client, url, &self.budget).await
+    }
+
+    /// Whether a paginated walk has reached [`MAX_PAGES`] and must stop.
+    ///
+    /// Why (#6084): every listing here looped until GitHub returned a short
+    /// page, which trusts the server to eventually end the walk. A cap makes
+    /// each walk finite; recording the stop is what keeps the shortened result
+    /// from reading downstream exactly like a complete one.
+    /// What: returns `false` below the cap. At the cap, warns, appends a
+    /// truncation notice to the budget, and returns `true` for the caller to
+    /// break on.
+    /// Test: `client_tests::a_listing_that_never_ends_stops_at_the_page_cap_and_says_so`.
+    fn page_cap_reached(&self, endpoint: &str, scope: &str, page: u32) -> bool {
+        if page <= MAX_PAGES {
+            return false;
+        }
+        warn!(
+            endpoint,
+            scope,
+            pages = MAX_PAGES,
+            "GitHub listing hit the page cap; results for this scope are partial"
+        );
+        self.budget.note_truncation(format!(
+            "GitHub {endpoint} listing for {scope} stopped at the {MAX_PAGES}-page cap \
+             ({} items); these results are PARTIAL",
+            MAX_PAGES * PAGE_SIZE
+        ));
+        true
+    }
+
+    /// Bounds this client hit while fetching, in operator-facing wording.
+    ///
+    /// Empty when nothing was truncated. Non-empty means the data this client
+    /// returned is incomplete and the caller must say so (#6084).
+    pub(crate) fn fetch_notices(&self) -> Vec<String> {
+        self.budget.notices()
+    }
+
+    /// Whether this client's budget latched, meaning it stopped fetching early.
+    ///
+    /// A caller that continued past per-item failures uses this to tell "the
+    /// items I skipped were individually bad" from "GitHub stopped answering
+    /// and everything after the trip was never attempted" (#6084).
+    pub(crate) fn throttled(&self) -> bool {
+        self.budget.tripped_error().is_some()
     }
 
     /// Fetch all reviews for a given pull request, paginating until exhausted.
@@ -495,6 +553,9 @@ impl GitHubClient {
                 break;
             }
             page += 1;
+            if self.page_cap_reached("reviews", &format!("{owner}/{repo}#{pr_number}"), page) {
+                break;
+            }
         }
         Ok(out)
     }
@@ -540,6 +601,10 @@ impl GitHubClient {
                 break;
             }
             page += 1;
+            let scope = format!("{}/{}#{pr_number}", self.owner, self.repo);
+            if self.page_cap_reached("pr commits", &scope, page) {
+                break;
+            }
         }
         Ok(out)
     }
@@ -588,6 +653,10 @@ impl GitHubClient {
                 break;
             }
             page += 1;
+            let scope = format!("{}/{}", self.owner, self.repo);
+            if self.page_cap_reached("issues", &scope, page) {
+                break;
+            }
         }
         Ok(out)
     }
@@ -609,6 +678,10 @@ impl PrProvider for GitHubClient {
         prs: &[PullRequest],
     ) -> crate::core::Result<usize> {
         GitHubClient::store_pull_requests(self, db, prs)
+    }
+
+    fn fetch_notices(&self) -> Vec<String> {
+        GitHubClient::fetch_notices(self)
     }
 }
 
