@@ -336,38 +336,24 @@ impl HealthClient {
     /// per-palace name, vector count, and KG triple count so the operator can
     /// see at a glance which palaces hold the most memory and which carry a
     /// knowledge graph. `memory.status` only exposes aggregate totals.
-    /// What (#6286): the retired `GET /api/v1/palaces` answered one row per
-    /// palace WITH its counts, and no method does — `palace_list` answers bare
-    /// ids. So this asks for the ids and fans out `memory.palace_get` per
-    /// palace, which is also what makes the counts measurements rather than the
-    /// placeholder zeros the peek-based route reported for an unresident palace
-    /// (#4682). Any error yields an empty list.
-    /// Test: the projection is unit-tested via `project_palace_rows`.
+    ///
+    /// What (#6286): one `memory.palaces_list` call. This fanned out
+    /// `memory.palace_get` per id, because nothing on the socket answered a
+    /// roster WITH counts — `palace_list` answers bare ids and the retired
+    /// `GET /api/v1/palaces` reported peek-based placeholder zeros for any
+    /// unresident palace (#4682). The fan-out also dropped a palace whose call
+    /// failed, silently; `memory.palaces_list` carries a per-palace error
+    /// instead, and [`project_palace_roster`] renders it.
+    ///
+    /// A whole-call failure still yields an empty list — the panel's other
+    /// rows are worth showing, and the daemon's own health line already says
+    /// it is unreachable.
+    /// Test: the projection is unit-tested via `project_palace_roster`.
     pub async fn memory_collections(&self) -> Vec<CollectionRow> {
-        let Ok(listed) = self.memory_call("palace_list", json!({})).await else {
+        let Ok(listed) = self.memory_call("memory.palaces_list", json!({})).await else {
             return Vec::new();
         };
-        let ids: Vec<String> = listed
-            .get("palaces")
-            .and_then(|v| v.as_array())
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let mut rows = Vec::with_capacity(ids.len());
-        for id in ids {
-            if let Ok(palace) = self
-                .memory_call("memory.palace_get", json!({ "palace_id": id }))
-                .await
-            {
-                rows.push(palace);
-            }
-        }
-        project_palace_rows(&Value::Array(rows))
+        project_palace_roster(&listed)
     }
 
     /// Request a graceful shutdown of the daemon via its `admin/stop` endpoint.
@@ -448,6 +434,48 @@ pub(crate) fn project_log_tail(body: &serde_json::Value) -> (Vec<String>, u64) {
     (lines, total)
 }
 
+/// Project a `memory.palaces_list` answer into left-panel rows (#6286).
+///
+/// Why: the roster's rows come in two shapes — a palace the daemon read, and a
+/// palace it could not. The second must be RENDERED rather than skipped: the
+/// fan-out this replaced dropped it at the call site, so the panel could list
+/// fewer palaces than the daemon has with nothing saying which or why.
+/// What: a readable row goes through [`project_palace_rows`], keeping its
+/// empty-palace filter. A row carrying `error` becomes a row with `ok: false`
+/// and the daemon's reason as its note, exempt from that filter — a palace
+/// whose counts could not be read must not be mistaken for one holding
+/// nothing.
+/// Test: `project_palace_roster_reads_counts`,
+/// `project_palace_roster_renders_a_failed_row`.
+pub(crate) fn project_palace_roster(answer: &serde_json::Value) -> Vec<CollectionRow> {
+    let Some(rows) = answer.get("palaces").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        if let Some(palace) = row.get("palace").filter(|v| v.is_object()) {
+            out.extend(project_palace_rows(&serde_json::Value::Array(vec![
+                palace.clone(),
+            ])));
+            continue;
+        }
+        let Some(error) = row.get("error").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let id = row
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_string();
+        out.push(CollectionRow {
+            id,
+            note: format!("counts unavailable: {error}"),
+            ok: false,
+            ..Default::default()
+        });
+    }
+    out
+}
 /// Project a memory daemon `/api/v1/palaces` payload into palace rows.
 ///
 /// Why: centralising the projection keeps the renderer terse and lets a unit

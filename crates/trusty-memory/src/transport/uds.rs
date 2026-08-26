@@ -92,6 +92,7 @@ pub const FOLDED_METHODS: &[&str] = &[
     "memory.status",
     "memory.config",
     "memory.palace_get",
+    "memory.palaces_list",
     "memory.drawers_list",
     "memory.drawer_create",
     "memory.drawer_delete",
@@ -249,6 +250,12 @@ pub fn build_router(state: AppState) -> RpcRouter {
         "memory.palace_get",
         PalaceParams,
         palaces::get_palace
+    );
+    let router = bind!(
+        router,
+        "memory.palaces_list",
+        NoParams,
+        palaces::palaces_list
     );
     let router = bind!(
         router,

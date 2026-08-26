@@ -407,6 +407,117 @@ async fn rpc_palace_get_reports_not_found_for_an_unknown_id() {
     daemon.shutdown().await;
 }
 
+/// Why: `memory.palaces_list` is what replaces the monitor's N-call
+/// `memory.palace_get` fan-out, so it has to answer one row per palace WITH
+/// real counts — not the placeholder zeros the retired `GET /api/v1/palaces`
+/// reported for any palace that was not already resident (#4640). A row whose
+/// counts were peeked rather than measured is the defect this method exists to
+/// close.
+/// What: seeds two palaces, writes a drawer into one through the folded create,
+/// and asserts both appear with the write reflected in the counts.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn rpc_palaces_list_reports_counts_per_palace() {
+    let state = test_state();
+    let written = seed_palace(&state, "roster-one");
+    let empty = seed_palace(&state, "roster-two");
+    let daemon = Daemon::start(state).await;
+
+    daemon
+        .ok(
+            "memory.drawer_create",
+            json!({
+                "palace_id": written,
+                "content": "a drawer the roster has to count",
+                "force": true,
+            }),
+        )
+        .await;
+
+    let result = daemon.ok("memory.palaces_list", json!({})).await;
+    let rows = result["palaces"]
+        .as_array()
+        .expect("palaces_list answers a palaces array");
+    assert_eq!(rows.len(), 2, "one row per palace: {result}");
+
+    let row = rows
+        .iter()
+        .find(|r| r["id"] == written.as_str())
+        .expect("the written palace is listed");
+    assert!(row["error"].is_null(), "a readable palace carries no error");
+    assert_eq!(
+        row["palace"]["drawer_count"], 1,
+        "the count must be a measurement, not a peeked zero: {row}"
+    );
+
+    let row = rows
+        .iter()
+        .find(|r| r["id"] == empty.as_str())
+        .expect("the empty palace is listed");
+    assert!(row["error"].is_null());
+    assert_eq!(row["palace"]["drawer_count"], 0);
+}
+
+/// Why: the fan-out this replaces dropped a palace whose call failed at
+/// `debug!`, so the panel could report a palace COUNT above fewer rows than
+/// that with nothing saying which were missing. The row type carries an error
+/// field so that cannot recur, and this is what proves the field is reachable
+/// rather than decorative.
+/// What: seeds a palace, then makes its data directory unopenable by replacing
+/// it with a regular file, and asserts the palace still appears — with `palace`
+/// absent and `error` set.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn rpc_palaces_list_reports_an_unreadable_palace_rather_than_dropping_it() {
+    let state = test_state();
+    let good = seed_palace(&state, "roster-good");
+
+    // Created through a SEPARATE registry so `state.registry` never caches its
+    // handle: `create_palace` registers the handle it just opened, and a
+    // resident handle is returned without touching disk, so a palace seeded the
+    // usual way cannot be made to fail an open at all.
+    let broken = seed_palace_off_registry(&state, "roster-broken");
+
+    // The registry lists the palace from its `palace.json`, then reads
+    // `identity.txt` on the way to opening its stores. Leaving the metadata
+    // intact and putting a DIRECTORY where that file belongs makes the read
+    // fail with `EISDIR` — the palace is listed and cannot be opened, which is
+    // the shape a permissions problem or a jammed redb lock produces, without
+    // needing either.
+    let dir = state.data_root.join(&broken);
+    std::fs::create_dir_all(dir.join("identity.txt")).expect("wedge the palace identity");
+
+    let daemon = Daemon::start(state).await;
+    let result = daemon.ok("memory.palaces_list", json!({})).await;
+    let rows = result["palaces"]
+        .as_array()
+        .expect("palaces_list answers a palaces array");
+    assert_eq!(
+        rows.len(),
+        2,
+        "an unreadable palace must still be a row: {result}"
+    );
+
+    let row = rows
+        .iter()
+        .find(|r| r["id"] == broken.as_str())
+        .expect("the wedged palace is listed");
+    assert!(
+        row["error"].is_string(),
+        "the row must carry why it could not be read: {row}"
+    );
+    assert!(
+        row["palace"].is_null(),
+        "a failed read must not become a row of zeros: {row}"
+    );
+
+    let row = rows
+        .iter()
+        .find(|r| r["id"] == good.as_str())
+        .expect("the healthy palace is unaffected");
+    assert!(row["error"].is_null());
+}
+
 /// Why: the clamp is what stops a caller pulling a whole graph by asking for
 /// one page, and it used to live in the axum extractor layer that is gone. A
 /// clamp that did not survive the move would be invisible until a palace was
@@ -972,5 +1083,29 @@ fn seed_palace(state: &AppState, name: &str) -> String {
         .registry
         .create_palace(&state.data_root, palace)
         .expect("create the test palace");
+    id.0
+}
+
+/// Create a real palace on disk WITHOUT registering it in `state`'s registry.
+///
+/// Why: `create_palace` registers the handle it opened, and `open_palace`
+/// returns a resident handle without touching disk — so a palace seeded the
+/// usual way opens no matter what its files look like. A separate registry
+/// instance writes the same bytes and leaves `state.registry` cold, which is
+/// the only way to exercise an open that fails.
+fn seed_palace_off_registry(state: &AppState, name: &str) -> String {
+    use trusty_common::memory_core::palace::{Palace, PalaceId};
+    use trusty_common::memory_core::PalaceRegistry;
+    let id = PalaceId::new(name);
+    let palace = Palace {
+        id: id.clone(),
+        name: name.to_string(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir: state.data_root.join(name),
+    };
+    PalaceRegistry::new()
+        .create_palace(&state.data_root, palace)
+        .expect("create the test palace off-registry");
     id.0
 }

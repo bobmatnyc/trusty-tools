@@ -127,43 +127,29 @@ impl MemoryClient {
     /// Fetch the palace list with live counts.
     ///
     /// Why (#6286): the retired `GET /api/v1/palaces` returned one row per
-    /// palace WITH its counts. Nothing on the socket does — `palace_list`
-    /// answers bare ids, and `memory.palace_get` answers one palace. So this
-    /// asks for the ids and then fans out one `memory.palace_get` per id.
+    /// palace WITH its counts, and the first pass at this migration had nothing
+    /// on the socket that did — `palace_list` answers bare ids and
+    /// `memory.palace_get` answers one palace — so it fanned out one
+    /// `palace_get` per id. That fan-out then dropped a palace whose call
+    /// failed at `debug!`, which is how the panel could show "12 palaces" over
+    /// nine rows with nothing saying why.
     ///
-    /// The cost is not what the fan-out makes it look like. The bulk route used
-    /// `PalaceRegistry::peek` since #4640, so it reported `cached: false` and
-    /// placeholder zeros for any palace not already resident — which is why
-    /// `fetch_palace` had to exist at all (#4682). `memory.palace_get` opens the
-    /// palace, so the FIRST poll pays a cold open per palace and every poll
-    /// after it hits the daemon's registry. The rows are also real counts
-    /// rather than zeros, which the bulk route only managed for resident
-    /// palaces.
+    /// `memory.palaces_list` is the one call that answers what the fan-out was
+    /// assembling: the same opens, one round trip instead of N, and a row that
+    /// carries its own failure. A palace that could not be read is now a row
+    /// saying so rather than a silent omission.
     ///
-    /// What: `palace_list`, then a `memory.palace_get` per id. A palace whose
-    /// detail call fails is dropped rather than rendered as a row of zeros.
-    /// Test: live behaviour is covered by the trusty-memory daemon suite.
+    /// What: one `memory.palaces_list` call; every row's `palace` object goes
+    /// through [`parse_palace_detail`], and a row carrying `error` becomes a
+    /// [`PalaceRow`] marked [`PalaceRow::counts_unknown`] with the daemon's
+    /// reason on it. A row that is neither is a warn and a skip — the only
+    /// remaining drop, and it means the daemon answered a shape this client
+    /// does not know.
+    /// Test: `palaces_project_a_failed_row_rather_than_dropping_it`,
+    /// `palaces_project_a_readable_row`.
     async fn palaces(&self) -> anyhow::Result<Vec<PalaceRow>> {
-        let listed = self.call("palace_list", json!({})).await?;
-        let ids: Vec<String> = listed
-            .get("palaces")
-            .and_then(|v| v.as_array())
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let mut rows = Vec::with_capacity(ids.len());
-        for id in ids {
-            match self.fetch_palace(&id).await {
-                Ok(row) => rows.push(row),
-                Err(e) => tracing::debug!(palace = %id, "palace detail probe failed: {e}"),
-            }
-        }
-        Ok(rows)
+        let listed = self.call("memory.palaces_list", json!({})).await?;
+        Ok(project_palaces(&listed))
     }
 
     /// Fetch one palace's live counts.
@@ -288,6 +274,55 @@ impl MemoryClient {
             .await?;
         Ok(project_events(&raw, after_id))
     }
+}
+
+/// [`MemoryClient::palaces`]' body, over an already-fetched roster.
+///
+/// Why: separated so the failed-row projection is testable without a daemon.
+/// It is the half that silently lost palaces before #6286, and a projection
+/// that quietly dropped a row again would be invisible in exactly the same way.
+/// Test: `palaces_project_a_readable_row`,
+/// `palaces_project_a_failed_row_rather_than_dropping_it`.
+pub(super) fn project_palaces(raw: &Value) -> Vec<PalaceRow> {
+    let Some(rows) = raw.get("palaces").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id = row
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if let Some(detail) = row.get("palace").and_then(parse_palace_detail) {
+            out.push(detail);
+            continue;
+        }
+        if let Some(error) = row.get("error").and_then(Value::as_str) {
+            // A row the daemon could not read is rendered, not dropped: the
+            // panel's palace count and its row count have to agree, and a
+            // reader has to be able to see which palace is missing its numbers.
+            tracing::warn!(palace = %id, "palace counts unavailable: {error}");
+            out.push(PalaceRow {
+                id: id.clone(),
+                name: id,
+                vector_count: 0,
+                drawer_count: 0,
+                last_write_at: None,
+                description: Some(error.to_string()),
+                kg_triple_count: 0,
+                node_count: 0,
+                edge_count: 0,
+                community_count: 0,
+                is_compacting: false,
+                // #4682's rule: zero here means unknown, never empty.
+                counts_unknown: true,
+            });
+            continue;
+        }
+        tracing::warn!(palace = %id, "palace row carried neither counts nor a reason");
+    }
+    out
 }
 
 /// [`MemoryClient::recent_events`]' body, over an already-fetched page.

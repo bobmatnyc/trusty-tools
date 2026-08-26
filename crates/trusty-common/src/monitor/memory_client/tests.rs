@@ -4,14 +4,15 @@
 //! tests cover socket resolution, the activity-poll cursor, and every
 //! JSON-projection function without requiring a running daemon.
 //! What: unit tests for `resolve_memory_socket`, `MemoryClient` construction,
-//! `project_events`, and all `parse_*` / `creator_label` functions.
+//! `project_events`, `project_palaces`, and all `parse_*` / `creator_label`
+//! functions.
 //! Test: this file is the test coverage.
 
 #[cfg(test)]
 #[allow(clippy::module_inception)]
 mod tests {
     use super::super::client::MemoryClient;
-    use super::super::client::project_events;
+    use super::super::client::{project_events, project_palaces};
     use super::super::parsers::{
         creator_label, parse_drawers, parse_dream_stats, parse_memory_details, parse_memory_event,
         parse_palace_detail, parse_recall_hits,
@@ -93,6 +94,100 @@ mod tests {
         let (cursor, events) = project_events(&page, cursor);
         assert_eq!(cursor, 9, "an unchanged page must not move the cursor");
         assert!(events.is_empty(), "nothing past the cursor replays");
+    }
+
+    /// Why (#6286): the palace panel is assembled from `memory.palaces_list`
+    /// now, and the readable case has to project the nested `palace` object
+    /// rather than the row itself — a projection reading the row would find no
+    /// counts and drop it, which is the failure this method replaced.
+    /// What: feeds a one-row roster and asserts the counts land.
+    /// Test: this test.
+    #[test]
+    fn palaces_project_a_readable_row() {
+        let roster = serde_json::json!({
+            "palaces": [{
+                "id": "cto",
+                "error": null,
+                "palace": {
+                    "id": "cto",
+                    "name": "cto",
+                    "drawer_count": 12,
+                    "vector_count": 12,
+                    "kg_triple_count": 3,
+                    "cached": true,
+                },
+            }],
+        });
+        let rows = project_palaces(&roster);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "cto");
+        assert_eq!(rows[0].drawer_count, 12);
+        assert!(
+            !rows[0].counts_unknown,
+            "a row the daemon read is a measurement"
+        );
+    }
+
+    /// Why (#6286 review, finding 7): the fan-out this replaced dropped a
+    /// palace whose fetch failed at `debug!`, so the panel could report a
+    /// palace COUNT above fewer rows than that with nothing saying which were
+    /// missing. A failed row must be RENDERED — carrying `counts_unknown` so no
+    /// zero is read as a measurement, and the daemon's reason so an operator
+    /// can act on it.
+    /// What: feeds a roster whose second row carries `error` instead of
+    /// `palace`, and asserts both rows survive.
+    /// Test: this test.
+    #[test]
+    fn palaces_project_a_failed_row_rather_than_dropping_it() {
+        let roster = serde_json::json!({
+            "palaces": [
+                {
+                    "id": "healthy",
+                    "error": null,
+                    "palace": { "id": "healthy", "name": "healthy", "drawer_count": 4 },
+                },
+                { "id": "wedged", "error": "open KG for wedged: permission denied" },
+            ],
+        });
+        let rows = project_palaces(&roster);
+        assert_eq!(
+            rows.len(),
+            2,
+            "a palace the daemon could not read must still be a row: {rows:?}"
+        );
+        let wedged = rows
+            .iter()
+            .find(|r| r.id == "wedged")
+            .expect("the failed row");
+        assert!(wedged.counts_unknown, "its zeros mean unknown, never empty");
+        assert_eq!(
+            wedged.description.as_deref(),
+            Some("open KG for wedged: permission denied"),
+            "the daemon's reason has to reach the panel"
+        );
+    }
+
+    /// Why: a roster shape this client does not know is the one remaining drop,
+    /// and it must not take the rest of the roster with it.
+    /// What: feeds a row carrying neither counts nor a reason alongside a good
+    /// one, and asserts only the unknown row is skipped.
+    /// Test: this test.
+    #[test]
+    fn palaces_skip_only_the_row_they_cannot_read() {
+        let roster = serde_json::json!({
+            "palaces": [
+                { "id": "mystery" },
+                { "id": "ok", "error": null, "palace": { "id": "ok", "name": "ok" } },
+            ],
+        });
+        let rows = project_palaces(&roster);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "ok");
+
+        assert!(
+            project_palaces(&serde_json::json!({})).is_empty(),
+            "an answer with no palaces array is empty, not a panic"
+        );
     }
 
     /// Why (issue #4682): `cached: false` rows carry placeholder zeros — 2,180

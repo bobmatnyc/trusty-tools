@@ -9,7 +9,8 @@
 
 use super::activity::{DREAMING_SPINNER, INDEXING_SPINNER};
 use super::probes::{
-    project_edge_kinds, project_log_tail, project_memory_counts, project_palace_rows,
+    project_edge_kinds, project_log_tail, project_memory_counts, project_palace_roster,
+    project_palace_rows,
 };
 use super::screen::format_count_suffix;
 use super::types::HealthWire;
@@ -402,6 +403,70 @@ fn project_palace_rows_reads_palaces() {
     assert_eq!(rows[1].count, 0);
     assert_eq!(rows[1].kg_count, 42);
     assert!(project_palace_rows(&serde_json::json!({})).is_empty());
+}
+
+/// Why (#6286): the panel reads `memory.palaces_list` now, whose rows nest the
+/// palace under `palace`. A projection reading the row itself would find no
+/// counts and drop every palace, which looks identical to a daemon with none.
+/// Test: itself.
+#[test]
+fn project_palace_roster_reads_counts() {
+    let answer = serde_json::json!({
+        "palaces": [
+            {
+                "id": "default",
+                "error": null,
+                "palace": { "name": "default", "vector_count": 8400u64, "kg_triple_count": 1200u64 },
+            },
+        ],
+    });
+    let rows = project_palace_roster(&answer);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "default");
+    assert_eq!(rows[0].count, 8400);
+    assert_eq!(rows[0].kg_count, 1200);
+    assert!(rows[0].ok);
+
+    assert!(
+        project_palace_roster(&serde_json::json!({})).is_empty(),
+        "an answer with no palaces array is empty, not a panic"
+    );
+}
+
+/// Why (#6286 review, finding 7): the `memory.palace_get` fan-out this replaced
+/// dropped a palace whose call failed, so the panel could list fewer palaces
+/// than the daemon has with nothing saying which or why. A failed row is
+/// rendered with `ok: false` and the daemon's reason — and it must be EXEMPT
+/// from the empty-palace filter, because a palace whose counts could not be
+/// read is not a palace holding nothing.
+/// Test: itself.
+#[test]
+fn project_palace_roster_renders_a_failed_row() {
+    let answer = serde_json::json!({
+        "palaces": [
+            {
+                "id": "live",
+                "error": null,
+                "palace": { "name": "live", "vector_count": 10u64, "kg_triple_count": 0u64 },
+            },
+            { "id": "wedged", "error": "open KG for wedged: permission denied" },
+        ],
+    });
+    let rows = project_palace_roster(&answer);
+    let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["live", "wedged"],
+        "an unreadable palace must still be a row"
+    );
+    let wedged = &rows[1];
+    assert!(!wedged.ok, "a row with no counts is not healthy");
+    assert_eq!(wedged.count, 0);
+    assert!(
+        wedged.note.contains("permission denied"),
+        "the daemon's reason has to reach the operator: {}",
+        wedged.note
+    );
 }
 
 #[test]

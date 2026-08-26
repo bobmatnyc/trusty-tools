@@ -1,14 +1,22 @@
-//! Daemon summary, config, one palace, and drawer CRUD (#6286).
+//! Daemon summary, config, the palace roster, one palace, and drawer CRUD
+//! (#6286).
 //!
-//! Why: these six were `/api/v1/status`, `/config`, `GET /palaces/{id}` and the
-//! three drawer routes. `palace_list`, `palace_create`, `palace_update` and
-//! `palace_delete` are NOT here — they were already tool methods the
-//! dispatcher routes, so folding them again would be a second implementation of
-//! the same call.
+//! Why: these were `/api/v1/status`, `/config`, `GET /palaces`,
+//! `GET /palaces/{id}` and the three drawer routes. `palace_create`,
+//! `palace_update` and `palace_delete` are NOT here — they were already tool
+//! methods the dispatcher routes, so folding them again would be a second
+//! implementation of the same call.
+//!
+//! [`palaces_list`] is the one that is not a straight fold. `palace_list`, the
+//! tool, answers bare ids; `GET /palaces` answered rows but with `peek`-based
+//! placeholder zeros for any palace not already resident (#4640). Neither is
+//! what a roster with counts needs, which is why the monitor was fanning out one
+//! [`get_palace`] per id — see [`palaces_list`] and [`PalaceListRow`].
+//!
 //! What: each handler delegates to `MemoryService`, which is where the
 //! behaviour lived all along; the axum extractors become one params struct.
 //! Test: `super::super::uds::tests` — `rpc_status_*`, `rpc_drawer_*`,
-//! `rpc_palace_get_*`.
+//! `rpc_palace_get_*`, `rpc_palaces_list_*`.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -62,6 +70,75 @@ pub async fn get_palace(state: &AppState, params: PalaceParams) -> Result<Value,
             .get_palace(&params.palace_id)
             .await?,
     )
+}
+
+/// One palace's row in [`palaces_list`], or why its counts are missing.
+///
+/// Why the error is a FIELD rather than an omitted row (#6286): the monitor's
+/// predecessor — an N-call `memory.palace_get` fan-out — dropped a palace whose
+/// call failed at `debug!`, so the panel could report "12 palaces" above 9 rows
+/// with nothing to say which three were missing or why. A row that can carry
+/// its own failure makes that impossible to reintroduce: every palace the
+/// registry lists appears, and one that could not be read says so.
+///
+/// What: `id` is always present. Exactly one of `palace` and `error` is
+/// non-null. `error` is serialised even when null so a consumer reads it
+/// directly rather than testing for the key.
+///
+/// `palace` is nested rather than flattened because [`crate::service::PalaceInfo`]
+/// carries its own `id`, and a flatten would put two spellings of the same
+/// field in one object.
+/// Test: `rpc_palaces_list_reports_counts_per_palace`,
+/// `rpc_palaces_list_reports_an_unreadable_palace_rather_than_dropping_it`.
+#[derive(Debug, Serialize)]
+pub struct PalaceListRow {
+    /// The palace id, present whether or not its counts could be read.
+    pub id: String,
+    /// The palace's real counts. Never a row of zeros standing in for unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub palace: Option<crate::service::PalaceInfo>,
+    /// Why the counts are absent. `null` when `palace` is present.
+    pub error: Option<String>,
+}
+
+/// `memory.palaces_list` — one row per palace, with real counts (#6286).
+///
+/// Why: this is the contract the retired `GET /api/v1/palaces` carried, with
+/// the counts it could not. That route used `PalaceRegistry::peek` since #4640,
+/// so it reported `cached: false` and placeholder zeros for any palace not
+/// already resident — which is why the monitor fanned out one
+/// `memory.palace_get` per id instead, and why the panel could disagree with
+/// itself about how many palaces there are.
+///
+/// What: delegates to `MemoryService::list_palaces_with_counts`, which opens
+/// each palace and keeps per-palace failures. See that method for why opening
+/// every palace is the same cost as the fan-out it replaces, not a new one.
+/// Answers `{"palaces": [PalaceListRow, …]}` — an object rather than a bare
+/// array so a later addition (a total, a truncation flag) is not a breaking
+/// shape change.
+///
+/// Test: `rpc_palaces_list_reports_counts_per_palace`,
+/// `rpc_palaces_list_reports_an_unreadable_palace_rather_than_dropping_it`.
+pub async fn palaces_list(state: &AppState, _params: NoParams) -> Result<Value, ApiError> {
+    let rows = crate::service::MemoryService::new(state.clone())
+        .list_palaces_with_counts()
+        .await?;
+    let rows: Vec<PalaceListRow> = rows
+        .into_iter()
+        .map(|(id, result)| match result {
+            Ok(info) => PalaceListRow {
+                id,
+                palace: Some(info),
+                error: None,
+            },
+            Err(error) => PalaceListRow {
+                id,
+                palace: None,
+                error: Some(error),
+            },
+        })
+        .collect();
+    to_value(json!({ "palaces": rows }))
 }
 
 /// Params for `memory.drawers_list`.
