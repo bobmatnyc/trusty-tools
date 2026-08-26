@@ -82,8 +82,18 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// `trusty_common::uds::send_framed_stream_request_capped`; the console does
 /// exactly that.
 ///
-/// Test: `streaming_method_is_refused_rather_than_half_answered`.
-const STREAMING_METHODS: &[&str] = &["memory.chat"];
+/// **This list must equal the daemon's `transport::uds::STREAM_METHODS`.** It
+/// is a second copy, because the bridge refuses a method BEFORE dialling and so
+/// cannot ask the router what it registered. A method the daemon streams and
+/// this list omits is exactly the silent case the paragraph above describes:
+/// #6286 added `memory.activity_stream` to the daemon and not to this list, so
+/// an MCP client calling it would have hung waiting for a shape it was never
+/// going to get. `bridge_streaming_methods_match_the_daemon` in
+/// `tests/uds_consumer_contract.rs` is what keeps them equal.
+///
+/// Test: `streaming_method_is_refused_rather_than_half_answered`,
+/// `bridge_streaming_methods_match_the_daemon`.
+pub const STREAMING_METHODS: &[&str] = &["memory.chat", "memory.activity_stream"];
 
 /// Rewrite a request's `jsonrpc` to `"2.0"` before it is forwarded (#6286).
 ///

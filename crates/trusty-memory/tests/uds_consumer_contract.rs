@@ -252,3 +252,29 @@ fn memory_rpc_frame_budget_matches_the_daemon() {
         "the client's budget and the daemon's must be the same figure"
     );
 }
+
+/// Why: `serve_stdio_bridge::STREAMING_METHODS` is a SECOND copy of the
+/// daemon's `transport::uds::STREAM_METHODS`, and it has to be — the bridge
+/// refuses a streaming method before it dials, so it cannot ask the router what
+/// was registered. The two drift silently in the dangerous direction: a method
+/// the daemon streams and the bridge does not know is one the bridge forwards
+/// as an ordinary call, leaving an MCP client waiting for a single response
+/// frame that never comes. #6286 added `memory.activity_stream` to the daemon
+/// and not to the bridge, which is that exact case.
+///
+/// What: compares the two lists as sets. The bridge is not required to keep the
+/// daemon's declaration order — only to know the same names.
+/// Test: this is the test.
+#[test]
+fn bridge_streaming_methods_match_the_daemon() {
+    let mut daemon = trusty_memory::transport::uds::STREAM_METHODS.to_vec();
+    let mut bridge = trusty_memory::commands::serve_stdio_bridge::STREAMING_METHODS.to_vec();
+    daemon.sort_unstable();
+    bridge.sort_unstable();
+    assert_eq!(
+        bridge, daemon,
+        "the bridge must refuse exactly the methods the daemon streams — a name \
+         only the daemon knows is one the bridge forwards as a unary call, and \
+         the client waits forever"
+    );
+}

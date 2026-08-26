@@ -173,7 +173,7 @@ async fn feed_reports_a_terminal_error_and_stops_being_live() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(!feed.is_live(), "a terminal error ends the feed");
-    let reason = feed.last_error().expect("the reason is recorded");
+    let reason = feed.take_last_error().expect("the reason is recorded");
     assert!(
         reason.contains("fell over"),
         "the daemon's own message must survive: {reason}"
@@ -223,7 +223,7 @@ async fn feed_records_a_lag_without_logging_it_as_an_event() {
         }],
         "the lag notice is not an activity row"
     );
-    let reason = feed.last_error().expect("the lag is recorded");
+    let reason = feed.take_last_error().expect("the lag is recorded");
     assert!(
         reason.contains('7'),
         "the reader has to be able to say how many it missed: {reason}"
@@ -231,5 +231,37 @@ async fn feed_records_a_lag_without_logging_it_as_an_event() {
     assert!(
         feed.is_live(),
         "a lag is a hole in a working feed, not the end of one"
+    );
+}
+
+/// Why (#6286 review, finding 4): the caller renders each notice once, on an
+/// ordinary tick. A slot that kept its value would re-render the same lag every
+/// tick until the stream died; one that cleared without being read would lose
+/// it. Taking is what makes "push once and clear" the caller's whole job.
+/// Test: itself.
+#[tokio::test]
+async fn feed_take_last_error_clears_the_slot() {
+    let daemon = stream_daemon_with(vec![Ok(json!({ "type": "lagged", "lagged": 3 }))], true).await;
+
+    let feed = ActivityFeed::open(&daemon.socket)
+        .await
+        .expect("the stream opens");
+
+    let mut first = None;
+    for _ in 0..200 {
+        first = feed.take_last_error();
+        if first.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        first.is_some_and(|r| r.contains('3')),
+        "the first take reports the lag"
+    );
+    assert!(
+        feed.take_last_error().is_none(),
+        "a second take on an otherwise quiet feed reports nothing — the notice \
+         is rendered once, not on every tick until the stream dies"
     );
 }

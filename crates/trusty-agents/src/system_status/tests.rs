@@ -95,3 +95,39 @@ fn runner_label_matches_toml_kebab_case_convention() {
     assert_eq!(runner_label(RunnerKind::ClaudeCode), "claude-code");
     assert_eq!(runner_label(RunnerKind::InProcess), "in-process");
 }
+
+/// Why (#6286 review, finding 2): `probe_memory` and `probe_analyze` dialled an
+/// address ADR-0032 and #6287 stopped publishing, so both reported their daemon
+/// permanently down. The fix derives a socket instead — and a socket nothing is
+/// serving must STILL be a clean `up: false` rather than a hang or a panic,
+/// which is the contract the HTTP probe held.
+/// What: points the data directory at an empty tempdir, so the derived socket
+/// path exists nowhere, and asserts both probes report down promptly.
+/// Test: itself.
+#[tokio::test]
+async fn uds_daemon_with_no_socket_reports_up_false() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // SAFETY: the override is read inside the probes below and removed before
+    // this test returns.
+    unsafe {
+        std::env::set_var(trusty_common::DATA_DIR_OVERRIDE_ENV, tmp.path());
+    }
+    let started = std::time::Instant::now();
+    let memory = super::daemons::probe_memory().await;
+    let analyze = super::daemons::probe_analyze().await;
+    unsafe {
+        std::env::remove_var(trusty_common::DATA_DIR_OVERRIDE_ENV);
+    }
+
+    assert!(!memory.up, "nothing is serving the memory socket");
+    assert!(!analyze.up, "nothing is serving the analyze socket");
+    assert!(
+        memory.version.is_none() && analyze.version.is_none(),
+        "a down daemon reports no version"
+    );
+    assert!(
+        started.elapsed() < super::daemons::PROBE_TIMEOUT * 3,
+        "a refused dial must not wait out the budget twice over: {:?}",
+        started.elapsed()
+    );
+}

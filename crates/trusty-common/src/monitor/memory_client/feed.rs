@@ -14,10 +14,15 @@
 //!
 //! **A dead stream is visible, and the caller falls back.** The daemon
 //! restarting, the socket going away, or a terminal error frame all end the
-//! stream; [`ActivityFeed::is_live`] goes false, the reason is on
-//! [`ActivityFeed::last_error`], and the caller resumes polling
+//! stream; [`ActivityFeed::is_live`] goes false, the reason is waiting on
+//! [`ActivityFeed::take_last_error`], and the caller resumes polling
 //! `memory.activity`. Blanking the log instead would present a live daemon as
 //! an idle one.
+//!
+//! **A lag is reported the same way, on a feed that is still live.** The
+//! daemon tells a reader that fell behind how many events it dropped; that
+//! notice sits in the same slot, and the caller takes it on any tick rather
+//! than only when the stream dies.
 //!
 //! Test: `feed_drains_what_the_stream_pushed`,
 //! `feed_reports_a_terminal_error_and_stops_being_live`,
@@ -154,15 +159,27 @@ impl ActivityFeed {
         self.live.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Why the stream ended, or the last hole it reported.
+    /// Take why the stream ended, or the last hole it reported, clearing it.
+    ///
+    /// Why it TAKES rather than reads (#6286 review, finding 4): a lag notice
+    /// on a still-live feed has to reach the caller on an ordinary tick, and a
+    /// caller that polls a non-clearing slot would either re-render the same
+    /// notice every tick or need its own seen-marker. Taking it means the
+    /// caller renders each notice exactly once, and the two cases — a lag and a
+    /// death — read the same slot the same way.
     ///
     /// `Some` while [`Self::is_live`] is still true means the daemon reported a
-    /// lag: the feed is working and some events were missed.
-    pub fn last_error(&self) -> Option<String> {
+    /// lag: the feed is working and some events were missed. `Some` once
+    /// `is_live` is false is why it stopped.
+    ///
+    /// Test: `feed_reports_a_terminal_error_and_stops_being_live`,
+    /// `feed_records_a_lag_without_logging_it_as_an_event`,
+    /// `feed_take_last_error_clears_the_slot`.
+    pub fn take_last_error(&self) -> Option<String> {
         self.last_error
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .clone()
+            .take()
     }
 
     /// Take every event that has arrived since the last call, without blocking.
