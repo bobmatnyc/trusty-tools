@@ -1,6 +1,12 @@
 [package]
 name = "trusty-mcp"
-version = "0.1.1"
+# 0.1.1 -> 0.1.2 carries no code change. The `trusty-mcp-v0.1.1` tag is pinned
+# by a protected ruleset to c66fb18ff, and that commit fails Gate 1 of the
+# pre-publish workflow (two broken intra-doc links, fixed in this same commit),
+# so it can never satisfy `check-publish-ready.sh` CHECK 7. #6178: a release tag
+# here cannot be moved or deleted, so the version number is spent and the
+# release moves forward to a gate-clean commit instead.
+version = "0.1.2"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
