@@ -455,6 +455,453 @@ async fn server_round_trips_and_removes_its_socket_on_shutdown() {
     );
 }
 
+// ── streaming (#6286) ───────────────────────────────────────────────────────
+
+/// A request that opts into a stream. The flag is the whole negotiation: a
+/// frame without it is the protocol exactly as it stood.
+fn stream_frame(id: u64, method: &str, params: serde_json::Value) -> serde_json::Value {
+    json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params, "stream": true })
+}
+
+/// A router that streams `count` tokens on `"tokens"`, plus the unary methods,
+/// so the two tables are exercised against one another.
+///
+/// `count` of zero streams nothing and still ends on a terminal frame, which is
+/// the case a "the end is implied by silence" design would get wrong.
+fn token_router(count: usize) -> RpcRouter {
+    greeting_router().typed_stream("tokens", move |_req: ()| async move {
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        // Produced from a task, exactly as an LLM client feeds its channel:
+        // the handler returns the receiver before a single token exists.
+        tokio::spawn(async move {
+            for n in 0..count {
+                if tx.send(Ok(json!(format!("t{n}")))).await.is_err() {
+                    return;
+                }
+            }
+        });
+        Ok(rx)
+    })
+}
+
+#[test]
+fn stream_frames_carry_the_phase_discriminant() {
+    // A plain response has no `stream` field at all; that absence is what lets a
+    // reader tell the two envelopes apart on one socket.
+    let item = serde_json::to_value(RpcStreamFrame::item(json!(1), json!("tok"))).expect("encode");
+    assert_eq!(item["stream"], json!("item"));
+    assert_eq!(item["result"], json!("tok"));
+
+    let end = serde_json::to_value(RpcStreamFrame::end(json!(1))).expect("encode");
+    assert_eq!(end["stream"], json!("end"));
+    assert!(end.get("result").is_none() && end.get("error").is_none());
+
+    let failed =
+        serde_json::to_value(RpcStreamFrame::error(json!(1), RpcError::internal("no"))).expect("e");
+    assert_eq!(failed["stream"], json!("error"));
+    assert_eq!(failed["error"]["message"], json!("no"));
+
+    let unary = serde_json::to_value(RpcResponse::success(json!(1), json!("x"))).expect("encode");
+    assert!(
+        unary.get("stream").is_none(),
+        "a unary response must never carry the discriminant"
+    );
+}
+
+#[test]
+fn stream_names_are_sorted_and_separate_from_unary_names() {
+    let router = token_router(1);
+    assert_eq!(router.stream_names().collect::<Vec<_>>(), vec!["tokens"]);
+    assert_eq!(
+        router.method_names().collect::<Vec<_>>(),
+        vec!["explode", "greet"],
+        "a streaming name must not appear in the unary table"
+    );
+}
+
+#[tokio::test]
+async fn dispatch_streaming_answers_a_unary_request_unchanged() {
+    // Backward compatibility, at the decision layer: the wider entry point must
+    // produce byte-identical answers for every request that predates #6286.
+    for (id, method, params) in [
+        (1u64, "greet", json!({ "name": "ada" })),
+        (2, "explode", json!(null)),
+        (3, "nope", json!(null)),
+    ] {
+        let raw = frame(id, method, params.clone());
+        let unary = greeting_router().dispatch(&raw).await;
+        let wide = match greeting_router().dispatch_streaming(&raw).await {
+            RpcOutcome::Single(response) => response,
+            other => panic!("a request without the flag must not stream: {other:?}"),
+        };
+        assert_eq!(
+            serde_json::to_value(&unary).expect("encode"),
+            serde_json::to_value(&wide).expect("encode"),
+            "dispatch_streaming changed the answer for {method}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn stream_opt_in_is_read_from_the_request_frame() {
+    // The negotiation itself: the same method, the same params, and only the
+    // flag decides which shape comes back.
+    let router = token_router(1);
+
+    let without = frame(1, "tokens", json!(null));
+    match router.dispatch_streaming(&without).await {
+        RpcOutcome::Single(response) => {
+            assert_eq!(response.error.expect("an error").code, CODE_STREAM_REQUIRED)
+        }
+        other => panic!("no flag must not produce a stream: {other:?}"),
+    }
+
+    let with = serde_json::to_vec(&stream_frame(1, "tokens", json!(null))).expect("encode");
+    match router.dispatch_streaming(&with).await {
+        RpcOutcome::Stream { id, .. } => assert_eq!(id, json!(1)),
+        other => panic!("the flag must produce a stream: {other:?}"),
+    }
+}
+
+/// Read every frame of a streaming call, returning the items and the terminal
+/// frame. Uses the production client half, so the contract is proven end to end.
+async fn collect_stream(
+    socket: &std::path::Path,
+    id: u64,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<Vec<String>, crate::uds::UdsRpcError> {
+    let request = stream_frame(id, method, params);
+    let mut stream: crate::uds::FramedStream<String> =
+        crate::uds::send_framed_stream_request(socket, &request, Duration::from_secs(10)).await?;
+    let mut items = Vec::new();
+    while let Some(item) = stream.next_frame().await {
+        items.push(item?);
+    }
+    Ok(items)
+}
+
+#[tokio::test]
+async fn stream_round_trips_many_frames_over_a_real_socket() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (socket, _stop, _handle) =
+        spawn_server(tmp.path(), token_router(3), RpcServeOptions::default());
+    await_socket(&socket).await;
+
+    let items = collect_stream(&socket, 1, "tokens", json!(null))
+        .await
+        .expect("the stream must complete");
+
+    assert_eq!(items, vec!["t0", "t1", "t2"]);
+}
+
+#[tokio::test]
+async fn stream_of_zero_items_still_ends_on_a_terminal_frame() {
+    // "No items" and "truncated" must not look the same on the wire, or an empty
+    // answer and a lost one are indistinguishable.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (socket, _stop, _handle) =
+        spawn_server(tmp.path(), token_router(0), RpcServeOptions::default());
+    await_socket(&socket).await;
+
+    let items = collect_stream(&socket, 1, "tokens", json!(null))
+        .await
+        .expect("an empty stream is still a complete one");
+
+    assert!(items.is_empty());
+}
+
+#[tokio::test]
+async fn stream_reports_a_handler_error_as_a_terminal_frame() {
+    // The Fail-Open branch: a producer that fails after two items must reach the
+    // client as a REASON, never as a stream that quietly stopped at two.
+    let router = RpcRouter::new().typed_stream("tokens", |_req: ()| async move {
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        tokio::spawn(async move {
+            let _ = tx.send(Ok(json!("t0"))).await;
+            let _ = tx.send(Ok(json!("t1"))).await;
+            let _ = tx
+                .send(Err(RpcError::new(-32003, "the model gave up")))
+                .await;
+        });
+        Ok(rx)
+    });
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (socket, _stop, _handle) = spawn_server(tmp.path(), router, RpcServeOptions::default());
+    await_socket(&socket).await;
+
+    let err = collect_stream(&socket, 1, "tokens", json!(null))
+        .await
+        .expect_err("a mid-stream failure must not read as a complete answer");
+
+    match err {
+        crate::uds::UdsRpcError::Stream { error, .. } => {
+            assert_eq!(error, RpcError::new(-32003, "the model gave up"),);
+        }
+        other => panic!("expected Stream, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn stream_reports_an_open_failure_as_a_terminal_frame() {
+    // A handler that refuses before producing anything answers in the same shape
+    // as one that fails half way — the caller has one thing to read either way.
+    let router = RpcRouter::new().typed_stream("tokens", |_req: ()| async move {
+        Err(RpcError::new(-32004, "no model configured"))
+    });
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (socket, _stop, _handle) = spawn_server(tmp.path(), router, RpcServeOptions::default());
+    await_socket(&socket).await;
+
+    let err = collect_stream(&socket, 1, "tokens", json!(null))
+        .await
+        .expect_err("an open failure is still an error");
+
+    assert!(
+        matches!(&err, crate::uds::UdsRpcError::Stream { error, .. } if error.code == -32004),
+        "expected the handler's own code, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn stream_reports_invalid_params_before_opening_the_stream() {
+    let router = RpcRouter::new().typed_stream("tokens", |_req: Greet| async move {
+        let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        Ok(rx)
+    });
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (socket, _stop, _handle) = spawn_server(tmp.path(), router, RpcServeOptions::default());
+    await_socket(&socket).await;
+
+    let err = collect_stream(&socket, 1, "tokens", json!({ "name": 17 }))
+        .await
+        .expect_err("bad params must not open a stream");
+
+    assert!(
+        matches!(&err, crate::uds::UdsRpcError::Stream { error, .. }
+            if error.code == CODE_INVALID_PARAMS),
+        "expected invalid_params, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn stream_request_for_a_non_streaming_method_is_refused() {
+    // The streaming client API against a unary method. It must fail with a
+    // reason and finish — never hang waiting for a terminal frame that a unary
+    // answer does not contain.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (socket, _stop, _handle) =
+        spawn_server(tmp.path(), token_router(1), RpcServeOptions::default());
+    await_socket(&socket).await;
+
+    for method in ["greet", "no-such-method"] {
+        let err = tokio::time::timeout(
+            Duration::from_secs(5),
+            collect_stream(&socket, 1, method, json!({ "name": "ada" })),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{method} hung instead of failing"))
+        .expect_err("a method that does not stream must refuse");
+
+        match err {
+            crate::uds::UdsRpcError::Stream { error, .. } => {
+                assert_eq!(error.code, CODE_STREAM_UNSUPPORTED);
+                assert!(
+                    error.message.contains("tokens"),
+                    "the refusal must name what this listener does stream: {}",
+                    error.message
+                );
+            }
+            other => panic!("expected a terminal error frame for {method}, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn unary_request_for_a_streaming_method_is_refused_in_one_frame() {
+    // The other direction: an old client, which writes one frame and reads one
+    // frame, must get exactly that — not a stream it cannot parse, and not a
+    // hang.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (socket, _stop, _handle) =
+        spawn_server(tmp.path(), token_router(3), RpcServeOptions::default());
+    await_socket(&socket).await;
+
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        call(&socket, 1, "tokens", json!(null)),
+    )
+    .await
+    .expect("a unary call on a streaming method must not hang");
+
+    let error = response.error.expect("an error");
+    assert_eq!(error.code, CODE_STREAM_REQUIRED);
+    assert!(
+        error.message.contains("stream"),
+        "the refusal must say how to ask again: {}",
+        error.message
+    );
+}
+
+#[tokio::test]
+async fn stream_refuses_an_item_larger_than_the_frame_budget() {
+    // Per frame, not per stream: an item the client could not buffer becomes a
+    // terminal error rather than a frame that desynchronises the connection.
+    let router = RpcRouter::new().typed_stream("tokens", |_req: ()| async move {
+        let (tx, rx) = tokio::sync::mpsc::channel(2);
+        tokio::spawn(async move {
+            let _ = tx.send(Ok(json!("small"))).await;
+            let _ = tx.send(Ok(json!("x".repeat(4096)))).await;
+        });
+        Ok(rx)
+    });
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (socket, _stop, _handle) = spawn_server(
+        tmp.path(),
+        router,
+        RpcServeOptions {
+            max_frame_bytes: 512,
+            ..RpcServeOptions::default()
+        },
+    );
+    await_socket(&socket).await;
+
+    let request = stream_frame(1, "tokens", json!(null));
+    let mut stream: crate::uds::FramedStream<String> =
+        crate::uds::send_framed_stream_request_capped(
+            &socket,
+            &request,
+            Duration::from_secs(10),
+            512,
+        )
+        .await
+        .expect("open");
+
+    assert_eq!(
+        stream.next_frame().await.expect("an item").expect("ok"),
+        "small",
+        "the frames before the oversized one still arrive"
+    );
+    let err = stream
+        .next_frame()
+        .await
+        .expect("a report")
+        .expect_err("an oversized item must not be written");
+    assert!(
+        matches!(&err, crate::uds::UdsRpcError::Stream { error, .. }
+            if error.message.contains("frame budget")),
+        "expected a terminal budget refusal, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn stream_serves_one_frame_requests_on_other_connections_while_running() {
+    // A stream holds one connection for as long as its producer runs. The accept
+    // loop must keep answering everything else meanwhile — the property a server
+    // that drained streams inline would lose.
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let release = Arc::new(tokio::sync::Mutex::new(Some(release_rx)));
+    let router = greeting_router().typed_stream("tokens", move |_req: ()| {
+        let release = Arc::clone(&release);
+        async move {
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                let _ = tx.send(Ok(json!("first"))).await;
+                // Hold the stream open until the unary calls have been served.
+                if let Some(gate) = release.lock().await.take() {
+                    let _ = gate.await;
+                }
+                let _ = tx.send(Ok(json!("last"))).await;
+            });
+            Ok(rx)
+        }
+    });
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (socket, _stop, _handle) = spawn_server(tmp.path(), router, RpcServeOptions::default());
+    await_socket(&socket).await;
+
+    let request = stream_frame(1, "tokens", json!(null));
+    let mut stream: crate::uds::FramedStream<String> =
+        crate::uds::send_framed_stream_request(&socket, &request, Duration::from_secs(10))
+            .await
+            .expect("open");
+    assert_eq!(
+        stream.next_frame().await.expect("an item").expect("ok"),
+        "first",
+        "the stream is live before the interleaved calls"
+    );
+
+    for n in 0..3u64 {
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            call(&socket, 100 + n, "greet", json!({ "name": "ada" })),
+        )
+        .await
+        .expect("a one-frame call must not queue behind a live stream");
+        assert_eq!(response.result, Some(json!({ "text": "hello ada" })));
+    }
+
+    release_tx.send(()).expect("release the stream");
+    assert_eq!(
+        stream.next_frame().await.expect("an item").expect("ok"),
+        "last"
+    );
+    assert!(
+        stream.next_frame().await.is_none(),
+        "the terminal frame ends the stream"
+    );
+}
+
+#[tokio::test]
+async fn stream_survives_a_client_that_disconnects_mid_stream() {
+    // Dropping a reader mid-stream must not wedge the accept loop or take the
+    // process down. The producer stops on its own when its receiver is dropped;
+    // what is asserted here is that the server still serves afterwards.
+    let router = greeting_router().typed_stream("tokens", |_req: ()| async move {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        tokio::spawn(async move {
+            // Far more items than the client will read, so the write fails
+            // part-way rather than at a convenient boundary.
+            for n in 0..10_000u32 {
+                if tx.send(Ok(json!(format!("t{n}")))).await.is_err() {
+                    return;
+                }
+            }
+        });
+        Ok(rx)
+    });
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (socket, _stop, _handle) = spawn_server(tmp.path(), router, RpcServeOptions::default());
+    await_socket(&socket).await;
+
+    {
+        let request = stream_frame(1, "tokens", json!(null));
+        let mut stream: crate::uds::FramedStream<String> =
+            crate::uds::send_framed_stream_request(&socket, &request, Duration::from_secs(10))
+                .await
+                .expect("open");
+        assert_eq!(
+            stream.next_frame().await.expect("an item").expect("ok"),
+            "t0"
+        );
+        // Drop the reader with thousands of frames still to come.
+    }
+
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        call(&socket, 2, "greet", json!({ "name": "ada" })),
+    )
+    .await
+    .expect("an abandoned stream must not wedge the accept loop");
+    assert_eq!(response.result, Some(json!({ "text": "hello ada" })));
+}
+
 // ── one connection, driven directly ─────────────────────────────────────────
 
 #[tokio::test]

@@ -14,7 +14,13 @@ name = "trusty-common"
 # `RpcRouter::fallback`. Both are additions inside an existing module: no public
 # item was removed or changed, and no existing trait gained a method, so nothing
 # here breaks a consumer.
-version = "0.44.1"
+# 0.44.2 (#6286): patch — multi-frame streaming responses over UDS. Everything
+# is an addition: a new `uds::stream_client` module, new items inside
+# `uds::server`, new `#[non_exhaustive]` `UdsRpcError` variants, and new
+# `RpcRouter` methods. `RpcRequest` is deliberately untouched — the `"stream"`
+# opt-in is read through a private probe struct rather than a new public field,
+# which would have made an additive feature a 0.x break.
+version = "0.44.2"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

@@ -17,22 +17,49 @@
 //! a service with its own generic dispatcher mounts instead of naming every
 //! method (#6286).
 //!
+//! [`RpcRouter::typed_stream`] registers a method that answers in many frames
+//! instead of one (#6286). Streaming and unary names live in separate tables, so
+//! one name is one or the other, and [`RpcRouter::dispatch_streaming`] is the
+//! wider entry point that can return either. [`RpcRouter::dispatch`] keeps
+//! answering with exactly one frame and refuses a streaming method rather than
+//! producing an answer its caller cannot read.
+//!
 //! Dispatch is `async` and takes `&self`, so one router serves every connection
 //! concurrently; nothing here holds a lock across a handler call.
 //!
-//! Test: `super::tests` — `dispatch_*`.
+//! Test: `super::tests` — `dispatch_*` and `stream_*`.
 
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
+use super::stream::{RpcOutcome, RpcStreamMethod, typed_stream_method};
 use super::wire::{
     CODE_INVALID_REQUEST, CODE_PARSE_ERROR, JSONRPC_VERSION, RpcError, RpcRequest, RpcResponse,
 };
+
+/// The request field a caller sets to ask for a stream (#6286).
+///
+/// Why it is read separately rather than added to [`RpcRequest`]: that struct's
+/// fields are all public and it is not `#[non_exhaustive]`, so a new field would
+/// break every external crate that builds one with a literal — a major bump for
+/// an additive feature. Reading the flag through its own probe keeps
+/// [`RpcRequest`] byte-identical as a public type.
+///
+/// The second parse costs one pass over the frame and is paid ONLY on a request
+/// whose method is registered as a streaming one, which is about to do far more
+/// work than a parse. A unary request never reaches it.
+///
+/// Test: `stream_opt_in_is_read_from_the_request_frame`.
+#[derive(Deserialize)]
+struct StreamOptIn {
+    #[serde(default)]
+    stream: bool,
+}
 
 /// One method's implementation.
 ///
@@ -148,6 +175,7 @@ where
 #[derive(Default)]
 pub struct RpcRouter {
     methods: BTreeMap<String, Arc<dyn RpcMethod>>,
+    streams: BTreeMap<String, Arc<dyn RpcStreamMethod>>,
     fallback: Option<Arc<dyn RpcFallback>>,
 }
 
@@ -157,6 +185,7 @@ impl std::fmt::Debug for RpcRouter {
         // all fallback, so the flag is part of what this value is.
         f.debug_struct("RpcRouter")
             .field("methods", &self.method_names().collect::<Vec<_>>())
+            .field("streams", &self.stream_names().collect::<Vec<_>>())
             .field("fallback", &self.fallback.is_some())
             .finish()
     }
@@ -189,6 +218,41 @@ impl RpcRouter {
         self.method(name, typed_method::<Req, Resp, F, Fut>(call))
     }
 
+    /// Register a streaming `handler` under `name`, replacing any previous
+    /// streaming registration (#6286).
+    ///
+    /// Streaming and unary names live in SEPARATE tables, so one name is one or
+    /// the other and never both. Registering `"chat"` in both would leave the
+    /// answer depending on the request's `stream` flag, which is a protocol the
+    /// caller cannot reason about from the method name alone.
+    ///
+    /// Test: `stream_round_trips_many_frames_over_a_real_socket`.
+    pub fn stream_method(mut self, name: impl Into<String>, handler: impl RpcStreamMethod) -> Self {
+        self.streams.insert(name.into(), Arc::new(handler));
+        self
+    }
+
+    /// Register a streaming async function over the caller's own request type —
+    /// [`stream_method`] composed with [`typed_stream_method`].
+    ///
+    /// The function returns an `mpsc::Receiver`, so a producer that already
+    /// fills an `mpsc::Sender` from a background task — `trusty-memory`'s chat
+    /// handler is the case #6286 exists for — hands back its receiver and
+    /// changes nothing else.
+    ///
+    /// [`stream_method`]: RpcRouter::stream_method
+    ///
+    /// Test: `stream_round_trips_many_frames_over_a_real_socket`,
+    /// `stream_reports_invalid_params_before_opening_the_stream`.
+    pub fn typed_stream<Req, F, Fut>(self, name: impl Into<String>, call: F) -> Self
+    where
+        Req: DeserializeOwned + Send + 'static,
+        F: Fn(Req) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<super::RpcStreamItems, RpcError>> + Send + 'static,
+    {
+        self.stream_method(name, typed_stream_method::<Req, F, Fut>(call))
+    }
+
     /// Serve every unregistered method through `fallback`, replacing any
     /// previous one (#6286).
     ///
@@ -215,7 +279,14 @@ impl RpcRouter {
         self.methods.keys().map(String::as_str)
     }
 
-    /// Decide the response for one request frame.
+    /// The registered streaming method names, in sorted order (#6286).
+    ///
+    /// Test: `stream_names_are_sorted_and_separate_from_unary_names`.
+    pub fn stream_names(&self) -> impl Iterator<Item = &str> {
+        self.streams.keys().map(String::as_str)
+    }
+
+    /// Decide the ONE response frame for one request frame.
     ///
     /// What, in order: parse the frame; refuse a `jsonrpc` that is not
     /// [`JSONRPC_VERSION`]; look the method up; run the handler. A name no
@@ -224,10 +295,21 @@ impl RpcRouter {
     /// answers with a `null` id because there was no readable id to echo —
     /// every other arm echoes the request's.
     ///
+    /// A method registered with [`typed_stream`] is refused here with
+    /// [`CODE_STREAM_REQUIRED`] rather than served (#6286): a caller of this
+    /// function writes one frame and reads one frame, so it could not read the
+    /// answer a stream produces. [`dispatch_streaming`] is the entry point that
+    /// can. A router with no streaming methods never reaches that arm and
+    /// behaves exactly as it did before #6286.
+    ///
     /// Never returns `Err`: a failure to serve is itself a response frame, so
     /// the caller always has something to write back. Hanging up instead would
     /// give the client a transport error where a reason exists. A fallback's
     /// error is no exception — it becomes this frame's error half verbatim.
+    ///
+    /// [`typed_stream`]: RpcRouter::typed_stream
+    /// [`dispatch_streaming`]: RpcRouter::dispatch_streaming
+    /// [`CODE_STREAM_REQUIRED`]: super::CODE_STREAM_REQUIRED
     ///
     /// Test: `dispatch_routes_to_the_registered_handler`,
     /// `dispatch_reports_method_not_found_for_an_unregistered_method`,
@@ -237,22 +319,138 @@ impl RpcRouter {
     /// `dispatch_propagates_a_handler_error_verbatim`,
     /// `dispatch_routes_an_unregistered_method_to_the_fallback`,
     /// `dispatch_prefers_a_registered_method_over_the_fallback`,
-    /// `dispatch_maps_a_fallback_error_to_an_rpc_error_response`.
+    /// `dispatch_maps_a_fallback_error_to_an_rpc_error_response`,
+    /// `unary_request_for_a_streaming_method_is_refused_in_one_frame`.
     ///
     /// [`fallback`]: RpcRouter::fallback
     pub async fn dispatch(&self, frame: &[u8]) -> RpcResponse {
+        let request = match self.envelope(frame) {
+            Ok(request) => request,
+            Err(response) => return response,
+        };
+
+        // A caller of `dispatch` writes one frame and reads one frame, so a
+        // streaming method has to refuse in that shape rather than answer in a
+        // shape the caller cannot read (#6286).
+        if self.streams.contains_key(&request.method) {
+            let method = request.method.clone();
+            return RpcResponse::failure(request.id, RpcError::stream_required(&method));
+        }
+
+        self.call_unary(request).await
+    }
+
+    /// Decide the response for one request frame, allowing a streaming answer
+    /// (#6286).
+    ///
+    /// Why: [`dispatch`] answers with a value, which cannot express "many frames
+    /// follow". This is the wider decision [`super::handle_connection`] drives,
+    /// kept separate so every existing caller of `dispatch` is untouched and a
+    /// transport that can write only one frame cannot accidentally be handed a
+    /// stream.
+    ///
+    /// What, in order: the same envelope checks [`dispatch`] runs, then the
+    /// four-way decision between the caller's `stream` flag and whether the
+    /// method is registered as streaming.
+    ///
+    /// | `"stream"` | method | answer |
+    /// |---|---|---|
+    /// | absent/false | unary or fallback | one [`RpcResponse`] — unchanged |
+    /// | absent/false | streaming | one [`RpcResponse`], [`CODE_STREAM_REQUIRED`] |
+    /// | true | streaming | the stream |
+    /// | true | anything else | one terminal error frame, [`CODE_STREAM_UNSUPPORTED`] |
+    ///
+    /// A [`fallback`] is never consulted for a streaming request: [`RpcFallback`]
+    /// answers with one value and has no way to produce a sequence, so a
+    /// streaming request it "served" would silently become a one-item stream.
+    ///
+    /// The `stream` flag is read only when this router registers at least one
+    /// streaming method. A router with none — every consumer that predates
+    /// #6286 — cannot reach a streaming answer, so the flag cannot change what
+    /// it says and is not parsed.
+    ///
+    /// Never returns `Err`, for the same reason [`dispatch`] does not: a refusal
+    /// is a frame, so the connection always has something to write.
+    ///
+    /// [`dispatch`]: RpcRouter::dispatch
+    /// [`fallback`]: RpcRouter::fallback
+    /// [`CODE_STREAM_REQUIRED`]: super::CODE_STREAM_REQUIRED
+    /// [`CODE_STREAM_UNSUPPORTED`]: super::CODE_STREAM_UNSUPPORTED
+    ///
+    /// Test: `dispatch_streaming_answers_a_unary_request_unchanged`,
+    /// `stream_round_trips_many_frames_over_a_real_socket`,
+    /// `stream_request_for_a_non_streaming_method_is_refused`,
+    /// `unary_request_for_a_streaming_method_is_refused_in_one_frame`,
+    /// `stream_opt_in_is_read_from_the_request_frame`.
+    pub async fn dispatch_streaming(&self, frame: &[u8]) -> RpcOutcome {
+        let request = match self.envelope(frame) {
+            Ok(request) => request,
+            Err(response) => return RpcOutcome::Single(response),
+        };
+
+        if self.streams.is_empty() {
+            return RpcOutcome::Single(self.call_unary(request).await);
+        }
+
+        let wants_stream = serde_json::from_slice::<StreamOptIn>(frame)
+            .map(|opt_in| opt_in.stream)
+            .unwrap_or(false);
+
+        match (wants_stream, self.streams.get(&request.method)) {
+            (true, Some(handler)) => {
+                // Cloned out of the map before the await for the same reason the
+                // unary arm does it: nothing borrowed from `self` is held across
+                // a handler call.
+                let handler = Arc::clone(handler);
+                match handler.call(request.params).await {
+                    Ok(items) => RpcOutcome::Stream {
+                        id: request.id,
+                        items,
+                    },
+                    Err(error) => RpcOutcome::refused(request.id, error),
+                }
+            }
+            (true, None) => {
+                let streaming: Vec<&str> = self.stream_names().collect();
+                RpcOutcome::refused(
+                    request.id,
+                    RpcError::stream_unsupported(&request.method, &streaming),
+                )
+            }
+            (false, Some(_)) => {
+                let method = request.method.clone();
+                RpcOutcome::Single(RpcResponse::failure(
+                    request.id,
+                    RpcError::stream_required(&method),
+                ))
+            }
+            (false, None) => RpcOutcome::Single(self.call_unary(request).await),
+        }
+    }
+
+    /// Parse one frame and check its envelope, or produce the refusal frame.
+    ///
+    /// Split out so [`dispatch`] and [`dispatch_streaming`] share exactly one
+    /// copy of the parse and version checks rather than drifting apart.
+    ///
+    /// [`dispatch`]: RpcRouter::dispatch
+    /// [`dispatch_streaming`]: RpcRouter::dispatch_streaming
+    ///
+    /// Test: `dispatch_rejects_an_unparseable_frame`,
+    /// `dispatch_rejects_a_wrong_jsonrpc_version`.
+    fn envelope(&self, frame: &[u8]) -> Result<RpcRequest, RpcResponse> {
         let request: RpcRequest = match serde_json::from_slice(frame) {
             Ok(r) => r,
             Err(e) => {
-                return RpcResponse::failure(
+                return Err(RpcResponse::failure(
                     serde_json::Value::Null,
                     RpcError::new(CODE_PARSE_ERROR, format!("unparseable request frame: {e}")),
-                );
+                ));
             }
         };
 
         if request.jsonrpc != JSONRPC_VERSION {
-            return RpcResponse::failure(
+            return Err(RpcResponse::failure(
                 request.id,
                 RpcError::new(
                     CODE_INVALID_REQUEST,
@@ -261,9 +459,15 @@ impl RpcRouter {
                         request.jsonrpc
                     ),
                 ),
-            );
+            ));
         }
 
+        Ok(request)
+    }
+
+    /// Run one already-checked request against the unary method table, falling
+    /// back where a fallback is mounted.
+    async fn call_unary(&self, request: RpcRequest) -> RpcResponse {
         let Some(handler) = self.methods.get(&request.method) else {
             return self.dispatch_unregistered(request).await;
         };
