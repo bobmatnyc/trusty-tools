@@ -101,8 +101,10 @@ impl Tools {
     /// them in keeps the daemon this starts and the binary the sweep checked
     /// from ever being two different installs — the same reason
     /// `tga::audit::SearchGuard` resolves its binary once at the entry point.
-    /// What: the two paths as given, with both addresses resolved by
-    /// [`daemons::search_base_url`] and [`daemons::analyze_base_url`].
+    /// What: the two paths as given, with the search URL resolved by
+    /// [`daemons::search_base_url`] and the analyze socket by
+    /// [`daemons::analyze_socket`] — #6287 retired the analyze daemon's HTTP
+    /// base URL, so that half of the pair is a Unix socket path now.
     /// Test: `super::grounding_tests::pinned_tools_keep_the_paths_they_were_given`.
     #[must_use]
     pub fn pinned(search: PathBuf, analyze: PathBuf) -> Self {

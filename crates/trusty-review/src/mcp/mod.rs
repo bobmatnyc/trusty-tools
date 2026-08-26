@@ -220,9 +220,11 @@ pub(crate) async fn dispatch_deferred(
 /// the reviewer LLM provider (Bedrock or OpenRouter, per config), optionally
 /// builds the verifier provider (degrading to `None` on failure — embedded use
 /// must not hard-fail a host daemon over a missing verifier model), builds the
-/// HTTP search + analyze clients from config (the analyze client defaults to
-/// [`crate::config::DEFAULT_ANALYZER_URL`], i.e. loopback to the hosting analyze daemon, so
-/// embedded reviews get authoritative static-analysis context), and returns the
+/// HTTP search client and a [`SubprocessAnalyzeClient`] from config (#6287
+/// deleted the HTTP analyze client and its loopback default URL; the subprocess
+/// client spawns the `trusty-analyze` binary per call — `TRUSTY_ANALYZE_BIN`,
+/// else `trusty-analyze` on PATH — so embedded reviews get authoritative
+/// static-analysis context with no analyze daemon running), and returns the
 /// assembled `AppState`. #5064: the dedup requirement is declared through
 /// `DedupNeed::NotNeeded` rather than by passing a bare `None` — embedded
 /// callers never post (`allow_posting=false` in every tool handler), so the
