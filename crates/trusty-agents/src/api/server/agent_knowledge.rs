@@ -67,9 +67,10 @@ use crate::tools::registry::config::{DriverKind, EndpointConfig};
 
 /// `GET /api/agents/:name/knowledge` — HTTP entry point.
 ///
-/// Why/What: see the module doc. Daemon base URLs are discovered the same
-/// way as `agent_stores_route`; the skill-source root mirrors the dispatch
-/// call sites (project CWD), matching `agent_skills_route`.
+/// Why/What: see the module doc. The two daemons are discovered the same way
+/// as `agent_stores_route` — trusty-search by its `http_addr`, trusty-memory by
+/// its derived socket (#6286); the skill-source root mirrors the dispatch call
+/// sites (project CWD), matching `agent_skills_route`.
 /// Test: `super::tests::agent_knowledge::knowledge_route_reports_bound_store_and_granted_tool`.
 pub(super) async fn agent_knowledge_route(
     State(_state): State<AppState>,
@@ -81,7 +82,9 @@ pub(super) async fn agent_knowledge_route(
         &name,
         &project_root,
         trusty_common::resolve_daemon_base_url("trusty-search").as_deref(),
-        trusty_common::resolve_daemon_base_url("trusty-memory").as_deref(),
+        trusty_common::memory_rpc::resolve_memory_socket()
+            .ok()
+            .as_deref(),
     )
     .await
 }
@@ -102,7 +105,7 @@ pub(super) async fn knowledge_at(
     name: &str,
     project_root: &std::path::Path,
     search_base: Option<&str>,
-    memory_base: Option<&str>,
+    memory_socket: Option<&std::path::Path>,
 ) -> Response {
     if name.is_empty() || name.contains(['/', '\\']) || name == "." || name == ".." {
         return (
@@ -133,7 +136,7 @@ pub(super) async fn knowledge_at(
     let (stores, tools, skills, config_error) = parse_knowledge_sections(&raw);
 
     // K-a: unchanged resolution logic from `/stores` (#3878/#3864).
-    let statuses = resolve_store_statuses(name, &stores, search_base, memory_base).await;
+    let statuses = resolve_store_statuses(name, &stores, search_base, memory_socket).await;
     let issues = stores.validate();
     // Tier-2 `[tools].search_indexes` attachments (#3232/#4009, epic #4007),
     // reported the SAME way `/stores` already reports them — as a bare id
