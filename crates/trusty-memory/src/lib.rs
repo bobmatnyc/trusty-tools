@@ -118,6 +118,10 @@ pub mod prompt_log;
 pub mod service;
 pub mod session_store_cache;
 pub mod startup_scan;
+// A real daemon on a temp socket, shared by every in-crate test that has to
+// prove a caller and the daemon agree (#6286). Never shipped.
+#[cfg(all(test, feature = "daemon"))]
+pub(crate) mod test_daemon;
 pub mod tools;
 pub mod transport;
 pub mod ui_assets;

@@ -385,8 +385,8 @@ mod tests {
     }
 
     /// Why: the hook is wired into every Claude Code session start; failing
-    /// it would block the session opening. Without a running daemon
-    /// `read_daemon_addr` returns `None`, and we must degrade silently.
+    /// it would block the session opening. Without a running daemon the
+    /// derived socket is not there to dial, and we must degrade silently.
     /// What: pin a tempdir as the data directory, then call the handler
     /// with an unreachable daemon and assert it returns `Ok(())`.
     #[tokio::test]

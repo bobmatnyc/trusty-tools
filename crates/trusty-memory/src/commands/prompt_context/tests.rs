@@ -913,8 +913,8 @@ fn resolve_palace_for_log_falls_back_to_process_cwd() {
 /// daemon-address lockfile (the canonical "daemon not running" signal)
 /// must produce `Ok(())` with no stdout, not an error.
 /// What: redirects `trusty_common::resolve_data_dir` at a fresh tempdir
-/// via `TRUSTY_DATA_DIR_OVERRIDE` so `read_daemon_addr("trusty-memory")`
-/// observes a missing lockfile, then runs the handler and asserts it
+/// via `TRUSTY_DATA_DIR_OVERRIDE` so the derived socket path is nowhere
+/// and the dial is refused, then runs the handler and asserts it
 /// returns `Ok(())`. Calls `handle_prompt_context_with_payload` directly
 /// (issue #2079) with a fixed empty payload instead of
 /// `handle_prompt_context()` so the test never spawns a real blocking

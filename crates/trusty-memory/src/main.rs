@@ -782,7 +782,7 @@ async fn main() -> Result<()> {
             } else {
                 trusty_memory::commands::port::PortFormat::Port
             };
-            trusty_memory::commands::port::handle_port(format)
+            trusty_memory::commands::port::handle_port(format).await
         }
         Command::Upgrade { check, yes } => handle_upgrade(check, yes).await,
         Command::Config(cmd) => cmd.run().await,

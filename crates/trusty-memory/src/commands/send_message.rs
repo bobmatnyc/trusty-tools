@@ -28,9 +28,8 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// Why: pure CLI shim around the HTTP send endpoint so the binary surface
 /// stays consistent ("anything you can do via MCP, you can do via CLI").
-/// What: resolves the daemon address from
-/// `trusty_common::read_daemon_addr("trusty-memory")`, posts the message
-/// payload, prints the response JSON, and exits non-zero on any failure
+/// What: calls `memory.message_send` through `crate::client`, prints the
+/// response JSON, and exits non-zero on any failure
 /// (unlike the SessionStart hook, this command is run by a human / script
 /// who wants to see failures).
 /// Test: covered manually via `trusty-memory start && trusty-memory
