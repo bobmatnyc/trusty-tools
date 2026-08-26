@@ -16,6 +16,20 @@
 # this many pre-existing dangling pointers across a workspace where the
 # Test: convention was never mechanically checked before. New pointers
 # introduced from this point on are NOT grandfathered — fix them for real.
+#
+# Added 2026-07-21 (issue #3581): the check_test_pointers.sh parser had two
+# blind spots — glob-shaped citations (`foo_*`) were silently dropped by the
+# candidate filter instead of being resolved, and a `(parenthetical)` aside
+# right after a citation broke the leading-run scan before any later
+# citations in the same annotation were ever examined. Fixing both blind
+# spots surfaced 53 previously-invisible genuine dangling pointers below —
+# pre-existing drift the gate could never see, not new regressions. Each was
+# individually verified (no near-match test exists anywhere in the citing
+# crate, or the near-match is a different function's tests) before being
+# grandfathered here; several sibling pointers found in the same sweep were
+# fixed directly in the doc comment instead (renamed to the real test name,
+# corrected to a resolving glob, or reworded so a legitimate cross-crate
+# citation is no longer a bare backtick span) and are NOT in this list.
 crates/trusty-agents-common/src/compress/tool_output/rtk.rs	compress_tool_output_async_with_path_reports_native_fallback_when_rtk_absent
 crates/trusty-agents-common/src/compress/tool_output/strategy.rs	get_filter_returns_expected_type
 crates/trusty-agents-common/src/perf.rs	collector_flush_writes_json_and_log
@@ -27,6 +41,7 @@ crates/trusty-agents-common/src/session_registry.rs	list_returns_all_entries
 crates/trusty-agents-common/src/skills/manifest.rs	skill_manifest_save_is_atomic
 crates/trusty-agents/src/agents/claude_code_runner/dispatcher.rs	dispatcher_routes_claude_code
 crates/trusty-agents/src/agents/claude_code_runner/dispatcher.rs	dispatcher_routes_in_process
+crates/trusty-agents/src/agents/config.rs	build_safe_registry_with_ast_native
 crates/trusty-agents/src/agents/config.rs	compress_config_defaults_disabled
 crates/trusty-agents/src/agents/config.rs	tools_config_parses_ast_native
 crates/trusty-agents/src/agents/params.rs	compress_config_defaults_disabled
@@ -34,12 +49,14 @@ crates/trusty-agents/src/api/server/auth.rs	auth_middleware_allows_health
 crates/trusty-agents/src/api/server/handlers.rs	docs_search_falls_back_when_index_missing
 crates/trusty-agents/src/api/server/handlers.rs	docs_search_returns_results_when_index_present
 crates/trusty-agents/src/api/server/handlers.rs	submit_task_returns_running
+crates/trusty-agents/src/api/server/project_registration.rs	connect_project_creates_tm_config_when_adapter_supplied
 crates/trusty-agents/src/api/server/project_registration.rs	get_project_config_returns_404_when_missing
 crates/trusty-agents/src/api/server/project_registration.rs	get_project_config_returns_existing
 crates/trusty-agents/src/api/server/projects.rs	list_projects_returns_empty_when_registry_unavailable
 crates/trusty-agents/src/api/server/projects.rs	load_tm_projects_from_disk_returns_empty_on_missing_file
 crates/trusty-agents/src/api/server/projects.rs	scan_agents_dir_parses_toml
 crates/trusty-agents/src/api/server/state.rs	app_state_persists_and_reloads_tasks
+crates/trusty-agents/src/api/server/state.rs	docs_search_*
 crates/trusty-agents/src/cli/memories_cmd/mod.rs	memory_export_includes_segment_field
 crates/trusty-agents/src/cli/memories_cmd/ops.rs	memory_export_includes_segment_field
 crates/trusty-agents/src/cli/search_cmd/format.rs	format_memory_results_json
@@ -66,6 +83,7 @@ crates/trusty-agents/src/env_compat.rs	env_var_old_fallback
 crates/trusty-agents/src/env_compat.rs	env_var_os_new_wins
 crates/trusty-agents/src/env_compat.rs	env_var_os_old_fallback
 crates/trusty-agents/src/events.rs	ast_operation_round_trips_through_subscribe
+crates/trusty-agents/src/identity/mod.rs	caller_identity_from_env_*
 crates/trusty-agents/src/identity/mod.rs	caller_identity_from_env_round_trips
 crates/trusty-agents/src/inspection/mod.rs	inspect_dry_run_emits_expected_json_shape
 crates/trusty-agents/src/inspection/mod.rs	inspect_dry_run_python_task_picks_python_engineer
@@ -96,9 +114,11 @@ crates/trusty-agents/src/repl/markdown.rs	inline_code
 crates/trusty-agents/src/repl/markdown.rs	inline_italic
 crates/trusty-agents/src/repl/markdown.rs	unmatched_delim
 crates/trusty-agents/src/repl/mod.rs	repl_skips_when_not_a_tty
+crates/trusty-agents/src/repl/tui/pickers.rs	detect_choices_*
 crates/trusty-agents/src/repl/tui/status.rs	persist_daily_usage_writes_after_interval
 crates/trusty-agents/src/repl/tui/types.rs	agent_scope_label_color_project
 crates/trusty-agents/src/repl/tui/types.rs	agent_scope_label_color_user
+crates/trusty-agents/src/repl/tui/types.rs	inline_choice_picker_*
 crates/trusty-agents/src/repl/tui/types.rs	process_event_open_picker_sets_state
 crates/trusty-agents/src/repl/tui/types.rs	process_event_set_choices_populates_inline_picker
 crates/trusty-agents/src/repl/tui/types.rs	repl_app_busy_since_cleared_on_response
@@ -144,17 +164,21 @@ crates/trusty-analyze/src/core/tools.rs	diagnostics_report_marks_unavailable_too
 crates/trusty-analyze/src/lang/adapters/python/calls.rs	python_extracts_from_imports
 crates/trusty-analyze/src/lang/ext_map.rs	ext_map_completeness
 crates/trusty-analyze/src/mcp/review.rs	tr_review_health_routes
+crates/trusty-analyze/src/service/handlers/analysis.rs	diagnostics_pagination_*
+crates/trusty-analyze/src/service/handlers/analysis.rs	smells_omit_content_*
 crates/trusty-analyze/src/service/handlers/analysis.rs	smells_omit_content_default_strips_content
 crates/trusty-analyze/src/types/complexity.rs	custom_thresholds_change_detection_results
 crates/trusty-analyze/tests/stdio_harness.rs	precheck_search_up
 crates/trusty-code/src/agent_loop/cadence.rs	stays_under_budget_every_turn
 crates/trusty-code/src/agent_loop/mod.rs	sink_receives_tool_error_for_fatal_failures
+crates/trusty-code/src/agent_loop/transcript.rs	compact_span_tagged_*
 crates/trusty-code/src/agent_loop/transcript.rs	maybe_compact_marks_middle_span_only
 crates/trusty-code/src/agent_loop/transcript.rs	push_response_appends_assistant
 crates/trusty-code/src/agents/config.rs	agent_config_llm_params
 crates/trusty-code/src/agents/config.rs	agent_config_runner_kind
 crates/trusty-code/src/agents/config.rs	agent_config_system_prompt
 crates/trusty-code/src/events.rs	ast_operation_round_trips_through_subscribe
+crates/trusty-code/src/identity/mod.rs	caller_identity_from_env_*
 crates/trusty-code/src/jsonrpc/error.rs	rpc_error_domain_sets_error_type_in_data
 crates/trusty-code/src/llm/debug_capture/mod.rs	from_env_directory_gets_fresh_per_run_file
 crates/trusty-code/src/llm/debug_capture/mod.rs	from_env_opens_literal_file_path
@@ -174,30 +198,43 @@ crates/trusty-code/src/session/registry.rs	cancel_is_idempotent_on_terminal_sess
 crates/trusty-code/src/session/registry.rs	detach_stops_the_forwarder
 crates/trusty-code/src/session/registry_transcript.rs	get_transcript_returns_stored_record
 crates/trusty-code/src/session/transcript.rs	get_transcript_returns_stored_record
+crates/trusty-code/src/skills/frontmatter.rs	parse_kv_line_*
 crates/trusty-code/src/skills/mod.rs	load_skill_body_io_error
 crates/trusty-code/src/tools/registry.rs	register_panics_on_duplicate_in_debug
 crates/trusty-code/src/tools/registry.rs	register_then_dispatch_succeeds
 crates/trusty-common/src/catchup/mpm_registry.rs	default_registry_path_under_home
 crates/trusty-common/src/catchup/mpm_session.rs	roundtrip_partial_json
 crates/trusty-common/src/catchup/session_finder.rs	parse_trusty_mpm_session_extracts_sections
-crates/trusty-common/src/embedder_client/error.rs	error_display
-crates/trusty-common/src/embedder_client/in_process.rs	in_process_embed_batch_empty
-crates/trusty-common/src/embedder_client/remote.rs	remote_embed_url_construction
-crates/trusty-common/src/embedder_client/supervisor.rs	stdio_eof_terminates_child
-crates/trusty-common/src/embedder_client/supervisor.rs	supervisor_restarts_on_crash
-crates/trusty-common/src/embedder_client/supervisor.rs	supervisor_spawns_mock_child_and_embeds
-crates/trusty-common/src/embedder/fast_embedder.rs	cache_hit_is_idempotent
-crates/trusty-common/src/embedder/fast_embedder.rs	embed_batch_returns_correct_dim
-crates/trusty-common/src/inference/config/mod.rs	config_command_mounts_and_parses
-crates/trusty-common/src/inference/config/ops.rs	unset_removes_key_and_reports_absence
+crates/trusty-common/src/chat/bedrock_impl.rs	bedrock_provider_new_uses_region
 crates/trusty-common/src/credentials/dotenv.rs	dotenv_tests
 crates/trusty-common/src/credentials/file_store.rs	file_store_tests
 crates/trusty-common/src/credentials/keyring_store.rs	keyring_store_tests
 crates/trusty-common/src/credentials/memory_store.rs	memory_store_tests
 crates/trusty-common/src/credentials/redact.rs	redact_tests
 crates/trusty-common/src/credentials/resolver.rs	resolver_tests
+crates/trusty-common/src/embedder/fast_embedder.rs	cache_hit_is_idempotent
+crates/trusty-common/src/embedder/fast_embedder.rs	embed_batch_returns_correct_dim
+crates/trusty-common/src/embedder_client/error.rs	error_display
+crates/trusty-common/src/embedder_client/in_process.rs	in_process_embed_batch_empty
+crates/trusty-common/src/embedder_client/remote.rs	remote_embed_url_construction
+crates/trusty-common/src/embedder_client/stdio.rs	decode_response_*
+crates/trusty-common/src/embedder_client/supervisor.rs	stdio_eof_terminates_child
+crates/trusty-common/src/embedder_client/supervisor.rs	supervisor_restarts_on_crash
+crates/trusty-common/src/embedder_client/supervisor.rs	supervisor_spawns_mock_child_and_embeds
+crates/trusty-common/src/inference/config/mod.rs	config_command_mounts_and_parses
+crates/trusty-common/src/inference/config/ops.rs	unset_removes_key_and_reports_absence
 crates/trusty-common/src/inference/registry/mod.rs	all_five_providers_seeded
+crates/trusty-common/src/intent_source/backend_fetcher.rs	backend_fetcher_token_*
+crates/trusty-common/src/intent_source/linkage.rs	linkage_pr_*
+crates/trusty-common/src/intent_source/resolve.rs	linkage_pr_*
+crates/trusty-common/src/intent_source/resolve.rs	precedence_*
+crates/trusty-common/src/intent_source/resolve.rs	precedence_agree_*
+crates/trusty-common/src/intent_source/resolve.rs	ticket_query_*
 crates/trusty-common/src/intent_source/spec_resolve.rs	spec_resolve_parse_block_scoped
+crates/trusty-common/src/intent_source/spec_resolve.rs	spec_resolve_section_*
+crates/trusty-common/src/intent_source/types.rs	pr_query_*
+crates/trusty-common/src/intent_source/types.rs	precedence_*
+crates/trusty-common/src/intent_source/types.rs	ticket_query_*
 crates/trusty-common/src/memory_core/dream/recall_benchmark.rs	dream_recall_benchmark_compression_ratio_math
 crates/trusty-common/src/memory_core/registry.rs	evict_idle_skips_recently_accessed_handle
 crates/trusty-common/src/memory_core/registry.rs	open_hydrates_persisted_palaces
@@ -207,18 +244,19 @@ crates/trusty-common/src/memory_core/retrieval/handle.rs	remember_classifies_ses
 crates/trusty-common/src/memory_core/semantic_consolidation/inference.rs	ollama_inference_new_stores_fields
 crates/trusty-common/src/memory_core/semantic_consolidation/inference.rs	openrouter_inference_new_stores_fields
 crates/trusty-common/src/memory_core/store/concurrent_open.rs	snapshot_path_is_unique_per_call
+crates/trusty-common/src/memory_core/store/kg/ops.rs	cascade_delete_removes_triples_for_drawer
+crates/trusty-common/src/memory_core/store/kg/ops.rs	palace_handle_read_only_when_kg_snapshotted
 crates/trusty-common/src/memory_core/store/kg_redb/import.rs	apply_batch_rolls_back_on_error
 crates/trusty-common/src/memory_core/store/kg_redb/store.rs	write_on_snapshot_returns_read_only_error
 crates/trusty-common/src/memory_core/store/kg_redb/types.rs	drawer_record_legacy_decode_without_new_fields
 crates/trusty-common/src/memory_core/store/kg_redb/types.rs	write_on_snapshot_returns_read_only_error
 crates/trusty-common/src/memory_core/store/kg_redb/write_ops.rs	cascade_delete_removes_triples_for_subject
 crates/trusty-common/src/memory_core/store/kg_writer.rs	writer_reports_error_per_op
-crates/trusty-common/src/memory_core/store/kg/ops.rs	cascade_delete_removes_triples_for_drawer
-crates/trusty-common/src/memory_core/store/kg/ops.rs	palace_handle_read_only_when_kg_snapshotted
 crates/trusty-common/src/rpc/client.rs	parse_args
 crates/trusty-common/src/rpc/transport/http.rs	http_transport_roundtrip
 crates/trusty-common/src/rpc/transport/stdio.rs	stdio_transport_echo
 crates/trusty-common/src/stdio_mcp_client/mod.rs	plugin_stderr_stdio_falls_back_on_bad_path
+crates/trusty-common/src/symgraph/contracts/edge_kind.rs	edge_kind_custom_survives_warm_boot
 crates/trusty-common/src/symgraph/editor.rs	add_import_inserts_at_top
 crates/trusty-common/src/symgraph/graph.rs	petgraph_view_basic
 crates/trusty-common/src/symgraph/symbol.rs	extract_symbols_js
@@ -227,6 +265,7 @@ crates/trusty-common/src/tickets/api/config.rs	github_from_env
 crates/trusty-common/src/tickets/api/config.rs	jira_from_env
 crates/trusty-common/src/tickets/api/config.rs	linear_from_env
 crates/trusty-common/src/tickets/api/config.rs	load_returns_default_when_no_file
+crates/trusty-common/src/update/mod.rs	cache_freshness_*
 crates/trusty-common/src/update/mod.rs	check_throttled_fresh_check_on_stale_cache
 crates/trusty-common/src/update/mod.rs	check_throttled_skips_when_env_set
 crates/trusty-common/src/update/mod.rs	check_throttled_uses_cache
@@ -246,8 +285,10 @@ crates/trusty-git-analytics/src/classify/tiers/llm.rs	from_llm_config_openrouter
 crates/trusty-git-analytics/src/collect/git/reachability.rs	scan_default_branch_master
 crates/trusty-git-analytics/src/collect/git/reachability.rs	scan_default_branch_missing
 crates/trusty-git-analytics/src/collect/pm_adapter/tests.rs	logs_contain
+crates/trusty-git-analytics/src/commands/incidents/mod.rs	parse_datadog_value_*
 crates/trusty-git-analytics/src/commands/incidents/mod.rs	parse_datadog_value_handles_monitor_shape
 crates/trusty-git-analytics/src/commands/override_cmd.rs	list_returns_all_when_repo_none
+crates/trusty-gworkspace/src/api/services/calendar.rs	build_event_body_attendees_*
 crates/trusty-installer/src/commands/plist_bootstrap.rs	resolve_uid_returns_nonzero
 crates/trusty-installer/src/commands/prereqs/mod.rs	check_no_warn_for_unrelated
 crates/trusty-installer/src/commands/prereqs/phase.rs	phase_all_present
@@ -274,6 +315,7 @@ crates/trusty-memory/src/commands/doctor/mod.rs	doctor_fix_palaces_lists_orphane
 crates/trusty-memory/src/commands/kuzu_migrate.rs	read_entities_returns_expected_count
 crates/trusty-memory/src/commands/kuzu_migrate.rs	read_relations_returns_expected_count
 crates/trusty-memory/src/commands/kuzu_migrate.rs	schema_table_names_are_defined
+crates/trusty-memory/src/commands/port.rs	parse_port_from_addr_*
 crates/trusty-memory/src/commands/serve_stdio_bridge.rs	value_to_mcp_response_err
 crates/trusty-memory/src/commands/serve_stdio_bridge.rs	value_to_mcp_response_malformed
 crates/trusty-memory/src/commands/serve_stdio_bridge.rs	value_to_mcp_response_ok
@@ -297,6 +339,7 @@ crates/trusty-memory/src/messaging/operations.rs	cwd_palace_slug_falls_back_to_b
 crates/trusty-memory/src/project_root/detection.rs	lazy_write_skipped_for_temp_dir_root
 crates/trusty-memory/src/project_root/mod.rs	project_slug_personal_always_allowed
 crates/trusty-memory/src/prompt_facts.rs	gather_hot_triples_skips_non_hot
+crates/trusty-memory/src/prompt_facts.rs	get_prompt_context_filters_by_query
 crates/trusty-memory/src/prompt_facts.rs	rebuild_prompt_cache_populates_triples_and_formatted
 crates/trusty-memory/src/prompt_facts.rs	rebuild_prompt_cache_reflects_writes
 crates/trusty-memory/src/prompt_log/config.rs	config_from_env_disabled
@@ -309,16 +352,23 @@ crates/trusty-memory/src/service/types.rs	create_palace_rejects_mismatch_when_cw
 crates/trusty-memory/src/service/types.rs	palace_list_includes_richer_counts
 crates/trusty-memory/src/tools/chat_ops.rs	chat_session_get_missing_errors
 crates/trusty-memory/src/tools/helpers.rs	dispatch_remember_rejects_short_content
+crates/trusty-memory/src/tools/memory_ops.rs	dispatch_memory_list_*
+crates/trusty-memory/src/tools/memory_ops.rs	dispatch_memory_recall_all_*
 crates/trusty-memory/src/tools/memory_ops.rs	recall_all_falls_back_to_bm25_and_l0_l1_while_warming
+crates/trusty-memory/src/tools/palace_ops.rs	dispatch_palace_delete_*
+crates/trusty-memory/src/tools/palace_ops.rs	dispatch_palace_update_*
 crates/trusty-memory/src/tools/tests.rs	note_returns_warming_error_while_state_is_warming
 crates/trusty-memory/src/tools/tests.rs	recall_returns_warming_error_while_state_is_warming
 crates/trusty-memory/src/tools/tests.rs	remember_returns_warming_error_while_state_is_warming
+crates/trusty-memory/src/transport/methods/health.rs	health_endpoint_probe_param_triggers_round_trip
+crates/trusty-memory/src/transport/methods/health.rs	health_sentinel_prefix_match_is_robust
 crates/trusty-mpm/src/activity/monitor.rs	summarizing_clears_after_check
 crates/trusty-mpm/src/bin/tm/cli/actions/coordinator.rs	cli_parses_watch_listen
 crates/trusty-mpm/src/bin/tm/cli/actions/coordinator.rs	cli_parses_watch_poll
 crates/trusty-mpm/src/bin/tm/cli/actions/mcp.rs	cli_parses_mcp_get
 crates/trusty-mpm/src/bin/tm/cli/actions/mcp.rs	cli_parses_mcp_list
 crates/trusty-mpm/src/bin/tm/cli/actions/mcp.rs	cli_parses_mcp_remove
+crates/trusty-mpm/src/bin/tm/cli/actions/session.rs	cli_parses_session_ls_terms_*
 crates/trusty-mpm/src/bin/tm/cli/actions/slack.rs	cli_parses_slack_start
 crates/trusty-mpm/src/bin/tm/cli/actions/telegram.rs	cli_parses_telegram_start
 crates/trusty-mpm/src/bin/tm/cli/mod.rs	cli_parses_load_standalone
@@ -346,6 +396,7 @@ crates/trusty-mpm/src/bin/tm/commands/picker_delete.rs	classify_managed_delete_c
 crates/trusty-mpm/src/bin/tm/commands/picker_delete.rs	classify_managed_delete_not_found
 crates/trusty-mpm/src/bin/tm/commands/picker_delete.rs	classify_managed_delete_ok
 crates/trusty-mpm/src/bin/tm/commands/picker_delete.rs	classify_managed_delete_other
+crates/trusty-mpm/src/bin/tm/commands/picker_delete.rs	confirm_line_*
 crates/trusty-mpm/src/bin/tm/commands/picker_delete.rs	confirm_line_default_rejects
 crates/trusty-mpm/src/bin/tm/commands/picker_delete.rs	confirm_line_force_accepts
 crates/trusty-mpm/src/bin/tm/commands/picker_delete.rs	confirm_line_force_rejects_yes
@@ -360,6 +411,7 @@ crates/trusty-mpm/src/bin/tm/commands/standalone.rs	test_rm_cmd_errors_on_unknow
 crates/trusty-mpm/src/bin/tm/commands/standalone.rs	test_rm_cmd_leaves_claude_config_intact
 crates/trusty-mpm/src/bin/tm/commands/standalone.rs	test_rm_cmd_removes_entry_and_dir
 crates/trusty-mpm/src/bin/tm/commands/statusline/compaction.rs	render_statusline_with_context_window
+crates/trusty-mpm/src/bin/tm/commands/watch/args.rs	looks_like_owner_repo_*
 crates/trusty-mpm/src/bin/tm/formatters/banner/mod.rs	daily_banner_two_panel_version_in_title_bar
 crates/trusty-mpm/src/bin/tm/formatters/banner/mod.rs	no_color_guard_restores_on_drop
 crates/trusty-mpm/src/bin/tm/formatters/info_box/mod.rs	probe_default_addr_handles_url_without_port
@@ -406,15 +458,15 @@ crates/trusty-mpm/src/core/mcp_test/mod.rs	read_bounded_line_reads_terminated_li
 crates/trusty-mpm/src/core/mcp_test/mod.rs	read_bounded_line_returns_none_at_eof
 crates/trusty-mpm/src/core/output_style.rs	detect_from_output_unparseable
 crates/trusty-mpm/src/core/session_launch/settings.rs	deploy_output_style_writes_under_project_root
-crates/trusty-mpm/src/core/sm/agent/chat_action_protocol.rs	inject_submit_arg_defaults_to_enter
-crates/trusty-mpm/src/core/sm/agent/chat_action_protocol.rs	inject_submit_arg_interrupt
-crates/trusty-mpm/src/core/sm/agent/chat_action_protocol.rs	inject_submit_arg_no_submit
-crates/trusty-mpm/src/core/sm/agent/chat_action.rs	truncate_result_is_char_safe
-crates/trusty-mpm/src/core/sm/agent/chat_action.rs	truncate_result_keeps_short_input
 crates/trusty-mpm/src/core/sm/agent/chat.rs	chat_inference_error_surfaces
 crates/trusty-mpm/src/core/sm/agent/chat.rs	chat_records_round
 crates/trusty-mpm/src/core/sm/agent/chat.rs	chat_unknown_provider_is_inference_error
 crates/trusty-mpm/src/core/sm/agent/chat.rs	chat_works_without_memory_feature
+crates/trusty-mpm/src/core/sm/agent/chat_action.rs	truncate_result_is_char_safe
+crates/trusty-mpm/src/core/sm/agent/chat_action.rs	truncate_result_keeps_short_input
+crates/trusty-mpm/src/core/sm/agent/chat_action_protocol.rs	inject_submit_arg_defaults_to_enter
+crates/trusty-mpm/src/core/sm/agent/chat_action_protocol.rs	inject_submit_arg_interrupt
+crates/trusty-mpm/src/core/sm/agent/chat_action_protocol.rs	inject_submit_arg_no_submit
 crates/trusty-mpm/src/core/sm/agent/delegate/decision.rs	parse_delegate_drops_blank_tasks
 crates/trusty-mpm/src/core/sm/agent/delegate/decision.rs	parse_delegate_with_tasks
 crates/trusty-mpm/src/core/sm/agent/delegate/mod.rs	delegate_launches_and_links
@@ -435,6 +487,7 @@ crates/trusty-mpm/src/core/sm/goals/store.rs	update_appends_note
 crates/trusty-mpm/src/core/sm/goals/store.rs	update_sets_state_and_evidence
 crates/trusty-mpm/src/core/sm/providers/resolve.rs	resolve_tests
 crates/trusty-mpm/src/core/standalone/registry.rs	test_alias_validation
+crates/trusty-mpm/src/core/standalone/registry.rs	test_atomic_save_tmp_cleaned_on_rename_failure
 crates/trusty-mpm/src/core/standalone/run.rs	test_check_credentials_with_env_var
 crates/trusty-mpm/src/core/trusty_tools_config.rs	config_dir_is_trusty_mpm
 crates/trusty-mpm/src/core/trusty_tools_config.rs	default_host_is_github_com
@@ -485,6 +538,7 @@ crates/trusty-mpm/src/daemon/managed_routes/activity.rs	activity_no_key_returns_
 crates/trusty-mpm/src/daemon/managed_routes/fleet.rs	fleet_route_groups_by_project
 crates/trusty-mpm/src/daemon/managed_routes/front_gate.rs	isr_failure_auto_accepts
 crates/trusty-mpm/src/daemon/managed_routes/front_gate.rs	non_ticketed_auto_accepts
+crates/trusty-mpm/src/daemon/managed_routes/front_gate.rs	production_gate_*
 crates/trusty-mpm/src/daemon/managed_routes/inproject/untracked_sync.rs	disabled_copies_nothing
 crates/trusty-mpm/src/daemon/managed_routes/inproject/untracked_sync.rs	subdirectory_pattern_matches_one_level
 crates/trusty-mpm/src/daemon/managed_routes/inproject/untracked_sync.rs	top_level_pattern_matches_only_root_files
@@ -504,6 +558,7 @@ crates/trusty-mpm/src/daemon/mcp_session.rs	session_stop_unknown_id_errors
 crates/trusty-mpm/src/daemon/optimizer.rs	get_optimizer_returns_default
 crates/trusty-mpm/src/daemon/optimizer.rs	optimize_rewrites_large_output
 crates/trusty-mpm/src/daemon/optimizer.rs	optimize_skips_small_output
+crates/trusty-mpm/src/daemon/orphan_gc.rs	process_tree_probe_self_has_no_managed_child
 crates/trusty-mpm/src/daemon/pairing_store.rs	claim_pending_restores_on_read_failure
 crates/trusty-mpm/src/daemon/services/tmux_service.rs	kill_best_effort_without_tmux_is_noop
 crates/trusty-mpm/src/daemon/services/tmux_service.rs	spawn_claude_without_tmux_is_unprocessable
@@ -516,6 +571,7 @@ crates/trusty-mpm/src/daemon/state/core.rs	expired_pair_code_is_rejected
 crates/trusty-mpm/src/daemon/state/core.rs	sm_agent_built_disabled_by_default
 crates/trusty-mpm/src/daemon/state/resources.rs	get_optimizer_returns_default
 crates/trusty-mpm/src/daemon/state/resources.rs	sm_agent_built_disabled_by_default
+crates/trusty-mpm/src/daemon/state/sessions.rs	gather_tracked_names_degraded_on_store_error
 crates/trusty-mpm/src/daemon/state/sessions.rs	gather_tracked_names_unions_both
 crates/trusty-mpm/src/daemon/state/sm.rs	sm_agent_built_disabled_by_default
 crates/trusty-mpm/src/daemon/tmux.rs	adopt_session_captures_state
@@ -577,6 +633,7 @@ crates/trusty-mpm/src/tui/coordinator/state.rs	output_log_is_bounded
 crates/trusty-mpm/src/tui/dashboard/mod.rs	sidebar_starts_visible_with_sessions
 crates/trusty-mpm/src/tui/project_ctl/events/mod.rs	decommission_always_opens_confirm_gate
 crates/trusty-mpm/src/tui/project_ctl/events/mod.rs	kill_on_active_session_opens_confirm_gate
+crates/trusty-mpm/src/tui/project_ctl/state/mod.rs	activity_failure_streak_*
 crates/trusty-review/src/commands/calibrate.rs	finding_not_recalled_diff_file
 crates/trusty-review/src/commands/calibrate.rs	finding_not_recalled_diff_kind
 crates/trusty-review/src/config/constants.rs	apex_context_truncates_long_query
@@ -590,6 +647,7 @@ crates/trusty-review/src/config/mapreduce.rs	map_mode_parse_garbage_falls_back_t
 crates/trusty-review/src/config/mapreduce.rs	mapreduce_malformed_env_fallback
 crates/trusty-review/src/config/mapreduce.rs	select_auto_truncates_triggers_mapreduce
 crates/trusty-review/src/config/mapreduce.rs	select_never_always_unified
+crates/trusty-review/src/config/mapreduce.rs	select_review_mode_*
 crates/trusty-review/src/config/mod.rs	resolve_index_updates_when_unset
 crates/trusty-review/src/config/mod.rs	test_config_defaults_no_env
 crates/trusty-review/src/config/mod.rs	test_config_from_env
@@ -673,8 +731,6 @@ crates/trusty-review/src/pipeline/mapreduce/synthesis.rs	synthesis_response_pars
 crates/trusty-review/src/pipeline/output.rs	print_review_result_includes_verdict
 crates/trusty-review/src/pipeline/parser.rs	parse_json_block_happy_path
 crates/trusty-review/src/pipeline/parser.rs	parse_verdict_keyword_fallback
-crates/trusty-review/src/pipeline/prompt_templates.rs	system_prompt_coverage_gating_off
-crates/trusty-review/src/pipeline/prompt_templates.rs	system_prompt_coverage_gating_on
 crates/trusty-review/src/pipeline/prompt.rs	build_review_prompt_coverage_gating_injects_block
 crates/trusty-review/src/pipeline/prompt.rs	build_review_prompt_includes_context_blocks
 crates/trusty-review/src/pipeline/prompt.rs	build_system_prompt_coverage_gating_on
@@ -683,8 +739,10 @@ crates/trusty-review/src/pipeline/prompt.rs	build_system_prompt_with_principles
 crates/trusty-review/src/pipeline/prompt.rs	prompt_includes_apex_context
 crates/trusty-review/src/pipeline/prompt.rs	system_prompt_coverage_gating_off
 crates/trusty-review/src/pipeline/prompt.rs	system_prompt_coverage_gating_on
-crates/trusty-review/src/pipeline/runner_context.rs	gather_context_degrades_gracefully_on_search_failure
+crates/trusty-review/src/pipeline/prompt_templates.rs	system_prompt_coverage_gating_off
+crates/trusty-review/src/pipeline/prompt_templates.rs	system_prompt_coverage_gating_on
 crates/trusty-review/src/pipeline/runner.rs	run_review_dedup_skips_completed
+crates/trusty-review/src/pipeline/runner_context.rs	gather_context_degrades_gracefully_on_search_failure
 crates/trusty-review/src/pipeline/verify.rs	error_class_maps_alarm_variants
 crates/trusty-review/src/pipeline/verify.rs	parse_judgment_confirmed
 crates/trusty-review/src/pipeline/verify.rs	parse_judgment_refuted
@@ -712,6 +770,7 @@ crates/trusty-search/src/commands/hook.rs	hook_scripts_all_exit_zero
 crates/trusty-search/src/commands/hook.rs	install_creates_and_is_idempotent
 crates/trusty-search/src/commands/hook.rs	resolve_repo_root_falls_back_to_git
 crates/trusty-search/src/commands/hook.rs	splice_inserts_and_replaces
+crates/trusty-search/src/commands/index_cwd_resolve.rs	cwd_resolve_matches_*
 crates/trusty-search/src/commands/index_cwd_resolve.rs	cwd_resolve_matches_ancestor
 crates/trusty-search/src/commands/index_cwd_resolve.rs	cwd_resolve_matches_exact
 crates/trusty-search/src/commands/index_cwd_resolve.rs	cwd_resolve_multiple_matches
@@ -721,6 +780,7 @@ crates/trusty-search/src/commands/index_status.rs	render_stage_row_shows_embed_p
 crates/trusty-search/src/commands/index_status.rs	render_status_table_formats_correctly
 crates/trusty-search/src/commands/log_rotation.rs	rotation_configured_false_when_nothing_installed
 crates/trusty-search/src/commands/migrate_storage/migrate.rs	migrate_legacy_pointer_file
+crates/trusty-search/src/commands/port.rs	parse_port_from_addr_*
 crates/trusty-search/src/commands/reindex_ui/bars.rs	active_phase_is_embed_returns_true_for_embedding_phases
 crates/trusty-search/src/commands/search.rs	search_delegates_to_query_with_explicit_index
 crates/trusty-search/src/commands/setup.rs	setup_patches_existing_settings_file
@@ -759,9 +819,12 @@ crates/trusty-search/src/core/repo_config.rs	defer_embed_round_trips_yaml
 crates/trusty-search/src/core/repo_config.rs	test_glob_match_recursive
 crates/trusty-search/src/core/search/hierarchy.rs	flat_peers_sharing_file_not_deduped
 crates/trusty-search/src/core/search/hierarchy.rs	hierarchy_deep_nesting
+crates/trusty-search/src/core/search/hierarchy.rs	hierarchy_from_root_paths_*
 crates/trusty-search/src/core/search/hierarchy.rs	nested_dedup_keeps_sub_index_hit
 crates/trusty-search/src/core/store/types.rs	test_rewrite_keys_to_relative
 crates/trusty-search/src/core/store/usearch_impl.rs	test_rewrite_keys_to_relative
+crates/trusty-search/src/core/store_config.rs	mmap_serve_mode_from_env_*
+crates/trusty-search/src/core/store_config.rs	vector_quant_from_env_*
 crates/trusty-search/src/core/symbol_graph/build.rs	test_update_file_drops_old_edges
 crates/trusty-search/src/mcp/tools/http.rs	delete_index
 crates/trusty-search/src/mcp/tools/http.rs	list_chunks
@@ -775,18 +838,20 @@ crates/trusty-search/src/service/embedder_supervisor/mod.rs	lazy_handle_defers_s
 crates/trusty-search/src/service/embedder_supervisor/mod.rs	lazy_handle_idle_shutdown
 crates/trusty-search/src/service/embedder_supervisor/mod.rs	lazy_handle_single_flight_concurrent
 crates/trusty-search/src/service/grep.rs	truncates_at_max_results
+crates/trusty-search/src/service/lazy_loader/mod.rs	select_warmboot_entries_*
 crates/trusty-search/src/service/lazy_loader/store.rs	cold_store_mark_failed_is_failed
-crates/trusty-search/src/service/persistence_timestamps.rs	update_last_indexed_unix_roundtrip
-crates/trusty-search/src/service/persistence_timestamps.rs	update_last_queried_unix_roundtrip
+crates/trusty-search/src/service/lazy_loader/store.rs	select_warmboot_entries_*
 crates/trusty-search/src/service/persistence.rs	colocated_hnsw_path_resolves_under_root
 crates/trusty-search/src/service/persistence.rs	defer_embed_round_trips
 crates/trusty-search/src/service/persistence.rs	per_index_dir_created
 crates/trusty-search/src/service/persistence.rs	registry_roundtrip
 crates/trusty-search/src/service/persistence.rs	registry_upsert_idempotent
-crates/trusty-search/src/service/reconcile_tests.rs	node_modules
+crates/trusty-search/src/service/persistence_timestamps.rs	update_last_indexed_unix_roundtrip
+crates/trusty-search/src/service/persistence_timestamps.rs	update_last_queried_unix_roundtrip
 crates/trusty-search/src/service/reconcile.rs	mtime_reconcile_falls_back_on_large_delta
 crates/trusty-search/src/service/reconcile.rs	mtime_reconcile_finds_newer_files
 crates/trusty-search/src/service/reconcile.rs	mtime_reconcile_skips_never_indexed
+crates/trusty-search/src/service/reconcile_tests.rs	node_modules
 crates/trusty-search/src/service/reindex/batch.rs	needs_embedder_init
 crates/trusty-search/src/service/reindex/mod.rs	background_reindex_queue_depth_increments_and_decrements
 crates/trusty-search/src/service/reindex/orchestrator.rs	interactive_reindex_not_starved_by_background
@@ -794,6 +859,7 @@ crates/trusty-search/src/service/reindex/pollers.rs	embedderd_peak_rss_captured_
 crates/trusty-search/src/service/reindex/pollers.rs	memory_limit_aborts_reindex_mid_batch
 crates/trusty-search/src/service/reindex/quarantine.rs	quarantine_blocks_until_deadline_expires
 crates/trusty-search/src/service/reindex/quarantine.rs	quarantine_count_reflects_active_quarantines
+crates/trusty-search/src/service/reindex/runner.rs	interactive_reindex_not_starved_by_background
 crates/trusty-search/src/service/reindex/semaphore.rs	interactive_reindex_not_starved_by_background
 crates/trusty-search/src/service/reindex/stages.rs	reindex_marks_failed_on_zero_vectors
 crates/trusty-search/src/service/server/admin.rs	get_config_returns_current_values
@@ -805,7 +871,6 @@ crates/trusty-search/src/service/server/router.rs	defer_embed_false_forces_synch
 crates/trusty-search/src/service/server/router.rs	list_indexes_returns_empty_initially
 crates/trusty-search/src/service/server/routing.rs	search_similar_fallback_reembeds_when_cache_misses
 crates/trusty-search/src/service/server/search_global.rs	test_global_search_fans_out_and_merges
-crates/trusty-search/src/service/server/state_impl.rs	emit_propagates_to_subscriber
 crates/trusty-search/src/service/server/state.rs	emit_propagates_to_subscriber
 crates/trusty-search/src/service/server/state.rs	health_emits_fda_hint_when_loaded_below_prior_count
 crates/trusty-search/src/service/server/state.rs	health_failed_index_reported
@@ -816,75 +881,12 @@ crates/trusty-search/src/service/server/state.rs	health_reports_stalled_embedder
 crates/trusty-search/src/service/server/state.rs	health_reports_warmboot_failures
 crates/trusty-search/src/service/server/state.rs	health_rss_fallback_on_contention
 crates/trusty-search/src/service/server/state.rs	health_surfaces_warmboot_summary
+crates/trusty-search/src/service/server/state_impl.rs	emit_propagates_to_subscriber
 crates/trusty-search/src/service/server/typeahead.rs	typeahead_empty_query_returns_empty
 crates/trusty-search/src/service/server/typeahead.rs	typeahead_lexical_returns_hits
 crates/trusty-search/src/service/server/typeahead.rs	typeahead_query_params_parsed
 crates/trusty-search/src/service/walker.rs	test_default_excludes_markdown_and_changelog
 crates/trusty-search/src/service/walker.rs	test_include_docs_keeps_markdown
+crates/trusty-search/src/service/warm_boot/mod.rs	warm_boot_canonicalize_best_effort_*
 crates/trusty-search/src/service/warm_boot/probe.rs	probe_timeout_increments_leaked_thread_count
 crates/trusty-search/src/service/warm_boot/probe.rs	probe_volume_inaccessible_fast_timeout
-#
-# Added 2026-07-21 (issue #3581): the check_test_pointers.sh parser had two
-# blind spots — glob-shaped citations (`foo_*`) were silently dropped by the
-# candidate filter instead of being resolved, and a `(parenthetical)` aside
-# right after a citation broke the leading-run scan before any later
-# citations in the same annotation were ever examined. Fixing both blind
-# spots surfaced 53 previously-invisible genuine dangling pointers below —
-# pre-existing drift the gate could never see, not new regressions. Each was
-# individually verified (no near-match test exists anywhere in the citing
-# crate, or the near-match is a different function's tests) before being
-# grandfathered here; several sibling pointers found in the same sweep were
-# fixed directly in the doc comment instead (renamed to the real test name,
-# corrected to a resolving glob, or reworded so a legitimate cross-crate
-# citation is no longer a bare backtick span) and are NOT in this list.
-crates/trusty-agents/src/agents/config.rs	build_safe_registry_with_ast_native
-crates/trusty-agents/src/api/server/project_registration.rs	connect_project_creates_tm_config_when_adapter_supplied
-crates/trusty-agents/src/api/server/state.rs	docs_search_*
-crates/trusty-agents/src/identity/mod.rs	caller_identity_from_env_*
-crates/trusty-agents/src/repl/tui/pickers.rs	detect_choices_*
-crates/trusty-agents/src/repl/tui/types.rs	inline_choice_picker_*
-crates/trusty-analyze/src/service/handlers/analysis.rs	smells_omit_content_*
-crates/trusty-analyze/src/service/handlers/analysis.rs	diagnostics_pagination_*
-crates/trusty-code/src/agent_loop/transcript.rs	compact_span_tagged_*
-crates/trusty-code/src/identity/mod.rs	caller_identity_from_env_*
-crates/trusty-code/src/skills/frontmatter.rs	parse_kv_line_*
-crates/trusty-common/src/chat/bedrock_impl.rs	bedrock_provider_new_uses_region
-crates/trusty-common/src/embedder_client/stdio.rs	decode_response_*
-crates/trusty-common/src/intent_source/backend_fetcher.rs	backend_fetcher_token_*
-crates/trusty-common/src/intent_source/linkage.rs	linkage_pr_*
-crates/trusty-common/src/intent_source/resolve.rs	linkage_pr_*
-crates/trusty-common/src/intent_source/resolve.rs	ticket_query_*
-crates/trusty-common/src/intent_source/resolve.rs	precedence_*
-crates/trusty-common/src/intent_source/resolve.rs	precedence_agree_*
-crates/trusty-common/src/intent_source/spec_resolve.rs	spec_resolve_section_*
-crates/trusty-common/src/intent_source/types.rs	pr_query_*
-crates/trusty-common/src/intent_source/types.rs	precedence_*
-crates/trusty-common/src/intent_source/types.rs	ticket_query_*
-crates/trusty-common/src/symgraph/contracts/edge_kind.rs	edge_kind_custom_survives_warm_boot
-crates/trusty-common/src/update/mod.rs	cache_freshness_*
-crates/trusty-git-analytics/src/commands/incidents/mod.rs	parse_datadog_value_*
-crates/trusty-gworkspace/src/api/services/calendar.rs	build_event_body_attendees_*
-crates/trusty-memory/src/commands/port.rs	parse_port_from_addr_*
-crates/trusty-memory/src/prompt_facts.rs	get_prompt_context_filters_by_query
-crates/trusty-memory/src/tools/memory_ops.rs	dispatch_memory_list_*
-crates/trusty-memory/src/tools/memory_ops.rs	dispatch_memory_recall_all_*
-crates/trusty-memory/src/tools/palace_ops.rs	dispatch_palace_delete_*
-crates/trusty-memory/src/tools/palace_ops.rs	dispatch_palace_update_*
-crates/trusty-mpm/src/bin/tm/cli/actions/session.rs	cli_parses_session_ls_terms_*
-crates/trusty-mpm/src/bin/tm/commands/picker_delete.rs	confirm_line_*
-crates/trusty-mpm/src/bin/tm/commands/watch/args.rs	looks_like_owner_repo_*
-crates/trusty-mpm/src/core/standalone/registry.rs	test_atomic_save_tmp_cleaned_on_rename_failure
-crates/trusty-mpm/src/daemon/managed_routes/front_gate.rs	production_gate_*
-crates/trusty-mpm/src/daemon/orphan_gc.rs	process_tree_probe_self_has_no_managed_child
-crates/trusty-mpm/src/daemon/state/sessions.rs	gather_tracked_names_degraded_on_store_error
-crates/trusty-mpm/src/tui/project_ctl/state/mod.rs	activity_failure_streak_*
-crates/trusty-review/src/config/mapreduce.rs	select_review_mode_*
-crates/trusty-search/src/commands/index_cwd_resolve.rs	cwd_resolve_matches_*
-crates/trusty-search/src/commands/port.rs	parse_port_from_addr_*
-crates/trusty-search/src/core/search/hierarchy.rs	hierarchy_from_root_paths_*
-crates/trusty-search/src/core/store_config.rs	mmap_serve_mode_from_env_*
-crates/trusty-search/src/core/store_config.rs	vector_quant_from_env_*
-crates/trusty-search/src/service/lazy_loader/mod.rs	select_warmboot_entries_*
-crates/trusty-search/src/service/lazy_loader/store.rs	select_warmboot_entries_*
-crates/trusty-search/src/service/reindex/runner.rs	interactive_reindex_not_starved_by_background
-crates/trusty-search/src/service/warm_boot/mod.rs	warm_boot_canonicalize_best_effort_*
