@@ -14,7 +14,9 @@
 //!   - [`RpcRouter`] is the caller's half: method names mapped to handlers over
 //!     the caller's own request and response types (see [`RpcRouter::typed`]).
 //!     A service that already has a generic `(method, params)` dispatcher
-//!     mounts it whole through [`RpcRouter::fallback`] instead (#6286).
+//!     mounts it whole through [`RpcRouter::fallback`] instead (#6286). A method
+//!     that answers in many frames rather than one is registered with
+//!     [`RpcRouter::typed_stream`] — see the wire contract below.
 //!   - [`RpcServer::run`] is the whole body of a daemon — bind, serve, unlink.
 //!   - [`serve_until`] and [`handle_connection`] are that body's two halves,
 //!     public so a caller with its own bind (say
@@ -26,6 +28,50 @@
 //! connection runs [`ensure_peer_is_self`] before a single byte is read. No
 //! CSRF, origin, or token machinery is ported from the HTTP shape those checks
 //! replace — on a UDS socket it would guard nothing (#6277 design review).
+//!
+//! ## The wire contract, including streams (#6286)
+//!
+//! A request is one newline-terminated JSON-RPC frame, unchanged:
+//!
+//! ```text
+//! {"jsonrpc":"2.0","id":7,"method":"chat","params":{…}}
+//! ```
+//!
+//! plus ONE optional field, `"stream": true`. Absent means false, and false is
+//! exactly the protocol as it stood — one request frame, one response frame,
+//! connection closed. An old client and a new server therefore behave as they
+//! always did, byte for byte, and so does a new client calling a method that
+//! does not stream.
+//!
+//! A request that asks for a stream, against a method registered with
+//! [`RpcRouter::typed_stream`], is answered with a SEQUENCE of frames on the
+//! same connection, each newline-terminated and each carrying a `"stream"`
+//! discriminant a plain response never has:
+//!
+//! ```text
+//! {"jsonrpc":"2.0","id":7,"stream":"item","result":"Hel"}
+//! {"jsonrpc":"2.0","id":7,"stream":"item","result":"lo"}
+//! {"jsonrpc":"2.0","id":7,"stream":"end"}
+//! ```
+//!
+//! **A stream terminates on a frame, never on EOF.** Exactly one terminal frame
+//! is written on every path — `"stream":"end"` when the producer finishes, and
+//! `"stream":"error"` carrying an [`RpcError`] when the handler fails mid-stream,
+//! when it fails to open at all, or when an item does not fit the frame budget.
+//! A client that reaches EOF without one reports it rather than returning what
+//! it happened to receive: a truncated token stream read as a complete answer is
+//! the Fail-Open branch this contract exists to close, and
+//! `stream_reports_a_truncated_stream_rather_than_an_empty_success` is its
+//! regression test.
+//!
+//! **The two mismatches both fail immediately, in the shape the caller reads.**
+//! A request WITHOUT the flag against a streaming method gets one ordinary
+//! response frame carrying [`CODE_STREAM_REQUIRED`]. A request WITH the flag
+//! against anything that does not stream — a unary method, a fallback-served
+//! name, an unknown name — gets one terminal `"stream":"error"` frame carrying
+//! [`CODE_STREAM_UNSUPPORTED`], naming the methods this listener does stream.
+//! Neither hangs, and neither leaves the caller decoding a frame shape it does
+//! not expect.
 //!
 //! **The socket file is unlinked explicitly.** [`bind_hardened`] binds and
 //! chmods; neither it nor `tokio::net::UnixListener`'s `Drop` removes the path,
@@ -39,6 +85,7 @@
 //! Test: `tests.rs` — `dispatch_*` for the decision, `serve_*` for the socket.
 
 mod router;
+mod stream;
 mod wire;
 
 #[cfg(test)]
@@ -55,9 +102,11 @@ use tokio::net::{UnixListener, UnixStream};
 use crate::uds::{MAX_FRAME_BYTES, UdsSecurityError, bind_hardened, ensure_peer_is_self};
 
 pub use router::{RpcFallback, RpcMethod, RpcRouter, typed_method};
+pub use stream::{RpcOutcome, RpcStreamItems, RpcStreamMethod, typed_stream_method, write_stream};
 pub use wire::{
     CODE_INTERNAL_ERROR, CODE_INVALID_PARAMS, CODE_INVALID_REQUEST, CODE_METHOD_NOT_FOUND,
-    CODE_PARSE_ERROR, JSONRPC_VERSION, RpcError, RpcRequest, RpcResponse,
+    CODE_PARSE_ERROR, CODE_STREAM_REQUIRED, CODE_STREAM_UNSUPPORTED, JSONRPC_VERSION, RpcError,
+    RpcRequest, RpcResponse, RpcStreamFrame, StreamPhase,
 };
 
 /// Everything that can stop this server, or stop one of its connections.
@@ -130,6 +179,15 @@ pub struct RpcServeOptions {
     /// whose method runs for minutes (`trusty-review`'s is the case #6277 is
     /// migrating) would otherwise need this raised to a figure that also lets a
     /// peer which connects and never writes hold a task for that long.
+    ///
+    /// **It does not apply between streamed response frames** (#6286). The gap
+    /// between two frames of a stream is the handler's own production latency —
+    /// an LLM deciding on the next token — and a budget there would kill a
+    /// legitimately slow stream. It bounds one thing: how long a peer may take
+    /// to deliver its REQUEST frame. A service that wants an idle-stream budget
+    /// enforces it in its producer, where the difference between "thinking" and
+    /// "stuck" is knowable; the client applies its own per-frame budget in
+    /// [`crate::uds::send_framed_stream_request`].
     pub read_timeout: Duration,
 
     /// Largest request frame accepted, counting its terminating newline.
@@ -148,12 +206,20 @@ pub struct RpcServeOptions {
     /// [`crate::uds::send_framed_request_capped`] — and must raise the client's
     /// to match, or it has only moved which side refuses.
     ///
+    /// **Per frame, in both directions** (#6286). On a streaming response it
+    /// governs each item frame separately, not the stream's total: an item that
+    /// would not fit is refused with a terminal error frame rather than
+    /// truncated, because the client applies the same budget to each frame it
+    /// reads and a frame it cannot buffer would desynchronise the rest of the
+    /// connection.
+    ///
     /// Not settable per method: the method name lives inside the frame this
     /// budget governs the reading of, so it is not known until after the budget
     /// has already been enforced.
     ///
     /// Test: `frame_of_exactly_the_budget_including_its_newline_is_accepted`,
-    /// `serve_rejects_an_oversized_frame`.
+    /// `serve_rejects_an_oversized_frame`,
+    /// `stream_refuses_an_item_larger_than_the_frame_budget`.
     pub max_frame_bytes: u64,
 }
 
@@ -194,17 +260,24 @@ pub enum Served {
 /// `UnixStream` pair without an accept loop.
 /// What: refuses a peer whose uid is not our own, reads bytes up to the first
 /// newline or EOF under [`RpcServeOptions::max_frame_bytes`], dispatches through
-/// `router`, and writes one newline-terminated response frame.
+/// `router`, and writes the answer — one response frame for a unary call, or the
+/// frame sequence the module docs' wire contract describes for a streaming one
+/// (#6286).
 ///
 /// # Errors
 ///
-/// Any [`RpcServerError`] variant except `Bind`. An error here means no
-/// response was written and the client sees a transport failure — which is why
-/// every failure the router can reason about is a response frame instead.
+/// Any [`RpcServerError`] variant except `Bind`. An error here means no complete
+/// answer was written and the client sees a transport failure — which is why
+/// every failure the router can reason about is a frame instead. On a stream,
+/// [`RpcServerError::Write`] mid-sequence is the client having gone away: the
+/// producer stops when its receiver drops here, and the accept loop is
+/// unaffected.
 ///
 /// Test: `serve_round_trips_a_request_over_a_real_socket`,
 /// `serve_rejects_an_oversized_frame`,
-/// `handle_connection_reports_a_liveness_probe_rather_than_a_failure`.
+/// `handle_connection_reports_a_liveness_probe_rather_than_a_failure`,
+/// `stream_round_trips_many_frames_over_a_real_socket`,
+/// `stream_survives_a_client_that_disconnects_mid_stream`.
 pub async fn handle_connection(
     mut stream: UnixStream,
     router: Arc<RpcRouter>,
@@ -234,20 +307,34 @@ pub async fn handle_connection(
         }
     }
 
-    let response = router.dispatch(&frame).await;
-    let errored = response.is_error();
-    // One owned, already-newline-terminated buffer, so the response leaves in a
-    // single write rather than a serialise-then-append pair.
-    let bytes =
-        crate::uds::encode_frame(&response).map_err(|source| RpcServerError::Encode { source })?;
-    stream
-        .write_all(&bytes)
-        .await
-        .map_err(|source| RpcServerError::Write { source })?;
-    stream
-        .flush()
-        .await
-        .map_err(|source| RpcServerError::Write { source })?;
+    let errored = match router.dispatch_streaming(&frame).await {
+        RpcOutcome::Single(response) => {
+            let errored = response.is_error();
+            // One owned, already-newline-terminated buffer, so the response
+            // leaves in a single write rather than a serialise-then-append pair.
+            let bytes = crate::uds::encode_frame(&response)
+                .map_err(|source| RpcServerError::Encode { source })?;
+            stream
+                .write_all(&bytes)
+                .await
+                .map_err(|source| RpcServerError::Write { source })?;
+            stream
+                .flush()
+                .await
+                .map_err(|source| RpcServerError::Write { source })?;
+            errored
+        }
+        // #6286: many frames, ending in exactly one terminal frame. A write
+        // failure part-way through is a dead client, not a server fault — it
+        // surfaces as `Write`, the connection is dropped, and the accept loop
+        // keeps serving. The handler's producer stops on its own when the
+        // receiver `write_stream` owns is dropped here.
+        RpcOutcome::Stream { id, items } => {
+            write_stream(&mut stream, id, items, options.max_frame_bytes)
+                .await
+                .map_err(|source| RpcServerError::Write { source })?
+        }
+    };
     Ok(Served::Answered { errored })
 }
 
@@ -393,6 +480,7 @@ impl RpcServer {
         tracing::info!(
             socket = %self.socket.display(),
             methods = ?self.router.method_names().collect::<Vec<_>>(),
+            streams = ?self.router.stream_names().collect::<Vec<_>>(),
             "uds rpc server bound"
         );
 

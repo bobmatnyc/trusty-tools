@@ -60,6 +60,9 @@ pub mod rpc;
 // ADR-0032 supplies a method table rather than a fourth hand-rolled accept loop.
 pub mod server;
 pub mod singleton;
+// #6286: the reading half of a multi-frame response, so a token stream has one
+// definition of what terminates it rather than one per consumer.
+pub mod stream_client;
 
 /// On-demand supervision of a UDS-serving child process (#5089 step 2).
 ///
@@ -85,6 +88,9 @@ pub use rpc::{
     send_framed_request_capped, write_frame,
 };
 pub use singleton::bind_singleton_hardened;
+pub use stream_client::{
+    FramedStream, send_framed_stream_request, send_framed_stream_request_capped,
+};
 #[cfg(feature = "uds-supervisor")]
 pub use supervisor::{
     ServiceTimeouts, SpawnSpec, SupervisorConfig, SupervisorError, UdsServiceSupervisor,

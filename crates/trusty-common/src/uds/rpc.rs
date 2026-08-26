@@ -151,6 +151,37 @@ pub enum UdsRpcError {
         /// The budget that elapsed.
         timeout: Duration,
     },
+
+    // #6286: APPENDED, never inserted. `#[non_exhaustive]` makes a new variant
+    // additive, but it does not make a MOVED one additive — placing these ahead
+    // of `Timeout` shifted its implicit discriminant from 7 to 9, which
+    // `cargo-semver-checks` reports as a major break because a downstream
+    // `as isize` cast would change value. New variants go at the end.
+    /// A streaming response ended on a terminal error frame (#6286).
+    ///
+    /// The server's own code and message, unrewritten. Distinct from
+    /// [`UdsRpcError::NoResponse`] on purpose: the peer answered, and what it
+    /// said is the reason the stream stopped.
+    #[error("{path} ended the stream with {error}")]
+    Stream {
+        /// Socket the stream was read from.
+        path: PathBuf,
+        /// The server's terminal error.
+        error: crate::uds::server::RpcError,
+    },
+
+    /// A streaming request was answered with an ordinary response frame (#6286).
+    ///
+    /// The method does not stream. Boxed because [`super::server::RpcResponse`]
+    /// is much larger than every other variant's payload, and an enum is as big
+    /// as its widest arm.
+    #[error("{path} answered with a single response frame rather than a stream")]
+    NotAStream {
+        /// Socket that answered.
+        path: PathBuf,
+        /// The frame it sent, so the caller reads the server's own refusal.
+        response: Box<crate::uds::server::RpcResponse>,
+    },
 }
 
 /// Send one JSON frame to `path` and decode the one frame that comes back.
@@ -327,10 +358,14 @@ where
 
 /// Dial `path`, write one frame, and half-close the write side.
 ///
-/// Split out so [`send_framed_request_capped`] and [`send_framed_notification`]
-/// share one copy of the dial-and-write sequence; the returned stream is the
-/// still-open read half for callers that expect a reply.
-async fn dial_and_send<Req>(path: &Path, request: &Req) -> Result<UnixStream, UdsRpcError>
+/// Split out so [`send_framed_request_capped`], [`send_framed_notification`] and
+/// [`super::stream_client::send_framed_stream_request_capped`] share one copy of
+/// the dial-and-write sequence; the returned stream is the still-open read half
+/// for callers that expect a reply.
+pub(super) async fn dial_and_send<Req>(
+    path: &Path,
+    request: &Req,
+) -> Result<UnixStream, UdsRpcError>
 where
     Req: Serialize + ?Sized,
 {
@@ -436,7 +471,7 @@ where
 /// Test: `read_failure_from_an_abortive_close_reads_as_a_hang_up`,
 /// `read_failure_after_partial_bytes_stays_a_read_error`,
 /// `read_failure_from_an_unrelated_errno_stays_a_read_error`.
-fn classify_read_failure(
+pub(super) fn classify_read_failure(
     path: &Path,
     source: std::io::Error,
     nothing_buffered: bool,
