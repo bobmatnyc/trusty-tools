@@ -9,6 +9,3 @@ Changed
   frame either way, so the guard reads `status` and accepts only `"ok"`. That
   keeps the audit's trusty-search dependency hard on every run rather than only
   on a fresh spawn.
-- `AnalyzeGuard::from_env` can now fail: a derived socket path can fail to
-  resolve where a string literal could not, and guessing one would send the
-  audit at a socket the daemon never binds.
