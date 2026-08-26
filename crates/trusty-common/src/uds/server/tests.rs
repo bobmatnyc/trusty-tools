@@ -156,6 +156,91 @@ async fn dispatch_propagates_a_handler_error_verbatim() {
     );
 }
 
+// ── the fallback seam (#6286) ───────────────────────────────────────────────
+
+/// A fallback that answers every name, echoing back what it was handed.
+///
+/// `refuse` names the one method it fails on, so the success and error arms are
+/// driven by the same implementation rather than two near-identical stubs.
+struct EchoFallback {
+    refuse: &'static str,
+}
+
+#[async_trait::async_trait]
+impl RpcFallback for EchoFallback {
+    async fn call(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, RpcError> {
+        if method == self.refuse {
+            return Err(RpcError::new(-32002, format!("fallback refused {method}")));
+        }
+        Ok(json!({ "method": method, "params": params }))
+    }
+}
+
+#[tokio::test]
+async fn dispatch_routes_an_unregistered_method_to_the_fallback() {
+    // The seam #6286 exists for: a name the router never registered reaches the
+    // service's own dispatcher, with the METHOD NAME intact — a fallback that
+    // saw only the params could not decide what to run.
+    let router = greeting_router().fallback(EchoFallback { refuse: "" });
+
+    let response = router
+        .dispatch(&frame(11, "review", json!({ "n": 1 })))
+        .await;
+
+    assert!(response.error.is_none(), "unexpected error: {response:?}");
+    assert_eq!(
+        response.result,
+        Some(json!({ "method": "review", "params": { "n": 1 } })),
+        "the fallback must receive both the method name and the params"
+    );
+    assert_eq!(response.id, json!(11), "the request id is still echoed");
+}
+
+#[tokio::test]
+async fn dispatch_prefers_a_registered_method_over_the_fallback() {
+    // Registered wins. Mounting a dispatcher must not silently take over a
+    // method the service deliberately registered separately — that would make
+    // the override direction depend on registration order.
+    let router = greeting_router().fallback(EchoFallback { refuse: "" });
+
+    let response = router
+        .dispatch(&frame(12, "greet", json!({ "name": "ada" })))
+        .await;
+
+    assert_eq!(
+        response.result,
+        Some(json!({ "text": "hello ada" })),
+        "the registered handler answered, not the fallback"
+    );
+}
+
+#[tokio::test]
+async fn dispatch_maps_a_fallback_error_to_an_rpc_error_response() {
+    // Fail-open check: a fallback that returns `Err` must produce a coded error
+    // FRAME. Dropping the connection instead would hand the caller a transport
+    // failure with no reason in it, and rewriting the code would lose the
+    // service's own refusal.
+    let router = greeting_router().fallback(EchoFallback { refuse: "review" });
+
+    let response = router.dispatch(&frame(13, "review", json!(null))).await;
+
+    assert_eq!(
+        response.error.expect("an error"),
+        RpcError::new(-32002, "fallback refused review"),
+        "the fallback's own code and message must survive verbatim"
+    );
+    assert!(response.result.is_none());
+    assert_eq!(response.id, json!(13));
+}
+
+// A router with no fallback still answers `method_not_found` — proven by
+// `dispatch_reports_method_not_found_for_an_unregistered_method` above, which
+// #6286 left untouched. It is not restated here.
+
 #[test]
 fn method_names_are_sorted_and_complete() {
     let router = greeting_router();

@@ -13,6 +13,8 @@
 //! What, in the order a daemon uses them.
 //!   - [`RpcRouter`] is the caller's half: method names mapped to handlers over
 //!     the caller's own request and response types (see [`RpcRouter::typed`]).
+//!     A service that already has a generic `(method, params)` dispatcher
+//!     mounts it whole through [`RpcRouter::fallback`] instead (#6286).
 //!   - [`RpcServer::run`] is the whole body of a daemon — bind, serve, unlink.
 //!   - [`serve_until`] and [`handle_connection`] are that body's two halves,
 //!     public so a caller with its own bind (say
@@ -52,7 +54,7 @@ use tokio::net::{UnixListener, UnixStream};
 
 use crate::uds::{MAX_FRAME_BYTES, UdsSecurityError, bind_hardened, ensure_peer_is_self};
 
-pub use router::{RpcMethod, RpcRouter, typed_method};
+pub use router::{RpcFallback, RpcMethod, RpcRouter, typed_method};
 pub use wire::{
     CODE_INTERNAL_ERROR, CODE_INVALID_PARAMS, CODE_INVALID_REQUEST, CODE_METHOD_NOT_FOUND,
     CODE_PARSE_ERROR, JSONRPC_VERSION, RpcError, RpcRequest, RpcResponse,
