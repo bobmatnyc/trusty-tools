@@ -1,4 +1,4 @@
-//! Route handlers for complexity, quality, refactor, and diagnostics endpoints.
+//! RPC handlers for complexity, quality, refactor, and diagnostics methods.
 //!
 //! Why: Extracted from `service/mod.rs` and further split from the graph/
 //! clustering handlers to keep each file focused and under the 500-line cap.
@@ -6,20 +6,21 @@
 //! hotspots, smell detection, quality grades, refactor suggestions, and
 //! on-demand external linting via `ToolRegistry`.
 //!
-//! What: Five public handlers plus supporting helpers. All are stateless
+//! What: Six public handlers plus supporting helpers. All are stateless
 //! analysis passes over the chunk corpus fetched from trusty-search.
 //!
-//! Test: All handler tests are in `service/tests.rs`. Core logic coverage lives
-//! in `core/` unit tests.
+//! #6287: each handler takes `(&AnalyzerAppState, Request)` rather than axum's
+//! `State`/`Path`/`Query` extractors. The path segment and the query string
+//! collapse into one `Deserialize` request struct per method, because a
+//! JSON-RPC call carries a single `params` object and has nowhere to put a
+//! path segment.
+//!
+//! Test: All handler tests are in `service/rpc_tests.rs`. Core logic coverage
+//! lives in `core/` unit tests.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Instant;
 
-use axum::{
-    extract::{Path, Query, State},
-    response::Json,
-};
 use serde::{Deserialize, Serialize};
 
 use crate::core::complexity::{compute_complexity_for, detect_smells_with_thresholds};
@@ -27,8 +28,19 @@ use crate::core::{analyze_refactor, quality, RefactorSuggestion, Severity};
 use crate::service::events::{fetch_chunks, AnalyzerAppState, ApiError};
 use crate::types::CodeChunk;
 
-#[derive(Deserialize)]
-pub struct HotspotsParams {
+/// Params of a method whose only argument is which index to read.
+///
+/// Why: `analyze.complexity_distribution`, `analyze.quality` and
+/// `analyze.scip_status` differ only in what they compute, so they share one
+/// request type rather than three identical ones.
+#[derive(Debug, Deserialize)]
+pub struct IndexRequest {
+    pub index_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HotspotsRequest {
+    pub index_id: String,
     #[serde(default = "default_top_n")]
     pub top_n: usize,
 }
@@ -54,16 +66,16 @@ fn default_omit_content() -> bool {
     true
 }
 
-/// Query parameters for `GET /indexes/{id}/smells` and
-/// `GET /indexes/{id}/diagnostics` (shared struct; diagnostics extends it).
+/// Params for `analyze.smells`.
 ///
-/// Why: #917 — unbounded payloads from these endpoints disconnect MCP sessions
+/// Why: #917 — unbounded payloads from this method disconnect MCP sessions
 /// via `-32000` when they exceed the stdio host's payload ceiling.
 /// What: adds `limit`, `offset`, and `omit_content` so callers can paginate
 /// and opt out of redundant raw source text.
 /// Test: `smells_pagination_*` and `smells_omit_content_*` unit tests below.
-#[derive(Deserialize)]
-pub struct SmellsParams {
+#[derive(Debug, Deserialize)]
+pub struct SmellsRequest {
+    pub index_id: String,
     /// Maximum results to return per page (default 500).
     #[serde(default = "default_limit")]
     pub limit: usize,
@@ -114,23 +126,22 @@ impl SmellItem {
 }
 
 pub async fn complexity_hotspots(
-    State(state): State<Arc<AnalyzerAppState>>,
-    Path(id): Path<String>,
-    Query(params): Query<HotspotsParams>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let chunks = fetch_chunks(&state, &id).await?;
-    let hotspots = quality::complexity_hotspots(&chunks, params.top_n);
-    Ok(Json(serde_json::json!({
-        "index_id": id,
-        "top_n": params.top_n,
+    state: &AnalyzerAppState,
+    req: HotspotsRequest,
+) -> Result<serde_json::Value, ApiError> {
+    let chunks = fetch_chunks(state, &req.index_id).await?;
+    let hotspots = quality::complexity_hotspots(&chunks, req.top_n);
+    Ok(serde_json::json!({
+        "index_id": req.index_id,
+        "top_n": req.top_n,
         "hotspots": hotspots,
-    })))
+    }))
 }
 
-/// `GET /indexes/{id}/complexity_distribution` — the full A–F histogram over
-/// the whole corpus.
+/// `analyze.complexity_distribution` — the full A–F histogram over the whole
+/// corpus.
 ///
-/// Why: `/complexity_hotspots` is a descending, truncated top-N; a consumer that
+/// Why: `complexity_hotspots` is a descending, truncated top-N; a consumer that
 /// buckets its response is describing the worst N functions, not the codebase.
 /// On a large repository that reads as "zero simple functions", which is what
 /// reached a due-diligence report (#5320). This endpoint answers the
@@ -140,22 +151,22 @@ pub async fn complexity_hotspots(
 /// What: delegates to `quality::complexity_distribution`, which counts only
 /// files with a mapped language and reports the counted total plus the number
 /// of non-code chunks it skipped.
-/// Test: `super::super::tests::complexity_distribution_endpoint_returns_all_bands`.
+/// Test: `rpc_complexity_distribution_returns_all_bands`.
 pub async fn complexity_distribution(
-    State(state): State<Arc<AnalyzerAppState>>,
-    Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let chunks = fetch_chunks(&state, &id).await?;
+    state: &AnalyzerAppState,
+    req: IndexRequest,
+) -> Result<serde_json::Value, ApiError> {
+    let chunks = fetch_chunks(state, &req.index_id).await?;
     let report = quality::complexity_distribution(&chunks);
-    Ok(Json(serde_json::json!({
-        "index_id": id,
+    Ok(serde_json::json!({
+        "index_id": req.index_id,
         "total": report.total,
         "skipped_non_code": report.skipped_non_code,
         "buckets": report.buckets,
-    })))
+    }))
 }
 
-/// `GET /indexes/{id}/smells` — return chunks with at least one detected smell.
+/// `analyze.smells` — return chunks with at least one detected smell.
 ///
 /// Why: #917 — the unbounded result set (full `content` per chunk) caused MCP
 /// session-killing `-32000` disconnects on large indexes. Pagination + content
@@ -165,36 +176,36 @@ pub async fn complexity_distribution(
 /// envelope (`total`, `returned`, `truncated`) so callers know when to
 /// paginate.
 /// Test: `smells_pagination_*` and `smells_omit_content_*` unit tests below;
-/// integration coverage in `service/tests.rs`.
+/// integration coverage in `service/rpc_tests.rs`.
 pub async fn smells(
-    State(state): State<Arc<AnalyzerAppState>>,
-    Path(id): Path<String>,
-    Query(params): Query<SmellsParams>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let chunks = fetch_chunks(&state, &id).await?;
+    state: &AnalyzerAppState,
+    req: SmellsRequest,
+) -> Result<serde_json::Value, ApiError> {
+    let chunks = fetch_chunks(state, &req.index_id).await?;
     let smelly = quality::smelly_chunks(&chunks);
     let total = smelly.len();
     let page: Vec<SmellItem> = smelly
         .iter()
-        .skip(params.offset)
-        .take(params.limit)
-        .map(|c| SmellItem::from_chunk(c, !params.omit_content))
+        .skip(req.offset)
+        .take(req.limit)
+        .map(|c| SmellItem::from_chunk(c, !req.omit_content))
         .collect();
     let returned = page.len();
-    let truncated = (params.offset + returned) < total;
-    Ok(Json(serde_json::json!({
-        "index_id": id,
+    let truncated = (req.offset + returned) < total;
+    Ok(serde_json::json!({
+        "index_id": req.index_id,
         "total": total,
-        "offset": params.offset,
-        "limit": params.limit,
+        "offset": req.offset,
+        "limit": req.limit,
         "returned": returned,
         "truncated": truncated,
         "chunks": page,
-    })))
+    }))
 }
 
-#[derive(Deserialize)]
-pub struct RefactorParams {
+#[derive(Debug, Deserialize)]
+pub struct RefactorRequest {
+    pub index_id: String,
     /// Optional path filter — only suggest refactors for chunks in this file.
     pub file: Option<String>,
     /// Minimum severity to include (`"low"` / `"medium"` / `"high"` /
@@ -215,21 +226,20 @@ pub struct RefactorParams {
 /// Test: a chunk with grade F + LongFunction returns one Critical
 /// ExtractMethod suggestion; covered transitively via `core::refactor` tests.
 pub async fn refactor_suggestions(
-    State(state): State<Arc<AnalyzerAppState>>,
-    Path(id): Path<String>,
-    Query(params): Query<RefactorParams>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let chunks = fetch_chunks(&state, &id).await?;
-    let min_severity = params
+    state: &AnalyzerAppState,
+    req: RefactorRequest,
+) -> Result<serde_json::Value, ApiError> {
+    let chunks = fetch_chunks(state, &req.index_id).await?;
+    let min_severity = req
         .min_severity
         .as_deref()
         .and_then(Severity::parse)
         .unwrap_or(Severity::Low);
-    let top_k = params.top_k.unwrap_or(20);
+    let top_k = req.top_k.unwrap_or(20);
 
     let mut out: Vec<RefactorSuggestion> = Vec::new();
     for chunk in &chunks {
-        if let Some(file) = params.file.as_deref() {
+        if let Some(file) = req.file.as_deref() {
             if chunk.file != file {
                 continue;
             }
@@ -268,12 +278,12 @@ pub async fn refactor_suggestions(
     });
     out.truncate(top_k);
 
-    Ok(Json(serde_json::json!({
-        "index_id": id,
+    Ok(serde_json::json!({
+        "index_id": req.index_id,
         "count": out.len(),
         "min_severity": min_severity_label(&min_severity),
         "suggestions": out,
-    })))
+    }))
 }
 
 fn min_severity_label(s: &Severity) -> &'static str {
@@ -286,14 +296,14 @@ fn min_severity_label(s: &Severity) -> &'static str {
 }
 
 pub async fn quality_report(
-    State(state): State<Arc<AnalyzerAppState>>,
-    Path(id): Path<String>,
-) -> Result<Json<quality::QualityReport>, ApiError> {
-    let chunks = fetch_chunks(&state, &id).await?;
-    Ok(Json(quality::aggregate_quality(&chunks)))
+    state: &AnalyzerAppState,
+    req: IndexRequest,
+) -> Result<quality::QualityReport, ApiError> {
+    let chunks = fetch_chunks(state, &req.index_id).await?;
+    Ok(quality::aggregate_quality(&chunks))
 }
 
-/// Query parameters for the on-demand diagnostics endpoint.
+/// Params for the on-demand diagnostics method.
 ///
 /// Why: extends the base tool-filter params with pagination controls to fix
 /// #917/#918. `omit_content` is intentionally absent — `ToolDiagnostic` carries
@@ -301,9 +311,10 @@ pub async fn quality_report(
 /// thinking content suppression is possible here.
 /// What: `language` and `tools` scope the linter run; `limit` / `offset` page
 /// the result set.
-/// Test: `diagnostics_pagination_*` below; integration in `service/tests.rs`.
-#[derive(Deserialize)]
-pub struct DiagnosticsParams {
+/// Test: `diagnostics_pagination_*` below; integration in `service/rpc_tests.rs`.
+#[derive(Debug, Deserialize)]
+pub struct DiagnosticsRequest {
+    pub index_id: String,
     /// Restrict analysis to a single language tag (`"rust"`, `"python"`, ...).
     pub language: Option<String>,
     /// Comma-separated list of tool names to run; defaults to all available.
@@ -316,11 +327,11 @@ pub struct DiagnosticsParams {
     pub offset: usize,
 }
 
-/// `GET /indexes/{id}/diagnostics` — run available external static-analysis
-/// tools (clippy, ruff, biome, ...) across the index corpus on demand.
+/// `analyze.diagnostics` — run available external static-analysis tools
+/// (clippy, ruff, biome, ...) across the index corpus on demand.
 ///
 /// Why: tree-sitter heuristics are uniform but shallow; real linters catch
-/// far more, but only when their binary is installed. This endpoint discovers
+/// far more, but only when their binary is installed. This method discovers
 /// what is available and runs it, file by file. Project-scoped tools (clippy,
 /// Roslyn) receive real on-disk paths via `root_path` and build once per
 /// request; file-scoped tools write to a scratch dir as before.
@@ -331,22 +342,22 @@ pub struct DiagnosticsParams {
 /// deadline. Results are sliced by `offset`+`limit` and returned with a
 /// pagination envelope carrying `timed_out` / `cutoff`.
 ///
-/// #6018: the request always answers with bytes. Three outcomes, all
-/// well-formed JSON — a complete report (`timed_out: false`), a partial report
-/// naming what the deadline cut off (`timed_out: true` plus `cutoff`), or, when
-/// even the grace window expires, HTTP 504 with an `error` body. What it never
-/// does again is run unbounded and let the client abandon the connection.
-/// Test: `diagnostics_endpoint_returns_empty_when_no_tools` boots the router
+/// #6018: the request always answers with a frame. Three outcomes — a complete
+/// report (`timed_out: false`), a partial report naming what the deadline cut
+/// off (`timed_out: true` plus `cutoff`), or, when even the grace window
+/// expires, an error frame naming the request. What it never does again is run
+/// unbounded and let the client abandon the connection.
+/// Test: `rpc_diagnostics_returns_empty_when_no_tools` drives a live socket
 /// with a stub client and confirms a well-formed empty response; the deadline
 /// branch is proven in `dispatch_stops_at_deadline_and_reports_cutoff`;
 /// pagination behaviour is unit-tested in `diagnostics_pagination_*` below.
 pub async fn diagnostics_for_index(
-    State(state): State<Arc<AnalyzerAppState>>,
-    Path(id): Path<String>,
-    Query(params): Query<DiagnosticsParams>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let chunks = fetch_chunks(&state, &id).await?;
-    let tool_filter: Option<Vec<String>> = params.tools.as_ref().map(|s| {
+    state: &AnalyzerAppState,
+    req: DiagnosticsRequest,
+) -> Result<serde_json::Value, ApiError> {
+    let id = req.index_id;
+    let chunks = fetch_chunks(state, &id).await?;
+    let tool_filter: Option<Vec<String>> = req.tools.as_ref().map(|s| {
         s.split(',')
             .map(|t| t.trim().to_string())
             .filter(|t| !t.is_empty())
@@ -378,7 +389,7 @@ pub async fn diagnostics_for_index(
 
     // Heavy work (process spawns, blocking I/O) runs off the async runtime,
     // under a cooperative deadline the dispatch honours between spawns (#6018).
-    let language_filter = params.language.clone();
+    let language_filter = req.language.clone();
     // #6018: every rung of the request-timeout ladder — this deadline, the
     // router's blanket layer, and the MCP client's own timeout — derives from
     // `core::deadlines` so raising the deadline cannot invert the ordering.
@@ -413,8 +424,8 @@ pub async fn diagnostics_for_index(
             );
             return Err(ApiError::gateway_timeout(format!(
                 "diagnostics for index '{id}' exceeded {}s over {file_count} files and was \
-                     abandoned with no partial result; narrow the request with ?language= or \
-                     ?tools=, or raise TRUSTY_DIAGNOSTICS_DEADLINE_SECS",
+                     abandoned with no partial result; narrow the request with `language` or \
+                     `tools`, or raise TRUSTY_DIAGNOSTICS_DEADLINE_SECS",
                 hard_budget.as_secs()
             )));
         }
@@ -424,17 +435,17 @@ pub async fn diagnostics_for_index(
     let page: Vec<&crate::core::ToolDiagnostic> = report
         .diagnostics
         .iter()
-        .skip(params.offset)
-        .take(params.limit)
+        .skip(req.offset)
+        .take(req.limit)
         .collect();
     let returned = page.len();
-    let truncated = (params.offset + returned) < total;
+    let truncated = (req.offset + returned) < total;
 
-    Ok(Json(serde_json::json!({
+    Ok(serde_json::json!({
         "index_id": id,
         "total": total,
-        "offset": params.offset,
-        "limit": params.limit,
+        "offset": req.offset,
+        "limit": req.limit,
         "returned": returned,
         "truncated": truncated,
         "tools_run": report.tools_run,
@@ -445,7 +456,7 @@ pub async fn diagnostics_for_index(
         "timed_out": report.cutoff.is_some(),
         "cutoff": report.cutoff,
         "diagnostics": page,
-    })))
+    }))
 }
 
 #[cfg(test)]

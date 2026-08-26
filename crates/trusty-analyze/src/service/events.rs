@@ -1,65 +1,29 @@
-//! SSE event types, shared daemon state, and lightweight HTTP error wrapper.
+//! Shared daemon state and the uniform handler error type.
 //!
 //! Why: Extracted from `service/mod.rs` to keep each module focused. This
-//! module owns the "observable state" side of the service — what events are
-//! broadcast and what shared data every handler receives — separated from the
-//! route-handler logic that acts on that state.
+//! module owns what every handler receives — the shared stores and clients —
+//! separated from the handler logic that acts on it.
 //!
-//! What: Defines `AnalyzerEvent` (the broadcast enum), `DEFAULT_PORT`,
-//! `AnalyzerAppState` (cloneable shared state threaded through axum), and
-//! `ApiError` (the uniform HTTP error type).
+//! What: defines [`AnalyzerAppState`] (cloneable shared state threaded through
+//! every RPC handler), [`ApiError`] (the uniform handler error), and
+//! [`fetch_chunks`] (the one way a handler reaches the search corpus).
 //!
-//! Test: `sse_subscriber_receives_emitted_event` and
-//! `sse_route_returns_event_stream_content_type` in `service/tests.rs`.
+//! #6287 removed `AnalyzerEvent`, the `events` broadcast channel and
+//! `DEFAULT_PORT` along with the axum surface that carried them. `/sse` was the
+//! only subscriber the enum ever had, and ADR-0032 leaves this daemon with no
+//! HTTP surface to stream from; a push channel with no transport is state
+//! nothing can observe. The dashboard mounts on `trusty-console` instead.
+//!
+//! Test: `service::rpc_tests` drives every handler over a real socket.
 
 use std::sync::Arc;
 
 use crate::core::{AnalyzerRegistry, FactStore, ScipOverlayStore, TrustySearchClient};
 use crate::embedder::{BowEmbedder, Embedder};
 use crate::types::SmellThresholds;
-use axum::{
-    http::StatusCode,
-    response::{IntoResponse, Json, Response},
+use trusty_common::uds::server::{
+    CODE_INTERNAL_ERROR, CODE_INVALID_PARAMS, RpcError,
 };
-use tokio::sync::broadcast;
-
-/// Live event broadcast over `/sse` for any dashboard subscribers.
-///
-/// Why: lets mutating endpoints (analysis, facts, SCIP ingest) push real-time
-/// updates to the embedded admin UI without polling. Mirrors the
-/// `DaemonEvent` pattern in `trusty-memory` so dashboards can be built with
-/// shared client-side wiring.
-/// What: tagged JSON enum serialized as `{"type": "...", ...fields}` for
-/// each event class.
-/// Test: `sse_stream_emits_fact_upserted` (see tests below) subscribes and
-/// observes one event after `POST /facts`.
-#[derive(Clone, Debug, serde::Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum AnalyzerEvent {
-    AnalysisStarted {
-        index_id: String,
-    },
-    AnalysisCompleted {
-        index_id: String,
-        chunk_count: usize,
-        duration_ms: u64,
-    },
-    FactUpserted {
-        subject: String,
-        predicate: String,
-    },
-    FactDeleted {
-        id: String,
-    },
-    ScipIngested {
-        index_id: String,
-        symbols_ingested: usize,
-    },
-}
-
-/// Default port the analyzer daemon binds to. Picked to sit next to
-/// trusty-search's 7878.
-pub const DEFAULT_PORT: u16 = 7879;
 
 /// Shared state for every handler. Cheap to clone (everything is `Arc`-ish).
 #[derive(Clone)]
@@ -91,16 +55,6 @@ pub struct AnalyzerAppState {
     /// Test: `scip_overlay_survives_state_rebuild`,
     /// `scip_overlay_status_404_when_never_ingested`.
     pub scip_overlays: ScipOverlayStore,
-    /// Broadcast sender for live `AnalyzerEvent` pushes to `/sse` subscribers.
-    ///
-    /// Why: mirrors trusty-memory's `events` channel so dashboards can react
-    /// to mutations without polling. Cap of 128 buffers transient slow
-    /// readers; lag emits a `lag` frame.
-    /// What: cloneable `broadcast::Sender`. Subscribers obtained via
-    /// `events.subscribe()` in the `/sse` handler.
-    /// Test: `sse_stream_emits_fact_upserted` confirms a subscriber observes
-    /// an emitted event after a successful POST.
-    pub events: broadcast::Sender<AnalyzerEvent>,
     /// Runtime-configurable thresholds for code-smell detection.
     ///
     /// Why: satisfies the README's "configurable thresholds" promise — operators
@@ -149,14 +103,12 @@ impl AnalyzerAppState {
         facts: FactStore,
         scip_overlays: ScipOverlayStore,
     ) -> Self {
-        let (events_tx, _) = broadcast::channel(128);
         Self {
             search,
             facts,
             registry: Arc::new(AnalyzerRegistry::default_registry()),
             embedder: Arc::new(BowEmbedder::default()),
             scip_overlays,
-            events: events_tx,
             smell_thresholds: SmellThresholds::default(),
             api_key: std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).ok(),
             llm_model: std::env::var("TRUSTY_LLM_MODEL")
@@ -172,14 +124,12 @@ impl AnalyzerAppState {
         registry: Arc<AnalyzerRegistry>,
         scip_overlays: ScipOverlayStore,
     ) -> Self {
-        let (events_tx, _) = broadcast::channel(128);
         Self {
             search,
             facts,
             registry,
             embedder: Arc::new(BowEmbedder::default()),
             scip_overlays,
-            events: events_tx,
             smell_thresholds: SmellThresholds::default(),
             api_key: std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).ok(),
             llm_model: std::env::var("TRUSTY_LLM_MODEL")
@@ -232,88 +182,129 @@ impl AnalyzerAppState {
         self.embedder = embedder;
         self
     }
-
-    /// Send an `AnalyzerEvent` to all connected SSE subscribers.
-    ///
-    /// Why: mutating handlers call this after a successful write so the
-    /// dashboard can update without polling. Best-effort —
-    /// `broadcast::Sender::send` returns `Err` only when there are no live
-    /// receivers, which is fine (no listeners == no work to do).
-    /// What: drops the send result so callers don't need to care.
-    /// Test: covered transitively by SSE integration tests.
-    pub fn emit(&self, event: AnalyzerEvent) {
-        let _ = self.events.send(event);
-    }
 }
 
-/// Lightweight error type for HTTP handlers — converts to JSON
-/// `{"error": "..."}` with an appropriate status code.
+/// JSON-RPC code for "the thing you named does not exist here".
 ///
-/// Why: aligns the analyzer's handler shape with trusty-memory so client
-/// SDKs and the embedded UI can rely on the same `{ error }` shape across
-/// every trusty-* daemon.
-/// What: holds a `StatusCode` and a message; constructors for 400/404/500.
+/// Why (#6287): `-32602 invalid_params` says the request was malformed and
+/// `-32603 internal_error` says this daemon broke. Neither describes
+/// `analyze.scip_status` for an index nobody has ingested, which is a correct
+/// request about an absent thing — the exact distinction #5049 added the
+/// endpoint to draw, previously carried by HTTP 404 versus 200-with-`nodes: 0`.
+/// Collapsing it into either neighbour would put that distinction back into
+/// prose a client has to pattern-match on.
+/// What: `-32004`, inside JSON-RPC's `-32000..=-32099` implementation-defined
+/// server-error band, so it can never collide with a reserved code.
+/// Test: `rpc_scip_status_reports_not_found_when_never_ingested`.
+pub const CODE_NOT_FOUND: i64 = -32004;
+
+/// What kind of failure a handler is reporting.
+///
+/// Why (#6287): this was an `axum::http::StatusCode`, which described how the
+/// failure would be ENCODED rather than what it was. ADR-0032 removed the HTTP
+/// surface that did the encoding, so a status code here would name a transport
+/// this daemon no longer speaks. The vocabulary itself is worth keeping —
+/// "the caller asked wrongly", "the upstream is down" and "we broke" are
+/// different facts, and [`RpcError`] is what carries them onto the wire now.
+/// What: one variant per constructor `ApiError` already had.
+/// Test: `rpc_reports_invalid_params_for_a_request_naming_no_index`,
+/// `rpc_scip_status_reports_not_found_when_never_ingested`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApiErrorKind {
+    /// The caller's own request is wrong.
+    BadRequest,
+    /// The request is well-formed but names something that does not exist.
+    NotFound,
+    /// This daemon failed.
+    Internal,
+    /// An upstream this daemon depends on — trusty-search, GitHub — failed.
+    BadGateway,
+    /// The handler's own work exceeded its deadline (#6018).
+    GatewayTimeout,
+}
+
+/// Uniform handler error: a kind plus a message.
+///
+/// Why: every handler in this crate reports failure the same way, so the
+/// mapping onto the wire lands once ([`From<ApiError> for RpcError`]) rather
+/// than at twenty call sites.
+/// What: holds an [`ApiErrorKind`] and a human-readable message; one
+/// constructor per kind.
 /// Test: covered transitively — any handler returning an `ApiError` is
-/// exercised by the integration suite.
+/// exercised by `service::rpc_tests`.
 pub(crate) struct ApiError {
-    pub status: StatusCode,
+    pub kind: ApiErrorKind,
     pub message: String,
 }
 
 impl ApiError {
     pub fn bad_request(msg: impl Into<String>) -> Self {
         Self {
-            status: StatusCode::BAD_REQUEST,
+            kind: ApiErrorKind::BadRequest,
             message: msg.into(),
         }
     }
-    /// 404 — used by `GET /indexes/{id}/scip` for "no overlay ingested" (#5049).
+    /// Used by `analyze.scip_status` for "no overlay ingested" (#5049).
     pub fn not_found(msg: impl Into<String>) -> Self {
         Self {
-            status: StatusCode::NOT_FOUND,
+            kind: ApiErrorKind::NotFound,
             message: msg.into(),
         }
     }
     pub fn internal(msg: impl Into<String>) -> Self {
         Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
+            kind: ApiErrorKind::Internal,
             message: msg.into(),
         }
     }
     pub fn bad_gateway(msg: impl Into<String>) -> Self {
         Self {
-            status: StatusCode::BAD_GATEWAY,
+            kind: ApiErrorKind::BadGateway,
             message: msg.into(),
         }
     }
 
-    /// 504 — the handler's own work exceeded its per-request deadline (#6018).
+    /// The handler's own work exceeded its per-request deadline (#6018).
     ///
-    /// Why: `GET /indexes/{id}/diagnostics` used to run unbounded, so a client
-    /// hit its read timeout and saw a transport-level abandon — zero bytes, no
-    /// status line, nothing to distinguish "still working" from "daemon dead".
-    /// A 504 with a JSON body says which request was abandoned and how to make
-    /// it fit.
-    /// What: builds an `ApiError` at `GATEWAY_TIMEOUT`; `IntoResponse` renders
-    /// it as `{"error": "<msg>"}` like every other variant.
+    /// Why: `analyze.diagnostics` used to run unbounded, so a client hit its
+    /// read timeout and saw a transport-level abandon — nothing to distinguish
+    /// "still working" from "daemon dead". An error frame naming the request
+    /// that was abandoned, and how to make it fit, is what replaces that
+    /// silence.
     /// Test: the timeout branch is exercised through
-    /// `dispatch_stops_at_deadline_and_reports_cutoff`; the response shape is
-    /// shared with the other constructors.
+    /// `dispatch_stops_at_deadline_and_reports_cutoff`.
     pub fn gateway_timeout(msg: impl Into<String>) -> Self {
         Self {
-            status: StatusCode::GATEWAY_TIMEOUT,
+            kind: ApiErrorKind::GatewayTimeout,
             message: msg.into(),
         }
     }
 }
 
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        (
-            self.status,
-            Json(serde_json::json!({ "error": self.message })),
-        )
-            .into_response()
+/// Map a handler failure onto the JSON-RPC error frame the client reads.
+///
+/// Why (#6287): the router takes `Result<Resp, RpcError>`, and without this
+/// every handler would spell the same mapping itself.
+/// What: `BadRequest` is the caller's fault and reports `invalid_params`;
+/// `NotFound` gets [`CODE_NOT_FOUND`] so #5049's distinction survives the
+/// transport change; everything else — an upstream that is down, a deadline
+/// that expired, a panic-adjacent internal failure — is `internal_error`,
+/// because none of them is something the caller could have sent differently.
+/// The message is carried verbatim: it is the only place a diagnostics cutoff
+/// or an unreachable trusty-search names itself.
+/// Test: `rpc_reports_invalid_params_for_a_request_naming_no_index`,
+/// `rpc_scip_status_reports_not_found_when_never_ingested`,
+/// `rpc_reports_internal_error_when_search_is_unreachable`.
+impl From<ApiError> for RpcError {
+    fn from(e: ApiError) -> Self {
+        let code = match e.kind {
+            ApiErrorKind::BadRequest => CODE_INVALID_PARAMS,
+            ApiErrorKind::NotFound => CODE_NOT_FOUND,
+            ApiErrorKind::Internal
+            | ApiErrorKind::BadGateway
+            | ApiErrorKind::GatewayTimeout => CODE_INTERNAL_ERROR,
+        };
+        RpcError::new(code, e.message)
     }
 }
 
