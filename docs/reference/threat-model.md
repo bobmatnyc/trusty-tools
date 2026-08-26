@@ -8,14 +8,19 @@ inter-service traffic moves to UDS, and only `trusty-console` keeps HTTP.
 [ADR-0018](../adr/0018-loopback-only-doctrine.md), the doctrine this document
 was written to audit compliance against, is now `Superseded by 0032`. The
 bind/guard/console-proxy-allowlist table below still describes the **live**
-topology as of this writing (nothing has migrated), so it is not yet wrong
-about current reality — but it is no longer a description of the target
-architecture, and most of its columns (per-daemon bind address, origin
-guard) stop applying once a daemon has no HTTP listener to guard.
-Re-deriving this table for the UDS topology is implementation work gated on
-an open question ADR-0032 does not resolve — see that ADR's Open Questions
-section (webhook ingress for on-demand processes) — and is out of scope for
-this update. Read ADR-0032 before treating any row below as prescriptive.
+topology as of this writing for five of the six daemons in ADR-0032's Scope
+— it is no longer a description of the target architecture, and most of its
+columns (per-daemon bind address, origin guard) stop applying once a daemon
+has no HTTP listener to guard. Re-deriving those rows for the UDS topology is
+implementation work, out of scope for this update. Read ADR-0032 before
+treating any row below as prescriptive.
+
+> 🟡 **Progress note (2026-08-26, Refs #6277, PR #6281).** `trusty-review` is
+> no longer part of "nothing has migrated": it is the first daemon through
+> ADR-0032's path, and its row below already reflects the UDS socket it now
+> serves. The remaining five daemons (`trusty-search`, `trusty-memory`,
+> `trusty-analyze`, `trusty-agents`, `trusty-mpm`) have not migrated and
+> their rows still describe the pre-ADR-0032 live topology.
 
 This is the authoritative reference for **who can reach which trusty-\* HTTP
 surface, from where, and what stops them.** It exists because the
@@ -55,12 +60,13 @@ reasoning — it is the compliance inventory the ADR promises.
 ADR-0018 governs bind-address reachability; ADR-0031 governs which local
 transport inter-crate callers use to reach an already-loopback-bound daemon —
 UDS for inter-crate same-host traffic, one shared HTTP server for everything
-external. **Nothing has migrated**, so the inventory below still describes the
-live topology. Whatever HTTP remains under ADR-0031 stays governed by ADR-0018
-exactly as written, and ADR-0031 authorises no new off-loopback binding. If
-adopted it would *strengthen* this doctrine's goal: a loopback TCP port is
-reachable by any local process, a `0600` socket is not. See ADR-0031 for the
-classification test.
+external. **Migration has started but is not complete** — `trusty-review` has
+moved (PR #6281, see the progress note above); the inventory below still
+describes the live topology for the other five daemons. Whatever HTTP remains
+under ADR-0031 stays governed by ADR-0018 exactly as written, and ADR-0031
+authorises no new off-loopback binding. If adopted it would *strengthen* this
+doctrine's goal: a loopback TCP port is reachable by any local process, a
+`0600` socket is not. See ADR-0031 for the classification test.
 
 **Two things this table does not show, worth stating so it is not misread:**
 
