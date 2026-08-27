@@ -29,9 +29,8 @@
 #
 # <crate>	<reason>
 trusty-mpm	binary-only consumer surface: installed as the `tm` executable via `cargo install trusty-mpm`, and a binary user gets a whole new executable, so library API compatibility is meaningless to them. Zero workspace packages depend on it (re-checked by the gate) and crates.io reported 0 reverse dependencies on 2026-08-12.
-# tga: owner ruling 2026-08-19 — no major bump; tga lib API has no external
-# linking consumers; ships 3.2.0. The 3.0.0 baseline delta that ruling covers is
-# `constructible_struct_adds_field` on `DdRepositoryEntry.authorship`
-# (src/report/dd_manifest.rs) and `struct_marked_non_exhaustive` on
-# `GithubConfig`, `JiraConfig` and `PmTicket`.
-tga	binary-only consumer surface: installed as the `tga` executable via `cargo install tga`, and a binary user gets a whole new executable, so library API compatibility is meaningless to them. trusty-audit drives `tga audit` as a child process and resolves it by version at runtime, which is a PATH lookup and not a Cargo edge (#5236, DOC-67 §6). Zero workspace packages depend on it (re-checked by the gate) and crates.io reported 0 reverse dependencies on 2026-08-19.
+# #6300: the `tga` row is REMOVED, not commented out. It claimed zero workspace
+# packages depend on tga's library; #6294 gave trusty-analyze a `tga` Cargo edge,
+# so the gate refused the skip and exited 3 on every tga run. The claim is dead,
+# and tga is gated like any other crate now. Do not re-add the row while that
+# edge exists — the gate re-checks the premise and will refuse again.
