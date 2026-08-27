@@ -139,7 +139,7 @@ pub(crate) mod git_credentials;
 use approve::approve_for_indexing;
 use child::spawn_tga;
 use pins::{PinnedBinaries, pinned_binaries};
-use verify::verify_output;
+use verify::{mark_complete, verify_output};
 
 // Re-exported at its historical path: `crate::rerender`, `crate::distribute`,
 // `crate::session` and both `cli` submodules name it as `crate::run::…`.
@@ -728,6 +728,13 @@ async fn run_one(
                 repo.name
             ));
         }
+    }
+    // #6141: the marker is the LAST thing written, and only for a repository
+    // that got all the way through. Until it is there the directory holds
+    // collection data and an unfinished report, which is what an interrupted run
+    // leaves and what used to be indistinguishable from a finished one.
+    if matches!(result, RepoResult::Succeeded) {
+        mark_complete(&output, &repo.name)?;
     }
     progress.unit_finished(
         Operation::Sweep,
@@ -3152,6 +3159,64 @@ trusty-review = "0.15.1"
             "a repository at a new position writes a new output and must be re-audited"
         );
         assert_eq!(second.resumed().count(), 0, "{second:?}");
+    }
+
+    /// Why (#6141): the interrupted-run case. `tga audit` writes the manifest,
+    /// then the grounding pass and the inference stamp edit it — kill the run in
+    /// between and the directory holds real collection data and a report that was
+    /// never finished, which `verify_output` accepts because the manifest is
+    /// there and names a repository. A re-run then carried it over and the
+    /// engagement shipped a repository nothing had finished.
+    /// What: audit one repository, remove its completion marker to leave exactly
+    /// what an interrupted run leaves, and re-run. It must be audited again
+    /// rather than resumed, and the reason must be stated rather than silent.
+    /// Test: this is the test.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_interrupted_repository_is_re_audited_not_carried_over() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        two_repos_ready(&work, NEVER);
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        let first = sweep(&work, &config(), &RunOptions::default(), &Progress::none())
+            .await
+            .expect("the sweep completes");
+        assert_eq!(first.status, RunStatus::AllSucceeded, "{first:?}");
+        assert_eq!(invocations(&work).len(), 1);
+        let output = first.repos[0].output.clone();
+        assert!(
+            output.join(verify::COMPLETION_FILE).is_file(),
+            "a finished repository must say so in its own directory: {output:?}"
+        );
+
+        // Exactly what a run killed after the child and before the end leaves:
+        // the manifest is there, the marker is not.
+        std::fs::remove_file(output.join(verify::COMPLETION_FILE)).expect("remove the marker");
+        assert!(
+            output.join(AuditManifest::FILE_NAME).is_file(),
+            "{output:?}"
+        );
+
+        let (recorder, progress) = Recorder::new();
+        let second = sweep(&work, &config(), &RunOptions::default(), &progress)
+            .await
+            .expect("the sweep completes");
+        assert_eq!(
+            invocations(&work).len(),
+            2,
+            "an unfinished repository must be audited again, not carried over"
+        );
+        assert!(!second.repos[0].resumed, "{:?}", second.repos[0]);
+        assert_eq!(second.resumed().count(), 0, "{second:?}");
+        assert!(
+            recorder.stages().iter().any(|e| e
+                .detail
+                .as_deref()
+                .is_some_and(|d| d.contains("did not finish"))),
+            "the re-collection must be announced: {:?}",
+            recorder.stages()
+        );
     }
 
     /// Why (#5494): the operator's override. A recipient who re-cloned their

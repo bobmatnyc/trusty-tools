@@ -44,6 +44,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use super::github_issues::GithubCredentialRecord;
+use super::verify::is_complete;
 use super::{RepoRun, RunReport, RunStatus, SelectedRepo, stem, verify_output};
 use crate::error::AuditError;
 use crate::workdir::{self, Area, WorkDir};
@@ -198,6 +199,9 @@ pub enum Recollect {
     OutputGone(String),
     /// The operator asked for a full re-collection.
     Forced,
+    /// The recorded output has no completion marker: an earlier run wrote it and
+    /// did not get to the end of that repository (#6141).
+    Unfinished,
 }
 
 impl Recollect {
@@ -208,6 +212,9 @@ impl Recollect {
             Self::Failed => "the earlier run recorded it as failed — retrying".to_owned(),
             Self::OutputGone(why) => format!("its recorded output is no longer usable: {why}"),
             Self::Forced => "`--fresh` was asked for".to_owned(),
+            Self::Unfinished => {
+                "an earlier run did not finish this repository — re-collecting".to_owned()
+            }
         }
     }
 }
@@ -275,6 +282,17 @@ pub(super) fn plan(
             // still has. Re-verifying re-reads the gaps too, so a carried-over
             // entry states what its manifest states today.
             match verify_output(&entry.output) {
+                // #6141: the manifest alone is not completion. The grounding
+                // pass and the inference stamp both run after `tga audit` wrote
+                // it, so a run killed between them leaves a directory this check
+                // accepts and no finished report. The marker is written last,
+                // and its absence is what says so. Asked AFTER `verify_output`
+                // so a deleted or unreadable output still gets that check's
+                // specific reason rather than this one's. A record from before
+                // the marker existed has none either, and is re-collected once —
+                // the same direction `RunProgress::complete` takes, for the same
+                // reason.
+                Ok(_) if !is_complete(&entry.output) => Err(Recollect::Unfinished),
                 Ok(gaps) => Ok(RepoRun {
                     gaps,
                     resumed: true,
