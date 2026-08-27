@@ -557,3 +557,215 @@ fn remove_still_removes_a_healthy_worktree() {
         "the session branch must be deleted too"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// #5949: the bookkeeping repair lives below every caller
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Build a real checkout at `dir` with one commit. Returns `false` when git is
+/// unavailable, matching the skip convention the tests above already use.
+///
+/// Why: the #5949 tests assert on what git itself reports, so a mocked git
+/// would test nothing.
+/// What: `git init` plus a committed `README.md`, with the identity and signing
+/// config every sandboxed commit needs.
+/// Test: `decommission_prunes_the_base_repo_worktree_registry`.
+fn init_repo_with_commit(dir: &std::path::Path) -> bool {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+    std::fs::create_dir_all(dir).expect("create repo dir");
+    if !git(&["init", "--quiet"]) {
+        return false;
+    }
+    assert!(git(&["config", "user.email", "ci@test.invalid"]));
+    assert!(git(&["config", "user.name", "CI"]));
+    assert!(git(&["config", "commit.gpgsign", "false"]));
+    std::fs::write(dir.join("README.md"), "seed\n").expect("write README");
+    assert!(git(&["add", "README.md"]));
+    assert!(git(&["commit", "--quiet", "-m", "seed"]));
+    true
+}
+
+/// `git -C <dir> worktree list --porcelain`, as a string.
+fn worktree_list(dir: &std::path::Path) -> String {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .expect("git worktree list");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// #5949: decommissioning an SM-OWNED workspace that git registers as a worktree
+/// leaves the base checkout's registry clean.
+///
+/// Why: the owned branch removes the directory with `remove_dir_all`, which git
+/// never learns about, so the entry survived in the base checkout's listing. The
+/// repair existed only in the client layer, which the MCP tool and the idle
+/// reaper never pass through — this asserts it from `SessionManager` itself, the
+/// one function every caller reaches regardless of transport.
+/// What: a real base checkout inside the managed root, a real registered
+/// worktree under it, an owned record pointing at that worktree, then
+/// `decommission_with_root`. Asserts the removal happened and that git no longer
+/// lists the leaf. Against the pre-fix code the last assertion fails: the
+/// directory is gone and the entry is still listed.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn decommission_prunes_the_base_repo_worktree_registry() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let mgr = SessionManager::new(dir.path(), FakeTmuxDriver::new())
+        .await
+        .expect("manager");
+
+    let managed_root = crate::test_support::hermetic_temp_dir();
+    let base = managed_root.path().join("owner").join("repo");
+    if !init_repo_with_commit(&base) {
+        eprintln!("decommission_prunes_the_base_repo_worktree_registry: git unavailable, skipping");
+        return;
+    }
+
+    let leaf = "tm-5949-session";
+    let ws = base.join(".worktrees").join(leaf);
+    let added = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&base)
+        .args([
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "session/tm-5949-session",
+        ])
+        .arg(&ws)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    assert!(added, "fixture: the worktree must be registered");
+    assert!(
+        worktree_list(&base).contains(leaf),
+        "fixture invariant: git must list the worktree before decommission"
+    );
+
+    let record = mgr
+        .create_with_id(
+            ManagedSessionId::new(),
+            "regression: #5949 in-process decommission".into(),
+            Some(ws.clone()),
+            None,
+            Some(ws.clone()),
+            None,
+            None,
+            crate::runtime::RuntimeKind::default(),
+            false,
+            // Owned: this is the branch that removes with `remove_dir_all` and
+            // therefore the one that strands git's bookkeeping.
+            true,
+        )
+        .await
+        .expect("create");
+
+    let (tombstone, workspace_removed) = mgr
+        .decommission_with_root(&record.id, managed_root.path(), None)
+        .await
+        .expect("decommission");
+
+    assert!(
+        workspace_removed,
+        "fixture invariant: an owned, existing workspace must be removed"
+    );
+    assert_eq!(tombstone.state, ManagedSessionState::Decommissioned);
+    assert!(!ws.exists(), "the workspace must be gone: {}", ws.display());
+    assert!(
+        !worktree_list(&base).contains(leaf),
+        "decommission left a stale worktree entry for {leaf} — the bookkeeping \
+         repair did not run below the caller (#5949)"
+    );
+}
+
+/// #5949: an owned workspace that IS its own checkout has no registry to repair.
+///
+/// Why: the repair resolves the checkout git says owns the workspace. For a
+/// plain SM-provisioned clone that answer is the workspace itself, which is
+/// about to be deleted — pruning there would only log a failure against a
+/// directory that no longer exists.
+/// What: an owned record pointing at a standalone checkout, asserted to select
+/// no registry root; the worktree case is asserted to select the base checkout.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn registry_root_to_repair_ignores_a_standalone_owned_clone() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let mgr = SessionManager::new(dir.path(), FakeTmuxDriver::new())
+        .await
+        .expect("manager");
+
+    let managed_root = crate::test_support::hermetic_temp_dir();
+    let clone = managed_root.path().join("owner").join("standalone");
+    if !init_repo_with_commit(&clone) {
+        eprintln!(
+            "registry_root_to_repair_ignores_a_standalone_owned_clone: git unavailable, skipping"
+        );
+        return;
+    }
+
+    let standalone = mgr
+        .create_with_id(
+            ManagedSessionId::new(),
+            "standalone clone".into(),
+            Some(clone.clone()),
+            None,
+            Some(clone.clone()),
+            None,
+            None,
+            crate::runtime::RuntimeKind::default(),
+            false,
+            true,
+        )
+        .await
+        .expect("create standalone");
+    assert!(
+        super::decommission::registry_root_to_repair(&standalone).is_none(),
+        "a checkout that owns itself has no external registry to repair"
+    );
+
+    let ws = clone.join(".worktrees").join("tm-5949-leaf");
+    let added = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&clone)
+        .args(["worktree", "add", "--quiet", "-b", "session/tm-5949-leaf"])
+        .arg(&ws)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    assert!(added, "fixture: the worktree must be registered");
+
+    let linked = mgr
+        .create_with_id(
+            ManagedSessionId::new(),
+            "linked worktree".into(),
+            Some(ws.clone()),
+            None,
+            Some(ws.clone()),
+            None,
+            None,
+            crate::runtime::RuntimeKind::default(),
+            false,
+            true,
+        )
+        .await
+        .expect("create linked");
+    let resolved = super::decommission::registry_root_to_repair(&linked)
+        .expect("a linked worktree resolves to its owning checkout");
+    let expected = std::fs::canonicalize(&clone).unwrap_or(clone);
+    assert_eq!(
+        resolved, expected,
+        "the repair must target the checkout git says owns the worktree"
+    );
+}

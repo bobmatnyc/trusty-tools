@@ -25,6 +25,7 @@ use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 use super::search_gc;
 use super::workspace_guard::is_safe_to_remove;
 use super::worktree_protection;
+use super::worktree_registry;
 use super::worktree_safety::{DirtyWorktree, inspect_dirt};
 
 /// Sentinel file written by [`create_session_worktree`] into every SM-created
@@ -465,6 +466,67 @@ fn prune_refs_after_removal(repo_root: &Path, path: &Path) {
     }
 }
 
+/// The base checkout whose worktree registry a decommission will strand (#5949).
+///
+/// Why: an SM-OWNED workspace is removed with `remove_dir_all`, which git never
+/// learns about — the entry survives in the base checkout's worktree list until
+/// something prunes it. The client layer already repaired this for the routed
+/// HTTP paths, so the MCP tool and the idle reaper — both of which call
+/// `decommission` in-process, below that layer — accumulated stale entries
+/// instead, the reaper unattended. Answering the question here means every
+/// caller inherits the repair regardless of transport.
+/// What: `None` unless the record names an owned workspace that git reports a
+/// DIFFERENT checkout as owning. A workspace that is its own checkout root has
+/// no external registry to repair, and an unowned one is removed by
+/// [`remove_session_worktree`], which prunes for itself. Must be called BEFORE
+/// the removal: git can only answer from a directory that still exists.
+/// Test: `decommission_prunes_the_base_repo_worktree_registry`,
+/// `registry_root_to_repair_ignores_a_standalone_owned_clone`.
+pub(super) fn registry_root_to_repair(record: &SessionRecord) -> Option<std::path::PathBuf> {
+    if !record.workspace_owned {
+        return None;
+    }
+    let ws = record.workspace_path.as_deref()?;
+    let root = worktree_registry::registry_root_for(ws)?;
+    // git reports a resolved path; the record's may still carry a symlinked
+    // spelling of the same directory (every macOS temp path does), so compare
+    // both in canonical form or the two would never look equal.
+    let ws_resolved = std::fs::canonicalize(ws).unwrap_or_else(|_| ws.to_path_buf());
+    (root != ws_resolved).then_some(root)
+}
+
+/// Clear the stale registry entry a removed worktree leaves behind (#5949).
+///
+/// Why: git keeps reporting a worktree whose directory was deleted out from
+/// under it, and every consumer of that listing — this crate's own reclaim
+/// sweep included — then reasons about a directory that is not there.
+/// What: runs the prune subcommand in `root`. Best-effort: a failure leaves a
+/// stale entry in git's output, never data loss, so it is logged and the
+/// teardown that already succeeded continues.
+/// Test: `decommission_prunes_the_base_repo_worktree_registry`.
+fn prune_worktree_registry(root: &Path) {
+    match std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["worktree", "prune"])
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            info!(root = %root.display(), "decommission: worktree registry pruned");
+        }
+        Ok(out) => warn!(
+            root = %root.display(),
+            "decommission: worktree prune exited {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+        Err(e) => warn!(
+            root = %root.display(),
+            "decommission: worktree prune failed to spawn: {e}"
+        ),
+    }
+}
+
 impl SessionManager {
     /// Decommission a session: stop the runtime, remove the workspace from disk
     /// (ONLY if the SM provisioned it), and mark the record `Decommissioned`.
@@ -687,6 +749,13 @@ impl SessionManager {
             record.workspace_owned,
         );
 
+        // #5949: resolve the checkout that owns this workspace's worktree
+        // registry BEFORE anything is removed. `registry_root_for` asks git
+        // from the workspace itself, so it can only be answered while the
+        // directory still exists — the same ordering contract `search_index_id`
+        // above is bound by, for the same reason.
+        let registry_root = registry_root_to_repair(&record);
+
         // Gracefully terminate the runtime before removing the workspace (#1975):
         // SIGTERM the claude process and give it a grace window to flush state,
         // then reclaim the pane — instead of an abrupt `kill_session`. Best-effort:
@@ -826,6 +895,12 @@ impl SessionManager {
                             workspace = %ws.display(),
                             "decommission: owned workspace removed from disk"
                         );
+                        // #5949: `remove_dir_all` is invisible to git, so the
+                        // base checkout still lists this worktree. Repair it
+                        // here — below every caller, in-process ones included.
+                        if let Some(ref root) = registry_root {
+                            prune_worktree_registry(root);
+                        }
                     }
                 }
             }
