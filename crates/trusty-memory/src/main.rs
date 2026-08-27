@@ -35,7 +35,11 @@ use trusty_memory::commands::prompt_context::run_prompt_context_and_exit;
 use trusty_memory::commands::send_message::handle_send_message;
 use trusty_memory::commands::service::{handle_service, ServiceAction};
 use trusty_memory::commands::upgrade::handle_upgrade;
-use trusty_memory::commands::{setup::handle_setup, start::handle_start, stop::handle_stop};
+use trusty_memory::commands::{
+    setup::{handle_setup, handle_setup_gui_client},
+    start::handle_start,
+    stop::handle_stop,
+};
 use trusty_memory::{resolve_palace_registry_dir, serve, AppState};
 
 /// Top-level CLI for `trusty-memory`.
@@ -176,7 +180,16 @@ enum Command {
     },
 
     /// First-time setup: data dir + launchd (macOS) + Claude settings patch.
-    Setup,
+    Setup {
+        /// Emit the MCP registration for a GUI client instead (e.g. `chatgpt`).
+        ///
+        /// #6307: a GUI client launched by launchd sees only
+        /// `PATH=/usr/bin:/bin:/usr/sbin:/sbin` and cannot resolve a bare
+        /// `trusty-memory`, so its entry needs this binary's absolute path and
+        /// a working directory that exists.
+        #[arg(long, value_name = "NAME")]
+        client: Option<String>,
+    },
 
     /// Print the daemon's prompt-context block to stdout (Claude Code hook).
     ///
@@ -709,7 +722,12 @@ async fn main() -> Result<()> {
             palace,
             limit,
         } => handle_migrate(target, dry_run, config_only, from, palace, limit),
-        Command::Setup => handle_setup(),
+        // #6307: `--client <name>` emits a GUI client's registration instead of
+        // running the local install phases, which a GUI client does not need.
+        Command::Setup { client } => match client {
+            Some(name) => handle_setup_gui_client(&name),
+            None => handle_setup(),
+        },
         Command::PromptContext => run_prompt_context_and_exit().await,
         Command::Service { action } => handle_service(&action),
         Command::Doctor { fix_palaces, fix } => {

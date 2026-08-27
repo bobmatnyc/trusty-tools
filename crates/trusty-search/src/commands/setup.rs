@@ -160,6 +160,32 @@ fn setup_codex(home: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Emit the MCP registration a GUI MCP client needs (#6307).
+///
+/// Why: ChatGPT desktop and every other launchd-launched GUI client inherits
+/// `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, which contains no directory any
+/// trusty-* binary is installed into. A registration whose `command` is the
+/// bare name `trusty-search` therefore exits 127 before MCP initialization and
+/// the client reports only that no tools were found. The registration this
+/// prints carries the absolute path of the running binary — read from
+/// `current_exe`, never assumed to be under `~/.cargo/bin` — and a working
+/// directory that exists.
+/// What: delegates to `trusty_common::gui_mcp_client::report`, the single
+/// implementation `trusty-memory setup --client` also calls, and prints what it
+/// returns.
+/// A GUI client needs none of [`handle_setup`]'s Claude-settings scanning, so
+/// this is a sibling entry point rather than a branch inside it.
+/// Test: covered by `gui_mcp_client`'s own tests in trusty-common;
+/// `handle_setup_gui_client_rejects_an_unknown_client` covers the wiring here.
+pub fn handle_setup_gui_client(client: &str) -> Result<()> {
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
+    let text =
+        trusty_common::gui_mcp_client::report(client, MCP_SERVER_KEY, MCP_SERVER_ARGS, &home)?;
+    println!("{text}");
+    Ok(())
+}
+
 /// Patch a single Claude settings file and print a one-line status.
 ///
 /// Why: the per-file accounting and the per-file UI line should always agree,
@@ -315,5 +341,53 @@ mod tests {
         let before = std::fs::read_to_string(&path).expect("read");
         setup_codex(tmp.path()).expect("second run");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    /// Why (#6307): the GUI-client path must reject a client it does not know
+    /// rather than printing a registration aimed at the wrong app.
+    #[test]
+    fn handle_setup_gui_client_rejects_an_unknown_client() {
+        let err = handle_setup_gui_client("cursor").expect_err("unknown client must be rejected");
+        assert!(err.to_string().contains("chatgpt"), "{err}");
+    }
+
+    /// Why (#6307): the registration this crate writes for Claude Code is
+    /// `{"command": "trusty-search"}` — a bare name that exits 127 under
+    /// launchd's `PATH`, which is the whole defect. The GUI registration must
+    /// not be that shape.
+    /// What: builds the GUI entry from the same server key and argument vector
+    /// and asserts its command is an absolute path that is not the bare binary
+    /// name, and that its working directory exists.
+    #[test]
+    fn gui_entry_is_absolute_where_the_claude_entry_is_bare() {
+        let bare = mcp_server_entry(MCP_SERVER_KEY, MCP_SERVER_ARGS);
+        assert_eq!(
+            bare["command"], MCP_SERVER_KEY,
+            "the Claude Code entry is the bare name"
+        );
+
+        let command = trusty_common::gui_mcp_client::running_binary_path().expect("exe resolves");
+        let working_dir =
+            trusty_common::gui_mcp_client::default_working_dir().expect("home resolves");
+        let entry = trusty_common::gui_mcp_client::build_entry(
+            MCP_SERVER_KEY,
+            MCP_SERVER_ARGS,
+            &command,
+            &working_dir,
+        )
+        .expect("gui entry builds");
+        let rendered = entry.to_json();
+
+        let cmd = rendered["command"].as_str().expect("command is a string");
+        assert!(
+            Path::new(cmd).is_absolute(),
+            "command must be absolute, got {cmd}"
+        );
+        assert_ne!(
+            cmd, MCP_SERVER_KEY,
+            "the bare name is what fails under launchd"
+        );
+        let cwd = rendered["cwd"].as_str().expect("cwd is a string");
+        assert!(Path::new(cwd).is_dir(), "cwd must exist, got {cwd}");
     }
 }

@@ -25,7 +25,12 @@ name = "trusty-common"
 # `call_memory_tool_at`'s `&str` base-URL parameter are gone, and
 # `CatchupOptions::memory_url` becomes `memory_socket: PathBuf`. Cargo's 0.x rule
 # puts a breaking change in the MINOR position.
-version = "0.45.0"
+# 0.45.1 (#6307): patch — the new public `gui_mcp_client` module is purely
+# additive; no public item was removed or changed. Kept in the PATCH position
+# rather than 0.44.0's MINOR-for-a-new-module precedent because the `^0.45`
+# requirement in the workspace table and in two crates' own manifests is what a
+# MINOR bump would force churn through, for no compatibility fact it records.
+version = "0.45.1"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

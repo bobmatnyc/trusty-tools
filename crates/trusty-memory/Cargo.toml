@@ -4,7 +4,11 @@ name = "trusty-memory"
 # run_http_dynamic, run_http_on, bind_dynamic_port, http_addr_path, the `web`
 # and `foreground` modules, and the `axum-server` feature (renamed `daemon`).
 # Cargo's 0.x rule puts a breaking change in the MINOR position.
-version = "0.25.0"
+# 0.25.1 (#6307): patch — `setup --client chatgpt` emits the MCP registration a
+# launchd-launched GUI client can spawn. `commands::setup::handle_setup_gui_client`
+# is a new public item beside an unchanged `handle_setup`, so nothing published
+# was removed or changed.
+version = "0.25.1"
 edition = "2021"
 description = "MCP server (stdio + Unix socket) for trusty-memory"
 license.workspace = true

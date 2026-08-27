@@ -13,7 +13,11 @@ name = "trusty-search"
 # hnsw_path/is_view; promote self-heals from the mapping when the recorded
 # snapshot is gone. Patch position per Cargo's 0.x rule — the public API gains
 # one defaulted `VectorStore` method and one new enum, nothing breaking.
-version = "0.49.3"
+# 0.49.4 (#6307): `setup --client chatgpt` emits the MCP registration a
+# launchd-launched GUI client can spawn. `commands` is not re-exported from
+# lib.rs, so the changed `handle_setup` signature is binary-internal and no
+# published item changed — patch position.
+version = "0.49.4"
 edition = "2021"
 description = "Machine-wide hybrid code search service: BM25 + vector + KG, zero cold-start, MCP server"
 readme = "README.md"

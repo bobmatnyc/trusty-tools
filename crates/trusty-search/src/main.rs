@@ -824,8 +824,18 @@ enum Commands {
     ///
     /// Examples:
     ///   trusty-search setup
+    ///   trusty-search setup --client chatgpt
     #[command(display_order = 28)]
-    Setup,
+    Setup {
+        /// Emit the MCP registration for a GUI client instead (e.g. `chatgpt`).
+        ///
+        /// #6307: a GUI client launched by launchd sees only
+        /// `PATH=/usr/bin:/bin:/usr/sbin:/sbin` and cannot resolve a bare
+        /// `trusty-search`, so its entry needs this binary's absolute path and
+        /// a working directory that exists.
+        #[arg(long, value_name = "NAME")]
+        client: Option<String>,
+    },
 
     /// Wire trusty-search into an IDE (Cursor, etc.)
     ///
@@ -1392,9 +1402,12 @@ async fn run() -> Result<()> {
             commands::prune::handle_prune(apply, yes, max_idle_days)?;
         }
 
-        Commands::Setup => {
-            commands::setup::handle_setup()?;
-        }
+        // #6307: `--client <name>` emits a GUI client's registration instead of
+        // scanning for Claude settings, which a GUI client does not use.
+        Commands::Setup { client } => match client {
+            Some(name) => commands::setup::handle_setup_gui_client(&name)?,
+            None => commands::setup::handle_setup()?,
+        },
 
         Commands::Integrate {
             target,
