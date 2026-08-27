@@ -59,13 +59,12 @@ pub(crate) async fn handle_dream_consolidate_room(state: &AppState, args: Value)
     let handle = open_palace_handle(state, &palace)?;
 
     // Seed the consolidation config from the daemon's user config so the
-    // inference backend (OpenRouter key / local model / local model id)
-    // matches the idle dream cycle. Everything else uses the dream defaults
-    // (semantic enabled). `dream_config_from_user_config` (issue #2593) also
-    // forwards `local_model.model` into `semantic.model` — previously only
-    // the key and the enabled flag were forwarded, leaving `semantic.model`
-    // on the OpenRouter-style default even when the local Ollama backend was
-    // what actually resolved.
+    // inference backend matches the idle dream cycle (issue #2593).
+    //
+    // #5188: that config now decides whether the LLM phase runs at all. With
+    // no `[semantic_consolidation] enabled = true` in
+    // ~/.trusty-memory/config.toml this tool consolidates nothing and reports
+    // zero counts, rather than calling a model the operator never configured.
     //
     // Use `crate::service::load_user_config` (the axum-free home of the loader,
     // issue #226) rather than the `crate::web::` re-export: this `tools` module

@@ -28,6 +28,9 @@
 //! Test: `cargo test -p trusty-memory --test serve_stdio_concurrent_e2e`.
 //! Requires Cargo to have built the binary via `CARGO_BIN_EXE_trusty-memory`.
 
+mod common;
+use common::DaemonGuard;
+
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
@@ -130,9 +133,10 @@ async fn spawn_raw_bridge(data_path: &std::path::Path) -> RawChild {
 /// `{data_path}/trusty-memory/http_addr` (the daemon writes this file
 /// synchronously during `run_http_on`) as the readiness signal.
 /// Panics if the file does not appear within `DAEMON_BOOT_TIMEOUT`.
-/// Returns the spawned child so the caller can kill it during teardown.
+/// Returns a [`DaemonGuard`] that kills the daemon on drop, so a failing
+/// assertion here or in the caller cannot orphan it (#5188).
 /// Test: used by `stdio_serve_concurrent_two_bridges_both_work`.
-fn spawn_daemon(data_path: &std::path::Path) -> std::process::Child {
+fn spawn_daemon(data_path: &std::path::Path) -> DaemonGuard {
     let child = std::process::Command::new(binary())
         .arg("serve")
         .arg("--foreground")
@@ -144,6 +148,9 @@ fn spawn_daemon(data_path: &std::path::Path) -> std::process::Child {
         .stderr(Stdio::inherit())
         .spawn()
         .expect("spawn daemon");
+    // #5188: own the child BEFORE the readiness poll — that poll asserts, and
+    // an unguarded child would outlive the panic.
+    let guard = DaemonGuard::new(child);
 
     // Poll for the readiness file.
     let readiness_file = data_path.join("trusty-memory").join("trusty-memory.sock");
@@ -161,7 +168,7 @@ fn spawn_daemon(data_path: &std::path::Path) -> std::process::Child {
         std::thread::sleep(POLL_INTERVAL);
     }
 
-    child
+    guard
 }
 
 /// Write one JSON-RPC request line to a raw stdin pipe.
@@ -224,7 +231,7 @@ async fn stdio_serve_concurrent_two_bridges_both_work() {
     // Provision ONE isolated daemon shared by both bridges.  Both bridges
     // share this data dir so they both discover the same http_addr.
     let data_dir = tempfile::tempdir().expect("tempdir");
-    let mut daemon = spawn_daemon(data_dir.path());
+    let daemon = spawn_daemon(data_dir.path());
 
     // Spawn two bridges pointing at the same provisioned daemon.
     let mut child1 = spawn_raw_bridge(data_dir.path()).await;
@@ -334,8 +341,8 @@ async fn stdio_serve_concurrent_two_bridges_both_work() {
     // ── Teardown ───────────────────────────────────────────────────────────
     child1.close().await;
     child2.close().await;
-    let _ = daemon.kill();
-    let _ = daemon.wait();
+    // #5188: `daemon` is a `DaemonGuard` — dropping it kills and reaps.
+    drop(daemon);
 }
 
 /// Why (regression for issue #1152): with `no_spawn: true`, the bridge must

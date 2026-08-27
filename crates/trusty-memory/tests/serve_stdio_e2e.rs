@@ -25,6 +25,9 @@
 
 #![allow(clippy::too_many_lines)]
 
+mod common;
+use common::DaemonGuard;
+
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
@@ -78,7 +81,8 @@ pub(crate) struct StdioChild {
     pub(crate) child: Child,
     pub(crate) stdin: ChildStdin,
     pub(crate) reader: BufReader<ChildStdout>,
-    daemon: std::process::Child,
+    // #5188: held only for its `Drop` — that is what kills the daemon.
+    _daemon: DaemonGuard,
     _data_dir: TempDir,
 }
 
@@ -111,6 +115,9 @@ impl StdioChild {
             .stderr(Stdio::inherit())
             .spawn()
             .expect("spawn daemon");
+        // #5188: own the child BEFORE the readiness poll — that poll asserts,
+        // and an unguarded child would outlive the panic.
+        let daemon = DaemonGuard::new(daemon);
 
         // Step 2: wait for the daemon's readiness signal.
         let readiness_file = data_dir
@@ -157,7 +164,7 @@ impl StdioChild {
             child,
             stdin,
             reader: BufReader::new(stdout),
-            daemon,
+            _daemon: daemon,
             _data_dir: data_dir,
         }
     }
@@ -217,8 +224,8 @@ impl StdioChild {
             .await
             .expect("bridge child must exit after stdin EOF")
             .expect("bridge child wait");
-        let _ = self.daemon.kill();
-        let _ = self.daemon.wait();
+        // #5188: `self.daemon` is a `DaemonGuard` — it kills and reaps on drop,
+        // which also covers the panics above that used to skip this teardown.
     }
 }
 

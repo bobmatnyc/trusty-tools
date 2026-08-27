@@ -37,15 +37,16 @@ pub struct DreamConfig {
     /// Drawers with fewer than this many whitespace-delimited words are dropped.
     pub content_prune_min_words: usize,
     /// Config for the optional inference-backed semantic consolidation phase.
-    /// The phase only fires when both `semantic.enabled` and a configured LLM
-    /// backend is available; it is silently skipped otherwise.
+    /// Off unless a config key turns it on (#5188), and even then it only
+    /// fires when `semantic.model` resolves to a usable provider.
     pub semantic: SemanticConsolidationConfig,
     /// OpenRouter API key for the semantic consolidation phase. When non-empty,
     /// takes precedence over the `OPENROUTER_API_KEY` environment variable.
     pub openrouter_api_key: String,
-    /// Whether the local Ollama (or compatible) model server is enabled.
-    /// When `true` and no OpenRouter key is available, the semantic phase uses
-    /// the local model at `http://localhost:11434`.
+    /// Whether a local model server may be used at all. Defaults to `false`
+    /// (#5188) and only permits — it never selects. `semantic.model` must
+    /// carry an explicit `ollama/` or `local/` prefix for the local backend to
+    /// be chosen; this flag is the operator's veto over that choice.
     pub local_model_enabled: bool,
     /// Whether to run the recall benchmark before and after each dream cycle.
     ///
@@ -87,7 +88,8 @@ impl Default for DreamConfig {
             content_prune_min_words: 4,
             semantic: SemanticConsolidationConfig::default(),
             openrouter_api_key: String::new(),
-            local_model_enabled: true,
+            // #5188: a local model server is opt-in, never a fallback.
+            local_model_enabled: false,
             recall_benchmark_enabled: true,
             fading: FadingParams::default(),
         }

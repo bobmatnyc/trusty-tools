@@ -17,6 +17,9 @@
 //!
 //! Test: `cargo test -p trusty-memory --test codex_stdio_e2e_5265`.
 
+mod common;
+use common::DaemonGuard;
+
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -54,7 +57,8 @@ struct CodexSession {
     child: Child,
     stdin: ChildStdin,
     reader: BufReader<ChildStdout>,
-    daemon: std::process::Child,
+    // #5188: held only for its `Drop` — that is what kills the daemon.
+    _daemon: DaemonGuard,
     _data_dir: tempfile::TempDir,
 }
 
@@ -82,6 +86,9 @@ impl CodexSession {
             .stderr(Stdio::inherit())
             .spawn()
             .expect("spawn daemon");
+        // #5188: own the child BEFORE the readiness poll — that poll asserts,
+        // and an unguarded child would outlive the panic.
+        let daemon = DaemonGuard::new(daemon);
 
         let readiness_file = data_dir
             .path()
@@ -114,7 +121,7 @@ impl CodexSession {
             child,
             stdin,
             reader: BufReader::new(stdout),
-            daemon,
+            _daemon: daemon,
             _data_dir: data_dir,
         }
     }
@@ -149,8 +156,7 @@ impl CodexSession {
             .await
             .expect("bridge must exit after stdin EOF")
             .expect("bridge wait");
-        let _ = self.daemon.kill();
-        let _ = self.daemon.wait();
+        // #5188: the `DaemonGuard` field kills and reaps when `self` drops.
     }
 }
 

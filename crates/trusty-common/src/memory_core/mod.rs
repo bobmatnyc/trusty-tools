@@ -50,8 +50,9 @@ pub use registry::PalaceRegistry;
 pub use retrieval::PalaceHandle;
 pub use room_identity::{DEFAULT_WING_ID, canonical_room_key, mint_room_id, room_to_uuid};
 pub use semantic_consolidation::{
-    ConsolidationAction, ConsolidationResult, MockInference, OllamaInference, OpenRouterInference,
-    SemanticConsolidationConfig, SemanticConsolidator, inference_available,
+    ConsolidationAction, ConsolidationProvider, ConsolidationResult, MockInference,
+    OllamaInference, OpenRouterInference, SemanticConsolidationConfig, SemanticConsolidator,
+    inference_available, resolve_consolidation_provider,
 };
 pub use share::{
     ImportOutcome, ImportSummary, SHARE_FORMAT_VERSION, SharedMemoryRecord, export_palace_jsonl,

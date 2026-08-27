@@ -67,7 +67,17 @@ impl SemanticConsolidator {
     /// the response cache for each batch, calls `self.inference.consolidate` on
     /// cache misses, and stops once `config.max_calls_per_cycle` LLM calls have
     /// been made. Returns a `ConsolidationResult` accumulating all actions.
-    /// Test: `consolidator_merges_cluster`, `consolidator_respects_call_budget`.
+    ///
+    /// Retry policy (#5188): the run PARKS on the first batch that errors —
+    /// remaining batches are skipped and the next dream cycle is the retry.
+    /// Parking beats exponential backoff here because the dream cycle is
+    /// already rate-limited by `DreamConfig::idle_secs`, so the cycle cadence
+    /// IS the backoff, and one failing batch means the backend is down rather
+    /// than that this batch was unlucky. Without it a crashed model runner got
+    /// `max_calls_per_cycle` (20) attempts per cycle, each blocking until the
+    /// 120 s request timeout — the every-two-minutes re-fire in #5188.
+    /// Test: `consolidator_merges_cluster`, `consolidator_respects_call_budget`,
+    /// `consolidator_parks_after_first_failed_batch`.
     pub async fn consolidate(&self, drawers: &[Drawer]) -> ConsolidationResult {
         let mut result = ConsolidationResult::default();
         let mut calls_made = 0usize;
@@ -103,12 +113,19 @@ impl SemanticConsolidator {
                         actions
                     }
                     Err(e) => {
+                        // #5188: park the whole run, don't march through the
+                        // remaining batches against a backend that just failed.
                         tracing::warn!(
                             error = %e,
-                            "semantic consolidation LLM call failed; skipping batch"
+                            backend = self.inference.name(),
+                            batches_skipped = drawers
+                                .len()
+                                .div_ceil(self.config.max_batch_size.max(1))
+                                .saturating_sub(calls_made + result.cache_hits + 1),
+                            "semantic consolidation LLM call failed; parking until the next \
+                             dream cycle"
                         );
-                        calls_made += 1; // count as consumed to avoid infinite retry
-                        vec![]
+                        break;
                     }
                 }
             };
