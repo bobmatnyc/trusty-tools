@@ -175,3 +175,6 @@ docs/certificates/*.mobileprovision
 .trusty-mpm/last-instructions.md
 # <<< trusty-mpm harness scaffolding <<<
 
+# trusty-audit engagement manifests carry provider keys — never commit
+/engagement.toml
+/engagement.toml.lock
