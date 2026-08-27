@@ -1251,8 +1251,12 @@ pub(crate) enum Command {
     /// Why: Claude Code's `statusLine` hook calls this command on every render
     /// cycle; this handler parses the hook JSON and emits one compact segment
     /// string for the status bar.
-    /// What: reads a JSON object from stdin, renders segments (project, model,
-    /// daemon, cost), exits 0. Missing or invalid fields degrade gracefully.
+    /// What: reads a JSON object from stdin and renders
+    /// `TM <ver> ● | <project> ⎇ <branch> | @<gh> | ✻<account> | <model> |
+    /// ctx% | <cost> | <usage>`, then exits 0. Missing or invalid fields
+    /// degrade gracefully. `●` marks a reachable daemon; the account is the
+    /// Claude Code login, read from `.claude.json` since the stdin payload does
+    /// not carry it (#6304).
     /// Test: `cli_parses_statusline` in `tests.rs`.
     Statusline,
 

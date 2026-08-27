@@ -4,13 +4,15 @@
 //! command; this handler parses the hook JSON from stdin and emits a compact
 //! ` | `-separated segment string on stdout. All fields degrade gracefully.
 //! What: reads a JSON object from stdin and renders the fixed-order layout
-//! `TM <ver> <port> | <project> ⎇ <branch> | @<gh> | <model> | ctx% | <cost> |
-//! <usage>` (#2011, extended #2140 with the trailing account-usage% segment)
+//! `TM <ver> ● | <project> ⎇ <branch> | @<gh> | ✻<account> | <model> | ctx% |
+//! <cost> | <usage>` (#2011, extended #2140 with the trailing account-usage%
+//! segment, #6304 dropped the daemon port and added the Claude Code account)
 //! to stdout. Missing or invalid fields produce empty/omitted segments;
 //! nothing ever panics or blocks the render path.
 //! Test: `render_statusline_minimal_input`, `render_statusline_full_payload`,
 //! `assemble_statusline_pins_segment_order_with_markers` in tests.
 
+pub(crate) mod account;
 // `pub(crate)` since #5539: `picker_delete_glob` reuses `branch`'s bounded
 // `tmux_session_name` probe rather than growing a second copy of it.
 pub(crate) mod branch;
@@ -19,7 +21,10 @@ mod usage;
 
 use std::io::Read as _;
 
+use std::path::Path;
+
 use crate::formatters::info_box::DaemonInfo;
+use account::{claude_account_segment_probe, claude_json_path};
 use branch::project_segment;
 use compaction::{ContextWindow, colorize_ctx_segment, compaction_segment};
 use usage::{RateLimits, usage_segment};
@@ -98,19 +103,36 @@ pub(crate) fn run_statusline() -> anyhow::Result<()> {
 /// results to the pure [`assemble_statusline`] lets the fixed segment ORDER be
 /// pinned by a deterministic unit test with hand-supplied strings, independent
 /// of real git/gh/daemon state.
-/// What: probes each of the seven segments (version+port, project+branch, gh
-/// account, model, ctx%, cost, account-usage%) in spec order and joins them
-/// via [`assemble_statusline`].
+/// What: probes each of the eight segments (version+daemon dot, project+branch,
+/// gh account, Claude Code account, model, ctx%, cost, account-usage%) in spec
+/// order and joins them via [`assemble_statusline`].
 /// Test: `render_statusline_minimal_input`, `render_statusline_full_payload`,
 /// `render_statusline_full_payload_matches_pipe_format`.
 pub(crate) fn render_statusline(input: &StatusInput) -> String {
+    render_statusline_from(input, claude_json_path().as_deref())
+}
+
+/// [`render_statusline`] against an explicit Claude Code config path.
+///
+/// Why (#6304): the account segment is the one probe whose source is a single
+/// file, so passing that path in makes both of its branches — account present,
+/// account underivable — assertable end to end. It has to be an injected path
+/// rather than a repointed `CLAUDE_CONFIG_DIR`: `env_isolation_tests` bans this
+/// target from writing that variable, since its tests share one process (#5544).
+/// What: identical to [`render_statusline`], except the account is read from
+/// `account_config` (or omitted when that is `None` or unreadable).
+/// Test: `render_statusline_shows_claude_account_when_config_is_present`.
+fn render_statusline_from(input: &StatusInput, account_config: Option<&Path>) -> String {
     // Lock-file read only — cheap and non-blocking; no HTTP session-count probe
     // is needed since the reformatted layout (#2011) no longer surfaces a count.
     let daemon = DaemonInfo::from_lock_file();
-    let version_port = version_port_segment(&daemon);
+    let version = version_segment(&daemon);
 
     let project = project_segment(&input.cwd);
     let gh = gh_account_segment_probe();
+    // #6304: the Claude Code account the session runs under; absent from the
+    // stdin payload, so it comes from Claude Code's own persisted config.
+    let account = claude_account_segment_probe(account_config);
     let model = model_segment(&input.model);
 
     // Compaction efficiency / live context fill; falls back to a bare
@@ -130,69 +152,63 @@ pub(crate) fn render_statusline(input: &StatusInput) -> String {
     // accounts (Claude Code simply omits `rate_limits` in those cases).
     let usage = usage_segment(input.rate_limits.as_ref());
 
-    assemble_statusline(version_port, project, gh, model, ctx, cost, usage)
+    assemble_statusline(version, project, gh, account, model, ctx, cost, usage)
 }
 
-/// Join the seven statusline segments in spec order, omitting absent ones.
+/// Join the eight statusline segments in spec order, omitting absent ones.
 ///
-/// Why (#2011 follow-up, extended #2140): separating ORDER + JOIN from the
-/// I/O-bound probes that produce each segment value is what makes the exact
-/// layout — `TM <ver> <port> | <project> ⎇ <branch> | @<gh> | <model> | ctx% |
-/// <cost> | <usage>` — pinned by a deterministic test using hand-supplied
-/// synthetic strings. Without this split, a future refactor could transpose
-/// or silently drop a middle segment and no test would catch it.
-/// What: takes the seven segments in fixed spec order (`version_port` is
-/// always present; the rest are `Option<String>`), filters out `None`s, and
-/// joins the survivors with ` | `. Pure — no I/O, no panics.
+/// Why (#2011 follow-up, extended #2140 and #6304): separating ORDER + JOIN
+/// from the I/O-bound probes that produce each segment value is what makes the
+/// exact layout — `TM <ver> ● | <project> ⎇ <branch> | @<gh> | ✻<account> |
+/// <model> | ctx% | <cost> | <usage>` — pinned by a deterministic test using
+/// hand-supplied synthetic strings. Without this split, a future refactor could
+/// transpose or silently drop a middle segment and no test would catch it.
+/// What: takes the eight segments in fixed spec order (`version` is always
+/// present; the rest are `Option<String>`), filters out `None`s, and joins the
+/// survivors with ` | `. Pure — no I/O, no panics.
 /// Test: `assemble_statusline_full_payload_pins_order_and_format`,
 /// `assemble_statusline_pins_segment_order_with_markers`,
 /// `assemble_statusline_omits_none_segments`.
 #[allow(clippy::too_many_arguments)]
 fn assemble_statusline(
-    version_port: String,
+    version: String,
     project: Option<String>,
     gh: Option<String>,
+    account: Option<String>,
     model: Option<String>,
     ctx: Option<String>,
     cost: Option<String>,
     usage: Option<String>,
 ) -> String {
-    [Some(version_port), project, gh, model, ctx, cost, usage]
+    [Some(version), project, gh, account, model, ctx, cost, usage]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>()
         .join(" | ")
 }
 
-/// Build the leading `TM <ver> <port>` segment.
+/// Build the leading `TM <ver> ●` segment.
 ///
-/// Why (#2011): the statusline reformat replaces the old `tm ●:<port>` /
-/// `tm ○` online-indicator glyphs with a plain-text `TM <ver> <port>` lead-in;
-/// the version always renders (it is a compile-time constant) so the segment
-/// degrades gracefully to just `TM <ver>` when the daemon is offline or its
-/// port cannot be parsed, rather than showing a stale or misleading port.
-/// What: reads `env!("CARGO_PKG_VERSION")` and appends the port parsed from
-/// `daemon.addr` (`host:port` → `port`) only when `daemon.online` is true and
-/// a port is present.
-/// Test: `version_port_segment_online_includes_port`,
-/// `version_port_segment_offline_omits_port`.
-fn version_port_segment(daemon: &DaemonInfo) -> String {
+/// Why (#6304): the port this segment used to append is not something an
+/// operator can act on from a status bar, and it invites port-based connection
+/// attempts the daemon's transport no longer guarantees. Its only other job was
+/// implicit — it appeared ONLY when the daemon was online, so its presence was
+/// the reachability indicator. Dropping it outright would take that bit with
+/// it, so the port is replaced by a bare `●`, which says the same thing in one
+/// column and names nothing that can go stale. (#2011 introduced the
+/// `TM <ver> <port>` form this replaces.)
+/// What: reads `env!("CARGO_PKG_VERSION")` and appends `●` when
+/// `daemon.online`; an offline or absent daemon renders `TM <ver>` alone.
+/// Test: `version_segment_online_shows_dot_not_port`,
+/// `version_segment_offline_omits_dot`,
+/// `render_statusline_never_contains_the_daemon_port`.
+fn version_segment(daemon: &DaemonInfo) -> String {
     let ver = env!("CARGO_PKG_VERSION");
-    match daemon_port(daemon) {
-        Some(port) if daemon.online => format!("TM {ver} {port}"),
-        _ => format!("TM {ver}"),
+    if daemon.online {
+        format!("TM {ver} \u{25cf}")
+    } else {
+        format!("TM {ver}")
     }
-}
-
-/// Extract the bare port substring from a `host:port` daemon address.
-///
-/// Why: centralises the `rfind(':')` parse so `version_port_segment` stays
-/// focused on assembly rather than string surgery.
-/// What: returns everything after the last `:`, or `None` when `addr` has no
-/// colon (e.g. empty/unset).
-/// Test: `version_port_segment_online_includes_port` (via the parsed port).
-fn daemon_port(daemon: &DaemonInfo) -> Option<&str> {
-    daemon.addr.rfind(':').map(|i| &daemon.addr[i + 1..])
 }
 
 // ── Segment builders ──────────────────────────────────────────────────────────
@@ -363,9 +379,10 @@ mod tests {
     #[test]
     fn assemble_statusline_full_payload_pins_order_and_format() {
         let out = assemble_statusline(
-            "TM 1.2.3 7880".to_string(),
+            "TM 1.2.3 \u{25cf}".to_string(),
             Some("bobmatnyc/trusty-tools \u{2387} main".to_string()),
             Some("@bobmatnyc".to_string()),
+            Some("\u{273b}someone@example.com".to_string()),
             Some("Claude Sonnet 4.6".to_string()),
             Some("ctx 41%".to_string()),
             Some("$1.23".to_string()),
@@ -373,7 +390,7 @@ mod tests {
         );
         assert_eq!(
             out,
-            "TM 1.2.3 7880 | bobmatnyc/trusty-tools \u{2387} main | @bobmatnyc | Claude Sonnet 4.6 | ctx 41% | $1.23 | \u{23f3}24% \u{1f4c5}41%"
+            "TM 1.2.3 \u{25cf} | bobmatnyc/trusty-tools \u{2387} main | @bobmatnyc | \u{273b}someone@example.com | Claude Sonnet 4.6 | ctx 41% | $1.23 | \u{23f3}24% \u{1f4c5}41%"
         );
     }
 
@@ -383,14 +400,15 @@ mod tests {
     /// model) produces a different, easily-diffed string rather than two
     /// plausible-looking segments that a reviewer might not notice swapped.
     /// What: asserts both the exact joined string AND the split-on-` | `
-    /// vector equal `[version_port, project, gh, model, ctx, cost]`.
+    /// vector equal `[version, project, gh, account, model, ctx, cost, usage]`.
     /// Test: itself.
     #[test]
     fn assemble_statusline_pins_segment_order_with_markers() {
         let out = assemble_statusline(
-            "VERSION_PORT".to_string(),
+            "VERSION".to_string(),
             Some("PROJECT".to_string()),
             Some("GH".to_string()),
+            Some("ACCOUNT".to_string()),
             Some("MODEL".to_string()),
             Some("CTX".to_string()),
             Some("COST".to_string()),
@@ -398,37 +416,42 @@ mod tests {
         );
         assert_eq!(
             out,
-            "VERSION_PORT | PROJECT | GH | MODEL | CTX | COST | USAGE"
+            "VERSION | PROJECT | GH | ACCOUNT | MODEL | CTX | COST | USAGE"
         );
         assert_eq!(
             out.split(" | ").collect::<Vec<_>>(),
             vec![
-                "VERSION_PORT",
-                "PROJECT",
-                "GH",
-                "MODEL",
-                "CTX",
-                "COST",
-                "USAGE"
+                "VERSION", "PROJECT", "GH", "ACCOUNT", "MODEL", "CTX", "COST", "USAGE"
             ],
-            "segment order must exactly match [version_port, project, gh, model, ctx, cost, usage]"
+            "segment order must exactly match [version, project, gh, account, model, ctx, cost, usage]"
         );
     }
 
-    /// Why (#2011 follow-up): every segment except `version_port` must be
-    /// omittable independently without leaving a stray/empty ` | ` pair, and
-    /// omitting all of them must fall back to just the lead-in segment.
+    /// Why (#2011 follow-up): every segment except `version` must be omittable
+    /// independently without leaving a stray/empty ` | ` pair, and omitting all
+    /// of them must fall back to just the lead-in segment.
     /// Test: itself.
     #[test]
     fn assemble_statusline_omits_none_segments() {
         // All optional segments absent → only the lead-in segment appears.
-        let out = assemble_statusline("TM 1.2.3".to_string(), None, None, None, None, None, None);
+        let out = assemble_statusline(
+            "TM 1.2.3".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert_eq!(out, "TM 1.2.3");
 
-        // A gap in the middle (gh absent) must not leave an empty separator pair.
+        // Gaps in the middle (gh and account absent) must not leave empty
+        // separator pairs.
         let out = assemble_statusline(
             "TM 1.2.3".to_string(),
             Some("proj".to_string()),
+            None,
             None,
             Some("model".to_string()),
             None,
@@ -438,28 +461,56 @@ mod tests {
         assert_eq!(out, "TM 1.2.3 | proj | model | $0.50");
     }
 
-    /// Why (#2011): `version_port_segment` must append the parsed port only
-    /// when the daemon is online, matching the `TM <ver> <port>` spec.
+    /// Why (#6304, branch a): an online daemon must render the bare `●`
+    /// reachability dot and NOT the port — the port is what this issue removes,
+    /// and this exact input (`127.0.0.1:7880`, online) is what used to produce
+    /// it.
     /// Test: itself.
     #[test]
-    fn version_port_segment_online_includes_port() {
+    fn version_segment_online_shows_dot_not_port() {
         let daemon = DaemonInfo {
             addr: "127.0.0.1:7880".to_string(),
             online: true,
             session_count: None,
         };
-        let seg = version_port_segment(&daemon);
-        assert_eq!(seg, format!("TM {} 7880", env!("CARGO_PKG_VERSION")));
+        let seg = version_segment(&daemon);
+        assert_eq!(seg, format!("TM {} \u{25cf}", env!("CARGO_PKG_VERSION")));
+        assert!(!seg.contains("7880"), "port must not appear: {seg}");
     }
 
-    /// Why (#2011): an offline/absent daemon must degrade to `TM <ver>` alone
-    /// rather than showing a stale or empty port.
+    /// Why (#2011, kept by #6304): an offline/absent daemon degrades to
+    /// `TM <ver>` alone — no dot, and still no port.
     /// Test: itself.
     #[test]
-    fn version_port_segment_offline_omits_port() {
+    fn version_segment_offline_omits_dot() {
         let daemon = DaemonInfo::default();
-        let seg = version_port_segment(&daemon);
+        let seg = version_segment(&daemon);
         assert_eq!(seg, format!("TM {}", env!("CARGO_PKG_VERSION")));
+        assert!(!seg.contains('\u{25cf}'), "no dot when offline: {seg}");
+    }
+
+    /// Why (#6304, branch a): the closure condition is that NO daemon state
+    /// renders a port, so drive the whole line for both states rather than only
+    /// the lead-in segment builder. The live daemon's address is supplied
+    /// explicitly so the assertion holds on a machine where the daemon is down.
+    /// Test: itself.
+    #[test]
+    fn render_statusline_never_contains_the_daemon_port() {
+        for online in [true, false] {
+            let daemon = DaemonInfo {
+                addr: "http://127.0.0.1:7880".to_string(),
+                online,
+                session_count: None,
+            };
+            let seg = version_segment(&daemon);
+            assert!(
+                !seg.contains("7880") && !seg.contains(':'),
+                "no port or host:port remnant (online={online}): {seg}"
+            );
+        }
+        // And end to end, with whatever the real lock file says.
+        let out = render_statusline(&full_input());
+        assert!(!out.contains("7880"), "no port in the rendered line: {out}");
     }
 
     /// Why: a single logged-in account renders `@<login>` with no warning mark.
@@ -503,7 +554,13 @@ mod tests {
         let mut input = full_input();
         input.model = ModelInfo::default();
         let out = render_statusline(&input);
-        assert!(!out.contains("claude"), "model segment must be omitted");
+        // #6304: assert the absence of the model strings themselves rather than
+        // the substring "claude" — the line now also carries the Claude Code
+        // account, whose email is outside this test's control.
+        assert!(
+            !out.contains("claude-sonnet-4-6") && !out.contains("Claude Sonnet 4.6"),
+            "model segment must be omitted: {out}"
+        );
         assert!(out.starts_with("TM "), "TM <ver> segment must still appear");
         assert!(out.contains("$1.23"), "cost must still appear");
     }
@@ -576,6 +633,43 @@ mod tests {
         let out = render_statusline(&input);
         // No compaction/ctx segment because session_id is empty
         assert!(!out.contains("ctx "), "no ctx segment without session_id");
+    }
+
+    /// Why (#6304, branches b and c): end-to-end proof that the Claude Code
+    /// account reaches the rendered line from Claude Code's own persisted
+    /// config, and that a config file that is not there omits the segment
+    /// instead of rendering a placeholder. The path is injected, so nothing
+    /// here depends on the operator's home directory or login state — and
+    /// nothing writes `CLAUDE_CONFIG_DIR`, which this target bans (#5544).
+    /// Test: itself.
+    #[test]
+    fn render_statusline_shows_claude_account_when_config_is_present() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cfg = dir.path().join(".claude.json");
+
+        // Nothing at the path yet → segment omitted.
+        let absent = render_statusline_from(&full_input(), Some(&cfg));
+        assert!(
+            !absent.contains('\u{273b}'),
+            "account segment must be omitted with no config: {absent}"
+        );
+        // No path at all (neither CLAUDE_CONFIG_DIR nor a home dir resolvable).
+        let none = render_statusline_from(&full_input(), None);
+        assert!(
+            !none.contains('\u{273b}'),
+            "account segment must be omitted with no config path: {none}"
+        );
+
+        std::fs::write(
+            &cfg,
+            r#"{"oauthAccount": {"emailAddress": "someone@example.com"}}"#,
+        )
+        .expect("write config");
+        let present = render_statusline_from(&full_input(), Some(&cfg));
+        assert!(
+            present.contains("\u{273b}someone@example.com"),
+            "account segment must appear once the config names one: {present}"
+        );
     }
 
     /// Why (#2140): end-to-end check that `rate_limits` flows from
