@@ -7,7 +7,7 @@
 //! splash art, the literal title `"trusty-agents ctrl"`, and a fixed
 //! `/help`/`/connect`/`/clear`/`/status` command list. Depending on
 //! `trusty_common` here would violate DOC-50 §2.2's dependency direction
-//! (`trusty-tui` → ratatui/crossterm/tokio/serde only) and hard-coding any
+//! (`trusty-code-tui` → ratatui/crossterm/tokio/serde only) and hard-coding any
 //! product's commands would violate the generalization mandate (§3.2) — so
 //! every one of those became an [`crate::app::ReplApp`] field a product sets
 //! at construction: [`ReplApp::banner_art`] (pre-rendered, empty by default),

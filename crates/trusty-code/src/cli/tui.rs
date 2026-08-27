@@ -1,7 +1,7 @@
 //! `tcode tui` — launch the interactive TUI REPL against a running
 //! `tcode serve --http` daemon (issue #4424; DOC-50 §4.1, AC-2.4).
 //!
-//! Why: every DOC-50 MVP slice landed — the shared `trusty-tui` framework
+//! Why: every DOC-50 MVP slice landed — the shared `trusty-code-tui` framework
 //! (event loop, generalized `ReplApp`, widgets) and
 //! `trusty_code::tui_client::CodeEngine` (the `TuiEngine` impl) — but
 //! nothing ever CONSTRUCTED a `CodeEngine` outside tests, so the REPL was
@@ -11,9 +11,9 @@
 //! decisions belong elsewhere" contract.
 //! What: [`run`] resolves the optional project path, obtains a daemon URL to
 //! drive from `super::daemon_autospawn`, and hands a `CodeEngine` pointed at
-//! it to `trusty_tui::run::run` together with the shared `ReplApp` model,
-//! its reducer (`trusty_tui::app::apply`), and its renderer
-//! (`trusty_tui::layout::draw`).
+//! it to `trusty_code_tui::run::run` together with the shared `ReplApp` model,
+//! its reducer (`trusty_code_tui::app::apply`), and its renderer
+//! (`trusty_code_tui::layout::draw`).
 //!
 //! `tcode tui` AUTO-SPAWNS its daemon (#4512, reversing DOC-50 §4.1's
 //! deferral): discovery is unchanged (`TCODE_DAEMON_URL` -> the `http_addr`
@@ -32,7 +32,7 @@
 //! this TUI is refused rather than attached to. See
 //! `super::daemon_autospawn` for the whole policy — none of it lives here.
 //!
-//! Daemon resolution deliberately runs BEFORE `trusty_tui::run::run` enters
+//! Daemon resolution deliberately runs BEFORE `trusty_code_tui::run::run` enters
 //! the alternate screen, so the startup spinner and any failure land on a
 //! normal terminal instead of flashing behind a TUI that is about to tear
 //! itself down.
@@ -44,7 +44,7 @@
 //! tui_refuses_to_spawn_for_an_unreachable_explicit_daemon_url,
 //! tui_refuses_a_daemon_bound_to_a_different_project}` cover the CLI surface
 //! against the REAL binary. The launch path past daemon resolution needs a
-//! real TTY (`trusty_tui::TerminalGuard::enter`), so it is verified by
+//! real TTY (`trusty_code_tui::TerminalGuard::enter`), so it is verified by
 //! running `tcode tui` by hand; the engine half is already covered
 //! end-to-end by `tests/tui_client_engine.rs`.
 
@@ -53,7 +53,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use trusty_code::tui_client::CodeEngine;
-use trusty_tui::ReplApp;
+use trusty_code_tui::ReplApp;
 
 use super::daemon_autospawn;
 
@@ -79,11 +79,11 @@ pub async fn run(project: Option<PathBuf>) -> Result<()> {
     let engine = CodeEngine::with_daemon_url(http, daemon_url, project);
     let app = ReplApp::new(PRODUCT_LABEL, user_label());
 
-    trusty_tui::run::run(
+    trusty_code_tui::run::run(
         Arc::new(engine),
         app,
-        trusty_tui::app::apply,
-        trusty_tui::layout::draw,
+        trusty_code_tui::app::apply,
+        trusty_code_tui::layout::draw,
     )
     .await
 }

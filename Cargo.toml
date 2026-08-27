@@ -69,6 +69,7 @@ default-members = [
     "crates/trusty-audit",
     "crates/trusty-channels",
     "crates/trusty-code",
+    "crates/trusty-code-tui",
     "crates/trusty-common",
     "crates/trusty-console",
     "crates/trusty-cto-db",
@@ -86,7 +87,6 @@ default-members = [
     "crates/trusty-review",
     "crates/trusty-search",
     "crates/trusty-sld-lint",
-    "crates/trusty-tui",
 ]
 
 [workspace.package]
@@ -115,10 +115,10 @@ authors = ["Bob Matsuoka <bob@matsuoka.com>"]
 # trusty-code: per-project Claude-Code-compatible MPM orchestration harness (#587).
 # First published to crates.io at version 0.1.0.
 trusty-code = { path = "crates/trusty-code", version = "0.4.0" }
-# trusty-tui: engine-agnostic terminal-UI seam (`TuiEngine` trait + `ReplEvent`)
+# trusty-code-tui: engine-agnostic terminal-UI seam (`TuiEngine` trait + `ReplEvent`)
 # shared by trusty-code's `tcode tui` and trusty-agents' tagent REPL (DOC-50,
 # epic #3411). Not yet published (Slice 1, #3425).
-trusty-tui = { path = "crates/trusty-tui", version = "0.1.0" }
+trusty-code-tui = { path = "crates/trusty-code-tui", version = "0.1.0" }
 trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.6.0" }
 trusty-common = { path = "crates/trusty-common", version = "0.45" }
 # Shared JSON-RPC 2.0 / MCP protocol primitives, extracted from

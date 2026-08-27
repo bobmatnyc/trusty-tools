@@ -8,7 +8,7 @@
 //! pump), so they earn their own file; `engine.rs` keeps the public
 //! `CodeEngine` wrapper and the `TuiEngine` impl that delegates into this.
 //! What: [`EngineState`] itself, and every method DOC-50's design puts on
-//! the engine adapter: `commands`/`picker` (ahead of `trusty-tui` Slice
+//! the engine adapter: `commands`/`picker` (ahead of `trusty-code-tui` Slice
 //! 1.5's synchronous accessors, #3428 — see [`EngineState::commands`]'s
 //! docs for why these caches use `std::sync::Mutex`, not
 //! `tokio::sync::Mutex`), `refresh_workstream_cache` (re-fetches
@@ -28,7 +28,9 @@ use std::sync::atomic::AtomicBool;
 
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
-use trusty_tui::{CommandDescriptor, PickerItem, ReplEvent, StatuslineSegment, WorkstreamSummary};
+use trusty_code_tui::{
+    CommandDescriptor, PickerItem, ReplEvent, StatuslineSegment, WorkstreamSummary,
+};
 
 use crate::events::SessionEventEnvelope;
 

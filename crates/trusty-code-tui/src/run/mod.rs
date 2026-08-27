@@ -1,6 +1,6 @@
 //! The shared render/event loop (Slice 2, #3414).
 //!
-//! Why: DOC-50 §2.2 puts the event loop itself in `trusty-tui` so tagent and
+//! Why: DOC-50 §2.2 puts the event loop itself in `trusty-code-tui` so tagent and
 //! tcode stop each owning a bespoke copy — this module is the shared engine
 //! that shape lives in, generalized from the proven design in
 //! `crates/trusty-agents/src/repl/tui/run.rs::event_loop` (100ms redraw tick,

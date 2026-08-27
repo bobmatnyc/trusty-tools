@@ -162,7 +162,7 @@ indicatif = { workspace = true }
 trusty-progress = { workspace = true }
 # TUI (#5197): `tga tui`. Pinned to the workspace versions (ratatui 0.29 /
 # crossterm 0.28) that trusty-common's `monitor-tui` feature also uses —
-# NOT the 0.30/0.29 pair in `crates/trusty-tui`, which would put two ratatui
+# NOT the 0.30/0.29 pair in `crates/trusty-code-tui`, which would put two ratatui
 # majors in one build graph.
 ratatui = { workspace = true }
 crossterm = { workspace = true }

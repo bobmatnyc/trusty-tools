@@ -10,7 +10,7 @@
 //!
 //! What: this module defines the enum and the handful of payload types it
 //! needs. It intentionally does NOT depend on `crossterm` — [`KeyInput`] is
-//! trusty-tui's own minimal key representation; Slice 2 (#3414) adds the
+//! trusty-code-tui's own minimal key representation; Slice 2 (#3414) adds the
 //! crossterm-backed terminal layer that translates real `crossterm::event::KeyEvent`
 //! values into this type at the boundary, keeping `ReplEvent` itself
 //! terminal-library-agnostic.
@@ -245,8 +245,8 @@ pub struct KeyModifiers {
 ///
 /// Why: `ReplEvent::WorkstreamUpdated` needs a payload; the full
 /// `Workstream` type lives in trusty-code/trusty-agents-common and must not
-/// become a `trusty-tui` dependency (that would invert DOC-50 §2.2's
-/// dependency direction — `trusty-tui` depends on nothing product-specific).
+/// become a `trusty-code-tui` dependency (that would invert DOC-50 §2.2's
+/// dependency direction — `trusty-code-tui` depends on nothing product-specific).
 /// What: `id` and `name` are the two fields DOC-50 §5 Slice 6's status-line
 /// example ("WS: Token rotation (a1b2c3d4)") actually needs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

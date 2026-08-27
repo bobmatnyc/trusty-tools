@@ -129,7 +129,7 @@ pub enum StatuslineSegment {
 /// discover until it tried. This enum is deliberately independent of any
 /// terminal-rendering library (`crate::model` has zero terminal-library
 /// dependency, by design, per the crate root doc comment — even though
-/// `trusty-tui` as a whole now depends on `ratatui`) so it stays JSON-safe
+/// `trusty-code-tui` as a whole now depends on `ratatui`) so it stays JSON-safe
 /// for an HTTP-transported engine (`CodeEngine`, Slice 3) and so this module
 /// never needs a `ratatui::style::Color`/`Modifier` in its public API.
 /// What: a small, closed set of semantic emphases — not raw RGB/attribute
@@ -206,7 +206,7 @@ pub struct PickerRequest {
 ///
 /// Why: DOC-50 §5 Slice 7 / Q4 splits slash commands into client-side
 /// built-ins (`/help`, `/clear`, `/quit`, handled entirely inside
-/// `trusty-tui`, never reaching `TuiEngine::handle_input`) and
+/// `trusty-code-tui`, never reaching `TuiEngine::handle_input`) and
 /// engine-routed domain commands (`/model`, `/workstream`, forwarded to
 /// `TuiEngine::handle_input`). `/help` needs to enumerate both, so
 /// [`CommandRouting`] records which side owns dispatch — generalizing
@@ -233,7 +233,7 @@ pub struct CommandDescriptor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandRouting {
-    /// Handled entirely inside `trusty-tui` (`/help`, `/clear`, `/quit`);
+    /// Handled entirely inside `trusty-code-tui` (`/help`, `/clear`, `/quit`);
     /// never reaches `TuiEngine::handle_input`.
     BuiltIn,
     /// Forwarded to `TuiEngine::handle_input` for the engine to execute

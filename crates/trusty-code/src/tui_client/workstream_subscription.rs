@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use tokio::sync::mpsc::UnboundedSender;
-use trusty_tui::ReplEvent;
+use trusty_code_tui::ReplEvent;
 
 use crate::events::Event;
 
@@ -105,13 +105,13 @@ pub(super) async fn run_workstream_subscription(
                         // marker and `subscribe_workstream_events`'s next
                         // `current_id`) — the shared `ReplApp::active_workstream`
                         // the STATUS LINE actually renders from lives entirely
-                        // on the `trusty-tui` side and is populated ONLY by
+                        // on the `trusty-code-tui` side and is populated ONLY by
                         // `ReplEvent::WorkstreamUpdated`. Discarding this
                         // return value (as the code did before this fix) left
                         // the status line showing a stale workstream name
                         // forever after every activation change — a
                         // `WorkstreamUpdated` was never actually sent, despite
-                        // `trusty-tui`'s reducer being written to expect one
+                        // `trusty-code-tui`'s reducer being written to expect one
                         // as this event's follow-up.
                         let refreshed = state.refresh_workstream_cache().await;
                         if let Some(ws) = refreshed {
@@ -141,14 +141,14 @@ pub(super) async fn run_workstream_subscription(
                             None => {
                                 // Deactivated, no replacement active. The
                                 // shared `ReplEvent::WorkstreamActivationChanged`
-                                // (`trusty_tui::event`) now carries
+                                // (`trusty_code_tui::event`) now carries
                                 // `new_active_id: Option<String>`, so this
                                 // state is representable structurally rather
                                 // than as free text — `ReplEvent::WorkstreamUpdated`
                                 // cannot represent "no active workstream" (its
                                 // payload is a concrete `WorkstreamSummary`,
                                 // not `Option`), which is exactly why this
-                                // event exists: `trusty-tui`'s reducer clears
+                                // event exists: `trusty-code-tui`'s reducer clears
                                 // `ReplApp::active_workstream` directly on
                                 // `new_active_id: None`, rather than waiting
                                 // for a `WorkstreamUpdated` that will never

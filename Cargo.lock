@@ -11389,9 +11389,9 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "trusty-agents-common",
+ "trusty-code-tui",
  "trusty-common",
  "trusty-mcp",
- "trusty-tui",
  "uuid",
  "wiremock",
 ]
@@ -11407,6 +11407,20 @@ dependencies = [
  "tauri-build",
  "tokio",
  "trusty-code",
+]
+
+[[package]]
+name = "trusty-code-tui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "crossterm 0.29.0",
+ "ratatui 0.30.2",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -11936,20 +11950,6 @@ dependencies = [
  "thiserror 1.0.69",
  "trusty-common",
  "walkdir",
-]
-
-[[package]]
-name = "trusty-tui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "crossterm 0.29.0",
- "ratatui 0.30.2",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
 ]
 
 [[package]]

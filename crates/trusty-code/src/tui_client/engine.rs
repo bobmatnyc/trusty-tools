@@ -1,4 +1,4 @@
-//! [`CodeEngine`]: the `trusty_tui::TuiEngine` adapter driving a long-lived
+//! [`CodeEngine`]: the `trusty_code_tui::TuiEngine` adapter driving a long-lived
 //! `tcode serve --http` daemon (issue #3415, DOC-50 §3.3/§3.4).
 //!
 //! Why: see `crate::tui_client`'s module docs for the ephemeral-`--stdio`
@@ -14,7 +14,7 @@
 //! What: [`CodeEngine`] is a thin `Arc<EngineState>` wrapper so the
 //! background workstream-subscription task spawned by
 //! `subscribe_workstream_events` can share the SAME state (and refresh the
-//! SAME caches) without a second, divergent copy. `trusty-tui` Slice 1.5
+//! SAME caches) without a second, divergent copy. `trusty-code-tui` Slice 1.5
 //! (#3428, merged) added the SYNCHRONOUS `TuiEngine::commands()`/
 //! `picker(name)` accessors this `impl TuiEngine` block implements directly
 //! (not as inherent methods — see the `impl TuiEngine for CodeEngine`
@@ -35,7 +35,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
-use trusty_tui::{CommandDescriptor, CommandRouting, PickerRequest, ReplEvent, TuiEngine};
+use trusty_code_tui::{CommandDescriptor, CommandRouting, PickerRequest, ReplEvent, TuiEngine};
 
 use super::discovery::discover_daemon_url;
 use super::engine_state::EngineState;
@@ -127,7 +127,7 @@ pub fn build_http_client() -> reqwest::Client {
         .unwrap_or_else(|_| reqwest::Client::new())
 }
 
-/// The `trusty_tui::TuiEngine` adapter for `tcode tui` — see module docs.
+/// The `trusty_code_tui::TuiEngine` adapter for `tcode tui` — see module docs.
 pub struct CodeEngine {
     state: Arc<EngineState>,
 }

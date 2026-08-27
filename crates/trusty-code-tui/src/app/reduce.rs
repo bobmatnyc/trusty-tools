@@ -44,7 +44,7 @@ const PAGE_SCROLL: isize = 10;
 ///
 /// Why: a free function (rather than an `ReplApp` method) so it matches
 /// `crate::run::event_loop`'s `apply: impl FnMut(&mut M, ReplEvent)` shape
-/// exactly — a caller passes `trusty_tui::app::apply` directly as that
+/// exactly — a caller passes `trusty_code_tui::app::apply` directly as that
 /// argument.
 /// What: dispatches on every [`ReplEvent`] variant (see the module doc
 /// comment for what's out of scope). `Key` events are further dispatched by

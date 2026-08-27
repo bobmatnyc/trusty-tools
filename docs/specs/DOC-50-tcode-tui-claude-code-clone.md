@@ -102,18 +102,18 @@ The TUI is a **thin client**. This is not a recommendation; it is a binding arch
 **The crate hierarchy:**
 
 ```
-trusty-tui (NEW shared crate, or trusty-common::tui feature)
+trusty-code-tui (NEW shared crate, or trusty-common::tui feature)
 ├── Public exports: TuiEngine (trait), ReplUi (struct), ReplEvent, ReplConfig
 ├── Modules: widgets, layout, input, event_loop, pickers, status
 └── No public exports of ratatui or crossterm (encapsulated)
 
 trusty-code/src/tui_client (NEW, ~400–600 lines)
 ├── CodeEngine: impl TuiEngine  ← engine adapter (thin) 
-└── Drives trusty-tui's ReplUi with daemon JSON-RPC calls
+└── Drives trusty-code-tui's ReplUi with daemon JSON-RPC calls
 
 trusty-agents/src/repl/tui (REFACTORED, existing tagent REPL)
 ├── AgentEngine: impl TuiEngine  ← engine adapter (thin)
-└── Uses trusty-tui's ReplUi and slash-command framework
+└── Uses trusty-code-tui's ReplUi and slash-command framework
 ```
 
 **The engine-adapter trait:**
@@ -121,7 +121,7 @@ trusty-agents/src/repl/tui (REFACTORED, existing tagent REPL)
 A single trait (`TuiEngine`) abstracts the **semantic difference** between tagent and tcode:
 
 ```rust
-// In trusty-tui (shared crate)
+// In trusty-code-tui (shared crate)
 #[async_trait::async_trait]
 pub trait TuiEngine: Send + Sync {
     /// Process a submitted line (user input or slash command).
@@ -147,16 +147,16 @@ pub trait TuiEngine: Send + Sync {
 
 **Dependency direction (critical):**
 ```
-trusty-code → trusty-tui
-trusty-agents → trusty-tui
-trusty-tui → (ratatui, crossterm, tokio, serde only)
+trusty-code → trusty-code-tui
+trusty-agents → trusty-code-tui
+trusty-code-tui → (ratatui, crossterm, tokio, serde only)
 ```
 
-trusty-tui does **not** depend on `trusty-code` or `trusty-agents`. Both products depend on `trusty-tui`.
+trusty-code-tui does **not** depend on `trusty-code` or `trusty-agents`. Both products depend on `trusty-code-tui`.
 
-### 2.3 Extraction plan: what moves to trusty-tui, what stays in tagent
+### 2.3 Extraction plan: what moves to trusty-code-tui, what stays in tagent
 
-**MOVE to trusty-tui:**
+**MOVE to trusty-code-tui:**
 1. **Core event loop** (`crates/trusty-agents/src/repl/tui/run.rs:event_loop` and friends) — the 100ms-tick render loop, key reader thread, terminal setup/restore.
 2. **ReplApp state machine** (chat scrollback, input buffer, history, line-edit cursor position, tick counters).
 3. **Widgets** (scrollback area, status line, input composer, slash-command hint panel).
@@ -167,7 +167,7 @@ trusty-tui does **not** depend on `trusty-code` or `trusty-agents`. Both product
 
 **STAY in trusty-agents:**
 1. **AgentEngine impl** — the agent-specific logic (agent roster, model picker, `/agent` command, persona switching).
-2. **Slash-command handlers** (`repl/commands/*.rs`) — Agent-specific commands like `/model`, `/agent`, `/update`, `/code-review`, etc. (but the framework + dispatch logic moves to trusty-tui as `SlashCommandRouter`).
+2. **Slash-command handlers** (`repl/commands/*.rs`) — Agent-specific commands like `/model`, `/agent`, `/update`, `/code-review`, etc. (but the framework + dispatch logic moves to trusty-code-tui as `SlashCommandRouter`).
 3. **Streaming orchestration** — How tagent handles streaming input from the daemon, merges concurrent agent events, etc.
 
 **MOVE (extracted and shared):**
@@ -193,14 +193,14 @@ trusty-tui does **not** depend on `trusty-code` or `trusty-agents`. Both product
 **ID:** SPEC-TTUI-03~draft
 **Status:** Draft
 
-### 3.1 Step 1: Create the shared trusty-tui crate
+### 3.1 Step 1: Create the shared trusty-code-tui crate
 
-**New crate:** `crates/trusty-tui/` (or add a `tui` feature to `trusty-common`; see Q2 below).
+**New crate:** `crates/trusty-code-tui/` (or add a `tui` feature to `trusty-common`; see Q2 below).
 
 **Module layout:**
 
 ```
-crates/trusty-tui/
+crates/trusty-code-tui/
 ├── Cargo.toml (ratatui 0.30*, crossterm, tokio, async-trait, serde, uuid)
 ├── src/
 │   ├── lib.rs (public exports)
@@ -257,9 +257,9 @@ pub use {run_tui, ReplStartup};
 
 **Result:** Widgets and state machine remain UI-generic; all semantic data flows from the engine. This is a prerequisite for Slice 4+ to work without tagent/tcode divergence.
 
-### 3.3 Step 3: Scaffold trusty-tui (framework + trait)
+### 3.3 Step 3: Scaffold trusty-code-tui (framework + trait)
 
-**Phase 1A.1:** Create `trusty-tui` crate (new).
+**Phase 1A.1:** Create `trusty-code-tui` crate (new).
 
 **Phase 1A.2:** Scaffold only the **framework** (terminal setup/restore RAII, TuiEngine trait, ReplEvent enum, event_loop skeleton) and move/adapt tests. No widgets yet.
 
@@ -323,15 +323,15 @@ own daemon when none is running (see §4.1). The port reference above was also
 stale — the implemented default is `serve::DEFAULT_HTTP_PORT` = **7882** (7881
 belongs to trusty-memory).
 
-### 3.5 Step 5: Add widgets and render layer (trusty-tui)
+### 3.5 Step 5: Add widgets and render layer (trusty-code-tui)
 
-**Phase 1A.4:** Move widgets (scrollback, input_composer, status_line, pickers) and layout from tagent to trusty-tui/src/widgets/. Tests must migrate (no coverage drops).
+**Phase 1A.4:** Move widgets (scrollback, input_composer, status_line, pickers) and layout from tagent to trusty-code-tui/src/widgets/. Tests must migrate (no coverage drops).
 
-### 3.6 Step 6: Refactor tagent onto trusty-tui (ATOMIC CUTOVER)
+### 3.6 Step 6: Refactor tagent onto trusty-code-tui (ATOMIC CUTOVER)
 
 **Phase 1A.5:** Create `AgentEngine` impl in tagent. Refactor tagent's REPL to use `run_tui<AgentEngine>`.
 
-**CRITICAL — Atomicity:** All file deletions from tagent/src/repl/tui/, the new AgentEngine impl, the new trusty-tui dependency, and the compat-shim (if any) MUST land in the SAME commit. Tagent's REPL must never be broken on main (no intermediate state where files are deleted but engine is not wired).
+**CRITICAL — Atomicity:** All file deletions from tagent/src/repl/tui/, the new AgentEngine impl, the new trusty-code-tui dependency, and the compat-shim (if any) MUST land in the SAME commit. Tagent's REPL must never be broken on main (no intermediate state where files are deleted but engine is not wired).
 
 **Regression test:** Tagent REPL behavior unchanged (minus panic-safety improvement; see Slice 2 AC).
 
@@ -445,14 +445,14 @@ belongs to trusty-memory).
 
 Each slice is independently shippable and critic-gateable.
 
-### Slice 1: trusty-tui framework scaffold (Phase 1A.1–1A.2)
+### Slice 1: trusty-code-tui framework scaffold (Phase 1A.1–1A.2)
 
-**What:** Create the `trusty-tui` crate with the `TuiEngine` trait, `ReplEvent` enum, and event loop scaffold (no rendering yet).
+**What:** Create the `trusty-code-tui` crate with the `TuiEngine` trait, `ReplEvent` enum, and event loop scaffold (no rendering yet).
 
 **Deliverable:**
-- `crates/trusty-tui/Cargo.toml` with ratatui 0.30, crossterm, tokio.
-- `trusty_tui::TuiEngine` trait: `handle_input`, `setup`, `shutdown`.
-- `trusty_tui::ReplEvent` enum: Key, Resize, Scroll, AssistantOutput, ToolInvocation, StatusMessage, WorkstreamUpdated, WorkstreamActivationChanged.
+- `crates/trusty-code-tui/Cargo.toml` with ratatui 0.30, crossterm, tokio.
+- `trusty_code_tui::TuiEngine` trait: `handle_input`, `setup`, `shutdown`.
+- `trusty_code_tui::ReplEvent` enum: Key, Resize, Scroll, AssistantOutput, ToolInvocation, StatusMessage, WorkstreamUpdated, WorkstreamActivationChanged.
 - `run_tui<H: TuiEngine>` async fn signature (not fully implemented yet, stub ok).
 - Compile check only; no integration test yet.
 
@@ -494,7 +494,7 @@ Each slice is independently shippable and critic-gateable.
 - **Spike:** Compile tagent's chat.rs, markdown.rs, banner.rs, and layout code against ratatui 0.30 (before moving them in Slice 4). Verify no breaking API changes; document any migration steps. This de-risks the 0.30 bump (Q2 resolution).
 
 **Acceptance:**
-- `cargo run -p trusty-tui --example minimal` enters alt-screen; panic in event loop triggers Drop guard → terminal restored to cooked mode.
+- `cargo run -p trusty-code-tui --example minimal` enters alt-screen; panic in event loop triggers Drop guard → terminal restored to cooked mode.
 - Key presses captured and routed.
 - Tick fires every 100ms.
 - Ratatui 0.30 spike compiles; breaking changes (if any) documented.
@@ -525,21 +525,21 @@ Each slice is independently shippable and critic-gateable.
 
 ### Slice 4: ReplApp state, widgets, and tagent file migration (Phase 1A.4)
 
-**What:** Move `ReplApp` and widgets from tagent to trusty-tui; migrate tests; inventory/migrate orphaned files.
+**What:** Move `ReplApp` and widgets from tagent to trusty-code-tui; migrate tests; inventory/migrate orphaned files.
 
 **Deliverable:**
-- `trusty_tui::ReplApp` struct (generalized per Slice 1.5): chat messages, input buffer, history, cursor, tick counter, engine-supplied adapters.
+- `trusty_code_tui::ReplApp` struct (generalized per Slice 1.5): chat messages, input buffer, history, cursor, tick counter, engine-supplied adapters.
 - Widgets: scrollback (Paragraph + line wrapping), input_composer (Block + editable), status_line (Gauge + engine-supplied Spans).
 - `draw(Frame, ReplApp)` function: renders widgets.
-- **File migration from tagent/src/repl/tui/ to trusty-tui/src/:**
-  - `chat.rs` (454L) → `trusty-tui/src/widgets/chat.rs` (or delete if subsumed by scrollback.rs + input_composer.rs).
-  - `markdown.rs` (297L) → `trusty-tui/src/render/markdown.rs` (formatting helper).
-  - `banner.rs` (247L) → `trusty-tui/src/widgets/banner.rs` (or Phase 2, status quo TBD).
-  - `tests_render.rs, tests_input.rs, tests_state.rs` (~1,436L total) → **MUST MIGRATE** to trusty-tui/ (no coverage drops). Create `trusty-tui/src/tests/` with equivalent structure.
+- **File migration from tagent/src/repl/tui/ to trusty-code-tui/src/:**
+  - `chat.rs` (454L) → `trusty-code-tui/src/widgets/chat.rs` (or delete if subsumed by scrollback.rs + input_composer.rs).
+  - `markdown.rs` (297L) → `trusty-code-tui/src/render/markdown.rs` (formatting helper).
+  - `banner.rs` (247L) → `trusty-code-tui/src/widgets/banner.rs` (or Phase 2, status quo TBD).
+  - `tests_render.rs, tests_input.rs, tests_state.rs` (~1,436L total) → **MUST MIGRATE** to trusty-code-tui/ (no coverage drops). Create `trusty-code-tui/src/tests/` with equivalent structure.
   - Spike output (Slice 2) informs any ratatui 0.30 fixes needed during migration.
 
 **Acceptance:**
-- `cargo test -p trusty-tui` passes (all tagent tests now trusty-tui tests).
+- `cargo test -p trusty-code-tui` passes (all tagent tests now trusty-code-tui tests).
 - Visual test: `tcode tui` renders scrollback, input, status line correctly.
 - All orphaned files have a home; none left behind without justification.
 
@@ -589,7 +589,7 @@ Each slice is independently shippable and critic-gateable.
 
 **Deliverable:**
 - `SlashCommandRouter` trait: `dispatch(cmd: &str, args: &[&str], tx: UnboundedSender<ReplEvent>) -> Result<bool>`.
-- Built-in commands (in trusty-tui): `/clear` → `ReplEvent::ClearScrollback`, `/help` → list all commands, `/quit` → `app.quit = true`.
+- Built-in commands (in trusty-code-tui): `/clear` → `ReplEvent::ClearScrollback`, `/help` → list all commands, `/quit` → `app.quit = true`.
 - CodeEngine-specific commands: `/workstream list` → call daemon, emit `ReplEvent::StatusMessage(formatted list)`.
 - CodeEngine-specific commands: `/workstream activate <id>` → call `workstream.activate{id}`, daemon responds.
 
@@ -635,7 +635,7 @@ Each slice is independently shippable and critic-gateable.
 
 ### Slice 10: Tagent REPL refactoring (Phase 1A.5, critical for safety)
 
-**What:** Refactor tagent's REPL to use the extracted `trusty-tui` crate and AgentEngine adapter.
+**What:** Refactor tagent's REPL to use the extracted `trusty-code-tui` crate and AgentEngine adapter.
 
 **Deliverable:**
 - Implement `AgentEngine` (thin adapter for tagent).
@@ -658,7 +658,7 @@ Each slice is independently shippable and critic-gateable.
 
 ### Q1 — Shared crate naming
 
-**RESOLVED (Bob, 2026-07-20):** New standalone `crates/trusty-tui/` crate (not a trusty-common feature).
+**RESOLVED (Bob, 2026-07-20):** New standalone `crates/trusty-code-tui/` crate (not a trusty-common feature).
 
 Clear isolation; ratatui + crossterm are heavy deps unrelated to trusty-common's core. Independent versioning supports future harnesses.
 
@@ -678,7 +678,7 @@ Known limitation: "tcode tui requires full-size terminal with alt-screen support
 
 **RESOLVED (Bob, 2026-07-20):** Mixed routing (Option 2).
 
-Built-in commands (`/help`, `/clear`, `/quit`) are client-side (trusty-tui). Domain-specific commands (`/model`, `/agent`, `/workstream`) route to engine. Keeps MVP simple.
+Built-in commands (`/help`, `/clear`, `/quit`) are client-side (trusty-code-tui). Domain-specific commands (`/model`, `/agent`, `/workstream`) route to engine. Keeps MVP simple.
 
 ### Q5 — Workstream activation in MVP
 
@@ -719,19 +719,19 @@ Removed from MVP status line (shows session/model/project/workstream only). Cost
 
 ### AC-1: Thin-client contract (binding from DOC-39)
 
-**AC-1.1** No TUI code (files under `crates/trusty-tui/` or `crates/trusty-code/src/tui_client/`) reads the filesystem, spawns a process, or calls `git` directly. Every such fact arrives from a daemon call.
+**AC-1.1** No TUI code (files under `crates/trusty-code-tui/` or `crates/trusty-code/src/tui_client/`) reads the filesystem, spawns a process, or calls `git` directly. Every such fact arrives from a daemon call.
 
 **AC-1.2** The TUI has no dependency on `trusty-code` or `trusty-agents` in its public API. Only `TuiEngine`, `ReplEvent`, and lifecycle items are public.
 
 **AC-1.3** The `TuiEngine` trait is implemented by each product crate independently. No shared implementation.
 
-### AC-2: Extraction success (trusty-tui shared crate)
+### AC-2: Extraction success (trusty-code-tui shared crate)
 
-**AC-2.1** `trusty-tui` crate is created and compiles with ratatui 0.30.
+**AC-2.1** `trusty-code-tui` crate is created and compiles with ratatui 0.30.
 
 **AC-2.2** `TuiEngine` trait is defined and documented. Both `CodeEngine` and `AgentEngine` implement it without breaking changes.
 
-**AC-2.3** Tagent's REPL is refactored to use `trusty-tui` with **UX parity + panic-safety improvement**. All existing commands, scrollback, history, and line editing work identically. **Behavioral change (bug fix):** Tagent gains panic-safe terminal restoration (RAII Drop guard); a panic in the event loop no longer leaves the terminal in raw/alt-screen mode (tagent's current bug, fixed by Slice 2).
+**AC-2.3** Tagent's REPL is refactored to use `trusty-code-tui` with **UX parity + panic-safety improvement**. All existing commands, scrollback, history, and line editing work identically. **Behavioral change (bug fix):** Tagent gains panic-safe terminal restoration (RAII Drop guard); a panic in the event loop no longer leaves the terminal in raw/alt-screen mode (tagent's current bug, fixed by Slice 2).
 
 **AC-2.4** CodeEngine is implemented and tcode can launch a REPL with `tcode tui` command.
 
@@ -831,8 +831,8 @@ Removed from MVP status line (shows session/model/project/workstream only). Cost
 ### Lint and build
 
 ```bash
-cargo build -p trusty-tui --release
-cargo test -p trusty-tui --release
+cargo build -p trusty-code-tui --release
+cargo test -p trusty-code-tui --release
 cargo test -p trusty-code --release
 cargo test -p trusty-agents --release
 bash scripts/check_sld.sh    # SLD spec-doc lint (this spec)

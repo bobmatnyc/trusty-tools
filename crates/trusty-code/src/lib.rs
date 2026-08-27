@@ -504,7 +504,7 @@ pub mod task;
 /// end-to-end coverage in `tests/cli_e2e.rs`.
 pub mod cli_client;
 
-/// `CodeEngine` — the `trusty-tui` engine adapter driving a long-lived
+/// `CodeEngine` — the `trusty-code-tui` engine adapter driving a long-lived
 /// `tcode serve --http` daemon for the interactive `tcode tui` (#3415,
 /// DOC-50 §3.3/§3.4, epic #3411 Slice 3).
 ///
@@ -512,10 +512,10 @@ pub mod cli_client;
 /// invocation — the right shape for one-shot commands, wrong for an
 /// interactive REPL that needs to hold a session open, stream responses
 /// live, and observe workstream activation pushed from OTHER clients. This
-/// module is the HTTP counterpart: a thin `trusty_tui::TuiEngine`
+/// module is the HTTP counterpart: a thin `trusty_code_tui::TuiEngine`
 /// implementation that discovers an already-running daemon and drives it
 /// over pooled HTTP + SSE, translating daemon responses into
-/// `trusty_tui::ReplEvent`s — no business logic of its own (DOC-39 §2.1
+/// `trusty_code_tui::ReplEvent`s — no business logic of its own (DOC-39 §2.1
 /// thin-client axiom).
 /// What: `tui_client::discovery` (daemon lookup: `TCODE_DAEMON_URL` env var
 /// -> `serve::discovery`'s `http_addr` file -> liveness ping), `tui_client::rpc`
