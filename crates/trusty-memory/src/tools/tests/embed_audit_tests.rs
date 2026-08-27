@@ -223,3 +223,69 @@ async fn embed_sweep_reports_a_palace_with_an_unembedded_drawer() {
     assert_eq!(out["palaces"][0]["missing"], 1, "{out}");
     assert_eq!(out["palaces"][0]["healthy"], false, "{out}");
 }
+
+/// Why (#5000, #4786): a palace whose bytes are on disk but cannot be opened is
+/// the case the sweep exists to surface. Dropping its row would make an
+/// unreadable palace and a healthy one look identical — the `console_metrics`
+/// blind spot restated — and one such palace must not abort the sweep and take
+/// every other row down with it.
+/// What: puts an unopenable palace beside a readable one. The fixture is
+/// `palace.json` plus a garbage `index.usearch.redb`, which
+/// `load_palaces_from_disk_records_an_unopenable_palace` already proves a
+/// read-only client refuses. Asserts the sweep counts it in `unreadable`, gives
+/// its row the error rather than omitting the row, and still reports the
+/// readable palace.
+/// Test: itself.
+#[tokio::test]
+async fn embed_sweep_reports_a_palace_it_could_not_open() {
+    let (state, tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "sweep-readable"}))
+        .await
+        .expect("palace_create");
+
+    // Enumerable from disk, unopenable once reached: 4096 bytes of garbage
+    // where the vector store belongs. Nothing opens it here, so no handle is
+    // left in the redb cache to perturb the sweep under test.
+    let broken = "sweep-unreadable";
+    let data_dir = tmp.path().join(broken);
+    std::fs::create_dir_all(&data_dir).expect("mkdir palace data dir");
+    trusty_common::memory_core::store::PalaceStore::save_palace(
+        &trusty_common::memory_core::Palace {
+            id: trusty_common::memory_core::PalaceId::new(broken),
+            name: broken.to_string(),
+            description: None,
+            created_at: chrono::Utc::now(),
+            data_dir: data_dir.clone(),
+        },
+    )
+    .expect("persist palace metadata");
+    std::fs::write(data_dir.join("index.usearch.redb"), [0xABu8; 4096])
+        .expect("write incompatible-format store");
+
+    let out = dispatch_tool(&state, "palace_embed_sweep", json!({}))
+        .await
+        .expect("one unopenable palace must not fail the whole sweep");
+
+    assert_eq!(
+        out["palace_count"], 2,
+        "both palaces are on disk, so both must be enumerated: {out}"
+    );
+    assert_eq!(
+        out["unreadable"], 1,
+        "a palace that could not be opened must be counted, not omitted: {out}"
+    );
+    let rows = out["palaces"].as_array().expect("palaces array");
+    let broken_row = rows
+        .iter()
+        .find(|r| r["palace"] == broken)
+        .unwrap_or_else(|| panic!("the unreadable palace must still have a row: {out}"));
+    assert!(
+        broken_row["error"].as_str().is_some_and(|e| !e.is_empty()),
+        "an unreadable row must say why, or it reads as an empty palace: {out}"
+    );
+    assert!(
+        rows.iter()
+            .any(|r| r["palace"] == "sweep-readable" && r["drawer_count"].is_number()),
+        "one bad palace must not cost the readable palace its row: {out}"
+    );
+}
