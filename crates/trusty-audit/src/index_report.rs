@@ -524,8 +524,8 @@ impl Producer {
                     "the `tga` extract database built from that repository's git history — metrics, never file contents",
                 ),
                 (
-                    "../logs/<NN>-<repo>.log",
-                    "the combined stdout and stderr of that repository's `tga audit` child, with known credentials removed",
+                    "../logs/<run>/<NN>-<repo>.log",
+                    "the combined stdout and stderr of that repository's `tga audit` child, with known credentials removed — under one directory per run, so re-running keeps the earlier record (#6137)",
                 ),
             ],
             Producer::Render => vec![
