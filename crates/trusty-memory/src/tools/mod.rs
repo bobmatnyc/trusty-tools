@@ -32,6 +32,9 @@ pub mod chat_definitions;
 pub mod chat_ops;
 pub mod definitions;
 pub mod dream_ops;
+// #5000 / #4786: answer "is this findable?" per id and per estate.
+pub mod embed_audit;
+pub mod embed_audit_definitions;
 pub mod helpers;
 pub mod kg_ops;
 pub mod memory_ops;
@@ -127,6 +130,11 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
         "palace_reembed" => handle_palace_reembed(state, args).await,
         // #5005: free drawers destroyed by a vector-id collision.
         "palace_unalias" => handle_palace_unalias(state, args).await,
+        // #5000: verify a caller's OWN drawer ids, not the whole missing set.
+        "palace_verify_embedded" => embed_audit::handle_palace_verify_embedded(state, args).await,
+        // #5000 / #4786: every palace on disk, uncapped — the console report is
+        // capped at 20 and shows an uncached palace as 0/0, i.e. healthy.
+        "palace_embed_sweep" => embed_audit::handle_palace_embed_sweep(state, args).await,
         "kg_gaps" => handle_kg_gaps(state, args).await,
         "memory_recall_all" => handle_memory_recall_all(state, args).await,
         "get_prompt_context" => handle_get_prompt_context(state, args).await,

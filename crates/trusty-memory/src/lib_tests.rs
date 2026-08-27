@@ -101,7 +101,8 @@ async fn tools_list_returns_all_tools() {
     // #4906 adds `palace_reembed`; #5005 adds `palace_unalias`;
     // #4776 adds `kg_list_subjects`; `kg_retract_triple` adds the inverse of
     // `kg_assert`.
-    assert_eq!(tools.len(), 47);
+    // #5000 / #4786 add `palace_verify_embedded` and `palace_embed_sweep`.
+    assert_eq!(tools.len(), 49);
 }
 
 #[tokio::test]
