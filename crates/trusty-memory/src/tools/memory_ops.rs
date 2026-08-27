@@ -524,9 +524,19 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
     }
 
     let embedder = state.embedder().await?;
-    let results = recall_deep_scoped(&handle, embedder.as_ref(), query, &scope, top_k)
-        .await
-        .context("recall_deep")?;
+    // #5036: deep recall runs the lexical lane alongside the vector lane, the
+    // same as its `memory_recall` sibling. It was the one dispatch path that
+    // had the fusion available and did not call it, so a deep recall answered
+    // by vector centroid alone.
+    let vector_fut = recall_deep_scoped(&handle, embedder.as_ref(), query, &scope, top_k);
+    let bm25_fut = bm25_search_optional(state, handle.id.as_str(), query, top_k);
+    let (vector_res, bm25_res) = tokio::join!(vector_fut, bm25_fut);
+    let mut results = vector_res.context("recall_deep")?;
+    // ADR-0027 T7: no scope filter needed on the lexical side — the fusion only
+    // boosts drawers already in the vector list, which is already scoped.
+    if let Some(bm25_hits) = bm25_res {
+        fuse_bm25_into_recall(&mut results, &bm25_hits, top_k);
+    }
     Ok(serialize_recall(&palace, query, results))
 }
 
