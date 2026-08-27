@@ -31,7 +31,13 @@ name = "tga"
 # PATCH — the derives change but the API surface does not: the same six structs
 # still implement `Serialize` over the same fields, with the same names and the
 # same types. What changes is the value written for a credential.
-version = "4.0.1"
+#
+# 4.0.1 → 4.0.2 (#6300): no code change. `tga-v4.0.1` is pinned by a protected
+# ruleset (#6178) to 8d9e5cfb9, and this branch's exclusion-row removal lands
+# after it, so `preflight-publish.sh` CHECK 6 (tag/publish commit parity) can
+# never be satisfied at that tag. 4.0.1 is a burned version number and the
+# release moves forward to a gate-clean commit.
+version = "4.0.2"
 publish = true
 edition = "2021"
 # Aligned with the workspace MSRV (1.94) per #254. Required for
