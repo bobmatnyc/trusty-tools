@@ -1,6 +1,10 @@
 [package]
 name = "trusty-mpm"
-version = "1.5.4"
+# 1.5.5 (#6304): patch — 1.5.4 is already published on crates.io and this PR
+# edits `src/**`, so the `PR version bump vs crates.io` gate (#4421) requires
+# the bump here. Patch because every changed item lives in the `tm` BIN target
+# (`src/bin/tm/commands/statusline/`); the library's public API is untouched.
+version = "1.5.5"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
