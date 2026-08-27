@@ -175,9 +175,3 @@ docs/certificates/*.mobileprovision
 .trusty-mpm/last-instructions.md
 # <<< trusty-mpm harness scaffolding <<<
 
-# `run.rs::counts_invocations` spawns a stub `tga` that appends to
-# `invocations.txt` relative to its own CWD. When the suite runs from the crate
-# directory that lands here instead of in the test's work-dir, and #6287 got as
-# far as committing 49 blank lines of it. Ignored so a `git add -A` cannot
-# commit the artifact again; the leak itself is a separate defect.
-crates/trusty-audit/invocations.txt
