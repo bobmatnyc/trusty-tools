@@ -288,46 +288,91 @@ pub async fn run_stdio_bridge(palace: Option<String>) -> Result<()> {
         let caller_workstream = caller_workstream.clone();
 
         async move {
-            // Decide suppression from the REQUEST before touching the daemon.
-            // MCP spec section 4.1: a notification has no id -- the server MUST NOT
-            // reply. Forwarding the notification to the daemon would cause
-            // the daemon to return a response that we'd emit to stdout,
-            // corrupting the MCP channel.
-            if is_notification(&req) {
-                return mcp::Response::suppressed();
-            }
-
-            // Serialise the MCP request envelope into the value we'll POST.
-            // We need to potentially inject a default palace into params,
-            // then this bridge's own resolved caller identity (DOC-53 §4.3)
-            // into the tool arguments so the daemon never has to guess.
-            let req_value = inject_default_palace(req_to_value(&req), default_palace.as_deref());
-            let req_value = inject_caller_context(
-                req_value,
+            answer_one_request(
+                &socket,
+                req,
+                default_palace.as_deref(),
                 caller_workstream.as_deref(),
                 caller_cwd.as_deref(),
-            );
-
-            match forward_rpc(&socket, req_value).await {
-                Ok(resp_value) => value_to_mcp_response(resp_value),
-                Err(e) => {
-                    // Transport-level failure (daemon down, timeout).
-                    // Return a JSON-RPC internal error rather than crashing
-                    // the loop -- the next request might succeed once the daemon
-                    // recovers.
-                    tracing::warn!("daemon bridge: transport error: {e:#}");
-                    mcp::Response::err(
-                        None,
-                        mcp::error_codes::INTERNAL_ERROR,
-                        format!("trusty-memory daemon unreachable: {e:#}"),
-                    )
-                }
-            }
+            )
+            .await
         }
     })
     .await;
 
     result
+}
+
+/// Answer exactly one MCP request: suppress, inject, forward, map.
+///
+/// Why (#6309): this was an inline closure body, and the transport-failure arm
+/// inside it built its error response with `id: None`. `mcp::Response` skips a
+/// `None` id when it serialises, so the frame reached the client with no `id`
+/// field at all — and a JSON-RPC client matches a response to its request by
+/// id, so an id-less error is never matched to anything. The bridge answered;
+/// the client went on waiting. That is the "hung with no response or progress"
+/// a session saw after its daemon was upgraded underneath it: not an unbounded
+/// wait in the bridge, an answer addressed to nobody.
+///
+/// What: returns [`mcp::Response::suppressed`] for a notification (MCP spec
+/// §4.1 — an id-less request gets no reply, which is the one case where an
+/// absent id is correct), otherwise injects the default palace and this
+/// bridge's caller identity, forwards over `socket`, and maps the daemon's
+/// answer back. A transport failure becomes a JSON-RPC error **carrying the
+/// request's own id**, so the client resolves that call instead of blocking on
+/// it, and the loop stays alive for the next request.
+///
+/// The failure is bounded by [`REQUEST_TIMEOUT`] and names the socket it could
+/// not reach: `send_framed_request_capped` wraps the connect in its timeout,
+/// and every `UdsRpcError` variant carries the path.
+///
+/// Test: `a_transport_failure_answers_the_request_that_caused_it`,
+/// `a_transport_failure_names_the_endpoint_and_does_not_hang`,
+/// `notification_requests_are_suppressed`.
+pub(crate) async fn answer_one_request(
+    socket: &Path,
+    req: mcp::Request,
+    default_palace: Option<&str>,
+    caller_workstream: Option<&str>,
+    caller_cwd: Option<&str>,
+) -> mcp::Response {
+    // Decide suppression from the REQUEST before touching the daemon.
+    // MCP spec section 4.1: a notification has no id -- the server MUST NOT
+    // reply. Forwarding the notification to the daemon would cause
+    // the daemon to return a response that we'd emit to stdout,
+    // corrupting the MCP channel.
+    if is_notification(&req) {
+        return mcp::Response::suppressed();
+    }
+
+    // #6309: captured BEFORE the forward, because it is what the error arm
+    // below owes the client — a response the client cannot match is a hang.
+    let id = req.id.clone();
+
+    // Serialise the MCP request envelope into the value we'll POST.
+    // We need to potentially inject a default palace into params,
+    // then this bridge's own resolved caller identity (DOC-53 §4.3)
+    // into the tool arguments so the daemon never has to guess.
+    let req_value = inject_default_palace(req_to_value(&req), default_palace);
+    let req_value = inject_caller_context(req_value, caller_workstream, caller_cwd);
+
+    match forward_rpc(socket, req_value).await {
+        Ok(resp_value) => value_to_mcp_response(resp_value),
+        Err(e) => {
+            // Transport-level failure (daemon down, timeout).
+            // Return a JSON-RPC internal error rather than crashing
+            // the loop -- the next request might succeed once the daemon
+            // recovers.
+            tracing::warn!("daemon bridge: transport error: {e:#}");
+            // #6309: `id`, never `None` — an id-less error frame matches no
+            // pending call, so the client waits instead of failing.
+            mcp::Response::err(
+                id,
+                mcp::error_codes::INTERNAL_ERROR,
+                format!("trusty-memory daemon unreachable: {e:#}"),
+            )
+        }
+    }
 }
 
 /// Convert a `trusty_mcp::Request` to a `serde_json::Value`.
@@ -951,5 +996,100 @@ mod tests {
             "a refused dial must not wait out REQUEST_TIMEOUT: {:?}",
             started.elapsed()
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // #6309 — the endpoint vanishes mid-session
+    // -----------------------------------------------------------------------
+
+    /// Build the request a live session would send once its daemon is gone.
+    fn a_request_with_id(id: i64) -> mcp::Request {
+        mcp::Request {
+            jsonrpc: Some("2.0".to_string()),
+            id: Some(json!(id)),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "memory_remember",
+                "arguments": {"text": "anything"}
+            })),
+        }
+    }
+
+    /// Why (#6309): a JSON-RPC client matches a response to its request by
+    /// `id`. `mcp::Response` omits the field entirely when the id is `None`, so
+    /// an error built with `None` reaches the client as a frame belonging to no
+    /// pending call — the client keeps waiting and the session reads as hung,
+    /// which is exactly what a session saw when its daemon was upgraded
+    /// underneath it. The bridge had answered; nobody could tell.
+    /// What: forwards to a socket nothing is serving and asserts the error
+    /// carries the id of the request that caused it.
+    /// Test: itself.
+    #[tokio::test]
+    async fn a_transport_failure_answers_the_request_that_caused_it() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let resp = answer_one_request(
+            &tmp.path().join("vanished.sock"),
+            a_request_with_id(7),
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        assert!(resp.error.is_some(), "an unreachable daemon is an error");
+        assert_eq!(
+            resp.id,
+            Some(json!(7)),
+            "the error must carry the id of the request it answers, or the \
+             client never matches it and waits forever"
+        );
+        assert!(!resp.suppress, "a request with an id always gets a reply");
+    }
+
+    /// Why (#6309 acceptance): "a bridge whose daemon endpoint is gone returns
+    /// an error within the backoff cap (≤30 s) on every request", and the error
+    /// has to name the endpoint or the operator cannot tell an upgraded daemon
+    /// from a wedged one.
+    /// What: measures the vanished-socket round trip and asserts both the bound
+    /// and that the socket path appears in the message.
+    /// Test: itself.
+    #[tokio::test]
+    async fn a_transport_failure_names_the_endpoint_and_does_not_hang() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let socket = tmp.path().join("vanished.sock");
+
+        let started = std::time::Instant::now();
+        let resp = answer_one_request(&socket, a_request_with_id(11), None, None, None).await;
+        let elapsed = started.elapsed();
+
+        let message = resp
+            .error
+            .expect("an unreachable daemon is an error")
+            .message;
+        assert!(
+            message.contains(&socket.display().to_string()),
+            "the error must name the endpoint it could not reach, got: {message}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(30),
+            "a gone endpoint must answer inside the backoff cap: {elapsed:?}"
+        );
+    }
+
+    /// Why: the id fix must not reach notifications — an id-less request gets
+    /// no reply at all (MCP spec §4.1), and emitting one would corrupt the
+    /// stdio channel. This is the one case where an absent id is correct.
+    /// Test: itself.
+    #[tokio::test]
+    async fn answer_one_request_suppresses_a_notification() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let req = mcp::Request {
+            jsonrpc: Some("2.0".to_string()),
+            id: None,
+            method: "notifications/initialized".to_string(),
+            params: None,
+        };
+        let resp = answer_one_request(&tmp.path().join("absent.sock"), req, None, None, None).await;
+        assert!(resp.suppress, "a notification must not be answered");
     }
 }
