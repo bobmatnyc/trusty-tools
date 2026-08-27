@@ -214,29 +214,50 @@ curl -sSf https://raw.githubusercontent.com/bobmatnyc/trusty-tools/main/install.
 | `TRUSTY_FORCE=1` | Re-download even if already installed (same as `--force`) |
 | `TRUSTY_NO_MODIFY_PATH=1` | Don't modify your shell PATH |
 
-**Supported platforms:** macOS (Apple Silicon) and Linux (x86_64). For other platforms, build from source with `cargo install trusty-installer`.
+**Supported platforms:** macOS (Apple Silicon), Linux x86_64, and Linux arm64 (`aarch64-unknown-linux-gnu`). macOS Intel is not supported — build from source with `cargo install trusty-installer`.
 
 **Security:** The installer is served over HTTPS and every downloaded binary is SHA-256 verified against its published checksum. The installer script itself is not signed — review it before running if you require higher assurance: https://github.com/bobmatnyc/trusty-tools/blob/main/install.sh
 
 ---
 
+### With `tctl` (the control plane)
+
+`tctl` — the `trusty-installer` binary the bootstrap script above puts on your
+PATH — is the recommended route for the seven crates it manages: `trusty-search`,
+`trusty-memory`, `trusty-analyze`, `trusty-review`, `trusty-console`,
+`trusty-mpm`, and `tga`. It installs them, upgrades them together, and knows
+which of them run as daemons.
+
+```bash
+tctl install                       # the full managed set
+tctl install trusty-search         # one member
+tctl install trusty-search --dry-run
+tctl status                        # what is installed, and which daemons are up
+```
+
+Homebrew below is the alternative when you want one binary and nothing else.
+
 ### With Homebrew
 
-The easiest way to install individual trusty-* binaries via package manager. First, add the tap:
+Installs individual trusty-* binaries via package manager. First, add the tap:
 
 ```bash
 brew tap bobmatnyc/trusty
 ```
 
-Then install any of the six published binaries:
+Then install any of the ten published binaries:
 
 ```bash
-brew install trusty-search
-brew install trusty-memory
 brew install trusty-analyze
-brew install trusty-review
-brew install trusty-mpm
+brew install trusty-audit
+brew install trusty-code
+brew install trusty-console
 brew install trusty-git-analytics
+brew install trusty-installer
+brew install trusty-memory
+brew install trusty-mpm
+brew install trusty-review
+brew install trusty-search
 ```
 
 Or combine into a single command:
