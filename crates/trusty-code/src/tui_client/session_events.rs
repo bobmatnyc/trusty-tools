@@ -13,7 +13,7 @@
 
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
-use trusty_tui::ReplEvent;
+use trusty_code_tui::ReplEvent;
 
 use crate::events::{Event, SessionEventEnvelope};
 
@@ -95,7 +95,7 @@ pub(super) fn forward_session_event(
         // (`Event::AgentMessageDelta`, `events.rs:459`) into the SAME
         // `AssistantOutput` chunk-append machinery `Message`/`AgentMessage`
         // above already use, so no new rendering path is needed in
-        // `trusty-tui` — `done: false` appends via `ReplApp::streaming_idx`,
+        // `trusty-code-tui` — `done: false` appends via `ReplApp::streaming_idx`,
         // `done: true` finalizes (`reduce.rs:141-172`).
         //
         // KNOWN GAP (reported, not fixed here — see PR description): the
@@ -106,11 +106,11 @@ pub(super) fn forward_session_event(
         // carries neither id, and `ReplApp::streaming_idx` is a single
         // `Option<usize>` shared by the whole app (not keyed at all) — so
         // two agents legitimately streaming concurrently within ONE human
-        // turn (the busy-guard at `trusty-tui/src/app/mod.rs:457-471` only
+        // turn (the busy-guard at `trusty-code-tui/src/app/mod.rs:457-471` only
         // rules out a SECOND top-level turn starting, not concurrent
         // sub-agents inside the current one) will interleave into the same
         // chat bubble today. Fixing this requires threading a key through
-        // `trusty-tui`'s `ReplEvent`/`ReplApp` (out of this slice's file
+        // `trusty-code-tui`'s `ReplEvent`/`ReplApp` (out of this slice's file
         // scope — a shared, cross-slice type). Tracked as a follow-up.
         Event::AgentMessageDelta { delta, done, .. } => {
             let _ = tx.send(ReplEvent::AssistantOutput {

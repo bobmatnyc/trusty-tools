@@ -4,7 +4,7 @@
 //! Why: `CodeEngine` is the thin-client seam over a `tcode serve --http`
 //! daemon — its correctness is entirely about the wire contract (which RPC
 //! methods it calls, with what params, and how it turns the daemon's
-//! responses/SSE events into `trusty_tui::ReplEvent`s), not about any real
+//! responses/SSE events into `trusty_code_tui::ReplEvent`s), not about any real
 //! agent-loop behaviour. A `wiremock`-backed mock daemon (mirroring
 //! `crates/trusty-channels/tests/client_http.rs`'s pattern) lets this suite
 //! assert on that wire contract without spawning the real `tcode` binary —
@@ -28,7 +28,7 @@ use serde_json::json;
 use tokio::sync::mpsc::unbounded_channel;
 use trusty_code::tui_client::CodeEngine;
 use trusty_code::tui_client::discovery::DAEMON_URL_ENV;
-use trusty_tui::{ReplEvent, TuiEngine};
+use trusty_code_tui::{ReplEvent, TuiEngine};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
@@ -201,7 +201,7 @@ async fn count_rpc_calls(server: &MockServer, method: &str) -> usize {
 
 /// `setup` must create a session via `session.create` and report the
 /// daemon's active workstream — and must have already populated
-/// `CodeEngine`'s pre-fetched caches for `trusty-tui`'s synchronous
+/// `CodeEngine`'s pre-fetched caches for `trusty-code-tui`'s synchronous
 /// `TuiEngine::commands()`/`picker()` accessors (#3428).
 #[tokio::test]
 async fn setup_creates_session_and_reports_active_workstream() {
@@ -482,7 +482,7 @@ async fn subscribe_workstream_events_emits_activation_changed_with_wire_field_na
         events.iter().any(|e| matches!(
             e,
             ReplEvent::StatuslineUpdate(segs)
-                if segs.iter().any(|s| matches!(s, trusty_tui::StatuslineSegment::Workstream { .. }))
+                if segs.iter().any(|s| matches!(s, trusty_code_tui::StatuslineSegment::Workstream { .. }))
         )),
         "expected a StatuslineUpdate carrying a Workstream segment; got {events:?}"
     );
@@ -501,7 +501,7 @@ async fn subscribe_workstream_events_emits_activation_changed_with_wire_field_na
 /// stale indefinitely. This asserts BOTH halves of the fix: the cache
 /// actually refreshes (a second `workstream.list` call beyond `setup()`'s
 /// own), and the engine surfaces a structured signal — now that
-/// `trusty-tui`'s `ReplEvent::WorkstreamActivationChanged` carries
+/// `trusty-code-tui`'s `ReplEvent::WorkstreamActivationChanged` carries
 /// `new_active_id: Option<String>`, deactivation-with-no-replacement is
 /// `WorkstreamActivationChanged { new_active_id: None, prior_id: Some(..) }`
 /// rather than a free-text `StatusMessage` fallback.

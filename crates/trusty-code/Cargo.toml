@@ -115,7 +115,7 @@ trusty-common = { workspace = true, features = ["catchup", "stdio-mcp-client", "
 # `tui_client::CodeEngine` (#3415, DOC-50 §3.3/§3.4, epic #3411 Slice 3): the
 # shared engine-adapter trait + event vocabulary (`TuiEngine`/`ReplEvent`)
 # both `tcode tui` and tagent's REPL implement against.
-trusty-tui = { workspace = true }
+trusty-code-tui = { workspace = true }
 
 # `tcode serve --http`: POST /rpc + GET /health over axum (#2053). Per
 # CLAUDE.md, axum stays feature-gated in *library* crates

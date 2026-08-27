@@ -24,7 +24,7 @@
 //! §4.1/AC-2.4) is the odd one out: instead of spawning its own ephemeral
 //! `--stdio` child, it attaches to an ALREADY-RUNNING `tcode serve --http`
 //! daemon and hands `trusty_code::tui_client::CodeEngine` to
-//! `trusty_tui::run::run` — see `crate::cli::tui`.
+//! `trusty_code_tui::run::run` — see `crate::cli::tui`.
 //!
 //! Test: `cargo run -p trusty-code -- --version` must exit 0 and print the
 //! crate version. The thin-client subcommands are covered end-to-end by

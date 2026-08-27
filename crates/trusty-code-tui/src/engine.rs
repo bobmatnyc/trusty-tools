@@ -1,6 +1,6 @@
 //! The engine-adapter seam: [`TuiEngine`].
 //!
-//! Why: `trusty-tui` renders one interaction model for two different
+//! Why: `trusty-code-tui` renders one interaction model for two different
 //! products — trusty-code (daemon-backed coding agent) and trusty-agents
 //! (tagent's REPL). Rather than fork the TUI per product, the TUI stays
 //! engine-agnostic and each product supplies a thin [`TuiEngine`]
@@ -87,7 +87,7 @@ pub trait TuiEngine: Send + Sync {
     /// implementations are NOT required to send a synthetic empty
     /// `AssistantOutput { done: true, .. }` just to clear `busy`.
     /// Test: exercised via a mock `TuiEngine` in Slice 2+ integration tests
-    /// (`crates/trusty-tui/tests/`); no runtime behavior to unit-test yet in
+    /// (`crates/trusty-code-tui/tests/`); no runtime behavior to unit-test yet in
     /// Slice 1.
     async fn handle_input(&self, line: String, tx: UnboundedSender<ReplEvent>) -> Result<bool>;
 
@@ -146,7 +146,7 @@ pub trait TuiEngine: Send + Sync {
     ///
     /// Why: DOC-50 §6 Q4 (mixed routing) splits slash commands into
     /// client-side built-ins (`/help`, `/clear`, `/quit` — owned by
-    /// `trusty-tui` itself, never listed here) and engine-routed domain
+    /// `trusty-code-tui` itself, never listed here) and engine-routed domain
     /// commands. This is how `/help` (Slice 7) learns about the latter
     /// without the shared crate hardcoding tagent's or tcode's command set
     /// (replacing tagent's `SLASH_COMMANDS` array,

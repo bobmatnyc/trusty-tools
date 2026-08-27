@@ -16,7 +16,7 @@ use crate::tui_client::session_events::{
     forward_session_event, is_retryable_status, terminal_stream_failure_event,
 };
 use crate::tui_client::workstream_subscription::parse_workstream_envelope;
-use trusty_tui::{StatuslineSegment, WorkstreamSummary};
+use trusty_code_tui::{StatuslineSegment, WorkstreamSummary};
 
 fn envelope(event: Event) -> SessionEventEnvelope {
     SessionEventEnvelope::new("s-1".to_string(), 1, chrono::Utc::now(), event)
@@ -162,7 +162,7 @@ fn forward_unrelated_event_is_ignored() {
 /// tcode streaming epic #3696 Slice 2: a non-final `AgentMessageDelta`
 /// (`done: false`) must forward as an `AssistantOutput` chunk with
 /// `done: false`, reusing the SAME append machinery `Message`/`AgentMessage`
-/// use (`trusty-tui reduce.rs`'s `streaming_idx`-keyed append) — no new
+/// use (`trusty-code-tui reduce.rs`'s `streaming_idx`-keyed append) — no new
 /// rendering path.
 #[test]
 fn forward_agent_message_delta_not_done_appends() {
@@ -230,10 +230,10 @@ fn forward_agent_message_delta_done_finalizes() {
 /// NOTE (see PR description / module doc comment on the `AgentMessageDelta`
 /// arm): this proves `forward_session_event` doesn't merge them. It does
 /// NOT prove the two stay visually separate once downstream in
-/// `trusty-tui` — `ReplEvent::AssistantOutput` carries no `agent_id`/
+/// `trusty-code-tui` — `ReplEvent::AssistantOutput` carries no `agent_id`/
 /// `turn_id`, and `ReplApp::streaming_idx` is a single unkeyed
 /// `Option<usize>`, so today the reducer WOULD interleave them into one
-/// chat bubble. That gap lives in `trusty-tui` (out of this crate's file
+/// chat bubble. That gap lives in `trusty-code-tui` (out of this crate's file
 /// scope) and is tracked as a follow-up, not fixed in this slice.
 #[test]
 fn forward_agent_message_delta_distinct_agent_ids_not_merged() {

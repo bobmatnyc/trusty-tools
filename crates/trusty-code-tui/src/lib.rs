@@ -1,4 +1,4 @@
-//! `trusty-tui` — the engine-agnostic terminal-UI seam shared by
+//! `trusty-code-tui` — the engine-agnostic terminal-UI seam shared by
 //! trusty-code's `tcode tui` and trusty-agents' tagent REPL.
 //!
 //! Why: today, tagent owns a mature ratatui-based REPL
@@ -42,7 +42,7 @@
 //! cutover this crate is building toward).
 //!
 //! Dependency direction (DOC-50 §2.2, binding): `trusty-code` and
-//! `trusty-agents` depend on `trusty-tui`; `trusty-tui` depends on neither.
+//! `trusty-agents` depend on `trusty-code-tui`; `trusty-code-tui` depends on neither.
 //! This crate's public API therefore never references a product-specific
 //! type.
 //!

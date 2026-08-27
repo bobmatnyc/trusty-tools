@@ -1,7 +1,7 @@
 //! [`EngineError`]: [`crate::tui_client::CodeEngine`]'s unified error type.
 //!
 //! Why: `CodeEngine`'s `TuiEngine` methods return `anyhow::Result` (the
-//! trait's signature, `crates/trusty-tui/src/engine.rs`), but the engine's
+//! trait's signature, `crates/trusty-code-tui/src/engine.rs`), but the engine's
 //! own internal helpers need a concrete, matchable error type — both so
 //! tests can assert on WHICH failure occurred (discovery vs. transport vs.
 //! an RPC error envelope) and so `?` composes cleanly across the
