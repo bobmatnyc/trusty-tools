@@ -737,12 +737,33 @@ impl MemoryService {
         deep: bool,
     ) -> ServiceResult<Value> {
         let handle = self.open_handle(id)?;
-        let results = if deep {
+        let mut results = if deep {
             recall_deep_with_default_embedder(&handle, query, top_k).await
         } else {
             recall_with_default_embedder(&handle, query, top_k).await
         }
         .map_err(|e| ServiceError::internal(format!("recall: {e:#}")))?;
+        // #5036: the lexical lane, on the path the UserPromptSubmit hook
+        // actually takes. `handle_memory_recall` has run vector and BM25 in
+        // parallel and RRF-fused them since #156; this route reached
+        // `retrieval::layers` directly and was vector-only, so a prompt with no
+        // lexical counterweight retrieved by vector centroid alone.
+        //
+        // Keyed on the RESOLVED palace id, never the caller's slug —
+        // `open_handle` follows aliases, and the corpus the backfill wrote
+        // belongs to the resolved palace.
+        //
+        // Reuses `fuse_bm25_into_recall` rather than deriving a second scorer:
+        // it only BOOSTS drawers the vector lane already returned and never
+        // promotes a BM25-only hit, so it has no scaling constant that can
+        // degenerate when the surviving set is empty — the failure that folded
+        // three earlier attempts at this wiring.
+        if let Some(hits) =
+            crate::tools::bm25::bm25_search_optional(&self.state, handle.id.as_str(), query, top_k)
+                .await
+        {
+            crate::tools::bm25::fuse_bm25_into_recall(&mut results, &hits, top_k);
+        }
         let payload: Vec<Value> = results.into_iter().map(recall_entry_json).collect();
         Ok(json!(payload))
     }
