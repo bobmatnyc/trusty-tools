@@ -212,6 +212,34 @@ pub fn handle_setup() -> Result<()> {
     Ok(())
 }
 
+/// Emit the MCP registration a GUI MCP client needs (#6307).
+///
+/// Why: ChatGPT desktop and every other launchd-launched GUI client inherits
+/// `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, which contains no directory any
+/// trusty-* binary is installed into. A registration whose `command` is the
+/// bare name `trusty-memory` therefore exits 127 before MCP initialization and
+/// the client reports only that no tools were found. The registration this
+/// prints carries the absolute path of the running binary — read from
+/// `current_exe`, never assumed to be under `~/.cargo/bin` — and a working
+/// directory that exists.
+/// What: delegates to `trusty_common::gui_mcp_client::report`, the single
+/// implementation `trusty-search setup --client` also calls, and prints what it
+/// returns.
+/// A GUI client needs none of [`handle_setup`]'s phases re-run — no data
+/// directory, no launchd job, no Claude settings — so this is a sibling entry
+/// point rather than a branch inside it, which also leaves `handle_setup`'s
+/// published signature untouched.
+/// Test: covered by `gui_mcp_client`'s own tests in trusty-common;
+/// `handle_setup_gui_client_rejects_an_unknown_client` covers the wiring here.
+pub fn handle_setup_gui_client(client: &str) -> Result<()> {
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
+    let text =
+        trusty_common::gui_mcp_client::report(client, MCP_SERVER_KEY, MCP_SERVER_ARGS, &home)?;
+    println!("{text}");
+    Ok(())
+}
+
 /// Register (or repair) the Codex CLI's stdio MCP entry for trusty-memory.
 ///
 /// Why (#5265): Codex listed `trusty-memory` as an enabled stdio server and

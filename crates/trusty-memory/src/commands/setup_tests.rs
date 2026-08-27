@@ -422,3 +422,52 @@ fn setup_codex_is_idempotent() {
     setup_codex(tmp.path()).expect("second run");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
 }
+
+/// Why (#6307): the GUI-client path must reject a client it does not know
+/// rather than printing a registration aimed at the wrong app.
+/// What: calls `handle_setup_gui_client` with an unsupported name and asserts
+/// the error names the supported list.
+#[test]
+fn handle_setup_gui_client_rejects_an_unknown_client() {
+    let err = handle_setup_gui_client("cursor").expect_err("unknown client must be rejected");
+    assert!(err.to_string().contains("chatgpt"), "{err}");
+}
+
+/// Why (#6307): the registration this crate writes for Claude Code is
+/// `{"command": "trusty-memory"}` — a bare name that exits 127 under launchd's
+/// `PATH`, which is the whole defect. The GUI registration must not be that
+/// shape.
+/// What: builds the GUI entry from the same server key and argument vector and
+/// asserts its command is an absolute path that is not the bare binary name,
+/// and that its working directory exists.
+#[test]
+fn gui_entry_is_absolute_where_the_claude_entry_is_bare() {
+    let bare = mcp_server_entry(MCP_SERVER_KEY, MCP_SERVER_ARGS);
+    assert_eq!(
+        bare["command"], MCP_SERVER_KEY,
+        "the Claude Code entry is the bare name"
+    );
+
+    let command = trusty_common::gui_mcp_client::running_binary_path().expect("exe resolves");
+    let working_dir = trusty_common::gui_mcp_client::default_working_dir().expect("home resolves");
+    let entry = trusty_common::gui_mcp_client::build_entry(
+        MCP_SERVER_KEY,
+        MCP_SERVER_ARGS,
+        &command,
+        &working_dir,
+    )
+    .expect("gui entry builds");
+    let rendered = entry.to_json();
+
+    let cmd = rendered["command"].as_str().expect("command is a string");
+    assert!(
+        Path::new(cmd).is_absolute(),
+        "command must be absolute, got {cmd}"
+    );
+    assert_ne!(
+        cmd, MCP_SERVER_KEY,
+        "the bare name is what fails under launchd"
+    );
+    let cwd = rendered["cwd"].as_str().expect("cwd is a string");
+    assert!(Path::new(cwd).is_dir(), "cwd must exist, got {cwd}");
+}

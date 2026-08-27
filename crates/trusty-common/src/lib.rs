@@ -171,6 +171,21 @@ pub mod sys_metrics;
 /// Test: `cargo test -p trusty-common --features unconditional-only bin_resolve`.
 pub mod bin_resolve;
 
+/// MCP registration for GUI clients launched by launchd (#6307).
+///
+/// Why: a GUI client started by launchd sees only
+/// `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, so an entry whose `command` is a bare
+/// `trusty-memory` exits 127 before MCP initialization and the client reports
+/// only "no tools". The registration must carry the absolute path of the
+/// running binary and a working directory that exists.
+/// What: [`gui_mcp_client::running_binary_path`],
+/// [`gui_mcp_client::build_entry`], and [`gui_mcp_client::configure`] — the
+/// single implementation both `trusty-memory setup` and `trusty-search setup`
+/// call.
+/// Test: `cargo test -p trusty-common --features unconditional-only --
+/// gui_mcp_client`.
+pub mod gui_mcp_client;
+
 /// macOS LaunchAgent generation and lifecycle management. macOS-only —
 /// the module compiles to nothing on every other platform.
 #[cfg(target_os = "macos")]
