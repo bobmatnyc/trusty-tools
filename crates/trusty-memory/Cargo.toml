@@ -8,7 +8,7 @@ name = "trusty-memory"
 # launchd-launched GUI client can spawn. `commands::setup::handle_setup_gui_client`
 # is a new public item beside an unchanged `handle_setup`, so nothing published
 # was removed or changed.
-version = "0.25.1"
+version = "0.25.2"
 edition = "2021"
 description = "MCP server (stdio + Unix socket) for trusty-memory"
 license.workspace = true
