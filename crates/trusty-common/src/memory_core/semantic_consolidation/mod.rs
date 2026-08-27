@@ -20,9 +20,10 @@ mod types;
 pub use consolidator::SemanticConsolidator;
 pub use inference::{Inference, MockInference, OllamaInference, OpenRouterInference};
 pub use types::{
-    CanonicalDrawer, ConsolidationAction, ConsolidationResult, SemanticConsolidationConfig,
-    inference_available, parse_consolidation_actions, resolve_openrouter_api_key,
-    validate_ollama_model,
+    CanonicalDrawer, ConsolidationAction, ConsolidationProvider, ConsolidationResult,
+    DEFAULT_LOCAL_BASE_URL, LOCAL_HOST_ENV, LOCAL_MODEL_PREFIXES, SemanticConsolidationConfig,
+    inference_available, parse_consolidation_actions, resolve_consolidation_provider,
+    resolve_openrouter_api_key, validate_ollama_model,
 };
 
 #[cfg(test)]
@@ -40,11 +41,18 @@ mod tests {
         d
     }
 
-    /// Why: lock the default config values so accidental changes are caught.
+    /// Why (#5188): the phase spends money and calls an external model, so it
+    /// is opt-in — a daemon with no config file must run the LLM-free dream
+    /// phases and nothing else. This assertion is the regression guard: before
+    /// the fix `enabled` was `true`, which is what put an unconfigured daemon
+    /// on `http://localhost:11434`.
     #[test]
     fn semantic_config_defaults() {
         let cfg = SemanticConsolidationConfig::default();
-        assert!(cfg.enabled);
+        assert!(
+            !cfg.enabled,
+            "semantic consolidation must default OFF (#5188)"
+        );
         assert_eq!(cfg.model, "anthropic/claude-haiku-4-5");
         assert!((cfg.similarity_threshold - 0.75).abs() < 1e-6);
         assert_eq!(cfg.max_batch_size, 8);
@@ -251,6 +259,171 @@ mod tests {
         assert!(validate_ollama_model("qwen/qwen2.5:7b-instruct").is_ok());
         assert!(validate_ollama_model("mistralai/mistral-nemo:12b").is_ok());
         assert!(validate_ollama_model("meta-llama/llama-3.1:8b").is_ok());
+    }
+
+    // ─── #5188: provider resolution never falls back to a local endpoint ──
+
+    /// Why (#5188): the reported production config — the OpenRouter-style
+    /// default model, no key anywhere, and a local backend that used to be
+    /// enabled by default. It must resolve to nothing at all, not to Ollama.
+    /// What: asserts `Unavailable` naming `openrouter`, with
+    /// `local_model_enabled = true` so the assertion is about the MODEL ID
+    /// rather than about the local backend being switched off.
+    #[test]
+    #[serial_test::serial(dotenv_credential_env)]
+    fn resolve_provider_unprefixed_model_without_key_is_unavailable() {
+        crate::credentials::load_env_local_once();
+        let _guard = EnvVarGuard::remove("OPENROUTER_API_KEY");
+
+        let resolved = resolve_consolidation_provider("anthropic/claude-haiku-4-5", "", true);
+
+        match resolved {
+            ConsolidationProvider::Unavailable { provider, reason } => {
+                assert_eq!(provider, "openrouter");
+                assert!(
+                    reason.contains("OPENROUTER_API_KEY"),
+                    "reason should name the missing key: {reason}"
+                );
+            }
+            other => panic!("an unprefixed model with no key must not resolve: {other:?}"),
+        }
+    }
+
+    /// Why (#5188): a bare Ollama tag is still not a request for Ollama — the
+    /// prefix is. `"llama3.2"` with no key used to build an Ollama client.
+    #[test]
+    #[serial_test::serial(dotenv_credential_env)]
+    fn resolve_provider_local_requires_explicit_prefix() {
+        crate::credentials::load_env_local_once();
+        let _guard = EnvVarGuard::remove("OPENROUTER_API_KEY");
+
+        assert!(matches!(
+            resolve_consolidation_provider("llama3.2", "", true),
+            ConsolidationProvider::Unavailable { .. }
+        ));
+
+        match resolve_consolidation_provider("ollama/llama3.2", "", true) {
+            ConsolidationProvider::Local { model, base_url } => {
+                assert_eq!(model, "llama3.2", "the prefix is stripped for the wire");
+                assert!(base_url.contains("11434"), "unexpected base url {base_url}");
+            }
+            other => panic!("an explicit ollama/ prefix must select local: {other:?}"),
+        }
+    }
+
+    /// Why (#5188): `[local_model] enabled = false` is the operator's veto over
+    /// the local backend, so it must beat an explicit prefix.
+    #[test]
+    #[serial_test::serial(dotenv_credential_env)]
+    fn resolve_provider_local_prefix_vetoed_when_disabled() {
+        crate::credentials::load_env_local_once();
+        let _guard = EnvVarGuard::remove("OPENROUTER_API_KEY");
+
+        match resolve_consolidation_provider("ollama/llama3.2", "", false) {
+            ConsolidationProvider::Unavailable { provider, reason } => {
+                assert_eq!(provider, "local");
+                assert!(
+                    reason.contains("local_model"),
+                    "reason should name the knob: {reason}"
+                );
+            }
+            other => panic!("a disabled local backend must not resolve: {other:?}"),
+        }
+    }
+
+    /// Why: a configured key still routes an unprefixed model to OpenRouter —
+    /// #5188 removes the local fallback, not the working path.
+    #[test]
+    fn resolve_provider_openrouter_when_key_present() {
+        match resolve_consolidation_provider("anthropic/claude-haiku-4-5", "sk-test-key", true) {
+            ConsolidationProvider::OpenRouter { api_key, model } => {
+                assert_eq!(api_key, "sk-test-key");
+                assert_eq!(model, "anthropic/claude-haiku-4-5");
+            }
+            other => panic!("a configured key must select OpenRouter: {other:?}"),
+        }
+    }
+
+    /// Why (#5188): `OLLAMA_HOST` is the workspace-wide override for a local
+    /// model server's address; consolidation hardcoded `localhost:11434` and
+    /// ignored it, so a remote Ollama could never be reached and no test could
+    /// point the client somewhere harmless.
+    #[test]
+    #[serial_test::serial(dotenv_credential_env)]
+    fn resolve_provider_local_honours_the_host_override() {
+        crate::credentials::load_env_local_once();
+        let _key = EnvVarGuard::remove("OPENROUTER_API_KEY");
+        let _host = EnvVarGuard::set(LOCAL_HOST_ENV, "http://192.0.2.1:9/");
+
+        match resolve_consolidation_provider("ollama/llama3.2", "", true) {
+            ConsolidationProvider::Local { base_url, .. } => {
+                assert_eq!(base_url, "http://192.0.2.1:9");
+            }
+            other => panic!("expected a local provider: {other:?}"),
+        }
+    }
+
+    // ─── #5188: a failed batch parks, it does not re-fire ─────────────────
+
+    /// An `Inference` backend that always errors, counting its calls.
+    ///
+    /// Why (#5188): the production failure was a crashed Ollama runner
+    /// answering HTTP 500. `MockInference` only ever succeeds, so nothing
+    /// covered what the consolidator does when a batch fails.
+    struct FailingInference {
+        call_count: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Inference for FailingInference {
+        fn name(&self) -> &str {
+            "failing"
+        }
+
+        async fn consolidate(
+            &self,
+            _drawers: &[Drawer],
+        ) -> anyhow::Result<Vec<ConsolidationAction>> {
+            self.call_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            anyhow::bail!("model runner has unexpectedly stopped")
+        }
+    }
+
+    /// Why (#5188): a crashed backend used to get `max_calls_per_cycle` (20)
+    /// attempts per dream cycle, each blocking until the 120 s request timeout
+    /// — the "retries the same batch every ~2 min" symptom. One failure now
+    /// parks the whole run; the next dream cycle is the retry.
+    /// What: three full batches of drawers against a backend that always
+    /// errors; asserts exactly one call was made.
+    #[tokio::test]
+    async fn consolidator_parks_after_first_failed_batch() {
+        let call_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let inference = Arc::new(FailingInference {
+            call_count: call_count.clone(),
+        });
+        let consolidator = SemanticConsolidator::new(
+            inference,
+            SemanticConsolidationConfig {
+                enabled: true,
+                max_batch_size: 2,
+                max_calls_per_cycle: 20,
+                ..SemanticConsolidationConfig::default()
+            },
+        );
+        let drawers: Vec<Drawer> = (0..6)
+            .map(|i| make_drawer(&format!("fact number {i}"), 0.5))
+            .collect();
+
+        let result = consolidator.consolidate(&drawers).await;
+
+        assert_eq!(
+            call_count.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "a failed batch must park the run, not march through the rest"
+        );
+        assert_eq!(result.llm_calls, 0, "a failed call produced no actions");
+        assert!(result.canonical_drawers.is_empty());
     }
 
     /// Why: dropping the `:tag` suffix removes the only signal that

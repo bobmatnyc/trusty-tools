@@ -31,6 +31,14 @@ struct UserConfigMin {
     openrouter: OpenRouterMin,
     #[serde(default)]
     local_model: LocalModelMin,
+    /// `[semantic_consolidation]` — the switch for the dream cycle's LLM phase.
+    /// Absent from the schema until #5188, so a `config.toml` asking for the
+    /// phase to be off was parsed and discarded while the phase ran anyway.
+    /// `[semantic]` is accepted as an alias: it matches `DreamConfig`'s field
+    /// name, so both spellings are in circulation and silently dropping either
+    /// one is the defect this table exists to fix.
+    #[serde(default, alias = "semantic")]
+    semantic_consolidation: SemanticConsolidationMin,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -41,9 +49,13 @@ struct OpenRouterMin {
     model: String,
 }
 
+/// `[local_model]` — a local OpenAI-compatible server (Ollama, LM Studio).
+///
+/// #5188: `enabled` now defaults to FALSE. It defaulted to true, which is how a
+/// daemon with no config file at all decided a local model was available.
 #[derive(Deserialize, Clone)]
 struct LocalModelMin {
-    #[serde(default = "default_local_enabled")]
+    #[serde(default)]
     enabled: bool,
     #[serde(default = "default_local_base_url")]
     base_url: String,
@@ -51,24 +63,35 @@ struct LocalModelMin {
     model: String,
 }
 
-fn default_local_enabled() -> bool {
-    true
+impl Default for LocalModelMin {
+    fn default() -> Self {
+        Self {
+            // #5188: opt-in, so an absent `[local_model]` table means "no".
+            enabled: false,
+            base_url: default_local_base_url(),
+            model: default_local_model(),
+        }
+    }
 }
+
+/// `[semantic_consolidation]` — the dream cycle's LLM phase (#5188).
+#[derive(Deserialize, Default, Clone)]
+struct SemanticConsolidationMin {
+    /// Defaults to false: the phase costs money and calls an external model,
+    /// so the file has to ask for it.
+    #[serde(default)]
+    enabled: bool,
+    /// Model id. Empty falls back to `[openrouter] model`. An `ollama/` or
+    /// `local/` prefix is the only thing that selects a local model server.
+    #[serde(default)]
+    model: String,
+}
+
 fn default_local_base_url() -> String {
     "http://localhost:11434".to_string()
 }
 fn default_local_model() -> String {
     "llama3.2".to_string()
-}
-
-impl Default for LocalModelMin {
-    fn default() -> Self {
-        Self {
-            enabled: default_local_enabled(),
-            base_url: default_local_base_url(),
-            model: default_local_model(),
-        }
-    }
 }
 
 /// Loaded user config (mirrors the public `LoadedUserConfig` from `web.rs`).
@@ -84,8 +107,74 @@ impl Default for LoadedUserConfig {
         Self {
             openrouter_api_key: String::new(),
             openrouter_model: "anthropic/claude-3-5-sonnet".to_string(),
-            local_model: trusty_common::LocalModelConfig::default(),
+            // #5188: NOT `LocalModelConfig::default()`, whose `enabled: true`
+            // is what let a daemon with no config file probe a local Ollama.
+            // trusty-search shares that struct, so the default stays as it is
+            // and trusty-memory states its own answer here.
+            local_model: trusty_common::LocalModelConfig {
+                enabled: false,
+                base_url: default_local_base_url(),
+                model: default_local_model(),
+            },
         }
+    }
+}
+
+/// Path of the user config file this module reads.
+///
+/// Why (#5188): `load_user_config` and `load_semantic_consolidation_config`
+/// project two different shapes out of the same file; one path expression
+/// keeps them from drifting apart.
+/// What: `~/.trusty-memory/config.toml`; `None` when the home directory
+/// cannot be resolved.
+fn user_config_path() -> Option<std::path::PathBuf> {
+    Some(dirs::home_dir()?.join(".trusty-memory").join("config.toml"))
+}
+
+/// Parse the whole config file into its minimal mirror.
+///
+/// Why (#5188): the single reader for `~/.trusty-memory/config.toml`. A
+/// malformed file yields defaults rather than an error, matching the
+/// pre-existing behaviour of `load_user_config` — the daemon starts either way.
+/// What: `None` when the home directory cannot be resolved or the file cannot
+/// be read; `Some(UserConfigMin::default())` when the file is absent or
+/// unparseable.
+fn read_user_config_min() -> Option<UserConfigMin> {
+    let path = user_config_path()?;
+    if !path.exists() {
+        return Some(UserConfigMin::default());
+    }
+    let raw = std::fs::read_to_string(&path).ok()?;
+    Some(toml::from_str(&raw).unwrap_or_default())
+}
+
+/// Read the `[semantic_consolidation]` table into a
+/// [`SemanticConsolidationConfig`].
+///
+/// Why (#5188): the dream cycle's LLM phase had no config key at all — the
+/// struct's `enabled` field was hardcoded true by `dream_config_from_user_config`
+/// and a `[semantic_consolidation]` block in the file was silently discarded.
+/// This is the key that turns the phase on.
+/// What: `enabled` and `model` come from the file; every other field keeps its
+/// [`SemanticConsolidationConfig::default`] value. An empty `model` is left
+/// empty for [`dream_config_from_user_config`] to fill from `[openrouter]`.
+/// Returns the all-default (disabled) config when the file is absent.
+/// Test: `semantic_consolidation_is_off_without_a_config_file`.
+pub fn load_semantic_consolidation_config() -> SemanticConsolidationConfig {
+    load_semantic_consolidation_config_from(&read_user_config_min().unwrap_or_default())
+}
+
+/// The pure projection behind [`load_semantic_consolidation_config`].
+///
+/// Why (#5188): separates "read the file" from "read the table" so a test can
+/// state its own input instead of asserting against the developer's real
+/// `~/.trusty-memory/config.toml`.
+/// Test: `semantic_consolidation_is_off_without_a_config_file`.
+fn load_semantic_consolidation_config_from(parsed: &UserConfigMin) -> SemanticConsolidationConfig {
+    SemanticConsolidationConfig {
+        enabled: parsed.semantic_consolidation.enabled,
+        model: parsed.semantic_consolidation.model.clone(),
+        ..SemanticConsolidationConfig::default()
     }
 }
 
@@ -98,13 +187,7 @@ impl Default for LoadedUserConfig {
 /// directory itself can't be resolved.
 /// Test: indirectly via `config_endpoint_returns_payload`.
 pub fn load_user_config() -> Option<LoadedUserConfig> {
-    let home = dirs::home_dir()?;
-    let path = home.join(".trusty-memory").join("config.toml");
-    if !path.exists() {
-        return Some(LoadedUserConfig::default());
-    }
-    let raw = std::fs::read_to_string(&path).ok()?;
-    let parsed: UserConfigMin = toml::from_str(&raw).unwrap_or_default();
+    let parsed = read_user_config_min()?;
     let model = if parsed.openrouter.model.is_empty() {
         "anthropic/claude-3-5-sonnet".to_string()
     } else {
@@ -121,58 +204,59 @@ pub fn load_user_config() -> Option<LoadedUserConfig> {
     })
 }
 
-/// Derive a `DreamConfig` seed from the user's loaded config (OpenRouter key,
-/// local-model flag, and local-model id).
+/// Derive a `DreamConfig` seed from the user's config file.
 ///
-/// Why (issue #2593): the idle dream scheduler and the on-demand
-/// `dream_consolidate_room`/`palace_dream` tools both need to translate
-/// `LoadedUserConfig` into `DreamConfig` identically, or the two paths
-/// silently diverge — the idle scheduler previously used
-/// `DreamConfig::default()` outright (ignoring the user's config.toml
-/// entirely), and the on-demand path forwarded the OpenRouter key and the
-/// local-model flag but dropped `local_model.model`, leaving
-/// `semantic.model` on the OpenRouter-style default even when consolidation
-/// resolved to a local Ollama backend — the exact misconfiguration
-/// `validate_ollama_model` now rejects. Centralising the derivation also
-/// pins the "which model string goes with which backend" decision: it
-/// mirrors `build_consolidator_from_config`'s own branch
-/// (`local_model_enabled && api_key.is_empty()` => Ollama) so the model
-/// forwarded here always matches the backend the dream cycle will actually
-/// select. The key-presence half of that branch is resolved via the SAME
-/// `trusty_common::memory_core::semantic_consolidation::resolve_openrouter_api_key`
-/// that `build_consolidator_from_config` itself calls — an earlier version
-/// of this function checked only `cfg.openrouter_api_key` (config.toml),
-/// which diverged from `build_consolidator_from_config`'s env-var-fallback
-/// resolution whenever `OPENROUTER_API_KEY` was set in the daemon's process
-/// environment but absent from config.toml: this function picked the
-/// local-model id while the consolidator built the OpenRouter backend,
-/// silently sending an Ollama tag to OpenRouter every cycle.
-/// What: sets `openrouter_api_key`, `local_model_enabled`, and
-/// `semantic.model` (the local-model id when the local path resolves, the
-/// OpenRouter model id otherwise); every other `DreamConfig` field keeps its
-/// default.
-/// Test: `dream_config_from_user_config_prefers_local_model_when_resolved`,
-/// `dream_config_from_user_config_prefers_openrouter_model_with_key`,
-/// `dream_config_from_user_config_prefers_openrouter_model_with_env_key`.
+/// Why (#2593): the idle dream scheduler and the on-demand
+/// `dream_consolidate_room`/`palace_dream` tools must translate the user's
+/// config into `DreamConfig` identically, or the two paths silently diverge —
+/// the idle scheduler once used `DreamConfig::default()` outright and never
+/// saw `config.toml` at all.
+///
+/// Why (#5188): the semantic phase's enable switch and model id now come from
+/// `[semantic_consolidation]` rather than being hardcoded. Two behaviours
+/// changed here. The phase is off unless the file says otherwise, and
+/// `[local_model] model` no longer leaks into `semantic.model`: forwarding it
+/// meant "no OpenRouter key" chose a local model server by itself, which is
+/// how an unconfigured daemon loaded a 45 GB model into a crash loop. A local
+/// server is now named explicitly — `model = "ollama/llama3.2"` — and
+/// `[local_model] enabled` only permits that choice.
+/// What: `semantic.enabled` and `semantic.model` come from
+/// [`load_semantic_consolidation_config`], with an empty model falling back to
+/// `[openrouter] model`. `openrouter_api_key` and `local_model_enabled` come
+/// from `cfg`. Every other `DreamConfig` field keeps its default.
+/// Test: `dream_config_is_off_and_names_no_local_model_by_default`,
+/// `dream_config_forwards_an_explicit_ollama_model`,
+/// `dream_config_from_user_config_prefers_openrouter_model_with_key`.
 pub fn dream_config_from_user_config(cfg: &LoadedUserConfig) -> DreamConfig {
-    let resolved_api_key =
-        trusty_common::memory_core::semantic_consolidation::resolve_openrouter_api_key(
-            &cfg.openrouter_api_key,
-        );
-    let resolves_local = cfg.local_model.enabled && resolved_api_key.is_empty();
-    let model = if resolves_local {
-        cfg.local_model.model.clone()
-    } else {
+    dream_config_from_parts(cfg, load_semantic_consolidation_config())
+}
+
+/// [`dream_config_from_user_config`] with the semantic section passed in.
+///
+/// Why (#5188): `load_semantic_consolidation_config` reads the developer's real
+/// `~/.trusty-memory/config.toml`, so a test driving the public wrapper asserts
+/// against whatever that machine happens to hold. Splitting the file read from
+/// the derivation lets the tests state their own input.
+/// What: pure — no file, no environment.
+/// Test: `dream_config_is_off_and_names_no_local_model_by_default`,
+/// `dream_config_forwards_an_explicit_ollama_model`.
+fn dream_config_from_parts(
+    cfg: &LoadedUserConfig,
+    semantic: SemanticConsolidationConfig,
+) -> DreamConfig {
+    // #5188: an empty `[semantic_consolidation] model` inherits the OpenRouter
+    // model id — never the local-model id, which would pick a local backend
+    // nobody asked for.
+    let model = if semantic.model.trim().is_empty() {
         cfg.openrouter_model.clone()
+    } else {
+        semantic.model.clone()
     };
 
     DreamConfig {
         openrouter_api_key: cfg.openrouter_api_key.clone(),
         local_model_enabled: cfg.local_model.enabled,
-        semantic: SemanticConsolidationConfig {
-            model,
-            ..SemanticConsolidationConfig::default()
-        },
+        semantic: SemanticConsolidationConfig { model, ..semantic },
         ..DreamConfig::default()
     }
 }
@@ -181,47 +265,140 @@ pub fn dream_config_from_user_config(cfg: &LoadedUserConfig) -> DreamConfig {
 mod tests {
     use super::*;
 
-    /// Why (issue #2593): the exact production gap — the idle scheduler and
-    /// the on-demand tool both need `local_model.model` to reach
-    /// `DreamConfig.semantic.model` when the local Ollama path is what will
-    /// actually resolve (local model enabled, no OpenRouter key ANYWHERE —
-    /// neither config.toml nor the real process environment; without the
-    /// `EnvVarGuard::remove` this test is order-dependent on whatever the
-    /// ambient shell happens to export, since `dream_config_from_user_config`
-    /// now resolves the env-var fallback too — code review follow-up on
-    /// #2977). `#[serial]` avoids racing other tests that read/write the
-    /// same real env var.
-    /// What: builds a `LoadedUserConfig` with a configured local model id and
-    /// no OpenRouter key; asserts the derived `DreamConfig.semantic.model`
-    /// equals the configured local model, not the OpenRouter-style default.
-    #[test]
-    #[serial_test::serial]
-    fn dream_config_from_user_config_prefers_local_model_when_resolved() {
-        let _guard = EnvVarGuard::remove("OPENROUTER_API_KEY");
-        let cfg = LoadedUserConfig {
+    fn openrouter_only_cfg() -> LoadedUserConfig {
+        LoadedUserConfig {
             openrouter_api_key: String::new(),
             openrouter_model: "anthropic/claude-3-5-sonnet".to_string(),
             local_model: trusty_common::LocalModelConfig {
-                enabled: true,
+                enabled: false,
                 base_url: "http://localhost:11434".to_string(),
                 model: "llama3.2".to_string(),
             },
-        };
-
-        let dream_cfg = dream_config_from_user_config(&cfg);
-
-        assert_eq!(dream_cfg.semantic.model, "llama3.2");
-        assert!(dream_cfg.local_model_enabled);
-        assert!(dream_cfg.openrouter_api_key.is_empty());
+        }
     }
 
-    /// Why: when an OpenRouter key is configured, consolidation resolves to
-    /// the OpenRouter backend regardless of `local_model.enabled` (mirrors
-    /// `build_consolidator_from_config`'s branch), so the OpenRouter model
-    /// id must be forwarded instead of the local-model id.
-    /// What: builds a `LoadedUserConfig` with both a local model AND an
-    /// OpenRouter key configured; asserts the derived `semantic.model` is
-    /// the OpenRouter model, not the local one.
+    /// Why (#5188): the reported repro — no `~/.trusty-memory/config.toml`, no
+    /// provider key — must produce a `DreamConfig` that cannot reach a local
+    /// model server. Before the fix this config had `semantic.enabled = true`,
+    /// `local_model_enabled = true`, and `semantic.model = "qwen3:30b"`, which
+    /// is exactly what drove a 45 GB model into a crash loop.
+    /// What: derives from the all-defaults user config and asserts the phase is
+    /// off, the local backend is not permitted, and no local model id was
+    /// forwarded.
+    #[test]
+    fn dream_config_is_off_and_names_no_local_model_by_default() {
+        let dream_cfg = dream_config_from_parts(
+            &LoadedUserConfig::default(),
+            load_semantic_consolidation_config_from(&UserConfigMin::default()),
+        );
+
+        assert!(
+            !dream_cfg.semantic.enabled,
+            "semantic consolidation must be off until a config key enables it"
+        );
+        assert!(
+            !dream_cfg.local_model_enabled,
+            "a local model server must not be permitted by default"
+        );
+        assert!(
+            !dream_cfg.semantic.model.starts_with("ollama/")
+                && !dream_cfg.semantic.model.starts_with("local/"),
+            "no local model id may be forwarded by default, got {:?}",
+            dream_cfg.semantic.model
+        );
+    }
+
+    /// Why (#5188): `LoadedUserConfig::default()` is what `load_user_config`
+    /// returns when the file is absent, so its `local_model.enabled` IS the
+    /// no-config-file answer.
+    #[test]
+    fn loaded_user_config_default_disables_the_local_model() {
+        assert!(!LoadedUserConfig::default().local_model.enabled);
+    }
+
+    /// Why (#5188): an absent `[local_model]` table must mean "no", not
+    /// "yes" — that default is how the daemon decided a local model existed.
+    #[test]
+    fn absent_local_model_table_parses_as_disabled() {
+        let parsed: UserConfigMin = toml::from_str("").expect("empty config parses");
+        assert!(!parsed.local_model.enabled);
+        assert!(!parsed.semantic_consolidation.enabled);
+    }
+
+    /// Why (#5188): the `[semantic_consolidation]` table was not in the schema
+    /// at all, so a file asking for the phase was — like a file asking against
+    /// it — silently discarded. Pins that both directions now parse.
+    #[test]
+    fn semantic_consolidation_table_is_read_from_the_file() {
+        let parsed: UserConfigMin = toml::from_str(
+            r#"
+[semantic_consolidation]
+enabled = true
+model = "ollama/llama3.2"
+"#,
+        )
+        .expect("config parses");
+        assert!(parsed.semantic_consolidation.enabled);
+        assert_eq!(parsed.semantic_consolidation.model, "ollama/llama3.2");
+    }
+
+    /// Why (#5188): `[semantic]` matches `DreamConfig`'s field name, so an
+    /// operator reading the struct writes that spelling. Accepting only
+    /// `[semantic_consolidation]` would drop it silently — the same failure
+    /// this table was added to fix.
+    #[test]
+    fn semantic_table_alias_is_accepted() {
+        let parsed: UserConfigMin = toml::from_str(
+            r#"
+[semantic]
+enabled = true
+"#,
+        )
+        .expect("config parses");
+        assert!(parsed.semantic_consolidation.enabled);
+    }
+
+    /// Why (#5188): a local model server is reachable only when the operator
+    /// names it. Pins that the explicit `ollama/` id survives the derivation
+    /// verbatim — the prefix is what `resolve_consolidation_provider` reads.
+    #[test]
+    fn dream_config_forwards_an_explicit_ollama_model() {
+        let mut cfg = openrouter_only_cfg();
+        cfg.local_model.enabled = true;
+        let semantic = SemanticConsolidationConfig {
+            enabled: true,
+            model: "ollama/llama3.2".to_string(),
+            ..SemanticConsolidationConfig::default()
+        };
+
+        let dream_cfg = dream_config_from_parts(&cfg, semantic);
+
+        assert!(dream_cfg.semantic.enabled);
+        assert_eq!(dream_cfg.semantic.model, "ollama/llama3.2");
+        assert!(dream_cfg.local_model_enabled);
+    }
+
+    /// Why (#5188): with the phase enabled but no model named, the id must come
+    /// from `[openrouter]` — never from `[local_model]`, which is how "no key"
+    /// used to select a local backend on its own.
+    #[test]
+    fn empty_semantic_model_inherits_the_openrouter_model_not_the_local_one() {
+        let mut cfg = openrouter_only_cfg();
+        cfg.local_model.enabled = true;
+        cfg.local_model.model = "qwen3:30b".to_string();
+        let semantic = SemanticConsolidationConfig {
+            enabled: true,
+            model: String::new(),
+            ..SemanticConsolidationConfig::default()
+        };
+
+        let dream_cfg = dream_config_from_parts(&cfg, semantic);
+
+        assert_eq!(dream_cfg.semantic.model, "anthropic/claude-3-5-sonnet");
+    }
+
+    /// Why: an OpenRouter key configured in the file must reach `DreamConfig`
+    /// so the consolidator can build the OpenRouter backend.
     #[test]
     fn dream_config_from_user_config_prefers_openrouter_model_with_key() {
         let cfg = LoadedUserConfig {
@@ -233,84 +410,27 @@ mod tests {
                 model: "llama3.2".to_string(),
             },
         };
+        let semantic = SemanticConsolidationConfig {
+            enabled: true,
+            // No `[semantic_consolidation] model`, so `[openrouter] model` fills in.
+            model: String::new(),
+            ..SemanticConsolidationConfig::default()
+        };
 
-        let dream_cfg = dream_config_from_user_config(&cfg);
+        let dream_cfg = dream_config_from_parts(&cfg, semantic);
 
         assert_eq!(dream_cfg.semantic.model, "anthropic/claude-3-5-sonnet");
         assert_eq!(dream_cfg.openrouter_api_key, "sk-test-key");
     }
 
-    /// Why (code review follow-up on #2977): `config.toml` may have no
-    /// OpenRouter key while the daemon's process environment carries
-    /// `OPENROUTER_API_KEY` — `build_consolidator_from_config` (trusty-common)
-    /// resolves that env-var fallback before choosing a backend, so this
-    /// helper must resolve it identically or it picks the local-model id
-    /// while the consolidator builds the OpenRouter backend, silently
-    /// sending an Ollama tag to OpenRouter every cycle. `#[serial]` +
-    /// `EnvVarGuard` (mirroring the pattern in
-    /// `trusty_common::memory_core::dream::tests`) avoid racing other tests
-    /// that read/write the same real env var.
-    /// What: empty `openrouter_api_key` in config, `OPENROUTER_API_KEY` set
-    /// in the real environment; asserts the OpenRouter model is chosen, not
-    /// the local one.
+    /// Why (#5188): `load_semantic_consolidation_config` reads the developer's
+    /// real config file, so the hermetic half of its contract — "an absent or
+    /// empty file yields a disabled phase" — is asserted through the same
+    /// projection with a stated input.
     #[test]
-    #[serial_test::serial]
-    fn dream_config_from_user_config_prefers_openrouter_model_with_env_key() {
-        let _guard = EnvVarGuard::set("OPENROUTER_API_KEY", "sk-from-env");
-
-        let cfg = LoadedUserConfig {
-            openrouter_api_key: String::new(),
-            openrouter_model: "anthropic/claude-3-5-sonnet".to_string(),
-            local_model: trusty_common::LocalModelConfig {
-                enabled: true,
-                base_url: "http://localhost:11434".to_string(),
-                model: "llama3.2".to_string(),
-            },
-        };
-
-        let dream_cfg = dream_config_from_user_config(&cfg);
-
-        assert_eq!(
-            dream_cfg.semantic.model, "anthropic/claude-3-5-sonnet",
-            "an env-supplied OpenRouter key must resolve the OpenRouter \
-             model, not the local one, even though config.toml has no key"
-        );
-    }
-
-    // ─── RAII env-var guard for tests (mirrors
-    // trusty_common::memory_core::dream::tests::EnvVarGuard) ───────────────
-    //
-    // Safety: test-only; `#[serial_test::serial]` on every caller serialises
-    // access to the real process environment across test threads.
-
-    struct EnvVarGuard {
-        key: &'static str,
-        previous: Option<String>,
-    }
-
-    impl EnvVarGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let previous = std::env::var(key).ok();
-            // Safety: test-only; caller is `#[serial]`.
-            unsafe { std::env::set_var(key, value) };
-            Self { key, previous }
-        }
-
-        fn remove(key: &'static str) -> Self {
-            let previous = std::env::var(key).ok();
-            // Safety: test-only; caller is `#[serial]`.
-            unsafe { std::env::remove_var(key) };
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            // Safety: test-only; caller is `#[serial]`.
-            match &self.previous {
-                Some(v) => unsafe { std::env::set_var(self.key, v) },
-                None => unsafe { std::env::remove_var(self.key) },
-            }
-        }
+    fn semantic_consolidation_is_off_without_a_config_file() {
+        let cfg = load_semantic_consolidation_config_from(&UserConfigMin::default());
+        assert!(!cfg.enabled);
+        assert!(cfg.model.is_empty());
     }
 }

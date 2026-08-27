@@ -17,7 +17,7 @@ use crate::memory_core::decay::DecayConfig;
 use crate::memory_core::palace::{Drawer, RoomType};
 use crate::memory_core::retrieval::{PalaceHandle, shared_embedder};
 use crate::memory_core::semantic_consolidation::{
-    SemanticConsolidator, inference_available, resolve_openrouter_api_key, validate_ollama_model,
+    SemanticConsolidator, resolve_consolidation_provider, validate_ollama_model,
 };
 use crate::memory_core::store::vector::VectorStore;
 use crate::memory_core::timeouts;
@@ -343,51 +343,59 @@ pub struct RoomConsolidationStats {
     pub facts_evicted: usize,
 }
 
-/// Build the production semantic consolidator from config, gating on inference
-/// availability and validating the model against the resolved provider.
+/// Build the production semantic consolidator from config, resolving the
+/// provider and validating the model against it.
 ///
 /// Why: both the idle dream pass and the on-demand room consolidation need the
-/// identical "is inference configured? then build a backend" logic; sharing it
-/// keeps the gate in one place. It is also the single place that validates the
-/// configured model against the resolved provider (issue #2593), so a
-/// misconfigured Ollama model id is caught before the first of many doomed
-/// network calls rather than retried every cycle.
-/// What: returns `Ok(None)` when `config.semantic` is disabled or no inference
-/// backend is available (a legitimate, silent no-op); returns `Err` with an
-/// actionable message when the resolved backend is Ollama and
-/// `config.semantic.model` cannot resolve there (see `validate_ollama_model`);
-/// otherwise builds an `OllamaInference` (when a local model is enabled and no
-/// key is set) or `OpenRouterInference` and wraps it in a
-/// `SemanticConsolidator`.
-/// Test: exercised via `dream_cycle_semantic_consolidation_no_inference`
-/// (`Ok(None)` path), `dream_cycle_semantic_consolidation_invalid_model_disables_once`
-/// (`Err` path), and the production daemon; the env-tier read itself is pinned
-/// by `dream::tests::dedup_only_config_ignores_an_ambient_openrouter_key`.
+/// identical "which backend, if any?" logic; sharing it keeps the decision in
+/// one place. It is also where the model is validated against the resolved
+/// provider (#2593), so a model id that cannot work is caught before the first
+/// of many doomed network calls.
+/// What: returns `Ok(None)` — a silent, per-cycle no-op — only when
+/// `config.semantic.enabled` is false, which is the default (#5188). When the
+/// phase IS enabled, [`resolve_consolidation_provider`] picks the backend from
+/// the model id: an `ollama/`/`local/` prefix builds an `OllamaInference`
+/// against the resolved local host, any other id builds an
+/// `OpenRouterInference` from the resolved key, and no usable provider returns
+/// `Err` naming the provider and what is missing. `Err` is also what a
+/// local model id that Ollama cannot serve produces (`validate_ollama_model`).
+/// Both `Err` cases mean "enabled but unusable": the caller logs once and
+/// parks, rather than retrying a config that cannot change under it.
+/// Test: `dream_cycle_semantic_consolidation_disabled_by_default_builds_nothing`
+/// (`Ok(None)` path), `dream_semantic_no_provider_parks_without_local_fallback`
+/// and `dream_cycle_semantic_consolidation_invalid_model_disables_once`
+/// (`Err` paths); the env-tier read is pinned by
+/// `dream::tests::dedup_only_config_ignores_an_ambient_openrouter_key`.
 ///
-/// `pub(super)` only so that last test can call it directly — reaching it
-/// through `dream_cycle` cannot distinguish "no backend was built" from "a
-/// backend was built and its network call failed", which is the whole
-/// distinction that test exists to pin. Still private to `dream`.
+/// `pub(super)` only so those tests can call it directly — reaching it through
+/// `dream_cycle` cannot distinguish "no backend was built" from "a backend was
+/// built and its network call failed", which is the whole distinction they
+/// exist to pin. Still private to `dream`.
 pub(super) fn build_consolidator_from_config(
     config: &DreamConfig,
 ) -> Result<Option<Arc<SemanticConsolidator>>> {
     if !config.semantic.enabled {
         return Ok(None);
     }
-    let api_key = resolve_openrouter_api_key(&config.openrouter_api_key);
-    if !inference_available(&api_key, config.local_model_enabled) {
-        return Ok(None);
-    }
-    use crate::memory_core::semantic_consolidation::{OllamaInference, OpenRouterInference};
+    use crate::memory_core::semantic_consolidation::{
+        ConsolidationProvider, OllamaInference, OpenRouterInference,
+    };
+    // #5188: the model id selects the backend — a local endpoint is never a
+    // fallback for a missing key.
     let backend: Arc<dyn crate::memory_core::semantic_consolidation::Inference> =
-        if config.local_model_enabled && api_key.is_empty() {
-            validate_ollama_model(&config.semantic.model)?;
-            Arc::new(OllamaInference::new(
-                "http://localhost:11434",
-                &config.semantic.model,
-            ))
-        } else {
-            Arc::new(OpenRouterInference::new(api_key, &config.semantic.model))
+        match resolve_consolidation_provider(
+            &config.semantic.model,
+            &config.openrouter_api_key,
+            config.local_model_enabled,
+        ) {
+            ConsolidationProvider::Local { base_url, model } => {
+                validate_ollama_model(&model)?;
+                Arc::new(OllamaInference::new(base_url, model))
+            }
+            ConsolidationProvider::OpenRouter { api_key, model } => {
+                Arc::new(OpenRouterInference::new(api_key, model))
+            }
+            ConsolidationProvider::Unavailable { reason, .. } => anyhow::bail!(reason),
         };
     Ok(Some(Arc::new(SemanticConsolidator::new(
         backend,
@@ -555,20 +563,20 @@ async fn apply_alias_and_flag_passes(
 /// near-duplicate triples expressed differently). This phase delegates
 /// canonicalization to a cheap LLM, preserving original drawers and adding
 /// canonical replacements with `superseded_by` links in the KG.
-/// What: gates on `inference_available`; when false logs at DEBUG and
-/// returns `(0, 0, 0)` immediately. When true (or when a consolidator is
-/// injected via `Dreamer::with_consolidator`), runs consolidation on all
-/// current non-Task drawers, writes each canonical drawer via `handle.remember`,
-/// and records the `superseded_by` KG triple so the original drawers are
-/// traceable. Additive-only — originals are preserved. When
-/// `build_consolidator_from_config` reports a misconfigured model/provider
-/// combination (issue #2593), logs ONE loud `error!` naming the model, the
-/// provider, and the config knob to fix, sets `disabled`, and returns
-/// `(0, 0, 0)`; every subsequent call with the same `disabled` flag short-
-/// circuits before rebuilding or retrying, instead of failing every cycle.
+/// What: returns `(0, 0, 0)` at DEBUG when `semantic.enabled` is false, which
+/// is the default (#5188). Otherwise runs consolidation on all current non-Task
+/// drawers, writes each canonical drawer via `handle.remember`, and records the
+/// `superseded_by` KG triple so the original drawers are traceable.
+/// Additive-only — originals are preserved. When
+/// `build_consolidator_from_config` reports the phase as enabled but unusable —
+/// no provider resolved (#5188) or a model the resolved provider cannot serve
+/// (#2593) — logs ONE `warn!` naming the model, the provider, and the config
+/// knob to fix, sets `disabled`, and returns `(0, 0, 0)`; every subsequent call
+/// short-circuits on that flag instead of rebuilding and failing every cycle.
 /// Returns `(canonical_count, llm_calls, cache_hits)`.
 /// Test: `dream_cycle_semantic_consolidation_with_mock` (injected
 /// consolidator); `dream_cycle_semantic_consolidation_no_inference`;
+/// `dream_semantic_no_provider_parks_without_local_fallback`;
 /// `dream_cycle_semantic_consolidation_invalid_model_disables_once`.
 pub(super) async fn semantic_consolidation_pass(
     handle: &Arc<PalaceHandle>,
@@ -602,12 +610,14 @@ pub(super) async fn semantic_consolidation_pass(
                 Ok(None) => {
                     tracing::debug!(
                         palace = %handle.id,
-                        "skipping semantic consolidation: disabled or inference unavailable"
+                        "skipping semantic consolidation: disabled in config"
                     );
                     return (0, 0, 0);
                 }
                 Err(e) => {
-                    tracing::error!(
+                    // #5188: one warn, then park — never a per-cycle retry of a
+                    // config that cannot change while the daemon runs.
+                    tracing::warn!(
                         palace = %handle.id,
                         model = %config.semantic.model,
                         "semantic consolidation disabled for this palace: {e:#}"

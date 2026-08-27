@@ -30,6 +30,15 @@ fn dream_config_defaults() {
         cfg.recall_benchmark_enabled,
         "recall benchmark is enabled by default"
     );
+    // #5188: both halves of "never reach a model nobody configured".
+    assert!(
+        !cfg.semantic.enabled,
+        "semantic consolidation must default OFF"
+    );
+    assert!(
+        !cfg.local_model_enabled,
+        "a local model server must not be permitted by default"
+    );
 }
 
 /// Why: `touch` must reset the idle clock; with `idle_secs=0` `is_idle`
@@ -848,12 +857,15 @@ async fn dream_cycle_semantic_consolidation_no_inference() {
     );
 }
 
-/// Why (issue #2593): the exact production failure — default config
-/// (`local_model_enabled = true`, no OpenRouter key, `semantic.model =
-/// "anthropic/claude-haiku-4-5"`) — must be caught once and disable the
-/// phase for this `Dreamer`'s lifetime instead of retrying every cycle.
-/// What: Runs `dream_cycle` twice with no injected consolidator and
-/// `DreamConfig::default()`. Asserts both cycles report zero semantic work,
+/// Why (issue #2593): a cloud model id pointed at a local model server must
+/// be caught once and disable the phase for this `Dreamer`'s lifetime instead
+/// of being retried every cycle. #5188 changed how that config is spelled —
+/// the local backend is now requested by an `ollama/` prefix rather than
+/// inferred from a missing key — so the id under test is
+/// `ollama/anthropic/claude-haiku-4-5`: an explicit local request naming a
+/// model Ollama cannot serve.
+/// What: Runs `dream_cycle` twice with no injected consolidator.
+/// Asserts both cycles report zero semantic work,
 /// `Dreamer::is_semantic_consolidation_disabled()` is `true` after the first
 /// cycle, and it stays `true` (no reset) after the second — proving the
 /// second cycle short-circuited before rebuilding/retrying the backend.
@@ -874,10 +886,19 @@ async fn dream_cycle_semantic_consolidation_invalid_model_disables_once() {
         .await
         .unwrap();
 
-    // Deliberately the real default: this test is ABOUT the semantic phase's
-    // validation path, so it must keep `semantic.enabled = true` and rely on
-    // `EnvVarGuard::remove` above for its hermeticity.
-    let dreamer = Dreamer::new(DreamConfig::default());
+    // This test is ABOUT the model-validation path, so it must get past the
+    // #5188 gates: the phase enabled, the local backend permitted, and the
+    // model explicitly asking for that backend.
+    let dreamer = Dreamer::new(DreamConfig {
+        semantic: crate::memory_core::semantic_consolidation::SemanticConsolidationConfig {
+            enabled: true,
+            model: "ollama/anthropic/claude-haiku-4-5".to_string(),
+            ..Default::default()
+        },
+        local_model_enabled: true,
+        openrouter_api_key: String::new(),
+        ..DreamConfig::default()
+    });
     assert!(!dreamer.is_semantic_consolidation_disabled());
 
     let stats1 = dreamer.dream_cycle(&handle).await.unwrap();
@@ -910,21 +931,25 @@ async fn dream_cycle_semantic_consolidation_invalid_model_disables_once() {
     );
 }
 
-/// Why (issue #2593): a correctly-configured local model (a bare Ollama tag,
-/// no OpenRouter/cloud vendor prefix) must pass validation and NOT trip the
-/// disable flag — only the specific cloud-vendor-prefix mismatch should.
-/// What: Sets `semantic.model = "llama3.1"` with the local-model path
-/// enabled. The actual HTTP call still fails in this sandboxed test
-/// environment (no live Ollama server), which `SemanticConsolidator`
-/// already handles gracefully (counts the call, returns no actions) — the
-/// assertion here is specifically that `is_semantic_consolidation_disabled()`
-/// stays `false`, proving the model passed validation and normal operation
-/// (build + attempt) proceeded unchanged.
+/// Why (issue #2593): a correctly-configured local model must pass validation
+/// and NOT trip the disable flag — only the cloud-vendor-prefix mismatch
+/// should. #5188 adds the `ollama/` prefix as the way to request that backend.
+/// What: Sets `semantic.model = "ollama/llama3.1"` with the local backend
+/// permitted, and points `OLLAMA_HOST` at a closed loopback port so the run
+/// gets an immediate connection refusal instead of reaching whatever the
+/// developer has listening on 11434. `SemanticConsolidator` handles the failed
+/// call gracefully; the assertion here is that
+/// `is_semantic_consolidation_disabled()` stays `false`, proving the model
+/// passed validation and the normal build-and-attempt path ran.
 /// Test: This test itself.
 #[tokio::test]
 #[serial(dotenv_credential_env)]
 async fn dream_cycle_semantic_consolidation_valid_local_model_not_disabled() {
     let _guard = EnvVarGuard::remove("OPENROUTER_API_KEY");
+    let _host = EnvVarGuard::set(
+        crate::memory_core::semantic_consolidation::LOCAL_HOST_ENV,
+        &format!("http://127.0.0.1:{}", closed_loopback_port()),
+    );
 
     let handle = open_test_handle("dream-semantic-valid-local-model").await;
     handle
@@ -940,7 +965,7 @@ async fn dream_cycle_semantic_consolidation_valid_local_model_not_disabled() {
     let dreamer = Dreamer::new(DreamConfig {
         semantic: crate::memory_core::semantic_consolidation::SemanticConsolidationConfig {
             enabled: true,
-            model: "llama3.1".to_string(),
+            model: "ollama/llama3.1".to_string(),
             ..Default::default()
         },
         local_model_enabled: true,
@@ -953,6 +978,140 @@ async fn dream_cycle_semantic_consolidation_valid_local_model_not_disabled() {
     assert!(
         !dreamer.is_semantic_consolidation_disabled(),
         "a valid local model id must pass validation and not disable the phase"
+    );
+}
+
+/// A loopback TCP port with nothing listening on it.
+///
+/// Why (#5188): tests that must NOT reach a live Ollama need an address that
+/// refuses instantly rather than one that hangs until a connect timeout.
+/// Binding then dropping a listener yields a port the OS just confirmed free.
+/// What: `0` asks the OS to choose; the listener is dropped before returning,
+/// so a later connect gets ECONNREFUSED.
+/// Test: used by `dream_cycle_semantic_consolidation_valid_local_model_not_disabled`.
+fn closed_loopback_port() -> u16 {
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral loopback port");
+    let port = listener
+        .local_addr()
+        .expect("ephemeral listener has an address")
+        .port();
+    drop(listener);
+    port
+}
+
+/// Why (#5188): the reported repro, asserted at the socket. A daemon with the
+/// semantic phase enabled and NO usable provider must open zero connections to
+/// a local model server, and must park after saying so once — it used to build
+/// an Ollama client against `http://localhost:11434` and drive a 45 GB model
+/// into a crash loop that re-fired every ~2 minutes.
+///
+/// What: binds a listener, points `OLLAMA_HOST` at it, and runs two dream
+/// cycles with `semantic.enabled = true`, no OpenRouter key anywhere, the local
+/// backend permitted, and `model = "llama3.2"` — a bare Ollama tag, which is
+/// what an operator's `[local_model] model` used to become. Asserts the phase
+/// disabled itself after the FIRST cycle — so the single warn is logged once
+/// and the second cycle short-circuits — and that the listener's accept queue
+/// is empty, which is only true if no connection was ever completed.
+///
+/// The bare tag matters: `"anthropic/claude-haiku-4-5"` would be rejected by
+/// `validate_ollama_model` (#2593) before any client was built, so the test
+/// would pass against pre-fix code for the wrong reason. `"llama3.2"` passes
+/// that validator, so only the #5188 change stops it.
+///
+/// Pre-fix this failed on the disable assertion: an unprefixed model with no
+/// key built an `OllamaInference` against the hardcoded `localhost:11434` and
+/// the phase stayed enabled.
+/// Test: This test itself.
+#[tokio::test]
+#[serial(dotenv_credential_env)]
+async fn dream_semantic_no_provider_parks_without_local_fallback() {
+    crate::credentials::load_env_local_once();
+    let _key = EnvVarGuard::remove("OPENROUTER_API_KEY");
+
+    // A real listener, so a fallback would COMPLETE its connect and be counted
+    // rather than failing at the TCP layer and looking like the fix working.
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral loopback port");
+    let addr = listener.local_addr().expect("listener has an address");
+    listener
+        .set_nonblocking(true)
+        .expect("listener can be polled without blocking");
+    let _host = EnvVarGuard::set(
+        crate::memory_core::semantic_consolidation::LOCAL_HOST_ENV,
+        &format!("http://{addr}"),
+    );
+
+    let handle = open_test_handle("dream-semantic-no-provider").await;
+    handle
+        .remember(
+            "a memory the semantic phase must not send anywhere".into(),
+            RoomType::General,
+            vec![],
+            0.5,
+        )
+        .await
+        .unwrap();
+
+    let dreamer = Dreamer::new(DreamConfig {
+        semantic: crate::memory_core::semantic_consolidation::SemanticConsolidationConfig {
+            enabled: true,
+            model: "llama3.2".to_string(),
+            ..Default::default()
+        },
+        // Permitted, but never selected: the model id carries no `ollama/`
+        // prefix, so there is nothing asking for the local backend.
+        local_model_enabled: true,
+        openrouter_api_key: String::new(),
+        ..DreamConfig::default()
+    });
+
+    let stats1 = dreamer.dream_cycle(&handle).await.unwrap();
+    assert_eq!(stats1.semantic_llm_calls, 0, "no provider, no LLM calls");
+    assert!(
+        dreamer.is_semantic_consolidation_disabled(),
+        "an unusable provider must warn once and park, not retry every cycle"
+    );
+
+    let stats2 = dreamer.dream_cycle(&handle).await.unwrap();
+    assert_eq!(stats2.semantic_llm_calls, 0);
+    assert!(dreamer.is_semantic_consolidation_disabled());
+
+    match listener.accept() {
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+        Ok((_, peer)) => panic!(
+            "semantic consolidation opened a connection to the local model \
+             endpoint from {peer} — the #5188 fallback is back"
+        ),
+        Err(e) => panic!("unexpected accept error: {e}"),
+    }
+
+    assert_eq!(
+        handle.drawers.read().len(),
+        1,
+        "drawer must survive untouched"
+    );
+}
+
+/// Why (#5188): the fresh-daemon case — no config file, so every default
+/// applies. `build_consolidator_from_config` must return `Ok(None)`, which is
+/// the structural guarantee that no inference client of any kind is
+/// constructed and so no endpoint can be contacted.
+/// What: asserts `Ok(None)` for `DreamConfig::default()` with no key in the
+/// environment. Pre-fix this returned `Ok(Some(_))` wrapping an
+/// `OllamaInference`.
+/// Test: This test itself.
+#[test]
+#[serial(dotenv_credential_env)]
+fn dream_cycle_semantic_consolidation_disabled_by_default_builds_nothing() {
+    crate::credentials::load_env_local_once();
+    let _guard = EnvVarGuard::remove("OPENROUTER_API_KEY");
+
+    assert!(
+        super::cycle::build_consolidator_from_config(&DreamConfig::default())
+            .expect("a disabled semantic phase is not an error")
+            .is_none(),
+        "an unconfigured daemon must build no inference backend at all"
     );
 }
 
@@ -1583,13 +1742,12 @@ async fn consolidate_scoped_skips_task_drawers() {
 }
 
 /// Why: when no inference backend is configured the tool must no-op cleanly.
-/// What: with the OpenRouter env key removed, the local-model path explicitly
-/// disabled, and no injected consolidator, `consolidate_scoped` returns zero
-/// counts without error. `local_model_enabled: false` is set explicitly here
-/// (issue #2593): `DreamConfig::default()` alone is no longer "no inference"
-/// — its default model/provider combination is exactly the misconfiguration
-/// this issue fixes, so it now returns `Err` (see
-/// `consolidate_scoped_invalid_model_returns_err`) instead of a silent no-op.
+/// What: with the OpenRouter env key removed and no injected consolidator,
+/// `consolidate_scoped` returns zero counts without error. Since #5188 the
+/// silence comes from `semantic.enabled` defaulting to false, so this is now
+/// the fresh-daemon path rather than a special case; `local_model_enabled:
+/// false` is kept explicit to state that the local backend is not permitted
+/// either.
 /// Test: this function.
 #[tokio::test]
 #[serial(dotenv_credential_env)]
@@ -1614,10 +1772,11 @@ async fn consolidate_scoped_no_inference_is_noop() {
 /// surface a misconfigured model/provider combination to the caller as an
 /// error rather than silently no-op'ing (it's a single user-triggered call,
 /// not a recurring background job, so there is nothing to "disable").
-/// What: `DreamConfig::default()` — local-model path enabled, no OpenRouter
-/// key, default OpenRouter-style model id — is exactly the #2593
-/// misconfiguration. Asserts `consolidate_scoped` returns `Err` naming both
-/// the model and Ollama.
+/// What: the phase enabled, the local backend permitted, and
+/// `ollama/anthropic/claude-haiku-4-5` — an explicit local request naming a
+/// model Ollama cannot serve (the #2593 misconfiguration, spelled the #5188
+/// way). Asserts `consolidate_scoped` returns `Err` naming both the model and
+/// Ollama.
 #[tokio::test]
 #[serial(dotenv_credential_env)]
 async fn consolidate_scoped_invalid_model_returns_err() {
@@ -1627,7 +1786,16 @@ async fn consolidate_scoped_invalid_model_returns_err() {
         .remember("some aged fact".into(), RoomType::Backend, vec![], 0.5)
         .await
         .unwrap();
-    let err = consolidate_scoped(&handle, &DreamConfig::default(), None, 7, None)
+    let cfg = DreamConfig {
+        semantic: crate::memory_core::semantic_consolidation::SemanticConsolidationConfig {
+            enabled: true,
+            model: "ollama/anthropic/claude-haiku-4-5".to_string(),
+            ..Default::default()
+        },
+        local_model_enabled: true,
+        ..DreamConfig::default()
+    };
+    let err = consolidate_scoped(&handle, &cfg, None, 7, None)
         .await
         .unwrap_err();
     let msg = format!("{err:#}");
@@ -1794,9 +1962,11 @@ async fn apply_consolidation_result_keeps_original_when_kg_write_fails() {
 /// the intermittency behind `dream_cycle_merges_duplicates` and
 /// `dream_cycle_compression_ratio_nonzero_after_dedup`.
 /// What: with a fixture key in the environment, asserts the dedup-only config
-/// builds NO backend while the default config builds one. Constructing a
-/// backend issues no request, so this reaches no network and needs no real
-/// credential.
+/// builds NO backend while an otherwise-identical config with the semantic
+/// phase switched on builds one. Constructing a backend issues no request, so
+/// this reaches no network and needs no real credential. Since #5188 the
+/// second half must enable the phase explicitly — `DreamConfig::default()` no
+/// longer builds anything, which would have made this assertion vacuous.
 /// Test: itself.
 #[test]
 #[serial(dotenv_credential_env)]
@@ -1811,12 +1981,19 @@ fn dedup_only_config_ignores_an_ambient_openrouter_key() {
          key is never read and no LLM call can be issued"
     );
 
+    let semantic_on = DreamConfig {
+        semantic: crate::memory_core::semantic_consolidation::SemanticConsolidationConfig {
+            enabled: true,
+            ..Default::default()
+        },
+        ..DreamConfig::default()
+    };
     assert!(
-        super::cycle::build_consolidator_from_config(&DreamConfig::default())
+        super::cycle::build_consolidator_from_config(&semantic_on)
             .expect("a resolvable cloud key passes model validation")
             .is_some(),
-        "default config turns an ambient OPENROUTER_API_KEY into a live \
-         backend — the behaviour the dedup tests used to inherit by accident"
+        "an enabled semantic phase turns an ambient OPENROUTER_API_KEY into a \
+         live backend — the behaviour the dedup tests used to inherit by accident"
     );
 }
 
