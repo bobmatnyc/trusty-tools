@@ -73,7 +73,7 @@ use crate::manifest::AuditManifest;
 use crate::progress::{Operation, Progress, StageEvent, StageState, UnitOutcome};
 use crate::registry;
 use crate::relay::Scrubber;
-use crate::workdir::{Area, WorkDir};
+use crate::workdir::{self, Area, WorkDir};
 
 // #5823: the selection file crossed run.rs past the 500-SLOC production cap, and
 // it is the one concern here with producers outside this crate. Re-exported, so
@@ -443,6 +443,14 @@ where
     // does not depend on a record another repository's child rewrote meanwhile.
     let plan = checkpoint::plan(work, &selected, options.fresh)?;
 
+    // #6137: one log directory per launch, created before the first child and
+    // named so that nothing an earlier run wrote can be truncated by this one.
+    // The prune runs here rather than at the end because a sweep that dies
+    // never reaches an end, and retention that only holds for clean exits is
+    // not retention.
+    let session_logs = work.create_session_logs()?;
+    work.prune_session_logs(workdir::SESSION_LOG_RETENTION);
+
     // #5823: the operation is announced only once the refusals above are past,
     // so a display never opens on a sweep that is not going to run.
     let total = selected.len();
@@ -472,6 +480,7 @@ where
                     progress,
                     total,
                     &scrubber,
+                    &session_logs,
                 )
                 .await?
             }
@@ -627,6 +636,7 @@ async fn run_one(
     progress: &Progress,
     total: usize,
     scrubber: &Scrubber,
+    session_logs: &Path,
 ) -> Result<RepoRun, AuditError> {
     // #6080: the run index states how long each repository took. Started before
     // the checkout check rather than around the child alone, so the figure is
@@ -635,7 +645,9 @@ async fn run_one(
     let started = std::time::Instant::now();
     let stem = stem(index, &repo.name);
     let output = work.path(Area::Output).join(&stem);
-    let log = work.path(Area::Logs).join(format!("{stem}.log"));
+    // #6137: into this launch's own log directory, not straight into `logs/`
+    // where the next run's `File::create` would truncate it.
+    let log = session_logs.join(format!("{stem}.log"));
     let checkout = absolute_checkout(work, &repo.path);
     progress.unit_started(Operation::Sweep, repo.name.as_str(), index + 1, total);
 
@@ -1188,8 +1200,18 @@ trusty-review = "0.15.1"
         assert!(index.contains("Reports: 1 of 2 repositories"), "{index}");
         assert!(index.contains("### acme-web"), "{index}");
         assert!(index.contains("No report — `tga audit` exited"), "{index}");
+        // #6137: the link walks into the session directory this launch made, so
+        // the assertion names the log relative to `logs/` rather than the
+        // whole path — the session name is a timestamp this test cannot know.
+        let linked = report.repos[1]
+            .log
+            .strip_prefix(work.root())
+            .expect("the log stays under the root")
+            .display()
+            .to_string();
+        assert!(linked.ends_with("01-acme-web.log"), "{linked}");
         assert!(
-            index.contains("[../logs/01-acme-web.log](../logs/01-acme-web.log)"),
+            index.contains(&format!("[../{linked}](../{linked})")),
             "the failed repository's log must be linked: {index}"
         );
     }
@@ -3060,6 +3082,88 @@ trusty-review = "0.15.1"
             "`--fresh` must run the child again"
         );
         assert_eq!(report.resumed().count(), 0);
+    }
+
+    /// Why (#6137): every child log went to `logs/<NN>-<repo>.log`, and
+    /// `File::create` truncates — so the second run over an engagement
+    /// destroyed the first's record before it had produced anything to replace
+    /// it. An operator comparing a failing run against the one that worked had
+    /// nothing left to compare, and an external engagement reported the same
+    /// loss.
+    /// What: two `--fresh` sweeps over one repository. The two logs are
+    /// different files, both under `logs/`, and the first still says what it
+    /// said.
+    /// Test: this is the test.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_second_run_does_not_truncate_the_first_runs_log() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, &says("the first run"));
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        let first = sweep(
+            &work,
+            &config(),
+            &RunOptions { fresh: true },
+            &Progress::none(),
+        )
+        .await
+        .expect("the sweep completes");
+        let first_log = first.repos[0].log.clone();
+        assert!(
+            std::fs::read_to_string(&first_log)
+                .expect("the first log was written")
+                .contains("the first run"),
+            "{first_log:?}"
+        );
+
+        install_stubs(&work, &says("the second run"));
+        let second = sweep(
+            &work,
+            &config(),
+            &RunOptions { fresh: true },
+            &Progress::none(),
+        )
+        .await
+        .expect("the sweep completes");
+        let second_log = second.repos[0].log.clone();
+
+        assert_ne!(
+            first_log, second_log,
+            "the second run wrote to the first run's log path"
+        );
+        assert!(
+            second_log.starts_with(work.path(Area::Logs)),
+            "a session log must stay under the logs area: {second_log:?}"
+        );
+        assert!(
+            std::fs::read_to_string(&first_log)
+                .expect("the first log survives the second run")
+                .contains("the first run"),
+            "the second run truncated the first run's log"
+        );
+        assert!(
+            std::fs::read_to_string(&second_log)
+                .expect("the second log was written")
+                .contains("the second run"),
+            "{second_log:?}"
+        );
+    }
+
+    /// A stub `tga` that says `line` on stdout and writes the manifest a real
+    /// one would, so two runs can be told apart by what their logs hold.
+    fn says(line: &str) -> String {
+        format!(
+            "#!/bin/sh\nout=\"\"\nwhile [ $# -gt 0 ]; do\n  \
+             case \"$1\" in --output) out=\"$2\"; shift;; esac\n  shift\ndone\n\
+             if [ -z \"$out\" ]; then exit 0; fi\n\
+             echo '{line}'\n\
+             mkdir -p \"$out\"\n\
+             printf '[report]\\ntitle = \"Acme\"\\n\\n[[repositories]]\\n\
+             name = \"acme\"\\npath = \"/r\"\\n' > \"$out/manifest.toml\"\nexit 0\n"
+        )
     }
 
     /// Why (#5823): piping the child's streams to read them is the change most

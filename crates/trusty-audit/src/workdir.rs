@@ -57,6 +57,39 @@ use crate::error::AuditError;
 /// Environment variable that overrides the default working-directory root.
 pub const WORKDIR_ENV: &str = "TRUSTY_AUDIT_WORKDIR";
 
+/// How many same-second session directories [`WorkDir::create_session_logs`]
+/// will try before refusing. A hundred launches inside one second is not a
+/// condition to keep retrying through.
+const SESSION_COLLISION_LIMIT: usize = 100;
+
+/// How many launches' logs are kept under `logs/` (#6137).
+///
+/// A run writes one file per selected repository, so twenty launches of a
+/// sixty-repository engagement is twelve hundred text files — large enough to
+/// want a bound, small enough that an operator comparing today's run against
+/// last week's still has it.
+pub const SESSION_LOG_RETENTION: usize = 20;
+
+/// A name for this launch's log directory, unique and ordered by time.
+///
+/// Why (#6137): the directory has to be distinguishable from every earlier
+/// one by looking at it, and [`WorkDir::prune_session_logs`] has to be able to
+/// say which is newest without opening anything. A local timestamp answers
+/// both — it sorts lexicographically in the same order it happened.
+/// What: `YYYYMMDD-HHMMSS-<pid>`, in the operator's own local time because the
+/// index and the CLI already state times that way (`index_report::local_now`).
+/// The pid is what makes it unique: two launches in the same second are
+/// otherwise the same directory, and the second would truncate the first's logs
+/// — the defect this replaces.
+/// Test: `layout_tests::a_session_id_sorts_by_time_and_carries_the_pid`.
+pub fn new_session_id() -> String {
+    format!(
+        "{}-{}",
+        chrono::Local::now().format("%Y%m%d-%H%M%S"),
+        std::process::id()
+    )
+}
+
 /// Directory name appended to the current directory when home cannot be found.
 pub const DEFAULT_WORKDIR_NAME: &str = "trusty-audit-work";
 
@@ -94,7 +127,8 @@ pub enum Area {
     State,
     /// The deliverable that goes back: report plus manifest. Never a credential.
     Output,
-    /// Logs from the tools this crate runs.
+    /// Logs from the tools this crate runs, one subdirectory per launch
+    /// (#6137 — see [`WorkDir::session_logs`]).
     Logs,
 }
 
@@ -132,7 +166,7 @@ impl Area {
                 "the deliverable to return — report and manifest, never a key; \
                  start at index.md"
             }
-            Area::Logs => "output from the tools this client runs",
+            Area::Logs => "output from the tools this client runs, one directory per run",
         }
     }
 }
@@ -234,6 +268,115 @@ impl WorkDir {
     /// Every area paired with its path, in [`Area::ALL`] order.
     pub fn layout(&self) -> Vec<(Area, PathBuf)> {
         Area::ALL.iter().map(|a| (*a, self.path(*a))).collect()
+    }
+
+    /// The directory this launch's child logs go in: `logs/<session>/`.
+    ///
+    /// Why (#6137): every log was written straight into `logs/` under a name
+    /// derived only from the repository's selection position, and
+    /// `File::create` truncates — so re-running an audit destroyed the record of
+    /// the previous one before the new run had produced anything to replace it.
+    /// An operator comparing a failing run against the one that worked had
+    /// nothing left to compare against, and an external engagement reported the
+    /// same loss.
+    /// What: one subdirectory per launch, named by [`new_session_id`]. Nothing
+    /// else about a log's name changes, so `<NN>-<repo>.log` still identifies
+    /// the repository within a run; what identifies the RUN is now the
+    /// directory. A repository carried over by the checkpoint keeps the path
+    /// recorded when it was audited, which is in the session that produced it.
+    /// Test: `super::layout_tests::a_session_log_directory_is_under_the_logs_area`.
+    pub fn session_logs(&self, session: &str) -> PathBuf {
+        self.path(Area::Logs).join(session)
+    }
+
+    /// Create this launch's log directory, and hand back the path.
+    ///
+    /// Why (#6137): [`new_session_id`] resolves to the second, so two launches
+    /// inside one second — or two sweeps inside one process, which is what the
+    /// tests do — would name the same directory and the second would truncate
+    /// the first's logs. That is the defect the session directory exists to
+    /// remove, so the creation has to be the thing that establishes uniqueness,
+    /// not the name.
+    /// What: `create_dir` rather than `create_dir_all` on the session
+    /// directory itself, so an existing one is an error rather than a silent
+    /// reuse; on collision it appends `-2`, `-3` and so on. The suffixed name
+    /// still sorts after the one it collided with, so
+    /// [`Self::prune_session_logs`] keeps ordering runs correctly.
+    /// Test: `super::layout_tests::two_sessions_in_one_second_get_their_own_directory`.
+    ///
+    /// # Errors
+    ///
+    /// [`AuditError::WorkDir`] naming the directory that could not be created,
+    /// including the case where [`SESSION_COLLISION_LIMIT`] candidates were all
+    /// taken.
+    pub fn create_session_logs(&self) -> Result<PathBuf, AuditError> {
+        let logs = self.path(Area::Logs);
+        std::fs::create_dir_all(&logs).map_err(|source| AuditError::WorkDir {
+            path: logs.clone(),
+            source,
+        })?;
+        let base = new_session_id();
+        for attempt in 1..=SESSION_COLLISION_LIMIT {
+            let name = if attempt == 1 {
+                base.clone()
+            } else {
+                format!("{base}-{attempt}")
+            };
+            let candidate = logs.join(name);
+            match std::fs::create_dir(&candidate) {
+                Ok(()) => return Ok(candidate),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(source) => {
+                    return Err(AuditError::WorkDir {
+                        path: candidate,
+                        source,
+                    });
+                }
+            }
+        }
+        Err(AuditError::WorkDir {
+            path: logs.join(base),
+            source: std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!(
+                    "{SESSION_COLLISION_LIMIT} session log directories already exist for this second"
+                ),
+            ),
+        })
+    }
+
+    /// Delete all but the `keep` most recent session log directories.
+    ///
+    /// Why (#6137): per-session logs accumulate one directory per launch
+    /// forever, and the ticket asks for retention alongside persistence.
+    /// What: reads `logs/`, keeps the `keep` directories whose names sort
+    /// highest — [`new_session_id`] is ordered lexicographically the same way it
+    /// is ordered in time — and removes the rest. Returns what it removed.
+    ///
+    /// Housekeeping, so a directory that will not delete is LEFT and the run
+    /// continues: the consequence is one stale log kept, which is the direction
+    /// this ticket asks for anyway, and failing an hours-long sweep over it
+    /// would be worse than the condition. Only directories are considered; a
+    /// file directly under `logs/` is one an older version wrote and is never
+    /// removed by this.
+    /// Test: `super::layout_tests::pruning_keeps_the_newest_session_logs`,
+    /// `super::layout_tests::pruning_leaves_loose_files_alone`.
+    pub fn prune_session_logs(&self, keep: usize) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(self.path(Area::Logs)) else {
+            return Vec::new();
+        };
+        let mut sessions: Vec<PathBuf> = entries
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .map(|e| e.path())
+            .collect();
+        sessions.sort();
+        let removable = sessions.len().saturating_sub(keep);
+        sessions
+            .into_iter()
+            .take(removable)
+            .filter(|dir| std::fs::remove_dir_all(dir).is_ok())
+            .collect()
     }
 
     /// Create the root and every area directory, idempotently.
@@ -519,6 +662,125 @@ fn writer_tag() -> String {
 
 #[cfg(test)]
 mod layout_tests {
+    /// Why (#6137): a launch's logs must be reachable under the area the layout
+    /// already owns, or `rm -rf <root>` stops being a complete uninstall and
+    /// the index's relative links stop resolving.
+    /// What: the session directory is `logs/<session>` and nothing else.
+    /// Test: this is the test.
+    #[test]
+    fn a_session_log_directory_is_under_the_logs_area() {
+        let work = WorkDir::new("/work");
+        let session = work.session_logs("20260827-101500-4242");
+        assert_eq!(
+            session,
+            Path::new("/work/logs/20260827-101500-4242"),
+            "{session:?}"
+        );
+        assert!(session.starts_with(work.path(Area::Logs)), "{session:?}");
+    }
+
+    /// Why (#6137): two launches inside the same second would otherwise share a
+    /// directory, and the second would truncate the first's logs — the exact
+    /// defect the session directory exists to remove. The name must also sort
+    /// by time, because that is how [`WorkDir::prune_session_logs`] decides
+    /// which directories are the newest.
+    /// What: the shape, and that the process id is in it.
+    /// Test: this is the test.
+    #[test]
+    fn a_session_id_sorts_by_time_and_carries_the_pid() {
+        let id = new_session_id();
+        let (stamp, pid) = id.rsplit_once('-').expect("<date>-<time>-<pid>");
+        assert_eq!(pid, std::process::id().to_string(), "{id}");
+        let (date, time) = stamp.split_once('-').expect("<date>-<time>");
+        assert_eq!(date.len(), 8, "{id}");
+        assert_eq!(time.len(), 6, "{id}");
+        assert!(
+            date.chars().chain(time.chars()).all(|c| c.is_ascii_digit()),
+            "a name that is not all digits does not sort by time: {id}"
+        );
+    }
+
+    /// Why (#6137): the whole point. Two sweeps inside one second name the same
+    /// session, and the second must not be handed the first's directory —
+    /// `File::create` truncates, so sharing it reinstates the defect.
+    /// What: two creations in a row against one work directory produce two
+    /// paths, both under `logs/`, and the first's contents survive.
+    /// Test: this is the test.
+    #[test]
+    fn two_sessions_in_one_second_get_their_own_directory() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = WorkDir::new(tmp.path());
+
+        let first = work.create_session_logs().expect("first session");
+        std::fs::write(first.join("00-acme-api.log"), b"the first run").expect("write");
+        let second = work.create_session_logs().expect("second session");
+
+        assert_ne!(
+            first, second,
+            "the second launch reused the first's directory"
+        );
+        assert!(second.starts_with(work.path(Area::Logs)), "{second:?}");
+        assert_eq!(
+            std::fs::read_to_string(first.join("00-acme-api.log")).expect("the first log survives"),
+            "the first run"
+        );
+    }
+
+    /// Why (#6137): persisting a log per launch trades the truncation defect
+    /// for unbounded growth unless something bounds it. The ticket asks for
+    /// both.
+    /// What: five session directories, keep two — the two whose names sort
+    /// highest survive, because [`new_session_id`] orders names the way time
+    /// orders runs.
+    /// Test: this is the test.
+    #[test]
+    fn pruning_keeps_the_newest_session_logs() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = WorkDir::new(tmp.path());
+        let logs = work.path(Area::Logs);
+        let names = [
+            "20260101-000000-1",
+            "20260102-000000-1",
+            "20260103-000000-1",
+            "20260104-000000-1",
+            "20260105-000000-1",
+        ];
+        for name in names {
+            std::fs::create_dir_all(logs.join(name)).expect("mkdir session");
+            std::fs::write(logs.join(name).join("00-acme.log"), b"x").expect("write log");
+        }
+
+        let removed = work.prune_session_logs(2);
+        assert_eq!(removed.len(), 3, "{removed:?}");
+
+        let mut kept: Vec<String> = std::fs::read_dir(&logs)
+            .expect("read logs")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        kept.sort();
+        assert_eq!(
+            kept,
+            vec![names[3].to_owned(), names[4].to_owned()],
+            "{kept:?}"
+        );
+    }
+
+    /// A file written directly into `logs/` by an older version is not a
+    /// session and is never removed by the prune (#6137).
+    #[test]
+    fn pruning_leaves_loose_files_alone() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = WorkDir::new(tmp.path());
+        let logs = work.path(Area::Logs);
+        std::fs::create_dir_all(&logs).expect("mkdir logs");
+        let loose = logs.join("00-acme-api.log");
+        std::fs::write(&loose, b"an earlier version's log").expect("write");
+
+        assert!(work.prune_session_logs(0).is_empty());
+        assert!(loose.is_file(), "a loose log must survive the prune");
+    }
+
     use super::*;
 
     const HOME: &str = "/Users/recipient";
