@@ -15,6 +15,7 @@
 
 use std::path::Path;
 
+use crate::error::AuditError;
 use crate::manifest::AuditManifest;
 
 /// The gap line `tga` writes when a collection stage failed but the sweep
@@ -94,4 +95,53 @@ pub(super) fn verify_output(output: &Path) -> Result<Vec<String>, String> {
         ));
     }
     Ok(manifest.report.gaps)
+}
+
+/// The file a repository's output directory carries once its audit finished.
+///
+/// Why (#6141): `manifest.toml` says a `tga audit` child wrote something, not
+/// that the run got through the rest of the repository — the grounding pass and
+/// the inference stamp both run after it, and both edit that same manifest. A
+/// run killed in between leaves a directory holding real collection data and no
+/// finished report, which at a glance is what a completed repository looks
+/// like. Completion was recorded only in `state/run-progress.toml`, one document
+/// for the whole sweep, so nothing about the DIRECTORY said which it was.
+/// What: a marker file inside the output directory itself, so the answer travels
+/// with the data — a directory copied, inspected or re-rendered on its own still
+/// says whether it is finished.
+pub(super) const COMPLETION_FILE: &str = "audit-complete.toml";
+
+/// Record that this repository's output directory is finished.
+///
+/// Why/What: see [`COMPLETION_FILE`]. Written LAST, after the child, the
+/// grounding pass and the inference stamp, so its presence means every writer of
+/// this directory has run. Written atomically, because a half-written marker on
+/// a killed run is the ambiguity this removes.
+/// Test: `super::run_tests::an_interrupted_repository_is_re_audited_not_carried_over`.
+///
+/// # Errors
+///
+/// [`AuditError::WorkDir`] naming the marker that could not be written. This is
+/// a sweep-level failure rather than a per-repository one: a run that cannot
+/// record completion would carry the repository over next time on the strength
+/// of a marker that is not there, which is the defect in reverse.
+pub(super) fn mark_complete(output: &Path, repo: &str) -> Result<(), AuditError> {
+    let text = format!(
+        "repository = {repo:?}\nfinished = {finished:?}\ntrusty_audit = {version:?}\n",
+        finished = crate::index_report::local_now(),
+        version = env!("CARGO_PKG_VERSION"),
+    );
+    crate::workdir::write_atomically(&output.join(COMPLETION_FILE), &text)
+}
+
+/// Whether this output directory carries the completion marker.
+///
+/// A directory with no marker is not necessarily broken — one written before
+/// this file existed has none — so the caller decides what to do about it.
+/// [`super::checkpoint::plan`] re-audits it, which is the safe direction: it
+/// costs one repository's collection once, where believing it costs a report
+/// that was never rendered.
+/// Test: `super::run_tests::an_interrupted_repository_is_re_audited_not_carried_over`.
+pub(super) fn is_complete(output: &Path) -> bool {
+    output.join(COMPLETION_FILE).is_file()
 }
