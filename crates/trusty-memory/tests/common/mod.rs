@@ -23,7 +23,7 @@ use std::process::Child;
 /// What: kills and reaps in `Drop`. Both results are discarded — the child may
 /// already have exited, and a teardown error must not mask the test's own
 /// failure.
-/// Test: `serve_stdio_concurrent_two_bridges_both_work` and the other daemon
+/// Test: `stdio_serve_concurrent_two_bridges_both_work` and the other daemon
 /// tests; the guarantee itself is structural.
 pub struct DaemonGuard {
     child: Child,

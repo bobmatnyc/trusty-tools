@@ -16,9 +16,9 @@
 //! from `service::mod` unchanged so `crate::service::{load_user_config,
 //! dream_config_from_user_config, LoadedUserConfig}` keeps resolving exactly as
 //! before this split — no public API change.
-//! Test: `dream_config_from_user_config_prefers_local_model_when_resolved`,
+//! Test: `dream_config_is_off_and_names_no_local_model_by_default`,
 //! `dream_config_from_user_config_prefers_openrouter_model_with_key`,
-//! `dream_config_from_user_config_prefers_openrouter_model_with_env_key`.
+//! `semantic_consolidation_is_off_without_a_config_file`.
 
 use serde::Deserialize;
 use trusty_common::memory_core::dream::DreamConfig;
