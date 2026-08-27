@@ -200,6 +200,28 @@ fn section_heading(predicate: &str) -> &str {
 /// internals.
 /// Test: `build_prompt_context_groups_and_formats`,
 /// `build_prompt_context_empty_when_no_hot_triples`.
+/// Render one hot triple as the bullet the Tier S block shows it as.
+///
+/// Why (#5879): [`build_prompt_context`] and the injected "Relevant KG facts"
+/// section can both reach the same triple — Tier S gathers hot predicates across
+/// every palace, the KG section gathers them from the current one, so the second
+/// is a subset of the first and every overlapping triple was rendered twice on
+/// every prompt of every session. The KG section drops what Tier S already
+/// showed, and it can only recognise that if both sides spell a bullet the same
+/// way. One function is what makes them the same by construction rather than by
+/// two string literals staying in step.
+/// What: aliases and shorthands read as `- short → full`; every other hot
+/// predicate drops the subject, which is typically a synthetic `convention-1` id
+/// with no value to the model. No trailing newline — the caller owns spacing.
+/// Test: `build_prompt_context_groups_and_formats`,
+/// `compose_injection_drops_a_kg_fact_tier_s_already_rendered`.
+pub fn hot_fact_bullet(subject: &str, predicate: &str, object: &str) -> String {
+    match predicate {
+        "is_alias_for" | "is_shorthand_for" => format!("- {subject} → {object}"),
+        _ => format!("- {object}"),
+    }
+}
+
 pub fn build_prompt_context(triples: &[(String, String, String)]) -> String {
     // Filter and group preserving HOT_PREDICATES ordering.
     // `(predicate, triples-in-that-section)`; aliased to satisfy clippy's
@@ -228,24 +250,8 @@ pub fn build_prompt_context(triples: &[(String, String, String)]) -> String {
         out.push_str(section_heading(predicate));
         out.push('\n');
         for (subject, _predicate, object) in items {
-            // Aliases / shorthands read best as "short → full"; conventions
-            // and facts are self-contained so we drop the subject (which is
-            // typically a synthetic "convention-1" id with no value to the
-            // model).
-            match predicate {
-                "is_alias_for" | "is_shorthand_for" => {
-                    out.push_str("- ");
-                    out.push_str(subject);
-                    out.push_str(" → ");
-                    out.push_str(object);
-                    out.push('\n');
-                }
-                _ => {
-                    out.push_str("- ");
-                    out.push_str(object);
-                    out.push('\n');
-                }
-            }
+            out.push_str(&hot_fact_bullet(subject, predicate, object));
+            out.push('\n');
         }
     }
     out

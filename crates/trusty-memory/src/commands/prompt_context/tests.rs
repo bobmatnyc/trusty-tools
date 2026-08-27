@@ -2135,3 +2135,92 @@ async fn prompt_context_logs_recall_query_shape() {
 
     addr_handle.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// #5879 — the KG section must not reprint what Tier S already printed
+// ---------------------------------------------------------------------------
+
+/// Why (#5879): `gather_hot_facts` admits hot predicates across every palace and
+/// `select_relevant_triples` admits them from the current one, so every triple
+/// the "Relevant KG facts" section can emit is already in the Tier S block above
+/// it. It cost nothing only while no palace held a hot triple — the first
+/// `kg_assert` with a hot predicate makes every prompt of every session pay for
+/// the duplicate render.
+/// What: renders a Tier S block through the real `build_prompt_context`, hands
+/// `compose_injection` the same triple, and asserts the fact appears once.
+/// Test: itself.
+#[test]
+fn compose_injection_drops_a_kg_fact_tier_s_already_rendered() {
+    use filter::RawTriple;
+    let tier_s = crate::prompt_facts::build_prompt_context(&[(
+        "tga".to_string(),
+        "is_alias_for".to_string(),
+        "trusty-git-analytics".to_string(),
+    )]);
+    assert!(
+        tier_s.contains("trusty-git-analytics"),
+        "the fixture must actually render the fact: {tier_s}"
+    );
+
+    let out = format::compose_injection(
+        Some(&tier_s),
+        &[],
+        0,
+        &[RawTriple {
+            subject: "tga".into(),
+            predicate: "is_alias_for".into(),
+            object: "trusty-git-analytics".into(),
+        }],
+        None,
+    );
+
+    assert_eq!(
+        out.matches("trusty-git-analytics").count(),
+        1,
+        "the fact must be rendered once, not once per section: {out}"
+    );
+    assert!(
+        !out.contains("## Relevant KG facts"),
+        "a section with nothing left to say must not emit its heading: {out}"
+    );
+}
+
+/// Why (#5879): dropping the section outright was the other way out and is
+/// wrong — `gather_hot_facts` logs and SKIPS a palace whose KG fails to read,
+/// and the whole Tier S block is absent when the global fetch fails. In both
+/// cases the KG section is the only thing carrying the fact.
+/// What: gives Tier S one fact and the KG section a different one; asserts both
+/// survive.
+/// Test: itself.
+#[test]
+fn compose_injection_keeps_a_kg_fact_tier_s_did_not_render() {
+    use filter::RawTriple;
+    let tier_s = crate::prompt_facts::build_prompt_context(&[(
+        "tga".to_string(),
+        "is_alias_for".to_string(),
+        "trusty-git-analytics".to_string(),
+    )]);
+
+    let out = format::compose_injection(
+        Some(&tier_s),
+        &[],
+        0,
+        &[RawTriple {
+            subject: "ts".into(),
+            predicate: "is_alias_for".into(),
+            object: "trusty-search".into(),
+        }],
+        None,
+    );
+
+    assert!(
+        out.contains("## Relevant KG facts"),
+        "a fact Tier S never showed still earns the section: {out}"
+    );
+    assert!(out.contains("trusty-search"), "{out}");
+    assert_eq!(
+        out.matches("trusty-git-analytics").count(),
+        1,
+        "the Tier S fact is still rendered exactly once: {out}"
+    );
+}

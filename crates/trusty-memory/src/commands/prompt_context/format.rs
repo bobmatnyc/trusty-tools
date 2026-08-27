@@ -103,6 +103,34 @@ pub(super) const KG_SECTION_BYTE_CAP: usize = 256;
 /// `compose_injection_is_silent_when_everything_was_withheld`,
 /// `compose_injection_empty_inputs_yields_empty`,
 /// `prompt_context_recalls_palace_drawers`.
+/// The bullet lines the Tier S block already printed.
+///
+/// Why (#5879): `gather_hot_facts` admits hot predicates from EVERY palace and
+/// `select_relevant_triples` admits them from the CURRENT one, so the KG section
+/// is a subset of the Tier S block above it and re-rendered whatever the two
+/// shared. That cost nothing only while no palace held a hot triple; the first
+/// `kg_assert` with a hot predicate makes every prompt of every session pay for
+/// the duplicate.
+///
+/// The section stays rather than being deleted, because the two sources can
+/// genuinely disagree: `gather_hot_facts` logs and SKIPS a palace whose KG fails
+/// to read, and this whole block is `None` when the global fetch fails, and in
+/// both cases the KG section is the only thing carrying the fact.
+///
+/// What: the trimmed text of every `- ` line in the block, as a set. Comparing
+/// whole lines rather than substrings is deliberate — a short object like
+/// `- tm` would substring-match half the block.
+/// Test: `compose_injection_drops_a_kg_fact_tier_s_already_rendered`,
+/// `compose_injection_keeps_a_kg_fact_tier_s_did_not_render`.
+fn tier_s_bullets(global_facts: Option<&str>) -> std::collections::HashSet<&str> {
+    global_facts
+        .into_iter()
+        .flat_map(|facts| facts.lines())
+        .map(str::trim)
+        .filter(|line| line.starts_with("- "))
+        .collect()
+}
+
 pub(super) fn compose_injection(
     global_facts: Option<&str>,
     drawers: &[RecalledDrawer],
@@ -139,9 +167,16 @@ pub(super) fn compose_injection(
         push_section(&mut out, section.trim_end());
     }
     if !triples.is_empty() {
+        // #5879: what Tier S already printed must not be printed again.
+        let already_shown = tier_s_bullets(global_facts);
         let mut section = String::from("## Relevant KG facts\n");
         let mut rendered = 0usize;
         for t in triples {
+            if already_shown.contains(
+                crate::prompt_facts::hot_fact_bullet(&t.subject, &t.predicate, &t.object).trim(),
+            ) {
+                continue;
+            }
             let line = format!("- {} **{}** {}\n", t.subject, t.predicate, t.object);
             // #5819 (ADR-0028 D7): the KG section gets its own byte budget, so
             // a palace with many hot triples cannot crowd out drawer recall.
