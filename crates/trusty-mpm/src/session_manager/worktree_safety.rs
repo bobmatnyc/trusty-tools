@@ -91,8 +91,9 @@
 //! - **A repository nested inside a gitignored subtree OF a nested repository**
 //!   — the scan stops descending at the first repository root it finds.
 //! - **The bare-branch population, partially.** `count_session_branch_unpushed`
-//!   covers both `session/<leaf>` and the bare `<leaf>` spelling, but see its
-//!   own doc for which of the two `decommission` actually force-deletes today.
+//!   covers both `session/<leaf>` and the bare `<leaf>` spelling. Since #4165
+//!   every producer emits `session/<leaf>`; the bare arm covers worktrees
+//!   provisioned by an older build, whose branch `decommission` still misses.
 //! - **`DirtyWorktreePolicy::ForceDiscard`**, which destroys all of the above
 //!   by explicit operator opt-in.
 //!
@@ -605,26 +606,20 @@ fn count_unpushed(path: &Path) -> Result<usize, String> {
 /// the branch still carries the commit. HEAD-only counting therefore returned a
 /// false CLEAN for the one branch about to be force-deleted.
 /// What: BOTH spellings of "the branch named after this directory" are checked
-/// — `refs/heads/session/<leaf>` and the bare `refs/heads/<leaf>` — because the
-/// two halves of trusty-mpm disagree about which one it is, and have since
-/// before this guard existed:
-/// - `core::worktree_naming::worktree_branch_for` (used by
-///   `inproject::create_session_worktree` AND by `remove_session_worktree`'s
-///   `branch -D`) says `session/<leaf>`;
-/// - `provisioner/workspace.rs:803` names the branch for the
-///   `.base/.worktrees/<session-id>` shape **bare** — `session_id.to_string()`
-///   — which is the DOMINANT population of the ~95-worktree sweep.
+/// — `refs/heads/session/<leaf>` and the bare `refs/heads/<leaf>`. Every
+/// producer now emits the prefixed spelling: `worktree_branch_for` backs
+/// `inproject::create_session_worktree`, `remove_session_worktree`'s
+/// `branch -D`, and — since #4165 — `provisioner::workspace::provision_in`,
+/// which used to name the branch bare and so leaked one branch per session.
 ///
-/// Today that divergence is not a loss path: `branch -D session/<uuid>` simply
-/// misses, so a bare branch survives the removal. Checking it anyway is
-/// deliberate conservatism, and the reason is the point of this whole PR — the
-/// divergence is a live bug that will be fixed on ONE side or the other, and if
-/// it is fixed on the `remove_session_worktree` side then bare branches start
-/// being destroyed. A guard that silently goes from correct to inert because
-/// somebody repaired an unrelated naming bug is exactly the failure mode this
-/// module exists to prevent. Over-reporting costs an operator one look; the
-/// other direction costs the work. Tracked as a follow-up rather than fixed
-/// here, since renaming branches is not a safety-gate change.
+/// The bare check stays for the population already on disk. Worktrees
+/// provisioned before #4165 still carry a bare branch, `branch -D
+/// session/<uuid>` still misses it, and it still survives removal — so
+/// counting it here over-reports rather than under-reports, which is the
+/// direction this module errs in deliberately. Drop the bare arm only once
+/// no pre-#4165 worktree remains; a guard that goes quietly inert because
+/// somebody repaired a naming bug is the failure mode this module exists to
+/// prevent.
 ///
 /// 0 when neither ref exists (`for-each-ref` exits 0 with empty output, so
 /// absence is distinguishable from a spawn failure, which stays an `Err`).
