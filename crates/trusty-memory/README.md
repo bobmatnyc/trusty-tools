@@ -256,7 +256,7 @@ per-palace conversation store: turns are stored verbatim and bypass the
 `memory_remember` signal/noise and dedup gates.
 
 <!-- BEGIN GENERATED: mcp-tools -->
-The MCP server registers **47 tools**. Authoritative source: `trusty_memory::tools::tool_definitions` —
+The MCP server registers **49 tools**. Authoritative source: `trusty_memory::tools::tool_definitions` —
 this table is generated from it, not maintained by hand.
 
 | Tool | Arguments | Summary |
@@ -292,11 +292,13 @@ this table is generated from it, not maintained by hand.
 | `palace_create` | `name`, `cwd?`, `description?`, `force?` | Create a new memory palace. |
 | `palace_delete` | `palace_id`, `force?` | Delete an entire memory palace, including its drawers, vectors, and knowledge graph. |
 | `palace_dream` | `palace`, `max_age_days?`, `room?` | On-demand LLM-driven consolidation for a palace (issue #1721). |
+| `palace_embed_sweep` | — | #5000 / #4786: vector coverage for EVERY palace on disk, uncapped. |
 | `palace_info` | `palace` | Get metadata and stats for a single palace. |
 | `palace_list` | — | List all palaces on this machine. |
 | `palace_reembed` | `palace`, `dry_run?`, `limit?` | #4906: report drawers that have no vector (durable but unfindable), and optionally re-embed them. |
 | `palace_unalias` | `palace`, `dry_run?` | #5005: free drawers whose vector was destroyed by an id collision (`palace_reembed` reports these as `aliased`), so a re-embed can repair… |
 | `palace_update` | `palace_id`, `name` | Update the display name of an existing palace. |
+| `palace_verify_embedded` | `palace`, `drawer_ids` | #5000: answer whether YOUR OWN drawer ids are vector-findable. |
 | `remove_prompt_fact` | `subject`, `predicate` | Retract the active triple for a (subject, predicate) pair from the prompt-facts surface. |
 | `room_create` | `palace`, `label`, `description?`, `wing?` | Create a room in a palace, or return the existing one (ADR-0027). |
 | `room_list` | `palace`, `wing?` | List every room registered in a palace (ADR-0027). |

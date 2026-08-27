@@ -87,8 +87,8 @@ mod tests {
         let tools = svc.tools();
         assert_eq!(
             tools.len(),
-            47,
-            "expected 47 memory tools (chat-session + dream-ops + palace_dream + the ADR-0027 room and wing surfaces + #4906 palace_reembed + #5005 palace_unalias + #4776 kg_list_subjects + kg_retract_triple), got {}",
+            49,
+            "expected 49 memory tools (chat-session + dream-ops + palace_dream + the ADR-0027 room and wing surfaces + #4906 palace_reembed + #5005 palace_unalias + #4776 kg_list_subjects + kg_retract_triple + #5000 palace_verify_embedded and palace_embed_sweep), got {}",
             tools.len()
         );
     }
@@ -111,7 +111,7 @@ mod tests {
         //      so we must confirm dynamic dispatch resolves correctly here.
         let svc: Box<dyn ServiceDescriptor> = Box::new(MemoryMcpService);
         assert_eq!(svc.name(), "trusty-memory");
-        assert_eq!(svc.tools().len(), 47);
+        assert_eq!(svc.tools().len(), 49);
         assert_eq!(svc.scopes_for("palace_create"), vec!["memory.write"]);
         // #5005: the repair deletes vector keys, so it must classify as a write.
         assert_eq!(svc.scopes_for("palace_unalias"), vec!["memory.write"]);

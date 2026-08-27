@@ -63,6 +63,10 @@ pub fn scopes_for_tool(name: &str) -> Vec<String> {
         // #4776: subject enumeration reads the KG and writes nothing.
         | "kg_list_subjects"
         | "kg_gaps"
+        // #5000 / #4786: both read coverage and repair nothing — the repair
+        // they report on is `palace_reembed`'s, which is scoped as a write.
+        | "palace_verify_embedded"
+        | "palace_embed_sweep"
         | "list_prompt_facts"
         | "get_prompt_context"
         | "console_metrics"

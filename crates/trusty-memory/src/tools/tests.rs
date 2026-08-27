@@ -125,6 +125,9 @@ fn tool_definitions_drops_palace_required_when_default_set() {
         ("palace_compact", true),
         ("palace_reembed", true),
         ("palace_unalias", true),
+        // #5000: `palace_embed_sweep` is absent on purpose — it takes no
+        // arguments at all, so it has no conditional `palace` to drop.
+        ("palace_verify_embedded", true),
         ("kg_assert", true),
         ("kg_query", true),
         // Issue #664: add_alias and discover_aliases now include `palace`
@@ -192,6 +195,9 @@ fn tool_definitions_lists_all_tools() {
         "palace_compact",
         "palace_reembed",
         "palace_unalias",
+        // #5000 / #4786: verify a caller's own ids; sweep the whole estate.
+        "palace_verify_embedded",
+        "palace_embed_sweep",
         "kg_assert",
         // The inverse of `kg_assert`, on the full triple key.
         "kg_retract_triple",
@@ -538,6 +544,7 @@ async fn dispatch_kg_assert_then_query() {
     assert_eq!(triples[0]["predicate"], "works_at");
 }
 
+mod embed_audit_tests;
 mod kg_retract_tests;
 mod write_budget_tests;
 

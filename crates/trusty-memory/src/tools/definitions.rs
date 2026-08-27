@@ -10,6 +10,7 @@
 use serde_json::{json, Value};
 
 use super::chat_definitions::chat_tool_definitions;
+use super::embed_audit_definitions::embed_audit_tool_definitions;
 use super::room_definitions::room_tool_definitions;
 use super::task_definitions::task_tool_definitions;
 use super::wing_definitions::wing_tool_definitions;
@@ -488,6 +489,9 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
     // own sibling module for the same 500-SLOC reason as the task and chat groups.
     tools.extend(room_tool_definitions(has_default));
     tools.extend(wing_tool_definitions(has_default));
+    // #5000 / #4786: spliced for the recursion limit as much as the SLOC cap —
+    // see `embed_audit_definitions`.
+    tools.extend(embed_audit_tool_definitions(has_default));
     tools.push(metrics);
     result
 }
