@@ -1,30 +1,24 @@
 # trusty-tools — Claude Code Instructions
 
-Unified Rust workspace consolidating the entire trusty-* AI tooling ecosystem.
-21 crates — shared libraries, daemon/MCP servers, the MPM platform, the
-control plane, and an orchestrator — all co-located under one Cargo workspace.
+Unified Rust workspace for the trusty-* AI tooling ecosystem: 21 crates —
+shared libraries, daemon/MCP servers, the MPM platform, the control plane, and
+an orchestrator — under one Cargo workspace.
 
 ## Project Overview
 
-This is a **Rust workspace** (Cargo workspace, resolver v2, glob members
-`crates/*`) under the MIT License. Every crate manages its own `version` field independently;
-`[workspace.package]` shares `rust-version`, `edition`, `license`, `repository`,
-and `authors` but no longer carries a version field (see #343).
-
-**MSRV**: `1.94`, enforced in CI with `dtolnay/rust-toolchain@1.94`. The
-`aws-config` / `aws-sdk-bedrockruntime` floor that drives it, and the per-crate
-edition policy, are in
-[ADR-0029](docs/adr/0029-msrv-1-94-and-edition-policy.md).
+- Cargo workspace, resolver v2, glob members `crates/*`, MIT License.
+- Each crate owns its `version`. `[workspace.package]` shares `rust-version`,
+  `edition`, `license`, `repository`, `authors` — no version field (#343).
+- **MSRV `1.94`**, enforced in CI with `dtolnay/rust-toolchain@1.94`
+  ([ADR-0029](docs/adr/0029-msrv-1-94-and-edition-policy.md)).
 
 ## Role & Scope
 
-`trusty-tools` is the **single source of truth** for all trusty-* AI tooling.
-The authoritative crate list is the `[workspace.members]` glob in the root
-`Cargo.toml`; every subdirectory under `crates/` with a `Cargo.toml` is a
-member. Per-crate purposes are in
-[docs/reference/crate-map.md](docs/reference/crate-map.md); the seven repos this
-monorepo replaced are in
-[docs/reference/former-repos.md](docs/reference/former-repos.md).
+- `trusty-tools` is the **single source of truth** for all trusty-* AI tooling.
+- The authoritative crate list is the `[workspace.members]` glob in the root
+  `Cargo.toml` — every `crates/*` subdirectory with a `Cargo.toml` is a member.
+- Crate purposes: [crate-map.md](docs/reference/crate-map.md). Replaced repos:
+  [former-repos.md](docs/reference/former-repos.md).
 
 ## Build and Test Commands
 
@@ -39,22 +33,17 @@ cargo clippy -p <crate> --all-targets -- -D warnings   # lint one crate
 cargo fmt                                              # format (--check to verify only)
 ```
 
-For any other invocation — release builds, feature-gated tests,
-`--include-ignored` / ONNX tests, a single test by name, the `trusty-search`
-performance regression suite, `cargo update` / `cargo audit`, or running a
-crate's binary — call `Skill(skill="cargo-commands")` rather than guessing.
+- For anything else — release builds, feature-gated tests, `--include-ignored` /
+  ONNX tests, a single test by name, the `trusty-search` performance suite,
+  `cargo update` / `cargo audit`, running a crate binary — call
+  `Skill(skill="cargo-commands")` rather than guessing.
+- 🟡 **Crate name ≠ directory name.** `-p <crate>` takes the `name` field from
+  the crate's `Cargo.toml`; exceptions are in Abbreviations & Aliases below. On
+  "package not found", read the crate's `Cargo.toml`.
 
-🟡 **Crate name ≠ directory name.** `-p <crate>` takes the `name` field from the
-crate's `Cargo.toml`, not the directory. Most match; the exceptions are in the
-Abbreviations & Aliases table below (notably `crates/trusty-git-analytics/` →
-`-p tga`). On "package not found", read the crate's `Cargo.toml`.
-
-🔴 **`trusty-common` takes `--features` on every test run (#4901).** Its
-`default` feature set is empty, so `cargo test -p trusty-common` compiles none
-of its 25+ gated modules: it ran 328 of the crate's ~2062 tests and exited 0 —
-including with a `memory_core` file that did not compile, which is how PR #4899
-reported a green gate before the correct code existed. That form is now a
-`compile_error!` rather than a false green. Name what you changed:
+🔴 **`trusty-common` takes `--features` on every test run (#4901)** — its
+`default` set is empty, so a bare `cargo test -p trusty-common` is a
+`compile_error!`. Name what you changed:
 
 ```bash
 cargo test -p trusty-common --features memory-core,embedder-test-support  # memory_core
@@ -62,25 +51,18 @@ cargo test -p trusty-common --features <feature>                          # any 
 cargo test -p trusty-common --features unconditional-only                 # only the always-compiled surface
 ```
 
-`cargo build` / `cargo check -p trusty-common` are unaffected — the guard is
-`cfg(test)`-scoped, so no consumer crate sees it. `--all-features` is not
-available (the three `embedder-*` ORT variants are mutually exclusive); whole-
-crate coverage comes from `cargo test --workspace`, where feature unification
-pulls in what the consumers enable. Other crates in this workspace can hide the
-same trap — before trusting a crate-scoped green, check whether the module you
-edited sits behind a non-default feature.
+- `cargo build` / `cargo check -p trusty-common` are unaffected.
+  `--all-features` is unavailable — the `embedder-*` ORT variants are mutually
+  exclusive.
+- 🟡 Other crates hide the same trap: before trusting a crate-scoped green, check
+  whether the module you edited sits behind a non-default feature.
 
 ## Rust Test Ladder — how much testing this change needs
 
 🔴 **This ladder is the authoritative answer to "how much testing does this
-change need" for this repo.** Run the smallest deterministic gate that covers the
-change's blast radius — no less, and no more. The framework's Low / Normal / High
-risk labels map onto the rungs below (1–2 = Low, 3–4 = Normal, 5–6 = High); when
-the question is *which command to run*, this table decides.
-
-Required tests stay in the implementation PR (`tm-workflow`, "One Outcome,
-One PR"). Name the rung and paste its command in the PR body so a reviewer can
-see which rung was actually run.
+change need" for this repo.** Run the smallest deterministic gate covering the
+change's blast radius. Risk labels map onto the rungs (1–2 Low, 3–4 Normal,
+5–6 High).
 
 | # | Change class | Risk | PR gate, in short |
 |---|---|---|---|
@@ -91,151 +73,61 @@ see which rung was actually run.
 | 5 | Cross-crate contract, persistence, security, process lifecycle, **release tooling** | High | Rung 4, plus `--include-ignored` integration coverage, failure-path/concurrency tests, and a `code-critic` round |
 | 6 | **UI / API surface** — Svelte UIs, MCP tool schemas, HTTP routes | High | Rung 3 or 4 for the Rust side, plus the UI package's own test/build and one binary smoke run — with direct UI/API evidence, not just crate tests |
 
-The exact command chain for each rung, its development-proof step, and its
-hardening/release gate are in
-[docs/reference/test-ladder-baseline.md](docs/reference/test-ladder-baseline.md).
-Read that page's rung entry before running the gate, and paste the command you
-actually ran into the PR body.
-
-🔴 **`cargo test --workspace` is not the default inner-loop proof for a localized
-change.** It is keyed to the stage, not the rung: it belongs at the publish
-boundary, and rungs 4–6 are the ones that reach it — a rung-4 PR does not owe a
-workspace run to merge. Making every narrow PR depend on the whole workspace
-turns unrelated flakes into an issue factory without adding one line of coverage
-for your change.
-
-🔴 **Scope down, never scope away.** Choosing a lower rung is a statement about
-blast radius, and you must be able to prove it (see the baseline-failure rules
-below). It is never licence to make a red gate green by deleting, `#[ignore]`-ing,
-`cfg`-gating, `--exclude`-ing, or `--lib`-narrowing coverage. That remains the
-hard line it has always been.
-
-**Evidence detail:** a PR body may summarise a **passing** gate as command +
-counts + scope; raw output stays **mandatory** for failures, flakes, performance
-claims, and disputed results. Full rule in
-[docs/reference/test-ladder-baseline.md](docs/reference/test-ladder-baseline.md)
-("How Much Gate Output the PR Body Owes").
+- Required tests stay in the implementation PR. Name the rung and paste its
+  command in the PR body. Per-rung commands and evidence rules:
+  [test-ladder-baseline.md](docs/reference/test-ladder-baseline.md).
+- 🔴 **`cargo test --workspace` is not the default inner-loop proof for a
+  localized change** — it belongs at the publish boundary; a rung-4 PR does not
+  owe one to merge.
+- 🔴 **Scope down, never scope away.** A lower rung is a claim about blast radius
+  you must be able to prove. Never licence to make a red gate green by deleting,
+  `#[ignore]`-ing, `cfg`-gating, `--exclude`-ing, or `--lib`-narrowing coverage.
+- **Evidence:** a PR body may summarise a **passing** gate as command + counts +
+  scope; raw output stays **mandatory** for failures, flakes, performance claims,
+  and disputed results.
 
 ### What CI actually gates
 
-🔴 **A bounded list of required checks gates every merge — read it live, never
-hand-copy the list.** This section has repeated the same mistake every time a
-required job was added — most recently when `ci.yml` gained `trusty-mpm-gui
-clippy` and `trusty-code-gui clippy`
-([#5958](https://github.com/bobmatnyc/trusty-tools/pull/5958)) and branch
-protection picked both up as required. Copying the list here only gives the
-next such change one more place to go stale, and a stale copy has already cost
-a real merge (next paragraph). The list is never worth copying here — read it
-directly:
+- 🔴 **Read the required-contexts list live, never hand-copy it** — a stale copy
+  cost [#5836](https://github.com/bobmatnyc/trusty-tools/pull/5836) a merge:
 
-```bash
-gh api repos/bobmatnyc/trusty-tools/branches/main/protection \
-  --jq '.required_status_checks.contexts'
-```
+  ```bash
+  gh api repos/bobmatnyc/trusty-tools/branches/main/protection \
+    --jq '.required_status_checks.contexts'
+  ```
 
-That endpoint is readable by this account with no special access needed.
-Every required job triggers unconditionally — none of them carries a `paths:`
-filter, because a `paths:` filter would leave a required context pending
-forever on a PR that never touches those paths, instead of reporting green.
-What varies per PR is not whether a job runs but how much it does once
-running: each gates its expensive steps behind a
-`docs_only` boolean computed once by the `changes` job (`ci.yml:166-195`), so
-a docs-only PR gets a green required check in well under a minute of runner
-startup instead of tens of minutes of cargo — a code PR settles in roughly
-four minutes, a docs-only PR in under one. `required_status_checks.strict` is
-`false`: a PR's head does not need to be up to date with `main` for its own
-checks to count toward the merge.
-
-🔴 **A stale copy of this list costs a real merge.** A stale six-item copy of
-this list cost [#5836](https://github.com/bobmatnyc/trusty-tools/pull/5836) a
-merge attempt: every documented check was green, and `gh pr merge` refused
-anyway with "the base branch policy prohibits the merge." That error names no
-check, so it never points back at the stale list as the cause.
-
-🟡 **Why `trusty-agents-ui clippy` and `trusty-audit-ui clippy` exist as
-separate jobs.** The required `Clippy` job runs `--workspace --all-targets`
-but excludes the Tauri UI crates (`ci.yml:34-47`) because they need
-WebKit2GTK; dedicated per-crate jobs compile them instead. Before
-2026-08-18 those dedicated jobs ran but were not required, so a gate that
-runs without being required is not a gate: [#5929](https://github.com/bobmatnyc/trusty-tools/pull/5929)
-merged with `trusty-audit-ui clippy` red, and `main` failed
-`cargo check --workspace` for hours
-([#5935](https://github.com/bobmatnyc/trusty-tools/issues/5935), fixed by
-`15dca258`).
-
-🔴 **`Rust tests (pre-publish gate)` — the eight shards — does not run on pull
-requests.** It runs ~9.6 minutes per shard, roughly 3x the entire required set,
-and it is not a required context, so on a PR it is skipped outright rather than
-run-and-ignored. It runs on every push to `main` and on `workflow_dispatch`. Do
-not wait for it on a PR — there is nothing to wait for.
-
-🟡 **What a PR still proves, and what moves to `main`.** `Clippy` is required and
-runs `--workspace --all-targets`, so every test target still COMPILES on every PR.
-What defers to `main` is test EXECUTION. Run the ladder rung your change earns
-before merging — that is the coverage the shards no longer duplicate per-PR.
-
-🟡 **To run the full suite on a branch:** Actions → CI → "Run workflow" against
-that branch. Reach for it when a change is broad enough that a crate-scoped local
-run does not cover it and you would rather not find out on `main`.
-
-🟡 **A red `main` files an issue.** `ci.yml`'s `notify-main-failure` job runs on
-every push to `main`, folds every job conclusion (the shards included) through
-`scripts/classify-ci-results.sh`, and on any non-green verdict opens or comments on
-the `ci-red-main`-labelled tracking issue, then fails the run. It is a GitHub issue,
-not a page — nobody is woken up.
-
-🟡 **A `BEHIND` branch merges fine.** `strict: false` (above) means GitHub
-requires only that the PR's own head carry green required contexts, not that
-the branch be current with base — so `gh pr merge --squash --delete-branch
---auto` is the right tool for an ordinary PR; GitHub owns the wait.
-[#5958](https://github.com/bobmatnyc/trusty-tools/pull/5958) proves it: its
-squash commit `d18184ee` has a single parent, `a4e629e0`
-([#5961](https://github.com/bobmatnyc/trusty-tools/pull/5961)), which had
-merged 47 seconds earlier — the PR had synced `main` into its branch twice
-(04:34Z, 04:48Z) and was still exactly one commit BEHIND, missing that PR,
-when armed auto-merge fired at 04:52:55Z. It merged anyway.
-Updating for BEHIND alone buys nothing and costs real time: every
-`update-branch` restarts CI from scratch, including four Tauri UI clippy jobs
-at roughly 15 minutes each on a cold system-deps install, and while it
-reruns, `main` can move again — which is how a merge loop forms and fails to
-converge. That happened here too: two manual `Merge branch 'main' into …`
-sync commits, 14 minutes apart, before it merged BEHIND regardless. What
-actually blocks a merge is `mergeStateStatus` reporting `BLOCKED` — pending or
-failing checks — which GitHub reports with priority over `BEHIND` in that same
-field; that priority is almost certainly why past "refuses to merge while
-BEHIND" reports read as a branch-currency problem when the real block was
-pending checks. `gh pr update-branch <n>` stays correct for a genuine
-`CONFLICTING` state, which is different and harder.
-
-🔴 **BEHIND does not block a merge; a missing required job definition does —
-and the two look identical from the outside.** A `pull_request`-triggered
-workflow runs from the PR's own ref, not from `main`'s. A PR whose branch
-does not contain the commit that ADDED a job has no definition for that job
-in its workflow snapshot and can never produce that check run. GitHub counts
-a required context with no check run as UNMET, so the PR sits `BLOCKED`
-permanently — and `gh pr checks` does not list the missing context as
-pending, it is simply absent, so everything the PR *can* produce reads
-SUCCESS. [#5958](https://github.com/bobmatnyc/trusty-tools/pull/5958) added
-`trusty-mpm-gui clippy` and `trusty-code-gui clippy`, and branch protection
-made both required immediately after; [#5962](https://github.com/bobmatnyc/trusty-tools/pull/5962),
-opened before that merge, had every context it could produce green,
-auto-merge armed, and sat BLOCKED indefinitely with nothing red anywhere. For
-a PR predating a newly-required job, `update-branch` is not optional — it is
-the only way the check can exist. Also expect the operational consequence:
-adding a required context wedges every open PR that predates the job, so plan
-to `update-branch` all of them once branch protection picks it up.
-
-🟡 **`gh pr merge --admin` is not confirmed harmless here — don't reach for
-it.** The account is NOT push-only: `gh api repos/bobmatnyc/trusty-tools --jq
-'.permissions'` returns `{"admin":true,"maintain":true,"pull":true,"push":true,
-"triage":true}` for `bobmatnyc`, the repo owner — this file's push-only/
-`admin: false` claim was disproved once already in an earlier session and is
-corrected here for the second time. `gh`'s own source (`cli/cli`,
-`pkg/cmd/pr/merge/merge.go`) codes `allowsAdminOverride` `true` for both
-`BLOCKED` and `BEHIND`, so the flag is not the silent no-op this file claimed.
-Still do not use it: every required context passing on the PR's own head
-remains the bar — `strict: false` means the base does not have to be current
-too.
+- Every required job triggers unconditionally (no `paths:` filters) and
+  short-circuits on the `docs_only` boolean from the `changes` job
+  (`ci.yml:166-195`).
+- `required_status_checks.strict` is `false`: a PR's head need not be current
+  with `main` for its checks to count.
+- 🟡 The required `Clippy` job runs `--workspace --all-targets` but excludes the
+  Tauri UI crates (`ci.yml:34-47`); their dedicated per-crate clippy jobs must
+  stay *required* to be gates
+  ([#5929](https://github.com/bobmatnyc/trusty-tools/pull/5929),
+  [#5935](https://github.com/bobmatnyc/trusty-tools/issues/5935)).
+- 🔴 **`Rust tests (pre-publish gate)` — the eight shards — does not run on pull
+  requests.** Not required, skipped outright on a PR; runs on push to `main` and
+  `workflow_dispatch`. Do not wait for it.
+- 🟡 A PR proves every test target COMPILES; test EXECUTION defers to `main`, so
+  run the ladder rung your change earns before merging. Full suite on a branch:
+  Actions → CI → "Run workflow".
+- 🟡 **A red `main` files an issue** — `notify-main-failure` opens or comments on
+  the `ci-red-main`-labelled tracking issue, then fails the run.
+- 🟡 **A `BEHIND` branch merges fine** — use `gh pr merge --squash
+  --delete-branch --auto`
+  ([#5958](https://github.com/bobmatnyc/trusty-tools/pull/5958)). What blocks is
+  `mergeStateStatus` reporting `BLOCKED` (pending or failing checks); updating
+  for BEHIND alone restarts CI and can fail to converge. `gh pr update-branch
+  <n>` stays correct for a genuine `CONFLICTING` state.
+- 🔴 **A PR predating a newly-required job must `update-branch`** — its branch
+  lacks the commit that ADDED the job, so it can never produce that check run and
+  sits `BLOCKED` with nothing red and the context absent from `gh pr checks`
+  ([#5962](https://github.com/bobmatnyc/trusty-tools/pull/5962)). Adding a
+  required context wedges every open PR that predates it.
+- 🟡 **Do not use `gh pr merge --admin`** — the account is repo owner and the
+  flag is not a no-op for `BLOCKED` or `BEHIND`. Every required context passing
+  on the PR's own head remains the bar.
 
 ### Baseline failures — the Rust specifics
 
@@ -245,25 +137,20 @@ too.
 If the failing crate depends on nothing you changed, prove it with an empty
 `git diff --name-only origin/main...HEAD -- <crate>/`; otherwise that diff
 proves nothing and you must reproduce the failure on `origin/main` instead.
-For the known-environmental flaky tests on this machine (the `trusty-search`
-filesystem-watcher tests, `execute_doctor_against_test_daemon`'s timing), the
-five-step protocol for telling a pre-existing red from one you caused, and the
-exact report-string format: see
-[docs/reference/test-ladder-baseline.md](docs/reference/test-ladder-baseline.md).
+
+- Known-environmental flaky tests, the five-step pre-existing-red protocol, and
+  the report-string format:
+  [test-ladder-baseline.md](docs/reference/test-ladder-baseline.md).
 
 ## Key Conventions
 
-🔴 **Rust issue boundary — search before filing.** Whether a finding earns an
-issue at all is decided by the **Ticket-Promotion Gate** in the framework skill
-`tm-ticketing` — read it there. What this repo adds is *what to search by*: the
-**test name**, the **panic / error text**, the **affected symbol**, and the
-**crate**. Search open and recently closed issues on all four. What to do with a
-hit — `COMMENT`, `REOPEN`, `NEW REGRESSION`, or `NO TICKET` — is `tm-ticketing`'s
-disposition to make, not automatically an append (#5202). Rationale per key:
-[docs/reference/issue-search-keys.md](docs/reference/issue-search-keys.md).
+🔴 **Search before filing.** `tm-ticketing` owns whether a finding earns an issue
+and the disposition on a hit (`COMMENT` / `REOPEN` / `NEW REGRESSION` /
+`NO TICKET` — not automatically an append, #5202). Search open and recently
+closed issues by **test name**, **panic / error text**, **affected symbol**, and
+**crate** ([issue-search-keys.md](docs/reference/issue-search-keys.md)).
 
-🔴 **Issue lifecycle — open → coded → merged → tested → closed (owner ruling
-2026-08-19).** Project-specific ticket states, tracked with three mutually
+🔴 **Issue lifecycle — open → coded → merged → tested → closed.** Three mutually
 exclusive labels between GitHub's native open/closed:
 
 | Label | Meaning |
@@ -272,37 +159,39 @@ exclusive labels between GitHub's native open/closed:
 | `status:merged` | PR merged to main; live verification pending |
 | `status:tested` | Verified live (installed binary / real run); eligible to close |
 
-Advancing a state removes the prior label in the same edit (`gh issue edit N
---add-label status:merged --remove-label status:coded`) — GitHub has no native
-exclusive-label mechanism, so the discipline is on the writer. Fix PRs
-reference their issue as `Refs #N`, **never** `Closes #N`: merge must not
-auto-close. An issue closes only from `status:tested`, with the live
-verification evidence in the closing comment; a merged fix that fails live
-verification keeps its issue open with the failure evidence.
+- Advancing a state removes the prior label in the same edit:
+  `gh issue edit N --add-label status:merged --remove-label status:coded`.
+- Fix PRs use `Refs #N`, **never** `Closes #N` — merge must not auto-close.
+- An issue closes only from `status:tested`, with live verification evidence in
+  the closing comment. A merged fix that fails live verification stays open.
 
-🔴 **Why/What/Test doc pattern with proportional depth** — public items carry
-documentation proportional to how surprising the code is:
+🔴 **Why/What/Test doc pattern with proportional depth:**
 
 ```rust
 /// Why: <motivation>   /// What: <mechanics>   /// Test: <where coverage lives>
 ```
 
-The full three-section pattern is mandatory for API entry points, design-heavy
-code, error contracts, safety/TCC behavior, and cross-crate surfaces. A
-single-line doc suffices for trivial items (simple getters, obvious one-liners,
-thin re-exports) — if a competent reader's first guess is right, one line is
-complete. Defensive-reasoning paragraphs and issue-history anecdotes belong in
-linked ADRs or issues, not inline comments; use `// See <issue-or-adr>`.
-Worked examples and the four-axis model: `Skill(skill="documentation-style")`.
+- Mandatory in full for API entry points, design-heavy code, error contracts,
+  safety/TCC behavior, and cross-crate surfaces. One line suffices for trivial
+  items (simple getters, obvious one-liners, thin re-exports).
+- Defensive-reasoning paragraphs and issue-history anecdotes go in linked ADRs or
+  issues, not inline comments — use `// See <issue-or-adr>`. Worked examples:
+  `Skill(skill="documentation-style")`.
 
-🟡 **Ticket-attributed inline comments** — when a ticket drives a change, leave a
-pointer at the change site: `// #1234: <one-line reason>`, or `// See #1234`. One
-line, never a narrative; the reasoning stays in the ticket.
+🟡 **Ticket-attributed inline comments** — leave `// #1234: <one-line reason>` or
+`// See #1234` at the change site. One line, never a narrative.
 
-🔴 **No `unwrap()` in library code** — use `?` with `anyhow::Result` for
-application/binary code and `thiserror` for library error types. Reserve
-`expect()` only for cases that are genuinely programmer errors (invariants that
-can never occur at runtime).
+🔴 **No `unwrap()` in library code** — `?` with `anyhow::Result` for
+application/binary code, `thiserror` for library error types. Reserve `expect()`
+for invariants that can never occur at runtime.
+
+🔴 **`thiserror` for libraries, `anyhow` for binaries** — library crates define
+structured error enums with `#[derive(thiserror::Error)]`; binary and daemon
+crates use `anyhow::Result`.
+
+🔴 **Feature flags** — `trusty-common` gates `axum` and `tower-http` behind the
+`axum-server` feature. Never add axum as an unconditional dependency in a library
+crate; enable it explicitly in crates that serve HTTP.
 
 🔴 **SLOC file size hard cap (MECHANICALLY ENFORCED, dual-cap since #1131,
 TEST_CAP raised #4074):**
@@ -312,262 +201,182 @@ TEST_CAP raised #4074):**
 | Production source files | **500 SLOC** |
 | Test / benchmark files | **3000 SLOC** |
 
-Comments, doc comments (`//`, `///`, `//!`, `/* … */`), and blank lines do
-**not** count toward the cap — only non-comment code lines in tracked `.rs`
-files do (e.g. `crates/trusty-common/src/lib.rs` is 809 raw lines but 113
-SLOC). Exact counting definition:
-[docs/reference/sloc-cap.md](docs/reference/sloc-cap.md).
+- Comments, doc comments, and blank lines do **not** count — only non-comment
+  code lines in tracked `.rs` files ([sloc-cap.md](docs/reference/sloc-cap.md)).
+- A file is a **test/benchmark file** when ANY match: basename exactly
+  `tests.rs`; basename ending `_test.rs` or `_tests.rs`; a `/tests/` path segment
+  (covers `crates/*/tests/*.rs` and `src/**/tests/*.rs`); a `/benches/` path
+  segment. All other tracked `.rs` files are **production**, capped at 500.
+- 🟡 **Inline `#[cfg(test)] mod <name> { … }` bodies do not count (#5153)** —
+  only that exact shape. `#[cfg(test)] mod tests;` sibling declarations,
+  `#[cfg(test)]` on an `fn`/`impl`/`use`, and `all(test, …)` / `any(test, …)`
+  predicates are all still counted.
+- 🔴 Enforced by `scripts/check_line_cap.sh` in CI and the pre-commit hook
+  (#610) — a new tracked file over its cap **cannot merge**. Never green this
+  gate by deleting, `#[ignore]`-ing, or excluding a file from the count; split it.
+- 🟡 **No standalone SLOC-cap fix** — the split ships inside the PR that next
+  adds to that file. Not licence to leave a red gate red: if your PR trips the
+  cap, split in that PR.
 
-A file is classified as a **test/benchmark file** when ANY of these match:
-- basename is exactly `tests.rs`
-- basename ends with `_test.rs` or `_tests.rs`
-- path contains a `/tests/` directory segment (covers `crates/*/tests/*.rs`
-  integration tests AND any `src/**/tests/*.rs` inline test modules)
-- path contains a `/benches/` directory segment
+🔴 **The SLOC region detector is SHARED, and a new consumer inherits its failure
+modes.** `scripts/lib/sloc_awk.sh` serves `check_line_cap.sh` (skip test bodies
+when counting) and `check_teardown_guard.sh` (skip test-only call sites, via
+`emit_skip=1`). It is line-based, not a Rust parser, and fails CLOSED: an
+unrecognised spelling leaves the region COUNTED.
 
-All other tracked `.rs` files are **production files**, capped at 500 SLOC.
+- Weigh that bias per consumer before reusing it — a false cap violation is
+  noise, but the teardown gate's only silencer is a durable row in
+  `scripts/teardown-guard-manifest.tsv`.
+- A consumer that would fail OPEN on a missed region must not use this detector
+  as its only check.
 
-🟡 **Inline `#[cfg(test)] mod <name> { … }` bodies do not count (#5153).** Add
-tests to a 460-SLOC module without splitting it. Only that exact shape is
-excluded — `#[cfg(test)] mod tests;` sibling declarations, `#[cfg(test)]` on an
-`fn`/`impl`/`use`, and predicates like `all(test, …)` or `any(test, …)` are all
-still counted. Braces inside string, byte-string, raw-string, and `'{'` char
-literals do NOT skew the region any more; they are blanked before balancing.
+🔴 **Common entry point, clean domain demarcation** — every capability shared
+across two or more crates (spawning git/gh/tmux/launchctl, building an HTTP
+client, resolving a daemon's address, reading a secret or config value, redacting
+output, retrying a fallible call) MUST have exactly one implementation, in
+`trusty-common` or the crate owning that domain, that every consumer routes
+through. A second independent implementation is a defect.
 
-🔴 **That region detector is SHARED, and a new consumer inherits its failure
-modes.** It lives in `scripts/lib/sloc_awk.sh` and is used by
-`scripts/check_line_cap.sh` (to skip test bodies when counting) and
-`scripts/check_teardown_guard.sh` (to skip test-only call sites, via
-`emit_skip=1`). It is line-based, not a Rust parser, and it fails CLOSED: an
-unrecognised spelling leaves the region COUNTED, never silently dropped.
+- Before writing `Command::new(...)`, `reqwest::Client::builder()`,
+  `std::env::var(...)` for a cross-crate concern, or bespoke read-this-config /
+  find-this-daemon / scrub-this-string logic: search first (`git grep`, then the
+  trusty-common source tree) and extend rather than duplicate.
+- Scope: capabilities shared ACROSS crates. Duplication WITHIN one crate is not
+  covered — consolidate that on its own merits (#4058). Per-domain status:
+  [domain-consolidation-audit.md](docs/reference/domain-consolidation-audit.md).
 
-Read that as a per-consumer question before reusing it, because one bias has
-two consequences. For the cap, a missed region is a false cap violation —
-noise. For the teardown gate, a missed region reported ten test fixtures as
-unguarded production writers, and the only way to silence one is a row in
-`scripts/teardown-guard-manifest.tsv` — a durable claim that a real write is
-exempt, which outlives the mistake and reads later as a considered decision.
-A consumer that would fail OPEN on a missed region must not use this detector
-as its only check.
-
-🟡 **No standalone SLOC-cap fix.** Never open a PR whose only purpose is bringing
-a file back under cap — the split ships inside the PR that next adds to that
-file, which is the PR the gate blocks anyway, so it costs one CI cycle instead of
-two. That is not licence to leave a red gate red: if your PR trips the cap, split
-in that PR. Example — a rebase pushed `bin/tm/main.rs` to 505 SLOC while the
-branch was adding a third `RepairAction` arm, and that same PR moved the match
-into a submodule.
-
-🔴 Mechanically enforced by `scripts/check_line_cap.sh` in CI and the pre-commit
-hook (#610) — a new tracked file over its cap **cannot merge**. Never turn this
-gate green by deleting, `#[ignore]`-ing, or excluding a file from the count;
-split it instead. Counting definition, the split pattern, when a violation gets
-fixed, ratchet-allowlist mechanics, and refactor history:
-[docs/reference/sloc-cap.md](docs/reference/sloc-cap.md).
-
-🔴 **`thiserror` for libraries, `anyhow` for binaries** — library crates
-(`trusty-common`, `trusty-embedderd`, etc.) define structured error enums with
-`#[derive(thiserror::Error)]`. Binary and daemon crates use `anyhow::Result`
-throughout.
-
-🔴 **Feature flags** — `trusty-common` gates `axum` and `tower-http` behind the
-`axum-server` feature flag. Do not add axum as an unconditional dependency in
-any library crate. Enable it explicitly in crates that serve HTTP.
-
-🔴 **Common entry point, clean domain demarcation** — Every capability shared across
-two or more crates — spawning an external tool (git, gh, tmux, launchctl), building
-an HTTP client, resolving a daemon's address, reading a secret or config value,
-redacting sensitive output, retrying a fallible call — MUST have exactly one
-implementation, living in trusty-common (or the crate that most naturally owns that
-domain), that every consumer routes through. Before writing `Command::new(...)`,
-`reqwest::Client::builder()`, `std::env::var(...)` for a cross-crate concern, or any
-bespoke read-this-config / find-this-daemon / scrub-this-string logic: search for an
-existing entry point first (`git grep`, then trusty-common source tree) and extend it
-rather than duplicating. A second independent implementation of a shared capability is
-a defect, not a convenience — behavior fixes, security patches, and safety guardrails
-must land once, not N times, and silent drift between copies is a hidden risk. Per-domain
-consolidation status is in
-[docs/reference/domain-consolidation-audit.md](docs/reference/domain-consolidation-audit.md).
-Scope: this rule governs capabilities shared ACROSS crates. Duplication of a
-capability WITHIN a single crate is not covered by it — consolidate that on
-its own merits when the drift has caused (or clearly will cause) a real
-defect, not by citing this rule (#4058 binary-name-table consolidation).
-
-The remaining 🟡/🟢 conventions — editions, global state, stderr logging,
-dependency declaration, and ignore-tagged tests — are one-liners in the
-"Common Pitfalls — Quick Checklist" below, with the reasoning in
-[docs/reference/common-pitfalls.md](docs/reference/common-pitfalls.md).
+Remaining 🟡/🟢 conventions — editions, global state, stderr logging, dependency
+declaration, ignore-tagged tests — are one-liners in "Common Pitfalls" below.
 
 ## Git Tag / Release Convention
 
 🔴 **Version bumps, tagging, and publishing are delegated to `local-ops`. The PM
 never edits a version file, cuts a tag, or runs `cargo publish` directly.**
 
-Every crate versions and tags independently: `<crate-name>-v<version>`.
-
-Before any bump, tag, or publish, call `Skill(skill="cargo-publish")`. It carries
-the full release sequence, the mandatory publish-only-from-merged-main and
-identity/clean-tree guards (`scripts/check-publish-ready.sh`,
-`scripts/preflight-publish.sh`), cross-crate publish ordering and propagation
-waits, the `tga` tag aliases (#1128), and the connection-safe daemon restart.
-
-> **Full release workflow, `scripts/bump-version.sh`, and Developer-ID signing
-> setup:** see [docs/reference/release-workflow.md](docs/reference/release-workflow.md).
+- Every crate versions and tags independently: `<crate-name>-v<version>`.
+- Before any bump, tag, or publish, call `Skill(skill="cargo-publish")` — it
+  carries the release sequence, the publish-only-from-merged-main and
+  identity/clean-tree guards (`check-publish-ready.sh`, `preflight-publish.sh`),
+  cross-crate ordering, the `tga` tag aliases (#1128), and the connection-safe
+  daemon restart. Full workflow and Developer-ID signing:
+  [release-workflow.md](docs/reference/release-workflow.md).
 
 🔴 **Internal consistency is the bar — do not deliberate over external SemVer.**
-The question worth answering about a public-API change is whether every crate in
-this workspace still agrees with itself. What a third-party crates.io consumer
-would experience is not a question to weigh, hold work over, or write an
-analysis about. Pick the version that keeps the workspace consistent and move on.
+Keep the workspace self-consistent. What a third-party crates.io consumer would
+experience is not a question to weigh, hold work over, or write an analysis about.
 
-🔴 **That governs deliberation, not the gate (#5050, moved to release-time by
-#5149).** `scripts/preflight-publish.sh` CHECK 5 still runs `cargo-semver-checks`
-against the crate's latest crates.io release immediately before `cargo publish`,
-and its nonzero exit is still the absolute stop — `cargo publish` runs locally,
-so no CI job can stop a bad upload. Nothing above makes that gate advisory, and
-nothing above is licence to silence it with an exclusions-file row.
+🔴 **That governs deliberation, not the gate (#5050, release-time since #5149).**
+`preflight-publish.sh` CHECK 5 runs `cargo-semver-checks` immediately before
+`cargo publish`, and its nonzero exit is the absolute stop — no CI job can stop a
+bad local upload. Never treat it as advisory or silence it with an
+exclusions-file row.
 
-🔴 **A zero exit is NOT the mirror of that stop (#5620).** `check_semver.sh`
-exits 0 both when it compared a crate and found nothing wrong and when it
-compared nothing at all, and CHECK 5 used to read only the status — so
-`0 crate(s) checked, 0 skipped, 1 inventory NOT computed` printed `[PASS]` and
-trusty-review 0.16.0 shipped with its public-API delta unexamined by any tool.
-CHECK 5 now reads the counts: **`0 compared` and `[PASS]` are unreachable
-together.** A recorded skip prints `[SKIP]` and permits, a blind gate prints
-`[FAIL]` and stops, and `PREFLIGHT_SEMVER_UNVERIFIED="<reason>"` downgrades a
-blind gate to `[WARN]` — a reason string, never a boolean, and never for a
-standing machine limitation (that belongs in
-`scripts/semver-checks-feature-exclusions.tsv`). The tag-push workflow
-`.github/workflows/semver-checks.yml` reports the same check independently.
-Cargo's 0.x rule applies: for a `0.y.z` crate the breaking bump is the MINOR
-position. A workspace `cargo check` can never catch this class of break, because
-the root `Cargo.toml` path override pairs local source with local dependency — so
-the workspace compiling clean is not evidence the published crates agree (#4088).
+🔴 **A zero exit is NOT the mirror of that stop (#5620)** — `check_semver.sh`
+exits 0 both when it compared a crate cleanly and when it compared nothing.
 
-🟡 **On an ordinary PR it compares nothing.** `.github/workflows/semver-checks.yml`
-triggers on every PR, then decides inside the job whether a release is under test
-(#5311); on a PR that does not bump a crate's declared version it exits in ~15s
-having compared nothing. So a breaking change merges unnoticed and surfaces at the
-release that ships it. That is expected, not a problem to pre-empt — the release is
-where it gets dealt with. `#[non_exhaustive]` on public structs and enums is still
-worth reaching for, purely because it keeps the gate quiet at release time. To check
-a change yourself: `bash scripts/check_semver.sh --crate <crate>`. See
-[docs/reference/semver-gate.md](docs/reference/semver-gate.md).
+- **`0 compared` and `[PASS]` are unreachable together.** A recorded skip prints
+  `[SKIP]` and permits; a blind gate prints `[FAIL]` and stops.
+- `PREFLIGHT_SEMVER_UNVERIFIED="<reason>"` downgrades a blind gate to `[WARN]` —
+  a reason string, never a boolean, and never for a standing machine limitation
+  (that belongs in `scripts/semver-checks-feature-exclusions.tsv`).
+- Cargo's 0.x rule applies: for a `0.y.z` crate the breaking bump is MINOR.
+- A workspace `cargo check` never catches this class of break — the root
+  `Cargo.toml` path override pairs local source with local dependency (#4088).
 
-🔴 **The tag must name the commit that gets published.** Nothing bound the two
-together until `preflight-publish.sh` CHECK 6
-(`scripts/check-tag-publish-parity.sh`): `check-publish-ready.sh` GUARD 2 asks
-only whether the tag is an ANCESTOR of `origin/main`, and CHECK 1 asks only
-whether HEAD EQUALS `origin/main`, so a tag several commits behind HEAD passes
-both. That is where a release lands whenever `main` moves and the run is
-fast-forwarded to satisfy CHECK 1 — which shipped `tga-v2.17.0` tagged at
-`246e4ca2` against a published `.cargo_vcs_info.json` of `7d5cf82e1` on
-2026-08-11, all gates green. **Fast-forwarded after tagging? Reset the checkout
-back to the tagged commit and publish that** — `git reset --hard <tag>`. After
-`cargo publish`, run `make publish-verify CRATE=<crate>`.
-See [release-workflow.md](docs/reference/release-workflow.md#tagpublish-commit-parity-guard).
+🟡 **On an ordinary PR the semver gate compares nothing** — `semver-checks.yml`
+exits in ~15s when no crate version is bumped (#5311). Expected, not something to
+pre-empt; `#[non_exhaustive]` on public structs and enums keeps it quiet at
+release time. Check a change yourself: `bash scripts/check_semver.sh --crate
+<crate>` ([semver-gate.md](docs/reference/semver-gate.md)).
+
+🔴 **The tag must name the commit that gets published** — `preflight-publish.sh`
+CHECK 6 (`check-tag-publish-parity.sh`) binds them, because the earlier guards
+accept a tag behind HEAD. **Fast-forwarded after tagging? Reset the checkout back
+to the tagged commit and publish that** — `git reset --hard <tag>`. After
+`cargo publish`, run `make publish-verify CRATE=<crate>`
+([parity guard](docs/reference/release-workflow.md#tagpublish-commit-parity-guard)).
 
 🔴 **Release tags here are immutable — a stranded tag burns its version number
-(#6178).** An enforcing ruleset rejects both a force-update and a delete of a
-`*-v*` tag with GH013, and `admin: true` on the account does not lift it. The
-ruleset is invisible to the GitHub API, so nothing warns you before the push
-fails. Any recipe that says re-tag, move the tag, or delete and re-push cannot
-execute on this repo — reset the checkout to the tag instead of moving the tag
-to the checkout.
+(#6178).** A ruleset rejects force-update and delete of a `*-v*` tag with GH013;
+`admin: true` does not lift it and the ruleset is invisible to the API.
 
-When the tagged commit can never pass the publish gate, that version number is
-spent: **bump to the next version and tag fresh.** Proven 2026-08-22 —
-`trusty-search-v0.49.0` and `trusty-review-v0.24.0` are permanently stranded at
-`4af0ef8ee`, and the release shipped as `0.49.1` / `0.24.1` instead. Tag as late
-as you can, immediately before `cargo publish`, so there is nothing to strand.
+- Re-tagging, moving a tag, or delete-and-re-push cannot execute here — reset the
+  checkout to the tag instead.
+- When the tagged commit can never pass the publish gate, that version number is
+  spent: **bump to the next version and tag fresh.**
+- Tag as late as possible, immediately before `cargo publish`.
 
-🔴 **CRITICAL macOS note:** never use `cp` to install a release binary on
-macOS — always `cargo install`. A plain `cp` over an on-PATH binary leaves a
-stale kernel cdhash cache and the next exec is SIGKILL'd as an invalid
-signature, which looks exactly like an OOM kill.
+🔴 **CRITICAL macOS note:** never use `cp` to install a release binary on macOS —
+always `cargo install`. A `cp` over an on-PATH binary leaves a stale kernel
+cdhash cache and the next exec is SIGKILL'd as an invalid signature, which looks
+exactly like an OOM kill.
 
 🟢 **macOS TCC scope split — read before re-granting anything:** `trusty-search`
 (and other external-volume daemons) needs **Full Disk Access**; `trusty-mpm` /
 `tm` needs the separate **App Data** category only, and must never be granted
-Full Disk Access. Certificate setup, signed-install scripts, the `launchctl
-bootout` restart playbook, and orphan-listener verification (#873, #2558, #534,
-#2486, #4230) are in the release-workflow reference above.
+Full Disk Access. Certificates, signed-install scripts, the `launchctl bootout`
+restart playbook, and orphan-listener verification (#873, #2558, #534, #2486,
+#4230): [release-workflow.md](docs/reference/release-workflow.md).
 
 ### Per-PR Changelog Fragment (issue #4476)
 
 🔴 **Every PR that touches a crate's `src/**` adds a changelog FRAGMENT file to
 that crate, in the same PR. Never edit a crate's `CHANGELOG.md` by hand.** A PR
 that changes crate source and lands with no fragment is a **review-gate
-failure** — the same tier as a failing `cargo test` / `cargo clippy` gate — and
-also a CI failure (`scripts/check_changelog_fragment.sh`). No "trivial change"
-exception. Docs-only, CI-only, test-only and `testdata/` PRs may skip it.
+failure** — the tier of a failing `cargo test` / `cargo clippy` gate — and a CI
+failure (`scripts/check_changelog_fragment.sh`). No "trivial change" exception.
+Docs-only, CI-only, test-only and `testdata/` PRs may skip it.
 
 ```
 crates/<crate>/changelog.d/<issue-or-pr-number>-<short-slug>.md
 ```
 
-Fragment format and category line: `Skill(skill="tm-workflow")`. Assembler
-and CI-gate specifics:
-[docs/reference/changelog-fragments.md](docs/reference/changelog-fragments.md).
+- Format and category line: `Skill(skill="tm-workflow")`. Assembler and CI-gate
+  specifics: [changelog-fragments.md](docs/reference/changelog-fragments.md).
 
 ## Cross-Crate Development Workflow
 
-Cargo resolves internal crates via path automatically, so no `[patch.crates-io]`
-dance is needed during development. Modifying a library crate is **rung 4** of
-the test ladder above: `cargo check --workspace`, then `cargo test -p <consumer>`
-for each direct dependent, all committed together — workspace builds are atomic.
-Publish-time `[patch.crates-io]` semantics are in
-`Skill(skill="cargo-publish")`.
+- Cargo resolves internal crates via path automatically — no `[patch.crates-io]`
+  dance during development.
+- Modifying a library crate is **rung 4**: `cargo check --workspace`, then
+  `cargo test -p <consumer>` for each direct dependent, all committed together.
+- Publish-time `[patch.crates-io]` semantics: `Skill(skill="cargo-publish")`.
 
 ## Parallel Worktree Discipline
 
 Generic worktree discipline — main checkout read-only for source (mechanically
-enforced; [ADR-0044](docs/adr/0044-main-checkout-write-boundary-and-agent-worktree-ownership.md),
-[ADR-0048](docs/adr/0048-dispatched-writers-get-a-worktree-and-the-write-boundary-is-enforced.md)), provisioning off `origin/main`,
-branch-is-the-workstream, one worktree per independently reviewable PR outcome,
-subagent confinement, cleanup — lives in `Skill(skill="tm-workflow")`. It
-applies here in full. What follows is only what this repo adds.
+enforced;
+[ADR-0044](docs/adr/0044-main-checkout-write-boundary-and-agent-worktree-ownership.md),
+[ADR-0048](docs/adr/0048-dispatched-writers-get-a-worktree-and-the-write-boundary-is-enforced.md)),
+provisioning off `origin/main`, branch-is-the-workstream, one worktree per
+independently reviewable PR outcome, subagent confinement, cleanup — lives in
+`Skill(skill="tm-workflow")` and applies here in full. This repo adds only:
 
-**End-to-end delivery chain:** accepted outcome → optional issue → worktree
-branch → one cohesive PR → applicable Rust gates → trusty-review gate →
-squash-merge → worktree cleanup. `tm-workflow` owns the full sequence and
-`tm-ticketing` owns whether the optional issue exists; this file adds only the
-Rust-specific gates (see the Rust Test Ladder above).
+- **Delivery chain:** accepted outcome → optional issue → worktree branch → one
+  cohesive PR → applicable Rust gates → trusty-review gate → squash-merge →
+  worktree cleanup. This file adds only the Rust gates (the test ladder above).
+- 🟡 **`cargo install` a clean checkout, never `cp`** — Cargo renames atomically
+  into `~/.cargo/bin/`, keeping the macOS cdhash cache consistent:
 
-🟡 **`cargo install` a clean checkout, never `cp`.** The preferred pattern for
-installing a freshly-built binary onto your PATH is:
+  ```bash
+  cargo install --path .claude/worktrees/<dirname>/crates/<name> --locked
+  ```
 
-```bash
-cargo install --path .claude/worktrees/<dirname>/crates/<name> --locked
-```
-
-Cargo writes atomically to a temp file and renames into `~/.cargo/bin/`, which
-keeps the macOS kernel's cdhash cache consistent (see the release-workflow
-note above). A plain `cp` over an on-PATH binary leaves a stale cdhash cache
-and the next exec is SIGKILL'd — that hazard is about `cargo install` versus
-`cp`, and holds identically no matter which checkout you run it from.
-
-What the checkout DOES decide is provenance: `cargo install --path` bakes in
-whatever is on disk, including uncommitted edits. Install from a checkout with
-an empty `git status --porcelain` at a known commit. A freshly-provisioned
-worktree off `origin/main` satisfies that by construction, which is why it
-stays the default. The main checkout is not automatically disqualified, but
-the write boundary
-([ADR-0044](docs/adr/0044-main-checkout-write-boundary-and-agent-worktree-ownership.md),
-[ADR-0048](docs/adr/0048-dispatched-writers-get-a-worktree-and-the-write-boundary-is-enforced.md),
-[ADR-0049](docs/adr/0049-docs-commits-are-permitted-in-a-main-checkout.md))
-only restricts SOURCE writes there — it classifies by file extension, and
-documents and configuration (`.md` included) stay writable, and since
-ADR-0049 committable, directly in the main checkout. Check `git status
---porcelain` before installing from either location; don't assume it.
-
-> **Extended discipline rationale, the install-from-worktree commands, and the
-> throwaway-worktree fallback for installing from a dirty checkout:** see
-> [docs/reference/worktree-discipline.md](docs/reference/worktree-discipline.md).
+- `--path` bakes in whatever is on disk, uncommitted edits included. Install only
+  from a checkout with an empty `git status --porcelain` at a known commit —
+  check it, don't assume it. A fresh worktree off `origin/main` satisfies that by
+  construction and stays the default.
+- The main checkout is not automatically disqualified: the write boundary
+  restricts SOURCE writes only, so docs and configuration (`.md` included) stay
+  writable and committable there
+  ([ADR-0049](docs/adr/0049-docs-commits-are-permitted-in-a-main-checkout.md)).
+- Extended rationale and the throwaway-worktree fallback for a dirty checkout:
+  [worktree-discipline.md](docs/reference/worktree-discipline.md).
 
 ## Abbreviations & Aliases
 
-When the user (or any agent) refers to a crate by abbreviation, resolve it using this table before taking any action.
+Resolve any crate abbreviation with this table before taking action — it applies
+everywhere: ticket descriptions, build commands, conversation.
 
 | Abbreviation | Full crate name | Cargo package flag | Directory |
 |---|---|---|---|
@@ -584,89 +393,63 @@ When the user (or any agent) refers to a crate by abbreviation, resolve it using
 | `tctl` | trusty-installer | `-p trusty-installer` | `crates/trusty-installer/` |
 | `taudit` | trusty-audit | `-p trusty-audit` | `crates/trusty-audit/` (bins: `trusty-audit`, `taudit`) |
 
-These abbreviations apply everywhere: ticket descriptions, build commands, references in conversation. Always expand before running `cargo` commands.
-
-> **Auto-resolution:** When connected to trusty-memory MCP, call `get_prompt_context()` at the start of each turn to load current aliases and conventions. Pass a `query` string to filter to relevant facts only.
+> **Auto-resolution:** When connected to trusty-memory MCP, call
+> `get_prompt_context()` at the start of each turn to load current aliases and
+> conventions. Pass a `query` string to filter to relevant facts only.
 
 ## Development Environment
 
-### Required Tools
-
-- **Rust**: `rustup` with the toolchain pinned to MSRV `1.94` or later.
-  Install: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-- **Node / pnpm**: only needed if working on the Svelte UIs embedded in
-  `trusty-search` or `trusty-memory`. Install pnpm via `npm i -g pnpm`.
-- **Git**: standard; the workspace uses git tags for per-crate releases.
-
-### Environment Variables
-
-`RUST_LOG` (tracing filter) and `SKIP_UI_BUILD=1` (skip the Svelte UI build in
-`build.rs`) are the two you reach for day to day. Every variable, including
-`OPENROUTER_API_KEY`, `TRUSTY_LLM_MODEL` and `TRUSTY_NO_KG`, is in
-[docs/reference/environment-variables.md](docs/reference/environment-variables.md).
-
-### IDE Setup
-
-> **Full IDE setup reference:** see [docs/reference/ide-setup.md](docs/reference/ide-setup.md).
-
-Quick: VS Code needs `rust-analyzer` + `Even Better TOML` extensions; RustRover auto-detects the workspace.
-
-### Running Individual MCP Servers Locally
-
-> **Detailed MCP server examples and wiring:** see [docs/reference/running-mcp-servers.md](docs/reference/running-mcp-servers.md).
-
-Quick: `RUST_LOG=info cargo run -p trusty-search -- start` (daemon), `cargo run -p trusty-search -- serve` (MCP stdio mode).
+- **Rust**: `rustup`, toolchain at MSRV `1.94` or later
+  (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`).
+- **Node / pnpm**: only for the Svelte UIs in `trusty-search` / `trusty-memory`
+  (`npm i -g pnpm`).
+- **Env vars**: `RUST_LOG` and `SKIP_UI_BUILD=1` (skip the Svelte UI build in
+  `build.rs`) are the day-to-day two. Full table:
+  [environment-variables.md](docs/reference/environment-variables.md).
+- **IDE**: VS Code needs `rust-analyzer` + `Even Better TOML`; RustRover
+  auto-detects ([ide-setup.md](docs/reference/ide-setup.md)).
+- **MCP servers locally**: `RUST_LOG=info cargo run -p trusty-search -- start`
+  (daemon), `cargo run -p trusty-search -- serve` (MCP stdio). Wiring:
+  [running-mcp-servers.md](docs/reference/running-mcp-servers.md).
 
 ## Public Website (`website/`)
 
-SvelteKit + `adapter-vercel`, deployed to Vercel from `main`. Two page
-families with DIFFERENT update semantics:
+SvelteKit + `adapter-vercel`, deployed to Vercel from `main`. Two page families
+with DIFFERENT update semantics:
 
 - **`/docs/**`** — generated at build time from files listed in
-  `docs/public-manifest.tsv`. Edit a listed `docs/` file, merge to main, and
-  the live site updates automatically. A `PAGE` row naming a missing file
-  FAILS the build; a `docs/` file absent from the manifest is simply never
-  public (an allowlist boundary, not a bug).
-- **`/tools/<crate>`** — six hand-authored flagship pages (search, memory,
-  mpm, analyze, review, tga). Their copy is static prose in
-  `website/src/lib/tools.ts` and `website/src/routes/tools/*/+page.svelte`,
-  verified against crate source when written. 🔴 **Editing a crate README does
-  NOT update its flagship page** — nothing in the build reads crate READMEs.
-  Update those files by hand.
-
-Vercel rebuilds only when a push touches `website/`, `docs/`, `Cargo.lock`, or
-`crates/*/Cargo.toml`. A `crates/*/README.md` or root `README.md` change
-triggers no rebuild — nor does a `CLAUDE.md` edit, which is expected.
-
-🔴 There is no `vercel.json`. Root Directory, "Include source files outside of
-the Root Directory", and the Ignored Build Step are configured in the Vercel
-dashboard only — dashboard drift leaves no trace in git. Setup and the full
-path table: [website/README.md](website/README.md).
-
-🟡 Website tests run in CI under `.github/workflows/website-tests.yml` (#5200) —
-its own workflow, not a leg on `ci.yml`'s `ui-checks` matrix, because
-`scripts/detect-docs-only.sh` buckets `website/**` as docs-only and every
-`ui-checks` step is gated on `docs_only != 'true'`; a leg there would skip on
-exactly the PRs it exists to check. Still run them by hand before pushing:
-`pnpm test` from INSIDE `website/` — pnpm is pinned there (`packageManager`
-field); a shell at the repo root has no such pin and its resolved pnpm can
-require a Node version newer than what's installed. The workflow runs Node 20;
-a newer local Node can report spurious `localStorage` failures in
-`theme.test.ts`.
+  `docs/public-manifest.tsv`. Edit a listed `docs/` file, merge to main, and the
+  live site updates. A `PAGE` row naming a missing file FAILS the build; a
+  `docs/` file absent from the manifest is never public (allowlist, not a bug).
+- **`/tools/<crate>`** — six hand-authored flagship pages (search, memory, mpm,
+  analyze, review, tga), static prose in `website/src/lib/tools.ts` and
+  `website/src/routes/tools/*/+page.svelte`.
+- 🔴 **Editing a crate README does NOT update its flagship page** — nothing in
+  the build reads crate READMEs. Update those files by hand.
+- Vercel rebuilds only when a push touches `website/`, `docs/`, `Cargo.lock`, or
+  `crates/*/Cargo.toml` — not a `README.md` or `CLAUDE.md` change.
+- 🔴 There is no `vercel.json`. Root Directory, "Include source files outside of
+  the Root Directory", and the Ignored Build Step live in the Vercel dashboard
+  only — dashboard drift leaves no trace in git
+  ([website/README.md](website/README.md)).
+- 🟡 Website tests run under `.github/workflows/website-tests.yml` (#5200), not
+  `ci.yml`'s `ui-checks`. Run them by hand before pushing: `pnpm test` from
+  INSIDE `website/`, where pnpm is pinned (`packageManager`). The workflow runs
+  Node 20 — a newer local Node reports spurious `localStorage` failures in
+  `theme.test.ts`.
 
 ## Common Pitfalls — Quick Checklist
 
-For extended explanations, see [docs/reference/common-pitfalls.md](docs/reference/common-pitfalls.md).
+Rules already stated above (error handling, axum gating, SLOC caps, dependent
+testing) are not repeated here. Extended explanations:
+[common-pitfalls.md](docs/reference/common-pitfalls.md).
 
-- **Library error handling:** use `thiserror`, not `unwrap()` in libraries
 - **Daemon stdout:** never log to stdout in daemons or MCP servers — `init_tracing` writes to stderr so stdout stays clean for MCP JSON-RPC framing
-- **Axum in libraries:** gate behind `axum-server` feature flag
-- **Shared crate changes:** always run `cargo check` + tests for all dependents
-- **SLOC cap:** respect 500/3000 SLOC limits (prod/test); use `bash scripts/check_line_cap.sh`
+- **Line-cap check:** `bash scripts/check_line_cap.sh`
 - **UI build:** install pnpm or set `SKIP_UI_BUILD=1` before `cargo build`
 - **Patch tables:** put all `[patch.crates-io]` in root `Cargo.toml` only
-- **Workspace deps:** shared external crates are declared once in `[workspace.dependencies]` and referenced as `dep = { workspace = true }` — never pin locally if already in the workspace table; `default-features` is likewise owned by the root entry — `default-features = false` on a member is ignored unless the root entry sets it too (see common-pitfalls.md)
-- **Internal deps:** reference sibling crates as `trusty-common = { workspace = true }`; the workspace manifest owns the path, so every member resolves from in-tree source
+- **Workspace deps:** shared external crates are declared once in `[workspace.dependencies]` and referenced as `dep = { workspace = true }` — never pin locally if already in the workspace table; `default-features` is likewise owned by the root entry, so `default-features = false` on a member is ignored unless the root entry sets it too
+- **Internal deps:** reference sibling crates as `trusty-common = { workspace = true }`; the workspace manifest owns the path
 - **No global state:** helpers are free functions or small structs — no `lazy_static!` / `once_cell::sync::Lazy` except the tracing subscriber, which uses `try_init` to stay idempotent across test binaries
 - **MSRV drift:** prefer stable channel toolchains; don't break `rust-version = "1.94"`
 - **Edition mismatch:** the workspace *default* is edition 2024 (`edition.workspace = true`); 11 crates pin `edition = "2021"` explicitly. Let-chains (`if let … && let …`) only compile in 2024 — read the crate's `Cargo.toml` before copying one in
@@ -674,23 +457,10 @@ For extended explanations, see [docs/reference/common-pitfalls.md](docs/referenc
 
 ## Reference Documentation
 
-Full-length reference materials for less-frequent lookups:
+Most references are linked from the rule they serve, above. Not linked elsewhere:
 
-- **Code structure & crate map:** [docs/reference/crate-map.md](docs/reference/crate-map.md)
-- **Documentation layout conventions:** [docs/reference/documentation-layout.md](docs/reference/documentation-layout.md)
-- **Former repos (monorepo history):** [docs/reference/former-repos.md](docs/reference/former-repos.md)
-- **Release workflow (with macOS signing details):** [docs/reference/release-workflow.md](docs/reference/release-workflow.md)
-- **Worktree discipline (extended rationale):** [docs/reference/worktree-discipline.md](docs/reference/worktree-discipline.md)
-- **Common pitfalls (detailed explanations):** [docs/reference/common-pitfalls.md](docs/reference/common-pitfalls.md)
-- **Environment variables (full table):** [docs/reference/environment-variables.md](docs/reference/environment-variables.md)
-- **IDE setup (detailed):** [docs/reference/ide-setup.md](docs/reference/ide-setup.md)
-- **Running MCP servers (examples & wiring):** [docs/reference/running-mcp-servers.md](docs/reference/running-mcp-servers.md)
-- **Spec-Linked Documentation (SLD) policy:** [DOC-38](docs/specs/spec-linked-documentation.md) — the standard for declaring source↔spec references; enforced by `scripts/check_sld.sh`.
-- **HTTP trust-boundary threat model:** [docs/reference/threat-model.md](docs/reference/threat-model.md) — per-daemon bind/guard/proxy compliance inventory for the loopback-only doctrine ([ADR-0018](docs/adr/0018-loopback-only-doctrine.md)).
-- **Domain consolidation audit:** [docs/reference/domain-consolidation-audit.md](docs/reference/domain-consolidation-audit.md) — dated per-domain status behind the common-entry-point rule.
-- **Per-PR changelog fragments:** [docs/reference/changelog-fragments.md](docs/reference/changelog-fragments.md) — assembler and CI-gate mechanics.
-- **Public-API / SemVer gate:** [docs/reference/semver-gate.md](docs/reference/semver-gate.md) — where it runs (release-time, not per-PR), what it checks, which crates it skips and why, and the feature-exclusion file.
-- **Rust test ladder gate commands:** [docs/reference/test-ladder-baseline.md](docs/reference/test-ladder-baseline.md) — the exact command chain per rung, the baseline-failure protocol, and how much gate output a PR body owes.
-- **Generated doc regions:** [docs/reference/generated-doc-regions.md](docs/reference/generated-doc-regions.md) — the `<!-- BEGIN GENERATED: … -->` marker contract, the `UPDATE_DOCS=1 cargo test -p <crate> --test generated_docs` regeneration command, and the plainly-stated limit: a crate with no markers is not checked.
-- **Rust issue search keys:** [docs/reference/issue-search-keys.md](docs/reference/issue-search-keys.md) — why test name / panic text / symbol / crate find the canonical issue.
-- **Public documentation allowlist:** [docs/public-manifest.tsv](docs/public-manifest.tsv) — the curated list of `docs/` pages the public website may publish; format documented in the file header. It is an ALLOWLIST, so a page absent from it is never public. Enforced by `scripts/check_public_docs.sh` (self-test `scripts/check_public_docs_selftest.sh`). The internal mdBook (`docs/book.toml` + `docs/SUMMARY.md`) is unaffected and remains the complete offline book.
+- [documentation-layout.md](docs/reference/documentation-layout.md) — docs layout conventions
+- [DOC-38](docs/specs/spec-linked-documentation.md) — SLD policy, enforced by `scripts/check_sld.sh`
+- [threat-model.md](docs/reference/threat-model.md) — per-daemon bind/guard/proxy inventory ([ADR-0018](docs/adr/0018-loopback-only-doctrine.md))
+- [generated-doc-regions.md](docs/reference/generated-doc-regions.md) — the `<!-- BEGIN GENERATED: … -->` contract and `UPDATE_DOCS=1 cargo test -p <crate> --test generated_docs`; a crate with no markers is not checked
+- [public-manifest.tsv](docs/public-manifest.tsv) — ALLOWLIST of publishable `docs/` pages (absent = never public), enforced by `scripts/check_public_docs.sh`; the internal mdBook is unaffected
