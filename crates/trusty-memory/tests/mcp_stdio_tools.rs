@@ -132,9 +132,14 @@ async fn remember(state: &AppState, palace: &str, text: &str, tags: &[&str]) -> 
     )
     .await
     .expect("memory_remember");
+    // #6297: the response, not a bare "drawer_id in response". `memory_remember`
+    // answers Ok with a rejection payload when the content gate declines, so the
+    // old message named the missing field and hid the reason it was missing —
+    // which is how three perf fixtures reported a setup panic that said nothing
+    // about the gate that caused it.
     res["drawer_id"]
         .as_str()
-        .expect("drawer_id in response")
+        .unwrap_or_else(|| panic!("memory_remember returned no drawer_id: {res}"))
         .to_string()
 }
 
@@ -890,6 +895,159 @@ async fn read_only_open_while_writer_holds_lock_succeeds() {
 // Performance budgets (ignored by default; run with --include-ignored)
 // ---------------------------------------------------------------------------
 
+// #6297: the perf fixtures below hit two `memory_remember` admission gates that
+// landed after they were written, and each died in setup before reaching the
+// section it times. Both gates are correct production behaviour; the fixtures
+// were stale.
+//
+//  1. `MCP_MIN_TOKENS` (8) rejected "warm-up drawer" and "seed" outright.
+//     [`perf_seed_text`] is long enough to clear it.
+//  2. The rolling dedup window (`DEDUP_SIMILARITY_THRESHOLD` 0.92 on
+//     Jaro-Winkler, 5 minutes) then rejected the lengthened seeds as
+//     near-duplicates of each other — Jaro-Winkler pays a prefix bonus, so a
+//     templated string differing only in a trailing index scores far above the
+//     threshold. Varying the FIRST word is what actually separates them.
+
+/// Per-drawer seed text for the perf fixtures.
+///
+/// Why (#6297): a seed carries a timed operation but still goes through the real
+/// `memory_remember` handler, so it owes that handler's admission rules —
+/// bypassing them would time a write path no caller can reach. It must also be
+/// genuinely distinct per `i`: the recall budget over 100 identical drawers
+/// measures a degenerate index, and the dedup window rejects near-duplicates
+/// outright.
+/// What: draws a subject, verb and object from three pools of coprime length and
+/// puts the varying subject first, where Jaro-Winkler's prefix bonus applies.
+/// The trailing `alpha-{i}` token keeps each drawer individually addressable by
+/// the recall query.
+/// Test: used by every `perf_*` fixture below.
+fn perf_seed_text(i: usize) -> String {
+    const SUBJECTS: &[&str] = &[
+        "Harbour", "Lantern", "Meadow", "Quartz", "Tundra", "Violin", "Zephyr", "Cobalt", "Fennel",
+        "Gantry", "Ripcord",
+    ];
+    const VERBS: &[&str] = &[
+        "measures",
+        "reroutes",
+        "catalogues",
+        "dampens",
+        "polishes",
+        "forecasts",
+        "untangles",
+    ];
+    const OBJECTS: &[&str] = &[
+        "ledger",
+        "antenna",
+        "trellis",
+        "sextant",
+        "bassoon",
+        "kiln",
+        "marmalade",
+        "spillway",
+        "quorum",
+    ];
+    let subject = SUBJECTS[i % SUBJECTS.len()];
+    let verb = VERBS[i % VERBS.len()];
+    let object = OBJECTS[i % OBJECTS.len()];
+    format!("{subject} {verb} the {object} on bay {i}, topic alpha-{i}.")
+}
+
+// #6297: the budgets, and what they are for.
+//
+// These are wall-clock budgets on developer hardware, competing with whatever
+// else the machine is doing — `cargo test` runs them in parallel with each
+// other by default, and this workspace's own builds run alongside. They exist
+// to catch an ORDER-OF-MAGNITUDE regression, not to microbenchmark: a budget
+// set at the observed median turns every loaded machine into a red gate, which
+// is what the two below did.
+//
+// Measured on an M-series Mac, 2026-08-27, `--include-ignored`. Serial is
+// `--test-threads=1`; parallel is the default and is what the budget must
+// survive, because it is the invocation everyone actually runs.
+//
+//                        serial     parallel   old budget   new budget
+//   kg_assert             19.3 ms    68.3 ms      10 ms       250 ms
+//   kg_query              25.1 ms    52.2 ms      20 ms       150 ms
+//   memory_recall          6.0 ms    33.3 ms      50 ms       150 ms
+//   palace_cold_open     101.5 ms   358.7 ms     200 ms       750 ms
+//   memory_remember      195.5 ms   542.4 ms     500 ms      1500 ms
+//   ten_concurrent        800 ms      3.48 s       1 s           8 s
+//
+// Running in parallel costs a factor of ~3, and every old budget sat inside
+// that factor — so the verdict was decided by scheduling noise, not by the
+// code. `kg_assert` is the clearest case: it is one durable redb write
+// transaction, its floor is an APFS fsync, and a separate n=5 sample ranged
+// 19.1–125.7 ms serial. No code change brings that under 10 ms on this
+// hardware; the budget was unreachable, not missed.
+//
+// `ten_concurrent` had never once run to completion before this change — it
+// died in setup on the content gate — so its 1 s was a guess no measurement
+// had ever tested.
+//
+// Each budget is set above the parallel measurement with roughly 2.5x
+// headroom. A regression worth catching here is a factor, not a few
+// milliseconds.
+
+/// One durable redb write transaction; the floor is an fsync.
+const KG_ASSERT_BUDGET: Duration = Duration::from_millis(250);
+
+/// One indexed read over a 1000-triple palace.
+const KG_QUERY_BUDGET: Duration = Duration::from_millis(150);
+
+/// First open of a palace already on disk, with no in-process cache.
+const PALACE_COLD_OPEN_BUDGET: Duration = Duration::from_millis(750);
+
+/// One warm `memory_remember`, ONNX embedding pass included.
+const MEMORY_REMEMBER_BUDGET: Duration = Duration::from_millis(1500);
+
+/// One warm `memory_recall` over 100 drawers.
+const MEMORY_RECALL_BUDGET: Duration = Duration::from_millis(150);
+
+/// Ten parallel snapshot opens against a flocked palace.
+const TEN_CONCURRENT_OPENS_BUDGET: Duration = Duration::from_secs(8);
+
+/// Report a timing, then hold it to its budget.
+///
+/// Why (#6297): two budgets here were missed by main and the failure said only
+/// which one. Nobody could tell an order-of-magnitude regression from a machine
+/// under load without re-running by hand, because a passing measurement printed
+/// nothing at all. Emitting it unconditionally makes `--nocapture` a
+/// measurement, not just a pass/fail.
+/// What: writes `perf: <label> <elapsed> (budget <budget>)` to stderr — never
+/// stdout, which these tests share with nothing but is the MCP channel's
+/// convention here — then asserts.
+/// Test: every `perf_*` fixture below.
+fn assert_within_budget(label: &str, elapsed: Duration, budget: Duration) {
+    eprintln!("perf: {label} {elapsed:?} (budget {budget:?})");
+    assert!(
+        elapsed < budget,
+        "{label} took {elapsed:?} (budget {budget:?})"
+    );
+}
+
+/// Seed a drawer past the dedup window.
+///
+/// Why (#6297): bulk seeding states "populate this palace with N drawers", which
+/// is what `force` means at the MCP boundary — an intentional write the rolling
+/// dedup window must not silently drop. It bypasses the quality gates only, so
+/// [`perf_seed_text`] still carries content the unforced path would accept. The
+/// TIMED calls never use this: they measure the real admission path, dedup
+/// check included.
+async fn remember_seed(state: &AppState, palace: &str, i: usize) {
+    dispatch_tool(
+        state,
+        "memory_remember",
+        json!({
+            "palace": palace,
+            "text": perf_seed_text(i),
+            "room": "General",
+            "force": true,
+        }),
+    )
+    .await
+    .expect("memory_remember seed");
+}
+
 /// Why: `memory_remember` is the slowest tool because it owns the ONNX
 /// embedding pass; we want to catch regressions if the warm-path cost
 /// exceeds 500 ms.
@@ -899,25 +1057,20 @@ async fn read_only_open_while_writer_holds_lock_succeeds() {
 /// Test: this test (run with `cargo test -- --include-ignored`).
 #[tokio::test]
 #[ignore = "perf budget — requires warm embedder; run with --include-ignored"]
-async fn perf_memory_remember_under_500ms() {
+async fn perf_memory_remember_within_budget() {
     let fx = Fixture::new();
     create_palace(fx.state(), "perf-remember").await;
-    // Warm-up: first call pays the ONNX session-load cost.
-    remember(fx.state(), "perf-remember", "warm-up drawer", &[]).await;
+    // Warm-up: first call pays the ONNX session-load cost. Forced, so the
+    // timed call below is the only one whose admission path is measured.
+    remember_seed(fx.state(), "perf-remember", 0).await;
 
+    // #6297: the timed call is deliberately NOT forced — it measures the real
+    // admission path, dedup check included. Index 5 shares no word with index 0,
+    // so the dedup window has nothing to match it against.
     let started = Instant::now();
-    remember(
-        fx.state(),
-        "perf-remember",
-        "timed drawer for the perf budget",
-        &[],
-    )
-    .await;
+    remember(fx.state(), "perf-remember", &perf_seed_text(5), &[]).await;
     let elapsed = started.elapsed();
-    assert!(
-        elapsed < Duration::from_millis(500),
-        "memory_remember took {elapsed:?} (budget: 500ms)"
-    );
+    assert_within_budget("memory_remember", elapsed, MEMORY_REMEMBER_BUDGET);
 }
 
 /// Why: `memory_recall` over a moderately-sized palace must stay below
@@ -927,17 +1080,11 @@ async fn perf_memory_remember_under_500ms() {
 /// Test: this test (run with `cargo test -- --include-ignored`).
 #[tokio::test]
 #[ignore = "perf budget — 100-drawer seed is slow; run with --include-ignored"]
-async fn perf_memory_recall_100_drawers_under_50ms() {
+async fn perf_memory_recall_100_drawers_within_budget() {
     let fx = Fixture::new();
     create_palace(fx.state(), "perf-recall").await;
     for i in 0..100 {
-        remember(
-            fx.state(),
-            "perf-recall",
-            &format!("Seed drawer {i} about unique topic alpha-{i}"),
-            &[],
-        )
-        .await;
+        remember_seed(fx.state(), "perf-recall", i).await;
     }
     // Warm-up recall — primes the embedder for the query path.
     dispatch_tool(
@@ -957,10 +1104,7 @@ async fn perf_memory_recall_100_drawers_under_50ms() {
     .await
     .unwrap();
     let elapsed = started.elapsed();
-    assert!(
-        elapsed < Duration::from_millis(50),
-        "memory_recall took {elapsed:?} (budget: 50ms)"
-    );
+    assert_within_budget("memory_recall", elapsed, MEMORY_RECALL_BUDGET);
 }
 
 /// Why: `kg_assert` is a single redb write transaction; budget 10 ms.
@@ -968,7 +1112,7 @@ async fn perf_memory_recall_100_drawers_under_50ms() {
 /// Test: this test (run with `--include-ignored`).
 #[tokio::test]
 #[ignore = "perf budget — run with --include-ignored"]
-async fn perf_kg_assert_under_10ms() {
+async fn perf_kg_assert_within_budget() {
     let fx = Fixture::new();
     create_palace(fx.state(), "perf-assert").await;
 
@@ -986,10 +1130,7 @@ async fn perf_kg_assert_under_10ms() {
     .await
     .unwrap();
     let elapsed = started.elapsed();
-    assert!(
-        elapsed < Duration::from_millis(10),
-        "kg_assert took {elapsed:?} (budget: 10ms)"
-    );
+    assert_within_budget("kg_assert", elapsed, KG_ASSERT_BUDGET);
 }
 
 /// Why: `kg_query` against a 1000-triple palace must stay below 20 ms.
@@ -998,7 +1139,7 @@ async fn perf_kg_assert_under_10ms() {
 /// Test: this test (run with `--include-ignored`).
 #[tokio::test]
 #[ignore = "perf budget — 1000-triple seed is slow; run with --include-ignored"]
-async fn perf_kg_query_1000_triples_under_20ms() {
+async fn perf_kg_query_1000_triples_within_budget() {
     let fx = Fixture::new();
     create_palace(fx.state(), "perf-query").await;
     for i in 0..1000 {
@@ -1025,10 +1166,7 @@ async fn perf_kg_query_1000_triples_under_20ms() {
     .await
     .unwrap();
     let elapsed = started.elapsed();
-    assert!(
-        elapsed < Duration::from_millis(20),
-        "kg_query took {elapsed:?} (budget: 20ms)"
-    );
+    assert_within_budget("kg_query", elapsed, KG_QUERY_BUDGET);
 }
 
 /// Why: Cold palace open (palace dir already on disk, no in-process
@@ -1039,7 +1177,7 @@ async fn perf_kg_query_1000_triples_under_20ms() {
 /// Test: this test (run with `--include-ignored`).
 #[tokio::test]
 #[ignore = "perf budget — run with --include-ignored"]
-async fn perf_palace_cold_open_under_200ms() {
+async fn perf_palace_cold_open_within_budget() {
     let tmp = tempfile::tempdir().unwrap();
     let data_root = tmp.path().to_path_buf();
     // Seed the palace then drop the seeding state so the in-process
@@ -1052,10 +1190,7 @@ async fn perf_palace_cold_open_under_200ms() {
         .await
         .unwrap();
     let elapsed = started.elapsed();
-    assert!(
-        elapsed < Duration::from_millis(200),
-        "cold palace_info took {elapsed:?} (budget: 200ms)"
-    );
+    assert_within_budget("palace_cold_open", elapsed, PALACE_COLD_OPEN_BUDGET);
 }
 
 /// Why: Ten parallel snapshot opens must all succeed and finish within
@@ -1064,14 +1199,24 @@ async fn perf_palace_cold_open_under_200ms() {
 /// What: Locks the redb files of a seeded palace, spawns 10
 /// `palace_info` tasks against fresh `AppState`s, joins them, asserts
 /// all succeeded and total elapsed < 1 s.
+///
+/// #6297: seeds through `seed_palace` rather than a live `Fixture`. The
+/// fixture's own `AppState` holds redb open, so `lock_palace_files` — a raw
+/// `Database::create` standing in for a peer process — failed with
+/// `DatabaseAlreadyOpen` against it. `seed_palace` drops the seeding state and
+/// yields until the per-palace `KgWriter` actor releases its store `Arc`, which
+/// is what leaves the files free to flock. The defect was latent: the seed
+/// panicked on the content gate before ever reaching this line.
 /// Test: this test (run with `--include-ignored`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "perf budget — run with --include-ignored"]
-async fn perf_ten_concurrent_read_only_opens_under_1s() {
-    let fx = Fixture::new();
-    create_palace(fx.state(), "perf-concurrent").await;
-    remember(fx.state(), "perf-concurrent", "seed", &[]).await;
-    let data_root = fx.data_root().to_path_buf();
+async fn perf_ten_concurrent_read_only_opens_within_budget() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data_root = tmp.path().to_path_buf();
+    seed_palace(&data_root, "perf-concurrent", |state, palace| async move {
+        remember_seed(&state, &palace, 0).await;
+    })
+    .await;
     let palace_dir = data_root.join("perf-concurrent");
     let _live = lock_palace_files(&palace_dir);
 
@@ -1088,8 +1233,5 @@ async fn perf_ten_concurrent_read_only_opens_under_1s() {
         h.await.expect("task join").expect("palace_info ok");
     }
     let elapsed = started.elapsed();
-    assert!(
-        elapsed < Duration::from_secs(1),
-        "10 concurrent snapshot opens took {elapsed:?} (budget: 1s)"
-    );
+    assert_within_budget("ten_concurrent_opens", elapsed, TEN_CONCURRENT_OPENS_BUDGET);
 }
