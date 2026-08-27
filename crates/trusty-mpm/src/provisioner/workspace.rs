@@ -767,10 +767,13 @@ impl<G: GitBackend> WorkspaceProvisioner<G> {
     /// `git worktree remove --force` it later), runs `prepare_session` (unless
     /// `prepare` is false), and returns the [`PreparedWorkspace`] — `branch` is
     /// the REQUESTED `git_ref`, not the internal per-session branch name
-    /// backing the worktree (that internal name is `session_id` itself, chosen
-    /// so `decommission`'s existing branch cleanup — which deletes a branch
-    /// named after the worktree's leaf directory — finds and removes it).
+    /// backing the worktree. That internal name is
+    /// `core::worktree_naming::worktree_branch_for(session_id)` =
+    /// `session/<session_id>`, the same spelling
+    /// `session_manager::decommission::remove_session_worktree` force-deletes
+    /// (#4165 — it used to be the bare `session_id`, which that step missed).
     /// Test: `provision_in_uses_explicit_project_dir`,
+    /// `provision_in_names_the_branch_with_the_session_prefix`,
     /// `provision_reuses_base_checkout_across_sessions`.
     pub fn provision_in(
         &self,
@@ -788,12 +791,14 @@ impl<G: GitBackend> WorkspaceProvisioner<G> {
         let workspace_path = project_dir
             .join(crate::session_manager::decommission::worktrees_dirname())
             .join(session_id.to_string());
-        // The branch backing this worktree is named after the session id
-        // itself (not e.g. "session/<id>") so that
-        // `session_manager::decommission::remove_session_worktree`'s branch
-        // cleanup step — which deletes a branch named after the worktree's
-        // leaf directory name — targets the right ref.
-        let branch_name = session_id.to_string();
+        // #4165: name the branch through the shared convention. It used to be
+        // the bare `session_id`, under a comment claiming
+        // `remove_session_worktree` deletes a branch named after the leaf
+        // directory; it deletes `worktree_branch_for(leaf)` = `session/<leaf>`,
+        // so every bare branch survived decommission and leaked in the base
+        // clone.
+        let branch_name =
+            crate::core::worktree_naming::worktree_branch_for(&session_id.to_string());
 
         debug!(
             session = %session_id,

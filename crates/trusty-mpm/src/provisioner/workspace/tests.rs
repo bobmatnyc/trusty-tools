@@ -157,6 +157,41 @@ fn provision_in_uses_explicit_project_dir() {
     assert!(ws.path.starts_with(&project_dir));
 }
 
+/// #4165: the branch `provision_in` creates must carry the `session/` prefix.
+///
+/// Why: `remove_session_worktree` step 3 force-deletes
+/// `worktree_branch_for(leaf)` = `session/<leaf>`. The provisioner named its
+/// branch bare, so that delete missed and every provisioned session leaked a
+/// branch in the base clone. Pre-fix this assertion reads
+/// `gitdir: …/worktrees/<uuid>` and fails.
+/// What: provisions one session against `FakeGitBackend`, whose `worktree_add`
+/// records the branch name it was handed into the worktree's `.git` file, and
+/// asserts that name equals `worktree_branch_for(session_id)`.
+/// Test: this function IS the test.
+#[test]
+#[serial_test::serial]
+fn provision_in_names_the_branch_with_the_session_prefix() {
+    let root = crate::test_support::hermetic_temp_dir();
+    let _home = set_home(root.path());
+    let prov = make_provisioner(&root);
+    let id = ManagedSessionId::new();
+    let project_dir = root.path().join("owner").join("repo");
+
+    let ws = prov
+        .provision_in(&project_dir, &id, "https://github.com/owner/repo", "", "t")
+        .unwrap();
+
+    // `FakeGitBackend::worktree_add` writes `gitdir: <base>/worktrees/<branch>`.
+    let gitdir = std::fs::read_to_string(ws.path.join(".git")).expect("worktree .git file");
+    let expected = crate::core::worktree_naming::worktree_branch_for(&id.to_string());
+    assert_eq!(
+        gitdir.trim(),
+        format!("gitdir: {}/worktrees/{expected}", project_dir.display()),
+        "#4165: provision_in must name the branch through worktree_branch_for, \
+         so remove_session_worktree's `branch -D {expected}` finds it"
+    );
+}
+
 /// #4270 requirement 1: provisioning from a repo URL puts the worktree at
 /// `<project-root>/.worktrees/<name>`, not `<root>/.base/.worktrees/<name>`.
 ///
