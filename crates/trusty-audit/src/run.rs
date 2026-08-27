@@ -2689,24 +2689,48 @@ trusty-review = "0.15.1"
 
     // ── #5494: the incremental checkpoint, and resuming against it ───────────
 
-    /// A stub `tga` that appends its `--output` to `invocations.txt` in the
+    /// A stub `tga` that appends its `--output` to [`INVOCATION_LOG`] under the
     /// work-dir root, then writes the manifest a real one would. It exits 3 for
     /// any repository whose output path ends with `fails`, so a test can make
     /// one repository of several fail without a second script.
     ///
     /// The invocation log is what "was this repository re-collected" is read
     /// from: the report says what the sweep CLAIMS, and this says what ran.
-    fn counts_invocations(fails: &str) -> String {
+    ///
+    /// #6293: every path this script touches is ABSOLUTE, interpolated from
+    /// `work` when the script is generated. It used to write `invocations.txt`
+    /// and read `state/run-progress.toml` relative to the child's own working
+    /// directory, which is the work root for exactly one caller —
+    /// [`child::spawn_tga`], the only spawner in this crate that sets one.
+    /// `install_stubs` puts this same script behind `tga`, `trusty-analyze` AND
+    /// `trusty-review`, and `index_report::tool_version`, `approve` and
+    /// `grounding::index` all spawn with the parent's working directory, so
+    /// those runs appended to whatever directory the test binary started in.
+    /// Running the suite from the crate directory put the log in the checkout,
+    /// and 49 blank lines of it were committed by accident (`f3ec62545`).
+    ///
+    /// A child handed no `--output` exits 0 having recorded nothing: the log
+    /// holds the `--output` paths an audit child was given, and a `--version`
+    /// probe is not one of them. Before #6293 such a run appended a blank line
+    /// and then failed its way through `mkdir -p ""` and a write to
+    /// `/manifest.toml`, which is what the 49 committed blank lines were.
+    /// Test: `the_invocation_log_lands_in_the_work_root_whatever_the_child_cwd_is`.
+    fn counts_invocations(work: &WorkDir, fails: &str) -> String {
+        let log = work.root().join(INVOCATION_LOG);
+        let progress = progress_path(work);
         format!(
             "#!/bin/sh\nout=\"\"\nwhile [ $# -gt 0 ]; do\n  \
              case \"$1\" in --output) out=\"$2\"; shift;; esac\n  shift\ndone\n\
-             echo \"$out\" >> invocations.txt\n\
-             if [ -f state/run-progress.toml ]; then \
-             cp state/run-progress.toml \"$out.seen.toml\"; fi\n\
+             if [ -z \"$out\" ]; then exit 0; fi\n\
+             echo \"$out\" >> '{log}'\n\
+             if [ -f '{progress}' ]; then \
+             cp '{progress}' \"$out.seen.toml\"; fi\n\
              mkdir -p \"$out\"\n\
              case \"$out\" in *{fails}) exit 3;; esac\n\
              printf '[report]\\ntitle = \"Acme\"\\n\\n[[repositories]]\\n\
-             name = \"acme\"\\npath = \"/r\"\\n' > \"$out/manifest.toml\"\nexit 0\n"
+             name = \"acme\"\\npath = \"/r\"\\n' > \"$out/manifest.toml\"\nexit 0\n",
+            log = log.display(),
+            progress = progress.display(),
         )
     }
 
@@ -2714,17 +2738,98 @@ trusty-review = "0.15.1"
     /// succeeds.
     const NEVER: &str = "--no-such-repository--";
 
+    /// The file under the work root that [`counts_invocations`] records into.
+    const INVOCATION_LOG: &str = "invocations.txt";
+
     /// Every `--output` a stub child was handed, in the order they ran.
+    ///
+    /// #6293: an absent log is a panic, not an empty vector. It used to be read
+    /// with `unwrap_or_default()`, so a log the stub had written somewhere else
+    /// came back empty and every `assert_eq!(invocations(&work).len(), n)`
+    /// compared zero against a number it never observed. A test that cannot see
+    /// what ran has to fail.
+    /// Test: `a_missing_invocation_log_is_a_failure_not_an_empty_count`.
     fn invocations(work: &WorkDir) -> Vec<String> {
-        std::fs::read_to_string(work.root().join("invocations.txt"))
-            .unwrap_or_default()
+        let path = work.root().join(INVOCATION_LOG);
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("no stub invocation log at {}: {e}", path.display()))
             .lines()
             .map(str::to_owned)
             .collect()
     }
 
+    /// Why (#6293): the stub wrote its invocation log to a RELATIVE path, so it
+    /// landed wherever the child happened to be started. Only
+    /// [`child::spawn_tga`] sets a working directory; `install_stubs` installs
+    /// this same script behind `trusty-analyze` and `trusty-review` too, and
+    /// every other spawner in this crate inherits the parent's. That is how the
+    /// log ended up in the checkout, and how 49 blank lines of it were
+    /// committed (`f3ec62545`).
+    /// What: run the generated script from a directory that is NOT the work
+    /// root. The log must land under the root, and that directory must stay
+    /// empty. A child given no `--output` records nothing at all.
+    /// Test: this is the test.
+    #[cfg(unix)]
+    #[test]
+    fn the_invocation_log_lands_in_the_work_root_whatever_the_child_cwd_is() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        std::fs::create_dir_all(work.root()).expect("mkdir root");
+        let elsewhere = tempfile::tempdir().expect("tempdir");
+
+        let script = work.root().join("stub.sh");
+        std::fs::write(&script, counts_invocations(&work, NEVER)).expect("write stub");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        let output = work.path(Area::Output).join("00-acme-api");
+        let audit = std::process::Command::new(&script)
+            .arg("--output")
+            .arg(&output)
+            .current_dir(elsewhere.path())
+            .status()
+            .expect("the stub runs");
+        assert!(audit.success(), "{audit:?}");
+
+        // The probe shape that produced the blank lines: no `--output` at all.
+        // Its exit status is not the subject — what it RECORDS is.
+        let _ = std::process::Command::new(&script)
+            .arg("--version")
+            .current_dir(elsewhere.path())
+            .status()
+            .expect("the stub runs");
+
+        assert!(
+            !elsewhere.path().join(INVOCATION_LOG).exists(),
+            "the stub wrote its log into the directory it was started in, not the work root"
+        );
+        assert_eq!(
+            invocations(&work),
+            vec![output.display().to_string()],
+            "the log must hold the one `--output` an audit child was handed, and nothing for \
+             the version probe"
+        );
+    }
+
+    /// Why (#6293): `invocations()` read the log with `unwrap_or_default()`, so
+    /// a log written anywhere else came back as an empty vector rather than an
+    /// error. Every `assert_eq!(invocations(&work).len(), n)` then compared
+    /// zero against a number nothing had produced — the assertion passes only
+    /// because `n` happens to be what the sweep also failed to record. A test
+    /// that cannot read what ran must fail.
+    /// What: read the log of a work directory no stub has ever written into.
+    /// Test: this is the test.
+    #[test]
+    #[should_panic(expected = "no stub invocation log at")]
+    fn a_missing_invocation_log_is_a_failure_not_an_empty_count() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let _ = invocations(&work);
+    }
+
     fn two_repos_ready(work: &WorkDir, fails: &str) {
-        install_stubs(work, &counts_invocations(fails));
+        install_stubs(work, &counts_invocations(work, fails));
         make_repo(work, "acme-api");
         make_repo(work, "acme-web");
         select(
@@ -2905,7 +3010,7 @@ trusty-review = "0.15.1"
     async fn a_sweep_that_ends_early_keeps_the_entries_it_was_carrying_over() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let work = work_in(tmp.path());
-        install_stubs(&work, &counts_invocations(NEVER));
+        install_stubs(&work, &counts_invocations(&work, NEVER));
         for name in ["a", "d", "b", "c"] {
             make_repo(&work, name);
         }
@@ -2963,7 +3068,7 @@ trusty-review = "0.15.1"
     async fn a_deleted_output_is_re_audited_rather_than_reported_complete() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let work = work_in(tmp.path());
-        install_stubs(&work, &counts_invocations(NEVER));
+        install_stubs(&work, &counts_invocations(&work, NEVER));
         make_repo(&work, "acme-api");
         select(&work, &[("acme-api", "repos/acme-api")]);
 
@@ -3037,7 +3142,7 @@ trusty-review = "0.15.1"
     async fn a_fresh_run_re_audits_everything() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let work = work_in(tmp.path());
-        install_stubs(&work, &counts_invocations(NEVER));
+        install_stubs(&work, &counts_invocations(&work, NEVER));
         make_repo(&work, "acme-api");
         select(&work, &[("acme-api", "repos/acme-api")]);
 
