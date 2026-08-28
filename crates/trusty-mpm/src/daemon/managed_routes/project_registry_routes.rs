@@ -37,6 +37,7 @@ use tracing::warn;
 
 use crate::core::gh_account::{GH_DOCTOR_TIMEOUT, GhAuthProbe, probe_gh_auth};
 use crate::core::trusty_tools_config::GithubConfig;
+use crate::daemon::error::DaemonError;
 use crate::daemon::state::DaemonState;
 use crate::project::{Project, ProjectStoreError};
 
@@ -114,19 +115,46 @@ pub struct ProjectsListResponse {
 pub async fn list_projects_registry_route(
     State(state): State<Arc<DaemonState>>,
 ) -> impl IntoResponse {
+    // #6288: the body is shared with `mpm.projects.registry.list`.
+    match list_projects_registry_op(&state).await {
+        Ok(body) => Json(body).into_response(),
+        Err(e) => plain(e),
+    }
+}
+
+/// Render a registry-B failure in this surface's historical plain-text body.
+///
+/// Why (#6288 slice 5): these four routes have always answered a bare
+/// `text/plain` body — `project foo not found`, not a JSON `{ "error": … }`
+/// object. Their bodies now report a [`DaemonError`] so the socket transport can
+/// carry the same failure class, and this renders that value back onto the exact
+/// wire the routes had before. [`DaemonError::detail`] is what drops the
+/// variant's `Display` prefix.
+fn plain(e: DaemonError) -> Response {
+    (e.status(), e.detail()).into_response()
+}
+
+/// [`list_projects_registry_route`]'s body, with no transport in it (#6288).
+///
+/// # Errors
+///
+/// [`DaemonError::Internal`] when the registry read fails.
+///
+/// Test: `parity_projects_registry_list_agrees_across_transports`.
+pub async fn list_projects_registry_op(
+    state: &Arc<DaemonState>,
+) -> Result<ProjectsListResponse, DaemonError> {
     let registry = state.project_registry().await;
     match registry.list().await {
         Ok(projects) => {
             let count = projects.len();
-            Json(ProjectsListResponse { projects, count }).into_response()
+            Ok(ProjectsListResponse { projects, count })
         }
         Err(e) => {
             warn!(error = %e, "list_projects_registry_route: registry read failed");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
+            Err(DaemonError::Internal(
                 "project registry read failed".to_string(),
-            )
-                .into_response()
+            ))
         }
     }
 }
@@ -169,11 +197,35 @@ pub async fn register_project_registry_route(
     State(state): State<Arc<DaemonState>>,
     Json(body): Json<RegisterProjectBody>,
 ) -> impl IntoResponse {
+    // #6288: the body is shared with `mpm.projects.registry.register`.
+    match register_project_registry_op(&state, body).await {
+        Ok(project) => (StatusCode::CREATED, Json(project)).into_response(),
+        Err(e) => plain(e),
+    }
+}
+
+/// [`register_project_registry_route`]'s body, with no transport in it (#6288).
+///
+/// # Errors
+///
+/// [`DaemonError::InvalidRequest`] on a blank `name` or `repo_url`;
+/// [`DaemonError::Internal`] when the registry write fails.
+///
+/// Test: `parity_projects_registry_register_agrees_across_transports`,
+/// `rpc_projects_registry_register_rejects_a_blank_name`.
+pub async fn register_project_registry_op(
+    state: &Arc<DaemonState>,
+    body: RegisterProjectBody,
+) -> Result<Project, DaemonError> {
     if body.name.trim().is_empty() {
-        return (StatusCode::BAD_REQUEST, "project name must not be empty").into_response();
+        return Err(DaemonError::InvalidRequest(
+            "project name must not be empty".to_string(),
+        ));
     }
     if body.repo_url.trim().is_empty() {
-        return (StatusCode::BAD_REQUEST, "repo_url must not be empty").into_response();
+        return Err(DaemonError::InvalidRequest(
+            "repo_url must not be empty".to_string(),
+        ));
     }
 
     let registry = state.project_registry().await;
@@ -219,13 +271,11 @@ pub async fn register_project_registry_route(
     };
     if let Err(e) = registry.register(project.clone()).await {
         warn!(error = %e, project = %project.name, "register_project_registry_route: register failed");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
+        return Err(DaemonError::Internal(
             "project registry write failed".to_string(),
-        )
-            .into_response();
+        ));
     }
-    (StatusCode::CREATED, Json(project)).into_response()
+    Ok(project)
 }
 
 /// Fold a register-time `--gh-config-dir` into a project's `github` binding
@@ -281,19 +331,37 @@ pub async fn get_project_registry_route(
     State(state): State<Arc<DaemonState>>,
     AxumPath(name): AxumPath<String>,
 ) -> impl IntoResponse {
-    let registry = state.project_registry().await;
-    match registry.get(&name).await {
+    // #6288: the body is shared with `mpm.projects.registry.get`.
+    match get_project_registry_op(&state, &name).await {
         Ok(project) => Json(project).into_response(),
+        Err(e) => plain(e),
+    }
+}
+
+/// [`get_project_registry_route`]'s body, with no transport in it (#6288).
+///
+/// # Errors
+///
+/// [`DaemonError::NotFound`] when `name` is not registered;
+/// [`DaemonError::Internal`] on any other store read failure.
+///
+/// Test: `parity_projects_registry_get_agrees_across_transports`,
+/// `rpc_projects_registry_get_unknown_project_is_not_found`.
+pub async fn get_project_registry_op(
+    state: &Arc<DaemonState>,
+    name: &str,
+) -> Result<Project, DaemonError> {
+    let registry = state.project_registry().await;
+    match registry.get(name).await {
+        Ok(project) => Ok(project),
         Err(ProjectStoreError::NotFound(_)) => {
-            (StatusCode::NOT_FOUND, format!("project {name} not found")).into_response()
+            Err(DaemonError::NotFound(format!("project {name} not found")))
         }
         Err(e) => {
             warn!(error = %e, project = %name, "get_project_registry_route: registry read failed");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
+            Err(DaemonError::Internal(
                 "project registry read failed".to_string(),
-            )
-                .into_response()
+            ))
         }
     }
 }
@@ -442,10 +510,39 @@ pub async fn patch_project_registry_route(
     AxumPath(name): AxumPath<String>,
     Json(body): Json<PatchProjectBody>,
 ) -> impl IntoResponse {
-    // #2121: only a request that actually SETS `gh_user` pays for the `gh auth
-    // status` subprocess — absent and `null` (clear) never run it. The probe
-    // blocks its thread for up to GH_DOCTOR_TIMEOUT, so it runs off the async
-    // executor.
+    // #6288: the body is shared with `mpm.projects.registry.patch`, and the
+    // #2121 conditional `gh auth status` probe moved inside it so both
+    // transports pay for it on exactly the same condition.
+    match patch_project_registry_op(&state, &name, body).await {
+        Ok(project) => Json(project).into_response(),
+        Err(e) => plain(e),
+    }
+}
+
+/// [`patch_project_registry_route`]'s body, with no transport in it (#6288).
+///
+/// Why it takes the probe rather than running it: `mpm.projects.registry.patch`
+/// must pay the same `gh auth status` cost on the same condition the HTTP route
+/// does — only when the request actually SETS `gh_user`. Sharing the probe
+/// decision as well as the validation keeps the two transports from differing on
+/// when a subprocess is spawned.
+///
+/// # Errors
+///
+/// [`DaemonError::InvalidRequest`] on a name change, a blank required field, a
+/// blank tag, or a `gh_user` `gh` does not report as logged in;
+/// [`DaemonError::ServiceUnavailable`] when `gh` could not be asked;
+/// [`DaemonError::NotFound`] when `name` is not registered;
+/// [`DaemonError::Internal`] when the registry write fails.
+///
+/// Test: `parity_projects_registry_patch_agrees_across_transports`,
+/// `rpc_projects_registry_patch_rejects_a_blank_required_field`.
+pub async fn patch_project_registry_op(
+    state: &Arc<DaemonState>,
+    name: &str,
+    body: PatchProjectBody,
+) -> Result<Project, DaemonError> {
+    // #6288: the same conditional probe the HTTP route runs, in the shared body.
     let probe = match body.gh_user.as_ref().and_then(|v| v.as_deref()) {
         Some(login) if !login.trim().is_empty() => Some(
             tokio::task::spawn_blocking(|| probe_gh_auth(GH_DOCTOR_TIMEOUT))
@@ -456,7 +553,7 @@ pub async fn patch_project_registry_route(
         ),
         _ => None,
     };
-    patch_project_registry_with_probe(state, name, body, probe).await
+    patch_project_registry_with_probe(Arc::clone(state), name.to_string(), body, probe).await
 }
 
 /// [`patch_project_registry_route`]'s body, with the `gh auth status` answer
@@ -477,25 +574,27 @@ pub(crate) async fn patch_project_registry_with_probe(
     name: String,
     body: PatchProjectBody,
     probe: Option<GhAuthProbe>,
-) -> Response {
+) -> Result<Project, DaemonError> {
     if let Some(new_name) = &body.name
         && new_name.trim() != name
     {
-        return (
-            StatusCode::BAD_REQUEST,
-            "project name is the identity key and cannot be changed via PATCH",
-        )
-            .into_response();
+        return Err(DaemonError::InvalidRequest(
+            "project name is the identity key and cannot be changed via PATCH".to_string(),
+        ));
     }
     if let Some(repo_url) = &body.repo_url
         && repo_url.trim().is_empty()
     {
-        return (StatusCode::BAD_REQUEST, "repo_url must not be empty").into_response();
+        return Err(DaemonError::InvalidRequest(
+            "repo_url must not be empty".to_string(),
+        ));
     }
     if let Some(default_branch) = &body.default_branch
         && default_branch.trim().is_empty()
     {
-        return (StatusCode::BAD_REQUEST, "default_branch must not be empty").into_response();
+        return Err(DaemonError::InvalidRequest(
+            "default_branch must not be empty".to_string(),
+        ));
     }
 
     let tags_add = match body
@@ -503,7 +602,7 @@ pub(crate) async fn patch_project_registry_with_probe(
         .map(|tags| trim_and_reject_blank_tags(tags, "tags_add"))
     {
         Some(Ok(tags)) => Some(tags),
-        Some(Err(msg)) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+        Some(Err(msg)) => return Err(DaemonError::InvalidRequest(msg)),
         None => None,
     };
     let tags_remove = match body
@@ -511,16 +610,13 @@ pub(crate) async fn patch_project_registry_with_probe(
         .map(|tags| trim_and_reject_blank_tags(tags, "tags_remove"))
     {
         Some(Ok(tags)) => Some(tags),
-        Some(Err(msg)) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+        Some(Err(msg)) => return Err(DaemonError::InvalidRequest(msg)),
         None => None,
     };
     // #2121: verify a `gh_user` SET before anything touches the store; absent
     // and `null` (clear) pass straight through.
     let gh_user = match body.gh_user {
-        Some(Some(login)) => match validate_gh_user_login(&login, probe.as_ref()) {
-            Ok(canonical) => Some(Some(canonical)),
-            Err((status, message)) => return (status, message).into_response(),
-        },
+        Some(Some(login)) => Some(Some(validate_gh_user_login(&login, probe.as_ref())?)),
         other => other,
     };
 
@@ -570,17 +666,15 @@ pub(crate) async fn patch_project_registry_with_probe(
         .await;
 
     match result {
-        Ok(project) => Json(project).into_response(),
+        Ok(project) => Ok(project),
         Err(ProjectStoreError::NotFound(_)) => {
-            (StatusCode::NOT_FOUND, format!("project {name} not found")).into_response()
+            Err(DaemonError::NotFound(format!("project {name} not found")))
         }
         Err(e) => {
             warn!(error = %e, project = %name, "patch_project_registry_route: registry write failed");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
+            Err(DaemonError::Internal(
                 "project registry write failed".to_string(),
-            )
-                .into_response()
+            ))
         }
     }
 }
@@ -609,47 +703,33 @@ pub(crate) async fn patch_project_registry_with_probe(
 /// `validate_gh_user_rejects_a_blank_login`,
 /// `validate_gh_user_rejects_a_host_with_no_accounts`,
 /// `validate_gh_user_is_503_when_gh_could_not_answer`.
-fn validate_gh_user_login(
-    login: &str,
-    probe: Option<&GhAuthProbe>,
-) -> Result<String, (StatusCode, String)> {
+fn validate_gh_user_login(login: &str, probe: Option<&GhAuthProbe>) -> Result<String, DaemonError> {
     let login = login.trim();
     if login.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
+        return Err(DaemonError::InvalidRequest(
             "gh_user must not be blank — send null to clear it".to_string(),
         ));
     }
     match probe {
         Some(GhAuthProbe::Answered(status)) => match status.canonical_logged_in_login(login) {
             Some(canonical) => Ok(canonical),
-            None if status.logged_in.is_empty() => Err((
-                StatusCode::BAD_REQUEST,
-                format!(
-                    "gh_user must name an account `gh auth status` reports as logged in, but it \
-                     reports none — run `gh auth login` before setting gh_user to '{login}'"
-                ),
-            )),
-            None => Err((
-                StatusCode::BAD_REQUEST,
-                format!(
-                    "gh_user must name an account `gh auth status` reports as logged in; \
-                     '{login}' is not one of: {}",
-                    status.logged_in.join(", ")
-                ),
-            )),
+            None if status.logged_in.is_empty() => Err(DaemonError::InvalidRequest(format!(
+                "gh_user must name an account `gh auth status` reports as logged in, but it \
+                 reports none — run `gh auth login` before setting gh_user to '{login}'"
+            ))),
+            None => Err(DaemonError::InvalidRequest(format!(
+                "gh_user must name an account `gh auth status` reports as logged in; \
+                 '{login}' is not one of: {}",
+                status.logged_in.join(", ")
+            ))),
         },
-        Some(GhAuthProbe::Inconclusive(why)) => Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!("gh_user '{login}' could not be verified against `gh auth status`: {why}"),
-        )),
-        None => Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!(
-                "gh_user '{login}' could not be verified: no `gh auth status` answer was \
-                 available for this request"
-            ),
-        )),
+        Some(GhAuthProbe::Inconclusive(why)) => Err(DaemonError::ServiceUnavailable(format!(
+            "gh_user '{login}' could not be verified against `gh auth status`: {why}"
+        ))),
+        None => Err(DaemonError::ServiceUnavailable(format!(
+            "gh_user '{login}' could not be verified: no `gh auth status` answer was \
+             available for this request"
+        ))),
     }
 }
 
@@ -719,8 +799,10 @@ mod tests {
     /// Test: itself.
     #[test]
     fn validate_gh_user_rejects_an_unknown_login() {
-        let (status, message) =
-            validate_gh_user_login("typo-bot", Some(&two_accounts())).unwrap_err();
+        // #6288: the helper reports a `DaemonError` now; the status and the
+        // operator-facing text are unchanged and still what is asserted.
+        let error = validate_gh_user_login("typo-bot", Some(&two_accounts())).unwrap_err();
+        let (status, message) = (error.status(), error.detail());
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(message.contains("gh_user"), "{message}");
         assert!(message.contains("typo-bot"), "{message}");
@@ -733,8 +815,8 @@ mod tests {
     #[test]
     fn validate_gh_user_rejects_a_blank_login() {
         for blank in ["", "   "] {
-            let (status, message) =
-                validate_gh_user_login(blank, Some(&two_accounts())).unwrap_err();
+            let error = validate_gh_user_login(blank, Some(&two_accounts())).unwrap_err();
+            let (status, message) = (error.status(), error.detail());
             assert_eq!(status, StatusCode::BAD_REQUEST);
             assert!(message.contains("null"), "{message}");
         }
@@ -746,7 +828,8 @@ mod tests {
     #[test]
     fn validate_gh_user_rejects_a_host_with_no_accounts() {
         let probe = GhAuthProbe::Answered(GhAccountStatus::default());
-        let (status, message) = validate_gh_user_login("bobmatnyc", Some(&probe)).unwrap_err();
+        let error = validate_gh_user_login("bobmatnyc", Some(&probe)).unwrap_err();
+        let (status, message) = (error.status(), error.detail());
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(message.contains("gh auth login"), "{message}");
     }
@@ -758,12 +841,13 @@ mod tests {
     #[test]
     fn validate_gh_user_is_503_when_gh_could_not_answer() {
         let probe = GhAuthProbe::Inconclusive("`gh` could not be run".to_string());
-        let (status, message) = validate_gh_user_login("bobmatnyc", Some(&probe)).unwrap_err();
+        let error = validate_gh_user_login("bobmatnyc", Some(&probe)).unwrap_err();
+        let (status, message) = (error.status(), error.detail());
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert!(message.contains("could not be verified"), "{message}");
 
-        let (status, _) = validate_gh_user_login("bobmatnyc", None).unwrap_err();
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let error = validate_gh_user_login("bobmatnyc", None).unwrap_err();
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     /// Seed an isolated daemon holding one registered project.
@@ -808,7 +892,8 @@ mod tests {
             Some(two_accounts()),
         )
         .await;
-        assert_eq!(resp.status(), StatusCode::OK);
+        // #6288: the seam answers `Result<Project, DaemonError>` now.
+        assert!(resp.is_ok(), "{:?}", resp.err().map(|e| e.to_string()));
 
         let stored = state
             .project_registry()
@@ -846,7 +931,12 @@ mod tests {
             Some(two_accounts()),
         )
         .await;
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        // #6288: the seam answers `Result<Project, DaemonError>` now; the
+        // status the HTTP delegator would render is still what is asserted.
+        assert_eq!(
+            resp.expect_err("the request must be refused").status(),
+            StatusCode::BAD_REQUEST
+        );
 
         let after = state
             .project_registry()
@@ -874,7 +964,8 @@ mod tests {
             None,
         )
         .await;
-        assert_eq!(resp.status(), StatusCode::OK);
+        // #6288: the seam answers `Result<Project, DaemonError>` now.
+        assert!(resp.is_ok(), "{:?}", resp.err().map(|e| e.to_string()));
         assert_eq!(
             state
                 .project_registry()

@@ -184,13 +184,29 @@ pub async fn granted_worktree_route(
     Path(id): Path<String>,
     Json(req): Json<SharedTreeDispatchRequest>,
 ) -> Result<Json<SharedTreeWritersResponse>, DaemonError> {
-    let session = uuid::Uuid::parse_str(&id)
+    // #6288: the body is shared with `mpm.delegation.granted_worktree`.
+    Ok(Json(granted_worktree_op(&state, &id, req)?))
+}
+
+/// [`granted_worktree_route`]'s body, with no transport in it (#6288 slice 5).
+///
+/// # Errors
+///
+/// [`DaemonError::InvalidRequest`] when `id` is not a UUID.
+///
+/// Test: `parity_delegation_granted_worktree_agrees_across_transports`.
+pub fn granted_worktree_op(
+    state: &Arc<DaemonState>,
+    id: &str,
+    req: SharedTreeDispatchRequest,
+) -> Result<SharedTreeWritersResponse, DaemonError> {
+    let session = uuid::Uuid::parse_str(id)
         .map(SessionId)
         .map_err(|_| DaemonError::InvalidRequest(format!("malformed session id: {id}")))?;
 
     let payload = &req.payload;
     let Some(cwd) = str_field(payload, "cwd").map(PathBuf::from) else {
-        return Ok(Json(SharedTreeWritersResponse::default()));
+        return Ok(SharedTreeWritersResponse::default());
     };
     let exclude = str_field(payload, "tool_use_id");
     let input = payload.get("input");
@@ -201,7 +217,7 @@ pub async fn granted_worktree_route(
     let (names, claimed) = state.claim_shared_tree_dispatch(&cwd, exclude, eligible, |s| {
         crate::daemon::services::delegation_tracker::record_granted_isolation(s, session, payload);
     });
-    Ok(Json(writers_response(&names, claimed)))
+    Ok(writers_response(&names, claimed))
 }
 
 /// `POST /api/v1/sessions/{id}/delegations/shared-tree-dispatch` (#4480, #5324).
@@ -231,13 +247,31 @@ pub async fn shared_tree_dispatch_route(
     Path(id): Path<String>,
     Json(req): Json<SharedTreeDispatchRequest>,
 ) -> Result<Json<SharedTreeWritersResponse>, DaemonError> {
-    let session = uuid::Uuid::parse_str(&id)
+    // #6288: the body is shared with `mpm.delegation.shared_tree_dispatch`.
+    Ok(Json(shared_tree_dispatch_op(&state, &id, req)?))
+}
+
+/// [`shared_tree_dispatch_route`]'s body, with no transport in it (#6288
+/// slice 5).
+///
+/// # Errors
+///
+/// [`DaemonError::InvalidRequest`] when `id` is not a UUID.
+///
+/// Test: `parity_delegation_shared_tree_dispatch_agrees_across_transports`,
+/// `rpc_delegation_rejects_a_malformed_session_id`.
+pub fn shared_tree_dispatch_op(
+    state: &Arc<DaemonState>,
+    id: &str,
+    req: SharedTreeDispatchRequest,
+) -> Result<SharedTreeWritersResponse, DaemonError> {
+    let session = uuid::Uuid::parse_str(id)
         .map(SessionId)
         .map_err(|_| DaemonError::InvalidRequest(format!("malformed session id: {id}")))?;
 
     let payload = &req.payload;
     let Some(cwd) = str_field(payload, "cwd").map(PathBuf::from) else {
-        return Ok(Json(SharedTreeWritersResponse::default()));
+        return Ok(SharedTreeWritersResponse::default());
     };
     let exclude = str_field(payload, "tool_use_id");
     let input = payload.get("input");
@@ -257,7 +291,7 @@ pub async fn shared_tree_dispatch_route(
         );
     });
 
-    Ok(Json(writers_response(&names, claimed)))
+    Ok(writers_response(&names, claimed))
 }
 
 /// Fold a list of live writer names into the wire response.

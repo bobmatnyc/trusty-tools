@@ -7,9 +7,17 @@
 //! explicit that this surface should mirror the existing patterns rather than
 //! invent a new one.
 //! What: five handlers — register/deregister/list an instance, publish a peer
-//! message, and subscribe to one instance's inbound stream.
+//! message, and subscribe to one instance's inbound stream. Since #6288 slice
+//! 5 the four request/response verbs are ALSO JSON-RPC methods on the daemon's
+//! Unix socket: each handler is now a delegator over a transport-neutral
+//! `*_op` body ([`register_op`], [`deregister_op`], [`list_op`], [`publish_op`])
+//! that both transports call, so one route keeps one implementation.
+//! [`subscribe_instance`] is deliberately NOT among them — it is SSE, and it
+//! needs the `RpcStreamMethod` seam slice 6 owns. No RPC method is registered
+//! for it, and its handler is untouched here.
 //! Test: `bus::tests` — `route_register_returns_instance_id`,
-//! `route_publish_to_dead_instance_is_410`, `route_list_instances`.
+//! `route_publish_to_dead_instance_is_410`, `route_list_instances`; the
+//! transport-parity cases live in `daemon::rpc::registry::tests`.
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -26,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
+use crate::daemon::error::DaemonError;
 use crate::daemon::state::DaemonState;
 
 use super::envelope::{BusEnvelope, BusPayload, CallerIdentity};
@@ -156,11 +165,21 @@ pub async fn register_instance(
     State(state): State<Arc<DaemonState>>,
     Json(req): Json<RegisterInstanceRequest>,
 ) -> Result<(StatusCode, Json<InstanceMeta>), BusError> {
-    let meta = state
+    // #6288: the body is shared with `mpm.bus.register` over the Unix socket.
+    Ok((StatusCode::CREATED, Json(register_op(&state, req)?)))
+}
+
+/// [`register_instance`]'s body, with no transport in it (#6288 slice 5).
+///
+/// Test: `parity_bus_register_agrees_across_transports`.
+pub fn register_op(
+    state: &Arc<DaemonState>,
+    req: RegisterInstanceRequest,
+) -> Result<InstanceMeta, BusError> {
+    state
         .bus()
         .registry()
-        .register(&req.definition_id, req.project)?;
-    Ok((StatusCode::CREATED, Json(meta)))
+        .register(&req.definition_id, req.project)
 }
 
 /// `DELETE /api/v1/bus/instances/{instance_id}` — deregister on exit.
@@ -173,10 +192,53 @@ pub async fn deregister_instance(
     State(state): State<Arc<DaemonState>>,
     Path(instance_id): Path<String>,
 ) -> StatusCode {
-    if state.bus().registry().deregister(&instance_id) {
-        StatusCode::NO_CONTENT
+    // #6288: the body is shared with `mpm.bus.deregister` over the Unix socket.
+    // The status pair is preserved exactly — this route has never had a body.
+    match deregister_op(&state, &instance_id) {
+        Ok(_) => StatusCode::NO_CONTENT,
+        Err(_) => StatusCode::NOT_FOUND,
+    }
+}
+
+/// The acknowledgement `mpm.bus.deregister` answers with.
+///
+/// Why: the HTTP route says "removed" with a bodyless `204`, which a JSON-RPC
+/// result cannot express — a result is a JSON value or it is an error. Rather
+/// than inventing a null result, the socket answers a one-field record, and
+/// the miss stays an ERROR on both transports (`404` / `CODE_NOT_FOUND`) so a
+/// caller still cannot mistake "there was nothing to remove" for a removal.
+/// Test: `parity_bus_deregister_agrees_across_transports`,
+/// `rpc_bus_deregister_unknown_instance_reports_not_found`.
+#[derive(Debug, Serialize)]
+pub struct DeregisterAck {
+    /// Always `true` — a failure is an error frame, never `false` here.
+    pub deregistered: bool,
+}
+
+/// [`deregister_instance`]'s body, with no transport in it (#6288 slice 5).
+///
+/// Why the error is a [`DaemonError`] rather than a [`BusError`]: `BusError` has
+/// no "was not registered" variant, and the two candidates both say the wrong
+/// thing — `InstanceGone` is `410` (this route has always answered `404`) and
+/// `NoLiveInstance` is about a DEFINITION that resolved to nothing. Inventing a
+/// bus variant to serve one route would put a fifth addressing failure into an
+/// enum DOC-60 §4 keeps deliberately narrow.
+///
+/// # Errors
+///
+/// [`DaemonError::NotFound`] when `instance_id` was not a live registration.
+///
+/// Test: `parity_bus_deregister_agrees_across_transports`.
+pub fn deregister_op(
+    state: &Arc<DaemonState>,
+    instance_id: &str,
+) -> Result<DeregisterAck, DaemonError> {
+    if state.bus().registry().deregister(instance_id) {
+        Ok(DeregisterAck { deregistered: true })
     } else {
-        StatusCode::NOT_FOUND
+        Err(DaemonError::NotFound(format!(
+            "bus instance '{instance_id}' is not registered"
+        )))
     }
 }
 
@@ -187,9 +249,17 @@ pub async fn deregister_instance(
 /// What: every live [`InstanceMeta`], ordered by registration sequence.
 /// Test: `route_list_instances`.
 pub async fn list_instances(State(state): State<Arc<DaemonState>>) -> Json<ListInstancesResponse> {
-    Json(ListInstancesResponse {
+    // #6288: the body is shared with `mpm.bus.list` over the Unix socket.
+    Json(list_op(&state))
+}
+
+/// [`list_instances`]'s body, with no transport in it (#6288 slice 5).
+///
+/// Test: `parity_bus_list_agrees_across_transports`.
+pub fn list_op(state: &Arc<DaemonState>) -> ListInstancesResponse {
+    ListInstancesResponse {
         instances: state.bus().registry().live(),
-    })
+    }
 }
 
 /// `POST /api/v1/bus/publish` — send one peer message.
@@ -212,11 +282,39 @@ pub async fn publish_message(
     State(state): State<Arc<DaemonState>>,
     Json(req): Json<PublishRequest>,
 ) -> Result<(StatusCode, Json<BusEnvelope>), BusError> {
+    // #6288: the body is shared with `mpm.bus.publish` over the Unix socket.
+    Ok((StatusCode::ACCEPTED, Json(publish_op(&state, req)?)))
+}
+
+/// [`publish_message`]'s body, with no transport in it (#6288 slice 5).
+///
+/// Why this is a call-signature move and nothing more: DOC-60 §4's fail-closed
+/// sequencing lives inside
+/// [`PeerBus::publish`](crate::daemon::bus::PeerBus::publish) — structural
+/// validation of the caller identity, then the `assistant_instance` edge check,
+/// then sender verification against the registry, then target resolution, then
+/// the delivery attempt, with the durable record written to state what actually
+/// happened. None of that moved, and none of it is re-derived here, so the
+/// socket path rejects at exactly the same four points the HTTP path does.
+/// Every rejection reaches the caller as a [`BusError`], which both transports
+/// render from the same `status` table.
+///
+/// # Errors
+///
+/// Every [`BusError`] `PeerBus::publish` can raise, plus
+/// [`BusError::InvalidTarget`] when the request names neither addressing mode.
+///
+/// Test: `parity_bus_publish_agrees_across_transports`,
+/// `rpc_bus_publish_rejects_a_forged_user_kind`,
+/// `rpc_bus_publish_rejects_an_unregistered_sender`,
+/// `rpc_bus_publish_to_a_dead_instance_is_gone`,
+/// `rpc_bus_publish_without_a_subscriber_is_conflict`,
+/// `rpc_bus_publish_without_a_target_is_invalid`.
+pub fn publish_op(state: &Arc<DaemonState>, req: PublishRequest) -> Result<BusEnvelope, BusError> {
     let target = req.to.to_peer_target()?;
-    let envelope = state
+    state
         .bus()
-        .publish(req.from, &target, req.payload, req.in_reply_to)?;
-    Ok((StatusCode::ACCEPTED, Json(envelope)))
+        .publish(req.from, &target, req.payload, req.in_reply_to)
 }
 
 /// `GET /api/v1/bus/subscribe/{instance_id}` — an instance's inbound stream.

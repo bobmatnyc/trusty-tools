@@ -149,6 +149,8 @@ pub use crate::daemon::error::rpc_code_for_status as status_to_rpc_code;
 mod outcome_tests {
     use trusty_common::uds::server::{CODE_INTERNAL_ERROR, CODE_INVALID_PARAMS};
 
+    use crate::daemon::error::CODE_UPSTREAM_FAILED;
+
     use super::*;
 
     #[test]
@@ -184,7 +186,9 @@ mod outcome_tests {
         assert_eq!(status_to_rpc_code(409), CODE_CONFLICT);
         assert_eq!(status_to_rpc_code(422), CODE_UNPROCESSABLE);
         assert_eq!(status_to_rpc_code(500), CODE_INTERNAL_ERROR);
-        assert_eq!(status_to_rpc_code(502), CODE_INTERNAL_ERROR);
+        // #6288 slice 5: 502 gained its own code once the manager surface began
+        // reporting "a configured provider answered badly".
+        assert_eq!(status_to_rpc_code(502), CODE_UPSTREAM_FAILED);
     }
 
     /// The two 422 resume refusals keep distinct codes, since the socket has no

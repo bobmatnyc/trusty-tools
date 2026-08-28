@@ -161,9 +161,17 @@ fn advertised_endpoints() -> Vec<ManagerEndpoint> {
 /// /verb-set data with the live palace availability. Read-only; never mutates.
 /// Test: `manager_version_route_reports_capabilities` in `tests/manager_routes.rs`.
 pub async fn manager_version_route(State(state): State<Arc<DaemonState>>) -> impl IntoResponse {
+    // #6288: the body is shared with `mpm.manager.version`.
+    Json(version_op(&state))
+}
+
+/// [`manager_version_route`]'s body, with no transport in it (#6288 slice 5).
+///
+/// Test: `parity_manager_version_agrees_across_transports`.
+pub fn version_op(state: &Arc<DaemonState>) -> ManagerVersionResponse {
     let manager = state.manager_state();
     let palace = manager.palace();
-    Json(ManagerVersionResponse {
+    ManagerVersionResponse {
         manager_api_version: MANAGER_API_VERSION,
         crate_version: env!("CARGO_PKG_VERSION"),
         phase: MANAGER_PHASE,
@@ -173,5 +181,5 @@ pub async fn manager_version_route(State(state): State<Arc<DaemonState>>) -> imp
             available: palace.is_available(),
             reason: palace.unavailable_reason().map(str::to_string),
         },
-    })
+    }
 }

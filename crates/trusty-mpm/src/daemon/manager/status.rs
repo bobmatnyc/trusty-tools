@@ -21,11 +21,12 @@
 
 use std::sync::Arc;
 
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use axum::{Json, extract::State, response::IntoResponse};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tracing::warn;
 
+use crate::daemon::error::DaemonError;
 use crate::daemon::managed_routes::{
     DeliverableStatusCounts, MilestoneStatusCounts, ProjectStatusResponse, SessionStateCounts,
     aggregate_project_status,
@@ -218,21 +219,26 @@ fn fold_totals(per_project: &[ProjectStatusResponse]) -> PortfolioTotals {
 /// What: lists every registered project plus all session/Deliverable/Milestone
 /// records ONCE, folds them via [`aggregate_portfolio_status`], and returns the
 /// [`PortfolioStatusResponse`]. Any store read error becomes a
-/// `(500, message)` pair the caller renders — the library never `unwrap`s a store
-/// result. Read-only: it never mutates a record (§2.1 boundary).
+/// [`DaemonError::Internal`] the caller renders — the library never `unwrap`s a
+/// store result. #6288 changed that error from an HTTP `(StatusCode, String)`
+/// pair to the typed value, so the socket transport can carry the SAME failure
+/// without re-deriving a status; the plain-text HTTP body is reproduced from
+/// [`DaemonError::detail`]. Read-only: it never mutates a record (§2.1).
+///
+/// # Errors
+///
+/// [`DaemonError::Internal`] when the project, deliverable, or milestone store
+/// read fails.
 /// Test: `manager_status_route_rolls_up_all_projects`,
 /// `manager_status_route_empty_portfolio` in `tests/manager_routes.rs`; the digest
 /// and chat coverage in `tests/manager_inference.rs` exercise it via those routes.
 pub(crate) async fn load_portfolio_status(
     state: &DaemonState,
-) -> Result<PortfolioStatusResponse, (StatusCode, String)> {
+) -> Result<PortfolioStatusResponse, DaemonError> {
     let registry = state.project_registry().await;
     let projects = registry.list().await.map_err(|e| {
         warn!(error = %e, "manager status: project registry read failed");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "project registry read failed".to_string(),
-        )
+        DaemonError::Internal("project registry read failed".to_string())
     })?;
 
     let sessions = state.session_manager().await.list().await;
@@ -240,17 +246,11 @@ pub(crate) async fn load_portfolio_status(
     let deliverable_mgr = state.deliverable_manager().await;
     let deliverables = deliverable_mgr.all_deliverables().await.map_err(|e| {
         warn!(error = %e, "manager status: deliverable store read failed");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "deliverable store read failed".to_string(),
-        )
+        DaemonError::Internal("deliverable store read failed".to_string())
     })?;
     let milestones = deliverable_mgr.all_milestones().await.map_err(|e| {
         warn!(error = %e, "manager status: milestone store read failed");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "milestone store read failed".to_string(),
-        )
+        DaemonError::Internal("milestone store read failed".to_string())
     })?;
 
     Ok(aggregate_portfolio_status(
@@ -269,14 +269,17 @@ pub(crate) async fn load_portfolio_status(
 /// The handler is a thin, read-only composition over the same registry / session
 /// / Deliverable stores the per-project endpoint reads — it adds no persistence,
 /// no reasoning, and never mutates a record (§2.1 boundary).
-/// What: delegates to [`load_portfolio_status`] and renders the rollup as JSON, or
-/// the store-read error as its `(500, message)` pair.
+/// What: delegates to [`load_portfolio_status`] — which IS the transport-neutral
+/// body `mpm.manager.status` calls (#6288) — and renders the rollup as JSON, or
+/// the store-read error as the same `(500, plain text)` pair it always was.
 /// Test: `manager_status_route_rolls_up_all_projects`,
-/// `manager_status_route_empty_portfolio` in `tests/manager_routes.rs`.
+/// `manager_status_route_empty_portfolio` in `tests/manager_routes.rs`;
+/// `parity_manager_status_agrees_across_transports`.
 pub async fn manager_status_route(State(state): State<Arc<DaemonState>>) -> impl IntoResponse {
     match load_portfolio_status(&state).await {
         Ok(rollup) => Json(rollup).into_response(),
-        Err((code, msg)) => (code, msg).into_response(),
+        // #6288: `detail` keeps the body plain text, exactly as before.
+        Err(e) => (e.status(), e.detail()).into_response(),
     }
 }
 

@@ -28,13 +28,13 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use trusty_common::inference::{ChatMessage, ChatRequest};
 
 use super::inference::{MANAGER_MAX_TOKENS, MANAGER_TEMPERATURE};
+use crate::daemon::error::DaemonError;
 use crate::daemon::state::DaemonState;
 use crate::project::resolver::{ProjectMatch, ProjectResolution, ResolverError, resolve_project};
 
@@ -230,46 +230,73 @@ pub async fn manager_route_task_route(
     State(state): State<Arc<DaemonState>>,
     Json(body): Json<RouteTaskRequest>,
 ) -> impl IntoResponse {
+    // #6288: the body is shared with `mpm.manager.route_task`.
+    match route_task_op(&state, body).await {
+        Ok(reply) => Json(reply).into_response(),
+        Err(e) => render_route_task_error(e),
+    }
+}
+
+/// Render a route-task failure in this route's historical body shape (#6288).
+///
+/// Why: both failure classes have always answered a typed `{ error, message }`
+/// JSON object, with different `error` codes. Only where the failure is
+/// DECIDED moved.
+fn render_route_task_error(e: DaemonError) -> axum::response::Response {
+    let code = match &e {
+        DaemonError::InvalidRequest(_) => "invalid_request",
+        _ => "registry_read_failed",
+    };
+    (
+        e.status(),
+        Json(json!({ "error": code, "message": e.detail() })),
+    )
+        .into_response()
+}
+
+/// [`manager_route_task_route`]'s body, with no transport in it (#6288 slice 5).
+///
+/// # Errors
+///
+/// [`DaemonError::InvalidRequest`] on blank `text`; [`DaemonError::Internal`]
+/// when the project registry read fails. Every other outcome — including
+/// no-match and an inconclusive disambiguation — is an advisory `Ok`, exactly
+/// as it was over HTTP.
+///
+/// Test: `parity_manager_route_task_agrees_across_transports`,
+/// `rpc_manager_route_task_rejects_blank_text`.
+pub async fn route_task_op(
+    state: &Arc<DaemonState>,
+    body: RouteTaskRequest,
+) -> Result<RouteTaskResponse, DaemonError> {
     let text = body.text.trim().to_string();
     if text.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "invalid_request", "message": "text must not be empty" })),
-        )
-            .into_response();
+        return Err(DaemonError::InvalidRequest(
+            "text must not be empty".to_string(),
+        ));
     }
 
     let registry = state.project_registry().await;
-    let projects = match registry.list().await {
-        Ok(projects) => projects,
-        Err(e) => {
-            tracing::warn!(error = %e, "route-task: project registry read failed");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": "registry_read_failed",
-                             "message": "project registry read failed" })),
-            )
-                .into_response();
-        }
-    };
+    let projects = registry.list().await.map_err(|e| {
+        tracing::warn!(error = %e, "route-task: project registry read failed");
+        DaemonError::Internal("project registry read failed".to_string())
+    })?;
 
     let resolution = match resolve_project(&text, &projects) {
         Ok(resolution) => resolution,
         Err(ResolverError::EmptyRegistry) => {
-            return Json(no_match_response(
+            return Ok(no_match_response(
                 "no projects are registered; register one with `tm projects register`",
-            ))
-            .into_response();
+            ));
         }
         Err(ResolverError::NoMatch { .. }) => {
-            return Json(no_match_response("no registered project matched the task"))
-                .into_response();
+            return Ok(no_match_response("no registered project matched the task"));
         }
     };
 
     // Unambiguous: reuse the deterministic pick verbatim — no inference.
     if !resolution.needs_disambiguation() {
-        return Json(resolver_response(&resolution, None)).into_response();
+        return Ok(resolver_response(&resolution, None));
     }
 
     // Tie/low-confidence: #2109 owns the judgment. Escalate to ONE LLM call.
@@ -278,14 +305,13 @@ pub async fn manager_route_task_route(
         Err(_) => {
             // No provider — degrade to the deterministic top candidate rather
             // than fail; advisory output must never panic (§4 degrade bar).
-            return Json(resolver_response(
+            return Ok(resolver_response(
                 &resolution,
                 Some(
                     "multiple candidates tied and no inference provider was available to \
                       disambiguate, so the highest-confidence candidate was chosen",
                 ),
-            ))
-            .into_response();
+            ));
         }
     };
 
@@ -308,7 +334,7 @@ pub async fn manager_route_task_route(
     };
 
     match picked {
-        Some(m) => Json(RouteTaskResponse {
+        Some(m) => Ok(RouteTaskResponse {
             project: Some(m.project.name.clone()),
             confidence: m.confidence,
             rationale: format!(
@@ -320,15 +346,13 @@ pub async fn manager_route_task_route(
                 m.reason.label(),
             ),
             resolved_by: ResolvedBy::Disambiguation,
-        })
-        .into_response(),
+        }),
         // The call failed or named an unlisted project — fall back to the
         // deterministic top candidate.
-        None => Json(resolver_response(
+        None => Ok(resolver_response(
             &resolution,
             Some("disambiguation was inconclusive, so the highest-confidence candidate was chosen"),
-        ))
-        .into_response(),
+        )),
     }
 }
 

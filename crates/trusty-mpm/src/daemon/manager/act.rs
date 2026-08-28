@@ -23,12 +23,12 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::actuator::{InjectOutcome, ManagerActuator, SummarizeOutcome, resolve_actuator};
+use crate::daemon::error::DaemonError;
 use crate::daemon::state::DaemonState;
 
 /// The action a caller proposes (and, on confirm, the manager executes).
@@ -308,39 +308,67 @@ pub async fn manager_act_route(
     State(state): State<Arc<DaemonState>>,
     Json(body): Json<ActRequest>,
 ) -> impl IntoResponse {
-    let conversation_key = body.conversation_key.trim().to_string();
-    if conversation_key.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "invalid_request",
-                         "message": "conversation_key must not be empty" })),
-        )
-            .into_response();
-    }
-
-    // Propose-only: return what confirming would do; execute NOTHING.
-    if !body.confirm {
-        return Json(ActResponse::Proposed {
-            proposal: propose_message(&body.action),
-            action: body.action,
-        })
-        .into_response();
-    }
-
-    // Confirmed: resolve the execution seam (test override, else production) and
-    // execute through the SAME dispatch the chat confirm turn uses.
-    let actuator = resolve_actuator(&state);
-    match execute_action(&actuator, &conversation_key, body.action).await {
+    // #6288: the body is shared with `mpm.manager.act`.
+    match act_op(&state, body).await {
         Ok(response) => Json(response).into_response(),
-        Err(error) => {
-            tracing::warn!("manager act: action execution failed: {error}");
+        Err(e) => {
+            let code = match &e {
+                DaemonError::InvalidRequest(_) => "invalid_request",
+                _ => "launch_failed",
+            };
             (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({ "error": "launch_failed", "message": error })),
+                e.status(),
+                Json(json!({ "error": code, "message": e.detail() })),
             )
                 .into_response()
         }
     }
+}
+
+/// [`manager_act_route`]'s body, with no transport in it (#6288 slice 5).
+///
+/// Why the propose→confirm gate is unchanged: `confirm == false` still returns
+/// [`ActResponse::Proposed`] and executes nothing, and the confirmed path still
+/// runs through the one [`execute_action`] seam the chat confirm turn drives.
+/// Moving the call site changed neither, so the socket cannot mutate a session
+/// on a call an HTTP caller could not have mutated one with.
+///
+/// # Errors
+///
+/// [`DaemonError::InvalidRequest`] on a blank conversation key;
+/// [`DaemonError::UpstreamFailed`] when a confirmed launch fails to spawn.
+/// Inject and summarize outcomes are advisory `Ok` values, never errors.
+///
+/// Test: `parity_manager_act_propose_agrees_across_transports`,
+/// `rpc_manager_act_rejects_a_blank_conversation_key`.
+pub async fn act_op(
+    state: &Arc<DaemonState>,
+    body: ActRequest,
+) -> Result<ActResponse, DaemonError> {
+    let conversation_key = body.conversation_key.trim().to_string();
+    if conversation_key.is_empty() {
+        return Err(DaemonError::InvalidRequest(
+            "conversation_key must not be empty".to_string(),
+        ));
+    }
+
+    // Propose-only: return what confirming would do; execute NOTHING.
+    if !body.confirm {
+        return Ok(ActResponse::Proposed {
+            proposal: propose_message(&body.action),
+            action: body.action,
+        });
+    }
+
+    // Confirmed: resolve the execution seam (test override, else production) and
+    // execute through the SAME dispatch the chat confirm turn uses.
+    let actuator = resolve_actuator(state);
+    execute_action(&actuator, &conversation_key, body.action)
+        .await
+        .map_err(|error| {
+            tracing::warn!("manager act: action execution failed: {error}");
+            DaemonError::UpstreamFailed(error)
+        })
 }
 
 #[cfg(test)]

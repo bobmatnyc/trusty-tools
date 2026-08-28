@@ -40,8 +40,10 @@ mod launch_on_main;
 mod lifecycle;
 pub mod managed_checkout;
 mod mcp_spawn_gate;
-mod project_registry_routes;
-mod project_status;
+// #6288: `pub` so `rpc::registry::projects` can call the shared `*_op` bodies.
+pub mod project_registry_routes;
+// #6288: `pub` so `rpc::registry::projects` can call `project_status_op`.
+pub mod project_status;
 pub mod provision_status;
 pub mod proxy;
 pub mod prune;

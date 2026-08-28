@@ -52,6 +52,23 @@ pub const CODE_UNPROCESSABLE: i64 = -32006;
 /// HTTP 409 over the socket: the request conflicts with the record's state.
 pub const CODE_CONFLICT: i64 = -32009;
 
+/// HTTP 502 over the socket: an upstream this daemon called answered badly.
+///
+/// #6288: distinct from [`CODE_UNAVAILABLE`], which says the daemon has no
+/// provider configured at all. This one says a configured provider was called
+/// and the call failed, so the caller's retry advice differs.
+pub const CODE_UPSTREAM_FAILED: i64 = -32007;
+
+/// HTTP 410 over the socket: the addressed resource existed and is now gone.
+///
+/// #6288: the peer bus's instance-bypass failure ([`BusError::InstanceGone`])
+/// is the only route in this daemon that distinguishes "gone" from "never
+/// existed", and DOC-60 §4 requires the sender to be able to tell them apart
+/// without parsing a message — so the distinction has to survive the socket.
+///
+/// [`BusError::InstanceGone`]: crate::daemon::bus::BusError::InstanceGone
+pub const CODE_GONE: i64 = -32008;
+
 /// A resume refused because the workspace directory is gone (#6288 slice 4).
 ///
 /// Why its own code rather than plain [`CODE_UNPROCESSABLE`]: on HTTP the two
@@ -87,6 +104,10 @@ pub fn rpc_code_for_status(status: u16) -> i64 {
         404 => CODE_NOT_FOUND,
         409 => CODE_CONFLICT,
         422 => CODE_UNPROCESSABLE,
+        // #6288 slice 5: the manager surface is the first to report "a
+        // configured provider answered badly", so 502 stops falling through to
+        // 500. See `DaemonError::UpstreamFailed`.
+        502 => CODE_UPSTREAM_FAILED,
         503 => CODE_UNAVAILABLE,
         // Everything left maps to 500, and a caller could not have sent any of
         // them differently.
@@ -252,6 +273,23 @@ pub enum DaemonError {
     /// Test: `error_status_codes_map`, `spawn_session_without_claude_returns_422`.
     #[error("unprocessable: {0}")]
     Unprocessable(String),
+
+    /// An upstream service this daemon called answered badly.
+    ///
+    /// Why (#6288 slice 5): the L3 manager's digest, chat, and route-task
+    /// routes call a configured inference provider and return HTTP 502 when
+    /// that call errors or returns an empty body. That is a different fact
+    /// from [`ServiceUnavailable`](Self::ServiceUnavailable) (503, "no provider
+    /// is configured"), and a caller's correct reaction differs: retry a 502,
+    /// configure a provider for a 503. Before this variant the distinction
+    /// lived only in the handlers' own `StatusCode` literals, which a shared
+    /// transport-neutral body cannot carry — so serving those routes over the
+    /// socket needed the class to become a value.
+    /// What: carries the operator-facing reason; maps to HTTP 502 and to
+    /// [`CODE_UPSTREAM_FAILED`] on the socket.
+    /// Test: `error_status_codes_map`, `rpc_error_codes_track_http_statuses`.
+    #[error("upstream failed: {0}")]
+    UpstreamFailed(String),
 }
 
 impl DaemonError {
@@ -275,6 +313,33 @@ impl DaemonError {
             Self::TmuxUnavailable(_) | Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::Unprocessable(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::UpstreamFailed(_) => StatusCode::BAD_GATEWAY,
+        }
+    }
+
+    /// The message WITHOUT the variant's `Display` prefix.
+    ///
+    /// Why (#6288 slice 5): several routes moving onto the socket answer HTTP
+    /// with a bare plain-text body — `project foo not found`, not
+    /// `{"error":"not found: project foo not found"}`. Their bodies now live in
+    /// a shared `*_op` that reports a [`DaemonError`], and the HTTP delegator
+    /// has to reproduce the old body byte for byte, which `Display` cannot do:
+    /// it prepends the variant label. This returns just the payload, so a
+    /// delegator can render `(status, detail)` and leave the wire unchanged.
+    /// What: the carried string for the single-field variants; `to_string()`
+    /// for the structured ones, which have no single payload to return.
+    /// Test: `detail_drops_the_display_prefix`.
+    pub fn detail(&self) -> String {
+        match self {
+            Self::TmuxUnavailable(m)
+            | Self::InvalidRequest(m)
+            | Self::Internal(m)
+            | Self::ServiceUnavailable(m)
+            | Self::Forbidden(m)
+            | Self::NotFound(m)
+            | Self::Unprocessable(m)
+            | Self::UpstreamFailed(m) => m.clone(),
+            other => other.to_string(),
         }
     }
 }
@@ -388,6 +453,12 @@ mod tests {
             DaemonError::Unprocessable("x".into()).status(),
             StatusCode::UNPROCESSABLE_ENTITY
         );
+        // #6288: 502 is the manager surface's "a configured provider answered
+        // badly", distinct from the 503 no-provider case above it.
+        assert_eq!(
+            DaemonError::UpstreamFailed("x".into()).status(),
+            StatusCode::BAD_GATEWAY
+        );
         assert_eq!(
             DaemonError::DeliverableNotFound { id: "x".into() }.status(),
             StatusCode::NOT_FOUND
@@ -443,6 +514,10 @@ mod tests {
             ),
             (DaemonError::Unprocessable("x".into()), CODE_UNPROCESSABLE),
             (
+                DaemonError::UpstreamFailed("x".into()),
+                CODE_UPSTREAM_FAILED,
+            ),
+            (
                 DaemonError::ServiceUnavailable("x".into()),
                 CODE_UNAVAILABLE,
             ),
@@ -488,6 +563,21 @@ mod tests {
         assert!(msg.contains("proposed"), "{msg}");
         assert!(msg.contains("complete"), "{msg}");
         assert!(msg.contains("in-progress"), "{msg}");
+    }
+
+    /// Why (#6288): a plain-text route's HTTP body is reproduced from
+    /// `detail`, so a prefix leaking back in silently changes that wire.
+    /// Test: this function IS the test.
+    #[test]
+    fn detail_drops_the_display_prefix() {
+        let e = DaemonError::NotFound("project foo not found".into());
+        assert_eq!(e.to_string(), "not found: project foo not found");
+        assert_eq!(e.detail(), "project foo not found");
+
+        // A structured variant has no single payload, so it falls back to
+        // `Display` rather than losing its fields.
+        let e = DaemonError::SessionNotFound { id: "abc".into() };
+        assert_eq!(e.detail(), e.to_string());
     }
 
     #[test]

@@ -32,13 +32,13 @@ use std::sync::Arc;
 use axum::{
     Json,
     extract::{Path as AxumPath, State},
-    http::StatusCode,
     response::IntoResponse,
 };
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tracing::warn;
 
+use crate::daemon::error::DaemonError;
 use crate::daemon::state::DaemonState;
 use crate::deliverable::{
     Deliverable, DeliverableId, DeliverableStatus, Milestone, MilestoneStatus,
@@ -399,11 +399,33 @@ pub async fn project_status_route(
     State(state): State<Arc<DaemonState>>,
     AxumPath(name): AxumPath<String>,
 ) -> impl IntoResponse {
+    // #6288: the body is shared with `mpm.projects.status`. The plain-text
+    // error bodies are preserved via `DaemonError::detail`.
+    match project_status_op(&state, &name).await {
+        Ok(rollup) => Json(rollup).into_response(),
+        Err(e) => (e.status(), e.detail()).into_response(),
+    }
+}
+
+/// [`project_status_route`]'s body, with no transport in it (#6288 slice 5).
+///
+/// # Errors
+///
+/// [`DaemonError::NotFound`] when `name` is not registered;
+/// [`DaemonError::Internal`] when the project, deliverable, or milestone store
+/// read fails.
+///
+/// Test: `parity_project_status_agrees_across_transports`,
+/// `rpc_project_status_unknown_project_is_not_found`.
+pub async fn project_status_op(
+    state: &Arc<DaemonState>,
+    name: &str,
+) -> Result<ProjectStatusResponse, DaemonError> {
     let registry = state.project_registry().await;
-    let project = match registry.get(&name).await {
+    let project = match registry.get(name).await {
         Ok(project) => project,
         Err(ProjectStoreError::NotFound(_)) => {
-            return (StatusCode::NOT_FOUND, format!("project {name} not found")).into_response();
+            return Err(DaemonError::NotFound(format!("project {name} not found")));
         }
         Err(e) => {
             warn!(
@@ -411,11 +433,9 @@ pub async fn project_status_route(
                 project = %name,
                 "project_status_route: project registry read failed"
             );
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
+            return Err(DaemonError::Internal(
                 "project registry read failed".to_string(),
-            )
-                .into_response();
+            ));
         }
     };
 
@@ -431,11 +451,9 @@ pub async fn project_status_route(
                 project = %name,
                 "project_status_route: deliverable store read failed"
             );
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
+            return Err(DaemonError::Internal(
                 "deliverable store read failed".to_string(),
-            )
-                .into_response();
+            ));
         }
     };
     let milestones = match deliverable_mgr.all_milestones().await {
@@ -446,21 +464,18 @@ pub async fn project_status_route(
                 project = %name,
                 "project_status_route: milestone store read failed"
             );
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
+            return Err(DaemonError::Internal(
                 "milestone store read failed".to_string(),
-            )
-                .into_response();
+            ));
         }
     };
 
-    Json(aggregate_project_status(
+    Ok(aggregate_project_status(
         &project,
         &sessions,
         &deliverables,
         &milestones,
     ))
-    .into_response()
 }
 
 #[cfg(test)]
