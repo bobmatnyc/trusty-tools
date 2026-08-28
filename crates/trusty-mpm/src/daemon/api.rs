@@ -29,13 +29,16 @@ use utoipa_swagger_ui::SwaggerUi;
 use crate::core::compress::CompressionLevel;
 use crate::core::hook::HookEvent;
 use crate::core::project::ProjectInfo;
-use crate::core::session::{ControlModel, Session, SessionId, SessionStatus};
+use crate::core::session::Session;
 
 use super::error::DaemonError;
 // #6288: the transport-neutral bodies these handlers and the socket's
 // `mpm.*` methods both call. One route, one implementation.
 use super::rpc::core_ops;
-use super::services::{HookDecision, HookService, PairingService, SessionService, TmuxService};
+// #6288 slice 3: the shared bodies for the legacy session, hook, and polled
+// event routes. Every handler below is a thin adapter over one of them.
+use super::rpc::sessions_legacy_ops as sessions_ops;
+use super::services::PairingService;
 use super::state::DaemonState;
 
 /// The SESSCTL control-plane routes (`/api/v1/control/sessions/*`, WI-2 #1593).
@@ -67,16 +70,21 @@ pub use claude_config_routes::*;
 /// (`.line-cap-allowlist.tsv`) could absorb. It is cohesive and
 /// self-contained — both hook handlers are called only from `ingest_hook`
 /// below — so it moves out, mirroring `control_routes`/`claude_config_routes`.
-/// Not `pub`: unlike those two, nothing outside `api.rs` calls these handlers
-/// directly (`ingest_hook` is the only public entry point), so a private
-/// `use` is enough to bring the names into `api.rs`'s own scope — and, via
-/// `api_tests.rs`'s `use super::*;`, into the test module too.
-mod session_start_correlation;
-use session_start_correlation::{correlate_session_start, handle_session_end};
+/// `pub(crate)` since #6288 slice 3: `ingest_hook`'s body now lives in
+/// `daemon::rpc::sessions_legacy_ops` so the socket and HTTP share it, and that
+/// module is outside `daemon::api`. Still not `pub` — nothing outside this
+/// crate calls these handlers.
+pub(crate) mod session_start_correlation;
 // Only `api_tests.rs` (via `use super::*;`) calls this directly — a plain
 // `use` would be flagged `unused_imports` on the non-test lib target.
 #[cfg(test)]
 use session_start_correlation::session_end_pane_still_live;
+// #6288 slice 3: `SessionId` left this file with the handler bodies that named
+// it. `api_tests.rs` still reaches it through `use super::*;` — and imports
+// `ControlModel`/`SessionStatus`/`TmuxService` itself — so this one name keeps
+// the same `cfg(test)` treatment as the import above.
+#[cfg(test)]
+use crate::core::session::SessionId;
 
 /// The cross-session coordinator routes (`/api/v1/sessions/context` + `/chat`).
 ///
@@ -469,11 +477,8 @@ pub async fn list_sessions(
     State(state): State<Arc<DaemonState>>,
     Query(query): Query<SessionQuery>,
 ) -> Json<SessionsResponse> {
-    let sessions = match query.project {
-        Some(path) => state.list_sessions_for_project(&path),
-        None => state.list_sessions(),
-    };
-    Json(SessionsResponse { sessions })
+    // #6288: the body is shared with `mpm.sessions.list` over the Unix socket.
+    Json(sessions_ops::list_sessions(&state, query))
 }
 
 /// `GET /events/poll` — JSON snapshot of recent hook events (legacy / fallback).
@@ -492,9 +497,8 @@ pub async fn list_sessions(
     responses((status = 200, description = "Recent hook events across all sessions"))
 )]
 pub async fn recent_events(State(state): State<Arc<DaemonState>>) -> Json<EventsResponse> {
-    Json(EventsResponse {
-        events: state.recent_hook_events(),
-    })
+    // #6288: the body is shared with `mpm.events.poll` over the Unix socket.
+    Json(sessions_ops::recent_events(&state))
 }
 
 /// `GET /events` — live SSE stream of every hook event.
@@ -612,53 +616,10 @@ pub async fn register_session(
     State(state): State<Arc<DaemonState>>,
     Json(body): Json<RegisterSession>,
 ) -> Result<Json<RegisterSessionResponse>, DaemonError> {
-    // Derive the tmux name from the project directory (`tm-<folder>`) so the
-    // registry name matches the folder-based session the CLI creates. A
-    // caller-supplied `name` always wins; otherwise fall back to the UUID name.
-    let project_dir = body.project_path.as_deref();
-    let mut session = Session::new(
-        SessionId::new(),
-        body.project.clone(),
-        ControlModel::Tmux,
-        project_dir,
-    );
-    session.project_path = body.project_path.clone();
-    if let Some(name) = body.name.as_deref().filter(|n| !n.is_empty()) {
-        session.tmux_name = name.to_string();
-    }
-    if let Some(workdir) = body.workdir.as_deref() {
-        // Mirror the workdir onto the session record so the dashboard and the
-        // reaper see the spawn directory, not the project label. The
-        // `Session::workdir` field is the per-session working directory; the
-        // `project` field is a label / association.
-        session.workdir = workdir.to_string_lossy().into_owned();
-    }
-
-    // Spawn mode: create the tmux host and start `claude` *before* the session
-    // is registered, so a 422 or 500 leaves the registry untouched. This
-    // matches the standard HTTP contract — a failed POST should not leave a
-    // half-created resource visible to subsequent GETs.
-    if let Some(workdir) = body.workdir.as_deref() {
-        TmuxService::spawn_claude(&session.tmux_name, workdir)?;
-        // The session is now actively running `claude`; mark it Active so the
-        // dashboard reflects reality rather than the default `Starting` state.
-        session.status = SessionStatus::Active;
-    }
-
-    let id = session.id;
-    let tmux_name = session.tmux_name.clone();
-    state.register_session(session);
-
-    // Discover the `claude` PID inside the registered tmux pane in the
-    // background so the reaper can monitor process liveness. This is the
-    // daemon-side counterpart of the CLI's post-launch PID capture; it does not
-    // block the response, and a failure is logged, never fatal.
-    super::services::session_service::spawn_pid_capture(Arc::clone(&state), id, tmux_name.clone());
-
-    Ok(Json(RegisterSessionResponse {
-        id,
-        name: tmux_name,
-    }))
+    // #6288: the body is shared with `mpm.sessions.register` over the Unix
+    // socket; `mpm.sessions.connect` mounts the same body under its own name,
+    // exactly as `POST /api/v1/sessions/connect` does here.
+    Ok(Json(sessions_ops::register_session(&state, body)?))
 }
 
 /// `POST /api/v1/sessions/connect` — register a session for a *connect* (no
@@ -711,11 +672,8 @@ pub async fn get_session(
     State(state): State<Arc<DaemonState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Session>, DaemonError> {
-    let session_id = parse_id(&id)?;
-    state
-        .session(session_id)
-        .map(Json)
-        .ok_or(DaemonError::SessionNotFound { id })
+    // #6288: the body is shared with `mpm.sessions.get` over the Unix socket.
+    Ok(Json(sessions_ops::get_session(&state, &id)?))
 }
 
 /// `DELETE /sessions/:id` — deregister a session AND kill its tmux host.
@@ -748,55 +706,9 @@ pub async fn remove_session(
     State(state): State<Arc<DaemonState>>,
     Path(id): Path<String>,
 ) -> Result<Json<RemoveSessionResponse>, DaemonError> {
-    let session = parse_id(&id)?;
-    let removed = state
-        .remove_session(session)
-        .ok_or_else(|| DaemonError::SessionNotFound { id: id.clone() })?;
-
-    // Best-effort teardown: kill the owning tmux host so the session does not
-    // leak, then reconcile the SessionManager store for any record that shares
-    // the same tmux name. Neither step fails the response — the registry entry
-    // is already gone, which is the contract the DELETE promises.
-    let tmux_name = removed.tmux_name.clone();
-    TmuxService::kill_best_effort(&tmux_name);
-    reconcile_managed_store_on_delete(&state, &tmux_name).await;
-
-    Ok(Json(RemoveSessionResponse { removed: id }))
-}
-
-/// Decommission any SessionManager record that shares `tmux_name`, best-effort.
-///
-/// Why: the legacy `DaemonState` registry and the `SessionManager` store are two
-/// registries that can both track a session under the same tmux name. A DELETE
-/// against the legacy registry must not leave the managed store pointing at a
-/// now-dead tmux host, or the orphan-GC and `ls` would show a phantom (#1454).
-/// What: lists the managed store, finds records whose `tmux_name` matches and
-/// that are not already terminal (Stopped/Decommissioned), and decommissions
-/// each. Every step is best-effort: a store-read or decommission failure is
-/// logged to stderr via `tracing` and swallowed so the HTTP DELETE still
-/// succeeds. Idempotent — already-terminal records are skipped.
-/// Test: exercised by `full_user_cycle`; the managed-store decommission path
-/// itself is unit-tested in `session_manager::tests`.
-async fn reconcile_managed_store_on_delete(state: &Arc<DaemonState>, tmux_name: &str) {
-    let mgr = state.session_manager().await;
-    for record in mgr.list().await {
-        if record.tmux_name != tmux_name {
-            continue;
-        }
-        if matches!(
-            record.state,
-            crate::session_manager::ManagedSessionState::Stopped
-                | crate::session_manager::ManagedSessionState::Decommissioned
-        ) {
-            continue;
-        }
-        if let Err(e) = mgr.decommission(&record.id, None).await {
-            tracing::warn!(
-                name = %tmux_name,
-                "DELETE reconcile: decommission of managed record failed (may already be gone): {e}"
-            );
-        }
-    }
+    // #6288: the body — including the best-effort tmux kill and the managed-
+    // store reconcile — is shared with `mpm.sessions.delete` over the socket.
+    Ok(Json(sessions_ops::remove_session(&state, &id).await?))
 }
 
 /// `DELETE /sessions/dead` — reap registry entries with no live tmux session.
@@ -814,11 +726,8 @@ async fn reconcile_managed_store_on_delete(state: &Arc<DaemonState>, tmux_name: 
     responses((status = 200, description = "Dead sessions reaped; returns the removed count"))
 )]
 pub async fn reap_sessions(State(state): State<Arc<DaemonState>>) -> Json<ReapResponse> {
-    let result = SessionService::new(&state).reap();
-    Json(ReapResponse {
-        removed: result.reaped,
-        stopped: result.stopped,
-    })
+    // #6288: the body is shared with `mpm.sessions.reap` over the Unix socket.
+    Json(sessions_ops::reap_sessions(&state))
 }
 
 /// JSON body for `PATCH /sessions/{id}/pid`.
@@ -858,15 +767,8 @@ pub async fn set_session_pid(
     Path(id): Path<String>,
     Json(body): Json<SetPidRequest>,
 ) -> Result<Json<SetPidResponse>, DaemonError> {
-    let session = parse_id(&id)?;
-    if state.set_session_pid(session, body.pid) {
-        Ok(Json(SetPidResponse {
-            session_id: id,
-            pid: body.pid,
-        }))
-    } else {
-        Err(DaemonError::SessionNotFound { id })
-    }
+    // #6288: the body is shared with `mpm.sessions.set_pid` over the socket.
+    Ok(Json(sessions_ops::set_session_pid(&state, &id, body.pid)?))
 }
 
 /// `POST /sessions/discover` — auto-discover Claude Code sessions.
@@ -887,12 +789,8 @@ pub async fn set_session_pid(
     responses((status = 200, description = "tmux sessions running Claude Code, newly registered"))
 )]
 pub async fn discover_sessions(State(state): State<Arc<DaemonState>>) -> Json<DiscoverResponse> {
-    let result = super::discovery::discover_all(&state).await;
-    Json(DiscoverResponse {
-        discovered: result.adopted,
-        sessions: result.sessions,
-        skipped: result.skipped,
-    })
+    // #6288: the body is shared with `mpm.sessions.discover` over the socket.
+    Json(sessions_ops::discover_sessions(&state).await)
 }
 
 /// `GET /sessions/:id/events/poll` — JSON snapshot of one session's hook events.
@@ -918,10 +816,8 @@ pub async fn session_events(
     State(state): State<Arc<DaemonState>>,
     Path(id): Path<String>,
 ) -> Result<Json<EventsResponse>, DaemonError> {
-    let session = parse_id(&id)?;
-    Ok(Json(EventsResponse {
-        events: state.hook_events_for(session),
-    }))
+    // #6288: the body is shared with `mpm.sessions.events_poll` over the socket.
+    Ok(Json(sessions_ops::session_events(&state, &id)?))
 }
 
 /// `GET /sessions/{id}/events` — live SSE stream of one session's hook events.
@@ -958,65 +854,6 @@ pub async fn stream_session_events(
             .interval(Duration::from_secs(15))
             .text("ping"),
     )
-}
-
-/// Result of applying an optional compression level to captured output.
-///
-/// Why: the command and output endpoints share the same compress-then-return
-/// shape; bundling the text and stats lets one helper produce both.
-/// What: the (possibly compressed) text, the byte stats, and the level as a
-/// lowercase wire string (`None` when no compression was applied).
-/// Test: `apply_compression_off_is_passthrough`, `apply_compression_summarise`.
-struct CompressedOutput {
-    /// The output text after compression (or unchanged when off).
-    text: String,
-    /// Byte counts before and after compression.
-    stats: crate::core::compress::CompressionStats,
-    /// Lowercase wire name of the level applied, or `None` when uncompressed.
-    level_label: Option<String>,
-}
-
-/// Apply an optional compression level to captured pane output.
-///
-/// Why: `POST .../command` and `GET .../output` both accept an optional
-/// `?compress=` query param; doing the compress-or-passthrough decision once
-/// keeps the two handlers identical.
-/// What: when `level` is `Some`, runs [`compress_output`] and records the
-/// level's lowercase label; when `None`, returns the raw text with empty stats
-/// and no label.
-/// Test: `apply_compression_off_is_passthrough`, `apply_compression_summarise`.
-fn apply_compression(level: Option<CompressionLevel>, raw: &str) -> CompressedOutput {
-    match level {
-        Some(level) => {
-            let (text, stats) = crate::core::compress::compress_output(raw, level);
-            CompressedOutput {
-                text,
-                stats,
-                level_label: Some(compression_level_label(level)),
-            }
-        }
-        None => CompressedOutput {
-            text: raw.to_string(),
-            stats: crate::core::compress::CompressionStats::default(),
-            level_label: None,
-        },
-    }
-}
-
-/// Lowercase wire name for a [`CompressionLevel`].
-///
-/// Why: API responses report the applied level as a stable lowercase string,
-/// matching the `snake_case` serde representation of the enum.
-/// What: maps each variant to its `serde` wire name.
-/// Test: `compress_level_label_matches_serde`.
-fn compression_level_label(level: CompressionLevel) -> String {
-    match level {
-        CompressionLevel::Off => "off",
-        CompressionLevel::Trim => "trim",
-        CompressionLevel::Summarise => "summarise",
-        CompressionLevel::Caveman => "caveman",
-    }
-    .to_string()
 }
 
 /// JSON body for `POST /sessions/{id}/pause`.
@@ -1058,12 +895,12 @@ pub async fn pause_session(
     Path(id): Path<String>,
     Json(body): Json<PauseRequest>,
 ) -> Result<Json<PauseResponse>, DaemonError> {
-    let result = SessionService::new(&state).pause(&id, body.summary)?;
-    Ok(Json(PauseResponse {
-        paused: true,
-        session_id: result.session_id,
-        summary: result.summary,
-    }))
+    // #6288: the body is shared with `mpm.sessions.pause` over the Unix socket.
+    Ok(Json(sessions_ops::pause_session(
+        &state,
+        &id,
+        body.summary,
+    )?))
 }
 
 /// `POST /sessions/{id}/resume` — resume a previously-paused session.
@@ -1089,8 +926,8 @@ pub async fn resume_session(
     State(state): State<Arc<DaemonState>>,
     Path(id): Path<String>,
 ) -> Result<Json<ResumeResponse>, DaemonError> {
-    SessionService::new(&state).resume(&id)?;
-    Ok(Json(ResumeResponse { resumed: true }))
+    // #6288: the body is shared with `mpm.sessions.resume` over the socket.
+    Ok(Json(sessions_ops::resume_session(&state, &id)?))
 }
 
 /// JSON body for `POST /sessions/{id}/command`.
@@ -1151,21 +988,10 @@ pub async fn send_command(
     Query(query): Query<CommandQuery>,
     Json(body): Json<CommandRequest>,
 ) -> Result<Json<CommandResponse>, DaemonError> {
-    let session = SessionService::new(&state).command_target(&id)?;
-    TmuxService::send_command(&session, &body.command);
-
-    // Give the pane a moment to render the command's output before capturing.
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    let raw = TmuxService::capture(&session, 100);
-    let compressed = apply_compression(query.compress, &raw);
-
-    Ok(Json(CommandResponse {
-        sent: true,
-        output: compressed.text,
-        original_bytes: compressed.stats.original_bytes,
-        compressed_bytes: compressed.stats.compressed_bytes,
-        compress_level: compressed.level_label,
-    }))
+    // #6288: the body is shared with `mpm.sessions.command` over the socket.
+    Ok(Json(
+        sessions_ops::send_command(&state, &id, &body.command, query.compress).await?,
+    ))
 }
 
 /// Query parameters for `GET /sessions/{id}/output`.
@@ -1184,11 +1010,6 @@ pub struct OutputQuery {
     /// Values: off, trim, summarise, caveman. Defaults to none (raw output).
     #[serde(default)]
     pub compress: Option<CompressionLevel>,
-}
-
-/// Default trailing-line count for `GET /sessions/{id}/output`.
-fn default_output_lines() -> u32 {
-    50
 }
 
 /// `GET /sessions/{id}/output` — capture the current tmux pane output.
@@ -1219,17 +1040,15 @@ pub async fn get_output(
     Path(id): Path<String>,
     Query(query): Query<OutputQuery>,
 ) -> Result<Json<OutputResponse>, DaemonError> {
-    let session = SessionService::new(&state).resolve(&id)?;
-    let lines = query.lines.unwrap_or_else(default_output_lines);
-    let raw = TmuxService::capture(&session, lines);
-    let compressed = apply_compression(query.compress, &raw);
-    Ok(Json(OutputResponse {
-        output: compressed.text,
-        lines,
-        original_bytes: compressed.stats.original_bytes,
-        compressed_bytes: compressed.stats.compressed_bytes,
-        compress_level: compressed.level_label,
-    }))
+    // #6288: the body is shared with `mpm.sessions.output` and its
+    // `mpm.sessions.pane` alias over the Unix socket, mirroring the two HTTP
+    // routes that already point here.
+    Ok(Json(sessions_ops::get_output(
+        &state,
+        &id,
+        query.lines,
+        query.compress,
+    )?))
 }
 
 /// `GET /breakers` — every agent's circuit-breaker state.
@@ -1294,39 +1113,9 @@ pub async fn ingest_hook(
     State(state): State<Arc<DaemonState>>,
     Json(post): Json<HookPost>,
 ) -> Result<Json<HookAcceptedResponse>, DaemonError> {
-    let session = parse_id(&post.session_id)?;
-
-    // Auto-register on SessionStart if not already known. This is how a claude
-    // session connects itself to the daemon: its first hook event registers it
-    // using the incoming UUID, so discovery and `POST /sessions` are not the
-    // only ways a session enters state. The workdir is left empty here and
-    // enriched later by a snapshot or subsequent events.
-    if post.event == HookEvent::SessionStart && state.session(session).is_none() {
-        let mut new_session = Session::new(session, String::new(), ControlModel::Tmux, None);
-        new_session.status = SessionStatus::Active;
-        state.register_session(new_session);
-        tracing::info!("auto-registered session on SessionStart: {session:?}");
-    }
-
-    // #1744: correlate Claude session id → managed session on SessionStart;
-    // immediately mark the managed session Stopped on SessionEnd.
-    if post.event == HookEvent::SessionStart {
-        correlate_session_start(&state, &post.session_id, &post.payload).await;
-    }
-    if post.event == HookEvent::SessionEnd {
-        handle_session_end(&state, &post.session_id).await;
-    }
-
-    // #2621 (code-critic MEDIUM): the idle-park surface+auto-nudge dispatch
-    // lives inside `HookService::process` (daemon/services/hook_service.rs),
-    // not here — this grandfathered handler is already at its line-cap budget,
-    // and `HookService` already has the same event/session/payload inputs.
-    match HookService::new(Arc::clone(&state)).process(session, post.event, post.payload) {
-        HookDecision::Block { reason } => Err(DaemonError::OverseerBlocked { reason }),
-        _ => Ok(Json(HookAcceptedResponse {
-            accepted: post.event,
-        })),
-    }
+    // #6288: the body — auto-registration, the #1744 correlation, and the
+    // overseer veto — is shared with `mpm.hooks.ingest` over the Unix socket.
+    Ok(Json(sessions_ops::ingest_hook(&state, post).await?))
 }
 
 /// `GET /overseer` — current session-overseer configuration and status.
@@ -1861,14 +1650,6 @@ pub async fn report_bug_http(
     Json(core_ops::report_bug(&state, body).await)
 }
 
-/// Parse a UUID string into a `SessionId`, mapping failure to a `400`-mapped
-/// [`DaemonError::InvalidRequest`].
-fn parse_id(raw: &str) -> Result<SessionId, DaemonError> {
-    uuid::Uuid::parse_str(raw)
-        .map(SessionId)
-        .map_err(|_| DaemonError::InvalidRequest(format!("malformed session id: {raw}")))
-}
-
 /// Handler unit tests.
 ///
 /// Why: the suite is large enough that keeping it in `api.rs` pushed the file
@@ -1876,6 +1657,14 @@ fn parse_id(raw: &str) -> Result<SessionId, DaemonError> {
 /// surface readable while the tests still see the private helpers via
 /// `super::*`.
 /// Test: this *is* the test module.
+// #6288 slice 3: `apply_compression` and its label helper moved to
+// `daemon::rpc::sessions_legacy_ops` with the two handler bodies that use them.
+// `api_tests.rs` reaches them through its `use super::*;`, so re-export the
+// names here rather than editing the cases. Test-only: nothing in the non-test
+// lib target references them any more.
+#[cfg(test)]
+pub(crate) use super::rpc::sessions_legacy_ops::{apply_compression, compression_level_label};
+
 #[cfg(test)]
 #[path = "api_tests.rs"]
 mod tests;
