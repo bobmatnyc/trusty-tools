@@ -41,6 +41,10 @@
   --trusty-text-muted:      #8a7460;
   --trusty-accent:          #b7410e;
   --trusty-accent-hover:    #8a2f0b;
+  /* Brand mark face — the machine eyes/mouth/readouts punched out of the rust
+     robot mark (docs/design/UI/icons/trusty-console-mark.svg). Paper on light,
+     oxide on dark, so the mark reads on either field without a second asset. */
+  --trusty-mark-face:       #fffdf9;
   /* Status */
   --trusty-success:         #3f6f2a;
   --trusty-warning:         #b07d10;
@@ -61,6 +65,7 @@
   --trusty-text-muted:      #a58a6b;
   --trusty-accent:          #d97742;
   --trusty-accent-hover:    #e8905c;
+  --trusty-mark-face:       #201612;
   /* Status — brighter to hold contrast on dark paper */
   --trusty-success:         #8fbf6a;
   --trusty-warning:         #d9a83a;
