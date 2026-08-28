@@ -28,10 +28,22 @@ you changed; a bare workspace run is a hardening gate, not an inner loop.
 ```bash
 cargo build                                            # build all crates (dev)
 cargo check -p <crate>                                 # fastest — no codegen
-cargo test -p <crate>                                  # test one crate
+cargo test -p <crate> --no-fail-fast                   # test one crate — EVERY target
 cargo clippy -p <crate> --all-targets -- -D warnings   # lint one crate
 cargo fmt                                              # format (--check to verify only)
 ```
+
+🔴 **`--no-fail-fast` is not optional (#5354).** Cargo runs each test target as
+its own binary and stops issuing further targets the moment one target reports a
+failure — it does not run them all and report the aggregate. One failing `--lib`
+test therefore hides every integration target behind it, and the run exits
+having covered far less than its counts suggest, with nothing at the call site
+saying so. It has bitten twice: `--test tm_hook_pm_guard` never executed once
+across a full session of runs (#5324), and the
+`execute_doctor_against_test_daemon` timing flake masked 49 targets on PR #5904.
+Same family as #4307 (a filter matching zero tests reports `ok`) and #4901 (a
+non-default feature compiles a module out). Worked example and what a pasted
+count then proves: [test-ladder-baseline.md](docs/reference/test-ladder-baseline.md).
 
 - For anything else — release builds, feature-gated tests, `--include-ignored` /
   ONNX tests, a single test by name, the `trusty-search` performance suite,
@@ -67,9 +79,9 @@ change's blast radius. Risk labels map onto the rungs (1–2 Low, 3–4 Normal,
 | # | Change class | Risk | PR gate, in short |
 |---|---|---|---|
 | 1 | Docs, comments, changelog fragments only | Low | Doc gates only (`check_sld.sh`, plus doc-numbers / line-cap if touched). No Cargo test by default. |
-| 2 | Test-only stabilization — flake fix, fixture, test harness | Low | `fmt --check` + `test -p <crate>`, with the flake re-run ~10× |
-| 3 | Localized behavior inside one crate | Normal | `fmt --check` + `check` + `clippy` + `test`, all `-p <crate>`, plus one regression test that provably failed before |
-| 4 | **Cross-crate change** — public API or shared library (`trusty-common`, `trusty-embedderd`, …) | Normal → High | Rung 3 on the library, then `check --workspace` + `test -p <consumer>` for **each direct dependent** |
+| 2 | Test-only stabilization — flake fix, fixture, test harness | Low | `fmt --check` + `test -p <crate> --no-fail-fast`, with the flake re-run ~10× |
+| 3 | Localized behavior inside one crate | Normal | `fmt --check` + `check` + `clippy` + `test --no-fail-fast`, all `-p <crate>`, plus one regression test that provably failed before |
+| 4 | **Cross-crate change** — public API or shared library (`trusty-common`, `trusty-embedderd`, …) | Normal → High | Rung 3 on the library, then `check --workspace` + `test -p <consumer> --no-fail-fast` for **each direct dependent** |
 | 5 | Cross-crate contract, persistence, security, process lifecycle, **release tooling** | High | Rung 4, plus `--include-ignored` integration coverage, failure-path/concurrency tests, and a `code-critic` round |
 | 6 | **UI / API surface** — Svelte UIs, MCP tool schemas, HTTP routes | High | Rung 3 or 4 for the Rust side, plus the UI package's own test/build and one binary smoke run — with direct UI/API evidence, not just crate tests |
 
@@ -84,7 +96,8 @@ change's blast radius. Risk labels map onto the rungs (1–2 Low, 3–4 Normal,
   `#[ignore]`-ing, `cfg`-gating, `--exclude`-ing, or `--lib`-narrowing coverage.
 - **Evidence:** a PR body may summarise a **passing** gate as command + counts +
   scope; raw output stays **mandatory** for failures, flakes, performance claims,
-  and disputed results.
+  and disputed results. Counts from a run WITHOUT `--no-fail-fast` prove only the
+  targets that ran, so name the flag beside them (#5354).
 
 ### What CI actually gates
 
@@ -109,6 +122,14 @@ change's blast radius. Risk labels map onto the rungs (1–2 Low, 3–4 Normal,
 - 🔴 **`Rust tests (pre-publish gate)` — the eight shards — does not run on pull
   requests.** Not required, skipped outright on a PR; runs on push to `main` and
   `workflow_dispatch`. Do not wait for it.
+- 🔴 **Those shards run `cargo nextest`, which gives every test its own PROCESS,
+  so `#[serial_test::serial]` serializes nothing there (#4162).** The `$HOME`
+  isolation PR #4120 established survives — a `set_var("HOME")` is process-local,
+  so nextest's isolation is strictly stronger than an in-process lock for env
+  state. What lapses is any `#[serial]` guarding a resource shared ACROSS
+  processes (a fixed path, a fixed port, one real file): use
+  `#[serial_test::file_serial]` for those, and keep redirecting `$HOME` per test.
+  Measurements: [test-ladder-baseline.md](docs/reference/test-ladder-baseline.md).
 - 🟡 A PR proves every test target COMPILES; test EXECUTION defers to `main`, so
   run the ladder rung your change earns before merging. Full suite on a branch:
   Actions → CI → "Run workflow".
