@@ -463,3 +463,190 @@ async fn the_adapter_respawns_a_server_that_idled_out() {
         .arg(socket.to_string_lossy().as_ref())
         .status();
 }
+
+/// One `trusty-analyze serve --mcp` process, driven the way an MCP client does.
+///
+/// Why a fixture rather than an inline spawn: the property under test needs the
+/// stdio loop and the socket the SAME process binds, and it needs both still
+/// there after a silence. Holding stdin open is what keeps the loop alive — it
+/// ends when stdin closes — so the handle owns stdin for the length of the test
+/// rather than writing to it and dropping it.
+///
+/// `kill_on_drop` is what keeps a panicking assertion from leaking a child that
+/// holds a path inside the tempdir the test is about to remove.
+struct McpSession {
+    _child: tokio::process::Child,
+    stdin: tokio::process::ChildStdin,
+    stdout: tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+    socket: PathBuf,
+}
+
+impl McpSession {
+    /// Spawn `serve --mcp` under `dir`, with `idle_secs` as the daemon's window.
+    ///
+    /// The `--facts-path` and `--socket` overrides keep the child off the
+    /// developer's real data directory, exactly as [`spawn_server`] does.
+    fn start(dir: &Path, search: &StubSearch, idle_secs: u64) -> Self {
+        use tokio::io::AsyncBufReadExt as _;
+
+        let socket = dir.join("trusty-analyze.sock");
+        let stores = dir.join("mcp-store");
+        std::fs::create_dir_all(&stores).expect("create the child's store directory");
+        let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_trusty-analyze"))
+            .arg("--facts-path")
+            .arg(stores.join("facts.redb"))
+            .args(["serve", "--mcp", "--socket"])
+            .arg(&socket)
+            .env("TRUSTY_SEARCH_URL", &search.base_url)
+            .env("TRUSTY_ANALYZE_IDLE_TIMEOUT_SECS", idle_secs.to_string())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn trusty-analyze serve --mcp");
+        let stdin = child.stdin.take().expect("piped stdin");
+        let stdout = tokio::io::BufReader::new(child.stdout.take().expect("piped stdout")).lines();
+        Self {
+            _child: child,
+            stdin,
+            stdout,
+            socket,
+        }
+    }
+
+    /// Send one JSON-RPC request and read its response line.
+    ///
+    /// The exchange is in lockstep — one line out, one line in — which is what
+    /// the MCP stdio contract is, and what lets a stalled loop surface as an
+    /// explicit timeout rather than as a hung test.
+    async fn request(
+        &mut self,
+        id: u64,
+        method: &str,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        use tokio::io::AsyncWriteExt as _;
+
+        let line = serde_json::to_string(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        }))
+        .expect("serialize the request");
+        self.stdin
+            .write_all(format!("{line}\n").as_bytes())
+            .await
+            .expect("write the request to the child's stdin");
+        self.stdin.flush().await.expect("flush stdin");
+
+        let raw = tokio::time::timeout(Duration::from_secs(60), self.stdout.next_line())
+            .await
+            .unwrap_or_else(|_| panic!("no answer to {method} within 60s"))
+            .expect("read the child's stdout")
+            .unwrap_or_else(|| panic!("the child closed stdout before answering {method}"));
+        serde_json::from_str(&raw)
+            .unwrap_or_else(|e| panic!("{method} answered non-JSON: {e}: {raw}"))
+    }
+
+    /// Call `analyzer_health` and return the tool result, asserting it worked.
+    ///
+    /// 🔴 Why `isError` is the assertion and not a JSON-RPC `error` member:
+    /// `tools/call` maps the dispatcher's `DispatchError::Transport` onto a
+    /// SUCCESSFUL response carrying `isError: true` (`mcp::helpers::wrap_tool_error`),
+    /// so a dead socket reaches a client as an ok-shaped frame. A test that only
+    /// checked for a JSON-RPC `error` would pass against a daemon that had
+    /// already exited.
+    async fn health(&mut self, id: u64) -> serde_json::Value {
+        let response = self
+            .request(
+                id,
+                "tools/call",
+                serde_json::json!({ "name": "analyzer_health", "arguments": {} }),
+            )
+            .await;
+        assert!(
+            response.get("error").is_none(),
+            "analyzer_health must not answer a JSON-RPC error: {response}"
+        );
+        let result = response
+            .get("result")
+            .cloned()
+            .unwrap_or_else(|| panic!("analyzer_health answered without a result: {response}"));
+        assert_eq!(
+            result.get("isError").and_then(serde_json::Value::as_bool),
+            Some(false),
+            "analyzer_health reached no daemon; the socket the stdio loop dials is gone: {result}"
+        );
+        result
+    }
+}
+
+/// Why (#6355): the `--mcp` branch spawns the daemon in a task and then runs the
+/// stdio loop in the foreground, and `mcp::rpc_client::call` dials that socket
+/// once per tool call with no respawn. With the idle window applied to that
+/// daemon, a session that went quiet past the window lost its transport for the
+/// rest of the process's life: the daemon task exited and unlinked the socket
+/// while the loop stayed connected to its client over stdin/stdout, and every
+/// later tool call came back `isError` with a transport failure. Nothing
+/// recovers from that — the client's only cure is to restart the server.
+///
+/// What: drives a real `serve --mcp` child with a two-second window, answers one
+/// tool call, stays silent for six windows, then asserts both that the socket is
+/// still served and that a second tool call still reaches a daemon.
+///
+/// 🔴 The silence is a bare sleep, deliberately — no liveness polling inside it.
+/// A probe connection is an OPEN connection, and `IdleTracker::expired` sleeps a
+/// whole further window whenever it observes one, so polling would push the idle
+/// exit out and let this test pass against the wiring it exists to refuse.
+///
+/// Against `9d8cc6a9a` this fails at the `still_serving` assertion: the socket is
+/// gone roughly two seconds into the silence.
+/// Test: this is the test.
+#[serial_test::serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_mcp_session_outlives_the_idle_window() {
+    const IDLE_SECS: u64 = 2;
+    /// Six windows: long enough that an idle exit has certainly happened by now,
+    /// short enough to stay an ordinary test cost.
+    const SILENCE: Duration = Duration::from_secs(12);
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let search = StubSearch::start().await;
+    let mut session = McpSession::start(tmp.path(), &search, IDLE_SECS);
+
+    let initialized = session
+        .request(1, "initialize", serde_json::Value::Null)
+        .await;
+    assert!(
+        initialized.get("result").is_some(),
+        "the stdio loop must initialize before anything else is proven: {initialized}"
+    );
+
+    let socket = session.socket.clone();
+    assert!(
+        await_serving(&socket, Duration::from_secs(30)).await,
+        "the --mcp child never bound {}",
+        socket.display()
+    );
+
+    // The "before" call. It also refreshes the idle window, so the silence below
+    // is measured from a known instant rather than from the bind.
+    session.health(2).await;
+
+    tokio::time::sleep(SILENCE).await;
+
+    let still_serving =
+        trusty_common::uds::socket_is_serving(&socket, Duration::from_secs(2)).await;
+    assert!(
+        still_serving,
+        "the daemon behind a live MCP session exited after {}s of silence; the --mcp \
+         branch must not apply an idle window (#6355)",
+        SILENCE.as_secs()
+    );
+
+    // The claim is about the DISPATCHER, not just the socket file: this is the
+    // call that used to come back `isError` for the rest of the session.
+    session.health(3).await;
+}
