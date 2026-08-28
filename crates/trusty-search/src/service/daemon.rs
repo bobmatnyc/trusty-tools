@@ -28,7 +28,9 @@
 //! same path errors), (c) auto-port selection when the requested port is
 //! taken.
 
-use crate::service::server::{build_router_with_self_origins, SearchAppState};
+use crate::service::server::SearchAppState;
+// #6285: the UDS listener this daemon binds alongside its HTTP listener.
+use crate::service::socket;
 use fs4::FileExt;
 use std::{
     fs::{File, OpenOptions},
@@ -674,6 +676,17 @@ pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<()
     let addr = listener.local_addr()?;
     let port = addr.port();
 
+    // #6285: both listeners bind before anything is published. A half-bound
+    // daemon must not exist — the port file and the shared discovery registry
+    // below announce a daemon, and announcing one whose socket then failed to
+    // bind hands every consumer of the retire slice an address with nothing
+    // behind it. A bind failure here is fatal rather than a degrade to
+    // HTTP-only (the Fail-Open Check).
+    let rpc_socket = socket::socket_path().map_err(|e| DaemonError::Server(e.to_string()))?;
+    let rpc = socket::bind(&rpc_socket)
+        .await
+        .map_err(|e| DaemonError::Server(format!("{e:#}")))?;
+
     // Atomically write the port file (write + rename).
     write_port_file(&port_path, port)?;
 
@@ -705,9 +718,10 @@ pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<()
 
     // Startup banner (stderr only — stdout is JSON-RPC transport).
     eprintln!(
-        "trusty-search v{} — HTTP admin panel: http://{}",
+        "trusty-search v{} — HTTP admin panel: http://{} — rpc socket: {}",
         env!("CARGO_PKG_VERSION"),
         addr,
+        rpc.path.display(),
     );
 
     // Stamp port into state so the SPA knows window.__DAEMON_PORT__.
@@ -721,7 +735,12 @@ pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<()
     // `from_bind_addrs` drops loopback (already trusted), so a plain loopback
     // bind yields the empty default.
     let self_origins = trusty_common::server::SelfOrigins::from_bind_addrs(&[addr]);
-    let router = build_router_with_self_origins(state, self_origins);
+    // #6285: ONE `Arc<SearchAppState>`, shared by both transports. The socket
+    // and the router are two doors onto one daemon, not two daemons — a second
+    // `Arc::new` would give the socket its own registry and its own tickers.
+    let state_arc = std::sync::Arc::new(state);
+    let rpc_state = std::sync::Arc::clone(&state_arc);
+    let router = crate::service::server::build_router_on(state_arc, self_origins);
 
     tracing::info!("daemon listening on {addr} (lock {})", lock_path.display());
 
@@ -758,18 +777,46 @@ pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<()
         std::sync::Arc::new(std::sync::OnceLock::new());
     let sigterm_at_signal = std::sync::Arc::clone(&sigterm_at);
 
+    // #6285: the stop condition is awaited ONCE and fanned out to both
+    // listeners through a token. Awaiting it separately in each would work on
+    // SIGTERM and fail on Ctrl-C, where `tokio::signal` delivers to whichever
+    // waiter is registered — one listener would drain and the other would keep
+    // accepting.
+    //
     // Issue #829: OS signal OR in-process admin_stop channel.
-    let serve_result = axum::serve(listener, router)
-        .with_graceful_shutdown(async move {
-            tokio::select! {
-                _ = shutdown_signal() => {}
-                _ = shutdown_rx.changed() => {
-                    tracing::warn!("daemon: in-process stop via admin_stop");
-                }
+    let drain = tokio_util::sync::CancellationToken::new();
+    let signal_watcher = drain.clone();
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = shutdown_signal() => {}
+            _ = shutdown_rx.changed() => {
+                tracing::warn!("daemon: in-process stop via admin_stop");
             }
-            let _ = sigterm_at_signal.set(std::time::Instant::now());
-        })
+        }
+        let _ = sigterm_at_signal.set(std::time::Instant::now());
+        signal_watcher.cancel();
+    });
+
+    let rpc_drain = drain.clone();
+    let rpc_task = tokio::spawn(async move {
+        socket::serve_until_shutdown(rpc, rpc_state, rpc_drain.cancelled_owned()).await;
+    });
+
+    let http_drain = drain.clone();
+    let serve_result = axum::serve(listener, router)
+        .with_graceful_shutdown(http_drain.cancelled_owned())
         .await;
+
+    // #6285: cancel unconditionally, so the socket is unlinked even when axum
+    // exits for a reason that was never a shutdown signal (a bind/accept
+    // error). Cancelling a token the signal watcher already cancelled is a
+    // no-op, so the ordinary drain is unaffected. The join happens BEFORE the
+    // flush below for the same reason the watchers are stopped first — an RPC
+    // connection still in a handler must not race the flush.
+    drain.cancel();
+    if let Err(e) = rpc_task.await {
+        tracing::warn!("the rpc serve task did not exit cleanly: {e}");
+    }
 
     // Issue #1621: stop every filesystem watcher before flushing so no save
     // event races the shutdown flush by mutating an index mid-write. Aborts the

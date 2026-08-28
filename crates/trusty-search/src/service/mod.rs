@@ -32,6 +32,9 @@ pub mod roots_registry;
 pub mod server;
 pub mod shutdown_budget;
 pub mod shutdown_flush;
+// #6285 (ADR-0032): the hardened UDS listener the daemon serves alongside its
+// HTTP listener while the route families migrate.
+pub mod socket;
 pub mod stall_tracker;
 pub mod timeout_recovery;
 pub mod ui;
