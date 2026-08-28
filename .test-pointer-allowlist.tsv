@@ -867,7 +867,6 @@ crates/trusty-search/src/service/server/admin.rs	patch_config_partial_update
 crates/trusty-search/src/service/server/files.rs	test_get_index_chunks_paginates
 crates/trusty-search/src/service/server/router.rs	create_index_threads_hygiene_fields
 crates/trusty-search/src/service/server/router.rs	defer_embed_false_forces_synchronous_index
-crates/trusty-search/src/service/server/router.rs	list_indexes_returns_empty_initially
 crates/trusty-search/src/service/server/routing.rs	search_similar_fallback_reembeds_when_cache_misses
 crates/trusty-search/src/service/server/search_global.rs	test_global_search_fans_out_and_merges
 crates/trusty-search/src/service/server/state.rs	emit_propagates_to_subscriber

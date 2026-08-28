@@ -232,7 +232,7 @@ pub(super) async fn index_status_handler(
 /// [`crate::service::rpc::error::rpc_error_from_http`] turns into the JSON-RPC
 /// code — so one decision classifies the refusal on both transports.
 /// Test: `index_status_over_the_socket_matches_the_http_body`,
-/// `index_status_over_the_socket_reports_an_unknown_index_as_not_found`.
+/// `an_unknown_index_reports_not_found_on_every_index_scoped_read`.
 pub(crate) async fn index_status_report(
     state: &Arc<SearchAppState>,
     id: &str,
