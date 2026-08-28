@@ -14,3 +14,7 @@ Changed
   host. It is now visited when the member has a retired service.
 - A retired unit that will not go down fails the install instead of being
   reported as a skip, so the exit code shows it.
+- `tctl upgrade` evicts a retired member's unit too, through the same
+  mechanism. `restart_plan` read the member as "not a daemon" and skipped it, so
+  an upgrade left `com.trusty.review` loaded and respawning; only `tctl install`
+  cleared it. A unit that will not go down now fails that member's upgrade.
