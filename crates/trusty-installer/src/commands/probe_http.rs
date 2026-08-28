@@ -143,6 +143,23 @@ pub fn fixed_port_for(binary: &str) -> Option<u16> {
 ///
 /// Test: `tests::uds_members_have_no_fixed_port`,
 /// `tests::probe_uds_reads_the_health_envelope_off_a_result_frame`.
+/// Whether a member is started on demand rather than kept resident (#6350).
+///
+/// Why this exists as its own predicate: `uds_socket_for` answers "which
+/// transport", and this answers "who owns the lifetime" — two different
+/// questions that happen to have overlapping answers today. A member listed
+/// here has no launchd unit, so a socket that is not answering means nothing is
+/// using it, not that anything is broken.
+///
+/// Kept as a literal for the reason `uds_health_method` records: `tctl` has no
+/// Cargo edge on any daemon, and adding one to share a `&str` would pull an
+/// analysis engine into its build.
+///
+/// Test: `tests::on_demand_members_are_a_subset_of_the_uds_members`.
+pub fn on_demand_member(binary: &str) -> bool {
+    binary == trusty_common::uds::ANALYZE_SERVICE
+}
+
 pub fn uds_socket_for(binary: &str) -> Option<std::path::PathBuf> {
     match binary {
         // #6290: NO trusty-review row. It has no daemon and no socket — see
@@ -898,6 +915,22 @@ pub async fn probe_daemon_http(app: &str, binary: &str) -> ProbeOutcome {
                 detail: format!("{binary} serves a socket but names no health method"),
             };
         };
+        // #6350: an on-demand member is not expected to be running. A socket
+        // that does not answer is its NORMAL resting state, so probing it
+        // directly would report a healthy installation as `down` and send
+        // `verify_tail` off to repair a service that has nothing wrong with it.
+        // Starting it is the probe: a member that can be started and answers
+        // `<domain>.health` is working, and one that cannot is not.
+        if on_demand_member(binary) {
+            if let Err(e) = trusty_common::uds::OnDemandAnalyze::at(&socket)
+                .ensure_running()
+                .await
+            {
+                return ProbeOutcome::ProbeFailed {
+                    detail: format!("{binary} could not be started on demand: {e}"),
+                };
+            }
+        }
         return probe_socket(&socket, method).await;
     }
 

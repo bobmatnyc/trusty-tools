@@ -25,7 +25,7 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 use tracing::info;
-use trusty_common::uds::server::{serve_until, RpcRouter, RpcServeOptions};
+use trusty_common::uds::server::{RpcRouter, RpcServeOptions};
 
 use crate::service::events::AnalyzerAppState;
 use crate::service::handlers::{analysis, deep, facts, graph, review, system};
@@ -376,6 +376,21 @@ fn serve_options() -> RpcServeOptions {
 ///
 /// Test: `rpc_health_answers_over_a_real_socket`,
 /// `rpc_unlinks_its_socket_on_shutdown`.
+/// This server's own shutdown budget, as the supervisor contract requires.
+///
+/// Why it is declared here and not only in `trusty-common`: `ServiceTimeouts`'
+/// sourcing rule says the supervisor's `shutdown_flush` must be the supervised
+/// binary's REAL budget, and `trusty-common` cannot import this crate to read
+/// it. So this is the definition, and
+/// `analyze_flush_budget_matches_the_supervisor_contract` pins
+/// `trusty_common::uds::ANALYZE_SHUTDOWN_FLUSH` against it — a drift is a test
+/// failure rather than a SIGKILL landing mid-shutdown.
+///
+/// One second is honest for this server: every handler commits its redb write
+/// before answering, so a SIGTERM discards nothing that was acked. The budget
+/// covers the accept loop returning and the socket unlink below.
+pub const SHUTDOWN_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
 pub async fn serve(state: AnalyzerAppState, socket: &Path) -> Result<()> {
     // Migration cleanup, deliberately OUTSIDE `serve_with_shutdown`: it resolves
     // the real `$HOME` and the real data directory, so a test that drove it
@@ -387,6 +402,33 @@ pub async fn serve(state: AnalyzerAppState, socket: &Path) -> Result<()> {
     serve_with_shutdown(state, socket, trusty_common::shutdown_signal()).await
 }
 
+/// [`serve`], with the idle window resolved from the environment (#6350).
+///
+/// Why this is the process entry point now: ADR-0032 retires the launchd unit,
+/// so nothing restarts this server and nothing stops it either — it has to end
+/// itself, or the first request of the day leaves a process resident until the
+/// machine reboots. That is the resident daemon this change removed, minus the
+/// supervisor that would at least have restarted it after a crash.
+///
+/// What: reads [`trusty_common::uds::ANALYZE_IDLE_TIMEOUT_ENV`] through the
+/// shared parser, so `0` means "never exit" and an unset variable means the
+/// ten-minute default. The window is announced on stderr at startup, because an
+/// operator watching a foreground server needs to know it will end and when.
+///
+/// # Errors
+///
+/// As [`serve`].
+///
+/// Test: `tests/on_demand.rs`' `serve_exits_on_its_own_idle_window` drives the
+/// real binary to an idle exit; the policy itself is covered by
+/// `trusty-common`'s `idle_timeout_parses_its_three_meanings`.
+pub async fn serve_on_demand(state: AnalyzerAppState, socket: &Path) -> Result<()> {
+    remove_retired_discovery_files();
+
+    let idle = trusty_common::uds::analyze_idle_timeout_from_env();
+    serve_with_idle(state, socket, trusty_common::shutdown_signal(), idle).await
+}
+
 /// [`serve`]'s body, with the shutdown future supplied by the caller.
 ///
 /// Why: `serve` waits on SIGTERM/SIGINT, which a test cannot deliver to its own
@@ -396,7 +438,8 @@ pub async fn serve(state: AnalyzerAppState, socket: &Path) -> Result<()> {
 /// re-implementing the loop and deleting the file itself, which is a test that
 /// passes whether or not the unlink below exists.
 ///
-/// What: binds through `bind_singleton_hardened`, serves via [`serve_until`],
+/// What: binds through `bind_singleton_hardened`, serves via
+/// [`trusty_common::uds::server::serve_until_idle`],
 /// then removes the socket file BEFORE dropping the listener — the order
 /// `webhook_relay::listener` records, because reversed there is a window in
 /// which nothing answers the path but the file is still there, and a successor
@@ -413,6 +456,42 @@ pub async fn serve_with_shutdown(
     socket: &Path,
     shutdown: impl std::future::Future<Output = ()> + Send,
 ) -> Result<()> {
+    serve_with_idle(state, socket, shutdown, None).await
+}
+
+/// [`serve_with_shutdown`], plus the idle window (#6350).
+///
+/// Why both signatures exist: `serve_with_shutdown` is what a caller that owns
+/// the process lifetime wants — the `--mcp` path runs this server inside a
+/// process whose real job is an MCP stdio loop, and an idle exit there would
+/// silently drop the transport that loop dials. `None` is therefore a real
+/// choice, not a legacy default.
+///
+/// What: binds through `bind_singleton_hardened`, serves via
+/// [`trusty_common::uds::server::serve_until_idle`], then removes the socket
+/// file BEFORE dropping the listener — the order `webhook_relay::listener`
+/// records, because reversed there is a window in which nothing answers the path
+/// but the file is still there, and a successor that rebinds in that window has
+/// its fresh socket deleted by this process.
+///
+/// The unlink runs on BOTH exits. An idle exit that left the file behind would
+/// make the next `ensure_running` spawn a child that fails its bind, and
+/// `bind_singleton_hardened`'s takeover is a recovery path, not a licence to
+/// leave corpses.
+///
+/// # Errors
+///
+/// As [`serve`].
+///
+/// Test: `rpc_unlinks_its_socket_on_shutdown`,
+/// `rpc_accepts_a_request_larger_than_the_shared_default`, and
+/// `tests/on_demand.rs`' `serve_exits_on_its_own_idle_window`.
+pub async fn serve_with_idle(
+    state: AnalyzerAppState,
+    socket: &Path,
+    shutdown: impl std::future::Future<Output = ()> + Send,
+    idle: Option<std::time::Duration>,
+) -> Result<()> {
     // #6287: no `SelfOrigins` / `with_guarded_middleware` here, and its absence
     // is deliberate rather than an oversight. That machinery was browser-CSRF
     // defence for the destructive routes (`POST /indexes/{id}/scip`,
@@ -426,10 +505,31 @@ pub async fn serve_with_shutdown(
         .with_context(|| format!("bind trusty-analyze socket at {}", socket.display()))?;
 
     let router = Arc::new(build_router(state));
-    info!(socket = %socket.display(), methods = router.method_names().count(), "trusty-analyze serving");
-    eprintln!("trusty-analyze: serving on {}", socket.display());
+    info!(socket = %socket.display(), methods = router.method_names().count(), idle = ?idle, "trusty-analyze serving");
+    match idle {
+        Some(window) => eprintln!(
+            "trusty-analyze: serving on {} (exits after {}s idle)",
+            socket.display(),
+            window.as_secs()
+        ),
+        None => eprintln!("trusty-analyze: serving on {}", socket.display()),
+    }
 
-    serve_until(&listener, Arc::clone(&router), serve_options(), shutdown).await;
+    // #6350: the tracker is what makes the exit conditional on real traffic
+    // rather than on a bare timer — see `IdleTracker`.
+    let tracker = idle.map(trusty_common::uds::server::IdleTracker::new);
+    let exit = trusty_common::uds::server::serve_until_idle(
+        &listener,
+        Arc::clone(&router),
+        serve_options(),
+        shutdown,
+        tracker,
+    )
+    .await;
+    if exit == trusty_common::uds::server::ServeExit::Idle {
+        info!(socket = %socket.display(), "trusty-analyze idle; exiting");
+        eprintln!("trusty-analyze: idle; exiting");
+    }
 
     if let Err(e) = std::fs::remove_file(socket) {
         tracing::debug!(socket = %socket.display(), error = %e, "socket already gone");

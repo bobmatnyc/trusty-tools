@@ -76,7 +76,22 @@ pub fn plist_label_for(binary: &str) -> String {
 ///
 /// Test: `tests::plist_path_layout`.
 pub fn plist_path_for(binary: &str) -> Option<PathBuf> {
-    let label = plist_label_for(binary);
+    plist_path_for_label(&plist_label_for(binary))
+}
+
+/// Resolve the on-disk plist path for a launchd LABEL.
+///
+/// Why (#6350): a retired member's eviction walks
+/// `trusty_common::launchd_labels::retired_labels_for_member`, which yields
+/// LABELS — the canonical one plus every legacy alias — and each has its own
+/// file. [`plist_path_for`] cannot answer that: it resolves ONE label from a
+/// binary name, so an alias would resolve to the canonical file and the alias's
+/// own plist would be left on disk.
+///
+/// What: `~/Library/LaunchAgents/<label>.plist`. `None` when the home directory
+/// cannot be resolved.
+/// Test: `tests::plist_path_layout` covers the shared join.
+pub fn plist_path_for_label(label: &str) -> Option<PathBuf> {
     dirs::home_dir().map(|h| {
         h.join("Library")
             .join("LaunchAgents")

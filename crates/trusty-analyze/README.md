@@ -106,15 +106,46 @@ Homebrew provides:
 # trusty-search must be running first (hard runtime dependency)
 trusty-search start
 
-# Run the analyzer sidecar
-trusty-analyze serve --search-url http://127.0.0.1:7878
-
-# Analyze a named index
+# Analyze a named index — the server starts itself if it is not up
 trusty-analyze analyze <index-id> --top-k 20
 
 # Check liveness
 trusty-analyze health
 ```
+
+### Running the server (#6350)
+
+**You normally do not.** trusty-analyze runs ON DEMAND: `trusty-analyze deep`,
+`trusty-review report --analyze`, and `tctl up` each start it if nothing is
+serving its socket, and it exits after ten minutes with no traffic. There is no
+LaunchAgent and no `service install` — installing the binary is the whole setup.
+
+Run it in the foreground only when you want to watch it:
+
+```bash
+trusty-analyze serve --search-url http://127.0.0.1:7878
+```
+
+Two environment variables govern the lifecycle:
+
+| Variable | Effect |
+|---|---|
+| `TRUSTY_ANALYZE_IDLE_TIMEOUT_SECS` | Idle window in seconds. `0` disables the idle exit. Default `600`. |
+| `TRUSTY_ANALYZE_EXTERNAL=1` | Clients never start a server; they dial whatever you are running. |
+
+**Migrating off the old daemon.** Every machine that installed trusty-analyze
+before this change has `com.trusty.analyze` loaded, and upgrading the binary
+does not unload it. Evict it once:
+
+```bash
+trusty-analyze service uninstall
+```
+
+`trusty-analyze setup daemon`, `tctl install` and `tctl upgrade` run the same
+eviction, so you get it either way. `tctl` drives it through the shared
+`RETIRED_SERVICES` registry — the same pass that clears the retired
+`com.trusty.review` unit — and a unit that will not go down fails that member's
+install or upgrade rather than passing quietly.
 
 ### Ops health check
 

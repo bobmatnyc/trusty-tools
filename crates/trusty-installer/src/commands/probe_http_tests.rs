@@ -1105,3 +1105,26 @@ fn only_transport_failures_are_confirmed_down() {
         );
     }
 }
+
+/// Why (#6350): `on_demand_member` decides whether a not-answering socket is a
+/// failure or a resting state, and it can only decide that for a member that
+/// HAS a socket. A name here that `uds_socket_for` does not know would make the
+/// predicate dead code that silently never fires.
+/// Test: this is the test.
+#[test]
+fn on_demand_members_are_a_subset_of_the_uds_members() {
+    assert!(
+        on_demand_member("trusty-analyze"),
+        "trusty-analyze is the on-demand member #6350 introduced"
+    );
+    assert!(
+        uds_socket_for("trusty-analyze").is_some(),
+        "an on-demand member must have a socket to be probed over"
+    );
+    for resident in ["trusty-review", "trusty-memory", "trusty-search"] {
+        assert!(
+            !on_demand_member(resident),
+            "{resident} is still resident; a dead socket there IS a failure"
+        );
+    }
+}

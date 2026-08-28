@@ -20,7 +20,7 @@ use trusty_analyze::core::FactStore;
 use trusty_analyze::core::TrustySearchClient;
 use trusty_analyze::core::{overlay_path_beside_facts, ScipOverlayStore};
 use trusty_analyze::mcp::AnalyzerMcpServer;
-use trusty_analyze::service::{serve, AnalyzerAppState};
+use trusty_analyze::service::{serve_on_demand, AnalyzerAppState};
 
 /// Output format for the `review`, `deep`, and `review-pr` subcommands.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -118,7 +118,7 @@ pub async fn run_serve(
         // pointed at the same path rather than at a second transport.
         let socket_for_daemon = socket.clone();
         let daemon = tokio::spawn(async move {
-            if let Err(e) = serve(state, &socket_for_daemon).await {
+            if let Err(e) = serve_on_demand(state, &socket_for_daemon).await {
                 tracing::error!("trusty-analyze daemon exited: {e:#}");
             }
         });
@@ -126,7 +126,7 @@ pub async fn run_serve(
         daemon.abort();
         result
     } else {
-        serve(state, &socket).await
+        serve_on_demand(state, &socket).await
     }
 }
 
@@ -148,13 +148,26 @@ pub async fn run_serve(
 /// When the socket cannot be dialled, when the daemon answers with a JSON-RPC
 /// error, or when the report does not decode.
 ///
-/// Test: `run_deep_reports_an_absent_socket`.
+/// #6350: the socket is no longer assumed to be served. `ensure_running` starts
+/// `trusty-analyze serve` when nothing is there and returns immediately when
+/// something is, so `deep` works with no daemon installed and never starts a
+/// second one beside a live server. Its failure is reported, not degraded —
+/// there is no offline deep-analysis path to fall back to.
+///
+/// Test: `run_deep_reports_an_absent_socket`; the start itself is
+/// `tests/on_demand.rs`' `two_concurrent_callers_share_one_server`.
 pub async fn run_deep(
     index_id: String,
     model: Option<String>,
     format: OutputFormat,
     socket: &Path,
 ) -> Result<()> {
+    // #6350: start the server before dialling it.
+    trusty_common::uds::OnDemandAnalyze::at(socket)
+        .ensure_running()
+        .await
+        .with_context(|| format!("start trusty-analyze on demand for {}", socket.display()))?;
+
     let mut params = serde_json::json!({ "index_id": index_id });
     if let Some(m) = model.as_deref() {
         params["model"] = serde_json::Value::String(m.to_string());
@@ -277,14 +290,29 @@ mod tests {
     /// could not do.
     /// What: points `run_deep` at a path in an empty temp dir and asserts the
     /// error names it.
+    ///
+    /// #6350: `TRUSTY_ANALYZE_EXTERNAL=1` is set for the duration, and it is
+    /// load-bearing twice over. `run_deep` now starts the server before
+    /// dialling, so without the opt-out this test would spawn a real
+    /// `trusty-analyze` on any machine that has one installed, wait out the
+    /// 20-second spawn budget, and then assert against a spawn error instead of
+    /// the dial error it exists to prove. With the opt-out the client dials
+    /// whatever is there and nothing is — which is exactly the arrangement an
+    /// operator running their own server has. The START failure is covered
+    /// separately, against a real binary, in `tests/on_demand.rs`.
     /// Test: this is the test.
+    #[serial_test::serial]
     #[tokio::test]
     async fn run_deep_reports_an_absent_socket() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let socket = tmp.path().join("absent.sock");
-        let err = run_deep("idx".into(), None, OutputFormat::Json, &socket)
-            .await
-            .expect_err("an absent socket cannot answer");
+        // SAFETY: `#[serial]` keeps every other test in this binary off the
+        // environment for the duration, which is the precondition `set_var` /
+        // `remove_var` carry in edition 2024.
+        unsafe { std::env::set_var(trusty_common::uds::ANALYZE_EXTERNAL_ENV, "1") };
+        let result = run_deep("idx".into(), None, OutputFormat::Json, &socket).await;
+        unsafe { std::env::remove_var(trusty_common::uds::ANALYZE_EXTERNAL_ENV) };
+        let err = result.expect_err("an absent socket cannot answer");
         let rendered = format!("{err:#}");
         assert!(
             rendered.contains(&socket.display().to_string()),

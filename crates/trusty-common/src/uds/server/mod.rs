@@ -84,6 +84,7 @@
 //!
 //! Test: `tests.rs` — `dispatch_*` for the decision, `serve_*` for the socket.
 
+mod idle;
 mod router;
 mod stream;
 mod wire;
@@ -101,6 +102,7 @@ use tokio::net::{UnixListener, UnixStream};
 
 use crate::uds::{MAX_FRAME_BYTES, UdsSecurityError, bind_hardened, ensure_peer_is_self};
 
+pub use idle::{IdleGuard, IdleTracker};
 pub use router::{RpcFallback, RpcMethod, RpcRouter, typed_method};
 pub use stream::{RpcOutcome, RpcStreamItems, RpcStreamMethod, typed_stream_method, write_stream};
 pub use wire::{
@@ -366,12 +368,200 @@ pub async fn serve_until(
     options: RpcServeOptions,
     shutdown: impl std::future::Future<Output = ()> + Send,
 ) {
+    let _ = serve_until_idle(listener, router, options, shutdown, None).await;
+}
+
+/// Why a serve loop ended.
+///
+/// Why this is returned rather than logged: an on-demand service's caller
+/// distinguishes the two — a shutdown is an operator or supervisor stopping the
+/// process, an idle exit is the process reclaiming itself and is the normal end
+/// of a successful lifetime. `trusty-analyze` prints a different line for each.
+///
+/// Test: `serve_until_idle_exits_when_the_window_elapses`,
+/// `serve_stops_on_shutdown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServeExit {
+    /// The caller's shutdown future resolved (SIGTERM/SIGINT, or a test).
+    Shutdown,
+    /// No connection answered anything for the whole idle window.
+    Idle,
+}
+
+/// How long an idle exit waits for a connection already in the kernel backlog.
+///
+/// Why (#6350): `connect(2)` against a listening socket succeeds the moment the
+/// kernel queues it — the server need not have called `accept` yet. So a client
+/// that dialled microseconds before the idle window elapsed is sitting in the
+/// backlog, and a loop that returned straight from the idle arm would drop the
+/// listener and unlink the socket with that client's connection still queued.
+/// The client sees a reset, not a refusal, and only `trusty-review`'s adapter
+/// retries one; `trusty-analyze deep` and `tctl`'s probe report it as a failure
+/// the operator cannot act on.
+///
+/// What: 50ms is chosen against the cost of being wrong in each direction. A
+/// queued connection is already in the backlog, so it is accepted on the first
+/// poll and the window is never actually spent; the only case that spends it is
+/// a genuinely idle service, which pays 50ms once in its whole lifetime.
+const IDLE_EXIT_DRAIN: Duration = Duration::from_millis(50);
+
+/// The future [`serve_until_idle`] races against `accept`.
+///
+/// Why a named function rather than an inline `async` block: two `async` blocks
+/// have two different anonymous types, and the loop re-arms this one in place
+/// after a drain. `Pin::set` needs the replacement to be the SAME type, which
+/// only one `impl Future` origin gives.
+///
+/// What: [`IdleTracker::expired`] when a policy is configured. With none it
+/// never resolves, so the arm is inert and the loop behaves as [`serve_until`]
+/// always has.
+async fn idle_expiry(idle: Option<Arc<IdleTracker>>) {
+    match idle {
+        Some(tracker) => tracker.expired().await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+/// What [`drain_backlog`] found in the backlog.
+enum Drained {
+    /// A client was queued and its request has been answered. The exit is
+    /// cancelled and the idle window restarts.
+    Answered,
+    /// Nothing was queued, or what was queued asked nothing. The exit stands.
+    Nothing,
+}
+
+/// Which arm of [`serve_until_idle`]'s `select!` won.
+///
+/// Why an enum rather than the drain running inside the arm: the drain re-arms
+/// the pinned idle future afterwards, and `Pin::set` cannot run while the
+/// `select!` still holds the `&mut` borrow of it. Naming the winner ends that
+/// borrow at the `select!`'s closing brace.
+enum Step {
+    /// `accept` won; this is its result, error included.
+    Accepted(std::io::Result<(UnixStream, tokio::net::unix::SocketAddr)>),
+    /// The idle window elapsed.
+    IdleElapsed,
+}
+
+/// Serve one connection queued before the idle window elapsed, if any.
+///
+/// Why: see [`IDLE_EXIT_DRAIN`]. Resolving the race in the CLIENT's favour is
+/// the only safe direction — serving one extra request costs a round trip,
+/// while resetting a connection the client believes it made costs that client a
+/// failure it has no way to distinguish from a broken service.
+///
+/// 🔴 Why only an ANSWERED connection cancels the exit: a bare connect-and-close
+/// is what [`crate::uds::socket_is_serving`] does on a poll loop, and a drain
+/// that treated one as activity would hand the poller exactly the power
+/// [`IdleGuard`] exists to deny it — an observed livelock, not a hypothetical.
+/// A probe caught in the drain is served and the exit proceeds.
+///
+/// Why the connection is served INLINE rather than spawned: this is the last
+/// thing that happens before the caller unlinks the socket and drops the
+/// listener, and a spawned task would race the process exit. Awaiting it is what
+/// guarantees the client has its answer first. One connection, once per
+/// lifetime.
+///
+/// Test: `a_client_queued_when_the_idle_window_elapses_is_served_not_reset`,
+/// `serve_until_idle_ignores_liveness_probes`.
+async fn drain_backlog(
+    listener: &UnixListener,
+    router: &Arc<RpcRouter>,
+    options: RpcServeOptions,
+    idle: Option<&Arc<IdleTracker>>,
+) -> Drained {
+    let Ok(accepted) = tokio::time::timeout(IDLE_EXIT_DRAIN, listener.accept()).await else {
+        return Drained::Nothing;
+    };
+    let stream = match accepted {
+        Ok((stream, _)) => stream,
+        Err(e) => {
+            tracing::warn!(error = %e, "uds rpc listener accept failed during idle drain");
+            return Drained::Nothing;
+        }
+    };
+    let mut guard = idle.map(IdleTracker::connection_opened);
+    let served = handle_connection(stream, Arc::clone(router), options).await;
+    let answered = matches!(served, Ok(Served::Answered { .. }));
+    if let Err(e) = &served {
+        tracing::warn!(error = %e, "uds rpc connection failed during idle drain");
+    }
+    if answered && let Some(g) = guard.as_mut() {
+        g.answered();
+    }
+    if let Some(g) = guard {
+        g.release().await;
+    }
+    if answered {
+        Drained::Answered
+    } else {
+        Drained::Nothing
+    }
+}
+
+/// [`serve_until`], plus an optional idle-exit policy (#6350).
+///
+/// Why: ADR-0032 makes `trusty-analyze` an on-demand service — clients spawn it
+/// and nothing supervises it — so the accept loop is the only place that knows
+/// enough to end the process. It has to be here rather than in a timer the
+/// service arms itself, because "idle" means no connection is OPEN and none has
+/// answered recently, and only this loop observes both.
+///
+/// What: identical to [`serve_until`] with `idle` as `None`. With a tracker, the
+/// loop additionally races [`IdleTracker::expired`] against `accept` and returns
+/// [`ServeExit::Idle`] when it wins. Each accepted connection holds an
+/// [`IdleGuard`] for its lifetime, so the window can never elapse under an open
+/// connection; the guard is marked answered only for a connection that produced
+/// a response, which is what keeps a liveness-probe poll loop from pinning the
+/// process alive.
+///
+/// #6350: an expired window does not exit immediately. [`drain_backlog`] first
+/// gives the kernel backlog [`IDLE_EXIT_DRAIN`] to yield a connection that was
+/// queued before the window elapsed; one that appears is served like any other
+/// and the loop continues, so the exit only stands when nobody was waiting.
+///
+/// Test: `serve_until_idle_exits_when_the_window_elapses`,
+/// `serve_until_idle_is_reset_by_an_answered_request`,
+/// `serve_until_idle_ignores_liveness_probes`,
+/// `a_client_queued_when_the_idle_window_elapses_is_served_not_reset`.
+pub async fn serve_until_idle(
+    listener: &UnixListener,
+    router: Arc<RpcRouter>,
+    options: RpcServeOptions,
+    shutdown: impl std::future::Future<Output = ()> + Send,
+    idle: Option<Arc<IdleTracker>>,
+) -> ServeExit {
     tokio::pin!(shutdown);
+    let idle_expired = idle_expiry(idle.clone());
+    tokio::pin!(idle_expired);
+
     loop {
-        let accepted = tokio::select! {
+        let step = tokio::select! {
             biased;
-            () = &mut shutdown => return,
-            accepted = listener.accept() => accepted,
+            () = &mut shutdown => return ServeExit::Shutdown,
+            () = &mut idle_expired => Step::IdleElapsed,
+            accepted = listener.accept() => Step::Accepted(accepted),
+        };
+        // #6350: the drain runs HERE, not inside the arm — the `select!`'s
+        // borrow of `idle_expired` has ended, so the re-arm below can run. The
+        // future is re-armed ONLY on this path: an `async` block panics if
+        // polled after it completes, and rebuilding it on every iteration
+        // instead would restart `expired`'s open-connection branch, which sleeps
+        // a whole window whenever it observes a connection in flight — a client
+        // polling faster than the window would then hold the process open
+        // forever.
+        let accepted = match step {
+            Step::Accepted(accepted) => accepted,
+            Step::IdleElapsed => {
+                match drain_backlog(listener, &router, options, idle.as_ref()).await {
+                    Drained::Answered => {
+                        idle_expired.set(idle_expiry(idle.clone()));
+                        continue;
+                    }
+                    Drained::Nothing => return ServeExit::Idle,
+                }
+            }
         };
         let stream = match accepted {
             Ok((stream, _)) => stream,
@@ -380,6 +570,10 @@ pub async fn serve_until(
                 continue;
             }
         };
+        // Taken BEFORE the connection task is spawned: taking it inside would
+        // leave a window in which the count is zero while a connection is
+        // already accepted, and the idle future could win the race in it.
+        let guard = idle.as_ref().map(IdleTracker::connection_opened);
         let router = Arc::clone(&router);
         tokio::spawn(async move {
             // #6277 review: the connection runs in an INNER task whose
@@ -390,8 +584,13 @@ pub async fn serve_until(
             // costs one task per connection and buys the one log line that says
             // which method took the process down a path nobody expected.
             let inner = tokio::spawn(handle_connection(stream, router, options));
+            let mut guard = guard;
             match inner.await {
-                Ok(Ok(Served::Answered { .. })) => {}
+                Ok(Ok(Served::Answered { .. })) => {
+                    if let Some(g) = guard.as_mut() {
+                        g.answered();
+                    }
+                }
                 Ok(Ok(Served::LivenessProbe)) => {
                     tracing::debug!("liveness probe connected and closed without a frame");
                 }
@@ -410,6 +609,9 @@ pub async fn serve_until(
                 Err(join) => {
                     tracing::warn!(error = %join, "uds rpc connection task was cancelled");
                 }
+            }
+            if let Some(g) = guard {
+                g.release().await;
             }
         });
     }

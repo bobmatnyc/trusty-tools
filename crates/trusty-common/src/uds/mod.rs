@@ -80,7 +80,23 @@ pub mod stream_client;
 #[cfg(feature = "uds-supervisor")]
 pub mod supervisor;
 
+/// The single entry point for starting `trusty-analyze` on demand (#6350).
+///
+/// Why it sits beside [`supervisor`] rather than inside it: the supervisor is
+/// the generic machinery, and this is the one service description every client
+/// crate shares. Gated behind the same feature, because it is that machinery
+/// applied.
+/// Test: `on_demand_tests.rs`.
+#[cfg(feature = "uds-supervisor")]
+pub mod on_demand;
+
 pub use dir::prepare_socket_dir;
+#[cfg(feature = "uds-supervisor")]
+pub use on_demand::{
+    ANALYZE_EXTERNAL_ENV, ANALYZE_IDLE_TIMEOUT_ENV, ANALYZE_SERVICE, ANALYZE_SHUTDOWN_FLUSH,
+    DEFAULT_ANALYZE_IDLE_TIMEOUT, OnDemandAnalyze, analyze_idle_timeout,
+    analyze_idle_timeout_from_env,
+};
 pub use peer::{ensure_peer_is_self, peer_uid, self_uid};
 pub use probe::{SocketVerdict, probe_socket_verdict, socket_is_serving};
 pub use rpc::{

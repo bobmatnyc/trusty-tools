@@ -306,7 +306,20 @@ async fn every_consumer_sees_an_absent_daemon_as_not_running() {
     );
     assert!(info.version.is_none(), "there is no envelope to read");
 
+    // #6350: `tctl`'s probe now STARTS an on-demand member before dialling it,
+    // so without the opt-out this assertion would spawn a real server (and wait
+    // out its 20-second budget) rather than observing an absent one. With the
+    // opt-out the probe dials whatever is there — the arrangement an operator
+    // running their own server has — and an absent daemon is `Refused`, which
+    // is the property this test exists to pin: every consumer agrees on what
+    // "not running" looks like. That the probe can START one is covered
+    // separately in `tests/on_demand.rs`.
+    //
+    // SAFETY: the surrounding `EnvGuard` already serialises this test against
+    // the rest of the file's environment mutation.
+    unsafe { std::env::set_var(trusty_common::uds::ANALYZE_EXTERNAL_ENV, "1") };
     let outcome = probe_daemon_http("trusty-analyze", "trusty-analyze").await;
+    unsafe { std::env::remove_var(trusty_common::uds::ANALYZE_EXTERNAL_ENV) };
     assert_eq!(outcome, ProbeOutcome::Refused, "got {outcome:?}");
     assert!(outcome.is_confirmed_down());
     // `EnvGuard` restores the environment on the way out, panic or not.

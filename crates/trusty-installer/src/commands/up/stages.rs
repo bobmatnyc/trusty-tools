@@ -154,8 +154,18 @@ fn stage_core(members: &[BootMember], runner: &dyn Runner) -> (StageStatus, Stri
 /// Why: The analyze daemon health gates the console's analyze tab, but the
 /// analysis *content* is advisory and never gates boot (RESOLVED Q6).
 ///
-/// What: With `AnalyzeMode::Skip` → a `Skipped` report. Otherwise ensures the
-/// analyze daemon; the daemon being down is `Degraded` (non-hard), not `Failed`.
+/// #6350: this stage no longer asks whether a daemon is RESIDENT, because none
+/// is. trusty-analyze has no launchd unit; a client starts it and it exits on
+/// its own idle window, so "nothing is listening" is its healthy resting state
+/// and gating on a live dial would report every correct installation as
+/// degraded. What the stage asks instead is the question that still has a wrong
+/// answer: can a client on this machine start it and get an answer? That is
+/// `ensure_member`, which for an on-demand member resolves through
+/// `probe_http`'s `on_demand_member` branch — one start plus one
+/// `analyze.health` ping, after which the server is left to reclaim itself.
+///
+/// What: With `AnalyzeMode::Skip` → a `Skipped` report. Otherwise runs that
+/// one-shot check; a failure is `Degraded` (non-hard), not `Failed`.
 /// `Blocking` vs `Background` only changes the detail label (the actual snapshot
 /// scheduling is a passthrough to trusty-analyze).
 ///
@@ -192,17 +202,21 @@ fn stage_analyze(
             "analyze",
             StageStatus::Ok,
             format!(
-                "daemon {} ; {mode} over [{targets}] (non-gating)",
+                "on demand, answered {} ; {mode} over [{targets}] (non-gating)",
                 outcome.action
             ),
         )
     } else {
-        // Analyze daemon down is degraded, not a hard failure (§5).
+        // #6350: the wording matters. "daemon down" was accurate when one was
+        // supposed to be resident; now it would describe the normal state and
+        // send an operator looking for a service to restart. What failed is the
+        // START, which is a different fix (install the binary, or read why the
+        // spawn was refused). Still Degraded, not a hard failure (§5).
         StageReport::new(
             "analyze",
             StageStatus::Degraded,
             format!(
-                "analyze daemon down ({}); analysis content absent",
+                "analyze could not be started on demand ({}); analysis content absent",
                 outcome.action
             ),
         )

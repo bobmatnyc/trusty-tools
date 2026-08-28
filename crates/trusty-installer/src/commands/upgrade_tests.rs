@@ -184,43 +184,42 @@ fn run_check_is_readonly() {
 
 /// Why: the load-bearing Phase 1a assertion. Every daemon member must
 /// PLAN a restart. Before the fix all of them planned one in name only.
-/// What: on macOS, the five launchd daemons plan `Launchd` and trusty-mpm
+/// What: on macOS, the three launchd daemons plan `Launchd` and trusty-mpm
 /// plans `OwnVerb` — matching what `tctl restart` does for the same
 /// members, which is the point of sharing the implementation.
+///
+/// #6290, #6350: trusty-review and trusty-analyze both left the launchd loop.
+/// Neither has a unit to bounce, and asserting one for analyze is what pinned
+/// the defect `upgrade_evicts_a_retired_members_unit` now pins the fix for.
 /// Test: this is the test.
 #[test]
 fn restart_plan_daemons_restart() {
     use super::super::stable_set::ManageStrategy;
-    for binary in [
-        "trusty-search",
-        "trusty-memory",
-        "trusty-analyze",
-        "trusty-console",
-    ] {
+    for binary in ["trusty-search", "trusty-memory", "trusty-console"] {
         assert_eq!(
             restart_plan(binary, true, true),
             RestartPlan::Restart(ManageStrategy::Launchd),
             "{binary} must be bounced through launchd after an upgrade"
         );
     }
-    // #6290: upgrading trusty-review has nothing to bounce — the next `run`
-    // invocation IS the new binary. It is not a no-op either: the stale
-    // `com.trusty.review` unit is EVICTED here. This assertion previously
-    // expected `NoRestart`, which is what let the upgrade path leave that unit
-    // loaded (#6290 review, HIGH).
-    assert_eq!(
-        restart_plan("trusty-review", true, true),
-        RestartPlan::EvictRetired,
-        "a per-invocation member has no process to restart, but its retired \
-         unit must still be cleared"
-    );
-    assert!(
-        !matches!(
-            restart_plan("trusty-review", true, true),
-            RestartPlan::Restart(_)
-        ),
-        "and nothing may be bounced for it"
-    );
+    // #6290, #6350: upgrading a retired member has nothing to bounce — the
+    // next invocation IS the new binary. It is not a no-op either: the stale
+    // unit is EVICTED here. This assertion previously expected `NoRestart` for
+    // review, which is what let the upgrade path leave that unit loaded (#6290
+    // review, HIGH), and `Restart(Launchd)` for analyze, which would have
+    // bootstrapped the very unit #6350 evicts.
+    for retired in ["trusty-review", "trusty-analyze"] {
+        assert_eq!(
+            restart_plan(retired, true, true),
+            RestartPlan::EvictRetired,
+            "{retired} has no process to restart, but its retired unit must \
+             still be cleared"
+        );
+        assert!(
+            !matches!(restart_plan(retired, true, true), RestartPlan::Restart(_)),
+            "and nothing may be bounced for {retired}"
+        );
+    }
     assert_eq!(
         restart_plan("trusty-mpm", true, true),
         RestartPlan::Restart(ManageStrategy::OwnVerb),
@@ -231,6 +230,39 @@ fn restart_plan_daemons_restart() {
         restart_plan("trusty-mpm", true, false),
         RestartPlan::Restart(ManageStrategy::OwnVerb)
     );
+}
+
+/// REGRESSION (#6350): `tctl upgrade` evicts trusty-analyze's retired unit.
+///
+/// Why: analyze carries `daemon: true`, so before its row joined
+/// `RETIRED_SERVICES` it fell through to `ManageStrategy::Launchd` and
+/// `restart_plan` returned `Restart(Launchd)` — sending `restart_member` at the
+/// retired `com.trusty.analyze` label and bootstrapping the unit the
+/// retirement exists to remove. The port guard could not catch it: analyze has
+/// bound no port since #6287, so `resolve_guard_ports` is empty and
+/// `guard_bootstrap_label` permits vacuously.
+///
+/// What: drives `restart_plan` — the upgrade path's own decision function, not
+/// `bootstrap_one` — and asserts analyze routes to the SAME eviction review
+/// does, on both platforms. One mechanism, two rows.
+/// Test: this is the test.
+#[test]
+fn upgrade_evicts_the_retired_analyze_unit() {
+    use crate::commands::stable_set::{manage_strategy_for, ManageStrategy};
+    assert_eq!(
+        manage_strategy_for("trusty-analyze", true),
+        ManageStrategy::None,
+        "a retired member has no lifecycle to control — that part is correct"
+    );
+
+    for macos in [true, false] {
+        assert_eq!(
+            restart_plan("trusty-analyze", true, macos),
+            RestartPlan::EvictRetired,
+            "a retired member must be EVICTED by the upgrade, not bounced \
+             through launchd (macos={macos})"
+        );
+    }
 }
 
 /// Why: `tga` is the one non-daemon in the stable set; bouncing it would be

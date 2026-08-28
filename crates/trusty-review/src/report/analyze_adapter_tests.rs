@@ -1020,3 +1020,91 @@ fn an_absent_region_kind_renders_as_before() {
     let f = refactor_finding(&nameless_region()).expect("critical → amber");
     assert_eq!(f.title, "Split oversized impl block");
 }
+
+/// Restore an environment variable to whatever it held before the test.
+///
+/// Why: the two variables below are process-global, and the tests around this
+/// one read `TRUSTY_SEARCH_URL` through `ReviewConfig::from_env_and_file`.
+/// Same shape as `redact_tests.rs`'s `TokenEnvGuard`.
+struct EnvGuard(&'static str, Option<String>);
+
+impl EnvGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let prev = std::env::var(key).ok();
+        // SAFETY: every test that sets these is `#[serial_test::serial]`, and
+        // the guard restores the previous value on drop.
+        unsafe { std::env::set_var(key, value) };
+        EnvGuard(key, prev)
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: as above.
+        unsafe {
+            match self.1.take() {
+                Some(prev) => std::env::set_var(self.0, prev),
+                None => std::env::remove_var(self.0),
+            }
+        }
+    }
+}
+
+/// Why (#6350 Fail-Open Check): the adapter now STARTS trusty-analyze rather
+/// than assuming it is resident, and a start that fails must not read as a
+/// clean pass. The report has to say the dimension went unassessed — which is
+/// what `AnalyzeGap::Unreachable` renders — rather than silently omitting it.
+///
+/// What makes the failure deterministic: `resolve_binary` searches `PATH` and
+/// the well-known bin directories, so on a machine with trusty-analyze
+/// installed the missing-binary branch is unreachable and the spawned child
+/// would start normally. Pointing `TRUSTY_SEARCH_URL` at port 1 — privileged
+/// and unbound — makes the child's startup probe of trusty-search always
+/// refuse, so it exits before binding and the start always fails.
+/// `tests/on_demand.rs::a_server_that_cannot_start_is_an_error_not_a_success`
+/// forces it the same way.
+///
+/// The assertion is on the VARIANT, not on the rendered string: every
+/// `AnalyzeGap` names trusty-analyze, so `contains("trusty-analyze")` also held
+/// for `NotIndexed` — which is what a machine with a live trusty-search
+/// returned once the child started successfully.
+/// Test: this is the test.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_failed_start_is_reported_rather_than_swallowed() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let socket = tmp.path().join("nothing-here.sock");
+    // Port 1 is privileged and unbound: the child's trusty-search probe always
+    // refuses, so it exits before it binds.
+    let _search = EnvGuard::set("TRUSTY_SEARCH_URL", "http://127.0.0.1:1");
+    // Off the real data directory: a developer machine with a live analyze
+    // server holds an exclusive redb lock on it, which would fail the child for
+    // a reason that has nothing to do with the property under test.
+    let _facts = EnvGuard::set(
+        "TRUSTY_ANALYZER_FACTS",
+        &tmp.path().join("facts.redb").to_string_lossy(),
+    );
+    let src = HttpAnalyzeMetricsSource::new(&socket).expect("infallible since #6287");
+
+    let verdict = tokio::time::timeout(
+        std::time::Duration::from_secs(90),
+        src.fetch_named("some-index"),
+    )
+    .await
+    .expect("a failed start must not hang the report");
+
+    match verdict {
+        AnalyzeFetch::Missing(gap) => assert_eq!(
+            gap,
+            AnalyzeGap::Unreachable,
+            "a start that could not succeed is `Unreachable`, not any other gap"
+        ),
+        AnalyzeFetch::Fetched { .. } => {
+            panic!("nothing is serving that socket; metrics cannot have been fetched")
+        }
+    }
+    assert!(
+        !socket.exists(),
+        "a failed start must not leave a socket implying success"
+    );
+}

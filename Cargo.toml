@@ -166,14 +166,14 @@ trusty-review = { path = "crates/trusty-review", version = "0.29", default-featu
 # (de-bundled from the host crates for single-owner-per-binary). It is still a
 # published library crate; the path entry remains so any local lib consumers
 # resolve in-tree.
-trusty-console = { path = "crates/trusty-console", version = "0.7.0" }
+trusty-console = { path = "crates/trusty-console", version = "0.8.0" }
 # trusty-progress: shared rustup/cargo-style progress + status display (#1315).
 # Consumed by trusty-installer for install/upgrade component rows; published library crate.
 trusty-progress = { path = "crates/trusty-progress", version = "0.3.0" }
 # trusty-installer: consumed as a LIBRARY by trusty-audit for the pinned,
 # fail-closed prebuilt download entry point (#5491, #5495). trusty-audit is
 # `publish = false`, so this entry exists for in-tree resolution.
-trusty-installer = { path = "crates/trusty-installer", version = "0.12" }
+trusty-installer = { path = "crates/trusty-installer", version = "0.13" }
 # trusty-audit: consumed as a LIBRARY by the auditor client's Tauri shell
 # (`trusty-audit-ui`, #5477 phase 1), which calls `Session::execute` in-process
 # rather than serving HTTP or shelling out to the `taudit` binary — DOC-68 §11

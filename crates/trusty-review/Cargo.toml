@@ -153,7 +153,7 @@ clap         = { workspace = true }
 # it: the serve transport depends on `uds::server` directly now, and an implied
 # feature is one refactor away from disappearing under a consumer that never
 # said it needed it.
-trusty-common = { workspace = true, features = ["intent-source", "config-cli", "webhook-relay", "gh-cli", "uds", "redb-open"] }  # `redb-open` (#5063): the workspace's single redb corruption classifier, which `store::redb_error_is_incompatible_format` delegates to
+trusty-common = { workspace = true, features = ["intent-source", "config-cli", "webhook-relay", "gh-cli", "uds", "uds-supervisor", "redb-open"] }  # `redb-open` (#5063): the workspace's single redb corruption classifier, which `store::redb_error_is_incompatible_format` delegates to
 # JSON-RPC / MCP primitives (ADR-0040, #5803). Optional: only the `mcp` feature
 # compiles `src/mcp/`.
 trusty-mcp = { workspace = true, optional = true }

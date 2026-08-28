@@ -3,7 +3,7 @@ name = "trusty-installer"
 # 0.12.1 (#6288): patch — 0.12.0 is published and this PR edits `src/**`,
 # dropping `SUPERVISOR_METRICS_PORT` and `LaunchctlPort::port_guard` now that the
 # supervisor binds no port. No out-of-workspace consumer of either.
-version = "0.12.1"
+version = "0.13.0"
 edition = "2021"
 description = "Thin control plane for the claude-mpm stack: install, upgrade, restart, health, and config coordination across all trusty-* tools."
 readme = "README.md"
@@ -83,7 +83,7 @@ tracing-subscriber = { workspace = true }
 # `memory-rpc` (#6286): `ensure`'s palace stage and its `--wait` readiness probe
 # dial trusty-memory through the shared client. ADR-0032 left no `http_addr` for
 # `resolve_base_url` to read, so both read a running daemon as absent without it.
-trusty-common = { workspace = true, features = ["update-check", "config-cli", "uds", "memory-rpc"] }
+trusty-common = { workspace = true, features = ["update-check", "config-cli", "uds", "uds-supervisor", "memory-rpc"] }  # uds-supervisor (#6350): tctl probes trusty-analyze by starting it on demand
 # Rustup/cargo-style progress display (#1315): Narrator `info:` lines + the
 # right-aligned ComponentTracker table for install/upgrade rows.
 trusty-progress = { workspace = true }

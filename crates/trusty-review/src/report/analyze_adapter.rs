@@ -5,9 +5,20 @@
 //! trusty-analyze WITHOUT an LLM and WITHOUT a hand-authored metrics JSON. A
 //! library dependency on trusty-analyze is impossible (a cargo cycle: analyze
 //! already optionally depends on trusty-review via its `review` feature), so
-//! this adapter is a thin HTTP client over the analyze daemon (`:7879`) plus a
-//! pure mapping from the daemon's wire JSON onto the report's v0
-//! [`AnalyzeMetrics`]. Every probe/fetch/parse failure is fail-open — the
+//! this adapter is a thin JSON-RPC client over the analyze daemon's hardened
+//! Unix socket plus a pure mapping from the daemon's wire JSON onto the report's
+//! v0 [`AnalyzeMetrics`]. (#6287 retired the `127.0.0.1:7879` HTTP listener this
+//! header used to name; there is no port and no discovery file — the socket path
+//! is derived through `trusty_common::daemon_socket_path`.)
+//!
+//! #6350: nothing is resident on the far end of that socket any more. The
+//! adapter starts the server itself, once per source, through
+//! [`trusty_common::uds::OnDemandAnalyze`] — the same entry point every other
+//! client uses, so a second client racing this one adopts the same process
+//! rather than starting a second. A start that FAILS is not silent: it becomes
+//! a `Transport` error, which prints the fallback line on stderr and lands in
+//! the report's Gaps & Caveats as an unassessed dimension. Every
+//! probe/fetch/parse failure is fail-open — the
 //! adapter degrades to `None` and the report falls through to the built-in
 //! scan; a missing analyze index is never an error. Since #6041 that degradation
 //! is per endpoint rather than per repository: a dataset that fails leaves the
@@ -449,6 +460,19 @@ pub enum AnalyzeFetch {
 /// in-process stub daemon; unit tests here cover the fail-open conversions.
 pub struct HttpAnalyzeMetricsSource {
     socket: PathBuf,
+    /// The on-demand starter, shared across every fetch this source makes.
+    ///
+    /// One handle, not one per call: its spawn gate is what keeps two
+    /// concurrent fetches from each starting a server (#6350).
+    launcher: trusty_common::uds::OnDemandAnalyze,
+    /// Memoised result of the single start attempt.
+    ///
+    /// Why memoised: `enrich_with_analyze_gaps` iterates repositories, so an
+    /// un-memoised start would re-probe the socket once per repo. Why the
+    /// FAILURE is memoised too: a machine with no trusty-analyze installed
+    /// would otherwise pay a spawn budget per repository, and report the same
+    /// failure N times.
+    started: tokio::sync::OnceCell<Result<(), String>>,
 }
 
 impl HttpAnalyzeMetricsSource {
@@ -470,9 +494,52 @@ impl HttpAnalyzeMetricsSource {
     ///
     /// Test: `new_accepts_a_socket_path`.
     pub fn new(socket: impl Into<PathBuf>) -> AdapterResult<Self> {
+        let socket = socket.into();
         Ok(Self {
-            socket: socket.into(),
+            launcher: trusty_common::uds::OnDemandAnalyze::at(&socket),
+            socket,
+            started: tokio::sync::OnceCell::new(),
         })
+    }
+
+    /// Start trusty-analyze if nothing is serving, exactly once per source.
+    ///
+    /// Why this is here and not at the CLI call site: the CLI hands this type a
+    /// socket path and asks for metrics; "is anything serving that path" is this
+    /// type's problem, and putting it here means an embedded caller
+    /// (`trusty-analyze --features review`, the MCP tools) gets the same
+    /// behaviour without duplicating the start.
+    ///
+    /// What: delegates to the shared [`trusty_common::uds::OnDemandAnalyze`],
+    /// memoising the outcome. A failure is converted to a string rather than
+    /// kept as an error, because `OnceCell` stores one value for every caller
+    /// and `SupervisorError` is not `Clone`.
+    ///
+    /// # Errors
+    ///
+    /// [`AnalyzeAdapterError::Transport`] when the server could not be started.
+    /// It is NOT degraded to a silent `None` here: the caller converts it into
+    /// the visible "falling back to scan" line and a Gaps & Caveats entry.
+    ///
+    /// Test: `a_failed_start_is_reported_rather_than_swallowed`.
+    async fn ensure_started(&self) -> AdapterResult<()> {
+        let outcome = self
+            .started
+            .get_or_init(|| async {
+                self.launcher
+                    .ensure_running()
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| format!("{e:#}"))
+            })
+            .await;
+        match outcome {
+            Ok(()) => Ok(()),
+            Err(reason) => Err(AnalyzeAdapterError::Transport(format!(
+                "could not start trusty-analyze on demand for {}: {reason}",
+                self.socket.display()
+            ))),
+        }
     }
 
     /// Call one endpoint and deserialize its `result` into `T`, mapping every
@@ -492,7 +559,77 @@ impl HttpAnalyzeMetricsSource {
     /// JSON-RPC envelope check.
     /// Test: `a_request_that_outlives_its_budget_is_a_timeout_not_a_transport_error`,
     /// `fetch_returns_none_on_unreachable_daemon`.
+    /// One request, with a respawn-and-retry when the server has gone away.
+    ///
+    /// Why (#6350): an on-demand server exits after its idle window, and a
+    /// multi-repository report is exactly the caller that can straddle one — the
+    /// diagnostics endpoint alone has a multi-minute budget, so a run over
+    /// several repositories can leave the socket untouched for longer than the
+    /// ten-minute default. `ensure_started` runs once per source, so without
+    /// this every fetch after the exit would hard-fail with nothing left to
+    /// restart it. #6287 removed the old retry on the assumption that the far
+    /// end was resident; #6350 invalidated that assumption.
+    ///
+    /// What: on a `Transport` failure — a socket that refused, vanished, or hung
+    /// up — start the server again and reissue the request EXACTLY once. The
+    /// second failure is returned as-is.
+    ///
+    /// A `Timeout` deliberately does not retry: the server answered the connect
+    /// and is working, so reissuing would double an already-long budget and hide
+    /// a slow handler behind a doubled wait. Nor does an `Rpc` or `Parse`
+    /// failure, which are answers, not absences.
+    ///
+    /// # Errors
+    ///
+    /// The second attempt's error, or the restart's if that is what failed.
+    ///
+    /// Test: `tests/on_demand.rs`' `the_adapter_respawns_a_server_that_idled_out`.
     async fn call<T: serde::de::DeserializeOwned>(
+        &self,
+        endpoint: AnalyzeEndpoint,
+        index_id: &str,
+        budget: Duration,
+    ) -> AdapterResult<T> {
+        match self.call_once(endpoint, index_id, budget).await {
+            Err(AnalyzeAdapterError::Transport(first)) => {
+                tracing::debug!(
+                    index_id,
+                    endpoint = endpoint.as_str(),
+                    error = %first,
+                    "--analyze: the socket did not answer; restarting the server and retrying once"
+                );
+                self.restart().await.map_err(|e| {
+                    AnalyzeAdapterError::Transport(format!("{first}; and the retry failed: {e}"))
+                })?;
+                self.call_once(endpoint, index_id, budget).await
+            }
+            other => other,
+        }
+    }
+
+    /// Start the server, bypassing [`Self::ensure_started`]'s memo.
+    ///
+    /// Why not reuse the memo: it holds the outcome of the FIRST start, and the
+    /// case this exists for is a server that started successfully and has since
+    /// exited. Reading the memo would return that stale `Ok` and start nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`AnalyzeAdapterError::Transport`] when the server could not be started.
+    async fn restart(&self) -> AdapterResult<()> {
+        self.launcher
+            .ensure_running()
+            .await
+            .map(|_| ())
+            .map_err(|e| {
+                AnalyzeAdapterError::Transport(format!(
+                    "could not restart trusty-analyze for {}: {e:#}",
+                    self.socket.display()
+                ))
+            })
+    }
+
+    async fn call_once<T: serde::de::DeserializeOwned>(
         &self,
         endpoint: AnalyzeEndpoint,
         index_id: &str,
@@ -598,6 +735,9 @@ impl HttpAnalyzeMetricsSource {
         &self,
         index_id: &str,
     ) -> AdapterResult<Option<(AnalyzeMetrics, Vec<AnalyzeCaveat>)>> {
+        // #6350: nothing is resident on this socket; start it before dialling.
+        self.ensure_started().await?;
+
         if !self.index_served(index_id).await? {
             tracing::warn!(
                 index_id,

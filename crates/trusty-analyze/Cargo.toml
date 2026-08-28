@@ -5,7 +5,7 @@ name        = "trusty-analyze"
 # position. `core::redb_open::is_format_obsolete` keeps its name and signature
 # and delegates its body to `trusty_common::redb_open::is_incompatible_format`;
 # no public item is added, removed, or changed shape.
-version     = "0.12.1"
+version     = "0.12.2"
 edition     = "2021"
 license.workspace    = true
 authors.workspace    = true
@@ -92,7 +92,7 @@ mime_guess         = { workspace = true }
 # `webhook-relay` (#5182): the console->target relay wire contract AND its
 # receive half — the durable inbox, the listener, and the hardened UDS bind
 # this crate mounts in `webhook_listener`. Implies `uds` and `webhook-hmac`.
-trusty-common      = { workspace = true, features = ["symgraph", "cli-help", "update-check", "bedrock", "console-metrics", "config-cli", "webhook-relay", "redb-open"] }  # `redb-open` (#5063): the workspace's single redb corruption classifier, which `core::redb_open` delegates to
+trusty-common      = { workspace = true, features = ["symgraph", "cli-help", "update-check", "bedrock", "console-metrics", "config-cli", "webhook-relay", "uds-supervisor", "redb-open"] }  # `redb-open` (#5063): the workspace's single redb corruption classifier, which `core::redb_open` delegates to; `uds-supervisor` (#6350): the shared on-demand entry point every analyze client starts this server through
 trusty-mcp         = { workspace = true }  # daemon-bridge startup guard (ADR-0040, #5803)
 tree-sitter            = { workspace = true }
 tree-sitter-rust       = { workspace = true }
@@ -180,6 +180,12 @@ features = ["http-server"]
 
 [dev-dependencies]
 tempfile       = { workspace = true }
+# #6350: `tests/on_demand.rs` stands up a stub trusty-search `/health`. It has
+# to be axum rather than a hand-written HTTP/1.1 responder because
+# `core::client::TrustySearchClient` builds its reqwest client with
+# `http2_prior_knowledge()` — a raw HTTP/1.1 reply is never read. `axum::serve`
+# runs hyper's auto Builder, which answers the h2c preface.
+axum           = { workspace = true }
 tower          = { workspace = true }
 http-body-util = { workspace = true }
 # docgen (#5205 follow-up): `tests/generated_docs.rs` renders the MCP tool
@@ -203,6 +209,12 @@ trusty-common     = { workspace = true, features = ["docgen"] }
 # Svelte UI, so `cargo test -p trusty-analyze` now needs pnpm on PATH. Without
 # it, set `SKIP_UI_BUILD=1` — the build script's documented escape hatch, and
 # what CI uses.
+# #6350: `tests/on_demand.rs` drives the REAL review adapter against a real
+# server to prove it respawns one that idled out mid-report. The adapter lives
+# in trusty-review and the binary lives here, so this is the only crate where
+# both halves are in scope. Path-only for the same publish-ordering reason the
+# four above are.
+trusty-review    = { path = "../trusty-review", default-features = false, features = ["report"] }
 trusty-console   = { path = "../trusty-console" }
 trusty-installer = { path = "../trusty-installer" }
 tga              = { path = "../trusty-git-analytics" }

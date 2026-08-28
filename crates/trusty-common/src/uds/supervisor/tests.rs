@@ -425,7 +425,7 @@ async fn spawn_child_creates_requested_directories() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let data = tmp.path().join("nested/data");
     let spec = SpawnSpec::new("/bin/echo").create_dir(&data);
-    let mut child = super::child::spawn_child("test-service", "k", &spec)
+    let mut child = super::child::spawn_child("test-service", "k", &spec, false)
         .await
         .expect("spawn");
     let _ = child.wait().await;
@@ -441,7 +441,7 @@ async fn spawn_child_creates_requested_directories() {
 async fn spawn_child_reports_a_missing_binary() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let spec = SpawnSpec::new(tmp.path().join("no-such-binary"));
-    let err = super::child::spawn_child("test-service", "k", &spec)
+    let err = super::child::spawn_child("test-service", "k", &spec, false)
         .await
         .expect_err("a missing binary must fail");
     assert!(
@@ -862,4 +862,91 @@ async fn an_over_long_socket_path_is_rejected_before_spawning() {
         "expected SocketPath, got {err:?}"
     );
     assert_eq!(sup.spawned_count(), 0);
+}
+
+// ── detached mode for on-demand services (#6350) ────────────────────────────
+
+/// Why: the flag is what separates "console owns this child" from "the service
+/// owns itself", and every behaviour below turns on it, so a builder that
+/// dropped it would fail silently as a lifetime bug rather than loudly here.
+/// Test: this test itself.
+#[test]
+fn supervisor_config_carries_the_detached_flag() {
+    assert!(
+        !config(1, None).detached,
+        "the default must stay `kill_on_drop`: a resident owner reclaims its children"
+    );
+    assert!(config(1, None).with_detached(true).detached);
+    assert!(
+        !config(1, None)
+            .with_detached(true)
+            .with_detached(false)
+            .detached
+    );
+}
+
+/// Why: the whole point of detached mode is that this supervisor does not own
+/// the child, so a detached spawn must leave the population map untouched —
+/// otherwise a transient CLI's `shutdown()` (or its `Drop`) would take down a
+/// server another client is mid-request against.
+///
+/// What: `sleep` never binds the socket, so `ensure_running` reports
+/// [`SupervisorError::SpawnTimeout`] — but it reports it having spawned exactly
+/// one child and retained none. The spawn budget is 400 ms (`TEST_TIMEOUTS`), so
+/// the test costs that plus the SIGTERM the detached path sends to the process
+/// that never bound.
+/// Test: this test itself.
+#[serial_test::serial]
+#[tokio::test]
+async fn detached_children_are_not_retained_in_the_population() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let socket = tmp.path().join("detached.sock");
+    let sup = UdsServiceSupervisor::new(config(3, None).with_detached(true));
+
+    let err = sup
+        .ensure_running("inst", &socket, || Ok(SpawnSpec::new("sleep").arg("60")))
+        .await
+        .expect_err("a child that never binds must not be reported as running");
+
+    assert!(
+        matches!(err, SupervisorError::SpawnTimeout { .. }),
+        "unexpected error: {err:?}"
+    );
+    assert_eq!(sup.spawned_count(), 1, "the spawn did happen");
+    assert_eq!(
+        sup.supervised_count().await,
+        0,
+        "a detached child must never enter the population map"
+    );
+}
+
+/// Why: detached mode changes who owns the child, not how a running service is
+/// found. The already-serving fast path is what makes a second concurrent
+/// client adopt the first client's server instead of racing it, so it has to
+/// hold with the flag set.
+/// Test: this test itself.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_detached_caller_adopts_a_socket_that_is_already_serving() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let socket = tmp.path().join("live.sock");
+    // `bind_hardened`, not a bare bind: the adopt path runs
+    // `verify_socket_for_connect`, which refuses a socket in a 0755 directory.
+    // A plain `UnixListener::bind` under a tempdir fails that check, and the
+    // refusal is correct — the fixture has to meet the real precondition.
+    let _listener = crate::uds::bind_hardened(&socket).expect("bind");
+    let sup = UdsServiceSupervisor::new(config(3, None).with_detached(true));
+
+    let path = sup
+        .ensure_running("inst", &socket, never_spawn)
+        .await
+        .expect("a serving socket must be adopted, not raced");
+
+    assert_eq!(path, socket);
+    assert_eq!(
+        sup.spawned_count(),
+        0,
+        "nothing may be spawned over a live socket"
+    );
+    assert_eq!(sup.supervised_count().await, 0);
 }

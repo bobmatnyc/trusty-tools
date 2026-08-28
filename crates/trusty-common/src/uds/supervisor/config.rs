@@ -235,6 +235,8 @@ pub struct SupervisorConfig {
     pub timeouts: ServiceTimeouts,
     /// Environment variable that opts spawn supervision out when set to `"1"`.
     pub external_env: Option<String>,
+    /// Whether spawned children outlive this supervisor (#6350).
+    pub detached: bool,
 }
 
 impl SupervisorConfig {
@@ -249,12 +251,39 @@ impl SupervisorConfig {
             rss_limit_mb: None,
             timeouts,
             external_env: None,
+            detached: false,
         }
     }
 
     /// Set the per-child RSS ceiling in MB; `None` disables enforcement.
     pub fn with_rss_limit_mb(mut self, rss_limit_mb: Option<u64>) -> Self {
         self.rss_limit_mb = rss_limit_mb;
+        self
+    }
+
+    /// Let spawned children outlive this supervisor (#6350).
+    ///
+    /// Why: the default answers "keep this child alive for as long as I need
+    /// it", which is what `trusty-console` wants — it is resident, it owns the
+    /// child, and `kill_on_drop` guarantees no orphan survives it. An on-demand
+    /// service under ADR-0032 is the opposite arrangement: the client is a CLI
+    /// that exits in seconds, the SERVICE decides when to end (its own idle
+    /// window), and a second client is expected to reuse the same process. With
+    /// the default, the first client's exit would SIGKILL a server a concurrent
+    /// client was mid-request against.
+    ///
+    /// What: the child is spawned without `kill_on_drop`, is not entered into
+    /// the supervisor's population map, and is reaped by a detached task that
+    /// waits on it. Everything the map drives — the `max_live` cap, LRU
+    /// eviction, RSS reaping, [`super::UdsServiceSupervisor::shutdown`] — has
+    /// nothing to act on in this mode, deliberately: a child that owns its own
+    /// lifetime is not this supervisor's to reclaim. What DOES still apply is
+    /// the part an on-demand caller needs — the spawn gate, the
+    /// already-serving check, socket verification, and the post-spawn probe.
+    ///
+    /// Test: `detached_children_are_not_retained_in_the_population`.
+    pub fn with_detached(mut self, detached: bool) -> Self {
+        self.detached = detached;
         self
     }
 

@@ -120,6 +120,9 @@ fn diagnose(m: &StableMember) -> MemberDoctor {
                 .map(|p| p.exists())
                 .unwrap_or(false),
         ),
+        // #6290, #6350: a retired member needs no plist, so "is one installed"
+        // has no answer to give. Evicting a plist an OLDER install left behind
+        // is `tctl install` / `tctl upgrade`'s eviction, not a doctor row.
         ManageStrategy::OwnVerb | ManageStrategy::None => None,
     };
     let port_recorded = matches!(
