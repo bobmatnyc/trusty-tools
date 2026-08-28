@@ -544,4 +544,147 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("unknown runtime"), "{err}");
     }
+
+    /// Point `$HOME` at a temp directory and restore it on drop, panic or not.
+    ///
+    /// Why: `SessionManager::decommission` resolves its containment root from
+    /// the ambient environment, so a test that wants a real removal to happen
+    /// must seed its workspace under a redirected root. The redirect is
+    /// process-wide, hence `#[serial_test::serial]` on the only user.
+    /// What: swaps `$HOME` and puts the prior value back on drop.
+    /// Test: `session_decommission_prunes_stale_worktree_bookkeeping`.
+    struct HomeGuard(Option<String>);
+
+    impl HomeGuard {
+        fn redirect(to: &std::path::Path) -> Self {
+            let prior = std::env::var("HOME").ok();
+            // SAFETY: the only caller is `#[serial_test::serial]`.
+            unsafe { std::env::set_var("HOME", to) };
+            Self(prior)
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            // SAFETY: the only caller is `#[serial_test::serial]`.
+            match self.0 {
+                Some(ref prior) => unsafe { std::env::set_var("HOME", prior) },
+                None => unsafe { std::env::remove_var("HOME") },
+            }
+        }
+    }
+
+    /// #5949: the MCP `session_decommission` tool leaves the base checkout's
+    /// worktree bookkeeping clean.
+    ///
+    /// Why: this tool calls `SessionManager::decommission` in-process, below the
+    /// client layer that carried the repair for the routed HTTP paths, so it
+    /// removed an owned workspace and left git still listing it. The idle reaper
+    /// reaches the same function the same way and runs unattended.
+    /// What: a real checkout with a real registered worktree under a redirected
+    /// `$HOME`, an owned record pointing at that worktree, then the MCP tool.
+    /// Asserts the tombstone came back and that git no longer lists the leaf.
+    /// Against the pre-fix code the last assertion fails.
+    /// Test: this function IS the test.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn session_decommission_prunes_stale_worktree_bookkeeping() {
+        fn git(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+                .unwrap_or_else(|e| panic!("git {args:?} could not run: {e}"))
+        }
+
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home_guard = HomeGuard::redirect(home.path());
+        let workspace_root = trusty_common::workspace_layout::resolve_workspace_root(None);
+
+        let base = workspace_root.join("tm-5949-base");
+        std::fs::create_dir_all(&base).expect("create base repo dir");
+        if !git(&base, &["init", "--quiet"]).status.success() {
+            eprintln!("session_decommission_prunes_stale_worktree_bookkeeping: no git, skipping");
+            return;
+        }
+        assert!(
+            git(&base, &["config", "user.email", "ci@test.invalid"])
+                .status
+                .success()
+        );
+        assert!(git(&base, &["config", "user.name", "CI"]).status.success());
+        assert!(
+            git(&base, &["config", "commit.gpgsign", "false"])
+                .status
+                .success()
+        );
+        std::fs::write(base.join("README.md"), "seed\n").expect("write README");
+        assert!(git(&base, &["add", "README.md"]).status.success());
+        assert!(
+            git(&base, &["commit", "--quiet", "-m", "seed"])
+                .status
+                .success()
+        );
+
+        let id = crate::session_manager::ManagedSessionId::new();
+        let leaf = format!("tm-5949-{id}");
+        let ws = base.join(".worktrees").join(&leaf);
+        assert!(
+            git(
+                &base,
+                &[
+                    "worktree",
+                    "add",
+                    "--quiet",
+                    "-b",
+                    &format!("session/{leaf}"),
+                    &ws.to_string_lossy(),
+                ],
+            )
+            .status
+            .success(),
+            "fixture: the worktree must be registered"
+        );
+        let listed = |dir: &std::path::Path| {
+            String::from_utf8_lossy(&git(dir, &["worktree", "list", "--porcelain"]).stdout)
+                .into_owned()
+        };
+        assert!(
+            listed(&base).contains(&leaf),
+            "fixture invariant: git must list the worktree before decommission"
+        );
+
+        let (_root, s) = state().await;
+        s.session_manager()
+            .await
+            .create_with_id(
+                id,
+                "regression: #5949 MCP decommission".to_string(),
+                Some(ws.clone()),
+                None,
+                Some(ws.clone()),
+                None,
+                None,
+                crate::runtime::RuntimeKind::default(),
+                false,
+                // Owned: the branch that removes with `remove_dir_all`.
+                true,
+            )
+            .await
+            .expect("seed session");
+
+        let json = session_decommission(&s, &id.to_string())
+            .await
+            .expect("decommission");
+        assert_eq!(json["state"], "decommissioned", "{json}");
+        assert!(!ws.exists(), "the workspace must be gone: {}", ws.display());
+        assert!(
+            !listed(&base).contains(&leaf),
+            "the MCP decommission left a stale worktree entry for {leaf} — the \
+             bookkeeping repair did not run (#5949)"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }
