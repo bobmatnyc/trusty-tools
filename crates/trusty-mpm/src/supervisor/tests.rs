@@ -1092,7 +1092,6 @@ async fn supervisor_run_until_stops_cleanly() {
         interval: std::time::Duration::from_secs(3600),
         auto_resume: true,
         classify_idle: false,
-        ..SupervisorConfig::default()
     };
     let metrics_file = dir.path().join("supervisor-metrics.json");
     let sup: Supervisor<StubClassifier> = Supervisor::new(mgr, cfg, None)
