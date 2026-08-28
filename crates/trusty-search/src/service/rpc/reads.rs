@@ -47,6 +47,8 @@
 //! Test: `reads_tests.rs` — one `*_over_the_socket_matches_the_http_body` per
 //! family, driving the real axum router and the real socket router against one
 //! shared state.
+//!
+//! [`register`]: crate::service::rpc::reads::register
 
 use std::sync::Arc;
 
