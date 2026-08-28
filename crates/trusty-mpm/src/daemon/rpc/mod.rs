@@ -19,6 +19,14 @@ pub mod core;
 /// handlers both call, so one route has one implementation.
 pub mod core_ops;
 
+/// Registration for the legacy session registry, hook ingestion, and the polled
+/// event feeds (#6288 slice 3). The SSE stream legs stay on HTTP until slice 6.
+pub mod sessions_legacy;
+
+/// The transport-neutral bodies `sessions_legacy`'s methods and `daemon::api`'s
+/// HTTP handlers both call, so one route has one implementation.
+pub mod sessions_legacy_ops;
+
 /// Registration for the managed-session lifecycle, the SESSCTL control plane,
 /// and the L2 proxy (#6288 slice 4).
 pub mod managed;

@@ -68,7 +68,7 @@ use crate::daemon::state::DaemonState;
 /// `session_start_hook_still_refuses_a_live_subagent_id`,
 /// `session_start_hook_reasserting_same_id_is_a_noop`,
 /// `session_start_hook_re_correlates_a_stale_id` in `api_tests.rs`.
-pub(super) async fn correlate_session_start(
+pub(crate) async fn correlate_session_start(
     state: &Arc<DaemonState>,
     claude_session_id: &str,
     payload: &serde_json::Value,
@@ -273,7 +273,7 @@ pub(super) fn session_end_pane_still_live(
 /// the gate fails open); the gate's own decision logic is covered by the
 /// `session_end_pane_still_live_*` unit tests above;
 /// `session_end_hook_clears_claude_session_id` covers the #4337 clear.
-pub(super) async fn handle_session_end(state: &Arc<DaemonState>, claude_session_id: &str) {
+pub(crate) async fn handle_session_end(state: &Arc<DaemonState>, claude_session_id: &str) {
     let mgr = state.session_manager().await;
     let records = mgr.list().await;
     let matched = records.iter().find(|r| {
