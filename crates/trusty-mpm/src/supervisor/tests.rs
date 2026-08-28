@@ -915,13 +915,19 @@ fn published_metrics_round_trip() {
     fleet.run_stats.sweeps = 7;
     fleet.run_stats.auto_resumed = 3;
     let now = Utc::now();
+    let interval = std::time::Duration::from_secs(45);
 
-    publish::write_at(&path, &fleet, now).expect("publish writes");
+    publish::write_at(&path, &fleet, interval, now).expect("publish writes");
     let back = publish::read_at(&path)
         .expect("read succeeds")
         .expect("a snapshot exists");
     assert_eq!(back.fleet, fleet);
     assert_eq!(back.written_at.timestamp(), now.timestamp());
+    assert_eq!(
+        back.interval_secs, 45,
+        "the writer's cadence must travel with the snapshot — the reader sizes \
+         its staleness window from it"
+    );
 
     // Atomic publish: the temp file is renamed into place, never left behind.
     let leftovers: Vec<_> = std::fs::read_dir(path.parent().expect("parent"))
@@ -985,12 +991,26 @@ fn read_status_old_snapshot_is_stale() {
     let path = tmp.path().join("supervisor-metrics.json");
     let mut fleet = FleetMetrics::default();
     fleet.run_stats.sweeps = 42;
-    let written_at = Utc::now() - chrono::Duration::seconds(publish::STALE_AFTER_SECS + 60);
-    publish::write_at(&path, &fleet, written_at).expect("publish writes");
+    // The default 30s cadence puts the threshold on the floor (300s), so this
+    // is the same case the fixed constant used to cover.
+    let default_interval = SupervisorConfig::default().interval;
+    let threshold = publish::stale_after_secs(default_interval);
+    assert_eq!(
+        threshold,
+        publish::STALE_FLOOR_SECS,
+        "default cadence floors"
+    );
+    let written_at = Utc::now() - chrono::Duration::seconds(threshold + 60);
+    publish::write_at(&path, &fleet, default_interval, written_at).expect("publish writes");
 
     match publish::read_status_at(&path, Utc::now()) {
-        SupervisorMetricsStatus::Stale { snapshot, age_secs } => {
-            assert!(age_secs > publish::STALE_AFTER_SECS, "age {age_secs}");
+        SupervisorMetricsStatus::Stale {
+            snapshot,
+            age_secs,
+            stale_after_secs,
+        } => {
+            assert_eq!(stale_after_secs, threshold);
+            assert!(age_secs > threshold, "age {age_secs}");
             assert_eq!(
                 snapshot.fleet.run_stats.sweeps, 42,
                 "a stale snapshot still carries the last real counters"
@@ -1000,7 +1020,7 @@ fn read_status_old_snapshot_is_stale() {
     }
 
     // The same file republished now is current.
-    publish::write_at(&path, &fleet, Utc::now()).expect("republish");
+    publish::write_at(&path, &fleet, default_interval, Utc::now()).expect("republish");
     assert!(
         matches!(
             publish::read_status_at(&path, Utc::now()),
@@ -1008,6 +1028,107 @@ fn read_status_old_snapshot_is_stale() {
         ),
         "a freshly-published snapshot must be Current"
     );
+}
+
+/// REGRESSION (#6288 critic HIGH): the staleness window is derived from the
+/// writer's cadence, not a fixed constant.
+///
+/// Why: `TRUSTY_MPM_SUPERVISOR_INTERVAL` is unbounded and `config.rs` documents
+/// slow overnight cadences as supported. A fixed 300s threshold marks a healthy
+/// supervisor stale for part of every cycle once the interval passes 300s, and
+/// permanently once it passes 600s. The floor keeps a fast cadence from flapping.
+/// Test: this is the test.
+#[test]
+fn stale_threshold_tracks_the_configured_interval() {
+    use std::time::Duration;
+    // Below the floor: the floor wins, so a 30s default keeps its 300s window.
+    assert_eq!(
+        publish::stale_after_secs(Duration::from_secs(30)),
+        publish::STALE_FLOOR_SECS
+    );
+    assert_eq!(
+        publish::stale_after_secs(Duration::from_secs(1)),
+        publish::STALE_FLOOR_SECS,
+        "a 1s debug cadence must not flap on ordinary scheduling jitter"
+    );
+    // At and above the floor: three sweeps.
+    assert_eq!(publish::stale_after_secs(Duration::from_secs(100)), 300);
+    assert_eq!(publish::stale_after_secs(Duration::from_secs(900)), 2700);
+    assert_eq!(publish::stale_after_secs(Duration::from_secs(3600)), 10_800);
+    // A nonsensical interval saturates rather than overflowing.
+    assert!(publish::stale_after_secs(Duration::from_secs(u64::MAX)) > 0);
+}
+
+/// REGRESSION (#6288 critic HIGH): a supervisor on a 15-minute overnight cadence
+/// reads Current 400 seconds after its last publish — a fixed 300s threshold
+/// called it Stale — and Stale only once it has genuinely missed three sweeps.
+/// Test: this is the test.
+#[test]
+fn read_status_respects_a_slow_configured_interval() {
+    let tmp = TempDir::new().expect("tempdir");
+    let path = tmp.path().join("supervisor-metrics.json");
+    let slow = std::time::Duration::from_secs(900);
+    let mut fleet = FleetMetrics::default();
+    fleet.run_stats.sweeps = 5;
+    let written_at = Utc::now();
+    publish::write_at(&path, &fleet, slow, written_at).expect("publish writes");
+
+    let at_400 = written_at + chrono::Duration::seconds(400);
+    match publish::read_status_at(&path, at_400) {
+        SupervisorMetricsStatus::Current {
+            stale_after_secs, ..
+        } => assert_eq!(stale_after_secs, 2700),
+        other => panic!(
+            "a 900s-cadence supervisor 400s after its publish is mid-cycle and              healthy, not stale: {other:?}"
+        ),
+    }
+
+    let at_3000 = written_at + chrono::Duration::seconds(3000);
+    match publish::read_status_at(&path, at_3000) {
+        SupervisorMetricsStatus::Stale {
+            age_secs,
+            stale_after_secs,
+            ..
+        } => {
+            assert_eq!(age_secs, 3000);
+            assert_eq!(stale_after_secs, 2700);
+        }
+        other => panic!("three missed 900s sweeps must read Stale: {other:?}"),
+    }
+}
+
+/// Why: a snapshot left by a binary that predates `interval_secs` must still
+/// parse, and must fall back to the default cadence — which floors the window at
+/// the 300s the fixed constant used, so an upgrade changes no verdict.
+/// Test: this is the test.
+#[test]
+fn snapshot_without_interval_falls_back_to_the_default_cadence() {
+    let tmp = TempDir::new().expect("tempdir");
+    let path = tmp.path().join("supervisor-metrics.json");
+    let written_at = Utc::now() - chrono::Duration::seconds(120);
+    let legacy = serde_json::json!({
+        "written_at": written_at,
+        "fleet": FleetMetrics::default(),
+    });
+    std::fs::write(&path, legacy.to_string()).expect("write legacy snapshot");
+
+    let back = publish::read_at(&path)
+        .expect("a pre-interval snapshot must still parse")
+        .expect("a snapshot exists");
+    assert_eq!(
+        back.interval_secs,
+        crate::supervisor::config::DEFAULT_INTERVAL_SECS
+    );
+    match publish::read_status_at(&path, Utc::now()) {
+        SupervisorMetricsStatus::Current {
+            stale_after_secs, ..
+        } => assert_eq!(
+            stale_after_secs,
+            publish::STALE_FLOOR_SECS,
+            "the fallback must reproduce the pre-#6288 window exactly"
+        ),
+        other => panic!("120s old at the default cadence is Current: {other:?}"),
+    }
 }
 
 /// Why: `metrics_path` is the one location the supervisor writes and the daemon

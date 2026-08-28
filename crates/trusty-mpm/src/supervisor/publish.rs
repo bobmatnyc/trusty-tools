@@ -17,13 +17,20 @@
 //! never observes a half-written file; [`read_status_at`] classifies what a
 //! reader finds as [`SupervisorMetricsStatus::Current`],
 //! [`SupervisorMetricsStatus::Stale`], or
-//! [`SupervisorMetricsStatus::Unavailable`] — never as a silent zero.
+//! [`SupervisorMetricsStatus::Unavailable`] — never as a silent zero. Staleness
+//! is judged against the cadence the writing supervisor actually runs at
+//! ([`stale_after_secs`]), not a fixed wall-clock constant.
 //! Test: `published_metrics_round_trip`, `read_status_absent_is_unavailable`,
 //! `read_status_corrupt_is_unavailable`, `read_status_old_snapshot_is_stale`,
 //! `supervisor_publishes_run_stats_after_sweeps`,
-//! `supervisor_metrics_merge_reports_real_run_stats` in `super::tests`.
+//! `supervisor_metrics_merge_reports_real_run_stats`,
+//! `stale_threshold_tracks_the_configured_interval`,
+//! `read_status_respects_a_slow_configured_interval`,
+//! `snapshot_without_interval_falls_back_to_the_default_cadence` in
+//! `super::tests`.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -41,17 +48,48 @@ use crate::supervisor::metrics::FleetMetrics;
 /// Test: `metrics_path_is_under_root`.
 pub const SUPERVISOR_METRICS_FILE: &str = "supervisor-metrics.json";
 
-/// How old a published snapshot may be before a reader reports it as stale.
+/// How many missed publishes make a snapshot stale.
 ///
-/// Why: the supervisor republishes after every sweep, and the default cadence is
-/// [`crate::supervisor::config::DEFAULT_INTERVAL_SECS`] (30s). Ten missed sweeps
-/// means the supervisor is stopped, wedged, or crash-looping — the reader must
-/// say so rather than presenting month-old counters as current. Ten rather than
-/// one or two so a slow sweep, a `launchctl` restart, or an operator-lengthened
-/// interval does not flap the status.
-/// What: 300 seconds.
-/// Test: `read_status_old_snapshot_is_stale`.
-pub const STALE_AFTER_SECS: i64 = 300;
+/// Why: staleness has to be measured in SWEEPS, not wall-clock seconds. The
+/// cadence is operator-tunable and unbounded — `config.rs` documents slow
+/// overnight cadences as a supported case — so a fixed threshold marks a
+/// perfectly healthy supervisor stale for part of every cycle once the interval
+/// exceeds it, and permanently once it exceeds it twice over. Three because one
+/// missed publish is an ordinary slow sweep (the sweep lists the fleet and may
+/// call an LLM to classify panes), two is unusual, and three consecutive misses
+/// is a stopped, wedged, or crash-looping process rather than a slow one.
+/// What: the multiplier applied to the writer's configured interval by
+/// [`stale_after_secs`].
+/// Test: `stale_threshold_tracks_the_configured_interval`,
+/// `read_status_respects_a_slow_configured_interval`.
+pub const STALE_AFTER_SWEEPS: i64 = 3;
+
+/// Lower bound on the staleness threshold, whatever the interval.
+///
+/// Why: a fast cadence must not make the status flap. At the 30s default,
+/// three sweeps is 90 seconds — close enough to ordinary scheduling jitter, a
+/// `launchctl` restart, or one slow LLM-backed sweep that a reader would see
+/// `stale` flicker on a healthy supervisor. The floor also keeps the default
+/// install's threshold exactly where it was before the interval became part of
+/// the calculation.
+/// What: 300 seconds — ten sweeps at the 30s default
+/// ([`crate::supervisor::config::DEFAULT_INTERVAL_SECS`]).
+/// Test: `stale_threshold_tracks_the_configured_interval`,
+/// `read_status_old_snapshot_is_stale`.
+pub const STALE_FLOOR_SECS: i64 = 300;
+
+/// The age at which a snapshot written by a supervisor on `interval` is stale.
+///
+/// Why: see [`STALE_AFTER_SWEEPS`] — the threshold has to scale with the
+/// writer's cadence or a slow overnight supervisor reads as dead.
+/// What: `max(STALE_AFTER_SWEEPS * interval, STALE_FLOOR_SECS)`, saturating so a
+/// nonsensical interval cannot overflow the multiplication.
+/// Test: `stale_threshold_tracks_the_configured_interval`.
+pub fn stale_after_secs(interval: Duration) -> i64 {
+    let secs = i64::try_from(interval.as_secs()).unwrap_or(i64::MAX);
+    secs.saturating_mul(STALE_AFTER_SWEEPS)
+        .max(STALE_FLOOR_SECS)
+}
 
 /// Errors publishing or reading the supervisor's metrics snapshot.
 ///
@@ -77,17 +115,32 @@ pub enum PublishError {
 /// observed it. Without the timestamp there is no way to tell a live supervisor
 /// from a stopped one whose last file is still on disk, which is how a stale
 /// counter gets presented as current.
-/// What: `written_at` (the publish instant) plus the full [`FleetMetrics`],
-/// which carries the [`crate::supervisor::SupervisorRunStats`] counters — sweeps,
-/// auto-resumes, resume failures, classifications — inside its `run_stats` field.
-/// Test: `published_metrics_round_trip`.
+/// What: `written_at` (the publish instant), `interval_secs` (the cadence the
+/// writer is configured at, so the reader can size its staleness window), and
+/// the full [`FleetMetrics`], which carries the
+/// [`crate::supervisor::SupervisorRunStats`] counters — sweeps, auto-resumes,
+/// resume failures, classifications — inside its `run_stats` field.
+/// Test: `published_metrics_round_trip`,
+/// `snapshot_without_interval_falls_back_to_the_default_cadence`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublishedMetrics {
     /// When the supervisor wrote this snapshot.
     pub written_at: DateTime<Utc>,
+    /// The sweep cadence the writing supervisor is configured at.
+    ///
+    /// A snapshot written by a binary that predates this field deserialises to
+    /// [`crate::supervisor::config::DEFAULT_INTERVAL_SECS`], which puts the
+    /// threshold on [`STALE_FLOOR_SECS`] — the behaviour that field replaced.
+    #[serde(default = "default_interval_secs")]
+    pub interval_secs: u64,
     /// Fleet counts, surfaced pending decisions, and the supervisor's own
     /// cumulative `run_stats`.
     pub fleet: FleetMetrics,
+}
+
+/// Serde fallback for a snapshot written before `interval_secs` existed.
+fn default_interval_secs() -> u64 {
+    crate::supervisor::config::DEFAULT_INTERVAL_SECS
 }
 
 /// What a reader found at the snapshot path.
@@ -104,20 +157,24 @@ pub struct PublishedMetrics {
 /// `read_status_old_snapshot_is_stale`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SupervisorMetricsStatus {
-    /// A snapshot no older than [`STALE_AFTER_SECS`].
+    /// A snapshot no older than its own [`stale_after_secs`] window.
     Current {
         /// The published snapshot.
         snapshot: Box<PublishedMetrics>,
         /// Seconds between `written_at` and the reading instant.
         age_secs: i64,
+        /// The window this snapshot was judged against, from its own cadence.
+        stale_after_secs: i64,
     },
-    /// A snapshot older than [`STALE_AFTER_SECS`] — the supervisor is probably
-    /// not running.
+    /// A snapshot past its [`stale_after_secs`] window — the supervisor is
+    /// probably not running.
     Stale {
         /// The published snapshot, still the last real observation.
         snapshot: Box<PublishedMetrics>,
         /// Seconds between `written_at` and the reading instant.
         age_secs: i64,
+        /// The window this snapshot was judged against, from its own cadence.
+        stale_after_secs: i64,
     },
     /// No usable snapshot: the file is absent, unreadable, or corrupt.
     Unavailable {
@@ -143,15 +200,23 @@ pub fn metrics_path(paths: &FrameworkPaths) -> PathBuf {
 /// file and report `Unavailable` for a supervisor that is working fine. Routing
 /// through the crate's shared [`atomic_write`] (temp file + rename) makes the
 /// publish a single rename the reader either sees or does not.
-/// What: creates the parent directory if absent, serialises `fleet` and `now`
-/// into a [`PublishedMetrics`], and swaps it into place.
+/// What: creates the parent directory if absent, serialises `fleet`, `now`, and
+/// the writer's `interval` into a [`PublishedMetrics`], and swaps it into place.
+/// The interval travels with the snapshot because the reader cannot otherwise
+/// know how long a gap between publishes is normal for this supervisor.
 /// Test: `published_metrics_round_trip`, `supervisor_publishes_run_stats_after_sweeps`.
-pub fn write_at(path: &Path, fleet: &FleetMetrics, now: DateTime<Utc>) -> Result<(), PublishError> {
+pub fn write_at(
+    path: &Path,
+    fleet: &FleetMetrics,
+    interval: Duration,
+    now: DateTime<Utc>,
+) -> Result<(), PublishError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let published = PublishedMetrics {
         written_at: now,
+        interval_secs: interval.as_secs(),
         fleet: fleet.clone(),
     };
     let text = serde_json::to_string_pretty(&published)?;
@@ -161,17 +226,6 @@ pub fn write_at(path: &Path, fleet: &FleetMetrics, now: DateTime<Utc>) -> Result
         crate::core::agent_manifest::ManifestError::Io(io) => PublishError::Io(io),
         crate::core::agent_manifest::ManifestError::Json(j) => PublishError::Json(j),
     })
-}
-
-/// Publish a snapshot to the default framework root.
-///
-/// Why: the running supervisor wants `~/.trusty-mpm/supervisor-metrics.json`
-/// without resolving the home directory itself.
-/// What: resolves [`FrameworkPaths::default`] and calls [`write_at`].
-/// Test: covered through [`write_at`]; the default-root resolution is
-/// `metrics_path_is_under_root`.
-pub fn write(fleet: &FleetMetrics, now: DateTime<Utc>) -> Result<(), PublishError> {
-    write_at(&metrics_path(&FrameworkPaths::default()), fleet, now)
 }
 
 /// Read a published snapshot from an explicit path.
@@ -197,24 +251,30 @@ pub fn read_at(path: &Path) -> Result<Option<PublishedMetrics>, PublishError> {
 /// or ancient snapshot silently becomes zeroed counters.
 /// What: absent / unreadable / unparseable → `Unavailable` with the reason;
 /// otherwise `Current` or `Stale` by comparing the snapshot age against
-/// [`STALE_AFTER_SECS`]. A snapshot dated in the future (a clock step) has a
-/// negative age and counts as current — the alternative, calling it stale,
-/// would hide live counters over a clock adjustment.
+/// [`stale_after_secs`] computed from the snapshot's OWN `interval_secs`, so a
+/// supervisor on a 15-minute overnight cadence is not called dead 5 minutes into
+/// every cycle. A snapshot dated in the future (a clock step) has a negative age
+/// and counts as current — the alternative, calling it stale, would hide live
+/// counters over a clock adjustment.
 /// Test: `read_status_absent_is_unavailable`, `read_status_corrupt_is_unavailable`,
-/// `read_status_old_snapshot_is_stale`.
+/// `read_status_old_snapshot_is_stale`,
+/// `read_status_respects_a_slow_configured_interval`.
 pub fn read_status_at(path: &Path, now: DateTime<Utc>) -> SupervisorMetricsStatus {
     match read_at(path) {
         Ok(Some(snapshot)) => {
             let age_secs = (now - snapshot.written_at).num_seconds();
-            if age_secs > STALE_AFTER_SECS {
+            let stale_after_secs = stale_after_secs(Duration::from_secs(snapshot.interval_secs));
+            if age_secs > stale_after_secs {
                 SupervisorMetricsStatus::Stale {
                     snapshot: Box::new(snapshot),
                     age_secs,
+                    stale_after_secs,
                 }
             } else {
                 SupervisorMetricsStatus::Current {
                     snapshot: Box::new(snapshot),
                     age_secs,
+                    stale_after_secs,
                 }
             }
         }

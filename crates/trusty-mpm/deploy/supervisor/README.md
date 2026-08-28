@@ -36,10 +36,17 @@ jq . ~/.trusty-mpm/supervisor-metrics.json
 ```
 
 The file carries the fleet counts, the surfaced `pending_decision`s, the
-supervisor's cumulative `run_stats`, and the `written_at` instant it was
-published. A snapshot older than 300 seconds (ten default sweeps) is reported as
-**stale** rather than current — that, or an absent file, is how the console says
-"the supervisor is not running" instead of showing a confident zero.
+supervisor's cumulative `run_stats`, the `written_at` instant it was published,
+and the `interval_secs` the supervisor is configured at.
+
+A snapshot is reported as **stale** rather than current once it is older than
+three sweeps at that interval, with a 300-second floor — so the default 30s
+cadence tolerates 300 seconds, and a `TRUSTY_MPM_SUPERVISOR_INTERVAL=900`
+overnight supervisor tolerates 2700. Sizing the window from the cadence is what
+keeps a slow overnight supervisor from reading as dead for most of every cycle;
+the floor keeps a fast cadence from flapping on ordinary scheduling jitter. A
+stale or absent file is how the console says "the supervisor is not running"
+instead of showing a confident zero.
 
 ## Configuration (env vars)
 

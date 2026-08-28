@@ -255,7 +255,15 @@ impl<C: LlmClassifier> Supervisor<C> {
     /// Test: `supervisor_publishes_run_stats_after_sweeps`.
     pub async fn publish_snapshot(&self) {
         let snapshot = self.snapshot().await;
-        if let Err(e) = publish::write_at(&self.metrics_path, &snapshot, chrono::Utc::now()) {
+        // #6288: the cadence travels with the snapshot so the reader can size its
+        // staleness window against the interval this supervisor actually runs at,
+        // rather than a fixed constant a slow overnight cadence would trip.
+        if let Err(e) = publish::write_at(
+            &self.metrics_path,
+            &snapshot,
+            self.cfg.interval,
+            chrono::Utc::now(),
+        ) {
             error!(
                 path = %self.metrics_path.display(),
                 "supervisor: cannot publish metrics snapshot: {e}; \

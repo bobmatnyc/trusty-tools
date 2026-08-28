@@ -567,17 +567,22 @@ fn supervisor_metrics_merge_flags_a_stale_snapshot() {
     let path = tmp.path().join("supervisor-metrics.json");
     let mut published = FleetMetrics::default();
     published.run_stats.sweeps = 11;
-    let written_at =
-        Utc::now() - chrono::Duration::seconds(crate::supervisor::publish::STALE_AFTER_SECS + 30);
-    crate::supervisor::publish::write_at(&path, &published, written_at).expect("publish");
+    let interval = std::time::Duration::from_secs(30);
+    let threshold = crate::supervisor::publish::stale_after_secs(interval);
+    let written_at = Utc::now() - chrono::Duration::seconds(threshold + 30);
+    crate::supervisor::publish::write_at(&path, &published, interval, written_at).expect("publish");
 
     let mut fleet = FleetMetrics::default();
     let block = merge_supervisor_metrics(&mut fleet, &path, Utc::now());
 
     assert_eq!(block["status"], "stale");
-    assert!(
-        block["age_secs"].as_i64().expect("age") > crate::supervisor::publish::STALE_AFTER_SECS
+    assert!(block["age_secs"].as_i64().expect("age") > threshold);
+    assert_eq!(
+        block["stale_after_secs"].as_i64().expect("threshold"),
+        threshold,
+        "the block must report the window the verdict actually used: {block}"
     );
+    assert_eq!(block["interval_secs"], 30);
     assert_eq!(
         fleet.run_stats.sweeps, 11,
         "a stale snapshot's counters are still merged — dropping them would \

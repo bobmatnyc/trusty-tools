@@ -59,8 +59,8 @@ const SERVICE_VERSION: &str = env!("CARGO_PKG_VERSION");
 ///   its config without touching the env, so this is an inference about another
 ///   process, not an observation of it. It is only consulted when no override
 ///   file exists — i.e. before the operator has ever used the toggle. Closing
-///   that gap needs the supervisor to publish its resolved flag on the `/metrics`
-///   endpoint it already serves; tracked separately.
+///   that gap means adding the supervisor's resolved flag to the snapshot it
+///   already publishes (#6288); tracked separately.
 /// - `effective`: what the supervisor's next sweep will do — the persisted file
 ///   when it exists, otherwise `env`, or `null` when the file could not be read.
 /// - `read_error`: `null` normally; the I/O error string when the desired-state
@@ -126,10 +126,13 @@ async fn fleet_snapshot(state: &Arc<DaemonState>) -> Value {
 /// FAIL-OPEN CHECK: a missing, unreadable, or corrupt file must never read as
 /// "zero sweeps" — that is the defect, one layer out. Every outcome is named on
 /// the wire in `supervisor_metrics.status`:
-/// - `current` — a snapshot no older than [`publish::STALE_AFTER_SECS`]; its
-///   `run_stats` are merged into `fleet`.
+/// - `current` — a snapshot inside its own staleness window
+///   ([`publish::stale_after_secs`], sized from the cadence the writing
+///   supervisor runs at); its `run_stats` are merged into `fleet`.
 /// - `stale` — an older snapshot, still merged (it is the last real
 ///   observation), but flagged so the console does not present it as live.
+///   `interval_secs` and `stale_after_secs` ride along so a reader can see which
+///   window the verdict used.
 /// - `unavailable` — nothing usable; `fleet.run_stats` stays at its default AND
 ///   `reason` says why, so a reader can tell "the supervisor is not running"
 ///   from "the supervisor has run zero sweeps".
@@ -148,28 +151,41 @@ pub(crate) fn merge_supervisor_metrics(
     now: DateTime<Utc>,
 ) -> Value {
     match publish::read_status_at(path, now) {
-        SupervisorMetricsStatus::Current { snapshot, age_secs } => {
+        SupervisorMetricsStatus::Current {
+            snapshot,
+            age_secs,
+            stale_after_secs,
+        } => {
+            let interval_secs = snapshot.interval_secs;
             fleet.run_stats = snapshot.fleet.run_stats;
             json!({
                 "status": "current",
                 "written_at": snapshot.written_at,
                 "age_secs": age_secs,
-                "stale_after_secs": publish::STALE_AFTER_SECS,
+                "interval_secs": interval_secs,
+                "stale_after_secs": stale_after_secs,
             })
         }
-        SupervisorMetricsStatus::Stale { snapshot, age_secs } => {
+        SupervisorMetricsStatus::Stale {
+            snapshot,
+            age_secs,
+            stale_after_secs,
+        } => {
+            let interval_secs = snapshot.interval_secs;
             fleet.run_stats = snapshot.fleet.run_stats;
             json!({
                 "status": "stale",
                 "written_at": snapshot.written_at,
                 "age_secs": age_secs,
-                "stale_after_secs": publish::STALE_AFTER_SECS,
+                "interval_secs": interval_secs,
+                "stale_after_secs": stale_after_secs,
             })
         }
+        // No snapshot means no cadence to report a window for; a threshold here
+        // would be a number invented by the reader.
         SupervisorMetricsStatus::Unavailable { reason } => json!({
             "status": "unavailable",
             "reason": reason,
-            "stale_after_secs": publish::STALE_AFTER_SECS,
         }),
     }
 }
