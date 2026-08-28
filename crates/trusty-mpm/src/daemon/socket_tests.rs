@@ -33,11 +33,10 @@ async fn spawn_listener(
     tokio::sync::oneshot::Sender<()>,
     tokio::task::JoinHandle<()>,
 ) {
-    let listener = bind(socket).await.expect("bind a fresh socket path");
+    let bound = bind(socket).await.expect("bind a fresh socket path");
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
-    let socket_owned = socket.to_path_buf();
     let handle = tokio::spawn(async move {
-        serve_until_shutdown(listener, &socket_owned, async {
+        serve_until_shutdown(bound, async {
             let _ = stop_rx.await;
         })
         .await;

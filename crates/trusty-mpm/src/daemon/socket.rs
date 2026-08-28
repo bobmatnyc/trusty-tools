@@ -72,6 +72,23 @@ fn serve_options() -> RpcServeOptions {
     RpcServeOptions::default()
 }
 
+/// A bound RPC socket, with the path it occupies.
+///
+/// Why the two travel together: the listener must be served and the path must
+/// be unlinked afterwards, and the unlink has to name the path this listener
+/// actually took. Passing them separately let a caller hand
+/// [`serve_until_shutdown`] a path that was not the one [`bind`] used, which
+/// unlinks somebody else's socket. One value cannot be assembled wrong.
+///
+/// Test: exercised by every test in `socket_tests.rs`.
+#[derive(Debug)]
+pub struct BoundSocket {
+    /// The listener [`bind`] took.
+    pub listener: UnixListener,
+    /// The path it occupies, unlinked by [`serve_until_shutdown`].
+    pub path: PathBuf,
+}
+
 /// Bind `socket`, refusing to start when another daemon is live on it.
 ///
 /// Why `bind_singleton_hardened` rather than `bind_hardened`: this daemon is
@@ -91,10 +108,14 @@ fn serve_options() -> RpcServeOptions {
 ///
 /// Test: `bind_refuses_a_socket_another_process_is_serving`,
 /// `bind_reclaims_a_stale_socket_file`.
-pub async fn bind(socket: &Path) -> Result<UnixListener> {
-    trusty_common::uds::bind_singleton_hardened(socket)
+pub async fn bind(socket: &Path) -> Result<BoundSocket> {
+    let listener = trusty_common::uds::bind_singleton_hardened(socket)
         .await
-        .with_context(|| format!("bind trusty-mpm socket at {}", socket.display()))
+        .with_context(|| format!("bind trusty-mpm socket at {}", socket.display()))?;
+    Ok(BoundSocket {
+        listener,
+        path: socket.to_path_buf(),
+    })
 }
 
 /// Serve `listener` until `shutdown` resolves, then unlink `socket`.
@@ -111,21 +132,21 @@ pub async fn bind(socket: &Path) -> Result<UnixListener> {
 /// Test: `serve_unlinks_its_socket_on_shutdown`,
 /// `unknown_method_gets_a_method_not_found_frame`.
 pub async fn serve_until_shutdown(
-    listener: UnixListener,
-    socket: &Path,
+    bound: BoundSocket,
     shutdown: impl std::future::Future<Output = ()> + Send,
 ) {
+    let BoundSocket { listener, path } = bound;
     let router = Arc::new(build_router());
     tracing::info!(
-        socket = %socket.display(),
+        socket = %path.display(),
         methods = router.method_names().count(),
         "trusty-mpm serving rpc"
     );
 
     serve_until(&listener, router, serve_options(), shutdown).await;
 
-    if let Err(e) = std::fs::remove_file(socket) {
-        tracing::debug!(socket = %socket.display(), error = %e, "socket already gone");
+    if let Err(e) = std::fs::remove_file(&path) {
+        tracing::debug!(socket = %path.display(), error = %e, "socket already gone");
     }
     drop(listener);
 }

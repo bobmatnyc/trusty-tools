@@ -140,18 +140,17 @@ pub(crate) async fn run_daemon(
     let base_url = format!("http://{actual_addr}");
     tracing::info!("daemon listening on {base_url}");
 
-    // Write lock file so clients can discover us (backward-compat for existing
-    // clients that parse the TOML lock directly, e.g. the old MpmConnector).
-    //
-    // #6288: the socket path is DERIVED, so resolving it here — ahead of the
-    // bind `serve_http` performs — cannot disagree with what the daemon goes on
-    // to bind. Recording it lets a reader tell a socket-serving daemon from a
-    // pre-#6288 one. A resolution failure is not fatal here: `serve_http` binds
-    // that same path moments later and fails startup then, with the same error.
-    let socket_path = trusty_mpm::daemon::socket::socket_path()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
-    trusty_mpm::daemon::lock::write_lock(&base_url, &socket_path);
+    // #6288: bind the RPC socket and only then write the lock file, which is
+    // what clients discover us by (backward-compat for existing clients that
+    // parse the TOML lock directly, e.g. the old MpmConnector). See
+    // [`bind_socket_then_publish`] for why the order is the point.
+    let socket_path = trusty_mpm::daemon::socket::socket_path()?;
+    let rpc = bind_socket_then_publish(
+        &base_url,
+        &socket_path,
+        &trusty_mpm::core::discovery::lock_file_path(),
+    )
+    .await?;
     // Also write the standard trusty-common http_addr file so the console's
     // reverse proxy can discover the daemon address via the shared
     // `read_daemon_addr` helper (#1849 Phase 1).
@@ -187,10 +186,52 @@ pub(crate) async fn run_daemon(
         if let Err(e) = trusty_common::remove_daemon_addr("trusty-mpm") {
             tracing::warn!("failed to remove trusty-mpm http_addr discovery file: {e:#}");
         }
+        // See #6288: this exit almost certainly wins the race against
+        // `serve_with_shutdown`'s graceful drain, so neither the session reap
+        // (#1455) nor the socket unlink is guaranteed to run on a real SIGTERM.
+        // The socket is self-healing — `daemon::socket::bind` reclaims a file
+        // nobody is serving — so slice 1 leaves the race alone; slice 7, which
+        // moves the clients onto the socket, is where it gets fixed.
         std::process::exit(0);
     });
 
-    trusty_mpm::daemon::serve_http(state, listener).await
+    trusty_mpm::daemon::serve_http(state, listener, rpc).await
+}
+
+/// Bind the RPC socket, then publish the daemon's identity — in that order.
+///
+/// Why the order is the whole function (#6288): the lock file names a daemon
+/// that is about to serve, and `run_daemon` has no cleanup path on its error
+/// return. Before this slice there was one bind and it happened first, so a
+/// written lock always named a daemon that had taken every listener it needed.
+/// The socket bind is a second, fallible step; writing the lock between the two
+/// would leave a record naming a process that then aborts, and the next client
+/// would resolve a daemon URL nothing answers.
+///
+/// What: [`trusty_mpm::daemon::socket::bind`], then
+/// [`trusty_mpm::core::daemon_identity::write_lock_at`]. `lock_path` is a
+/// parameter so the test can assert against a temp path instead of the
+/// operator's real `~/.trusty-mpm/daemon.lock`.
+///
+/// # Errors
+///
+/// When the socket cannot be bound — including when another trusty-mpm is
+/// already serving it. Nothing is published on that path.
+///
+/// Test: `bind_socket_then_publish_writes_no_lock_when_the_socket_is_taken`,
+/// `bind_socket_then_publish_writes_the_lock_when_the_bind_succeeds`.
+async fn bind_socket_then_publish(
+    base_url: &str,
+    socket: &std::path::Path,
+    lock_path: &std::path::Path,
+) -> anyhow::Result<trusty_mpm::daemon::socket::BoundSocket> {
+    let rpc = trusty_mpm::daemon::socket::bind(socket).await?;
+    trusty_mpm::core::daemon_identity::write_lock_at(
+        lock_path,
+        base_url,
+        &socket.display().to_string(),
+    );
+    Ok(rpc)
 }
 
 /// Block until the process receives a shutdown signal (SIGINT or SIGTERM).
@@ -393,6 +434,71 @@ fn tailscale_deprecated_error() -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The regression test for the stale lock #6288 slice 1 would otherwise
+    /// have introduced.
+    ///
+    /// Why: `write_lock` used to be the step right after the only bind, so a
+    /// written lock always named a daemon holding every listener it needed.
+    /// The UDS bind is a second fallible step, and `run_daemon` has no cleanup
+    /// path on its error return — so a lock written before that bind would
+    /// outlive the aborted process and send the next client to a daemon that
+    /// never started.
+    /// What: holds the socket with a live listener, so the bind is refused,
+    /// then asserts the lock file was never created. Swapping the two
+    /// statements in `bind_socket_then_publish` makes this fail.
+    /// Test: this function IS the test.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bind_socket_then_publish_writes_no_lock_when_the_socket_is_taken() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let socket = tmp.path().join("sockets").join("trusty-mpm.sock");
+        let lock_path = tmp.path().join("daemon.lock");
+
+        // An incumbent daemon: a real listener the takeover must refuse.
+        let incumbent = trusty_mpm::daemon::socket::bind(&socket)
+            .await
+            .expect("the incumbent binds a fresh path");
+
+        let err = bind_socket_then_publish("http://127.0.0.1:7880", &socket, &lock_path)
+            .await
+            .expect_err("a bind against a live socket must fail");
+        assert!(
+            format!("{err:#}").contains(&socket.display().to_string()),
+            "the error must name the path: {err:#}"
+        );
+        assert!(
+            !lock_path.exists(),
+            "no lock file may name a daemon that failed to start: {}",
+            lock_path.display()
+        );
+
+        drop(incumbent);
+    }
+
+    /// The other half: a successful bind DOES publish, and the record carries
+    /// both endpoints.
+    ///
+    /// Why: an ordering test that only proves the failure path would pass if
+    /// the write were deleted outright.
+    /// Test: this function IS the test.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bind_socket_then_publish_writes_the_lock_when_the_bind_succeeds() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let socket = tmp.path().join("sockets").join("trusty-mpm.sock");
+        let lock_path = tmp.path().join("daemon.lock");
+
+        let rpc = bind_socket_then_publish("http://127.0.0.1:7880", &socket, &lock_path)
+            .await
+            .expect("a fresh socket binds");
+
+        let lock = trusty_mpm::core::daemon_identity::read_lock_at(&lock_path)
+            .expect("the lock must be written and readable");
+        assert_eq!(lock.addr, "http://127.0.0.1:7880");
+        assert_eq!(lock.socket_path, socket.display().to_string());
+        assert_eq!(lock.pid, std::process::id());
+
+        drop(rpc);
+    }
 
     /// `run_daemon` must refuse `--tailscale` before doing anything else —
     /// no bind, no chdir, no lock file — so the deprecation error is fast

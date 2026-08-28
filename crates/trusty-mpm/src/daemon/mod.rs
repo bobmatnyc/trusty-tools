@@ -68,46 +68,78 @@ pub use state::DaemonState;
 /// Why: the HTTP boot sequence is shared by both the standalone `trusty-mpmd`
 /// shim and the unified `trusty-mpm daemon` subcommand; living in the library
 /// keeps a single source of truth.
-/// What: announces tmux availability, discovers the trusty sidecars, spawns the
-/// file watcher, then serves the axum router until the socket closes.
-/// Test: `cargo run -p trusty-mpm-cli -- daemon` logs "trusty-mpm daemon
-/// starting" and `curl localhost:7880/health` returns `ok`.
-pub async fn run_http(state: Arc<DaemonState>, addr: SocketAddr) -> anyhow::Result<()> {
-    info!("trusty-mpm daemon starting on {addr}");
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    serve_http(state, listener).await
-}
-
-/// Run the daemon's background tasks and HTTP API on an already-bound listener.
-///
-/// Why: the CLI performs auto port selection (binding an ephemeral port when
-/// the configured one is busy) and needs the daemon to serve on that exact
-/// listener; passing a pre-bound `TcpListener` lets it own the bind decision
-/// while the daemon still owns sidecar discovery, the watcher, and the reaper.
-/// What: binds the Unix socket (#6288), discovers the trusty sidecars, spawns
-/// the file watcher and the dead-session reaper, then serves the axum router on
-/// `listener` AND the RPC router on the socket until both drain.
+/// What: binds both listeners — the TCP port and the RPC socket (#6288) — then
+/// hands them to [`serve_http`].
 ///
 /// # Errors
 ///
-/// When the Unix socket cannot be bound — including when another trusty-mpm is
-/// answering it — or when the HTTP server exits with one. A socket that cannot
-/// be bound fails startup rather than degrading to an HTTP-only daemon, exactly
-/// as a failed `TcpListener::bind` would (the Fail-Open Check, #6288).
+/// When either listener cannot be bound, or as [`serve_http`].
 ///
-/// Test: covered indirectly by the e2e suite, which boots the daemon on a
-/// loopback port and drives it over HTTP; the socket half is covered by
+/// Test: `cargo run -p trusty-mpm-cli -- daemon` logs "trusty-mpm daemon
+/// starting" and `curl localhost:7880/health` returns `ok`; the dual-serve and
+/// drain behaviour is covered by `tests/daemon_dual_serve.rs`.
+pub async fn run_http(state: Arc<DaemonState>, addr: SocketAddr) -> anyhow::Result<()> {
+    info!("trusty-mpm daemon starting on {addr}");
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    // #6288: both binds complete before anything is served, for the same reason
+    // `run_daemon` publishes nothing until both succeed — a half-bound daemon
+    // must not exist.
+    let rpc = socket::bind(&socket::socket_path()?).await?;
+    serve_http(state, listener, rpc).await
+}
+
+/// Run the daemon's background tasks, HTTP API, and RPC socket on already-bound
+/// listeners.
+///
+/// Why both listeners arrive pre-bound: the CLI performs auto port selection
+/// (binding an ephemeral port when the configured one is busy) and needs the
+/// daemon to serve on that exact listener. The socket is pre-bound for a
+/// stronger reason (#6288) — `run_daemon` writes a lock file naming this
+/// daemon, and a lock must never name a daemon that then fails to start. Both
+/// binds happen in the caller, before anything is published, so a UDS bind
+/// failure aborts before the lock is written rather than leaving a record with
+/// no cleanup path.
+///
+/// What: discovers the trusty sidecars, spawns the file watcher and the
+/// dead-session reaper, then serves the axum router on `listener` AND the RPC
+/// router on `rpc` until both drain on SIGTERM/SIGINT.
+///
+/// # Errors
+///
+/// When the HTTP server exits with one.
+///
+/// Test: `serve_http_drains_both_listeners_on_shutdown` in
+/// `tests/daemon_dual_serve.rs` drives this body through
+/// [`serve_with_shutdown`]; the socket half in isolation is covered by
 /// `socket_tests.rs`.
 pub async fn serve_http(
     state: Arc<DaemonState>,
     listener: tokio::net::TcpListener,
+    rpc: socket::BoundSocket,
 ) -> anyhow::Result<()> {
-    // #6288: bind the socket FIRST, before any background loop is spawned, so a
-    // refusal leaves nothing running to unwind. `?` is the whole Fail-Open
-    // Check: a daemon that cannot take its socket does not start HTTP-only.
-    let socket_path = socket::socket_path()?;
-    let rpc_listener = socket::bind(&socket_path).await?;
+    serve_with_shutdown(state, listener, rpc, trusty_common::shutdown_signal()).await
+}
 
+/// [`serve_http`]'s body, with the shutdown future supplied by the caller.
+///
+/// Why: [`serve_http`] waits on SIGTERM/SIGINT, which a test cannot deliver to
+/// its own process without affecting the whole test binary. Taking the future
+/// as a parameter is what lets `serve_http_drains_both_listeners_on_shutdown`
+/// drive the REAL drain — the same fan-out, the same unlink — rather than
+/// re-implementing the loop, which would pass whether or not the fan-out below
+/// exists.
+///
+/// # Errors
+///
+/// As [`serve_http`].
+///
+/// Test: `serve_http_drains_both_listeners_on_shutdown`.
+pub async fn serve_with_shutdown(
+    state: Arc<DaemonState>,
+    listener: tokio::net::TcpListener,
+    rpc: socket::BoundSocket,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()> {
     // #5784: report a gated environment as gated. Without this branch the
     // refusal reads as "tmux not found", which sends an operator hunting for a
     // missing binary instead of showing them the reassigned `$HOME` and the
@@ -226,22 +258,21 @@ pub async fn serve_http(
     // fail-open per session. Also calls `manager.shutdown()` to graceful-stop
     // all live managed sessions via SIGTERM-before-kill.
     //
-    // #6288: the signal is awaited ONCE, by the task below, and fanned out to
-    // both listeners through a token. Awaiting `shutdown_signal()` separately in
-    // each would work on SIGTERM and fail on Ctrl-C, where `tokio::signal`
-    // delivers to whichever waiter is registered — one listener would drain and
-    // the other would keep accepting.
+    // #6288: `shutdown` is awaited ONCE, by the task below, and fanned out to
+    // both listeners through a token. Awaiting a signal separately in each would
+    // work on SIGTERM and fail on Ctrl-C, where `tokio::signal` delivers to
+    // whichever waiter is registered — one listener would drain and the other
+    // would keep accepting.
     let drain = tokio_util::sync::CancellationToken::new();
     let signal_watcher = drain.clone();
     tokio::spawn(async move {
-        trusty_common::shutdown_signal().await;
+        shutdown.await;
         signal_watcher.cancel();
     });
 
     let rpc_drain = drain.clone();
-    let rpc_socket = socket_path.clone();
     let rpc_task = tokio::spawn(async move {
-        socket::serve_until_shutdown(rpc_listener, &rpc_socket, rpc_drain.cancelled_owned()).await;
+        socket::serve_until_shutdown(rpc, rpc_drain.cancelled_owned()).await;
     });
 
     let http_drain = drain.clone();
