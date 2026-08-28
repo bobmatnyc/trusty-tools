@@ -188,6 +188,10 @@ pub use typeahead::{
 
 use self::health::upgrade_handler;
 
+// #6285: the one seam `service::socket` reads the health report through, so the
+// socket and `GET /health` cannot report different things.
+pub(crate) use health::health_report;
+
 /// Build the axum router with the shared state.
 ///
 /// Why: Wraps `state` in an `Arc` so every handler clones the pointer cheaply.
@@ -231,11 +235,29 @@ pub fn build_router_with_self_origins(
     state: SearchAppState,
     self_origins: trusty_common::server::SelfOrigins,
 ) -> Router {
+    build_router_on(Arc::new(state), self_origins)
+}
+
+/// [`build_router_with_self_origins`], over a state the caller already shares.
+///
+/// Why (#6285, ADR-0032): the daemon now serves the same registry on two
+/// transports — this router and `service::socket`'s RPC listener. Both have to
+/// read the ONE `SearchAppState` the tickers mutate; a second `Arc::new` would
+/// give the socket its own registry, its own disk-size ticker, and its own
+/// residency sweep, and the two doors would disagree about which indexes exist.
+/// What: the whole former body of [`build_router_with_self_origins`], taking
+/// the `Arc` instead of making it. The by-value entry point above is unchanged
+/// for every existing caller and test.
+/// Test: `both_transports_report_the_same_index_count` in
+/// `service::socket::tests`.
+pub fn build_router_on(
+    state_arc: Arc<SearchAppState>,
+    self_origins: trusty_common::server::SelfOrigins,
+) -> Router {
     use crate::service::query_timeout::{apply_query_timeout, QueryTimeoutConfig};
     use crate::service::ui::{
         chat_handler, list_chat_providers, ui_asset_handler, ui_index_handler,
     };
-    let state_arc = Arc::new(state);
     spawn_status_ticker(Arc::clone(&state_arc));
     spawn_disk_size_ticker(Arc::clone(&state_arc));
     spawn_idle_chunk_eviction_ticker(Arc::clone(&state_arc));
