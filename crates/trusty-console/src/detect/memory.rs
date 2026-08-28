@@ -16,7 +16,9 @@
 //! What: `MemoryConnector::detect()` dials `memory.health` over the socket and
 //! reads `version` off the answer.
 //! Test: `memory_connector_reports_available_when_nothing_is_serving`,
-//! `memory_connector_reads_the_version_off_a_live_socket`.
+//! `memory_connector_reads_the_version_off_a_live_socket`,
+//! `memory_connector_sends_params_so_a_strict_health_handler_answers`,
+//! `memory_connector_reports_degraded_when_the_daemon_answers_with_an_error`.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -116,7 +118,26 @@ impl Default for MemoryConnector {
     }
 }
 
-/// Dial `memory.health` and return the envelope, or `None` if nothing answered.
+/// What one `memory.health` dial observed.
+///
+/// Why (#6356): "the daemon did not answer" and "the daemon answered, but not
+/// with health" are different facts about a machine, and collapsing both into
+/// `None` is what let a live daemon render as "Binary found but daemon is not
+/// running" for as long as the request was malformed. A daemon that answers at
+/// all is running; only the first case is silence.
+/// What: three variants, one per verdict `detect_from` can reach.
+/// Test: `memory_connector_reports_degraded_when_the_daemon_answers_with_an_error`.
+enum ProbeOutcome {
+    /// The daemon answered with a readable health envelope.
+    Healthy(HealthEnvelope),
+    /// The daemon answered, but not with health. Carries the operator-facing
+    /// reason, which becomes the card's hint.
+    Unhealthy(String),
+    /// Nothing answered - no socket, no listener, or the dial timed out.
+    Silent,
+}
+
+/// Dial `memory.health` and report what came back.
 ///
 /// Why: `ServiceConnector::detect` is synchronous — the poller calls it inside
 /// `spawn_blocking` — and the shared UDS client is async. The exchange runs on
@@ -127,34 +148,65 @@ impl Default for MemoryConnector {
 /// from any caller regardless of what it is running on.
 ///
 /// What: one `send_framed_request` bounded by [`HEALTH_TIMEOUT`], then a
-/// JSON-RPC envelope check. A response carrying an `error` is `None`: the
-/// daemon answered, but not with health, and the console has nothing to render.
+/// JSON-RPC envelope check, mapped onto [`ProbeOutcome`]. A response carrying
+/// an `error` is [`ProbeOutcome::Unhealthy`], not silence - the daemon is
+/// there, and reporting otherwise is what #6356 was.
 ///
-/// Test: `memory_connector_reports_available_when_nothing_is_serving`.
-fn probe_health(socket: &Path) -> Option<HealthEnvelope> {
+/// Test: `memory_connector_reports_available_when_nothing_is_serving`,
+/// `memory_connector_sends_params_so_a_strict_health_handler_answers`,
+/// `memory_connector_reports_degraded_when_the_daemon_answers_with_an_error`.
+fn probe_health(socket: &Path) -> ProbeOutcome {
     let socket = socket.to_path_buf();
-    let handle = std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("console-memory-probe".to_owned())
         .spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .ok()?;
+            else {
+                return ProbeOutcome::Silent;
+            };
             rt.block_on(async {
+                // #6356: `memory.health` binds `HealthQuery`, and
+                // `RpcRouter::typed` decodes an absent `params` as
+                // `Value::Null`, which a derived `Deserialize` refuses however
+                // many of its fields default. The sibling daemons bind
+                // `NoParams`, whose hand-written `Deserialize` accepts null,
+                // which is why only this connector was affected. `{}` takes
+                // every default - the cheap health path, not the embedder
+                // round-trip `probe`/`deep` would ask for.
                 let request = serde_json::json!({
                     "jsonrpc": "2.0",
                     "id": 1,
                     "method": METHOD_HEALTH,
+                    "params": {},
                 });
-                let response: trusty_common::uds::server::RpcResponse =
-                    trusty_common::uds::send_framed_request(&socket, &request, HEALTH_TIMEOUT)
-                        .await
-                        .ok()?;
-                serde_json::from_value::<HealthEnvelope>(response.result?).ok()
+                let sent = trusty_common::uds::send_framed_request::<
+                    _,
+                    trusty_common::uds::server::RpcResponse,
+                >(&socket, &request, HEALTH_TIMEOUT)
+                .await;
+                let Ok(response) = sent else {
+                    return ProbeOutcome::Silent;
+                };
+                if let Some(error) = response.error {
+                    return ProbeOutcome::Unhealthy(format!(
+                        "trusty-memory answered {METHOD_HEALTH} with an error (code {}): {}",
+                        error.code, error.message
+                    ));
+                }
+                match response.result.map(serde_json::from_value::<HealthEnvelope>) {
+                    Some(Ok(health)) => ProbeOutcome::Healthy(health),
+                    _ => ProbeOutcome::Unhealthy(format!(
+                        "trusty-memory answered {METHOD_HEALTH} with a body that is not a health envelope"
+                    )),
+                }
             })
-        })
-        .ok()?;
-    handle.join().ok()?
+        });
+    let Ok(handle) = spawned else {
+        return ProbeOutcome::Silent;
+    };
+    handle.join().unwrap_or(ProbeOutcome::Silent)
 }
 
 impl ServiceConnector for MemoryConnector {
@@ -180,7 +232,8 @@ impl ServiceConnector for MemoryConnector {
     /// [`MemoryConnector::socket_path`].
     /// Test: `memory_connector_reports_available_when_nothing_is_serving`,
     /// `memory_connector_reads_the_version_off_a_live_socket`,
-    /// `memory_connector_surfaces_an_unresolvable_socket_path_as_a_hint`.
+    /// `memory_connector_surfaces_an_unresolvable_socket_path_as_a_hint`,
+    /// `memory_connector_reports_degraded_when_the_daemon_answers_with_an_error`.
     fn detect(&self) -> ServiceInfo {
         self.detect_from(self.socket_path())
     }
@@ -195,8 +248,9 @@ impl MemoryConnector {
     /// process-global and, in this crate's test binary, is read by five sibling
     /// connectors running in parallel. Taking the resolved result as a parameter
     /// makes the arm assertable with no global state at all.
-    /// What: binary check, then the three verdicts.
-    /// Test: `memory_connector_surfaces_an_unresolvable_socket_path_as_a_hint`.
+    /// What: binary check, then the four verdicts.
+    /// Test: `memory_connector_surfaces_an_unresolvable_socket_path_as_a_hint`,
+    /// `memory_connector_reports_degraded_when_the_daemon_answers_with_an_error`.
     fn detect_from(&self, socket: Result<PathBuf, String>) -> ServiceInfo {
         let base =
             |status: ServiceStatus, version: Option<String>, hint: Option<String>| ServiceInfo {
@@ -218,8 +272,14 @@ impl MemoryConnector {
         };
 
         match probe_health(&socket) {
-            Some(health) => base(ServiceStatus::Running, health.version, None),
-            None => base(ServiceStatus::Available, None, None),
+            ProbeOutcome::Healthy(health) => base(ServiceStatus::Running, health.version, None),
+            // #6356: a daemon that answers is running, so the row says so
+            // rather than repeating the "not running" line an operator has
+            // already disproved by seeing the socket. `Degraded` is the row
+            // model's existing "reachable, but not answering as expected"
+            // state, and the card renders its hint verbatim.
+            ProbeOutcome::Unhealthy(reason) => base(ServiceStatus::Degraded, None, Some(reason)),
+            ProbeOutcome::Silent => base(ServiceStatus::Available, None, None),
         }
     }
 }
@@ -229,6 +289,37 @@ impl MemoryConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Bind `socket` and answer exactly one frame with whatever `reply` makes
+    /// of the request it received.
+    ///
+    /// Why: three tests need a `memory.health` responder and differ only in
+    /// what it answers - one accepts anything, one mirrors trusty-memory's
+    /// `HealthQuery` decode, one refuses everything. Sharing the
+    /// accept-read-write half leaves that difference as the only thing each
+    /// test states.
+    /// What: binds a hardened socket, reads the request frame to EOF (the
+    /// client half-closes its write side after sending), and writes
+    /// `reply(frame)` followed by the newline the framing terminates on.
+    /// Test: used by the three socket-backed tests below.
+    fn spawn_health_socket(
+        socket: &Path,
+        reply: impl FnOnce(serde_json::Value) -> String + Send + 'static,
+    ) {
+        let listener = trusty_common::uds::bind_hardened(socket).expect("bind");
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            let Ok((mut conn, _)) = listener.accept().await else {
+                return;
+            };
+            let mut raw = Vec::new();
+            let _ = conn.read_to_end(&mut raw).await;
+            let frame = serde_json::from_slice(&raw).unwrap_or(serde_json::Value::Null);
+            let _ = conn.write_all(reply(frame).as_bytes()).await;
+            let _ = conn.write_all(b"\n").await;
+            let _ = conn.flush().await;
+        });
+    }
 
     /// Why (#6286): the pre-migration connector read a dotfile nothing rewrites
     /// any more, so any process holding the port it named made this report a
@@ -319,21 +410,9 @@ mod tests {
         }
 
         let tmp = tempfile::TempDir::new().expect("tempdir");
-        let socket = tmp.path().join("sockets").join("analyze.sock");
-        let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
-
-        tokio::spawn(async move {
-            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-            let Ok((mut conn, _)) = listener.accept().await else {
-                return;
-            };
-            let mut sink = Vec::new();
-            let _ = conn.read_to_end(&mut sink).await;
-            let reply =
-                br#"{"jsonrpc":"2.0","id":1,"result":{"status":"ok","version":"9.9.9","search_reachable":true}}"#;
-            let _ = conn.write_all(reply).await;
-            let _ = conn.write_all(b"\n").await;
-            let _ = conn.flush().await;
+        let socket = tmp.path().join("sockets").join("memory.sock");
+        spawn_health_socket(&socket, |_frame| {
+            r#"{"jsonrpc":"2.0","id":1,"result":{"status":"ok","version":"9.9.9","search_reachable":true}}"#.to_string()
         });
 
         let connector = MemoryConnector::with_socket(socket);
@@ -343,5 +422,92 @@ mod tests {
 
         assert_eq!(info.status, ServiceStatus::Running);
         assert_eq!(info.version.as_deref(), Some("9.9.9"));
+    }
+
+    /// Why (#6356): the probe sent no `params` at all, and trusty-memory 0.25.2
+    /// answers `-32602` - "params do not decode: invalid type: null, expected
+    /// struct HealthQuery" - instead of health, so a running daemon rendered as
+    /// "Available - Binary found but daemon is not running". This is the test
+    /// that fails without the `"params": {}` the request now carries.
+    /// What: the responder mirrors the daemon's own decode - an object `params`
+    /// is accepted, anything else is refused exactly as the real handler
+    /// refuses it - and the connector must come back Running with the version.
+    /// Test: this is the test.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn memory_connector_sends_params_so_a_strict_health_handler_answers() {
+        if which::which("trusty-memory").is_err() {
+            eprintln!("skip: trusty-memory is not on PATH, so detect() short-circuits to Absent");
+            return;
+        }
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let socket = tmp.path().join("sockets").join("memory.sock");
+        spawn_health_socket(&socket, |frame| {
+            match frame.get("params") {
+                Some(serde_json::Value::Object(_)) => r#"{"jsonrpc":"2.0","id":1,"result":{"status":"ok","version":"0.25.2"}}"#.to_string(),
+                _ => r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"params do not decode: invalid type: null, expected struct HealthQuery"}}"#.to_string(),
+            }
+        });
+
+        let connector = MemoryConnector::with_socket(socket);
+        let info = tokio::task::spawn_blocking(move || connector.detect())
+            .await
+            .expect("detect");
+
+        assert_eq!(
+            info.status,
+            ServiceStatus::Running,
+            "a daemon that answers health must read as Running, not {:?} (hint: {:?})",
+            info.status,
+            info.hint
+        );
+        assert_eq!(info.version.as_deref(), Some("0.25.2"));
+    }
+
+    /// Why (#6356): telling "answered wrongly" apart from "did not answer" must
+    /// not turn the probe fail-open. An error answer is still not health, so
+    /// the row must never claim `Running` or invent a version - it reports the
+    /// daemon as reachable-but-wrong and hands the operator the error verbatim.
+    /// What: a responder that refuses every call, whatever it is sent.
+    /// Test: this is the test.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn memory_connector_reports_degraded_when_the_daemon_answers_with_an_error() {
+        if which::which("trusty-memory").is_err() {
+            eprintln!("skip: trusty-memory is not on PATH, so detect() short-circuits to Absent");
+            return;
+        }
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let socket = tmp.path().join("sockets").join("memory.sock");
+        spawn_health_socket(&socket, |_frame| {
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}"#
+                .to_string()
+        });
+
+        let connector = MemoryConnector::with_socket(socket);
+        let info = tokio::task::spawn_blocking(move || connector.detect())
+            .await
+            .expect("detect");
+
+        assert_ne!(
+            info.status,
+            ServiceStatus::Running,
+            "an error answer is not health, however reachable the daemon is"
+        );
+        assert_eq!(
+            info.status,
+            ServiceStatus::Degraded,
+            "a daemon that answers is running, so the row must not read Available"
+        );
+        assert!(
+            info.version.is_none(),
+            "there was no health envelope to read a version off: {:?}",
+            info.version
+        );
+        let hint = info.hint.expect("an error answer must explain itself");
+        assert!(
+            hint.contains("-32601") && hint.contains("method not found"),
+            "the hint must carry the daemon's own error verbatim: {hint}"
+        );
     }
 }
