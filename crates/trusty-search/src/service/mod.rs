@@ -22,6 +22,10 @@ pub mod mcp_descriptor;
 pub mod metrics;
 pub mod network_fs;
 pub mod orphan_reaper;
+// #6371: the read-only census the console's cleanup action lists before it
+// deletes anything. Sits beside the reaper because it routes the reap decision
+// through `orphan_reaper::is_reapable_orphan`.
+pub mod orphan_report;
 pub mod persistence;
 pub mod persistence_loader;
 pub mod persistence_timestamps;

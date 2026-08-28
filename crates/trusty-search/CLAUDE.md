@@ -248,6 +248,44 @@ reuses it. This is the safe deregistration verb for registry hygiene. Pass
   `removed` is `false` when nothing was removed at all. Never treat a `500` here
   as "probably removed".
 
+##### `GET /registry/orphans`
+
+Census of `indexes.toml` — which registrations have a root that is gone (#6371).
+
+Reads the REGISTRY FILE, not the in-memory registry. That is the point: a row
+the #767 allowlist excluded at warm boot is absent from `GET /indexes` and from
+every roster built on it, and this is where it becomes visible. The route
+removes nothing; `DELETE /indexes/:id` stays the one deregistration path.
+
+- **Request body**: none.
+- **Response 200**:
+  ```json
+  {
+    "orphans": [
+      { "id": ".tmp8eTxnc", "root_path": "/private/var/folders/…/T/ts-x",
+        "colocated": false, "repo_identity": null }
+    ],
+    "indeterminate": [
+      { "id": "kemono", "root_path": "/Volumes/Kemono/project",
+        "reason": "the root is on an external volume; …" }
+    ],
+    "live_count": 7,
+    "total": 9
+  }
+  ```
+  - `orphans`: roots `service::orphan_reaper::is_reapable_orphan` calls gone —
+    the root is missing and its immediate parent survives it. Safe to offer for
+    deletion.
+  - `indeterminate`: roots the daemon DECLINED to judge — anything under
+    `/Volumes` (a mounted-but-TCC-blocked volume answers `false` to `exists()`,
+    or hangs), and a missing root whose parent is missing too, which is what an
+    unmounted volume looks like. `exists()` answers `false` for a deleted
+    directory and an unavailable one alike, so these are reported separately
+    rather than folded into `orphans`. A caller must never delete them.
+  - `live_count` + `orphans.len()` + `indeterminate.len()` == `total`.
+- **Response 500**: `{ "error": "could not read the index registry: …" }` — an
+  unreadable registry is an error, never an empty census.
+
 ##### `GET /indexes/:id/status`
 
 Per-index stats.
