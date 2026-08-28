@@ -1,0 +1,2 @@
+Fixed
+- A delete the daemon skipped no longer reads as success (#6360). `DELETE /indexes/{id}` answers `200 OK` with `removed: false` for an index trusty-search never had, and `data_deleted: false` when the registration went but the bytes stayed (#3049); both surface as a failure carrying the daemon's own words, as do a JSON-RPC refusal from `palace_delete` and any answer that does not confirm the exact id

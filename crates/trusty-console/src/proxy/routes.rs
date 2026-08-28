@@ -95,7 +95,10 @@ fn full_id(service_key: &str) -> Option<&'static str> {
 /// What: Returns `true` if `url` starts with `http://127.`, `http://[::1]`, or
 /// `http://localhost`; `false` for anything else.
 /// Test: `test_is_local_upstream_*` below.
-fn is_local_upstream(url: &str) -> bool {
+// #6360: `pub(crate)` so the console's delete routes apply the same
+// loopback predicate before dialling a daemon, rather than minting a second
+// answer to "is this upstream local".
+pub(crate) fn is_local_upstream(url: &str) -> bool {
     url.starts_with("http://127.")
         || url.starts_with("http://[::1]")
         || url.starts_with("http://localhost")

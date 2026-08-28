@@ -84,7 +84,11 @@ impl MetricsCache {
 /// What: Calls `handle.poll_metrics()`. On success writes to cache and logs
 /// `debug!`. On failure retains the previous cache value and logs `warn!`.
 /// Test: Covered by end-to-end smoke test (no live binary available in unit tests).
-async fn poll_once(handle: &McpServiceHandle, cache: &MetricsCache) {
+///
+// #6360: `pub(crate)` so a completed delete can refresh the roster it changed
+// immediately, instead of leaving the dashboard on a cache written up to one
+// poll interval ago. See `routes::deletes::refresh_metrics`.
+pub(crate) async fn poll_once(handle: &McpServiceHandle, cache: &MetricsCache) {
     match handle.poll_metrics().await {
         Ok(report) => {
             debug!(

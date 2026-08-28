@@ -1,0 +1,4 @@
+Added
+- The dashboard deletes a trusty-memory palace and a trusty-search index from their roster rows (#6360). `DELETE /api/console/memory/palaces/{id}` calls `palace_delete` over trusty-memory's Unix socket — the transport `MemoryConnector` already uses — and `DELETE /api/console/search/indexes/{id}` calls trusty-search's own `DELETE /indexes/{id}`. The console implements no deletion of its own
+- Each delete is behind a confirm step that names the exact id, so one click cannot destroy a corpus. The confirm carries the daemon's own opt-in flag: `force` for a palace that still holds drawers, `delete_data` for an index whose on-disk corpus should go rather than only its registration
+- A confirmed delete re-polls the owning daemon's `console_metrics` before answering, so the roster the dashboard re-fetches reflects the delete instead of a cache written up to a poll interval ago. The row is never removed client-side
