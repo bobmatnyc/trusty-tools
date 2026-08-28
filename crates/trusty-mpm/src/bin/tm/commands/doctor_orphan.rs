@@ -26,7 +26,8 @@
 //!
 //! This lives in the `tm` CLI binary rather than the daemon's server-side
 //! `run_doctor` for the same reason as the #2332 stale-daemon check
-//! (`doctor_stale`): the answer depends on state outside the responding process.
+//! (`doctor_stale`): the answer depends on state outside the responding
+//! process.
 //! Only a client can compare "who answered" against "who launchd was told to
 //! run", and in the #4230 state the daemon that answers is precisely the one
 //! whose self-report cannot be trusted.
@@ -49,7 +50,7 @@ pub(crate) const CHECK_NAME: &str = "daemon_orphan";
 /// Assemble the #4230 orphan check from the caller's `/health` snapshot.
 ///
 /// Why: the snapshot is passed in rather than re-fetched (#4230 review, LOW-1) —
-/// `commands::misc::doctor` already needs it for the #2332 staleness check, and
+/// `commands::doctor_local` already needs it for the #2332 staleness check, and
 /// issuing a second GET both contradicted this module's own doc and sampled the
 /// daemon twice, which could straddle a restart.
 /// What: resolves the registered daemon launchd label and, when there is one,

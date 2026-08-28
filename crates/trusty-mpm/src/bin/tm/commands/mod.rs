@@ -6,10 +6,11 @@
 //! What: re-exports handler modules — `auth`, `compress`, `daemon`,
 //! `hook_rewrite`, `install`, `launch`, `managed`, `managed_route`, `meta`,
 //! `misc`, `project`, `services`, `session`, `slack`, `supervisor`, `telegram`.
-//! Two client-side `tm doctor` probes also live here rather than in the daemon's
+//! Three client-side `tm doctor` probes also live here rather than in the daemon's
 //! `run_doctor`, because each needs state the responding daemon cannot report on
 //! itself: `doctor_stale` (this binary's own `CARGO_PKG_VERSION`, #2332) and
-//! `doctor_orphan` (whether launchd owns the process that answered, #4230).
+//! `doctor_orphan` (whether launchd owns the process that answered, #4230), and
+//! `doctor_daemon_row` (whether a daemon answered at all, #6336).
 //! Test: each module has its own unit tests; integration coverage lives in
 //! `tests.rs`.
 
@@ -24,7 +25,11 @@ pub(crate) mod daemon;
 pub(crate) mod delete;
 // #4230: the client-side orphan-daemon check — the daemon's own `run_doctor`
 // cannot detect that the process answering it is the unsupervised one.
+// #6336: the standalone `tm doctor` — the battery runs in-process and the
+// daemon is one appended reachability row, never a precondition.
+pub(crate) mod doctor_daemon_row;
 pub(crate) mod doctor_fix_skills;
+pub(crate) mod doctor_local;
 pub(crate) mod doctor_orphan;
 // #4948: the `tm doctor --fix` driver — dry-run by default, `--yes` to write.
 pub(crate) mod doctor_repair;

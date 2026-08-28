@@ -298,6 +298,39 @@ impl DaemonClient {
         Ok(snapshot)
     }
 
+    /// Fetch `GET /health` under an explicit per-request bound, keeping the
+    /// transport error TYPED.
+    ///
+    /// Why (#6336): `tm doctor` reports daemon reachability as one check row
+    /// with three outcomes — reachable, not running, unresponsive — and only a
+    /// typed `reqwest::Error` can tell the last two apart (`is_connect()` means
+    /// nothing is listening; anything else means something answered the socket
+    /// but not the probe). [`Self::health_snapshot`] flattens both into
+    /// `anyhow`, which is right for callers that only need "unreachable" and
+    /// wrong for a probe whose whole job is the distinction. The explicit
+    /// bound exists because doctor's probe is interactive: the client-level
+    /// [`config::DEFAULT_REQUEST_TIMEOUT`] is a correctness ceiling for a
+    /// wedged daemon, not a latency budget an operator waits out.
+    /// What: same request as [`Self::health_snapshot`], with
+    /// `RequestBuilder::timeout` overriding the client default for this call
+    /// only, and the `reqwest::Error` returned unwrapped.
+    /// Test: `daemon_probe_reports_not_running_when_nothing_listens`
+    /// (`src/bin/tm/commands/doctor_daemon_row_tests.rs`).
+    pub async fn health_snapshot_within(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<HealthSnapshot, reqwest::Error> {
+        let url = format!("{}/health", self.base);
+        self.http
+            .get(&url)
+            .timeout(timeout)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await
+    }
+
     /// Pause a session via `POST /sessions/{id}/pause`.
     ///
     /// Why: the dashboard's `p` key pauses the selected session in place.
