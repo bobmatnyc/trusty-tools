@@ -125,13 +125,14 @@ of those bind it; all three go when that client migrates. Whatever you pick:
   rather than as a zero. The installer's #4470 foreign-port guard for this
   bootstrap went with it — a process that binds nothing cannot collide.
 - **#3364** — `trusty-code`'s default HTTP port (7881) collided with
-  `trusty-mpm`'s supervisor metrics listener (`DEFAULT_METRICS_ADDR`, also
-  7881) — two defaults picked independently, on the same port, with no
-  cross-crate guard catching it because neither `trusty-code` nor the
-  supervisor had a `known_siblings`-style test at the time. The collision
-  was masked rather than surfaced: the supervisor answered `/health` with a
-  generic `{"status":"ok"}`, so both `tcode`'s GUI client and ops health
-  probes got a false-healthy signal while every real `tcode` route 404'd.
+  `trusty-mpm`'s supervisor metrics listener (then `DEFAULT_METRICS_ADDR`,
+  also 7881; both removed by #6288) — two defaults picked independently, on
+  the same port, with no cross-crate guard catching it because neither
+  `trusty-code` nor the supervisor had a `known_siblings`-style test at the
+  time. The collision was masked rather than surfaced: the supervisor
+  answered `/health` with a generic `{"status":"ok"}`, so both `tcode`'s GUI
+  client and ops health probes got a false-healthy signal while every real
+  `tcode` route 404'd.
   Fixed by moving `trusty-code::serve::DEFAULT_HTTP_PORT` to 7882 (in
   lockstep with `trusty-code-gui`'s hardcoded default) and adding this
   table plus a collision-guard test to `trusty-code` itself.
