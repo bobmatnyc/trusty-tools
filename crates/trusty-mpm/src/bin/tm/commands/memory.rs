@@ -27,6 +27,7 @@ pub(crate) async fn memory(action: MemoryAction) -> anyhow::Result<()> {
             dir,
             palace,
             dry_run,
+            refresh,
             json,
             allow_secret_like,
             memory_socket,
@@ -35,6 +36,7 @@ pub(crate) async fn memory(action: MemoryAction) -> anyhow::Result<()> {
                 dir,
                 palace,
                 dry_run,
+                refresh,
                 allow_secret_like,
                 memory_socket,
             };
@@ -67,8 +69,10 @@ fn print_summary(report: &ImportReport) {
         let status = match file.status {
             ImportStatus::Created => "created",
             ImportStatus::Skipped => "skipped",
+            ImportStatus::Refreshed => "refreshed",
             ImportStatus::WouldCreate => "would-create",
             ImportStatus::WouldSkip => "would-skip",
+            ImportStatus::WouldRefresh => "would-refresh",
             ImportStatus::Failed => "FAILED",
         };
         let drawer = file.drawer_id.as_deref().unwrap_or("-");
@@ -77,7 +81,13 @@ fn print_summary(report: &ImportReport) {
     }
     let mode = if report.dry_run { " (dry run)" } else { "" };
     println!(
-        "\n{} file(s) in {}{mode}: {} created, {} skipped, {} failed → palace {}",
-        report.total, report.dir, report.created, report.skipped, report.failed, report.palace,
+        "\n{} file(s) in {}{mode}: {} created, {} refreshed, {} skipped, {} failed → palace {}",
+        report.total,
+        report.dir,
+        report.created,
+        report.refreshed,
+        report.skipped,
+        report.failed,
+        report.palace,
     );
 }

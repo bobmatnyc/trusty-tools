@@ -23,10 +23,11 @@ pub(crate) enum MemoryAction {
     /// its slug tag, with drawers that merely link to that slug excluded, so
     /// the match does not depend on the file's prose: a file whose text has
     /// changed since it was imported is still skipped, and the report says its
-    /// drawer has drifted. This command does not refresh a drifted drawer —
-    /// delete it and re-import to replace it. When several drawers could be
-    /// the file's own, or the slug tag is shared by more drawers than one
-    /// lookup returns, the file is reported as failed rather than guessed at.
+    /// drawer has drifted. `--refresh` (issue #5044) replaces such a drawer
+    /// with the file's current text and requires every drawer the run names to
+    /// be retrievable. When several drawers could be the file's own, or the
+    /// slug tag is shared by more drawers than one lookup returns, the file is
+    /// reported as failed rather than guessed at.
     Import {
         /// Directory of memory `.md` files (scanned non-recursively).
         dir: PathBuf,
@@ -36,6 +37,11 @@ pub(crate) enum MemoryAction {
         /// Parse, derive, and dedup-check without writing anything.
         #[arg(long)]
         dry_run: bool,
+        /// Replace a drifted drawer with the file's current text, and fail any
+        /// file whose drawer is not retrievable — the mode to run immediately
+        /// before deleting the source files (issue #5044).
+        #[arg(long)]
+        refresh: bool,
         /// Print the full JSON report instead of the human summary.
         #[arg(long)]
         json: bool,
