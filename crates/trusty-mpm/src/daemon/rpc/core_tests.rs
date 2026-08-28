@@ -10,16 +10,24 @@
 //!
 //! ## The comparison allowlist
 //!
-//! Two fields are dropped before comparing, both on `mpm.doctor`, and both
+//! Three things are dropped before comparing, all on `mpm.doctor`, and all
 //! because the DAEMON varies them between two calls of the same code rather
 //! than because the transports disagree:
 //!
 //! - `generated_at`, which `DoctorReport::from_checks` stamps with `Utc::now()`
 //!   at every call (`core::doctor`).
 //! - the `worktree_disk` check's `message`, which reports how much of the
-//!   worktree tree the probe measured inside its 3-second deadline. Its `name`
-//!   and `status` are still compared — see
-//!   [`blank_deadline_bounded_messages`].
+//!   worktree tree the probe measured inside its 3-second deadline.
+//! - the `worktrees` check's `message`, which reports how many worktrees the
+//!   reconciled inventory classified — "14 live, 265 not reclaimable" on one
+//!   call and "266" on the next, because every agent on the machine adds and
+//!   removes worktrees while the test runs (#6358).
+//!
+//! Both worktree probes rescan the host's live worktree tree per call, which is
+//! what makes their two messages the only host-sampled strings in the report.
+//! Their `name` and `status` are still compared, so a check that vanished or
+//! changed verdict between the transports still fails — see
+//! [`HOST_SAMPLED_MESSAGE_CHECKS`] and [`blank_host_sampled_messages`].
 //!
 //! Nothing else is excused. Every other method is compared whole, `pid`
 //! included — the two transports run in one process, so a `pid` that differed
@@ -297,8 +305,10 @@ async fn parity_tmux_sessions_agrees_across_transports() {
 }
 
 /// Why `generated_at` is dropped: `DoctorReport::from_checks` stamps it with
-/// `Utc::now()` on every call, so two calls differ there by construction. Every
-/// other field — the overall status and every check — is compared whole.
+/// `Utc::now()` on every call, so two calls differ there by construction. The
+/// two [`HOST_SAMPLED_MESSAGE_CHECKS`] messages are blanked for the same
+/// reason. Every other field — the overall status, and every check's name,
+/// status and message — is compared whole.
 ///
 /// Why serial: the agent, asset-tier and hooks checks resolve paths under
 /// `$HOME`, and several tests in this binary move `$HOME` process-wide through
@@ -333,31 +343,56 @@ async fn parity_doctor_agrees_across_transports() {
     );
     assert_same(
         "mpm.doctor",
-        blank_deadline_bounded_messages(body),
-        blank_deadline_bounded_messages(result),
+        blank_host_sampled_messages(body),
+        blank_host_sampled_messages(result),
         &["generated_at"],
     );
 }
 
-/// Blank the `worktree_disk` check's message, keeping its name and status.
+/// The doctor checks whose `message` samples live host state, by name (#6358).
 ///
-/// Why: that probe measures worktree sizes against a 3-second deadline and
-/// reports how far it got — "6.2 GiB … 268 worktree(s) went unmeasured" on one
-/// call and "6.8 GiB … 267" on the next. The variation is the PROBE's, not the
-/// transport's, so comparing that string would make this test a stopwatch. Its
-/// `name` and `status` are still compared, so a check that vanished or changed
-/// verdict between the transports still fails.
+/// Why exactly these two: both rescan the machine's worktree tree on every
+/// call, and both put what that scan found into their message —
+/// `worktree_disk` reports how far it got against a 3-second deadline
+/// ("6.2 GiB … 268 worktree(s) went unmeasured" on one call, "6.8 GiB … 267" on
+/// the next), and `worktrees` reports the reconciled inventory's counts
+/// ("14 live, 265 not reclaimable" against "266"). Both strings therefore
+/// change whenever an agent elsewhere on the machine adds or removes a
+/// worktree between this test's two calls, which is the PROBE varying, not the
+/// transports disagreeing. Every other check's message reads config on disk or
+/// a daemon's own answer, and is compared whole.
+/// What: the names [`blank_host_sampled_messages`] blanks.
+/// Test: [`parity_doctor_agrees_across_transports`].
+const HOST_SAMPLED_MESSAGE_CHECKS: &[&str] = &["worktree_disk", "worktrees"];
+
+/// Blank each [`HOST_SAMPLED_MESSAGE_CHECKS`] message, keeping name and status.
 ///
-/// This is the second and last entry in the allowlist this module's doc records.
-fn blank_deadline_bounded_messages(mut report: Value) -> Value {
+/// Why the presence assertion: a blank-by-name pass over a report that no
+/// longer contains the name would silently exclude nothing, and the test would
+/// go back to flaking on a message it believed it had dropped. Requiring every
+/// named check to appear turns a rename into a failure that says so.
+fn blank_host_sampled_messages(mut report: Value) -> Value {
+    let mut blanked: Vec<String> = Vec::new();
     if let Some(checks) = report.get_mut("checks").and_then(Value::as_array_mut) {
         for check in checks {
-            if check.get("name") == Some(&json!("worktree_disk"))
+            let Some(name) = check.get("name").and_then(Value::as_str).map(str::to_owned) else {
+                continue;
+            };
+            if HOST_SAMPLED_MESSAGE_CHECKS.contains(&name.as_str())
                 && let Some(map) = check.as_object_mut()
             {
-                map.insert("message".into(), json!("<deadline-bounded>"));
+                map.insert("message".into(), json!("<host-sampled>"));
+                blanked.push(name);
             }
         }
+    }
+    for name in HOST_SAMPLED_MESSAGE_CHECKS {
+        assert!(
+            blanked.iter().any(|seen| seen == name),
+            "the allowlist names the `{name}` check, which this report does not \
+             contain — a renamed check must fail here rather than silently stop \
+             being excluded"
+        );
     }
     report
 }
