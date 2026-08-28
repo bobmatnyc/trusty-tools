@@ -969,6 +969,31 @@ pub fn remove_index_registry_entry_at(path: &Path, id: &str) -> Result<()> {
     remove_index_registry_entries_at(path, std::slice::from_ref(&id))
 }
 
+/// Look one registration up in `indexes.toml` by id (#6363).
+///
+/// Why: `unregister_index` decided "does this index exist?" from the two
+/// IN-MEMORY stores only, so an id the #767 allowlist excluded at warm boot —
+/// present in `indexes.toml`, absent from both stores — was neither deletable
+/// nor unknown: the handler answered `200 removed:false` and left the row and
+/// its data dir in place forever. The durable registry is the third place an
+/// index can exist, so the delete path needs a way to ask it.
+/// What: loads the registry and returns the entry whose id matches, or `None`
+/// when the file has no such row. Propagates a load error rather than
+/// reporting `None` — an unparseable registry must not read as "absent"
+/// (#4317, #4871), because a delete would then answer 404 for an index that
+/// is really there.
+/// Test: `finds_a_registered_entry_by_id`, `find_by_id_is_none_for_an_absent_id`.
+pub fn find_index_registry_entry(id: &str) -> Result<Option<PersistedIndex>> {
+    find_index_registry_entry_at(&indexes_toml_path()?, id)
+}
+
+/// Path-injectable variant of [`find_index_registry_entry`].
+pub fn find_index_registry_entry_at(path: &Path, id: &str) -> Result<Option<PersistedIndex>> {
+    Ok(load_index_registry_at(path)?
+        .into_iter()
+        .find(|e| e.id == id))
+}
+
 /// Remove many entries by id in ONE read-modify-write (#4317).
 ///
 /// Why: the boot orphan-reaper used to publish its survivors with

@@ -228,12 +228,16 @@ async fn restore_failed_index_grep_says_restart_not_retry() {
 async fn deleted_cold_parked_index_is_404_not_a_permanent_503() {
     let state = state_with_cold_index("cold-deleted");
 
+    // #6363: the handler now answers 404 for an id in no store and no
+    // `indexes.toml` row, so its return type is a `Result`. A cold-parked index
+    // IS registered, so this call must land on the `Ok` arm.
     let axum::Json(body) = super::search::delete_index_handler(
         State(Arc::clone(&state)),
         axum::extract::Path("cold-deleted".to_string()),
         axum::extract::Query(serde_json::from_value(serde_json::json!({})).expect("params")),
     )
-    .await;
+    .await
+    .expect("deleting a cold-parked index must succeed");
     assert_eq!(
         body["removed"],
         serde_json::Value::Bool(true),

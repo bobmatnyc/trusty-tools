@@ -58,20 +58,52 @@ pub(super) struct DeleteIndexParams {
 /// Why: see [`DeleteIndexParams`]. BREAKING (issue #4123): a bare `DELETE` no
 /// longer deletes on-disk data. Callers that genuinely want the disk reclaimed
 /// must now pass `?delete_data=true`.
+///
+/// #6363: the response also carries the two verdicts the body could not express
+/// before. An id that exists in NO store and no `indexes.toml` row answers
+/// `404`, where it used to answer `200 {"removed": false}` — indistinguishable
+/// from a delete that found the index and declined to remove it. And a delete
+/// whose durable cleanup FAILED (the `indexes.toml` rewrite, or the data-dir
+/// removal) answers `500` with `ok: false` and an `error` string, so no caller
+/// records a removal that did not happen.
 /// What: delegates to [`unregister_index`] — the same function the
 /// orphan-reaper already drives with `delete_data=false` — and echoes
 /// `data_deleted` so a caller can confirm which of the two semantics ran
 /// instead of inferring it from the request it sent.
 /// Test: `delete_index_without_param_preserves_data`,
-/// `delete_index_with_delete_data_true_destroys_data`.
+/// `delete_index_with_delete_data_true_destroys_data`,
+/// `delete_of_an_allowlist_excluded_registration_removes_the_row`,
+/// `delete_of_an_id_in_no_store_and_no_registry_is_404`,
+/// `a_failed_indexes_toml_rewrite_is_reported_not_swallowed`.
 pub(super) async fn delete_index_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
     Query(params): Query<DeleteIndexParams>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let outcome = unregister_index(&state, &id, params.delete_data).await;
-    Json(serde_json::json!({
+    // #6363: absent from the hot registry, the cold store AND `indexes.toml` —
+    // there is nothing here to delete, and saying so is the only answer that
+    // distinguishes a typo from a delete that failed.
+    if !outcome.registered {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "id": id,
+                "error": format!("unknown index: {id}"),
+                "ok": false,
+                "removed": false,
+                "data_deleted": false,
+                "quiesced": outcome.quiesced,
+            })),
+        ));
+    }
+    let mut body = serde_json::json!({
         "id": id,
+        // #6363: `true` only when every durable step this delete attempted
+        // succeeded. `removed` alone cannot carry that: a hot index whose
+        // `indexes.toml` rewrite failed really was deregistered in memory, and
+        // still comes back on the next warm boot.
+        "ok": outcome.error.is_none(),
         "removed": outcome.removed,
         // #3049: reported from what the delete actually DID, not from the flag
         // the request sent. This used to read `removed && params.delete_data`,
@@ -85,7 +117,16 @@ pub(super) async fn delete_index_handler(
         // `removed: true` (only reachable without `?delete_data=true`) it means
         // the deregistration went ahead while a writer was still running.
         "quiesced": outcome.quiesced,
-    }))
+    });
+    // #6363: a durable-cleanup failure is a FAILED delete, not a delete with a
+    // footnote. Before this it was a `warn!` in the daemon log and a `200` on
+    // the wire; the caller recorded the registration as gone while the row was
+    // still in `indexes.toml`.
+    if let Some(error) = outcome.error {
+        body["error"] = serde_json::Value::String(error);
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(body)));
+    }
+    Ok(Json(body))
 }
 
 /// What a call to [`unregister_index`] actually did, as opposed to what its
@@ -116,6 +157,19 @@ pub(super) struct UnregisterOutcome {
     /// was requested, that nothing at all was changed (`removed` is then `false`
     /// too). See [`unregister_index`].
     pub(super) quiesced: bool,
+    /// Whether the id existed in ANY of the three places an index can be
+    /// recorded: the hot registry, the cold store, or the `indexes.toml` row
+    /// (#6363). `false` is the 404 verdict — nothing here to delete. Distinct
+    /// from `removed`, which is whether this call actually removed something:
+    /// a delete that found the index and then failed to rewrite the registry is
+    /// `registered: true, removed: false`.
+    pub(super) registered: bool,
+    /// The durable-cleanup failure this delete hit, if any (#6363): the
+    /// `indexes.toml` rewrite, the data-dir removal, or a registry file that
+    /// could not be read at all. `Some` means the delete did not fully happen,
+    /// so no caller may record it as done. Both failures used to be a `warn!`
+    /// with no representation on the wire.
+    pub(super) error: Option<String>,
 }
 
 /// How long `unregister_index` waits for in-flight writers to drain before it
@@ -161,6 +215,18 @@ const DELETE_QUIESCE_TIMEOUT: std::time::Duration = std::time::Duration::from_mi
 /// cold-parked-only index was never removed from `indexes.toml` at all, so the
 /// next warm boot resurrected it. A cold record now counts as "an index was
 /// removed" for the durable-cleanup half below.
+/// #6363: also handles the id that is in `indexes.toml` and in NEITHER store.
+/// The #767 allowlist gate drops an unapproved root at warm boot
+/// (`retain_approved_entries`, `commands/start/restore.rs`) before it reaches
+/// `registry` or `cold_store`, so those rows were invisible to both existence
+/// checks above: the durable-cleanup branch never ran, and the handler answered
+/// `200 {"removed": false}` with the row and the data dir untouched. One host
+/// accumulated 60 such rows, each of them keeping `warm_boot_degraded` true on
+/// every boot and clearable only by hand-editing `indexes.toml`. A registry-only
+/// id is now removed like any other, and the durable failures — the rewrite, the
+/// data-dir removal, an unreadable registry — are REPORTED through
+/// `UnregisterOutcome::error` instead of being logged and answered as success.
+///
 /// #3049: the delete QUIESCES the index before tearing it down. It signals this
 /// id's cancel flag, then waits up to [`DELETE_QUIESCE_TIMEOUT`] for the
 /// EXCLUSIVE side of `index_teardown_lock`, and holds it across teardown. Before
@@ -194,7 +260,8 @@ const DELETE_QUIESCE_TIMEOUT: std::time::Duration = std::time::Duration::from_mi
 /// missed six paths that hold no permit.
 /// Test: delete-path handler tests; reaper behaviour covered by `orphan_reaper`
 /// unit tests plus the `spawn_orphan_reaper_ticker` wiring; the quiesce and
-/// refusal behaviour by `service::server::tests_3049`.
+/// refusal behaviour by `service::server::tests_3049`; the registry-only,
+/// unknown-id and failed-cleanup arms by `service::server::tests_6363`.
 pub(super) async fn unregister_index(
     state: &Arc<SearchAppState>,
     id: &str,
@@ -241,6 +308,15 @@ pub(super) async fn unregister_index(
             removed: false,
             data_deleted: false,
             quiesced: false,
+            // #6363: an id with a writer holding its teardown lock exists by
+            // construction, and the #3049 contract for this branch is "nothing
+            // changed — re-issue the delete". Reporting it as unknown (404)
+            // would tell the caller to stop retrying the one thing that works.
+            registered: true,
+            // Not an `error`: `quiesced: false` with `removed: false` already IS
+            // the #3049 verdict for this branch, and it is retryable rather than
+            // a failed cleanup.
+            error: None,
         };
     }
     if !quiesced {
@@ -255,7 +331,7 @@ pub(super) async fn unregister_index(
             DELETE_QUIESCE_TIMEOUT,
         );
     }
-    let (removed, removed_handle) = state.registry.remove_and_get(&index_id);
+    let (removed_hot, removed_handle) = state.registry.remove_and_get(&index_id);
     let root_path_for_cleanup = removed_handle.map(|h| h.root_path.clone());
     // #5075: drop the cold-store records too, or the #5057 guards answer 503
     // forever for an id that is now absent from every store. Sampled BEFORE the
@@ -269,13 +345,62 @@ pub(super) async fn unregister_index(
         .map(|e| e.root_path);
     state.cold_store.purge(&index_id);
     let root_path_for_cleanup = root_path_for_cleanup.or(cold_root);
-    let removed = removed || was_cold;
+    let in_memory_removed = removed_hot || was_cold;
+    // #6363: `indexes.toml` is the THIRD place an index can be recorded, and the
+    // only one the #767 allowlist gate leaves an entry in — `retain_approved_entries`
+    // drops an unapproved root before it reaches either store, so a warm boot
+    // produces exactly this shape. Consulting it here is what turns those rows
+    // from undeletable (200 `removed:false`, row and data dir intact) into an
+    // ordinary delete, and what lets a genuinely unknown id 404 instead.
+    let mut errors: Vec<String> = Vec::new();
+    let registry_entry = if in_memory_removed {
+        // Already proven to exist; skip the file read on the hot path.
+        None
+    } else {
+        match crate::service::persistence::find_index_registry_entry(id) {
+            Ok(entry) => entry,
+            Err(e) => {
+                // An unreadable registry is not proof of absence (#4317/#4871),
+                // so this must never become a 404. Report it as the failure it
+                // is and let the caller retry once the file is readable.
+                tracing::error!(
+                    "delete[{id}]: could not read indexes.toml to check for a \
+                     registration-only row ({e:#}) — refusing to report this id as \
+                     unknown (issue #6363)"
+                );
+                errors.push(format!("indexes.toml unreadable: {e:#}"));
+                None
+            }
+        }
+    };
+    let registry_only = registry_entry.is_some();
+    let root_path_for_cleanup = root_path_for_cleanup.or(registry_entry.map(|e| e.root_path));
+    // A registry read that failed leaves existence UNKNOWN; treating it as
+    // "registered" keeps the answer a reportable failure rather than a 404.
+    let registered = in_memory_removed || registry_only || !errors.is_empty();
     state.reindex_progress.remove(&index_id);
     state.watcher_manager.stop_for_index(&index_id).await;
     let mut data_deleted = false;
-    if removed {
-        if let Err(e) = crate::service::persistence::remove_index_registry_entry(id) {
-            tracing::warn!("could not remove '{id}' from indexes.toml: {e}");
+    let mut removed = in_memory_removed;
+    if in_memory_removed || registry_only {
+        match crate::service::persistence::remove_index_registry_entry(id) {
+            // #6363: for a registry-only id this rewrite IS the removal — there
+            // was no in-memory registration to drop — so `removed` becomes true
+            // here rather than being decided before the durable work ran.
+            Ok(()) => removed = true,
+            Err(e) => {
+                // #6363: was a `warn!` that nothing on the wire reflected. A
+                // registry-only delete whose rewrite fails removed NOTHING, so
+                // `removed` stays false; a hot delete really did drop the
+                // in-memory registration, so it stays true — and both report the
+                // failure through `error`.
+                tracing::error!(
+                    "delete[{id}]: could not remove the indexes.toml row ({e:#}) — the \
+                     registration survives a restart; reporting the delete as FAILED \
+                     rather than logging and answering 200 (issue #6363)"
+                );
+                errors.push(format!("indexes.toml rewrite failed: {e:#}"));
+            }
         }
         if delete_data {
             // Reaching here means the quiesce wait SUCCEEDED — a `delete_data`
@@ -286,11 +411,18 @@ pub(super) async fn unregister_index(
                 // #3049: this is the only assignment of `data_deleted` —
                 // the response field can no longer disagree with the disk.
                 Ok(()) => data_deleted = true,
-                Err(e) => tracing::error!(
-                    "delete[{id}]: on-disk data removal FAILED ({e}) — reporting \
-                     data_deleted=false so the caller does not record this corpus \
-                     as reclaimed (issue #3049)"
-                ),
+                Err(e) => {
+                    tracing::error!(
+                        "delete[{id}]: on-disk data removal FAILED ({e}) — reporting \
+                         data_deleted=false so the caller does not record this corpus \
+                         as reclaimed (issue #3049)"
+                    );
+                    // #6363: `data_deleted: false` says the bytes are still
+                    // there but not that anything went WRONG — a bare DELETE
+                    // reports the same value on its success path. Carry the
+                    // failure itself so the response can be a 500.
+                    errors.push(format!("data-dir removal failed: {e:#}"));
+                }
             }
         }
         if let Some(ref root) = root_path_for_cleanup {
@@ -352,6 +484,8 @@ pub(super) async fn unregister_index(
         removed,
         data_deleted,
         quiesced,
+        registered,
+        error: (!errors.is_empty()).then(|| errors.join("; ")),
     }
 }
 
