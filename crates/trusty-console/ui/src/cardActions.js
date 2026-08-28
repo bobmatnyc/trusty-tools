@@ -49,6 +49,28 @@ export function cardActivation(actions) {
 }
 
 /**
+ * Turn an arbitrary string into something usable as an HTML element id.
+ *
+ * Why: #6370 derived element ids from `service.id` in TWO places — here and in
+ * `ServiceCard.svelte` — with the same regex written out twice. Two copies of
+ * an id-derivation rule is how `aria-describedby` starts pointing at ids the
+ * markup no longer emits: change one and the description silently references
+ * nothing. This is the one rule; both read it.
+ *
+ * What: replaces every character outside `[A-Za-z0-9_-]` with `-`. It is NOT
+ * injective — `a/b` and `a b` both become `a-b` — which is safe only because
+ * these ids come from the console's own fixed service roster
+ * (`detect::order_for_display`), where every id is already distinct within
+ * `[a-z-]`. Do not reuse it for ids that arrive from a daemon or an operator.
+ *
+ * @param {unknown} value The raw id.
+ * @returns {string} The sanitized id fragment.
+ */
+export function sanitizeElementId(value) {
+  return String(value ?? '').replace(/[^A-Za-z0-9_-]/g, '-');
+}
+
+/**
  * The statuses whose card renders an explanatory hint paragraph.
  *
  * Why: the hint is the sentence telling an operator what to DO about a card
@@ -80,7 +102,7 @@ const STATUSES_WITH_HINT = new Set(['absent', 'available', 'degraded']);
  * @returns {string} A space-separated id list, in reading order.
  */
 export function cardDescribedBy(service) {
-  const sid = String(service?.id ?? '').replace(/[^A-Za-z0-9_-]/g, '-');
+  const sid = sanitizeElementId(service?.id);
   const ids = [`svc-${sid}-status`];
   if (service?.version) ids.push(`svc-${sid}-version`);
   if (STATUSES_WITH_HINT.has(service?.status)) ids.push(`svc-${sid}-hint`);

@@ -4,6 +4,9 @@
   // #6360: the palace roster grew a delete action; the control itself is shared
   // with the Search tab so both confirm and report failures identically.
   import DeleteAction from './DeleteAction.svelte';
+  // #6371: the non-destructive half of the roster's actions — reclaim a
+  // palace's orphaned vectors without touching a drawer.
+  import CompactAction from './CompactAction.svelte';
   // #6372: which of the three ways a row's counts were obtained decides how it
   // renders. The decision is a tested pure function, not template logic.
   import { countCell, sourceBadge, statsSource } from './palaceRows.js';
@@ -175,7 +178,10 @@
                 <td class="num">{countCell(p, 'room_count')}</td>
                 <td class="num">{countCell(p, 'kg_triple_count')}</td>
                 <td class="actions">
-                  <DeleteAction kind="palace" id={p.id} onDeleted={reloadRoster} />
+                  <div class="row-actions">
+                    <CompactAction id={p.id} onCompacted={reloadRoster} />
+                    <DeleteAction kind="palace" id={p.id} onDeleted={reloadRoster} />
+                  </div>
                 </td>
               </tr>
             {/each}
@@ -242,6 +248,9 @@
      expanded confirm panel grows downward without shifting the row's numbers. */
   th.actions-head, td.actions { text-align: right; }
   td.actions { vertical-align: top; }
+  /* #6371: compact sits beside delete. They wrap rather than force the table
+     wider, and each keeps its own confirm panel. */
+  .row-actions { display: flex; gap: 0.35rem; justify-content: flex-end; flex-wrap: wrap; }
   code {
     font-family: 'JetBrains Mono', monospace; font-size: 0.8rem;
     background: var(--trusty-surface-raised); padding: 0.1rem 0.35rem; border-radius: 0.25rem;

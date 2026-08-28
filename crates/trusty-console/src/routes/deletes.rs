@@ -20,7 +20,7 @@
 //! Neither route reports success it did not observe. A daemon that refuses, a
 //! daemon that answers a JSON-RPC error, and a daemon that skips the work and
 //! answers `removed: false` all become a NON-success verdict carrying the
-//! daemon's own words — see [`DeleteVerdict`]. That last case is the one worth
+//! daemon's own words — see [`ActionVerdict`]. That last case is the one worth
 //! naming: `DELETE /indexes/{id}` answers `200 OK` with `removed: false` for an
 //! index it never had, so status code alone would report a delete that never
 //! happened as a success.
@@ -29,144 +29,16 @@
 //! module below drive both transports against stub daemons.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use axum::extract::{Path as AxumPath, Query, State};
-use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::routes::memory_rpc;
+use crate::routes::verdict::{ActionVerdict, first_line, validate_id};
+use crate::routes::{ACTION_TIMEOUT, MEMORY_SERVICE, SEARCH_SERVICE_ID};
 use crate::server::AppState;
-
-/// How long one delete may take, end to end.
-///
-/// Why not the 3s the health probe uses: tearing down a palace drops a redb
-/// store and an HNSW graph, and deregistering an index waits for in-flight
-/// writers to quiesce. Both are disk work bounded by corpus size, not by a
-/// round trip.
-const DELETE_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Longest resource id this console will forward.
-///
-/// Bounds what reaches a daemon and what reaches a log line; no real palace or
-/// index id comes near it.
-const MAX_ID_LEN: usize = 128;
-
-/// The service id the poller cache keys trusty-search's base URL under.
-const SEARCH_SERVICE_ID: &str = "trusty-search";
-
-/// The daemon whose socket carries `palace_delete`.
-const MEMORY_SERVICE: &str = "trusty-memory";
-
-// ─── verdict ─────────────────────────────────────────────────────────────────
-
-/// What one delete attempt actually did, as opposed to what was asked for.
-///
-/// Why: the two daemons fail in four distinguishable ways and an operator needs
-/// them apart — a refusal is fixable (pass force, empty the palace), an
-/// unreachable daemon is not the same problem, and a skipped delete looks like
-/// success on the wire. Collapsing them into a bool is how a no-op gets rendered
-/// as "deleted".
-/// What: a closed set of verdicts, each carrying the daemon's own message where
-/// there is one. Only [`DeleteVerdict::Deleted`] renders as success.
-/// Test: `verdict_*` below assert the status code each maps onto.
-#[derive(Debug)]
-pub(crate) enum DeleteVerdict {
-    /// The daemon confirmed it removed the resource. `detail` is its own answer.
-    Deleted { id: String, detail: Value },
-    /// The daemon answered, and did not delete — a refusal, an error, or a
-    /// no-op. `reason` is the daemon's message wherever the daemon supplied one.
-    Refused {
-        id: String,
-        reason: String,
-        detail: Value,
-    },
-    /// Nothing answered: the daemon is not running, the socket or address could
-    /// not be resolved, or the exchange timed out.
-    Unreachable { id: String, reason: String },
-    /// The request never left the console — the id is not one this route will
-    /// forward.
-    Invalid { id: String, reason: String },
-}
-
-impl DeleteVerdict {
-    /// The HTTP status this verdict answers with.
-    ///
-    /// Why `409` for a refusal and a no-op alike: both mean the daemon's current
-    /// state prevented the delete, and both are retryable once the operator
-    /// changes that state. `502` would claim the daemon misbehaved when it
-    /// answered correctly.
-    /// Test: `verdict_status_codes_separate_the_four_arms`.
-    fn status(&self) -> StatusCode {
-        match self {
-            Self::Deleted { .. } => StatusCode::OK,
-            Self::Refused { .. } => StatusCode::CONFLICT,
-            Self::Unreachable { .. } => StatusCode::SERVICE_UNAVAILABLE,
-            Self::Invalid { .. } => StatusCode::BAD_REQUEST,
-        }
-    }
-}
-
-impl IntoResponse for DeleteVerdict {
-    /// Render the verdict as the console's delete-response envelope.
-    ///
-    /// What: every body carries `ok` and `id`; a non-success body carries
-    /// `error` with the daemon's own words. `ok` is never derived from the
-    /// status code by the caller — the UI reads this field, so a body that
-    /// somehow reached a 2xx without a confirmed delete still reads as failure.
-    /// Test: `index_delete_reports_a_skipped_delete_as_a_failure`.
-    fn into_response(self) -> Response {
-        let status = self.status();
-        let body = match self {
-            Self::Deleted { id, detail } => json!({ "ok": true, "id": id, "detail": detail }),
-            Self::Refused { id, reason, detail } => {
-                json!({ "ok": false, "id": id, "error": reason, "detail": detail })
-            }
-            Self::Unreachable { id, reason } | Self::Invalid { id, reason } => {
-                json!({ "ok": false, "id": id, "error": reason })
-            }
-        };
-        (status, axum::Json(body)).into_response()
-    }
-}
-
-// ─── id validation ───────────────────────────────────────────────────────────
-
-/// Accept an id only if it is safe to place in a URL path and a JSON field.
-///
-/// Why: the id arrives from the network and is appended to a trusty-search URL
-/// path. Nothing here ever reaches a shell or a filesystem path — the console
-/// does no deletion itself — but an id that can carry `/`, `..`, `?`, or a
-/// control byte could still steer the upstream request at a different route on
-/// the daemon. An allowlist refuses that at the console boundary instead of
-/// relying on the daemon to.
-/// What: non-empty, at most [`MAX_ID_LEN`] bytes, every character in
-/// `[A-Za-z0-9._-]`, and no `..` anywhere. `Err` carries a reason safe to render.
-/// Test: `validate_id_accepts_ordinary_ids`, `validate_id_rejects_traversal`,
-/// `validate_id_rejects_separators_and_control_bytes`.
-fn validate_id(id: &str) -> Result<(), String> {
-    if id.is_empty() {
-        return Err("the resource id is empty".to_string());
-    }
-    if id.len() > MAX_ID_LEN {
-        return Err(format!(
-            "the resource id is longer than the {MAX_ID_LEN}-byte limit"
-        ));
-    }
-    if id.contains("..") {
-        return Err("the resource id contains '..'".to_string());
-    }
-    if let Some(bad) = id
-        .chars()
-        .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')))
-    {
-        return Err(format!(
-            "the resource id contains {bad:?}; only letters, digits, '.', '_' and '-' are accepted"
-        ));
-    }
-    Ok(())
-}
 
 // ─── trusty-memory: palace_delete over the daemon socket ─────────────────────
 
@@ -178,107 +50,50 @@ fn validate_id(id: &str) -> Result<(), String> {
 /// bare method name because that is the envelope trusty-memory's dispatcher
 /// routes it under; the folded method table does not carry it.
 ///
-/// What: one framed JSON-RPC exchange on `socket`. A transport failure is
-/// [`DeleteVerdict::Unreachable`]. A JSON-RPC `error` is
-/// [`DeleteVerdict::Refused`] carrying the daemon's message — that is the arm a
-/// non-empty palace without `force` lands in. A result is accepted ONLY when the
-/// tool's own payload confirms the id it deleted; anything else is `Refused`,
-/// because a daemon that answered without confirming has not told us it deleted
-/// anything.
+/// What: one [`memory_rpc::call_tool`] exchange, which maps an unreachable
+/// daemon and a JSON-RPC `error` to their verdicts — the second is the arm a
+/// non-empty palace without `force` lands in. What is left for this function is
+/// the confirmation: the answer is a success ONLY when the tool's own payload
+/// names the id it deleted. Anything else is `Refused`, because a daemon that
+/// answered without confirming has not told us it deleted anything.
 ///
 /// Test: `palace_delete_confirms_a_real_delete`,
 /// `palace_delete_reports_a_daemon_refusal_as_a_failure`,
 /// `palace_delete_reports_an_unconfirmed_answer_as_a_failure`,
 /// `palace_delete_reports_a_dead_socket_as_unreachable`.
-pub(crate) async fn delete_palace_on_socket(socket: &Path, id: &str, force: bool) -> DeleteVerdict {
+pub(crate) async fn delete_palace_on_socket(socket: &Path, id: &str, force: bool) -> ActionVerdict {
     if let Err(reason) = validate_id(id) {
-        return DeleteVerdict::Invalid {
+        return ActionVerdict::Invalid {
             id: id.to_string(),
             reason,
         };
     }
 
-    // #6360: `tools/call` is the envelope trusty-memory's dispatcher routes
-    // `palace_delete` under — it is absent from `FOLDED_METHODS` and from
-    // `TOOL_METHODS`, so a bare `"method": "palace_delete"` answers
-    // `method_not_found`.
-    let request = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {
-            "name": "palace_delete",
-            "arguments": { "palace_id": id, "force": force },
-        },
-    });
-
-    let sent =
-        trusty_common::uds::send_framed_request::<_, trusty_common::uds::server::RpcResponse>(
-            socket,
-            &request,
-            DELETE_TIMEOUT,
-        )
-        .await;
-
-    let response = match sent {
-        Ok(r) => r,
-        Err(e) => {
-            return DeleteVerdict::Unreachable {
-                id: id.to_string(),
-                reason: format!("{MEMORY_SERVICE} did not answer palace_delete: {e}"),
-            };
-        }
+    let payload = match memory_rpc::call_tool(
+        socket,
+        "palace_delete",
+        json!({ "palace_id": id, "force": force }),
+        id,
+    )
+    .await
+    {
+        Ok(payload) => payload,
+        Err(verdict) => return verdict,
     };
 
-    if let Some(error) = response.error {
-        return DeleteVerdict::Refused {
-            id: id.to_string(),
-            reason: format!(
-                "{MEMORY_SERVICE} refused palace_delete (code {}): {}",
-                error.code, error.message
-            ),
-            detail: json!({ "code": error.code }),
-        };
-    }
-
-    let result = response.result.unwrap_or(Value::Null);
-    match confirmed_palace_id(&result) {
-        Some(deleted) if deleted == id => DeleteVerdict::Deleted {
+    match payload.get("deleted").and_then(Value::as_str) {
+        Some(deleted) if deleted == id => ActionVerdict::Succeeded {
             id: id.to_string(),
             detail: json!({ "deleted": deleted }),
         },
-        _ => DeleteVerdict::Refused {
+        _ => ActionVerdict::Refused {
             id: id.to_string(),
             reason: format!(
                 "{MEMORY_SERVICE} answered palace_delete without confirming the palace was deleted"
             ),
-            detail: result,
+            detail: payload,
         },
     }
-}
-
-/// Read the palace id a `tools/call` answer claims to have deleted.
-///
-/// Why: `tools/call` wraps every tool result in MCP's `content[0].text` block,
-/// so the tool's `{"deleted": "<id>"}` arrives as a JSON string inside a JSON
-/// envelope. Parsing it is what turns "the daemon replied" into "the daemon
-/// deleted this exact palace"; without it a successful `ping`-shaped reply would
-/// read as a delete.
-/// What: `result.content[0].text`, parsed as JSON, then its `deleted` field.
-/// `None` whenever any step is absent or the wrong shape.
-/// Test: `palace_delete_reports_an_unconfirmed_answer_as_a_failure`.
-fn confirmed_palace_id(result: &Value) -> Option<String> {
-    let text = result
-        .get("content")?
-        .as_array()?
-        .first()?
-        .get("text")?
-        .as_str()?;
-    serde_json::from_str::<Value>(text)
-        .ok()?
-        .get("deleted")?
-        .as_str()
-        .map(str::to_string)
 }
 
 // ─── trusty-search: DELETE /indexes/{id} on the loopback daemon ──────────────
@@ -294,7 +109,7 @@ fn confirmed_palace_id(result: &Value) -> Option<String> {
 /// #4123 a bare delete deregisters and PRESERVES the on-disk corpus, so
 /// `delete_data` is passed explicitly rather than left to a default either side
 /// might change. The answer is read for what it says the daemon DID:
-///   - a non-2xx status is [`DeleteVerdict::Refused`] carrying the body;
+///   - a non-2xx status is [`ActionVerdict::Refused`] carrying the body;
 ///   - `removed: false` is `Refused` even on `200` — that is the no-op an
 ///     unregistered id produces, and it is the failure mode this route exists to
 ///     not paper over;
@@ -314,9 +129,9 @@ pub(crate) async fn delete_index_on_daemon(
     base_url: &str,
     id: &str,
     delete_data: bool,
-) -> DeleteVerdict {
+) -> ActionVerdict {
     if let Err(reason) = validate_id(id) {
-        return DeleteVerdict::Invalid {
+        return ActionVerdict::Invalid {
             id: id.to_string(),
             reason,
         };
@@ -327,7 +142,7 @@ pub(crate) async fn delete_index_on_daemon(
     // (ADR-0018), so a non-local upstream in the cache is a bug and must not be
     // dialled. Reusing the proxy's predicate keeps one definition of "local".
     if !crate::proxy::routes::is_local_upstream(&base) {
-        return DeleteVerdict::Unreachable {
+        return ActionVerdict::Unreachable {
             id: id.to_string(),
             reason: format!("the resolved {SEARCH_SERVICE_ID} address '{base}' is not loopback"),
         };
@@ -340,11 +155,11 @@ pub(crate) async fn delete_index_on_daemon(
         base.trim_end_matches('/')
     );
 
-    let sent = client.delete(&url).timeout(DELETE_TIMEOUT).send().await;
+    let sent = client.delete(&url).timeout(ACTION_TIMEOUT).send().await;
     let response = match sent {
         Ok(r) => r,
         Err(e) => {
-            return DeleteVerdict::Unreachable {
+            return ActionVerdict::Unreachable {
                 id: id.to_string(),
                 reason: format!("{SEARCH_SERVICE_ID} did not answer the delete: {e}"),
             };
@@ -356,7 +171,7 @@ pub(crate) async fn delete_index_on_daemon(
     let parsed: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
 
     if !status.is_success() {
-        return DeleteVerdict::Refused {
+        return ActionVerdict::Refused {
             id: id.to_string(),
             reason: format!(
                 "{SEARCH_SERVICE_ID} refused the delete with HTTP {}: {}",
@@ -369,7 +184,7 @@ pub(crate) async fn delete_index_on_daemon(
 
     if parsed.get("removed").and_then(Value::as_bool) != Some(true) {
         let quiesced = parsed.get("quiesced").and_then(Value::as_bool);
-        return DeleteVerdict::Refused {
+        return ActionVerdict::Refused {
             id: id.to_string(),
             reason: format!(
                 "{SEARCH_SERVICE_ID} skipped the delete: no registration for '{id}' was removed{}",
@@ -385,12 +200,12 @@ pub(crate) async fn delete_index_on_daemon(
 
     // #6360: the daemon echoes the id it acted on. A `removed: true` naming a
     // DIFFERENT index is not a confirmation for the one that was asked for —
-    // the same check `confirmed_palace_id` makes on the memory side. An answer
+    // the same confirmation check `delete_palace_on_socket` makes. An answer
     // carrying no `id` at all is accepted, because that field is the daemon's
     // echo of the request rather than a fact it discovered.
     match parsed.get("id").and_then(Value::as_str) {
         Some(echoed) if echoed != id => {
-            return DeleteVerdict::Refused {
+            return ActionVerdict::Refused {
                 id: id.to_string(),
                 reason: format!(
                     "{SEARCH_SERVICE_ID} confirmed a delete for '{echoed}', not for '{id}'"
@@ -402,7 +217,7 @@ pub(crate) async fn delete_index_on_daemon(
     }
 
     if delete_data && parsed.get("data_deleted").and_then(Value::as_bool) != Some(true) {
-        return DeleteVerdict::Refused {
+        return ActionVerdict::Refused {
             id: id.to_string(),
             reason: format!(
                 "{SEARCH_SERVICE_ID} deregistered '{id}' but did not delete its on-disk data"
@@ -411,32 +226,10 @@ pub(crate) async fn delete_index_on_daemon(
         };
     }
 
-    DeleteVerdict::Deleted {
+    ActionVerdict::Succeeded {
         id: id.to_string(),
         detail: parsed,
     }
-}
-
-/// The first line of `body`, truncated, for a one-line error message.
-///
-/// Keeps a daemon's multi-line or oversized error body from being pasted whole
-/// into a JSON field the dashboard renders inline.
-fn first_line(body: &str) -> String {
-    const MAX: usize = 300;
-    let line = body.lines().next().unwrap_or("").trim();
-    if line.len() <= MAX {
-        return line.to_string();
-    }
-    // Cut on a char boundary — `str::floor_char_boundary` is still unstable, and
-    // slicing mid-codepoint would panic on a daemon message containing any
-    // non-ASCII byte.
-    let cut = line
-        .char_indices()
-        .map(|(i, _)| i)
-        .take_while(|i| *i <= MAX)
-        .last()
-        .unwrap_or(0);
-    format!("{}…", &line[..cut])
 }
 
 // ─── handlers ────────────────────────────────────────────────────────────────
@@ -473,13 +266,13 @@ pub async fn delete_palace_handler(
     // resolution failure answered first would mask the id as the real problem
     // and make the guard untestable without a live daemon.
     if let Err(reason) = validate_id(&id) {
-        return DeleteVerdict::Invalid { id, reason }.into_response();
+        return ActionVerdict::Invalid { id, reason }.into_response();
     }
 
     let socket: PathBuf = match trusty_common::daemon_socket_path(MEMORY_SERVICE) {
         Ok(p) => p,
         Err(e) => {
-            return DeleteVerdict::Unreachable {
+            return ActionVerdict::Unreachable {
                 id,
                 reason: format!("could not resolve the {MEMORY_SERVICE} socket path: {e:#}"),
             }
@@ -488,7 +281,7 @@ pub async fn delete_palace_handler(
     };
 
     let verdict = delete_palace_on_socket(&socket, &id, params.force).await;
-    if matches!(verdict, DeleteVerdict::Deleted { .. }) {
+    if matches!(verdict, ActionVerdict::Succeeded { .. }) {
         refresh_metrics(&state, MEMORY_SERVICE, state.memory_metrics_cache()).await;
     }
     verdict.into_response()
@@ -527,7 +320,7 @@ pub async fn delete_index_handler(
     // whether the guard ran at all — `index_route_rejects_a_bad_id` could pass
     // against an empty `AppState` without validation ever executing.
     if let Err(reason) = validate_id(&id) {
-        return DeleteVerdict::Invalid { id, reason }.into_response();
+        return ActionVerdict::Invalid { id, reason }.into_response();
     }
 
     let base_url = match state.poller_cache().snapshot().await {
@@ -535,7 +328,7 @@ pub async fn delete_index_handler(
         None => None,
     };
     let Some(base_url) = base_url else {
-        return DeleteVerdict::Unreachable {
+        return ActionVerdict::Unreachable {
             id,
             reason: format!(
                 "{SEARCH_SERVICE_ID} is not reachable: the console has no live address for it"
@@ -546,7 +339,7 @@ pub async fn delete_index_handler(
 
     let client = state.http_client();
     let verdict = delete_index_on_daemon(&client, &base_url, &id, params.delete_data).await;
-    if matches!(verdict, DeleteVerdict::Deleted { .. }) {
+    if matches!(verdict, ActionVerdict::Succeeded { .. }) {
         refresh_metrics(&state, SEARCH_SERVICE_ID, state.search_metrics_cache()).await;
     }
     verdict.into_response()
@@ -567,7 +360,7 @@ pub async fn delete_index_handler(
 /// Test: `palace_route_rejects_a_traversal_id` reaches this module without
 /// reaching this function; the refresh itself needs a live daemon and is covered
 /// by the #6360 smoke run.
-async fn refresh_metrics(
+pub(crate) async fn refresh_metrics(
     state: &AppState,
     service_id: &str,
     cache: &crate::metrics_poller::MetricsCache,
@@ -584,8 +377,10 @@ async fn refresh_metrics(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::routes::verdict::MAX_ID_LEN;
     use axum::body::Body;
     use axum::http::Request;
+    use axum::http::StatusCode;
     use http_body_util::BodyExt as _;
     use tower::ServiceExt as _;
 
@@ -655,9 +450,9 @@ mod tests {
     }
 
     /// Assert a verdict is not a success and say what it carried when it is.
-    fn assert_failure(verdict: &DeleteVerdict, must_mention: &str) {
+    fn assert_failure(verdict: &ActionVerdict, must_mention: &str) {
         assert!(
-            !matches!(verdict, DeleteVerdict::Deleted { .. }),
+            !matches!(verdict, ActionVerdict::Succeeded { .. }),
             "expected a failure verdict, got {verdict:?}"
         );
         let text = format!("{verdict:?}");
@@ -722,7 +517,7 @@ mod tests {
     fn verdict_status_codes_separate_the_four_arms() {
         let id = "x".to_string();
         assert_eq!(
-            DeleteVerdict::Deleted {
+            ActionVerdict::Succeeded {
                 id: id.clone(),
                 detail: Value::Null
             }
@@ -730,7 +525,7 @@ mod tests {
             StatusCode::OK
         );
         assert_eq!(
-            DeleteVerdict::Refused {
+            ActionVerdict::Refused {
                 id: id.clone(),
                 reason: String::new(),
                 detail: Value::Null
@@ -739,7 +534,7 @@ mod tests {
             StatusCode::CONFLICT
         );
         assert_eq!(
-            DeleteVerdict::Unreachable {
+            ActionVerdict::Unreachable {
                 id: id.clone(),
                 reason: String::new()
             }
@@ -747,7 +542,7 @@ mod tests {
             StatusCode::SERVICE_UNAVAILABLE
         );
         assert_eq!(
-            DeleteVerdict::Invalid {
+            ActionVerdict::Invalid {
                 id,
                 reason: String::new()
             }
@@ -768,7 +563,7 @@ mod tests {
 
         let verdict = delete_palace_on_socket(&socket, "scratch", true).await;
         assert!(
-            matches!(&verdict, DeleteVerdict::Deleted { id, .. } if id == "scratch"),
+            matches!(&verdict, ActionVerdict::Succeeded { id, .. } if id == "scratch"),
             "a confirmed delete must read as success: {verdict:?}"
         );
     }
@@ -829,7 +624,7 @@ mod tests {
         let verdict =
             delete_palace_on_socket(&tmp.path().join("absent.sock"), "scratch", false).await;
         assert!(
-            matches!(verdict, DeleteVerdict::Unreachable { .. }),
+            matches!(verdict, ActionVerdict::Unreachable { .. }),
             "a dead socket must read as unreachable: {verdict:?}"
         );
     }
@@ -842,7 +637,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let verdict = delete_palace_on_socket(&tmp.path().join("absent.sock"), "../x", false).await;
         assert!(
-            matches!(verdict, DeleteVerdict::Invalid { .. }),
+            matches!(verdict, ActionVerdict::Invalid { .. }),
             "a traversal id must be refused at the console: {verdict:?}"
         );
     }
@@ -861,7 +656,7 @@ mod tests {
         .await;
         let verdict = delete_index_on_daemon(&client(), &base, "scratch", false).await;
         assert!(
-            matches!(&verdict, DeleteVerdict::Deleted { id, .. } if id == "scratch"),
+            matches!(&verdict, ActionVerdict::Succeeded { id, .. } if id == "scratch"),
             "a confirmed delete must read as success: {verdict:?}"
         );
     }
@@ -983,7 +778,7 @@ mod tests {
         let verdict =
             delete_index_on_daemon(&client(), &format!("http://{addr}"), "scratch", false).await;
         assert!(
-            matches!(verdict, DeleteVerdict::Unreachable { .. }),
+            matches!(verdict, ActionVerdict::Unreachable { .. }),
             "a dead daemon must read as unreachable: {verdict:?}"
         );
     }
@@ -1029,7 +824,7 @@ mod tests {
         let verdict =
             delete_index_on_daemon(&client(), "http://10.0.0.9:7878", "scratch", false).await;
         assert!(
-            matches!(&verdict, DeleteVerdict::Unreachable { reason, .. } if reason.contains("not loopback")),
+            matches!(&verdict, ActionVerdict::Unreachable { reason, .. } if reason.contains("not loopback")),
             "a remote upstream must be refused: {verdict:?}"
         );
     }

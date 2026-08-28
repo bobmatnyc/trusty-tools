@@ -4,6 +4,10 @@
   // #6360: the index roster grew a delete action; the control itself is shared
   // with the Memory tab so both confirm and report failures identically.
   import DeleteAction from './DeleteAction.svelte';
+  // #6371: the index table can only show registrations the daemon actually
+  // registered. A registration the warm-boot allowlist excluded is in neither,
+  // so the cleanup panel below is the only place it is visible.
+  import StaleIndexCleanup from './StaleIndexCleanup.svelte';
 
   /** Format bytes into a human-readable string (KB / MB / GB). */
   function formatBytes(bytes) {
@@ -162,6 +166,8 @@
     {:else}
       <p class="empty-hint">No indexes registered.</p>
     {/if}
+
+    <StaleIndexCleanup onPruned={reloadRoster} />
   {/if}
 </div>
 
