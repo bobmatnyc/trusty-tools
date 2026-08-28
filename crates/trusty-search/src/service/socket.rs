@@ -19,8 +19,9 @@
 //! | Slice | Surface | State |
 //! |---|---|---|
 //! | 1 | the listener itself, plus [`METHOD_HEALTH`] | landed (PR #6367) |
-//! | 2 | the READ surface — indexes, status, config, chunks, graph, call chain | this one, in [`crate::service::rpc::reads`] |
-//! | 3+ | search and grep; the write and lifecycle routes; the SSE streams | not started |
+//! | 2 | the READ surface — indexes, status, config, chunks, graph, call chain | landed (PR #6368), in [`crate::service::rpc::reads`] |
+//! | 3 | the QUERY surface — search and its fan-out, grep and its fan-out, similarity, typeahead | this one, in [`crate::service::rpc::queries`] |
+//! | 4+ | the write and lifecycle routes; the SSE streams | not started |
 //! | retire | delete the axum surface and move the eleven dialling crates | not started |
 //!
 //! **Two doors, one daemon.** The socket serves the same `Arc<SearchAppState>`
@@ -46,7 +47,7 @@ use serde::{Deserialize, Serialize};
 use tokio::net::UnixListener;
 use trusty_common::uds::server::{serve_until, RpcRouter, RpcServeOptions};
 
-use crate::service::rpc::reads;
+use crate::service::rpc::{queries, reads};
 use crate::service::server::SearchAppState;
 
 #[cfg(test)]
@@ -85,6 +86,13 @@ pub const METHODS: &[&str] = &[
     reads::METHOD_GRAPH_STATS,
     reads::METHOD_GRAPH_NEIGHBORS,
     reads::METHOD_CALL_CHAIN,
+    // #6285 slice 3 — the query surface.
+    queries::METHOD_QUERY,
+    queries::METHOD_QUERY_ALL,
+    queries::METHOD_GREP,
+    queries::METHOD_GREP_ALL,
+    queries::METHOD_SIMILAR,
+    queries::METHOD_TYPEAHEAD,
 ];
 
 /// The params of a method that takes no arguments.
@@ -139,7 +147,7 @@ pub fn socket_path() -> Result<PathBuf> {
 /// [`crate::service::server::health_report`] — the same call `GET /health`
 /// makes, so the two transports cannot answer differently. Each later slice
 /// appends one `register` call for its own route family; slice 2's is
-/// [`reads::register`].
+/// [`reads::register`] and slice 3's is [`queries::register`].
 /// Test: `rpc_router_registers_every_documented_method`,
 /// `rpc_reports_method_not_found_for_an_unknown_method`.
 fn build_router(state: &Arc<SearchAppState>) -> RpcRouter {
@@ -151,16 +159,23 @@ fn build_router(state: &Arc<SearchAppState>) -> RpcRouter {
             async move { Ok(crate::service::server::health_report(state).await) }
         },
     );
-    reads::register(router, state)
+    let router = reads::register(router, state);
+    queries::register(router, state)
 }
 
 /// Per-connection budgets for this listener.
 ///
 /// The shared defaults: a 30-second bound on delivering a REQUEST frame, and
-/// the 8 MiB shared frame budget. Neither bounds a handler, and health has
-/// nothing to bound. The slice that moves `POST /indexes/{id}/graph` (a 64 MiB
-/// axum body limit today) raises `max_frame_bytes` here and on the client
-/// together.
+/// the 8 MiB shared frame budget. Neither bounds a handler; slice 3's query
+/// methods are bounded by the interactive query deadline instead, which they
+/// share with their HTTP routes (see [`queries::register`]).
+///
+/// Two surfaces will outgrow the 8 MiB budget, and both are raised on the
+/// listener and the client TOGETHER — raising it here alone only moves which
+/// end refuses. `POST /indexes/{id}/graph` carries a 64 MiB axum body limit
+/// today, and a slice-3 query response can exceed 8 MiB when a caller asks for
+/// full content at a large `top_k` or a grep at a large `max_results`. Both
+/// wait for the retire slice, which is when a consumer first dials these names.
 fn serve_options() -> RpcServeOptions {
     RpcServeOptions::default()
 }

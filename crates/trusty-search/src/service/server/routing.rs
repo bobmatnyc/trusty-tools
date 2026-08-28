@@ -202,14 +202,56 @@ pub(super) async fn search_similar_handler(
     Path(id): Path<String>,
     Json(req): Json<SearchSimilarRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let index_id = IndexId::new(id);
-    let handle = state.registry.get(&index_id).ok_or(StatusCode::NOT_FOUND)?;
+    // #6285 slice 3: HTTP still answers a BARE status with an empty body, which
+    // is what this route has always sent. The body the core carries beside that
+    // status exists for the socket, where `RpcError` requires a message and an
+    // empty one would tell a caller nothing. The retire slice, which deletes
+    // this wrapper, is where HTTP gains the body too.
+    search_similar_report(&state, &id, req)
+        .await
+        .map(Json)
+        .map_err(|(status, _body)| status)
+}
+
+/// The body `POST /indexes/{id}/search_similar` serves, without the transport
+/// (#6285 slice 3).
+///
+/// Why: `search.similar` answers the same question over the socket. One body is
+/// what stops the two transports resolving a different seed chunk, or one
+/// re-embedding on a cache miss while the other 404s.
+/// What: [`search_similar_handler`]'s whole former body, with each bare
+/// `StatusCode` refusal given the wording that says WHICH of the four misses it
+/// was — an unknown index, an unknown seed, an index with no embedder, or a
+/// failed embed. HTTP discards that wording today (see the wrapper); the socket
+/// carries it.
+/// Test: `search_similar_over_the_socket_matches_the_http_body`,
+/// `an_unknown_index_reports_not_found_on_every_query_method`.
+pub(crate) async fn search_similar_report(
+    state: &Arc<SearchAppState>,
+    id: &str,
+    req: SearchSimilarRequest,
+) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
+    /// One refusal, as `(status, body)`.
+    fn refuse(status: StatusCode, error: &str) -> (StatusCode, serde_json::Value) {
+        (status, serde_json::json!({ "error": error }))
+    }
+
+    let index_id = IndexId::new(id.to_string());
+    let handle = state
+        .registry
+        .get(&index_id)
+        .ok_or_else(|| refuse(StatusCode::NOT_FOUND, &format!("unknown index: {id}")))?;
     let started = std::time::Instant::now();
     let indexer = handle.indexer.read().await;
     let chunk_id = indexer
         .find_chunk_id(&req.file, req.function.as_deref())
         .await
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .ok_or_else(|| {
+            refuse(
+                StatusCode::NOT_FOUND,
+                &format!("no seed chunk for file '{}' in index '{id}'", req.file),
+            )
+        })?;
     // Issue #484: the LRU embedding cache misses for skip_kg=true indexes
     // (entries are only written at reindex time and are evicted under memory
     // pressure).  When the cache misses, fetch the chunk's text and re-embed
@@ -220,21 +262,44 @@ pub(super) async fn search_similar_handler(
         let content = indexer
             .chunk_content_by_id(&chunk_id)
             .await
-            .ok_or(StatusCode::NOT_FOUND)?;
+            .ok_or_else(|| {
+                refuse(
+                    StatusCode::NOT_FOUND,
+                    &format!("seed chunk '{chunk_id}' has no content in index '{id}'"),
+                )
+            })?;
         indexer
             .embed_text(&content)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .ok_or(StatusCode::NOT_FOUND)? // BM25-only: no embedder wired
+            .map_err(|e| {
+                tracing::warn!(index_id = %id, error = %e, "search_similar: seed embed failed");
+                refuse(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal search error: could not embed the seed chunk",
+                )
+            })?
+            // BM25-only: no embedder wired.
+            .ok_or_else(|| {
+                refuse(
+                    StatusCode::NOT_FOUND,
+                    &format!("index '{id}' has no embedder, so it has no similar-code lane"),
+                )
+            })?
     };
     let results = indexer
         .similar_by_embedding(&embedding, req.top_k, Some(&chunk_id))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            tracing::warn!(index_id = %id, error = %e, "search_similar: neighbour lookup failed");
+            refuse(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal search error: the vector lane could not be queried",
+            )
+        })?;
     let latency_ms = started.elapsed().as_millis() as u64;
-    Ok(Json(serde_json::json!({
+    Ok(serde_json::json!({
         "results": results,
         "seed_chunk_id": chunk_id,
         "latency_ms": latency_ms,
-    })))
+    }))
 }

@@ -168,18 +168,90 @@ impl ConcurrencyLimiter {
     }
 }
 
+/// The refusal a caller that could not be admitted gets, without the transport
+/// (#6285 slice 3).
+///
+/// Why: the socket serves the same six query methods this limiter gates on
+/// HTTP, and `RpcError` has nowhere to put a `Retry-After` header. Splitting
+/// the pair out lets the socket carry the same `error` and `message` while
+/// [`busy_response`] keeps the header HTTP callers already read.
+/// What: `503` beside `{"error": "server_busy", …}`.
+/// Test: `queries_are_refused_when_the_shared_limiter_is_saturated`.
+pub fn busy_refusal() -> (StatusCode, serde_json::Value) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        serde_json::json!({
+            "error": "server_busy",
+            "message": "Request queue full, retry shortly",
+        }),
+    )
+}
+
 /// Build the 503 response body used when the queue is full.
 fn busy_response() -> Response {
-    let body = Json(serde_json::json!({
-        "error": "server_busy",
-        "message": "Request queue full, retry shortly",
-    }));
-    let mut resp = (StatusCode::SERVICE_UNAVAILABLE, body).into_response();
+    let (status, body) = busy_refusal();
+    let mut resp = (status, Json(body)).into_response();
     resp.headers_mut().insert(
         axum::http::header::RETRY_AFTER,
         axum::http::HeaderValue::from_static("2"),
     );
     resp
+}
+
+/// Take one admission slot, or report why the caller cannot have one.
+///
+/// Why (#6285 slice 3): [`apply_limiter`] is an axum middleware, so a second
+/// transport serving the same routes could not reach it and would admit
+/// callers the HTTP door had already refused — two doors, each with its own
+/// idea of how loaded the daemon is. This is the whole admission decision with
+/// the axum shape stripped off, so the socket gates on the SAME semaphore.
+/// What: the fast-path `try_acquire_owned`, then the bounded queue — a full
+/// queue and a queue-wait that outlasts `queue_timeout` both answer
+/// [`busy_refusal`]. The returned permit holds the slot; dropping it releases
+/// it, so a caller must keep it alive for as long as the work runs.
+/// Test: `limiter_returns_503_when_queue_full`, `queue_wait_returns_503_on_timeout`,
+/// `queries_are_refused_when_the_shared_limiter_is_saturated`.
+pub async fn admit(
+    limiter: &Arc<ConcurrencyLimiter>,
+) -> Result<tokio::sync::OwnedSemaphorePermit, (StatusCode, serde_json::Value)> {
+    // Fast-path: try to acquire a permit without waiting. The common case is
+    // an idle daemon where there's always a permit free.
+    if let Ok(permit) = limiter.semaphore.clone().try_acquire_owned() {
+        return Ok(permit);
+    }
+
+    // No permit available — try to admit to the waiting queue.
+    let current_waiters = limiter.waiting.fetch_add(1, Ordering::Relaxed);
+    metrics::gauge!("trusty_queue_depth").set((current_waiters + 1) as f64);
+    if current_waiters >= limiter.queue_depth {
+        // Queue full — back off the waiter counter and reject.
+        limiter.waiting.fetch_sub(1, Ordering::Relaxed);
+        metrics::gauge!("trusty_queue_depth").set(limiter.waiting.load(Ordering::Relaxed) as f64);
+        metrics::counter!("trusty_requests_rejected_total").increment(1);
+        tracing::warn!("concurrency limiter: queue full, returning 503");
+        return Err(busy_refusal());
+    }
+    // Wait for a permit, bounded by the queue timeout (issue #907).
+    // On timeout, return 503 immediately — never hang indefinitely.
+    let deadline = limiter.queue_timeout;
+    let acquired = tokio::time::timeout(deadline, limiter.semaphore.clone().acquire_owned()).await;
+    limiter.waiting.fetch_sub(1, Ordering::Relaxed);
+    metrics::gauge!("trusty_queue_depth").set(limiter.waiting.load(Ordering::Relaxed) as f64);
+    match acquired {
+        Err(_elapsed) => {
+            // Timed out waiting for a permit — refuse with the busy verdict so
+            // clients back off gracefully.
+            metrics::counter!("trusty_requests_rejected_total").increment(1);
+            tracing::warn!(
+                timeout_secs = deadline.as_secs(),
+                "concurrency limiter: queue-wait timed out, returning 503 (issue #907)"
+            );
+            Err(busy_refusal())
+        }
+        Ok(Ok(permit)) => Ok(permit),
+        // Semaphore closed — should never happen during normal operation; fail closed.
+        Ok(Err(_)) => Err(busy_refusal()),
+    }
 }
 
 /// Axum middleware that gates the wrapped handler behind the limiter.
@@ -198,52 +270,11 @@ pub async fn apply_limiter(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    // Fast-path: try to acquire a permit without waiting. The common case is
-    // an idle daemon where there's always a permit free.
-    let permit = limiter.semaphore.clone().try_acquire_owned().ok();
-
-    let permit = match permit {
-        Some(p) => p,
-        None => {
-            // No permit available — try to admit to the waiting queue.
-            let current_waiters = limiter.waiting.fetch_add(1, Ordering::Relaxed);
-            metrics::gauge!("trusty_queue_depth").set((current_waiters + 1) as f64);
-            if current_waiters >= limiter.queue_depth {
-                // Queue full — back off the waiter counter and reject.
-                limiter.waiting.fetch_sub(1, Ordering::Relaxed);
-                metrics::gauge!("trusty_queue_depth")
-                    .set(limiter.waiting.load(Ordering::Relaxed) as f64);
-                metrics::counter!("trusty_requests_rejected_total").increment(1);
-                tracing::warn!("concurrency limiter: queue full, returning 503");
-                return busy_response();
-            }
-            // Wait for a permit, bounded by the queue timeout (issue #907).
-            // On timeout, return 503 immediately — never hang indefinitely.
-            let deadline = limiter.queue_timeout;
-            let acquired =
-                tokio::time::timeout(deadline, limiter.semaphore.clone().acquire_owned()).await;
-            limiter.waiting.fetch_sub(1, Ordering::Relaxed);
-            metrics::gauge!("trusty_queue_depth")
-                .set(limiter.waiting.load(Ordering::Relaxed) as f64);
-            match acquired {
-                Err(_elapsed) => {
-                    // Timed out waiting for a permit — return busy/503 with a
-                    // Retry-After header so clients back off gracefully.
-                    metrics::counter!("trusty_requests_rejected_total").increment(1);
-                    tracing::warn!(
-                        timeout_secs = deadline.as_secs(),
-                        "concurrency limiter: queue-wait timed out, returning 503 (issue #907)"
-                    );
-                    return busy_response();
-                }
-                Ok(Ok(p)) => p,
-                Ok(Err(_)) => {
-                    // Semaphore closed — should never happen during normal
-                    // operation; fail closed.
-                    return busy_response();
-                }
-            }
-        }
+    // #6285 slice 3: the decision itself is `admit`, shared with the socket.
+    // HTTP keeps the `Retry-After` header, which is what `busy_response` adds
+    // over the pair `admit` reports.
+    let Ok(permit) = admit(&limiter).await else {
+        return busy_response();
     };
 
     let response = next.run(request).await;

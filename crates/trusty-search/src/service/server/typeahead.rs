@@ -73,13 +73,36 @@ pub async fn typeahead_handler(
     Path(id): Path<String>,
     Query(params): Query<TypeaheadParams>,
 ) -> Result<Json<TypeaheadResponse>, (StatusCode, Json<serde_json::Value>)> {
+    typeahead_report(&state, &id, params)
+        .await
+        .map(Json)
+        .map_err(|(status, body)| (status, Json(body)))
+}
+
+/// The body `GET /indexes/{id}/typeahead` serves, without the transport
+/// (#6285 slice 3).
+///
+/// Why: `search.typeahead` answers the same question over the socket. One body
+/// is what stops the two transports clamping `limit` differently or disagreeing
+/// about which lane a mode selects.
+/// What: [`typeahead_handler`]'s whole former body. A refusal keeps its HTTP
+/// status beside its body, because that status is what
+/// [`crate::service::rpc::error::rpc_error_from_http`] turns into the JSON-RPC
+/// code.
+/// Test: `typeahead_over_the_socket_matches_the_http_body`,
+/// `an_unknown_index_reports_not_found_on_every_query_method`.
+pub(crate) async fn typeahead_report(
+    state: &Arc<SearchAppState>,
+    id: &str,
+    params: TypeaheadParams,
+) -> Result<TypeaheadResponse, (StatusCode, serde_json::Value)> {
     let q = params.q.trim();
     if q.is_empty() {
-        return Ok(Json(TypeaheadResponse {
+        return Ok(TypeaheadResponse {
             hits: vec![],
             mode: "lexical".to_string(),
             latency_ms: 0,
-        }));
+        });
     }
 
     let limit = params
@@ -89,13 +112,13 @@ pub async fn typeahead_handler(
 
     let mode = params.mode.unwrap_or_default();
 
-    let index_id = IndexId::new(id.clone());
+    let index_id = IndexId::new(id.to_string());
     let handle = match state.registry.get(&index_id) {
         Some(h) => h,
         None => {
             return Err((
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": format!("unknown index: {id}") })),
+                serde_json::json!({ "error": format!("unknown index: {id}") }),
             ))
         }
     };
@@ -126,7 +149,7 @@ pub async fn typeahead_handler(
         tracing::warn!(index_id = %id, err = %e, "typeahead search error");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": "internal search error" })),
+            serde_json::json!({ "error": "internal search error" }),
         )
     })?;
     drop(indexer);
@@ -155,9 +178,9 @@ pub async fn typeahead_handler(
         "typeahead"
     );
 
-    Ok(Json(TypeaheadResponse {
+    Ok(TypeaheadResponse {
         hits,
         mode: mode_str.to_owned(),
         latency_ms,
-    }))
+    })
 }

@@ -204,6 +204,15 @@ pub(crate) use index_config::{index_config_report, IndexConfigView};
 pub(crate) use indexes::{list_indexes_report, ListIndexesParams};
 pub(crate) use status::{graph_report, graph_stats_report, index_status_report, GraphQueryParams};
 
+// #6285 slice 3: the query surface's transport-neutral bodies. Same contract as
+// the slice-2 block above — `service::rpc::queries` registers one JSON-RPC
+// method per entry, and the axum handlers wrap the SAME functions.
+pub(crate) use files::{global_grep_report, grep_report};
+pub(crate) use routing::search_similar_report;
+pub(crate) use search::search_report;
+pub(crate) use search_global::global_search_report;
+pub(crate) use typeahead::{typeahead_report, TypeaheadParams};
+
 /// Build the axum router with the shared state.
 ///
 /// Why: Wraps `state` in an `Arc` so every handler clones the pointer cheaply.
@@ -266,7 +275,7 @@ pub fn build_router_on(
     state_arc: Arc<SearchAppState>,
     self_origins: trusty_common::server::SelfOrigins,
 ) -> Router {
-    use crate::service::query_timeout::{apply_query_timeout, QueryTimeoutConfig};
+    use crate::service::query_timeout::apply_query_timeout;
     use crate::service::ui::{
         chat_handler, list_chat_providers, ui_asset_handler, ui_index_handler,
     };
@@ -283,8 +292,11 @@ pub fn build_router_on(
     // reconcile walks registered handles only.
     crate::service::timeout_recovery::spawn_timeout_recovery_ticker(Arc::clone(&state_arc));
 
-    let limiter = crate::service::concurrency::ConcurrencyLimiter::from_env();
-    let query_timeout_cfg = QueryTimeoutConfig::from_env();
+    // #6285 slice 3: both live on the state so the socket gates the same six
+    // query methods on the SAME semaphore and the SAME deadline. Building them
+    // here would give each transport its own.
+    let limiter = Arc::clone(&state_arc.query_limiter);
+    let query_timeout_cfg = Arc::clone(&state_arc.query_timeout);
 
     // Interactive routes: concurrency-limited AND query-deadline-bounded.
     // MUST NOT include reindex / index-file — those are legitimately long-running.
