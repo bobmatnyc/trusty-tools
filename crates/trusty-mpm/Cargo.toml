@@ -10,7 +10,10 @@ name = "trusty-mpm"
 # #5949 rides the same 1.5.6: the worktree registry repair it adds to
 # `session_manager::decommission` is `pub(super)`, so no public item changed
 # signature.
-version = "1.5.7"
+# 1.5.8 (#6288): patch — 1.5.7 is published and this PR edits `src/**`. Patch
+# because the removed items (`supervisor::http`, `SupervisorConfig::metrics_addr`)
+# have no out-of-workspace consumer, and every in-workspace caller moved with them.
+version = "1.5.8"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

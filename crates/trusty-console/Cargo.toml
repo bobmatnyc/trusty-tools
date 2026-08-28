@@ -1,6 +1,9 @@
 [package]
 name        = "trusty-console"
-version     = "0.7.0"
+# 0.7.1 (#6288): patch — 0.7.0 is published and this PR edits `src/**`. The only
+# change is dropping the retired supervisor's 7881 row from a test's
+# known-siblings table; no public item moved.
+version     = "0.7.1"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true
