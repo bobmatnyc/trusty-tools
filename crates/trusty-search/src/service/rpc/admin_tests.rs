@@ -140,7 +140,11 @@ async fn http_get(router: &Router, uri: &str) -> serde_json::Value {
         .body(Body::empty())
         .expect("build the request");
     let (status, body) = http_raw(router, request).await;
-    assert_eq!(status, StatusCode::OK, "GET {uri} answered {status}: {body}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "GET {uri} answered {status}: {body}"
+    );
     body
 }
 
@@ -400,15 +404,37 @@ async fn config_set_over_the_socket_matches_the_http_body() {
     assert_eq!(memory_limit_mb(), Some(2048));
     assert_eq!(index_memory_limit_mb(), Some(512));
 
-    // An explicit null disables, and must do so identically.
+    // An explicit null disables the per-index cap, and must do so identically on
+    // both transports. What comes BACK is the RESOLVED figure, not the raw cell:
+    // `core::memguard::index_memory_limit_mb` falls back to the global limit when
+    // the per-index one is disabled, so both bodies report the global 4096 rather
+    // than `null`. #6285: a socket that answered the raw cell would disagree with
+    // the route about the same request.
+    set_memory_limit_mb(Some(4096));
+    set_index_memory_limit_mb(Some(512));
+    let disabled_over_http = http_ok(
+        &http,
+        "PATCH",
+        "/config",
+        serde_json::json!({ "index_memory_limit_mb": null }),
+    )
+    .await;
+
+    set_memory_limit_mb(Some(4096));
+    set_index_memory_limit_mb(Some(512));
     let disabled = rpc_ok(
         &rpc,
         admin::METHOD_CONFIG_SET,
         serde_json::json!({ "index_memory_limit_mb": null }),
     )
     .await;
-    assert_eq!(disabled["index_memory_limit_mb"], serde_json::Value::Null);
-    assert_eq!(index_memory_limit_mb(), None);
+    assert_eq!(disabled, disabled_over_http);
+    assert_eq!(
+        disabled["index_memory_limit_mb"],
+        serde_json::json!(4096),
+        "a disabled per-index cap resolves to the global limit on both transports"
+    );
+    assert_eq!(index_memory_limit_mb(), Some(4096));
 }
 
 /// Why: this write's only refusal is a malformed field, and the failure that
@@ -463,12 +489,7 @@ async fn logs_tail_over_the_socket_matches_the_http_body() {
     }
 
     let over_http = http_get(&http, "/logs/tail?n=3").await;
-    let over_socket = rpc_ok(
-        &rpc,
-        admin::METHOD_LOGS_TAIL,
-        serde_json::json!({ "n": 3 }),
-    )
-    .await;
+    let over_socket = rpc_ok(&rpc, admin::METHOD_LOGS_TAIL, serde_json::json!({ "n": 3 })).await;
 
     assert_eq!(
         over_socket["lines"].as_array().map(Vec::len),
@@ -608,4 +629,3 @@ async fn an_unreadable_registry_is_refused_on_either_transport() {
         "unreadable registry",
     );
 }
-

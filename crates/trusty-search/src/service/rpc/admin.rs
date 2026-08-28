@@ -120,11 +120,14 @@ pub struct IndexConfigSet {
 /// Why its own type rather than decoding [`LogsTailParams`] directly: `n` is a
 /// query parameter with a serde default on HTTP, and a JSON-RPC call to a method
 /// with no arguments carries `params: null` — which `LogsTailParams` refuses
-/// outright, so every default-shaped tail would answer `invalid_params`. This
-/// wrapper carries the same default and accepts an absent `params`.
-/// What: `{}` or an absent `params` means [`DEFAULT_LOGS_TAIL_N`] lines;
-/// `{"n": 500}` is the same request `?n=500` makes. The clamp lives in the core,
-/// not here, so both transports refuse an over-large `n` identically.
+/// outright, so every default-shaped tail would answer `invalid_params`.
+/// What: `{}` means [`DEFAULT_LOGS_TAIL_N`] lines; `{"n": 500}` is the same
+/// request `?n=500` makes. The clamp lives in the core, not here, so both
+/// transports refuse an over-large `n` identically.
+///
+/// A derived `Deserialize` still refuses `null`, so [`register`] decodes this as
+/// `Option<LogsTail>` and reads `None` as the default — an absent `params` and an
+/// explicit `null` arrive here as the same `Value::Null` (#6285).
 /// Test: `logs_tail_over_the_socket_matches_the_http_body`,
 /// `logs_tail_clamps_n_on_the_socket_too`.
 ///
@@ -150,7 +153,9 @@ pub struct LogsTail {
 /// siblings drive each registration against its HTTP twin.
 pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
     use crate::service::orphan_report::registry_orphans_report;
-    use crate::service::server::{logs_tail_report, patch_config_report, patch_index_config_report};
+    use crate::service::server::{
+        logs_tail_report, patch_config_report, patch_index_config_report,
+    };
 
     // ---- the two config writes (axum's `free` group) ------------------------
     let held = Arc::clone(state);
@@ -173,16 +178,19 @@ pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
 
     // ---- the two operational reads ------------------------------------------
     let held = Arc::clone(state);
-    let router = router.typed::<LogsTail, serde_json::Value, _, _>(METHOD_LOGS_TAIL, move |p| {
-        let state = Arc::clone(&held);
-        async move {
-            let params = match p.n {
-                Some(n) => LogsTailParams { n },
-                None => LogsTailParams::default(),
-            };
-            Ok(logs_tail_report(&state, &params))
-        }
-    });
+    // #6285: `Option<LogsTail>` so a call with no arguments decodes — the router
+    // hands a handler `Value::Null` for both an absent and an explicit `params`.
+    let router =
+        router.typed::<Option<LogsTail>, serde_json::Value, _, _>(METHOD_LOGS_TAIL, move |p| {
+            let state = Arc::clone(&held);
+            async move {
+                let params = match p.and_then(|p| p.n) {
+                    Some(n) => LogsTailParams { n },
+                    None => LogsTailParams::default(),
+                };
+                Ok(logs_tail_report(&state, &params))
+            }
+        });
 
     router.typed::<super::super::socket::NoParams, serde_json::Value, _, _>(
         METHOD_REGISTRY_ORPHANS,
