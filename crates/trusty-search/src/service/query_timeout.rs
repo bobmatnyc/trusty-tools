@@ -83,6 +83,23 @@ impl QueryTimeoutConfig {
     }
 }
 
+/// The refusal an expired query gets, without the transport (#6285 slice 3).
+///
+/// Why: the socket serves the same interactive query methods and must report
+/// an expiry as the caller's own timeout rather than as an internal fault.
+/// What: `408` beside `{"error": "query_timeout", …}`.
+/// Test: `query_timeout_returns_408_when_handler_stalls`,
+/// `a_query_that_outlasts_the_deadline_reports_the_same_refusal_on_both_transports`.
+pub fn timeout_refusal() -> (StatusCode, serde_json::Value) {
+    (
+        StatusCode::REQUEST_TIMEOUT,
+        serde_json::json!({
+            "error": "query_timeout",
+            "message": "Query exceeded the configured time limit — try a narrower query or retry",
+        }),
+    )
+}
+
 /// Build the response body for a query-timeout expiry (HTTP 408).
 ///
 /// Why: a consistent JSON error shape lets clients distinguish a query timeout
@@ -90,11 +107,40 @@ impl QueryTimeoutConfig {
 /// What: returns `{"error":"query_timeout","message":"…"}` with status 408.
 /// Test: `query_timeout_returns_408_when_handler_stalls`.
 fn timeout_response() -> Response {
-    let body = Json(serde_json::json!({
-        "error": "query_timeout",
-        "message": "Query exceeded the configured time limit — try a narrower query or retry",
-    }));
-    (StatusCode::REQUEST_TIMEOUT, body).into_response()
+    let (status, body) = timeout_refusal();
+    (status, Json(body)).into_response()
+}
+
+/// Run `fut` under this daemon's interactive-query deadline (#6285 slice 3).
+///
+/// Why: [`apply_query_timeout`] is an axum middleware, so a second transport
+/// serving the same query methods could not reach it — a socket search against
+/// a stalled embedder would hang with nothing to cancel it, while the HTTP
+/// route answered 408. This is the deadline with the axum shape stripped off,
+/// including the counter, so an expiry looks the same to an operator whichever
+/// door it arrived at.
+/// What: `tokio::time::timeout` around `fut`; on expiry the future is dropped
+/// (cancelling it) and [`timeout_refusal`] is returned.
+/// Test: `query_timeout_returns_408_when_handler_stalls`,
+/// `a_query_that_outlasts_the_deadline_reports_the_same_refusal_on_both_transports`.
+pub async fn with_query_deadline<F>(
+    cfg: &QueryTimeoutConfig,
+    fut: F,
+) -> Result<F::Output, (StatusCode, serde_json::Value)>
+where
+    F: std::future::Future,
+{
+    match tokio::time::timeout(cfg.timeout, fut).await {
+        Ok(value) => Ok(value),
+        Err(_elapsed) => {
+            tracing::warn!(
+                timeout_secs = cfg.timeout.as_secs(),
+                "query_timeout: interactive query exceeded deadline (issue #907)"
+            );
+            metrics::counter!("trusty_query_timeouts_total").increment(1);
+            Err(timeout_refusal())
+        }
+    }
 }
 
 /// Axum middleware: enforce a per-request wall-clock deadline on interactive
@@ -114,16 +160,11 @@ pub async fn apply_query_timeout(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    match tokio::time::timeout(cfg.timeout, next.run(request)).await {
+    // #6285 slice 3: the deadline itself is `with_query_deadline`, shared with
+    // the socket so one expiry decision serves both transports.
+    match with_query_deadline(&cfg, next.run(request)).await {
         Ok(response) => response,
-        Err(_elapsed) => {
-            tracing::warn!(
-                timeout_secs = cfg.timeout.as_secs(),
-                "query_timeout: interactive query exceeded deadline, returning 408 (issue #907)"
-            );
-            metrics::counter!("trusty_query_timeouts_total").increment(1);
-            timeout_response()
-        }
+        Err(_) => timeout_response(),
     }
 }
 

@@ -137,11 +137,31 @@ pub(super) async fn global_search_handler(
     State(state): State<Arc<SearchAppState>>,
     Json(req): Json<GlobalSearchRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    global_search_report(&state, req)
+        .await
+        .map(Json)
+        .map_err(|(status, body)| (status, Json(body)))
+}
+
+/// The body `POST /search` serves, without the transport (#6285 slice 3).
+///
+/// Why: `search.query.all` answers the same question over the socket. The
+/// fan-out's incompleteness counters — `cold_indexes_skipped`,
+/// `corpus_failed_indexes_skipped`, `corpus_read_failed_indexes_skipped` — are
+/// the fields a caller reads to know the sweep was partial, so a second
+/// implementation that omitted one would report a complete answer over a
+/// missing corpus.
+/// What: [`global_search_handler`]'s whole former body.
+/// Test: `global_search_over_the_socket_matches_the_http_body`.
+pub(crate) async fn global_search_report(
+    state: &Arc<SearchAppState>,
+    req: GlobalSearchRequest,
+) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
     // Issue #882: reject empty / whitespace-only queries before fan-out.
     if req.query.trim().is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "query must not be empty" })),
+            serde_json::json!({ "error": "query must not be empty" }),
         ));
     }
 
@@ -176,7 +196,7 @@ pub(super) async fn global_search_handler(
     };
     let total_indexes = index_ids.len();
     if index_ids.is_empty() {
-        return Ok(Json(serde_json::json!({
+        return Ok(serde_json::json!({
             "results": Vec::<crate::core::indexer::CodeChunk>::new(),
             "indexes_searched": Vec::<String>::new(),
             "total_indexes": 0_usize,
@@ -188,7 +208,7 @@ pub(super) async fn global_search_handler(
             "corpus_read_failed_indexes_skipped": 0_usize,
             "latency_ms": 0_u64,
             "intent": format!("{:?}", QueryClassifier::classify(&req.query)),
-        })));
+        }));
     }
 
     let started = std::time::Instant::now();
@@ -445,7 +465,7 @@ pub(super) async fn global_search_handler(
         .collect();
 
     let latency_ms = started.elapsed().as_millis() as u64;
-    Ok(Json(serde_json::json!({
+    Ok(serde_json::json!({
         "results": results,
         "indexes_searched": indexes_searched,
         "total_indexes": total_indexes,
@@ -471,5 +491,5 @@ pub(super) async fn global_search_handler(
         // Issue #2845: the effective concurrency cap applied to this fan-out,
         // so callers/operators can confirm bounding (or serial mode) took hold.
         "fanout_concurrency": fanout_concurrency,
-    })))
+    }))
 }

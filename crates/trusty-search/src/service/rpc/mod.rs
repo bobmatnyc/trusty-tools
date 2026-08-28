@@ -17,3 +17,7 @@ pub mod error;
 /// Registration for the read families: indexes, status, config, chunks, graph,
 /// and call chain (#6285 slice 2).
 pub mod reads;
+
+/// Registration for the query families: hybrid search and its fan-out, grep and
+/// its fan-out, code-to-code similarity, and typeahead (#6285 slice 3).
+pub mod queries;

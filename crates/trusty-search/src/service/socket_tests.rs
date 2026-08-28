@@ -151,10 +151,6 @@ async fn dial_once(socket: &Path, request: &serde_json::Value) -> RawExchange {
 /// rename pass review and surface as `method_not_found` in a crate with no
 /// Cargo edge on this one.
 ///
-/// #6285 slice 2: the second assertion is what a dropped `reads::register` call
-/// fails on. The first alone would still pass — [`METHODS`] and the
-/// registrations would simply shrink together, and a slice's whole family could
-/// silently stop being served.
 /// Test: this function IS the test.
 #[test]
 fn rpc_router_registers_every_documented_method() {
@@ -167,12 +163,34 @@ fn rpc_router_registers_every_documented_method() {
         registered, documented,
         "METHODS must list exactly what build_router registers"
     );
+}
 
-    for family in [&[METHOD_HEALTH][..], crate::service::rpc::reads::METHODS] {
-        for method in family {
+/// Why: [`METHODS`] splices in each family's constants one by one, so a family
+/// can grow a name that never reaches this list. That name is then registered
+/// nowhere and listed nowhere, which
+/// [`rpc_router_registers_every_documented_method`] cannot see — both sides of
+/// its `assert_eq!` are simply missing it, and they compare equal. The family's
+/// own array still claims the name, and the retire slice's consumers will read
+/// THAT array.
+///
+/// #6285 slice 2 shipped this as a loop inside the assert_eq test, justified as
+/// catching a dropped `register` call. It does not: `METHODS` names each
+/// family constant explicitly, so dropping `reads::register` leaves `documented`
+/// holding names `registered` lacks and the `assert_eq!` fails first. Split out
+/// here, comparing the two CONSTANT arrays and never the router, it is
+/// independent of that test rather than a weaker restatement of it.
+/// Test: this function IS the test.
+#[test]
+fn every_family_method_is_spliced_into_the_socket_method_list() {
+    for (family, names) in [
+        ("health", &[METHOD_HEALTH][..]),
+        ("reads", crate::service::rpc::reads::METHODS),
+        ("queries", crate::service::rpc::queries::METHODS),
+    ] {
+        for method in names {
             assert!(
-                registered.contains(method),
-                "{method} is documented by its family but the router does not serve it"
+                METHODS.contains(method),
+                "{method} is named by the {family} family but METHODS does not splice it in"
             );
         }
     }

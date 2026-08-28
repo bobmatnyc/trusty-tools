@@ -60,6 +60,11 @@ impl SearchAppState {
         let (shutdown_tx, _) = watch::channel(false);
         Self {
             registry,
+            // #6285 slice 3: one limiter and one deadline per DAEMON, not per
+            // router — the socket and the axum router both gate the query
+            // surface on these.
+            query_limiter: crate::service::concurrency::ConcurrencyLimiter::from_env(),
+            query_timeout: crate::service::query_timeout::QueryTimeoutConfig::from_env(),
             cold_store: Arc::new(crate::service::lazy_loader::ColdIndexStore::new()),
             reindex_progress: Arc::new(DashMap::new()),
             last_reindex_aborted_at: Arc::new(DashMap::new()),
@@ -124,6 +129,30 @@ impl SearchAppState {
             // drain is observed by `health_handler`.
             last_seen_defer_embed_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
+    }
+
+    /// Builder-style: replace the query surface's admission limiter and
+    /// deadline (#6285 slice 3).
+    ///
+    /// Why: both are resolved from the environment in [`Self::new`], so the
+    /// only way to prove a saturated limiter or an expired deadline is to
+    /// inject a tiny one — and injecting on the STATE is what makes the proof a
+    /// parity test, since the axum router reads these same two values.
+    /// Following `ConcurrencyLimiter::with_limits` and
+    /// `QueryTimeoutConfig::from_duration`, which are `cfg(test)` for the same
+    /// reason.
+    /// What: overwrites both fields and returns `self`.
+    /// Test: `queries_are_refused_when_the_shared_limiter_is_saturated`,
+    /// `a_query_that_outlasts_the_deadline_reports_the_same_refusal_on_both_transports`.
+    #[cfg(test)]
+    pub fn with_query_guards(
+        mut self,
+        limiter: Arc<crate::service::concurrency::ConcurrencyLimiter>,
+        timeout: Arc<crate::service::query_timeout::QueryTimeoutConfig>,
+    ) -> Self {
+        self.query_limiter = limiter;
+        self.query_timeout = timeout;
+        self
     }
 
     /// Builder-style: pin the persisted `indexes.toml` path (issue #2717).

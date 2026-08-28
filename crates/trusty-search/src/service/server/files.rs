@@ -413,21 +413,44 @@ pub(super) async fn grep_handler(
     Path(id): Path<String>,
     Json(req): Json<crate::service::grep::GrepRequest>,
 ) -> Result<Json<crate::service::grep::GrepResponse>, (StatusCode, Json<serde_json::Value>)> {
+    grep_report(&state, &id, req)
+        .await
+        .map(Json)
+        .map_err(|(status, body)| (status, Json(body)))
+}
+
+/// The body `POST /indexes/{id}/grep` serves, without the transport
+/// (#6285 slice 3).
+///
+/// Why: `search.grep` answers the same question over the socket. One body is
+/// what stops the two transports compiling the same pattern into different
+/// matchers, or one reporting an unreadable corpus as zero matches.
+/// What: [`grep_handler`]'s whole former body. A refusal keeps its HTTP status
+/// beside its body, because that status is what
+/// [`crate::service::rpc::error::rpc_error_from_http`] turns into the JSON-RPC
+/// code — so a cold-parked index is the retryable 503 class on both.
+/// Test: `grep_over_the_socket_matches_the_http_body`,
+/// `a_bad_regex_reports_invalid_params_on_both_transports`.
+pub(crate) async fn grep_report(
+    state: &Arc<SearchAppState>,
+    id: &str,
+    req: crate::service::grep::GrepRequest,
+) -> Result<crate::service::grep::GrepResponse, (StatusCode, serde_json::Value)> {
     // Issue #882: empty / whitespace-only patterns match every line in every
     // file, producing a meaningless dump of the entire corpus.
     if req.pattern.trim().is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "pattern must not be empty" })),
+            serde_json::json!({ "error": "pattern must not be empty" }),
         ));
     }
     let compiled = crate::service::grep::CompiledGrep::compile(&req).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": e.to_string() })),
+            serde_json::json!({ "error": e.to_string() }),
         )
     })?;
-    let index_id = IndexId::new(id);
+    let index_id = IndexId::new(id.to_string());
     // #4715: same rule as `index_status_handler` — a cold-parked index exists.
     // #5061: the three-way verdict (and the `restore_via` hint that tells a
     // caller a plain `search` reloads a cold-parked index) now lives in one
@@ -435,10 +458,9 @@ pub(super) async fn grep_handler(
     let handle = match state.registry.get(&index_id) {
         Some(h) => h,
         None => {
-            return Err(super::degraded::residency_miss_response(
-                &state.cold_store,
-                &index_id,
-            ))
+            let (status, body) =
+                super::degraded::residency_miss_response(&state.cold_store, &index_id);
+            return Err((status, body.0));
         }
     };
 
@@ -448,7 +470,10 @@ pub(super) async fn grep_handler(
     // zero matches tells the caller its literal is nowhere in the code.
     grep_one_index(&handle, &compiled, &mut matches, req.max_results)
         .await
-        .map_err(|e| corpus_backed_read_error(&index_id.0, &e))?;
+        .map_err(|e| {
+            let (status, body) = corpus_backed_read_error(&index_id.0, &e);
+            (status, body.0)
+        })?;
     let truncated = matches.len() >= req.max_results;
     tracing::info!(
         index_id = %index_id,
@@ -458,11 +483,11 @@ pub(super) async fn grep_handler(
         "grep"
     );
     let total = matches.len();
-    Ok(Json(crate::service::grep::GrepResponse {
+    Ok(crate::service::grep::GrepResponse {
         matches,
         total,
         truncated,
-    }))
+    })
 }
 
 /// `POST /grep` — grep-parity regex search fanned out across indexes.
@@ -479,17 +504,35 @@ pub(super) async fn global_grep_handler(
     State(state): State<Arc<SearchAppState>>,
     Json(req): Json<crate::service::grep::GrepRequest>,
 ) -> Result<Json<crate::service::grep::GrepResponse>, (StatusCode, Json<serde_json::Value>)> {
-    // Issue #882: same guard as grep_handler — an empty pattern matches every line.
+    global_grep_report(&state, req)
+        .await
+        .map(Json)
+        .map_err(|(status, body)| (status, Json(body)))
+}
+
+/// The body `POST /grep` serves, without the transport (#6285 slice 3).
+///
+/// Why: `search.grep.all` answers the same question over the socket. The
+/// fan-out's tolerance rules — an unknown `index_id` narrows to nothing rather
+/// than 404-ing, one unreadable corpus refuses the whole sweep — are exactly the
+/// kind a second implementation would get subtly wrong.
+/// What: [`global_grep_handler`]'s whole former body.
+/// Test: `global_grep_over_the_socket_matches_the_http_body`.
+pub(crate) async fn global_grep_report(
+    state: &Arc<SearchAppState>,
+    req: crate::service::grep::GrepRequest,
+) -> Result<crate::service::grep::GrepResponse, (StatusCode, serde_json::Value)> {
+    // Issue #882: same guard as grep_report — an empty pattern matches every line.
     if req.pattern.trim().is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "pattern must not be empty" })),
+            serde_json::json!({ "error": "pattern must not be empty" }),
         ));
     }
     let compiled = crate::service::grep::CompiledGrep::compile(&req).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": e.to_string() })),
+            serde_json::json!({ "error": e.to_string() }),
         )
     })?;
 
@@ -515,7 +558,10 @@ pub(super) async fn global_grep_handler(
             // than return the other indexes' matches as the complete answer.
             grep_one_index(&handle, &compiled, &mut matches, req.max_results)
                 .await
-                .map_err(|e| corpus_backed_read_error(&id.0, &e))?;
+                .map_err(|e| {
+                    let (status, body) = corpus_backed_read_error(&id.0, &e);
+                    (status, body.0)
+                })?;
         }
     }
     let truncated = matches.len() >= req.max_results;
@@ -526,11 +572,11 @@ pub(super) async fn global_grep_handler(
         "grep_global"
     );
     let total = matches.len();
-    Ok(Json(crate::service::grep::GrepResponse {
+    Ok(crate::service::grep::GrepResponse {
         matches,
         total,
         truncated,
-    }))
+    })
 }
 
 /// Query params for `GET /indexes/{id}/call_chain` (issue #76).

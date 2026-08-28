@@ -6,8 +6,8 @@ use axum::http::StatusCode;
 use trusty_common::uds::server::{CODE_INTERNAL_ERROR, CODE_INVALID_PARAMS};
 
 use super::{
-    code_for, refusal_is_permanent, rpc_error_from_http, CODE_NOT_FOUND, CODE_UNAVAILABLE,
-    CODE_UNAVAILABLE_PERMANENT,
+    code_for, refusal_is_permanent, rpc_error_from_http, CODE_DEADLINE_EXCEEDED, CODE_NOT_FOUND,
+    CODE_UNAVAILABLE, CODE_UNAVAILABLE_PERMANENT,
 };
 
 /// Why: the code is the ONLY thing a socket client can branch on — `RpcError`
@@ -19,6 +19,10 @@ use super::{
 fn status_and_permanence_pick_the_code() {
     assert_eq!(code_for(400, false), CODE_INVALID_PARAMS);
     assert_eq!(code_for(404, false), CODE_NOT_FOUND);
+    // #6285 slice 3: the query deadline. Permanence is not consulted — a body
+    // this surface builds itself, never one carrying `retryable`.
+    assert_eq!(code_for(408, false), CODE_DEADLINE_EXCEEDED);
+    assert_eq!(code_for(408, true), CODE_DEADLINE_EXCEEDED);
     assert_eq!(code_for(503, false), CODE_UNAVAILABLE);
     assert_eq!(code_for(503, true), CODE_UNAVAILABLE_PERMANENT);
     assert_eq!(code_for(500, false), CODE_INTERNAL_ERROR);

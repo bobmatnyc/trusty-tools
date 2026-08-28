@@ -8,8 +8,12 @@
 //! body both transports serve fails these rather than surfacing in a consumer.
 //!
 //! What: one `*_over_the_socket_matches_the_http_body` per route family, plus
-//! the refusal classes — an unknown index, a KG-disabled index, and a param the
-//! caller got wrong.
+//! the refusal classes — an unknown index, a cold-parked one, a KG-disabled
+//! one, and a param the caller got wrong. The two 503 halves are both driven
+//! end to end: a cold-parked index for the retryable code and a `skip_kg` index
+//! for the permanent one, because the code is the ONLY thing a socket client can
+//! branch on and reading one as the other sends a caller either to poll forever
+//! or to give up on an index a search would restore (#6285 slice 3).
 //!
 //! **Host-sampled fields are excluded, and only those.** `graph`'s
 //! `generated_at` is `Utc::now()` at answer time, so two reads microseconds
@@ -31,7 +35,7 @@ use trusty_common::uds::server::{RpcError, RpcRouter, CODE_INVALID_PARAMS};
 use crate::core::chunker::{ChunkType, RawChunk};
 use crate::core::indexer::CodeIndexer;
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
-use crate::service::rpc::error::{CODE_NOT_FOUND, CODE_UNAVAILABLE_PERMANENT};
+use crate::service::rpc::error::{CODE_NOT_FOUND, CODE_UNAVAILABLE, CODE_UNAVAILABLE_PERMANENT};
 use crate::service::server::{build_router_on, SearchAppState};
 
 use crate::service::rpc::reads;
@@ -45,6 +49,13 @@ const KG_OFF_INDEX: &str = "parity-6285-kg-off";
 
 /// An id no store holds, for the not-found arm.
 const MISSING: &str = "parity-6285-absent";
+
+/// A third index, present ONLY in the cold store, for the transient-503 arm.
+///
+/// This is the state `restore_eager_entry` leaves an index in when its eager
+/// restore times out — the default configuration, no env var involved (#4250)
+/// — and the one `TRUSTY_MAX_RESIDENT_INDEXES` produces on purpose (#2161).
+const COLD_INDEX: &str = "parity-6285-cold";
 
 /// A minimal in-memory chunk. `function_name` is what
 /// `call_chain::resolve_entry_point` falls back to when the symbol graph is
@@ -109,6 +120,17 @@ async fn fixture() -> (Arc<SearchAppState>, Router, RpcRouter) {
     registry.register(kg_off);
 
     let state = Arc::new(SearchAppState::new(registry));
+    // Registered and built, but not resident — the third index exists only
+    // here, so an index-scoped read finds it in the cold store rather than the
+    // registry. It is invisible to `GET /indexes`, which lists the registry.
+    state
+        .cold_store
+        .register_cold_entries(vec![crate::service::persistence::PersistedIndex {
+            id: COLD_INDEX.to_string(),
+            root_path: "/nonexistent/parity-6285-cold".into(),
+            ..Default::default()
+        }]);
+
     let http = build_router_on(
         Arc::clone(&state),
         trusty_common::server::SelfOrigins::default(),
@@ -499,6 +521,49 @@ async fn an_unknown_index_reports_not_found_on_every_index_scoped_read() {
             "{method} must name the index an operator has to act on: {err}"
         );
     }
+}
+
+/// Why: the retryable half of the 503 split had no end-to-end case — slice 2
+/// proved `CODE_UNAVAILABLE_PERMANENT` through `kg_unavailable` and left
+/// [`CODE_UNAVAILABLE`] proved only by the unit table in `error_tests.rs`. That
+/// is the half a consumer acts on: a cold-parked index is registered, built,
+/// and one search away from serving, so a caller that read it as permanent
+/// would give up on an index that was never lost. This drives the real
+/// cold-store state through both transports.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cold_parked_index_reports_the_retryable_unavailable_code() {
+    let (_state, http, rpc) = fixture().await;
+
+    let (status, body) = http_raw(&http, &format!("/indexes/{COLD_INDEX}/status")).await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "fixture precondition: HTTP refuses a non-resident index with 503"
+    );
+    assert!(
+        body.contains("\"retryable\":true"),
+        "fixture precondition: the refusal says waiting can succeed: {body}"
+    );
+
+    let err = rpc_err(
+        &rpc,
+        reads::METHOD_INDEX_STATUS,
+        serde_json::json!({ "index_id": COLD_INDEX }),
+    )
+    .await;
+    assert_eq!(
+        err.code, CODE_UNAVAILABLE,
+        "an index a search would reload must not read as permanently gone: {err}"
+    );
+    assert_ne!(
+        err.code, CODE_NOT_FOUND,
+        "and it must not read as an index that never existed (#4715): {err}"
+    );
+    assert!(
+        err.message.contains("index_not_resident"),
+        "the refusal must keep the class name HTTP reports: {err}"
+    );
 }
 
 /// Why: `kg_unavailable` on a `skip_kg` index never clears by waiting — only a

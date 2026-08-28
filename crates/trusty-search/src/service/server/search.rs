@@ -492,22 +492,50 @@ pub(super) async fn unregister_index(
 pub(super) async fn search_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
-    Json(mut query): Json<SearchQuery>,
+    Json(query): Json<SearchQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    search_report(&state, &id, query)
+        .await
+        .map(Json)
+        .map_err(|(status, body)| (status, Json(body)))
+}
+
+/// The body `POST /indexes/{id}/search` serves, without the transport
+/// (#6285 slice 3).
+///
+/// Why: `search.query` answers the same question over the socket, and this is
+/// the daemon's most-read body — the lazy cold-load, the facet routing (#5069),
+/// the lane down-shift, the five drop counters and the whole `meta` block. Two
+/// implementations of it would diverge on the first change to any of them.
+/// What: [`search_handler`]'s whole former body. A refusal keeps its HTTP status
+/// beside its body, because that status is what
+/// [`crate::service::rpc::error::rpc_error_from_http`] turns into the JSON-RPC
+/// code — so `vector_unavailable`'s `retryable` split reaches a socket caller as
+/// the retryable/permanent code pair rather than one 503 class.
+/// Test: `search_over_the_socket_matches_the_http_body`,
+/// `an_unknown_index_reports_not_found_on_every_query_method`,
+/// `an_empty_query_reports_invalid_params_on_both_transports`.
+pub(crate) async fn search_report(
+    state: &Arc<SearchAppState>,
+    id: &str,
+    mut query: SearchQuery,
+) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
     // Issue #882: reject empty / whitespace-only queries before touching the
     // index. An empty query falls through to a pure k-NN vector search that
     // returns arbitrary top-k results — not useful and potentially expensive.
     if query.text.trim().is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "query must not be empty" })),
+            serde_json::json!({ "error": "query must not be empty" }),
         ));
     }
-    let index_id = IndexId::new(id);
+    let index_id = IndexId::new(id.to_string());
     // Issue #993: hot registry first, then the cold-store lazy load. #5349 moved
     // that flow into `index_resolve` so the write endpoints drive the identical
     // load instead of 503-ing against the same daemon state.
-    let handle = super::index_resolve::resolve_or_load_index(&state, &index_id).await?;
+    let handle = super::index_resolve::resolve_or_load_index(state, &index_id)
+        .await
+        .map_err(|(status, body)| (status, body.0))?;
     // #4087: a registered index whose durable corpus failed to open holds no
     // chunks at all, so every search against it returned HTTP 200 with
     // `results: []` — a total outage presented as "no matches". Fail loudly
@@ -515,8 +543,10 @@ pub(super) async fn search_handler(
     // to retry (transient) or escalate (permanent). Placed before the watcher
     // wake and the `last_queried` write so a broken index neither spawns a
     // watcher (which #4122 quarantines anyway) nor records a phantom query.
-    if let Some(resp) = super::degraded::corpus_failure_response(&index_id.0, &handle).await {
-        return Err(resp);
+    if let Some((status, body)) =
+        super::degraded::corpus_failure_response(&index_id.0, &handle).await
+    {
+        return Err((status, body.0));
     }
     // Idle-watcher wake: an index served without a live watcher was either
     // idle-suspended (`server::tickers::spawn_watcher_idle_suspend_ticker`) or
@@ -599,7 +629,7 @@ pub(super) async fn search_handler(
     // cannot answer. Serving BM25 rows under a 200 answers a different question
     // silently, so refuse with the same shape `search_kg` uses for `skip_kg`.
     if query.stage == Some(crate::core::indexer::SearchStage::Semantic) {
-        if let Some(resp) = super::degraded::vector_lane_unavailable(
+        if let Some((refusal_status, refusal_body)) = super::degraded::vector_lane_unavailable(
             &index_id.0,
             handle.skip_vector,
             &stages_snapshot,
@@ -608,9 +638,9 @@ pub(super) async fn search_handler(
             // caller's declared lane against the facet of the same repo that
             // holds the vectors before refusing outright.
             let Some((served_id, served_handle)) =
-                super::facet_route::resolve_semantic_facet(&state, &index_id).await
+                super::facet_route::resolve_semantic_facet(state, &index_id).await
             else {
-                return Err(resp);
+                return Err((refusal_status, refusal_body.0));
             };
             tracing::info!(
                 requested = %index_id,
@@ -649,22 +679,22 @@ pub(super) async fn search_handler(
         // The downcast matters here and not in the grep/call_chain wrapper:
         // `search_with_drops` also fails for reasons that have nothing to do
         // with the corpus (an embed call, the vector store), and those stay 500.
-        if let Some(resp) = super::degraded::corpus_read_failure_from(&e) {
+        if let Some((status, body)) = super::degraded::corpus_read_failure_from(&e) {
             tracing::warn!(
                 index_id = %index_id,
                 error = %e,
                 "search: the durable corpus could not be read"
             );
-            return resp;
+            return (status, body.0);
         }
         tracing::warn!(index_id = %index_id, error = %e, "search failed");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
+            serde_json::json!({
                 "error": "internal search error",
                 "index_id": index_id.0,
                 "message": format!("{e:#}"),
-            })),
+            }),
         )
     })?;
     // Issue #64: defense-in-depth post-filter. Chunks are stored with `file`
@@ -813,5 +843,5 @@ pub(super) async fn search_handler(
             );
         }
     }
-    Ok(Json(body))
+    Ok(body)
 }

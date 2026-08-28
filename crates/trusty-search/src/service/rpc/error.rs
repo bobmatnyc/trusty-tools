@@ -62,19 +62,36 @@ pub const CODE_UNAVAILABLE: i64 = -32002;
 /// -32009 plus -32023/-32024.
 pub const CODE_UNAVAILABLE_PERMANENT: i64 = -32012;
 
+/// HTTP 408 over the socket — the interactive-query deadline (#907) expired
+/// before the handler answered (#6285 slice 3).
+///
+/// Distinct from [`CODE_UNAVAILABLE`] because the remedy is different: a busy
+/// daemon clears on its own, while a query that outran the deadline will do it
+/// again unless the caller narrows it. Folding it into `internal_error` would
+/// tell the caller to file a bug about its own too-broad query.
+///
+/// The same number `trusty-analyze` uses for the same meaning
+/// (`service::events::CODE_DEADLINE_EXCEEDED`).
+pub const CODE_DEADLINE_EXCEEDED: i64 = -32005;
+
 /// The JSON-RPC code an HTTP status projects onto.
 ///
 /// Why a function rather than a match at each call site: the read surface has
 /// nine methods and four refusal classes between them, and one table is what
 /// makes "the code is a pure function of what HTTP would have sent" checkable.
-/// What: 400 is the caller's fault; 404 is permanent absence; 503 splits on
-/// `permanent` — see [`refusal_is_permanent`]. Everything else is internal, and
-/// the caller could not have sent any of them differently.
+/// What: 400 is the caller's fault; 404 is permanent absence; 408 is the query
+/// deadline; 503 splits on `permanent` — see [`refusal_is_permanent`].
+/// Everything else is internal, and the caller could not have sent any of them
+/// differently.
+///
+/// #6285 slice 3 added 408: the query surface is the only one HTTP bounds with
+/// a per-request deadline, so the read surface never produced that status.
 /// Test: `status_and_permanence_pick_the_code`.
 pub fn code_for(status: u16, permanent: bool) -> i64 {
     match status {
         400 => CODE_INVALID_PARAMS,
         404 => CODE_NOT_FOUND,
+        408 => CODE_DEADLINE_EXCEEDED,
         503 if permanent => CODE_UNAVAILABLE_PERMANENT,
         503 => CODE_UNAVAILABLE,
         _ => CODE_INTERNAL_ERROR,
