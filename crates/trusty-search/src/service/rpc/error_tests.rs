@@ -6,8 +6,9 @@ use axum::http::StatusCode;
 use trusty_common::uds::server::{CODE_INTERNAL_ERROR, CODE_INVALID_PARAMS};
 
 use super::{
-    code_for, refusal_is_permanent, rpc_error_from_http, CODE_DEADLINE_EXCEEDED, CODE_NOT_FOUND,
-    CODE_UNAVAILABLE, CODE_UNAVAILABLE_PERMANENT,
+    code_for, refusal_is_permanent, rpc_error_from_http, CODE_CONFLICT, CODE_DEADLINE_EXCEEDED,
+    CODE_FORBIDDEN, CODE_NOT_FOUND, CODE_TOO_MANY_REQUESTS, CODE_UNAVAILABLE,
+    CODE_UNAVAILABLE_PERMANENT,
 };
 
 /// Why: the code is the ONLY thing a socket client can branch on — `RpcError`
@@ -29,6 +30,28 @@ fn status_and_permanence_pick_the_code() {
     // A status this surface does not produce is internal rather than a silent
     // mis-classification as one of the coded families.
     assert_eq!(code_for(418, true), CODE_INTERNAL_ERROR);
+}
+
+/// Why: #6285 slice 4 put three statuses on this surface that no read or query
+/// route produces — 403 (root not approved), 409 (registry collision) and 429
+/// (reindex cooldown). Each has a remedy the caller can act on and the body
+/// already names, and each answered `internal_error` before, which reads as
+/// "file a bug". The one that must NOT move is 500: a corpus that would not open
+/// is not something a caller could have sent differently.
+/// Test: this function IS the test.
+#[test]
+fn the_write_surface_statuses_each_pick_their_own_code() {
+    assert_eq!(code_for(403, false), CODE_FORBIDDEN);
+    assert_eq!(code_for(409, false), CODE_CONFLICT);
+    assert_eq!(code_for(429, false), CODE_TOO_MANY_REQUESTS);
+    // Permanence is not consulted for any of the three — none of these bodies
+    // carries `retryable`, and reading an absent field as a verdict is what
+    // `refusal_is_permanent` exists to avoid.
+    assert_eq!(code_for(403, true), CODE_FORBIDDEN);
+    assert_eq!(code_for(409, true), CODE_CONFLICT);
+    assert_eq!(code_for(429, true), CODE_TOO_MANY_REQUESTS);
+    // Unmoved: an internal fault stays internal.
+    assert_eq!(code_for(500, true), CODE_INTERNAL_ERROR);
 }
 
 /// Why: `retryable` settles permanence wherever it is present, and both arms

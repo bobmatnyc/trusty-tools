@@ -186,6 +186,7 @@ fn every_family_method_is_spliced_into_the_socket_method_list() {
         ("health", &[METHOD_HEALTH][..]),
         ("reads", crate::service::rpc::reads::METHODS),
         ("queries", crate::service::rpc::queries::METHODS),
+        ("writes", crate::service::rpc::writes::METHODS),
     ] {
         for method in names {
             assert!(

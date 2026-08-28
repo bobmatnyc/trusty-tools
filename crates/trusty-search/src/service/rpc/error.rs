@@ -74,6 +74,42 @@ pub const CODE_UNAVAILABLE_PERMANENT: i64 = -32012;
 /// (`service::events::CODE_DEADLINE_EXCEEDED`).
 pub const CODE_DEADLINE_EXCEEDED: i64 = -32005;
 
+/// HTTP 403 over the socket — the #767 allowlist has not approved this root
+/// (#6285 slice 4).
+///
+/// Why not `internal_error`: the remedy is the operator's and the body names it
+/// (`trusty-search index add <root>`). Telling a caller to file a bug about a
+/// policy decision it can resolve is the wrong instruction.
+///
+/// The same number `trusty-mpm` uses for the same meaning
+/// (`daemon::error::CODE_FORBIDDEN`).
+pub const CODE_FORBIDDEN: i64 = -32003;
+
+/// HTTP 409 over the socket — this write collides with a registration that
+/// already exists (#6285 slice 4).
+///
+/// Why distinct from [`CODE_NOT_FOUND`] and [`CODE_INVALID_PARAMS`]: the request
+/// is well-formed and the subject exists; what is wrong is the state of the
+/// registry. #2336, #3993 and #5357 all answer 409, and each names in the body
+/// the OTHER id or root the caller has to deal with — a code that said "your
+/// params were bad" would send it back to re-check a request that was correct.
+///
+/// The same number `trusty-mpm` uses for the same meaning
+/// (`daemon::error::CODE_CONFLICT`).
+pub const CODE_CONFLICT: i64 = -32009;
+
+/// HTTP 429 over the socket — the #120 reindex cooldown is still running
+/// (#6285 slice 4).
+///
+/// Why not [`CODE_UNAVAILABLE`]: both clear on their own, but this one clears at
+/// a time the body states (`retry_after_secs`), and retrying before then fails
+/// identically. Folding it into the generic busy code would invite the tight
+/// retry loop the cooldown exists to break.
+///
+/// A free slot beside [`CODE_UNAVAILABLE_PERMANENT`]: `trusty-common` holds
+/// -32010/-32011 and trusty-mpm holds -32000 through -32009 plus -32023/-32024.
+pub const CODE_TOO_MANY_REQUESTS: i64 = -32013;
+
 /// The JSON-RPC code an HTTP status projects onto.
 ///
 /// Why a function rather than a match at each call site: the read surface has
@@ -86,12 +122,24 @@ pub const CODE_DEADLINE_EXCEEDED: i64 = -32005;
 ///
 /// #6285 slice 3 added 408: the query surface is the only one HTTP bounds with
 /// a per-request deadline, so the read surface never produced that status.
-/// Test: `status_and_permanence_pick_the_code`.
+///
+/// #6285 slice 4 added 403, 409 and 429. The write surface is the first to
+/// refuse for a reason the CALLER can act on but did not cause by malforming
+/// its request — an unapproved root, a registry collision, a cooldown — and all
+/// three fell to `internal_error`, which tells a caller to file a bug about a
+/// refusal whose remedy the body already names. 500 is deliberately still
+/// `internal_error`: a corpus that would not open or an HNSW that would not
+/// allocate is not something the caller could have sent differently.
+/// Test: `status_and_permanence_pick_the_code`,
+/// `the_write_surface_statuses_each_pick_their_own_code`.
 pub fn code_for(status: u16, permanent: bool) -> i64 {
     match status {
         400 => CODE_INVALID_PARAMS,
+        403 => CODE_FORBIDDEN,
         404 => CODE_NOT_FOUND,
         408 => CODE_DEADLINE_EXCEEDED,
+        409 => CODE_CONFLICT,
+        429 => CODE_TOO_MANY_REQUESTS,
         503 if permanent => CODE_UNAVAILABLE_PERMANENT,
         503 => CODE_UNAVAILABLE,
         _ => CODE_INTERNAL_ERROR,
