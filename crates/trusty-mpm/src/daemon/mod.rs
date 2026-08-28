@@ -49,6 +49,8 @@ pub mod runtime_reap;
 pub mod services;
 pub(crate) mod session_record_kind;
 pub mod sm_stdio;
+/// The hardened Unix-socket listener served alongside HTTP (#6288, ADR-0032).
+pub mod socket;
 pub(crate) mod spawn_command;
 pub mod state;
 pub mod tmux;
@@ -82,14 +84,30 @@ pub async fn run_http(state: Arc<DaemonState>, addr: SocketAddr) -> anyhow::Resu
 /// the configured one is busy) and needs the daemon to serve on that exact
 /// listener; passing a pre-bound `TcpListener` lets it own the bind decision
 /// while the daemon still owns sidecar discovery, the watcher, and the reaper.
-/// What: discovers the trusty sidecars, spawns the file watcher and the
-/// dead-session reaper, then serves the axum router on `listener` until close.
+/// What: binds the Unix socket (#6288), discovers the trusty sidecars, spawns
+/// the file watcher and the dead-session reaper, then serves the axum router on
+/// `listener` AND the RPC router on the socket until both drain.
+///
+/// # Errors
+///
+/// When the Unix socket cannot be bound — including when another trusty-mpm is
+/// answering it — or when the HTTP server exits with one. A socket that cannot
+/// be bound fails startup rather than degrading to an HTTP-only daemon, exactly
+/// as a failed `TcpListener::bind` would (the Fail-Open Check, #6288).
+///
 /// Test: covered indirectly by the e2e suite, which boots the daemon on a
-/// loopback port and drives it over HTTP.
+/// loopback port and drives it over HTTP; the socket half is covered by
+/// `socket_tests.rs`.
 pub async fn serve_http(
     state: Arc<DaemonState>,
     listener: tokio::net::TcpListener,
 ) -> anyhow::Result<()> {
+    // #6288: bind the socket FIRST, before any background loop is spawned, so a
+    // refusal leaves nothing running to unwind. `?` is the whole Fail-Open
+    // Check: a daemon that cannot take its socket does not start HTTP-only.
+    let socket_path = socket::socket_path()?;
+    let rpc_listener = socket::bind(&socket_path).await?;
+
     // #5784: report a gated environment as gated. Without this branch the
     // refusal reads as "tmux not found", which sends an operator hunting for a
     // missing binary instead of showing them the reassigned `$HOME` and the
@@ -207,13 +225,33 @@ pub async fn serve_http(
     // mid-sweep), then walks BOTH registries and kills each live session,
     // fail-open per session. Also calls `manager.shutdown()` to graceful-stop
     // all live managed sessions via SIGTERM-before-kill.
+    //
+    // #6288: the signal is awaited ONCE, by the task below, and fanned out to
+    // both listeners through a token. Awaiting `shutdown_signal()` separately in
+    // each would work on SIGTERM and fail on Ctrl-C, where `tokio::signal`
+    // delivers to whichever waiter is registered — one listener would drain and
+    // the other would keep accepting.
+    let drain = tokio_util::sync::CancellationToken::new();
+    let signal_watcher = drain.clone();
+    tokio::spawn(async move {
+        trusty_common::shutdown_signal().await;
+        signal_watcher.cancel();
+    });
+
+    let rpc_drain = drain.clone();
+    let rpc_socket = socket_path.clone();
+    let rpc_task = tokio::spawn(async move {
+        socket::serve_until_shutdown(rpc_listener, &rpc_socket, rpc_drain.cancelled_owned()).await;
+    });
+
+    let http_drain = drain.clone();
     let reaper_state = Arc::clone(&state);
-    axum::serve(
+    let http_result = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .with_graceful_shutdown(async move {
-        shutdown_signal().await;
+        http_drain.cancelled_owned().await;
         // Signal all background loops to stop before we walk the session list.
         cancel.cancel();
         // Graceful-stop live SessionManager sessions (SIGTERM → 2s wait → kill).
@@ -226,44 +264,26 @@ pub async fn serve_http(
         // Reap remaining legacy-registry sessions not covered by mgr.shutdown().
         reap_all_live_sessions(reaper_state).await;
     })
-    .await?;
+    .await;
+
+    // #6288: cancel unconditionally, so the socket is unlinked even when axum
+    // exits for a reason that was never a shutdown signal. Cancelling a token
+    // the signal watcher already cancelled is a no-op, so the ordinary drain is
+    // unaffected. The `?` waits until AFTER the join for the same reason —
+    // returning early would leave a socket file no successor bound.
+    drain.cancel();
+    if let Err(e) = rpc_task.await {
+        tracing::warn!(error = %e, "the rpc serve task did not exit cleanly");
+    }
+    http_result?;
     Ok(())
 }
 
-/// Block until the process receives a shutdown signal (SIGINT or SIGTERM).
-///
-/// Why: the graceful-shutdown reaper (#1455) must fire on the SAME signals the
-/// daemon is stopped with. `tm restart` / `launchctl bootout` deliver SIGTERM;
-/// trapping only Ctrl-C (SIGINT) would skip the reap on the common stop path and
-/// leak every live session. This mirrors the binary's `wait_for_shutdown_signal`
-/// so the library boot path (used by external in-process consumers) reaps too.
-/// What: on Unix, races `ctrl_c()` against a SIGTERM stream; if registering the
-/// SIGTERM handler fails it falls back to awaiting Ctrl-C alone. On non-Unix
-/// (no SIGTERM) it simply awaits Ctrl-C.
-/// Test: signal delivery is environment-bound and not unit-tested; the reap it
-/// triggers is covered by `reap_all_live_sessions`'s own behaviour.
-async fn shutdown_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut term = match signal(SignalKind::terminate()) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("failed to register SIGTERM handler: {e}");
-                let _ = tokio::signal::ctrl_c().await;
-                return;
-            }
-        };
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
-    }
-}
+// #6288: the private `shutdown_signal` that used to live here was a
+// line-for-line copy of `trusty_common::shutdown_signal` — same SIGTERM stream,
+// same Ctrl-C race, same fallback when the handler fails to register. The
+// signal is now awaited once, through the shared entry point, and fanned out to
+// both listeners; see `serve_http`'s drain token.
 
 /// Kill every live tmux session in the LEGACY DaemonState registry on shutdown.
 ///

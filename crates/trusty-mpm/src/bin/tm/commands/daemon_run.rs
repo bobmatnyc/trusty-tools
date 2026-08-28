@@ -142,7 +142,16 @@ pub(crate) async fn run_daemon(
 
     // Write lock file so clients can discover us (backward-compat for existing
     // clients that parse the TOML lock directly, e.g. the old MpmConnector).
-    trusty_mpm::daemon::lock::write_lock(&base_url);
+    //
+    // #6288: the socket path is DERIVED, so resolving it here — ahead of the
+    // bind `serve_http` performs — cannot disagree with what the daemon goes on
+    // to bind. Recording it lets a reader tell a socket-serving daemon from a
+    // pre-#6288 one. A resolution failure is not fatal here: `serve_http` binds
+    // that same path moments later and fails startup then, with the same error.
+    let socket_path = trusty_mpm::daemon::socket::socket_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    trusty_mpm::daemon::lock::write_lock(&base_url, &socket_path);
     // Also write the standard trusty-common http_addr file so the console's
     // reverse proxy can discover the daemon address via the shared
     // `read_daemon_addr` helper (#1849 Phase 1).
