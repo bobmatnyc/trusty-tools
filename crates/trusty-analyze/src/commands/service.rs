@@ -76,6 +76,17 @@ pub fn run_service_action(action: ServiceAction) -> Result<()> {
 /// Why a struct rather than four returns: the exit decision and the operator's
 /// remediation text are one verdict, and a caller that could take the lines
 /// without the `failed` flag is the fail-open shape this exists to prevent.
+///
+/// `cfg_attr(not(macos), allow(dead_code))`: the only non-test caller is
+/// [`service_uninstall`], and launchd is macOS-only, so off macOS that caller is
+/// configured out. This module is private to the `trusty-analyze` BIN target, so
+/// in a non-test Linux build nothing constructs `Rendered` and `dead_code` fires
+/// under CI's `-D warnings` (#6355) — while a macOS `cargo clippy` stays green
+/// and never shows it. The item is not dead, it is platform-conditional: the
+/// renderer is pure precisely so the tests below prove the fail-closed contract
+/// on every platform. Same reasoning and same attribute as `trusty-installer`'s
+/// `verify_launchd_state::LaunchdList`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Rendered {
     /// Lines for stdout — what was cleared.
@@ -106,6 +117,10 @@ pub struct Rendered {
 /// Test: `render_reports_a_cleared_unit`, `render_is_silent_for_an_absent_unit`,
 /// `render_fails_closed_on_a_unit_that_would_not_go`,
 /// `render_fails_even_when_another_label_was_cleared`.
+///
+/// `cfg_attr(not(macos), allow(dead_code))`: see [`Rendered`] — off macOS the
+/// one non-test caller is configured out (#6355).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[must_use]
 pub fn render_evictions(evictions: &[LabelEviction]) -> Rendered {
     let mut r = Rendered::default();
