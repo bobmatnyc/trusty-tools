@@ -1,6 +1,9 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import RefreshHeader from './RefreshHeader.svelte';
+  // #6360: the palace roster grew a delete action; the control itself is shared
+  // with the Search tab so both confirm and report failures identically.
+  import DeleteAction from './DeleteAction.svelte';
 
   let report = $state(null);
   let loading = $state(true);
@@ -42,6 +45,26 @@
     } finally {
       loading = false;
       refreshing = false;
+    }
+  }
+
+  /**
+   * Re-read the palace roster from the daemon after a confirmed delete (#6360).
+   *
+   * Why not `fetchMetrics(true)`: that call drops itself when a background tick
+   * is already in flight, and a dropped refresh right after a delete leaves the
+   * deleted palace on screen until the next tick — which reads as a delete that
+   * did not happen. This one always issues the request. The row is never
+   * removed locally: what the daemon reports is what the table shows.
+   */
+  async function reloadRoster() {
+    try {
+      const resp = await fetch('/api/console/metrics/memory');
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      report = await resp.json();
+      error = null;
+    } catch (e) {
+      error = e.message;
     }
   }
 
@@ -128,6 +151,7 @@
               <th>Drawers</th>
               <th>Vectors</th>
               <th>KG Triples</th>
+              <th class="actions-head">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -143,6 +167,9 @@
                 <td class="num">{p.cached === false ? '—' : p.drawer_count}</td>
                 <td class="num">{p.cached === false ? '—' : p.vector_count}</td>
                 <td class="num">{p.cached === false ? '—' : p.kg_triple_count}</td>
+                <td class="actions">
+                  <DeleteAction kind="palace" id={p.id} onDeleted={reloadRoster} />
+                </td>
               </tr>
             {/each}
           </tbody>
@@ -204,6 +231,10 @@
   tr:last-child td { border-bottom: none; }
   tr:hover td { background: var(--trusty-card-bg); }
   td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  /* #6360: the delete column. Right-aligned and vertically top-anchored so the
+     expanded confirm panel grows downward without shifting the row's numbers. */
+  th.actions-head, td.actions { text-align: right; }
+  td.actions { vertical-align: top; }
   code {
     font-family: 'JetBrains Mono', monospace; font-size: 0.8rem;
     background: var(--trusty-surface-raised); padding: 0.1rem 0.35rem; border-radius: 0.25rem;

@@ -1,6 +1,9 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import RefreshHeader from './RefreshHeader.svelte';
+  // #6360: the index roster grew a delete action; the control itself is shared
+  // with the Memory tab so both confirm and report failures identically.
+  import DeleteAction from './DeleteAction.svelte';
 
   /** Format bytes into a human-readable string (KB / MB / GB). */
   function formatBytes(bytes) {
@@ -49,6 +52,26 @@
     } finally {
       loading = false;
       refreshing = false;
+    }
+  }
+
+  /**
+   * Re-read the index roster from the daemon after a confirmed delete (#6360).
+   *
+   * Why not `fetchMetrics(true)`: that call drops itself when a background tick
+   * is already in flight, and a dropped refresh right after a delete leaves the
+   * deleted index on screen until the next tick — which reads as a delete that
+   * did not happen. This one always issues the request. The row is never
+   * removed locally: what the daemon reports is what the table shows.
+   */
+  async function reloadRoster() {
+    try {
+      const resp = await fetch('/api/console/metrics/search');
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      report = await resp.json();
+      error = null;
+    } catch (e) {
+      error = e.message;
     }
   }
 
@@ -115,6 +138,7 @@
               <th>ID</th>
               <th>Root Path</th>
               <th>Size</th>
+              <th class="actions-head">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -124,6 +148,11 @@
                 <td class="path">{idx.root_path ?? '—'}</td>
                 <td class="num">
                   {idx.size_bytes != null ? formatBytes(idx.size_bytes) : '—'}
+                </td>
+                <td class="actions">
+                  {#if idx.id}
+                    <DeleteAction kind="index" id={idx.id} onDeleted={reloadRoster} />
+                  {/if}
                 </td>
               </tr>
             {/each}
@@ -194,6 +223,10 @@
   tr:hover td { background: var(--trusty-card-bg); }
   td.num { text-align: right; font-variant-numeric: tabular-nums; }
   td.path { font-size: 0.8rem; color: var(--trusty-text-secondary); max-width: 400px; overflow: hidden; text-overflow: ellipsis; }
+  /* #6360: the delete column. Right-aligned and vertically top-anchored so the
+     expanded confirm panel grows downward without shifting the row's numbers. */
+  th.actions-head, td.actions { text-align: right; }
+  td.actions { vertical-align: top; }
   code {
     font-family: 'JetBrains Mono', monospace; font-size: 0.8rem;
     background: var(--trusty-surface-raised); padding: 0.1rem 0.35rem; border-radius: 0.25rem;

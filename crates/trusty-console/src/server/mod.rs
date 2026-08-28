@@ -12,6 +12,10 @@
 //!     [`build_router_with_webhooks`].
 //!   - `GET /api/console/metrics/webhooks` — oldest-pending spool age as a red
 //!     health state.
+//!   - `DELETE /api/console/memory/palaces/{id}` — delete one palace via
+//!     trusty-memory's `palace_delete` on its socket (#6360).
+//!   - `DELETE /api/console/search/indexes/{id}` — delete one index via
+//!     trusty-search's own `DELETE /indexes/{id}` (#6360).
 //!   - `GET /api/console/metrics/analyze/indexes` — analyze index list via stdio MCP.
 //!   - `GET /api/console/metrics/analyze/visualize?index=<id>` — graph+entities+clusters.
 //!   - `…/api/console/sessions/*` — the single HTTP front door for the trusty-mpm
@@ -130,9 +134,20 @@ impl AppState {
         // idle-connection reuse forces every proxied request to open a fresh
         // connection to whatever process currently owns the port, eliminating the
         // stale-reuse failure at the root. Loopback connect cost is negligible.
+        // #6360: reqwest follows up to 10 redirects by default, and every
+        // loopback check in this crate — the proxy's `is_local_upstream`, the
+        // delete routes' reuse of it — validates only the URL it was handed. A
+        // 3xx from an upstream would re-issue the request, body and method
+        // intact, at whatever host the `Location` names, which for a DELETE
+        // means a destructive call to an address nothing checked. Refusing to
+        // follow leaves the 3xx as the response: the proxy hands it to the
+        // browser (which is what a reverse proxy should do with a redirect the
+        // upstream chose) and the delete routes read it as a non-2xx refusal.
+        // Nothing in this crate relied on following one.
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .pool_max_idle_per_host(0)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("reqwest client init");
         let analyze_handle = Arc::new(McpServiceHandle::new(
@@ -408,6 +423,18 @@ fn build_router_inner(
         .route(
             "/api/console/config/mpm",
             get(crate::routes::config::get_handler).post(crate::routes::config::post_handler),
+        )
+        // #6360: operator-driven deletion of one palace / one index. Both call
+        // the owning daemon's existing teardown and report what it actually did
+        // — the console implements no deletion of its own. The router-wide
+        // origin guard below covers them, as it does every other write route.
+        .route(
+            "/api/console/memory/palaces/{id}",
+            axum::routing::delete(crate::routes::deletes::delete_palace_handler),
+        )
+        .route(
+            "/api/console/search/indexes/{id}",
+            axum::routing::delete(crate::routes::deletes::delete_index_handler),
         )
         // Analyze on-demand routes — call the analyze stdio MCP directly (no /proxy).
         .route(
