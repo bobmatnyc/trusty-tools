@@ -192,6 +192,18 @@ use self::health::upgrade_handler;
 // socket and `GET /health` cannot report different things.
 pub(crate) use health::health_report;
 
+// #6285 slice 2: the read surface's transport-neutral bodies and the param
+// types they take. `service::rpc::reads` registers one JSON-RPC method per
+// entry here; the axum handlers above wrap the SAME functions, which is what
+// makes a socket-versus-HTTP parity assertion meaningful rather than a
+// comparison of two independent implementations.
+pub(crate) use admin::{config_report, ConfigResponse};
+pub(crate) use contrib_graph::{graph_neighbors_report, NeighborsParams};
+pub(crate) use files::{call_chain_report, index_chunks_report, CallChainParams};
+pub(crate) use index_config::{index_config_report, IndexConfigView};
+pub(crate) use indexes::{list_indexes_report, ListIndexesParams};
+pub(crate) use status::{graph_report, graph_stats_report, index_status_report, GraphQueryParams};
+
 /// Build the axum router with the shared state.
 ///
 /// Why: Wraps `state` in an `Arc` so every handler clones the pointer cheaply.

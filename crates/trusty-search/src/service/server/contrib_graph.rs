@@ -192,7 +192,7 @@ pub(super) async fn ingest_graph_handler(
 }
 
 #[derive(Debug, Deserialize)]
-pub(super) struct NeighborsParams {
+pub(crate) struct NeighborsParams {
     /// Start node id (symbol or contributed canonical id).
     pub node: String,
     /// `in` | `out` | `both` (default `both`).
@@ -236,7 +236,26 @@ pub(super) async fn graph_neighbors_handler(
     Path(id): Path<String>,
     Query(params): Query<NeighborsParams>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let err = |code: StatusCode, msg: String| (code, Json(serde_json::json!({ "error": msg })));
+    graph_neighbors_report(&state, &id, &params)
+        .await
+        .map(Json)
+        .map_err(|(status, body)| (status, Json(body)))
+}
+
+/// The body `GET /indexes/{id}/graph/neighbors` serves, without the transport
+/// (#6285 slice 2).
+///
+/// Why: `search.graph.neighbors` runs the same BFS over the socket. The
+/// direction and edge-kind vocabularies are parsed here, so one body is what
+/// keeps the two transports accepting and refusing the same tokens.
+/// What: [`graph_neighbors_handler`]'s whole former body.
+/// Test: `graph_neighbors_over_the_socket_matches_the_http_body`.
+pub(crate) async fn graph_neighbors_report(
+    state: &Arc<SearchAppState>,
+    id: &str,
+    params: &NeighborsParams,
+) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
+    let err = |code: StatusCode, msg: String| (code, serde_json::json!({ "error": msg }));
 
     let index_id = IndexId::new(id);
     let handle = state
@@ -288,7 +307,7 @@ pub(super) async fn graph_neighbors_handler(
         })
         .collect();
 
-    Ok(Json(serde_json::json!({
+    Ok(serde_json::json!({
         "index_id": index_id.to_string(),
         "node": params.node,
         "node_kind": graph.node_kind(&params.node),
@@ -296,5 +315,5 @@ pub(super) async fn graph_neighbors_handler(
         "max_hops": max_hops,
         "count": neighbors.len(),
         "neighbors": neighbors,
-    })))
+    }))
 }

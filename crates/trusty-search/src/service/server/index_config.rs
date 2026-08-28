@@ -140,15 +140,35 @@ pub(super) async fn index_config_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
 ) -> Response {
+    match index_config_report(&state, &id) {
+        Ok(view) => Json(view).into_response(),
+        Err((status, body)) => (status, Json(body)).into_response(),
+    }
+}
+
+/// The view `GET /indexes/{id}/config` serves, without the transport
+/// (#6285 slice 2).
+///
+/// Why: `search.index.config.get` reads the same hygiene knobs over the socket,
+/// and a second projection of the handle would drift from the PATCH echo-back
+/// that shares [`IndexConfigView`].
+/// What: the handle lookup plus [`IndexConfigView::from_handle`]. Returns the
+/// typed view rather than a `Value` so both transports serialise one struct.
+/// Test: `index_config_over_the_socket_matches_the_http_body`.
+pub(crate) fn index_config_report(
+    state: &Arc<SearchAppState>,
+    id: &str,
+) -> Result<IndexConfigView, (StatusCode, serde_json::Value)> {
     let index_id = IndexId::new(id);
     let Some(handle) = state.registry.get(&index_id) else {
-        return (
+        return Err((
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": format!("unknown index '{}'", index_id.0) })),
-        )
-            .into_response();
+            // Byte-identical to the body this route already served — this slice
+            // moves the read onto the socket and changes no HTTP response.
+            serde_json::json!({ "error": format!("unknown index '{}'", index_id.0) }),
+        ));
     };
-    Json(IndexConfigView::from_handle(&handle)).into_response()
+    Ok(IndexConfigView::from_handle(&handle))
 }
 
 /// `PATCH /indexes/:id/config` — update the index's hygiene config and/or

@@ -150,6 +150,11 @@ async fn dial_once(socket: &Path, request: &serde_json::Value) -> RawExchange {
 /// that drifts from the registrations is worse than no array — it would let a
 /// rename pass review and surface as `method_not_found` in a crate with no
 /// Cargo edge on this one.
+///
+/// #6285 slice 2: the second assertion is what a dropped `reads::register` call
+/// fails on. The first alone would still pass — [`METHODS`] and the
+/// registrations would simply shrink together, and a slice's whole family could
+/// silently stop being served.
 /// Test: this function IS the test.
 #[test]
 fn rpc_router_registers_every_documented_method() {
@@ -162,6 +167,15 @@ fn rpc_router_registers_every_documented_method() {
         registered, documented,
         "METHODS must list exactly what build_router registers"
     );
+
+    for family in [&[METHOD_HEALTH][..], crate::service::rpc::reads::METHODS] {
+        for method in family {
+            assert!(
+                registered.contains(method),
+                "{method} is documented by its family but the router does not serve it"
+            );
+        }
+    }
 }
 
 /// Why: an unregistered name could plausibly fail three ways a client cannot

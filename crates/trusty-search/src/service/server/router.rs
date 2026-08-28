@@ -7,17 +7,7 @@
 //! boundaries. Private response types local to one handler live in that
 //! handler's module instead.
 //! Test: exercised by each endpoint's handler tests.
-use serde::{Deserialize, Serialize};
-
-/// Response shape for `GET /indexes` (flat list).
-///
-/// Why: Backward-compatible flat list returned when `?details` is absent.
-/// What: `{"indexes":["id1","id2"]}`.
-/// Test: `list_indexes_returns_empty_initially` and related.
-#[derive(Serialize)]
-pub(super) struct IndexListResponse {
-    pub indexes: Vec<String>,
-}
+use serde::Deserialize;
 
 /// Per-index entry returned by `GET /indexes?details=true` (issue #312).
 ///
