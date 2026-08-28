@@ -335,7 +335,9 @@ impl LaunchdConfig {
     /// What: per label, boots out only a unit that is actually loaded, verifies
     /// launchd let go, then deletes the plist; any step failing yields
     /// [`EvictionOutcome::Failed`] with the reason.
-    /// Test: `evict_legacy_keeps_only_evicted_labels`.
+    /// Test: `eviction_outcome_only_failed_is_a_failure` proves the outcome
+    /// taxonomy this return type carries; the launchctl steps themselves are
+    /// exercised through the trusty-installer eviction tests.
     pub fn evict_legacy_detailed(&self, legacy_labels: &[&str]) -> Vec<LabelEviction> {
         legacy_labels
             .iter()
