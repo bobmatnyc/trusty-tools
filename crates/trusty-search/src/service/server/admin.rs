@@ -131,7 +131,7 @@ pub(super) struct PatchConfigRequest {
 /// the env-var-derived keys (`memory_limit_mb` / `index_memory_limit_mb`) for
 /// symmetry with the request body.
 #[derive(Debug, Serialize)]
-pub(super) struct ConfigResponse {
+pub(crate) struct ConfigResponse {
     memory_limit_mb: Option<u64>,
     index_memory_limit_mb: Option<u64>,
 }
@@ -165,11 +165,21 @@ where
 pub(super) async fn get_config_handler(
     State(_state): State<Arc<SearchAppState>>,
 ) -> Json<ConfigResponse> {
+    Json(config_report())
+}
+
+/// The values `GET /config` reports, without the transport (#6285 slice 2).
+///
+/// Why: `search.config.get` reads the same two `AtomicU64` cells over the
+/// socket. Both limits are process-global, so this takes no state and the two
+/// transports read the same numbers by construction.
+/// Test: `config_over_the_socket_matches_the_http_body`.
+pub(crate) fn config_report() -> ConfigResponse {
     use crate::core::memguard::{index_memory_limit_mb, memory_limit_mb};
-    Json(ConfigResponse {
+    ConfigResponse {
         memory_limit_mb: memory_limit_mb(),
         index_memory_limit_mb: index_memory_limit_mb(),
-    })
+    }
 }
 
 /// `PATCH /config` — update the daemon's runtime memory-limit configuration.

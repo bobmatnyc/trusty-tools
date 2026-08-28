@@ -4,7 +4,7 @@
 //! with their request/response types. The `PATCH /indexes/:id` relocate handler
 //! lives in `indexes_relocate` to keep this file under the 500-line cap.
 //! What: `list_indexes_handler`, `create_index_handler`, and the types they use
-//! (`ListIndexesParams`, `IndexListResponse`, `IndexDetailEntry`).
+//! (`ListIndexesParams`, `IndexDetailEntry`).
 //! Issue #2336: `create_index_handler` also guards against registering a
 //! second index over a `root_path` already owned by a different registered
 //! id (409), and refuses to register a handle whose corpus open failed.
@@ -24,7 +24,7 @@ use super::helpers::{
     identifies_same_root, root_path_collision_response, root_path_mismatch_response,
     validate_root_path,
 };
-use super::router::{CreateIndexRequest, IndexDetailEntry, IndexListResponse};
+use super::router::{CreateIndexRequest, IndexDetailEntry};
 use super::state::{DaemonEvent, SearchAppState};
 use super::status::index_disk_and_mtime;
 
@@ -40,13 +40,13 @@ pub(super) use super::indexes_relocate::relocate_index_handler;
 /// Test: `list_indexes_tree_format_shape`, `list_indexes_flat_default_unchanged`,
 /// and `list_indexes_details_includes_size_bytes`.
 #[derive(Deserialize, Default)]
-pub(super) struct ListIndexesParams {
+pub(crate) struct ListIndexesParams {
     #[serde(default)]
-    pub(super) format: Option<String>,
+    pub(crate) format: Option<String>,
     /// Issue #312: when `true`, return `[{id, size_bytes}]` objects instead of
     /// bare strings so callers can display per-index disk usage.
     #[serde(default)]
-    pub(super) details: bool,
+    pub(crate) details: bool,
     /// DOC-37 (issue #2611): restrict the listing to indexes whose canonical
     /// repo identity matches this `owner/repo` (or `content:<sha>`) value.
     ///
@@ -57,7 +57,7 @@ pub(super) struct ListIndexesParams {
     /// slug differences still match; unparseable input is compared verbatim.
     /// Absent ⇒ no filtering (today's behaviour).
     #[serde(default)]
-    pub(super) repo_identity: Option<String>,
+    pub(crate) repo_identity: Option<String>,
 }
 
 /// Resolve the canonical repo identity for each registered handle (DOC-37).
@@ -142,6 +142,24 @@ pub(super) async fn list_indexes_handler(
     State(state): State<Arc<SearchAppState>>,
     Query(params): Query<ListIndexesParams>,
 ) -> Response {
+    Json(list_indexes_report(&state, &params)).into_response()
+}
+
+/// The body `GET /indexes` serves, without the transport (#6285 slice 2).
+///
+/// Why: `search.indexes.list` answers the same question over the socket, and
+/// two implementations would let the flat / tree / details arms drift apart on
+/// one transport without the other noticing. This is the ONE body; the axum
+/// handler above wraps it in `Json` and the RPC registration returns it as the
+/// frame's `result`.
+/// What: [`list_indexes_handler`]'s whole former body, returning the value it
+/// used to serialise. Not `async` — nothing here awaits.
+/// Test: `indexes_list_over_the_socket_matches_the_http_body` in
+/// `service::rpc::reads::tests`.
+pub(crate) fn list_indexes_report(
+    state: &Arc<SearchAppState>,
+    params: &ListIndexesParams,
+) -> serde_json::Value {
     let want_tree = params
         .format
         .as_deref()
@@ -157,18 +175,18 @@ pub(super) async fn list_indexes_handler(
     if want_tree {
         let mut handles = state.registry.list_handles();
         if let Some(target) = &identity_filter {
-            let ids = resolve_identities(&state, &handles);
+            let ids = resolve_identities(state, &handles);
             handles.retain(|h| ids.get(&h.id.0).cloned().flatten().as_ref() == Some(target));
         }
         let entries = crate::core::search::hierarchy::build_tree_entries(&state.registry, &handles);
-        Json(serde_json::json!({ "indexes": entries })).into_response()
+        serde_json::json!({ "indexes": entries })
     } else if params.details {
         // Issue #312: return per-index disk usage alongside each id.
         // Issue #661: also include root_path so callers can derive the index
         // from the current project directory without N status round-trips.
         // DOC-37: also carry repo_identity so callers can group facets by repo.
         let handles = state.registry.list_handles();
-        let ids = resolve_identities(&state, &handles);
+        let ids = resolve_identities(state, &handles);
         let entries: Vec<IndexDetailEntry> = handles
             .into_iter()
             .filter_map(|handle| {
@@ -190,22 +208,20 @@ pub(super) async fn list_indexes_handler(
                 })
             })
             .collect();
-        Json(serde_json::json!({ "indexes": entries })).into_response()
+        serde_json::json!({ "indexes": entries })
     } else if let Some(target) = &identity_filter {
         // Flat list, but scoped to one repo identity (DOC-37).
         let handles = state.registry.list_handles();
-        let ids = resolve_identities(&state, &handles);
+        let ids = resolve_identities(state, &handles);
         let indexes: Vec<String> = handles
             .into_iter()
             .filter(|h| ids.get(&h.id.0).cloned().flatten().as_ref() == Some(target))
             .map(|h| h.id.0.clone())
             .collect();
-        Json(IndexListResponse { indexes }).into_response()
+        serde_json::json!({ "indexes": indexes })
     } else {
-        Json(IndexListResponse {
-            indexes: state.registry.list().into_iter().map(|id| id.0).collect(),
-        })
-        .into_response()
+        let indexes: Vec<String> = state.registry.list().into_iter().map(|id| id.0).collect();
+        serde_json::json!({ "indexes": indexes })
     }
 }
 

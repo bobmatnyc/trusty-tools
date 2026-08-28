@@ -215,16 +215,37 @@ pub(super) async fn index_status_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    index_status_report(&state, &id)
+        .await
+        .map(Json)
+        .map_err(|(status, body)| (status, Json(body)))
+}
+
+/// The body `GET /indexes/{id}/status` serves, without the transport
+/// (#6285 slice 2).
+///
+/// Why: `search.index.status` answers the same question over the socket. One
+/// body is what stops the two transports reporting a different chunk count,
+/// stage snapshot, or residency verdict for the same index.
+/// What: [`index_status_handler`]'s whole former body. A refusal keeps its HTTP
+/// status beside its body, because that status is what
+/// [`crate::service::rpc::error::rpc_error_from_http`] turns into the JSON-RPC
+/// code — so one decision classifies the refusal on both transports.
+/// Test: `index_status_over_the_socket_matches_the_http_body`,
+/// `index_status_over_the_socket_reports_an_unknown_index_as_not_found`.
+pub(crate) async fn index_status_report(
+    state: &Arc<SearchAppState>,
+    id: &str,
+) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
     let index_id = IndexId::new(id);
     let handle = match state.registry.get(&index_id) {
         Some(h) => h,
         // #5061: registered-but-not-resident, permanently failed, and genuinely
         // unknown are three different answers; the builder renders each.
         None => {
-            return Err(super::degraded::residency_miss_response(
-                &state.cold_store,
-                &index_id,
-            ))
+            let (status, body) =
+                super::degraded::residency_miss_response(&state.cold_store, &index_id);
+            return Err((status, body.0));
         }
     };
     let indexer = handle.indexer.read().await;
@@ -389,7 +410,7 @@ pub(super) async fn index_status_handler(
         // keeps its name for wire compatibility.
         "embedded_this_boot": stages_snapshot.semantic.embedded,
     });
-    Ok(Json(serde_json::json!({
+    Ok(serde_json::json!({
         "index_id": index_id.0,
         "root_path": handle.root_path,
         "chunk_count": chunk_count,
@@ -430,7 +451,7 @@ pub(super) async fn index_status_handler(
             "network_mount_degraded": watcher_degraded_reason.is_some(),
             "degraded_reason": watcher_degraded_reason,
         },
-    })))
+    }))
 }
 
 /// Optional query parameters for `GET /indexes/{id}/graph` (issue #128).
@@ -441,14 +462,14 @@ pub(super) async fn index_status_handler(
 /// What: all fields optional; absent params apply no filter.
 /// Test: covered by `test_graph_handler_filters` in `tests/integration_tests.rs`.
 #[derive(Debug, Default, serde::Deserialize)]
-pub(super) struct GraphQueryParams {
+pub(crate) struct GraphQueryParams {
     /// Comma-separated node `type` values to keep (e.g. `Symbol,File`).
-    pub(super) types: Option<String>,
+    pub(crate) types: Option<String>,
     /// Comma-separated `EdgeKind` display names to keep (e.g.
     /// `CallsFunction,Implements`).
-    pub(super) edge_types: Option<String>,
+    pub(crate) edge_types: Option<String>,
     /// Minimum edge weight; edges below this are dropped.
-    pub(super) min_weight: Option<f32>,
+    pub(crate) min_weight: Option<f32>,
 }
 
 /// Parse a comma-separated filter param into a trimmed, lower-cased set.
@@ -506,8 +527,42 @@ pub(super) async fn graph_handler(
     Path(id): Path<String>,
     Query(params): Query<GraphQueryParams>,
 ) -> Result<Response, StatusCode> {
+    // The HTTP 404 stays a bare status with no body, exactly as before: the
+    // body the core builds exists so the socket's error frame can carry a
+    // message, and adding one here would be a change to a route this slice is
+    // not moving.
+    let body = graph_report(&state, &id, &params)
+        .await
+        .map_err(|(status, _)| status)?;
+
+    let mut response = Json(body).into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("max-age=3600"),
+    );
+    Ok(response)
+}
+
+/// The body `GET /indexes/{id}/graph` serves, without the transport
+/// (#6285 slice 2).
+///
+/// Why: `search.graph.get` exports the same graph over the socket. Filtering
+/// (`types` / `edge_types` / `min_weight`) and the edge-endpoint drop rule are
+/// subtle enough that a second implementation would diverge silently.
+/// What: [`graph_handler`]'s whole former body up to the response. The
+/// `Cache-Control` header stays in the handler — it is an HTTP concern with no
+/// counterpart on a socket.
+/// Test: `graph_over_the_socket_matches_the_http_body`.
+pub(crate) async fn graph_report(
+    state: &Arc<SearchAppState>,
+    id: &str,
+    params: &GraphQueryParams,
+) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
     let index_id = IndexId::new(id);
-    let handle = state.registry.get(&index_id).ok_or(StatusCode::NOT_FOUND)?;
+    let handle = state
+        .registry
+        .get(&index_id)
+        .ok_or_else(|| unknown_index(&index_id))?;
     let graph = {
         let indexer = handle.indexer.read().await;
         indexer.snapshot_symbol_graph().await
@@ -563,22 +618,32 @@ pub(super) async fn graph_handler(
         }));
     }
 
-    let body = serde_json::json!({
+    Ok(serde_json::json!({
         "nodes": nodes,
         "edges": edges,
         "stats": {
             "node_count": graph.node_count(),
             "edge_count": graph.edge_count(),
         },
+        // Sampled from the host clock at answer time, so two reads microseconds
+        // apart legitimately differ — the parity test excludes it (#6358).
         "generated_at": chrono::Utc::now().to_rfc3339(),
-    });
+    }))
+}
 
-    let mut response = Json(body).into_response();
-    response.headers_mut().insert(
-        axum::http::header::CACHE_CONTROL,
-        axum::http::HeaderValue::from_static("max-age=3600"),
-    );
-    Ok(response)
+/// The refusal every graph read shares for an id the hot registry does not hold.
+///
+/// Why one builder: `graph`, `graph/stats` and `graph/neighbors` all answered a
+/// bare 404 or their own hand-rolled body, and the socket needs a message for
+/// the error frame. One spelling is what keeps the three saying the same thing.
+fn unknown_index(index_id: &IndexId) -> (StatusCode, serde_json::Value) {
+    (
+        StatusCode::NOT_FOUND,
+        serde_json::json!({
+            "error": format!("unknown index: {}", index_id.0),
+            "index_id": index_id.0,
+        }),
+    )
 }
 
 /// `GET /indexes/{id}/graph/stats` — symbol-graph summary statistics
@@ -599,8 +664,26 @@ pub(super) async fn graph_stats_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    // As in `graph_handler`: the HTTP 404 keeps its bare-status shape.
+    graph_stats_report(&state, &id)
+        .await
+        .map(Json)
+        .map_err(|(status, _)| status)
+}
+
+/// The body `GET /indexes/{id}/graph/stats` serves, without the transport
+/// (#6285 slice 2).
+///
+/// Test: `graph_stats_over_the_socket_matches_the_http_body`.
+pub(crate) async fn graph_stats_report(
+    state: &Arc<SearchAppState>,
+    id: &str,
+) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
     let index_id = IndexId::new(id);
-    let handle = state.registry.get(&index_id).ok_or(StatusCode::NOT_FOUND)?;
+    let handle = state
+        .registry
+        .get(&index_id)
+        .ok_or_else(|| unknown_index(&index_id))?;
     let graph = {
         let indexer = handle.indexer.read().await;
         indexer.snapshot_symbol_graph().await
@@ -613,10 +696,10 @@ pub(super) async fn graph_stats_handler(
 
     // Issue #816: surface dropped-edge count so operators can detect
     // daemon/corpus version skew without log scraping.
-    Ok(Json(serde_json::json!({
+    Ok(serde_json::json!({
         "node_count": graph.node_count(),
         "edge_count": graph.edge_count(),
         "edge_kinds": serde_json::Value::Object(edge_kinds),
         "unknown_edge_tags_dropped": graph.unknown_edge_tags_dropped(),
-    })))
+    }))
 }
