@@ -19,10 +19,18 @@ use axum::{
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use futures_util::TryStreamExt;
 use reqwest::Method;
 use tracing::{debug, trace, warn};
 
 use crate::server::AppState;
+
+/// How long a body may take when the caller asked for a stream and the upstream
+/// did not return one (#6155).
+///
+/// Matches the default client's whole-request timeout, so claiming
+/// `Accept: text/event-stream` buys no more time than an ordinary call.
+const NON_STREAM_BODY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 // Hop-by-hop headers that must not be forwarded in either direction.
 // RFC 7230 §6.1 and common proxy practice.
@@ -166,19 +174,43 @@ fn filter_headers(headers: &HeaderMap) -> HeaderMap {
     out
 }
 
+/// Whether any value of `name` mentions the SSE media type (#6155).
+///
+/// One helper for both sides of the exchange: the request's `Accept` says what
+/// the caller wants, the response's `Content-Type` says what the upstream
+/// actually sent, and the two are compared. A media type is case-insensitive
+/// and may sit in a list beside a `q=` parameter.
+/// Test: `test_wants_event_stream_*` and `test_event_stream_response_*` below.
+fn mentions_event_stream(headers: &HeaderMap, name: header::HeaderName) -> bool {
+    headers.get_all(name).iter().any(|v| {
+        v.to_str()
+            .is_ok_and(|s| s.to_ascii_lowercase().contains("text/event-stream"))
+    })
+}
+
 /// Whether the caller is opening a Server-Sent Events stream (#6155).
 ///
 /// Why: an SSE response never ends, so it must not be proxied under a
 /// whole-request deadline. The browser's `EventSource` always sends
 /// `Accept: text/event-stream`, which is the only signal available before the
-/// upstream has answered.
+/// upstream has answered — a claim, not proof, which is why the response is
+/// checked too (`event_stream_response`).
 /// What: `true` when any `Accept` header value mentions `text/event-stream`.
 /// Test: `test_wants_event_stream_*` below.
 fn wants_event_stream(headers: &HeaderMap) -> bool {
-    headers.get_all(header::ACCEPT).iter().any(|v| {
-        v.to_str()
-            .is_ok_and(|s| s.to_ascii_lowercase().contains("text/event-stream"))
-    })
+    mentions_event_stream(headers, header::ACCEPT)
+}
+
+/// Whether the upstream actually answered with a Server-Sent Events body.
+///
+/// Why: this is the half the caller cannot forge. Only a response the upstream
+/// labelled `text/event-stream` is streamed under the deadline-free client;
+/// anything else is read under `NON_STREAM_BODY_TIMEOUT`, so naming that Accept
+/// type on an ordinary route buys no extra connection time.
+/// What: `true` when the response `Content-Type` mentions `text/event-stream`.
+/// Test: `test_event_stream_response_*` below.
+fn event_stream_response(headers: &HeaderMap) -> bool {
+    mentions_event_stream(headers, header::CONTENT_TYPE)
 }
 
 /// Build a plain-text error response.
@@ -373,7 +405,8 @@ pub async fn proxy_handler(
     // connection to stay open indefinitely. The default client's 30-second
     // whole-request timeout would cut it, so those requests go through the
     // stream client instead.
-    let client = if wants_event_stream(&parts.headers) {
+    let asked_for_event_stream = wants_event_stream(&parts.headers);
+    let client = if asked_for_event_stream {
         state.stream_client()
     } else {
         state.http_client()
@@ -411,12 +444,50 @@ pub async fn proxy_handler(
         }
     }
 
+    // #6155: only a response the upstream actually labelled `text/event-stream`
+    // earns the deadline-free client it was fetched with. `Accept` is a caller
+    // claim, so without this an ordinary proxied GET sent with
+    // `Accept: text/event-stream` would hold a connection open indefinitely by
+    // trickling bytes, since `stream_client` bounds silence and not duration.
+    // Bounding the client instead would be the wrong trade: `/reindex/stream`
+    // runs as long as the reindex does, and the SPA reads a closed stream as
+    // "complete" (`ui/src/lib/views/Indexes.svelte`), so a total cap would
+    // report a long reindex finished while it was still running.
+    if asked_for_event_stream && !event_stream_response(upstream_resp.headers()) {
+        warn!(
+            "proxy: {service_key} asked for an event stream but upstream answered \
+             a non-stream body — reading it under a bounded deadline"
+        );
+        let collected = tokio::time::timeout(NON_STREAM_BODY_TIMEOUT, upstream_resp.bytes()).await;
+        let body = match collected {
+            Ok(Ok(b)) => Body::from(b),
+            Ok(Err(e)) => {
+                warn!("proxy: failed to read upstream body: {e}");
+                Body::from("upstream body error")
+            }
+            Err(_) => {
+                warn!("proxy: upstream body exceeded the non-stream deadline");
+                return error_response(StatusCode::GATEWAY_TIMEOUT, "upstream body timeout");
+            }
+        };
+        return resp_builder
+            .body(body)
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+    }
+
     // #6155: hand the upstream body back as a stream rather than collecting it
     // first. Collecting never returns for a Server-Sent Events response — the
     // search SPA's `/status/stream` and `/reindex/stream` produced no bytes at
     // all through this proxy until the whole-request timeout fired. Streaming
     // also stops a large search response being held twice in memory.
-    let resp_body = Body::from_stream(upstream_resp.bytes_stream());
+    //
+    // `inspect_err` restores the log the pre-streaming `.bytes().await` path
+    // had: a mid-stream failure otherwise reaches the browser as a truncated
+    // body with nothing on the console side saying why.
+    let key_for_log = service_key.clone();
+    let resp_body = Body::from_stream(upstream_resp.bytes_stream().inspect_err(move |e| {
+        warn!("proxy: {key_for_log}: upstream body failed mid-stream: {e}");
+    }));
 
     resp_builder
         .body(resp_body)
@@ -837,5 +908,54 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
         assert!(!wants_event_stream(&h));
+    }
+
+    /// Why: the response header is the half a caller cannot forge, and it is
+    /// what decides whether the deadline-free client's body is handed straight
+    /// to the caller (#6155).
+    /// What: asserts the SSE content type is recognised with and without a
+    /// charset parameter, and that an ordinary JSON response is not.
+    /// Test: this test itself.
+    #[test]
+    fn test_event_stream_response_matches_content_type() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/event-stream"),
+        );
+        assert!(event_stream_response(&h));
+
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/event-stream; charset=utf-8"),
+        );
+        assert!(event_stream_response(&h), "must tolerate a charset param");
+    }
+
+    /// An upstream that answered JSON must NOT be treated as a stream, however
+    /// the request's `Accept` was written — that pairing is the one the
+    /// bounded-body path exists for.
+    #[test]
+    fn test_event_stream_response_false_for_ordinary_responses() {
+        assert!(!event_stream_response(&HeaderMap::new()));
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        assert!(!event_stream_response(&h));
+
+        // The shape the guard catches: caller claims SSE, upstream sends JSON.
+        let mut req = HeaderMap::new();
+        req.insert(
+            header::ACCEPT,
+            HeaderValue::from_static("text/event-stream"),
+        );
+        assert!(wants_event_stream(&req));
+        assert!(
+            !event_stream_response(&h),
+            "an Accept claim must not make a JSON response a stream"
+        );
     }
 }

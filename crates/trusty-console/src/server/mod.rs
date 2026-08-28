@@ -111,6 +111,12 @@ pub struct AppState {
     /// without bounding one that is still sending. Both search streams stay
     /// well inside it: `/status/stream` pushes every 2 seconds and
     /// `/reindex/stream` heartbeats every 20.
+    ///
+    /// The absent total deadline is why `proxy_handler` does not hand this
+    /// client's body straight to the caller. `Accept` is a caller claim, so a
+    /// response the upstream did not label `text/event-stream` is read under
+    /// `NON_STREAM_BODY_TIMEOUT` instead — otherwise any proxied GET could opt
+    /// into an unbounded connection by naming that Accept type.
     /// Test: `proxy::routes::tests::test_wants_event_stream_*` covers which
     /// client a request gets; the timeout itself is construction, exercised by
     /// the live `/status/stream` smoke run recorded on #6155.

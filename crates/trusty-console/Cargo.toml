@@ -61,6 +61,10 @@ mime_guess         = { workspace = true }
 # UDS dial/framing the webhook relay uses and the single GitHub HMAC verifier.
 trusty-common      = { workspace = true, features = ["stdio-mcp-client", "console-metrics", "config-cli", "axum-server", "uds", "uds-supervisor", "webhook-hmac", "webhook-relay"] }
 reqwest            = { workspace = true }
+# #6155: `TryStreamExt::inspect_err` on the proxied upstream body, so a
+# mid-stream failure is logged instead of reaching the browser as a silent
+# truncation.
+futures-util       = { workspace = true }
 thiserror          = { workspace = true }
 # Spool entries hold the raw webhook body byte-exact; base64 keeps the JSON
 # container from corrupting bytes the HMAC was computed over.

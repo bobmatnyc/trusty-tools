@@ -570,6 +570,41 @@ run_case "case24b sibling staleness fails the cratea gate" 1 "BUNDLE-STALE" "$R"
 stamp "$R" cratea
 run_case "case24c stamping cratea does not launder cratea-extra" 1 "BUNDLE-STALE" "$R" cratea
 
+# ---------------------------------------------------------------------------
+# Case 24d/24e — #6155: the MANIFEST-GAP safety net must see a SECOND bundle.
+#
+# Discovery used to collapse a bundle path to its crate name and ask "does this
+# crate have a row?" — which answers yes for a crate shipping two bundles with
+# a row for only one. Deleting or mistyping the second row then left the gate
+# inspecting one bundle and reporting OK: the #3606 shape, with no alarm.
+# 24d deletes the row; 24e keeps it but keys it where the crate-scoped gate
+# will never reach it. Both must fire MANIFEST-GAP.
+# ---------------------------------------------------------------------------
+R="$(mkrepo case24de)"
+add_crate "$R" cratea
+add_crate "$R" crateb
+add_ui_source "$R" cratea dark
+add_ui_source "$R" crateb light
+add_bundle "$R" cratea ui-dist AAA111
+add_bundle "$R" cratea ui-extra-dist BBB222
+
+# 24d — the second bundle ships with NO row at all.
+add_manifest "$R" \
+  "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist"
+stamp "$R" cratea
+commit_all "$R" "cratea ships two bundles, manifest declares one"
+run_case "case24d an undeclared second bundle fires MANIFEST-GAP" 1 "MANIFEST-GAP" "$R" cratea
+
+# 24e — the row exists and names the right bundle_dir, but its key is one the
+# crate-scoped gate never inspects, so the bundle ships unchecked anyway.
+add_manifest "$R" \
+  "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist" \
+  "crateaextra${TAB}crates/crateb/ui${TAB}crates/cratea/ui-extra-dist"
+stamp "$R" cratea
+stamp "$R" crateaextra
+commit_all "$R" "second row present but keyed out of cratea's scope"
+run_case "case24e a row keyed outside the crate's scope fires MANIFEST-GAP" 1 "MANIFEST-GAP" "$R" cratea
+
 echo
 echo "check-ui-bundle-freshness-selftest: ${PASSED} passed, ${FAILED} failed, ${SKIPPED} skipped"
 [ "$FAILED" -eq 0 ] || exit 1

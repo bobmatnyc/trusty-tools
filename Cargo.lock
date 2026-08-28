@@ -11514,6 +11514,7 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "dirs 5.0.1",
+ "futures-util",
  "http-body-util",
  "mime_guess",
  "open",
