@@ -32,6 +32,9 @@ use crate::core::project::ProjectInfo;
 use crate::core::session::{ControlModel, Session, SessionId, SessionStatus};
 
 use super::error::DaemonError;
+// #6288: the transport-neutral bodies these handlers and the socket's
+// `mpm.*` methods both call. One route, one implementation.
+use super::rpc::core_ops;
 use super::services::{HookDecision, HookService, PairingService, SessionService, TmuxService};
 use super::state::DaemonState;
 
@@ -438,25 +441,8 @@ pub fn router(state: Arc<DaemonState>) -> Router {
     responses((status = 200, description = "Daemon is alive", body = HealthResponse))
 )]
 pub async fn health(State(state): State<Arc<DaemonState>>) -> Json<HealthResponse> {
-    let fw = crate::core::paths::FrameworkPaths::from_root(state.framework_root());
-    // The daemon-wide baseline uses the framework root as the "project" so only
-    // the user/catalog/default manifest layers apply (no per-project override).
-    let report = crate::core::update_check::detect_for_framework(&fw, state.framework_root());
-    Json(HealthResponse {
-        status: "ok".to_owned(),
-        catalog_stale: report.stale,
-        catalog_unknown: report.unknown,
-        catalog_changes: report.summary_lines(),
-        supervised: state.supervised(),
-        // #4469: the three-state answer the bool above collapses. Published so
-        // `tm doctor` can distinguish "launchd says no" from "could not ask".
-        launchd_supervision: state.launchd_supervision(),
-        version: env!("CARGO_PKG_VERSION").to_owned(),
-        // #4230: identify WHICH process answered, so `tm doctor` can compare it
-        // against the PID launchd owns instead of trusting `supervised` alone.
-        pid: std::process::id(),
-        unsupervised_forced: state.unsupervised_forced(),
-    })
+    // #6288: the body is shared with `mpm.health` over the Unix socket.
+    Json(core_ops::health(&state).await)
 }
 
 /// Query parameters for `GET /sessions`.
@@ -1254,12 +1240,8 @@ pub async fn get_output(
     responses((status = 200, description = "Array of per-agent circuit-breaker states"))
 )]
 pub async fn breakers(State(state): State<Arc<DaemonState>>) -> Json<BreakersResponse> {
-    let breakers = state
-        .all_breakers()
-        .into_iter()
-        .map(|(agent, breaker)| BreakerEntry { agent, breaker })
-        .collect();
-    Json(BreakersResponse { breakers })
+    // #6288: the body is shared with `mpm.breakers` over the Unix socket.
+    Json(core_ops::breakers(&state))
 }
 
 /// JSON body for the universal hook relay endpoint.
@@ -1361,12 +1343,8 @@ pub async fn ingest_hook(
     responses((status = 200, description = "Overseer enabled flag and handler type"))
 )]
 pub async fn get_overseer(State(state): State<Arc<DaemonState>>) -> Json<OverseerResponse> {
-    Json(OverseerResponse {
-        overseer: OverseerStatus {
-            enabled: state.overseer().is_enabled(),
-            handler: state.overseer_handler().to_string(),
-        },
-    })
+    // #6288: the body is shared with `mpm.overseer` over the Unix socket.
+    Json(core_ops::overseer(&state))
 }
 
 /// `POST /llm/chat` — send a message to the LLM chat assistant.
@@ -1393,17 +1371,8 @@ pub async fn llm_chat(
     State(state): State<Arc<DaemonState>>,
     Json(body): Json<LlmChatRequest>,
 ) -> Result<Json<LlmChatResponse>, DaemonError> {
-    let overseer = state.llm_overseer().ok_or_else(|| {
-        DaemonError::ServiceUnavailable(
-            "LLM chat is not configured (no OpenRouter API key)".to_string(),
-        )
-    })?;
-    let mut history = body.history;
-    let reply = overseer
-        .chat(&mut history, &body.message)
-        .await
-        .map_err(|e| DaemonError::Internal(e.to_string()))?;
-    Ok(Json(LlmChatResponse { reply, history }))
+    // #6288: the body is shared with `mpm.llm.chat` over the Unix socket.
+    Ok(Json(core_ops::llm_chat(&state, body).await?))
 }
 
 /// `GET /optimizer` — current token-use optimizer configuration.
@@ -1422,10 +1391,8 @@ pub async fn llm_chat(
     responses((status = 200, description = "Current token-use optimizer configuration"))
 )]
 pub async fn get_optimizer(State(state): State<Arc<DaemonState>>) -> Json<OptimizerResponse> {
-    Json(OptimizerResponse {
-        optimizer: state.optimizer_config(),
-        scope: crate::daemon::optimizer::OPTIMIZER_SCOPE_NOTE.to_string(),
-    })
+    // #6288: the body is shared with `mpm.optimizer` over the Unix socket.
+    Json(core_ops::optimizer(&state))
 }
 
 /// JSON body for registering a project via `POST /projects`.
@@ -1576,11 +1543,10 @@ fn system_time_to_iso8601(time: std::time::SystemTime) -> String {
     responses((status = 200, description = "All tmux sessions with origin labels"))
 )]
 pub async fn list_tmux_sessions(
-    State(_state): State<Arc<DaemonState>>,
+    State(state): State<Arc<DaemonState>>,
 ) -> Json<TmuxSessionsResponse> {
-    Json(TmuxSessionsResponse {
-        sessions: TmuxService::list_all(),
-    })
+    // #6288: the body is shared with `mpm.tmux.sessions` over the Unix socket.
+    Json(core_ops::list_tmux_sessions(&state))
 }
 
 /// `GET /tmux/sessions/{name}/snapshot` — capture any session's current state.
@@ -1601,11 +1567,11 @@ pub async fn list_tmux_sessions(
     )
 )]
 pub async fn tmux_snapshot(
-    State(_state): State<Arc<DaemonState>>,
+    State(state): State<Arc<DaemonState>>,
     Path(name): Path<String>,
 ) -> Result<Json<TmuxSnapshotResponse>, DaemonError> {
-    let snapshot = TmuxService::snapshot(&name, 100)?;
-    Ok(Json(TmuxSnapshotResponse { snapshot }))
+    // #6288: the body is shared with `mpm.tmux.snapshot` over the Unix socket.
+    Ok(Json(core_ops::tmux_snapshot(&state, &name)?))
 }
 
 /// JSON body for `POST /tmux/adopt`.
@@ -1638,11 +1604,11 @@ pub struct AdoptRequest {
     )
 )]
 pub async fn adopt_tmux_session(
-    State(_state): State<Arc<DaemonState>>,
+    State(state): State<Arc<DaemonState>>,
     Json(body): Json<AdoptRequest>,
 ) -> Result<Json<AdoptResponse>, DaemonError> {
-    let adopted = TmuxService::adopt(&body.session)?;
-    Ok(Json(AdoptResponse { adopted }))
+    // #6288: the body is shared with `mpm.tmux.adopt` over the Unix socket.
+    Ok(Json(core_ops::adopt_tmux(&state, body)?))
 }
 
 // ---- bot pairing --------------------------------------------------------
@@ -1789,11 +1755,8 @@ pub async fn doctor(
     State(state): State<Arc<DaemonState>>,
     Query(query): Query<DoctorQuery>,
 ) -> Json<crate::core::doctor::DoctorReport> {
-    // #6336: the workspace paths, the managed root, and the reconciled worktree
-    // counts are all derived by `run_doctor_for_manager`, so this route and the
-    // daemonless `tm doctor` CLI cannot drift on how the fleet is read.
-    let mgr = state.session_manager().await;
-    Json(super::doctor::run_doctor_for_manager(&mgr, query.project.as_deref()).await)
+    // #6288: the body is shared with `mpm.doctor` over the Unix socket.
+    Json(core_ops::doctor(&state, query).await)
 }
 
 // ── Bug-reporting HTTP endpoints (Phase 2 surface + Phase 3 filing) ──────────
@@ -1826,28 +1789,11 @@ pub struct ErrorsQuery {
     responses((status = 200, description = "Deduplicated error list"))
 )]
 pub async fn list_errors(
-    State(_state): State<Arc<DaemonState>>,
+    State(state): State<Arc<DaemonState>>,
     Query(query): Query<ErrorsQuery>,
 ) -> Json<ErrorsResponse> {
-    let limit = query.limit.unwrap_or(20).min(100) as usize;
-    let errors = super::bug_report::aggregate_errors(limit);
-    let summaries: Vec<ErrorSummary> = errors
-        .iter()
-        .map(|e| ErrorSummary {
-            fingerprint: e.record.fingerprint.clone(),
-            crate_target: e.record.crate_target.clone(),
-            crate_version: e.record.crate_version.clone(),
-            summary: e.record.summary(),
-            occurrences: e.occurrences,
-            timestamp_secs: e.record.timestamp_secs,
-        })
-        .collect();
-    let total = summaries.len();
-    Json(ErrorsResponse {
-        errors: summaries,
-        total,
-        limit,
-    })
+    // #6288: the body is shared with `mpm.errors.list` over the Unix socket.
+    Json(core_ops::list_errors(&state, query))
 }
 
 /// JSON body for `POST /api/v1/report-bug`.
@@ -1865,28 +1811,11 @@ pub struct ReportBugApiRequest {
     pub confirm: bool,
 }
 
-/// Build a [`BugReportPreview`] from a scrubbed [`IssuePreview`].
+/// The scrubbed-preview builder, now shared with `mpm.report_bug` (#6288).
 ///
-/// Why: both the `confirm:false` path and the rate-limited path must return the
-///      same preview shape so HTTP clients can inspect before (or after a blocked)
-///      filing.
-/// What: maps `IssuePreview` fields to [`BugReportPreview`] (the wire type).
-/// Test: exercised transitively by `report_bug_no_confirm_includes_preview`.
-fn to_wire_preview(p: &super::bug_report::IssuePreview) -> BugReportPreview {
-    BugReportPreview {
-        title: p.title.clone(),
-        body: p.body.clone(),
-        labels: p.labels.clone(),
-        scrub_changes: p
-            .scrub_changes
-            .iter()
-            .map(|c| ScrubChangeSummary {
-                pattern: c.pattern.to_string(),
-                hint: c.hint.to_string(),
-            })
-            .collect(),
-    }
-}
+/// Why a re-export rather than a move outright: `api_tests` reaches it as
+/// `super::to_wire_preview`, and the HTTP tests must keep passing unmodified.
+pub use super::rpc::core_ops::to_wire_preview;
 
 /// `POST /api/v1/report-bug` — file or preview a bug report via HTTP.
 ///
@@ -1925,115 +1854,11 @@ fn to_wire_preview(p: &super::bug_report::IssuePreview) -> BugReportPreview {
     )
 )]
 pub async fn report_bug_http(
-    State(_state): State<Arc<DaemonState>>,
+    State(state): State<Arc<DaemonState>>,
     Json(body): Json<ReportBugApiRequest>,
 ) -> Json<ReportBugHttpResponse> {
-    // Load errors and find the requested fingerprint.
-    let errors = super::bug_report::aggregate_errors(500);
-    let found = errors
-        .into_iter()
-        .find(|e| e.record.fingerprint == body.fingerprint);
-
-    let Some(agg) = found else {
-        return Json(ReportBugHttpResponse {
-            filed: false,
-            deduped: None,
-            issue_url: None,
-            issue_number: None,
-            note: Some(format!(
-                "fingerprint `{}` not found in local error stores; \
-                 run GET /api/v1/errors to see available fingerprints",
-                body.fingerprint
-            )),
-            preview: None,
-            rate_limited: None,
-        });
-    };
-
-    let preview = super::bug_report::build_preview(&agg);
-
-    // Fix 2 (P1): include scrubbed preview in confirm:false response.
-    if !body.confirm {
-        return Json(ReportBugHttpResponse {
-            filed: false,
-            deduped: None,
-            issue_url: None,
-            issue_number: None,
-            note: Some("confirm:false — preview only. POST with confirm:true to file.".to_string()),
-            preview: Some(to_wire_preview(&preview)),
-            rate_limited: None,
-        });
-    }
-
-    // Fix 3 (P2): check the rate-limit guard before calling GitHub.
-    let guard = super::bug_report::RateLimitGuard::production();
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let rl_decision = guard.check(&body.fingerprint, now_secs);
-    if !rl_decision.is_allowed() {
-        return Json(ReportBugHttpResponse {
-            filed: false,
-            deduped: None,
-            issue_url: None,
-            issue_number: None,
-            note: Some(rl_decision.block_reason()),
-            preview: None,
-            rate_limited: Some(true),
-        });
-    }
-
-    // Fix 1 (P0): use the full resolution chain — PAT → file → GitHub App → NoToken.
-    let fingerprint = body.fingerprint.clone();
-    let provider = super::bug_report::ResolvedProvider;
-    let result =
-        tokio::task::spawn_blocking(move || super::bug_report::file_issue(&preview, &provider))
-            .await;
-
-    match result {
-        Ok(Ok(filing)) => {
-            // Fix 3 (P2): record the successful filing in the rate-limit store.
-            // State-file failures are non-fatal — log and allow.
-            guard.record_filed(&fingerprint, now_secs);
-            Json(ReportBugHttpResponse {
-                filed: true,
-                deduped: Some(filing.deduped),
-                issue_url: Some(filing.issue_url),
-                issue_number: Some(filing.issue_number),
-                note: None,
-                preview: None,
-                rate_limited: None,
-            })
-        }
-        Ok(Err(super::bug_report::GithubFilingError::NoToken)) => Json(ReportBugHttpResponse {
-            filed: false,
-            deduped: None,
-            issue_url: None,
-            issue_number: None,
-            note: Some(super::bug_report::GithubFilingError::NoToken.to_string()),
-            preview: None,
-            rate_limited: None,
-        }),
-        Ok(Err(e)) => Json(ReportBugHttpResponse {
-            filed: false,
-            deduped: None,
-            issue_url: None,
-            issue_number: None,
-            note: Some(format!("GitHub filing failed: {e}")),
-            preview: None,
-            rate_limited: None,
-        }),
-        Err(e) => Json(ReportBugHttpResponse {
-            filed: false,
-            deduped: None,
-            issue_url: None,
-            issue_number: None,
-            note: Some(format!("internal error: {e}")),
-            preview: None,
-            rate_limited: None,
-        }),
-    }
+    // #6288: the body is shared with `mpm.report_bug` over the Unix socket.
+    Json(core_ops::report_bug(&state, body).await)
 }
 
 /// Parse a UUID string into a `SessionId`, mapping failure to a `400`-mapped

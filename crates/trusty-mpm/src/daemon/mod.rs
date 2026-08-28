@@ -45,6 +45,8 @@ pub mod overseer_compose;
 pub mod pairing_routes;
 pub mod pairing_store;
 pub mod provisioning;
+// #6288: the method families served on the Unix socket.
+pub mod rpc;
 pub mod runtime_reap;
 pub mod services;
 pub(crate) mod session_record_kind;
@@ -271,8 +273,11 @@ pub async fn serve_with_shutdown(
     });
 
     let rpc_drain = drain.clone();
+    // #6288 slice 2: the socket serves the SAME state the axum router was built
+    // with, so the two transports are two doors onto one daemon, not two.
+    let rpc_state = Arc::clone(&state);
     let rpc_task = tokio::spawn(async move {
-        socket::serve_until_shutdown(rpc, rpc_drain.cancelled_owned()).await;
+        socket::serve_until_shutdown(rpc, rpc_state, rpc_drain.cancelled_owned()).await;
     });
 
     let http_drain = drain.clone();
