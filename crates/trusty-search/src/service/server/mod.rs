@@ -94,7 +94,7 @@ mod tests_829;
 #[cfg(test)]
 mod tests_chunks;
 #[cfg(test)]
-mod tests_components;
+pub(crate) mod tests_components;
 #[cfg(test)]
 mod tests_contrib_graph;
 #[cfg(test)]
@@ -212,6 +212,18 @@ pub(crate) use routing::search_similar_report;
 pub(crate) use search::search_report;
 pub(crate) use search_global::global_search_report;
 pub(crate) use typeahead::{typeahead_report, TypeaheadParams};
+
+// #6285 slice 4: the write surface's transport-neutral bodies and the request
+// types they take. Same contract as the two blocks above, and it is what carries
+// the failure arms across: every refusal these cores return is the ONE decision
+// both transports render, so a socket write cannot land where the HTTP route
+// would have refused it — nor report a landing that did not happen.
+pub(crate) use contrib_graph::{ingest_graph_report, IngestGraphRequest};
+pub(crate) use files::{index_file_report, remove_file_report};
+pub(crate) use indexes::create_index_report;
+pub(crate) use indexes_relocate::{relocate_index_report, RelocateIndexRequest};
+pub(crate) use reindex_handlers::reindex_report;
+pub(crate) use search::{delete_index_report, DeleteIndexParams};
 
 /// Build the axum router with the shared state.
 ///

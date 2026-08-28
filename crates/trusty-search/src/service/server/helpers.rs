@@ -8,12 +8,17 @@
 //! What: `validate_root_path`, `file_is_within_root`,
 //! `find_root_path_collision`, `root_path_collision_response`,
 //! `embedder_initializing_response`, `embedder_error_response`.
+//!
+//! #6285 slice 4: every builder here answers `(StatusCode, serde_json::Value)`
+//! rather than an encoded `Response`. The write cores this file serves are the
+//! same body on HTTP and on the socket, and only the pair form reaches both —
+//! `rpc::error::rpc_error_from_http` derives the JSON-RPC code from that status,
+//! and `reindex_report` used to re-parse an encoded response's bytes back into
+//! JSON to get at it. The axum handlers wrap the pair with `(status,
+//! Json(body)).into_response()`, so nothing on the wire changed.
 //! Test: `file_is_within_root_*`, `create_index_canonicalizes_*`,
 //! `validate_root_path_denylist_*`, and `tests_2336.rs` tests.
-use axum::{
-    http::StatusCode,
-    response::{IntoResponse, Json, Response},
-};
+use axum::http::StatusCode;
 
 use crate::core::registry::{IndexHandle, IndexId};
 
@@ -57,34 +62,31 @@ use crate::core::registry::{IndexHandle, IndexId};
 /// `create_index_allows_sensitive_path_when_opted_in`,
 /// `create_index_still_rejects_sensitive_path_by_default` in
 /// `tests_denylist.rs`.
-#[allow(clippy::result_large_err)]
 pub(super) async fn validate_root_path(
     path: &std::path::Path,
     allow_sensitive_path: bool,
     allowlist_paths: &crate::allowlist::AllowlistPaths,
-) -> Result<std::path::PathBuf, Response> {
+) -> Result<std::path::PathBuf, (StatusCode, serde_json::Value)> {
     if path.as_os_str().is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
+            serde_json::json!({
                 "error": "root_path is required and must not be empty"
-            })),
-        )
-            .into_response());
+            }),
+        ));
     }
     if !path.is_absolute() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
+            serde_json::json!({
                 "error": format!(
                     "root_path must be absolute (got {:?}); relative paths \
                      would be resolved against the daemon's CWD which is \
                      not the caller's CWD",
                     path.display()
                 ),
-            })),
-        )
-            .into_response());
+            }),
+        ));
     }
     // Issue #829: use tokio::fs::metadata instead of path.is_dir() to avoid
     // blocking the async executor on a potentially slow filesystem probe.
@@ -95,14 +97,13 @@ pub(super) async fn validate_root_path(
     if !is_dir {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
+            serde_json::json!({
                 "error": format!(
                     "root_path {:?} does not exist or is not a directory",
                     path.display()
                 ),
-            })),
-        )
-            .into_response());
+            }),
+        ));
     }
     // Issue #829: use tokio::fs::canonicalize instead of std::fs::canonicalize.
     // This resolves symlinks on the blocking pool without parking an async thread.
@@ -114,15 +115,14 @@ pub(super) async fn validate_root_path(
         Err(e) => {
             return Err((
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
+                serde_json::json!({
                     "error": format!(
                         "root_path {:?} could not be canonicalized: {}",
                         path.display(),
                         e
                     ),
-                })),
-            )
-                .into_response());
+                }),
+            ));
         }
     };
     // Hard denylist check on the canonical path — symlinks and `..` traversals
@@ -151,13 +151,12 @@ pub(super) async fn validate_root_path(
         );
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
+            serde_json::json!({
                 "error": format!(
                     "indexing refused: {reason}"
                 ),
-            })),
-        )
-            .into_response());
+            }),
+        ));
     }
     // #767: default-deny. The denylist above says which roots are NEVER
     // indexable; this says which roots ARE — an explicit `allowlist.toml`
@@ -218,7 +217,10 @@ pub(super) async fn validate_root_path(
 /// what is missing is authorization.
 /// Test: `create_index_refuses_unlisted_root`,
 /// `create_index_accepts_allowlisted_root` in `tests_allowlist_gate_767.rs`.
-fn allowlist_refusal_response(canonical: &std::path::Path, reason: &str) -> Response {
+fn allowlist_refusal_response(
+    canonical: &std::path::Path,
+    reason: &str,
+) -> (StatusCode, serde_json::Value) {
     tracing::warn!(
         path = %canonical.display(),
         %reason,
@@ -226,7 +228,7 @@ fn allowlist_refusal_response(canonical: &std::path::Path, reason: &str) -> Resp
     );
     (
         StatusCode::FORBIDDEN,
-        Json(serde_json::json!({
+        serde_json::json!({
             "error": format!("indexing refused: {reason}"),
             "root_path": canonical.display().to_string(),
             "remedy": format!(
@@ -234,9 +236,8 @@ fn allowlist_refusal_response(canonical: &std::path::Path, reason: &str) -> Resp
                  or register it as a project with `tm`",
                 canonical.display()
             ),
-        })),
+        }),
     )
-        .into_response()
 }
 
 /// Determine whether a chunk's stored `file` field falls within an index's
@@ -446,10 +447,10 @@ pub(super) fn root_path_mismatch_response(
     index_id: &IndexId,
     registered: &std::path::Path,
     requested: &std::path::Path,
-) -> Response {
+) -> (StatusCode, serde_json::Value) {
     (
         StatusCode::CONFLICT,
-        Json(serde_json::json!({
+        serde_json::json!({
             "error": format!(
                 "index '{}' is registered at {:?}; it cannot be re-registered at {:?} \
                  because one index identifies one directory tree. Use the relocate \
@@ -467,9 +468,8 @@ pub(super) fn root_path_mismatch_response(
             // sibling builders above and in `indexes_relocate.rs` already use.
             "registered_root_path": registered.display().to_string(),
             "requested_root_path": requested.display().to_string(),
-        })),
+        }),
     )
-        .into_response()
 }
 
 /// Build a `409 Conflict` response naming the index that already owns
@@ -484,10 +484,10 @@ pub(super) fn root_path_mismatch_response(
 pub(super) fn root_path_collision_response(
     existing_id: &IndexId,
     root_path: &std::path::Path,
-) -> Response {
+) -> (StatusCode, serde_json::Value) {
     (
         StatusCode::CONFLICT,
-        Json(serde_json::json!({
+        serde_json::json!({
             "error": format!(
                 "root_path {:?} is already registered to index '{}'; two indexes cannot \
                  share one on-disk corpus (issues #2305, #2336)",
@@ -495,9 +495,8 @@ pub(super) fn root_path_collision_response(
                 existing_id,
             ),
             "existing_id": existing_id.0,
-        })),
+        }),
     )
-        .into_response()
 }
 
 /// Build a `503 Service Unavailable` response for handlers that require the
@@ -510,14 +509,13 @@ pub(super) fn root_path_collision_response(
 /// What: returns `(503, {"error": "embedder initializing, retry in a few seconds"})`.
 /// Test: hit `POST /indexes` immediately after daemon boot; assert 503 and
 /// JSON body shape.
-pub(super) fn embedder_initializing_response() -> Response {
+pub(super) fn embedder_initializing_response() -> (StatusCode, serde_json::Value) {
     (
         StatusCode::SERVICE_UNAVAILABLE,
-        Json(serde_json::json!({
+        serde_json::json!({
             "error": "embedder initializing, retry in a few seconds"
-        })),
+        }),
     )
-        .into_response()
 }
 
 /// Build a `503 Service Unavailable` response when the embedder background
@@ -530,12 +528,11 @@ pub(super) fn embedder_initializing_response() -> Response {
 /// (e.g. "init timed out after 60s") in logs and CLI output.
 /// What: returns `(503, {"error": "embedder init failed: <message>"})`.
 /// Test: `create_index_returns_503_with_error_when_embedder_failed`.
-pub(super) fn embedder_error_response(message: &str) -> Response {
+pub(super) fn embedder_error_response(message: &str) -> (StatusCode, serde_json::Value) {
     (
         StatusCode::SERVICE_UNAVAILABLE,
-        Json(serde_json::json!({
+        serde_json::json!({
             "error": format!("embedder init failed: {message}"),
-        })),
+        }),
     )
-        .into_response()
 }

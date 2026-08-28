@@ -46,10 +46,35 @@ pub(super) async fn index_file_handler(
     Path(id): Path<String>,
     Json(req): Json<IndexFileRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    index_file_report(&state, &id, req)
+        .await
+        .map(Json)
+        .map_err(|(status, body)| (status, Json(body)))
+}
+
+/// The body `POST /indexes/{id}/index-file` serves, without the transport
+/// (#6285 slice 4).
+///
+/// Why: `search.index.file.put` is the same write over the socket. The failure
+/// that matters is the one #5061 named — a write that never landed reported as
+/// one that did — so the error arm returning `index_file_failed` rather than
+/// `indexed: true` has to be the SAME arm on both transports.
+/// What: [`index_file_handler`]'s whole former body, with the refusal as its
+/// HTTP status beside its body.
+/// Test: `index_file_over_the_socket_matches_the_http_body`,
+/// `a_failed_index_file_never_reports_indexed_on_either_transport` in
+/// `crate::service::rpc::writes`.
+pub(crate) async fn index_file_report(
+    state: &Arc<SearchAppState>,
+    id: &str,
+    req: IndexFileRequest,
+) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
     let index_id = IndexId::new(id);
     // #5349: the write path drives the same lazy load the read path drives —
     // a cold-parked index is reloaded here, not reported as unwritable.
-    let handle = super::index_resolve::resolve_or_load_index(&state, &index_id).await?;
+    let handle = super::index_resolve::resolve_or_load_index(state, &index_id)
+        .await
+        .map_err(|(status, body)| (status, body.0))?;
     // #3049: hold the teardown lock's shared side across the write so a
     // concurrent DELETE cannot remove_dir_all this index's data mid-write.
     let _teardown_guard = crate::service::reindex::acquire_index_teardown_read(&index_id).await;
@@ -69,19 +94,19 @@ pub(super) async fn index_file_handler(
             );
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
+                serde_json::json!({
                     "error": "index_file_failed",
                     "index_id": index_id.0,
                     "path": req.path,
                     "message": e.to_string(),
-                })),
+                }),
             )
         })?;
-    Ok(Json(serde_json::json!({
+    Ok(serde_json::json!({
         "index_id": index_id.0,
         "path": req.path,
         "indexed": true,
-    })))
+    }))
 }
 
 /// `POST /indexes/:id/remove-file` — drop one file's chunks from an index.
@@ -95,10 +120,32 @@ pub(super) async fn remove_file_handler(
     Path(id): Path<String>,
     Json(req): Json<RemoveFileRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    remove_file_report(&state, &id, req)
+        .await
+        .map(Json)
+        .map_err(|(status, body)| (status, Json(body)))
+}
+
+/// The body `POST /indexes/{id}/remove-file` serves, without the transport
+/// (#6285 slice 4).
+///
+/// Why and What: the delete half of [`index_file_report`]'s contract — same
+/// callers, same lazy load, same residency verdict, and the same rule that a
+/// removal which failed never reports a chunk count.
+/// Test: `remove_file_over_the_socket_matches_the_http_body`,
+/// `a_failed_remove_file_never_reports_a_removal_on_either_transport` in
+/// `crate::service::rpc::writes`.
+pub(crate) async fn remove_file_report(
+    state: &Arc<SearchAppState>,
+    id: &str,
+    req: RemoveFileRequest,
+) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
     let index_id = IndexId::new(id);
     // #5349: see the sibling handler — a delete drives the load too, so the two
     // halves of the incremental contract cannot disagree about reachability.
-    let handle = super::index_resolve::resolve_or_load_index(&state, &index_id).await?;
+    let handle = super::index_resolve::resolve_or_load_index(state, &index_id)
+        .await
+        .map_err(|(status, body)| (status, body.0))?;
     // #3049: see the sibling handler — same guard, same reason.
     let _teardown_guard = crate::service::reindex::acquire_index_teardown_read(&index_id).await;
     let indexer = handle.indexer.read().await;
@@ -113,19 +160,19 @@ pub(super) async fn remove_file_handler(
         );
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
+            serde_json::json!({
                 "error": "remove_file_failed",
                 "index_id": index_id.0,
                 "path": req.path,
                 "message": e.to_string(),
-            })),
+            }),
         )
     })?;
-    Ok(Json(serde_json::json!({
+    Ok(serde_json::json!({
         "index_id": index_id.0,
         "path": req.path,
         "removed_chunks": removed,
-    })))
+    }))
 }
 
 /// Render a chunk enumeration's corpus-read failure through the shared builder

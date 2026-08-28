@@ -56,12 +56,12 @@ fn state_with_index(id: &str) -> Arc<SearchAppState> {
 ///
 /// Shared with `tests_4123` (issue #4123), which needs the same panic-safe
 /// restore — hence `pub(super)` and the [`Self::path`] accessor.
-pub(super) struct IsolatedDataDir {
+pub(crate) struct IsolatedDataDir {
     tmp: tempfile::TempDir,
 }
 
 impl IsolatedDataDir {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("TRUSTY_DATA_DIR", tmp.path()) };
         Self { tmp }
@@ -69,7 +69,7 @@ impl IsolatedDataDir {
 
     /// The isolated dir itself, for tests that must also place fixtures inside
     /// the sandbox they just pointed `TRUSTY_DATA_DIR` at.
-    pub(super) fn path(&self) -> &std::path::Path {
+    pub(crate) fn path(&self) -> &std::path::Path {
         self.tmp.path()
     }
 }

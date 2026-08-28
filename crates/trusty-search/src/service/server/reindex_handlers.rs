@@ -49,12 +49,37 @@ pub(super) async fn reindex_handler(
     Path(id): Path<String>,
     body: Option<Json<ReindexRequest>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let index_id = IndexId::new(id.clone());
+    reindex_report(&state, &id, body.map(|Json(req)| req))
+        .await
+        .map(Json)
+        .map_err(|(status, body)| (status, Json(body)))
+}
+
+/// The body `POST /indexes/{id}/reindex` serves, without the transport
+/// (#6285 slice 4).
+///
+/// Why: `search.index.reindex` is the TRIGGER only — it spawns the walk and
+/// answers `queued: true`. Its refusals are what a second implementation would
+/// get wrong: the #120 cooldown that stops an infinite memory-abort loop, and
+/// the three guards on a `root_path` override (#3993 collision, #5357 root-move
+/// gate, #767 allowlist) that each stop this index being re-pointed at a tree it
+/// must not claim. The SSE progress stream stays on HTTP until slice 5.
+/// What: [`reindex_handler`]'s whole former body, taking the already-decoded
+/// request. `None` is the empty-body form axum's `Option<Json<_>>` produces.
+/// Test: `reindex_over_the_socket_matches_the_http_body`,
+/// `a_refused_root_override_never_queues_a_walk_on_either_transport` in
+/// `crate::service::rpc::writes`.
+pub(crate) async fn reindex_report(
+    state: &Arc<SearchAppState>,
+    id: &str,
+    body: Option<ReindexRequest>,
+) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
+    let index_id = IndexId::new(id);
     let mut handle = state.registry.get(&index_id).ok_or((
         StatusCode::NOT_FOUND,
-        Json(serde_json::json!({
+        serde_json::json!({
             "error": format!("unknown index: {}", index_id.0),
-        })),
+        }),
     ))?;
 
     // Issue #120: cooldown guard. If the most recent reindex for this index
@@ -83,13 +108,13 @@ pub(super) async fn reindex_handler(
             );
             return Err((
                 StatusCode::TOO_MANY_REQUESTS,
-                Json(serde_json::json!({
+                serde_json::json!({
                     "error": "reindex cooldown active after memory-limit abort",
                     "index_id": index_id.0,
                     "retry_after_secs": remaining_secs,
                     "cooldown_secs": cooldown.as_secs(),
                     "hint": "lower TRUSTY_MAX_BATCH_SIZE or raise TRUSTY_MEMORY_LIMIT_MB before retrying",
-                })),
+                }),
             ));
         }
         // Cooldown elapsed — drop the stale entry so the next abort (if any)
@@ -107,7 +132,7 @@ pub(super) async fn reindex_handler(
     // startup auto-discover reindexes never starve interactive requests.
     // Default false (interactive/priority path) when the field is absent.
     let mut is_interactive = true;
-    if let Some(Json(req)) = body {
+    if let Some(req) = body {
         force = req.force.unwrap_or(false);
         is_interactive = !req.background.unwrap_or(false);
         if let Some(new_root) = req.root_path {
@@ -127,14 +152,10 @@ pub(super) async fn reindex_handler(
             let new_root = match validate_root_path(&new_root, false, &state.allowlist_paths).await
             {
                 Ok(canonical) => canonical,
-                Err(resp) => {
-                    let (parts, body) = resp.into_parts();
-                    let status = parts.status;
-                    let body_bytes = axum::body::to_bytes(body, 4096).await.unwrap_or_default();
-                    let json: serde_json::Value = serde_json::from_slice(&body_bytes)
-                        .unwrap_or_else(|_| serde_json::json!({}));
-                    return Err((status, Json(json)));
-                }
+                // #6285 slice 4: `validate_root_path` now answers the same
+                // `(status, body)` pair every core returns, so the refusal is
+                // forwarded rather than re-parsed out of an encoded response.
+                Err(refusal) => return Err(refusal),
             };
             // Issue #3993 (Gap E): a root_path override previously had NO
             // collision check at all — `state.registry.register(new_handle)`
@@ -163,7 +184,7 @@ pub(super) async fn reindex_handler(
                 );
                 return Err((
                     StatusCode::CONFLICT,
-                    Json(serde_json::json!({
+                    serde_json::json!({
                         "error": format!(
                             "root_path {:?} is already registered to index '{}'; two \
                              indexes cannot share one on-disk corpus (issues #2305, \
@@ -172,7 +193,7 @@ pub(super) async fn reindex_handler(
                             existing_id,
                         ),
                         "existing_id": existing_id.0,
-                    })),
+                    }),
                 ));
             }
             // #4951 review HIGH-1: refuse an override the reindex runner will
@@ -214,11 +235,11 @@ pub(super) async fn reindex_handler(
                     );
                     return Err((
                         StatusCode::CONFLICT,
-                        Json(serde_json::json!({
+                        serde_json::json!({
                             "error": refusal.reason,
                             "indexed_root": refusal.indexed_root,
                             "persisted_root": refusal.persisted_root,
-                        })),
+                        }),
                     ));
                 }
             };
@@ -360,11 +381,11 @@ pub(super) async fn reindex_handler(
         None,
     );
 
-    Ok(Json(serde_json::json!({
+    Ok(serde_json::json!({
         "index_id": index_id.0,
         "queued": true,
         "stream_url": format!("/indexes/{}/reindex/stream", index_id.0),
-    })))
+    }))
 }
 
 /// Heartbeat interval for the reindex SSE stream.

@@ -227,8 +227,32 @@ pub(crate) fn list_indexes_report(
 
 pub(super) async fn create_index_handler(
     State(state): State<Arc<SearchAppState>>,
-    Json(mut req): Json<CreateIndexRequest>,
+    Json(req): Json<CreateIndexRequest>,
 ) -> Response {
+    match create_index_report(&state, req).await {
+        Ok(body) => Json(body).into_response(),
+        Err((status, body)) => (status, Json(body)).into_response(),
+    }
+}
+
+/// The body `POST /indexes` serves, without the transport (#6285 slice 4).
+///
+/// Why: `search.index.create` registers an index over the socket, and this is
+/// the write whose failure arms matter most — every refusal below is a point
+/// where the registration must NOT happen. One core is what stops the socket
+/// registering an index the HTTP route would have refused, or reporting
+/// `created: true` for a registration that did not land.
+/// What: [`create_index_handler`]'s whole former body. A refusal keeps its HTTP
+/// status beside its body, because that status is what
+/// [`crate::service::rpc::error::rpc_error_from_http`] turns into the JSON-RPC
+/// code.
+/// Test: `create_over_the_socket_matches_the_http_body`,
+/// `a_refused_create_registers_nothing_on_either_transport` in
+/// `crate::service::rpc::writes`.
+pub(crate) async fn create_index_report(
+    state: &Arc<SearchAppState>,
+    mut req: CreateIndexRequest,
+) -> Result<serde_json::Value, (axum::http::StatusCode, serde_json::Value)> {
     let id = IndexId::new(req.id.clone());
     // Issue #63: validate root_path is absolute and points at an existing
     // directory before registering. Previously the handler accepted any
@@ -259,7 +283,7 @@ pub(super) async fn create_index_handler(
     .await
     {
         Ok(p) => p,
-        Err(resp) => return resp,
+        Err(refusal) => return Err(refusal),
     };
     req.root_path = canonical_root;
     // #3049 round 3: hold this id's teardown-lock SHARED side across the whole
@@ -301,9 +325,13 @@ pub(super) async fn create_index_handler(
                 req.root_path.display(),
                 registered_root.display(),
             );
-            return root_path_mismatch_response(&id, &registered_root, &req.root_path);
+            return Err(root_path_mismatch_response(
+                &id,
+                &registered_root,
+                &req.root_path,
+            ));
         }
-        return Json(serde_json::json!({
+        return Ok(serde_json::json!({
             "id": req.id,
             "created": false,
             "reason": "already exists",
@@ -312,8 +340,7 @@ pub(super) async fn create_index_handler(
             // same reason as `root_path_mismatch_response` — serializing a raw
             // `Path` through `json!` panics on a non-UTF-8 path (#5827).
             "root_path": registered_root.display().to_string(),
-        }))
-        .into_response();
+        }));
     }
     // Issue #2336: reject a second live index over the same canonical
     // root_path. Two registrations sharing one colocated root resolve to the
@@ -350,7 +377,7 @@ pub(super) async fn create_index_handler(
             req.root_path.display(),
             existing_id,
         );
-        return root_path_collision_response(&existing_id, &req.root_path);
+        return Err(root_path_collision_response(&existing_id, &req.root_path));
     }
     // Why (issue: 10s readiness timeout): the embedder may still be loading
     // when the daemon accepts its first request. Reject hybrid-index creation
@@ -363,9 +390,9 @@ pub(super) async fn create_index_handler(
         // surface it in the 503 so callers stop polling and operators see
         // a useful message in logs / dashboards.
         if let Some(err) = state.current_embedder_error() {
-            return embedder_error_response(&err);
+            return Err(embedder_error_response(&err));
         }
-        return embedder_initializing_response();
+        return Err(embedder_initializing_response());
     };
     // Bug A fix: when an embedder is attached to the shared state, wire the
     // newly created indexer with both an `Embedder` and a `VectorStore` so
@@ -429,13 +456,12 @@ pub(super) async fn create_index_handler(
                     "create_index: HNSW allocator failed for '{}': {e} (closes #954)",
                     req.id
                 );
-                return (
+                return Err((
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    axum::Json(serde_json::json!({
+                    serde_json::json!({
                         "error": format!("HNSW allocation failed (OOM): {e}")
-                    })),
-                )
-                    .into_response();
+                    }),
+                ));
             }
         };
     // Issue #3748 slice B PR 1: wire the priority-lane pool so this newly
@@ -464,17 +490,16 @@ pub(super) async fn create_index_handler(
             req.id,
             req.root_path.display()
         );
-        return (
+        return Err((
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(serde_json::json!({
+            serde_json::json!({
                 "error": format!(
                     "corpus open failed for root_path {:?}; refusing to register a broken \
                      index handle",
                     req.root_path.display()
                 )
-            })),
-        )
-            .into_response();
+            }),
+        ));
     }
 
     // Resolve repo-config filters (issue: trusty-search.yaml wiring). The
@@ -802,12 +827,11 @@ pub(super) async fn create_index_handler(
     // Push event so connected dashboards refresh their index list without a
     // page reload (mirrors the trusty-memory `palace_created` pattern).
     state.emit(DaemonEvent::IndexRegistered { id: req.id.clone() });
-    Json(serde_json::json!({
+    Ok(serde_json::json!({
         "id": req.id,
         "created": true,
         // DOC-37: echo the derived identity so a caller registering an index
         // learns its repo grouping key without a follow-up list round-trip.
         "repo_identity": repo_identity,
     }))
-    .into_response()
 }
