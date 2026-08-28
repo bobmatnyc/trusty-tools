@@ -43,7 +43,7 @@ mod tests;
 ///
 /// When the data directory cannot be resolved or created.
 ///
-/// Test: `socket_path_is_named_for_the_product_under_the_data_dir`.
+/// Test: `socket_path_is_the_product_named_socket_under_the_data_dir`.
 pub fn socket_path() -> Result<PathBuf> {
     // #6288: the ONE data-dir entry point; never a second hand-rolled resolver.
     trusty_common::daemon_socket_path("trusty-mpm")
