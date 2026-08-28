@@ -1,0 +1,4 @@
+Fixed
+
+- **Two `commands/start/restore.rs` tests left 6 empty directories in `$HOME` on every run.** `warmboot_counts_every_entry_the_allowlist_excluded` and `a_partial_pre_gate_allowlist_does_not_cost_indexes_on_upgrade` built their fixture roots with `tempdir_in(dirs::home_dir())` inside a `.map()` and then called `std::mem::forget(dir)` to keep each guard alive past the closure. `mem::forget` skips `TempDir::drop`, so `~/ts-warmboot-count*` and `~/ts-upgrade-partial*` accumulated one pair of triples per `cargo test -p trusty-search` — 120 of them on the reporter's machine over nine days (refs [#6333](https://github.com/bobmatnyc/trusty-tools/issues/6333))
+  - the guards now `unzip` out of the same `map` into a `Vec<TempDir>` bound in the test body, so the roots still exist while `retain_approved_entries` canonicalizes them and `Drop` removes them at return. The sibling `warmboot_drops_unapproved_entries` already held its guards this way
