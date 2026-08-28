@@ -129,7 +129,8 @@ pub struct IndexConfigSet {
 /// `Option<LogsTail>` and reads `None` as the default — an absent `params` and an
 /// explicit `null` arrive here as the same `Value::Null` (#6285).
 /// Test: `logs_tail_over_the_socket_matches_the_http_body`,
-/// `logs_tail_clamps_n_on_the_socket_too`.
+/// `logs_tail_clamps_n_on_the_socket_too`,
+/// `a_malformed_n_is_refused_before_the_log_ring_is_read`.
 ///
 /// [`DEFAULT_LOGS_TAIL_N`]: crate::service::server::LogsTailParams
 #[derive(Debug, Default, Deserialize)]

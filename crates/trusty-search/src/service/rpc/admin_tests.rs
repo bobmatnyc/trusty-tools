@@ -526,6 +526,60 @@ async fn logs_tail_clamps_n_on_the_socket_too() {
     );
 }
 
+/// Why: `n` is the one field this method decodes, and the clamp only runs once a
+/// NUMBER has been parsed — a caller who sends a string or an object reaches no
+/// clamp and no route, so the refusal has to come from the decoder. The sibling
+/// `a_malformed_config_set_applies_neither_field_on_either_transport` pins that
+/// for the write; this pins it for the read, where the analogue of "no field
+/// moved" is that the ring still serves its page afterwards rather than being
+/// consumed or disturbed by the refusal (#6285).
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn a_malformed_n_is_refused_before_the_log_ring_is_read() {
+    let (state, http, rpc) = routers(&[]);
+    for i in 0..3 {
+        state.log_buffer.push(format!("line {i}"));
+    }
+
+    // Both transports refuse a non-numeric `n` — axum's `Query` extractor on one
+    // side, the router's decoder on the other. The two STATUSES are deliberately
+    // not compared: each is its own transport's layer answering, not a decision
+    // either core made. Same reasoning as the config.set sibling.
+    let (status, body) = http_raw(
+        &http,
+        Request::builder()
+            .method("GET")
+            .uri("/logs/tail?n=lots")
+            .body(Body::empty())
+            .expect("build the request"),
+    )
+    .await;
+    assert!(
+        status.is_client_error(),
+        "HTTP must refuse a non-numeric n, got {status}: {body}"
+    );
+
+    for malformed in [
+        serde_json::json!({ "n": "lots" }),
+        serde_json::json!({ "n": { "count": 5 } }),
+        serde_json::json!({ "n": -1 }),
+    ] {
+        let refused = rpc_err(&rpc, admin::METHOD_LOGS_TAIL, malformed.clone()).await;
+        assert_eq!(
+            refused.code, CODE_INVALID_PARAMS,
+            "{malformed} carries no decodable n, so it is the caller's fault: {refused:?}"
+        );
+    }
+
+    // The refusals stopped at the decoder: a well-formed call still serves the
+    // same page the HTTP route serves for the same request.
+    assert_eq!(
+        rpc_ok(&rpc, admin::METHOD_LOGS_TAIL, serde_json::json!({ "n": 3 })).await,
+        http_get(&http, "/logs/tail?n=3").await,
+    );
+}
+
 // ------------------------------------------------- search.registry.orphans ---
 
 /// Plant an `indexes.toml` row for `id` at `root` in the isolated data dir.
