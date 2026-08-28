@@ -403,8 +403,8 @@ pub(crate) async fn decommission_core(
 /// What: maps [`CODE_WORKSPACE_GONE`] → `workspace_missing` and
 /// [`CODE_PANE_GONE`] → `pane_gone`; every other outcome passes through
 /// untouched.
-/// Test: `resume_http_still_tags_the_reason_header` in
-/// `daemon::rpc::managed_tests`.
+/// Test: `resume_http_response_restores_the_reason_header_from_the_rpc_code`
+/// in this module's `cores_tests`.
 pub(crate) fn resume_http_response(outcome: RouteOutcome) -> axum::response::Response {
     let reason = match outcome.rpc_code {
         Some(CODE_WORKSPACE_GONE) => Some("workspace_missing"),

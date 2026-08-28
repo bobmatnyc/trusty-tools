@@ -188,7 +188,8 @@ pub async fn prune_worktrees_route(
 /// The transport-neutral body of `POST .../managed/prune-worktrees` (#6288),
 /// served over the socket as `mpm.managed.prune_worktrees`.
 ///
-/// Test: `managed_prune_worktrees_parity` in `daemon::rpc::managed_tests`.
+/// Test: `managed_prune_worktrees_parity_defaults_to_a_preview` in
+/// `daemon::rpc::managed_tests`.
 pub(crate) async fn prune_worktrees_core(
     state: &Arc<DaemonState>,
     req: PruneWorktreesRequest,
