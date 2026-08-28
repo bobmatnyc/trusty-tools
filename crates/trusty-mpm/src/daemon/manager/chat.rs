@@ -49,6 +49,7 @@ use super::chat_store::{ChatTurn, TurnRole};
 use super::inference::{MANAGER_MAX_TOKENS, MANAGER_TEMPERATURE};
 use super::proposal::{extract_proposed_action, is_confirmation};
 use super::status::{PortfolioStatusResponse, load_portfolio_status};
+use crate::daemon::error::DaemonError;
 use crate::daemon::state::DaemonState;
 
 /// Request body for `POST /api/v1/manager/chat`.
@@ -224,20 +225,69 @@ pub async fn manager_chat_route(
     State(state): State<Arc<DaemonState>>,
     Json(body): Json<ChatRequestBody>,
 ) -> impl IntoResponse {
+    // #6288: the body is shared with `mpm.manager.chat`.
+    match chat_op(&state, body).await {
+        Ok(reply) => Json(reply).into_response(),
+        Err(e) => render_chat_error(e),
+    }
+}
+
+/// Render a chat failure in this route's historical body shape (#6288).
+///
+/// Why: three of the four failure classes have always answered a typed
+/// `{ error, message }` JSON object, and the fourth — a store read failure
+/// reaching here from [`load_portfolio_status`] — has always answered plain
+/// text. Both wires are preserved exactly; only where the failure is DECIDED
+/// moved, from the handler into [`chat_op`].
+fn render_chat_error(e: DaemonError) -> axum::response::Response {
+    match &e {
+        DaemonError::InvalidRequest(m) => {
+            chat_error(StatusCode::BAD_REQUEST, "invalid_request", m.clone())
+        }
+        DaemonError::ServiceUnavailable(m) => chat_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "inference_unavailable",
+            m.clone(),
+        ),
+        DaemonError::UpstreamFailed(m) => {
+            chat_error(StatusCode::BAD_GATEWAY, "inference_failed", m.clone())
+        }
+        other => (other.status(), other.detail()).into_response(),
+    }
+}
+
+/// [`manager_chat_route`]'s body, with no transport in it (#6288 slice 5).
+///
+/// Why nothing about the propose→confirm flow moved: the pending-proposal store
+/// is consulted, and unconditionally consumed, before any inference call — that
+/// ordering is what makes the confirm turn deterministic and zero-LLM, and it is
+/// preserved verbatim here. A socket caller therefore gets the same next-turn
+/// TTL semantics as an HTTP one.
+///
+/// # Errors
+///
+/// [`DaemonError::InvalidRequest`] on a blank conversation key or message;
+/// [`DaemonError::Internal`] when a store read fails;
+/// [`DaemonError::ServiceUnavailable`] when no provider is configured;
+/// [`DaemonError::UpstreamFailed`] when the provider call fails or returns
+/// nothing.
+///
+/// Test: `parity_manager_chat_agrees_across_transports`,
+/// `rpc_manager_chat_rejects_a_blank_conversation_key`.
+pub async fn chat_op(
+    state: &Arc<DaemonState>,
+    body: ChatRequestBody,
+) -> Result<ChatReplyBody, DaemonError> {
     let conversation_key = body.conversation_key.trim().to_string();
     if conversation_key.is_empty() {
-        return chat_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
+        return Err(DaemonError::InvalidRequest(
             "conversation_key must not be empty".to_string(),
-        );
+        ));
     }
     if body.message.trim().is_empty() {
-        return chat_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
+        return Err(DaemonError::InvalidRequest(
             "message must not be empty".to_string(),
-        );
+        ));
     }
 
     let manager = state.manager_state();
@@ -250,7 +300,7 @@ pub async fn manager_chat_route(
     if let Some(pending) = manager.proposals().take(&conversation_key)
         && is_confirmation(&body.message)
     {
-        let actuator = resolve_actuator(&state);
+        let actuator = resolve_actuator(state);
         let action_result = match execute_action(&actuator, &conversation_key, pending).await {
             Ok(response) => response,
             Err(error) => {
@@ -271,31 +321,21 @@ pub async fn manager_chat_route(
             .palace()
             .record_chat_turn(&conversation_key, &body.message, &reply)
             .await;
-        return Json(ChatReplyBody {
+        return Ok(ChatReplyBody {
             conversation_key,
             reply,
             model,
             turn_count,
             action_result: Some(action_result),
-        })
-        .into_response();
+        });
     }
 
-    let status = match load_portfolio_status(&state).await {
-        Ok(status) => status,
-        Err((code, msg)) => return (code, msg).into_response(),
-    };
+    let status = load_portfolio_status(state).await?;
 
-    let (model, adapter) = match manager.inference().resolve() {
-        Ok(pair) => pair,
-        Err(unavailable) => {
-            return chat_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "inference_unavailable",
-                unavailable.to_string(),
-            );
-        }
-    };
+    let (model, adapter) = manager
+        .inference()
+        .resolve()
+        .map_err(|unavailable| DaemonError::ServiceUnavailable(unavailable.to_string()))?;
 
     let history = manager.conversations().history(&conversation_key);
     // No tool-calling surface: NO `tools` are attached, so the model has no API
@@ -313,20 +353,16 @@ pub async fn manager_chat_route(
         Ok(response) => match response.first_text().filter(|t| !t.trim().is_empty()) {
             Some(text) => text,
             None => {
-                return chat_error(
-                    StatusCode::BAD_GATEWAY,
-                    "inference_failed",
+                return Err(DaemonError::UpstreamFailed(
                     "provider returned an empty reply".to_string(),
-                );
+                ));
             }
         },
         Err(e) => {
             tracing::warn!("manager chat inference call failed: {e}");
-            return chat_error(
-                StatusCode::BAD_GATEWAY,
-                "inference_failed",
+            return Err(DaemonError::UpstreamFailed(
                 "inference call failed".to_string(),
-            );
+            ));
         }
     };
 
@@ -359,14 +395,13 @@ pub async fn manager_chat_route(
         .record_chat_turn(&conversation_key, &body.message, &reply)
         .await;
 
-    Json(ChatReplyBody {
+    Ok(ChatReplyBody {
         conversation_key,
         reply,
         model,
         turn_count,
         action_result,
     })
-    .into_response()
 }
 
 #[cfg(test)]

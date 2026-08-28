@@ -66,12 +66,15 @@ pub fn socket_path() -> Result<PathBuf> {
 /// `rpc_router_registers_every_documented_method`,
 /// `every_scoped_route_has_a_method`.
 fn build_router(state: &Arc<DaemonState>) -> RpcRouter {
-    // #6288 slice 2: the core request/response families. Slices 5-6 append here.
+    // #6288 slice 2: the core request/response families. Slice 6 appends here.
     let router = rpc::core::register(RpcRouter::new(), state);
     // #6288 slice 3: the legacy session registry, hooks, and the polled feeds.
     let router = rpc::sessions_legacy::register(router, state);
     // #6288 slice 4: managed sessions, the control plane, and the L2 proxy.
-    rpc::managed::register(router, state)
+    let router = rpc::managed::register(router, state);
+    // #6288 slice 5: projects, deliverables/milestones, manager, bus, pairing,
+    // delegation.
+    rpc::registry::register(router, state)
 }
 
 /// Per-connection budgets for this listener.

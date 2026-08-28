@@ -30,3 +30,8 @@ pub mod sessions_legacy_ops;
 /// Registration for the managed-session lifecycle, the SESSCTL control plane,
 /// and the L2 proxy (#6288 slice 4).
 pub mod managed;
+
+/// Registration for the record-keeping families: registry-B projects,
+/// deliverables/milestones, the L3 manager, the peer bus, pairing, and the
+/// delegation query (#6288 slice 5).
+pub mod registry;

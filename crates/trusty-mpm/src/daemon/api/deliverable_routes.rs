@@ -262,7 +262,28 @@ pub async fn create_deliverable(
     Path(project): Path<String>,
     body_in: Result<Json<CreateDeliverable>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Deliverable>), DaemonError> {
+    // #6288: the body is shared with `mpm.deliverables.create`.
     let req = body(body_in)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(create_deliverable_op(&state, project, req).await?),
+    ))
+}
+
+/// [`create_deliverable`]'s body, with no transport in it (#6288 slice 5).
+///
+/// # Errors
+///
+/// [`DaemonError::InvalidRequest`] on a blank name; [`DaemonError::Internal`]
+/// when the store write fails.
+///
+/// Test: `parity_deliverable_create_agrees_across_transports`,
+/// `rpc_deliverable_create_rejects_a_blank_name`.
+pub async fn create_deliverable_op(
+    state: &Arc<DaemonState>,
+    project: String,
+    req: CreateDeliverable,
+) -> Result<Deliverable, DaemonError> {
     if req.name.trim().is_empty() {
         return Err(DaemonError::InvalidRequest(
             "deliverable name must not be empty".into(),
@@ -285,7 +306,7 @@ pub async fn create_deliverable(
     mgr.upsert_deliverable(deliverable.clone())
         .await
         .map_err(store_internal)?;
-    Ok((StatusCode::CREATED, Json(deliverable)))
+    Ok(deliverable)
 }
 
 /// `GET /api/v1/projects/{name}/deliverables` — list a project's Deliverables.
@@ -299,15 +320,31 @@ pub async fn list_deliverables(
     Path(project): Path<String>,
     Query(query): Query<DeliverableListQuery>,
 ) -> Result<Json<DeliverablesResponse>, DaemonError> {
+    // #6288: the body is shared with `mpm.deliverables.list`.
+    Ok(Json(list_deliverables_op(&state, &project, query).await?))
+}
+
+/// [`list_deliverables`]'s body, with no transport in it (#6288 slice 5).
+///
+/// # Errors
+///
+/// [`DaemonError::Internal`] when the store read fails.
+///
+/// Test: `parity_deliverable_list_agrees_across_transports`.
+pub async fn list_deliverables_op(
+    state: &Arc<DaemonState>,
+    project: &str,
+    query: DeliverableListQuery,
+) -> Result<DeliverablesResponse, DaemonError> {
     let mgr = state.deliverable_manager().await;
     let mut deliverables = mgr
-        .deliverables_by_project(&project)
+        .deliverables_by_project(project)
         .await
         .map_err(store_internal)?;
     if let Some(status) = query.status {
         deliverables.retain(|d| d.status == status);
     }
-    Ok(Json(DeliverablesResponse { deliverables }))
+    Ok(DeliverablesResponse { deliverables })
 }
 
 /// Fetch a Deliverable and confirm it belongs to `project` (404 otherwise).
@@ -348,8 +385,9 @@ pub async fn get_deliverable(
     State(state): State<Arc<DaemonState>>,
     Path((project, id)): Path<(String, String)>,
 ) -> Result<Json<Deliverable>, DaemonError> {
-    let d = fetch_scoped(&state, &project, &id).await?;
-    Ok(Json(d))
+    // #6288: `fetch_scoped` IS the transport-neutral body — `mpm.deliverables.get`
+    // calls it directly rather than through a second one-line wrapper.
+    Ok(Json(fetch_scoped(&state, &project, &id).await?))
 }
 
 /// `PATCH /api/v1/projects/{name}/deliverables/{id}` — update a Deliverable.
@@ -378,12 +416,40 @@ pub async fn patch_deliverable(
     Path((project, id)): Path<(String, String)>,
     body_in: Result<Json<PatchDeliverable>, JsonRejection>,
 ) -> Result<Json<Deliverable>, DaemonError> {
+    // #6288: the body is shared with `mpm.deliverables.patch`.
     let patch = body(body_in)?;
+    Ok(Json(
+        patch_deliverable_op(&state, &project, &id, patch).await?,
+    ))
+}
+
+/// [`patch_deliverable`]'s body, with no transport in it (#6288 slice 5).
+///
+/// Why the §10.3 state machine did not move with it: the transition check runs
+/// inside the SAME closure `update_deliverable_with` holds its single write
+/// lock across, so relocating the call site changed neither when it runs nor
+/// what it sees. A rejected transition still leaves the record untouched, and
+/// it does so identically on both transports.
+///
+/// # Errors
+///
+/// [`DaemonError::InvalidRequest`] on a blank name;
+/// [`DaemonError::DeliverableNotFound`] when the id does not resolve inside
+/// `project`; [`DaemonError::InvalidTransition`] on an illegal status change.
+///
+/// Test: `parity_deliverable_patch_agrees_across_transports`,
+/// `rpc_deliverable_patch_rejects_an_illegal_transition`.
+pub async fn patch_deliverable_op(
+    state: &Arc<DaemonState>,
+    project: &str,
+    id: &str,
+    patch: PatchDeliverable,
+) -> Result<Deliverable, DaemonError> {
     reject_blank_patch_name(&patch.name, "deliverable")?;
 
     let mgr = state.deliverable_manager().await;
     let updated = mgr
-        .update_deliverable_with(&id, &project, move |mut d| {
+        .update_deliverable_with(id, project, move |mut d| {
             // #2380: enforce the status state machine BEFORE any other mutation,
             // so a rejected transition leaves the record untouched. Validated
             // against `d.status`, which was fetched and will be persisted under
@@ -419,8 +485,8 @@ pub async fn patch_deliverable(
             Ok(d)
         })
         .await
-        .map_err(|e| update_err(e, &id))?;
-    Ok(Json(updated))
+        .map_err(|e| update_err(e, id))?;
+    Ok(updated)
 }
 
 // ───────────────────────── Milestone DTOs ────────────────────────────
@@ -500,7 +566,27 @@ pub async fn create_milestone(
     Path(project): Path<String>,
     body_in: Result<Json<CreateMilestone>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Milestone>), DaemonError> {
+    // #6288: the body is shared with `mpm.milestones.create`.
     let req = body(body_in)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(create_milestone_op(&state, project, req).await?),
+    ))
+}
+
+/// [`create_milestone`]'s body, with no transport in it (#6288 slice 5).
+///
+/// # Errors
+///
+/// [`DaemonError::InvalidRequest`] on a blank name; [`DaemonError::Internal`]
+/// when the store write fails.
+///
+/// Test: `parity_milestone_create_agrees_across_transports`.
+pub async fn create_milestone_op(
+    state: &Arc<DaemonState>,
+    project: String,
+    req: CreateMilestone,
+) -> Result<Milestone, DaemonError> {
     if req.name.trim().is_empty() {
         return Err(DaemonError::InvalidRequest(
             "milestone name must not be empty".into(),
@@ -520,7 +606,7 @@ pub async fn create_milestone(
     mgr.upsert_milestone(milestone.clone())
         .await
         .map_err(store_internal)?;
-    Ok((StatusCode::CREATED, Json(milestone)))
+    Ok(milestone)
 }
 
 /// `GET /api/v1/projects/{name}/milestones` — list a project's Milestones.
@@ -528,16 +614,31 @@ pub async fn list_milestones(
     State(state): State<Arc<DaemonState>>,
     Path(project): Path<String>,
 ) -> Result<Json<MilestonesResponse>, DaemonError> {
+    // #6288: the body is shared with `mpm.milestones.list`.
+    Ok(Json(list_milestones_op(&state, &project).await?))
+}
+
+/// [`list_milestones`]'s body, with no transport in it (#6288 slice 5).
+///
+/// # Errors
+///
+/// [`DaemonError::Internal`] when the store read fails.
+///
+/// Test: `parity_milestone_list_agrees_across_transports`.
+pub async fn list_milestones_op(
+    state: &Arc<DaemonState>,
+    project: &str,
+) -> Result<MilestonesResponse, DaemonError> {
     let mgr = state.deliverable_manager().await;
     let milestones = mgr
-        .milestones_by_project(&project)
+        .milestones_by_project(project)
         .await
         .map_err(store_internal)?;
-    Ok(Json(MilestonesResponse { milestones }))
+    Ok(MilestonesResponse { milestones })
 }
 
 /// Fetch a Milestone and confirm it belongs to `project` (404 otherwise).
-async fn fetch_scoped_milestone(
+pub(crate) async fn fetch_scoped_milestone(
     state: &Arc<DaemonState>,
     project: &str,
     id: &str,
@@ -558,8 +659,10 @@ pub async fn get_milestone(
     State(state): State<Arc<DaemonState>>,
     Path((project, id)): Path<(String, String)>,
 ) -> Result<Json<Milestone>, DaemonError> {
-    let m = fetch_scoped_milestone(&state, &project, &id).await?;
-    Ok(Json(m))
+    // #6288: `fetch_scoped_milestone` IS the transport-neutral body — it is
+    // `pub(crate)` so `mpm.milestones.get` calls it rather than a second
+    // one-line wrapper.
+    Ok(Json(fetch_scoped_milestone(&state, &project, &id).await?))
 }
 
 /// `PATCH /api/v1/projects/{name}/milestones/{id}` — update a Milestone.
@@ -579,12 +682,33 @@ pub async fn patch_milestone(
     Path((project, id)): Path<(String, String)>,
     body_in: Result<Json<PatchMilestone>, JsonRejection>,
 ) -> Result<Json<Milestone>, DaemonError> {
+    // #6288: the body is shared with `mpm.milestones.patch`.
     let patch = body(body_in)?;
+    Ok(Json(
+        patch_milestone_op(&state, &project, &id, patch).await?,
+    ))
+}
+
+/// [`patch_milestone`]'s body, with no transport in it (#6288 slice 5).
+///
+/// # Errors
+///
+/// [`DaemonError::InvalidRequest`] on a blank name;
+/// [`DaemonError::MilestoneNotFound`] when the id does not resolve inside
+/// `project`.
+///
+/// Test: `parity_milestone_patch_agrees_across_transports`.
+pub async fn patch_milestone_op(
+    state: &Arc<DaemonState>,
+    project: &str,
+    id: &str,
+    patch: PatchMilestone,
+) -> Result<Milestone, DaemonError> {
     reject_blank_patch_name(&patch.name, "milestone")?;
 
     let mgr = state.deliverable_manager().await;
     let updated = mgr
-        .update_milestone_with(&id, &project, move |mut m| {
+        .update_milestone_with(id, project, move |mut m| {
             if let Some(name) = patch.name {
                 m.name = name;
             }
@@ -603,6 +727,6 @@ pub async fn patch_milestone(
             m
         })
         .await
-        .map_err(|e| milestone_lookup_err(e, &id))?;
-    Ok(Json(updated))
+        .map_err(|e| milestone_lookup_err(e, id))?;
+    Ok(updated)
 }

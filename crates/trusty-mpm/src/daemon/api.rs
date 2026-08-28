@@ -38,7 +38,6 @@ use super::rpc::core_ops;
 // #6288 slice 3: the shared bodies for the legacy session, hook, and polled
 // event routes. Every handler below is a thin adapter over one of them.
 use super::rpc::sessions_legacy_ops as sessions_ops;
-use super::services::PairingService;
 use super::state::DaemonState;
 
 /// The SESSCTL control-plane routes (`/api/v1/control/sessions/*`, WI-2 #1593).
@@ -1215,7 +1214,10 @@ pub async fn register_project(
     State(state): State<Arc<DaemonState>>,
     Json(body): Json<RegisterProject>,
 ) -> Json<ProjectInfo> {
-    Json(state.register_project(body.path))
+    // #6288: the body is shared with `mpm.projects.register`.
+    Json(crate::daemon::rpc::registry::projects::register_project_op(
+        &state, body.path,
+    ))
 }
 
 /// `GET /projects` — snapshot of every registered project.
@@ -1226,9 +1228,10 @@ pub async fn register_project(
     responses((status = 200, description = "Array of registered projects", body = [ProjectInfo]))
 )]
 pub async fn list_projects(State(state): State<Arc<DaemonState>>) -> Json<ProjectsResponse> {
-    Json(ProjectsResponse {
-        projects: state.list_projects(),
-    })
+    // #6288: the body is shared with `mpm.projects.list`.
+    Json(crate::daemon::rpc::registry::projects::list_projects_op(
+        &state,
+    ))
 }
 
 /// Query parameters for `GET /projects/current`.
@@ -1264,12 +1267,10 @@ pub async fn current_project(
     State(state): State<Arc<DaemonState>>,
     Query(query): Query<CurrentProjectQuery>,
 ) -> Result<Json<ProjectInfo>, DaemonError> {
-    match state.project(&query.path) {
-        Some(info) => Ok(Json(info)),
-        None => Err(DaemonError::SessionNotFound {
-            id: query.path.display().to_string(),
-        }),
-    }
+    // #6288: the body is shared with `mpm.projects.current`.
+    Ok(Json(
+        crate::daemon::rpc::registry::projects::current_project_op(&state, &query.path)?,
+    ))
 }
 
 /// `GET /projects/discover` — projects mined from `~/.claude/projects/`.
@@ -1291,27 +1292,8 @@ pub async fn current_project(
 pub async fn discover_projects(
     State(_state): State<Arc<DaemonState>>,
 ) -> Json<DiscoverProjectsResponse> {
-    let projects = crate::core::project_discovery::ProjectDiscovery::discover()
-        .into_iter()
-        .map(|p| DiscoveredProjectInfo {
-            path: p.path.display().to_string(),
-            session_count: p.session_count,
-            last_session: p.last_session.map(system_time_to_iso8601),
-        })
-        .collect();
-    Json(DiscoverProjectsResponse { projects })
-}
-
-/// Render a `SystemTime` as an ISO-8601 / RFC3339 UTC string.
-///
-/// Why: the discovery endpoint reports session times as human- and
-/// machine-readable strings; `SystemTime` has no wire-stable serde form.
-/// What: converts via `chrono::DateTime<Utc>`, falling back to the Unix epoch
-/// for the (unreachable in practice) pre-1970 case.
-/// Test: covered by `discover_projects_returns_array`.
-fn system_time_to_iso8601(time: std::time::SystemTime) -> String {
-    let datetime: chrono::DateTime<chrono::Utc> = time.into();
-    datetime.to_rfc3339()
+    // #6288: the body is shared with `mpm.projects.discover`.
+    Json(crate::daemon::rpc::registry::projects::discover_projects_op())
 }
 
 // ---- universal tmux session management ---------------------------------
@@ -1419,7 +1401,8 @@ pub async fn adopt_tmux_session(
 pub async fn pair_request(
     State(state): State<Arc<DaemonState>>,
 ) -> Json<super::services::PairCode> {
-    Json(PairingService::new(&state).request_code())
+    // #6288: the body is shared with `mpm.pair.request`.
+    Json(crate::daemon::rpc::registry::pairing::request_op(&state))
 }
 
 /// JSON body for `POST /pair/confirm`.
@@ -1455,18 +1438,10 @@ pub async fn pair_confirm(
     State(state): State<Arc<DaemonState>>,
     Json(body): Json<PairConfirmRequest>,
 ) -> Json<PairConfirmResponse> {
-    match PairingService::new(&state).confirm(&body.code, body.chat_id) {
-        Ok(()) => Json(PairConfirmResponse {
-            success: true,
-            chat_id: Some(body.chat_id),
-            error: None,
-        }),
-        Err(_) => Json(PairConfirmResponse {
-            success: false,
-            chat_id: None,
-            error: Some("invalid or expired code".to_string()),
-        }),
-    }
+    // #6288: the body is shared with `mpm.pair.confirm`.
+    Json(crate::daemon::rpc::registry::pairing::confirm_op(
+        &state, &body,
+    ))
 }
 
 /// `GET /pair/status` — report whether a Telegram chat is paired.
@@ -1484,7 +1459,8 @@ pub async fn pair_confirm(
 pub async fn pair_status(
     State(state): State<Arc<DaemonState>>,
 ) -> Json<super::services::PairStatus> {
-    Json(PairingService::new(&state).status())
+    // #6288: the body is shared with `mpm.pair.status`.
+    Json(crate::daemon::rpc::registry::pairing::status_op(&state))
 }
 
 /// `POST /pair/reset` — clear the Telegram pairing.
@@ -1500,8 +1476,8 @@ pub async fn pair_status(
     responses((status = 200, description = "Pairing cleared"))
 )]
 pub async fn pair_reset(State(state): State<Arc<DaemonState>>) -> Json<PairResetResponse> {
-    PairingService::new(&state).reset();
-    Json(PairResetResponse { reset: true })
+    // #6288: the body is shared with `mpm.pair.reset`.
+    Json(crate::daemon::rpc::registry::pairing::reset_op(&state))
 }
 
 // ---- diagnostics --------------------------------------------------------

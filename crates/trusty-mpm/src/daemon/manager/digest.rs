@@ -29,6 +29,7 @@ use trusty_common::inference::{ChatMessage, ChatRequest};
 
 use super::inference::{MANAGER_MAX_TOKENS, MANAGER_TEMPERATURE};
 use super::status::{PortfolioStatusResponse, load_portfolio_status, rollup_of};
+use crate::daemon::error::DaemonError;
 use crate::daemon::state::DaemonState;
 
 /// `generated_by` marker for a genuine LLM-authored narrative.
@@ -218,15 +219,76 @@ pub async fn manager_digest_route(
     State(state): State<Arc<DaemonState>>,
     Query(query): Query<DigestQuery>,
 ) -> impl IntoResponse {
-    let scope = match parse_scope(query.scope.as_deref()) {
-        Ok(scope) => scope,
-        Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
-    };
+    // #6288: the body is shared with `mpm.manager.digest`. The status this
+    // route renders comes from the outcome, so 200/503/502 are unchanged.
+    match digest_op(&state, query).await {
+        Ok(outcome) => (outcome.http_status(), Json(outcome.into_body())).into_response(),
+        // These three have always been plain-text bodies; `detail` keeps them so.
+        Err(e) => (e.status(), e.detail()).into_response(),
+    }
+}
 
-    let full = match load_portfolio_status(&state).await {
-        Ok(full) => full,
-        Err((code, msg)) => return (code, msg).into_response(),
-    };
+/// What one digest call produced, and how the two transports render it.
+///
+/// Why this is an OUTCOME rather than three `Result` arms: the 503 and 502 legs
+/// are not empty refusals — each carries a complete [`DigestResponse`] with the
+/// deterministic narrative and the full rollup, which is the entire point of
+/// DOC-16 D1's degrade contract. A JSON-RPC error frame is `{code, message}`
+/// and cannot carry a body, so turning those two into RPC errors would DROP the
+/// numbers the caller asked for. Over the socket all three are results, and the
+/// `error` field already on [`DigestResponse`] (`None` /
+/// `"inference_unavailable"` / `"inference_failed"`) is what distinguishes
+/// them — the same field an HTTP caller reads. Only the three genuinely empty
+/// refusals (bad scope, unknown project, store read failed) are errors, and
+/// those are [`DaemonError`]s on both transports.
+/// Test: `parity_manager_digest_agrees_across_transports` drives the
+/// no-provider leg through both transports and compares the whole body.
+#[derive(Debug)]
+pub enum DigestOutcome {
+    /// A provider answered; `generated_by` is the LLM (HTTP 200).
+    Generated(DigestResponse),
+    /// No provider is configured; the deterministic fallback (HTTP 503).
+    Unavailable(DigestResponse),
+    /// A configured provider was called and failed; the fallback (HTTP 502).
+    Failed(DigestResponse),
+}
+
+impl DigestOutcome {
+    /// The status the HTTP route answers with, unchanged from before #6288.
+    fn http_status(&self) -> StatusCode {
+        match self {
+            Self::Generated(_) => StatusCode::OK,
+            Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Failed(_) => StatusCode::BAD_GATEWAY,
+        }
+    }
+
+    /// The body, which is identical on both transports.
+    pub fn into_body(self) -> DigestResponse {
+        match self {
+            Self::Generated(b) | Self::Unavailable(b) | Self::Failed(b) => b,
+        }
+    }
+}
+
+/// [`manager_digest_route`]'s body, with no transport in it (#6288 slice 5).
+///
+/// # Errors
+///
+/// [`DaemonError::InvalidRequest`] on a malformed `scope`;
+/// [`DaemonError::NotFound`] when a project scope names no registered project;
+/// [`DaemonError::Internal`] when a store read fails.
+///
+/// Test: `parity_manager_digest_agrees_across_transports`,
+/// `rpc_manager_digest_rejects_a_malformed_scope`,
+/// `rpc_manager_digest_unknown_project_is_not_found`.
+pub async fn digest_op(
+    state: &Arc<DaemonState>,
+    query: DigestQuery,
+) -> Result<DigestOutcome, DaemonError> {
+    let scope = parse_scope(query.scope.as_deref()).map_err(DaemonError::InvalidRequest)?;
+
+    let full = load_portfolio_status(state).await?;
 
     // Narrow to scope, reusing the per-project rollups verbatim (never re-derived).
     let scoped = match &scope {
@@ -235,11 +297,9 @@ pub async fn manager_digest_route(
             match full.projects.iter().find(|p| &p.project_name == name) {
                 Some(p) => rollup_of(vec![p.clone()]),
                 None => {
-                    return (
-                        StatusCode::NOT_FOUND,
-                        format!("project '{name}' is not registered"),
-                    )
-                        .into_response();
+                    return Err(DaemonError::NotFound(format!(
+                        "project '{name}' is not registered"
+                    )));
                 }
             }
         }
@@ -251,19 +311,15 @@ pub async fn manager_digest_route(
     let (model, adapter) = match state.manager_state().inference().resolve() {
         Ok(pair) => pair,
         Err(unavailable) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(DigestResponse {
-                    scope: scope_label.clone(),
-                    generated_by: GENERATED_BY_FALLBACK,
-                    model: None,
-                    narrative: deterministic_narrative(&scope_label, &scoped),
-                    status: scoped,
-                    error: Some("inference_unavailable".to_string()),
-                    message: Some(unavailable.to_string()),
-                }),
-            )
-                .into_response();
+            return Ok(DigestOutcome::Unavailable(DigestResponse {
+                scope: scope_label.clone(),
+                generated_by: GENERATED_BY_FALLBACK,
+                model: None,
+                narrative: deterministic_narrative(&scope_label, &scoped),
+                status: scoped,
+                error: Some("inference_unavailable".to_string()),
+                message: Some(unavailable.to_string()),
+            }));
         }
     };
 
@@ -274,7 +330,7 @@ pub async fn manager_digest_route(
 
     match adapter.chat(&request).await {
         Ok(response) => match response.first_text().filter(|t| !t.trim().is_empty()) {
-            Some(narrative) => Json(DigestResponse {
+            Some(narrative) => Ok(DigestOutcome::Generated(DigestResponse {
                 scope: scope_label,
                 generated_by: GENERATED_BY_LLM,
                 model: Some(model),
@@ -282,13 +338,20 @@ pub async fn manager_digest_route(
                 status: scoped,
                 error: None,
                 message: None,
-            })
-            .into_response(),
-            None => digest_call_failed(scope_label, scoped, "provider returned an empty narrative"),
+            })),
+            None => Ok(digest_call_failed(
+                scope_label,
+                scoped,
+                "provider returned an empty narrative",
+            )),
         },
         Err(e) => {
             tracing::warn!("manager digest inference call failed: {e}");
-            digest_call_failed(scope_label, scoped, "inference call failed")
+            Ok(digest_call_failed(
+                scope_label,
+                scoped,
+                "inference call failed",
+            ))
         }
     }
 }
@@ -300,28 +363,26 @@ pub async fn manager_digest_route(
 /// and a clearly-marked deterministic narrative, distinct (502) from the
 /// no-provider 503 case.
 /// What: renders a [`DigestResponse`] with the fallback narrative + an
-/// `inference_failed` error code as a `502`.
+/// `inference_failed` error code, as [`DigestOutcome::Failed`] — which the HTTP
+/// route still answers with `502` (#6288 moved the status out of this function
+/// and onto the outcome; the body is byte-identical).
 /// Test: HTTP coverage in `tests/manager_inference.rs`.
 fn digest_call_failed(
     scope_label: String,
     status: PortfolioStatusResponse,
     reason: &str,
-) -> axum::response::Response {
-    (
-        StatusCode::BAD_GATEWAY,
-        Json(DigestResponse {
-            scope: scope_label.clone(),
-            generated_by: GENERATED_BY_FALLBACK,
-            model: None,
-            narrative: deterministic_narrative(&scope_label, &status),
-            status,
-            error: Some("inference_failed".to_string()),
-            message: Some(format!(
-                "{reason}; returning the deterministic rollup — see GET /api/v1/manager/status"
-            )),
-        }),
-    )
-        .into_response()
+) -> DigestOutcome {
+    DigestOutcome::Failed(DigestResponse {
+        scope: scope_label.clone(),
+        generated_by: GENERATED_BY_FALLBACK,
+        model: None,
+        narrative: deterministic_narrative(&scope_label, &status),
+        status,
+        error: Some("inference_failed".to_string()),
+        message: Some(format!(
+            "{reason}; returning the deterministic rollup — see GET /api/v1/manager/status"
+        )),
+    })
 }
 
 #[cfg(test)]

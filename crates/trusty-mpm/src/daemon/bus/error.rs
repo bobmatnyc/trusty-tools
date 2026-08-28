@@ -14,6 +14,9 @@ use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use thiserror::Error;
+use trusty_common::uds::server::{CODE_INTERNAL_ERROR, CODE_INVALID_PARAMS, RpcError};
+
+use crate::daemon::error::{CODE_CONFLICT, CODE_FORBIDDEN, CODE_GONE, CODE_NOT_FOUND};
 
 /// A peer-bus publish, addressing, or registration failure.
 ///
@@ -149,6 +152,36 @@ impl BusError {
             | Self::InvalidCaller(_)
             | Self::CallerKindNotPermitted { .. } => StatusCode::BAD_REQUEST,
         }
+    }
+}
+
+/// Map a bus failure onto the JSON-RPC error frame a socket client reads.
+///
+/// Why (#6288 slice 5): the bus's four request/response verbs are served over
+/// the Unix socket as well as over HTTP, and DOC-60 §4's whole point is that a
+/// sender can tell WHICH failure it hit from the status alone. A socket caller
+/// gets the same discrimination only if the code is derived from the same
+/// [`BusError::status`] table the HTTP transport reads — a second hand-written
+/// table here would let the two drift, and the drift would be silent.
+/// What: derives the code from the status, so `403` sender-unverified, `404`
+/// no-live-instance, `410` instance-gone, `409` no-subscriber, and `400`
+/// malformed each stay distinguishable. The message crosses verbatim, so it is
+/// the same string the HTTP body's `error` field carries.
+/// Test: `bus_error_rpc_codes_track_http_statuses`.
+impl From<BusError> for RpcError {
+    fn from(e: BusError) -> Self {
+        let code = match e.status() {
+            StatusCode::BAD_REQUEST => CODE_INVALID_PARAMS,
+            StatusCode::FORBIDDEN => CODE_FORBIDDEN,
+            StatusCode::NOT_FOUND => CODE_NOT_FOUND,
+            StatusCode::CONFLICT => CODE_CONFLICT,
+            StatusCode::GONE => CODE_GONE,
+            // Unreachable while `status` stays total over the variants above;
+            // a new variant that forgets a row lands here rather than silently
+            // borrowing another failure's code.
+            _ => CODE_INTERNAL_ERROR,
+        };
+        RpcError::new(code, e.to_string())
     }
 }
 
