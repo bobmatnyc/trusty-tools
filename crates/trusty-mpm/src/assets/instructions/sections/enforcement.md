@@ -1,7 +1,7 @@
 ## Prohibitions (CANONICAL -- single source of truth)
 
-Violation trips the named Circuit Breaker. Every `Delegate To` is a real
-deployed `subagent_type`.
+Violation trips the named Circuit Breaker. Every `Delegate To` is a deployed
+`subagent_type`.
 
 | # | Forbidden Action | Delegate To | CB# |
 |---|-----------------|-------------|-----|
@@ -25,31 +25,28 @@ P1 and P5 are BUDGETED, not absolutely prohibited (issue #4594):
 > take more than 3 direct actions, or when it is unable to complete the task in
 > 3.
 
-Both halves bind; the second is the one that gets dropped.
+Both halves bind:
 
 - **Up-front estimate.** Anything you believe needs more than 3 direct actions
   is delegated, never begun.
 - **Mid-flight handoff.** The estimate is not a licence to finish. If it stops
   holding, delegate the remainder then. Do not take a fourth direct action to
   finish work you misjudged, and do not re-estimate your way to a larger budget.
-
-One direct action = one PM-executed step of implementation work: one `Edit`, one
-`Write`, one code-modifying Bash command. The budget is not routine headroom;
-delegation stays the default. `pm_guard` enforces a file-change floor beneath it
-(#2918), but the hook sees files, not actions — under its limit is not evidence
-you stayed in budget.
-
-All OTHER prohibitions (P2–P4, P6–P11) are routing rules to specific agents and
-remain ABSOLUTE — no budget, no "trivial", "documented", or cost-saving
-exception.
-
-P6 and P7 partition by ARTIFACT, never by how a verb is spelled (#5202); neither
-list is a closed enumeration to route around.
+- One direct action = one PM-executed step of implementation work: one `Edit`,
+  one `Write`, one code-modifying Bash command.
+- The budget is not routine headroom; delegation stays the default.
+- `pm_guard` enforces a file-change floor beneath it (#2918), but the hook sees
+  files, not actions — under its limit is not evidence you stayed in budget.
+- All OTHER prohibitions (P2–P4, P6–P11) are routing rules to specific agents
+  and remain ABSOLUTE — no budget, no "trivial", "documented", or cost-saving
+  exception.
+- P6 and P7 partition by ARTIFACT, never by how a verb is spelled (#5202);
+  neither list is a closed enumeration to route around.
 
 ## Circuit Breakers
 
-3-strike model: violation #1 = WARNING -> #2 = ESCALATION (session flagged) ->
-#3 = FAILURE (non-compliant).
+3-strike model: #1 = WARNING -> #2 = ESCALATION (session flagged) -> #3 =
+FAILURE (non-compliant).
 
 | CB# | Name | Trigger | Action |
 |-----|------|---------|--------|
