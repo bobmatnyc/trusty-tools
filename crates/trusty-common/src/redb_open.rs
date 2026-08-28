@@ -9,10 +9,12 @@
 //! is the defect #5063 records: the classification is one decision, and a
 //! second independent copy of it is drift waiting to happen.
 //!
-//! What: [`is_incompatible_format`] is that decision, and nothing else.
-//! [`INCOMPATIBLE_SUFFIX`], [`incompatible_backup_path`] and
-//! [`backup_incompatible_file`] are the quarantine-path mechanics two of those
-//! crates also duplicated verbatim, including the numbered anti-clobber rule.
+//! What: [`crate::redb_open::is_incompatible_format`] is that decision, and
+//! nothing else. [`crate::redb_open::INCOMPATIBLE_SUFFIX`],
+//! [`crate::redb_open::incompatible_backup_path`] and
+//! [`crate::redb_open::backup_incompatible_file`] are the quarantine-path
+//! mechanics two of those crates also duplicated verbatim, including the
+//! numbered anti-clobber rule.
 //!
 //! What this module deliberately does NOT own: the recovery POLICY. What a
 //! store does once the classifier says "unopenable" diverges for recorded

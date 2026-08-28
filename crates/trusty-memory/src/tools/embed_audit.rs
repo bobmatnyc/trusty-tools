@@ -1,7 +1,7 @@
 //! Answer "is this findable?" directly, per id and per estate (#5000, #4786).
 //!
 //! Why: `palace_reembed` reports one palace's whole missing set, and
-//! `console_metrics` reports at most [`MAX_PALACES_IN_REPORT`] of them from
+//! [`crate::console_metrics`] reports at most `MAX_PALACES_IN_REPORT` of them from
 //! cache. Neither answers the two questions that actually get asked.
 //!
 //! A deletion-bearing workflow asks about ITS OWN ids — #4834 deleted 72 source
@@ -25,7 +25,8 @@
 //! that gap in both directions: palace `trusty-tools` read a gap of 4 with 0
 //! drawers missing (id aliasing, nothing absent), and orphan vectors can mask a
 //! real hole the other way. What is reported instead is
-//! [`EmbedHealth::missing_vector_ids`] plus the alias audit's `key_rows` versus
+//! [`trusty_common::memory_core::retrieval::EmbedHealth::missing_vector_ids`]
+//! plus the alias audit's `key_rows` versus
 //! `distinct_vector_ids` — the pair that catches both classes. An audit that
 //! could not RUN is never a pass: it reports `unavailable`, and a caller gating
 //! a deletion on it must treat that as a block.
