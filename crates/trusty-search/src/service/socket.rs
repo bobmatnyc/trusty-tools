@@ -22,8 +22,21 @@
 //! | 2 | the READ surface — indexes, status, config, chunks, graph, call chain | landed (PR #6368), in [`crate::service::rpc::reads`] |
 //! | 3 | the QUERY surface — search and its fan-out, grep and its fan-out, similarity, typeahead | landed (PR #6377), in [`crate::service::rpc::queries`] |
 //! | 4 | the WRITE surface — index create, delete, relocate, the two per-file writes, the reindex trigger, contributed-graph ingest | landed (PR #6381), in [`crate::service::rpc::writes`] |
-//! | 5 | the STREAMS — reindex progress and the daemon status stream | this one, in [`crate::service::rpc::streams`] |
-//! | retire | delete the axum surface and move the eleven dialling crates | not started |
+//! | 5 | the STREAMS — reindex progress and the daemon status stream | landed (PR #6383), in [`crate::service::rpc::streams`] |
+//! | 5.5 | the REMAINDER with a named consumer — the two config writes, the log tail, the registry orphan census — plus the frame-cap raise | this one, in [`crate::service::rpc::admin`] |
+//! | consumer wave | move the eleven dialling crates onto these names, one PR per crate | not started |
+//! | retire | delete the axum surface, `ui.rs`, and the `http_addr` writer | not started, gated on the consumer wave |
+//!
+//! **Slice 5.5 closes the method gap, not the migration.** Every HTTP route with
+//! a consumer outside this crate now has a method here, which is the
+//! precondition the consumer wave needs and did not have. Four routes are
+//! deliberately still HTTP-only: `POST /admin/stop`, `POST /upgrade`,
+//! `POST /chat` and `GET /api/chat/providers` have no observed external caller
+//! (chat serves the embedded `/ui` alone), and `GET /metrics` is Prometheus
+//! text, which is HTTP-shaped by nature. `GET /indexes/{id}/communities` is a
+//! DEAD route — `trusty-common`'s monitor calls it and the daemon has never
+//! served it — and is a pre-existing bug with its own ticket, not a gap this
+//! surface owes a method for.
 //!
 //! **Two doors, one daemon.** The socket serves the same `Arc<SearchAppState>`
 //! the axum router was built on — see
@@ -48,7 +61,7 @@ use serde::{Deserialize, Serialize};
 use tokio::net::UnixListener;
 use trusty_common::uds::server::{serve_until, RpcRouter, RpcServeOptions};
 
-use crate::service::rpc::{queries, reads, streams, writes};
+use crate::service::rpc::{admin, queries, reads, streams, writes};
 use crate::service::server::SearchAppState;
 
 #[cfg(test)]
@@ -108,6 +121,12 @@ pub const METHODS: &[&str] = &[
     // against the union of the two.
     streams::METHOD_STATUS_STREAM,
     streams::METHOD_INDEX_REINDEX_STREAM,
+    // #6285 slice 5.5 — the operational remainder. Back in the unary table with
+    // the twenty-three above.
+    admin::METHOD_INDEX_CONFIG_SET,
+    admin::METHOD_CONFIG_SET,
+    admin::METHOD_LOGS_TAIL,
+    admin::METHOD_REGISTRY_ORPHANS,
 ];
 
 /// The params of a method that takes no arguments.
@@ -178,31 +197,60 @@ fn build_router(state: &Arc<SearchAppState>) -> RpcRouter {
     let router = reads::register(router, state);
     let router = queries::register(router, state);
     let router = writes::register(router, state);
+    let router = admin::register(router, state);
     streams::register(router, state)
 }
 
+/// The frame budget this listener accepts, in bytes (#6285 slice 5.5).
+///
+/// Why 64 MiB and not a figure of this surface's own: it is exactly the
+/// `DefaultBodyLimit` `POST /indexes/{id}/graph` carries
+/// (`service::server::build_router_on`), which is what makes the two doors take
+/// the same payload rather than nearly the same one. A contributed graph is the
+/// largest thing either transport moves — PR #1129 recorded ~20 MB maxima from
+/// large pilot corpora and sized the HTTP limit at ~3× that — and a slice-3
+/// query response can also pass 8 MiB when a caller asks for full content at a
+/// large `top_k`. Both were refused here and accepted there until this slice.
+///
+/// A caller must raise its own budget to match with
+/// [`trusty_common::uds::send_framed_request_capped`]; see [`serve_options`].
+pub const MAX_FRAME_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Per-connection budgets for this listener.
 ///
-/// The shared defaults: a 30-second bound on delivering a REQUEST frame, and
-/// the 8 MiB shared frame budget. Neither bounds a handler; slice 3's query
-/// methods are bounded by the interactive query deadline instead, which they
-/// share with their HTTP routes (see [`queries::register`]).
+/// The read bound is the shared default — 30 seconds to deliver a REQUEST
+/// frame. It bounds no handler; slice 3's query methods are bounded by the
+/// interactive query deadline instead, which they share with their HTTP routes
+/// (see [`queries::register`]). It is not a stream's idle budget either: neither
+/// end applies a deadline between two frames of a response (#6286).
 ///
-/// Two surfaces will outgrow the 8 MiB budget, and both are raised on the
-/// listener and the client TOGETHER — raising it here alone only moves which
-/// end refuses. `POST /indexes/{id}/graph` carries a 64 MiB axum body limit
-/// today, and a slice-3 query response can exceed 8 MiB when a caller asks for
-/// full content at a large `top_k` or a grep at a large `max_results`. Both
-/// wait for the retire slice, which is when a consumer first dials these names.
+/// **The frame budget is [`MAX_FRAME_BYTES`], and the two ends now match.** The
+/// shared 8 MiB default is a control-plane figure, and this surface is not one:
+/// `search.graph.ingest` carries a document HTTP accepts up to 64 MiB, so until
+/// this slice a producer whose graph exceeded 8 MiB was refused on the socket
+/// and served on HTTP. Raising the listener alone would only have moved which
+/// end refuses — [`trusty_common::uds::send_framed_request`] applies the 8 MiB
+/// default to the RESPONSE it reads — so a consumer moving onto the query or
+/// ingest names dials through
+/// [`trusty_common::uds::send_framed_request_capped`] with this same figure
+/// rather than the plain helper. Anything smaller on the client turns a request
+/// this listener accepted into a `FrameTooLarge` on the way back.
 ///
-/// Slice 5's streams are NOT a third such surface. The budget bounds each
-/// streamed frame separately rather than their sum, and one progress event or
-/// one `DaemonEvent` is a few hundred bytes — a stream reaches the cap only if a
-/// single event does. The read bound is not a stream's idle budget either: it
-/// bounds delivery of the REQUEST frame, and neither end applies a deadline
-/// between two frames of a response (#6286).
+/// The raise costs no memory at rest. It is a ceiling on how far a single
+/// unterminated frame may grow before the read is refused, not an allocation:
+/// an ordinary `search.health` frame is a few hundred bytes either way.
+///
+/// Slice 5's streams are unaffected. The budget bounds each streamed frame
+/// separately rather than their sum, and one progress event or one `DaemonEvent`
+/// is a few hundred bytes — a stream reaches the cap only if a single event
+/// does.
+///
+/// Test: `serve_options_matches_the_http_graph_ingest_body_limit`.
 fn serve_options() -> RpcServeOptions {
-    RpcServeOptions::default()
+    RpcServeOptions {
+        max_frame_bytes: MAX_FRAME_BYTES,
+        ..RpcServeOptions::default()
+    }
 }
 
 /// A bound RPC socket, with the path it occupies.

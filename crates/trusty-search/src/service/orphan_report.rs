@@ -187,6 +187,34 @@ pub fn build_census(entries: &[PersistedIndex]) -> OrphanCensus {
 pub async fn registry_orphans_handler() -> axum::response::Response {
     use axum::response::IntoResponse as _;
 
+    match registry_orphans_report().await {
+        Ok(census) => axum::Json(census).into_response(),
+        Err((status, body)) => (status, axum::Json(body)).into_response(),
+    }
+}
+
+/// The census `GET /registry/orphans` serves, without the transport
+/// (#6285 slice 5.5).
+///
+/// Why: `search.registry.orphans` is what `trusty-console`'s cleanup tab dials
+/// once the retire slice moves it off HTTP, and it is the ONE method on this
+/// surface that reads the registry FILE rather than `SearchAppState` — which is
+/// why it takes no state. A second reader over the socket would be a second
+/// place deciding what `exists()` returning `false` means, and the whole point
+/// of #6371's three-valued classification is that the decision has one home.
+/// What: the blocking file read and the census, both off the runtime thread —
+/// a root on a network mount can make a `stat` slow enough to stall the reactor.
+///
+/// # Errors
+///
+/// `500` when the registry cannot be read, or when the blocking task itself
+/// failed. Never an empty census for either: "nothing to clean up" and "I could
+/// not look" are the two answers this route exists to keep apart.
+///
+/// Test: `registry_orphans_over_the_socket_matches_the_http_body`,
+/// `an_unreadable_registry_is_refused_on_either_transport`.
+pub async fn registry_orphans_report(
+) -> Result<OrphanCensus, (axum::http::StatusCode, serde_json::Value)> {
     let built = tokio::task::spawn_blocking(|| -> anyhow::Result<OrphanCensus> {
         let path = crate::service::persistence::indexes_toml_path()?;
         let entries = crate::service::persistence::load_index_registry_at(&path)?;
@@ -195,21 +223,19 @@ pub async fn registry_orphans_handler() -> axum::response::Response {
     .await;
 
     match built {
-        Ok(Ok(census)) => axum::Json(census).into_response(),
-        Ok(Err(e)) => (
+        Ok(Ok(census)) => Ok(census),
+        Ok(Err(e)) => Err((
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(serde_json::json!({
+            serde_json::json!({
                 "error": format!("could not read the index registry: {e:#}")
-            })),
-        )
-            .into_response(),
-        Err(e) => (
+            }),
+        )),
+        Err(e) => Err((
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(serde_json::json!({
+            serde_json::json!({
                 "error": format!("the registry census task failed: {e}")
-            })),
-        )
-            .into_response(),
+            }),
+        )),
     }
 }
 

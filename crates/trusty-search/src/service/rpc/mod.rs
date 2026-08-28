@@ -32,8 +32,12 @@ pub mod writes;
 /// index's reindex progress stream (#6285 slice 5).
 pub mod streams;
 
+/// Registration for the operational remainder: the two config writes, the log
+/// tail, and the registry orphan census (#6285 slice 5.5).
+pub mod admin;
+
 /// Per-method admission and deadline lane pins for the whole socket surface
-/// (#6285 slice 5, discharging the slice-4 review's deferred MEDIUM).
+/// (#6285 slice 5, widened in slice 5.5 to every lock-taking method).
 #[cfg(test)]
 #[path = "lanes_tests.rs"]
 mod lanes_tests;
