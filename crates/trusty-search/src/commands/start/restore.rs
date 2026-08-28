@@ -880,18 +880,19 @@ mod tests {
             .save_to(&paths.allowlist_file())
             .expect("write empty allowlist");
 
-        let entries: Vec<PersistedIndex> = (0..3)
+        // #6333: the guards live in this scope so `Drop` removes them at
+        // return. The previous `mem::forget` kept them alive by leaking one
+        // `~/ts-warmboot-count*` directory per entry, every run.
+        let (guards, entries): (Vec<tempfile::TempDir>, Vec<PersistedIndex>) = (0..3)
             .map(|i| {
                 let dir = tempfile::Builder::new()
                     .prefix("ts-warmboot-count")
                     .tempdir_in(dirs::home_dir().expect("home"))
                     .expect("tempdir");
                 let root = dir.path().canonicalize().expect("canonicalize");
-                // Keep the tempdir alive for the length of the call.
-                std::mem::forget(dir);
-                PersistedIndex::new(format!("e{i}"), root)
+                (dir, PersistedIndex::new(format!("e{i}"), root))
             })
-            .collect();
+            .unzip();
 
         let out = retain_approved_entries(entries, &paths);
         assert!(out.kept.is_empty(), "{:?}", out.kept);
@@ -899,6 +900,7 @@ mod tests {
             out.excluded, 3,
             "every excluded entry must be counted so the summary can report the cause"
         );
+        drop(guards);
     }
 
     /// The #5926 end-to-end shape: an upgrade whose `allowlist.toml` already
@@ -917,17 +919,18 @@ mod tests {
             .with_project_paths(fx.path().join("projects.json"));
         let registry_path = fx.path().join("indexes.toml");
 
-        let roots: Vec<std::path::PathBuf> = (0..3)
+        // #6333: same leak as above — hold the guards instead of forgetting
+        // them, so the three `~/ts-upgrade-partial*` directories are removed.
+        let (guards, roots): (Vec<tempfile::TempDir>, Vec<std::path::PathBuf>) = (0..3)
             .map(|_| {
                 let dir = tempfile::Builder::new()
                     .prefix("ts-upgrade-partial")
                     .tempdir_in(dirs::home_dir().expect("home"))
                     .expect("tempdir");
                 let root = dir.path().canonicalize().expect("canonicalize");
-                std::mem::forget(dir);
-                root
+                (dir, root)
             })
-            .collect();
+            .unzip();
         let entries: Vec<PersistedIndex> = roots
             .iter()
             .enumerate()
@@ -960,6 +963,7 @@ mod tests {
             out.kept
         );
         assert_eq!(out.kept.len(), 3, "{:?}", out.kept);
+        drop(guards);
     }
 
     /// An unreadable allowlist keeps every entry. Un-indexing the whole fleet
