@@ -134,12 +134,16 @@ async fn serve_http_drains_both_listeners_on_shutdown() {
     );
 
     // ── One shutdown drains both ─────────────────────────────────────────────
-    stop_tx.send(()).expect("the serve task must still be running");
+    stop_tx
+        .send(())
+        .expect("the serve task must still be running");
 
     let joined = tokio::time::timeout(DRAIN_BUDGET, served)
         .await
-        .expect("both listeners must drain on ONE shutdown — a listener still \
-                 waiting on its own signal never returns")
+        .expect(
+            "both listeners must drain on ONE shutdown — a listener still \
+                 waiting on its own signal never returns",
+        )
         .expect("the serve task must not panic");
     joined.expect("a clean drain is not an error");
 
