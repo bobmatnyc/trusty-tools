@@ -23,7 +23,12 @@
    * @typedef {{ id: string, display_name: string, status: string, version?: string, url?: string, hint?: string }} Service
    * @type {{ service: Service, tabbedServices: Set<string>, onViewDetails?: (id: string) => void }}
    */
-  import { cardActivation, cardDescribedBy, isActivationKey } from './cardActions.js';
+  import {
+    cardActivation,
+    cardDescribedBy,
+    isActivationKey,
+    sanitizeElementId,
+  } from './cardActions.js';
 
   let { service, tabbedServices = new Set(), onViewDetails } = $props();
 
@@ -65,7 +70,9 @@
   let activation = $derived(cardActivation(actions));
   // #6370: the elements a screen reader reads as this card's description.
   let describedBy = $derived(cardDescribedBy(service));
-  let elementId = $derived(String(service.id).replace(/[^A-Za-z0-9_-]/g, '-'));
+  // The same helper `cardDescribedBy` derives its ids with, so the ids this
+  // markup emits and the ids that description points at cannot drift apart.
+  let elementId = $derived(sanitizeElementId(service.id));
 
   /**
    * Activate the card from the keyboard.

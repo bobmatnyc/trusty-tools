@@ -347,6 +347,13 @@ pub fn build_router_on(
         .route("/", get(|| async { Redirect::permanent("/ui/") }))
         .route("/health", get(health_handler))
         .route("/logs/tail", get(logs_tail_handler))
+        // #6371: a census of `indexes.toml`, not of the live registry — an
+        // allowlist-excluded registration is in neither `state.registry` nor
+        // `GET /indexes`, and is exactly the row this route exists to show.
+        .route(
+            "/registry/orphans",
+            get(crate::service::orphan_report::registry_orphans_handler),
+        )
         .route("/admin/stop", post(admin_stop_handler))
         .route("/status/stream", get(status_stream_handler))
         .route(

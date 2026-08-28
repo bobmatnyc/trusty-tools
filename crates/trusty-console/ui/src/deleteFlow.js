@@ -88,12 +88,32 @@ export function deleteUrl(kind, id, option) {
  * @returns {{ok: boolean, message: string}} Outcome and the text to display.
  */
 export function readDeleteResult(status, body) {
+  return readActionResult(status, body, 'delete', (b) => `Deleted "${b.id ?? ''}".`);
+}
+
+/**
+ * The same reading, for any single-resource action the console routes.
+ *
+ * Why (#6371): compacting a palace has the identical contract — the console
+ * route reduces the daemon's answer to an `ok` field, and the UI must believe
+ * that field rather than the status code. A second copy of this reading is how
+ * one action starts trusting a 2xx while the other does not.
+ *
+ * @param {number} status HTTP status of the console's response.
+ * @param {object|null} body Parsed JSON body, or null when it did not parse.
+ * @param {string} noun What failed, for the fallback message ("delete",
+ *   "compaction").
+ * @param {(body: object) => string} describeSuccess Builds the success message
+ *   from the response body.
+ * @returns {{ok: boolean, message: string}} Outcome and the text to display.
+ */
+export function readActionResult(status, body, noun, describeSuccess) {
   if (status === 200 && body && body.ok === true) {
-    return { ok: true, message: `Deleted "${body.id ?? ''}".` };
+    return { ok: true, message: describeSuccess(body) };
   }
   const reported = body && typeof body.error === 'string' ? body.error.trim() : '';
   return {
     ok: false,
-    message: reported || `The delete failed (HTTP ${status}) and the daemon gave no reason.`,
+    message: reported || `The ${noun} failed (HTTP ${status}) and the daemon gave no reason.`,
   };
 }

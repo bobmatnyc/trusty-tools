@@ -40,7 +40,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{Response, StatusCode, header},
     response::IntoResponse,
-    routing::{any, get},
+    routing::{any, get, post},
 };
 use rust_embed::RustEmbed;
 use serde::Deserialize;
@@ -435,6 +435,17 @@ fn build_router_inner(
         .route(
             "/api/console/search/indexes/{id}",
             axum::routing::delete(crate::routes::deletes::delete_index_handler),
+        )
+        // #6371: batch prune of stale index registrations, and palace
+        // compaction. `prune-indexes` is not `indexes/prune` because a static
+        // segment beside `indexes/{id}` would shadow an index named `prune`.
+        .route(
+            "/api/console/search/prune-indexes",
+            post(crate::routes::cleanup::prune_indexes_handler),
+        )
+        .route(
+            "/api/console/memory/palaces/{id}/compact",
+            post(crate::routes::cleanup::compact_palace_handler),
         )
         // Analyze on-demand routes — call the analyze stdio MCP directly (no /proxy).
         .route(

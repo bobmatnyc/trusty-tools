@@ -8,7 +8,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { cardActivation, cardDescribedBy, isActivationKey } from './cardActions.js';
+import {
+  cardActivation,
+  cardDescribedBy,
+  isActivationKey,
+  sanitizeElementId,
+} from './cardActions.js';
 
 const action = (id) => ({ id, label: id, run: () => id });
 
@@ -84,10 +89,29 @@ test('the version is described only when the service reports one', () => {
   assert.ok(!without.split(' ').includes('svc-x-version'), without);
 });
 
-test('two cards never share a described-by id', () => {
+test('two distinct service ids produce two distinct described-by ids', () => {
+  // Renamed from "two cards never share a described-by id" (PR #6373 review,
+  // carried by #6371): that name claimed an injectivity the sanitizer does not
+  // have, and this assertion never tested it — see the collision test below.
+  // What it does prove is the case that matters for the real roster, whose ids
+  // differ before sanitizing.
   assert.notEqual(
     cardDescribedBy({ id: 'trusty-search', status: 'running' }),
     cardDescribedBy({ id: 'trusty-memory', status: 'running' }),
+  );
+});
+
+test('the sanitizer collides on ids that differ only in a disallowed character', () => {
+  // The genuine collision case the renamed test above was believed to catch and
+  // does not. It is pinned rather than fixed because these ids come from the
+  // console's own fixed service roster, where every id is already distinct
+  // within [a-z-]; a caller feeding this daemon- or operator-supplied ids would
+  // need a different derivation, and this test is what says so out loud.
+  assert.equal(sanitizeElementId('a/b'), 'a-b');
+  assert.equal(sanitizeElementId('a b'), 'a-b');
+  assert.equal(
+    cardDescribedBy({ id: 'a/b', status: 'running' }),
+    cardDescribedBy({ id: 'a b', status: 'running' }),
   );
 });
 
@@ -96,4 +120,21 @@ test('an id carrying a separator still produces a usable element id', () => {
     cardDescribedBy({ id: 'weird/id here', status: 'running' }),
     'svc-weird-id-here-status',
   );
+});
+
+test('the described-by ids and the markup ids come from one sanitizer', () => {
+  // The defect this prevents: ServiceCard used to inline the same regex, so a
+  // change to one derivation left aria-describedby pointing at ids the markup
+  // no longer emitted. Both now call sanitizeElementId, and this pins the two
+  // to the same output.
+  const id = 'weird/id here';
+  assert.equal(
+    cardDescribedBy({ id, status: 'running' }),
+    `svc-${sanitizeElementId(id)}-status`,
+  );
+});
+
+test('the sanitizer survives a missing id rather than throwing', () => {
+  assert.equal(sanitizeElementId(undefined), '');
+  assert.equal(sanitizeElementId(null), '');
 });
