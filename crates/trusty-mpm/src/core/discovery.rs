@@ -369,11 +369,58 @@ pub async fn resolve_daemon_url_via_gateway(
     client: &reqwest::Client,
     explicit: Option<&str>,
 ) -> String {
-    let console_addr = trusty_common::read_daemon_addr("trusty-console")
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| DEFAULT_CONSOLE_ADDR.to_string());
+    let console_addr = console_addr();
     resolve_daemon_url_via_gateway_inner(client, explicit, &console_addr).await
+}
+
+/// Resolve the `host:port` the trusty-console is selected to serve on.
+///
+/// Why: two callers need the console's selected port — the gateway resolver
+/// above, and the `tm statusline` version segment, which links to the
+/// dashboard. This repo's common-entry-point rule makes a second copy of the
+/// discovery-file read a defect, so the read lives here once and both callers
+/// route through it.
+/// What: reads the `trusty-console` discovery file via
+/// [`trusty_common::read_daemon_addr`]; an absent, unreadable, or blank file
+/// falls back to [`DEFAULT_CONSOLE_ADDR`]. Never errors, never probes the
+/// network, and blocks on nothing but one small file read — the statusline
+/// render path tolerates none of those.
+/// Test: `console_addr_from_prefers_the_recorded_addr`,
+/// `console_addr_from_falls_back_when_absent_or_blank`.
+pub fn console_addr() -> String {
+    console_addr_from(
+        trusty_common::read_daemon_addr("trusty-console")
+            .ok()
+            .flatten(),
+    )
+}
+
+/// Pure core of [`console_addr`] with the discovery-file read injected.
+///
+/// Why: mirrors [`resolve_daemon_url_via_gateway_inner`] — the fallback rule is
+/// the part worth testing, and testing it should not require stubbing `$HOME`.
+/// What: returns `recorded` trimmed when it is present and non-blank, else
+/// [`DEFAULT_CONSOLE_ADDR`].
+/// Test: `console_addr_from_prefers_the_recorded_addr`,
+/// `console_addr_from_falls_back_when_absent_or_blank`.
+fn console_addr_from(recorded: Option<String>) -> String {
+    recorded
+        .map(|a| a.trim().to_string())
+        .filter(|a| !a.is_empty())
+        .unwrap_or_else(|| DEFAULT_CONSOLE_ADDR.to_string())
+}
+
+/// Build the trusty-console's base URL on its selected port.
+///
+/// Why: the `tm statusline` version segment is a clickable link to the
+/// dashboard, and the link target must name the port the console is actually
+/// configured for.
+/// What: `http://{console_addr()}`. Plain HTTP because the console serves
+/// loopback by default (ADR-0018); a console bound elsewhere records that
+/// address in the same discovery file, so the host comes from there too.
+/// Test: `console_base_url_wraps_the_resolved_addr`.
+pub fn console_base_url() -> String {
+    format!("http://{}", console_addr())
 }
 
 /// Inner implementation of the gateway resolver with an injected console addr.
@@ -968,5 +1015,50 @@ mod tests {
             unsafe { std::env::set_var("TRUSTY_MPM_URL", v) };
         }
         assert_eq!(result, None, "an unset TRUSTY_MPM_URL must resolve to None");
+    }
+
+    /// Why: a console configured on a non-default port is the whole reason this
+    /// resolver exists — a fallback that ignored the recorded address would
+    /// still pass a default-port-only test.
+    /// Test: itself.
+    #[test]
+    fn console_addr_from_prefers_the_recorded_addr() {
+        assert_eq!(
+            console_addr_from(Some("127.0.0.1:9911".to_string())),
+            "127.0.0.1:9911"
+        );
+        // Surrounding whitespace in the discovery file must not leak into a URL.
+        assert_eq!(
+            console_addr_from(Some("  127.0.0.1:9911\n".to_string())),
+            "127.0.0.1:9911"
+        );
+    }
+
+    /// Why: the console is often not running, and no caller may fail or block
+    /// because of that — every absent/blank case degrades to the default.
+    /// Test: itself.
+    #[test]
+    fn console_addr_from_falls_back_when_absent_or_blank() {
+        assert_eq!(console_addr_from(None), DEFAULT_CONSOLE_ADDR);
+        assert_eq!(console_addr_from(Some(String::new())), DEFAULT_CONSOLE_ADDR);
+        assert_eq!(
+            console_addr_from(Some("   \n".to_string())),
+            DEFAULT_CONSOLE_ADDR
+        );
+    }
+
+    /// Why: the statusline link target is this string, so the `http://` prefix
+    /// and the selected port must both be pinned.
+    /// Test: itself.
+    #[test]
+    fn console_base_url_wraps_the_resolved_addr() {
+        let url = console_base_url();
+        assert!(
+            url.starts_with("http://"),
+            "console base URL must be an http:// URL: {url}"
+        );
+        // With no discovery file this is the default; with one it is whatever
+        // the console recorded. Either way the port must survive into the URL.
+        assert_eq!(url, format!("http://{}", console_addr()));
     }
 }

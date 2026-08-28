@@ -7,10 +7,14 @@
 //! `TM <ver> ● | <project> ⎇ <branch> | @<gh> | ✻<account> | <model> | ctx% |
 //! <cost> | <usage>` (#2011, extended #2140 with the trailing account-usage%
 //! segment, #6304 dropped the daemon port and added the Claude Code account)
-//! to stdout. Missing or invalid fields produce empty/omitted segments;
-//! nothing ever panics or blocks the render path.
+//! to stdout. The leading `TM <ver>` text is an OSC 8 hyperlink to the
+//! trusty-console on its selected port, so Cmd-click opens the dashboard while
+//! the rendered columns stay exactly as wide as before. Missing or invalid
+//! fields produce empty/omitted segments; nothing ever panics or blocks the
+//! render path.
 //! Test: `render_statusline_minimal_input`, `render_statusline_full_payload`,
-//! `assemble_statusline_pins_segment_order_with_markers` in tests.
+//! `assemble_statusline_pins_segment_order_with_markers`,
+//! `version_segment_links_to_the_console_on_a_non_default_port` in tests.
 
 pub(crate) mod account;
 // `pub(crate)` since #5539: `picker_delete_glob` reuses `branch`'s bounded
@@ -187,7 +191,40 @@ fn assemble_statusline(
         .join(" | ")
 }
 
-/// Build the leading `TM <ver> ●` segment.
+/// Build the leading `TM <ver> ●` segment as a link to the trusty-console.
+///
+/// Why: the dashboard is one Cmd-click away from a bar the operator is already
+/// looking at, and the version text is where they already look for "what am I
+/// running". Wrapping that text rather than adding a segment keeps the bar the
+/// same width. The link is an OSC 8 hyperlink, so the port lives in the escape
+/// sequence and never in a rendered column — #6304 removed the visible daemon
+/// port from this segment on the grounds that a printed port invites stale
+/// connection attempts, and a hyperlink target resolved fresh on every render
+/// does not reintroduce that.
+/// What: [`version_text`] for the visible text, [`hyperlink`] for the wrapping,
+/// and `discovery::console_base_url()` for the target — the same
+/// discovery-file read the `tm` gateway resolver uses, so the URL carries the
+/// port the console is actually selected for. No probe, no network call, and a
+/// missing console config degrades to the default port.
+/// Test: `version_segment_links_to_the_console_on_a_non_default_port`,
+/// `version_segment_links_to_the_default_console_port`,
+/// `version_segment_keeps_the_version_text_verbatim`.
+fn version_segment(daemon: &DaemonInfo) -> String {
+    version_segment_linked(daemon, &trusty_mpm::core::discovery::console_base_url())
+}
+
+/// [`version_segment`] with the console URL injected.
+///
+/// Why: lets the link tests pin a non-default port without a running console or
+/// a stubbed `$HOME`.
+/// What: wraps [`version_text`] in an OSC 8 link to `console_url`.
+/// Test: `version_segment_links_to_the_console_on_a_non_default_port`,
+/// `version_segment_links_to_the_default_console_port`.
+fn version_segment_linked(daemon: &DaemonInfo, console_url: &str) -> String {
+    hyperlink(&version_text(daemon), console_url)
+}
+
+/// The visible text of the leading segment: `TM <ver> ●`.
 ///
 /// Why (#6304): the port this segment used to append is not something an
 /// operator can act on from a status bar, and it invites port-based connection
@@ -202,13 +239,29 @@ fn assemble_statusline(
 /// Test: `version_segment_online_shows_dot_not_port`,
 /// `version_segment_offline_omits_dot`,
 /// `render_statusline_never_contains_the_daemon_port`.
-fn version_segment(daemon: &DaemonInfo) -> String {
+fn version_text(daemon: &DaemonInfo) -> String {
     let ver = env!("CARGO_PKG_VERSION");
     if daemon.online {
         format!("TM {ver} \u{25cf}")
     } else {
         format!("TM {ver}")
     }
+}
+
+/// Wrap `text` in an OSC 8 terminal hyperlink pointing at `url`.
+///
+/// Why: Claude Code's status line documents OSC 8 as the supported way to make
+/// status text clickable, alongside the SGR colors this module already emits
+/// (<https://code.claude.com/docs/en/statusline>, "Links"). A terminal without
+/// hyperlink support renders the text and drops the escape, so no fallback URL
+/// is printed beside it — printing one would put the port back in a visible
+/// column for every operator to pay for.
+/// What: `ESC ] 8 ; ; <url> BEL <text> ESC ] 8 ; ; BEL`. BEL (`\x07`) rather
+/// than ST terminates each half, matching the form in those docs' own examples.
+/// Test: `hyperlink_wraps_text_in_osc8`,
+/// `version_segment_keeps_the_version_text_verbatim`.
+fn hyperlink(text: &str, url: &str) -> String {
+    format!("\u{1b}]8;;{url}\u{7}{text}\u{1b}]8;;\u{7}")
 }
 
 // ── Segment builders ──────────────────────────────────────────────────────────
@@ -321,7 +374,10 @@ mod tests {
         // Empty StatusInput (all defaults) must not panic; the `TM <ver>` lead-in
         // segment always appears (#2011).
         let out = render_statusline(&StatusInput::default());
-        assert!(out.starts_with("TM "), "TM <ver> segment must always lead");
+        assert!(
+            visible_text(&out).starts_with("TM "),
+            "TM <ver> segment must always lead"
+        );
         assert!(!out.is_empty(), "output must not be empty");
     }
 
@@ -352,7 +408,7 @@ mod tests {
         let out = render_statusline(&input);
         let ver = env!("CARGO_PKG_VERSION");
         assert!(
-            out.starts_with(&format!("TM {ver}")),
+            visible_text(&out).starts_with(&format!("TM {ver}")),
             "must lead with TM <ver>: {out}"
         );
         assert!(
@@ -473,7 +529,7 @@ mod tests {
             online: true,
             session_count: None,
         };
-        let seg = version_segment(&daemon);
+        let seg = version_text(&daemon);
         assert_eq!(seg, format!("TM {} \u{25cf}", env!("CARGO_PKG_VERSION")));
         assert!(!seg.contains("7880"), "port must not appear: {seg}");
     }
@@ -484,15 +540,43 @@ mod tests {
     #[test]
     fn version_segment_offline_omits_dot() {
         let daemon = DaemonInfo::default();
-        let seg = version_segment(&daemon);
+        let seg = version_text(&daemon);
         assert_eq!(seg, format!("TM {}", env!("CARGO_PKG_VERSION")));
         assert!(!seg.contains('\u{25cf}'), "no dot when offline: {seg}");
+    }
+
+    /// Strip OSC 8 hyperlink sequences, leaving the text a terminal displays.
+    ///
+    /// Why: the console link puts a `host:port` URL in the emitted bytes, so a
+    /// test about what an operator SEES has to drop the escapes first. Without
+    /// this the port assertions below would read the link target and call it a
+    /// rendered column.
+    /// What: removes every `ESC ] 8 ; ; … BEL` run, keeping everything between
+    /// the opener and the closer.
+    /// Test: exercised by `render_statusline_never_contains_the_daemon_port`
+    /// and `version_segment_keeps_the_version_text_verbatim`.
+    fn visible_text(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut rest = s;
+        while let Some(start) = rest.find("\u{1b}]8;;") {
+            out.push_str(&rest[..start]);
+            let after = &rest[start + "\u{1b}]8;;".len()..];
+            match after.find('\u{7}') {
+                Some(end) => rest = &after[end + 1..],
+                None => return out,
+            }
+        }
+        out.push_str(rest);
+        out
     }
 
     /// Why (#6304, branch a): the closure condition is that NO daemon state
     /// renders a port, so drive the whole line for both states rather than only
     /// the lead-in segment builder. The live daemon's address is supplied
     /// explicitly so the assertion holds on a machine where the daemon is down.
+    /// The console link added later moved the assertion onto the VISIBLE text —
+    /// a link target is not a rendered column, and the daemon port must not
+    /// appear in either.
     /// Test: itself.
     #[test]
     fn render_statusline_never_contains_the_daemon_port() {
@@ -502,15 +586,115 @@ mod tests {
                 online,
                 session_count: None,
             };
-            let seg = version_segment(&daemon);
+            let seg = version_text(&daemon);
             assert!(
                 !seg.contains("7880") && !seg.contains(':'),
                 "no port or host:port remnant (online={online}): {seg}"
             );
+            // The linked form must not leak the URL into the visible text
+            // either — only the daemon-free `TM <ver> ●` may show.
+            let linked = version_segment_linked(&daemon, "http://127.0.0.1:9911");
+            assert_eq!(visible_text(&linked), seg);
         }
         // And end to end, with whatever the real lock file says.
         let out = render_statusline(&full_input());
-        assert!(!out.contains("7880"), "no port in the rendered line: {out}");
+        let seen = visible_text(&out);
+        assert!(
+            !seen.contains("7880"),
+            "no port in the rendered line: {seen}"
+        );
+        assert!(
+            !out.contains("7880"),
+            "the daemon port is not the link target either: {out}"
+        );
+    }
+
+    /// Why: the whole point of the link is the console's SELECTED port — a test
+    /// that only pinned the default would still pass against a hardcoded 7788.
+    /// Test: itself.
+    #[test]
+    fn version_segment_links_to_the_console_on_a_non_default_port() {
+        let daemon = DaemonInfo {
+            addr: "127.0.0.1:7880".to_string(),
+            online: true,
+            session_count: None,
+        };
+        let seg = version_segment_linked(&daemon, "http://127.0.0.1:9911");
+        assert!(
+            seg.contains("http://127.0.0.1:9911"),
+            "the configured port must be the link target: {seg:?}"
+        );
+        assert!(
+            !seg.contains("7788"),
+            "the default port must not be substituted: {seg:?}"
+        );
+    }
+
+    /// Why: with no console configured the link must still resolve — to the
+    /// default port, never to an empty or malformed URL.
+    /// Test: itself.
+    #[test]
+    fn version_segment_links_to_the_default_console_port() {
+        let url = format!(
+            "http://{}",
+            trusty_mpm::core::discovery::DEFAULT_CONSOLE_ADDR
+        );
+        assert_eq!(url, "http://127.0.0.1:7788");
+        let seg = version_segment_linked(&DaemonInfo::default(), &url);
+        assert!(
+            seg.contains("http://127.0.0.1:7788"),
+            "default console port must be the link target: {seg:?}"
+        );
+    }
+
+    /// Why: the link must not alter what an operator reads — the version text
+    /// stays byte-for-byte what it was before the wrapping.
+    /// Test: itself.
+    #[test]
+    fn version_segment_keeps_the_version_text_verbatim() {
+        let daemon = DaemonInfo {
+            addr: String::new(),
+            online: true,
+            session_count: None,
+        };
+        let text = version_text(&daemon);
+        let seg = version_segment_linked(&daemon, "http://127.0.0.1:9911");
+        assert!(
+            seg.contains(&text),
+            "version text must survive verbatim: {seg:?}"
+        );
+        assert_eq!(visible_text(&seg), text);
+        assert_eq!(
+            visible_text(&seg),
+            format!("TM {} \u{25cf}", env!("CARGO_PKG_VERSION"))
+        );
+    }
+
+    /// Why: the escape framing is a wire format a terminal parses — one wrong
+    /// byte and the line renders as garbage rather than a link.
+    /// Test: itself.
+    #[test]
+    fn hyperlink_wraps_text_in_osc8() {
+        assert_eq!(
+            hyperlink("TM 1.2.3", "http://127.0.0.1:9911"),
+            "\u{1b}]8;;http://127.0.0.1:9911\u{7}TM 1.2.3\u{1b}]8;;\u{7}"
+        );
+    }
+
+    /// Why: the console link rides on the first segment, so the rendered line
+    /// must still lead with the version text and still be pipe-separated.
+    /// Test: itself.
+    #[test]
+    fn render_statusline_leads_with_the_linked_version_segment() {
+        let out = render_statusline(&full_input());
+        assert!(
+            out.starts_with("\u{1b}]8;;http://"),
+            "the line must open with the console link: {out:?}"
+        );
+        assert!(
+            visible_text(&out).starts_with(&format!("TM {}", env!("CARGO_PKG_VERSION"))),
+            "visible text must still lead with TM <ver>: {out:?}"
+        );
     }
 
     /// Why: a single logged-in account renders `@<login>` with no warning mark.
@@ -561,7 +745,10 @@ mod tests {
             !out.contains("claude-sonnet-4-6") && !out.contains("Claude Sonnet 4.6"),
             "model segment must be omitted: {out}"
         );
-        assert!(out.starts_with("TM "), "TM <ver> segment must still appear");
+        assert!(
+            visible_text(&out).starts_with("TM "),
+            "TM <ver> segment must still appear"
+        );
         assert!(out.contains("$1.23"), "cost must still appear");
     }
 
@@ -587,7 +774,7 @@ mod tests {
         // as run_statusline's unwrap_or_default on parse failure.
         let out = render_statusline(&StatusInput::default());
         assert!(
-            out.starts_with("TM "),
+            visible_text(&out).starts_with("TM "),
             "graceful fallback must still emit the TM <ver> segment"
         );
         assert!(
