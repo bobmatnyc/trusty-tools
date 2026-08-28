@@ -18,3 +18,7 @@ pub mod core;
 /// The transport-neutral bodies `core`'s methods and `daemon::api`'s HTTP
 /// handlers both call, so one route has one implementation.
 pub mod core_ops;
+
+/// Registration for the managed-session lifecycle, the SESSCTL control plane,
+/// and the L2 proxy (#6288 slice 4).
+pub mod managed;

@@ -18,14 +18,14 @@
 use std::sync::Arc;
 
 use axum::{
-    Json, Router,
+    Router,
     extract::State,
-    http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
 };
 use tracing::warn;
 
+use crate::daemon::rpc::managed::outcome::RouteOutcome;
 use crate::daemon::state::DaemonState;
 
 /// The two worktree routes as one sub-router (#4288).
@@ -67,18 +67,22 @@ pub fn worktree_routes() -> Router<Arc<DaemonState>> {
 /// lie for this surface.
 /// Test: `reconcile_worktrees_route_reports_without_mutating`.
 pub async fn reconcile_worktrees_route(State(state): State<Arc<DaemonState>>) -> impl IntoResponse {
+    reconcile_worktrees_core(&state).await // #6288
+}
+
+/// The transport-neutral body of `GET .../managed/reconcile-worktrees` (#6288),
+/// served over the socket as `mpm.managed.reconcile_worktrees`.
+///
+/// Test: `managed_reconcile_worktrees_parity` in `daemon::rpc::managed_tests`.
+pub(crate) async fn reconcile_worktrees_core(state: &Arc<DaemonState>) -> RouteOutcome {
     let mgr = state.session_manager().await;
     let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
     let repos_root = crate::core::trusty_tools_config::workspace_root(&config);
     match mgr.reconcile_worktree_inventory(&repos_root).await {
-        Ok(report) => Json(report).into_response(),
+        Ok(report) => RouteOutcome::ok(&report),
         Err(e) => {
             warn!("reconcile-worktrees route: inventory scan failed: {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("worktree reconciliation failed: {e}"),
-            )
-                .into_response()
+            RouteOutcome::text(500, format!("worktree reconciliation failed: {e}"))
         }
     }
 }

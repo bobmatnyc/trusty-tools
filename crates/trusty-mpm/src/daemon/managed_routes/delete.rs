@@ -15,15 +15,14 @@
 use std::sync::Arc;
 
 use axum::{
-    Json,
     extract::{Path as AxumPath, State},
-    http::StatusCode,
     response::IntoResponse,
 };
 
 use super::{
     DeleteQuery, DeleteResponse, parse_id, record_to_summary, stop_managed_session_runtime,
 };
+use crate::daemon::rpc::managed::outcome::RouteOutcome;
 use crate::daemon::state::DaemonState;
 
 /// POST /api/v1/sessions/managed/{id}/delete — soft-delete the RECORD, mark `--deleted--` (#2012).
@@ -47,24 +46,39 @@ pub async fn delete_managed_session(
     AxumPath(id_str): AxumPath<String>,
     axum::extract::Query(q): axum::extract::Query<DeleteQuery>,
 ) -> impl IntoResponse {
-    let id = match parse_id(&id_str) {
+    delete_core(&state, &id_str, q.force).await // #6288
+}
+
+/// The transport-neutral body of `POST .../{id}/delete` (#6288), served over
+/// the socket as `mpm.managed.delete`.
+///
+/// Test: `managed_delete_parity` (the missing-id refusal),
+/// `managed_delete_refuses_a_running_session_without_force` and
+/// `managed_delete_force_bypasses_the_running_guard_on_both_transports` (the
+/// `force` flag, decoded from a real JSON-RPC frame) — all in
+/// `daemon::rpc::managed_tests`.
+pub(crate) async fn delete_core(
+    state: &Arc<DaemonState>,
+    id_str: &str,
+    force: bool,
+) -> RouteOutcome {
+    let id = match parse_id(id_str) {
         Ok(id) => id,
-        Err((code, msg)) => return (code, msg).into_response(),
+        Err((code, msg)) => return RouteOutcome::text(code.as_u16(), msg),
     };
     let mgr = state.session_manager().await;
-    match mgr.delete_record(&id, q.force).await {
-        Ok(record) => Json(DeleteResponse {
+    match mgr.delete_record(&id, force).await {
+        Ok(record) => RouteOutcome::ok(&DeleteResponse {
             summary: record_to_summary(&record),
             deleted: true,
-        })
-        .into_response(),
+        }),
         Err(crate::session_manager::ManagedError::SessionNotFound(_)) => {
-            (StatusCode::NOT_FOUND, format!("session {id_str} not found")).into_response()
+            RouteOutcome::text(404, format!("session {id_str} not found"))
         }
         Err(crate::session_manager::ManagedError::InvalidState(_, reason)) => {
-            (StatusCode::CONFLICT, reason).into_response()
+            RouteOutcome::text(409, reason)
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => RouteOutcome::text(500, e.to_string()),
     }
 }
 

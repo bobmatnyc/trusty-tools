@@ -25,9 +25,8 @@
 use std::sync::Arc;
 
 use axum::{
-    Json, Router,
+    Router,
     extract::{Path as AxumPath, State},
-    http::StatusCode,
     response::IntoResponse,
     routing::post,
 };
@@ -35,6 +34,7 @@ use serde::Serialize;
 
 use super::summary::parse_id;
 use crate::core::paths::FrameworkPaths;
+use crate::daemon::rpc::managed::outcome::RouteOutcome;
 use crate::daemon::state::DaemonState;
 use crate::session_manager::{ManagedSessionState, SessionRecord};
 
@@ -193,32 +193,40 @@ pub async fn sync_session_assets_route(
     State(state): State<Arc<DaemonState>>,
     AxumPath(id_str): AxumPath<String>,
 ) -> impl IntoResponse {
-    let id = match parse_id(&id_str) {
+    sync_session_assets_core(&state, &id_str).await // #6288
+}
+
+/// The transport-neutral body of `POST .../{id}/sync-assets` (#6288), served
+/// over the socket as `mpm.managed.sync_assets`.
+///
+/// Test: `managed_sync_assets_parity` in `daemon::rpc::managed_tests`.
+pub(crate) async fn sync_session_assets_core(
+    state: &Arc<DaemonState>,
+    id_str: &str,
+) -> RouteOutcome {
+    let id = match parse_id(id_str) {
         Ok(id) => id,
-        Err((code, msg)) => return (code, msg).into_response(),
+        Err((code, msg)) => return RouteOutcome::text(code.as_u16(), msg),
     };
     let mgr = state.session_manager().await;
     let record = match mgr.get(&id).await {
         Ok(r) => r,
-        Err(_) => {
-            return (StatusCode::NOT_FOUND, format!("session {id_str} not found")).into_response();
-        }
+        Err(_) => return RouteOutcome::text(404, format!("session {id_str} not found")),
     };
     if !syncable(&record.state) {
-        return (
-            StatusCode::CONFLICT,
+        return RouteOutcome::text(
+            409,
             format!(
                 "session {id_str} is {} — sync-assets only applies to active/stopped/errored \
                  sessions (a provisioning session has not deployed yet; a decommissioned \
                  session's workspace is gone and must never be recreated)",
                 record.state
             ),
-        )
-            .into_response();
+        );
     }
     match sync_one(record).await {
-        Ok(resp) => Json(resp).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Ok(resp) => RouteOutcome::ok(&resp),
+        Err(e) => RouteOutcome::text(500, e),
     }
 }
 
@@ -240,6 +248,14 @@ pub async fn sync_session_assets_route(
 pub async fn sync_all_session_assets_route(
     State(state): State<Arc<DaemonState>>,
 ) -> impl IntoResponse {
+    sync_all_session_assets_core(&state).await // #6288
+}
+
+/// The transport-neutral body of `POST .../managed/sync-assets` (#6288), served
+/// over the socket as `mpm.managed.sync_assets_all`.
+///
+/// Test: `managed_sync_assets_all_parity` in `daemon::rpc::managed_tests`.
+pub(crate) async fn sync_all_session_assets_core(state: &Arc<DaemonState>) -> RouteOutcome {
     let mgr = state.session_manager().await;
     let records = mgr.list().await;
 
@@ -258,7 +274,7 @@ pub async fn sync_all_session_assets_route(
         }
     }
 
-    Json(SyncAllAssetsResponse {
+    RouteOutcome::ok(&SyncAllAssetsResponse {
         synced,
         skipped,
         errors,

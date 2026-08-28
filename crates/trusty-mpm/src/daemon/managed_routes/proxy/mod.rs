@@ -42,6 +42,7 @@ use serde::{Deserialize, Serialize};
 use crate::client::proxy::{
     FocusOutcome, FocusTarget, InjectOutcome, ManagedBackend, SessionProxy, SummarizeOutcome,
 };
+use crate::daemon::rpc::managed::outcome::RouteOutcome;
 use crate::daemon::state::DaemonState;
 
 mod backend;
@@ -291,9 +292,19 @@ pub async fn proxy_focus(
     State(state): State<Arc<DaemonState>>,
     Json(req): Json<ProxyFocusRequest>,
 ) -> impl IntoResponse {
-    let proxy = local_proxy(&state);
+    // #6288: the body lives in `focus_core` so the socket serves this same route.
+    focus_core(&state, req).await
+}
+
+/// The transport-neutral body of `POST /api/v1/sessions/proxy/focus` (#6288).
+///
+/// Served over HTTP by [`proxy_focus`] and over the socket as
+/// `mpm.proxy.focus`; there is one implementation, not two.
+/// Test: `proxy_focus_parity` in `daemon::rpc::managed_tests`.
+pub(crate) async fn focus_core(state: &Arc<DaemonState>, req: ProxyFocusRequest) -> RouteOutcome {
+    let proxy = local_proxy(state);
     let outcome = proxy.focus(&req.conversation_key, &req.session_id).await;
-    Json(ProxyFocusResponse::from(outcome)).into_response()
+    RouteOutcome::ok(&ProxyFocusResponse::from(outcome))
 }
 
 /// `GET /api/v1/sessions/proxy/focus/{conversation_key}` — query the current
@@ -308,9 +319,20 @@ pub async fn proxy_get_focus(
     State(state): State<Arc<DaemonState>>,
     AxumPath(conversation_key): AxumPath<String>,
 ) -> impl IntoResponse {
-    let proxy = local_proxy(&state);
-    let outcome = proxy.focus(&conversation_key, "").await;
-    Json(ProxyFocusResponse::from(outcome)).into_response()
+    get_focus_core(&state, &conversation_key).await // #6288
+}
+
+/// The transport-neutral body of `GET .../proxy/focus/{conversation_key}`
+/// (#6288), served over the socket as `mpm.proxy.get_focus`.
+///
+/// Test: `proxy_get_focus_parity` in `daemon::rpc::managed_tests`.
+pub(crate) async fn get_focus_core(
+    state: &Arc<DaemonState>,
+    conversation_key: &str,
+) -> RouteOutcome {
+    let proxy = local_proxy(state);
+    let outcome = proxy.focus(conversation_key, "").await;
+    RouteOutcome::ok(&ProxyFocusResponse::from(outcome))
 }
 
 /// `POST /api/v1/sessions/proxy/unfocus` — clear a conversation's focus.
@@ -324,9 +346,20 @@ pub async fn proxy_unfocus(
     State(state): State<Arc<DaemonState>>,
     Json(req): Json<ProxyUnfocusRequest>,
 ) -> impl IntoResponse {
-    let proxy = local_proxy(&state);
-    let cleared = proxy.unfocus(&req.conversation_key).map(Into::into);
-    Json(ProxyUnfocusResponse { cleared }).into_response()
+    unfocus_core(&state, req).await // #6288
+}
+
+/// The transport-neutral body of `POST /api/v1/sessions/proxy/unfocus` (#6288),
+/// served over the socket as `mpm.proxy.unfocus`.
+///
+/// Test: `proxy_unfocus_parity` in `daemon::rpc::managed_tests`.
+pub(crate) async fn unfocus_core(
+    state: &Arc<DaemonState>,
+    req: ProxyUnfocusRequest,
+) -> RouteOutcome {
+    let proxy = local_proxy(state);
+    let cleared: Option<ProxyTargetWire> = proxy.unfocus(&req.conversation_key).map(Into::into);
+    RouteOutcome::ok(&ProxyUnfocusResponse { cleared })
 }
 
 /// `POST /api/v1/sessions/proxy/message` — route free text exactly like a
@@ -346,9 +379,20 @@ pub async fn proxy_message(
     State(state): State<Arc<DaemonState>>,
     Json(req): Json<ProxyMessageRequest>,
 ) -> impl IntoResponse {
-    let proxy = local_proxy(&state);
+    message_core(&state, req).await // #6288
+}
+
+/// The transport-neutral body of `POST /api/v1/sessions/proxy/message` (#6288),
+/// served over the socket as `mpm.proxy.message`.
+///
+/// Test: `proxy_message_parity` in `daemon::rpc::managed_tests`.
+pub(crate) async fn message_core(
+    state: &Arc<DaemonState>,
+    req: ProxyMessageRequest,
+) -> RouteOutcome {
+    let proxy = local_proxy(state);
     let outcome = proxy.inject(&req.conversation_key, &req.text).await;
-    Json(ProxyMessageResponse::from(outcome)).into_response()
+    RouteOutcome::ok(&ProxyMessageResponse::from(outcome))
 }
 
 /// `GET /api/v1/sessions/proxy/summary/{conversation_key}` — digest the focused
@@ -362,9 +406,17 @@ pub async fn proxy_summary(
     State(state): State<Arc<DaemonState>>,
     AxumPath(conversation_key): AxumPath<String>,
 ) -> impl IntoResponse {
-    let proxy = local_proxy(&state);
-    let outcome = proxy.summarize(&conversation_key).await;
-    Json(ProxySummaryResponse::from(outcome)).into_response()
+    summary_core(&state, &conversation_key).await // #6288
+}
+
+/// The transport-neutral body of `GET .../proxy/summary/{conversation_key}`
+/// (#6288), served over the socket as `mpm.proxy.summary`.
+///
+/// Test: `proxy_summary_parity` in `daemon::rpc::managed_tests`.
+pub(crate) async fn summary_core(state: &Arc<DaemonState>, conversation_key: &str) -> RouteOutcome {
+    let proxy = local_proxy(state);
+    let outcome = proxy.summarize(conversation_key).await;
+    RouteOutcome::ok(&ProxySummaryResponse::from(outcome))
 }
 
 /// Build the sub-router for the local session-manager PROXY surface.

@@ -9,10 +9,11 @@
 
 use std::sync::Arc;
 
-use axum::{Json, extract::State, response::IntoResponse};
+use axum::{extract::State, response::IntoResponse};
 use serde::Serialize;
 use tracing::warn;
 
+use crate::daemon::rpc::managed::outcome::RouteOutcome;
 use crate::daemon::state::DaemonState;
 use crate::session_manager::SessionRecord;
 
@@ -63,6 +64,14 @@ pub struct FleetByProjectResponse {
 /// Test: `fleet_route_groups_by_project` in `tests/session_manager_mvp.rs`;
 /// `fleet_route_marks_dead_session_unresumable` in the same file (#2595).
 pub async fn fleet_by_project_route(State(state): State<Arc<DaemonState>>) -> impl IntoResponse {
+    fleet_core(&state).await // #6288
+}
+
+/// The transport-neutral body of `GET .../managed/fleet` (#6288), served over
+/// the socket as `mpm.managed.fleet`.
+///
+/// Test: `managed_fleet_parity` in `daemon::rpc::managed_tests`.
+pub(crate) async fn fleet_core(state: &Arc<DaemonState>) -> RouteOutcome {
     let mgr = state.session_manager().await;
     let registry = state.project_registry().await;
 
@@ -94,7 +103,7 @@ pub async fn fleet_by_project_route(State(state): State<Arc<DaemonState>>) -> im
         });
     }
 
-    Json(FleetByProjectResponse {
+    RouteOutcome::ok(&FleetByProjectResponse {
         projects: project_groups,
     })
 }

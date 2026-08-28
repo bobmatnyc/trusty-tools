@@ -8,6 +8,7 @@
 //! Test: this file IS the test module.
 
 use super::*;
+use axum::http::StatusCode;
 
 use crate::daemon::state::DaemonState;
 use crate::session_manager::worktree_git_fixture::GitWorktreeFixture;

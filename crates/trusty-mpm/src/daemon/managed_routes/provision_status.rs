@@ -20,10 +20,9 @@
 use std::sync::Arc;
 
 use axum::{
-    Json, Router,
+    Router,
     extract::{Path as AxumPath, State},
-    http::StatusCode,
-    response::{IntoResponse, Response},
+    response::IntoResponse,
     routing::get,
 };
 use serde::Serialize;
@@ -34,6 +33,7 @@ use super::lifecycle::{SpawnParams, spawn_managed};
 use super::summary::parse_id;
 use crate::core::provisioning_stage::ProvisioningStage;
 use crate::daemon::provisioning::{ProvisioningLifecycle, ProvisioningProgress};
+use crate::daemon::rpc::managed::outcome::RouteOutcome;
 use crate::daemon::state::DaemonState;
 use crate::session_manager::ManagedSessionId;
 
@@ -249,18 +249,19 @@ pub fn router() -> Router<Arc<DaemonState>> {
 /// `202` with `{ id, state: "provisioning" }`.
 /// Test: `spawn_background_registers_and_polls_ready` covers the registry
 /// begin + poll; the `202` shape is covered by the integration tests.
-pub fn accept_async_spawn(state: Arc<DaemonState>, params: SpawnParams) -> Response {
+pub fn accept_async_spawn(state: Arc<DaemonState>, params: SpawnParams) -> RouteOutcome {
     let session_id = ManagedSessionId::new();
     let id = session_id.to_string();
     spawn_background(state, session_id, params);
-    (
-        StatusCode::ACCEPTED,
-        Json(AsyncSpawnResponse {
+    // #6288: 202 as a transport-neutral outcome, so the socket serves the same
+    // async-spawn ack the HTTP route does.
+    RouteOutcome::json(
+        202,
+        &AsyncSpawnResponse {
             id,
             state: "provisioning".to_string(),
-        }),
+        },
     )
-        .into_response()
 }
 
 /// GET /api/v1/sessions/managed/{id}/provision-status — poll async spawn progress.
@@ -280,34 +281,38 @@ pub async fn get_provision_status(
     State(state): State<Arc<DaemonState>>,
     AxumPath(id_str): AxumPath<String>,
 ) -> impl IntoResponse {
-    if let Some(progress) = state.provisioning.get(&id_str) {
-        return Json(ProvisionStatusResponse::from_progress(&progress)).into_response();
+    provision_status_core(&state, &id_str).await // #6288
+}
+
+/// The transport-neutral body of `GET .../{id}/provision-status` (#6288),
+/// served over the socket as `mpm.managed.provision_status`.
+///
+/// Test: `managed_provision_status_parity` in `daemon::rpc::managed_tests`.
+pub(crate) async fn provision_status_core(state: &Arc<DaemonState>, id_str: &str) -> RouteOutcome {
+    if let Some(progress) = state.provisioning.get(id_str) {
+        return RouteOutcome::ok(&ProvisionStatusResponse::from_progress(&progress));
     }
 
     // Not (or no longer) a tracked job — parse the id and fall back to the live
     // session store so a pruned/sync session still answers `ready`.
-    let id = match parse_id(&id_str) {
+    let id = match parse_id(id_str) {
         Ok(id) => id,
-        Err((code, msg)) => return (code, msg).into_response(),
+        Err((code, msg)) => return RouteOutcome::text(code.as_u16(), msg),
     };
     let mgr = state.session_manager().await;
     match mgr.get(&id).await {
-        Ok(record) => Json(ProvisionStatusResponse::ready_from_record(
+        Ok(record) => RouteOutcome::ok(&ProvisionStatusResponse::ready_from_record(
             &record.id.to_string(),
             &record.tmux_name,
-        ))
-        .into_response(),
-        Err(_) => (
-            StatusCode::NOT_FOUND,
-            format!("no provisioning job or session for {id_str}"),
-        )
-            .into_response(),
+        )),
+        Err(_) => RouteOutcome::text(404, format!("no provisioning job or session for {id_str}")),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
 
     fn stage_frame(session: &str, stage: &str, detail: Option<&str>) -> Value {
         let mut v = serde_json::json!({

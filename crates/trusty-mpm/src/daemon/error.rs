@@ -52,6 +52,48 @@ pub const CODE_UNPROCESSABLE: i64 = -32006;
 /// HTTP 409 over the socket: the request conflicts with the record's state.
 pub const CODE_CONFLICT: i64 = -32009;
 
+/// A resume refused because the workspace directory is gone (#6288 slice 4).
+///
+/// Why its own code rather than plain [`CODE_UNPROCESSABLE`]: on HTTP the two
+/// 422 resume classes are told apart by an `x-trusty-resume-reason` header, and
+/// they need DIFFERENT operator remedies — a vanished workspace is safe to
+/// `tm session delete --force`, a vanished pane is not, because a live sibling
+/// tmux window may still hold work. The socket has no headers, so the
+/// discriminant becomes the code rather than being dropped or smuggled into the
+/// message. See `managed_routes::resume_error`.
+pub const CODE_WORKSPACE_GONE: i64 = -32023;
+
+/// A resume refused because the recorded tmux pane is gone (#6288 slice 4). See
+/// [`CODE_WORKSPACE_GONE`] for why the two 422 classes carry distinct codes.
+pub const CODE_PANE_GONE: i64 = -32024;
+
+/// The JSON-RPC code an HTTP status projects onto (#6288).
+///
+/// Why: slice 2 wrote this table inside `From<DaemonError> for RpcError`, and
+/// slice 4's route bodies — which report a status without ever building a
+/// [`DaemonError`] — needed the identical mapping. Two copies of it would let
+/// the same status answer two different codes depending on which family served
+/// the route, which is the exact drift the shared-body rule exists to prevent.
+/// Extracting it leaves ONE table with two callers.
+/// What: takes a raw `u16` rather than a `StatusCode` so callers under
+/// `daemon::rpc` can use it without importing an HTTP type — the acceptance bar
+/// for slice 4 is that no HTTP type appears there.
+/// Test: `rpc_error_codes_track_http_statuses`,
+/// `status_to_rpc_code_maps_each_refusal_class`.
+pub fn rpc_code_for_status(status: u16) -> i64 {
+    match status {
+        400 => CODE_INVALID_PARAMS,
+        403 => CODE_FORBIDDEN,
+        404 => CODE_NOT_FOUND,
+        409 => CODE_CONFLICT,
+        422 => CODE_UNPROCESSABLE,
+        503 => CODE_UNAVAILABLE,
+        // Everything left maps to 500, and a caller could not have sent any of
+        // them differently.
+        _ => CODE_INTERNAL_ERROR,
+    }
+}
+
 /// A failure surfaced by a daemon domain service or request handler.
 ///
 /// Why: domain services must report *why* an operation failed without knowing
@@ -279,18 +321,9 @@ impl IntoResponse for DaemonError {
 /// through a real failure.
 impl From<DaemonError> for RpcError {
     fn from(e: DaemonError) -> Self {
-        let code = match e.status() {
-            StatusCode::BAD_REQUEST => CODE_INVALID_PARAMS,
-            StatusCode::NOT_FOUND => CODE_NOT_FOUND,
-            StatusCode::FORBIDDEN => CODE_FORBIDDEN,
-            StatusCode::CONFLICT => CODE_CONFLICT,
-            StatusCode::UNPROCESSABLE_ENTITY => CODE_UNPROCESSABLE,
-            StatusCode::SERVICE_UNAVAILABLE => CODE_UNAVAILABLE,
-            // Everything left maps to 500, and a caller could not have sent any
-            // of them differently.
-            _ => CODE_INTERNAL_ERROR,
-        };
-        RpcError::new(code, e.to_string())
+        // #6288 slice 4: the table moved to `rpc_code_for_status` so the route
+        // bodies that report a status without building a `DaemonError` share it.
+        RpcError::new(rpc_code_for_status(e.status().as_u16()), e.to_string())
     }
 }
 

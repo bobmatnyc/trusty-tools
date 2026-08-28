@@ -29,6 +29,8 @@ use tokio_stream::wrappers::BroadcastStream;
 
 use crate::control::event::BackendKind;
 use crate::control::{ActorCommand, ControlSessionId, RunParams};
+use crate::daemon::rpc::managed::control::CallerTrust;
+use crate::daemon::rpc::managed::outcome::RouteOutcome;
 use crate::daemon::state::DaemonState;
 
 // ── RAII write-lock guard ─────────────────────────────────────────────────────
@@ -260,16 +262,13 @@ fn parse_backend(s: Option<&str>) -> BackendKind {
 /// address, `Ok(())` otherwise. Reuses [`super::rpc::is_loopback`] rather than
 /// re-implementing the check (single entry point).
 /// Test: `ctl_run_session_rejects_non_loopback_peer`.
-fn loopback_guard(peer: &SocketAddr) -> Result<(), (StatusCode, String)> {
-    if super::rpc::is_loopback(peer) {
-        Ok(())
-    } else {
+fn loopback_guard(peer: &SocketAddr) -> CallerTrust {
+    let is_loopback = super::rpc::is_loopback(peer);
+    if !is_loopback {
         tracing::warn!(%peer, "rejected non-loopback control-plane session request (#6197)");
-        Err((
-            StatusCode::FORBIDDEN,
-            "control-plane session routes are loopback-only; remote access is forbidden".to_owned(),
-        ))
     }
+    // #6288: the verdict has no literal — the constructor is the only way in.
+    CallerTrust::from_loopback_check(is_loopback)
 }
 
 /// True when every character of `s` is in the conservative command charset.
@@ -301,16 +300,15 @@ fn is_safe_cmd_charset(s: &str) -> bool {
 /// Test: `ctl_run_session_rejects_claude_cmd_outside_allowlist`,
 /// `ctl_run_session_accepts_default_claude_cmd`,
 /// `validate_claude_cmd_allows_default_refuses_paths`.
-fn validate_claude_cmd(cmd: Option<&str>) -> Result<(), (StatusCode, String)> {
+pub(crate) fn validate_claude_cmd(cmd: Option<&str>) -> Result<(), RouteOutcome> {
     match cmd {
         None => Ok(()),
         Some("claude") => Ok(()),
         Some(other) => {
             tracing::warn!(cmd = %other, "rejected claude_cmd outside the allowed set (#6197)");
-            Err((
-                StatusCode::BAD_REQUEST,
-                "claude_cmd override is not permitted over HTTP; omit it to use the default `claude`"
-                    .to_owned(),
+            Err(RouteOutcome::text(
+                400,
+                "claude_cmd override is not permitted over HTTP; omit it to use the default `claude`",
             ))
         }
     }
@@ -334,7 +332,7 @@ fn validate_claude_cmd(cmd: Option<&str>) -> Result<(), (StatusCode, String)> {
 /// only names which prompt file `claude` reads. See #6197.
 /// Test: `ctl_run_session_rejects_prompt_file_injection`,
 /// `validate_prompt_file_requires_absolute_existing_regular_file`.
-fn validate_prompt_file(prompt_file: Option<&str>) -> Result<(), (StatusCode, String)> {
+pub(crate) fn validate_prompt_file(prompt_file: Option<&str>) -> Result<(), RouteOutcome> {
     let Some(pf) = prompt_file else { return Ok(()) };
     let path = std::path::Path::new(pf);
     let traversal = path
@@ -344,10 +342,9 @@ fn validate_prompt_file(prompt_file: Option<&str>) -> Result<(), (StatusCode, St
         Ok(())
     } else {
         tracing::warn!(prompt_file = %pf, "rejected invalid prompt_file (#6197)");
-        Err((
-            StatusCode::BAD_REQUEST,
-            "prompt_file must be an absolute path (no `..`, no shell metacharacters) to an existing file"
-                .to_owned(),
+        Err(RouteOutcome::text(
+            400,
+            "prompt_file must be an absolute path (no `..`, no shell metacharacters) to an existing file",
         ))
     }
 }
@@ -371,7 +368,7 @@ fn validate_prompt_file(prompt_file: Option<&str>) -> Result<(), (StatusCode, St
 /// not offer. Tracked, not fixed here. See #6197.
 /// Test: `ctl_run_session_rejects_relative_workdir`,
 /// `ctl_run_session_rejects_workdir_traversal`.
-fn validate_workdir(workdir: &std::path::Path) -> Result<(), (StatusCode, String)> {
+pub(crate) fn validate_workdir(workdir: &std::path::Path) -> Result<(), RouteOutcome> {
     let traversal = workdir
         .components()
         .any(|c| matches!(c, std::path::Component::ParentDir));
@@ -379,9 +376,9 @@ fn validate_workdir(workdir: &std::path::Path) -> Result<(), (StatusCode, String
         Ok(())
     } else {
         tracing::warn!(workdir = %workdir.display(), "rejected invalid control-plane workdir (#6197)");
-        Err((
-            StatusCode::BAD_REQUEST,
-            "workdir must be an absolute path (no `..`) to an existing directory".to_owned(),
+        Err(RouteOutcome::text(
+            400,
+            "workdir must be an absolute path (no `..`) to an existing directory",
         ))
     }
 }
@@ -408,14 +405,49 @@ pub async fn ctl_run_session(
     State(state): State<Arc<DaemonState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(req): Json<CtlRunRequest>,
-) -> Result<Json<CtlRunResponse>, (StatusCode, String)> {
-    // #6197: this handler spawns a caller-named executable, so it enforces the
-    // same loopback boundary as `/rpc` and validates the two spawn inputs before
-    // anything is spawned.
-    loopback_guard(&peer)?;
-    validate_claude_cmd(req.claude_cmd.as_deref())?;
-    validate_prompt_file(req.prompt_file.as_deref())?;
-    validate_workdir(std::path::Path::new(&req.workdir))?;
+) -> impl axum::response::IntoResponse {
+    ctl_run_core(&state, loopback_guard(&peer), req).await // #6288
+}
+
+/// The transport-neutral body of `POST /api/v1/control/sessions/run` (#6288),
+/// served over the socket as `mpm.control.run`.
+///
+/// Why: this is the spawn route, and the four #6197 checks are what stand
+/// between a caller-supplied request and `Command::spawn`. Putting them in the
+/// shared body — ahead of every other statement, in the order PR #6205 wrote
+/// them — is what makes "the guard travels" a structural fact rather than a
+/// claim about two copies staying in step.
+/// What: refuses a caller no transport vouched for, with the same 403 the
+/// HTTP loopback guard answered, then runs `validate_claude_cmd`,
+/// `validate_prompt_file`, and `validate_workdir` before constructing
+/// [`RunParams`]. Only then is `run_session` reached.
+/// Test: `ctl_run_session_rejects_non_loopback_peer`,
+/// `ctl_run_session_rejects_claude_cmd_outside_allowlist`,
+/// `ctl_run_session_rejects_prompt_file_injection`,
+/// `ctl_run_session_rejects_relative_workdir`,
+/// `ctl_run_session_rejects_workdir_traversal`,
+/// `ctl_run_session_accepts_default_claude_cmd`, and each one's
+/// `rpc_ctl_run_*` twin in `daemon::rpc::managed_tests`.
+pub(crate) async fn ctl_run_core(
+    state: &Arc<DaemonState>,
+    trust: CallerTrust,
+    req: CtlRunRequest,
+) -> RouteOutcome {
+    // #6197: this route spawns a caller-named executable, so it enforces the
+    // caller boundary and validates every spawn input before anything is
+    // spawned. #6288: the checks live here so both transports run them.
+    if let Err(refusal) = trust.ensure_local() {
+        return refusal;
+    }
+    if let Err(refusal) = validate_claude_cmd(req.claude_cmd.as_deref()) {
+        return refusal;
+    }
+    if let Err(refusal) = validate_prompt_file(req.prompt_file.as_deref()) {
+        return refusal;
+    }
+    if let Err(refusal) = validate_workdir(std::path::Path::new(&req.workdir)) {
+        return refusal;
+    }
     let backend = parse_backend(req.backend.as_deref());
     let params = RunParams {
         project_id: req.project_id,
@@ -425,10 +457,10 @@ pub async fn ctl_run_session(
         claude_cmd: req.claude_cmd,
     };
     match state.session_registry.run_session(params).await {
-        Ok(id) => Ok(Json(CtlRunResponse {
+        Ok(id) => RouteOutcome::ok(&CtlRunResponse {
             session_id: id.to_string(),
-        })),
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+        }),
+        Err(e) => RouteOutcome::text(500, e.to_string()),
     }
 }
 
@@ -453,7 +485,10 @@ pub async fn ctl_connect_session(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Path(id_str): Path<String>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, String)> {
-    loopback_guard(&peer)?; // #6197
+    // #6197 + #6288: the same caller check, expressed through the shared token.
+    if !loopback_guard(&peer).is_local() {
+        return Err((StatusCode::FORBIDDEN, CallerTrust::REFUSAL.to_owned()));
+    }
     let id = parse_id(&id_str);
     let handle = state
         .session_registry
@@ -500,31 +535,48 @@ pub async fn ctl_stop_session(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Path(id_str): Path<String>,
     Query(query): Query<CtlStopQuery>,
-) -> Result<Json<CtlStopResponse>, (StatusCode, String)> {
-    loopback_guard(&peer)?; // #6197
-    let id = parse_id(&id_str);
-    let handle = state
-        .session_registry
-        .get(&id)
-        .await
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("session {id_str} not found")))?;
+) -> impl axum::response::IntoResponse {
+    ctl_stop_core(
+        &state,
+        loopback_guard(&peer),
+        &id_str,
+        query.force.unwrap_or(false),
+    )
+    .await // #6288
+}
 
-    let force = query.force.unwrap_or(false);
+/// The transport-neutral body of `POST .../control/sessions/{id}/stop` (#6288),
+/// served over the socket as `mpm.control.stop`.
+///
+/// Test: `ctl_stop_session_sends_stop_command`, `ctl_stop_session_not_found`,
+/// and `rpc_ctl_stop_parity` in `daemon::rpc::managed_tests`.
+pub(crate) async fn ctl_stop_core(
+    state: &Arc<DaemonState>,
+    trust: CallerTrust,
+    id_str: &str,
+    force: bool,
+) -> RouteOutcome {
+    if let Err(refusal) = trust.ensure_local() {
+        return refusal; // #6197
+    }
+    let id = parse_id(id_str);
+    let Some(handle) = state.session_registry.get(&id).await else {
+        return RouteOutcome::text(404, format!("session {id_str} not found"));
+    };
+
     let cmd = if force {
         ActorCommand::ForceStop
     } else {
         ActorCommand::Stop
     };
-    handle
-        .command_tx
-        .send(cmd)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Err(e) = handle.command_tx.send(cmd).await {
+        return RouteOutcome::text(500, e.to_string());
+    }
 
-    Ok(Json(CtlStopResponse {
-        session_id: id_str,
+    RouteOutcome::ok(&CtlStopResponse {
+        session_id: id_str.to_owned(),
         force,
-    }))
+    })
 }
 
 /// Return the auth state for a session.
@@ -538,23 +590,36 @@ pub async fn ctl_auth_session(
     State(state): State<Arc<DaemonState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Path(id_str): Path<String>,
-) -> Result<Json<CtlAuthResponse>, (StatusCode, String)> {
-    loopback_guard(&peer)?; // #6197
-    let id = parse_id(&id_str);
-    let handle = state
-        .session_registry
-        .get(&id)
-        .await
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("session {id_str} not found")))?;
+) -> impl axum::response::IntoResponse {
+    ctl_auth_core(&state, loopback_guard(&peer), &id_str).await // #6288
+}
+
+/// The transport-neutral body of `GET .../control/sessions/{id}/auth` (#6288),
+/// served over the socket as `mpm.control.auth`.
+///
+/// Test: `ctl_auth_session_returns_state`, `ctl_auth_session_not_found`, and
+/// `rpc_ctl_auth_parity` in `daemon::rpc::managed_tests`.
+pub(crate) async fn ctl_auth_core(
+    state: &Arc<DaemonState>,
+    trust: CallerTrust,
+    id_str: &str,
+) -> RouteOutcome {
+    if let Err(refusal) = trust.ensure_local() {
+        return refusal; // #6197
+    }
+    let id = parse_id(id_str);
+    let Some(handle) = state.session_registry.get(&id).await else {
+        return RouteOutcome::text(404, format!("session {id_str} not found"));
+    };
 
     let meta = handle.metadata.read().await;
     let state_label = meta.state.label().to_owned();
     let awaiting_auth = state_label == "awaiting-auth";
-    Ok(Json(CtlAuthResponse {
-        session_id: id_str,
+    RouteOutcome::ok(&CtlAuthResponse {
+        session_id: id_str.to_owned(),
         state: state_label,
         awaiting_auth,
-    }))
+    })
 }
 
 /// List all live SESSCTL sessions, optionally filtered by project.
@@ -571,8 +636,23 @@ pub async fn ctl_list_sessions(
     State(state): State<Arc<DaemonState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Query(query): Query<CtlListQuery>,
-) -> Result<Json<CtlListResponse>, (StatusCode, String)> {
-    loopback_guard(&peer)?; // #6197
+) -> impl axum::response::IntoResponse {
+    ctl_list_core(&state, loopback_guard(&peer), query).await // #6288
+}
+
+/// The transport-neutral body of `GET /api/v1/control/sessions` (#6288), served
+/// over the socket as `mpm.control.list`.
+///
+/// Test: `ctl_list_sessions_returns_empty`, `ctl_list_sessions_full_schema`, and
+/// `rpc_ctl_list_parity` in `daemon::rpc::managed_tests`.
+pub(crate) async fn ctl_list_core(
+    state: &Arc<DaemonState>,
+    trust: CallerTrust,
+    query: CtlListQuery,
+) -> RouteOutcome {
+    if let Err(refusal) = trust.ensure_local() {
+        return refusal; // #6197
+    }
     let ids = state.session_registry.list_ids().await;
     let mut sessions = Vec::with_capacity(ids.len());
     for id in ids {
@@ -604,7 +684,7 @@ pub async fn ctl_list_sessions(
             });
         }
     }
-    Ok(Json(CtlListResponse { sessions }))
+    RouteOutcome::ok(&CtlListResponse { sessions })
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1247,10 +1327,14 @@ mod tests {
     /// The loopback guard predicate accepts local and refuses remote peers (#6197).
     #[test]
     fn loopback_guard_accepts_loopback_refuses_remote() {
-        assert!(loopback_guard(&loopback_peer()).is_ok());
+        assert!(loopback_guard(&loopback_peer()).is_local());
         let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)), 1234);
-        let err = loopback_guard(&remote).expect_err("remote must be refused");
-        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert!(!loopback_guard(&remote).is_local());
+        // #6288: the refusal is the shared one both transports answer with.
+        let refusal = loopback_guard(&remote)
+            .ensure_local()
+            .expect_err("remote must be refused");
+        assert_eq!(refusal.status, 403);
     }
 
     /// `validate_claude_cmd` allows only the default and refuses every path or
@@ -1274,7 +1358,7 @@ mod tests {
             "",
         ] {
             let err = validate_claude_cmd(Some(bad)).expect_err("must refuse");
-            assert_eq!(err.0, StatusCode::BAD_REQUEST, "bad claude_cmd: {bad:?}");
+            assert_eq!(err.status, 400, "bad claude_cmd: {bad:?}");
         }
     }
 
