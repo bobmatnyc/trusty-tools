@@ -32,7 +32,7 @@ pub use mpm::MpmConnector;
 pub use review::ReviewConnector;
 pub use search::SearchConnector;
 
-use crate::connector::ServiceConnector;
+use crate::connector::{ServiceConnector, ServiceInfo, ServiceStatus};
 
 /// Process-wide lock serialising every test that mutates the global
 /// `TRUSTY_DATA_DIR_OVERRIDE` env var.
@@ -70,6 +70,39 @@ pub fn all_connectors() -> Vec<Box<dyn ServiceConnector>> {
     ]
 }
 
+/// Liveness rank used to sort the Overview grid — lower sorts first.
+///
+/// Why: #6370 — the dashboard showed connector-registration order, so a service
+/// that is not installed could sit above the one the operator is running.
+/// What: Running 0, Degraded 1, Available 2, Absent 3 — the order in which a
+/// service has something to show: a live daemon, a reachable-but-impaired
+/// daemon, an installed binary, then nothing.
+/// Test: `order_for_display_puts_running_first`.
+fn liveness_rank(info: &ServiceInfo) -> u8 {
+    match info.status {
+        ServiceStatus::Running => 0,
+        ServiceStatus::Degraded => 1,
+        ServiceStatus::Available => 2,
+        ServiceStatus::Absent => 3,
+    }
+}
+
+/// Sort detected services into dashboard display order.
+///
+/// Why: #6370 — largest / most recently active service first. `ServiceInfo`
+/// carries no size or activity counter, so liveness is the only activity signal
+/// the payload has; when a size metric lands it becomes the secondary key
+/// inside a rank.
+/// What: A STABLE sort on `liveness_rank`, so within one rank the
+/// `all_connectors()` registration order survives as the tiebreak and the grid
+/// never reshuffles between two polls that detected the same statuses.
+/// Test: `order_for_display_puts_running_first`,
+/// `order_for_display_is_stable_within_a_rank`,
+/// `order_for_display_is_idempotent`.
+pub fn order_for_display(services: &mut [ServiceInfo]) {
+    services.sort_by_key(liveness_rank);
+}
+
 // ─── tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -91,5 +124,77 @@ mod tests {
         assert_eq!(cs[3].id(), "trusty-review");
         assert_eq!(cs[4].id(), "trusty-mpm");
         assert_eq!(cs[5].id(), "trusty-agents");
+    }
+
+    /// Build a `ServiceInfo` carrying only the two fields ordering reads.
+    fn info(id: &str, status: ServiceStatus) -> ServiceInfo {
+        ServiceInfo {
+            id: id.to_string(),
+            display_name: id.to_string(),
+            status,
+            version: None,
+            url: None,
+            hint: None,
+        }
+    }
+
+    fn ids(services: &[ServiceInfo]) -> Vec<&str> {
+        services.iter().map(|s| s.id.as_str()).collect()
+    }
+
+    /// Why: #6370 — a card for a service that is not installed must not sit
+    /// above the daemon the operator is running.
+    /// What: feeds the four statuses in reverse rank order and asserts the sort
+    /// inverts them.
+    /// Test: this test itself.
+    #[test]
+    fn order_for_display_puts_running_first() {
+        let mut services = vec![
+            info("absent-one", ServiceStatus::Absent),
+            info("available-one", ServiceStatus::Available),
+            info("degraded-one", ServiceStatus::Degraded),
+            info("running-one", ServiceStatus::Running),
+        ];
+        order_for_display(&mut services);
+        assert_eq!(
+            ids(&services),
+            vec!["running-one", "degraded-one", "available-one", "absent-one"]
+        );
+    }
+
+    /// Why: two services with the same status must keep registration order, or
+    /// the grid reshuffles between polls that detected nothing new.
+    /// What: three Running services in registration order stay in that order.
+    /// Test: this test itself.
+    #[test]
+    fn order_for_display_is_stable_within_a_rank() {
+        let mut services = vec![
+            info("trusty-search", ServiceStatus::Running),
+            info("trusty-memory", ServiceStatus::Running),
+            info("trusty-analyze", ServiceStatus::Running),
+        ];
+        order_for_display(&mut services);
+        assert_eq!(
+            ids(&services),
+            vec!["trusty-search", "trusty-memory", "trusty-analyze"]
+        );
+    }
+
+    /// Why: the route sorts every response, so sorting an already-sorted list
+    /// must not move anything.
+    /// What: sorts twice and compares the two orders.
+    /// Test: this test itself.
+    #[test]
+    fn order_for_display_is_idempotent() {
+        let mut services = vec![
+            info("b", ServiceStatus::Absent),
+            info("a", ServiceStatus::Running),
+            info("c", ServiceStatus::Absent),
+        ];
+        order_for_display(&mut services);
+        let once: Vec<String> = services.iter().map(|s| s.id.clone()).collect();
+        order_for_display(&mut services);
+        let twice: Vec<String> = services.iter().map(|s| s.id.clone()).collect();
+        assert_eq!(once, twice);
     }
 }

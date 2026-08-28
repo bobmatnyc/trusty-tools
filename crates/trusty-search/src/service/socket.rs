@@ -5,16 +5,23 @@
 //! trusty-search's HTTP surface is ~35 routes over a `service::server` tree of
 //! ~16k SLOC, with eleven consumer crates dialling `127.0.0.1:7878`, so a
 //! single-PR cutover is not viable — the same conclusion #6288 reached for
-//! trusty-mpm, which migrated in six slices. This is slice 1: the socket is
-//! bound ALONGSIDE the HTTP listener, route families move onto it one slice at
-//! a time, and the retire slice deletes the axum surface and moves the
-//! consumers.
+//! trusty-mpm, which migrated in six slices. The socket is bound ALONGSIDE the
+//! HTTP listener, route families move onto it one slice at a time, and the
+//! retire slice deletes the axum surface and moves the consumers.
 //!
 //! What: the socket path (derived, never published to a discovery file), the
-//! bind, the serve loop, and [`METHODS`] — the names this listener answers.
-//! Slice 1 serves [`METHOD_HEALTH`] only. A name no slice has claimed answers
-//! `method_not_found` naming what is served, which is the contract every later
-//! slice inherits.
+//! bind, the serve loop, and [`METHODS`] — the names this listener answers. A
+//! name no slice has claimed answers `method_not_found` naming what is served,
+//! which is the contract every later slice inherits.
+//!
+//! ## Slices
+//!
+//! | Slice | Surface | State |
+//! |---|---|---|
+//! | 1 | the listener itself, plus [`METHOD_HEALTH`] | landed (PR #6367) |
+//! | 2 | the READ surface — indexes, status, config, chunks, graph, call chain | this one, in [`crate::service::rpc::reads`] |
+//! | 3+ | search and grep; the write and lifecycle routes; the SSE streams | not started |
+//! | retire | delete the axum surface and move the eleven dialling crates | not started |
 //!
 //! **Two doors, one daemon.** The socket serves the same `Arc<SearchAppState>`
 //! the axum router was built on — see
@@ -39,6 +46,7 @@ use serde::{Deserialize, Serialize};
 use tokio::net::UnixListener;
 use trusty_common::uds::server::{serve_until, RpcRouter, RpcServeOptions};
 
+use crate::service::rpc::reads;
 use crate::service::server::SearchAppState;
 
 #[cfg(test)]
@@ -61,9 +69,23 @@ pub const METHOD_HEALTH: &str = "search.health";
 /// reporting `method_not_found`.
 /// What: the `<domain>.<verb>` convention `trusty-review`'s `review.*` and
 /// `trusty-analyze`'s `analyze.*` sets established, one entry per
-/// [`build_router`] registration. Each later slice appends its own family.
+/// [`build_router`] registration. A family's own names are spliced in from its
+/// module rather than restated here, so a rename is a compile error rather than
+/// a drift between two lists. Each later slice appends its own family.
 /// Test: `rpc_router_registers_every_documented_method`.
-pub const METHODS: &[&str] = &[METHOD_HEALTH];
+pub const METHODS: &[&str] = &[
+    METHOD_HEALTH,
+    // #6285 slice 2 — the read surface.
+    reads::METHOD_INDEXES_LIST,
+    reads::METHOD_INDEX_STATUS,
+    reads::METHOD_INDEX_CONFIG_GET,
+    reads::METHOD_CONFIG_GET,
+    reads::METHOD_CHUNKS_LIST,
+    reads::METHOD_GRAPH_GET,
+    reads::METHOD_GRAPH_STATS,
+    reads::METHOD_GRAPH_NEIGHBORS,
+    reads::METHOD_CALL_CHAIN,
+];
 
 /// The params of a method that takes no arguments.
 ///
@@ -113,18 +135,23 @@ pub fn socket_path() -> Result<PathBuf> {
 /// Why: the only trusty-search-specific half of the server. Everything else —
 /// the peer-uid check, the framing, the JSON-RPC envelope, the accept loop — is
 /// [`trusty_common::uds::server`]'s.
-/// What: slice 1 registers [`METHOD_HEALTH`], which reads the report through
+/// What: [`METHOD_HEALTH`] reads its report through
 /// [`crate::service::server::health_report`] — the same call `GET /health`
 /// makes, so the two transports cannot answer differently. Each later slice
-/// appends one `register` call for its own route family.
+/// appends one `register` call for its own route family; slice 2's is
+/// [`reads::register`].
 /// Test: `rpc_router_registers_every_documented_method`,
 /// `rpc_reports_method_not_found_for_an_unknown_method`.
 fn build_router(state: &Arc<SearchAppState>) -> RpcRouter {
     let health_state = Arc::clone(state);
-    RpcRouter::new().typed::<NoParams, serde_json::Value, _, _>(METHOD_HEALTH, move |_params| {
-        let state = Arc::clone(&health_state);
-        async move { Ok(crate::service::server::health_report(state).await) }
-    })
+    let router = RpcRouter::new().typed::<NoParams, serde_json::Value, _, _>(
+        METHOD_HEALTH,
+        move |_params| {
+            let state = Arc::clone(&health_state);
+            async move { Ok(crate::service::server::health_report(state).await) }
+        },
+    );
+    reads::register(router, state)
 }
 
 /// Per-connection budgets for this listener.

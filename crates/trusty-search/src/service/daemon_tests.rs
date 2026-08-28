@@ -354,6 +354,85 @@ async fn run_daemon_isolated_instance_never_pollutes_shared_discovery() {
     );
 }
 
+/// The Fail-Open Check, driven through `run_daemon()` itself (#6285).
+///
+/// Why: `socket_tests::bind_refuses_a_socket_another_process_is_serving` proves
+/// [`crate::service::socket::bind`] returns an `Err`. It does not prove the
+/// daemon PROPAGATES it — a `let _ = socket::bind(..)` in `run_daemon` would
+/// leave that test green while the daemon degraded to HTTP-only and every
+/// consumer of the retire slice got an address with nothing behind it. This is
+/// the assertion the slice-1 critic round deferred: the whole entry point runs,
+/// against a socket path someone else is already serving, and must exit.
+///
+/// What: points `TRUSTY_DATA_DIR_OVERRIDE` at a tempdir — the same isolation
+/// `run_daemon_isolated_instance_never_pollutes_shared_discovery` relies on, so
+/// the lockfile, port file, `http_addr` file and socket all resolve under it
+/// and never a real production path. A live listener takes the socket path
+/// first, then `run_daemon` is called. Two things are asserted: it returns an
+/// `Err` naming the path, and NO `http_addr` file was written — the latter is
+/// what makes this about announcing a half-bound daemon rather than only about
+/// the return value, since the bind happens before every publish step.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial]
+async fn run_daemon_refuses_a_socket_another_process_is_serving() {
+    use crate::core::registry::IndexRegistry;
+    use crate::service::socket;
+
+    let override_tmp = tempfile::tempdir().unwrap();
+    let data_dir_tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("TRUSTY_DATA_DIR_OVERRIDE", override_tmp.path());
+        std::env::set_var("TRUSTY_DATA_DIR", data_dir_tmp.path());
+    }
+
+    // The incumbent: a REAL listener answering the path this daemon would take,
+    // which is what `bind_singleton_hardened` probes for before it reclaims.
+    let socket_path = socket::socket_path().expect("resolve the isolated socket path");
+    let incumbent = socket::bind(&socket_path)
+        .await
+        .expect("the incumbent must take the path first");
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let incumbent_state = std::sync::Arc::new(SearchAppState::new(IndexRegistry::new()));
+    let serving = tokio::spawn(async move {
+        socket::serve_until_shutdown(incumbent, incumbent_state, async {
+            let _ = stop_rx.await;
+        })
+        .await;
+    });
+    for _ in 0..200 {
+        if trusty_common::uds::socket_is_serving(&socket_path, std::time::Duration::from_millis(50))
+            .await
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let result = run_daemon(SearchAppState::new(IndexRegistry::new()), 0).await;
+
+    let isolated_http_addr = data_dir_tmp.path().join("http_addr");
+    let published = isolated_http_addr.exists();
+    let _ = stop_tx.send(());
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), serving).await;
+    unsafe {
+        std::env::remove_var("TRUSTY_DATA_DIR");
+        std::env::remove_var("TRUSTY_DATA_DIR_OVERRIDE");
+    }
+
+    let err = result.expect_err("a daemon that cannot bind its socket must not start");
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains(&socket_path.display().to_string()),
+        "the error must name the path an operator has to act on: {rendered}"
+    );
+    assert!(
+        !published,
+        "a daemon that failed its socket bind must not have announced itself at {}",
+        isolated_http_addr.display()
+    );
+}
+
 /// #4827: a line with no `=` used to be dropped in silence, so a typo cost the
 /// operator the setting and reported nothing. The parser must hand malformed
 /// lines back with their line numbers so the caller can warn.

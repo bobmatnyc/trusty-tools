@@ -142,12 +142,14 @@ pub(super) async fn remove_file_handler(
 /// The cursor path's redb arm has no direct test — see
 /// `CodeIndexer::enumerate_chunks_after` for why fixture-injecting a redb read
 /// fault is not reachable.
-fn corpus_read_failure_response(
+fn corpus_read_failure_report(
     index_id: &str,
     err: &anyhow::Error,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> (StatusCode, serde_json::Value) {
     tracing::warn!("index '{index_id}': chunk enumeration failed: {err:#}");
-    super::degraded::corpus_read_failure_response(index_id, &format!("{err:#}"))
+    let (status, body) =
+        super::degraded::corpus_read_failure_response(index_id, &format!("{err:#}"));
+    (status, body.0)
 }
 
 /// Query params for `GET /indexes/:id/chunks` (issue #54, #1325).
@@ -215,6 +217,26 @@ pub(super) async fn get_index_chunks_handler(
     Path(id): Path<String>,
     Query(params): Query<ChunksParams>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    index_chunks_report(&state, &id, &params)
+        .await
+        .map(Json)
+        .map_err(|(status, body)| (status, Json(body)))
+}
+
+/// The body `GET /indexes/{id}/chunks` serves, without the transport
+/// (#6285 slice 2).
+///
+/// Why: `search.chunks.list` pages the same corpus over the socket. The two
+/// pagination modes disagree on ordering by design, so a second implementation
+/// would be the one place a caller could silently lose or duplicate rows.
+/// What: [`get_index_chunks_handler`]'s whole former body, including the
+/// `MAX_CHUNKS_LIMIT` clamp and the mode selection.
+/// Test: `chunks_over_the_socket_matches_the_http_body`.
+pub(crate) async fn index_chunks_report(
+    state: &Arc<SearchAppState>,
+    id: &str,
+    params: &ChunksParams,
+) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
     let index_id = IndexId::new(id);
     // #4715: 404 must mean "no such index anywhere", not "not resident" —
     // see `index_status_handler` for why the MCP layer depends on that.
@@ -223,10 +245,9 @@ pub(super) async fn get_index_chunks_handler(
     let handle = match state.registry.get(&index_id) {
         Some(h) => h,
         None => {
-            return Err(super::degraded::residency_miss_response(
-                &state.cold_store,
-                &index_id,
-            ))
+            let (status, body) =
+                super::degraded::residency_miss_response(&state.cold_store, &index_id);
+            return Err((status, body.0));
         }
     };
     let limit = params.limit.min(MAX_CHUNKS_LIMIT);
@@ -249,15 +270,15 @@ pub(super) async fn get_index_chunks_handler(
         let (total, chunks, next_cursor) = indexer
             .enumerate_chunks_after(after, limit)
             .await
-            .map_err(|e| corpus_read_failure_response(&index_id.0, &e))?;
-        return Ok(Json(serde_json::json!({
+            .map_err(|e| corpus_read_failure_report(&index_id.0, &e))?;
+        return Ok(serde_json::json!({
             "index_id": index_id.0,
             "total": total,
             "offset": params.offset,
             "limit": limit,
             "chunks": chunks,
             "next_cursor": next_cursor,
-        })));
+        }));
     }
 
     // Offset mode (issue #54): retained verbatim for back-compat. `next_cursor`
@@ -268,15 +289,15 @@ pub(super) async fn get_index_chunks_handler(
     let (total, chunks) = indexer
         .enumerate_chunks(params.offset, limit)
         .await
-        .map_err(|e| corpus_read_failure_response(&index_id.0, &e))?;
-    Ok(Json(serde_json::json!({
+        .map_err(|e| corpus_read_failure_report(&index_id.0, &e))?;
+    Ok(serde_json::json!({
         "index_id": index_id.0,
         "total": total,
         "offset": params.offset,
         "limit": limit,
         "chunks": chunks,
         "next_cursor": serde_json::Value::Null,
-    })))
+    }))
 }
 
 /// Grep a single index's files and append hits into `out`, honouring the
@@ -520,11 +541,11 @@ pub(super) async fn global_grep_handler(
 /// What: mirrors the `get_call_chain` MCP tool args.
 /// Test: integration test `test_call_chain_handler_*`.
 #[derive(Debug, Deserialize)]
-pub(super) struct CallChainParams {
-    entry_point: String,
-    direction: Option<String>,
-    max_depth: Option<u32>,
-    include_source: Option<bool>,
+pub(crate) struct CallChainParams {
+    pub(crate) entry_point: String,
+    pub(crate) direction: Option<String>,
+    pub(crate) max_depth: Option<u32>,
+    pub(crate) include_source: Option<bool>,
 }
 
 /// `GET /indexes/{id}/call_chain?entry_point=...&direction=...&...` —
@@ -544,62 +565,9 @@ pub(super) async fn call_chain_handler(
     Path(id): Path<String>,
     Query(params): Query<CallChainParams>,
 ) -> Result<Response, (StatusCode, axum::Json<serde_json::Value>)> {
-    use crate::service::call_chain::{render_call_chain, CallChainRequest};
-
-    let req = CallChainRequest {
-        index_id: id.clone(),
-        entry_point: params.entry_point,
-        direction: params.direction,
-        max_depth: params.max_depth,
-        include_source: params.include_source,
-    };
-    let validated = req.validate().map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            axum::Json(serde_json::json!({ "error": e.to_string() })),
-        )
-    })?;
-
-    let index_id = IndexId::new(id);
-    let handle = state.registry.get(&index_id).ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            axum::Json(serde_json::json!({ "error": format!("unknown index: {}", index_id.0) })),
-        )
-    })?;
-
-    // Issue #313: skip_kg indexes have no symbol graph — return a structured
-    // 503 so callers can distinguish "KG disabled" from "no symbols found".
-    if handle.skip_kg {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            axum::Json(serde_json::json!({
-                "error": "kg_unavailable",
-                "reason": "skipped_by_config",
-                "index": index_id.0,
-            })),
-        ));
-    }
-
-    let (graph, chunks) = {
-        let indexer = handle.indexer.read().await;
-        let graph = indexer.snapshot_symbol_graph().await;
-        // #5917: the entry point is resolved against this snapshot, so an
-        // unreadable corpus rendered as `404 entry point not found` — a real
-        // symbol reported nonexistent, which reads as an answer about the code.
-        let chunks = indexer
-            .raw_chunks_snapshot()
-            .await
-            .map_err(|e| corpus_backed_read_error(&index_id.0, &e))?;
-        (graph, chunks)
-    };
-
-    let text = render_call_chain(&validated, graph.as_ref(), &chunks).map_err(|e| {
-        (
-            StatusCode::NOT_FOUND,
-            axum::Json(serde_json::json!({ "error": e })),
-        )
-    })?;
+    let text = call_chain_report(&state, &id, params)
+        .await
+        .map_err(|(status, body)| (status, axum::Json(body)))?;
     Ok((
         StatusCode::OK,
         [(
@@ -609,4 +577,75 @@ pub(super) async fn call_chain_handler(
         text,
     )
         .into_response())
+}
+
+/// The report `GET /indexes/{id}/call_chain` renders, without the transport
+/// (#6285 slice 2).
+///
+/// Why: `search.call_chain` answers the same question over the socket. The
+/// route's value is the rendered text, and the three refusal classes it
+/// distinguishes — invalid params, unknown index, KG disabled — are what a
+/// caller branches on, so both transports must derive them from one body.
+/// What: [`call_chain_handler`]'s whole former body up to the response. The
+/// result is the plain-text report; the socket returns it as a JSON string and
+/// the handler above sets the `text/plain` content type.
+/// Test: `call_chain_over_the_socket_matches_the_http_body`,
+/// `call_chain_over_the_socket_reports_a_kg_disabled_index_as_unavailable`.
+pub(crate) async fn call_chain_report(
+    state: &Arc<SearchAppState>,
+    id: &str,
+    params: CallChainParams,
+) -> Result<String, (StatusCode, serde_json::Value)> {
+    use crate::service::call_chain::{render_call_chain, CallChainRequest};
+
+    let req = CallChainRequest {
+        index_id: id.to_string(),
+        entry_point: params.entry_point,
+        direction: params.direction,
+        max_depth: params.max_depth,
+        include_source: params.include_source,
+    };
+    let validated = req.validate().map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({ "error": e.to_string() }),
+        )
+    })?;
+
+    let index_id = IndexId::new(id);
+    let handle = state.registry.get(&index_id).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            serde_json::json!({ "error": format!("unknown index: {}", index_id.0) }),
+        )
+    })?;
+
+    // Issue #313: skip_kg indexes have no symbol graph — return a structured
+    // 503 so callers can distinguish "KG disabled" from "no symbols found".
+    if handle.skip_kg {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            serde_json::json!({
+                "error": "kg_unavailable",
+                "reason": "skipped_by_config",
+                "index": index_id.0,
+            }),
+        ));
+    }
+
+    let (graph, chunks) = {
+        let indexer = handle.indexer.read().await;
+        let graph = indexer.snapshot_symbol_graph().await;
+        // #5917: the entry point is resolved against this snapshot, so an
+        // unreadable corpus rendered as `404 entry point not found` — a real
+        // symbol reported nonexistent, which reads as an answer about the code.
+        let chunks = indexer.raw_chunks_snapshot().await.map_err(|e| {
+            let (status, body) = corpus_backed_read_error(&index_id.0, &e);
+            (status, body.0)
+        })?;
+        (graph, chunks)
+    };
+
+    render_call_chain(&validated, graph.as_ref(), &chunks)
+        .map_err(|e| (StatusCode::NOT_FOUND, serde_json::json!({ "error": e })))
 }

@@ -24,7 +24,7 @@
     { id: 'memory',   label: 'Memory' },
     { id: 'analyze',  label: 'Analyze' },
     { id: 'review',   label: 'Review' },
-    { id: 'sessions', label: 'Sessions' },
+    { id: 'sessions', label: 'MPM Sessions' }, // #6370: UI label only — the id stays 'sessions'
     { id: 'config',   label: 'Config' },
   ];
 
