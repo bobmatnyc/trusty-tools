@@ -15,6 +15,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 use super::{bind, serve_until_shutdown, socket_path};
+use crate::daemon::state::DaemonState;
 
 /// How long a dial or a bind is given before the test calls it stuck.
 ///
@@ -50,8 +51,12 @@ async fn serve_bound(
     tokio::task::JoinHandle<()>,
 ) {
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    // #6288 slice 2: the listener now serves real methods, so it needs the
+    // state they read. `shared()` is the process-wide daemon state, which is
+    // what a test that only probes dispatch (never mutates) wants.
+    let state = DaemonState::shared();
     let handle = tokio::spawn(async move {
-        serve_until_shutdown(bound, async {
+        serve_until_shutdown(bound, state, async {
             let _ = stop_rx.await;
         })
         .await;
@@ -127,8 +132,9 @@ async fn dial_once(socket: &Path, request: &serde_json::Value) -> RawExchange {
 /// JSON-RPC error frame carrying `-32601`, the request's id echoed back, and a
 /// clean close with no trailing bytes.
 ///
-/// `mpm.health` is the method slice 2 registers first, so this also pins the
-/// answer a client gets from a daemon that has not yet taken that slice.
+/// The probed name has to be one NO slice serves: since #6288 slice 2 the
+/// router carries twenty real methods, and `mpm.health` — which this test used
+/// while the router was empty — now answers with a result.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
 async fn unknown_method_gets_a_method_not_found_frame() {
@@ -139,7 +145,7 @@ async fn unknown_method_gets_a_method_not_found_frame() {
     let exchange = dial_once(
         &socket,
         &serde_json::json!({
-            "jsonrpc": "2.0", "id": 7, "method": "mpm.health", "params": {},
+            "jsonrpc": "2.0", "id": 7, "method": "mpm.no.such.method", "params": {},
         }),
     )
     .await;
@@ -148,7 +154,7 @@ async fn unknown_method_gets_a_method_not_found_frame() {
     assert_eq!(exchange.frame["id"], 7);
     assert!(
         exchange.frame.get("result").is_none(),
-        "a router with no methods must not answer a result: {}",
+        "an unregistered method must not answer a result: {}",
         exchange.frame
     );
     assert_eq!(

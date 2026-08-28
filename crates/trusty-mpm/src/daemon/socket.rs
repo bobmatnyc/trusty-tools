@@ -2,14 +2,14 @@
 //!
 //! Why: ADR-0032 moves every trusty-* service off loopback TCP and onto a Unix
 //! socket, and trusty-mpm's HTTP surface is ~35k SLOC across a dozen route
-//! files. A single-PR cutover is not viable, so this slice adds the socket
-//! ALONGSIDE `127.0.0.1:7880` and registers nothing on it. Later slices move
-//! methods across; the retire slice deletes the axum surface.
+//! files. A single-PR cutover is not viable, so the socket was added ALONGSIDE
+//! `127.0.0.1:7880` (slice 1) and route families move onto it one slice at a
+//! time; the retire slice deletes the axum surface.
 //!
 //! What: the socket path (derived, never published to a discovery file), the
-//! bind, and the serve loop. The router this slice builds is deliberately
-//! EMPTY — a request for any method gets a well-formed `method_not_found`
-//! frame, which is the scaffolding's whole observable contract until slice 2.
+//! bind, and the serve loop. Which METHODS are served is `daemon::rpc`'s —
+//! [`build_router`] names one `register` call per family, and slice 2 mounted
+//! the first twenty. A name no family claims still answers `method_not_found`.
 //!
 //! The trust boundary is the socket, not the payload: `bind_singleton_hardened`
 //! puts a `0600` socket in a `0700` directory, and `serve_until` runs the
@@ -25,6 +25,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::net::UnixListener;
 use trusty_common::uds::server::{RpcRouter, RpcServeOptions, serve_until};
+
+use super::rpc;
+use super::state::DaemonState;
 
 #[cfg(test)]
 #[path = "socket_tests.rs"]
@@ -51,15 +54,19 @@ pub fn socket_path() -> Result<PathBuf> {
 
 /// The methods this listener serves.
 ///
-/// Why: slice 1 registers none, on purpose. An empty router is not a stub — it
-/// is a listener whose every answer is a `method_not_found` frame, which is a
-/// contract a client can be written against and a later slice can extend one
-/// method at a time without changing the transport.
+/// Why: the transport is fixed and this is the only part that grows. Slice 1
+/// registered nothing; each later slice adds one `register` call for its own
+/// route family, so a family arrives without the accept loop, the framing, or
+/// the peer check being touched.
 ///
-/// Test: `unknown_method_gets_a_method_not_found_frame`.
-fn build_router() -> RpcRouter {
-    // #6288: methods arrive in slices 2-6; the transport lands first.
-    RpcRouter::new()
+/// A name no family claims still answers `method_not_found` — the contract
+/// slice 1 established for the whole surface now holds for the remainder of it.
+///
+/// Test: `unknown_method_gets_a_method_not_found_frame`,
+/// `rpc_router_registers_every_documented_method`.
+fn build_router(state: &Arc<DaemonState>) -> RpcRouter {
+    // #6288 slice 2: the core request/response families. Slices 3-6 append here.
+    rpc::core::register(RpcRouter::new(), state)
 }
 
 /// Per-connection budgets for this listener.
@@ -133,10 +140,11 @@ pub async fn bind(socket: &Path) -> Result<BoundSocket> {
 /// `unknown_method_gets_a_method_not_found_frame`.
 pub async fn serve_until_shutdown(
     bound: BoundSocket,
+    state: Arc<DaemonState>,
     shutdown: impl std::future::Future<Output = ()> + Send,
 ) {
     let BoundSocket { listener, path } = bound;
-    let router = Arc::new(build_router());
+    let router = Arc::new(build_router(&state));
     tracing::info!(
         socket = %path.display(),
         methods = router.method_names().count(),

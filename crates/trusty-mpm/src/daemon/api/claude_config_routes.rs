@@ -25,6 +25,7 @@ use crate::daemon::api::types::{
     DeleteCheckpointResponse, DeployProfileResponse, ProfilesResponse, RestartResponse,
     RestoreResponse,
 };
+use crate::daemon::error::DaemonError;
 use crate::daemon::state::DaemonState;
 use crate::session_manager::record::{ManagedSessionState, SessionRecord};
 
@@ -56,17 +57,29 @@ pub struct ClaudeConfigQuery {
     responses((status = 200, description = "Analyzed config plus recommendations"))
 )]
 pub async fn get_claude_config(
-    State(_state): State<Arc<DaemonState>>,
+    State(state): State<Arc<DaemonState>>,
     Query(query): Query<ClaudeConfigQuery>,
 ) -> Json<ClaudeConfigResponse> {
+    Json(get_claude_config_op(&state, query))
+}
+
+/// Transport-neutral body of `GET /claude-config` and `mpm.claude_config.get`
+/// (#6288).
+///
+/// Test: `get_claude_config_returns_recommendations`,
+/// `parity_claude_config_get_agrees_across_transports`.
+pub fn get_claude_config_op(
+    _state: &Arc<DaemonState>,
+    query: ClaudeConfigQuery,
+) -> ClaudeConfigResponse {
     use crate::core::claude_config::ClaudeConfigReader;
     let paths = ClaudeConfigReader::paths_for_project(&query.project);
     let config = crate::daemon::claude_config::ClaudeConfigAnalyzer::read_config(&paths);
     let recommendations = crate::daemon::claude_config::ClaudeConfigAnalyzer::analyze(&config);
-    Json(ClaudeConfigResponse {
+    ClaudeConfigResponse {
         config,
         recommendations,
-    })
+    }
 }
 
 /// JSON body for `POST /claude-config/apply`.
@@ -103,9 +116,28 @@ pub struct ApplyConfigRequest {
     )
 )]
 pub async fn apply_claude_config(
-    State(_state): State<Arc<DaemonState>>,
+    State(state): State<Arc<DaemonState>>,
     Json(body): Json<ApplyConfigRequest>,
 ) -> Result<Json<ApplyConfigResponse>, StatusCode> {
+    apply_claude_config_op(&state, body)
+        .map(Json)
+        .map_err(|e| e.status())
+}
+
+/// Transport-neutral body of `POST /claude-config/apply` and
+/// `mpm.claude_config.apply` (#6288).
+///
+/// # Errors
+///
+/// [`DaemonError::NotFound`] when no recommendation carries that id (HTTP 404),
+/// [`DaemonError::Internal`] when applying it fails (HTTP 500).
+///
+/// Test: `apply_claude_config_unknown_rec_is_404`,
+/// `rpc_claude_config_apply_unknown_recommendation_reports_not_found`.
+pub fn apply_claude_config_op(
+    _state: &Arc<DaemonState>,
+    body: ApplyConfigRequest,
+) -> Result<ApplyConfigResponse, DaemonError> {
     use crate::core::claude_config::ClaudeConfigReader;
     let paths = ClaudeConfigReader::paths_for_project(&body.project);
     let config = crate::daemon::claude_config::ClaudeConfigAnalyzer::read_config(&paths);
@@ -113,7 +145,9 @@ pub async fn apply_claude_config(
     let rec = recommendations
         .iter()
         .find(|r| r.id == body.recommendation_id)
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .ok_or_else(|| {
+            DaemonError::NotFound(format!("recommendation `{}`", body.recommendation_id))
+        })?;
     let checkpoint_id = crate::daemon::claude_config::ClaudeConfigAnalyzer::apply_recommendation(
         rec,
         &paths,
@@ -121,13 +155,13 @@ pub async fn apply_claude_config(
     )
     .map_err(|e| {
         tracing::warn!("applying recommendation {} failed: {e}", rec.id);
-        StatusCode::INTERNAL_SERVER_ERROR
+        DaemonError::Internal(format!("applying recommendation {} failed: {e}", rec.id))
     })?;
-    Ok(Json(ApplyConfigResponse {
+    Ok(ApplyConfigResponse {
         applied: true,
         recommendation_id: body.recommendation_id,
         checkpoint_id,
-    }))
+    })
 }
 
 // ---- checkpoints & deployment profiles ----------------------------------
@@ -157,15 +191,27 @@ pub struct CheckpointQuery {
     responses((status = 200, description = "Config checkpoints, newest first"))
 )]
 pub async fn list_checkpoints(
-    State(_state): State<Arc<DaemonState>>,
+    State(state): State<Arc<DaemonState>>,
     Query(query): Query<CheckpointQuery>,
 ) -> Json<CheckpointsResponse> {
+    Json(list_checkpoints_op(&state, query))
+}
+
+/// Transport-neutral body of `GET /claude-config/checkpoints` and
+/// `mpm.claude_config.checkpoints.list` (#6288).
+///
+/// Test: `list_checkpoints_returns_array`,
+/// `parity_claude_config_checkpoints_agrees_across_transports`.
+pub fn list_checkpoints_op(
+    _state: &Arc<DaemonState>,
+    query: CheckpointQuery,
+) -> CheckpointsResponse {
     let checkpoints = crate::daemon::claude_config::ConfigCheckpointer::list(&query.project)
         .unwrap_or_else(|e| {
             tracing::warn!("listing checkpoints failed: {e}");
             Vec::new()
         });
-    Json(CheckpointsResponse { checkpoints })
+    CheckpointsResponse { checkpoints }
 }
 
 /// JSON body for `POST /claude-config/checkpoints`.
@@ -199,9 +245,26 @@ pub struct CreateCheckpointRequest {
     )
 )]
 pub async fn create_checkpoint(
-    State(_state): State<Arc<DaemonState>>,
+    State(state): State<Arc<DaemonState>>,
     Json(body): Json<CreateCheckpointRequest>,
 ) -> Result<Json<CreateCheckpointResponse>, StatusCode> {
+    create_checkpoint_op(&state, body)
+        .map(Json)
+        .map_err(|e| e.status())
+}
+
+/// Transport-neutral body of `POST /claude-config/checkpoints` and
+/// `mpm.claude_config.checkpoints.create` (#6288).
+///
+/// # Errors
+///
+/// [`DaemonError::Internal`] when the snapshot cannot be written (HTTP 500).
+///
+/// Test: `create_checkpoint_returns_id`.
+pub fn create_checkpoint_op(
+    _state: &Arc<DaemonState>,
+    body: CreateCheckpointRequest,
+) -> Result<CreateCheckpointResponse, DaemonError> {
     use crate::core::claude_config::ClaudeConfigReader;
     let paths = ClaudeConfigReader::paths_for_project(&body.project);
     let id = crate::daemon::claude_config::ConfigCheckpointer::create(
@@ -211,9 +274,9 @@ pub async fn create_checkpoint(
     )
     .map_err(|e| {
         tracing::warn!("creating checkpoint failed: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
+        DaemonError::Internal(format!("creating checkpoint failed: {e}"))
     })?;
-    Ok(Json(CreateCheckpointResponse { id }))
+    Ok(CreateCheckpointResponse { id })
 }
 
 /// JSON body for `POST /claude-config/restore`.
@@ -247,18 +310,39 @@ pub struct RestoreRequest {
     )
 )]
 pub async fn restore_checkpoint(
-    State(_state): State<Arc<DaemonState>>,
+    State(state): State<Arc<DaemonState>>,
     Json(body): Json<RestoreRequest>,
 ) -> Result<Json<RestoreResponse>, StatusCode> {
+    restore_checkpoint_op(&state, body)
+        .map(Json)
+        .map_err(|e| e.status())
+}
+
+/// Transport-neutral body of `POST /claude-config/restore` and
+/// `mpm.claude_config.restore` (#6288).
+///
+/// # Errors
+///
+/// [`DaemonError::Internal`] when the checkpoint is missing or the rewrite
+/// fails — HTTP 500, the status this route has always answered for both.
+///
+/// Test: `restore_unknown_checkpoint_is_500`.
+pub fn restore_checkpoint_op(
+    _state: &Arc<DaemonState>,
+    body: RestoreRequest,
+) -> Result<RestoreResponse, DaemonError> {
     crate::daemon::claude_config::ConfigCheckpointer::restore(&body.project, &body.checkpoint_id)
         .map_err(|e| {
         tracing::warn!("restoring checkpoint {} failed: {e}", body.checkpoint_id);
-        StatusCode::INTERNAL_SERVER_ERROR
+        DaemonError::Internal(format!(
+            "restoring checkpoint {} failed: {e}",
+            body.checkpoint_id
+        ))
     })?;
-    Ok(Json(RestoreResponse {
+    Ok(RestoreResponse {
         restored: true,
         checkpoint_id: body.checkpoint_id,
-    }))
+    })
 }
 
 /// `DELETE /claude-config/checkpoints/{id}?project=<path>` — delete a checkpoint.
@@ -280,15 +364,57 @@ pub async fn restore_checkpoint(
     )
 )]
 pub async fn delete_checkpoint(
-    State(_state): State<Arc<DaemonState>>,
+    State(state): State<Arc<DaemonState>>,
     Path(id): Path<String>,
     Query(query): Query<CheckpointQuery>,
 ) -> Result<Json<DeleteCheckpointResponse>, StatusCode> {
-    crate::daemon::claude_config::ConfigCheckpointer::delete(&query.project, &id).map_err(|e| {
-        tracing::warn!("deleting checkpoint {id} failed: {e}");
-        StatusCode::NOT_FOUND
-    })?;
-    Ok(Json(DeleteCheckpointResponse { deleted: id }))
+    delete_checkpoint_op(
+        &state,
+        DeleteCheckpointParams {
+            project: query.project,
+            id,
+        },
+    )
+    .map(Json)
+    .map_err(|e| e.status())
+}
+
+/// The two arguments `DELETE /claude-config/checkpoints/{id}` splits across a
+/// path segment and a query string, carried as one decoded value (#6288).
+///
+/// Why a struct rather than two parameters: the socket carries one `params`
+/// object per call, so the RPC method needs a single type to decode into, and
+/// giving the shared body that shape keeps one signature for both transports.
+#[derive(serde::Deserialize)]
+pub struct DeleteCheckpointParams {
+    /// Project directory whose checkpoint is being deleted.
+    pub project: PathBuf,
+    /// Id of the checkpoint to delete.
+    pub id: String,
+}
+
+/// Transport-neutral body of `DELETE /claude-config/checkpoints/{id}` and
+/// `mpm.claude_config.checkpoints.delete` (#6288).
+///
+/// # Errors
+///
+/// [`DaemonError::CheckpointNotFound`] when the checkpoint cannot be removed —
+/// HTTP 404, the status this route has always answered for every failure here.
+///
+/// Test: `delete_unknown_checkpoint_is_404`.
+pub fn delete_checkpoint_op(
+    _state: &Arc<DaemonState>,
+    params: DeleteCheckpointParams,
+) -> Result<DeleteCheckpointResponse, DaemonError> {
+    crate::daemon::claude_config::ConfigCheckpointer::delete(&params.project, &params.id).map_err(
+        |e| {
+            tracing::warn!("deleting checkpoint {} failed: {e}", params.id);
+            DaemonError::CheckpointNotFound {
+                id: params.id.clone(),
+            }
+        },
+    )?;
+    Ok(DeleteCheckpointResponse { deleted: params.id })
 }
 
 /// `GET /claude-config/profiles` — list the built-in deployment profiles.
@@ -302,9 +428,18 @@ pub async fn delete_checkpoint(
     tag = "claude-config",
     responses((status = 200, description = "Built-in deployment profiles"))
 )]
-pub async fn list_profiles(State(_state): State<Arc<DaemonState>>) -> Json<ProfilesResponse> {
+pub async fn list_profiles(State(state): State<Arc<DaemonState>>) -> Json<ProfilesResponse> {
+    Json(list_profiles_op(&state))
+}
+
+/// Transport-neutral body of `GET /claude-config/profiles` and
+/// `mpm.claude_config.profiles` (#6288).
+///
+/// Test: `list_profiles_returns_builtins`,
+/// `parity_claude_config_profiles_agrees_across_transports`.
+pub fn list_profiles_op(_state: &Arc<DaemonState>) -> ProfilesResponse {
     let profiles = crate::daemon::claude_config::ProfileDeployer::builtin_profiles();
-    Json(ProfilesResponse { profiles })
+    ProfilesResponse { profiles }
 }
 
 /// JSON body for `POST /claude-config/deploy`.
@@ -346,14 +481,33 @@ pub struct DeployProfileRequest {
     )
 )]
 pub async fn deploy_profile(
-    State(_state): State<Arc<DaemonState>>,
+    State(state): State<Arc<DaemonState>>,
     Json(body): Json<DeployProfileRequest>,
 ) -> Result<Json<DeployProfileResponse>, StatusCode> {
+    deploy_profile_op(&state, body)
+        .map(Json)
+        .map_err(|e| e.status())
+}
+
+/// Transport-neutral body of `POST /claude-config/deploy` and
+/// `mpm.claude_config.deploy` (#6288).
+///
+/// # Errors
+///
+/// [`DaemonError::NotFound`] when no built-in profile carries that name (HTTP
+/// 404), [`DaemonError::Internal`] when the deploy fails (HTTP 500).
+///
+/// Test: `deploy_profile_returns_checkpoint_id`, `deploy_unknown_profile_is_404`,
+/// `rpc_claude_config_deploy_unknown_profile_reports_not_found`.
+pub fn deploy_profile_op(
+    _state: &Arc<DaemonState>,
+    body: DeployProfileRequest,
+) -> Result<DeployProfileResponse, DaemonError> {
     use crate::core::claude_config::ClaudeConfigReader;
     let mut profile = crate::daemon::claude_config::ProfileDeployer::builtin_profiles()
         .into_iter()
         .find(|p| p.name == body.profile_name)
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .ok_or_else(|| DaemonError::NotFound(format!("profile `{}`", body.profile_name)))?;
     if let Some(target) = body.target {
         profile.target = target;
     }
@@ -362,12 +516,15 @@ pub async fn deploy_profile(
         crate::daemon::claude_config::ProfileDeployer::deploy(&profile, &paths, &body.project)
             .map_err(|e| {
                 tracing::warn!("deploying profile {} failed: {e}", body.profile_name);
-                StatusCode::INTERNAL_SERVER_ERROR
+                DaemonError::Internal(format!(
+                    "deploying profile {} failed: {e}",
+                    body.profile_name
+                ))
             })?;
-    Ok(Json(DeployProfileResponse {
+    Ok(DeployProfileResponse {
         deployed: body.profile_name,
         checkpoint_id,
-    }))
+    })
 }
 
 /// JSON body for `POST /claude-config/restart`.
@@ -445,6 +602,25 @@ pub async fn restart_claude_code(
     State(state): State<Arc<DaemonState>>,
     Json(body): Json<RestartRequest>,
 ) -> Result<Json<RestartResponse>, StatusCode> {
+    restart_claude_code_op(&state, body)
+        .await
+        .map(Json)
+        .map_err(|e| e.status())
+}
+
+/// Transport-neutral body of `POST /claude-config/restart` and
+/// `mpm.claude_config.restart` (#6288).
+///
+/// # Errors
+///
+/// [`DaemonError::Internal`] when tmux is absent or the recorded pane is
+/// confirmed gone (HTTP 500).
+///
+/// Test: `restart_claude_code_handles_missing_tmux`.
+pub async fn restart_claude_code_op(
+    state: &Arc<DaemonState>,
+    body: RestartRequest,
+) -> Result<RestartResponse, DaemonError> {
     let records = state.session_manager().await.list().await;
     let pane_id = select_restart_pane_id(&records, &body.tmux_session);
     crate::daemon::claude_config::ClaudeCodeRestarter::restart_in_session(
@@ -453,11 +629,11 @@ pub async fn restart_claude_code(
     )
     .map_err(|e| {
         tracing::warn!("restart in {} failed: {e}", body.tmux_session);
-        StatusCode::INTERNAL_SERVER_ERROR
+        DaemonError::Internal(format!("restart in {} failed: {e}", body.tmux_session))
     })?;
-    Ok(Json(RestartResponse {
+    Ok(RestartResponse {
         restarted: body.tmux_session,
-    }))
+    })
 }
 
 #[cfg(test)]

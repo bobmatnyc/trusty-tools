@@ -121,16 +121,22 @@ async fn serve_http_drains_both_listeners_on_shutdown() {
     }
     assert!(http_ok, "the HTTP listener must answer /health at {addr}");
 
-    // The socket serves an empty router in slice 1, so the answer is an error
-    // frame. That it is a FRAME is the point: the request was read and answered
-    // over the socket while HTTP was serving on the same runtime.
+    // Since #6288 slice 2 the socket serves `mpm.health` for real, so the answer
+    // is a RESULT rather than the `method_not_found` frame slice 1 asserted.
+    // That it is answered at all is still the point — the request was read and
+    // served over the socket while HTTP was serving on the same runtime — and a
+    // real result is the stronger evidence of it.
     let answer = call_over_socket(&socket, "mpm.health")
         .await
         .expect("the rpc listener must answer while HTTP is also serving");
+    assert!(
+        answer.get("error").is_none(),
+        "mpm.health is a registered method: {answer}"
+    );
     assert_eq!(
-        answer["error"]["code"],
-        serde_json::json!(trusty_common::uds::server::CODE_METHOD_NOT_FOUND),
-        "slice 1 registers no methods: {answer}"
+        answer["result"]["status"],
+        serde_json::json!("ok"),
+        "the socket must serve the same liveness word HTTP does: {answer}"
     );
 
     // ── One shutdown drains both ─────────────────────────────────────────────

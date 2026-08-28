@@ -8,14 +8,49 @@
 //! `IntoResponse` impl maps each variant to the right HTTP status. Business
 //! logic stays HTTP-agnostic; the transport mapping lives in one place.
 //! What: [`DaemonError`] enumerates every way a daemon request can fail, with a
-//! `thiserror`-derived `Display` and an `axum::IntoResponse` that picks the
-//! status code and renders a `{ "error": <message> }` body.
-//! Test: `error_status_codes_map` asserts the variant → status mapping.
+//! `thiserror`-derived `Display`, an `axum::IntoResponse` that picks the status
+//! code and renders a `{ "error": <message> }` body, and — since #6288 — a
+//! `From<DaemonError> for RpcError` that picks the JSON-RPC error code for the
+//! same failure on the Unix socket. Both transports read the SAME variant, so a
+//! route served over HTTP and over the socket cannot disagree about what went
+//! wrong.
+//! Test: `error_status_codes_map` asserts the variant → status mapping;
+//! `rpc_error_codes_track_http_statuses` asserts the variant → code mapping.
 
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use thiserror::Error;
+use trusty_common::uds::server::{CODE_INTERNAL_ERROR, CODE_INVALID_PARAMS, RpcError};
+
+// ---- JSON-RPC error codes for the daemon's non-standard failure kinds -------
+//
+// Why these are declared here rather than in `trusty_common::uds::server::wire`:
+// that module owns the codes JSON-RPC itself reserves (-32700..-32600) plus the
+// two streaming codes #6286 added. Everything below is a DOMAIN failure kind
+// with no JSON-RPC counterpart, so it lives beside the enum it describes.
+//
+// The numbers are not arbitrary. -32004 and -32005 are already spent by
+// `trusty-analyze` (`service::events::CODE_NOT_FOUND`, `CODE_DEADLINE_EXCEEDED`)
+// and -32010/-32011 by `trusty-common`'s streaming pair, so #6288 takes free
+// slots around them and reuses -32004 for the SAME meaning — a later
+// consolidation into `trusty-common` is then a move, not a renumbering.
+// Test: `rpc_error_codes_track_http_statuses`.
+
+/// HTTP 404 over the socket — the same code `trusty-analyze` uses.
+pub const CODE_NOT_FOUND: i64 = -32004;
+
+/// HTTP 503 over the socket: a capability this daemon is not configured for.
+pub const CODE_UNAVAILABLE: i64 = -32002;
+
+/// HTTP 403 over the socket: a guard rejected the request.
+pub const CODE_FORBIDDEN: i64 = -32003;
+
+/// HTTP 422 over the socket: well-formed but un-fulfillable.
+pub const CODE_UNPROCESSABLE: i64 = -32006;
+
+/// HTTP 409 over the socket: the request conflicts with the record's state.
+pub const CODE_CONFLICT: i64 = -32009;
 
 /// A failure surfaced by a daemon domain service or request handler.
 ///
@@ -150,6 +185,20 @@ pub enum DaemonError {
     #[error("forbidden: {0}")]
     Forbidden(String),
 
+    /// A resource of a kind with no dedicated variant above was not found.
+    ///
+    /// Why (#6288): the `/claude-config/*` routes 404 on an unknown
+    /// recommendation id and an unknown profile name. Both used to be a bare
+    /// `StatusCode::NOT_FOUND` returned straight from the handler, which
+    /// carried no message. Sharing one body between HTTP and RPC means the
+    /// failure has to be a typed value, and neither resource is a session, a
+    /// checkpoint, a deliverable, or a milestone.
+    /// What: carries the operator-facing message; maps to HTTP 404 and to
+    /// [`CODE_NOT_FOUND`](crate::daemon::error::CODE_NOT_FOUND) on the socket.
+    /// Test: `error_status_codes_map`, `rpc_error_codes_track_http_statuses`.
+    #[error("not found: {0}")]
+    NotFound(String),
+
     /// The request is syntactically valid but semantically un-fulfillable.
     ///
     /// Why: a precondition the daemon cannot satisfy (e.g. `POST /sessions`
@@ -176,7 +225,8 @@ impl DaemonError {
             | Self::CheckpointNotFound { .. }
             | Self::DeliverableNotFound { .. }
             | Self::MilestoneNotFound { .. }
-            | Self::ProjectNotFoundForRepoUrl { .. } => StatusCode::NOT_FOUND,
+            | Self::ProjectNotFoundForRepoUrl { .. }
+            | Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::SessionNotActive { .. } | Self::InvalidTransition { .. } => StatusCode::CONFLICT,
             Self::OverseerBlocked { .. } | Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::InvalidRequest(_) | Self::InvalidPairCode => StatusCode::BAD_REQUEST,
@@ -210,6 +260,37 @@ impl IntoResponse for DaemonError {
             _ => Json(serde_json::json!({ "error": self.to_string() })),
         };
         (status, body).into_response()
+    }
+}
+
+/// Map a daemon failure onto the JSON-RPC error frame a socket client reads.
+///
+/// Why (#6288): `RpcRouter::typed` takes `Result<Resp, RpcError>`, and every
+/// route this slice moves onto the socket already reports its failures as a
+/// [`DaemonError`]. Without this conversion each RPC registration would spell
+/// its own status-to-code table, and the HTTP status and the RPC code would be
+/// free to drift apart for the same variant.
+/// What: derives the code from [`DaemonError::status`], so the code is a pure
+/// function of the status the HTTP transport would have sent. The message
+/// crosses verbatim — it is the same string the HTTP body's `error` field
+/// carries, which is what makes a parity assertion meaningful.
+/// Test: `rpc_error_codes_track_http_statuses`;
+/// `rpc_tmux_snapshot_unknown_session_reports_a_coded_error` drives one arm
+/// through a real failure.
+impl From<DaemonError> for RpcError {
+    fn from(e: DaemonError) -> Self {
+        let code = match e.status() {
+            StatusCode::BAD_REQUEST => CODE_INVALID_PARAMS,
+            StatusCode::NOT_FOUND => CODE_NOT_FOUND,
+            StatusCode::FORBIDDEN => CODE_FORBIDDEN,
+            StatusCode::CONFLICT => CODE_CONFLICT,
+            StatusCode::UNPROCESSABLE_ENTITY => CODE_UNPROCESSABLE,
+            StatusCode::SERVICE_UNAVAILABLE => CODE_UNAVAILABLE,
+            // Everything left maps to 500, and a caller could not have sent any
+            // of them differently.
+            _ => CODE_INTERNAL_ERROR,
+        };
+        RpcError::new(code, e.to_string())
     }
 }
 
@@ -297,6 +378,67 @@ mod tests {
             }
             .status(),
             StatusCode::CONFLICT
+        );
+    }
+
+    /// Why (#6288): the socket and HTTP must never disagree about what a failure
+    /// was. The conversion derives the code FROM the status, so this pins that
+    /// derivation — a variant whose status changes moves its RPC code with it,
+    /// and a variant silently falling into the catch-all `internal` arm shows up
+    /// here.
+    /// Test: this function IS the test.
+    #[test]
+    fn rpc_error_codes_track_http_statuses() {
+        let cases: Vec<(DaemonError, i64)> = vec![
+            (
+                DaemonError::SessionNotFound { id: "x".into() },
+                CODE_NOT_FOUND,
+            ),
+            (DaemonError::NotFound("x".into()), CODE_NOT_FOUND),
+            (
+                DaemonError::CheckpointNotFound { id: "x".into() },
+                CODE_NOT_FOUND,
+            ),
+            (DaemonError::InvalidRequest("x".into()), CODE_INVALID_PARAMS),
+            (DaemonError::Forbidden("x".into()), CODE_FORBIDDEN),
+            (
+                DaemonError::SessionNotActive {
+                    id: "x".into(),
+                    status: "stopped".into(),
+                },
+                CODE_CONFLICT,
+            ),
+            (DaemonError::Unprocessable("x".into()), CODE_UNPROCESSABLE),
+            (
+                DaemonError::ServiceUnavailable("x".into()),
+                CODE_UNAVAILABLE,
+            ),
+            (DaemonError::Internal("x".into()), CODE_INTERNAL_ERROR),
+            (
+                DaemonError::TmuxUnavailable("x".into()),
+                CODE_INTERNAL_ERROR,
+            ),
+        ];
+
+        for (err, expected) in cases {
+            let message = err.to_string();
+            let rpc: RpcError = err.into();
+            assert_eq!(rpc.code, expected, "wrong code for {message:?}");
+            assert_eq!(
+                rpc.message, message,
+                "the RPC message must be the HTTP body's message verbatim"
+            );
+        }
+    }
+
+    /// Why: the #6288 variant is new, so its 404 mapping needs its own
+    /// assertion rather than riding on the pre-existing table above.
+    /// Test: this function IS the test.
+    #[test]
+    fn not_found_variant_is_404() {
+        assert_eq!(
+            DaemonError::NotFound("profile `nope`".into()).status(),
+            StatusCode::NOT_FOUND
         );
     }
 
