@@ -1,9 +1,11 @@
 [package]
 name        = "trusty-console"
-# 0.7.1 (#6288): patch — 0.7.0 is published and this PR edits `src/**`. The only
-# change is dropping the retired supervisor's 7881 row from a test's
-# known-siblings table; no public item moved.
-version     = "0.8.0"
+# 0.8.1 (#6371): patch — 0.8.0 was published while this PR was open and it edits
+# `src/**`. The public surface only GAINS items: the two cleanup handlers and
+# their request body. `DeleteVerdict` becoming `ActionVerdict` moves nothing
+# public — it was `pub(crate)`, as is everything else the routes refactor
+# touched.
+version     = "0.8.1"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true
