@@ -8,10 +8,13 @@ auto-resumer**, *not* a decision-maker:
   runtime does not leave work parked. (Gated by `TRUSTY_MPM_AUTO_RESUME`.)
 - It **observes** session health and classifies idle `active` sessions via the
   activity monitor (optional; needs `OPENROUTER_API_KEY`, otherwise `unknown`).
-- It **surfaces** `pending_decision`s over `/metrics` for a human or a higher-level
-  fleet manager — it **never auto-answers** a decision.
+- It **surfaces** `pending_decision`s for a human or a higher-level fleet manager
+  — it **never auto-answers** a decision.
 - It **survives reboots** under launchd (macOS) or systemd (Linux).
-- It exposes fleet state on `GET /metrics` and a liveness probe on `GET /health`.
+- It **publishes** fleet state to `~/.trusty-mpm/supervisor-metrics.json` after
+  every sweep. It binds **no network port** (#6288): the trusty-mpm daemon reads
+  that file, and the console renders it through `supervisor_status` /
+  `console_metrics`.
 
 ## Run it by hand
 
@@ -19,8 +22,8 @@ auto-resumer**, *not* a decision-maker:
 # Observe-only (no resume):
 tm supervisor
 
-# Auto-resume stopped sessions, poll every 30s, metrics on :7881:
-TRUSTY_MPM_AUTO_RESUME=1 tm supervisor --interval 30 --addr 127.0.0.1:7881
+# Auto-resume stopped sessions, poll every 30s:
+TRUSTY_MPM_AUTO_RESUME=1 tm supervisor --interval 30
 
 # Or pass --auto-resume instead of the env var:
 tm supervisor --auto-resume
@@ -29,9 +32,21 @@ tm supervisor --auto-resume
 Then query fleet state:
 
 ```bash
-curl -s http://127.0.0.1:7881/metrics | jq
-curl -s http://127.0.0.1:7881/health        # {"status":"ok"}
+jq . ~/.trusty-mpm/supervisor-metrics.json
 ```
+
+The file carries the fleet counts, the surfaced `pending_decision`s, the
+supervisor's cumulative `run_stats`, the `written_at` instant it was published,
+and the `interval_secs` the supervisor is configured at.
+
+A snapshot is reported as **stale** rather than current once it is older than
+three sweeps at that interval, with a 300-second floor — so the default 30s
+cadence tolerates 300 seconds, and a `TRUSTY_MPM_SUPERVISOR_INTERVAL=900`
+overnight supervisor tolerates 2700. Sizing the window from the cadence is what
+keeps a slow overnight supervisor from reading as dead for most of every cycle;
+the floor keeps a fast cadence from flapping on ordinary scheduling jitter. A
+stale or absent file is how the console says "the supervisor is not running"
+instead of showing a confident zero.
 
 ## Configuration (env vars)
 
@@ -40,12 +55,12 @@ curl -s http://127.0.0.1:7881/health        # {"status":"ok"}
 | `TRUSTY_MPM_AUTO_RESUME` | `0` (off) | `1`/`true` enables auto-resume of `stopped` sessions. **This is the master switch for resume.** |
 | `TRUSTY_MPM_SUPERVISOR_INTERVAL` | `30` | Poll interval, seconds. |
 | `TRUSTY_MPM_SUPERVISOR_CLASSIFY` | `1` (on) | `0`/`false` disables idle classification (no LLM spend). |
-| `TRUSTY_MPM_SUPERVISOR_ADDR` | `127.0.0.1:7881` | `/metrics` + `/health` bind address. |
 | `TRUSTY_LLM_MODEL` | `openai/gpt-4o-mini` | OpenRouter model used for idle-session activity classification. |
 | `OPENROUTER_API_KEY` | — | Required for real activity classification; absent ⇒ `unknown`. |
 
-CLI flags (`--interval`, `--addr`, `--auto-resume`, `--no-classify`) override the
-env vars.
+CLI flags (`--interval`, `--auto-resume`, `--no-classify`) override the env vars.
+`TRUSTY_MPM_SUPERVISOR_ADDR` and `--addr` were removed by #6288 along with the
+listener they configured; a leftover value in an environment is ignored.
 
 ## Enabling auto-resume
 
@@ -113,3 +128,8 @@ loginctl enable-linger "$USER"     # run without an active login session
 - macOS: `~/.trusty-mpm/logs/supervisor.{out,err}.log` plus the daily-rotated
   `~/.trusty-mpm/logs/trusty-mpm.log*`.
 - Linux: `journalctl --user -u trusty-mpm-supervisor -f`.
+
+A publish failure is logged at `error` and the sweep loop keeps going — losing
+observability must not stop auto-resume. The daemon then reports the snapshot as
+stale or unavailable, so a persistent failure shows up in the console rather than
+being swallowed.

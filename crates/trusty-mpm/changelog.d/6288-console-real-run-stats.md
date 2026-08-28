@@ -1,0 +1,2 @@
+Fixed
+- `console_metrics` and `supervisor_status` now report the supervisor's real `run_stats` — sweeps, auto-resumes, resume failures, classifications — instead of a permanent zero. A missing, corrupt, or stale snapshot is reported in a new `supervisor_metrics` field rather than as a silent zero. Staleness is measured against the supervisor's own configured sweep interval (three sweeps, floored at 300s), so a slow overnight cadence is not reported as a dead supervisor (Refs #6288).

@@ -7,12 +7,13 @@
 //! for a human, and survives reboots under launchd/systemd. It is a PASSIVE
 //! observer — it never makes autonomy decisions and never auto-answers a decision;
 //! it feeds fleet state back to a human or a higher-level fleet manager.
-//! What: re-exports the config, metrics, poller, and (feature-gated) HTTP types,
-//! and defines [`Supervisor`] — the long-running loop that, each tick, runs a
-//! fleet sweep ([`poller::run_tick`]), folds the result into [`SupervisorRunStats`],
-//! and publishes a fresh [`FleetMetrics`] snapshot for the `/metrics` endpoint.
+//! What: re-exports the config, metrics, poller, and publication types, and
+//! defines [`Supervisor`] — the long-running loop that, each tick, runs a fleet
+//! sweep ([`poller::run_tick`]), folds the result into [`SupervisorRunStats`],
+//! and publishes a fresh [`FleetMetrics`] snapshot to
+//! `<framework root>/supervisor-metrics.json` for the daemon to read (#6288).
 //! Test: `super::tests` covers config parsing, metrics derivation, the per-tick
-//! sweep (including an N-session fleet), and the HTTP handlers.
+//! sweep (including an N-session fleet), and the publish/read round trip.
 //!
 //! [`Supervisor`]: crate::supervisor::Supervisor
 //! [`poller::run_tick`]: crate::supervisor::poller::run_tick
@@ -22,9 +23,7 @@
 pub mod config;
 pub mod metrics;
 pub mod poller;
-
-#[cfg(feature = "daemon")]
-pub mod http;
+pub mod publish;
 
 #[cfg(test)]
 mod tests;
@@ -43,9 +42,7 @@ use crate::session_manager::SessionManager;
 pub use config::SupervisorConfig;
 pub use metrics::{FleetMetrics, PendingDecision, SupervisorRunStats};
 pub use poller::{TickReport, run_tick};
-
-#[cfg(feature = "daemon")]
-pub use http::{MetricsHandle, new_handle};
+pub use publish::{PublishedMetrics, SupervisorMetricsStatus};
 
 /// The unattended fleet supervisor.
 ///
@@ -72,6 +69,8 @@ pub struct Supervisor<C: LlmClassifier> {
     /// #5208: the last override read successfully, so a transient read failure
     /// cannot silently flip auto-resume off.
     last_override: Option<bool>,
+    /// #6288: where each sweep's snapshot is published for the daemon to read.
+    metrics_path: PathBuf,
 }
 
 impl<C: LlmClassifier> Supervisor<C> {
@@ -96,6 +95,9 @@ impl<C: LlmClassifier> Supervisor<C> {
             // writes, so production wiring needs no extra call.
             auto_resume_path: auto_resume::desired_path(&FrameworkPaths::default()),
             last_override: None,
+            // #6288: the same `~/.trusty-mpm` root the daemon reads from, so
+            // production wiring needs no extra call.
+            metrics_path: publish::metrics_path(&FrameworkPaths::default()),
         }
     }
 
@@ -110,6 +112,26 @@ impl<C: LlmClassifier> Supervisor<C> {
     pub fn with_auto_resume_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.auto_resume_path = path.into();
         self
+    }
+
+    /// Point the supervisor at a specific published-metrics file (#6288).
+    ///
+    /// Why: `new` resolves the real `~/.trusty-mpm/supervisor-metrics.json`, so a
+    /// test that let the loop publish would overwrite the developer's own live
+    /// snapshot. Tests pin a temp path; production keeps the default.
+    /// What: replaces [`Self::metrics_path`] and returns `self` for chaining.
+    /// Test: `supervisor_publishes_run_stats_after_sweeps`.
+    #[must_use]
+    pub fn with_metrics_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.metrics_path = path.into();
+        self
+    }
+
+    /// The path this supervisor publishes its snapshot to.
+    ///
+    /// Test: `supervisor_publishes_run_stats_after_sweeps`.
+    pub fn metrics_path(&self) -> &std::path::Path {
+        &self.metrics_path
     }
 
     /// Resolve the auto-resume flag in force for the sweep about to run.
@@ -205,7 +227,7 @@ impl<C: LlmClassifier> Supervisor<C> {
 
     /// Compute a fresh fleet-metrics snapshot overlaid with current run stats.
     ///
-    /// Why: the `/metrics` endpoint must reflect both the authoritative session
+    /// Why: the published snapshot must reflect both the authoritative session
     /// store AND what the supervisor itself has done; this composes the two.
     /// What: derives [`FleetMetrics::from_records`] from `mgr.list()` and copies the
     /// live `run_stats` in.
@@ -217,10 +239,43 @@ impl<C: LlmClassifier> Supervisor<C> {
         m
     }
 
+    /// Publish the current snapshot for the daemon to read (#6288).
+    ///
+    /// Why: `run_stats` lives only in this process. Until #6288 it left the
+    /// supervisor over a second HTTP listener nothing read, so the daemon's
+    /// `console_metrics` / `supervisor_status` reported zero sweeps forever.
+    /// Writing the snapshot to `<framework root>/supervisor-metrics.json` after
+    /// every sweep is what makes those counters real.
+    /// What: computes [`Self::snapshot`] and writes it atomically via
+    /// [`publish::write_at`]. BEST-EFFORT by design: a publish failure is logged
+    /// at `error` and the loop continues, because losing observability must not
+    /// stop the supervisor from auto-resuming sessions. The reader reports the
+    /// resulting staleness rather than a silent zero, so a persistent failure is
+    /// visible in the console instead of being swallowed here.
+    /// Test: `supervisor_publishes_run_stats_after_sweeps`.
+    pub async fn publish_snapshot(&self) {
+        let snapshot = self.snapshot().await;
+        // #6288: the cadence travels with the snapshot so the reader can size its
+        // staleness window against the interval this supervisor actually runs at,
+        // rather than a fixed constant a slow overnight cadence would trip.
+        if let Err(e) = publish::write_at(
+            &self.metrics_path,
+            &snapshot,
+            self.cfg.interval,
+            chrono::Utc::now(),
+        ) {
+            error!(
+                path = %self.metrics_path.display(),
+                "supervisor: cannot publish metrics snapshot: {e}; \
+                 the console will report it as unavailable/stale"
+            );
+        }
+    }
+
     /// Run the supervisor loop until an OS shutdown signal arrives.
     ///
     /// Why: this is the unattended heartbeat — it keeps the fleet moving (auto-
-    /// resume), keeps observing (classification), and keeps the `/metrics`
+    /// resume), keeps observing (classification), and keeps the published
     /// snapshot fresh, with no live caller. Per the project's connection-safe
     /// restart convention (CLAUDE.md #534) it must stop *cleanly* on SIGTERM /
     /// Ctrl-C: never killed mid-sweep, so a `cargo install` + restart cannot
@@ -231,9 +286,8 @@ impl<C: LlmClassifier> Supervisor<C> {
     /// Test: the per-iteration behavior is tested via `tick` + `snapshot`; clean
     /// shutdown is tested via `run_until` with an injected shutdown future
     /// (`supervisor_run_until_stops_cleanly`).
-    #[cfg(feature = "daemon")]
-    pub async fn run(self, handle: http::MetricsHandle) -> anyhow::Result<()> {
-        self.run_until(handle, shutdown_signal()).await
+    pub async fn run(self) -> anyhow::Result<()> {
+        self.run_until(shutdown_signal()).await
     }
 
     /// Run the supervisor loop until `shutdown` resolves, publishing snapshots.
@@ -244,16 +298,12 @@ impl<C: LlmClassifier> Supervisor<C> {
     /// keeps the loop testable: production passes the OS-signal future, a unit test
     /// passes a future it controls (e.g. a oneshot) to trigger a deterministic stop.
     /// What: on an interval timer (`cfg.interval`), `select!`s the next tick against
-    /// `shutdown`. On a tick it runs [`Self::tick`] and republishes [`Self::snapshot`]
-    /// into `handle`; once `shutdown` resolves it breaks the loop *after* any
-    /// in-flight sweep completes, logs a final line, and returns `Ok(())`.
+    /// `shutdown`. On a tick it runs [`Self::tick`] and republishes the snapshot
+    /// via [`Self::publish_snapshot`]; once `shutdown` resolves it breaks the loop
+    /// *after* any in-flight sweep completes, logs a final line, and returns
+    /// `Ok(())`.
     /// Test: `supervisor_run_until_stops_cleanly`.
-    #[cfg(feature = "daemon")]
-    pub async fn run_until(
-        mut self,
-        handle: http::MetricsHandle,
-        shutdown: impl Future<Output = ()>,
-    ) -> anyhow::Result<()> {
+    pub async fn run_until(mut self, shutdown: impl Future<Output = ()>) -> anyhow::Result<()> {
         // #5208: report the flag actually in force at boot, not just the env one —
         // the persisted console override outranks it and is consulted every sweep.
         let boot_auto_resume = self.resolve_auto_resume();
@@ -274,9 +324,10 @@ impl<C: LlmClassifier> Supervisor<C> {
             );
         }
         let mut timer = tokio::time::interval(self.cfg.interval);
-        // Publish an initial snapshot before the first sleep so /metrics is
-        // populated immediately on startup rather than after one full interval.
-        *handle.write().await = self.snapshot().await;
+        // #6288: publish an initial snapshot before the first sleep so the
+        // console sees the supervisor immediately on startup rather than after
+        // one full interval (during which it would read `unavailable`).
+        self.publish_snapshot().await;
         // Pin the shutdown future so it can be polled across loop iterations.
         let mut shutdown = std::pin::pin!(shutdown);
         loop {
@@ -294,7 +345,7 @@ impl<C: LlmClassifier> Supervisor<C> {
                 }
                 _ = timer.tick() => {
                     self.tick().await;
-                    *handle.write().await = self.snapshot().await;
+                    self.publish_snapshot().await;
                 }
             }
         }
@@ -315,7 +366,6 @@ impl<C: LlmClassifier> Supervisor<C> {
 /// Test: covered indirectly — `run`'s shutdown path is unit-tested via
 /// `run_until` with an injected future, since real OS signals can't be raised
 /// deterministically in a parallel test binary.
-#[cfg(feature = "daemon")]
 async fn shutdown_signal() {
     let ctrl_c = async {
         if let Err(e) = tokio::signal::ctrl_c().await {

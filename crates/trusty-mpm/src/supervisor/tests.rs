@@ -2,12 +2,12 @@
 //!
 //! Why: the supervisor is a long-running unattended process; its consequential
 //! behavior (auto-resume gating, the N-session fleet sweep, metrics derivation,
-//! HTTP handlers) must be proven offline — no real timers, tmux, or LLM. A
+//! snapshot publication) must be proven offline — no real timers, tmux, or LLM. A
 //! separate test file also keeps the production modules under the 500 SLOC cap.
 //! What: a self-contained `FakeTmux` driver and a `StubClassifier`, plus tests
 //! for config env parsing, [`FleetMetrics`] derivation, per-tick sweeps, the
 //! N-session fleet auto-resume (the #1206 acceptance criterion), the
-//! never-answer-pending-decision invariant, and the `/metrics` + `/health` routes.
+//! never-answer-pending-decision invariant, and the #6288 publish/read contract.
 //! Test: this file IS the test module; run `cargo test -p trusty-mpm`.
 
 use std::collections::HashMap;
@@ -27,10 +27,11 @@ use crate::session_manager::{
 use super::Supervisor;
 use super::config::{
     DEFAULT_LLM_MODEL, ENV_AUTO_RESUME, ENV_CLASSIFY_IDLE, ENV_INTERVAL_SECS, ENV_LLM_MODEL,
-    ENV_METRICS_ADDR, SupervisorConfig,
+    SupervisorConfig,
 };
 use super::metrics::FleetMetrics;
 use super::poller::run_tick;
+use super::publish::{self, SupervisorMetricsStatus};
 
 // ── Test doubles ─────────────────────────────────────────────────────────────
 
@@ -234,7 +235,7 @@ async fn seed_sessions(
 /// What: returns an `impl Fn(&str) -> Option<String>` that looks each key up in the
 /// supplied pairs, mirroring `std::env::var(key).ok()`.
 /// Test: used by `auto_resume_env_parsing`, `interval_env_parsing`,
-/// `classify_idle_env_parsing`, `metrics_addr_env_parsing`.
+/// `classify_idle_env_parsing`.
 fn fake_env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
     let map: HashMap<String, String> = pairs
         .iter()
@@ -249,7 +250,6 @@ fn config_defaults() {
     assert_eq!(c.interval.as_secs(), 30);
     assert!(!c.auto_resume);
     assert!(c.classify_idle);
-    assert_eq!(c.metrics_addr.to_string(), "127.0.0.1:7881");
     // An empty injected env yields the same defaults (no process env touched).
     let from_empty = SupervisorConfig::from_env_with(fake_env(&[]));
     assert_eq!(from_empty, c);
@@ -296,13 +296,22 @@ fn classify_idle_env_parsing() {
     assert!(unset.classify_idle);
 }
 
+/// REGRESSION (#6288): the supervisor binds no address, so no env var, CLI flag,
+/// or config field may reintroduce one. `TRUSTY_MPM_SUPERVISOR_ADDR` was the
+/// name; a config built with it set must be indistinguishable from the default,
+/// which is only true while `SupervisorConfig` has no address field at all.
 #[test]
-fn metrics_addr_env_parsing() {
-    let custom = SupervisorConfig::from_env_with(fake_env(&[(ENV_METRICS_ADDR, "127.0.0.1:9999")]));
-    assert_eq!(custom.metrics_addr.to_string(), "127.0.0.1:9999");
-    // Garbage falls back to the default address.
-    let garbage = SupervisorConfig::from_env_with(fake_env(&[(ENV_METRICS_ADDR, "garbage")]));
-    assert_eq!(garbage.metrics_addr.to_string(), "127.0.0.1:7881");
+fn supervisor_config_ignores_a_stale_bind_address() {
+    let with_stale_addr = SupervisorConfig::from_env_with(fake_env(&[(
+        "TRUSTY_MPM_SUPERVISOR_ADDR",
+        "127.0.0.1:7881",
+    )]));
+    assert_eq!(
+        with_stale_addr,
+        SupervisorConfig::default(),
+        "a leftover TRUSTY_MPM_SUPERVISOR_ADDR in an operator's environment must \
+         change nothing — the supervisor publishes to a file (#6288)"
+    );
 }
 
 #[test]
@@ -888,110 +897,401 @@ async fn supervisor_failed_resume_surfaces_as_errored() {
     );
 }
 
-// ── HTTP tests (daemon feature) ──────────────────────────────────────────────
+// ── #6288: snapshot publication (the file the daemon reads) ──────────────────
 
-#[cfg(feature = "daemon")]
-mod http_tests {
-    use super::*;
-    use crate::supervisor::http;
-    use axum::body::Body;
-    use axum::http::{Request, StatusCode};
-    use tower::ServiceExt as _;
+/// Why: the daemon deserialises exactly what the supervisor serialised; a field
+/// rename on either side silently degrades `run_stats` back to zero, which is
+/// the defect #6288 exists to close. Round-tripping through the real file pins
+/// the wire shape.
+/// Test: this is the test.
+#[test]
+fn published_metrics_round_trip() {
+    let tmp = TempDir::new().expect("tempdir");
+    let path = tmp.path().join("nested").join("supervisor-metrics.json");
+    let mut fleet = FleetMetrics::from_records(&[
+        rec(ManagedSessionState::Active, None),
+        rec(ManagedSessionState::Stopped, None),
+    ]);
+    fleet.run_stats.sweeps = 7;
+    fleet.run_stats.auto_resumed = 3;
+    let now = Utc::now();
+    let interval = std::time::Duration::from_secs(45);
 
-    #[tokio::test]
-    async fn health_endpoint_ok() {
-        let handle = http::new_handle();
-        let app = http::router(handle);
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/health")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
-            .await
-            .unwrap();
-        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(v["status"], "ok");
+    publish::write_at(&path, &fleet, interval, now).expect("publish writes");
+    let back = publish::read_at(&path)
+        .expect("read succeeds")
+        .expect("a snapshot exists");
+    assert_eq!(back.fleet, fleet);
+    assert_eq!(back.written_at.timestamp(), now.timestamp());
+    assert_eq!(
+        back.interval_secs, 45,
+        "the writer's cadence must travel with the snapshot — the reader sizes \
+         its staleness window from it"
+    );
+
+    // Atomic publish: the temp file is renamed into place, never left behind.
+    let leftovers: Vec<_> = std::fs::read_dir(path.parent().expect("parent"))
+        .expect("readdir")
+        .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+        .filter(|n| n.ends_with(".tmp"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "temp files left behind: {leftovers:?}"
+    );
+}
+
+/// FAIL-OPEN CHECK (#6288): no snapshot must read as `Unavailable` carrying a
+/// reason, never as a silently-zeroed `run_stats`. Before this issue the daemon
+/// had no file to read and reported zero sweeps with nothing to explain it.
+/// Test: this is the test.
+#[test]
+fn read_status_absent_is_unavailable() {
+    let tmp = TempDir::new().expect("tempdir");
+    let path = tmp.path().join("supervisor-metrics.json");
+    match publish::read_status_at(&path, Utc::now()) {
+        SupervisorMetricsStatus::Unavailable { reason } => {
+            assert!(
+                reason.contains("supervisor"),
+                "the reason must tell an operator what is missing: {reason}"
+            );
+        }
+        other => panic!("an absent snapshot must be Unavailable, got {other:?}"),
+    }
+}
+
+/// FAIL-OPEN CHECK (#6288): a corrupt or truncated file must NOT be flattened
+/// into "absent and therefore zero" — it reports `Unavailable` with the parse
+/// error, so a broken publisher is visible rather than looking like an idle one.
+/// Test: this is the test.
+#[test]
+fn read_status_corrupt_is_unavailable() {
+    let tmp = TempDir::new().expect("tempdir");
+    let path = tmp.path().join("supervisor-metrics.json");
+    std::fs::write(&path, "{ this is not json").expect("write corrupt");
+    match publish::read_status_at(&path, Utc::now()) {
+        SupervisorMetricsStatus::Unavailable { reason } => {
+            assert!(
+                reason.contains("json"),
+                "a corrupt file must report the parse failure: {reason}"
+            );
+        }
+        other => panic!("a corrupt snapshot must be Unavailable, got {other:?}"),
+    }
+}
+
+/// Why (#6288): a stopped supervisor leaves its last file on disk forever.
+/// Presenting month-old counters as current is the same lie as presenting zero,
+/// so the reader ages them out. It still hands back the snapshot, because the
+/// last real observation beats no observation.
+/// Test: this is the test.
+#[test]
+fn read_status_old_snapshot_is_stale() {
+    let tmp = TempDir::new().expect("tempdir");
+    let path = tmp.path().join("supervisor-metrics.json");
+    let mut fleet = FleetMetrics::default();
+    fleet.run_stats.sweeps = 42;
+    // The default 30s cadence puts the threshold on the floor (300s), so this
+    // is the same case the fixed constant used to cover.
+    let default_interval = SupervisorConfig::default().interval;
+    let threshold = publish::stale_after_secs(default_interval);
+    assert_eq!(
+        threshold,
+        publish::STALE_FLOOR_SECS,
+        "default cadence floors"
+    );
+    let written_at = Utc::now() - chrono::Duration::seconds(threshold + 60);
+    publish::write_at(&path, &fleet, default_interval, written_at).expect("publish writes");
+
+    match publish::read_status_at(&path, Utc::now()) {
+        SupervisorMetricsStatus::Stale {
+            snapshot,
+            age_secs,
+            stale_after_secs,
+        } => {
+            assert_eq!(stale_after_secs, threshold);
+            assert!(age_secs > threshold, "age {age_secs}");
+            assert_eq!(
+                snapshot.fleet.run_stats.sweeps, 42,
+                "a stale snapshot still carries the last real counters"
+            );
+        }
+        other => panic!("an old snapshot must be Stale, got {other:?}"),
     }
 
-    #[tokio::test]
-    async fn supervisor_run_until_stops_cleanly() {
-        // The loop must finish cleanly when its injected shutdown future resolves,
-        // having published at least the initial snapshot — never killed mid-sweep.
-        let dir = TempDir::new().unwrap();
-        let ws = TempDir::new().unwrap();
-        let tmux = FakeTmux::new();
-        let mgr = make_manager(&dir, tmux.clone()).await;
-        seed_sessions(&mgr, 2, ManagedSessionState::Stopped, &ws).await;
+    // The same file republished now is current.
+    publish::write_at(&path, &fleet, default_interval, Utc::now()).expect("republish");
+    assert!(
+        matches!(
+            publish::read_status_at(&path, Utc::now()),
+            SupervisorMetricsStatus::Current { .. }
+        ),
+        "a freshly-published snapshot must be Current"
+    );
+}
 
-        // A long interval guarantees the loop is parked on the timer when the
-        // shutdown signal fires, exercising the biased select's shutdown arm.
-        let cfg = SupervisorConfig {
-            interval: std::time::Duration::from_secs(3600),
-            auto_resume: true,
-            classify_idle: false,
-            ..SupervisorConfig::default()
-        };
-        let sup: Supervisor<StubClassifier> =
-            Supervisor::new(mgr, cfg, None).with_auto_resume_path(no_override(&dir));
+/// REGRESSION (#6288 critic HIGH): the staleness window is derived from the
+/// writer's cadence, not a fixed constant.
+///
+/// Why: `TRUSTY_MPM_SUPERVISOR_INTERVAL` is unbounded and `config.rs` documents
+/// slow overnight cadences as supported. A fixed 300s threshold marks a healthy
+/// supervisor stale for part of every cycle once the interval passes 300s, and
+/// permanently once it passes 600s. The floor keeps a fast cadence from flapping.
+/// Test: this is the test.
+#[test]
+fn stale_threshold_tracks_the_configured_interval() {
+    use std::time::Duration;
+    // Below the floor: the floor wins, so a 30s default keeps its 300s window.
+    assert_eq!(
+        publish::stale_after_secs(Duration::from_secs(30)),
+        publish::STALE_FLOOR_SECS
+    );
+    assert_eq!(
+        publish::stale_after_secs(Duration::from_secs(1)),
+        publish::STALE_FLOOR_SECS,
+        "a 1s debug cadence must not flap on ordinary scheduling jitter"
+    );
+    // At and above the floor: three sweeps.
+    assert_eq!(publish::stale_after_secs(Duration::from_secs(100)), 300);
+    assert_eq!(publish::stale_after_secs(Duration::from_secs(900)), 2700);
+    assert_eq!(publish::stale_after_secs(Duration::from_secs(3600)), 10_800);
+    // A nonsensical interval saturates rather than overflowing.
+    assert!(publish::stale_after_secs(Duration::from_secs(u64::MAX)) > 0);
+}
 
-        let handle = http::new_handle();
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        // Fire shutdown almost immediately; the loop should observe it and return.
-        tokio::spawn(async move {
-            let _ = tx.send(());
-        });
-        let shutdown = async move {
-            let _ = rx.await;
-        };
+/// REGRESSION (#6288 critic HIGH): a supervisor on a 15-minute overnight cadence
+/// reads Current 400 seconds after its last publish — a fixed 300s threshold
+/// called it Stale — and Stale only once it has genuinely missed three sweeps.
+/// Test: this is the test.
+#[test]
+fn read_status_respects_a_slow_configured_interval() {
+    let tmp = TempDir::new().expect("tempdir");
+    let path = tmp.path().join("supervisor-metrics.json");
+    let slow = std::time::Duration::from_secs(900);
+    let mut fleet = FleetMetrics::default();
+    fleet.run_stats.sweeps = 5;
+    let written_at = Utc::now();
+    publish::write_at(&path, &fleet, slow, written_at).expect("publish writes");
 
-        // Bound the test so a regression (loop ignoring shutdown) fails fast
-        // instead of hanging the suite.
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            sup.run_until(handle.clone(), shutdown),
-        )
+    let at_400 = written_at + chrono::Duration::seconds(400);
+    match publish::read_status_at(&path, at_400) {
+        SupervisorMetricsStatus::Current {
+            stale_after_secs, ..
+        } => assert_eq!(stale_after_secs, 2700),
+        other => panic!(
+            "a 900s-cadence supervisor 400s after its publish is mid-cycle and              healthy, not stale: {other:?}"
+        ),
+    }
+
+    let at_3000 = written_at + chrono::Duration::seconds(3000);
+    match publish::read_status_at(&path, at_3000) {
+        SupervisorMetricsStatus::Stale {
+            age_secs,
+            stale_after_secs,
+            ..
+        } => {
+            assert_eq!(age_secs, 3000);
+            assert_eq!(stale_after_secs, 2700);
+        }
+        other => panic!("three missed 900s sweeps must read Stale: {other:?}"),
+    }
+}
+
+/// Why: a snapshot left by a binary that predates `interval_secs` must still
+/// parse, and must fall back to the default cadence — which floors the window at
+/// the 300s the fixed constant used, so an upgrade changes no verdict.
+/// Test: this is the test.
+#[test]
+fn snapshot_without_interval_falls_back_to_the_default_cadence() {
+    let tmp = TempDir::new().expect("tempdir");
+    let path = tmp.path().join("supervisor-metrics.json");
+    let written_at = Utc::now() - chrono::Duration::seconds(120);
+    let legacy = serde_json::json!({
+        "written_at": written_at,
+        "fleet": FleetMetrics::default(),
+    });
+    std::fs::write(&path, legacy.to_string()).expect("write legacy snapshot");
+
+    let back = publish::read_at(&path)
+        .expect("a pre-interval snapshot must still parse")
+        .expect("a snapshot exists");
+    assert_eq!(
+        back.interval_secs,
+        crate::supervisor::config::DEFAULT_INTERVAL_SECS
+    );
+    match publish::read_status_at(&path, Utc::now()) {
+        SupervisorMetricsStatus::Current {
+            stale_after_secs, ..
+        } => assert_eq!(
+            stale_after_secs,
+            publish::STALE_FLOOR_SECS,
+            "the fallback must reproduce the pre-#6288 window exactly"
+        ),
+        other => panic!("120s old at the default cadence is Current: {other:?}"),
+    }
+}
+
+/// Why: `metrics_path` is the one location the supervisor writes and the daemon
+/// reads; a drift between them is invisible until `run_stats` silently zeroes.
+/// Test: this is the test.
+#[test]
+fn metrics_path_is_under_root() {
+    let paths = crate::core::paths::FrameworkPaths::under("/tmp/test-base");
+    let p = publish::metrics_path(&paths);
+    assert!(p.ends_with(".trusty-mpm/supervisor-metrics.json"), "{p:?}");
+}
+
+/// BEHAVIORAL BAR (#6288): after real sweeps against a real session manager, the
+/// counters a reader picks out of the published file are the supervisor's actual
+/// `run_stats` — non-zero sweeps and non-zero auto-resumes. This is the
+/// end-to-end path `console_metrics` / `supervisor_status` now take; the daemon
+/// side of the same round trip is
+/// `supervisor_metrics_merge_reports_real_run_stats` below.
+/// Test: this is the test.
+#[tokio::test]
+async fn supervisor_publishes_run_stats_after_sweeps() {
+    let dir = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    let tmux = FakeTmux::new();
+    let mgr = make_manager(&dir, tmux.clone()).await;
+    seed_sessions(&mgr, 2, ManagedSessionState::Stopped, &ws).await;
+
+    let cfg = SupervisorConfig {
+        auto_resume: true,
+        classify_idle: false,
+        ..SupervisorConfig::default()
+    };
+    let metrics_file = dir.path().join("supervisor-metrics.json");
+    let mut sup: Supervisor<StubClassifier> = Supervisor::new(mgr, cfg, None)
+        .with_auto_resume_path(no_override(&dir))
+        .with_metrics_path(&metrics_file);
+
+    // Nothing published yet: a reader must say so rather than report zero.
+    assert!(
+        matches!(
+            publish::read_status_at(&metrics_file, Utc::now()),
+            SupervisorMetricsStatus::Unavailable { .. }
+        ),
+        "before the first sweep there is no snapshot to read"
+    );
+
+    sup.tick().await;
+    sup.publish_snapshot().await;
+    sup.tick().await;
+    sup.publish_snapshot().await;
+
+    match publish::read_status_at(&metrics_file, Utc::now()) {
+        SupervisorMetricsStatus::Current { snapshot, .. } => {
+            let stats = &snapshot.fleet.run_stats;
+            assert_eq!(stats.sweeps, 2, "two real sweeps must be published");
+            assert_eq!(
+                stats.auto_resumed, 2,
+                "both seeded stopped sessions were auto-resumed; the published \
+                 counters must say so rather than defaulting to zero"
+            );
+        }
+        other => panic!("a just-published snapshot must be Current, got {other:?}"),
+    }
+}
+
+/// Why: the loop must publish an initial snapshot BEFORE parking on the timer,
+/// so the console sees the supervisor immediately on start rather than after one
+/// full interval, and must return cleanly on shutdown — never killed mid-sweep
+/// (CLAUDE.md #534).
+/// Test: this is the test.
+#[tokio::test]
+async fn supervisor_run_until_stops_cleanly() {
+    let dir = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    let tmux = FakeTmux::new();
+    let mgr = make_manager(&dir, tmux.clone()).await;
+    seed_sessions(&mgr, 2, ManagedSessionState::Stopped, &ws).await;
+
+    // A long interval guarantees the loop is parked on the timer when the
+    // shutdown signal fires, exercising the biased select's shutdown arm.
+    let cfg = SupervisorConfig {
+        interval: std::time::Duration::from_secs(3600),
+        auto_resume: true,
+        classify_idle: false,
+    };
+    let metrics_file = dir.path().join("supervisor-metrics.json");
+    let sup: Supervisor<StubClassifier> = Supervisor::new(mgr, cfg, None)
+        .with_auto_resume_path(no_override(&dir))
+        .with_metrics_path(&metrics_file);
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    // Fire shutdown almost immediately; the loop should observe it and return.
+    tokio::spawn(async move {
+        let _ = tx.send(());
+    });
+    let shutdown = async move {
+        let _ = rx.await;
+    };
+
+    // Bound the test so a regression (loop ignoring shutdown) fails fast
+    // instead of hanging the suite.
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), sup.run_until(shutdown))
         .await
         .expect("run_until must return promptly after shutdown");
-        result.expect("clean shutdown returns Ok");
+    result.expect("clean shutdown returns Ok");
 
-        // The initial snapshot was published before the loop parked on the timer.
-        assert_eq!(handle.read().await.stopped, 2);
-    }
+    // The initial snapshot was published before the loop parked on the timer.
+    let published = publish::read_at(&metrics_file)
+        .expect("read")
+        .expect("the loop published before parking on the timer");
+    assert_eq!(published.fleet.stopped, 2);
+}
 
-    #[tokio::test]
-    async fn metrics_endpoint_returns_snapshot() {
-        let handle = http::new_handle();
-        // Seed the shared snapshot as the loop would.
-        {
-            let records = vec![
-                rec(ManagedSessionState::Active, None),
-                rec(ManagedSessionState::Stopped, None),
-            ];
-            *handle.write().await = FleetMetrics::from_records(&records);
-        }
-        let app = http::router(handle);
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/metrics")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
-            .await
-            .unwrap();
-        let m: FleetMetrics = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(m.active, 1);
-        assert_eq!(m.stopped, 1);
-        assert_eq!(m.total, 2);
-    }
+/// BEHAVIORAL BAR (#6288), the daemon half: after real sweeps, the exact
+/// function `console_metrics` and `supervisor_status` call reports NON-ZERO
+/// `run_stats` read out of the published file, and labels them `current`.
+///
+/// Why this and not `supervisor_status(&state)` directly: that entry point
+/// resolves `FrameworkPaths::default()`, so asserting on it would read (and the
+/// supervisor half would overwrite) the developer's live
+/// `~/.trusty-mpm/supervisor-metrics.json`. `merge_supervisor_metrics` is the
+/// whole of what `fleet_snapshot` adds on top of `FleetMetrics::from_records`,
+/// driven here against a temp file. `supervisor_status_reports_fleet_and_auto_resume`
+/// covers the wiring from the tool down to it.
+/// Test: this is the test.
+#[cfg(feature = "daemon")]
+#[tokio::test]
+async fn supervisor_metrics_merge_reports_real_run_stats() {
+    let dir = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    let tmux = FakeTmux::new();
+    let mgr = make_manager(&dir, tmux.clone()).await;
+    seed_sessions(&mgr, 3, ManagedSessionState::Stopped, &ws).await;
+
+    let cfg = SupervisorConfig {
+        auto_resume: true,
+        classify_idle: false,
+        ..SupervisorConfig::default()
+    };
+    let metrics_file = dir.path().join("supervisor-metrics.json");
+    let mut sup: Supervisor<StubClassifier> = Supervisor::new(mgr, cfg, None)
+        .with_auto_resume_path(no_override(&dir))
+        .with_metrics_path(&metrics_file);
+    sup.tick().await;
+    sup.publish_snapshot().await;
+
+    // What the daemon does: derive the fleet from the session store (run_stats
+    // default), then merge in what the supervisor published.
+    let mut fleet = FleetMetrics::default();
+    assert_eq!(
+        fleet.run_stats.sweeps, 0,
+        "precondition: the daemon starts from zeroed counters"
+    );
+    let block =
+        crate::daemon::mcp_console::merge_supervisor_metrics(&mut fleet, &metrics_file, Utc::now());
+
+    assert_eq!(block["status"], "current");
+    assert_eq!(
+        fleet.run_stats.sweeps, 1,
+        "the daemon must report the supervisor's real sweep count, not zero"
+    );
+    assert_eq!(
+        fleet.run_stats.auto_resumed, 3,
+        "the daemon must report the supervisor's real auto-resume count: {block}"
+    );
 }

@@ -545,12 +545,14 @@ pub fn guard_bootstrap(binary: &str) -> Result<(), String> {
 /// Guard a prospective `launchctl bootstrap` for an explicitly named launchd
 /// label and port set (#4470).
 ///
-/// Why: not every bootstrap in this crate belongs to a stable-set MEMBER. The
-/// trusty-mpm supervisor (`plist_bootstrap`) has its own label and its own
-/// fixed port, and it was the one bootstrap site the first round of this fix
-/// missed. Taking `(what, label, ports)` explicitly — rather than deriving them
-/// from a member name — is what lets every site share ONE policy instead of the
-/// supervisor growing a second, drifting copy.
+/// Why: not every bootstrap in this crate belongs to a stable-set MEMBER, and a
+/// caller may already know the label and ports it means to guard rather than a
+/// member name to derive them from. [`guard_bootstrap`] is the member-name
+/// wrapper over this; both share ONE policy instead of each site growing its own
+/// drifting copy. #6288 removed the non-member caller this seam was introduced
+/// for (the trusty-mpm supervisor, which no longer binds a port), so today every
+/// caller arrives through `guard_bootstrap` — `lifecycle::launchd_control`'s
+/// Start and Restart paths and `service_bootstrap::RealServiceEnv::port_guard`.
 ///
 /// What: observes the port holder and launchd's owner for `label`, runs
 /// [`decide_over_range`], and maps the verdict onto a `Result`. `Ok(())` means

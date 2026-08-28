@@ -584,16 +584,12 @@ pub(crate) enum Command {
     /// metrics — all while making NO autonomy decisions itself.
     /// What: runs the supervisor loop, polling the managed-session store on an
     /// interval. Auto-resume is gated by `TRUSTY_MPM_AUTO_RESUME=1`; the poll
-    /// cadence, classification toggle, and metrics address are read from env
-    /// (`TRUSTY_MPM_SUPERVISOR_*`) but may be overridden by these flags. Serves
-    /// `/metrics` + `/health` for fleet observability.
+    /// cadence and classification toggle are read from env
+    /// (`TRUSTY_MPM_SUPERVISOR_*`) but may be overridden by these flags. #6288:
+    /// it binds no listener — each sweep's snapshot is published to
+    /// `~/.trusty-mpm/supervisor-metrics.json`, which the daemon reads.
     /// Test: `cli_parses_supervisor`.
     Supervisor {
-        /// Address the supervisor's `/metrics` + `/health` server binds to.
-        ///
-        /// Overrides `TRUSTY_MPM_SUPERVISOR_ADDR` when supplied.
-        #[arg(long, env = "TRUSTY_MPM_SUPERVISOR_ADDR")]
-        addr: Option<SocketAddr>,
         /// Poll interval in seconds (overrides `TRUSTY_MPM_SUPERVISOR_INTERVAL`).
         #[arg(long)]
         interval: Option<u64>,

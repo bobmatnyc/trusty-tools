@@ -34,7 +34,6 @@ RestartSec=5
 # 1), or pass `tm supervisor --auto-resume`.
 # Environment=TRUSTY_MPM_AUTO_RESUME=1
 Environment=TRUSTY_MPM_SUPERVISOR_INTERVAL=30
-Environment=TRUSTY_MPM_SUPERVISOR_ADDR=127.0.0.1:7881
 Environment=RUST_LOG=info
 # Optional: enable idle-session classification.
 # Environment=OPENROUTER_API_KEY=sk-or-...

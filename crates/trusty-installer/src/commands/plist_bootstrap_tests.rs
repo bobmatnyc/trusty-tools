@@ -557,91 +557,32 @@ fn install_mpm_supervisor_for_candidate_version_ignores_path_shadow() {
     );
 }
 
-// ── #4470: the supervisor's own foreign-port guard ─────────────────────
+// ── #6288: the supervisor binds nothing ────────────────────────────────
 
-/// Why (#4470 HIGH-2): the guard's port constant and the plist's
-/// `TRUSTY_MPM_SUPERVISOR_ADDR` are two copies of one number. If the
-/// template moves the supervisor to another port and the constant does
-/// not follow, the guard silently checks a port nothing binds — present,
-/// green, and useless. Pinning them together makes that drift a failure.
-/// What: asserts the rendered template contains `127.0.0.1:<constant>`.
+/// REGRESSION (#6288): the supervisor publishes its metrics to
+/// `~/.trusty-mpm/supervisor-metrics.json` and binds no listener, so the plist
+/// must seed no bind address.
+///
+/// Why this replaces `supervisor_port_matches_the_plist_template` rather than
+/// deleting it: that test pinned `SUPERVISOR_METRICS_PORT` against the
+/// template so the #4470 foreign-port guard could not drift onto a port
+/// nothing bound. The guard is gone because the bind is gone — but a future
+/// edit that puts `TRUSTY_MPM_SUPERVISOR_ADDR` back into the template would
+/// silently restore the collision hazard with no guard left to catch it. This
+/// asserts the absence, so that edit fails here.
+/// What: asserts the rendered template carries no `TRUSTY_MPM_SUPERVISOR_ADDR`
+/// key and no `127.0.0.1:` literal.
 /// Test: This is the test.
 #[test]
-fn supervisor_port_matches_the_plist_template() {
-    let needle = format!("127.0.0.1:{SUPERVISOR_METRICS_PORT}");
+fn supervisor_plist_binds_no_port() {
     assert!(
-        PLIST_TEMPLATE.contains(&needle),
-        "PLIST_TEMPLATE no longer binds {needle}; update SUPERVISOR_METRICS_PORT \
-         (the #4470 guard checks that port)"
-    );
-}
-
-/// Why (#4470 HIGH-2): this was the bootstrap site the first round of the
-/// fix missed. It matters more than a member's, not less:
-/// `supervisor/http.rs::bind` binds the metrics port BEFORE the supervision
-/// loop and fails fast, and the plist sets `KeepAlive=true` — so a foreign
-/// holder makes launchd restart the supervisor into the same collision
-/// indefinitely.
-///
-/// This test fails if the guard call is removed from
-/// `install_mpm_supervisor_for`: the function returns `Ok`, and the stub
-/// records the bootout + bootstrap it should never have issued.
-///
-/// What: with the injected launchctl port refusing, asserts the install
-/// returns `Err` naming the reason, and that NO bootout, NO bootstrap, and
-/// NO plist write happened.
-/// Test: This is the test.
-#[test]
-fn install_mpm_supervisor_for_refuses_when_a_foreign_process_holds_the_supervisor_port() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let stub = StubLaunchctl {
-        refuse_port: Some(
-            "port 7881 is held by pid 9931, which launchd does not supervise".to_owned(),
-        ),
-        ..StubLaunchctl::new()
-    };
-    let target = SupervisorTarget {
-        home: tmp.path().to_owned(),
-        domain: "gui/999999-isolated-test-domain".to_owned(),
-        launchctl: &stub,
-    };
-    let tm_path = tmp.path().join("local-bin").join("tm");
-
-    let err = install_mpm_supervisor_for(&target, false, &tm_path)
-        .expect_err("a held supervisor port must refuse the bootstrap");
-    let msg = format!("{err:#}");
-    assert!(msg.contains("9931"), "must name the offending pid: {msg}");
-    assert!(
-        msg.contains("supervisor"),
-        "must name what it refused: {msg}"
-    );
-
-    let calls = stub.calls();
-    assert!(
-        !calls.iter().any(|c| c.starts_with("bootout")),
-        "a refusal must NOT bootout the running supervisor — that would stop it \
-         and then decline to bring it back: {calls:?}"
+        !PLIST_TEMPLATE.contains("TRUSTY_MPM_SUPERVISOR_ADDR"),
+        "the supervisor binds no listener since #6288; a bind address in \
+         PLIST_TEMPLATE would reintroduce the #4470 collision hazard with no \
+         port guard left to catch it"
     );
     assert!(
-        !calls.iter().any(|c| c.starts_with("bootstrap")),
-        "a refusal must not issue a bootstrap: {calls:?}"
-    );
-    let agents_dir = tmp.path().join("Library").join("LaunchAgents");
-    let plist_path = agents_dir.join(format!("{PLIST_LABEL}.plist"));
-    assert!(
-        !plist_path.exists(),
-        "a refusal must change nothing on disk; found {}",
-        plist_path.display()
-    );
-    // A refusal must not even leave the directories behind (round-2 LOW): the
-    // `create_dir_all` calls run after the gate, not before it.
-    assert!(
-        !agents_dir.exists(),
-        "a refusal must not create the LaunchAgents dir; found {}",
-        agents_dir.display()
-    );
-    assert!(
-        !tmp.path().join(".trusty-mpm").join("logs").exists(),
-        "a refusal must not create the log dir"
+        !PLIST_TEMPLATE.contains("127.0.0.1:"),
+        "PLIST_TEMPLATE must seed no loopback bind address: {PLIST_TEMPLATE}"
     );
 }

@@ -342,17 +342,15 @@ mod tests {
                 8080,
                 "trusty-agents/src/runtime/mode_dispatch.rs (--port default 8080)",
             ),
-            (
-                // #3364: trusty-mpm's supervisor metrics listener — a distinct
-                // process/port from the `tm` daemon (7880) above, deployed via
-                // launchd and easy to miss since it isn't `tctl`-managed.
-                "trusty-mpm-supervisor",
-                7881,
-                "trusty-mpm/src/supervisor/config.rs::DEFAULT_METRICS_ADDR",
-            ),
+            // #6288: trusty-mpm's supervisor has NO ROW. It stopped binding
+            // 7881 for a `/metrics` + `/health` listener nothing read and
+            // publishes to `~/.trusty-mpm/supervisor-metrics.json` instead, so
+            // 7881 is not reserved by anything and listing it would forbid a
+            // future daemon a free port. #3364 (below) is why the row existed.
             (
                 // #3364: trusty-code's own default HTTP port, which previously
-                // reused 7881 and collided with the supervisor entry above.
+                // reused 7881 and collided with the supervisor's listener,
+                // since retired.
                 "trusty-code",
                 7882,
                 "trusty-code/src/serve/mod.rs::DEFAULT_HTTP_PORT",

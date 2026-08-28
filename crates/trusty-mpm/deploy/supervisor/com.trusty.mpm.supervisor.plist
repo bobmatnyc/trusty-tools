@@ -51,8 +51,9 @@
         -->
         <key>TRUSTY_MPM_SUPERVISOR_INTERVAL</key>
         <string>30</string>
-        <key>TRUSTY_MPM_SUPERVISOR_ADDR</key>
-        <string>127.0.0.1:7881</string>
+        <!-- #6288: no TRUSTY_MPM_SUPERVISOR_ADDR. The supervisor binds no
+             listener; it publishes each sweep's snapshot to
+             ~/.trusty-mpm/supervisor-metrics.json, which the daemon reads. -->
         <key>RUST_LOG</key>
         <string>info</string>
         <!-- Optional: enable idle-session activity classification.

@@ -7,13 +7,13 @@
 //! `TRUSTY_MPM_SUPERVISOR_INTERVAL`, …) auditable and gives the loop a single
 //! immutable config value to read each tick.
 //! What: defines [`SupervisorConfig`] with the poll interval, the auto-resume
-//! gate, the idle-classification toggle, and the metrics bind address; plus
-//! [`SupervisorConfig::from_env`] which reads the documented env vars with safe
-//! defaults.
+//! gate, and the idle-classification toggle; plus [`SupervisorConfig::from_env`]
+//! which reads the documented env vars with safe defaults. #6288 removed the
+//! metrics bind address: the supervisor publishes to a file instead of binding
+//! `127.0.0.1:7881`.
 //! Test: `config_defaults`, `auto_resume_env_parsing`, `interval_env_parsing`,
 //! `classify_idle_env_parsing` in `super::tests`.
 
-use std::net::SocketAddr;
 use std::time::Duration;
 
 /// Environment variable that gates auto-resume of `stopped` sessions.
@@ -65,14 +65,6 @@ pub const DEFAULT_LLM_MODEL: &str = crate::activity::classifier::DEFAULT_CLASSIF
 /// Test: `classify_idle_env_parsing`.
 pub const ENV_CLASSIFY_IDLE: &str = "TRUSTY_MPM_SUPERVISOR_CLASSIFY";
 
-/// Environment variable that overrides the metrics HTTP bind address.
-///
-/// Why: operators co-locating several daemons need to move the metrics port off
-/// the default to avoid collisions.
-/// What: parsed as a `SocketAddr`; invalid / absent values fall back to the default.
-/// Test: `metrics_addr_env_parsing`.
-pub const ENV_METRICS_ADDR: &str = "TRUSTY_MPM_SUPERVISOR_ADDR";
-
 /// Default poll interval when [`ENV_INTERVAL_SECS`] is unset: 30 seconds.
 ///
 /// Why: 30s balances responsiveness (a stopped session resumes within half a
@@ -81,22 +73,13 @@ pub const ENV_METRICS_ADDR: &str = "TRUSTY_MPM_SUPERVISOR_ADDR";
 /// Test: `config_defaults`.
 pub const DEFAULT_INTERVAL_SECS: u64 = 30;
 
-/// Default metrics bind address when [`ENV_METRICS_ADDR`] is unset.
-///
-/// Why: loopback-only by default keeps fleet state off the network unless the
-/// operator opts in; `7881` sits next to the daemon's `7880`.
-/// What: the fallback address string parsed by [`SupervisorConfig::from_env`].
-/// Test: `config_defaults`.
-pub const DEFAULT_METRICS_ADDR: &str = "127.0.0.1:7881";
-
 /// Immutable configuration for one supervisor run.
 ///
 /// Why: the loop reads its policy from one value per tick; bundling the knobs in
-/// a `Clone + Copy`-friendly struct (it is `Clone`; `SocketAddr` is `Copy`) makes
-/// the supervisor trivially testable — a test constructs a config directly rather
-/// than mutating process-wide env vars.
-/// What: carries the poll [`Duration`], the `auto_resume` gate, the
-/// `classify_idle` toggle, and the metrics [`SocketAddr`].
+/// a small `Clone` struct makes the supervisor trivially testable — a test
+/// constructs a config directly rather than mutating process-wide env vars.
+/// What: carries the poll [`Duration`], the `auto_resume` gate, and the
+/// `classify_idle` toggle.
 /// Test: `config_defaults` and every loop test constructs one of these.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SupervisorConfig {
@@ -106,24 +89,18 @@ pub struct SupervisorConfig {
     pub auto_resume: bool,
     /// When `true`, idle `active` sessions have their pane classified.
     pub classify_idle: bool,
-    /// Address the `/metrics` + `/health` HTTP server binds to.
-    pub metrics_addr: SocketAddr,
 }
 
 impl Default for SupervisorConfig {
     /// Why: a sensible no-env default makes the type usable in tests and as a
     /// base to override; auto-resume defaults OFF (safety) and classification ON.
-    /// What: 30s interval, `auto_resume = false`, `classify_idle = true`,
-    /// metrics on `127.0.0.1:7881`.
+    /// What: 30s interval, `auto_resume = false`, `classify_idle = true`.
     /// Test: `config_defaults`.
     fn default() -> Self {
         Self {
             interval: Duration::from_secs(DEFAULT_INTERVAL_SECS),
             auto_resume: false,
             classify_idle: true,
-            metrics_addr: DEFAULT_METRICS_ADDR
-                .parse()
-                .expect("DEFAULT_METRICS_ADDR is a valid SocketAddr literal"),
         }
     }
 }
@@ -135,9 +112,9 @@ impl SupervisorConfig {
     /// only pass configuration through the environment; this is the production
     /// entry point that maps the real process env onto the typed config.
     /// What: delegates to [`Self::from_env_with`] with a resolver backed by
-    /// [`std::env::var`], reading [`ENV_AUTO_RESUME`], [`ENV_INTERVAL_SECS`],
-    /// [`ENV_CLASSIFY_IDLE`], and [`ENV_METRICS_ADDR`], each falling back to its
-    /// default on absence or a parse failure.
+    /// [`std::env::var`], reading [`ENV_AUTO_RESUME`], [`ENV_INTERVAL_SECS`], and
+    /// [`ENV_CLASSIFY_IDLE`], each falling back to its default on absence or a
+    /// parse failure.
     /// Test: covered transitively by the `*_env_parsing` tests, which exercise the
     /// shared [`Self::from_env_with`] logic with an injected resolver.
     pub fn from_env() -> Self {
@@ -156,7 +133,7 @@ impl SupervisorConfig {
     /// or a parse failure; the parsing/fallback rules are identical to the legacy
     /// `from_env`.
     /// Test: `auto_resume_env_parsing`, `interval_env_parsing`,
-    /// `classify_idle_env_parsing`, `metrics_addr_env_parsing`, `config_defaults`.
+    /// `classify_idle_env_parsing`, `config_defaults`.
     pub fn from_env_with(get: impl Fn(&str) -> Option<String>) -> Self {
         let defaults = Self::default();
         let auto_resume = env_bool(&get, ENV_AUTO_RESUME).unwrap_or(defaults.auto_resume);
@@ -166,14 +143,10 @@ impl SupervisorConfig {
             .filter(|s| *s > 0)
             .map(Duration::from_secs)
             .unwrap_or(defaults.interval);
-        let metrics_addr = get(ENV_METRICS_ADDR)
-            .and_then(|v| v.trim().parse::<SocketAddr>().ok())
-            .unwrap_or(defaults.metrics_addr);
         Self {
             interval,
             auto_resume,
             classify_idle,
-            metrics_addr,
         }
     }
 }

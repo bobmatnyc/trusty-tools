@@ -17,15 +17,19 @@
 //! Test: `cargo test -p trusty-mpm daemon::mcp_console` covers report shape,
 //! fleet derivation, and the auto-resume persistence round-trip.
 
+use std::path::Path;
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use trusty_common::console_metrics::{ConsoleMetricsReport, ServiceHealth, make_report};
 
 use crate::core::auto_resume;
+use crate::core::paths::FrameworkPaths;
 use crate::core::trusty_tools_config::{self, TrustyToolsConfig};
 use crate::daemon::state::DaemonState;
 use crate::supervisor::metrics::FleetMetrics;
+use crate::supervisor::publish::{self, SupervisorMetricsStatus};
 
 /// Schema version of the `console_metrics` `metrics` payload for trusty-mpm.
 ///
@@ -55,8 +59,8 @@ const SERVICE_VERSION: &str = env!("CARGO_PKG_VERSION");
 ///   its config without touching the env, so this is an inference about another
 ///   process, not an observation of it. It is only consulted when no override
 ///   file exists — i.e. before the operator has ever used the toggle. Closing
-///   that gap needs the supervisor to publish its resolved flag on the `/metrics`
-///   endpoint it already serves; tracked separately.
+///   that gap means adding the supervisor's resolved flag to the snapshot it
+///   already publishes (#6288); tracked separately.
 /// - `effective`: what the supervisor's next sweep will do — the persisted file
 ///   when it exists, otherwise `env`, or `null` when the file could not be read.
 /// - `read_error`: `null` normally; the I/O error string when the desired-state
@@ -70,11 +74,21 @@ const SERVICE_VERSION: &str = env!("CARGO_PKG_VERSION");
 ///   "restart pending" hint would be a false claim; the key is kept for wire
 ///   compatibility until the console drops it.
 ///
+/// #6288 adds `supervisor_metrics`, describing where `fleet.run_stats` came
+/// from — see [`merge_supervisor_metrics`].
+///
 /// Test: `supervisor_status_reports_fleet_and_auto_resume`.
 async fn fleet_snapshot(state: &Arc<DaemonState>) -> Value {
     let mgr = state.session_manager().await;
     let records = mgr.list().await;
-    let fleet = FleetMetrics::from_records(&records);
+    let mut fleet = FleetMetrics::from_records(&records);
+    // #6288: `from_records` leaves `run_stats` at its default — those counters
+    // live in the separate supervisor process. Merge in what it published.
+    let supervisor_metrics = merge_supervisor_metrics(
+        &mut fleet,
+        &publish::metrics_path(&FrameworkPaths::default()),
+        Utc::now(),
+    );
 
     // #5208: read the tri-state override so `effective` can say "no file → the
     // supervisor's boot env stands" rather than flattening absence into `false`,
@@ -95,7 +109,85 @@ async fn fleet_snapshot(state: &Arc<DaemonState>) -> Value {
             "read_error": read_error,
             "pending_restart": false,
         },
+        "supervisor_metrics": supervisor_metrics,
     })
+}
+
+/// Overlay the supervisor's published `run_stats` onto `fleet`, and say where
+/// they came from (#6288).
+///
+/// Why: `FleetMetrics::from_records` can only see the session store. The sweep,
+/// auto-resume, resume-failure and classification counters live in the separate
+/// `tm supervisor` process, so before #6288 `console_metrics` and
+/// `supervisor_status` reported a confident zero for all four no matter how long
+/// the supervisor had been running. The counters now arrive through
+/// `<framework root>/supervisor-metrics.json`.
+///
+/// FAIL-OPEN CHECK: a missing, unreadable, or corrupt file must never read as
+/// "zero sweeps" — that is the defect, one layer out. Every outcome is named on
+/// the wire in `supervisor_metrics.status`:
+/// - `current` — a snapshot inside its own staleness window
+///   ([`publish::stale_after_secs`], sized from the cadence the writing
+///   supervisor runs at); its `run_stats` are merged into `fleet`.
+/// - `stale` — an older snapshot, still merged (it is the last real
+///   observation), but flagged so the console does not present it as live.
+///   `interval_secs` and `stale_after_secs` ride along so a reader can see which
+///   window the verdict used.
+/// - `unavailable` — nothing usable; `fleet.run_stats` stays at its default AND
+///   `reason` says why, so a reader can tell "the supervisor is not running"
+///   from "the supervisor has run zero sweeps".
+///
+/// What: reads `path` via [`publish::read_status_at`], merges `run_stats` for
+/// the two snapshot-bearing outcomes, and returns the JSON block described
+/// above. Takes `path` and `now` as parameters rather than resolving
+/// `FrameworkPaths::default()` internally so a test can drive the whole round
+/// trip against a temp file instead of the developer's live `~/.trusty-mpm`.
+/// Test: `supervisor_metrics_merge_absent_file_is_unavailable_not_zero`,
+/// `supervisor_metrics_merge_flags_a_stale_snapshot`, and — end to end from real
+/// sweeps — `supervisor::tests::supervisor_metrics_merge_reports_real_run_stats`.
+pub(crate) fn merge_supervisor_metrics(
+    fleet: &mut FleetMetrics,
+    path: &Path,
+    now: DateTime<Utc>,
+) -> Value {
+    match publish::read_status_at(path, now) {
+        SupervisorMetricsStatus::Current {
+            snapshot,
+            age_secs,
+            stale_after_secs,
+        } => {
+            let interval_secs = snapshot.interval_secs;
+            fleet.run_stats = snapshot.fleet.run_stats;
+            json!({
+                "status": "current",
+                "written_at": snapshot.written_at,
+                "age_secs": age_secs,
+                "interval_secs": interval_secs,
+                "stale_after_secs": stale_after_secs,
+            })
+        }
+        SupervisorMetricsStatus::Stale {
+            snapshot,
+            age_secs,
+            stale_after_secs,
+        } => {
+            let interval_secs = snapshot.interval_secs;
+            fleet.run_stats = snapshot.fleet.run_stats;
+            json!({
+                "status": "stale",
+                "written_at": snapshot.written_at,
+                "age_secs": age_secs,
+                "interval_secs": interval_secs,
+                "stale_after_secs": stale_after_secs,
+            })
+        }
+        // No snapshot means no cadence to report a window for; a threshold here
+        // would be a number invented by the reader.
+        SupervisorMetricsStatus::Unavailable { reason } => json!({
+            "status": "unavailable",
+            "reason": reason,
+        }),
+    }
 }
 
 /// Back the `console_metrics` tool with a [`ConsoleMetricsReport`].

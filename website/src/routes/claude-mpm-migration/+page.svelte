@@ -266,8 +266,8 @@ tm --version</pre>
 							<td><code class="whitespace-nowrap">127.0.0.1:7880</code></td>
 							<td class="text-foundry-secondary"
 								>Registered projects, the session roster, and the relayed hook feed. A separate
-								supervisor process watches sessions and reports on
-								<code class="whitespace-nowrap">7881</code>.</td
+								supervisor process watches sessions and publishes its fleet snapshot to a file
+								the daemon reads.</td
 							>
 						</tr>
 						<tr>
