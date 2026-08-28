@@ -28,6 +28,16 @@ pub mod queries;
 /// (#6285 slice 4).
 pub mod writes;
 
+/// Registration for the streaming families: the daemon status stream and one
+/// index's reindex progress stream (#6285 slice 5).
+pub mod streams;
+
+/// Per-method admission and deadline lane pins for the whole socket surface
+/// (#6285 slice 5, discharging the slice-4 review's deferred MEDIUM).
+#[cfg(test)]
+#[path = "lanes_tests.rs"]
+mod lanes_tests;
+
 /// A typed report as the JSON axum would have written for it.
 ///
 /// Why: `serde_json::to_value`, which the router applies to a typed response,
