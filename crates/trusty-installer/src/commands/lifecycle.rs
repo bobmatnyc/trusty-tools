@@ -288,13 +288,21 @@ pub fn restart_member(binary: &str, manage: ManageStrategy) -> anyhow::Result<St
 /// Why: launchd and process-managed members need different mechanisms; this is
 /// the one place that branches on [`ManageStrategy`].
 /// What: `Launchd` → [`launchd_control`] (macOS `launchctl`); `OwnVerb` →
-/// `<binary> <verb>` subprocess; `None` → a no-op note (filtered out earlier, so
-/// unreachable in practice). Returns a human detail string on success.
+/// `<binary> <verb>` subprocess; `None` → a no-op note, worded per whether the
+/// member is a non-daemon or one whose service is retired (#6290, #6350).
+/// Returns a human detail string on success.
 /// Test: side-effecting; the verb-name + ordering logic it relies on is tested.
 fn apply_to_member(verb: Verb, m: &StableMember) -> anyhow::Result<String> {
     match m.manage {
         ManageStrategy::Launchd => launchd_control(verb, &m.binary),
         ManageStrategy::OwnVerb => own_verb_control(verb, &m.binary),
+        // #6290, #6350: a member whose service is RETIRED lands here too, and
+        // that is the point — reaching `launchd_control` would bootstrap the
+        // very unit the retirement evicts. It is not a non-daemon, though, so
+        // the note says which of the two it is.
+        ManageStrategy::None if super::service_bootstrap::member_has_retired_service(&m.binary) => {
+            Ok("skipped (launchd service retired; nothing supervises it)".to_owned())
+        }
         ManageStrategy::None => Ok("skipped (not a daemon)".to_owned()),
     }
 }

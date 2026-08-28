@@ -39,14 +39,16 @@
 //! was never independent evidence of anything. Both are recorded as legacy
 //! aliases below.
 //!
-//! **A retired daemon keeps its row (#6290).** [`SERVICES`] is what an install
-//! WRITES; [`RETIRED_SERVICES`] is what an upgrade must CLEAR. trusty-review is
-//! the first row in the second table: ADR-0032's review lane retired its daemon
-//! outright, so nothing installs `com.trusty.review` any more — but every host
-//! that ran the old binary still has that unit loaded, pointed at a `serve`
-//! subcommand the binary no longer has. Dropping the row would leave the unit
-//! unnamed by anything and therefore un-evictable, which is why a retirement is
-//! a MOVE between the two tables, never a deletion.
+//! **A retired daemon keeps its row (#6290, #6350).** [`SERVICES`] is what an
+//! install WRITES; [`RETIRED_SERVICES`] is what an upgrade must CLEAR. Two rows
+//! sit in the second table, both from ADR-0032: trusty-review retired its
+//! daemon outright (#6290, reviews run per invocation), and trusty-analyze
+//! retired its resident one (#6350, a client starts it and it exits on its own
+//! idle window). Nothing installs either unit any more, but every host that ran
+//! an older binary still has one loaded under `KeepAlive::Always`. Dropping a
+//! row would leave that unit unnamed by anything and therefore un-evictable,
+//! which is why a retirement is a MOVE between the two tables, never a
+//! deletion.
 //!
 //! Deliberately NOT `#[cfg(target_os = "macos")]`, unlike `crate::launchd`:
 //! the registry is data, and gating it would stop the drift tests from running
@@ -100,7 +102,14 @@ pub const MPM_SUPERVISOR: &str = agent!("mpm", "supervisor");
 /// The trusty-memory daemon.
 pub const MEMORY: &str = agent!("memory");
 
-/// The trusty-analyze daemon.
+/// The RETIRED trusty-analyze daemon (#6350).
+///
+/// trusty-analyze has no resident daemon: a client starts it on demand and it
+/// exits on its own idle window. This label is kept so an upgrade can EVICT the
+/// unit a pre-#6350 install left loaded — it lives in [`RETIRED_SERVICES`], not
+/// [`SERVICES`], and nothing writes it any more. Deleting it would strand that
+/// unit on every host that ever installed the old binary, where
+/// `KeepAlive::Always` restarts the process the moment it reclaims itself.
 pub const ANALYZE: &str = agent!("analyze");
 
 /// The trusty-search daemon.
@@ -187,12 +196,6 @@ pub const SERVICES: &[Service] = &[
         legacy: &["com.trusty.trusty-memory"],
     },
     Service {
-        member: "trusty-analyze",
-        sub_unit: None,
-        label: ANALYZE,
-        legacy: &["com.trusty.trusty-analyze"],
-    },
-    Service {
         member: "trusty-search",
         sub_unit: None,
         label: SEARCH,
@@ -222,14 +225,16 @@ pub const SERVICES: &[Service] = &[
     },
 ];
 
-/// Services this workspace once installed and now only EVICTS (#6290).
+/// Services this workspace once installed and now only EVICTS (#6290, #6350).
 ///
 /// Why: retiring a daemon is not the same as never having had one. Every host
 /// that installed trusty-review before #6290 has `com.trusty.review` loaded,
-/// pointed at a `serve` subcommand the binary no longer has, and
-/// `KeepAlive::Always` respawns it forever. Deleting the row would leave that
-/// unit unnamed by anything, so nothing could boot it out; keeping it in
-/// [`SERVICES`] would keep an install WRITING it. This table is the third
+/// pointed at a `serve` subcommand the binary no longer has; every host that
+/// installed trusty-analyze before #6350 has `com.trusty.analyze` loaded,
+/// restarting the process the moment its idle window reclaims it. Both units
+/// carry `KeepAlive::Always`, so both respawn forever. Deleting a row would
+/// leave that unit unnamed by anything, so nothing could boot it out; keeping
+/// it in [`SERVICES`] would keep an install WRITING it. This table is the third
 /// answer: named, so it can be evicted; separate, so it is never installed.
 ///
 /// What: the same [`Service`] shape, read as "the labels an upgrade must clear
@@ -242,7 +247,8 @@ pub const SERVICES: &[Service] = &[
 /// loaded costs nothing at all.
 ///
 /// Test: `retired_services_are_not_installed`,
-/// `retired_review_carries_both_its_labels`.
+/// `retired_review_carries_both_its_labels`,
+/// `retired_analyze_carries_both_its_labels`.
 pub const RETIRED_SERVICES: &[Service] = &[
     // #6290: ADR-0032's review lane. Reviews run per invocation
     // (`trusty-review run`); there is no listener to supervise.
@@ -251,6 +257,14 @@ pub const RETIRED_SERVICES: &[Service] = &[
         sub_unit: None,
         label: REVIEW,
         legacy: &["com.trusty.trusty-review"],
+    },
+    // #6350: ADR-0032's analyze lane. A client starts the server on demand and
+    // it exits on its own idle window; there is nothing to supervise.
+    Service {
+        member: "trusty-analyze",
+        sub_unit: None,
+        label: ANALYZE,
+        legacy: &["com.trusty.trusty-analyze"],
     },
 ];
 
@@ -285,15 +299,16 @@ pub fn sub_label(base: &str, sub_unit: &str) -> String {
 /// What: returns the [`SERVICES`] or [`RETIRED_SERVICES`] entry whose `label`
 /// matches, or `None`.
 ///
-/// #6290 — why retired rows are searched too: the eviction of a retired unit
-/// needs its `legacy` list exactly as an install needs a live one's, and
-/// `com.trusty.review` is still a label this workspace names. Excluding it
-/// would make [`legacy_labels_for`] return empty for it, so an upgrade would
-/// boot out the canonical unit and leave `com.trusty.trusty-review` loaded
-/// beside it — #2938's two-units-one-service shape, arrived at from the other
-/// direction.
+/// #6290, #6350 — why retired rows are searched too: the eviction of a retired
+/// unit needs its `legacy` list exactly as an install needs a live one's, and
+/// `com.trusty.review` and `com.trusty.analyze` are still labels this workspace
+/// names. Excluding them would make [`legacy_labels_for`] return empty, so an
+/// upgrade would boot out the canonical unit and leave the `com.trusty.trusty-*`
+/// alias loaded beside it — #2938's two-units-one-service shape, arrived at from
+/// the other direction.
 /// Test: `every_legacy_label_resolves_to_one_service`,
-/// `retired_review_carries_both_its_labels`.
+/// `retired_review_carries_both_its_labels`,
+/// `retired_analyze_carries_both_its_labels`.
 #[must_use]
 pub fn service_for_label(label: &str) -> Option<&'static Service> {
     SERVICES
@@ -305,7 +320,7 @@ pub fn service_for_label(label: &str) -> Option<&'static Service> {
 /// The retired service registered for `member`, if any.
 ///
 /// What: the [`RETIRED_SERVICES`] entry whose `member` matches. `None` for a
-/// member that never had a retired unit, which is every member but one.
+/// member that never had a retired unit.
 /// Test: `retired_services_are_not_installed`.
 #[must_use]
 pub fn retired_service_for_member(member: &str) -> Option<&'static Service> {
@@ -319,8 +334,10 @@ pub fn retired_service_for_member(member: &str) -> Option<&'static Service> {
 /// remember to do — forgetting the second half is how a pre-rename unit
 /// survives an upgrade (#2938).
 /// What: the retired service's own `label` followed by its `legacy` aliases,
-/// newest first; empty for a member with no retired unit.
-/// Test: `retired_review_carries_both_its_labels`.
+/// newest first; empty for a member with no retired unit. The canonical label
+/// comes first because it is the one holding the running process.
+/// Test: `retired_review_carries_both_its_labels`,
+/// `retired_analyze_carries_both_its_labels`.
 #[must_use]
 pub fn retired_labels_for_member(member: &str) -> Vec<&'static str> {
     retired_service_for_member(member).map_or_else(Vec::new, |s| {

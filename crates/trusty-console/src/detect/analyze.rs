@@ -196,7 +196,24 @@ impl AnalyzeConnector {
     /// connectors running in parallel. Taking the resolved result as a parameter
     /// makes the arm assertable with no global state at all.
     /// What: binary check, then the three verdicts.
-    /// Test: `analyze_connector_surfaces_an_unresolvable_socket_path_as_a_hint`.
+    ///
+    /// 🔴 **This connector deliberately does not call `ensure_running`** (#6350),
+    /// unlike every other analyze client. It is a DETECTOR, and the console
+    /// renders it on a poll loop: a detector that started the service would keep
+    /// an on-demand server alive for as long as anyone had the dashboard open —
+    /// the exact outcome the idle window exists to prevent — and would then
+    /// report `Running` about a process it had just created, which is not an
+    /// observation.
+    ///
+    /// What that changes about the verdicts, now that resident is not the
+    /// healthy state: `Absent` is the only bad one (the binary is not
+    /// installed). `Available` means installed and startable, which for an
+    /// on-demand service is its correct resting state, not a degradation.
+    /// `Running` means a server happens to be up right now — a client is using
+    /// it, or one has not yet reached its idle window.
+    ///
+    /// Test: `analyze_connector_surfaces_an_unresolvable_socket_path_as_a_hint`,
+    /// `detect_never_starts_a_server`.
     fn detect_from(&self, socket: Result<PathBuf, String>) -> ServiceInfo {
         let base =
             |status: ServiceStatus, version: Option<String>, hint: Option<String>| ServiceInfo {
@@ -343,5 +360,30 @@ mod tests {
 
         assert_eq!(info.status, ServiceStatus::Running);
         assert_eq!(info.version.as_deref(), Some("9.9.9"));
+    }
+
+    /// Why (#6350): the console polls `detect` while a dashboard is open. If it
+    /// started trusty-analyze, an open browser tab would pin an on-demand
+    /// server resident forever — and the connector would be reporting on a
+    /// process it created rather than one it found.
+    /// What: points the connector at a socket path inside a tempdir, calls
+    /// `detect`, and asserts nothing bound it.
+    /// Test: this is the test.
+    #[test]
+    fn detect_never_starts_a_server() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let socket = tmp.path().join("must-stay-absent.sock");
+        let info = AnalyzeConnector::with_socket(socket.clone()).detect();
+
+        assert_ne!(
+            info.status,
+            ServiceStatus::Running,
+            "nothing was serving that path, so no verdict may claim it was"
+        );
+        assert!(
+            !socket.exists(),
+            "detect must observe, never start: {} was created",
+            socket.display()
+        );
     }
 }

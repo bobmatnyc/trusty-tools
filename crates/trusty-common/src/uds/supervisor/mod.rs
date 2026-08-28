@@ -267,12 +267,19 @@ impl UdsServiceSupervisor {
             key: key.to_string(),
             source,
         })?;
-        let child = spawn_child(service, key, &spec).await?;
+        let detached = self.config.detached;
+        let mut child = spawn_child(service, key, &spec, detached).await?;
         self.spawned.fetch_add(1, Ordering::Relaxed);
 
         if !probe::wait_for_socket(socket_path, &self.config.timeouts).await {
             // Explicit drop: `kill_on_drop` SIGKILLs the child that never bound.
             // Nothing was acked to it, so there is nothing to flush.
+            // #6350: a DETACHED child was spawned without `kill_on_drop`, so
+            // dropping it would leave a process that never bound running with
+            // nothing left holding a handle to it. Terminate it here instead.
+            if detached {
+                let _ = terminate_child(&mut child, self.config.timeouts.sigterm_patience).await;
+            }
             drop(child);
             return Err(SupervisorError::SpawnTimeout {
                 service: service.to_string(),
@@ -287,8 +294,22 @@ impl UdsServiceSupervisor {
             instance = %key,
             socket = %socket_path.display(),
             program = %spec.program.display(),
+            detached,
             "spawned supervised child"
         );
+
+        // #6350: a detached child owns its own lifetime (its idle window), so it
+        // is deliberately NOT entered into the population map — nothing in this
+        // supervisor may reap it, and the next caller adopts it through the
+        // already-serving check above. The waiter exists only so the process is
+        // not left a zombie when this supervisor outlives it; it never kills,
+        // and if this process exits first the child keeps serving.
+        if detached {
+            tokio::spawn(async move {
+                let _ = child.wait().await;
+            });
+            return Ok(socket_path.to_path_buf());
+        }
 
         let mut guard = self.children.lock().await;
         guard.insert(

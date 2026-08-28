@@ -250,12 +250,14 @@ enum Cmd {
         #[arg(value_enum)]
         shell: Shell,
     },
-    /// Manage the trusty-analyzer background service (macOS launchd).
+    /// Remove the launchd LaunchAgent an older version installed (macOS).
     ///
-    /// Installs a LaunchAgent plist at
-    /// `~/Library/LaunchAgents/com.trusty.trusty-analyze.plist` that runs the
-    /// daemon in the foreground under launchd supervision. Not supported on
-    /// Linux / Windows — the subcommand exits 1 with a clear message.
+    /// #6350: trusty-analyze installs no LaunchAgent. It starts on demand when a
+    /// client needs it and exits after an idle window, so a `KeepAlive: Always`
+    /// unit would restart it the moment it reclaimed itself. This subcommand is
+    /// the migration off one: `service uninstall` unloads `com.trusty.analyze`
+    /// and deletes its plist. Not supported on Linux / Windows — the subcommand
+    /// exits 1 with a clear message.
     Service {
         #[command(subcommand)]
         action: ServiceSubcommand,
@@ -318,17 +320,15 @@ enum Cmd {
     Config(trusty_common::inference::config::ConfigCommand),
 }
 
-/// Subcommands for `trusty-analyzer service` (macOS launchd integration).
+/// Subcommands for `trusty-analyze service` (macOS launchd migration).
+///
+/// #6350: `install`, `status` and `logs` are gone — see `commands::service`.
+/// trusty-analyze installs no unit; `uninstall` removes one a previous version
+/// left behind.
 #[derive(Subcommand, Debug)]
 enum ServiceSubcommand {
-    /// Install and start as a launchd service
-    Install,
-    /// Stop and uninstall the service
+    /// Unload and remove the LaunchAgent an older version installed
     Uninstall,
-    /// Show service status
-    Status,
-    /// Tail service logs
-    Logs,
 }
 
 #[derive(Subcommand, Debug)]
@@ -429,10 +429,13 @@ async fn main() -> Result<()> {
             // the daemon. Silence would leave an operator believing they had
             // moved a listener that no longer exists.
             if port.is_some() || mcp_port.is_some() {
+                // #6350: `service install` no longer exists — pointing an
+                // operator at it turned a warning into a second dead end.
                 tracing::warn!(
                     "--port / --mcp-port are retired (#6287): trusty-analyze serves a Unix \
-                     socket. Run `trusty-analyze service install` to refresh the launchd plist, \
-                     and `trusty-analyze socket` to see the path."
+                     socket. Run `trusty-analyze service uninstall` to evict the stale launchd \
+                     plist that is still passing them, and `trusty-analyze socket` to see the \
+                     path."
                 );
             }
             run_serve(search, facts_path, socket, mcp).await
@@ -623,10 +626,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Service { action } => {
             let action = match action {
-                ServiceSubcommand::Install => ServiceActionEnum::Install,
                 ServiceSubcommand::Uninstall => ServiceActionEnum::Uninstall,
-                ServiceSubcommand::Status => ServiceActionEnum::Status,
-                ServiceSubcommand::Logs => ServiceActionEnum::Logs,
             };
             run_service_action(action)
         }

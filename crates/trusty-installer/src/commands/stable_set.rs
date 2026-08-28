@@ -41,10 +41,12 @@ use serde::Serialize;
 /// `trusty_common::launchd::LaunchdConfig` `bootstrap`/`bootout`;
 /// [`ManageStrategy::OwnVerb`] → shell out to the member's own
 /// `<binary> start|stop|restart` subcommand; [`ManageStrategy::None`] →
-/// non-daemon (no lifecycle control).
+/// non-daemon, or a member whose launchd service is RETIRED (no lifecycle
+/// control either way).
 ///
 /// Test: `tests::mpm_uses_own_verb`, `tests::daemons_use_launchd`,
-/// `tests::non_daemon_has_no_strategy`.
+/// `tests::non_daemon_has_no_strategy`,
+/// `tests::a_retired_member_never_reaches_launchd_control`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ManageStrategy {
@@ -277,15 +279,29 @@ pub(super) fn gating_split<T>(rows: &[T], required: impl Fn(&T) -> bool) -> Gati
 /// function rather than a `StableMember` constructor detail. Keeping it in ONE
 /// place is the point: the divergent `SystemRunner::probe` this replaces existed
 /// precisely because "how is this member managed?" was answered twice.
-/// What: a non-daemon is [`ManageStrategy::None`]; trusty-mpm is
-/// [`ManageStrategy::OwnVerb`] (process-managed, not launchd); every other daemon
-/// is [`ManageStrategy::Launchd`].
-/// Test: `tests::manage_strategy_for_matches_the_stable_set`.
+/// What: a non-daemon is [`ManageStrategy::None`]; so is a member whose launchd
+/// service has been RETIRED; trusty-mpm is [`ManageStrategy::OwnVerb`]
+/// (process-managed, not launchd); every other daemon is
+/// [`ManageStrategy::Launchd`].
+///
+/// 🔴 #6350: the retired arm comes BEFORE the launchd fallthrough, and that
+/// ordering is what keeps trusty-analyze off launchd. It is still
+/// `daemon: true` — it IS a daemon, just an unsupervised one a client starts —
+/// so it fell through to `Launchd` and `tctl start` routed it into
+/// `lifecycle::launchd_control`, which `bootstrap`s the retired
+/// `com.trusty.analyze` unit on an upgraded host and shells out to a `service
+/// install` clap no longer defines on a fresh one. The port guard cannot catch
+/// it: analyze has bound no port since #6287, so `resolve_guard_ports` is empty
+/// and `guard_bootstrap_label` permits vacuously.
+///
+/// Test: `tests::manage_strategy_for_matches_the_stable_set`,
+/// `tests::a_retired_member_never_reaches_launchd_control`.
 pub fn manage_strategy_for(binary: &str, daemon: bool) -> ManageStrategy {
     if !daemon {
         ManageStrategy::None
     } else if trusty_common::launchd_labels::retired_service_for_member(binary).is_some() {
-        // #6290: a member whose launchd service is RETIRED has no lifecycle to
+        // #6290, #6350: a member whose launchd service is RETIRED has no
+        // lifecycle to
         // control — `tctl start` cannot start it and `verify_tail` must not
         // kickstart it, because there is no unit. `daemon: true` is kept in the
         // stable set so the install pass still visits the member and evicts the
@@ -885,30 +901,83 @@ mod tests {
 
     /// Why: The launchd-supervised daemons must resolve to the `Launchd`
     /// strategy so lifecycle drives `bootstrap`/`bootout`.
-    /// What: Asserts search/memory/analyze/console are `Launchd`, and that
-    /// trusty-review — whose service is retired (#6290) — is `None` despite
-    /// carrying `daemon: true`.
+    /// What: Asserts search/memory/console are `Launchd`, and that
+    /// trusty-review (#6290) and trusty-analyze (#6350) — whose services are
+    /// retired — are `None` despite carrying `daemon: true`.
     /// Test: This is the test.
     #[test]
     fn daemons_use_launchd() {
         let set = stable_set();
         let manage = |b: &str| set.iter().find(|m| m.binary == b).expect("present").manage;
-        for b in [
-            "trusty-search",
-            "trusty-memory",
-            "trusty-analyze",
-            "trusty-console",
-        ] {
+        for b in ["trusty-search", "trusty-memory", "trusty-console"] {
             assert_eq!(manage(b), ManageStrategy::Launchd, "{b}");
         }
-        // #6290: `daemon: true` keeps the member in the install pass so the
-        // stale unit is evicted; `manage: None` is what stops `tctl start` and
-        // `verify_tail` trying to control a unit that is not there.
-        assert_eq!(
-            manage("trusty-review"),
-            ManageStrategy::None,
-            "a retired service has no lifecycle to drive"
+        // #6290, #6350: `daemon: true` keeps each member in the install pass
+        // so the stale unit is evicted; `manage: None` is what stops
+        // `tctl start` and `verify_tail` trying to control a unit that is not
+        // there.
+        for retired in ["trusty-review", "trusty-analyze"] {
+            assert_eq!(
+                manage(retired),
+                ManageStrategy::None,
+                "{retired}'s service is retired and has no lifecycle to drive"
+            );
+        }
+    }
+
+    /// Why (#6290, #6350): every `tctl` path that could touch launchd for a
+    /// member reads `manage`, and a member whose service is RETIRED must reach
+    /// NONE of them. With `Launchd` — which is what a `daemon: true` member
+    /// falls through to — `tctl start` bootstraps the retired unit on an
+    /// upgraded host and shells out to a `service install` clap no longer
+    /// defines on a fresh one, exit 2. The port guard cannot catch it for
+    /// analyze: it binds no port since #6287, so `resolve_guard_ports` is empty
+    /// and the guard permits vacuously.
+    ///
+    /// What: for every retired member in the stable set — the strategy is
+    /// `None`, which is the one arm `lifecycle::apply_to_member` answers
+    /// without calling `launchd_control`; no `service install` is planned; and
+    /// the `daemon` flag is untouched, because it IS a daemon and must stay
+    /// probeable.
+    /// Test: This is the test.
+    #[test]
+    fn a_retired_member_never_reaches_launchd_control() {
+        let retired: Vec<StableMember> = stable_set()
+            .into_iter()
+            .filter(|m| crate::commands::service_bootstrap::member_has_retired_service(&m.binary))
+            .collect();
+        let names: Vec<&str> = retired.iter().map(|m| m.binary.as_str()).collect();
+        assert!(
+            names.contains(&"trusty-analyze"),
+            "trusty-analyze is retired since #6350; its absence means the \
+             registry and the stable set have drifted apart: {names:?}"
         );
+        for m in &retired {
+            assert_eq!(
+                m.manage,
+                ManageStrategy::None,
+                "{} must never be launchd-managed",
+                m.binary
+            );
+            assert_ne!(
+                m.manage,
+                ManageStrategy::Launchd,
+                "{} would reach `lifecycle::launchd_control` and bootstrap its \
+                 own retired unit",
+                m.binary
+            );
+            assert_eq!(manage_strategy_for(&m.binary, m.daemon), m.manage);
+            assert!(
+                !crate::commands::service_bootstrap::member_has_service_install(&m.binary),
+                "{} has no `service install` subcommand to shell out to",
+                m.binary
+            );
+            assert!(
+                m.daemon,
+                "{} is still a daemon — only its supervision changed",
+                m.binary
+            );
+        }
     }
 
     /// Why: A non-daemon has no lifecycle control; its strategy must be `None`.

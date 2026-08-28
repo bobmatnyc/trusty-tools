@@ -45,12 +45,19 @@ pub(super) struct ChildHandle {
 /// UDS service speaks its socket, not its pipes — inherits stderr so the child's
 /// tracing output reaches the parent's log stream, and sets `kill_on_drop` so an
 /// unsupervised drop reaps the child rather than leaking it.
+///
+/// `detached` inverts that last decision (#6350). An on-demand service ends on
+/// its own idle window and is meant to be reused by the next client, so a
+/// transient caller's exit must not take it down — see
+/// [`super::SupervisorConfig::with_detached`].
 /// Test: `spawn_child_creates_requested_directories`,
-/// `spawn_child_reports_a_missing_binary`.
+/// `spawn_child_reports_a_missing_binary`,
+/// `detached_children_are_not_retained_in_the_population`.
 pub(super) async fn spawn_child(
     service: &str,
     key: &str,
     spec: &SpawnSpec,
+    detached: bool,
 ) -> Result<Child, SupervisorError> {
     for dir in &spec.create_dirs {
         if !dir.exists() {
@@ -70,7 +77,7 @@ pub(super) async fn spawn_child(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
-        .kill_on_drop(true)
+        .kill_on_drop(!detached)
         .spawn()
         .map_err(|source| SupervisorError::Spawn {
             service: service.to_string(),

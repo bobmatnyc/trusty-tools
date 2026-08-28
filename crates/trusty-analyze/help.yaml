@@ -142,17 +142,14 @@ commands:
     args: [shell]
     examples:
       - cmd: trusty-analyze completions zsh > ~/.zsh/completions/_trusty-analyze
+  # 6350: trusty-analyze installs no LaunchAgent. `install`, `status` and `logs`
+  # are gone from clap, so advertising them here rendered three --help rows that
+  # each exit 2.
   service:
-    description: Manage the macOS launchd LaunchAgent
+    description: Migrate off the retired macOS launchd LaunchAgent
     subcommands:
-      install:
-        description: Install and start as a launchd service
       uninstall:
-        description: Stop and uninstall the service
-      status:
-        description: Show service status
-      logs:
-        description: Tail service logs
+        description: Unload and delete the retired LaunchAgent, if one is installed
   setup:
     description: Configure integrations (Claude Code, Cursor, claude-mpm)
     subcommands:
@@ -162,8 +159,9 @@ commands:
         description: Write .cursor/mcp.json
       claude-mpm:
         description: Wire into claude-mpm
+      # 6350: no plist is installed any more — see the `service` block above.
       daemon:
-        description: Install the launchd plist
+        description: Evict the retired LaunchAgent and prove the on-demand start works
       all:
         description: Run every setup target
   review-pr:

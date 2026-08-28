@@ -1,58 +1,62 @@
-//! Handler for `trusty-analyzer service` (macOS launchd integration).
+//! Handler for `trusty-analyze service` — retiring the launchd unit (#6350).
 //!
-//! Mirrors the trusty-search service layout: a thin platform-gated dispatcher
-//! that maps each `ServiceAction` to a single launchd operation via the shared
-//! `trusty_common::launchd` module. On non-macOS targets the entry point
-//! prints a clear message and exits 1.
+//! Why this file no longer installs anything: ADR-0032 makes trusty-analyze an
+//! on-demand service. Clients start it through
+//! `trusty_common::uds::OnDemandAnalyze` and it exits on its own idle window, so
+//! a `KeepAlive: Always` LaunchAgent would fight that directly — launchd would
+//! restart the process the moment it reclaimed itself, and the machine would be
+//! back to a resident daemon with an idle timer it can never honour.
+//!
+//! What survives is the half a migration needs. Every host that ran the previous
+//! installer has `com.trusty.analyze` loaded RIGHT NOW; upgrading the binary
+//! does not unload it. `service uninstall` is the operator-typed escape hatch
+//! that evicts it — `tctl install` and `tctl upgrade` do the same thing
+//! unattended, through the same `RETIRED_SERVICES` registry, for the hosts
+//! where nobody types anything.
+//!
+//! The eviction itself is NOT implemented here. `LaunchdConfig::evict_legacy_detailed`
+//! is the workspace's one implementation (#6290): it boots a label out only when
+//! it is actually loaded, VERIFIES launchd let go rather than trusting
+//! `bootout`'s exit code, then deletes the plist — and reports each label as
+//! `EvictionOutcome::{Evicted, Absent, Failed}`. This file decides what to
+//! PRINT and whether to exit non-zero, which is the only part that is
+//! trusty-analyze's own.
+//!
+//! Test: [`render_evictions`] is pure and platform-independent, so the
+//! fail-closed contract is proven on Linux CI without unloading a developer's
+//! real units.
 
 use anyhow::Result;
 use colored::Colorize;
+use trusty_common::launchd_labels::{EvictionOutcome, LabelEviction};
 
-/// Reverse-DNS label for the LaunchAgent. Used as the plist filename and the
-/// `Label` key — both must match for `launchctl` lookups to work.
+/// Subcommand actions for `trusty-analyze service`.
 ///
-/// #4868: value unchanged; read from the canonical registry rather than
-/// restated, so the installer's copy of it cannot drift away independently.
-#[cfg(target_os = "macos")]
-const LAUNCHD_LABEL: &str = trusty_common::launchd_labels::ANALYZE;
-
-/// Subcommand actions for `trusty-analyzer service`.
-///
-/// Why: launchd is the canonical way to keep a long-lived foreground service
-/// alive on macOS — wrapping plist mechanics in `service` subcommands keeps
-/// users from having to hand-edit XML.
-/// What: each variant maps to one launchd operation (or `tail -F` for Logs).
-/// Test: `cargo run -- service --help` lists the four actions; on Linux,
-/// any action prints "not supported" and exits 1.
+/// Why only one variant (#6350): `install`, `status` and `logs` all described a
+/// resident launchd unit. There is none — `install` would create the very thing
+/// ADR-0032 removed, and `status`/`logs` would report on a job launchd does not
+/// have and a log directory nothing writes. `trusty-analyze status` answers the
+/// question those two were used for, against the socket rather than launchd.
+/// What: `Uninstall` is the migration path off a previously-installed unit.
+/// Test: on Linux the action prints "not supported" and exits 1.
 #[derive(Debug, Clone)]
 pub enum ServiceAction {
-    /// Install the LaunchAgent plist and load it.
-    Install,
-    /// Unload the LaunchAgent and remove the plist.
+    /// Unload and delete the retired LaunchAgent, if one is installed.
     Uninstall,
-    /// Show launchd status for the agent.
-    Status,
-    /// Tail the launchd stdout / stderr logs.
-    Logs,
 }
 
-/// Dispatch a `trusty-analyzer service <action>` invocation.
+/// Dispatch a `trusty-analyze service <action>` invocation.
 ///
 /// Why: launchd is macOS-specific; on other platforms we exit cleanly with a
 /// clear message rather than emitting confusing plist errors.
-/// What: macOS routes to `service_install` / `service_uninstall` /
-/// `service_status` / `service_logs`. Non-macOS prints "not supported" and
-/// exits 1.
-/// Test: on Linux, every action exits 1 with the platform message;
-/// on macOS, `service status` runs `launchctl print` without crashing.
+/// What: macOS routes to `service_uninstall`. Non-macOS prints "not supported"
+/// and exits 1.
+/// Test: on Linux, the action exits 1 with the platform message.
 pub fn run_service_action(action: ServiceAction) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
         match action {
-            ServiceAction::Install => service_install(),
             ServiceAction::Uninstall => service_uninstall(),
-            ServiceAction::Status => service_status(),
-            ServiceAction::Logs => service_logs(),
         }
     }
     #[cfg(not(target_os = "macos"))]
@@ -60,205 +64,278 @@ pub fn run_service_action(action: ServiceAction) -> Result<()> {
         let _ = action;
         eprintln!(
             "{} `trusty-analyze service` is not supported on this platform — \
-             use your distro's service manager (systemd, OpenRC, etc.) directly.",
+             trusty-analyze runs on demand and installs no unit anywhere.",
             "✗".red()
         );
         std::process::exit(1);
     }
 }
 
-/// Resolve the log directory for the analyzer launchd agent.
+/// What `service uninstall` should print, and whether it must exit non-zero.
 ///
-/// Why: align with the other trusty-* daemons by writing logs under
-/// `~/.trusty-analyze/logs/` instead of `~/Library/Logs/`. Easier to find
-/// and matches the convention shared across the workspace.
-/// What: returns `~/.trusty-analyze/logs`, creating it on demand.
-/// Test: covered transitively by `setup daemon`.
-#[cfg(target_os = "macos")]
-fn launchd_log_dir() -> Result<std::path::PathBuf> {
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not resolve $HOME"))?;
-    let dir = home.join(".trusty-analyze").join("logs");
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir)
+/// Why a struct rather than four returns: the exit decision and the operator's
+/// remediation text are one verdict, and a caller that could take the lines
+/// without the `failed` flag is the fail-open shape this exists to prevent.
+///
+/// `cfg_attr(not(macos), allow(dead_code))`: the only non-test caller is
+/// [`service_uninstall`], and launchd is macOS-only, so off macOS that caller is
+/// configured out. This module is private to the `trusty-analyze` BIN target, so
+/// in a non-test Linux build nothing constructs `Rendered` and `dead_code` fires
+/// under CI's `-D warnings` (#6355) — while a macOS `cargo clippy` stays green
+/// and never shows it. The item is not dead, it is platform-conditional: the
+/// renderer is pure precisely so the tests below prove the fail-closed contract
+/// on every platform. Same reasoning and same attribute as `trusty-installer`'s
+/// `verify_launchd_state::LaunchdList`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Rendered {
+    /// Lines for stdout — what was cleared.
+    pub out: Vec<String>,
+    /// Lines for stderr — what refused to go, with how to clear it by hand.
+    pub errors: Vec<String>,
+    /// Whether anything was actually evicted, i.e. this host had a stale unit.
+    pub touched: bool,
+    /// Whether the command must exit non-zero.
+    pub failed: bool,
 }
 
-/// Build the shared `LaunchdConfig` for this daemon.
+/// Turn the shared eviction outcomes into operator-facing output.
 ///
-/// Why: every `service` action needs the same plist label, executable path,
-/// args, and log directory. Centralising the construction keeps install,
-/// uninstall, status, and logs in agreement.
-/// What: resolves the current executable, computes the log dir, and returns
-/// a `LaunchdConfig` configured for an always-on agent that runs
-/// `trusty-analyze serve` with a 10-second restart throttle.
-/// Test: exercised transitively by every macOS `service` subcommand.
+/// Why this is where the fail-closed decision lives: `EvictionOutcome::Failed`
+/// covers both a `launchctl bootout` that refused and a plist that would not
+/// delete, and BOTH leave a unit the next `launchctl load` — or the next login
+/// — brings straight back. Reporting either as done is the one outcome worse
+/// than failing, because the operator walks away believing the daemon is gone
+/// while it is still restarting. `EvictionOutcome::is_failure` is the shared
+/// rule; this function is what acts on it.
+///
+/// What: `Evicted` prints a cleared line and sets `touched`; `Absent` prints
+/// nothing, which is the steady state on every host that never installed the
+/// unit; `Failed` names the label, carries the reason through verbatim, and
+/// sets `failed`.
+///
+/// Test: `render_reports_a_cleared_unit`, `render_is_silent_for_an_absent_unit`,
+/// `render_fails_closed_on_a_unit_that_would_not_go`,
+/// `render_fails_even_when_another_label_was_cleared`.
+///
+/// `cfg_attr(not(macos), allow(dead_code))`: see [`Rendered`] — off macOS the
+/// one non-test caller is configured out (#6355).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[must_use]
+pub fn render_evictions(evictions: &[LabelEviction]) -> Rendered {
+    let mut r = Rendered::default();
+    for e in evictions {
+        match &e.outcome {
+            EvictionOutcome::Evicted => {
+                r.touched = true;
+                r.out.push(format!(
+                    "{} Cleared the retired LaunchAgent {}.",
+                    "✓".green(),
+                    e.label
+                ));
+            }
+            EvictionOutcome::Absent => {}
+            EvictionOutcome::Failed(why) => {
+                r.failed = true;
+                r.errors.push(format!(
+                    "{} {} is STILL THERE — {why}. Clear it by hand: \
+                     `launchctl bootout gui/$(id -u)/{}` then \
+                     `rm -f ~/Library/LaunchAgents/{}.plist`",
+                    "✗".red(),
+                    e.label,
+                    e.label,
+                    e.label
+                ));
+            }
+            // #6290: `EvictionOutcome` is `#[non_exhaustive]`. A variant added
+            // later must not fall through as "nothing happened" — that is the
+            // fail-open branch this renderer exists to close, and it would be
+            // silent. Failing here forces the new outcome to be given real
+            // wording before it can ship.
+            other => {
+                r.failed = true;
+                r.errors.push(format!(
+                    "{} {}: unrecognised eviction outcome {other:?} — treat the \
+                     unit as still present and check it by hand: \
+                     `launchctl list | grep {}`",
+                    "✗".red(),
+                    e.label,
+                    e.label
+                ));
+            }
+        }
+    }
+    r
+}
+
+/// Build a `LaunchdConfig` addressing `label`, for its `launchctl` operations.
+///
+/// The exec path, args, log dir and keep-alive are irrelevant here:
+/// `evict_legacy_detailed` overwrites the label per alias, and only `bootout` /
+/// `is_loaded` / `plist_path` are reached — none of which renders a plist. The
+/// type requires the rest, so they are filled with the cheapest values that
+/// mean nothing, the same minimal-config pattern the installer's
+/// `RealServiceEnv::evict_retired` uses.
 #[cfg(target_os = "macos")]
-fn launchd_config() -> Result<trusty_common::launchd::LaunchdConfig> {
+fn launchd_handle(label: &str) -> trusty_common::launchd::LaunchdConfig {
     use trusty_common::launchd::{KeepAlive, LaunchdConfig};
 
-    let exe = std::env::current_exe()
-        .map_err(|e| anyhow::anyhow!("could not resolve current exe: {e}"))?;
-    let log_dir = launchd_log_dir()?;
-    Ok(LaunchdConfig {
-        label: LAUNCHD_LABEL.to_string(),
-        exe_path: exe,
-        args: vec!["serve".to_string()],
-        log_dir,
+    LaunchdConfig {
+        label: label.to_owned(),
+        exe_path: std::path::PathBuf::from("trusty-analyze"),
+        args: Vec::new(),
+        log_dir: std::path::PathBuf::from("/tmp"),
         keep_alive: KeepAlive::Always,
-        throttle_interval: 10,
+        throttle_interval: 0,
         env_vars: Vec::new(),
-        // Why: the analyze daemon opens one redb file + per-index chunk
-        // caches but does not need elevated fd limits; None delegates to the
-        // OS default, matching the trusty-search pattern.
         fd_limit: None,
         working_directory: None,
-    })
+    }
 }
 
-/// Resolve the LaunchAgent plist path.
+/// Unload and delete every retired trusty-analyze LaunchAgent.
 ///
-/// Why: `setup daemon` needs to check whether the plist already exists before
-/// deciding whether to install or simply reload it.
-/// What: returns `~/Library/LaunchAgents/com.trusty.analyze.plist` via the
-/// shared `LaunchdConfig::plist_path` helper.
-/// Test: covered transitively by `setup daemon`.
-#[cfg(target_os = "macos")]
-pub fn launchd_plist_path() -> Result<std::path::PathBuf> {
-    launchd_config()?.plist_path()
-}
-
-/// Install and start the launchd LaunchAgent.
+/// Why this is `pub`: it is the migration step, and `setup daemon` runs it on
+/// every host so an operator who never types `service uninstall` is still moved
+/// off the resident unit.
 ///
-/// Why: exposed so the `setup daemon` subcommand can install the background
-/// service without re-implementing the plist mechanics.
-/// What: writes the plist via `LaunchdConfig::install`, then `bootstrap`s it
-/// into the current user's GUI domain via the shared helper.
-/// Test: `setup daemon` on macOS installs the plist and the daemon answers
-/// `/health`; on Linux `setup daemon` skips this path with a clear message.
+/// # Errors
+///
+/// Never returns `Err` today — a label that will not go down is reported in the
+/// outcome table and exits non-zero, not returned as an error, so the other
+/// labels still get their pass. The signature stays fallible for the dispatch
+/// seam.
 #[cfg(target_os = "macos")]
-pub fn service_install() -> Result<()> {
-    let cfg = launchd_config()?;
-    let plist_path = cfg.plist_path()?;
-    // #4868: the registry records `com.trusty.trusty-analyze` as a legacy alias
-    // and nothing acted on it. Evicting here is what makes that record mean
-    // something on a host that ran an older installer.
-    let outcome = cfg
-        .install_and_activate(trusty_common::launchd_labels::legacy_labels_for(
-            LAUNCHD_LABEL,
-        ))
-        .map_err(|e| anyhow::anyhow!("install LaunchAgent: {e}"))?;
-    for label in outcome.evicted() {
+pub fn service_uninstall() -> Result<()> {
+    let labels = trusty_common::launchd_labels::retired_labels_for_member("trusty-analyze");
+    // Only `label` matters, and `evict_legacy_detailed` overwrites it per alias.
+    let evictions = launchd_handle(labels[0]).evict_legacy_detailed(&labels);
+    let r = render_evictions(&evictions);
+
+    for line in &r.out {
+        println!("{line}");
+    }
+    for line in &r.errors {
+        eprintln!("{line}");
+    }
+    if !r.touched && !r.failed {
         println!(
-            "{} Evicted the stale LaunchAgent {label} — it named this daemon \
-             under an old label.",
-            "⚠".yellow()
+            "{} No trusty-analyze LaunchAgent is installed — it runs on demand.",
+            "·".dimmed()
         );
     }
-
-    let domain = format!("gui/{}", trusty_common::launchd::current_uid());
-    if matches!(
-        outcome,
-        trusty_common::launchd_activate::Activation::AlreadyCurrent { .. }
-    ) {
+    if r.touched && !r.failed {
         println!(
-            "{} {} is already loaded in {} with this exact unit — left running.",
-            "·".dimmed(),
-            LAUNCHD_LABEL,
-            domain
-        );
-    } else {
-        println!(
-            "{} Wrote LaunchAgent plist: {}",
-            "✓".green(),
-            plist_path.display()
-        );
-        println!(
-            "{} trusty-analyze service installed and started ({} loaded into {}).",
-            "✓".green(),
-            LAUNCHD_LABEL,
-            domain
+            "  trusty-analyze now starts on demand; nothing needs to be running \
+             for `{}` or `{}` to work.",
+            "trusty-analyze deep".cyan(),
+            "trusty-review report --analyze".cyan()
         );
     }
-    println!(
-        "  Logs:    {}\n  Status:  {}",
-        cfg.log_dir.display().to_string().dimmed(),
-        "trusty-analyze service status".cyan(),
-    );
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn service_uninstall() -> Result<()> {
-    let cfg = launchd_config()?;
-    let plist_path = cfg.plist_path()?;
-    if plist_path.exists() {
-        // bootout is best-effort: a not-loaded agent is fine here.
-        let _ = cfg.bootout();
-        std::fs::remove_file(&plist_path)
-            .map_err(|e| anyhow::anyhow!("remove {}: {e}", plist_path.display()))?;
-        println!(
-            "{} trusty-analyze service uninstalled ({} removed).",
-            "✓".green(),
-            plist_path.display()
-        );
-    } else {
-        println!(
-            "{} {} not installed — nothing to do",
-            "·".dimmed(),
-            plist_path.display()
-        );
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn service_status() -> Result<()> {
-    let uid = trusty_common::launchd::current_uid();
-    let target = format!("gui/{uid}/{LAUNCHD_LABEL}");
-    let output = std::process::Command::new("launchctl")
-        .args(["print", &target])
-        .output()
-        .map_err(|e| anyhow::anyhow!("launchctl print failed: {e}"))?;
-    if output.status.success() {
-        println!("{}", String::from_utf8_lossy(&output.stdout));
-    } else {
-        // `launchctl print` exits non-zero when the service isn't loaded.
-        eprintln!(
-            "{} {} is not loaded ({})",
-            "✗".red(),
-            target,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        eprintln!(
-            "  Install with: {}",
-            "trusty-analyze service install".cyan()
-        );
+    if r.failed {
         std::process::exit(1);
     }
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
-fn service_logs() -> Result<()> {
-    use std::os::unix::process::CommandExt;
-    let log_dir = launchd_log_dir()?;
-    // trusty_common's LaunchdConfig writes separate stdout/stderr files; tail
-    // both so users see the full picture in one stream.
-    let stdout_log = log_dir.join("stdout.log");
-    let stderr_log = log_dir.join("stderr.log");
-    if !stdout_log.exists() && !stderr_log.exists() {
-        eprintln!(
-            "{} No logs at {} yet — start the service first.",
-            "·".dimmed(),
-            log_dir.display()
-        );
-        return Ok(());
+// ─── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ev(label: &str, outcome: EvictionOutcome) -> LabelEviction {
+        LabelEviction::new(label, outcome)
     }
-    // Replace the current process with `tail -F` so the user gets a familiar
-    // follow-mode experience and we don't have to re-implement log rotation.
-    let err = std::process::Command::new("tail")
-        .arg("-F")
-        .arg(&stdout_log)
-        .arg(&stderr_log)
-        .exec();
-    Err(anyhow::anyhow!("exec tail failed: {err}"))
+
+    /// Why: the migration's whole job. A host with `com.trusty.analyze` loaded
+    /// must end the command told that it is gone, and must not exit non-zero
+    /// for having found work to do.
+    /// Test: this is the test.
+    #[test]
+    fn render_reports_a_cleared_unit() {
+        let r = render_evictions(&[ev("com.trusty.analyze", EvictionOutcome::Evicted)]);
+        assert!(r.touched);
+        assert!(!r.failed);
+        assert!(r.errors.is_empty());
+        assert_eq!(r.out.len(), 1);
+        assert!(r.out[0].contains("com.trusty.analyze"), "{:?}", r.out);
+    }
+
+    /// Why: on a machine that never installed the unit the command must be a
+    /// silent no-op rather than an error — it runs unconditionally from
+    /// `setup daemon`, so a line here would be permanent noise.
+    /// Test: this is the test.
+    #[test]
+    fn render_is_silent_for_an_absent_unit() {
+        let r = render_evictions(&[
+            ev("com.trusty.analyze", EvictionOutcome::Absent),
+            ev("com.trusty.trusty-analyze", EvictionOutcome::Absent),
+        ]);
+        assert_eq!(r, Rendered::default());
+    }
+
+    /// Why (#6350 fail-open check): a `launchctl bootout` that refused, and a
+    /// plist that survived its delete, are the same hazard — a unit the next
+    /// login brings straight back. `EvictionOutcome::Failed` covers both, and
+    /// reporting either as done tells the operator the daemon is gone while it
+    /// is still restarting.
+    /// What: the command fails, names the label, and carries the reason
+    /// through so the operator knows which of the two happened.
+    /// Test: this is the test.
+    #[test]
+    fn render_fails_closed_on_a_unit_that_would_not_go() {
+        for why in [
+            "still loaded after `launchctl bootout` reported success",
+            "could not delete /Users/x/Library/LaunchAgents/com.trusty.analyze.plist: EPERM",
+        ] {
+            let r = render_evictions(&[ev(
+                "com.trusty.analyze",
+                EvictionOutcome::Failed(why.to_owned()),
+            )]);
+            assert!(r.failed, "a surviving unit must exit non-zero: {why}");
+            assert!(r.out.is_empty(), "nothing was cleared: {:?}", r.out);
+            assert_eq!(r.errors.len(), 1);
+            assert!(r.errors[0].contains("com.trusty.analyze"), "{:?}", r.errors);
+            assert!(
+                r.errors[0].contains(why),
+                "the operator needs the cause verbatim: {:?}",
+                r.errors
+            );
+        }
+    }
+
+    /// Why: both labels exist on real hosts, and a pass that cleared one while
+    /// the other refused must still fail. Letting a success anywhere in the
+    /// list mask a failure is how a partially-migrated host reports clean.
+    /// Test: this is the test.
+    #[test]
+    fn render_fails_even_when_another_label_was_cleared() {
+        let r = render_evictions(&[
+            ev("com.trusty.analyze", EvictionOutcome::Evicted),
+            ev(
+                "com.trusty.trusty-analyze",
+                EvictionOutcome::Failed("still loaded".to_owned()),
+            ),
+        ]);
+        assert!(r.touched);
+        assert!(r.failed, "one survivor fails the whole pass");
+        assert_eq!(r.errors.len(), 1);
+    }
+
+    /// Why: the label set comes from the shared registry, so an alias added
+    /// there is evicted here without this file changing. The order is asserted
+    /// because the canonical label holds the running process.
+    /// Test: this is the test.
+    #[test]
+    fn the_retired_label_set_comes_from_the_registry() {
+        let labels = trusty_common::launchd_labels::retired_labels_for_member("trusty-analyze");
+        assert_eq!(
+            labels,
+            vec![
+                trusty_common::launchd_labels::ANALYZE,
+                "com.trusty.trusty-analyze"
+            ]
+        );
+    }
 }

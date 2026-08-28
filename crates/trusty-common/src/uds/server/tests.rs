@@ -1025,3 +1025,229 @@ async fn handle_connection_reports_an_error_response_as_answered() {
     assert_eq!(served, Served::Answered { errored: true });
     writer.abort();
 }
+
+// ── idle exit for an on-demand service (#6350) ──────────────────────────────
+
+/// Bind `dir/idle.sock` and serve it with `idle` as the idle policy.
+///
+/// Why a bespoke spawner rather than `spawn_server`: `RpcServer::run` owns its
+/// own bind and has no idle parameter, and the point of these tests is the
+/// accept loop's exit decision — so they drive `serve_until_idle` directly, the
+/// way `trusty-analyze`'s `serve_with_shutdown` does.
+fn spawn_idle_server(
+    dir: &std::path::Path,
+    idle: Duration,
+) -> (
+    std::path::PathBuf,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<ServeExit>,
+) {
+    let socket = dir.join("idle.sock");
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let bound = socket.clone();
+    let handle = tokio::spawn(async move {
+        let listener = crate::uds::bind_hardened(&bound).expect("bind");
+        let exit = serve_until_idle(
+            &listener,
+            Arc::new(greeting_router()),
+            RpcServeOptions::default(),
+            async move {
+                let _ = rx.await;
+            },
+            Some(IdleTracker::new(idle)),
+        )
+        .await;
+        let _ = std::fs::remove_file(&bound);
+        exit
+    });
+    (socket, tx, handle)
+}
+
+/// Why: this is the whole point of #6350 — an on-demand service that nobody
+/// talks to has to end itself, or it is the resident daemon it replaced.
+/// Test: this is the test.
+#[tokio::test]
+async fn serve_until_idle_exits_when_the_window_elapses() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (socket, _stop, handle) = spawn_idle_server(tmp.path(), Duration::from_millis(300));
+    await_socket(&socket).await;
+
+    let exit = tokio::time::timeout(Duration::from_secs(10), handle)
+        .await
+        .expect("the loop must exit on its own once the window elapses")
+        .expect("join");
+
+    assert_eq!(exit, ServeExit::Idle);
+    assert!(
+        !socket.exists(),
+        "an idle exit must unlink the socket, or the next spawn cannot bind"
+    );
+}
+
+/// Why: an idle timer that fired regardless of traffic would kill a service
+/// mid-conversation. A request has to push the deadline out.
+/// Test: this is the test.
+#[tokio::test]
+async fn serve_until_idle_is_reset_by_an_answered_request() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let window = Duration::from_millis(600);
+    let (socket, _stop, handle) = spawn_idle_server(tmp.path(), window);
+    await_socket(&socket).await;
+
+    // Answer one request roughly half a window in, so a loop that ignored the
+    // request would have already exited by the assertion below.
+    tokio::time::sleep(window / 2).await;
+    let response = call(&socket, 1, "greet", json!({ "name": "ada" })).await;
+    assert!(response.error.is_none(), "unexpected error: {response:?}");
+
+    tokio::time::sleep(window).await;
+    assert!(
+        !handle.is_finished(),
+        "the answered request must have restarted the idle window"
+    );
+
+    let exit = tokio::time::timeout(Duration::from_secs(10), handle)
+        .await
+        .expect("it must still exit once the restarted window elapses")
+        .expect("join");
+    assert_eq!(exit, ServeExit::Idle);
+}
+
+/// Why: `trusty-console`'s service detector connects and closes on a poll loop,
+/// and `ensure_running` probes the same way. If a bare connect counted as
+/// activity, a status page open in a browser would pin an on-demand service
+/// resident forever — the exact outcome idle exit exists to prevent.
+/// Test: this is the test.
+#[tokio::test]
+async fn serve_until_idle_ignores_liveness_probes() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let window = Duration::from_millis(400);
+    let (socket, _stop, handle) = spawn_idle_server(tmp.path(), window);
+    await_socket(&socket).await;
+
+    // `await_socket` already probed; keep probing across the whole window.
+    for _ in 0..8 {
+        assert!(crate::uds::socket_is_serving(&socket, Duration::from_millis(200)).await);
+        tokio::time::sleep(window / 8).await;
+    }
+
+    let exit = tokio::time::timeout(Duration::from_secs(10), handle)
+        .await
+        .expect("probes must not hold the window open")
+        .expect("join");
+    assert_eq!(exit, ServeExit::Idle);
+}
+
+/// Why: `serve_until` is the no-policy path every other daemon still uses, and
+/// it must behave exactly as it did before the idle parameter existed.
+/// Test: this is the test.
+#[tokio::test]
+async fn serve_until_without_a_policy_never_exits_on_its_own() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (socket, stop, handle) =
+        spawn_server(tmp.path(), greeting_router(), RpcServeOptions::default());
+    await_socket(&socket).await;
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !handle.is_finished(),
+        "with no idle policy the loop runs until its shutdown future resolves"
+    );
+
+    stop.send(()).expect("signal shutdown");
+    handle.await.expect("join").expect("clean shutdown");
+}
+
+/// Why: the guard is what keeps the window from elapsing under an open
+/// connection, and `Drop` is its panic backstop. Both are asserted here without
+/// a socket, so a counting bug is diagnosed at the tracker rather than as a
+/// flaky serve test.
+/// Test: this is the test.
+#[tokio::test]
+async fn idle_tracker_counts_open_connections_and_restores_on_drop() {
+    let tracker = IdleTracker::new(Duration::from_secs(60));
+    assert_eq!(tracker.open_connections(), 0);
+
+    let mut answered = tracker.connection_opened();
+    let dropped = tracker.connection_opened();
+    assert_eq!(tracker.open_connections(), 2);
+
+    drop(dropped);
+    assert_eq!(
+        tracker.open_connections(),
+        1,
+        "a cancelled or panicking connection must still release its slot"
+    );
+
+    answered.answered();
+    answered.release().await;
+    assert_eq!(tracker.open_connections(), 0);
+    assert_eq!(tracker.timeout(), Duration::from_secs(60));
+}
+
+/// Why (#6350): `connect(2)` succeeds as soon as the kernel queues the
+/// connection, so a client that dialled just before the idle window elapsed is
+/// already in the backlog when the loop decides to exit. Returning straight
+/// from the idle arm dropped the listener and unlinked the socket underneath
+/// that client, which reads to it as a reset — and only `trusty-review`'s
+/// adapter retries one. `trusty-analyze deep` and `tctl`'s probe report it as a
+/// failure the operator cannot act on.
+///
+/// What makes it deterministic rather than a timing race: the client connects
+/// and writes its frame BEFORE the serve loop runs, and the tracker is built
+/// far enough ahead that its window has already elapsed. `expired` is therefore
+/// ready on the loop's first poll and `biased` gives it the win, so the exit
+/// decision is taken with a connection provably queued. Against the pre-drain
+/// loop the read below returns zero bytes.
+/// Test: this is the test.
+#[tokio::test]
+async fn a_client_queued_when_the_idle_window_elapses_is_served_not_reset() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let socket = tmp.path().join("drain.sock");
+    let listener = crate::uds::bind_hardened(&socket).expect("bind");
+
+    // Built now, consumed below: by the time the loop first polls it, the
+    // window has elapsed with nothing open, so `expired` is ready.
+    let tracker = IdleTracker::new(Duration::from_millis(1));
+
+    let mut client = tokio::net::UnixStream::connect(&socket)
+        .await
+        .expect("connect queues in the backlog; nothing is accepting yet");
+    let mut request = frame(7, "greet", json!({ "name": "queued" }));
+    request.push(b'\n');
+    client.write_all(&request).await.expect("write request");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let serving = tokio::spawn(async move {
+        serve_until_idle(
+            &listener,
+            Arc::new(greeting_router()),
+            RpcServeOptions::default(),
+            std::future::pending::<()>(),
+            Some(tracker),
+        )
+        .await
+    });
+
+    let mut line = String::new();
+    let read = tokio::time::timeout(
+        Duration::from_secs(10),
+        BufReader::new(&mut client).read_line(&mut line),
+    )
+    .await
+    .expect("the queued client must not hang")
+    .expect("read response");
+    assert!(
+        read > 0,
+        "the queued connection was reset instead of served: the loop exited \
+         with it still in the backlog"
+    );
+    let response: RpcResponse = serde_json::from_str(&line).expect("parse response");
+    assert!(response.error.is_none(), "unexpected error: {response:?}");
+
+    let exit = tokio::time::timeout(Duration::from_secs(10), serving)
+        .await
+        .expect("the loop must still exit once the backlog really is empty")
+        .expect("join");
+    assert_eq!(exit, ServeExit::Idle);
+}

@@ -191,6 +191,18 @@ pub fn probe_member_health(binary: &str, manage: ManageStrategy) -> ProbeOutcome
         ManageStrategy::Launchd | ManageStrategy::OwnVerb => {
             probe_member_http_blocking(binary, binary)
         }
+        // #6350: an ON-DEMAND member is `None` as well, and for the same reason
+        // as #6290's per-invocation one — its launchd service is retired, so it
+        // has no lifecycle. It differs in what answers the health question: it
+        // still serves a socket, so `probe_daemon_http`'s `on_demand_member`
+        // branch STARTS it and asks `<domain>.health`. That is the only probe
+        // that separates "working" from "broken" for a service whose healthy
+        // resting state is not listening. Kept as its own arm rather than folded
+        // into the retired check, because being retired says nothing about
+        // whether a transport exists.
+        ManageStrategy::None if super::probe_http::on_demand_member(binary) => {
+            probe_member_http_blocking(binary, binary)
+        }
         // #6290: a per-invocation member is `None` too — it has no lifecycle —
         // but unlike `tga` it DOES have an honest health answer: the binary
         // resolved above, and `probe_daemon_http` routes it to a presence probe

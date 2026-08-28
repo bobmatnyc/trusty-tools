@@ -117,7 +117,7 @@ fn retired_services_are_not_installed() {
     let members: Vec<&str> = RETIRED_SERVICES.iter().map(|s| s.member).collect();
     assert_eq!(
         members,
-        vec!["trusty-review"],
+        vec!["trusty-review", "trusty-analyze"],
         "adding a retirement is a deliberate act — update this pin with it"
     );
 }
@@ -871,4 +871,35 @@ fn eviction_outcome_only_failed_is_a_failure() {
     let e = LabelEviction::new("com.trusty.review", EvictionOutcome::Absent);
     assert_eq!(e.label, "com.trusty.review");
     assert_eq!(e.outcome, EvictionOutcome::Absent);
+}
+
+/// Why (#6350): trusty-analyze's unit exists under two names on real hosts —
+/// `com.trusty.analyze` from the post-#4919 installer and
+/// `com.trusty.trusty-analyze` from before it. An eviction that clears only one
+/// leaves the other loaded under `KeepAlive::Always`, restarting the on-demand
+/// server the moment its idle window reclaims it.
+/// What: both labels come back from `retired_labels_for_member`, canonical
+/// first, and the member resolves through the retired lookup.
+/// Test: this is the test.
+#[test]
+fn retired_analyze_carries_both_its_labels() {
+    assert!(
+        retired_service_for_member("trusty-analyze").is_some(),
+        "trusty-analyze runs on demand since #6350 and installs no unit"
+    );
+    assert_eq!(
+        retired_labels_for_member("trusty-analyze"),
+        vec![ANALYZE, "com.trusty.trusty-analyze"]
+    );
+    assert!(
+        retired_labels_for_member("trusty-memory").is_empty(),
+        "a live member has nothing to evict"
+    );
+    // The retired row still resolves by label, which is what keeps
+    // `legacy_labels_for` from returning empty for it.
+    assert_eq!(
+        legacy_labels_for(ANALYZE),
+        &["com.trusty.trusty-analyze"],
+        "an eviction needs the retired row's legacy list just as an install needs a live one's"
+    );
 }

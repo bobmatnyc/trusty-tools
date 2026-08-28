@@ -241,20 +241,99 @@ fn evicting_a_retired_member_twice_is_quiet() {
 
 /// Why: the member predicate gates which daemons get a service bootstrap;
 /// every launchd-managed shared daemon must be recognised.
-/// What: asserts the five service members return `true`.
+/// What: asserts the three service members return `true` — trusty-review
+/// (#6290) and trusty-analyze (#6350) both left the list when their daemons
+/// were retired.
 /// Test: this is the test.
 #[test]
 fn service_members_recognised() {
-    for b in [
-        "trusty-search",
-        "trusty-memory",
-        "trusty-analyze",
-        "trusty-console",
-    ] {
+    for b in ["trusty-search", "trusty-memory", "trusty-console"] {
         assert!(
             member_has_service_install(b),
             "{b} should be a service member"
         );
+    }
+}
+
+/// REGRESSION (#6350): `tctl install` must never shell out to `trusty-analyze
+/// service install`, and must boot out the unit an earlier install left loaded.
+///
+/// Why: the analyze binary ships only `service uninstall` now — ADR-0032 makes
+/// it on demand — so the shell-out would exit 2 on every install. The second
+/// half matters more: `com.trusty.analyze` is loaded with `KeepAlive::Always`
+/// on every host that ran the old binary, restarting the server the moment its
+/// idle window reclaims it, and this pass is the only one that visits the
+/// member. The mirror of `retired_review_has_no_service_install`, driven
+/// through the SAME `bootstrap_one` eviction branch — one mechanism, two rows.
+/// Test: this is the test.
+#[test]
+fn retired_analyze_has_no_service_install() {
+    assert!(
+        !member_has_service_install("trusty-analyze"),
+        "shelling out to `trusty-analyze service install` would exit 2 — the \
+         subcommand is gone"
+    );
+    assert!(
+        super::member_has_retired_service("trusty-analyze"),
+        "trusty-analyze must still be visited, to clear its unit"
+    );
+
+    let env = FakeServiceEnv::new(true, false)
+        .with_retired_unit_loaded(&["com.trusty.analyze", "com.trusty.trusty-analyze"]);
+    let action = bootstrap_one(&env, "trusty-analyze", None);
+
+    assert_eq!(
+        *env.evicted.borrow(),
+        vec!["trusty-analyze".to_owned()],
+        "the retired unit must be booted out, not merely skipped"
+    );
+    assert!(
+        env.installed.borrow().is_empty(),
+        "nothing may be installed for a retired member: {:?}",
+        env.installed.borrow()
+    );
+    assert!(
+        env.fallback_calls.borrow().is_empty(),
+        "the bootstrap fallback must never fire for a retired member"
+    );
+    assert!(!action.is_failure());
+    match &action {
+        BootstrapAction::Skipped(reason) => {
+            assert!(reason.contains("com.trusty.analyze"), "reason: {reason}");
+            assert!(
+                reason.contains("com.trusty.trusty-analyze"),
+                "both labels exist on real hosts and both must be named: {reason}"
+            );
+        }
+        other => panic!("a retired member must be Skipped, got {other:?}"),
+    }
+}
+
+/// REGRESSION (#6350): a retired analyze unit that will not go down FAILS the
+/// install, exactly as a review one does.
+///
+/// Why: reporting `Skipped` for a `launchctl bootout` that refused exits 0 with
+/// `com.trusty.analyze` still loaded — and that unit restarts the on-demand
+/// server every time it reclaims itself, which is the state the retirement
+/// exists to end.
+/// Test: this is the test.
+#[test]
+fn a_retired_analyze_unit_that_will_not_go_down_fails_the_install() {
+    let env = FakeServiceEnv::new(true, false)
+        .with_retired_unit_loaded(&["com.trusty.analyze"])
+        .with_retired_eviction_failing("still loaded after `launchctl bootout` reported success");
+    let action = bootstrap_one(&env, "trusty-analyze", None);
+
+    assert!(
+        action.is_failure(),
+        "a retired unit still loaded must fail the install, got {action:?}"
+    );
+    match &action {
+        BootstrapAction::Failed(reason) => {
+            assert!(reason.contains("com.trusty.analyze"), "reason: {reason}");
+            assert!(reason.contains("still loaded"), "reason: {reason}");
+        }
+        other => panic!("expected Failed, got {other:?}"),
     }
 }
 
@@ -388,7 +467,11 @@ fn bootstrap_one_installs_when_absent() {
 #[test]
 fn bootstrap_one_reports_failure() {
     let env = FakeServiceEnv::new(false, true);
-    let action = bootstrap_one(&env, "trusty-analyze", None);
+    // #6290, #6350: trusty-review and trusty-analyze are both retired, so
+    // either would take the eviction branch rather than reaching the
+    // service-install failure path under test. trusty-console still installs a
+    // unit, which is what this test needs.
+    let action = bootstrap_one(&env, "trusty-console", None);
     match action {
         BootstrapAction::Failed(e) => assert!(e.contains("simulated failure")),
         other => panic!("expected Failed, got {other:?}"),

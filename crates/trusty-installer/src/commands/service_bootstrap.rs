@@ -203,20 +203,27 @@ impl BootstrapAction {
 /// service bootstrap for either would shell out to a subcommand that does not
 /// exist.
 ///
-/// #6290: trusty-review left this list. It has no daemon — reviews run per
-/// invocation — so it ships no `service` subcommand at all, and shelling out to
-/// one would be the same "subcommand that does not exist" failure the list
-/// exists to prevent. What it needs instead is EVICTION, which is
+/// #6290, #6350: trusty-review and trusty-analyze both left this list. Neither
+/// ships a `service install` subcommand any more — reviews run per invocation,
+/// and ADR-0032 makes analyze on demand — so shelling out to one would be the
+/// same "subcommand that does not exist" failure the list exists to prevent.
+/// What they need instead is EVICTION, which is
 /// [`member_has_retired_service`]'s question.
 ///
-/// What: `true` for search/memory/analyze/console; `false` otherwise.
+/// The exclusion is DERIVED, not remembered. Deleting a name from the list
+/// below is a second edit someone has to think to make, and #6350's first round
+/// made it here while leaving `manage_strategy_for` classifying analyze as
+/// launchd — so `tctl install` skipped the bootstrap while `tctl start` did it
+/// anyway. Both halves now read the one registry.
+///
+/// What: `true` for search/memory/console, minus any member whose service has
+/// since been retired; `false` otherwise.
 /// Test: `service_members_recognised`, `non_service_members_excluded`,
-/// `retired_review_has_no_service_install`.
+/// `retired_review_has_no_service_install`,
+/// `retired_analyze_has_no_service_install`.
 pub fn member_has_service_install(binary: &str) -> bool {
-    matches!(
-        binary,
-        "trusty-search" | "trusty-memory" | "trusty-analyze" | "trusty-console"
-    )
+    !member_has_retired_service(binary)
+        && matches!(binary, "trusty-search" | "trusty-memory" | "trusty-console")
 }
 
 /// Whether a member has a launchd unit an upgrade must boot out (#6290).

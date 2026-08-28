@@ -285,66 +285,52 @@ async fn daemon_serving() -> Result<bool> {
     Ok(trusty_common::uds::socket_is_serving(&socket, Duration::from_millis(500)).await)
 }
 
-/// Install and start the background daemon (idempotent).
+/// Migrate off the retired launchd unit and prove the on-demand path works.
 ///
-/// Why: gives users a one-command "make the daemon run forever" path.
-/// What: if the socket already answers, returns early. Otherwise installs the
-/// launchd service (when not already installed) and polls the socket for up to
-/// 10 s.
-/// Test: on a machine with the daemon already up, prints "already running" and
-/// exits 0; the launchd path is macOS-only and verified manually.
+/// Why this no longer installs anything (#6350): ADR-0032 makes trusty-analyze
+/// on-demand, so there is no "make the daemon run forever" state to reach. What
+/// an operator still needs from `setup daemon` is the two facts this now
+/// establishes — any unit a previous version installed is gone, and a client
+/// running on this machine can start the server.
+///
+/// What: evicts the retired LaunchAgent (macOS), returns early when something is
+/// already serving, and otherwise runs the same `ensure_running` every client
+/// uses. The server is left to its own idle window; nothing here pins it up.
+///
+/// Test: `commands::service`'s `retirement_*` cover the eviction decision;
+/// the spawn half is `on_demand_tests.rs`.
 async fn setup_daemon() -> Result<()> {
+    // #6350: run the launchd migration BEFORE the liveness check. A host that
+    // installed the old unit has one loaded right now, so `daemon_serving`
+    // returns true and an early return would leave the resident daemon — and
+    // its `KeepAlive: Always` restart loop — in place forever.
+    #[cfg(target_os = "macos")]
+    crate::commands::service::service_uninstall()?;
+
     if daemon_serving().await? {
-        println!("{} daemon already running", "✓".green());
+        println!("{} trusty-analyze is already serving", "✓".green());
         return Ok(());
     }
 
-    #[cfg(target_os = "macos")]
-    {
-        use crate::commands::service::{launchd_plist_path, service_install};
-
-        let plist = launchd_plist_path()?;
-        if !plist.exists() {
-            service_install()?;
-        } else {
-            // Plist exists but nothing is serving — (re)load it.
-            let status = std::process::Command::new("launchctl")
-                .arg("load")
-                .arg(&plist)
-                .status()
-                .context("launchctl load")?;
-            if !status.success() {
-                tracing::warn!("launchctl load exited with {status}");
-            }
-        }
-
-        // Poll the socket for up to 10 s. #4392's HTTP_PROXY hazard is gone
-        // with the HTTP client: a Unix socket has no proxy to be routed through.
-        for _ in 0..20 {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            if daemon_serving().await? {
-                println!("{} daemon installed and serving", "✓".green());
-                return Ok(());
-            }
-        }
-        println!(
-            "{} daemon installed but did not report healthy within 10 s — \
-             check `trusty-analyze service logs`",
-            "⚠".yellow()
-        );
-        Ok(())
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        println!(
-            "{} `setup daemon` installs a macOS launchd service; on this \
-             platform start the daemon with `trusty-analyze start` or your \
-             distro's service manager.",
-            "·".dimmed()
-        );
-        Ok(())
-    }
+    // #6350: no LaunchAgent is installed. The one thing `setup daemon` can
+    // usefully prove is that a client CAN start the server — so it runs the
+    // same on-demand path every client uses, then leaves the server to its own
+    // idle window rather than pinning it up.
+    let socket = trusty_analyze::service::socket_path()?;
+    trusty_common::uds::OnDemandAnalyze::at(&socket)
+        .ensure_running()
+        .await
+        .context("start trusty-analyze on demand")?;
+    println!(
+        "{} trusty-analyze starts on demand and answers {}",
+        "✓".green(),
+        socket.display()
+    );
+    println!(
+        "  Nothing needs to stay resident — the server exits after an idle \
+         period and any client restarts it."
+    );
+    Ok(())
 }
 
 #[cfg(test)]

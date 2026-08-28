@@ -115,6 +115,14 @@ of those bind it; all three go when that client migrates. Whatever you pick:
   (binary on PATH plus `--version`) instead of dialling. A probe left dialling
   would read `Refused`, which `is_confirmed_down` accepts, and kickstart a
   launchd label that no longer exists.
+- **#6350** — `trusty-analyze` went further and stopped being resident at all.
+  It has no launchd unit and no port; a client starts it through
+  `trusty_common::uds::OnDemandAnalyze` and it exits after an idle window. An
+  operator has nothing to run and nothing to install: neither
+  `trusty-analyze serve` nor `trusty-analyze service install` (which no longer
+  exists) is part of bringing the stack up. `com.trusty.analyze` is evicted by
+  `tctl install` and `tctl upgrade`, through the same `RETIRED_SERVICES`
+  mechanism that clears `com.trusty.review` — one eviction path, two rows.
 - **#6287** — `trusty-analyze` left this table the same way, on the same
   reasoning: it binds `<data dir>/trusty-analyze/trusty-analyze.sock` and has
   no `DEFAULT_PORT`. Four consumers dialled 7879 rather than two, so all four
