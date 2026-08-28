@@ -35,7 +35,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tower::ServiceExt;
 use trusty_common::uds::server::{
-    CODE_INVALID_PARAMS, CODE_METHOD_NOT_FOUND, RpcResponse, RpcRouter,
+    CODE_INTERNAL_ERROR, CODE_INVALID_PARAMS, CODE_METHOD_NOT_FOUND, RpcResponse, RpcRouter,
 };
 
 use super::{METHODS, register};
@@ -352,10 +352,10 @@ async fn parity_doctor_agrees_across_transports() {
 fn blank_deadline_bounded_messages(mut report: Value) -> Value {
     if let Some(checks) = report.get_mut("checks").and_then(Value::as_array_mut) {
         for check in checks {
-            if check.get("name") == Some(&json!("worktree_disk")) {
-                if let Some(map) = check.as_object_mut() {
-                    map.insert("message".into(), json!("<deadline-bounded>"));
-                }
+            if check.get("name") == Some(&json!("worktree_disk"))
+                && let Some(map) = check.as_object_mut()
+            {
+                map.insert("message".into(), json!("<deadline-bounded>"));
             }
         }
     }
@@ -578,4 +578,213 @@ async fn parity_tmux_adopt_unknown_session_agrees_across_transports() {
         error["message"], body["error"],
         "the socket must carry the HTTP body's message verbatim"
     );
+}
+
+// ── The four write-shaped claude-config methods ──────────────────────────────
+//
+// Why these get their own section: `checkpoints.create`, `checkpoints.delete`,
+// `restore` and `restart` all WRITE (or drive tmux), so a whole-body comparison
+// against an HTTP call would perform the side effect twice and — for `create`,
+// whose id embeds a timestamp and four random characters — compare two ids that
+// can never be equal. Each therefore asserts the same persisted effect its HTTP
+// test asserts, driven over the socket, or the failure both transports must
+// agree on. Every one dials a registered method and asserts a code OTHER than
+// `method_not_found`, so deleting the registration line in `core.rs::register`
+// fails the test rather than silently passing it.
+
+/// Why: `create` is the only method on this slice whose success is a WRITE, and
+/// its HTTP test (`create_checkpoint_returns_id`) proves it by listing the
+/// checkpoint back. This proves the socket performs the same write, with both
+/// halves over the socket — so a `create` registered but wired to the wrong body
+/// lists nothing.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn rpc_claude_config_checkpoint_create_then_list_sees_it() {
+    let (state, _dir) = hermetic();
+    let project = tempfile::tempdir().expect("project dir");
+    let project_path = project.path().display().to_string();
+    let router = rpc_router(&state);
+
+    let created = rpc_ok(
+        &router,
+        "mpm.claude_config.checkpoints.create",
+        json!({"project": project_path, "label": "from-the-socket"}),
+    )
+    .await;
+    let id = created["id"]
+        .as_str()
+        .expect("create returns an id")
+        .to_string();
+    assert!(!id.is_empty(), "the id must not be empty: {created}");
+
+    let listed = rpc_ok(
+        &router,
+        "mpm.claude_config.checkpoints.list",
+        json!({"project": project_path}),
+    )
+    .await;
+    assert!(
+        checkpoint_ids(&listed).contains(&id),
+        "the checkpoint written over the socket must be listed back: {listed}"
+    );
+}
+
+/// Why: `delete`'s effect is a removal, so the only assertion that proves it ran
+/// is that a checkpoint which WAS listed no longer is. Creating it over the
+/// socket first keeps the whole round trip on the transport under test.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn rpc_claude_config_checkpoint_delete_removes_a_created_checkpoint() {
+    let (state, _dir) = hermetic();
+    let project = tempfile::tempdir().expect("project dir");
+    let project_path = project.path().display().to_string();
+    let router = rpc_router(&state);
+
+    let created = rpc_ok(
+        &router,
+        "mpm.claude_config.checkpoints.create",
+        json!({"project": project_path}),
+    )
+    .await;
+    let id = created["id"]
+        .as_str()
+        .expect("create returns an id")
+        .to_string();
+    assert!(
+        checkpoint_ids(
+            &rpc_ok(
+                &router,
+                "mpm.claude_config.checkpoints.list",
+                json!({"project": project_path}),
+            )
+            .await
+        )
+        .contains(&id),
+        "the checkpoint must exist before the delete is meaningful"
+    );
+
+    let deleted = rpc_ok(
+        &router,
+        "mpm.claude_config.checkpoints.delete",
+        json!({"project": project_path, "id": id}),
+    )
+    .await;
+    assert_eq!(
+        deleted["deleted"],
+        json!(id),
+        "delete must name the checkpoint it removed: {deleted}"
+    );
+
+    let listed = rpc_ok(
+        &router,
+        "mpm.claude_config.checkpoints.list",
+        json!({"project": project_path}),
+    )
+    .await;
+    assert!(
+        !checkpoint_ids(&listed).contains(&id),
+        "the deleted checkpoint must be gone from the listing: {listed}"
+    );
+}
+
+/// The `id` of every checkpoint in a `checkpoints.list` result.
+fn checkpoint_ids(listed: &Value) -> Vec<String> {
+    listed["checkpoints"]
+        .as_array()
+        .expect("checkpoints is an array")
+        .iter()
+        .filter_map(|c| c["id"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// Why: a checkpoint id that was never written is the one `delete` failure both
+/// transports reach with no setup, and HTTP answers 404 for it
+/// (`delete_unknown_checkpoint_is_404`). The socket must answer the code that
+/// 404 maps to, not the `method_not_found` a missing registration would give.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn rpc_claude_config_delete_unknown_checkpoint_reports_not_found() {
+    let (state, _dir) = hermetic();
+    let project = tempfile::tempdir().expect("project dir");
+    let project_path = project.path().display().to_string();
+
+    let (status, _body) = http(
+        &state,
+        "DELETE",
+        &format!("/claude-config/checkpoints/no-such-checkpoint?project={project_path}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "HTTP must still 404");
+
+    let error = rpc_err(
+        &rpc_router(&state),
+        "mpm.claude_config.checkpoints.delete",
+        json!({"project": project_path, "id": "no-such-checkpoint"}),
+    )
+    .await;
+    assert_eq!(error["code"], json!(CODE_NOT_FOUND), "{error}");
+}
+
+/// Why: restoring an id that was never written is `restore`'s reachable failure,
+/// and HTTP answers 500 for it (`restore_unknown_checkpoint_is_500`) — a missing
+/// checkpoint and a failed rewrite are deliberately the same status there. This
+/// pins that the socket agrees rather than inventing a 404.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn rpc_claude_config_restore_unknown_checkpoint_reports_internal_error() {
+    let (state, _dir) = hermetic();
+    let project = tempfile::tempdir().expect("project dir");
+    let payload = json!({
+        "project": project.path().display().to_string(),
+        "checkpoint_id": "no-such-checkpoint",
+    });
+
+    let (status, _body) = http(
+        &state,
+        "POST",
+        "/claude-config/restore",
+        Some(payload.clone()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "HTTP must still 500"
+    );
+
+    let error = rpc_err(&rpc_router(&state), "mpm.claude_config.restore", payload).await;
+    assert_eq!(error["code"], json!(CODE_INTERNAL_ERROR), "{error}");
+}
+
+/// Why: `restart` drives tmux, so what it does on a machine with no tmux and on
+/// one with tmux but no such session are different failure kinds — pinning
+/// either would make this a report on the machine. What holds either way is that
+/// the socket's code is the one the observed HTTP status maps to, which is also
+/// what rules out `method_not_found`.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn rpc_claude_config_restart_unknown_session_reports_a_coded_error() {
+    let (state, _dir) = hermetic();
+    let payload = json!({"tmux_session": "no-such-session-xyz"});
+
+    let (status, _body) = http(
+        &state,
+        "POST",
+        "/claude-config/restart",
+        Some(payload.clone()),
+    )
+    .await;
+    assert!(
+        status.is_client_error() || status.is_server_error(),
+        "restarting a session that is not there must fail: {status}"
+    );
+
+    let error = rpc_err(&rpc_router(&state), "mpm.claude_config.restart", payload).await;
+    let expected = match status {
+        StatusCode::NOT_FOUND => CODE_NOT_FOUND,
+        StatusCode::INTERNAL_SERVER_ERROR => CODE_INTERNAL_ERROR,
+        other => panic!("unexpected status for a missing tmux session: {other}"),
+    };
+    assert_eq!(error["code"], json!(expected), "{error}");
 }
