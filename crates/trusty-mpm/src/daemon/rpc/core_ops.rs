@@ -29,6 +29,9 @@
 //! `parity_overseer_agrees_across_transports`,
 //! `parity_tmux_sessions_agrees_across_transports` — each drives one of these
 //! through BOTH transports and compares the answers.
+//!
+//! [`super::core`]: crate::daemon::rpc::core
+//! [`DaemonError`]: crate::daemon::error::DaemonError
 
 use std::sync::Arc;
 

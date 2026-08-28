@@ -591,7 +591,8 @@ pub struct RegisterSession {
 /// is created — that behaviour is unchanged so the existing CLI and hook
 /// auto-registration paths keep working).
 /// What: builds the `Session` record and registers it in state. When `workdir`
-/// is present, additionally creates the tmux session via [`TmuxService::spawn_claude`]
+/// is present, additionally creates the tmux session via
+/// [`TmuxService::spawn_claude`](crate::daemon::services::TmuxService::spawn_claude)
 /// and starts `claude` in it; failures map to HTTP 422 (`claude` missing or
 /// tmux missing) or 500 (tmux command failed). On success the new session
 /// appears immediately in `GET /sessions`.
@@ -1467,7 +1468,9 @@ pub async fn pair_status(
 ///
 /// Why: an operator unpairing the bot must drop the binding both in memory and
 /// on disk so a daemon restart does not restore it from `pairing.json`.
-/// What: delegates to [`PairingService::reset`] and returns `{ "reset": true }`.
+/// What: delegates to
+/// [`PairingService::reset`](crate::daemon::services::PairingService::reset) and
+/// returns `{ "reset": true }`.
 /// Test: `pair_reset_clears_pairing` in `api_tests.rs`.
 #[utoipa::path(
     post,
