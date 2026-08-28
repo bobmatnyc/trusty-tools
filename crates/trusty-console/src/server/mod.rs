@@ -134,9 +134,20 @@ impl AppState {
         // idle-connection reuse forces every proxied request to open a fresh
         // connection to whatever process currently owns the port, eliminating the
         // stale-reuse failure at the root. Loopback connect cost is negligible.
+        // #6360: reqwest follows up to 10 redirects by default, and every
+        // loopback check in this crate — the proxy's `is_local_upstream`, the
+        // delete routes' reuse of it — validates only the URL it was handed. A
+        // 3xx from an upstream would re-issue the request, body and method
+        // intact, at whatever host the `Location` names, which for a DELETE
+        // means a destructive call to an address nothing checked. Refusing to
+        // follow leaves the 3xx as the response: the proxy hands it to the
+        // browser (which is what a reverse proxy should do with a redirect the
+        // upstream chose) and the delete routes read it as a non-2xx refusal.
+        // Nothing in this crate relied on following one.
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .pool_max_idle_per_host(0)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("reqwest client init");
         let analyze_handle = Arc::new(McpServiceHandle::new(

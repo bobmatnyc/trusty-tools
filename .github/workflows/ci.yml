@@ -1673,7 +1673,8 @@ jobs:
   #                        the cheapest meaningful floor (catches compile-time
   #                        Svelte/TS errors) without inventing a test suite
   #   trusty-memory    -> vite build (build)       — same: no test scripts
-  #   trusty-console   -> vite build (build)       — same: no test scripts
+  #   trusty-console   -> vite build (build) + node --test (test)  — #6360 added
+  #                        src/*.test.js; `build` alone never ran them
   #   trusty-analyze   -> vite build (build)       — same: no test scripts
   #
   # trusty-agents/ui's `test` script (playwright e2e) is intentionally NOT
@@ -1737,7 +1738,10 @@ jobs:
             command: pnpm run build
           - name: trusty-console
             dir: crates/trusty-console/ui
-            command: pnpm run build
+            # #6360: `build` alone left src/*.test.js unexecuted in CI — the
+            # delete flow's fail-open property is asserted there. Not a new
+            # required context, so no open PR is wedged by the addition.
+            command: pnpm run build && pnpm run test
           - name: trusty-analyze
             dir: crates/trusty-analyze/ui
             command: pnpm run build

@@ -305,6 +305,7 @@ fn confirmed_palace_id(result: &Value) -> Option<String> {
 ///
 /// Test: `index_delete_confirms_a_real_delete`,
 /// `index_delete_reports_a_skipped_delete_as_a_failure`,
+/// `index_delete_rejects_a_confirmation_for_another_id`,
 /// `index_delete_reports_a_daemon_error_status_as_a_failure`,
 /// `index_delete_reports_undeleted_data_as_a_failure`,
 /// `index_delete_reports_a_dead_daemon_as_unreachable`.
@@ -382,6 +383,24 @@ pub(crate) async fn delete_index_on_daemon(
         };
     }
 
+    // #6360: the daemon echoes the id it acted on. A `removed: true` naming a
+    // DIFFERENT index is not a confirmation for the one that was asked for —
+    // the same check `confirmed_palace_id` makes on the memory side. An answer
+    // carrying no `id` at all is accepted, because that field is the daemon's
+    // echo of the request rather than a fact it discovered.
+    match parsed.get("id").and_then(Value::as_str) {
+        Some(echoed) if echoed != id => {
+            return DeleteVerdict::Refused {
+                id: id.to_string(),
+                reason: format!(
+                    "{SEARCH_SERVICE_ID} confirmed a delete for '{echoed}', not for '{id}'"
+                ),
+                detail: parsed,
+            };
+        }
+        _ => {}
+    }
+
     if delete_data && parsed.get("data_deleted").and_then(Value::as_bool) != Some(true) {
         return DeleteVerdict::Refused {
             id: id.to_string(),
@@ -437,19 +456,26 @@ pub struct PalaceDeleteParams {
 ///
 /// Why: the dashboard's palace roster needs an action, and the console must not
 /// grow its own teardown to provide one.
-/// What: resolves trusty-memory's socket the way
+/// What: validates the id, then resolves trusty-memory's socket the way
 /// [`crate::detect::MemoryConnector`] does — through
 /// `trusty_common::daemon_socket_path`, so both agree on the path — then calls
 /// [`delete_palace_on_socket`]. On success it re-polls trusty-memory's
 /// `console_metrics` immediately so the roster the UI re-fetches reflects the
 /// delete instead of a cache written up to a poll interval ago.
-/// Test: `palace_route_rejects_a_traversal_id`,
-/// `palace_route_reports_an_unresolvable_daemon_as_unreachable`.
+/// Test: `palace_route_rejects_a_traversal_id`.
 pub async fn delete_palace_handler(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     Query(params): Query<PalaceDeleteParams>,
 ) -> Response {
+    // #6360: BEFORE resolving the daemon. Resolution can fail on its own — an
+    // unresolvable data directory, a daemon that is not running — and a
+    // resolution failure answered first would mask the id as the real problem
+    // and make the guard untestable without a live daemon.
+    if let Err(reason) = validate_id(&id) {
+        return DeleteVerdict::Invalid { id, reason }.into_response();
+    }
+
     let socket: PathBuf = match trusty_common::daemon_socket_path(MEMORY_SERVICE) {
         Ok(p) => p,
         Err(e) => {
@@ -483,7 +509,8 @@ pub struct IndexDeleteParams {
 ///
 /// Why: the counterpart to [`delete_palace_handler`] for the Search tab's index
 /// roster.
-/// What: resolves trusty-search's loopback base URL from the health-poll cache —
+/// What: validates the id, then resolves trusty-search's loopback base URL from
+/// the health-poll cache —
 /// the same resolution the reverse proxy uses, so there is one answer to "where
 /// is trusty-search" — then calls [`delete_index_on_daemon`] with the crate's
 /// shared HTTP client. Refreshes the search metrics cache after a confirmed
@@ -495,6 +522,14 @@ pub async fn delete_index_handler(
     AxumPath(id): AxumPath<String>,
     Query(params): Query<IndexDeleteParams>,
 ) -> Response {
+    // #6360: BEFORE the cache lookup. Resolving first answered `503` for a
+    // malformed id whenever trusty-search happened to be unresolved, which hid
+    // whether the guard ran at all — `index_route_rejects_a_bad_id` could pass
+    // against an empty `AppState` without validation ever executing.
+    if let Err(reason) = validate_id(&id) {
+        return DeleteVerdict::Invalid { id, reason }.into_response();
+    }
+
     let base_url = match state.poller_cache().snapshot().await {
         Some(snap) => snap.url_map().get(SEARCH_SERVICE_ID).cloned(),
         None => None,
@@ -610,11 +645,13 @@ mod tests {
         format!("http://{addr}")
     }
 
+    /// The client the routes actually use.
+    ///
+    /// Built through `AppState` rather than by a second builder here: the
+    /// redirect assertion in `index_delete_does_not_follow_a_redirect` is only
+    /// worth anything if it exercises the production policy.
     fn client() -> reqwest::Client {
-        reqwest::Client::builder()
-            .pool_max_idle_per_host(0)
-            .build()
-            .expect("client")
+        (*AppState::new(vec![]).http_client()).clone()
     }
 
     /// Assert a verdict is not a success and say what it carried when it is.
@@ -861,6 +898,32 @@ mod tests {
         );
     }
 
+    /// Why (#6360): a `200` whose body carries no `removed` field at all is the
+    /// same class of answer as `removed: false` — the daemon did not say it
+    /// removed anything. Reading a missing field as success is how a protocol
+    /// change or a proxy that swallowed the body turns into a phantom delete.
+    /// Test: this is the test.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn index_delete_reports_an_empty_body_as_a_failure() {
+        let base = stub_search_daemon(StatusCode::OK, json!({})).await;
+        let verdict = delete_index_on_daemon(&client(), &base, "scratch", false).await;
+        assert_failure(&verdict, "skipped the delete");
+    }
+
+    /// Why: a `removed: true` naming a DIFFERENT index is not a confirmation
+    /// for the one that was asked for.
+    /// Test: this is the test.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn index_delete_rejects_a_confirmation_for_another_id() {
+        let base = stub_search_daemon(
+            StatusCode::OK,
+            json!({"id":"someone-else","removed":true,"data_deleted":false,"quiesced":true}),
+        )
+        .await;
+        let verdict = delete_index_on_daemon(&client(), &base, "scratch", false).await;
+        assert_failure(&verdict, "not for 'scratch'");
+    }
+
     /// Why: an abandoned teardown (`quiesced: false` beside `removed: false`)
     /// is a distinct condition the operator can act on — retry it — so the
     /// message must say so rather than reporting a bare skip.
@@ -925,6 +988,39 @@ mod tests {
         );
     }
 
+    /// Why (#6360): every loopback check in this crate validates the URL it was
+    /// handed and nothing else. A followed 3xx would re-issue the DELETE, method
+    /// and all, at whatever host the `Location` names — past the guard that just
+    /// ran. The stub redirects to a public address; if the policy ever went back
+    /// to `limited(10)`, this would leave loopback.
+    /// Test: this is the test.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn index_delete_does_not_follow_a_redirect() {
+        let app = axum::Router::new().route(
+            "/indexes/{id}",
+            axum::routing::delete(|| async {
+                (
+                    StatusCode::TEMPORARY_REDIRECT,
+                    [(
+                        axum::http::header::LOCATION,
+                        "http://169.254.169.254/indexes/scratch",
+                    )],
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let verdict =
+            delete_index_on_daemon(&client(), &format!("http://{addr}"), "scratch", false).await;
+        assert_failure(&verdict, "HTTP 307");
+    }
+
     /// Why (ADR-0018): a non-loopback upstream in the cache is a bug or a
     /// compromise; the delete must not be sent to it.
     /// Test: this is the test.
@@ -981,15 +1077,23 @@ mod tests {
         );
     }
 
-    /// Why: the index route rejects a bad id ahead of daemon resolution too, so
-    /// the guard does not depend on a running daemon to fire.
+    /// Why: the index route rejects a bad id AHEAD of daemon resolution, so the
+    /// guard fires with no daemon running. Accepting `503` here too would have
+    /// let this pass against an empty `AppState` without validation ever
+    /// executing — exactly the hole that made the assertion meaningless.
     /// Test: this is the test.
     #[tokio::test]
     async fn index_route_rejects_a_bad_id() {
-        let (status, _) = delete_through_router("/api/console/search/indexes/a%2Fb").await;
+        let (status, body) = delete_through_router("/api/console/search/indexes/a%2Fb").await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "validation must run before daemon resolution, so this cannot be 503: {body}"
+        );
+        assert_eq!(body["ok"], json!(false));
         assert!(
-            status == StatusCode::BAD_REQUEST || status == StatusCode::SERVICE_UNAVAILABLE,
-            "an id with a separator must never reach a daemon as-is (got {status})"
+            body["error"].as_str().unwrap_or_default().contains('/'),
+            "the error must name the offending character: {body}"
         );
     }
 
