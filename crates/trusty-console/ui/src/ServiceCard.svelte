@@ -9,16 +9,21 @@
    *       actions keeps a discrete button per action and stays inert itself.
    *       A clickable card carries role="button", tabindex=0 and an
    *       Enter/Space keydown handler, so it is reachable and operable from the
-   *       keyboard rather than being a div that only a mouse can use.
+   *       keyboard rather than being a div that only a mouse can use. Its
+   *       aria-label replaces the name the contents would compute, so
+   *       aria-describedby points back at the status badge, the version and the
+   *       hint — otherwise a screen reader announces the service and its action
+   *       and never says the card is degraded.
    * Test: `cardActions.test.js` covers the one-action / many-action / no-action
-   *       rule and the Enter/Space key set. Ordering of the cards themselves is
+   *       rule, the Enter/Space key set, and the described-by composition.
+   *       Ordering of the cards themselves is
    *       server-side — see `detect::order_for_display` and
    *       `test_services_route_orders_running_before_absent`.
    *
    * @typedef {{ id: string, display_name: string, status: string, version?: string, url?: string, hint?: string }} Service
    * @type {{ service: Service, tabbedServices: Set<string>, onViewDetails?: (id: string) => void }}
    */
-  import { cardActivation, isActivationKey } from './cardActions.js';
+  import { cardActivation, cardDescribedBy, isActivationKey } from './cardActions.js';
 
   let { service, tabbedServices = new Set(), onViewDetails } = $props();
 
@@ -58,6 +63,9 @@
       : [],
   );
   let activation = $derived(cardActivation(actions));
+  // #6370: the elements a screen reader reads as this card's description.
+  let describedBy = $derived(cardDescribedBy(service));
+  let elementId = $derived(String(service.id).replace(/[^A-Za-z0-9_-]/g, '-'));
 
   /**
    * Activate the card from the keyboard.
@@ -75,7 +83,7 @@
 {#snippet cardContents()}
   <div class="card-header">
     <h2 class="name">{service.display_name}</h2>
-    <span class="badge" style="--_s: {statusVar};">
+    <span class="badge" id="svc-{elementId}-status" style="--_s: {statusVar};">
       <span class="dot"></span>
       {statusLabel}
     </span>
@@ -84,14 +92,14 @@
   <div class="card-body">
     <p class="id">ID: <code>{service.id}</code></p>
     {#if service.version}
-      <p class="version">Version: <code>{service.version}</code></p>
+      <p class="version" id="svc-{elementId}-version">Version: <code>{service.version}</code></p>
     {/if}
     {#if service.status === 'absent'}
-      <p class="hint">Install with <code>cargo install {service.id}</code></p>
+      <p class="hint" id="svc-{elementId}-hint">Install with <code>cargo install {service.id}</code></p>
     {:else if service.status === 'available'}
-      <p class="hint">Binary found but daemon is not running.</p>
+      <p class="hint" id="svc-{elementId}-hint">Binary found but daemon is not running.</p>
     {:else if service.status === 'degraded'}
-      <p class="hint degraded-hint">{service.hint ?? 'Service reachable but its metrics tool is unavailable.'}</p>
+      <p class="hint degraded-hint" id="svc-{elementId}-hint">{service.hint ?? 'Service reachable but its metrics tool is unavailable.'}</p>
     {/if}
   </div>
 {/snippet}
@@ -99,12 +107,14 @@
 {#if activation.mode === 'card'}
   <!-- One action → the whole card is the button. The cue below is decorative:
        the accessible name comes from aria-label, so a screen reader announces
-       the service and its action once, not twice. -->
+       the service and its action once, not twice. aria-describedby then adds
+       the status, version and hint the label leaves out. -->
   <div
     class="card card-clickable"
     role="button"
     tabindex="0"
     aria-label="{service.display_name} — {activation.primary.label}"
+    aria-describedby={describedBy}
     onclick={activation.primary.run}
     onkeydown={handleCardKeydown}
   >

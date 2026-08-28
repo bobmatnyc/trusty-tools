@@ -47,3 +47,42 @@ export function cardActivation(actions) {
   if (list.length === 0) return { mode: 'none', primary: null };
   return { mode: 'buttons', primary: null };
 }
+
+/**
+ * The statuses whose card renders an explanatory hint paragraph.
+ *
+ * Why: the hint is the sentence telling an operator what to DO about a card
+ * that is not running, so it belongs in the card's accessible description.
+ * The three entries mirror the three hint branches in `ServiceCard.svelte` —
+ * a status added to one must be added to the other, or a screen reader loses
+ * the sentence a sighted user can see.
+ */
+const STATUSES_WITH_HINT = new Set(['absent', 'available', 'degraded']);
+
+/**
+ * Element ids that describe a card, for its `aria-describedby`.
+ *
+ * Why: #6370 — a clickable card takes its accessible NAME from `aria-label`,
+ * which replaces the name the contents would otherwise compute. Without a
+ * description, a screen-reader user tabbing across the Overview hears
+ * "Trusty Memory — View details" and nothing about the card being degraded,
+ * so the one card that needs attention sounds like the five that do not.
+ * Pointing at the elements already on screen — rather than restating their
+ * text in a hidden node — means the spoken description cannot drift from the
+ * visible one.
+ *
+ * What: always the status badge; the version when the service reports one;
+ * the hint paragraph for the statuses that render one. Ids are derived from
+ * `service.id`, which is unique per card, with anything outside
+ * `[A-Za-z0-9_-]` replaced so the result is a usable id.
+ *
+ * @param {{ id: string, status: string, version?: string }} service
+ * @returns {string} A space-separated id list, in reading order.
+ */
+export function cardDescribedBy(service) {
+  const sid = String(service?.id ?? '').replace(/[^A-Za-z0-9_-]/g, '-');
+  const ids = [`svc-${sid}-status`];
+  if (service?.version) ids.push(`svc-${sid}-version`);
+  if (STATUSES_WITH_HINT.has(service?.status)) ids.push(`svc-${sid}-hint`);
+  return ids.join(' ');
+}
