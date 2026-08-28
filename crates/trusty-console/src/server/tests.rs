@@ -104,6 +104,51 @@ async fn test_services_route_returns_json() {
     assert_eq!(body[2]["status"], "absent");
 }
 
+/// Why: #6370 — the Overview grid renders the array in response order, so the
+/// route must lead with the services that are live rather than with whichever
+/// connector `all_connectors()` happens to register first. This test fails on
+/// the pre-#6370 handler, which returned registration order untouched.
+/// What: registers three connectors in the WORST order (absent, available,
+/// running), issues GET /api/console/services, asserts the response inverts it.
+/// Test: this test itself.
+#[tokio::test]
+async fn test_services_route_orders_running_before_absent() {
+    let state = AppState::new(vec![
+        Box::new(StubConnector {
+            id: "trusty-analyze",
+            display_name: "Trusty Analyze",
+            status: ServiceStatus::Absent,
+        }),
+        Box::new(StubConnector {
+            id: "trusty-memory",
+            display_name: "Trusty Memory",
+            status: ServiceStatus::Available,
+        }),
+        Box::new(StubConnector {
+            id: "trusty-search",
+            display_name: "Trusty Search",
+            status: ServiceStatus::Running,
+        }),
+    ]);
+
+    let router = build_router(state);
+    let req = Request::builder()
+        .uri("/api/console/services")
+        .body(Body::empty())
+        .expect("request");
+    let resp = router.oneshot(req).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let bytes = get_bytes(resp).await;
+    let body: Vec<serde_json::Value> = serde_json::from_slice(&bytes).expect("parse json");
+    let ids: Vec<&str> = body.iter().map(|s| s["id"].as_str().unwrap()).collect();
+    assert_eq!(
+        ids,
+        vec!["trusty-search", "trusty-memory", "trusty-analyze"],
+        "running must lead, absent must trail; got {body:?}"
+    );
+}
+
 /// Why: health endpoint must return 200 with `status: ok`.
 /// What: issues GET /health and checks the JSON body.
 /// Test: this test itself.

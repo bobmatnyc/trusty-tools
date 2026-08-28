@@ -219,7 +219,7 @@
 </script>
 
 <div class="tab-content">
-  <RefreshHeader title="Sessions" onRefresh={() => fetchAll(true)} {refreshing} />
+  <RefreshHeader title="MPM Sessions" onRefresh={() => fetchAll(true)} {refreshing} />
 
   <!-- Controls row: poll interval + spawn -->
   <div class="controls">
