@@ -10,14 +10,13 @@
 use std::sync::Arc;
 
 use axum::{
-    Json,
     extract::{Path as AxumPath, State},
-    http::StatusCode,
     response::IntoResponse,
 };
 use serde::Serialize;
 use tracing::warn;
 
+use crate::daemon::rpc::managed::outcome::RouteOutcome;
 use crate::daemon::state::DaemonState;
 
 use super::parse_id;
@@ -110,16 +109,22 @@ pub async fn get_session_activity(
     State(state): State<Arc<DaemonState>>,
     AxumPath(id_str): AxumPath<String>,
 ) -> impl IntoResponse {
-    let id = match parse_id(&id_str) {
+    activity_core(&state, &id_str).await // #6288
+}
+
+/// The transport-neutral body of `GET .../{id}/activity` (#6288), served over
+/// the socket as `mpm.managed.activity`.
+///
+/// Test: `managed_activity_parity` in `daemon::rpc::managed_tests`.
+pub(crate) async fn activity_core(state: &Arc<DaemonState>, id_str: &str) -> RouteOutcome {
+    let id = match parse_id(id_str) {
         Ok(id) => id,
-        Err((code, msg)) => return (code, msg).into_response(),
+        Err((code, msg)) => return RouteOutcome::text(code.as_u16(), msg),
     };
     let mgr = state.session_manager().await;
     let record = match mgr.get(&id).await {
         Ok(r) => r,
-        Err(_) => {
-            return (StatusCode::NOT_FOUND, format!("session {id_str} not found")).into_response();
-        }
+        Err(_) => return RouteOutcome::text(404, format!("session {id_str} not found")),
     };
 
     // Capture the last 60 pane lines — always available, no LLM key required.
@@ -165,15 +170,11 @@ pub async fn get_session_activity(
     // `MissingApiKey` to an `Unknown` verdict non-erroring — the raw pane is
     // always available regardless of whether a key is configured.
     let monitor = state.activity_monitor();
-    let result = match monitor.check(&id_str, &raw_pane).await {
+    let result = match monitor.check(id_str, &raw_pane).await {
         Ok(r) => r,
         Err(e) => {
             warn!(session = %id_str, "activity check error (non-key): {e}");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("activity check failed: {e}"),
-            )
-                .into_response();
+            return RouteOutcome::text(500, format!("activity check failed: {e}"));
         }
     };
 
@@ -184,7 +185,7 @@ pub async fn get_session_activity(
         None
     };
 
-    Json(ActivityResponse {
+    RouteOutcome::ok(&ActivityResponse {
         raw_pane,
         runtime_active,
         pane_stale,
@@ -201,5 +202,4 @@ pub async fn get_session_activity(
         pending_decision: record.pending_decision,
         proposed_default: record.proposed_default,
     })
-    .into_response()
 }

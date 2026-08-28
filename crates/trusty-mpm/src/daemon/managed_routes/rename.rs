@@ -17,13 +17,13 @@ use std::sync::Arc;
 use axum::{
     Json,
     extract::{Path as AxumPath, State},
-    http::StatusCode,
     response::IntoResponse,
 };
 use serde::Deserialize;
 use tracing::warn;
 
 use super::{parse_id, record_to_summary};
+use crate::daemon::rpc::managed::outcome::RouteOutcome;
 use crate::daemon::state::DaemonState;
 use crate::session_manager::ManagedError;
 
@@ -60,29 +60,37 @@ pub async fn rename_managed_session(
     AxumPath(id_str): AxumPath<String>,
     Json(body): Json<RenameRequest>,
 ) -> impl IntoResponse {
-    let id = match parse_id(&id_str) {
+    rename_core(&state, &id_str, body).await // #6288
+}
+
+/// The transport-neutral body of `PATCH .../managed/{id}` (#6288), served over
+/// the socket as `mpm.managed.rename`.
+///
+/// Test: `managed_rename_parity` in `daemon::rpc::managed_tests`.
+pub(crate) async fn rename_core(
+    state: &Arc<DaemonState>,
+    id_str: &str,
+    body: RenameRequest,
+) -> RouteOutcome {
+    let id = match parse_id(id_str) {
         Ok(id) => id,
-        Err((code, msg)) => return (code, msg).into_response(),
+        Err((code, msg)) => return RouteOutcome::text(code.as_u16(), msg),
     };
     let mgr = state.session_manager().await;
     match mgr.rename(&id, &body.name).await {
-        Ok(record) => Json(record_to_summary(&record)).into_response(),
+        Ok(record) => RouteOutcome::ok(&record_to_summary(&record)),
         Err(ManagedError::SessionNotFound(_)) => {
-            (StatusCode::NOT_FOUND, format!("session {id_str} not found")).into_response()
+            RouteOutcome::text(404, format!("session {id_str} not found"))
         }
-        Err(e @ ManagedError::NameCollision(_)) => {
-            (StatusCode::CONFLICT, e.to_string()).into_response()
-        }
-        Err(ManagedError::InvalidState(_, reason)) => {
-            (StatusCode::BAD_REQUEST, reason).into_response()
-        }
+        Err(e @ ManagedError::NameCollision(_)) => RouteOutcome::text(409, e.to_string()),
+        Err(ManagedError::InvalidState(_, reason)) => RouteOutcome::text(400, reason),
         Err(e) => {
             // #5001: the body already carried this message, but nothing logged
             // it — a 500 here left NO daemon-side trace, so diagnosing one meant
             // correlating unrelated log spam. The unmapped remainder is by
             // definition the case nobody anticipated; log it where it happens.
             warn!(id = %id_str, error = %e, "rename failed with an unmapped error");
-            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+            RouteOutcome::text(500, e.to_string())
         }
     }
 }

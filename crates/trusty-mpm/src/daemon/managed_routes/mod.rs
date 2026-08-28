@@ -16,21 +16,20 @@ use std::sync::Arc;
 use axum::{
     Json,
     extract::{Path as AxumPath, State},
-    http::StatusCode,
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
-use tracing::warn;
 
 use crate::daemon::state::DaemonState;
 use crate::runtime::RuntimeKind;
 use crate::session_manager::ManagedSessionId;
 
 pub mod activity;
-mod delete;
+pub(crate) mod cores;
+pub mod delete;
 mod deliverable_link;
 mod deployment_check;
-mod fleet;
+pub mod fleet;
 mod foreign_harness;
 pub mod front_gate;
 pub mod inproject;
@@ -46,10 +45,11 @@ mod project_status;
 pub mod provision_status;
 pub mod proxy;
 pub mod prune;
-mod reactivate;
+pub mod reactivate;
 pub mod reconcile;
 pub mod rename;
 mod resume_error;
+pub(crate) mod route_outcome_http;
 mod session_prep;
 mod session_summary;
 mod summary;
@@ -81,7 +81,7 @@ pub use prune::{
     EphemeralQuery, PruneRequest, decommission_ephemeral_route, prune_managed_route,
     prune_worktrees_route,
 };
-pub use reactivate::reactivate_managed_session;
+pub use reactivate::{ReactivateQuery, reactivate_managed_session};
 pub use rename::{RenameRequest, rename_managed_session};
 pub use resume_error::ResumeManagedError;
 pub use session_summary::SessionSummary;
@@ -461,82 +461,8 @@ pub async fn spawn_session(
     State(state): State<Arc<DaemonState>>,
     Json(req): Json<SpawnRequest>,
 ) -> impl IntoResponse {
-    // Reject an invalid runtime selector up front with a 400 (the shared
-    // `spawn_managed` helper also rejects it, but doing it here lets us keep the
-    // HTTP-specific 400-vs-500 status distinction that existing clients rely on).
-    if let Some(raw) = req.runtime.as_deref()
-        && let Err(e) = raw.parse::<RuntimeKind>()
-    {
-        warn!("spawn_session: invalid runtime selector: {e}");
-        return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
-    }
-
-    // Deliverable linkage (DOC-35 §10.6, #2379): validate BEFORE any
-    // provisioning side effect, mirroring the runtime-selector pre-check
-    // above — an invalid `--deliverable` must never mint infrastructure for a
-    // link that was never going to be recorded.
-    if let Some(deliverable_id) = req.deliverable_id.as_deref()
-        && let Err(resp) =
-            deliverable_link::validate_deliverable_scope(&state, &req.repo_url, deliverable_id)
-                .await
-    {
-        return resp;
-    }
-
-    let params = SpawnParams {
-        repo_url: req.repo_url,
-        git_ref: req.git_ref,
-        task: req.task,
-        name_hint: req.name_hint,
-        runtime: req.runtime,
-        ephemeral: req.ephemeral,
-        // HTTP route == CLI-origin (`tm launch`/`tm ticket` client calls) —
-        // never subject to the MCP spawn gate (#1836/#1837).
-        mcp_initiated: false,
-        // Turnkey by default (#1903/#1299); a client sets `inject_task: false`
-        // to opt into the legacy metadata-only behavior (`--no-inject`).
-        inject_task: req.inject_task,
-        deliverable_id: req.deliverable_id,
-        // Force-new opt-out (#2450): a client (the picker's "launch new
-        // session", `tm session new`) sets `force_new: true` to skip the
-        // in-project reconnect pre-flight and always spawn fresh.
-        force_new: req.force_new,
-        // #5274: the explicit "give this session its own worktree" request. Only
-        // a human-driven surface sets it (`tm launch --worktree`); absent, the
-        // session runs in the project's main checkout.
-        worktree: req.worktree,
-    };
-
-    // Async path (#2605): provision on a detached task and return the job id
-    // immediately, so a large-repo clone never outlasts the client's HTTP
-    // timeout and the blocking provision runs OFF the request path. The runtime
-    // and deliverable validations above already ran synchronously, so an
-    // invalid request is still a fast 400/404 (never a deferred failure).
-    if req.background {
-        return provision_status::accept_async_spawn(state.clone(), params);
-    }
-
-    match spawn_managed(&state, ManagedSessionId::new(), params).await {
-        Ok(final_record) => {
-            let resp = SpawnResponse {
-                id: final_record.id.to_string(),
-                name: final_record.tmux_name.clone(),
-                workspace_path: final_record
-                    .workspace_path
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().to_string()),
-                repo_url: final_record.repo_url.clone(),
-                branch: final_record.branch.clone(),
-                state: final_record.state.to_string(),
-                created_at: final_record.created_at.to_rfc3339(),
-                attach_cmd: attach_cmd_for(&final_record.tmux_name),
-                runtime: final_record.runtime.as_str().to_owned(),
-                deliverable_id: final_record.deliverable_id.map(|id| id.to_string()),
-            };
-            (StatusCode::CREATED, Json(resp)).into_response()
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
-    }
+    // #6288: the body lives in `cores::spawn_core` so the socket serves it too.
+    cores::spawn_core(&state, req).await
 }
 
 /// POST /api/v1/sessions/managed/adopt — adopt an EXISTING tmux session (#1433).
@@ -558,51 +484,7 @@ pub async fn adopt_existing_session(
     State(state): State<Arc<DaemonState>>,
     Json(req): Json<AdoptExistingRequest>,
 ) -> impl IntoResponse {
-    // Resolve the runtime selector up front so a typo is a 400, not a 500.
-    let runtime = match req.runtime.as_deref() {
-        None => RuntimeKind::default(),
-        Some(raw) => match raw.parse::<RuntimeKind>() {
-            Ok(rk) => rk,
-            Err(e) => {
-                warn!("adopt_existing: invalid runtime selector: {e}");
-                return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
-            }
-        },
-    };
-
-    let task = req.task.unwrap_or_default();
-    let cwd = std::path::PathBuf::from(&req.cwd);
-
-    let mgr = state.session_manager().await;
-    match mgr
-        .adopt_existing(
-            &req.tmux_name,
-            cwd,
-            task,
-            runtime,
-            req.ephemeral.unwrap_or(false),
-        )
-        .await
-    {
-        Ok(record) => {
-            let resp = AdoptExistingResponse {
-                id: record.id.to_string(),
-                name: record.tmux_name.clone(),
-                state: record.state.to_string(),
-                cwd: record.cwd.to_string_lossy().to_string(),
-                runtime: record.runtime.as_str().to_owned(),
-                attach_cmd: attach_cmd_for(&record.tmux_name),
-            };
-            (StatusCode::CREATED, Json(resp)).into_response()
-        }
-        Err(crate::session_manager::ManagedError::TmuxSessionMissing(msg)) => {
-            (StatusCode::NOT_FOUND, msg).into_response()
-        }
-        Err(crate::session_manager::ManagedError::AlreadyAdopted(msg)) => {
-            (StatusCode::CONFLICT, msg).into_response()
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
+    cores::adopt_core(&state, req).await // #6288
 }
 
 /// GET /api/v1/sessions/managed — list all managed sessions.
@@ -645,35 +527,11 @@ pub async fn list_managed_sessions(
     State(state): State<Arc<DaemonState>>,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let mgr = state.session_manager().await;
-    let sid_filter = q.get("source_id").map(String::as_str);
-    // #3034: numbering is observed against the FULL, unfiltered record set
-    // BEFORE the `source_id` filter is applied — otherwise a session outside
-    // the current filter would go unobserved and receive a fresh number the
-    // next time it IS listed. `numbered_summaries` applies the `source_id`
-    // filter, the async unresumable/stale-assets probes, AND the live-tmux
-    // `state`/`attached` reconciliation (#3302/#3531 — a running/attached
-    // session must never read `(stopped)`) to the surviving rows, fail-closed
-    // on a tmux probe error (see `reconcile_against_tmux`).
     // #4335: `?slim=true` opts OUT of the expensive per-session `stale_assets`
-    // probe for callers that never read the flag (the nested-session guard).
-    // Absent/malformed → the full probe, so no existing client changes shape.
+    // probe. Absent/malformed keeps the full probe, so no existing client
+    // changes shape. #6288: the body itself lives in `cores::list_core`.
     let slim = q.get("slim").is_some_and(|v| v == "true" || v == "1");
-    let all_records = mgr.list().await;
-    let numbered = mgr.numbered_snapshot(&all_records).await;
-    let sessions = numbered_summaries(numbered, mgr.tmux.as_ref(), sid_filter, !slim).await;
-    // #5007: if `mgr.list()` just served its last-known in-memory set because
-    // the store could not be read, say so in the same response. Absent on a
-    // healthy store, so the wire shape is unchanged for every normal listing.
-    let store_health = mgr.store_health().await.map(|d| StoreHealthPayload {
-        message: d.message,
-        corrupt: d.corrupt,
-        observed_at: d.observed_at.to_rfc3339(),
-    });
-    Json(ListSessionsResponse {
-        sessions,
-        store_health,
-    })
+    cores::list_core(&state, q.get("source_id").map(String::as_str), slim).await
 }
 
 /// GET /api/v1/sessions/managed/{id} — get one session record.
@@ -689,27 +547,7 @@ pub async fn get_managed_session(
     State(state): State<Arc<DaemonState>>,
     AxumPath(id_str): AxumPath<String>,
 ) -> impl IntoResponse {
-    let id = match parse_id(&id_str) {
-        Ok(id) => id,
-        Err((code, msg)) => return (code, msg).into_response(),
-    };
-    let mgr = state.session_manager().await;
-    match mgr.get(&id).await {
-        Ok(record) => {
-            // Reconcile against live tmux like the list handler — this is the
-            // record `tm session resume <id>` reads, and its resume decision keys
-            // off `state`; serving a stale `stopped` for a live session would let
-            // resume destructively recreate the pane (code-critic HIGH).
-            let mut summary = record_to_summary_checked(&record).await;
-            reconcile_against_tmux(
-                mgr.tmux.as_ref(),
-                std::slice::from_mut(&mut summary),
-                std::slice::from_ref(&record),
-            );
-            Json(summary).into_response()
-        }
-        Err(_) => (StatusCode::NOT_FOUND, format!("session {id_str} not found")).into_response(),
-    }
+    cores::get_core(&state, &id_str).await // #6288
 }
 
 /// POST /api/v1/sessions/managed/{id}/send — inject text into pane.
@@ -723,25 +561,7 @@ pub async fn send_to_session(
     AxumPath(id_str): AxumPath<String>,
     Json(req): Json<SendInputRequest>,
 ) -> impl IntoResponse {
-    let id = match parse_id(&id_str) {
-        Ok(id) => id,
-        Err((code, msg)) => return (code, msg).into_response(),
-    };
-    let mgr = state.session_manager().await;
-    let tmux_name = match mgr.get(&id).await {
-        Ok(r) => r.tmux_name,
-        Err(_) => {
-            return (StatusCode::NOT_FOUND, format!("session {id_str} not found")).into_response();
-        }
-    };
-    match mgr.send_input(&id, &req.text).await {
-        Ok(()) => Json(SendInputResponse {
-            sent: true,
-            tmux_name,
-        })
-        .into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
+    cores::send_core(&state, &id_str, req).await // #6288
 }
 
 /// POST /api/v1/sessions/managed/{id}/answer — inject answer to pending decision.
@@ -755,61 +575,7 @@ pub async fn answer_session_decision(
     AxumPath(id_str): AxumPath<String>,
     Json(req): Json<AnswerRequest>,
 ) -> impl IntoResponse {
-    let id = match parse_id(&id_str) {
-        Ok(id) => id,
-        Err((code, msg)) => return (code, msg).into_response(),
-    };
-    let mgr = state.session_manager().await;
-    let record = match mgr.get(&id).await {
-        Ok(r) => r,
-        Err(_) => {
-            return (StatusCode::NOT_FOUND, format!("session {id_str} not found")).into_response();
-        }
-    };
-    let tmux_name = record.tmux_name.clone();
-
-    // FRONT-gate (#1360) path: a session escalated *before* spawn sits in
-    // `Provisioning` with a `pending_decision` and NO running harness. Answering
-    // it must clear the decision AND launch the withheld runtime (AC-15) — not
-    // inject the answer into a bare pane. Any other state is the ordinary
-    // harness-question path (`answer_decision`, which injects into the live pane).
-    let is_front_gate_escalation = record.state
-        == crate::session_manager::ManagedSessionState::Provisioning
-        && record.pending_decision.is_some();
-
-    if is_front_gate_escalation {
-        if let Err(e) = mgr.clear_pending_decision(&id).await {
-            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-        }
-        // Re-fetch AFTER clearing: `clear_pending_decision` upserts a new record
-        // version, so the `record` captured above is now stale (it still carries
-        // the pending decision). Spawn the runtime from the fresh snapshot so the
-        // withheld harness launches against the post-clear state (#1360 review).
-        let fresh = match mgr.get(&id).await {
-            Ok(r) => r,
-            Err(_) => {
-                return (StatusCode::NOT_FOUND, format!("session {id_str} not found"))
-                    .into_response();
-            }
-        };
-        match spawn_runtime_for(&state, &fresh).await {
-            Ok(()) => Json(AnswerResponse {
-                injected: true,
-                tmux_name,
-            })
-            .into_response(),
-            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
-        }
-    } else {
-        match mgr.answer_decision(&id, &req.answer).await {
-            Ok(()) => Json(AnswerResponse {
-                injected: true,
-                tmux_name,
-            })
-            .into_response(),
-            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-        }
-    }
+    cores::answer_core(&state, &id_str, req).await // #6288
 }
 
 /// GET /api/v1/sessions/managed/{id}/attach-cmd — return tmux attach command.
@@ -822,18 +588,7 @@ pub async fn get_attach_cmd(
     State(state): State<Arc<DaemonState>>,
     AxumPath(id_str): AxumPath<String>,
 ) -> impl IntoResponse {
-    let id = match parse_id(&id_str) {
-        Ok(id) => id,
-        Err((code, msg)) => return (code, msg).into_response(),
-    };
-    let mgr = state.session_manager().await;
-    match mgr.get(&id).await {
-        Ok(record) => {
-            let attach_cmd = attach_cmd_for(&record.tmux_name);
-            Json(AttachCmdResponse { attach_cmd }).into_response()
-        }
-        Err(_) => (StatusCode::NOT_FOUND, format!("session {id_str} not found")).into_response(),
-    }
+    cores::attach_cmd_core(&state, &id_str).await // #6288
 }
 
 /// POST /api/v1/sessions/managed/{id}/runtime-stop — stop the runtime only (keep workspace).
@@ -847,15 +602,7 @@ pub async fn stop_managed_session_runtime(
     State(state): State<Arc<DaemonState>>,
     AxumPath(id_str): AxumPath<String>,
 ) -> impl IntoResponse {
-    let id = match parse_id(&id_str) {
-        Ok(id) => id,
-        Err((code, msg)) => return (code, msg).into_response(),
-    };
-    let mgr = state.session_manager().await;
-    match mgr.stop(&id).await {
-        Ok(record) => Json(record_to_summary(&record)).into_response(),
-        Err(_) => (StatusCode::NOT_FOUND, format!("session {id_str} not found")).into_response(),
-    }
+    cores::runtime_stop_core(&state, &id_str).await // #6288
 }
 
 /// POST /api/v1/sessions/managed/{id}/resume — re-spawn the runtime in the existing workspace.
@@ -871,23 +618,10 @@ pub async fn resume_managed_session(
     State(state): State<Arc<DaemonState>>,
     AxumPath(id_str): AxumPath<String>,
 ) -> impl IntoResponse {
-    let id = match parse_id(&id_str) {
-        Ok(id) => id,
-        Err((code, msg)) => return (code, msg).into_response(),
-    };
-
-    // Single round-trip: the shared `resume_managed` helper performs the
-    // existence + state check inside `SessionManager::resume` and re-spawns the
-    // runtime. The TYPED error picks its own HTTP status/headers via its
-    // `IntoResponse` impl (`resume_error.rs`) — no pre-flight `get` (which
-    // introduced a TOCTOU race where the session could be decommissioned
-    // between the probe and the resume, yielding 500 instead of 404) and no
-    // `Display`-substring matching (which silently fell through to 500 whenever
-    // the error wording changed).
-    match resume_managed(&state, &id).await {
-        Ok(final_record) => Json(record_to_summary(&final_record)).into_response(),
-        Err(e) => e.into_response(),
-    }
+    // #6288: `resume_http_response` re-attaches the `x-trusty-resume-reason`
+    // header the 422 refusals carry; the socket reads the same distinction off
+    // the outcome's rpc code.
+    cores::resume_http_response(cores::resume_core(&state, &id_str).await)
 }
 
 /// Query parameters for POST /api/v1/sessions/managed/{id}/decommission
@@ -929,44 +663,7 @@ pub async fn decommission_managed_session(
     AxumPath(id_str): AxumPath<String>,
     axum::extract::Query(q): axum::extract::Query<DecommissionQuery>,
 ) -> impl IntoResponse {
-    let id = match parse_id(&id_str) {
-        Ok(id) => id,
-        Err((code, msg)) => return (code, msg).into_response(),
-    };
-    let mgr = state.session_manager().await;
-    // Pre-fetch the record to obtain the workspace_path BEFORE the tombstone clears
-    // it. `decommission` now returns `workspace_removed` directly (no TOCTOU
-    // filesystem re-check); `workspace_path_was` for the CLI's `git worktree prune`
-    // hint must still be captured here since the tombstone nulls it out.
-    let pre = mgr.get(&id).await.ok();
-    let pre_owned = pre.as_ref().map(|r| r.workspace_owned).unwrap_or(false);
-    let pre_ws = pre.and_then(|r| r.workspace_path);
-    let outcome = if q.record_only {
-        mgr.decommission_record_only(&id).await
-    } else {
-        mgr.decommission(&id, None).await
-    };
-    match outcome {
-        Ok((record, workspace_removed)) => {
-            // workspace_path_was: only meaningful for owned sessions (those where
-            // `decommission_with_root` might have removed the directory).
-            let workspace_path_was = if pre_owned {
-                pre_ws.map(|p| p.to_string_lossy().into_owned())
-            } else {
-                None
-            };
-            Json(DecommissionResponse {
-                summary: record_to_summary(&record),
-                workspace_removed,
-                workspace_path_was,
-            })
-            .into_response()
-        }
-        Err(crate::session_manager::ManagedError::SessionNotFound(_)) => {
-            (StatusCode::NOT_FOUND, format!("session {id_str} not found")).into_response()
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
+    cores::decommission_core(&state, &id_str, q.record_only).await // #6288
 }
 
 #[cfg(test)]

@@ -63,10 +63,13 @@ pub fn socket_path() -> Result<PathBuf> {
 /// slice 1 established for the whole surface now holds for the remainder of it.
 ///
 /// Test: `unknown_method_gets_a_method_not_found_frame`,
-/// `rpc_router_registers_every_documented_method`.
+/// `rpc_router_registers_every_documented_method`,
+/// `every_scoped_route_has_a_method`.
 fn build_router(state: &Arc<DaemonState>) -> RpcRouter {
     // #6288 slice 2: the core request/response families. Slices 3-6 append here.
-    rpc::core::register(RpcRouter::new(), state)
+    let router = rpc::core::register(RpcRouter::new(), state);
+    // #6288 slice 4: managed sessions, the control plane, and the L2 proxy.
+    rpc::managed::register(router, state)
 }
 
 /// Per-connection budgets for this listener.

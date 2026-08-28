@@ -15,14 +15,13 @@
 use std::sync::Arc;
 
 use axum::{
-    Json,
     extract::{Path as AxumPath, Query, State},
-    http::StatusCode,
     response::IntoResponse,
 };
 use serde::Deserialize;
 
 use crate::daemon::orphan_gc::{ChildLivenessProbe, PaneInfo, ProcessTreeProbe};
+use crate::daemon::rpc::managed::outcome::RouteOutcome;
 use crate::daemon::runtime_reap::{find_runtime_exited, session_has_live_pane};
 use crate::daemon::state::DaemonState;
 use crate::session_manager::{
@@ -111,15 +110,27 @@ pub async fn reactivate_managed_session(
     AxumPath(id_str): AxumPath<String>,
     Query(params): Query<ReactivateQuery>,
 ) -> impl IntoResponse {
-    let id = match parse_id(&id_str) {
+    reactivate_core(&state, &id_str, &params).await // #6288
+}
+
+/// The transport-neutral body of `POST .../{id}/reactivate` (#6288), served
+/// over the socket as `mpm.managed.reactivate`.
+///
+/// Test: `managed_reactivate_parity` in `daemon::rpc::managed_tests`.
+pub(crate) async fn reactivate_core(
+    state: &Arc<DaemonState>,
+    id_str: &str,
+    params: &ReactivateQuery,
+) -> RouteOutcome {
+    let id = match parse_id(id_str) {
         Ok(id) => id,
-        Err((code, msg)) => return (code, msg).into_response(),
+        Err((code, msg)) => return RouteOutcome::text(code.as_u16(), msg),
     };
     let mgr = state.session_manager().await;
     match mgr.mark_reactivated(&id).await {
-        Ok(record) => Json(record_to_summary(&record)).into_response(),
+        Ok(record) => RouteOutcome::ok(&record_to_summary(&record)),
         Err(ManagedError::SessionNotFound(_)) => {
-            (StatusCode::NOT_FOUND, format!("session {id_str} not found")).into_response()
+            RouteOutcome::text(404, format!("session {id_str} not found"))
         }
         Err(ManagedError::InvalidState(_, reason)) => match reconcile_stale_active_then_reactivate(
             &mgr,
@@ -129,10 +140,10 @@ pub async fn reactivate_managed_session(
         )
         .await
         {
-            Some(record) => Json(record_to_summary(&record)).into_response(),
-            None => (StatusCode::CONFLICT, reason).into_response(),
+            Some(record) => RouteOutcome::ok(&record_to_summary(&record)),
+            None => RouteOutcome::text(409, reason),
         },
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => RouteOutcome::text(500, e.to_string()),
     }
 }
 

@@ -13,10 +13,11 @@
 
 use std::sync::Arc;
 
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use axum::{Json, extract::State, response::IntoResponse};
 use serde::Deserialize;
 use tracing::warn;
 
+use crate::daemon::rpc::managed::outcome::RouteOutcome;
 use crate::daemon::state::DaemonState;
 use crate::session_manager::worktree_reclaim::ReclaimMode;
 use crate::session_manager::worktree_reclaim_sweep::reclaim_merged_pr_worktrees;
@@ -102,14 +103,25 @@ pub async fn decommission_ephemeral_route(
     State(state): State<Arc<DaemonState>>,
     axum::extract::Query(q): axum::extract::Query<EphemeralQuery>,
 ) -> impl IntoResponse {
+    decommission_ephemeral_core(&state, q.dry_run).await // #6288
+}
+
+/// The transport-neutral body of `POST .../managed/decommission-ephemeral`
+/// (#6288), served over the socket as `mpm.managed.decommission_ephemeral`.
+///
+/// Test: `managed_decommission_ephemeral_parity` in
+/// `daemon::rpc::managed_tests`.
+pub(crate) async fn decommission_ephemeral_core(
+    state: &Arc<DaemonState>,
+    dry_run: bool,
+) -> RouteOutcome {
     let mgr = state.session_manager().await;
-    match mgr.sweep_all_ephemeral(q.dry_run).await {
-        Ok(outcome) => Json(serde_json::json!({
+    match mgr.sweep_all_ephemeral(dry_run).await {
+        Ok(outcome) => RouteOutcome::ok(&serde_json::json!({
             "decommissioned": outcome.count(),
-            "dry_run": q.dry_run,
-        }))
-        .into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+            "dry_run": dry_run,
+        })),
+        Err(e) => RouteOutcome::text(500, e.to_string()),
     }
 }
 
@@ -170,6 +182,18 @@ pub async fn prune_worktrees_route(
     State(state): State<Arc<DaemonState>>,
     Json(req): Json<PruneWorktreesRequest>,
 ) -> impl IntoResponse {
+    prune_worktrees_core(&state, req).await // #6288
+}
+
+/// The transport-neutral body of `POST .../managed/prune-worktrees` (#6288),
+/// served over the socket as `mpm.managed.prune_worktrees`.
+///
+/// Test: `managed_prune_worktrees_parity_defaults_to_a_preview` in
+/// `daemon::rpc::managed_tests`.
+pub(crate) async fn prune_worktrees_core(
+    state: &Arc<DaemonState>,
+    req: PruneWorktreesRequest,
+) -> RouteOutcome {
     let mgr = state.session_manager().await;
     let records = mgr.list().await;
     // #4288 (item 4 of #4207): DELIBERATELY UNFILTERED. Do NOT "tidy this up"
@@ -263,7 +287,7 @@ pub async fn prune_worktrees_route(
                 // only place an agent's liveness is resolved from real
                 // `SubagentStop` signals, so it is read here and handed to the
                 // classifier as a probe rather than as a captured list.
-                let state_for_agents = Arc::clone(&state);
+                let state_for_agents = Arc::clone(state);
                 match tokio::task::spawn_blocking(move || {
                     let in_use_now = move || -> Option<Vec<std::path::PathBuf>> {
                         // `None` means "could not be determined", which REFUSES
@@ -322,7 +346,7 @@ pub async fn prune_worktrees_route(
             } else {
                 serde_json::Value::Null
             };
-            Json(serde_json::json!({
+            RouteOutcome::ok(&serde_json::json!({
                 "dry_run": req.dry_run,
                 "paths": paths,
                 "owner_unknown_paths": owner_unknown_paths,
@@ -330,15 +354,10 @@ pub async fn prune_worktrees_route(
                 "skipped_dirty": outcome.skipped_dirty,
                 "merged_prs": merged,
             }))
-            .into_response()
         }
         Err(e) => {
             warn!("prune-worktrees route: orphan scan failed: {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("orphan worktree scan failed: {e}"),
-            )
-                .into_response()
+            RouteOutcome::text(500, format!("orphan worktree scan failed: {e}"))
         }
     }
 }
@@ -364,11 +383,24 @@ pub async fn prune_managed_route(
     State(state): State<Arc<DaemonState>>,
     Json(req): Json<PruneRequest>,
 ) -> impl IntoResponse {
+    prune_managed_core(&state, req).await // #6288
+}
+
+/// The transport-neutral body of `POST .../managed/prune` (#6288), served over
+/// the socket as `mpm.managed.prune`.
+///
+/// Test: `managed_prune_parity`,
+/// `managed_prune_rejects_an_unparseable_invoking_session` in
+/// `daemon::rpc::managed_tests`.
+pub(crate) async fn prune_managed_core(
+    state: &Arc<DaemonState>,
+    req: PruneRequest,
+) -> RouteOutcome {
     let filter = match PruneFilter::parse(&req.state) {
         Ok(f) => f,
         Err(e) => {
             warn!("prune route: {e}");
-            return (StatusCode::BAD_REQUEST, e).into_response();
+            return RouteOutcome::text(400, e);
         }
     };
     let invoker = match req
@@ -383,7 +415,7 @@ pub async fn prune_managed_route(
                        running it without the requested self-exclusion (#6118)"
                 .to_string();
             warn!("prune route: {msg}");
-            return (StatusCode::BAD_REQUEST, msg).into_response();
+            return RouteOutcome::text(400, msg);
         }
     };
     let mgr = state.session_manager().await;
@@ -393,14 +425,15 @@ pub async fn prune_managed_route(
         .prune_managed(filter, req.dry_run, req.include_active, None, invoker)
         .await
     {
-        Ok(outcome) => Json(outcome).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Ok(outcome) => RouteOutcome::ok(&outcome),
+        Err(e) => RouteOutcome::text(500, e.to_string()),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
 
     /// #4091: a request body that says nothing about dirty worktrees must
     /// deserialize to the SAFE behaviour. An omitted field is the overwhelming
