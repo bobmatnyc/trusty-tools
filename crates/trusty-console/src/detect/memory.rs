@@ -18,6 +18,7 @@
 //! Test: `memory_connector_reports_available_when_nothing_is_serving`,
 //! `memory_connector_reads_the_version_off_a_live_socket`,
 //! `memory_connector_sends_params_so_a_strict_health_handler_answers`,
+//! `memory_connector_accepts_the_envelope_a_real_daemon_sends`,
 //! `memory_connector_reports_degraded_when_the_daemon_answers_with_an_error`.
 
 use std::path::{Path, PathBuf};
@@ -459,6 +460,44 @@ mod tests {
             ServiceStatus::Running,
             "a daemon that answers health must read as Running, not {:?} (hint: {:?})",
             info.status,
+            info.hint
+        );
+        assert_eq!(info.version.as_deref(), Some("0.25.2"));
+    }
+
+    /// Why (#6356): the two earlier tests reply with a hand-written envelope
+    /// carrying exactly the two fields `HealthEnvelope` names, so neither one
+    /// can catch the connector refusing what the daemon actually sends. This
+    /// replies with a frame captured verbatim from trusty-memory 0.25.2 over
+    /// its live socket — eight extra fields, including a nested `worker`
+    /// object — because the failure mode that recurred on 2026-08-28 was a
+    /// running daemon reading as stopped, and a `HealthEnvelope` that grew a
+    /// required field would reproduce it exactly.
+    /// What: the real answer, unedited, must read as Running with its version.
+    /// Test: this is the test.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn memory_connector_accepts_the_envelope_a_real_daemon_sends() {
+        if which::which("trusty-memory").is_err() {
+            eprintln!("skip: trusty-memory is not on PATH, so detect() short-circuits to Absent");
+            return;
+        }
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let socket = tmp.path().join("sockets").join("memory.sock");
+        spawn_health_socket(&socket, |_frame| {
+            r#"{"jsonrpc":"2.0","id":1,"result":{"cpu_pct":2.501335620880127,"daemon_state":"ready","disk_bytes":0,"fd_soft_limit":8192,"open_fds":22,"rss_mb":5151,"socket":"/Users/x/Library/Application Support/trusty-memory/trusty-memory.sock","status":"ok","uptime_secs":12124,"version":"0.25.2","worker":{"in_flight":0,"wedged":false}}}"#
+                .to_string()
+        });
+
+        let connector = MemoryConnector::with_socket(socket);
+        let info = tokio::task::spawn_blocking(move || connector.detect())
+            .await
+            .expect("detect");
+
+        assert_eq!(
+            info.status,
+            ServiceStatus::Running,
+            "a real daemon's own health frame must read as Running (hint: {:?})",
             info.hint
         );
         assert_eq!(info.version.as_deref(), Some("0.25.2"));

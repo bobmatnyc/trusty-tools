@@ -11,7 +11,11 @@ name = "trusty-memory"
 # 0.25.2 (#5188): patch — dream semantic consolidation is opt-in and never
 # falls back to a local model endpoint; a new `[semantic_consolidation]` config
 # key and Drop-guarded test daemons. No public item was removed or changed.
-version = "0.25.2"
+# 0.25.3 (#6372): patch — console_metrics reports counts for every palace on
+# disk rather than only the cache-resident ones, and carries room counts.
+# Additive payload fields and metrics_schema_version 3. No public item was
+# removed or changed.
+version = "0.25.3"
 edition = "2021"
 description = "MCP server (stdio + Unix socket) for trusty-memory"
 license.workspace = true

@@ -4,6 +4,9 @@
   // #6360: the palace roster grew a delete action; the control itself is shared
   // with the Search tab so both confirm and report failures identically.
   import DeleteAction from './DeleteAction.svelte';
+  // #6372: which of the three ways a row's counts were obtained decides how it
+  // renders. The decision is a tested pure function, not template logic.
+  import { countCell, sourceBadge, statsSource } from './palaceRows.js';
 
   let report = $state(null);
   let loading = $state(true);
@@ -108,22 +111,20 @@
 
     <!-- Aggregate stats -->
     <!--
-      Why (issue #1924): totals below reflect only palaces already resident in
-      trusty-memory's LRU open-handle cache — the daemon deliberately stopped
-      force-opening every palace on every poll (that was the root cause of the
-      cache-thrashing bug), so on hosts with more palaces than fit in the cache
-      the "Palaces" card and the per-row counts will legitimately undercount
-      until those palaces are touched by other traffic. Surfacing
-      cached_palace_count alongside palace_count, and flagging uncached rows,
-      keeps that distinction visible instead of silently showing misleading
-      zeros.
+      Why (#6372, amending #1924): the totals used to cover only palaces
+      resident in trusty-memory's LRU cache, because #1924 stopped the daemon
+      force-opening every palace on every poll. That left a host with 94
+      palaces and 2 resident reporting two palaces' worth of drawers. The
+      daemon now counts a closed palace off its files without opening it, so
+      the headline is how many palaces were counted, and residency moves to the
+      per-row badge where it belongs.
     -->
     <div class="stat-grid">
       <div class="stat-card">
         <span class="stat-value">
-          {report.metrics?.cached_palace_count ?? report.metrics?.palace_count ?? 0}<span class="stat-value-of">/{report.metrics?.palace_count ?? 0}</span>
+          {report.metrics?.counted_palace_count ?? report.metrics?.cached_palace_count ?? 0}<span class="stat-value-of">/{report.metrics?.palace_count ?? 0}</span>
         </span>
-        <span class="stat-label">Palaces (cached/total)</span>
+        <span class="stat-label">Palaces (counted/total)</span>
       </div>
       <div class="stat-card">
         <span class="stat-value">{report.metrics?.total_drawers ?? 0}</span>
@@ -132,6 +133,10 @@
       <div class="stat-card">
         <span class="stat-value">{report.metrics?.total_vectors ?? 0}</span>
         <span class="stat-label">Total Vectors</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-value">{report.metrics?.total_rooms ?? 0}</span>
+        <span class="stat-label">Total Rooms</span>
       </div>
       <div class="stat-card">
         <span class="stat-value">{report.metrics?.total_kg_triples ?? 0}</span>
@@ -150,23 +155,25 @@
               <th>Name</th>
               <th>Drawers</th>
               <th>Vectors</th>
+              <th>Rooms</th>
               <th>KG Triples</th>
               <th class="actions-head">Actions</th>
             </tr>
           </thead>
           <tbody>
             {#each report.metrics.palaces as p (p.id)}
-              <tr class:row-uncached={p.cached === false}>
+              <tr class:row-uncached={statsSource(p) === 'unavailable'}>
                 <td><code>{p.id}</code></td>
                 <td>
                   {p.name}
-                  {#if p.cached === false}
-                    <span class="uncached-badge" title="Not currently open in the LRU cache — counts unavailable without a forced disk read.">not loaded</span>
+                  {#if sourceBadge(p)}
+                    <span class="uncached-badge" title={sourceBadge(p).title}>{sourceBadge(p).label}</span>
                   {/if}
                 </td>
-                <td class="num">{p.cached === false ? '—' : p.drawer_count}</td>
-                <td class="num">{p.cached === false ? '—' : p.vector_count}</td>
-                <td class="num">{p.cached === false ? '—' : p.kg_triple_count}</td>
+                <td class="num">{countCell(p, 'drawer_count')}</td>
+                <td class="num">{countCell(p, 'vector_count')}</td>
+                <td class="num">{countCell(p, 'room_count')}</td>
+                <td class="num">{countCell(p, 'kg_triple_count')}</td>
                 <td class="actions">
                   <DeleteAction kind="palace" id={p.id} onDeleted={reloadRoster} />
                 </td>
@@ -241,8 +248,9 @@
   }
   .empty-hint { color: var(--trusty-text-secondary); font-size: 0.85rem; }
 
-  /* Issue #1924: distinguish "not currently cached" rows from genuinely
-     empty palaces so the undercounted totals aren't mistaken for real data. */
+  /* #6372: only a row whose counts could not be READ is greyed out. A palace
+     that is merely closed carries real numbers now, so greying it would say
+     the opposite of what it means. */
   tr.row-uncached td { color: var(--trusty-text-secondary); font-style: italic; }
   .uncached-badge {
     margin-left: 0.4rem; font-size: 0.68rem; font-style: normal; font-weight: 600;
