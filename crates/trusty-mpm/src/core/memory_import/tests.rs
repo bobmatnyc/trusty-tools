@@ -5,13 +5,16 @@
 //! nothing, and a re-run duplicates nothing — are the whole reason the command
 //! can be pointed at a live palace.
 //! What: pure parser tests plus loop tests driven against a stub JSON-RPC
-//! daemon that implements just `memory_list` and `memory_remember`.
+//! daemon that implements `memory_list`, `memory_remember`, `memory_forget`
+//! and `palace_verify_embedded`, and can be told to refuse any of them.
 //! Test: this file.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
+
+use crate::uds_mock::RpcError;
 
 use super::parse::{describe, parse_memory_file, split_frontmatter, wikilink_targets};
 use super::{DEDUP_CANDIDATE_LIMIT, ImportOptions, ImportStatus, has_headline_of, run_import};
@@ -249,17 +252,27 @@ struct StubState {
     writes: Vec<Value>,
     /// Every `memory_list` params object, in call order.
     lists: Vec<Value>,
+    /// Every `memory_forget` params object, in call order (#5044).
+    forgets: Vec<Value>,
     /// tag → drawer ids carrying it.
     by_tag: HashMap<String, Vec<String>>,
     /// drawer id → stored content.
     content: HashMap<String, String>,
+    /// Methods the daemon refuses, so a test can pick which half of the
+    /// forget-then-remember pair fails (#5044).
+    deny: HashSet<String>,
+    /// Drawer ids `palace_verify_embedded` reports as stored but unfindable.
+    unembedded: HashSet<String>,
 }
 
 type Stub = Arc<Mutex<StubState>>;
 
-fn rpc(state: &Stub, method: &str, params: Value) -> Value {
+fn rpc(state: &Stub, method: &str, params: Value) -> Result<Value, RpcError> {
     let mut st = state.lock().expect("stub lock");
-    match method {
+    if st.deny.contains(method) {
+        return Err(RpcError::internal(format!("{method} refused by the stub")));
+    }
+    Ok(match method {
         "memory_list" => {
             st.lists.push(params.clone());
             let tag = params.get("tag").and_then(Value::as_str).unwrap_or("");
@@ -302,8 +315,52 @@ fn rpc(state: &Stub, method: &str, params: Value) -> Value {
             }
             json!({ "drawer_id": id, "status": "stored" })
         }
+        "memory_forget" => {
+            st.forgets.push(params.clone());
+            let id = params
+                .get("drawer_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let existed = st.content.remove(&id).is_some();
+            for ids in st.by_tag.values_mut() {
+                ids.retain(|held| held != &id);
+            }
+            let status = if existed { "deleted" } else { "not_found" };
+            json!({ "status": status, "drawer_id": id, "palace": "stub" })
+        }
+        "palace_verify_embedded" => {
+            let requested: Vec<String> = params
+                .get("drawer_ids")
+                .and_then(Value::as_array)
+                .map(|ids| {
+                    ids.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let (mut embedded, mut missing, mut unknown) = (Vec::new(), Vec::new(), Vec::new());
+            for id in requested {
+                if !st.content.contains_key(&id) {
+                    unknown.push(id);
+                } else if st.unembedded.contains(&id) {
+                    missing.push(id);
+                } else {
+                    embedded.push(id);
+                }
+            }
+            json!({
+                "palace": "stub",
+                "embedded": embedded,
+                "missing": missing,
+                "unknown": unknown,
+                "alias_audit": "clean",
+                "verified": missing.is_empty() && unknown.is_empty(),
+            })
+        }
         other => json!({ "error": format!("unexpected method {other}") }),
-    }
+    })
 }
 
 /// Start the stub on a temp Unix socket (#6286); returns the daemon + state.
@@ -313,7 +370,7 @@ async fn start_stub() -> (crate::uds_mock::MockMemoryDaemon, Stub) {
     let daemon = crate::uds_mock::spawn(move |method: &str, params: Value| {
         let state = Arc::clone(&served);
         let method = method.to_string();
-        Box::pin(async move { Ok(rpc(&state, &method, params)) })
+        Box::pin(async move { rpc(&state, &method, params) })
     })
     .await;
     (daemon, state)
@@ -324,9 +381,33 @@ fn opts(dir: &std::path::Path, socket: &std::path::Path, dry_run: bool) -> Impor
         dir: dir.to_path_buf(),
         palace: "stub".to_string(),
         dry_run,
+        refresh: false,
         allow_secret_like: true,
         memory_socket: Some(socket.to_path_buf()),
     }
+}
+
+/// The same options with `refresh` on (#5044).
+fn refresh_opts(dir: &std::path::Path, socket: &std::path::Path, dry_run: bool) -> ImportOptions {
+    ImportOptions {
+        refresh: true,
+        ..opts(dir, socket, dry_run)
+    }
+}
+
+/// Import `SAMPLE`, then rewrite its `description` so the stored drawer drifts.
+///
+/// Returns the drawer id the first import wrote — the one a refresh replaces.
+async fn import_then_drift(dir: &std::path::Path, socket: &std::path::Path) -> String {
+    let first = run_import(&opts(dir, socket, false)).await.unwrap();
+    assert_eq!(first.created, 1, "{:#?}", first.files);
+    let id = first.files[0].drawer_id.clone().expect("drawer id");
+    let drifted = SAMPLE.replace(
+        "description: Admin-merge bypasses bot-approval ONLY — never a red CI gate;",
+        "description: Admin-merge bypasses bot approval, never a red CI gate",
+    );
+    std::fs::write(dir.join("admin-merge-only-on-green.md"), &drifted).unwrap();
+    id
 }
 
 // ---------------------------------------------------------------------------
@@ -655,6 +736,7 @@ fn report_serialises_with_per_file_status_and_drawer_id() {
         total: 1,
         created: 1,
         skipped: 0,
+        refreshed: 0,
         failed: 0,
         files: vec![super::FileResult {
             file: "a.md".into(),
@@ -669,4 +751,237 @@ fn report_serialises_with_per_file_status_and_drawer_id() {
     assert_eq!(json["files"][0]["status"], "created");
     assert_eq!(json["files"][0]["drawer_id"], "uuid-1");
     assert!(json["files"][0].get("detail").is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Refresh + findability gate (#5044)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn refresh_replaces_a_drifted_drawer() {
+    // The defect: the #4834 migration imported once and deleted its sources
+    // later, so a file edited in between left the palace serving superseded
+    // text. Drift was detected and reported; nothing repaired it.
+    let dir = write_dir(&[("admin-merge-only-on-green.md", SAMPLE)]);
+    let (daemon, state) = start_stub().await;
+    let stale_id = import_then_drift(dir.path(), daemon.socket()).await;
+
+    let second = run_import(&refresh_opts(dir.path(), daemon.socket(), false))
+        .await
+        .unwrap();
+
+    assert_eq!(second.failed, 0, "{:#?}", second.files);
+    assert_eq!(second.refreshed, 1, "{:#?}", second.files);
+    assert_eq!(second.files[0].status, ImportStatus::Refreshed);
+    let fresh_id = second.files[0].drawer_id.clone().expect("new drawer id");
+    assert_ne!(fresh_id, stale_id, "a refresh writes a new drawer");
+
+    let st = state.lock().unwrap();
+    assert_eq!(
+        st.forgets[0]["drawer_id"].as_str(),
+        Some(stale_id.as_str()),
+        "the stale drawer must be the one forgotten"
+    );
+    assert_eq!(
+        st.writes.len(),
+        2,
+        "one original write plus the replacement"
+    );
+    assert!(
+        !st.content.contains_key(&stale_id),
+        "the stale drawer must be gone, never left beside its replacement"
+    );
+    assert!(
+        st.content[&fresh_id]
+            .starts_with("Admin-merge bypasses bot approval, never a red CI gate."),
+        "{:?}",
+        st.content[&fresh_id]
+    );
+}
+
+#[tokio::test]
+async fn refresh_reports_the_lost_replacement_loudly() {
+    // Fail-open check: the forget lands, the write does not, and the palace
+    // now holds no copy of this file at all. Reporting that as anything but a
+    // failure would let a deletion workflow read a clean exit and drop the
+    // only surviving copy.
+    let dir = write_dir(&[("admin-merge-only-on-green.md", SAMPLE)]);
+    let (daemon, state) = start_stub().await;
+    let stale_id = import_then_drift(dir.path(), daemon.socket()).await;
+    state
+        .lock()
+        .unwrap()
+        .deny
+        .insert("memory_remember".to_string());
+
+    let second = run_import(&refresh_opts(dir.path(), daemon.socket(), false))
+        .await
+        .unwrap();
+
+    assert_eq!(second.refreshed, 0, "{:#?}", second.files);
+    assert_eq!(second.failed, 1, "{:#?}", second.files);
+    assert_eq!(second.files[0].status, ImportStatus::Failed);
+    let detail = second.files[0].detail.clone().unwrap_or_default();
+    assert!(detail.contains("DATA LOSS"), "{detail}");
+    assert!(detail.contains(&stale_id), "{detail}");
+    assert!(
+        detail.contains("do not delete its"),
+        "the report must say what not to do next: {detail}"
+    );
+
+    let st = state.lock().unwrap();
+    assert!(
+        !st.content.contains_key(&stale_id),
+        "the forget really did land — this is the state the row must report"
+    );
+}
+
+#[tokio::test]
+async fn refresh_aborts_with_the_stale_drawer_intact() {
+    // The other arm: the forget failed, so nothing changed and re-running is
+    // all the operator has to do. It must not read like the arm above.
+    let dir = write_dir(&[("admin-merge-only-on-green.md", SAMPLE)]);
+    let (daemon, state) = start_stub().await;
+    let stale_id = import_then_drift(dir.path(), daemon.socket()).await;
+    state
+        .lock()
+        .unwrap()
+        .deny
+        .insert("memory_forget".to_string());
+
+    let second = run_import(&refresh_opts(dir.path(), daemon.socket(), false))
+        .await
+        .unwrap();
+
+    assert_eq!(second.failed, 1, "{:#?}", second.files);
+    let detail = second.files[0].detail.clone().unwrap_or_default();
+    assert!(detail.contains("nothing changed"), "{detail}");
+    assert!(!detail.contains("DATA LOSS"), "{detail}");
+
+    let st = state.lock().unwrap();
+    assert!(
+        st.content.contains_key(&stale_id),
+        "the drawer must survive"
+    );
+    assert_eq!(st.writes.len(), 1, "an aborted refresh writes nothing");
+}
+
+#[tokio::test]
+async fn refresh_dry_run_touches_nothing() {
+    // `--dry-run --refresh` is the diff-check a deletion flow runs first: it
+    // must name every drawer it would replace without replacing any.
+    let dir = write_dir(&[("admin-merge-only-on-green.md", SAMPLE)]);
+    let (daemon, state) = start_stub().await;
+    let stale_id = import_then_drift(dir.path(), daemon.socket()).await;
+
+    let second = run_import(&refresh_opts(dir.path(), daemon.socket(), true))
+        .await
+        .unwrap();
+
+    assert_eq!(second.refreshed, 1, "{:#?}", second.files);
+    assert_eq!(second.files[0].status, ImportStatus::WouldRefresh);
+    assert_eq!(
+        second.files[0].drawer_id.as_deref(),
+        Some(stale_id.as_str())
+    );
+
+    let st = state.lock().unwrap();
+    assert!(st.forgets.is_empty(), "a dry run must forget nothing");
+    assert_eq!(st.writes.len(), 1, "a dry run must write nothing");
+}
+
+#[tokio::test]
+async fn verify_gate_fails_a_drawer_no_vector_search_returns() {
+    // A drawer can be stored, current, and permanently unfindable. Under
+    // `refresh` the run's exit code authorises deleting the source, so an
+    // unembedded drawer has to fail the file even when nothing drifted.
+    let dir = write_dir(&[("admin-merge-only-on-green.md", SAMPLE)]);
+    let (daemon, state) = start_stub().await;
+    let first = run_import(&refresh_opts(dir.path(), daemon.socket(), false))
+        .await
+        .unwrap();
+    assert_eq!(
+        first.failed, 0,
+        "a findable drawer passes: {:#?}",
+        first.files
+    );
+    let drawer_id = first.files[0].drawer_id.clone().expect("drawer id");
+    state.lock().unwrap().unembedded.insert(drawer_id);
+
+    let second = run_import(&refresh_opts(dir.path(), daemon.socket(), false))
+        .await
+        .unwrap();
+
+    assert_eq!(second.failed, 1, "{:#?}", second.files);
+    assert_eq!(second.files[0].status, ImportStatus::Failed);
+    let detail = second.files[0].detail.clone().unwrap_or_default();
+    assert!(detail.contains("not findable"), "{detail}");
+    assert!(detail.contains("no vector"), "{detail}");
+    // The skip reason it carried before the downgrade is still there.
+    assert!(detail.contains("already imported"), "{detail}");
+}
+
+#[tokio::test]
+async fn verify_gate_fails_closed_when_it_cannot_run() {
+    // An older daemon has no `palace_verify_embedded` at all. Nothing is known
+    // about the drawer, which is a block — not a pass.
+    let dir = write_dir(&[("admin-merge-only-on-green.md", SAMPLE)]);
+    let (daemon, state) = start_stub().await;
+    state
+        .lock()
+        .unwrap()
+        .deny
+        .insert("palace_verify_embedded".to_string());
+
+    let report = run_import(&refresh_opts(dir.path(), daemon.socket(), false))
+        .await
+        .unwrap();
+
+    assert_eq!(report.failed, 1, "{:#?}", report.files);
+    assert!(
+        report.files[0]
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("findability gate could not run"),
+        "{:#?}",
+        report.files[0]
+    );
+    assert!(
+        report.files[0]
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("the drawer was written"),
+        "an unverifiable row must still say the drawer is in the palace: {:#?}",
+        report.files[0]
+    );
+}
+
+#[tokio::test]
+async fn a_plain_run_never_calls_the_gate() {
+    // The gate costs one RPC per file. Without `refresh` it must not run at
+    // all, and drift must still be reported rather than repaired.
+    let dir = write_dir(&[("admin-merge-only-on-green.md", SAMPLE)]);
+    let (daemon, state) = start_stub().await;
+    let stale_id = import_then_drift(dir.path(), daemon.socket()).await;
+
+    let second = run_import(&opts(dir.path(), daemon.socket(), false))
+        .await
+        .unwrap();
+
+    assert_eq!(second.skipped, 1, "{:#?}", second.files);
+    assert_eq!(second.refreshed, 0);
+    assert!(
+        second.files[0]
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("drifted"),
+        "{:#?}",
+        second.files[0]
+    );
+    let st = state.lock().unwrap();
+    assert!(st.forgets.is_empty());
+    assert!(st.content.contains_key(&stale_id));
 }

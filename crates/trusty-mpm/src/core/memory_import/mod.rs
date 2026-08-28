@@ -35,9 +35,15 @@
 //! remainder is ambiguous, or the candidate set hit its ceiling, the file is
 //! reported as failed rather than guessed at.
 //!
+//! Drift is detected here but repaired in [`refresh`] (issue #5044): the plain
+//! run still refuses to touch a drifted drawer, and `ImportOptions::refresh`
+//! turns that refusal into a replace-in-place plus a findability gate, for the
+//! caller that is about to delete the source file.
+//!
 //! Test: `core::memory_import::tests`.
 
 pub mod parse;
+pub mod refresh;
 
 #[cfg(test)]
 mod tests;
@@ -55,8 +61,9 @@ pub use parse::{ParsedMemory, parse_memory_file};
 /// Why: the flag set is wide enough that a positional-argument signature would
 /// be unreadable at the call site, and threading a struct keeps the CLI layer
 /// a pure translation of clap args.
-/// What: source directory, target palace, and the three behaviour switches.
-/// Test: `dry_run_writes_nothing`, `import_is_idempotent`.
+/// What: source directory, target palace, and the behaviour switches.
+/// Test: `dry_run_writes_nothing`, `import_is_idempotent`,
+/// `refresh_replaces_a_drifted_drawer`.
 #[derive(Debug, Clone)]
 pub struct ImportOptions {
     /// Directory of memory `.md` files. Scanned non-recursively.
@@ -65,6 +72,11 @@ pub struct ImportOptions {
     pub palace: String,
     /// Parse, derive, and dedup-check, but never write.
     pub dry_run: bool,
+    /// Replace a drifted drawer with the file's current text, and require
+    /// every drawer this run maps a file to be retrievable (issue #5044).
+    /// Off by default: both halves are for the caller that is about to delete
+    /// the source files, not for an ordinary top-up import.
+    pub refresh: bool,
     /// Pass `allow_secret_like` on writes, so drawers whose prose trips
     /// trusty-memory's secret heuristic (a URL, a token-shaped identifier)
     /// still store instead of aborting the file.
@@ -89,10 +101,16 @@ pub enum ImportStatus {
     /// `drawer_id` carries the existing drawer when one was found, and `detail`
     /// says whether that drawer's text still matches the file.
     Skipped,
+    /// Refreshed under `refresh`: the drifted drawer was replaced in place and
+    /// `drawer_id` carries the new one (issue #5044).
+    Refreshed,
     /// Dry run: would have been written.
     WouldCreate,
     /// Dry run: would have been skipped.
     WouldSkip,
+    /// Dry run under `refresh`: the drifted drawer `drawer_id` names would
+    /// have been replaced.
+    WouldRefresh,
     /// Parse or write error; `error` carries the cause.
     Failed,
 }
@@ -138,6 +156,8 @@ pub struct ImportReport {
     pub created: usize,
     /// Files already present or not memory files.
     pub skipped: usize,
+    /// Drifted drawers replaced in place (or, in a dry run, that would be).
+    pub refreshed: usize,
     /// Files that failed to parse or write.
     pub failed: usize,
     /// Per-file detail, in filename order.
@@ -150,6 +170,7 @@ impl ImportReport {
         self.total = self.files.len();
         self.created = self.count(&[ImportStatus::Created, ImportStatus::WouldCreate]);
         self.skipped = self.count(&[ImportStatus::Skipped, ImportStatus::WouldSkip]);
+        self.refreshed = self.count(&[ImportStatus::Refreshed, ImportStatus::WouldRefresh]);
         self.failed = self.count(&[ImportStatus::Failed]);
     }
 
@@ -169,7 +190,9 @@ impl ImportReport {
 /// What: resolves the trusty-memory base URL (explicit override, else daemon
 /// discovery), lists `*.md` files in filename order, and for each one derives
 /// the drawer fields, checks for an existing drawer with the same slug tag,
-/// and — unless `dry_run` — writes it via `memory_remember`. Returns the
+/// and — unless `dry_run` — writes it via `memory_remember`. Under
+/// `opts.refresh` a drifted drawer is replaced in place and every row naming a
+/// drawer then passes [`refresh::verify_findable`]. Returns the
 /// [`ImportReport`]; a non-empty `failed` count is the caller's cue to exit
 /// non-zero.
 /// Test: `dry_run_writes_nothing`, `import_is_idempotent`,
@@ -189,12 +212,20 @@ pub async fn run_import(opts: &ImportOptions) -> anyhow::Result<ImportReport> {
         total: 0,
         created: 0,
         skipped: 0,
+        refreshed: 0,
         failed: 0,
         files: Vec::new(),
     };
 
     for path in markdown_files(&opts.dir)? {
-        report.files.push(import_one(&socket, opts, &path).await);
+        let mut result = import_one(&socket, opts, &path).await;
+        // #5044: under `refresh` the run's exit code is what authorises
+        // deleting the source, so every row that names a drawer has to prove
+        // that drawer is retrievable — including one this run only skipped.
+        if opts.refresh {
+            refresh::verify_findable(&socket, &opts.palace, &mut result).await;
+        }
+        report.files.push(result);
     }
     report.tally();
     Ok(report)
@@ -238,8 +269,9 @@ fn markdown_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
 /// What: reads and parses the file; a file with no frontmatter is a clean skip
 /// (`MEMORY.md` and other index files land here). Otherwise asks
 /// [`existing_drawer`] whether the palace already holds this file's own drawer
-/// and skips when it does — whether or not that drawer's text still matches;
-/// otherwise writes via `memory_remember` with `force` set (the established
+/// and skips when it does — a drifted drawer included, unless `opts.refresh`
+/// sends it to [`refresh_one`]; otherwise writes via `memory_remember` with
+/// `force` set (the established
 /// mapping — these drawers are deliberate re-writes of curated content, not
 /// conversational capture). Note that `force` bypasses trusty-memory's own
 /// dedup along with the rest of its quality gates, so the check above is the
@@ -276,14 +308,20 @@ async fn import_one(socket: &Path, opts: &ImportOptions, path: &Path) -> FileRes
             return skipped(file, parsed, drawer_id, "already imported", opts.dry_run);
         }
         Ok(Existing::Drifted(drawer_id)) => {
-            return skipped(
-                file,
-                parsed,
-                drawer_id,
-                "already imported, but the stored drawer's text has drifted from \
-                 this file — left unchanged, never duplicated",
-                opts.dry_run,
-            );
+            // #5044: a snapshot import that later deletes its sources leaves
+            // the palace serving superseded text unless drift is repaired.
+            if !opts.refresh {
+                return skipped(
+                    file,
+                    parsed,
+                    drawer_id,
+                    "already imported, but the stored drawer's text has drifted from \
+                     this file — left unchanged, never duplicated; re-run with \
+                     `refresh` to replace it",
+                    opts.dry_run,
+                );
+            }
+            return refresh_one(socket, opts, file, parsed, &drawer_id).await;
         }
         Ok(Existing::Absent) => {}
         Err(e) => {
@@ -322,6 +360,50 @@ async fn import_one(socket: &Path, opts: &ImportOptions, path: &Path) -> FileRes
             format!("write failed: {e:#}"),
             parsed.tags,
         ),
+    }
+}
+
+/// Replace one drifted drawer, or report why the palace was left as it is.
+///
+/// Why (#5044): the refresh path has three outcomes and they are not
+/// interchangeable — replaced, aborted with the stale drawer intact, and the
+/// window where the old drawer is gone and the new one was never written. Only
+/// the first may report success, and the third has to be loud enough that
+/// nobody deletes the source file after reading the report.
+/// What: dry-runs report [`ImportStatus::WouldRefresh`] and touch nothing.
+/// Otherwise [`refresh::refresh_drawer`] does the forget-then-remember and
+/// either arm of [`refresh::RefreshError`] becomes a failed row carrying that
+/// error's own wording.
+/// Test: `refresh_replaces_a_drifted_drawer`,
+/// `refresh_aborts_with_the_stale_drawer_intact`,
+/// `refresh_reports_the_lost_replacement_loudly`.
+async fn refresh_one(
+    socket: &Path,
+    opts: &ImportOptions,
+    file: String,
+    parsed: ParsedMemory,
+    drawer_id: &str,
+) -> FileResult {
+    if opts.dry_run {
+        return FileResult {
+            file,
+            name: Some(parsed.name),
+            status: ImportStatus::WouldRefresh,
+            drawer_id: Some(drawer_id.to_string()),
+            tags: parsed.tags,
+            detail: Some("the stored drawer's text has drifted from this file".to_string()),
+        };
+    }
+    match refresh::refresh_drawer(socket, opts, &parsed, drawer_id).await {
+        Ok(new_id) => FileResult {
+            file,
+            name: Some(parsed.name),
+            status: ImportStatus::Refreshed,
+            drawer_id: Some(new_id),
+            tags: parsed.tags,
+            detail: Some(format!("replaced the drifted drawer {drawer_id}")),
+        },
+        Err(e) => failure(file, Some(parsed.name), e.to_string(), parsed.tags),
     }
 }
 

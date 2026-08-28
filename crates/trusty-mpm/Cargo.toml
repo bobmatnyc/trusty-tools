@@ -4,6 +4,9 @@ name = "trusty-mpm"
 # edits `src/**`, so the `PR version bump vs crates.io` gate (#4421) requires
 # the bump here. Patch because the change is a bug fix inside
 # `provisioner::workspace::provision_in`; no public item changed signature.
+# #5044 rides the same 1.5.6: it adds `ImportOptions::refresh`, two
+# `ImportStatus` variants and `core::memory_import::refresh`, and the crate
+# has no out-of-workspace consumer to break.
 version = "1.5.6"
 edition.workspace = true
 rust-version.workspace = true

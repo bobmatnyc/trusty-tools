@@ -2182,6 +2182,7 @@ fn cli_parses_memory_import() {
                     dir,
                     palace,
                     dry_run,
+                    refresh,
                     json,
                     allow_secret_like,
                     memory_socket,
@@ -2190,6 +2191,7 @@ fn cli_parses_memory_import() {
             assert_eq!(dir, std::path::PathBuf::from("/tmp/mem"));
             assert_eq!(palace, "trusty-tools");
             assert!(!dry_run, "writes are the default mode");
+            assert!(!refresh, "#5044: replacing a drifted drawer stays opt-in");
             assert!(!json);
             assert!(!allow_secret_like);
             assert!(
@@ -2203,7 +2205,8 @@ fn cli_parses_memory_import() {
 
 /// Why (#4837): `--dry-run` is the safety flag an operator reaches for first,
 /// and `--json` is the machine-readable report a caller verifies with — both
-/// must round-trip, together with the explicit `--memory-socket` override.
+/// must round-trip, together with the explicit `--memory-socket` override and
+/// `--refresh` (#5044).
 #[test]
 fn cli_parses_memory_import_dry_run_json() {
     let cli = Cli::try_parse_from([
@@ -2214,6 +2217,7 @@ fn cli_parses_memory_import_dry_run_json() {
         "--palace",
         "p",
         "--dry-run",
+        "--refresh",
         "--json",
         "--allow-secret-like",
         "--memory-socket",
@@ -2225,6 +2229,7 @@ fn cli_parses_memory_import_dry_run_json() {
             action:
                 MemoryAction::Import {
                     dry_run,
+                    refresh,
                     json,
                     allow_secret_like,
                     memory_socket,
@@ -2232,6 +2237,7 @@ fn cli_parses_memory_import_dry_run_json() {
                 },
         } => {
             assert!(dry_run);
+            assert!(refresh);
             assert!(json);
             assert!(allow_secret_like);
             assert_eq!(
