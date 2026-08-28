@@ -10,7 +10,7 @@ name = "trusty-mpm"
 # #5949 rides the same 1.5.6: the worktree registry repair it adds to
 # `session_manager::decommission` is `pub(super)`, so no public item changed
 # signature.
-version = "1.5.6"
+version = "1.5.7"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
