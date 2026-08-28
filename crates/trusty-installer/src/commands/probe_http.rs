@@ -19,6 +19,8 @@
 //! trusty-analyze and trusty-memory serve a hardened Unix socket and are probed
 //! through [`uds_socket_for`] / [`classify_rpc_response`]; trusty-review has no
 //! transport at all since #6290 and is probed by presence ([`presence_only`]);
+//! trusty-search serves BOTH transports while #6285 retires its axum surface
+//! and is probed over both at once ([`dual_transport`]);
 //! everything else still answers `GET /health` over loopback. Three properties are load-bearing and each has a
 //! named regression test — remove any one of them and #4246 comes straight
 //! back:
@@ -110,6 +112,10 @@ const DEGRADED: &str = "degraded";
 pub fn fixed_port_for(binary: &str) -> Option<u16> {
     match binary {
         "trusty-console" => Some(7788),
+        // #6285: trusty-search now answers `search.health` on a socket too, but
+        // this row STAYS until the axum surface is deleted. It is what
+        // [`dual_transport`] reads to know a second leg exists, and an
+        // installed daemon older than the listener answers on nothing else.
         "trusty-search" => Some(7878),
         "trusty-mpm" => Some(7880),
         // #6277 / #6287 / #6286: NO trusty-review, trusty-analyze or
@@ -133,16 +139,18 @@ pub fn fixed_port_for(binary: &str) -> Option<u16> {
 ///
 /// What: the path from `trusty_common::daemon_socket_path`, the same call the
 /// daemon binds through, for members that serve UDS; `None` for every member
-/// still on HTTP. A member with a socket is probed ONLY over it — there is no
-/// second leg to reconcile, because there is no second transport, and no
-/// discovery file that could disagree with a derived path.
+/// still on HTTP. A member that has RETIRED HTTP is probed ONLY over the
+/// socket — there is no second leg to reconcile, because there is no second
+/// transport, and no discovery file that could disagree with a derived path.
+/// [`dual_transport`] is the exception, and states its own case.
 ///
 /// ADR-0035's console-side aggregator routing is deliberately NOT done here:
 /// its own open questions are unresolved, so this is a transport swap and
 /// nothing more.
 ///
 /// Test: `tests::uds_members_have_no_fixed_port`,
-/// `tests::probe_uds_reads_the_health_envelope_off_a_result_frame`.
+/// `tests::probe_uds_reads_the_health_envelope_off_a_result_frame`,
+/// `tests::uds_socket_for_matches_the_shared_entry_point`.
 /// Whether a member is started on demand rather than kept resident (#6350).
 ///
 /// Why this exists as its own predicate: `uds_socket_for` answers "which
@@ -164,9 +172,45 @@ pub fn uds_socket_for(binary: &str) -> Option<std::path::PathBuf> {
     match binary {
         // #6290: NO trusty-review row. It has no daemon and no socket — see
         // [`presence_only`].
-        "trusty-analyze" | "trusty-memory" => trusty_common::daemon_socket_path(binary).ok(),
+        // #6285: trusty-search binds this same path from
+        // `trusty_search::service::socket::socket_path`, which is
+        // `daemon_socket_path` under another name. It is the one member here
+        // that still serves HTTP as well — see [`dual_transport`].
+        "trusty-analyze" | "trusty-memory" | "trusty-search" => {
+            trusty_common::daemon_socket_path(binary).ok()
+        }
         _ => None,
     }
+}
+
+/// Whether a member answers on a socket AND on HTTP, so both legs must be read.
+///
+/// Why (#6285): every earlier migration deleted the daemon's axum surface in
+/// the PR that added its socket, so "has a socket" and "has no port" were the
+/// same fact. trusty-search breaks that pairing: its listener went up beside
+/// the axum server in #6367 and the HTTP surface is deleted several slices
+/// later. Probing only the socket in that window reads every INSTALLED
+/// trusty-search older than the listener as `Refused` — no published version
+/// binds one — and `Refused` is one of the two variants
+/// [`ProbeOutcome::is_confirmed_down`] accepts, so `verify_tail` would
+/// `launchctl kickstart -k` a healthy daemon on every `tctl install`. That is
+/// #4246, and on this member it lands as a SIGKILL mid-index-flush.
+///
+/// Probing only HTTP would be safe today and wrong tomorrow: it is the surface
+/// being retired, and the row that carries it disappears with it.
+///
+/// What: `true` for `trusty-search` only. Such a member's socket answer and its
+/// HTTP legs are reconciled through [`reconcile`], which already ranks an
+/// answer above a refusal — so whichever transport the installed binary serves
+/// is the one that decides the verdict. Deleting this arm is the LAST step of
+/// the retire program, once no daemon on the axum surface can still be
+/// installed; deleting it early re-ships #4246.
+///
+/// Test: `tests::search_is_probed_over_both_transports`,
+/// `tests::a_pre_socket_search_is_healthy_over_http_alone`,
+/// `tests::dual_transport_members_keep_a_fixed_port`.
+pub fn dual_transport(binary: &str) -> bool {
+    binary == "trusty-search"
 }
 
 /// Whether this member's health is a PRESENCE question, not a liveness one.
@@ -258,9 +302,10 @@ fn parse_version_line(stdout: &str) -> Option<String> {
 /// Duplicated as literals rather than imported: `trusty-installer` has no Cargo
 /// edge on either daemon, and adding one to share a `&str` would pull an
 /// LLM-pipeline crate and an analysis engine into `tctl`'s build.
-/// `trusty_review::service::METHOD_HEALTH` and
-/// `trusty_analyze::service::METHOD_HEALTH` are the definitions; each crate's
-/// `uds_consumer_contract` test is what keeps them equal.
+/// `trusty_analyze::service::METHOD_HEALTH`,
+/// `trusty_memory::transport::uds::METHOD_HEALTH` and
+/// `trusty_search::service::socket::METHOD_HEALTH` are the definitions; each
+/// daemon crate's `uds_consumer_contract` test is what keeps them equal.
 ///
 /// # Panics
 ///
@@ -274,6 +319,10 @@ fn uds_health_method(binary: &str) -> Option<&'static str> {
         // #6286: `trusty_memory::transport::uds::METHOD_HEALTH`. It is the only
         // folded method `tctl` needs, and the one trusty-console dials too.
         "trusty-memory" => Some("memory.health"),
+        // #6285: `trusty_search::service::socket::METHOD_HEALTH`. It reads the
+        // same `health_report()` the axum route does, so the two legs of a
+        // dual-transport probe cannot answer differently about the same daemon.
+        "trusty-search" => Some("search.health"),
         _ => None,
     }
 }
@@ -890,12 +939,18 @@ pub async fn probe_bases(
 /// probes them.
 /// #6277: a member with a Unix socket ([`uds_socket_for`]) is probed over it
 /// INSTEAD, and the HTTP legs are not attempted at all. There is nothing to
-/// reconcile: a UDS member has one transport, one derived path, and no
+/// reconcile: a retired-HTTP member has one transport, one derived path, and no
 /// discovery file, so a second leg could only contribute a false refusal.
+/// #6285: a [`dual_transport`] member is the one exception — its socket leg and
+/// its HTTP legs run concurrently and go through [`reconcile`], because during
+/// the retire window either transport may be the only one its installed binary
+/// serves.
 ///
 /// Test: `tests::probe_uses_http_addr_when_fixed_port_unknown`,
 /// `tests::probe_no_address_when_nothing_resolves`,
-/// `tests::probe_uds_reads_the_health_envelope_off_a_result_frame`.
+/// `tests::probe_uds_reads_the_health_envelope_off_a_result_frame`,
+/// `tests::search_is_probed_over_both_transports`,
+/// `tests::a_pre_socket_search_is_healthy_over_http_alone`.
 pub async fn probe_daemon_http(app: &str, binary: &str) -> ProbeOutcome {
     // #6290: checked FIRST. A per-invocation member has neither a socket nor an
     // address, so falling through would reach `NoAddress` — which renders
@@ -931,7 +986,28 @@ pub async fn probe_daemon_http(app: &str, binary: &str) -> ProbeOutcome {
                 };
             }
         }
-        return probe_socket(&socket, method).await;
+        // #6285: a member that has retired HTTP has exactly one transport and
+        // stops here. trusty-search has not retired it yet, so its socket
+        // answer is RECONCILED with the HTTP legs instead of replacing them —
+        // an installed daemon older than the listener answers only on 7878.
+        if !dual_transport(binary) {
+            return probe_socket(&socket, method).await;
+        }
+        let client = match build_probe_client() {
+            Ok(c) => c,
+            // A client that could not be built is a LOCAL failure and says
+            // nothing about the daemon, so the socket leg alone is still the
+            // honest answer — never a `ProbeFailed` that discards it.
+            Err(_) => return probe_socket(&socket, method).await,
+        };
+        let (recorded, fixed) = resolve_probe_bases(app, binary);
+        // Concurrently: a refusing leg costs a connect, but a wedged one costs
+        // REQUEST_TIMEOUT, and `verify_tail` polls every member repeatedly.
+        let (uds, http) = tokio::join!(
+            probe_socket(&socket, method),
+            probe_bases(&client, recorded, fixed)
+        );
+        return reconcile(vec![uds, http]);
     }
 
     let client = match build_probe_client() {

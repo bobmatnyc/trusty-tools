@@ -528,6 +528,9 @@ async fn probe_ignores_http_proxy_env() {
 #[test]
 fn fixed_ports_match_port_assignments_doc() {
     assert_eq!(fixed_port_for("trusty-console"), Some(7788));
+    // #6285: trusty-search answers `search.health` on a socket now AND still
+    // serves 7878. The row goes when the axum surface does, not before — see
+    // `dual_transport_members_keep_a_fixed_port`.
     assert_eq!(fixed_port_for("trusty-search"), Some(7878));
     assert_eq!(fixed_port_for("trusty-mpm"), Some(7880));
     // Never guess: `tga` is not a daemon, and `trusty-installer` binds nothing.
@@ -633,12 +636,20 @@ fn version_line_parses_the_clap_shape() {
 /// confirmed-down into `launchctl kickstart -k` — so every `tctl install` would
 /// hard-restart a healthy daemon. That is #4246 verbatim, and it is why a
 /// transport swap and its consumers have to land together.
-/// What: asserts the two resolvers are mutually exclusive for each UDS member
-/// and that an HTTP member resolves no socket.
+/// What: asserts the two resolvers are mutually exclusive for each member that
+/// has RETIRED HTTP, and that a member still on HTTP alone resolves no socket.
+/// #6285 narrows the claim from "has a socket" to "has retired HTTP": those
+/// were the same fact until trusty-search served both, and
+/// `dual_transport_members_keep_a_fixed_port` owns that member.
 /// Test: This is the test.
 #[test]
 fn uds_members_have_no_fixed_port() {
     for binary in ["trusty-analyze", "trusty-memory"] {
+        assert!(
+            !super::dual_transport(binary),
+            "{binary} retired HTTP; if that changed, this test is asserting the \
+             wrong thing about it"
+        );
         assert_eq!(
             fixed_port_for(binary),
             None,
@@ -651,9 +662,53 @@ fn uds_members_have_no_fixed_port() {
         );
     }
     assert!(
-        uds_socket_for("trusty-search").is_none(),
-        "an HTTP member must not resolve a socket"
+        uds_socket_for("trusty-console").is_none(),
+        "an HTTP-only member must not resolve a socket"
     );
+}
+
+/// REGRESSION (#6285): trusty-search must resolve BOTH transports.
+///
+/// Why: this is the inverse of `uds_members_have_no_fixed_port`, and it is what
+/// keeps a healthy daemon from being hard-restarted during the retire window.
+/// No published trusty-search binds a socket — the listener landed in an
+/// unpublished version — so an installed daemon answers on 7878 and nowhere
+/// else. Dropping the port row the moment the socket arrived would read every
+/// one of them as `Refused`, and `Refused` authorises `launchctl kickstart -k`,
+/// which on this member is a SIGKILL mid-index-flush.
+/// What: asserts the port row, the socket, the health method and the
+/// `dual_transport` predicate all answer for trusty-search at once.
+/// Test: This is the test.
+#[test]
+fn dual_transport_members_keep_a_fixed_port() {
+    assert!(super::dual_transport("trusty-search"));
+    assert_eq!(
+        fixed_port_for("trusty-search"),
+        Some(7878),
+        "the HTTP leg must survive until the axum surface is deleted"
+    );
+    assert!(
+        uds_socket_for("trusty-search").is_some(),
+        "the socket leg is the transport this migration moves to"
+    );
+    assert_eq!(
+        super::uds_health_method("trusty-search"),
+        Some("search.health")
+    );
+    // Nothing else is dual: every earlier migration deleted its axum surface in
+    // the same PR that added its socket.
+    for single in [
+        "trusty-analyze",
+        "trusty-memory",
+        "trusty-console",
+        "trusty-mpm",
+    ] {
+        assert!(
+            !super::dual_transport(single),
+            "{single} serves one transport; a second leg could only contribute a \
+             false refusal"
+        );
+    }
 }
 
 /// REGRESSION (#6287): every member with a socket must also name a health
@@ -670,7 +725,7 @@ fn uds_members_have_no_fixed_port() {
 /// Test: This is the test.
 #[test]
 fn every_uds_member_has_a_health_method() {
-    for binary in ["trusty-analyze", "trusty-memory"] {
+    for binary in ["trusty-analyze", "trusty-memory", "trusty-search"] {
         let method = super::uds_health_method(binary)
             .unwrap_or_else(|| panic!("{binary} serves a socket but names no health method"));
         let domain = binary.trim_start_matches("trusty-");
@@ -681,9 +736,9 @@ fn every_uds_member_has_a_health_method() {
         );
     }
     assert_eq!(
-        super::uds_health_method("trusty-search"),
+        super::uds_health_method("trusty-console"),
         None,
-        "an HTTP member must not name a UDS method"
+        "an HTTP-only member must not name a UDS method"
     );
 }
 
@@ -695,7 +750,12 @@ fn every_uds_member_has_a_health_method() {
 /// Test: This is the test.
 #[test]
 fn uds_socket_for_matches_the_shared_entry_point() {
-    for binary in ["trusty-analyze", "trusty-memory"] {
+    // Both sides read `TRUSTY_DATA_DIR_OVERRIDE`, which a sibling test sets and
+    // clears. Without the lock the two calls straddle that window and disagree
+    // about a path neither side got wrong — a pre-existing flake (~1 run in 8
+    // on main) that the socket-binding tests below make more likely.
+    let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    for binary in ["trusty-analyze", "trusty-memory", "trusty-search"] {
         assert_eq!(
             uds_socket_for(binary),
             trusty_common::daemon_socket_path(binary).ok(),
@@ -821,6 +881,115 @@ async fn probe_uds_reports_refused_for_an_absent_socket() {
     assert!(
         outcome.is_confirmed_down(),
         "nothing accepted the connection, which IS the evidence a repair needs"
+    );
+}
+
+/// A short-path data dir for a test that has to BIND the derived socket.
+///
+/// Why not `test_support::stub_data_dir`: a `sun_path` is 104 bytes on macOS,
+/// and that helper's name carries the app, the pid and a nanosecond timestamp
+/// under `/var/folders/...`, which overruns the budget before
+/// `trusty-search/trusty-search.sock` is appended. `bind_hardened` would fail
+/// on the path length rather than on anything this test is about.
+///
+/// # Preconditions
+/// The caller MUST be holding [`ENV_TEST_LOCK`] — the override is process-global.
+/// # Postconditions
+/// Returns the created directory; teardown is `clear_data_dir_override`.
+/// Test: used by `search_is_probed_over_both_transports`.
+fn short_data_dir(tag: &str) -> std::path::PathBuf {
+    let dir = std::path::PathBuf::from(format!("/tmp/tctl-{tag}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create short data dir");
+    unsafe {
+        // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
+        std::env::set_var(trusty_common::DATA_DIR_OVERRIDE_ENV, &dir);
+    }
+    dir
+}
+
+/// REGRESSION (#6285): a trusty-search that predates the socket must stay
+/// healthy.
+///
+/// Why: THE acceptance test for this migration. No published trusty-search
+/// binds a socket — the listener landed in an unpublished version — so on every
+/// machine that installs from crates.io today the socket leg answers `Refused`.
+/// `Refused` is one of the two variants `is_confirmed_down` accepts, and
+/// `verify_tail::needs_kickstart` turns a confirmed-down into `launchctl
+/// kickstart -k`, so a socket-only probe would hard-restart a healthy search on
+/// every `tctl install` — SIGKILL mid-index-flush, the harm CLAUDE.md names.
+/// What: no socket bound, a live stub on the recorded `http_addr`; asserts the
+/// reconciled verdict is `Serving`, renders `healthy`, and is NOT
+/// confirmed-down.
+/// Test: This is the test.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn a_pre_socket_search_is_healthy_over_http_alone() {
+    let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let recorded = stub_once(OK_LINE, REAL_SEARCH).await;
+    let dir = crate::commands::test_support::stub_data_dir("trusty-search", &recorded);
+
+    let outcome = probe_daemon_http("trusty-search", "trusty-search").await;
+    crate::commands::test_support::clear_data_dir_override(&dir);
+
+    assert!(
+        matches!(outcome, ProbeOutcome::Serving { .. }),
+        "a search daemon serving only HTTP must be Serving; got {outcome:?}"
+    );
+    assert_eq!(outcome.health_string(), "healthy");
+    assert!(
+        !outcome.is_confirmed_down(),
+        "an unbound socket must NEVER feed needs_kickstart while the HTTP leg \
+         is Serving — that is #4246 on a daemon whose restart is a SIGKILL \
+         mid-index-flush"
+    );
+}
+
+/// REGRESSION (#6285): a trusty-search that serves the socket is read off it.
+///
+/// Why: the other half of the window. Once the listener ships, the socket is
+/// the transport this migration moves to, and a dead HTTP leg beside it must
+/// not drag the verdict down — the same precedence rule
+/// `probe_port_walked_daemon_is_healthy` pins for two HTTP legs, now applied
+/// across two transports.
+/// What: binds the derived socket, answers one `search.health` frame, and
+/// points `http_addr` at an address nothing listens on. Asserts `Serving` and
+/// not confirmed-down. On a machine with a real trusty-search on 7878 that leg
+/// answers too — the assertion is the safety property, which must hold either
+/// way.
+/// Test: This is the test.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn search_is_probed_over_both_transports() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = short_data_dir("6285");
+    trusty_common::write_daemon_addr("trusty-search", &dead_addr()).expect("plant http_addr");
+    let socket = uds_socket_for("trusty-search").expect("search resolves a socket");
+    let _ = std::fs::remove_file(&socket);
+    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
+
+    tokio::spawn(async move {
+        let Ok((mut conn, _)) = listener.accept().await else {
+            return;
+        };
+        let mut sink = Vec::new();
+        let _ = conn.read_to_end(&mut sink).await;
+        let reply = format!("{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{REAL_SEARCH}}}\n");
+        let _ = conn.write_all(reply.as_bytes()).await;
+        let _ = conn.flush().await;
+    });
+
+    let outcome = probe_daemon_http("trusty-search", "trusty-search").await;
+    crate::commands::test_support::clear_data_dir_override(&dir);
+
+    assert!(
+        matches!(outcome, ProbeOutcome::Serving { .. }),
+        "a search daemon answering search.health must be Serving; got {outcome:?}"
+    );
+    assert!(
+        !outcome.is_confirmed_down(),
+        "a refused HTTP leg must not outrank a socket that answered"
     );
 }
 
