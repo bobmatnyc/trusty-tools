@@ -67,6 +67,10 @@
 //! cannot reach `connect(2)` in the first place.
 //!
 //! Test: `managed_tests.rs`.
+//!
+//! [`register`]: crate::daemon::rpc::managed::register
+//! [`outcome::status_to_rpc_code`]: crate::daemon::rpc::managed::outcome::status_to_rpc_code
+//! [`control::CallerTrust`]: crate::daemon::rpc::managed::control::CallerTrust
 
 pub mod control;
 pub mod outcome;

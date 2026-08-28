@@ -25,6 +25,11 @@
 //! index.
 //!
 //! Test: `error_tests.rs`.
+//!
+//! [`rpc_error_from_http`]: crate::service::rpc::error::rpc_error_from_http
+//! [`CODE_UNAVAILABLE`]: crate::service::rpc::error::CODE_UNAVAILABLE
+//! [`CODE_UNAVAILABLE_PERMANENT`]: crate::service::rpc::error::CODE_UNAVAILABLE_PERMANENT
+//! [`RpcError`]: trusty_common::uds::server::RpcError
 
 use trusty_common::uds::server::{RpcError, CODE_INTERNAL_ERROR, CODE_INVALID_PARAMS};
 

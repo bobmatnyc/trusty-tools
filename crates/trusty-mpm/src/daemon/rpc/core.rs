@@ -67,6 +67,9 @@
 //!
 //! Test: `core_tests.rs` — `rpc_*` for the wire behaviour, `parity_*` for the
 //! HTTP-versus-socket comparison.
+//!
+//! [`register`]: crate::daemon::rpc::core::register
+//! [`super::core_ops`]: crate::daemon::rpc::core_ops
 
 use std::sync::Arc;
 

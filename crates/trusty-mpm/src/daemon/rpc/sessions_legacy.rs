@@ -82,6 +82,9 @@
 //!
 //! Test: `sessions_legacy_tests.rs` — `rpc_*` for the wire behaviour, `parity_*`
 //! for the HTTP-versus-socket comparison.
+//!
+//! [`register`]: crate::daemon::rpc::sessions_legacy::register
+//! [`super::sessions_legacy_ops`]: crate::daemon::rpc::sessions_legacy_ops
 
 use std::sync::Arc;
 

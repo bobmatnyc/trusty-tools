@@ -86,6 +86,12 @@
 //!
 //! [`DaemonError`]: crate::daemon::error::DaemonError
 //! [`BusError`]: crate::daemon::bus::BusError
+//!
+//! [`register`]: crate::daemon::rpc::registry::register
+//! [`METHODS`]: crate::daemon::rpc::registry::METHODS
+//! [`projects`]: crate::daemon::rpc::registry::projects
+//! [`pairing`]: crate::daemon::rpc::registry::pairing
+//! [`manager`]: crate::daemon::rpc::registry::manager
 
 use std::sync::Arc;
 

@@ -66,6 +66,7 @@
 //!
 //! [`canonical_label`]: crate::launchd_labels::canonical_label
 //! [`SERVICES`]: crate::launchd_labels::SERVICES
+//! [`RETIRED_SERVICES`]: crate::launchd_labels::RETIRED_SERVICES
 
 /// Reverse-DNS domain prefix shared by every trusty-* LaunchAgent.
 ///

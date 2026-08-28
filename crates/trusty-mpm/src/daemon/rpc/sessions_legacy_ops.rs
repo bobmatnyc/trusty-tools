@@ -40,6 +40,13 @@
 //! rest of the `parity_*` set in `sessions_legacy_tests.rs`, which drives every
 //! body here through BOTH transports and compares the answers and the state
 //! each left behind.
+//!
+//! [`super::sessions_legacy`]: crate::daemon::rpc::sessions_legacy
+//! [`super::core_ops`]: crate::daemon::rpc::core_ops
+//! [`DaemonError`]: crate::daemon::error::DaemonError
+//! [`remove_session`]: crate::daemon::rpc::sessions_legacy_ops::remove_session
+//! [`pause_session`]: crate::daemon::rpc::sessions_legacy_ops::pause_session
+//! [`send_command`]: crate::daemon::rpc::sessions_legacy_ops::send_command
 
 use std::sync::Arc;
 

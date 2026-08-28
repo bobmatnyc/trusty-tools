@@ -8,7 +8,7 @@
 //!
 //! What: the socket path (derived, never published to a discovery file), the
 //! bind, and the serve loop. Which METHODS are served is `daemon::rpc`'s —
-//! [`build_router`] names one `register` call per family, and slice 2 mounted
+//! `build_router` names one `register` call per family, and slice 2 mounted
 //! the first twenty. A name no family claims still answers `method_not_found`.
 //!
 //! The trust boundary is the socket, not the payload: `bind_singleton_hardened`
