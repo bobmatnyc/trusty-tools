@@ -269,7 +269,7 @@ this table is generated from it, not maintained by hand.
 | `chat_session_list` | `palace`, `limit?`, `offset?` | List chat sessions in a palace as paginated metadata (id, title, timestamps, message_count) ordered most-recently-updated first. |
 | `chat_session_recall` | `palace`, `session_id` | Retrieve a full chat session with all turns in order (alias for chat_session_get, preferred name for agent-facing recall). |
 | `chat_turn_append` | `palace`, `session_id`, `prompt`, `response` | Append a prompt/response PAIR to a chat session as two consecutive messages (user role then assistant role). |
-| `console_metrics` | — | Return a ConsoleMetricsReport with palace aggregate statistics (palace_count, cached_palace_count, total_drawers, total_vectors,… |
+| `console_metrics` | — | Return a ConsoleMetricsReport with palace aggregate statistics (palace_count, counted_palace_count, cached_palace_count, total_drawers,… |
 | `discover_aliases` | `palace`, `project_root?` | Auto-discover project aliases by scanning Cargo workspace members, binary names, first-letter abbreviations, and the git remote. |
 | `dream_consolidate_room` | `palace`, `max_age_days?`, `room?` | Trigger LLM-driven semantic consolidation for one room (or all rooms) of a palace, on demand and synchronously (spec-001). |
 | `get_prompt_context` | `query?` | Fetch the current project context (aliases, conventions, facts, shorthands) from the memory palace as a Markdown block ready to drop into… |
