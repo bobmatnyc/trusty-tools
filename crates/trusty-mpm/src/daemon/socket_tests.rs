@@ -34,6 +34,21 @@ async fn spawn_listener(
     tokio::task::JoinHandle<()>,
 ) {
     let bound = bind(socket).await.expect("bind a fresh socket path");
+    serve_bound(bound, socket).await
+}
+
+/// Serve an already-bound socket, returning its stop trigger.
+///
+/// Split from [`spawn_listener`] so a test that needs to control HOW the bind
+/// happened — `bind_reclaims_a_stale_socket_file` retries it — still drives the
+/// same serve path.
+async fn serve_bound(
+    bound: super::BoundSocket,
+    socket: &Path,
+) -> (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     let handle = tokio::spawn(async move {
         serve_until_shutdown(bound, async {
@@ -222,6 +237,17 @@ async fn bind_refuses_a_socket_another_process_is_serving() {
 /// is `SocketVerdict::Inconclusive` and is refused rather than reclaimed; that
 /// asymmetry is deliberate (`uds::singleton`) and this test must not paper
 /// over it.
+///
+/// Why the bind is retried: `bind_singleton_hardened` reclaims only on a
+/// verdict the kernel PROVED, and its one-second probe can be starved on a
+/// machine running the rest of this suite in parallel — `uds::singleton`
+/// records that exact failure, "a starved probe read as `Inconclusive` and
+/// refused a genuinely stale socket, which is safe but wrong", and names the
+/// remedy: "one failed start that a retry fixes". So the retry models what a
+/// launchd-supervised daemon does, rather than hiding a defect. The assertion
+/// is unchanged and still fails if the reclaim never happens — a socket that is
+/// genuinely held is refused every attempt, which is what
+/// `bind_refuses_a_socket_another_process_is_serving` pins.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
 async fn bind_reclaims_a_stale_socket_file() {
@@ -236,7 +262,28 @@ async fn bind_reclaims_a_stale_socket_file() {
     drop(corpse);
     assert!(socket.exists(), "the corpse must outlive its listener");
 
-    let (stop, handle) = spawn_listener(&socket).await;
+    let mut last_err = None;
+    let mut bound = None;
+    for _ in 0..10 {
+        match bind(&socket).await {
+            Ok(b) => {
+                bound = Some(b);
+                break;
+            }
+            Err(e) => {
+                last_err = Some(e);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+    let bound = bound.unwrap_or_else(|| {
+        panic!(
+            "a socket nobody is serving must be reclaimed within ten starts; last error: {:#}",
+            last_err.expect("a failed loop records its error")
+        )
+    });
+
+    let (stop, handle) = serve_bound(bound, &socket).await;
     assert!(
         trusty_common::uds::socket_is_serving(&socket, GENEROUS).await,
         "the successor must be serving the reclaimed path"
