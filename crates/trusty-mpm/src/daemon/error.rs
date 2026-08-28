@@ -275,8 +275,8 @@ impl IntoResponse for DaemonError {
 /// crosses verbatim — it is the same string the HTTP body's `error` field
 /// carries, which is what makes a parity assertion meaningful.
 /// Test: `rpc_error_codes_track_http_statuses`;
-/// `rpc_tmux_snapshot_unknown_session_reports_not_found` drives one arm through
-/// a real failure.
+/// `rpc_tmux_snapshot_unknown_session_reports_a_coded_error` drives one arm
+/// through a real failure.
 impl From<DaemonError> for RpcError {
     fn from(e: DaemonError) -> Self {
         let code = match e.status() {

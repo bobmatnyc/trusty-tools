@@ -79,7 +79,7 @@ pub async fn doctor(
 /// Recently captured errors from every daemon store (`GET /api/v1/errors`,
 /// `mpm.errors.list`).
 ///
-/// Test: `list_errors_returns_array`, `parity_errors_agrees_across_transports`.
+/// Test: `parity_errors_agrees_across_transports`.
 pub fn list_errors(_state: &Arc<DaemonState>, query: ErrorsQuery) -> ErrorsResponse {
     let limit = query.limit.unwrap_or(20).min(100) as usize;
     let errors = bug_report::aggregate_errors(limit);
@@ -138,7 +138,8 @@ pub fn to_wire_preview(p: &bug_report::IssuePreview) -> BugReportPreview {
 /// the socket's peer-uid check is the stronger half of the guard pair here.
 ///
 /// Test: `report_bug_no_confirm_includes_preview`,
-/// `report_bug_rate_limited_returns_not_filed`,
+/// `report_bug_not_found_fingerprint_is_graceful`,
+/// `report_bug_rate_limit_guard_blocks_correctly`,
 /// `parity_report_bug_preview_agrees_across_transports`.
 pub async fn report_bug(
     _state: &Arc<DaemonState>,
@@ -266,7 +267,7 @@ pub fn breakers(state: &Arc<DaemonState>) -> BreakersResponse {
 /// The overseer's enabled flag and active handler (`GET /overseer`,
 /// `mpm.overseer`).
 ///
-/// Test: `get_overseer_returns_status`, `parity_overseer_agrees_across_transports`.
+/// Test: `parity_overseer_agrees_across_transports`.
 pub fn overseer(state: &Arc<DaemonState>) -> OverseerResponse {
     OverseerResponse {
         overseer: OverseerStatus {
@@ -316,8 +317,7 @@ pub async fn llm_chat(
 /// Every tmux session with its origin label (`GET /tmux/sessions`,
 /// `mpm.tmux.sessions`).
 ///
-/// Test: `list_tmux_sessions_returns_array`,
-/// `parity_tmux_sessions_agrees_across_transports`.
+/// Test: `parity_tmux_sessions_agrees_across_transports`.
 pub fn list_tmux_sessions(_state: &Arc<DaemonState>) -> TmuxSessionsResponse {
     TmuxSessionsResponse {
         sessions: TmuxService::list_all(),
