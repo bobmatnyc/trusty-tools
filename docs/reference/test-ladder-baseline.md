@@ -18,15 +18,73 @@ was exercised.
 | # | Development proof | PR gate — the command to run | Hardening / release gate |
 |---|---|---|---|
 | 1 | Read the rendered file | `bash scripts/check_sld.sh` (plus `check_doc_numbers.sh` / `check_line_cap.sh` if those surfaces were touched). No Cargo test by default. | CI required checks only |
-| 2 | Fail-before / pass-after, repeated: `cargo test -p <crate> <test> -- --exact --nocapture` run ~10× | `cargo fmt --check` && `cargo test -p <crate>`; add `-- --test-threads=1` when the flake is isolation-shaped | `cargo test --workspace` **only** when shared test infrastructure changed |
-| 3 | One targeted regression test that provably fails before the change | `cargo fmt --check` && `cargo check -p <crate>` && `cargo clippy -p <crate> -- -D warnings` && `cargo test -p <crate>` | Workspace gate only when release policy requires it |
-| 4 | Targeted regression plus `cargo test -p <lib>` | rung 3 for the library, then `cargo check --workspace` && `cargo test -p <consumer>` for **each direct dependent** | `cargo test --workspace` && `cargo clippy --workspace --all-targets -- -D warnings` at HARDEN/release |
-| 5 | Targeted plus failure-path and concurrency tests | rung 4, plus `cargo test -p <crate> -- --include-ignored` for gated integration coverage, plus an adversarial review round (`code-critic`) | full workspace, `cargo audit`, and for release tooling `scripts/check-publish-ready.sh <crate>` && `scripts/preflight-publish.sh <crate>` |
+| 2 | Fail-before / pass-after, repeated: `cargo test -p <crate> <test> -- --exact --nocapture` run ~10× | `cargo fmt --check` && `cargo test -p <crate> --no-fail-fast`; add `-- --test-threads=1` when the flake is isolation-shaped | `cargo test --workspace` **only** when shared test infrastructure changed |
+| 3 | One targeted regression test that provably fails before the change | `cargo fmt --check` && `cargo check -p <crate>` && `cargo clippy -p <crate> -- -D warnings` && `cargo test -p <crate> --no-fail-fast` | Workspace gate only when release policy requires it |
+| 4 | Targeted regression plus `cargo test -p <lib>` | rung 3 for the library, then `cargo check --workspace` && `cargo test -p <consumer> --no-fail-fast` for **each direct dependent** | `cargo test --workspace` && `cargo clippy --workspace --all-targets -- -D warnings` at HARDEN/release |
+| 5 | Targeted plus failure-path and concurrency tests | rung 4, plus `cargo test -p <crate> --no-fail-fast -- --include-ignored` for gated integration coverage, plus an adversarial review round (`code-critic`) | full workspace, `cargo audit`, and for release tooling `scripts/check-publish-ready.sh <crate>` && `scripts/preflight-publish.sh <crate>` |
 | 6 | Rust crate tests **plus** direct UI/API evidence (curl the route, call the MCP tool, load the page) | rung 3 or 4 for the Rust side, plus `pnpm -C crates/<crate>/ui test` (where the package defines one; otherwise `… build`) and one smoke run of the binary | full product/e2e gate plus `cargo test -- --include-ignored` when hardening |
 
 Why `cargo test --workspace` is absent from rungs 1–3, and the "scope down,
 never scope away" line that constrains picking a lower rung, are stated with the
 ladder itself in [`CLAUDE.md`](../../CLAUDE.md) — not repeated here.
+
+### Every rung carries `--no-fail-fast`, and the reason is not politeness
+
+Cargo runs each test target as its own binary and, by default, stops issuing
+further targets as soon as one target reports a failing test. It does not run
+every target and report the aggregate. A single failing `--lib` test therefore
+zeroes out every integration target behind it, and the invocation exits having
+covered far less than its counts suggest.
+
+Worked example, on a two-target project whose `--lib` target fails:
+
+```
+$ cargo test                      # only the --lib target ran
+test result: FAILED. 0 passed; 1 failed; 0 ignored
+error: test failed, to rerun pass `--lib`
+
+$ cargo test --no-fail-fast       # the integration target ran as well
+test result: FAILED. 0 passed; 1 failed; 0 ignored
+error: test failed, to rerun pass `--lib`
+test result: ok. 1 passed; 0 failed; 0 ignored
+```
+
+This is not hypothetical here. The #5324 implementer found
+`--test tm_hook_pm_guard` — the regression test that fix depends on — had never
+executed once across a full session of `cargo test -p trusty-mpm` runs, because
+the `--lib` target kept failing first; `--no-fail-fast` ran all 46 targets
+green. It recurred on PR #5904, where the `execute_doctor_against_test_daemon`
+timing flake masked 49 other targets. `bench_stale_assets_for_many` and the
+`tm_hook_pm_guard` family (#5914) supply the same trigger.
+
+It also changes what a pasted count proves. `5280 passed; 0 failed` from a run
+WITHOUT the flag is evidence about the targets that ran, not about the crate —
+so name the flag beside the counts, or a reviewer cannot tell the two apart.
+
+### `#[serial]` does not serialize under nextest
+
+CI's `test-shard` job runs `cargo nextest run --workspace`, and nextest gives
+every test its own process. `serial_test`'s `#[serial]` is an in-process lock,
+so it serializes nothing there. Measured 2026-08-27: two `#[serial]` tests
+sharing a key interleaved across two pids under nextest
+(`one ENTER` / `two ENTER` / `two EXIT` / `one EXIT`) and ran strictly one after
+the other in a single pid under `cargo test`.
+
+The `$HOME` isolation PR #4120 established is not the casualty #4162 predicted.
+A `set_var("HOME")` is process-local, so process-per-test isolation is strictly
+STRONGER than the in-process lock for env state — measured, the sibling test
+read the real `$HOME` while the mutating test held its own redirect, and it
+cannot observe the redirect at all. Running the `$HOME`-touching targets
+(`session_manager_mvp`, `local_spawn`) under both runners added no entry to the
+real `~/.claude.json`: 2828 projects before and after, both times.
+
+What DOES lapse is any `#[serial]` guarding a resource shared ACROSS processes —
+a fixed path, a fixed port, one real file. Guard those with
+`#[serial_test::file_serial]`, which takes a filesystem lock and needs
+serial_test's `file_locks` feature; `#[serial]` and `#[file_serial]` lock
+independently, so a resource must pick one and use it everywhere. And keep
+redirecting `$HOME` per test: the redirect is what keeps a test out of the
+operator's real config, and always was — `#[serial]` never did that job.
 
 ### `-p <crate>` is only a gate when the crate's default features compile the code
 
