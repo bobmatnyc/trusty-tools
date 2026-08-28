@@ -3,7 +3,12 @@
 //! Why: extracted from `main.rs` to keep that file under the 500-line cap (#610).
 //!
 //! What: resolves the diff source, builds deps, runs the review pipeline,
-//! optionally writes the log file, and exits non-zero on a skipped review.
+//! optionally writes the log file, and exits non-zero on a review that failed.
+//!
+//! #6290: this is the per-invocation entry point that replaces the retired
+//! `review.run` daemon method. `--json` prints the same `ReviewResult` object
+//! that method returned, and the exit rule lives in
+//! [`trusty_review::run_output`] so the JSON and the exit code cannot disagree.
 //!
 //! Test: CLI integration via `cargo run -p trusty-review -- run --help`;
 //! pipeline logic covered by `runner::tests`.
@@ -26,6 +31,7 @@ use trusty_review::{
         CallerContext, DiffSource, ReviewDeps, ReviewInput, TriggerDecision, log_json_path,
         run_review,
     },
+    run_output::{run_failure_reason, run_is_failure, run_json_payload},
     store::{DedupNeed, open_dedup_for},
 };
 
@@ -112,6 +118,16 @@ pub struct RunArgs {
     /// Write the review log file to the configured log directory.
     #[arg(long = "no-log", action = clap::ArgAction::SetFalse, default_value = "true")]
     pub write_log: bool,
+
+    /// Print the review as JSON on stdout instead of the human report.
+    ///
+    /// #6290: this is what the retired `review.run` JSON-RPC method returned —
+    /// the same `ReviewResult` object, field for field, so a caller that parsed
+    /// the daemon's answer parses this unchanged. A run that fails still prints
+    /// the JSON (with `error` set) AND exits non-zero; it never exits 0 on an
+    /// empty success.
+    #[arg(long)]
+    pub json: bool,
 }
 
 // ─── handler ─────────────────────────────────────────────────────────────────
@@ -187,7 +203,10 @@ pub async fn cmd_run(config: ReviewConfig, args: RunArgs) -> Result<()> {
         diff_source,
         reviewer_model: reviewer_model.clone(),
         write_log: args.write_log,
-        print_result: true,
+        // #6290: `--json` owns stdout, so the human report must not also be
+        // written there — a caller piping this into `jq` would get prose ahead
+        // of the object.
+        print_result: !args.json,
         trigger: TriggerDecision::None,
         run_mode: RunMode::Cli,
         allow_posting: ALLOW_POSTING,
@@ -197,19 +216,26 @@ pub async fn cmd_run(config: ReviewConfig, args: RunArgs) -> Result<()> {
 
     let result = run_review(&config_with_overrides, input, deps).await;
 
+    if args.json {
+        // Serialised before the failure check so a failed review still hands the
+        // caller its reason as data (#6290 fail-open check).
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&run_json_payload(&result))
+                .unwrap_or_else(|e| format!(r#"{{"error":"serialising the result failed: {e}"}}"#))
+        );
+    }
+
     if args.write_log {
         let log_path = log_json_path(&result, &config_with_overrides.log_dir);
         eprintln!("\nLog written to: {}", log_path.display());
     }
 
-    if result.status.is_skipped() {
-        anyhow::bail!(
-            "review skipped — {}",
-            result
-                .error
-                .as_deref()
-                .unwrap_or("required code-context dependency unavailable")
-        );
+    // #6290: was `status.is_skipped()` alone, which exited 0 on a provider
+    // outage — `abort_dry` records that as `error: Some(..)` with the status
+    // left at `Completed`. See `run_output::run_is_failure`.
+    if run_is_failure(&result) {
+        anyhow::bail!("{}", run_failure_reason(&result));
     }
 
     Ok(())

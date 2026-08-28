@@ -11,10 +11,13 @@ use super::*;
 /// produce — which is exactly how `com.trusty.trusty-search` survived. The
 /// convention has to be checkable, not merely documented.
 /// What: every main-daemon entry's `label` must equal `canonical_label(member)`.
+/// #6290: retired rows are held to the same rule — a retirement moves a row
+/// between tables, so its label must still be the one that is actually loaded
+/// on a host, or the eviction boots out a unit that does not exist.
 /// Test: this is the test.
 #[test]
 fn canonical_consts_match_the_convention() {
-    for svc in SERVICES {
+    for svc in SERVICES.iter().chain(RETIRED_SERVICES) {
         if svc.sub_unit.is_some() {
             continue;
         }
@@ -76,7 +79,10 @@ fn legacy_labels_are_never_canonical() {
 #[test]
 fn every_legacy_label_resolves_to_one_service() {
     let mut seen: Vec<&str> = Vec::new();
-    for svc in SERVICES {
+    // #6290: across BOTH tables. A retired label colliding with a live one is
+    // the worst version of this — an install would evict the unit it is about
+    // to need.
+    for svc in SERVICES.iter().chain(RETIRED_SERVICES) {
         for label in std::iter::once(&svc.label).chain(svc.legacy.iter()) {
             assert!(
                 !seen.contains(label),
@@ -85,6 +91,58 @@ fn every_legacy_label_resolves_to_one_service() {
             seen.push(label);
         }
     }
+}
+
+/// Why (#6290): the two tables answer opposite questions — what an install
+/// WRITES versus what an upgrade CLEARS — and a row that appeared in both would
+/// have an install bootstrap a unit and then boot it out, or the reverse,
+/// depending on step order.
+/// What: no retired member appears in `SERVICES`, and `RETIRED_SERVICES` names
+/// exactly the members whose daemon has been retired.
+/// Test: this is the test.
+#[test]
+fn retired_services_are_not_installed() {
+    for retired in RETIRED_SERVICES {
+        assert!(
+            !SERVICES.iter().any(|s| s.member == retired.member),
+            "{} is retired but still listed as a service an install writes",
+            retired.member
+        );
+        assert!(
+            retired_service_for_member(retired.member).is_some(),
+            "{} must be reachable by member lookup, or nothing can evict it",
+            retired.member
+        );
+    }
+    let members: Vec<&str> = RETIRED_SERVICES.iter().map(|s| s.member).collect();
+    assert_eq!(
+        members,
+        vec!["trusty-review"],
+        "adding a retirement is a deliberate act — update this pin with it"
+    );
+}
+
+/// Why (#6290): trusty-review's unit exists under two names on real hosts —
+/// `com.trusty.review` from the post-#4919 installer and
+/// `com.trusty.trusty-review` from before it. An eviction that clears only one
+/// leaves the other loaded, respawning a `serve` subcommand the binary no
+/// longer has, which is a crash loop with nothing in the log but a usage
+/// message.
+/// What: both labels come back from `retired_labels_for_member`, canonical
+/// first, and a live member yields nothing.
+/// Test: this is the test.
+#[test]
+fn retired_review_carries_both_its_labels() {
+    let labels = retired_labels_for_member("trusty-review");
+    assert_eq!(labels, vec![REVIEW, "com.trusty.trusty-review"]);
+    assert!(
+        retired_labels_for_member("trusty-search").is_empty(),
+        "a live member has nothing to evict"
+    );
+    assert!(
+        legacy_labels_for(REVIEW).contains(&"com.trusty.trusty-review"),
+        "the retired row's legacy alias must still resolve through the label lookup"
+    );
 }
 
 /// Why: the pre-#4919 labels must stay recorded as legacy or an upgrade from a

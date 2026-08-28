@@ -195,7 +195,6 @@ fn restart_plan_daemons_restart() {
         "trusty-search",
         "trusty-memory",
         "trusty-analyze",
-        "trusty-review",
         "trusty-console",
     ] {
         assert_eq!(
@@ -204,6 +203,14 @@ fn restart_plan_daemons_restart() {
             "{binary} must be bounced through launchd after an upgrade"
         );
     }
+    // #6290: upgrading trusty-review has nothing to bounce — the next `run`
+    // invocation IS the new binary. Planning a launchd restart would target
+    // `com.trusty.review`, the unit this release evicts.
+    assert_eq!(
+        restart_plan("trusty-review", true, true),
+        RestartPlan::NoRestart("no restart needed (not a daemon)".to_owned()),
+        "a per-invocation member has no process to restart"
+    );
     assert_eq!(
         restart_plan("trusty-mpm", true, true),
         RestartPlan::Restart(ManageStrategy::OwnVerb),

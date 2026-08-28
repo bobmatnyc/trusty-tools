@@ -10,8 +10,8 @@ review verdict with actionable findings.
 It ships as:
 
 - a one-shot **CLI** (`run` / `compare` subcommands)
-- a long-lived **HTTP webhook server** (`serve` subcommand, port 7880)
-- a **JSON-RPC 2.0 / MCP stdio service** (`serve --stdio`) for Claude Code integration
+- a **JSON-RPC 2.0 / MCP stdio service** (`mcp` subcommand) for Claude Code integration
+- a per-delivery **webhook drain** (`webhook-listen`), spawned by trusty-console
 
 ## Installation
 
@@ -146,34 +146,46 @@ required first running `trusty-search index <dir>` out of band.
 context) was proposed alongside `--source-root` but is **not** implemented in
 this pass — it is deferred to a follow-up issue.
 
-## HTTP server
+## No daemon — reviews run per invocation (#6290)
+
+`trusty-review` has no `serve` daemon, no launchd unit, and no socket. Every
+review is one process that starts, reviews, and exits. A cold start costs about
+191 ms against a median review of 36.7 s (#5028), so residency bought nothing
+it charged for.
+
+If a machine still has the old LaunchAgent loaded, `tctl up` boots it out and
+deletes its plist. Nothing else is needed.
+
+### The structured result
+
+`run --json` prints the same object the retired `review.run` JSON-RPC method
+returned — field for field, so a caller that parsed the daemon's answer parses
+this unchanged:
 
 ```bash
-# Start the HTTP daemon on port 7880
-trusty-review serve
-
-# Custom port / bind address
-trusty-review serve --port 8080 --bind 0.0.0.0
+trusty-review run --local-diff change.patch --json
+trusty-review run acme widget 42 --json | jq '.verdict, .findings_count'
 ```
 
-Endpoints:
+A review that could not complete — a bad diff, a provider outage — still prints
+its JSON, with the reason in `error`, and exits non-zero. It never exits 0 on an
+empty result.
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/health` | Liveness, dependency + inference status (see MCP `review_health` for schema) |
-| GET | `/status` | In-flight count + last error |
-| POST | `/review` | Synchronous on-demand review |
+| Retired | Now |
+|---|---|
+| `POST /review` → `review.run` | `trusty-review run … --json` |
+| `GET /health` → `review.health` | binary on PATH + `trusty-review --version` |
+| `GET /status` → `review.status` | nothing in flight; there is no resident process |
 
-`POST /pr/github/webhook` was retired in #5181 and now answers 404. GitHub
-deliveries reach `trusty-review` through `trusty-console`'s
-`POST /api/webhooks/{source}`, which verifies the HMAC once and relays over UDS
-to `trusty-review webhook-listen` (ADR-0034).
+GitHub webhooks never arrived here. `trusty-console` verifies the HMAC once and
+relays over UDS to `trusty-review webhook-listen` — a process console spawns per
+delivery and SIGTERMs, which drains its own durable inbox through the review
+pipeline (ADR-0034; `POST /pr/github/webhook` was retired in #5181).
 
 ## MCP stdio service (Claude Code integration)
 
 ```bash
-# Start the MCP stdio server
-trusty-review serve --stdio
+trusty-review mcp
 ```
 
 Wire into Claude Code via `.mcp.json`:
@@ -183,11 +195,14 @@ Wire into Claude Code via `.mcp.json`:
   "mcpServers": {
     "trusty-review": {
       "command": "trusty-review",
-      "args": ["serve", "--stdio"]
+      "args": ["mcp"]
     }
   }
 }
 ```
+
+`args: ["serve", "--stdio"]` still works — `serve` is an alias for `mcp` and
+`--stdio` is accepted and ignored, so no existing `.mcp.json` needs editing.
 
 ### MCP tools
 
@@ -316,7 +331,7 @@ explicit override:
 | Surface | Examples | Default when search is down |
 |---------|----------|------------------------------|
 | `Interactive` | MCP `review_pr`/`review_diff` tool calls; CLI `run --local-diff`/`--base`/`--source-root` | **Degrade** — a loudly-labelled, non-authoritative diff-only review still runs (the LLM is still called) |
-| `Hosted` | The GitHub webhook bot (`serve`); CLI `run <owner> <repo> <pr>` | **Skip** — refuse to review without code context (unchanged) |
+| `Hosted` | The GitHub webhook drain (`webhook-listen`); CLI `run <owner> <repo> <pr>` | **Skip** — refuse to review without code context (unchanged) |
 
 Neither MCP tool call nor a local-diff CLI review can post to a real GitHub
 PR, so degrading them when search is down is safe and more useful than
@@ -661,8 +676,8 @@ actionable.
 
 | Feature | Default | Description |
 |---------|---------|-------------|
-| `http-server` | yes | Axum HTTP daemon (`serve` subcommand without `--stdio`) |
-| `mcp` | yes | MCP stdio JSON-RPC service (`serve --stdio`) |
+| `http-server` | yes | `AppState` and the three review operations. A misnomer since #6277 (no axum) and doubly so since #6290 (no daemon); renaming it would break every consumer manifest for no behaviour |
+| `mcp` | yes | MCP stdio JSON-RPC service (`mcp` subcommand) |
 | `report` | yes | Deterministic technical due-diligence report generator (`report` subcommand) |
 
 > The conformance back gate (above) is backed by **trusty-common**'s

@@ -35,7 +35,7 @@ name = "trusty-common"
 # (`ConsolidationProvider`, `resolve_consolidation_provider`, three consts) or a
 # default VALUE change on an existing field; no public item was removed or had
 # its type changed, so nothing here breaks a consumer at compile time.
-version = "0.45.3"
+version = "0.45.4"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

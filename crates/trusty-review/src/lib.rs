@@ -31,6 +31,11 @@ pub mod integrations;
 pub mod llm;
 pub mod models;
 pub mod pipeline;
+// #6290: the machine-readable shape `trusty-review run --json` prints, and the
+// rule that decides its exit code. In the library rather than in `commands/`
+// because the parity test that pins it to the retired `review.run` result must
+// reach both this and `service::handlers`.
+pub mod run_output;
 // Why: coverage ingestion and verdict-gating (issue #1014).  Always compiled —
 // no feature gate — because `CoveragePolicy` is a pure data type used by
 // `ReviewConfig` and the runner in all modes.  The feature is off by default
@@ -60,16 +65,18 @@ pub mod store;
 #[cfg(feature = "report")]
 pub mod report;
 
-// Why: the service module is gated behind `http-server` so library consumers
-// that only need the pipeline (CLI one-shot, unit tests) do not pull in the
-// full axum + tower-http stack.
+// Why: `service` holds `AppState` and the three review operations. The gate is
+// kept so library consumers that only need the pipeline (CLI one-shot, unit
+// tests) do not compile them. #6290 retired the daemon the module was named
+// for; the name and the feature are misnomers deliberately left alone — see
+// `service::mod`.
 #[cfg(feature = "http-server")]
 pub mod service;
 
 // Why: the MCP module is gated behind the `mcp` feature so library consumers
 // that do not need the stdio JSON-RPC loop do not pull in trusty-common's MCP
-// primitives.  Enabled by default in the binary so `serve --stdio` is always
-// available.  The `mcp` feature implies `http-server` (AppState is defined there).
+// primitives.  Enabled by default in the binary so `trusty-review mcp` is
+// always available.  The `mcp` feature implies `http-server` (AppState is defined there).
 #[cfg(feature = "mcp")]
 pub mod mcp;
 

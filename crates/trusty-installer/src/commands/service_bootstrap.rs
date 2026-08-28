@@ -200,13 +200,37 @@ impl BootstrapAction {
 /// [`super::plist_bootstrap`]) and `tga` is not a daemon at all — attempting a
 /// service bootstrap for either would shell out to a subcommand that does not
 /// exist.
-/// What: `true` for search/memory/analyze/review/console; `false` otherwise.
-/// Test: `service_members_recognised`, `non_service_members_excluded`.
+///
+/// #6290: trusty-review left this list. It has no daemon — reviews run per
+/// invocation — so it ships no `service` subcommand at all, and shelling out to
+/// one would be the same "subcommand that does not exist" failure the list
+/// exists to prevent. What it needs instead is EVICTION, which is
+/// [`member_has_retired_service`]'s question.
+///
+/// What: `true` for search/memory/analyze/console; `false` otherwise.
+/// Test: `service_members_recognised`, `non_service_members_excluded`,
+/// `retired_review_has_no_service_install`.
 pub fn member_has_service_install(binary: &str) -> bool {
     matches!(
         binary,
-        "trusty-search" | "trusty-memory" | "trusty-analyze" | "trusty-review" | "trusty-console"
+        "trusty-search" | "trusty-memory" | "trusty-analyze" | "trusty-console"
     )
+}
+
+/// Whether a member has a launchd unit an upgrade must boot out (#6290).
+///
+/// Why: a retired daemon's unit does not disappear when the binary stops
+/// shipping the subcommand it launches. `com.trusty.review` is loaded with
+/// `KeepAlive::Always` on every host that installed trusty-review before this
+/// change, respawning a `serve` subcommand the new binary does not have. The
+/// install path is the only pass that visits every member on an operator's
+/// machine, so it is where the eviction belongs.
+/// What: delegates to the canonical registry — a member is retired iff
+/// `trusty_common::launchd_labels::RETIRED_SERVICES` names it. Restating the
+/// member list here is what #4919 spent four issues undoing.
+/// Test: `retired_review_has_no_service_install`.
+pub fn member_has_retired_service(binary: &str) -> bool {
+    trusty_common::launchd_labels::retired_service_for_member(binary).is_some()
 }
 
 /// Whether the post-install service-bootstrap step should run.
@@ -271,6 +295,16 @@ pub trait ServiceEnv {
     /// not supervise already hold its port? `Err` carries the operator-facing
     /// refusal.
     fn port_guard(&self, binary: &str) -> Result<(), String>;
+
+    /// #6290: boot out and delete every launchd unit this member has RETIRED,
+    /// returning the labels that were actually there.
+    ///
+    /// Best-effort, like [`trusty_common::launchd_activate::LaunchdConfig::evict_legacy`]
+    /// it delegates to: a unit that is absent, unloaded, or refuses to unload
+    /// must never fail an install, because nothing is being installed for this
+    /// member in the first place. An empty return means there was nothing to
+    /// clear, which is the steady state on every host after the first pass.
+    fn evict_retired(&self, binary: &str) -> Vec<String>;
 }
 
 /// Decide and (via the seam) execute the service bootstrap for one member.
@@ -337,6 +371,21 @@ pub fn bootstrap_one(
     binary: &str,
     exe_path: Option<&std::path::Path>,
 ) -> BootstrapAction {
+    // #6290: a retired member is visited to CLEAR its unit, not to install one.
+    // This runs before the `member_has_service_install` skip because that skip
+    // returns without touching launchd, which is exactly the state that leaves
+    // `com.trusty.review` respawning a subcommand the binary no longer has.
+    if member_has_retired_service(binary) {
+        let evicted = env.evict_retired(binary);
+        return BootstrapAction::Skipped(if evicted.is_empty() {
+            format!("{binary} has no launchd service (retired, #6290)")
+        } else {
+            format!(
+                "{binary}'s launchd service is retired (#6290) — evicted {}",
+                evicted.join(", ")
+            )
+        });
+    }
     if !member_has_service_install(binary) {
         return BootstrapAction::Skipped(format!("{binary} has no `service install` subcommand"));
     }
@@ -496,6 +545,42 @@ impl ServiceEnv for RealServiceEnv {
     // `tctl start`/`restart` path in `lifecycle.rs` calls the same function.
     fn port_guard(&self, binary: &str) -> Result<(), String> {
         super::port_guard::guard_bootstrap(binary)
+    }
+
+    // #6290: both of a retired member's labels — the canonical one and every
+    // legacy alias — are booted out and their plists deleted, through the same
+    // `evict_legacy` primitive an install uses for a renamed unit. Deleting the
+    // plist is what stops the next `launchctl bootstrap` resurrecting it.
+    fn evict_retired(&self, binary: &str) -> Vec<String> {
+        #[cfg(target_os = "macos")]
+        {
+            use trusty_common::launchd::{KeepAlive, LaunchdConfig};
+
+            let labels = trusty_common::launchd_labels::retired_labels_for_member(binary);
+            if labels.is_empty() {
+                return Vec::new();
+            }
+            // Only `label` matters to `bootout` / `plist_path`, and
+            // `evict_legacy` overwrites it per alias — the rest are inert, the
+            // same minimal-config pattern `bootstrap_fallback` above uses.
+            let cfg = LaunchdConfig {
+                label: labels[0].to_owned(),
+                exe_path: std::path::PathBuf::from(binary),
+                args: Vec::new(),
+                log_dir: std::path::PathBuf::from("/tmp"),
+                keep_alive: KeepAlive::Always,
+                throttle_interval: 0,
+                env_vars: Vec::new(),
+                fd_limit: None,
+                working_directory: None,
+            };
+            cfg.evict_legacy(&labels)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = binary;
+            Vec::new()
+        }
     }
 
     fn bootstrap_fallback(&self, binary: &str) -> anyhow::Result<()> {

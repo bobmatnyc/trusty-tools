@@ -598,6 +598,12 @@ impl super::super::service_bootstrap::ServiceEnv for FakeServiceEnv {
             Ok(())
         }
     }
+    // #6290: no member this fake is driven with is retired, so the eviction is
+    // a no-op here. The behaviour has its own coverage in
+    // `service_bootstrap_tests::retired_review_has_no_service_install`.
+    fn evict_retired(&self, _binary: &str) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Why: THE #3849 code-critic MEDIUM 2 core coverage gap — scenario (a):

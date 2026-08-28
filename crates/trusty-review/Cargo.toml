@@ -49,7 +49,7 @@ name        = "trusty-review"
 # `store::redb_error_is_incompatible_format` is `pub(crate)` and keeps its name
 # and signature; it now delegates its body to
 # `trusty_common::redb_open::is_incompatible_format`. No public item changes.
-version     = "0.28.1"
+version     = "0.28.2"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true

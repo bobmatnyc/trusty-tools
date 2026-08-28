@@ -284,6 +284,15 @@ pub(super) fn gating_split<T>(rows: &[T], required: impl Fn(&T) -> bool) -> Gati
 pub fn manage_strategy_for(binary: &str, daemon: bool) -> ManageStrategy {
     if !daemon {
         ManageStrategy::None
+    } else if trusty_common::launchd_labels::retired_service_for_member(binary).is_some() {
+        // #6290: a member whose launchd service is RETIRED has no lifecycle to
+        // control — `tctl start` cannot start it and `verify_tail` must not
+        // kickstart it, because there is no unit. `daemon: true` is kept in the
+        // stable set so the install pass still visits the member and evicts the
+        // stale unit (`service_bootstrap::member_has_retired_service`); this is
+        // where the "and does nothing else with it" half lives. Keying off the
+        // registry rather than a name here keeps the two halves from drifting.
+        ManageStrategy::None
     } else if binary == "trusty-mpm" {
         ManageStrategy::OwnVerb
     } else {
@@ -876,7 +885,9 @@ mod tests {
 
     /// Why: The launchd-supervised daemons must resolve to the `Launchd`
     /// strategy so lifecycle drives `bootstrap`/`bootout`.
-    /// What: Asserts search/memory/analyze/review/console are `Launchd`.
+    /// What: Asserts search/memory/analyze/console are `Launchd`, and that
+    /// trusty-review — whose service is retired (#6290) — is `None` despite
+    /// carrying `daemon: true`.
     /// Test: This is the test.
     #[test]
     fn daemons_use_launchd() {
@@ -886,11 +897,18 @@ mod tests {
             "trusty-search",
             "trusty-memory",
             "trusty-analyze",
-            "trusty-review",
             "trusty-console",
         ] {
             assert_eq!(manage(b), ManageStrategy::Launchd, "{b}");
         }
+        // #6290: `daemon: true` keeps the member in the install pass so the
+        // stale unit is evicted; `manage: None` is what stops `tctl start` and
+        // `verify_tail` trying to control a unit that is not there.
+        assert_eq!(
+            manage("trusty-review"),
+            ManageStrategy::None,
+            "a retired service has no lifecycle to drive"
+        );
     }
 
     /// Why: A non-daemon has no lifecycle control; its strategy must be `None`.

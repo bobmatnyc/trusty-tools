@@ -71,7 +71,7 @@ fn is_executable(path: &Path) -> bool {
 /// [`is_executable`]; otherwise `None` (genuinely not installed).
 /// Test: `tests::resolve_binary_path_install_dir_fallback_detects_executable`,
 /// `tests::resolve_binary_path_none_when_absent_everywhere`.
-fn resolve_binary_path(binary: &str) -> Option<PathBuf> {
+pub(super) fn resolve_binary_path(binary: &str) -> Option<PathBuf> {
     if let Ok(p) = which::which(binary) {
         return Some(p);
     }
@@ -191,8 +191,19 @@ pub fn probe_member_health(binary: &str, manage: ManageStrategy) -> ProbeOutcome
         ManageStrategy::Launchd | ManageStrategy::OwnVerb => {
             probe_member_http_blocking(binary, binary)
         }
-        // A non-daemon has no `/health` to ask. `Unprobeable` is the honest
-        // answer, not a policy choice.
+        // #6290: a per-invocation member is `None` too — it has no lifecycle —
+        // but unlike `tga` it DOES have an honest health answer: the binary
+        // resolved above, and `probe_daemon_http` routes it to a presence probe
+        // that runs `--version`. Reporting `Unprobeable` (rendered `unknown`)
+        // for a tool that is installed and working would be a worse answer than
+        // the one available. Narrowed to presence-only members on purpose:
+        // routing every `None` member through the transport probe would resolve
+        // no address for `tga` and report `down` for a binary that is fine.
+        ManageStrategy::None if super::probe_http::presence_only(binary) => {
+            probe_member_http_blocking(binary, binary)
+        }
+        // A non-daemon with no presence contract has no health to ask about.
+        // `Unprobeable` is the honest answer, not a policy choice.
         ManageStrategy::None => ProbeOutcome::Unprobeable,
     }
 }

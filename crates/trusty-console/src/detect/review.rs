@@ -1,113 +1,80 @@
 //! `ServiceConnector` implementation for `trusty-review`.
 //!
-//! Why: trusty-review served TCP loopback HTTP and published its bound address
-//! in `~/.trusty-review/http_addr`; this connector read that file and probed the
-//! port. #6277 (ADR-0032) moved the daemon onto a hardened Unix socket, so both
-//! halves of that are gone — there is no port and no discovery file. It also
-//! removes a bug the file made possible: a stale `http_addr` plus a squatter on
-//! the fallback port read as a healthy trusty-review. There is no fallback now,
-//! because there is nothing to fall back FROM: the socket path is derived, and
-//! the daemon and this connector resolve it through the same
-//! `trusty_common::daemon_socket_path` call.
+//! Why (#6290): trusty-review has no daemon. #6277 moved it from a TCP port to
+//! a Unix socket and this connector followed; ADR-0032's review lane retired
+//! the listener outright, so there is nothing left to dial. A connector that
+//! kept dialling would spend its 3-second budget on a socket nobody binds,
+//! once per detection pass, and report `Available` at the end of it — the same
+//! answer it reaches immediately by asking whether the binary is installed.
 //!
-//! The retired fallback was `127.0.0.1:7880` — two port moves stale, and
-//! trusty-mpm's daemon port since #2566, so a running `tm` reported
-//! trusty-review as Running. It is deleted rather than corrected.
+//! What: `detect()` resolves `trusty-review` on PATH and reads the version off
+//! `trusty-review --version`. `Running` is unreachable for this member and that
+//! is correct, not a gap: a per-invocation tool is installed or it is not.
 //!
-//! What: `ReviewConnector::detect()` dials `review.health` over the socket and
-//! reads `version` off the answer.
-//! Test: `review_connector_reports_available_when_nothing_is_serving`,
-//! `review_connector_reads_the_version_off_a_live_socket`.
+//! The webhook path is unaffected and is NOT what this connector reports on.
+//! Console still spawns `trusty-review webhook-listen` on demand for a relayed
+//! GitHub delivery and SIGTERMs it (ADR-0034 §1); that process's health is
+//! metered by `webhook::health` off the inbox backlog, not by a service card.
+//!
+//! Test: `review_connector_reports_available_when_the_binary_is_present`,
+//! `review_connector_reports_absent_when_the_binary_is_missing`,
+//! `review_connector_never_reaches_running`.
 
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::connector::{ServiceConnector, ServiceInfo, ServiceStatus};
 
 use super::helpers::binary_on_path;
 
-/// How long one health dial may take, end to end.
+/// How long `trusty-review --version` may take before the probe gives up.
 ///
-/// A local socket answers in single-digit milliseconds; trusty-review's own
-/// health handler bounds its dependency probes at 2 s (#3658), so this leaves
-/// headroom over that without letting one wedged service stall the console's
-/// whole detection pass.
-const HEALTH_TIMEOUT: Duration = Duration::from_secs(3);
-
-/// The method name `trusty-review`'s router registers for its health check.
-///
-/// Duplicated as a literal rather than imported: `trusty-console` has no Cargo
-/// edge on `trusty-review` and adding one to share a `&str` would pull an
-/// LLM-pipeline crate into the console's build. `rpc::METHOD_HEALTH` is the
-/// definition; this is the client's copy, and the integration test in
-/// `trusty-review/tests/uds_consumer_contract.rs` is what keeps them equal.
-const METHOD_HEALTH: &str = "review.health";
-
-/// The `result` half of a `review.health` response, as far as the console reads
-/// it.
-///
-/// Only `version` is consumed — the card renders it. `status` is deserialised
-/// too so a body that carries neither is refused as not-a-health-envelope
-/// rather than silently rendering a versionless Running card.
-#[derive(Debug, serde::Deserialize)]
-struct HealthEnvelope {
-    /// `"ok"` or `"degraded"`. Presence is what makes this a health answer.
-    #[allow(dead_code)]
-    status: String,
-    /// The daemon's own version, rendered on the service card.
-    version: Option<String>,
-}
+/// A cold `trusty-review` start was measured at 191 ms (#5028) and `--version`
+/// does strictly less than that — clap prints and exits before any config,
+/// credential or network work. Two seconds is far past any honest answer and
+/// still short enough that one wedged binary cannot stall the console's whole
+/// detection pass.
+const VERSION_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// ServiceConnector for `trusty-review`.
 ///
-/// Why: the console's dashboard needs to know whether the review daemon is
-/// running, and since #6277 that question is answered by dialling its socket.
-/// What: implements `detect()` — binary on PATH, then one `review.health` call.
+/// Why: the console dashboard's Review tab still needs to say whether review is
+/// usable on this machine. Since #6290 that question is "is the binary there
+/// and does it run", not "is a daemon up".
+/// What: implements `detect()` — binary on PATH, then one `--version` spawn.
 /// Test: see the module docs.
 pub struct ReviewConnector {
-    /// Override for the socket path (used in tests).
+    /// Override for the binary name (used in tests).
     ///
-    /// Before #6277 this was a HOME override, because the discovery file lived
-    /// under `~`. The socket path comes from the data directory now, which
-    /// `TRUSTY_DATA_DIR_OVERRIDE` already redirects — but that variable is
-    /// process-global and this connector runs beside five others in one poll,
-    /// so a path override keeps a test from redirecting its siblings too.
-    socket: Option<PathBuf>,
+    /// Why a name and not a path: `detect()` resolves through `PATH` exactly as
+    /// production does, so a test that points this at a name nothing provides
+    /// exercises the real resolution rather than a stubbed one. Before #6290
+    /// this field was a socket path; the socket is gone with the daemon.
+    binary: Option<String>,
 }
 
 impl ReviewConnector {
     /// Create a new `ReviewConnector`.
     pub fn new() -> Self {
-        Self { socket: None }
+        Self { binary: None }
     }
 
-    /// Create a connector that dials `socket` instead of the resolved path.
+    /// Create a connector that probes `binary` instead of `trusty-review`.
     ///
-    /// Why: unit tests must not dial the real user's running daemon, and the
-    /// integration test needs to point this at a socket it bound itself.
-    /// What: stores `socket` for use by `detect()`.
-    /// Test: `review_connector_reports_available_when_nothing_is_serving`.
-    pub fn with_socket(socket: PathBuf) -> Self {
+    /// Why: the absent-binary verdict is otherwise unreachable on a developer
+    /// machine, which has trusty-review installed. Overriding the NAME keeps
+    /// the test free of environment variables — five sibling connectors run in
+    /// the same pass and share this process's `PATH`.
+    /// What: stores `binary` for use by `detect()`.
+    /// Test: `review_connector_reports_absent_when_the_binary_is_missing`.
+    pub fn with_binary(binary: impl Into<String>) -> Self {
         Self {
-            socket: Some(socket),
+            binary: Some(binary.into()),
         }
     }
 
-    /// The socket this connector dials, or why it could not be resolved.
-    ///
-    /// Why the error is carried rather than discarded: a data directory that
-    /// cannot be resolved or created is an operator-fixable condition
-    /// (permissions, a `TRUSTY_DATA_DIR_OVERRIDE` pointing somewhere unusable),
-    /// and it is indistinguishable on the dashboard from a daemon that is simply
-    /// not running. `detect()` still reports `Available` — nothing was observed,
-    /// so claiming otherwise would be a guess — but puts the reason in `hint`, so
-    /// the card says what to fix instead of silently under-reporting.
-    fn socket_path(&self) -> Result<PathBuf, String> {
-        match &self.socket {
-            Some(p) => Ok(p.clone()),
-            None => trusty_common::daemon_socket_path("trusty-review")
-                .map_err(|e| format!("could not resolve the trusty-review socket path: {e:#}")),
-        }
+    /// The binary this connector looks for.
+    fn binary(&self) -> &str {
+        self.binary.as_deref().unwrap_or("trusty-review")
     }
 }
 
@@ -117,45 +84,54 @@ impl Default for ReviewConnector {
     }
 }
 
-/// Dial `review.health` and return the envelope, or `None` if nothing answered.
+/// Read the version off `<binary> --version`, or `None`.
 ///
-/// Why: `ServiceConnector::detect` is synchronous — the poller calls it inside
-/// `spawn_blocking` — and the shared UDS client is async. The exchange runs on
-/// a dedicated thread with its own current-thread runtime rather than through
-/// `Handle::block_on`, for the reason `trusty-installer`'s
-/// `probe_member_http_blocking` records: building a runtime and blocking on it
-/// from inside another runtime's worker panics, and this way the call is safe
-/// from any caller regardless of what it is running on.
-///
-/// What: one `send_framed_request` bounded by [`HEALTH_TIMEOUT`], then a
-/// JSON-RPC envelope check. A response carrying an `error` is `None`: the
-/// daemon answered, but not with health, and the console has nothing to render.
-///
-/// Test: `review_connector_reports_available_when_nothing_is_serving`.
-fn probe_health(socket: &Path) -> Option<HealthEnvelope> {
-    let socket = socket.to_path_buf();
-    let handle = std::thread::Builder::new()
-        .name("console-review-probe".to_owned())
-        .spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .ok()?;
-            rt.block_on(async {
-                let request = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": METHOD_HEALTH,
-                });
-                let response: trusty_common::uds::server::RpcResponse =
-                    trusty_common::uds::send_framed_request(&socket, &request, HEALTH_TIMEOUT)
-                        .await
-                        .ok()?;
-                serde_json::from_value::<HealthEnvelope>(response.result?).ok()
-            })
-        })
+/// Why: presence on `PATH` alone would report a binary that cannot execute — a
+/// broken signature, a truncated download — as usable. Running it is the
+/// cheapest check that tells the two apart, and it yields the version the card
+/// renders anyway.
+/// What: spawns `<binary> --version`, waits up to [`VERSION_TIMEOUT`], and
+/// takes the second whitespace-separated token of the first line (clap's
+/// `<name> <version>` shape). Any failure is `None`; the caller still reports
+/// `Available`, because the binary being there is the fact that was observed.
+/// Test: `review_connector_reports_available_when_the_binary_is_present`.
+fn binary_version(binary: &str) -> Option<String> {
+    let mut child = std::process::Command::new(binary)
+        .arg("--version")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
         .ok()?;
-    handle.join().ok()?
+
+    // `wait_timeout` is not in std; poll the child instead of blocking forever
+    // on a binary that hangs before printing.
+    let deadline = std::time::Instant::now() + VERSION_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break,
+            Ok(Some(_)) => {
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Err(_) => return None,
+        }
+    }
+
+    let output = child.wait_with_output().ok()?;
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()?
+        .split_whitespace()
+        .nth(1)
+        .map(str::to_owned)
 }
 
 impl ServiceConnector for ReviewConnector {
@@ -169,60 +145,35 @@ impl ServiceConnector for ReviewConnector {
 
     /// Detect trusty-review status.
     ///
-    /// Why: the console dashboard's Review tab needs to know whether the daemon
-    /// is up, and `tctl` makes the same call for a different reason — so the two
-    /// must agree, which they do by dialling the same method on the same
-    /// derived path (#6277).
-    /// What: binary check → `review.health` over the socket → status. `url` is
-    /// deliberately `None`: a UDS daemon has no URL, and ADR-0032 makes
-    /// trusty-console the only HTTP surface in the workspace, so a synthesised
-    /// `http://` address would be a link that cannot work. A socket path that
-    /// cannot be resolved reports `Available` with the reason in `hint` — see
-    /// [`ReviewConnector::socket_path`].
-    /// Test: `review_connector_reports_available_when_nothing_is_serving`,
-    /// `review_connector_reads_the_version_off_a_live_socket`,
-    /// `review_connector_surfaces_an_unresolvable_socket_path_as_a_hint`.
+    /// Why: `tctl` asks the same question for a different reason, and the two
+    /// must agree — since #6290 both ask it by presence
+    /// (`trusty_installer::commands::probe_http::probe_presence`), not by
+    /// dialling.
+    /// What: binary on PATH → `Absent` if not, otherwise `Available` carrying
+    /// whatever `--version` printed. `url` is `None`: there is no address, and
+    /// ADR-0032 makes trusty-console the only HTTP surface in the workspace, so
+    /// a synthesised one would be a link that cannot work.
+    /// Test: see the module docs.
     fn detect(&self) -> ServiceInfo {
-        self.detect_from(self.socket_path())
-    }
-}
-
-impl ReviewConnector {
-    /// [`ServiceConnector::detect`]'s body, over an already-resolved path.
-    ///
-    /// Why: the unresolvable-path arm is only reachable when
-    /// `trusty_common::daemon_socket_path` fails, and the only way to make it
-    /// fail from a test is to set `TRUSTY_DATA_DIR_OVERRIDE` — which is
-    /// process-global and, in this crate's test binary, is read by five sibling
-    /// connectors running in parallel. An earlier version of the test did that
-    /// and turned `detect::agents`'s unrelated test red. Taking the resolved
-    /// result as a parameter makes the arm assertable with no global state at
-    /// all.
-    /// What: binary check, then the three verdicts.
-    /// Test: `review_connector_surfaces_an_unresolvable_socket_path_as_a_hint`.
-    fn detect_from(&self, socket: Result<PathBuf, String>) -> ServiceInfo {
-        let base =
-            |status: ServiceStatus, version: Option<String>, hint: Option<String>| ServiceInfo {
+        let binary = self.binary();
+        if !binary_on_path(binary) {
+            return ServiceInfo {
                 id: self.id().to_string(),
                 display_name: self.display_name().to_string(),
-                status,
-                version,
+                status: ServiceStatus::Absent,
+                version: None,
                 url: None,
-                hint,
+                hint: None,
             };
-
-        if !binary_on_path("trusty-review") {
-            return base(ServiceStatus::Absent, None, None);
         }
 
-        let socket = match socket {
-            Ok(p) => p,
-            Err(reason) => return base(ServiceStatus::Available, None, Some(reason)),
-        };
-
-        match probe_health(&socket) {
-            Some(health) => base(ServiceStatus::Running, health.version, None),
-            None => base(ServiceStatus::Available, None, None),
+        ServiceInfo {
+            id: self.id().to_string(),
+            display_name: self.display_name().to_string(),
+            status: ServiceStatus::Available,
+            version: binary_version(binary),
+            url: None,
+            hint: None,
         }
     }
 }
@@ -233,120 +184,78 @@ impl ReviewConnector {
 mod tests {
     use super::*;
 
-    /// Why: the pre-#6277 connector fell back to probing `127.0.0.1:7880` when
-    /// its discovery file was missing — trusty-mpm's port since #2566 — so a
-    /// running `tm` made this report a trusty-review that was not there. The
-    /// fallback is gone, and this is what keeps it gone: an absent socket is
-    /// `Available`, never `Running`, whatever else is listening on the machine.
-    /// What: points the connector at a path in an empty temp dir and asserts
-    /// the verdict, branching only on whether the binary is installed.
-    /// Test: this is the test.
-    #[test]
-    fn review_connector_reports_available_when_nothing_is_serving() {
-        let tmp = tempfile::TempDir::new().expect("tempdir");
-        let connector = ReviewConnector::with_socket(tmp.path().join("absent.sock"));
-        let info = connector.detect();
-
-        let expected = if which::which("trusty-review").is_ok() {
-            ServiceStatus::Available
-        } else {
-            ServiceStatus::Absent
-        };
-        assert_eq!(info.status, expected);
-        assert_eq!(info.id, "trusty-review");
-        assert_eq!(info.display_name, "Trusty Review");
-        assert!(info.url.is_none(), "a UDS daemon has no URL to render");
-    }
-
-    /// Why (#6277): a data directory that cannot be resolved is operator-fixable
-    /// — a permissions problem, or a `TRUSTY_DATA_DIR_OVERRIDE` pointing
-    /// somewhere unusable — but on the dashboard it looks identical to a daemon
-    /// that is merely stopped. Reporting the reason turns a silent under-report
-    /// into something actionable, without upgrading the verdict: nothing was
-    /// observed, so `Available` is still the honest status.
+    /// REGRESSION (#6290): the console must answer for trusty-review with NO
+    /// trusty-review process anywhere, and must not hang doing it.
     ///
-    /// Drives `detect_from` rather than `detect`, so no environment variable is
-    /// touched. The first version of this test set `TRUSTY_DATA_DIR_OVERRIDE` to
-    /// force the failure and turned `detect::agents`'s unrelated test red — five
-    /// connectors read that variable and this crate runs its tests in parallel.
-    /// What: a resolution failure reports `Available` carrying the reason.
+    /// Why: nothing binds the review socket any more. A connector that still
+    /// dialled would burn its full 3-second budget on every detection pass and
+    /// arrive at exactly the verdict presence gives immediately. This test runs
+    /// in a process where no review daemon exists — which is every process, now
+    /// — and asserts a real answer comes back.
+    /// What: detects against this workspace's own binary (present on any machine
+    /// running this test), asserts `Available` with a version, and bounds the
+    /// call so a reintroduced dial would fail rather than merely be slow.
     /// Test: this is the test.
     #[test]
-    fn review_connector_surfaces_an_unresolvable_socket_path_as_a_hint() {
-        if which::which("trusty-review").is_err() {
-            eprintln!("skip: trusty-review is not on PATH, so detect() short-circuits to Absent");
+    fn review_connector_reports_available_when_the_binary_is_present() {
+        if which::which("cargo").is_err() {
+            eprintln!("skip: no cargo on PATH to probe as a stand-in binary");
             return;
         }
-
-        let info = ReviewConnector::new().detect_from(Err(
-            "could not resolve the trusty-review socket path: nope".to_string(),
-        ));
+        let started = std::time::Instant::now();
+        let info = ReviewConnector::with_binary("cargo").detect();
+        let elapsed = started.elapsed();
 
         assert_eq!(
             info.status,
             ServiceStatus::Available,
-            "nothing was observed, so the verdict must not claim more than that"
+            "a present per-invocation binary is Available"
         );
-        let hint = info.hint.expect("an unresolvable path must explain itself");
         assert!(
-            hint.contains("socket path"),
-            "the hint must name what could not be resolved: {hint}"
+            info.version.is_some(),
+            "the card renders the version read off `--version`"
+        );
+        assert_eq!(info.id, "trusty-review");
+        assert_eq!(info.display_name, "Trusty Review");
+        assert!(info.url.is_none(), "a per-invocation tool has no URL");
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "the detect must not dial anything — a socket dial's own budget is \
+             3 s, so this bound is what a reintroduced dial would trip: {elapsed:?}"
         );
     }
 
-    /// Why: the hint is for the failure case only. A connector that attached one
-    /// to a healthy or merely-stopped daemon would put a permanent "something is
-    /// wrong" note on a card where nothing is.
-    /// What: the resolvable path leaves `hint` empty.
+    /// Why: `Absent` is the one verdict that must stay reachable — an operator
+    /// whose install failed needs the card to say so rather than to say
+    /// `Available` with no version.
+    /// What: probes a name no binary can have.
     /// Test: this is the test.
     #[test]
-    fn review_connector_attaches_no_hint_when_the_path_resolves() {
-        let tmp = tempfile::TempDir::new().expect("tempdir");
-        let info = ReviewConnector::new().detect_from(Ok(tmp.path().join("absent.sock")));
-        assert!(
-            info.hint.is_none(),
-            "a resolvable path must not carry a remediation hint: {:?}",
-            info.hint
-        );
+    fn review_connector_reports_absent_when_the_binary_is_missing() {
+        let info = ReviewConnector::with_binary("trusty-review-does-not-exist-9f3a").detect();
+        assert_eq!(info.status, ServiceStatus::Absent);
+        assert!(info.version.is_none());
+        assert!(info.hint.is_none());
     }
 
-    /// Why: `Running` is the verdict that has to be earned by an ANSWER, and
-    /// the version it carries is what the card renders. A connector that
-    /// reported Running off a bare connect would have no version to show and
-    /// would call a wedged daemon healthy.
-    /// What: binds a socket that answers one `review.health` frame with a real
-    /// envelope, and asserts the connector reads the version off it.
+    /// Why: `Running` means "a daemon answered a health check", and trusty-review
+    /// has no daemon. Reporting it would tell an operator a process exists that
+    /// they could stop, restart or find in `ps` — none of which is true. This is
+    /// what keeps a future edit from reaching for the more reassuring word.
+    /// What: neither the present nor the absent path may produce `Running` or
+    /// `Degraded`.
     /// Test: this is the test.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn review_connector_reads_the_version_off_a_live_socket() {
-        if which::which("trusty-review").is_err() {
-            eprintln!("skip: trusty-review is not on PATH, so detect() short-circuits to Absent");
-            return;
+    #[test]
+    fn review_connector_never_reaches_running() {
+        for connector in [
+            ReviewConnector::new(),
+            ReviewConnector::with_binary("trusty-review-does-not-exist-9f3a"),
+        ] {
+            let status = connector.detect().status;
+            assert!(
+                matches!(status, ServiceStatus::Available | ServiceStatus::Absent),
+                "a per-invocation member has only two honest verdicts, got {status:?}"
+            );
         }
-
-        let tmp = tempfile::TempDir::new().expect("tempdir");
-        let socket = tmp.path().join("sockets").join("review.sock");
-        let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
-
-        tokio::spawn(async move {
-            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-            let Ok((mut conn, _)) = listener.accept().await else {
-                return;
-            };
-            let mut sink = Vec::new();
-            let _ = conn.read_to_end(&mut sink).await;
-            let reply = br#"{"jsonrpc":"2.0","id":1,"result":{"status":"ok","version":"9.9.9"}}"#;
-            let _ = conn.write_all(reply).await;
-            let _ = conn.write_all(b"\n").await;
-            let _ = conn.flush().await;
-        });
-
-        let connector = ReviewConnector::with_socket(socket);
-        let info = tokio::task::spawn_blocking(move || connector.detect())
-            .await
-            .expect("detect");
-
-        assert_eq!(info.status, ServiceStatus::Running);
-        assert_eq!(info.version.as_deref(), Some("9.9.9"));
     }
 }

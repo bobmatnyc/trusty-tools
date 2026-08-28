@@ -1,31 +1,35 @@
-//! Service layer for trusty-review — shared state and the UDS transport.
+//! Shared state and the review operations, over plain types.
 //!
-//! Why: wraps the existing review pipeline in a long-lived daemon so callers
-//! can request a review without spawning a CLI process.
+//! Why: the review pipeline needs its dependency set — config, LLM, verifier,
+//! search, analyze, dedup — built once and shared by every caller that runs
+//! more than one review in a process. [`AppState`] is that set.
 //!
-//! #6277 (ADR-0032) moved that daemon off TCP loopback HTTP. It no longer binds
-//! a port, no longer writes an `http_addr` discovery file, and no longer serves
-//! an axum router; it binds one hardened Unix socket and answers three
-//! JSON-RPC methods on it. `trusty-console` remains the workspace's only HTTP
-//! surface.
+//! #6290 (ADR-0032, review lane): this module used to wrap those operations in
+//! a long-lived daemon. It no longer does. There is no listener, no socket, no
+//! launchd unit and no `serve` subcommand — review runs per invocation, and
+//! `trusty-review run` is the entry point that covers what `review.run` served.
+//! What survives is the part that was never transport: `handle_review`,
+//! `handle_health` and `handle_status` as plain async functions, which the MCP
+//! stdio tools call directly.
 //!
-//! What: exports `AppState` and re-exports the wire layer from [`rpc`] —
-//! [`rpc::serve`], [`rpc::socket_path`], and the three method names. Every
-//! operation's logic lives in `handlers.rs`, over plain types.
+//! The module keeps its name and its `http-server` feature gate. Both are
+//! misnomers now — it serves nothing and has not pulled axum since #6277 — and
+//! renaming either is a breaking manifest change for every library consumer, in
+//! exchange for no behaviour. The rename waits for a change that is already
+//! breaking them.
+//!
+//! What: exports [`AppState`] and the three operations from [`handlers`], plus
+//! the inference probe they share.
 //!
 //! GitHub webhooks do NOT arrive here. #5181 retired `POST /pr/github/webhook`;
 //! `trusty-console` terminates the GitHub request and relays it over a separate
-//! UDS socket to `webhook_listener` (ADR-0034).
+//! UDS socket to `crate::webhook_listener`, a process console spawns on demand
+//! and SIGTERMs (ADR-0034).
 //!
-//! Test: `cargo test -p trusty-review --features http-server` exercises the
-//! router over a real socket in `rpc_tests.rs`, and each operation directly in
-//! `handlers_tests.rs`.
-//!
-//! Feature gate: the entire module is compiled only under `http-server`.
+//! Test: `handlers_tests.rs` and `handlers_status_tests.rs` call each operation
+//! directly.
 
 pub mod handlers;
 pub mod inference_probe;
-pub mod rpc;
 
 pub use handlers::AppState;
-pub use rpc::{METHOD_HEALTH, METHOD_RUN, METHOD_STATUS, serve, socket_path};
