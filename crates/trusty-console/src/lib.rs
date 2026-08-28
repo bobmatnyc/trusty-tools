@@ -55,6 +55,8 @@ pub mod proxy;
 pub mod routes;
 pub mod server;
 pub mod service;
+// #6155: the trusty-search SPA, mounted under /tools/search/.
+pub mod tools_ui;
 pub mod webhook;
 
 /// How often the background sweep re-attempts pending webhook deliveries.

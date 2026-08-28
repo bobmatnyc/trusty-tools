@@ -166,6 +166,21 @@ fn filter_headers(headers: &HeaderMap) -> HeaderMap {
     out
 }
 
+/// Whether the caller is opening a Server-Sent Events stream (#6155).
+///
+/// Why: an SSE response never ends, so it must not be proxied under a
+/// whole-request deadline. The browser's `EventSource` always sends
+/// `Accept: text/event-stream`, which is the only signal available before the
+/// upstream has answered.
+/// What: `true` when any `Accept` header value mentions `text/event-stream`.
+/// Test: `test_wants_event_stream_*` below.
+fn wants_event_stream(headers: &HeaderMap) -> bool {
+    headers.get_all(header::ACCEPT).iter().any(|v| {
+        v.to_str()
+            .is_ok_and(|s| s.to_ascii_lowercase().contains("text/event-stream"))
+    })
+}
+
 /// Build a plain-text error response.
 ///
 /// Why: Centralises error body construction so callers are one-liners.
@@ -353,7 +368,16 @@ pub async fn proxy_handler(
     // across the ~1 s window in which a restarted upstream daemon is not yet
     // accepting connections (#1984) rather than failing the caller's first
     // request outright.
-    let client = state.http_client();
+    //
+    // #6155: an `EventSource` asks for `text/event-stream` and expects the
+    // connection to stay open indefinitely. The default client's 30-second
+    // whole-request timeout would cut it, so those requests go through the
+    // stream client instead.
+    let client = if wants_event_stream(&parts.headers) {
+        state.stream_client()
+    } else {
+        state.http_client()
+    };
     let upstream_resp = match send_with_connect_retry(
         &client,
         method,
@@ -387,14 +411,12 @@ pub async fn proxy_handler(
         }
     }
 
-    // Stream the body.
-    let resp_body = match upstream_resp.bytes().await {
-        Ok(b) => Body::from(b),
-        Err(e) => {
-            warn!("proxy: failed to read upstream body: {e}");
-            Body::from("upstream body error")
-        }
-    };
+    // #6155: hand the upstream body back as a stream rather than collecting it
+    // first. Collecting never returns for a Server-Sent Events response — the
+    // search SPA's `/status/stream` and `/reindex/stream` produced no bytes at
+    // all through this proxy until the whole-request timeout fired. Streaming
+    // also stops a large search response being held twice in memory.
+    let resp_body = Body::from_stream(upstream_resp.bytes_stream());
 
     resp_builder
         .body(resp_body)
@@ -778,5 +800,42 @@ mod tests {
         .await
         .expect_err("no upstream should yield an error");
         assert!(err.is_connect(), "expected a connect error, got: {err}");
+    }
+
+    /// Why: an SSE request must not be proxied under the whole-request
+    /// deadline, and `Accept` is the only pre-response signal (#6155).
+    /// What: asserts the header match is case-insensitive, tolerates a full
+    /// `Accept` list, and stays false for an ordinary JSON call.
+    /// Test: this test itself.
+    #[test]
+    fn test_wants_event_stream_matches_accept_header() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::ACCEPT,
+            HeaderValue::from_static("text/event-stream"),
+        );
+        assert!(wants_event_stream(&h));
+
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::ACCEPT,
+            HeaderValue::from_static("Text/Event-Stream"),
+        );
+        assert!(wants_event_stream(&h), "match must be case-insensitive");
+
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::ACCEPT,
+            HeaderValue::from_static("text/event-stream, application/json;q=0.9"),
+        );
+        assert!(wants_event_stream(&h), "must match inside an Accept list");
+    }
+
+    #[test]
+    fn test_wants_event_stream_false_for_ordinary_requests() {
+        assert!(!wants_event_stream(&HeaderMap::new()));
+        let mut h = HeaderMap::new();
+        h.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
+        assert!(!wants_event_stream(&h));
     }
 }

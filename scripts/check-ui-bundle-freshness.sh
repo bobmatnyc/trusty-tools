@@ -243,6 +243,27 @@ manifest_row_for() {
   printf '%s\n' "$MANIFEST_ROWS" | awk -F'\t' -v c="$1" '$1 == c { print; exit }'
 }
 
+# row_matches_target <row_crate> — whether a manifest row belongs to the crate
+# the caller asked about.
+#
+# #6155: one crate can package more than one committed bundle. trusty-console
+# ships its own ui/dist AND ui-search-dist, the trusty-search SPA it serves at
+# /tools/search/. Those two rows cannot share a key: stamp-ui-bundle.sh stamps
+# every row matching the name it is given, and the console's build.rs stamps
+# `trusty-console` after building only its own UI — a shared key would have it
+# certify a bundle it never rebuilt, which is the #3606 laundering the stamp
+# exists to prevent. So the second row is keyed `<crate>-<suffix>` and THIS
+# gate matches it when asked about `<crate>`. The stamper under-claims, the
+# gate over-checks, and preflight-publish.sh CHECK 7 for trusty-console still
+# inspects both bundles the tarball carries.
+# Test: check-ui-bundle-freshness-selftest.sh case 24.
+row_matches_target() {
+  [ -z "$TARGET_CRATE" ] && return 0
+  [ "$1" = "$TARGET_CRATE" ] && return 0
+  case "$1" in "${TARGET_CRATE}-"*) return 0 ;; esac
+  return 1
+}
+
 for crate in $DISCOVERED; do
   [ -n "$TARGET_CRATE" ] && [ "$crate" != "$TARGET_CRATE" ] && continue
   if [ -z "$(manifest_row_for "$crate")" ]; then
@@ -401,9 +422,7 @@ check_row() {
 MATCHED_ROW=0
 while IFS="$(printf '\t')" read -r crate src_dir bundle_dir _rest; do
   [ -z "${crate:-}" ] && continue
-  if [ -n "$TARGET_CRATE" ] && [ "$crate" != "$TARGET_CRATE" ]; then
-    continue
-  fi
+  row_matches_target "$crate" || continue
   MATCHED_ROW=1
   if [ -z "${src_dir:-}" ] || [ -z "${bundle_dir:-}" ]; then
     fail "MANIFEST-STALE — ${crate}: row is missing a source_dir or bundle_dir column."

@@ -21,6 +21,8 @@ include = [
     "src/**/*",
     "build.rs",
     "ui/dist/**/*",
+    # #6155: the trusty-search SPA the console serves at /tools/search/.
+    "ui-search-dist/**/*",
     "Cargo.toml",
     "README.md",
 ]
