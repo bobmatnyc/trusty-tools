@@ -111,7 +111,7 @@ pub(super) async fn ingest_graph_handler(
 /// typed [`IngestGraphResponse`]; the socket re-encodes it the way axum writes
 /// it — see [`crate::service::rpc::as_http_body`].
 /// Test: `graph_ingest_over_the_socket_matches_the_http_body`,
-/// `an_unmerged_contribution_is_refused_identically_on_both_transports` in
+/// `an_unmerged_contribution_is_refused_identically_and_stays_unqueryable` in
 /// `crate::service::rpc::writes`.
 pub(crate) async fn ingest_graph_report(
     state: &Arc<SearchAppState>,

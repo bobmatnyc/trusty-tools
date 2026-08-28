@@ -154,7 +154,7 @@ pub struct IndexBody<B> {
 /// rather than a silent default either way.
 /// What: `{"index_id": "x"}` deregisters; `{"index_id": "x", "delete_data":
 /// true}` also destroys the data directory.
-/// Test: `delete_over_the_socket_matches_the_http_body`.
+/// Test: `an_allowlist_excluded_registration_deletes_over_the_socket_too`.
 #[derive(Debug, Deserialize)]
 pub struct DeleteIndex {
     /// The index to deregister — the `{id}` path segment on HTTP.
@@ -193,7 +193,7 @@ pub struct ReindexParams {
 /// finishes. Refusals keep HTTP's status, so a queue-full `503` reads the same
 /// on both transports.
 /// Test: `writes_are_refused_when_the_shared_limiter_is_saturated`,
-/// `a_saturated_limiter_never_reaches_the_write_itself`.
+/// `a_registry_level_write_is_not_admission_limited`.
 async fn bulk_guarded<T, F>(state: &Arc<SearchAppState>, body: F) -> Result<T, RpcError>
 where
     F: std::future::Future<Output = Result<T, (axum::http::StatusCode, serde_json::Value)>>,

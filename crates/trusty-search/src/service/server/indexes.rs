@@ -247,7 +247,7 @@ pub(super) async fn create_index_handler(
 /// [`crate::service::rpc::error::rpc_error_from_http`] turns into the JSON-RPC
 /// code.
 /// Test: `create_over_the_socket_matches_the_http_body`,
-/// `a_refused_create_registers_nothing_on_either_transport` in
+/// `a_root_the_allowlist_has_not_approved_is_refused_and_registers_nothing` in
 /// `crate::service::rpc::writes`.
 pub(crate) async fn create_index_report(
     state: &Arc<SearchAppState>,

@@ -67,7 +67,7 @@ pub(super) async fn reindex_handler(
 /// What: [`reindex_handler`]'s whole former body, taking the already-decoded
 /// request. `None` is the empty-body form axum's `Option<Json<_>>` produces.
 /// Test: `reindex_over_the_socket_matches_the_http_body`,
-/// `a_refused_root_override_never_queues_a_walk_on_either_transport` in
+/// `a_reindex_in_cooldown_is_refused_and_queues_nothing_on_either_transport` in
 /// `crate::service::rpc::writes`.
 pub(crate) async fn reindex_report(
     state: &Arc<SearchAppState>,

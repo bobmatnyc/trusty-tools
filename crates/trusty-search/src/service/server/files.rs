@@ -62,7 +62,7 @@ pub(super) async fn index_file_handler(
 /// What: [`index_file_handler`]'s whole former body, with the refusal as its
 /// HTTP status beside its body.
 /// Test: `index_file_over_the_socket_matches_the_http_body`,
-/// `a_failed_index_file_never_reports_indexed_on_either_transport` in
+/// `a_write_against_an_unknown_index_is_refused_and_indexes_nothing` in
 /// `crate::service::rpc::writes`.
 pub(crate) async fn index_file_report(
     state: &Arc<SearchAppState>,
@@ -133,7 +133,7 @@ pub(super) async fn remove_file_handler(
 /// callers, same lazy load, same residency verdict, and the same rule that a
 /// removal which failed never reports a chunk count.
 /// Test: `remove_file_over_the_socket_matches_the_http_body`,
-/// `a_failed_remove_file_never_reports_a_removal_on_either_transport` in
+/// `a_write_against_an_unknown_index_is_refused_and_indexes_nothing` in
 /// `crate::service::rpc::writes`.
 pub(crate) async fn remove_file_report(
     state: &Arc<SearchAppState>,

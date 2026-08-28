@@ -98,7 +98,7 @@ pub(super) async fn delete_index_handler(
 /// What: [`delete_index_handler`]'s whole former body, taking the already-parsed
 /// [`DeleteIndexParams`] so the destructive `delete_data` toggle is decoded once
 /// and never guessed at.
-/// Test: `delete_over_the_socket_matches_the_http_body`,
+/// Test: `a_delete_of_an_id_in_no_store_is_not_found_on_either_transport`,
 /// `an_allowlist_excluded_registration_deletes_over_the_socket_too`,
 /// `a_failed_delete_reports_the_failure_and_keeps_the_row_on_either_transport`
 /// in `crate::service::rpc::writes`.
