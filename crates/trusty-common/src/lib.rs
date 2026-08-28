@@ -579,6 +579,22 @@ pub mod credentials;
 #[cfg(feature = "credentials")]
 pub mod inference;
 
+/// The workspace's single redb corruption / obsolete-format classifier (#5063).
+///
+/// Why: five crates each carried a byte-identical copy of the four-arm `match`
+/// that decides whether an unopenable redb file may be quarantined, so a safety
+/// change to that decision had to land five times. The classifier previously
+/// lived under `memory-core`, which pulls in usearch, git2 and a bundled ORT
+/// embedder — a cost no consumer would pay for a predicate, which is why the
+/// copies existed. This module is gated behind the light `redb-open` feature
+/// (`dep:redb` only) so every store can route through it.
+/// What: [`redb_open::is_incompatible_format`] plus the quarantine-path helpers
+/// two of those crates also duplicated. Each store's recovery POLICY stays in
+/// its own crate — see the module docs for why they legitimately diverge.
+/// Test: `cargo test -p trusty-common --features redb-open -- redb_open::`.
+#[cfg(feature = "redb-open")]
+pub mod redb_open;
+
 // ─── Focused submodules (split from lib.rs in issue #1108) ────────────────
 
 /// TCP port auto-walking helper.

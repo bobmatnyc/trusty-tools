@@ -64,7 +64,7 @@ trusty-code = { workspace = true }
 #      `aws-types` below are already unconditional direct dependencies of this
 #      crate for the existing `llm::bedrock` (Converse, non-streaming) client.
 trusty-mcp = { workspace = true }  # JSON-RPC / MCP primitives (ADR-0040, #5803)
-trusty-common = { workspace = true, features = ["symgraph-parser", "memory-core", "cli-help", "palace-resolve", "stdio-mcp-client", "session-naming", "config-cli", "axum-server", "inference-client", "bedrock", "uds", "memory-rpc", "gh-cli"] }
+trusty-common = { workspace = true, features = ["symgraph-parser", "memory-core", "cli-help", "palace-resolve", "stdio-mcp-client", "session-naming", "config-cli", "axum-server", "inference-client", "bedrock", "uds", "memory-rpc", "gh-cli", "redb-open"] }  # `redb-open` (#5063): named explicitly rather than left to `memory-core`'s implication, because `memory::redb_recovery` uses it directly
 # Why (issue #226): trusty-agents only links `trusty_memory::MemoryMcpService` for
 #      in-process `rpc.discover` merging; it does not need the axum HTTP/SSE
 #      surface (it owns its own axum stack for the orchestrator's UI). Setting

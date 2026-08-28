@@ -13,6 +13,12 @@
 //! a full disk, a held lock — must stay fatal: recreating on top of a file
 //! that is merely unavailable would destroy data that is still good.
 //!
+//! #5063: the classification is now `trusty_common::redb_open`'s, shared with
+//! every other redb store in the workspace. Only the POLICY below stays here —
+//! it takes a caller-supplied quarantine suffix and recovery string so one
+//! helper serves both of this crate's stores, which is why it does not use
+//! trusty-common's fixed-suffix `open_or_recreate`.
+//!
 //! Test: `incompatible_facts_db_is_recreated` (facts),
 //! `incompatible_overlay_db_is_quarantined` and
 //! `unopenable_overlay_path_propagates_error` (SCIP overlays).
@@ -30,18 +36,15 @@ use redb::{Database, DatabaseError};
 /// resolve on its own and must not trigger a destructive recovery.
 /// What: returns `true` for `UpgradeRequired` / `RepairAborted` /
 /// `Storage(Corrupted)` / `Storage(Io(InvalidData))`; `false` otherwise.
+/// Delegates to `trusty_common::redb_open::is_incompatible_format`, the
+/// workspace's single copy of this decision (#5063). The name is kept so this
+/// crate's call sites read unchanged.
 /// Test: `incompatible_facts_db_is_recreated` exercises the `InvalidData`
 /// path; `unopenable_overlay_path_propagates_error` exercises the `false` arm.
 pub fn is_format_obsolete(err: &DatabaseError) -> bool {
-    use redb::StorageError;
-    match err {
-        DatabaseError::UpgradeRequired(_) | DatabaseError::RepairAborted => true,
-        DatabaseError::Storage(StorageError::Corrupted(_)) => true,
-        DatabaseError::Storage(StorageError::Io(io)) => {
-            io.kind() == std::io::ErrorKind::InvalidData
-        }
-        _ => false,
-    }
+    // #5063: one classifier for the whole workspace — this crate used to carry
+    // a byte-identical copy of the four-arm match.
+    trusty_common::redb_open::is_incompatible_format(err)
 }
 
 /// Open the redb at `path`, quarantining it and starting fresh when its
@@ -67,6 +70,9 @@ pub fn open_or_quarantine(
     match Database::create(path) {
         Ok(db) => Ok(db),
         Err(e) if is_format_obsolete(&e) => {
+            // #5063: the policy stays here — the caller-supplied suffix is why
+            // this crate does not route through trusty-common's fixed-suffix
+            // `open_or_recreate`.
             let mut backup = path.as_os_str().to_os_string();
             backup.push(quarantine_suffix);
             let backup = PathBuf::from(backup);

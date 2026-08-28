@@ -1,6 +1,11 @@
 [package]
 name        = "trusty-analyze"
-version     = "0.12.0"
+# 0.12.1 (#5063): PATCH — 0.12.0 is published on crates.io and this change edits
+# `src/**`, so the pre-merge version-bump gate (#4421) requires the next free
+# position. `core::redb_open::is_format_obsolete` keeps its name and signature
+# and delegates its body to `trusty_common::redb_open::is_incompatible_format`;
+# no public item is added, removed, or changed shape.
+version     = "0.12.1"
 edition     = "2021"
 license.workspace    = true
 authors.workspace    = true
@@ -87,7 +92,7 @@ mime_guess         = { workspace = true }
 # `webhook-relay` (#5182): the console->target relay wire contract AND its
 # receive half — the durable inbox, the listener, and the hardened UDS bind
 # this crate mounts in `webhook_listener`. Implies `uds` and `webhook-hmac`.
-trusty-common      = { workspace = true, features = ["symgraph", "cli-help", "update-check", "bedrock", "console-metrics", "config-cli", "webhook-relay"] }
+trusty-common      = { workspace = true, features = ["symgraph", "cli-help", "update-check", "bedrock", "console-metrics", "config-cli", "webhook-relay", "redb-open"] }  # `redb-open` (#5063): the workspace's single redb corruption classifier, which `core::redb_open` delegates to
 trusty-mcp         = { workspace = true }  # daemon-bridge startup guard (ADR-0040, #5803)
 tree-sitter            = { workspace = true }
 tree-sitter-rust       = { workspace = true }

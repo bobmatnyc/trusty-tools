@@ -128,6 +128,8 @@ fn recover_incompatible_db(path: &Path, cause: &DatabaseError) -> Result<OpenAtt
         Err(e) => return Err(DedupError::Open(e.to_string())),
     }
 
+    // #5063: the classification is trusty-common's; this rename-aside policy
+    // stays here because it must run under the sidecar recovery lock (#5064).
     let backup = sibling(path, INCOMPATIBLE_SUFFIX);
     std::fs::rename(path, &backup).map_err(|io| {
         DedupError::Open(format!(

@@ -43,7 +43,13 @@ name        = "trusty-review"
 # `src/**`, so the pre-merge guard requires the next free position. The public
 # surface only grows: `LlmRequest::effective_model` and
 # `OpenRouterProvider::with_base_url` are added, nothing changes shape or moves.
-version     = "0.28.0"
+#
+# #5063: PATCH bump — 0.28.0 is published on crates.io and this change touches
+# `src/**`, so the pre-merge guard requires the next free position.
+# `store::redb_error_is_incompatible_format` is `pub(crate)` and keeps its name
+# and signature; it now delegates its body to
+# `trusty_common::redb_open::is_incompatible_format`. No public item changes.
+version     = "0.28.1"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true
@@ -139,7 +145,7 @@ clap         = { workspace = true }
 # it: the serve transport depends on `uds::server` directly now, and an implied
 # feature is one refactor away from disappearing under a consumer that never
 # said it needed it.
-trusty-common = { workspace = true, features = ["intent-source", "config-cli", "webhook-relay", "gh-cli", "uds"] }
+trusty-common = { workspace = true, features = ["intent-source", "config-cli", "webhook-relay", "gh-cli", "uds", "redb-open"] }  # `redb-open` (#5063): the workspace's single redb corruption classifier, which `store::redb_error_is_incompatible_format` delegates to
 # JSON-RPC / MCP primitives (ADR-0040, #5803). Optional: only the `mcp` feature
 # compiles `src/mcp/`.
 trusty-mcp = { workspace = true, optional = true }

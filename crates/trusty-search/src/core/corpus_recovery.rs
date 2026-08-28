@@ -146,6 +146,9 @@ pub(crate) fn open_corpus_db_or_recreate(path: &Path, cache_bytes: usize) -> Res
     match Database::builder().set_cache_size(cache_bytes).create(path) {
         Ok(db) => Ok(db),
         Err(e) if is_incompatible_corpus_format(&e) => {
+            // #5063: the classification is trusty-common's; this recovery policy
+            // stays here because it fails CLOSED on genuine corruption (#4227)
+            // and opens with a tuned page-cache size.
             // #4227: back the file aside for BOTH buckets — quarantining a
             // corrupt corpus must never also destroy the operator's only
             // recovery source.
@@ -203,9 +206,11 @@ pub(crate) fn open_corpus_db_or_recreate(path: &Path, cache_bytes: usize) -> Res
 /// Why: a single well-known suffix lets operators reliably find the pre-upgrade
 /// `index.redb` bytes set aside during a redb 2.x → 4.x format mismatch, and
 /// keeps the recovery deterministic.
-/// What: the literal `".v2-incompatible"`, appended to `index.redb`.
+/// What: the literal `".v2-incompatible"`, appended to `index.redb` — the same
+/// constant every other redb store in the workspace quarantines with, aliased
+/// from `trusty_common::redb_open` (#5063).
 /// Test: `backup_renames_with_suffix`.
-pub(crate) const INCOMPATIBLE_CORPUS_SUFFIX: &str = ".v2-incompatible";
+pub(crate) const INCOMPATIBLE_CORPUS_SUFFIX: &str = trusty_common::redb_open::INCOMPATIBLE_SUFFIX;
 
 /// Classify a [`redb::DatabaseError`] as an incompatible / unreadable corpus
 /// format error.
@@ -220,17 +225,13 @@ pub(crate) const INCOMPATIBLE_CORPUS_SUFFIX: &str = ".v2-incompatible";
 /// Returns `false` for lock contention and genuine transient I/O errors. This
 /// predicate decides only whether the file is moved aside; whether a fresh
 /// corpus replaces it is [`is_genuine_corpus_corruption`]'s call (#4227).
+/// Delegates to `trusty_common::redb_open::is_incompatible_format`, the
+/// workspace's single copy of this decision (#5063).
 /// Test: `classifies_incompatible_corpus_format`.
 pub(crate) fn is_incompatible_corpus_format(err: &DatabaseError) -> bool {
-    use redb::StorageError;
-    match err {
-        DatabaseError::UpgradeRequired(_) | DatabaseError::RepairAborted => true,
-        DatabaseError::Storage(StorageError::Corrupted(_)) => true,
-        DatabaseError::Storage(StorageError::Io(io)) => {
-            io.kind() == std::io::ErrorKind::InvalidData
-        }
-        _ => false,
-    }
+    // #5063: one classifier for the whole workspace — this crate used to carry
+    // a byte-identical copy of the four-arm match.
+    trusty_common::redb_open::is_incompatible_format(err)
 }
 
 /// Split GENUINE CORRUPTION out of [`is_incompatible_corpus_format`]'s set
@@ -250,7 +251,8 @@ pub(crate) fn is_incompatible_corpus_format(err: &DatabaseError) -> bool {
 /// docs, "Residual risk") — and for everything outside
 /// [`is_incompatible_corpus_format`]'s set. Callers must gate on that predicate
 /// first; this one answers a narrower question and says nothing about errors it
-/// does not recognise.
+/// does not recognise. #5063 moved that first predicate to trusty-common; this
+/// one is trusty-search's alone and stays here.
 /// Test: `corruption_and_old_format_classify_apart`,
 /// `old_format_is_backed_up_and_recreated_without_error` (built on a real
 /// redb 2.x file, not synthetic bytes).
@@ -276,25 +278,13 @@ pub(crate) fn is_genuine_corpus_corruption(err: &DatabaseError) -> bool {
 /// What: renames `path` to `<path>.v2-incompatible`, appending a numeric
 /// counter if such a backup already exists (so successive failed boots never
 /// clobber an earlier backup). Returns the chosen backup path.
+/// Delegates to `trusty_common::redb_open::backup_incompatible_file`, which
+/// carries the identical suffix-plus-numbered-fallback rule this function used
+/// to duplicate verbatim (#5063).
 /// Test: `backup_renames_with_suffix`, `backup_path_avoids_clobber`.
 pub(crate) fn backup_incompatible_corpus(path: &Path) -> std::io::Result<PathBuf> {
-    let mut base = path.as_os_str().to_os_string();
-    base.push(INCOMPATIBLE_CORPUS_SUFFIX);
-    let mut backup = PathBuf::from(base);
-    if backup.exists() {
-        for n in 1..u32::MAX {
-            let mut s = path.as_os_str().to_os_string();
-            s.push(INCOMPATIBLE_CORPUS_SUFFIX);
-            s.push(format!(".{n}"));
-            let candidate = PathBuf::from(s);
-            if !candidate.exists() {
-                backup = candidate;
-                break;
-            }
-        }
-    }
-    std::fs::rename(path, &backup)?;
-    Ok(backup)
+    // #5063: one quarantine-path helper for the whole workspace.
+    trusty_common::redb_open::backup_incompatible_file(path)
 }
 
 #[cfg(test)]
