@@ -15,7 +15,9 @@ use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
-use super::{bind, serve_until_shutdown, socket_path, BoundSocket, METHODS, METHOD_HEALTH};
+use super::{
+    bind, serve_until_shutdown, socket_path, BoundSocket, MAX_FRAME_BYTES, METHODS, METHOD_HEALTH,
+};
 use crate::core::indexer::CodeIndexer;
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use crate::service::server::SearchAppState;
@@ -527,4 +529,154 @@ fn socket_path_is_the_product_named_socket_under_the_data_dir() {
          launchd): {}",
         path.display()
     );
+}
+
+// ------------------------------------------------ the frame budget (5.5) ---
+
+/// Why: [`MAX_FRAME_BYTES`] is only a constant until [`serve_options`] carries
+/// it, and the raise exists precisely because the shared control-plane default
+/// is too small for this surface. Asserting both halves — the listener takes the
+/// figure, and the figure is above the shared default — is what makes the two
+/// tests below meaningful rather than tautological.
+/// Test: this function IS the test.
+#[test]
+fn serve_options_carries_the_raised_frame_budget() {
+    assert_eq!(
+        super::serve_options().max_frame_bytes,
+        MAX_FRAME_BYTES,
+        "the listener must serve with this surface's budget, not the default"
+    );
+    const {
+        assert!(
+            MAX_FRAME_BYTES > trusty_common::uds::MAX_FRAME_BYTES,
+            "a budget at or below the shared default would be a no-op raise"
+        );
+    }
+}
+
+/// Why: `search.graph.ingest` carries a document `POST /indexes/{id}/graph`
+/// accepts up to 64 MiB, and until this slice the socket refused at 8 MiB — the
+/// same request served on one door and refused on the other. This drives a
+/// REQUEST frame over the shared default through a real listener, and pins the
+/// control beside it: the identical frame against a listener serving
+/// `RpcServeOptions::default()` is refused, so the raise is what carries it
+/// rather than the frame having been small enough all along.
+///
+/// `search.health` is the method because `NoParams` ignores its payload, so the
+/// filler is carried by the framing without a decode step of its own.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_frame_over_the_shared_default_is_accepted_and_refused_at_the_default() {
+    let dir = TempDir::new().expect("tempdir");
+    let raised = dir.path().join("raised.sock");
+    let (stop, handle) = spawn_listener(&raised, state_with_indexes(1)).await;
+
+    // One mebibyte past the shared default: over it, and far under this one.
+    let filler = "x".repeat(trusty_common::uds::MAX_FRAME_BYTES as usize + 1024 * 1024);
+    let request = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": METHOD_HEALTH, "params": { "filler": filler },
+    });
+
+    let answered = dial_once(&raised, &request).await;
+    assert!(
+        answered.frame.get("result").is_some(),
+        "a frame under this listener's budget must be served: {}",
+        answered.frame
+    );
+
+    let _ = stop.send(());
+    handle.await.expect("the serve task must not panic");
+
+    // The control: the same frame, a listener serving the shared default.
+    let defaulted = dir.path().join("defaulted.sock");
+    let bound = bind(&defaulted).await.expect("bind the control socket");
+    let router = Arc::new(super::build_router(&state_with_indexes(1)));
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let control = tokio::spawn(async move {
+        trusty_common::uds::server::serve_until(
+            &bound.listener,
+            router,
+            trusty_common::uds::server::RpcServeOptions::default(),
+            async {
+                let _ = stop_rx.await;
+            },
+        )
+        .await;
+    });
+    for _ in 0..200 {
+        if trusty_common::uds::socket_is_serving(&defaulted, Duration::from_millis(50)).await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let refused: Result<serde_json::Value, _> =
+        trusty_common::uds::send_framed_request(&defaulted, &request, GENEROUS).await;
+    assert!(
+        refused.is_err(),
+        "the shared default must refuse the frame this surface accepts: {refused:?}"
+    );
+
+    let _ = stop_tx.send(());
+    control
+        .await
+        .expect("the control serve task must not panic");
+}
+
+/// Why: raising the LISTENER alone only moves which end refuses — the client
+/// applies its own budget to the response frame it reads, and
+/// [`trusty_common::uds::send_framed_request`] applies the 8 MiB shared default.
+/// A consumer moving onto these names therefore dials through
+/// `send_framed_request_capped` with [`MAX_FRAME_BYTES`], and this pins that:
+/// the same response is delivered under this surface's budget and refused as
+/// `FrameTooLarge` under the shared one.
+///
+/// `search.logs.tail` is the method because the log ring is the one surface a
+/// test can fill to a known size without indexing anything.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_budget_below_this_listeners_refuses_a_response_it_serves() {
+    let dir = TempDir::new().expect("tempdir");
+    let socket = dir.path().join("tail.sock");
+    let state = state_with_indexes(0);
+
+    // 1000 lines is the ring's capacity; 9 KiB each puts the response frame past
+    // the shared 8 MiB default and well under this surface's 64 MiB.
+    let line = "y".repeat(9 * 1024);
+    for _ in 0..trusty_common::log_buffer::DEFAULT_LOG_CAPACITY {
+        state.log_buffer.push(line.clone());
+    }
+    let (stop, handle) = spawn_listener(&socket, Arc::clone(&state)).await;
+
+    let request = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "search.logs.tail", "params": { "n": 1000 },
+    });
+
+    let served: serde_json::Value = trusty_common::uds::send_framed_request_capped(
+        &socket,
+        &request,
+        GENEROUS,
+        MAX_FRAME_BYTES,
+    )
+    .await
+    .expect("this surface's budget must carry the response");
+    assert_eq!(
+        served["result"]["lines"].as_array().map(Vec::len),
+        Some(trusty_common::log_buffer::DEFAULT_LOG_CAPACITY),
+        "the whole ring must come back: {served}"
+    );
+
+    let refused: Result<serde_json::Value, _> =
+        trusty_common::uds::send_framed_request(&socket, &request, GENEROUS).await;
+    match refused {
+        Err(trusty_common::uds::UdsRpcError::FrameTooLarge { limit, .. }) => assert_eq!(
+            limit,
+            trusty_common::uds::MAX_FRAME_BYTES,
+            "the refusal must name the CLIENT's budget, not the listener's"
+        ),
+        other => panic!("the shared default must refuse this response: {other:?}"),
+    }
+
+    let _ = stop.send(());
+    handle.await.expect("the serve task must not panic");
 }

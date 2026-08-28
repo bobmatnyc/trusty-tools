@@ -214,6 +214,9 @@ fn build_router(state: &Arc<SearchAppState>) -> RpcRouter {
 ///
 /// A caller must raise its own budget to match with
 /// [`trusty_common::uds::send_framed_request_capped`]; see [`serve_options`].
+///
+/// Test: `serve_options_carries_the_raised_frame_budget`,
+/// `a_request_frame_over_the_shared_default_is_accepted_and_refused_at_the_default`.
 pub const MAX_FRAME_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Per-connection budgets for this listener.
@@ -245,7 +248,13 @@ pub const MAX_FRAME_BYTES: u64 = 64 * 1024 * 1024;
 /// is a few hundred bytes — a stream reaches the cap only if a single event
 /// does.
 ///
-/// Test: `serve_options_matches_the_http_graph_ingest_body_limit`.
+/// The HTTP half of the pairing is a compile-time link rather than a test:
+/// `build_router_on` names [`MAX_FRAME_BYTES`] in its `DefaultBodyLimit` instead
+/// of restating the literal, so the two doors cannot drift apart.
+///
+/// Test: `serve_options_carries_the_raised_frame_budget`,
+/// `a_request_frame_over_the_shared_default_is_accepted_and_refused_at_the_default`,
+/// `a_client_budget_below_this_listeners_refuses_a_response_it_serves`.
 fn serve_options() -> RpcServeOptions {
     RpcServeOptions {
         max_frame_bytes: MAX_FRAME_BYTES,
