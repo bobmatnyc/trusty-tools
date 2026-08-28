@@ -39,6 +39,15 @@
 //! was never independent evidence of anything. Both are recorded as legacy
 //! aliases below.
 //!
+//! **A retired daemon keeps its row (#6290).** [`SERVICES`] is what an install
+//! WRITES; [`RETIRED_SERVICES`] is what an upgrade must CLEAR. trusty-review is
+//! the first row in the second table: ADR-0032's review lane retired its daemon
+//! outright, so nothing installs `com.trusty.review` any more — but every host
+//! that ran the old binary still has that unit loaded, pointed at a `serve`
+//! subcommand the binary no longer has. Dropping the row would leave the unit
+//! unnamed by anything and therefore un-evictable, which is why a retirement is
+//! a MOVE between the two tables, never a deletion.
+//!
 //! Deliberately NOT `#[cfg(target_os = "macos")]`, unlike `crate::launchd`:
 //! the registry is data, and gating it would stop the drift tests from running
 //! on Linux CI, which is where a divergent literal most needs to be caught.
@@ -111,7 +120,13 @@ pub const SEARCH_LOGROTATE: &str = agent!("search", "logrotate");
 /// service status` queried a label that does not exist.
 pub const CONSOLE: &str = agent!("console");
 
-/// The trusty-review daemon.
+/// The RETIRED trusty-review daemon (#6290).
+///
+/// trusty-review has no daemon: reviews run per invocation. This label is kept
+/// so an upgrade can EVICT the unit a pre-#6290 install left loaded — it lives
+/// in [`RETIRED_SERVICES`], not [`SERVICES`], and nothing writes it any more.
+/// Deleting it would strand that unit on every host that ever installed the
+/// old binary, respawning a `serve` subcommand the binary no longer has.
 pub const REVIEW: &str = agent!("review");
 
 /// The trusty-agents Slack gateway (`tagent --slack`).
@@ -127,6 +142,11 @@ pub const AGENTS_SLACK: &str = agent!("agents", "slack");
 /// to; `label` is what a fresh install writes and bootstraps; `legacy` is every
 /// label a prior install of the SAME service could have registered, newest
 /// first. `legacy` is never empty for a service whose label has ever changed.
+///
+/// #6290: the same struct describes a RETIRED service in [`RETIRED_SERVICES`],
+/// where `label` reads as "the last label this service had" rather than "what a
+/// fresh install writes" — a retired service has no fresh install. Everything
+/// else means what it means here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Service {
     /// Workspace member the service belongs to, e.g. `"trusty-search"`.
@@ -195,16 +215,42 @@ pub const SERVICES: &[Service] = &[
         legacy: &["com.trusty.trusty-console"],
     },
     Service {
-        member: "trusty-review",
-        sub_unit: None,
-        label: REVIEW,
-        legacy: &["com.trusty.trusty-review"],
-    },
-    Service {
         member: "trusty-agents",
         sub_unit: Some("slack"),
         label: AGENTS_SLACK,
         legacy: &[],
+    },
+];
+
+/// Services this workspace once installed and now only EVICTS (#6290).
+///
+/// Why: retiring a daemon is not the same as never having had one. Every host
+/// that installed trusty-review before #6290 has `com.trusty.review` loaded,
+/// pointed at a `serve` subcommand the binary no longer has, and
+/// `KeepAlive::Always` respawns it forever. Deleting the row would leave that
+/// unit unnamed by anything, so nothing could boot it out; keeping it in
+/// [`SERVICES`] would keep an install WRITING it. This table is the third
+/// answer: named, so it can be evicted; separate, so it is never installed.
+///
+/// What: the same [`Service`] shape, read as "the labels an upgrade must clear
+/// for this member" — `label` plus every entry in `legacy`.
+/// [`retired_labels_for_member`] flattens the two.
+///
+/// A row moves here the moment its daemon is retired and stays forever: the
+/// population of hosts carrying a stale unit only ever grows more diffuse, and
+/// an eviction that costs one `launchctl bootout` against a label that is not
+/// loaded costs nothing at all.
+///
+/// Test: `retired_services_are_not_installed`,
+/// `retired_review_carries_both_its_labels`.
+pub const RETIRED_SERVICES: &[Service] = &[
+    // #6290: ADR-0032's review lane. Reviews run per invocation
+    // (`trusty-review run`); there is no listener to supervise.
+    Service {
+        member: "trusty-review",
+        sub_unit: None,
+        label: REVIEW,
+        legacy: &["com.trusty.trusty-review"],
     },
 ];
 
@@ -236,11 +282,52 @@ pub fn sub_label(base: &str, sub_unit: &str) -> String {
 
 /// Look up a service by its canonical label.
 ///
-/// What: returns the [`SERVICES`] entry whose `label` matches, or `None`.
-/// Test: `every_legacy_label_resolves_to_one_service`.
+/// What: returns the [`SERVICES`] or [`RETIRED_SERVICES`] entry whose `label`
+/// matches, or `None`.
+///
+/// #6290 — why retired rows are searched too: the eviction of a retired unit
+/// needs its `legacy` list exactly as an install needs a live one's, and
+/// `com.trusty.review` is still a label this workspace names. Excluding it
+/// would make [`legacy_labels_for`] return empty for it, so an upgrade would
+/// boot out the canonical unit and leave `com.trusty.trusty-review` loaded
+/// beside it — #2938's two-units-one-service shape, arrived at from the other
+/// direction.
+/// Test: `every_legacy_label_resolves_to_one_service`,
+/// `retired_review_carries_both_its_labels`.
 #[must_use]
 pub fn service_for_label(label: &str) -> Option<&'static Service> {
-    SERVICES.iter().find(|s| s.label == label)
+    SERVICES
+        .iter()
+        .chain(RETIRED_SERVICES)
+        .find(|s| s.label == label)
+}
+
+/// The retired service registered for `member`, if any.
+///
+/// What: the [`RETIRED_SERVICES`] entry whose `member` matches. `None` for a
+/// member that never had a retired unit, which is every member but one.
+/// Test: `retired_services_are_not_installed`.
+#[must_use]
+pub fn retired_service_for_member(member: &str) -> Option<&'static Service> {
+    RETIRED_SERVICES.iter().find(|s| s.member == member)
+}
+
+/// Every launchd label an upgrade must clear for `member`.
+///
+/// Why: an installer asking "is there anything to evict for this member?" wants
+/// one list, not a canonical label plus a separate legacy walk it has to
+/// remember to do — forgetting the second half is how a pre-rename unit
+/// survives an upgrade (#2938).
+/// What: the retired service's own `label` followed by its `legacy` aliases,
+/// newest first; empty for a member with no retired unit.
+/// Test: `retired_review_carries_both_its_labels`.
+#[must_use]
+pub fn retired_labels_for_member(member: &str) -> Vec<&'static str> {
+    retired_service_for_member(member).map_or_else(Vec::new, |s| {
+        std::iter::once(s.label)
+            .chain(s.legacy.iter().copied())
+            .collect()
+    })
 }
 
 /// Labels an upgrade must evict before bootstrapping `label`.
@@ -271,6 +358,70 @@ pub fn legacy_labels_for(label: &str) -> &'static [&'static str] {
 #[must_use]
 pub fn is_canonical_label(candidate: &str) -> bool {
     service_for_label(candidate).is_some()
+}
+
+/// What became of ONE launchd label an eviction pass tried to clear.
+///
+/// Why: an eviction that reports only "which labels were evicted" cannot tell
+/// "there was nothing there" apart from "the removal failed" (#6290). Those
+/// need opposite handling: the first is the steady state on every host after
+/// the first pass, the second leaves a retired unit loaded and respawning, and
+/// an installer that treats it as success exits 0 with the daemon still up.
+/// What: per label, one of evicted / absent / failed-with-a-reason.
+/// Test: `eviction_outcome_only_failed_is_a_failure`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EvictionOutcome {
+    /// The unit was loaded or its plist was on disk; neither is now.
+    Evicted,
+    /// Nothing to clear: not loaded, and no plist on disk.
+    Absent,
+    /// The unit is still loaded, or its plist is still on disk. The payload is
+    /// the operator-facing reason.
+    Failed(String),
+}
+
+impl EvictionOutcome {
+    /// Whether this outcome must fail the pass that produced it.
+    ///
+    /// Why: classified once, on the enum, rather than re-derived at each call
+    /// site — the same rule `BootstrapAction::is_failure` follows, and for the
+    /// same reason (#4470): an inline `matches!` at one call site is how a
+    /// variant comes to be silently treated as success.
+    /// Test: `eviction_outcome_only_failed_is_a_failure`.
+    #[must_use]
+    pub fn is_failure(&self) -> bool {
+        matches!(self, EvictionOutcome::Failed(_))
+    }
+}
+
+/// One label paired with what an eviction pass did to it.
+///
+/// Why: the caller reports per label, so the label has to travel with its
+/// outcome rather than being recoverable only by position (#6290).
+/// Test: `eviction_outcome_only_failed_is_a_failure`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LabelEviction {
+    /// The launchd label this outcome is about.
+    pub label: String,
+    /// What became of it.
+    pub outcome: EvictionOutcome,
+}
+
+impl LabelEviction {
+    /// Pair `label` with `outcome`.
+    ///
+    /// `#[non_exhaustive]` keeps a future field from being a breaking change,
+    /// so external crates (the installer, its test fakes) construct through
+    /// here rather than with a struct literal.
+    #[must_use]
+    pub fn new(label: impl Into<String>, outcome: EvictionOutcome) -> Self {
+        Self {
+            label: label.into(),
+            outcome,
+        }
+    }
 }
 
 #[cfg(test)]

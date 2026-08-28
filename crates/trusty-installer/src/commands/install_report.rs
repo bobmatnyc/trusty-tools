@@ -288,13 +288,24 @@ pub struct DryRunReport {
 /// loop (`install_all`) must never drift on this decision — a preview that
 /// disagrees with reality is worse than no preview at all. A single shared
 /// predicate is the only way to guarantee that.
-/// What: `true` when the post-install service-bootstrap step is enabled AND
-/// `m` is a [`ManageStrategy::Launchd`]-managed member.
+/// What: `true` when the post-install service-bootstrap step is enabled AND `m`
+/// either is a [`ManageStrategy::Launchd`]-managed member (there is a unit to
+/// install) or has a RETIRED service (there is a unit to EVICT).
 /// Test: `tests::dry_run_report_shape` (via `build_dry_run_report`);
-/// `install_all`'s use is exercised indirectly by the (side-effecting) install
-/// path.
+/// `plans_service_bootstrap_visits_a_retired_member`; `install_all`'s use is
+/// exercised indirectly by the (side-effecting) install path.
+///
+/// #6290: the retired half is not decoration. `manage_strategy_for` gives a
+/// retired member [`ManageStrategy::None`] — correctly, it has no lifecycle to
+/// control — so a Launchd-only predicate skipped it entirely and
+/// `bootstrap_one`'s eviction branch never ran in production. The unit stayed
+/// loaded on every host, respawning a subcommand the binary no longer has.
+/// Keyed off the retired-service registry rather than a member name, so a
+/// member retired later inherits this with no edit here.
 pub(super) fn plans_service_bootstrap(m: &StableMember, service_enabled: bool) -> bool {
-    service_enabled && m.manage == ManageStrategy::Launchd
+    service_enabled
+        && (m.manage == ManageStrategy::Launchd
+            || crate::commands::service_bootstrap::member_has_retired_service(&m.binary))
 }
 
 /// Whether an install would attempt the trusty-mpm launchd SUPERVISOR

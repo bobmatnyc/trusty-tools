@@ -49,7 +49,15 @@ name        = "trusty-review"
 # `store::redb_error_is_incompatible_format` is `pub(crate)` and keeps its name
 # and signature; it now delegates its body to
 # `trusty_common::redb_open::is_incompatible_format`. No public item changes.
-version     = "0.28.1"
+#
+# #6290: MINOR bump — retiring the serve daemon removes the whole
+# `service::rpc` module, its `serve`/`serve_with_shutdown`/`build_router`/
+# `socket_path` functions, the `METHOD_*` and `MAX_FRAME_BYTES` constants, and
+# the `NoParams` struct. `cargo-semver-checks` reports 4 major lints
+# (`function_missing`, `module_missing`, `pub_module_level_const_missing`,
+# `struct_missing`); for a `0.y.z` crate the breaking bump is the MINOR
+# position, so 0.28.1 -> 0.29.0.
+version     = "0.29.0"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true

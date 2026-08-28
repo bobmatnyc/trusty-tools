@@ -16,9 +16,10 @@
 //! Every one of those daemons *does* answer a health query on a transport it
 //! actually serves, so this module replaces the subprocess contract with that
 //! transport. Since #6277 (ADR-0032) which transport that is varies per member:
-//! trusty-review serves a hardened Unix socket and is probed through
-//! [`uds_socket_for`] / [`classify_rpc_response`]; everything else still answers
-//! `GET /health` over loopback. Three properties are load-bearing and each has a
+//! trusty-analyze and trusty-memory serve a hardened Unix socket and are probed
+//! through [`uds_socket_for`] / [`classify_rpc_response`]; trusty-review has no
+//! transport at all since #6290 and is probed by presence ([`presence_only`]);
+//! everything else still answers `GET /health` over loopback. Three properties are load-bearing and each has a
 //! named regression test — remove any one of them and #4246 comes straight
 //! back:
 //!
@@ -38,7 +39,7 @@
 //!    [`classify_response`]. trusty-analyze answers **HTTP 503** with
 //!    `status:"degraded"` when search is unreachable; a 2xx-only liveness check
 //!    (`ensure::daemon::health_ok`) calls that `down` and kickstarts it, while
-//!    trusty-review answers the same `degraded` in a result frame for the
+//!    a UDS member answers the same `degraded` in a result frame for the
 //!    identical condition. [`classify_rpc_response`] applies the same body-first
 //!    rule on the socket side, which is why a degraded UDS member is `Serving`
 //!    and only an `error` frame is `RpcError`.
@@ -144,11 +145,87 @@ pub fn fixed_port_for(binary: &str) -> Option<u16> {
 /// `tests::probe_uds_reads_the_health_envelope_off_a_result_frame`.
 pub fn uds_socket_for(binary: &str) -> Option<std::path::PathBuf> {
     match binary {
-        "trusty-review" | "trusty-analyze" | "trusty-memory" => {
-            trusty_common::daemon_socket_path(binary).ok()
-        }
+        // #6290: NO trusty-review row. It has no daemon and no socket — see
+        // [`presence_only`].
+        "trusty-analyze" | "trusty-memory" => trusty_common::daemon_socket_path(binary).ok(),
         _ => None,
     }
+}
+
+/// Whether this member's health is a PRESENCE question, not a liveness one.
+///
+/// Why (#6290): trusty-review runs per invocation. There is no process to be up
+/// or down, so every liveness answer a probe could give is wrong — `Refused` is
+/// the one it would give, and `Refused` is one of the two variants
+/// [`ProbeOutcome::is_confirmed_down`] accepts, which arms `launchctl kickstart
+/// -k` against a launchd label that no longer exists. The honest question for a
+/// per-invocation tool is whether the binary is installed and runnable, and
+/// [`probe_presence`] is what asks it.
+///
+/// What: `true` for `trusty-review`; `false` for everything else. Kept as its
+/// own predicate rather than folded into `probe_daemon_http`'s body so the
+/// "this member is not a daemon" claim is one testable place.
+///
+/// Test: `tests::review_is_probed_by_presence_not_by_dialling`.
+pub(super) fn presence_only(binary: &str) -> bool {
+    binary == "trusty-review"
+}
+
+/// Probe a per-invocation member by running `<binary> --version`.
+///
+/// Why: presence alone would report a binary that cannot execute — a broken
+/// signature, a truncated download, a missing dylib — as healthy, and on macOS
+/// the cdhash hazard in CLAUDE.md makes "on PATH but SIGKILLed on exec" a real
+/// state rather than a hypothetical one. Running the binary and reading the
+/// version it prints is the cheapest check that distinguishes the two, and it
+/// yields the version the status rollup renders anyway.
+///
+/// What: spawns `<binary> --version` under [`PRESENCE_TIMEOUT`] and returns
+/// [`ProbeOutcome::Serving`] carrying the parsed version. A binary that cannot
+/// be spawned is [`ProbeOutcome::NotInstalled`]; one that runs and fails is
+/// [`ProbeOutcome::ProbeFailed`] — NOT `Refused` or `Timeout`, because neither
+/// is true and both would arm the kickstart this function exists to keep
+/// disarmed.
+///
+/// Test: `tests::review_is_probed_by_presence_not_by_dialling`,
+/// `tests::presence_probe_of_an_absent_binary_is_not_installed`.
+fn probe_presence(binary: &str) -> ProbeOutcome {
+    let Some(path) = super::probe::resolve_binary_path(binary) else {
+        return ProbeOutcome::NotInstalled;
+    };
+    let output = std::process::Command::new(&path).arg("--version").output();
+    match output {
+        Ok(out) if out.status.success() => ProbeOutcome::Serving {
+            status: "ok".to_owned(),
+            version: parse_version_line(&String::from_utf8_lossy(&out.stdout)),
+        },
+        Ok(out) => ProbeOutcome::ProbeFailed {
+            detail: format!(
+                "`{} --version` exited {}: {}",
+                path.display(),
+                out.status,
+                sample(&out.stderr)
+            ),
+        },
+        Err(e) => ProbeOutcome::ProbeFailed {
+            detail: format!("spawn `{} --version`: {e}", path.display()),
+        },
+    }
+}
+
+/// Pull the version out of a `clap` `--version` line.
+///
+/// What: `"trusty-review 0.24.1"` → `Some("0.24.1")`. A line with no
+/// whitespace-separated second token yields `None` rather than the whole line,
+/// so a status card never renders a binary name where a version belongs.
+/// Test: `tests::version_line_parses_the_clap_shape`.
+fn parse_version_line(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .next()?
+        .split_whitespace()
+        .nth(1)
+        .map(str::to_owned)
 }
 
 /// The method a UDS member answers a health probe on.
@@ -174,7 +251,8 @@ pub fn uds_socket_for(binary: &str) -> Option<std::path::PathBuf> {
 /// arms are kept in step by `tests::every_uds_member_has_a_health_method`.
 fn uds_health_method(binary: &str) -> Option<&'static str> {
     match binary {
-        "trusty-review" => Some("review.health"),
+        // #6290: NO trusty-review row. `review.health` is gone with the daemon
+        // that answered it; the member is probed by presence instead.
         "trusty-analyze" => Some("analyze.health"),
         // #6286: `trusty_memory::transport::uds::METHOD_HEALTH`. It is the only
         // folded method `tctl` needs, and the one trusty-console dials too.
@@ -802,6 +880,12 @@ pub async fn probe_bases(
 /// `tests::probe_no_address_when_nothing_resolves`,
 /// `tests::probe_uds_reads_the_health_envelope_off_a_result_frame`.
 pub async fn probe_daemon_http(app: &str, binary: &str) -> ProbeOutcome {
+    // #6290: checked FIRST. A per-invocation member has neither a socket nor an
+    // address, so falling through would reach `NoAddress` — which renders
+    // `down` for a tool that is installed and working.
+    if presence_only(binary) {
+        return probe_presence(binary);
+    }
     if let Some(socket) = uds_socket_for(binary) {
         // #6287: the method is per-binary. `uds_socket_for` and
         // `uds_health_method` cover the same set, which

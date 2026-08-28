@@ -28,10 +28,9 @@ use trusty_review::config::ReviewConfig;
 
 use commands::calibrate::{CalibrateArgs, cmd_calibrate};
 use commands::compare::{CompareArgs, cmd_compare};
+#[cfg(feature = "mcp")]
+use commands::mcp_stdio::{McpArgs, cmd_mcp_stdio};
 use commands::run::{RunArgs, cmd_run};
-#[cfg(feature = "http-server")]
-use commands::serve::{ServeArgs, cmd_serve};
-use commands::socket::{SocketFormat, handle_socket};
 
 // ─── CLI top-level ────────────────────────────────────────────────────────────
 
@@ -40,9 +39,13 @@ use commands::socket::{SocketFormat, handle_socket};
 /// An LLM-backed code reviewer that fetches PR diffs, retrieves code context
 /// from trusty-search, and produces structured review verdicts.
 ///
-/// Reviews are dry-run by default (no comments posted to GitHub). `run` and
-/// `serve` post live when posting is enabled — set `PR_INTELLIGENCE_DRY_RUN=false`
-/// to allow live PR comments.
+/// Reviews are dry-run by default (no comments posted to GitHub). `run` posts
+/// live when posting is enabled — set `PR_INTELLIGENCE_DRY_RUN=false` to allow
+/// live PR comments.
+///
+/// #6290: there is no review daemon. Every review is one invocation of this
+/// binary; `run --json` returns the same structured result the retired
+/// `review.run` method did.
 #[derive(Debug, Parser)]
 #[command(
     name = "trusty-review",
@@ -83,42 +86,6 @@ enum Commands {
     /// override) and prints a comparison table.  Always dry-run.  Accepts the
     /// same --local-diff / --base [--head] local-diff flags as `run` (#2993).
     Compare(CompareArgs),
-
-    /// Report the Unix socket the trusty-review daemon serves on.
-    ///
-    /// #6277 replaced `trusty-review port` and its `http_addr` discovery file:
-    /// the daemon binds a socket whose path is derived from the data directory,
-    /// so there is no port to report and no file that can go stale.
-    ///
-    ///   trusty-review socket          → bare path: /…/trusty-review.sock
-    ///   trusty-review socket --json   → JSON:      {"socket":"…","serving":true}
-    ///
-    /// Exits non-zero when nothing is answering on the socket, so shell
-    /// substitution (`$(trusty-review socket)`) fails safely.
-    Socket {
-        /// Print a JSON object `{"socket":"…","serving":…}`.
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Start the long-lived daemon on its Unix socket (#6277).
-    ///
-    /// Serves three JSON-RPC methods over that socket:
-    ///   review.health                 — liveness + dep status
-    ///   review.status                 — in-flight count + last error
-    ///   review.run                    — synchronous on-demand review
-    ///
-    /// Run `trusty-review socket` to see the path. GitHub webhooks do not
-    /// arrive here — run `webhook-listen` for those:
-    /// `trusty-console` verifies the delivery and relays it over UDS (#5181).
-    ///
-    /// Pass --stdio to run as a MCP JSON-RPC stdio service instead.
-    ///
-    /// Dry-run by default (no comments posted). Posts reviews live to the PR
-    /// when posting is enabled — set `PR_INTELLIGENCE_DRY_RUN=false` to allow it.
-    /// Graceful shutdown on SIGTERM/SIGINT (in-flight requests are drained).
-    #[cfg(feature = "http-server")]
-    Serve(ServeArgs),
 
     /// Generate a deterministic technical due-diligence report from a manifest.
     ///
@@ -166,19 +133,21 @@ enum Commands {
     /// Run it by hand only to inspect the socket.
     WebhookListen,
 
-    /// Manage the macOS launchd LaunchAgent for the review daemon (#2557).
+    /// Run the MCP JSON-RPC 2.0 stdio service.
     ///
-    /// `install` writes `~/Library/LaunchAgents/com.trusty.trusty-review.plist`
-    /// (running `trusty-review serve`) and bootstraps it; `uninstall` unloads
-    /// and removes it; `status` / `logs` inspect the running agent. macOS-only.
-    /// `tctl install` / `tctl start` call `install` on the operator's behalf.
-    /// Requires the `http-server` feature (enabled by default) since it
-    /// daemonizes `trusty-review serve`.
-    #[cfg(feature = "http-server")]
-    Service {
-        #[command(subcommand)]
-        action: commands::service::ServiceAction,
-    },
+    /// stdout is the JSON-RPC transport; every log line goes to stderr. Wire it
+    /// into Claude Code via .mcp.json:
+    ///   { "mcpServers": { "trusty-review": { "command": "trusty-review",
+    ///                                        "args": ["mcp"] } } }
+    ///
+    /// Answers to `serve` as well, because that is what every `.mcp.json`
+    /// written before #6290 spells. `serve` no longer starts a daemon: there is
+    /// none. See `commands::mcp_stdio`.
+    ///
+    /// Requires the `mcp` Cargo feature (enabled by default).
+    #[cfg(feature = "mcp")]
+    #[command(alias = "serve")]
+    Mcp(McpArgs),
 }
 
 // ─── Entry point ──────────────────────────────────────────────────────────────
@@ -196,14 +165,8 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    // `service` drives macOS launchd (`launchctl`) synchronously — dispatch
-    // before the async runtime so `tctl install`/`tctl start` hooks pay no
-    // tokio start-up cost for a plist write.
-    #[cfg(feature = "http-server")]
-    if let Commands::Service { action } = &cli.command {
-        return commands::service::run_service_action(action);
-    }
-
+    // #6290: no synchronous launchd pre-dispatch any more — there is no
+    // `service` subcommand, because there is no unit for it to manage.
     let rt = tokio::runtime::Runtime::new().context("build tokio runtime")?;
     rt.block_on(async_main(cli))
 }
@@ -230,27 +193,51 @@ async fn async_main(cli: Cli) -> Result<()> {
     match command {
         Commands::Run(args) => cmd_run(config, args).await,
         Commands::Compare(args) => cmd_compare(config, args).await,
-        #[cfg(feature = "http-server")]
-        Commands::Serve(args) => cmd_serve(config, args).await,
+        #[cfg(feature = "mcp")]
+        Commands::Mcp(args) => cmd_mcp_stdio(config, args).await,
         // `report` is dispatched above, before the config is built.
         #[cfg(feature = "report")]
         Commands::Report(_) => unreachable!("report dispatched before the config is built"),
         Commands::Calibrate(args) => cmd_calibrate(config, args).await,
         Commands::WebhookListen => trusty_review::webhook_listener::run(config).await,
         Commands::Config(cmd) => cmd.run().await,
-        // #6277: `socket` probes the endpoint, which is async, so unlike the
-        // `port` command it replaces it cannot be dispatched before the runtime
-        // is up.
-        Commands::Socket { json } => {
-            let format = if json {
-                SocketFormat::Json
-            } else {
-                SocketFormat::Path
-            };
-            handle_socket(format).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// REGRESSION (#6290): `serve` must keep parsing, and must land on `Mcp`.
+    ///
+    /// Why: every `.mcp.json` on every host that has ever installed
+    /// trusty-review spells this `["serve", "--stdio"]`. clap exits 2 on an
+    /// unknown subcommand, so renaming without the alias turns an upgrade into
+    /// an MCP server that will not start, in a config file this repo does not
+    /// own and cannot edit.
+    /// What: both spellings parse to the same variant, and the daemon
+    /// subcommands the alias replaced are gone.
+    /// Test: this is the test.
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn serve_is_still_accepted_as_an_alias() {
+        for argv in [
+            vec!["trusty-review", "serve", "--stdio"],
+            vec!["trusty-review", "mcp"],
+        ] {
+            let cli =
+                Cli::try_parse_from(&argv).unwrap_or_else(|e| panic!("{argv:?} must parse: {e}"));
+            assert!(
+                matches!(cli.command, Commands::Mcp(_)),
+                "{argv:?} must reach the MCP stdio handler"
+            );
         }
-        // `service` is likewise dispatched synchronously in `main`.
-        #[cfg(feature = "http-server")]
-        Commands::Service { .. } => unreachable!("service dispatched before async_main"),
+
+        for retired in ["socket", "service"] {
+            assert!(
+                Cli::try_parse_from(["trusty-review", retired]).is_err(),
+                "`{retired}` described the daemon and must be gone, not silently accepted"
+            );
+        }
     }
 }

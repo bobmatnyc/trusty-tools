@@ -610,7 +610,34 @@ fn restart_daemon_member(c: &UpdateCandidate) -> anyhow::Result<String> {
     match restart_plan(&c.binary, c.daemon, cfg!(target_os = "macos")) {
         RestartPlan::NoRestart(note) => Ok(note),
         RestartPlan::Restart(strategy) => super::lifecycle::restart_member(&c.binary, strategy),
+        // #6290: not a restart — a member whose service is retired has its unit
+        // CLEARED here, through the same `evict_retired_unit` the install pass
+        // uses. Without this, `tctl upgrade` placed the new binary and left
+        // `com.trusty.review` loaded, respawning a subcommand the new binary
+        // answers with the retired-argv line, forever.
+        RestartPlan::EvictRetired => evict_result(
+            super::service_bootstrap::evict_retired_member(&c.binary),
+            &c.binary,
+        ),
     }
+}
+
+/// Turn a retired-unit eviction into an upgrade result (#6290).
+///
+/// Why: a unit that will not go down must FAIL the member's upgrade, not be
+/// reported as a note — the whole point of the eviction is that nothing else on
+/// the upgrade path will notice a unit still respawning.
+/// What: maps a failing [`BootstrapAction`] to `Err`, anything else to its note.
+/// Test: `tests::evict_result_failure_fails_the_upgrade`,
+/// `tests::evict_result_success_is_a_note`.
+fn evict_result(
+    action: super::service_bootstrap::BootstrapAction,
+    binary: &str,
+) -> anyhow::Result<String> {
+    if action.is_failure() {
+        anyhow::bail!("{}", action.note(binary));
+    }
+    Ok(action.note(binary))
 }
 
 /// What restarting a just-upgraded member requires, decided without doing it.
@@ -629,6 +656,9 @@ enum RestartPlan {
     Restart(super::stable_set::ManageStrategy),
     /// Nothing to bounce; the payload is the human note for the report.
     NoRestart(String),
+    /// #6290: the member's launchd service is RETIRED — evict its unit instead
+    /// of restarting anything. There is no replacement to bring up.
+    EvictRetired,
 }
 
 /// Decide how a just-upgraded member should be restarted.
@@ -642,9 +672,19 @@ enum RestartPlan {
 /// being reported as failed for a supervisor the host does not have.
 /// Test: `tests::restart_plan_daemons_restart`,
 /// `tests::restart_plan_non_daemon_is_a_noop`,
-/// `tests::restart_plan_launchd_member_off_macos_is_manual`.
+/// `tests::restart_plan_launchd_member_off_macos_is_manual`,
+/// `tests::upgrade_evicts_a_retired_members_unit`.
 fn restart_plan(binary: &str, daemon: bool, macos: bool) -> RestartPlan {
     use super::stable_set::{manage_strategy_for, ManageStrategy};
+
+    // #6290: checked BEFORE the strategy, because `manage_strategy_for` gives a
+    // retired member `ManageStrategy::None` — correctly, it has no lifecycle —
+    // which fell into the "not a daemon" no-op below and left the stale unit
+    // loaded after every `tctl upgrade`. Keyed off RETIRED_SERVICES, so a member
+    // retired later inherits this with no edit here.
+    if super::service_bootstrap::member_has_retired_service(binary) {
+        return RestartPlan::EvictRetired;
+    }
 
     match manage_strategy_for(binary, daemon) {
         ManageStrategy::None => {

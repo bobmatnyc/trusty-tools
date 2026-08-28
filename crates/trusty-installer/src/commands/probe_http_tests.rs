@@ -42,12 +42,15 @@ const REAL_ANALYZE: &str = r#"{"status":"ok","version":"0.7.4","search_reachable
 /// trusty-mpm, port 7880 — the only payload with NO `version` field.
 const REAL_MPM: &str = r#"{"status":"ok","catalog_stale":true,"catalog_unknown":false,"catalog_changes":["agent dart-engineer: new"],"supervised":false}"#;
 
-/// trusty-review — the `result` half of a `review.health` frame since #6277.
+/// A real `result` half of a UDS health frame, captured from trusty-review
+/// before #6290 retired its daemon.
 ///
-/// The BODY is unchanged by the transport swap; only what carries it moved. It
-/// stays in this table because the #4246 acceptance property is about the body:
-/// this payload must never classify as `down`, whether it arrives in an HTTP
-/// response or in a JSON-RPC result.
+/// It outlived the daemon that produced it because what it proves is about the
+/// BODY, not the sender: this is the richest health envelope any member has
+/// emitted — nested `deps`, an `inference` field, a `dry_run` flag — and
+/// `probe_uds_reads_the_health_envelope_off_a_result_frame` uses it to show the
+/// frame reader survives all of that. It is no longer in `real_payloads()`,
+/// because trusty-review no longer answers a health probe at all.
 const REAL_REVIEW: &str = r#"{"status":"ok","version":"0.10.1","dry_run":true,"reviewer_model":"us.anthropic.claude-sonnet-4-6","inference":"ok","deps":{"trusty_search":{"required":true,"reachable":true,"state":"ok"}}}"#;
 
 /// Every real payload, paired with the daemon it came from.
@@ -58,7 +61,6 @@ fn real_payloads() -> Vec<(&'static str, &'static str)> {
         ("trusty-search", REAL_SEARCH),
         ("trusty-analyze", REAL_ANALYZE),
         ("trusty-mpm", REAL_MPM),
-        ("trusty-review", REAL_REVIEW),
     ]
 }
 
@@ -537,21 +539,106 @@ fn fixed_ports_match_port_assignments_doc() {
     assert!(!matches!(fixed_port_for("trusty-code"), Some(7882)));
 }
 
+/// REGRESSION (#6290): trusty-review must be probed by presence, and every
+/// dialling resolver must refuse to answer for it.
+///
+/// Why: this is #4246's shape one step further on. Leaving a socket path behind
+/// makes `tctl` dial a socket nothing binds; that leg answers `Refused`,
+/// `Refused` is one of the two variants `is_confirmed_down` accepts, and
+/// `verify_tail` turns a confirmed-down into `launchctl kickstart -k` — against
+/// `com.trusty.review`, a label #6290 evicts. So the destructive repair would
+/// fire, every install, on a tool that is working perfectly. A presence probe
+/// can never produce either confirmed-down variant, which is the property the
+/// last assertion pins.
+/// What: asserts the three dialling resolvers are silent for trusty-review, and
+/// that a real presence probe answers `Serving` with a version and is not
+/// confirmed-down.
+/// Test: This is the test.
+#[test]
+fn review_is_probed_by_presence_not_by_dialling() {
+    assert!(
+        super::presence_only("trusty-review"),
+        "trusty-review runs per invocation and has nothing to dial"
+    );
+    assert_eq!(
+        uds_socket_for("trusty-review"),
+        None,
+        "a socket path for trusty-review would be dialled, read Refused, and \
+         kickstart a launchd label that no longer exists"
+    );
+    assert_eq!(fixed_port_for("trusty-review"), None);
+    assert_eq!(
+        super::uds_health_method("trusty-review"),
+        None,
+        "`review.health` went with the daemon that answered it"
+    );
+
+    // The live probe, against this workspace's own `tctl` binary — a binary that
+    // exists on any machine running this test, so the assertion is about the
+    // SHAPE of a presence answer rather than about trusty-review being
+    // installed.
+    let outcome = super::probe_presence("trusty-installer");
+    match outcome {
+        ProbeOutcome::Serving { status, version } => {
+            assert_eq!(status, "ok");
+            assert!(
+                version.is_some(),
+                "a presence probe must read the version off `--version`"
+            );
+        }
+        ProbeOutcome::NotInstalled => {
+            eprintln!("skip: trusty-installer is not on PATH in this environment");
+        }
+        other => panic!("a runnable binary must not probe as {other:?}"),
+    }
+    assert!(
+        !super::probe_presence("trusty-installer").is_confirmed_down(),
+        "a presence probe must NEVER be confirmed-down — that is what arms \
+         `launchctl kickstart -k`"
+    );
+}
+
+/// Why (#6290): a per-invocation member that is not installed is `NotInstalled`,
+/// which renders `not_installed` and is not confirmed-down. Reporting `Refused`
+/// would be both false — nothing was dialled — and dangerous.
+/// What: probes a name no binary can have.
+/// Test: This is the test.
+#[test]
+fn presence_probe_of_an_absent_binary_is_not_installed() {
+    let outcome = super::probe_presence("trusty-review-does-not-exist-9f3a");
+    assert_eq!(outcome, ProbeOutcome::NotInstalled);
+    assert!(!outcome.is_confirmed_down());
+}
+
+/// Why: a status card that renders `trusty-review` where a version belongs is
+/// worse than one that renders nothing — it looks like data.
+/// What: the clap shape parses; a single-token line yields `None`.
+/// Test: This is the test.
+#[test]
+fn version_line_parses_the_clap_shape() {
+    assert_eq!(
+        super::parse_version_line("trusty-review 0.24.1\n"),
+        Some("0.24.1".to_owned())
+    );
+    assert_eq!(super::parse_version_line("trusty-review\n"), None);
+    assert_eq!(super::parse_version_line(""), None);
+}
+
 /// REGRESSION (#6277): a member that serves a Unix socket must have NO fixed
 /// port, and must resolve a socket instead.
 ///
-/// Why: leaving `trusty-review => Some(7891)` behind would make `tctl` dial a
-/// port the daemon no longer binds. That leg answers `Refused`, `Refused` is one
-/// of the two variants `is_confirmed_down` accepts, and `verify_tail` turns a
+/// Why: leaving a retired member's port behind would make `tctl` dial a port no
+/// daemon binds. That leg answers `Refused`, `Refused` is one of the two
+/// variants `is_confirmed_down` accepts, and `verify_tail` turns a
 /// confirmed-down into `launchctl kickstart -k` — so every `tctl install` would
-/// hard-restart a healthy review daemon. That is #4246 verbatim, and it is why
-/// the transport swap and its consumers had to land together.
-/// What: asserts the two resolvers are mutually exclusive for trusty-review and
-/// that an HTTP member resolves no socket.
+/// hard-restart a healthy daemon. That is #4246 verbatim, and it is why a
+/// transport swap and its consumers have to land together.
+/// What: asserts the two resolvers are mutually exclusive for each UDS member
+/// and that an HTTP member resolves no socket.
 /// Test: This is the test.
 #[test]
 fn uds_members_have_no_fixed_port() {
-    for binary in ["trusty-review", "trusty-analyze", "trusty-memory"] {
+    for binary in ["trusty-analyze", "trusty-memory"] {
         assert_eq!(
             fixed_port_for(binary),
             None,
@@ -583,7 +670,7 @@ fn uds_members_have_no_fixed_port() {
 /// Test: This is the test.
 #[test]
 fn every_uds_member_has_a_health_method() {
-    for binary in ["trusty-review", "trusty-analyze", "trusty-memory"] {
+    for binary in ["trusty-analyze", "trusty-memory"] {
         let method = super::uds_health_method(binary)
             .unwrap_or_else(|| panic!("{binary} serves a socket but names no health method"));
         let domain = binary.trim_start_matches("trusty-");
@@ -608,7 +695,7 @@ fn every_uds_member_has_a_health_method() {
 /// Test: This is the test.
 #[test]
 fn uds_socket_for_matches_the_shared_entry_point() {
-    for binary in ["trusty-review", "trusty-analyze", "trusty-memory"] {
+    for binary in ["trusty-analyze", "trusty-memory"] {
         assert_eq!(
             uds_socket_for(binary),
             trusty_common::daemon_socket_path(binary).ok(),

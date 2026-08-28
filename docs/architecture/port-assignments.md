@@ -8,7 +8,7 @@
 **Related:** [ADR-0018 — Loopback-only doctrine](../adr/0018-loopback-only-doctrine.md),
 [Three-Harness Architecture](harnesses.md),
 [trusty-console `service.rs`](../../crates/trusty-console/src/service.rs),
-[trusty-review `service/mod.rs`](../../crates/trusty-review/src/service/mod.rs)
+[trusty-installer `probe_http.rs`](../../crates/trusty-installer/src/commands/probe_http.rs)
 
 ---
 
@@ -105,6 +105,16 @@ of those bind it; all three go when that client migrates. Whatever you pick:
   health probe — dial that socket, and moved in the same change: a probe left
   on 7891 would read `Refused` for a healthy daemon and kickstart it, which is
   the #4246 class.
+- **#6290** — `trusty-review` stopped having a transport at all. ADR-0032's
+  review lane retired the daemon: reviews run per invocation
+  (`trusty-review run --json`), so there is no port, no socket and no launchd
+  unit, and `com.trusty.review` is evicted by `tctl install` rather than
+  installed.
+  Its consumers moved with it in the same change, for the reason #6277 records
+  — `tctl`'s probe and the console's `ReviewConnector` both ask presence
+  (binary on PATH plus `--version`) instead of dialling. A probe left dialling
+  would read `Refused`, which `is_confirmed_down` accepts, and kickstart a
+  launchd label that no longer exists.
 - **#6287** — `trusty-analyze` left this table the same way, on the same
   reasoning: it binds `<data dir>/trusty-analyze/trusty-analyze.sock` and has
   no `DEFAULT_PORT`. Four consumers dialled 7879 rather than two, so all four
@@ -165,6 +175,6 @@ test-only sentinel addresses:
 - [ADR-0018 — Loopback-only doctrine](../adr/0018-loopback-only-doctrine.md)
 - [Three-Harness Architecture](harnesses.md)
 - `crates/trusty-console/src/service.rs` — `known_siblings` guard (console)
-- `crates/trusty-review/src/service/mod.rs` — `known_siblings` guard (review)
+- `crates/trusty-installer/src/commands/probe_http.rs` — `fixed_port_for` / `uds_socket_for` / `presence_only`: which members are dialled at all
 - `crates/trusty-code/src/serve/mod.rs` — `known_siblings` guard (tcode, #3364)
 - Issue #3364 — trusty-code default HTTP port collision (this table's origin)

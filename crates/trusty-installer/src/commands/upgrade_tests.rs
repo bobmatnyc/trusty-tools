@@ -195,7 +195,6 @@ fn restart_plan_daemons_restart() {
         "trusty-search",
         "trusty-memory",
         "trusty-analyze",
-        "trusty-review",
         "trusty-console",
     ] {
         assert_eq!(
@@ -204,6 +203,24 @@ fn restart_plan_daemons_restart() {
             "{binary} must be bounced through launchd after an upgrade"
         );
     }
+    // #6290: upgrading trusty-review has nothing to bounce — the next `run`
+    // invocation IS the new binary. It is not a no-op either: the stale
+    // `com.trusty.review` unit is EVICTED here. This assertion previously
+    // expected `NoRestart`, which is what let the upgrade path leave that unit
+    // loaded (#6290 review, HIGH).
+    assert_eq!(
+        restart_plan("trusty-review", true, true),
+        RestartPlan::EvictRetired,
+        "a per-invocation member has no process to restart, but its retired \
+         unit must still be cleared"
+    );
+    assert!(
+        !matches!(
+            restart_plan("trusty-review", true, true),
+            RestartPlan::Restart(_)
+        ),
+        "and nothing may be bounced for it"
+    );
     assert_eq!(
         restart_plan("trusty-mpm", true, true),
         RestartPlan::Restart(ManageStrategy::OwnVerb),
@@ -304,4 +321,61 @@ fn no_installer_call_site_invokes_upgrade_and_restart() {
          process launchd does not supervise. Restart via `lifecycle::restart_member` \
          instead.\nfound: {offenders:#?}"
     );
+}
+
+/// REGRESSION (#6290): `tctl upgrade` evicts a retired member's unit.
+///
+/// Why: `restart_plan` read `manage_strategy_for("trusty-review", true)`, which
+/// is `ManageStrategy::None` for a retired member, and returned
+/// `NoRestart("no restart needed (not a daemon)")` — the member reported ok with
+/// `com.trusty.review` still loaded. KeepAlive::Always then respawned `serve` on
+/// the throttle interval forever, and only `tctl install` cleared it, which an
+/// operator has no reason to run after an upgrade.
+/// What: drives `restart_plan` — the upgrade path's own decision function, not
+/// `bootstrap_one` — and asserts it routes to the eviction on both platforms.
+#[test]
+fn upgrade_evicts_a_retired_members_unit() {
+    use crate::commands::stable_set::{manage_strategy_for, ManageStrategy};
+    assert_eq!(
+        manage_strategy_for("trusty-review", true),
+        ManageStrategy::None,
+        "a retired member has no lifecycle to control — that part is correct"
+    );
+
+    for macos in [true, false] {
+        assert_eq!(
+            restart_plan("trusty-review", true, macos),
+            RestartPlan::EvictRetired,
+            "a retired member must be EVICTED by the upgrade, not skipped as a \
+             non-daemon (macos={macos})"
+        );
+    }
+}
+
+/// REGRESSION (#6290): a retired unit that will not go down fails the member's
+/// upgrade rather than being reported as a note.
+#[test]
+fn evict_result_failure_fails_the_upgrade() {
+    use crate::commands::service_bootstrap::BootstrapAction;
+    let err = evict_result(
+        BootstrapAction::Failed("com.trusty.review: still loaded".to_owned()),
+        "trusty-review",
+    )
+    .expect_err("a unit that will not go down must fail the upgrade");
+    assert!(
+        err.to_string().contains("still loaded"),
+        "the operator needs the reason: {err}"
+    );
+}
+
+/// A clean eviction is a note on a successful upgrade, not a failure.
+#[test]
+fn evict_result_success_is_a_note() {
+    use crate::commands::service_bootstrap::BootstrapAction;
+    let note = evict_result(
+        BootstrapAction::Skipped("trusty-review has no launchd service".to_owned()),
+        "trusty-review",
+    )
+    .expect("an absent unit must not fail the upgrade");
+    assert!(!note.is_empty());
 }

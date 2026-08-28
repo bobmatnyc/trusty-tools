@@ -1152,3 +1152,126 @@ fn dep_probe_timeout_env_zero_falls_back() {
         "zero env var must fall back to 2 s default"
     );
 }
+
+// ── Per-invocation parity (#6290) ─────────────────────────────────────────────
+
+/// REGRESSION (#6290): `trusty-review run --json` must return exactly what the
+/// retired `review.run` method did, for the same diff.
+///
+/// Why: #5028 measured 782 of 782 reviews going through the daemon's `/review`
+/// route. Retiring the daemon moves every one of those callers onto the CLI, and
+/// if the CLI's JSON differs in one field the migration is a silent data-format
+/// break — it surfaces as a missing key at the consumer, weeks later, not here.
+/// `service::rpc`'s router serialised the handler's return value with no
+/// envelope of its own, so parity means the CLI payload IS
+/// `serde_json::to_value(&ReviewResult)`.
+///
+/// What: drives `handle_review` — the operation the route served — over a local
+/// diff fixture with the fake LLM, then asserts `run_json_payload` over the
+/// returned result equals the RPC-era serialisation, and that the fields a
+/// caller keys off survived the move.
+/// Test: this is the test.
+#[tokio::test]
+async fn run_json_matches_the_shape_the_rpc_method_produced() {
+    let state = test_state();
+    let req = ReviewRequest {
+        local_diff_text: Some(
+            "diff --git a/src/lib.rs b/src/lib.rs\n\
+             --- a/src/lib.rs\n\
+             +++ b/src/lib.rs\n\
+             @@ -1,1 +1,2 @@\n\
+             fn main() {}\n\
+             +// a second line\n"
+                .to_string(),
+        ),
+        ..Default::default()
+    };
+
+    let result = handle_review(&state, req)
+        .await
+        .expect("a local diff is a complete request");
+
+    // What the JSON-RPC router put in `result` — `to_value` over the same value
+    // the handler returned, which is all `RpcRouter` ever did with it.
+    let rpc_result = serde_json::to_value(&result).expect("ReviewResult serialises");
+    let cli_json = crate::run_output::run_json_payload(&result);
+
+    assert_eq!(
+        cli_json, rpc_result,
+        "the per-invocation payload must be the retired review.run result, field for field"
+    );
+    for field in [
+        "owner",
+        "repo",
+        "pr_number",
+        "verdict",
+        "findings",
+        "findings_count",
+        "review_body",
+        "model",
+        "dry_run",
+        "status",
+    ] {
+        assert!(
+            cli_json.get(field).is_some(),
+            "`{field}` was in the daemon's answer and must still be here: {cli_json}"
+        );
+    }
+}
+
+/// REGRESSION (#6290, fail-open check): a review the pipeline could not complete
+/// must be reported as a failure by the per-invocation exit rule.
+///
+/// Why: `abort_dry` records a provider or transport failure as `error: Some(..)`
+/// and leaves `status` at `Completed`, so the pre-#6290 rule — which tested
+/// `status.is_skipped()` alone — exited 0. With the daemon gone, that exit code
+/// is what a CI gate reads, and a gate that passes on an outage is worse than no
+/// gate.
+/// What: takes a real `ReviewResult` off the handler, marks it the way
+/// `abort_dry` marks an aborted run, and asserts the rule catches it — while the
+/// same result with no error recorded passes.
+/// Test: this is the test.
+#[tokio::test]
+async fn a_failed_run_is_not_an_empty_success() {
+    let state = test_state();
+    let req = ReviewRequest {
+        local_diff_text: Some(
+            "diff --git a/src/lib.rs b/src/lib.rs\n\
+             --- a/src/lib.rs\n\
+             +++ b/src/lib.rs\n\
+             @@ -1,1 +1,2 @@\n\
+             fn main() {}\n\
+             +// a second line\n"
+                .to_string(),
+        ),
+        ..Default::default()
+    };
+    let mut ok = handle_review(&state, req).await.expect("complete request");
+    // The fixture's own outcome is not what is under test — the exit RULE is —
+    // so the clean case is stated rather than assumed.
+    ok.error = None;
+    ok.status = crate::models::ReviewStatus::Completed;
+    assert!(
+        !crate::run_output::run_is_failure(&ok),
+        "a completed review with no error must exit 0"
+    );
+
+    let mut aborted = ok;
+    aborted.error = Some("bedrock: connection reset by peer".to_owned());
+    assert!(
+        crate::run_output::run_is_failure(&aborted),
+        "a recorded pipeline error must exit non-zero even on a Completed status"
+    );
+    assert_eq!(
+        crate::run_output::run_failure_reason(&aborted),
+        "bedrock: connection reset by peer",
+        "the reason must reach the operator, not be swallowed by a generic message"
+    );
+    assert_eq!(
+        crate::run_output::run_json_payload(&aborted)
+            .get("error")
+            .and_then(serde_json::Value::as_str),
+        Some("bedrock: connection reset by peer"),
+        "the error must be IN the JSON, not only on stderr"
+    );
+}

@@ -200,10 +200,31 @@ fn service_uninstall() -> Result<()> {
     // #4868: a host that never ran the migrating install still has the unit
     // under its old label. Removing only the canonical plist printed "nothing
     // to do" while leaving that one loaded.
-    for label in cfg.evict_legacy(trusty_common::launchd_labels::legacy_labels_for(
+    // #6290: `evict_legacy` reports only the labels that WERE evicted, so a
+    // failed bootout or plist deletion vanished silently here. An uninstall
+    // installs nothing, so the fail-soft justification that covers an install's
+    // legacy eviction does not apply — the operator has to be told.
+    for e in cfg.evict_legacy_detailed(trusty_common::launchd_labels::legacy_labels_for(
         LAUNCHD_LABEL,
     )) {
-        println!("[ok] Unloaded and removed the stale LaunchAgent {label}");
+        use trusty_common::launchd_labels::EvictionOutcome;
+        match &e.outcome {
+            EvictionOutcome::Evicted => {
+                println!(
+                    "[ok] Unloaded and removed the stale LaunchAgent {}",
+                    e.label
+                );
+            }
+            EvictionOutcome::Failed(why) => {
+                eprintln!(
+                    "[!!] Could not clear the stale LaunchAgent {}: {why}",
+                    e.label
+                );
+            }
+            // `EvictionOutcome` is `#[non_exhaustive]`; Absent and any future
+            // outcome are silent here — only a failure needs the operator.
+            _ => {}
+        }
     }
     if plist_path.exists() {
         let _ = cfg.bootout();

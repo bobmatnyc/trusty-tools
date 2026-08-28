@@ -211,6 +211,9 @@ pub mod launchd_activate;
 /// while launchd had `com.trusty.search` loaded, activating nothing.
 /// What: [`launchd_labels::SERVICES`] plus the `com.trusty.<stem>` convention
 /// as executable code, and the legacy aliases an upgrade must evict.
+/// [`launchd_labels::RETIRED_SERVICES`] carries the other half (#6290): a
+/// daemon that has been retired keeps its row so an upgrade can still boot out
+/// the unit a pre-retirement install left loaded.
 /// Deliberately NOT macOS-gated, unlike `launchd`, so the drift tests run on
 /// Linux CI too. (`launchd` is named here, not linked: it does not exist on
 /// Linux, so a link to it breaks on the very platform this sentence is about.)

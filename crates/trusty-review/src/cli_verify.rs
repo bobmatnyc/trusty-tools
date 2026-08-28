@@ -8,7 +8,7 @@
 //! focused on argument parsing and dispatch.
 //!
 //! What: `build_verifier_opt` (non-fatal, returns `Option`) and
-//! `build_verifier_for_serve` (fatal, returns `Result<Option<_>>`).
+//! `build_verifier_for_mcp_stdio` (fatal, returns `Result<Option<_>>`).
 //!
 //! Test: the network build path is not unit-tested; the gating logic these feed
 //! (`enforce_verifier_liveness`) is covered in `pipeline::verify_liveness::tests`.
@@ -44,19 +44,21 @@ pub async fn build_verifier_opt(config: &ReviewConfig) -> Option<Arc<dyn LlmProv
     }
 }
 
-/// Build the verifier provider for the `serve` daemon (fatal on failure).
+/// Build the verifier provider for the MCP stdio service (fatal on failure).
 ///
-/// Why: unlike the one-shot CLI, the long-lived daemon must not silently degrade
+/// Why: unlike the one-shot CLI, a long-lived service must not silently degrade
 /// to no-verification on a verifier-build failure — that failure is exactly the
 /// kind of misconfiguration the liveness gate exists to catch.  When verification
 /// is enabled a build error is fatal; when disabled we return `None`.
+/// #6290: the `serve` daemon this was named for is retired; `cmd_mcp_stdio` is
+/// now the only caller, and it is long-lived for the same reason.
 /// What: returns `Ok(Some(provider))` when enabled and the build succeeds,
 /// `Ok(None)` when verification is disabled, and `Err` when enabled but the build
 /// fails.
 /// Test: build path is network-bound; the decision branch is covered by the
 /// liveness-gate unit tests via `enforce_verifier_liveness`.
 #[cfg(feature = "http-server")]
-pub async fn build_verifier_for_serve(
+pub async fn build_verifier_for_mcp_stdio(
     config: &ReviewConfig,
 ) -> anyhow::Result<Option<Arc<dyn LlmProvider>>> {
     // #5192: one implementation, in the lib, so the daemon and the webhook
