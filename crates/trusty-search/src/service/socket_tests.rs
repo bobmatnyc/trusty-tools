@@ -155,7 +155,7 @@ async fn dial_once(socket: &Path, request: &serde_json::Value) -> RawExchange {
 #[test]
 fn rpc_router_registers_every_documented_method() {
     let router = super::build_router(&state_with_indexes(0));
-    let mut registered: Vec<&str> = router.method_names().collect();
+    let mut registered: Vec<&str> = router.method_names().chain(router.stream_names()).collect();
     registered.sort_unstable();
     let mut documented: Vec<&str> = METHODS.to_vec();
     documented.sort_unstable();
@@ -163,6 +163,35 @@ fn rpc_router_registers_every_documented_method() {
         registered, documented,
         "METHODS must list exactly what build_router registers"
     );
+}
+
+/// Why: #6285 slice 5 registers its two names into the router's STREAMING
+/// table, and `rpc_router_registers_every_documented_method` reads the union of
+/// both tables — so registering a stream with `typed` instead of `typed_stream`
+/// keeps that test green while changing what a caller gets. It is not a
+/// degraded stream: `dispatch_streaming` answers a `"stream": true` request
+/// against a unary name with `CODE_STREAM_UNSUPPORTED`, so the dashboard sees a
+/// refusal rather than one frame. This pins the table each name lives in.
+/// Test: this function IS the test.
+#[test]
+fn rpc_router_registers_the_two_streams_as_streams() {
+    let router = super::build_router(&state_with_indexes(0));
+    let mut streaming: Vec<&str> = router.stream_names().collect();
+    streaming.sort_unstable();
+    let mut expected: Vec<&str> = crate::service::rpc::streams::METHODS.to_vec();
+    expected.sort_unstable();
+    assert_eq!(
+        streaming, expected,
+        "exactly the streams family may be registered as streaming"
+    );
+
+    let unary: Vec<&str> = router.method_names().collect();
+    for method in crate::service::rpc::streams::METHODS {
+        assert!(
+            !unary.contains(method),
+            "{method} must not also be a unary method — one name is one or the other"
+        );
+    }
 }
 
 /// Why: [`METHODS`] splices in each family's constants one by one, so a family
@@ -187,6 +216,7 @@ fn every_family_method_is_spliced_into_the_socket_method_list() {
         ("reads", crate::service::rpc::reads::METHODS),
         ("queries", crate::service::rpc::queries::METHODS),
         ("writes", crate::service::rpc::writes::METHODS),
+        ("streams", crate::service::rpc::streams::METHODS),
     ] {
         for method in names {
             assert!(

@@ -21,8 +21,8 @@
 //! | 1 | the listener itself, plus [`METHOD_HEALTH`] | landed (PR #6367) |
 //! | 2 | the READ surface — indexes, status, config, chunks, graph, call chain | landed (PR #6368), in [`crate::service::rpc::reads`] |
 //! | 3 | the QUERY surface — search and its fan-out, grep and its fan-out, similarity, typeahead | landed (PR #6377), in [`crate::service::rpc::queries`] |
-//! | 4 | the WRITE surface — index create, delete, relocate, the two per-file writes, the reindex trigger, contributed-graph ingest | this one, in [`crate::service::rpc::writes`] |
-//! | 5 | the SSE streams — reindex progress and the daemon status stream | not started |
+//! | 4 | the WRITE surface — index create, delete, relocate, the two per-file writes, the reindex trigger, contributed-graph ingest | landed (PR #6381), in [`crate::service::rpc::writes`] |
+//! | 5 | the STREAMS — reindex progress and the daemon status stream | this one, in [`crate::service::rpc::streams`] |
 //! | retire | delete the axum surface and move the eleven dialling crates | not started |
 //!
 //! **Two doors, one daemon.** The socket serves the same `Arc<SearchAppState>`
@@ -48,7 +48,7 @@ use serde::{Deserialize, Serialize};
 use tokio::net::UnixListener;
 use trusty_common::uds::server::{serve_until, RpcRouter, RpcServeOptions};
 
-use crate::service::rpc::{queries, reads, writes};
+use crate::service::rpc::{queries, reads, streams, writes};
 use crate::service::server::SearchAppState;
 
 #[cfg(test)]
@@ -102,6 +102,12 @@ pub const METHODS: &[&str] = &[
     writes::METHOD_INDEX_FILE_REMOVE,
     writes::METHOD_INDEX_REINDEX,
     writes::METHOD_GRAPH_INGEST,
+    // #6285 slice 5 — the streams. Registered in a SEPARATE router table from
+    // the twenty-three above: a name is streaming or unary, never both, so
+    // `rpc_router_registers_every_documented_method` compares this array
+    // against the union of the two.
+    streams::METHOD_STATUS_STREAM,
+    streams::METHOD_INDEX_REINDEX_STREAM,
 ];
 
 /// The params of a method that takes no arguments.
@@ -154,9 +160,10 @@ pub fn socket_path() -> Result<PathBuf> {
 /// [`trusty_common::uds::server`]'s.
 /// What: [`METHOD_HEALTH`] reads its report through
 /// [`crate::service::server::health_report`] — the same call `GET /health`
-/// makes, so the two transports cannot answer differently. Each later slice
-/// appends one `register` call for its own route family; slice 2's is
-/// [`reads::register`] and slice 3's is [`queries::register`].
+/// makes, so the two transports cannot answer differently. Each slice appends
+/// one `register` call for its own route family; slice 5's
+/// [`streams::register`] is the only one that registers into the router's
+/// STREAMING table rather than its unary one.
 /// Test: `rpc_router_registers_every_documented_method`,
 /// `rpc_reports_method_not_found_for_an_unknown_method`.
 fn build_router(state: &Arc<SearchAppState>) -> RpcRouter {
@@ -170,7 +177,8 @@ fn build_router(state: &Arc<SearchAppState>) -> RpcRouter {
     );
     let router = reads::register(router, state);
     let router = queries::register(router, state);
-    writes::register(router, state)
+    let router = writes::register(router, state);
+    streams::register(router, state)
 }
 
 /// Per-connection budgets for this listener.
@@ -186,6 +194,13 @@ fn build_router(state: &Arc<SearchAppState>) -> RpcRouter {
 /// today, and a slice-3 query response can exceed 8 MiB when a caller asks for
 /// full content at a large `top_k` or a grep at a large `max_results`. Both
 /// wait for the retire slice, which is when a consumer first dials these names.
+///
+/// Slice 5's streams are NOT a third such surface. The budget bounds each
+/// streamed frame separately rather than their sum, and one progress event or
+/// one `DaemonEvent` is a few hundred bytes — a stream reaches the cap only if a
+/// single event does. The read bound is not a stream's idle budget either: it
+/// bounds delivery of the REQUEST frame, and neither end applies a deadline
+/// between two frames of a response (#6286).
 fn serve_options() -> RpcServeOptions {
     RpcServeOptions::default()
 }
@@ -261,6 +276,7 @@ pub async fn serve_until_shutdown(
     tracing::info!(
         socket = %path.display(),
         methods = router.method_names().count(),
+        streams = router.stream_names().count(),
         "trusty-search serving rpc"
     );
 
