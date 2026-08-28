@@ -314,6 +314,57 @@ async fn a_live_reindex_stream_delivers_events_in_order_as_they_are_emitted() {
     );
 }
 
+/// Why: `reindex_stream` snapshots the replay buffer and THEN subscribes, and
+/// `ReindexProgress::push` buffers under the same lock and THEN broadcasts — so
+/// an event whose two halves straddle the open can be delivered twice or lost.
+/// That instant is not drivable: `reindex_stream` has no await point between the
+/// snapshot and the subscribe, so the window is only reachable from another
+/// thread with no seam to stop at.
+///
+/// What this pins is the composition either side of it — the two orderings that
+/// ARE deterministic. An event pushed strictly BEFORE the open arrives once, from
+/// the replay; one pushed strictly AFTER arrives once, live. A rewrite that
+/// subscribed before snapshotting, replayed twice, or dropped the replay changes
+/// one of those two counts, so it fails here even though the race itself is not
+/// reproducible. The window is inherited from the SSE handler and accepted, not
+/// introduced by this slice (#6285).
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_event_either_side_of_the_stream_opening_is_delivered_exactly_once() {
+    let (state, _http, rpc) = routers(&["rs"]).await;
+    let before = serde_json::json!({ "event": "start", "total_files": 2 });
+    let progress = plant_progress(
+        &state,
+        "rs",
+        ReindexStatus::Running,
+        std::slice::from_ref(&before),
+    )
+    .await;
+
+    let mut items = open_stream(
+        &rpc,
+        streams::METHOD_INDEX_REINDEX_STREAM,
+        serde_json::json!({ "index_id": "rs" }),
+    )
+    .await;
+
+    let after = serde_json::json!({ "event": "progress", "indexed": 1, "total": 2 });
+    progress.push(after.clone()).await;
+
+    // Two items, in that order: a third would mean the replayed event was also
+    // delivered live, and a first item of `after` would mean the replay was lost.
+    assert_eq!(
+        take_items(&mut items, 2).await,
+        vec![before, after],
+        "each event either side of the open must arrive exactly once, in order"
+    );
+
+    // The next item is the next event and nothing left over from the open.
+    let latest = serde_json::json!({ "event": "complete", "indexed": 2, "elapsed_ms": 3 });
+    progress.push(latest.clone()).await;
+    assert_eq!(take_items(&mut items, 1).await, vec![latest]);
+}
+
 /// Why: the SSE route answers `404` for an index with no recorded reindex, and a
 /// stream that opened and then ended empty would read to a consumer as "the
 /// reindex produced nothing" rather than "there is no reindex". This pins the
