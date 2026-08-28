@@ -1075,3 +1075,47 @@ fn refused_foreign_port_drives_all_ok_false_and_a_nonzero_exit_code() {
         "`tctl install` must exit non-zero when the #4470 port guard refused"
     );
 }
+
+/// REGRESSION (#6290): the install pass VISITS a member whose service is
+/// retired, so its stale unit actually gets evicted.
+///
+/// Why: `plans_service_bootstrap` gated on `manage == Launchd`, and
+/// `manage_strategy_for` gives a retired member `ManageStrategy::None`. Those
+/// two correct-in-isolation rules composed into a member the install loop
+/// skipped entirely, so `bootstrap_one`'s eviction branch — its only production
+/// caller being this predicate's call site — never ran on any host. The
+/// pre-existing `retired_review_has_no_service_install` passed only because it
+/// calls `bootstrap_one` directly, bypassing the gate that strands it.
+///
+/// This drives the shared predicate through `build_dry_run_report`, the same
+/// function the real install loop consults, using the manage strategy
+/// PRODUCTION derives rather than a hand-picked one.
+#[test]
+fn plans_service_bootstrap_visits_a_retired_member() {
+    let manage = crate::commands::stable_set::manage_strategy_for("trusty-review", true);
+    assert_eq!(
+        manage,
+        ManageStrategy::None,
+        "a retired member has no lifecycle to control — that part is correct"
+    );
+
+    let members = vec![stable_member_for_test(
+        "trusty-review",
+        "trusty-review",
+        manage,
+    )];
+    let report = build_dry_run_report(&members, true, std::path::Path::new("/tmp/tctl-test-bin"));
+
+    assert!(
+        report.members[0].service_bootstrap,
+        "a retired member must still be visited, to EVICT its unit — otherwise \
+         com.trusty.review stays loaded and respawning on every host forever"
+    );
+
+    let disabled =
+        build_dry_run_report(&members, false, std::path::Path::new("/tmp/tctl-test-bin"));
+    assert!(
+        !disabled.members[0].service_bootstrap,
+        "--no-service must still suppress the visit"
+    );
+}

@@ -34,6 +34,7 @@
 use anyhow::{Context, Result};
 
 use crate::launchd::{LaunchdConfig, current_uid};
+use crate::launchd_labels::{EvictionOutcome, LabelEviction};
 
 /// What an [`install_and_activate`](LaunchdConfig::install_and_activate) call
 /// actually did.
@@ -311,24 +312,82 @@ impl LaunchdConfig {
     /// What: best-effort per label; a legacy unit that is absent, not loaded, or
     /// refuses to unload never fails the install, because the canonical unit is
     /// still the thing being installed.
+    ///
+    /// #6290: this fail-soft contract holds only while something IS being
+    /// installed to replace the unit. A RETIRED unit has no replacement, so a
+    /// caller clearing one wants [`Self::evict_legacy_detailed`], which
+    /// distinguishes a failed removal from an absent one.
     pub fn evict_legacy(&self, legacy_labels: &[&str]) -> Vec<String> {
-        let mut evicted = Vec::new();
-        for legacy in legacy_labels {
-            let mut alias = self.clone();
-            alias.label = (*legacy).to_string();
-            let was_loaded = alias.is_loaded();
-            let _ = alias.bootout();
-            let removed = alias
-                .plist_path()
-                .ok()
-                .filter(|p| p.exists())
-                .map(|p| std::fs::remove_file(p).is_ok())
-                .unwrap_or(false);
-            if was_loaded || removed {
-                evicted.push((*legacy).to_string());
+        self.evict_legacy_detailed(legacy_labels)
+            .into_iter()
+            .filter(|e| e.outcome == EvictionOutcome::Evicted)
+            .map(|e| e.label)
+            .collect()
+    }
+
+    /// Boot out and delete every legacy label's unit, reporting each outcome.
+    ///
+    /// Why: [`Self::evict_legacy`] answers only "which labels were evicted", so
+    /// a label missing from its result could mean either "nothing was there" or
+    /// "the removal failed" (#6290). Those need opposite handling — the first is
+    /// the steady state, the second leaves a unit loaded and respawning — and a
+    /// caller that cannot tell them apart reports success either way.
+    /// What: per label, boots out only a unit that is actually loaded, verifies
+    /// launchd let go, then deletes the plist; any step failing yields
+    /// [`EvictionOutcome::Failed`] with the reason.
+    /// Test: `evict_legacy_keeps_only_evicted_labels`.
+    pub fn evict_legacy_detailed(&self, legacy_labels: &[&str]) -> Vec<LabelEviction> {
+        legacy_labels
+            .iter()
+            .map(|legacy| {
+                let mut alias = self.clone();
+                alias.label = (*legacy).to_string();
+                LabelEviction::new(*legacy, alias.evict_one())
+            })
+            .collect()
+    }
+
+    /// Clear THIS config's label, reporting what happened to it.
+    ///
+    /// What: bootout is issued only when the label is actually loaded (booting
+    /// out an unloaded label errors spuriously), and its postcondition is then
+    /// verified — `launchctl bootout` exiting 0 is not proof launchd let go, the
+    /// same gap [`Self::bootstrap_and_verify`] closes on the way in.
+    fn evict_one(&self) -> EvictionOutcome {
+        let was_loaded = self.is_loaded();
+        let mut failures: Vec<String> = Vec::new();
+
+        if was_loaded {
+            if let Err(e) = self.bootout() {
+                failures.push(format!("`launchctl bootout` failed: {e}"));
+            } else if self.is_loaded() {
+                failures
+                    .push("still loaded after `launchctl bootout` reported success".to_string());
             }
         }
-        evicted
+
+        let removed = match self.plist_path() {
+            Ok(path) if path.exists() => match std::fs::remove_file(&path) {
+                Ok(()) => true,
+                Err(e) => {
+                    failures.push(format!("could not delete {}: {e}", path.display()));
+                    false
+                }
+            },
+            Ok(_) => false,
+            Err(e) => {
+                failures.push(format!("could not resolve the plist path: {e}"));
+                false
+            }
+        };
+
+        if !failures.is_empty() {
+            EvictionOutcome::Failed(failures.join("; "))
+        } else if was_loaded || removed {
+            EvictionOutcome::Evicted
+        } else {
+            EvictionOutcome::Absent
+        }
     }
 
     /// Bootstrap this label and confirm launchd actually has it.

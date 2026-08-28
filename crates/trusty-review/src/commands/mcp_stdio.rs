@@ -101,9 +101,9 @@ fn retired_daemon_argv(args: &McpArgs) -> bool {
 ///
 /// Why: the unit cannot work — there is no daemon to start — and the operator
 /// reading a launchd log wants a command to paste rather than a description of
-/// one. `tctl up` evicts the retired unit as part of its ordinary bootstrap
-/// pass (`trusty_installer::commands::service_bootstrap`), so that is what this
-/// names.
+/// one. `tctl install` evicts the retired unit in its service-bootstrap pass
+/// (`trusty_installer::commands::service_bootstrap`), so that is what this
+/// names — NOT `tctl up`, which has no launchd pass at all (#6290 review).
 /// What: one line to stderr; stdout stays clean.
 /// Test: `stale_daemon_argv_still_parses` covers the parse half; the message
 /// itself is a single `eprintln!` with no branching.
@@ -112,7 +112,7 @@ fn report_retired_daemon_argv() {
         "trusty-review: this process was started with the retired daemon flags, \
          so a launchd unit predating #6290 is still loaded. trusty-review has no \
          daemon — reviews run per invocation (`trusty-review run`). Clear the \
-         stale unit with:\n    tctl up"
+         stale unit with:\n    tctl install"
     );
 }
 
@@ -185,7 +185,7 @@ async fn build_app_state(mut config: ReviewConfig, dedup_need: DedupNeed) -> Res
         .await
         .map_err(|e| anyhow::anyhow!("failed to build LLM provider: {e}"))?;
 
-    let verifier = cli_verify::build_verifier_for_serve(&config).await?;
+    let verifier = cli_verify::build_verifier_for_mcp_stdio(&config).await?;
     enforce_verifier_liveness(&config, verifier.as_ref())
         .await
         .map_err(|reason| anyhow::anyhow!(reason))?;

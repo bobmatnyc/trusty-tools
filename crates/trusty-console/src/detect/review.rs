@@ -84,24 +84,45 @@ impl Default for ReviewConnector {
     }
 }
 
-/// Read the version off `<binary> --version`, or `None`.
+/// What running `<binary> --version` established.
+///
+/// Why: "no version string" and "the binary cannot execute" are opposite facts
+/// that a bare `Option<String>` collapses into the same `None` (#6290). The
+/// second is the exact state the spawn exists to catch, and reporting it as
+/// `Available` also puts the console at odds with `tctl`, whose
+/// `probe_presence` calls it `ProbeFailed`.
+enum VersionProbe {
+    /// `--version` ran to completion; the payload is the parsed version, which
+    /// is `None` only when the output did not have clap's `<name> <version>`
+    /// shape. The binary works either way.
+    Ran(Option<String>),
+    /// On `PATH` but not runnable — a broken signature, a truncated download, a
+    /// hang. The payload is the operator-facing reason.
+    CannotExecute(String),
+}
+
+/// Run `<binary> --version` and report what happened.
 ///
 /// Why: presence on `PATH` alone would report a binary that cannot execute — a
 /// broken signature, a truncated download — as usable. Running it is the
 /// cheapest check that tells the two apart, and it yields the version the card
 /// renders anyway.
-/// What: spawns `<binary> --version`, waits up to [`VERSION_TIMEOUT`], and
-/// takes the second whitespace-separated token of the first line (clap's
-/// `<name> <version>` shape). Any failure is `None`; the caller still reports
-/// `Available`, because the binary being there is the fact that was observed.
-/// Test: `review_connector_reports_available_when_the_binary_is_present`.
-fn binary_version(binary: &str) -> Option<String> {
-    let mut child = std::process::Command::new(binary)
+/// What: spawns `<binary> --version`, waits up to [`VERSION_TIMEOUT`], and takes
+/// the second whitespace-separated token of the first line (clap's
+/// `<name> <version>` shape). A non-zero exit, a spawn failure, or a hang is
+/// [`VersionProbe::CannotExecute`], never a silent `None`.
+/// Test: `review_connector_reports_available_when_the_binary_is_present`,
+/// `a_binary_that_cannot_execute_is_not_available`.
+fn binary_version(binary: &str) -> VersionProbe {
+    let mut child = match std::process::Command::new(binary)
         .arg("--version")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .ok()?;
+    {
+        Ok(child) => child,
+        Err(e) => return VersionProbe::CannotExecute(format!("spawn `{binary} --version`: {e}")),
+    };
 
     // `wait_timeout` is not in std; poll the child instead of blocking forever
     // on a binary that hangs before printing.
@@ -109,9 +130,11 @@ fn binary_version(binary: &str) -> Option<String> {
     loop {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => break,
-            Ok(Some(_)) => {
+            Ok(Some(status)) => {
                 let _ = child.wait();
-                return None;
+                return VersionProbe::CannotExecute(format!(
+                    "`{binary} --version` exited {status}"
+                ));
             }
             Ok(None) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(10));
@@ -119,19 +142,28 @@ fn binary_version(binary: &str) -> Option<String> {
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return None;
+                return VersionProbe::CannotExecute(format!(
+                    "`{binary} --version` did not exit within {VERSION_TIMEOUT:?}"
+                ));
             }
-            Err(_) => return None,
+            Err(e) => {
+                return VersionProbe::CannotExecute(format!(
+                    "waiting on `{binary} --version`: {e}"
+                ));
+            }
         }
     }
 
-    let output = child.wait_with_output().ok()?;
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .next()?
-        .split_whitespace()
-        .nth(1)
-        .map(str::to_owned)
+    match child.wait_with_output() {
+        Ok(output) => VersionProbe::Ran(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .map(str::to_owned),
+        ),
+        Err(e) => VersionProbe::CannotExecute(format!("reading `{binary} --version`: {e}")),
+    }
 }
 
 impl ServiceConnector for ReviewConnector {
@@ -149,11 +181,14 @@ impl ServiceConnector for ReviewConnector {
     /// must agree — since #6290 both ask it by presence
     /// (`trusty_installer::commands::probe_http::probe_presence`), not by
     /// dialling.
-    /// What: binary on PATH → `Absent` if not, otherwise `Available` carrying
-    /// whatever `--version` printed. `url` is `None`: there is no address, and
-    /// ADR-0032 makes trusty-console the only HTTP surface in the workspace, so
-    /// a synthesised one would be a link that cannot work.
-    /// Test: see the module docs.
+    /// What: not on PATH → `Absent`. On PATH but not runnable → `Degraded` with
+    /// the reason as its `hint`, matching `tctl`'s `ProbeFailed` for the same
+    /// host. Otherwise `Available` carrying whatever `--version` printed. `url`
+    /// is `None`: there is no address, and ADR-0032 makes trusty-console the
+    /// only HTTP surface in the workspace, so a synthesised one would be a link
+    /// that cannot work.
+    /// Test: see the module docs;
+    /// `a_binary_that_cannot_execute_is_not_available`.
     fn detect(&self) -> ServiceInfo {
         let binary = self.binary();
         if !binary_on_path(binary) {
@@ -167,13 +202,28 @@ impl ServiceConnector for ReviewConnector {
             };
         }
 
+        // #6290: a binary that is present but will not run is NOT available.
+        // Reporting it as such is what put the console at odds with `tctl`,
+        // which calls the same host `ProbeFailed`.
+        let (status, version, hint) = match binary_version(binary) {
+            VersionProbe::Ran(version) => (ServiceStatus::Available, version, None),
+            VersionProbe::CannotExecute(why) => (
+                ServiceStatus::Degraded,
+                None,
+                Some(format!(
+                    "{binary} is on PATH but did not run: {why}. Reinstall it \
+                     with `cargo install {binary}`."
+                )),
+            ),
+        };
+
         ServiceInfo {
             id: self.id().to_string(),
             display_name: self.display_name().to_string(),
-            status: ServiceStatus::Available,
-            version: binary_version(binary),
+            status,
+            version,
             url: None,
-            hint: None,
+            hint,
         }
     }
 }
@@ -256,6 +306,32 @@ mod tests {
                 matches!(status, ServiceStatus::Available | ServiceStatus::Absent),
                 "a per-invocation member has only two honest verdicts, got {status:?}"
             );
+        }
+    }
+
+    /// REGRESSION (#6290): a binary that cannot execute is not `Available`.
+    ///
+    /// Why: `binary_version` returned `None` for BOTH "no version in the output"
+    /// and "the binary exited non-zero", and `detect` reported `Available`
+    /// regardless — the exact "cannot execute" state the spawn exists to catch,
+    /// reported as usable. It also disagreed with `tctl`, whose `probe_presence`
+    /// calls the same host `ProbeFailed`.
+    /// What: points the connector at a binary that exists and always exits 1
+    /// (`/usr/bin/false`), and asserts the verdict is not `Available`.
+    #[cfg(unix)]
+    #[test]
+    fn a_binary_that_cannot_execute_is_not_available() {
+        let probe = binary_version("/usr/bin/false");
+        match probe {
+            VersionProbe::CannotExecute(why) => {
+                assert!(
+                    why.contains("exited"),
+                    "the operator needs the reason: {why}"
+                );
+            }
+            VersionProbe::Ran(v) => {
+                panic!("a binary exiting 1 must not read as a clean run, got {v:?}")
+            }
         }
     }
 }

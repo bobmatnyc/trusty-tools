@@ -601,7 +601,7 @@ impl super::super::service_bootstrap::ServiceEnv for FakeServiceEnv {
     // #6290: no member this fake is driven with is retired, so the eviction is
     // a no-op here. The behaviour has its own coverage in
     // `service_bootstrap_tests::retired_review_has_no_service_install`.
-    fn evict_retired(&self, _binary: &str) -> Vec<String> {
+    fn evict_retired(&self, _binary: &str) -> Vec<trusty_common::launchd_labels::LabelEviction> {
         Vec::new()
     }
 }

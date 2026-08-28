@@ -72,6 +72,8 @@
 //! the #4470 port-guard refusals — (via `FakeServiceEnv`), and the
 //! [`start_plan`] relaxation used by `lifecycle.rs`.
 
+use trusty_common::launchd_labels::{EvictionOutcome, LabelEviction};
+
 /// Environment-variable opt-out for the post-install service bootstrap.
 ///
 /// Why: automation / CI and operators who manage launchd themselves need a way
@@ -297,14 +299,16 @@ pub trait ServiceEnv {
     fn port_guard(&self, binary: &str) -> Result<(), String>;
 
     /// #6290: boot out and delete every launchd unit this member has RETIRED,
-    /// returning the labels that were actually there.
+    /// reporting what became of each label.
     ///
-    /// Best-effort, like [`trusty_common::launchd_activate::LaunchdConfig::evict_legacy`]
-    /// it delegates to: a unit that is absent, unloaded, or refuses to unload
-    /// must never fail an install, because nothing is being installed for this
-    /// member in the first place. An empty return means there was nothing to
-    /// clear, which is the steady state on every host after the first pass.
-    fn evict_retired(&self, binary: &str) -> Vec<String>;
+    /// NOT best-effort, unlike the legacy-label eviction an install does on the
+    /// way to bootstrapping a replacement. A retired unit has no replacement: if
+    /// it stays loaded it keeps respawning a subcommand the binary no longer
+    /// has, and nothing later in the install will notice. So a failed removal
+    /// becomes a [`BootstrapAction::Failed`], which folds into the exit code. An
+    /// all-[`EvictionOutcome::Absent`] return is the steady state on every host
+    /// after the first pass.
+    fn evict_retired(&self, binary: &str) -> Vec<LabelEviction>;
 }
 
 /// Decide and (via the seam) execute the service bootstrap for one member.
@@ -376,7 +380,34 @@ pub fn bootstrap_one(
     // returns without touching launchd, which is exactly the state that leaves
     // `com.trusty.review` respawning a subcommand the binary no longer has.
     if member_has_retired_service(binary) {
-        let evicted = env.evict_retired(binary);
+        let outcomes = env.evict_retired(binary);
+
+        // #6290: a unit that would not go down is the whole reason this branch
+        // exists — reporting it as a skip exits 0 with the retired unit still
+        // respawning. `Failed` folds into `service_ok` -> `all_ok` -> the exit
+        // code, so the operator sees it.
+        let failures: Vec<String> = outcomes
+            .iter()
+            .filter_map(|e| match &e.outcome {
+                EvictionOutcome::Failed(why) => Some(format!("{}: {why}", e.label)),
+                _ => None,
+            })
+            .collect();
+        if !failures.is_empty() {
+            return BootstrapAction::Failed(format!(
+                "{binary}'s launchd service is retired (#6290) but could not be \
+                 cleared — {}. It will keep respawning until this is resolved: \
+                 boot each label out with `launchctl bootout gui/<uid>/<label>` \
+                 and delete its plist under ~/Library/LaunchAgents/",
+                failures.join("; ")
+            ));
+        }
+
+        let evicted: Vec<&str> = outcomes
+            .iter()
+            .filter(|e| e.outcome == EvictionOutcome::Evicted)
+            .map(|e| e.label.as_str())
+            .collect();
         return BootstrapAction::Skipped(if evicted.is_empty() {
             format!("{binary} has no launchd service (retired, #6290)")
         } else {
@@ -551,7 +582,7 @@ impl ServiceEnv for RealServiceEnv {
     // legacy alias — are booted out and their plists deleted, through the same
     // `evict_legacy` primitive an install uses for a renamed unit. Deleting the
     // plist is what stops the next `launchctl bootstrap` resurrecting it.
-    fn evict_retired(&self, binary: &str) -> Vec<String> {
+    fn evict_retired(&self, binary: &str) -> Vec<LabelEviction> {
         #[cfg(target_os = "macos")]
         {
             use trusty_common::launchd::{KeepAlive, LaunchdConfig};
@@ -574,7 +605,7 @@ impl ServiceEnv for RealServiceEnv {
                 fd_limit: None,
                 working_directory: None,
             };
-            cfg.evict_legacy(&labels)
+            cfg.evict_legacy_detailed(&labels)
         }
         #[cfg(not(target_os = "macos"))]
         {

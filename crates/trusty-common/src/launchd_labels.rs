@@ -360,5 +360,69 @@ pub fn is_canonical_label(candidate: &str) -> bool {
     service_for_label(candidate).is_some()
 }
 
+/// What became of ONE launchd label an eviction pass tried to clear.
+///
+/// Why: an eviction that reports only "which labels were evicted" cannot tell
+/// "there was nothing there" apart from "the removal failed" (#6290). Those
+/// need opposite handling: the first is the steady state on every host after
+/// the first pass, the second leaves a retired unit loaded and respawning, and
+/// an installer that treats it as success exits 0 with the daemon still up.
+/// What: per label, one of evicted / absent / failed-with-a-reason.
+/// Test: `eviction_outcome_only_failed_is_a_failure`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EvictionOutcome {
+    /// The unit was loaded or its plist was on disk; neither is now.
+    Evicted,
+    /// Nothing to clear: not loaded, and no plist on disk.
+    Absent,
+    /// The unit is still loaded, or its plist is still on disk. The payload is
+    /// the operator-facing reason.
+    Failed(String),
+}
+
+impl EvictionOutcome {
+    /// Whether this outcome must fail the pass that produced it.
+    ///
+    /// Why: classified once, on the enum, rather than re-derived at each call
+    /// site — the same rule `BootstrapAction::is_failure` follows, and for the
+    /// same reason (#4470): an inline `matches!` at one call site is how a
+    /// variant comes to be silently treated as success.
+    /// Test: `eviction_outcome_only_failed_is_a_failure`.
+    #[must_use]
+    pub fn is_failure(&self) -> bool {
+        matches!(self, EvictionOutcome::Failed(_))
+    }
+}
+
+/// One label paired with what an eviction pass did to it.
+///
+/// Why: the caller reports per label, so the label has to travel with its
+/// outcome rather than being recoverable only by position (#6290).
+/// Test: `eviction_outcome_only_failed_is_a_failure`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LabelEviction {
+    /// The launchd label this outcome is about.
+    pub label: String,
+    /// What became of it.
+    pub outcome: EvictionOutcome,
+}
+
+impl LabelEviction {
+    /// Pair `label` with `outcome`.
+    ///
+    /// `#[non_exhaustive]` keeps a future field from being a breaking change,
+    /// so external crates (the installer, its test fakes) construct through
+    /// here rather than with a struct literal.
+    #[must_use]
+    pub fn new(label: impl Into<String>, outcome: EvictionOutcome) -> Self {
+        Self {
+            label: label.into(),
+            outcome,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;

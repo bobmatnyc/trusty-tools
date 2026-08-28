@@ -153,8 +153,9 @@ review is one process that starts, reviews, and exits. A cold start costs about
 191 ms against a median review of 36.7 s (#5028), so residency bought nothing
 it charged for.
 
-If a machine still has the old LaunchAgent loaded, `tctl up` boots it out and
-deletes its plist. Nothing else is needed.
+If a machine still has the old LaunchAgent loaded, `tctl install` boots it out
+and deletes its plist. Nothing else is needed. (`tctl up` does not: it has no
+launchd pass.)
 
 ### The structured result
 

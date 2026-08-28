@@ -108,7 +108,8 @@ of those bind it; all three go when that client migrates. Whatever you pick:
 - **#6290** — `trusty-review` stopped having a transport at all. ADR-0032's
   review lane retired the daemon: reviews run per invocation
   (`trusty-review run --json`), so there is no port, no socket and no launchd
-  unit, and `com.trusty.review` is evicted by `tctl up` rather than installed.
+  unit, and `com.trusty.review` is evicted by `tctl install` rather than
+  installed.
   Its consumers moved with it in the same change, for the reason #6277 records
   — `tctl`'s probe and the console's `ReviewConnector` both ask presence
   (binary on PATH plus `--version`) instead of dialling. A probe left dialling

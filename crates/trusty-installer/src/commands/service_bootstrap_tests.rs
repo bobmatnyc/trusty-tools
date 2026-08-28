@@ -41,6 +41,9 @@ struct FakeServiceEnv {
     evicted: RefCell<Vec<String>>,
     /// #6290: the labels the fake pretends were loaded and got booted out.
     retired_loaded: Vec<String>,
+    /// #6290: when set, every retired label reports this failure reason instead
+    /// of going down — the `launchctl bootout` / `remove_file` failure arm.
+    retired_eviction_failure: Option<String>,
 }
 
 impl FakeServiceEnv {
@@ -59,12 +62,20 @@ impl FakeServiceEnv {
             fallback_calls: RefCell::new(Vec::new()),
             evicted: RefCell::new(Vec::new()),
             retired_loaded: Vec::new(),
+            retired_eviction_failure: None,
         }
     }
 
     /// Builder (#6290): simulate a host that still has the retired unit loaded.
     fn with_retired_unit_loaded(mut self, labels: &[&str]) -> Self {
         self.retired_loaded = labels.iter().map(|s| (*s).to_owned()).collect();
+        self
+    }
+
+    /// Builder (#6290): simulate a retired unit that will NOT go down —
+    /// `launchctl bootout` failing, or the plist refusing to delete.
+    fn with_retired_eviction_failing(mut self, why: &str) -> Self {
+        self.retired_eviction_failure = Some(why.to_owned());
         self
     }
 
@@ -131,9 +142,18 @@ impl ServiceEnv for FakeServiceEnv {
     // #6290: stands in for `launchctl bootout` + plist deletion. Records the
     // member so a test can prove the eviction was ATTEMPTED, and returns the
     // labels the fake was told are loaded.
-    fn evict_retired(&self, binary: &str) -> Vec<String> {
+    fn evict_retired(&self, binary: &str) -> Vec<LabelEviction> {
         self.evicted.borrow_mut().push(binary.to_string());
-        self.retired_loaded.clone()
+        self.retired_loaded
+            .iter()
+            .map(|label| {
+                let outcome = match &self.retired_eviction_failure {
+                    Some(why) => EvictionOutcome::Failed(why.clone()),
+                    None => EvictionOutcome::Evicted,
+                };
+                LabelEviction::new(label, outcome)
+            })
+            .collect()
     }
 }
 
@@ -803,5 +823,61 @@ fn bootstrap_one_forwards_the_concrete_exe_path_to_service_install() {
         env.installed_exe_paths.borrow().as_slice(),
         &[Some(concrete)],
         "the concrete just-installed path must reach `run_service_install`"
+    );
+}
+
+/// REGRESSION (#6290): a retired unit that will not go down FAILS the install.
+///
+/// Why: `evict_retired` used to return a bare `Vec<String>` of labels, so
+/// "nothing was there" and "`launchctl bootout` failed" were the same empty
+/// answer. `bootstrap_one` reported `Skipped` either way, `is_failure()` was
+/// false, and `tctl install` exited 0 while `com.trusty.review` stayed loaded —
+/// respawning `trusty-review serve`, a subcommand the binary no longer has.
+/// The operator had no signal at all, and this PR deletes `service.rs`, so the
+/// manual escape hatch is gone too.
+#[test]
+fn retired_unit_that_will_not_go_down_fails_the_install() {
+    let env = FakeServiceEnv::new(true, false)
+        .with_retired_unit_loaded(&["com.trusty.review"])
+        .with_retired_eviction_failing("still loaded after `launchctl bootout` reported success");
+    let action = bootstrap_one(&env, "trusty-review", None);
+
+    assert!(
+        action.is_failure(),
+        "a retired unit still loaded must fail the install, got {action:?}"
+    );
+    match &action {
+        BootstrapAction::Failed(reason) => {
+            assert!(
+                reason.contains("com.trusty.review"),
+                "the operator needs the label named: {reason}"
+            );
+            assert!(
+                reason.contains("still loaded"),
+                "the operator needs the cause: {reason}"
+            );
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
+}
+
+/// REGRESSION (#6290): an absent retired unit is NOT a failure.
+///
+/// Why: the steady state on every host after the first pass is "nothing to
+/// clear". If that read as a failure, every subsequent `tctl install` would
+/// exit non-zero — the mirror-image defect of the one above.
+#[test]
+fn retired_unit_already_absent_is_not_a_failure() {
+    let env = FakeServiceEnv::new(true, false);
+    let action = bootstrap_one(&env, "trusty-review", None);
+
+    assert!(
+        !action.is_failure(),
+        "an already-clean host must not fail the install, got {action:?}"
+    );
+    assert_eq!(
+        *env.evicted.borrow(),
+        vec!["trusty-review".to_owned()],
+        "the eviction must still be ATTEMPTED, even on a clean host"
     );
 }

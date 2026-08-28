@@ -853,3 +853,22 @@ fn extract_labels(line: &str) -> Vec<String> {
     }
     found
 }
+
+/// REGRESSION (#6290): only a FAILED eviction is a failure.
+///
+/// Why: `evict_legacy` used to return a bare `Vec<String>` of evicted labels,
+/// which collapsed "nothing was there" and "the removal failed" into the same
+/// absence. An installer reading that absence as success leaves a retired unit
+/// loaded and respawning while exiting 0.
+#[test]
+fn eviction_outcome_only_failed_is_a_failure() {
+    assert!(!EvictionOutcome::Evicted.is_failure());
+    assert!(!EvictionOutcome::Absent.is_failure());
+    assert!(EvictionOutcome::Failed("still loaded after bootout".into()).is_failure());
+
+    // The label travels with its outcome, so a caller reporting per label never
+    // has to recover it by position.
+    let e = LabelEviction::new("com.trusty.review", EvictionOutcome::Absent);
+    assert_eq!(e.label, "com.trusty.review");
+    assert_eq!(e.outcome, EvictionOutcome::Absent);
+}
