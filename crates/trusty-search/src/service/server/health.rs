@@ -1056,6 +1056,26 @@ pub(super) struct UpgradeRequest {
     confirm: bool,
 }
 
+/// The `/health` body, for a caller that is not an axum route (#6285).
+///
+/// Why: `search.health` over the UDS socket and `GET /health` must never be
+/// able to disagree. Both call [`health_handler`], so there is one probe
+/// implementation and one report; this only strips the `Json` wrapper the
+/// socket has no use for and serialises the result the socket's frame carries.
+/// `HealthResponse` itself stays `pub(super)` — the socket needs the bytes,
+/// not the type.
+/// What: `health_handler(State(state))`, unwrapped and serialised.
+/// Serialisation cannot fail for this type (no map with non-string keys, no
+/// non-finite float), so the impossible branch reports itself rather than
+/// panicking.
+/// Test: `health_over_the_socket_matches_the_http_body`.
+pub(crate) async fn health_report(state: Arc<SearchAppState>) -> serde_json::Value {
+    let Json(resp) = health_handler(State(state)).await;
+    serde_json::to_value(resp).unwrap_or_else(
+        |e| serde_json::json!({ "status": "error", "error": format!("serialize health: {e}") }),
+    )
+}
+
 /// `POST /upgrade` — check for or install a new trusty-search version (issue #537).
 ///
 /// Why: Exposes the upgrade workflow over HTTP so the MCP dispatcher (which

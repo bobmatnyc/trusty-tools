@@ -125,6 +125,11 @@ trusty-embedderd-py = { path = "../trusty-embedderd-py", version = "0.1.3" }
 # ── Async runtime / HTTP ───────────────────────────────────────────────────
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync", "time"] }
+# #6285: `CancellationToken` fans ONE shutdown out to the HTTP listener and
+# the UDS listener. Awaiting the signal separately in each works on SIGTERM and
+# fails on Ctrl-C, where `tokio::signal` delivers to whichever waiter is
+# registered. Declared once in `[workspace.dependencies]`.
+tokio-util = { workspace = true }
 async-trait = "0.1"
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip"] }
