@@ -4,7 +4,7 @@
 **Version:** v1
 **Subsystem:** ALL (every daemon that binds a loopback HTTP port)
 **Owner:** Engineering / Architecture
-**Last-updated:** 2026-07-19
+**Last-updated:** 2026-08-28
 **Related:** [ADR-0018 — Loopback-only doctrine](../adr/0018-loopback-only-doctrine.md),
 [Three-Harness Architecture](harnesses.md),
 [trusty-console `service.rs`](../../crates/trusty-console/src/service.rs),
@@ -50,7 +50,6 @@ else's guard test too).
 | 7788 | `trusty-console` | `trusty-console/src/lib.rs::DEFAULT_PORT` | Yes |
 | 7878 | `trusty-search` | `trusty-search/src/service/constants.rs::DEFAULT_PORT` | Yes |
 | 7880 | `trusty-mpm` daemon (`trusty-mpmd` / `tm`) | `trusty-mpm/src/core/discovery.rs::DEFAULT_DAEMON_ADDR` | No |
-| 7881 | `trusty-mpm` **supervisor** metrics/health listener — a distinct process from the 7880 daemon above | `trusty-mpm/src/supervisor/config.rs::DEFAULT_METRICS_ADDR` | Yes |
 | 7882 | `trusty-code` (`tcode serve --http`) | `trusty-code/src/serve/mod.rs::DEFAULT_HTTP_PORT` (mirrored by `trusty-code-gui/src/state.rs::DEFAULT_DAEMON_URL`) | No (#3364 follow-up) |
 | 7890 | `trusty-embedderd` `--http` mode (manual/dev-run only; auto-spawn always uses `--stdio`/UDS) | `trusty-embedderd/src/lib.rs::Args::http_addr` | No |
 | 8080 | `trusty-agents` API server | `trusty-agents/src/runtime/mode_dispatch.rs` / `trusty-agents/src/service/mod.rs::DEFAULT_SERVICE_PORT` | No |
@@ -58,11 +57,12 @@ else's guard test too).
 ## Next Free Port
 
 The next unclaimed value in the `78xx`/`79xx` block used by this workspace
-is **7892**. `7891`, `7879` and `7070` are also free again — #6277 moved
+is **7892**. `7891`, `7881`, `7879` and `7070` are also free again — #6277 moved
 `trusty-review` off TCP onto a Unix socket, #6287 did the same for
-`trusty-analyze`, and #6286 for `trusty-memory` — but prefer sequential
-allocation over reusing a released value, so a stale reference to any of them in
-an old log or script cannot resolve to a different daemon.
+`trusty-analyze`, #6286 for `trusty-memory`, and #6288 retired the `trusty-mpm`
+supervisor's listener outright — but prefer sequential allocation over reusing a
+released value, so a stale reference to any of them in an old log or script
+cannot resolve to a different daemon.
 
 `7070` is the one to be most careful about: it was the workspace's
 longest-standing default, it is still named as a taken port by the
@@ -81,6 +81,8 @@ of those bind it; all three go when that client migrates. Whatever you pick:
    Neither `trusty-review` nor `trusty-analyze` has one — #6277 and #6287
    removed their `DEFAULT_PORT`s, and #6287 dropped `trusty-analyze`'s 7879
    row from the console's and `trusty-code`'s guard tables in the same change.
+   #6288 dropped the `trusty-mpm-supervisor` 7881 row from both for the same
+   reason.
 4. Add a row to the table above.
 
 ## Incident History
@@ -112,12 +114,22 @@ of those bind it; all three go when that client migrates. Whatever you pick:
   each of them what it sees. The 7879 rows in `trusty-console`'s and
   `trusty-code`'s `known_siblings` guards went with it: a guard naming a port
   nothing binds refuses a value that is free.
+- **#6288** — the `trusty-mpm` **supervisor** left this table. It served
+  `/metrics` + `/health` on 7881 for fleet observability and nothing in the
+  workspace read it: the daemon's `console_metrics` / `supervisor_status`
+  rebuilt `FleetMetrics` from the session store and left `run_stats` at its
+  default, so both reported zero sweeps and zero auto-resumes however long the
+  supervisor had been running. It now publishes each sweep's snapshot to
+  `~/.trusty-mpm/supervisor-metrics.json` and the daemon merges the real
+  counters from there, with an absent, corrupt, or stale file reported as such
+  rather than as a zero. The installer's #4470 foreign-port guard for this
+  bootstrap went with it — a process that binds nothing cannot collide.
 - **#3364** — `trusty-code`'s default HTTP port (7881) collided with
   `trusty-mpm`'s supervisor metrics listener (`DEFAULT_METRICS_ADDR`, also
   7881) — two defaults picked independently, on the same port, with no
   cross-crate guard catching it because neither `trusty-code` nor the
   supervisor had a `known_siblings`-style test at the time. The collision
-  was masked rather than surfaced: the supervisor answers `/health` with a
+  was masked rather than surfaced: the supervisor answered `/health` with a
   generic `{"status":"ok"}`, so both `tcode`'s GUI client and ops health
   probes got a false-healthy signal while every real `tcode` route 404'd.
   Fixed by moving `trusty-code::serve::DEFAULT_HTTP_PORT` to 7882 (in

@@ -2,18 +2,18 @@
 //!
 //! Why: for overnight / unattended operation the managed-session fleet needs an
 //! always-on process that auto-resumes `stopped` sessions, observes health
-//! without a live caller, surfaces pending decisions, and exposes fleet metrics —
+//! without a live caller, surfaces pending decisions, and publishes fleet metrics —
 //! all while making NO autonomy decisions. This handler is the operator entry
 //! point (`tm supervisor`) that wires the real session manager + activity monitor
 //! and runs the loop until the process is signalled to stop.
 //! What: builds a [`SessionManager`] over the real tmux driver (falling back to a
 //! no-op driver when tmux is absent), resolves the [`SupervisorConfig`] from env
-//! with CLI overrides, spawns the `/metrics` + `/health` server, and runs the
-//! supervisor loop.
+//! with CLI overrides, and runs the supervisor loop, which publishes its snapshot
+//! to `~/.trusty-mpm/supervisor-metrics.json` after every sweep (#6288 — it no
+//! longer binds an HTTP listener of its own).
 //! Test: `cli_parses_supervisor` covers flag parsing; the loop logic is unit-
 //! tested in `trusty_mpm::supervisor::tests`.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 // #4427: `OpenRouterClassifier` moved to `activity::classifier`; both are
@@ -58,20 +58,17 @@ pub(crate) fn apply_interval_override(
 /// handler readable and lets the CLI flags cleanly override the env defaults.
 /// What: loads the managed-session store under `~/.trusty-mpm/session-manager`,
 /// builds the activity monitor unless `--no-classify` (or the env toggle) disables
-/// it, spawns the metrics server, and runs [`Supervisor::run`]. CLI flags take
-/// precedence over `TRUSTY_MPM_SUPERVISOR_*` / `TRUSTY_MPM_AUTO_RESUME`.
+/// it, and runs [`Supervisor::run`], which publishes each sweep's snapshot to
+/// `~/.trusty-mpm/supervisor-metrics.json`. CLI flags take precedence over
+/// `TRUSTY_MPM_SUPERVISOR_*` / `TRUSTY_MPM_AUTO_RESUME`.
 /// Test: `cli_parses_supervisor`; loop behavior in `supervisor::tests`.
 pub(crate) async fn run_supervisor(
-    addr: Option<SocketAddr>,
     interval: Option<u64>,
     auto_resume: bool,
     no_classify: bool,
 ) -> anyhow::Result<()> {
     // Resolve config from env, then apply CLI overrides (CLI wins).
     let mut cfg = SupervisorConfig::from_env();
-    if let Some(a) = addr {
-        cfg.metrics_addr = a;
-    }
     // A zero interval is rejected outright (immediate feedback) rather than
     // silently falling back to the default.
     apply_interval_override(&mut cfg, interval)?;
@@ -102,47 +99,20 @@ pub(crate) async fn run_supervisor(
         None
     };
 
-    // Bind the /metrics + /health listener BEFORE the loop so a port collision
-    // fails fast (propagated out of run_supervisor) instead of leaving the
-    // supervisor running for hours with no metrics endpoint.
-    let handle = trusty_mpm::supervisor::new_handle();
-    let metrics_addr = cfg.metrics_addr;
-    let listener = trusty_mpm::supervisor::http::bind(metrics_addr).await?;
-
-    // Now that the port is confirmed free, serve on the bound listener. We keep
-    // the JoinHandle and select on it inside the loop so a later serve failure
-    // surfaces rather than being swallowed by a detached task.
-    let server_handle = handle.clone();
-    let mut server_task = tokio::spawn(async move {
-        trusty_mpm::supervisor::http::serve_on(listener, server_handle).await
-    });
-
+    // #6288: no listener to bind. The loop publishes its snapshot to a file the
+    // daemon reads, so there is no port to collide on and no server task to race
+    // the loop against.
+    let interval_secs = cfg.interval.as_secs();
+    let (auto_resume_flag, classify_idle) = (cfg.auto_resume, cfg.classify_idle);
+    let supervisor = Supervisor::new(mgr, cfg, monitor);
     tracing::info!(
-        addr = %metrics_addr,
-        interval_secs = cfg.interval.as_secs(),
-        auto_resume = cfg.auto_resume,
-        classify_idle = cfg.classify_idle,
+        metrics_path = %supervisor.metrics_path().display(),
+        interval_secs,
+        auto_resume = auto_resume_flag,
+        classify_idle,
         "starting unattended supervisor"
     );
-
-    let supervisor = Supervisor::new(mgr, cfg, monitor);
-    // Race the supervisor loop against the metrics server task: if the server
-    // dies (serve error or panic), abort the supervisor and propagate the error
-    // instead of running on without observability.
-    tokio::select! {
-        loop_result = supervisor.run(handle) => loop_result,
-        server_result = &mut server_task => {
-            match server_result {
-                Ok(Ok(())) => {
-                    anyhow::bail!("supervisor metrics server exited unexpectedly")
-                }
-                Ok(Err(e)) => Err(e.context("supervisor metrics server failed")),
-                Err(join_err) => {
-                    Err(anyhow::anyhow!("supervisor metrics server task panicked: {join_err}"))
-                }
-            }
-        }
-    }
+    supervisor.run().await
 }
 
 #[cfg(test)]

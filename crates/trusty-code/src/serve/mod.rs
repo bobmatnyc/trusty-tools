@@ -74,13 +74,14 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 /// `trusty-mpm` daemon 7880, `trusty-embedderd` `--http` mode 7890).
 /// `trusty-review` used to hold 7891 and no longer does — #6277 moved it to a
 /// Unix socket. This constant previously reused `7881`, which turned
-/// out to collide with `trusty-mpm`'s supervisor metrics listener
-/// (`trusty_mpm::supervisor::config::DEFAULT_METRICS_ADDR`,
-/// `crates/trusty-mpm/src/supervisor/config.rs`) — the two defaults were
-/// picked independently and nothing pinned them apart, so a fresh install
-/// with both `tm supervisor` and `tcode serve` running answered `/health` on
-/// `tcode`'s port with the supervisor's generic `{"status":"ok"}`, masking a
-/// real 404 for every other route (#3364). `7882` is verified free against
+/// out to collide with `trusty-mpm`'s supervisor metrics listener — the two
+/// defaults were picked independently and nothing pinned them apart, so a
+/// fresh install with both `tm supervisor` and `tcode serve` running answered
+/// `/health` on `tcode`'s port with the supervisor's generic
+/// `{"status":"ok"}`, masking a real 404 for every other route (#3364). That
+/// listener is retired (#6288 — the supervisor publishes to a file), so 7881
+/// is free again; this constant stays on `7882` because a released value is
+/// not reused. `7882` is verified free against
 /// the full known-sibling table in
 /// `docs/architecture/port-assignments.md` and matches the session-local
 /// workaround used to confirm the fix (`tcode serve --http --port 7882`).
@@ -415,8 +416,7 @@ mod tests {
     /// Cross-crate port-uniqueness contract (#3364).
     ///
     /// Why: `DEFAULT_HTTP_PORT` previously reused `7881`, silently colliding
-    /// with `trusty-mpm`'s supervisor metrics listener
-    /// (`DEFAULT_METRICS_ADDR`, `crates/trusty-mpm/src/supervisor/config.rs`)
+    /// with `trusty-mpm`'s supervisor metrics listener (since retired, #6288)
     /// — the supervisor's generic `/health` masked the collision until a real
     /// `tcode` route 404'd. This mirrors the `default_port_does_not_collide_
     /// with_known_siblings` guard already used by `trusty-console` and
@@ -446,14 +446,11 @@ mod tests {
                 7880,
                 "trusty-mpm/src/core/discovery.rs::DEFAULT_DAEMON_ADDR",
             ),
-            (
-                // #3364: the collision that motivated this guard — trusty-mpm's
-                // supervisor metrics listener, deployed via launchd and never
-                // moved (unlike this crate's daemon default).
-                "trusty-mpm-supervisor",
-                7881,
-                "trusty-mpm/src/supervisor/config.rs::DEFAULT_METRICS_ADDR",
-            ),
+            // #6288: no trusty-mpm-supervisor row. The collision that motivated
+            // this guard (#3364) was against its 7881 listener; the supervisor
+            // now publishes to `~/.trusty-mpm/supervisor-metrics.json` and binds
+            // nothing, so 7881 is free and a guard naming it would refuse a
+            // value nothing holds.
             (
                 "trusty-console",
                 7788,

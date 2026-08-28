@@ -531,8 +531,9 @@ fn fixed_ports_match_port_assignments_doc() {
     // Never guess: `tga` is not a daemon, and `trusty-installer` binds nothing.
     assert_eq!(fixed_port_for("tga"), None);
     assert_eq!(fixed_port_for("trusty-installer"), None);
-    // 7881 (mpm supervisor metrics) and 7882 (tcode) belong to other processes
-    // and must not be probed as stable-set members.
+    // 7882 (tcode) belongs to another process and must not be probed as a
+    // stable-set member. 7881 is free since #6288 — the mpm supervisor stopped
+    // binding it and publishes its metrics to a file instead.
     assert!(!matches!(fixed_port_for("trusty-code"), Some(7882)));
 }
 

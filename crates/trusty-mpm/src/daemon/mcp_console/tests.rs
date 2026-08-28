@@ -4,8 +4,9 @@
 //! the 500-SLOC cap (mirrors `inproject.rs`/`inproject/tests.rs`); the tests
 //! themselves are unchanged.
 //! What: `config_read`/`config_write`/`apply_config_write` shape and merge
-//! tests (including the #2196 `untracked_sync` cases), plus the
-//! `console_metrics`/`supervisor_status` report-shape tests.
+//! tests (including the #2196 `untracked_sync` cases), the
+//! `console_metrics`/`supervisor_status` report-shape tests, and the #6288
+//! published-metrics merge.
 //! Test: this IS the test module.
 
 use super::*;
@@ -441,6 +442,15 @@ async fn console_metrics_report_has_expected_shape() {
         report["metrics"]["auto_resume"].is_object(),
         "metrics.auto_resume must be an object: {report}"
     );
+    // #6288: the report must always say where `fleet.run_stats` came from, so a
+    // zero is never mistaken for "the supervisor swept and did nothing".
+    assert!(
+        matches!(
+            report["metrics"]["supervisor_metrics"]["status"].as_str(),
+            Some("current") | Some("stale") | Some("unavailable")
+        ),
+        "metrics.supervisor_metrics.status must name the read outcome: {report}"
+    );
 }
 
 /// Why: the supervisor widget reads `fleet` counts and the auto-resume control
@@ -495,4 +505,82 @@ async fn supervisor_status_reports_fleet_and_auto_resume() {
         );
         assert!(ar["effective"].is_null());
     }
+
+    // #6288: `run_stats` comes from the supervisor's published file, so the
+    // status of that read is on the wire beside the fleet counts.
+    let sm = &status["supervisor_metrics"];
+    assert!(
+        sm.is_object(),
+        "supervisor_metrics must be an object: {status}"
+    );
+    match sm["status"].as_str() {
+        Some("current") | Some("stale") => {
+            assert!(
+                sm["age_secs"].is_i64(),
+                "a snapshot read reports its age: {sm}"
+            );
+            assert!(sm["written_at"].is_string());
+        }
+        Some("unavailable") => {
+            assert!(
+                sm["reason"].is_string(),
+                "an unavailable snapshot must say why, never report a bare zero: {sm}"
+            );
+        }
+        other => panic!("unexpected supervisor_metrics.status {other:?}: {status}"),
+    }
+}
+
+/// FAIL-OPEN CHECK (#6288): with no published snapshot, the daemon must leave
+/// `run_stats` at its default AND say `unavailable` with a reason. Reporting the
+/// zeroed counters silently is the exact defect this slice closes — an operator
+/// cannot tell "the supervisor is not running" from "it swept and did nothing".
+/// Test: this is the test.
+#[test]
+fn supervisor_metrics_merge_absent_file_is_unavailable_not_zero() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let path = tmp.path().join("supervisor-metrics.json");
+    let mut fleet = FleetMetrics::default();
+
+    let block = merge_supervisor_metrics(&mut fleet, &path, Utc::now());
+
+    assert_eq!(block["status"], "unavailable");
+    assert!(
+        block["reason"].as_str().is_some_and(|r| !r.is_empty()),
+        "the zero must arrive with a reason attached: {block}"
+    );
+    assert_eq!(
+        fleet.run_stats,
+        crate::supervisor::SupervisorRunStats::default(),
+        "with no snapshot the counters stay at their default — the `status` \
+         field is what stops that reading as a real zero"
+    );
+}
+
+/// Why (#6288): a stopped supervisor's last file stays on disk. The daemon must
+/// hand back its counters — they are the last real observation — while labelling
+/// them `stale` so the console does not present them as live.
+/// Test: this is the test.
+#[test]
+fn supervisor_metrics_merge_flags_a_stale_snapshot() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let path = tmp.path().join("supervisor-metrics.json");
+    let mut published = FleetMetrics::default();
+    published.run_stats.sweeps = 11;
+    let written_at =
+        Utc::now() - chrono::Duration::seconds(crate::supervisor::publish::STALE_AFTER_SECS + 30);
+    crate::supervisor::publish::write_at(&path, &published, written_at).expect("publish");
+
+    let mut fleet = FleetMetrics::default();
+    let block = merge_supervisor_metrics(&mut fleet, &path, Utc::now());
+
+    assert_eq!(block["status"], "stale");
+    assert!(
+        block["age_secs"].as_i64().expect("age") > crate::supervisor::publish::STALE_AFTER_SECS
+    );
+    assert_eq!(
+        fleet.run_stats.sweeps, 11,
+        "a stale snapshot's counters are still merged — dropping them would \
+         re-create the silent zero one layer out: {block}"
+    );
 }

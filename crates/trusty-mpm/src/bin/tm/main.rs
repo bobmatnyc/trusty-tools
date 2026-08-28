@@ -502,11 +502,10 @@ async fn main() -> anyhow::Result<()> {
             force,
         }) => run_daemon(addr, tailscale, mcp, force).await,
         Some(Command::Supervisor {
-            addr,
             interval,
             auto_resume,
             no_classify,
-        }) => commands::supervisor::run_supervisor(addr, interval, auto_resume, no_classify).await,
+        }) => commands::supervisor::run_supervisor(interval, auto_resume, no_classify).await,
         Some(Command::Launch {
             dir,
             style,
