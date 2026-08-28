@@ -436,6 +436,48 @@ pub async fn run_doctor(
     DoctorReport::from_checks(checks)
 }
 
+/// Run the full check battery against one [`SessionManager`]'s view of the fleet.
+///
+/// Why (#6336): [`run_doctor`] takes its fleet inputs as plain values, so the
+/// daemon's `GET /api/v1/doctor` handler and the standalone `tm doctor` CLI
+/// would each have to derive "which workspaces are live" and "how many
+/// worktrees are orphaned" on their own — two derivations of the same fact
+/// that drift. This is the one place that turns a session manager into
+/// `run_doctor`'s arguments, so a daemonless CLI run and an HTTP run report the
+/// identical battery. It is also why `tm doctor` needs no daemon at all: the
+/// CLI builds a read-only manager over the on-disk session store and calls this
+/// directly.
+/// What: reads every session record for `active_workspace_paths`, resolves the
+/// managed workspace root from [`crate::core::trusty_tools_config`], gathers the
+/// reconciled worktree counts, and delegates to [`run_doctor`]. Reads only —
+/// no spawn, no write, no daemon.
+/// Test: `doctor_endpoint_returns_report` covers the HTTP caller;
+/// `tm_doctor_reports_every_local_check_with_no_daemon`
+/// (`tests/tm_doctor_standalone.rs`) covers the daemonless CLI caller.
+pub async fn run_doctor_for_manager(
+    mgr: &crate::session_manager::SessionManager,
+    project_dir: Option<&Path>,
+) -> DoctorReport {
+    let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
+    let repos_root = crate::core::trusty_tools_config::workspace_root(&config);
+    let active_workspace_paths: Vec<PathBuf> = mgr
+        .list()
+        .await
+        .iter()
+        .filter_map(|r| r.workspace_path.clone())
+        .collect();
+    // #5947: the orphan count comes from the reconciled inventory — the same
+    // classification `prune-worktrees` and `reconcile-worktrees` share.
+    let worktree_counts = gather_worktree_counts(mgr, &repos_root).await;
+    run_doctor(
+        project_dir,
+        Some(&repos_root),
+        &active_workspace_paths,
+        worktree_counts,
+    )
+    .await
+}
+
 /// Is `project_dir` a workspace some live session was provisioned into?
 ///
 /// Why (#5867): [`FrameworkPaths::for_managed_workspace`] rewrites the SKILL

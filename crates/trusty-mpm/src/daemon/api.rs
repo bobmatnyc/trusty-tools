@@ -1770,11 +1770,13 @@ pub struct DoctorQuery {
 /// Why: a misconfigured stack fails in confusing ways; one endpoint that runs
 /// every "is this wired correctly?" probe gives operators (and the `tm doctor`
 /// CLI / Telegram `/doctor` command) a single actionable verdict.
-/// What: delegates to [`super::doctor::run_doctor`], which probes the
-/// instruction pipeline, agent and skill deployment, the trusty-memory /
+/// What: delegates to [`super::doctor::run_doctor_for_manager`], which probes
+/// the instruction pipeline, agent and skill deployment, the trusty-memory /
 /// trusty-search sidecars, AND orphaned git worktrees (#1840). The endpoint
 /// always returns `200` — individual failures live in the report's per-check
-/// statuses, not the HTTP status.
+/// statuses, not the HTTP status. `tm doctor` no longer calls this route at all
+/// (#6336) — it runs the same battery in-process — but Telegram `/doctor`,
+/// Slack `/doctor`, and any other HTTP consumer still do.
 /// Test: `doctor_endpoint_returns_report`.
 #[utoipa::path(
     get,
@@ -1787,27 +1789,11 @@ pub async fn doctor(
     State(state): State<Arc<DaemonState>>,
     Query(query): Query<DoctorQuery>,
 ) -> Json<crate::core::doctor::DoctorReport> {
-    // Collect active workspace paths for the worktree orphan check (#1840).
+    // #6336: the workspace paths, the managed root, and the reconciled worktree
+    // counts are all derived by `run_doctor_for_manager`, so this route and the
+    // daemonless `tm doctor` CLI cannot drift on how the fleet is read.
     let mgr = state.session_manager().await;
-    let records = mgr.list().await;
-    let active_workspace_paths: Vec<PathBuf> = records
-        .iter()
-        .filter_map(|r| r.workspace_path.clone())
-        .collect();
-    // Derive the managed workspace root from config (same precedence as decommission).
-    let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
-    let repos_root = crate::core::trusty_tools_config::workspace_root(&config);
-    // #5947: the orphan count comes from the reconciled inventory — the same
-    // classification `prune-worktrees` and `reconcile-worktrees` share.
-    Json(
-        super::doctor::run_doctor(
-            query.project.as_deref(),
-            Some(&repos_root),
-            &active_workspace_paths,
-            super::doctor::gather_worktree_counts(&mgr, &repos_root).await,
-        )
-        .await,
-    )
+    Json(super::doctor::run_doctor_for_manager(&mgr, query.project.as_deref()).await)
 }
 
 // ── Bug-reporting HTTP endpoints (Phase 2 surface + Phase 3 filing) ──────────

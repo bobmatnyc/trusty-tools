@@ -37,7 +37,7 @@ use commands::{
     managed_workspace::LaunchDir,
     manager::manager,
     memory::memory,
-    misc::{attach_cmd, coordinator, doctor, health, hook, optimizer, overseer, status, validate},
+    misc::{attach_cmd, coordinator, health, hook, optimizer, overseer, status, validate},
     project::project,
     projects::projects,
     services::services,
@@ -445,7 +445,9 @@ async fn main() -> anyhow::Result<()> {
             session(&client, &url, action).await
         }
         Some(Command::Events) => commands::misc::events(&client, &url).await,
-        Some(Command::Doctor { flags }) => doctor(&url, &flags).await,
+        // #6336: standalone — the battery runs in-process, so an unreachable
+        // daemon costs one check row rather than the whole report.
+        Some(Command::Doctor { flags }) => commands::doctor_local::doctor(&url, &flags).await,
         Some(Command::Validate { path, repair }) => validate(path, repair).await,
         Some(Command::Hooks { action }) => {
             use cli::HooksAction;

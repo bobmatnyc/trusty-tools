@@ -1,9 +1,11 @@
 //! Miscellaneous command handlers that don't belong to a larger group.
 //!
-//! Why: `status`, `events`, `doctor`, `hook`, `coordinator`, `overseer`,
+//! Why: `status`, `events`, `hook`, `coordinator`, `overseer`,
 //! `optimizer`, and `attach` are small, loosely related commands that are
 //! easier to find together than scattered across the codebase.
-//! What: one public `async fn` per subcommand, plus `status_icon` helper.
+//! What: one public `async fn` per subcommand. `doctor` moved to
+//! `doctor_local` when #6336 made it standalone — this file had 24 SLOC of
+//! headroom under the 500-SLOC production cap.
 //! Test: `cli_parses_*` parse tests for each command in `tests.rs`.
 
 use crate::cli::{CliCompressionLevel, OptimizerAction, OverseerAction};
@@ -110,118 +112,14 @@ pub(crate) async fn events(client: &reqwest::Client, url: &str) -> anyhow::Resul
     Ok(())
 }
 
-/// `doctor` subcommand — run and print the full system diagnostic.
-///
-/// Why: a misconfigured trusty-mpm stack fails confusingly; `tm doctor` runs
-/// every health probe in one command and prints a formatted verdict so the
-/// operator can confirm — or fix — a broken install at a glance.
-/// What: runs `TrustyCommand::Doctor` through the shared `CommandExecutor`
-/// (which calls `GET /api/v1/doctor`), then prints one status-tagged line per
-/// check plus the two client-side checks — the #2332 stale-daemon check (see
-/// [`super::doctor_stale::stale_daemon_check`]) and the #4230 orphan-daemon
-/// check (see [`super::doctor_orphan::orphan_daemon_check`]) — and an overall
-/// verdict that folds all three. When `prune_stale_skills` is set (hidden
-/// `--prune-stale-skills` flag), also runs `prune_stale_skills_locally` as a
-/// manual troubleshooting escape hatch — normal operation cleans up
-/// pre-rename `mpm-*` skill directories automatically and silently via the
-/// one-time `core::stale_skills::run_stale_mpm_skills_migration_once`
-/// migration at `tm` startup (#1905), so this flag should rarely be needed.
-/// Test: `cli_parses_doctor` / `cli_parses_doctor_prune_stale_skills` cover
-/// parsing; the report path is covered by the executor's
-/// `execute_doctor_against_test_daemon` test; the prune path is covered by
-/// `core::stale_skills`'s own unit tests; the stale-daemon comparison logic
-/// is covered by `core::version_staleness`'s own unit tests.
-pub(crate) async fn doctor(url: &str, flags: &crate::cli::DoctorFlags) -> anyhow::Result<()> {
-    use trusty_mpm::client::{CommandExecutor, CommandResult, DaemonClient, TrustyCommand};
-    use trusty_mpm::core::doctor::CheckStatus;
-
-    let executor = CommandExecutor::new(url.to_string());
-    match executor.execute(TrustyCommand::Doctor).await {
-        CommandResult::Doctor(report) => {
-            println!("trusty-mpm doctor");
-            for check in &report.checks {
-                println!(
-                    "  {} {:<13} {}",
-                    status_icon(check.status),
-                    check.name,
-                    check.message,
-                );
-            }
-
-            // #2332: this check runs HERE (client-side) rather than inside the
-            // daemon's own `run_doctor` because it needs THIS process's own
-            // `CARGO_PKG_VERSION` — `tm doctor` always executes as the
-            // just-installed binary, so its compiled-in version is the
-            // "installed" side of the comparison. The daemon can only ever
-            // report on itself.
-            //
-            // #4230: `/health` is fetched exactly ONCE here and shared with both
-            // client-side checks, so they always describe the same daemon rather
-            // than two probes that could straddle a restart. The restart hint is
-            // resolved from this host's launchd state because `tm restart` is a
-            // hard error where launchd owns the daemon.
-            let daemon = DaemonClient::new(url.to_string());
-            let snapshot = daemon.health_snapshot().await.ok();
-            let restart_hint = super::launchd_probe::daemon_restart_command();
-            let stale_check =
-                super::doctor_stale::stale_daemon_check(snapshot.as_ref(), &restart_hint);
-            println!(
-                "  {} {:<13} {}",
-                status_icon(stale_check.status),
-                stale_check.name,
-                stale_check.message,
-            );
-            // #4230: also client-side, and for a stronger reason than #2332's —
-            // the daemon that answers `run_doctor` is, in the orphan state,
-            // precisely the process whose own report cannot be trusted. Only a
-            // client can compare "who answered /health" against "who launchd was
-            // told to run".
-            let orphan_check = super::doctor_orphan::orphan_daemon_check(snapshot.as_ref());
-            println!(
-                "  {} {:<13} {}",
-                status_icon(orphan_check.status),
-                orphan_check.name,
-                orphan_check.message,
-            );
-            let overall = report
-                .overall
-                .worst(stale_check.status)
-                .worst(orphan_check.status);
-
-            println!(
-                "\noverall: {} {}",
-                status_icon(overall),
-                match overall {
-                    CheckStatus::Ok => "all checks passed",
-                    CheckStatus::Warn => "passed with warnings",
-                    // Issue #4005: deliberately not phrased as a pass. A
-                    // check that could not be determined has not passed.
-                    CheckStatus::Unknown =>
-                        "one or more checks could not be determined — health is UNKNOWN",
-                    CheckStatus::Fail => "one or more checks failed",
-                },
-            );
-        }
-        CommandResult::Error(msg) => eprintln!("doctor failed: {msg}"),
-        other => eprintln!("doctor: unexpected result {other:?}"),
-    }
-
-    // #4948: every opt-in local action the report can be followed by lives in
-    // `doctor_repair`, so this file stays the report and the actions stay
-    // together.
-    super::doctor_repair::run_post_report_actions(flags);
-
-    Ok(())
-}
-
 /// `validate` subcommand — diff a workspace's deployed `.claude/{agents,skills}`
 /// payload against the canonical bundled roster (issue #2158).
 ///
-/// Why: unlike `tm doctor` (which round-trips through a reachable daemon),
-/// this runs [`trusty_mpm::core::deploy_validate::validate_workspace`]
-/// directly against the local filesystem, so it works standalone — useful in
-/// CI, in a freshly-provisioned worktree with no daemon yet, or as a
-/// non-interactive gate (`tm validate --path <dir> || exit 1`).
+/// Why: this is the narrow deployment diff, where `tm doctor` is the whole
+/// stack — it runs [`trusty_mpm::core::deploy_validate::validate_workspace`]
+/// against one workspace and exits non-zero on a gap, which makes it usable
+/// as a non-interactive CI gate (`tm validate --path <dir> || exit 1`).
+/// Both run standalone against the local filesystem (#6336).
 /// What: resolves `path` (default: the current directory) to a
 /// `FrameworkPaths` via `FrameworkPaths::for_managed_workspace`, runs the
 /// validator, and — when `repair` is set and gaps were found — re-runs
@@ -351,25 +249,6 @@ pub(crate) async fn health(url: &str) -> anyhow::Result<()> {
         other => eprintln!("health: unexpected result {other:?}"),
     }
     Ok(())
-}
-
-/// Render a `CheckStatus` as a status icon for terminal output.
-///
-/// Why: the `tm doctor` table marks each check with a glanceable symbol; one
-/// helper keeps the mapping consistent between the per-check lines and the
-/// overall verdict.
-/// What: `Ok → ✅`, `Warn → ⚠️`, `Unknown → ❔`, `Fail → ❌`.
-/// Test: covered indirectly by the `doctor` output.
-fn status_icon(status: trusty_mpm::core::doctor::CheckStatus) -> &'static str {
-    use trusty_mpm::core::doctor::CheckStatus;
-    match status {
-        CheckStatus::Ok => "\u{2705}",
-        CheckStatus::Warn => "\u{26a0}\u{fe0f}",
-        // Never ✅ (issue #4005): an indeterminate check must not read as
-        // healthy at a glance.
-        CheckStatus::Unknown => "\u{2754}",
-        CheckStatus::Fail => "\u{274c}",
-    }
 }
 
 /// Best-effort read of Claude Code's hook stdin JSON payload.

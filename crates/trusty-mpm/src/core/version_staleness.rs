@@ -11,16 +11,20 @@
 //! self-reports on `GET /health` (see [`crate::daemon::api::types::HealthResponse::version`])
 //! is a purely client-side COMPARISON — the two values it folds together need
 //! no shared process or IPC to compare. It is NOT free of network cost,
-//! though: `tm doctor` issues one `GET /health` round-trip in addition to the
-//! primary `GET /api/v1/doctor` call, and the two requests are not atomic — the
-//! daemon can restart between them. That is handled by treating a transport
-//! failure on the `/health` call as `Warn` rather than propagating an error (see
-//! `stale_daemon_check` in the `tm` CLI binary's `commands::doctor_stale`
-//! module — a separate crate target from this library, so it cannot be an
-//! intra-doc link here), not by this module, which only ever sees the
-//! already-fetched strings. As of #4230 that single snapshot is fetched ONCE by
-//! `commands::misc::doctor` and shared with the `daemon_orphan` check, so the two
-//! client-side checks always describe the same daemon.
+//! though: it needs one `GET /health` round-trip, which #4230 made a single
+//! snapshot shared with the `daemon_orphan` check so the two client-side
+//! checks always describe the same daemon.
+//!
+//! #6336 removed the OTHER round-trip. `tm doctor` used to fetch the whole
+//! report from `GET /api/v1/doctor` and this comparison rode along on the same
+//! reachable daemon; the report now runs in-process and that shared `/health`
+//! probe is the ONLY daemon call doctor makes. When it fails, this check is
+//! SKIPPED, not reported: with no version to compare against there is nothing
+//! to say, and the daemon-reachability row already says the daemon is absent.
+//! Both call sites live in the `tm` CLI binary's
+//! `commands::{doctor_local, doctor_stale}` modules — a separate crate target
+//! from this library, so neither can be an intra-doc link here. This module
+//! only ever sees two already-fetched strings.
 //! What: [`parse_version_triple`] extracts a `(major, minor, patch)` triple
 //! from a `CARGO_PKG_VERSION`-shaped string (mirrors the lightweight parser in
 //! [`crate::core::output_style::parse_claude_version`] rather than pulling in
