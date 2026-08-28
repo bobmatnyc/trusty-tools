@@ -11239,7 +11239,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-analyze"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11809,7 +11809,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-review"
-version = "0.28.0"
+version = "0.28.1"
 dependencies = [
  "anyhow",
  "async-trait",

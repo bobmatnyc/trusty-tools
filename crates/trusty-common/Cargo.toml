@@ -531,7 +531,10 @@ memory-core = [
     "dep:parking_lot",
     "dep:thiserror",
     "dep:uuid",
-    "dep:redb",
+    # #5063: the shared redb corruption classifier moved to the light
+    # `redb-open` feature; memory-core implies it so `memory_core::store` is
+    # unchanged for every existing consumer.
+    "redb-open",
     "dep:postcard",
     "dep:petgraph",
     "dep:sha2",
@@ -576,6 +579,14 @@ tickets = ["dep:trusty-mcp", "dep:uuid", "dep:base64", "dep:thiserror", "dep:tom
 # GitHub CLI (#5475). Pulls in `thiserror` only — `tokio/process`, `serde` and
 # `serde_json` are already unconditional here.
 gh-cli = ["dep:thiserror"]
+# Enables the `redb_open` module: the workspace's single redb
+# corruption/obsolete-format classifier plus the quarantine-path helper (#5063).
+# Deliberately LIGHT — it gates only `dep:redb`, nothing else. The classifier
+# used to live under `memory-core`, which drags in usearch, git2 and a bundled
+# ORT embedder; no consumer would enable that stack to reuse a four-arm `match`,
+# which is why five crates each kept their own copy. `memory-core` implies this
+# feature, so `memory_core::store::redb_open` keeps working unchanged.
+redb-open = ["dep:redb"]
 # Enables the `intent_source` module: the shared intent-source resolver (ISR)
 # for the intent/method conformance gates (DOC-15, SPEC-CONFORMANCE-03, #1358).
 # Resolves the ticket method + spec method from a PR or ticket-id and applies

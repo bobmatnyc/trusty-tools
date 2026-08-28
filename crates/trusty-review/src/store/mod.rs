@@ -28,16 +28,14 @@ pub use in_flight::{InFlightCountGuard, InFlightGuard, InFlightRegistry};
 /// for genuine format problems — never for transient I/O or lock contention.
 /// What: returns `true` for `UpgradeRequired` / `RepairAborted` /
 /// `Storage(Corrupted)` / `Storage(Io(InvalidData))`; `false` otherwise.
+/// Delegates to `trusty_common::redb_open::is_incompatible_format`, the
+/// workspace's single copy of this decision (#5063). The recovery POLICY stays
+/// in `dedup_open` — it serialises the rename-aside behind a sidecar lock so
+/// two processes cannot rename away each other's fresh database (see #5064).
 /// Test: `dedup::tests::incompatible_dedup_db_is_recreated` exercises the
 /// `InvalidData` path end-to-end.
 pub(crate) fn redb_error_is_incompatible_format(err: &redb::DatabaseError) -> bool {
-    use redb::{DatabaseError, StorageError};
-    match err {
-        DatabaseError::UpgradeRequired(_) | DatabaseError::RepairAborted => true,
-        DatabaseError::Storage(StorageError::Corrupted(_)) => true,
-        DatabaseError::Storage(StorageError::Io(io)) => {
-            io.kind() == std::io::ErrorKind::InvalidData
-        }
-        _ => false,
-    }
+    // #5063: one classifier for the whole workspace — this crate used to carry
+    // a byte-identical copy of the four-arm match.
+    trusty_common::redb_open::is_incompatible_format(err)
 }

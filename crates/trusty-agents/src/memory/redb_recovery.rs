@@ -11,6 +11,12 @@
 //! incompatible-format error it renames the file aside to `*.v2-incompatible`,
 //! logs a loud `ERROR`, and creates a fresh empty database in its place.
 //!
+//! #5063: the classification is now `trusty_common::redb_open`'s, shared with
+//! every other redb store in the workspace. Only the POLICY below stays here —
+//! it returns `anyhow::Result` with per-path context rather than the bare
+//! `DatabaseError` trusty-common's `open_or_recreate` returns, and it renames
+//! to a fixed `.v2-incompatible` sibling with no numbered fallback.
+//!
 //! Test: `recreates_on_garbage_file`, `passes_through_clean_open`.
 
 use anyhow::{Context, Result};
@@ -23,17 +29,13 @@ use std::path::Path;
 /// but never on a transient I/O or lock error.
 /// What: returns `true` for `UpgradeRequired` / `RepairAborted` /
 /// `Storage(Corrupted)` / `Storage(Io(InvalidData))`; `false` otherwise.
+/// Delegates to `trusty_common::redb_open::is_incompatible_format`, the
+/// workspace's single copy of this decision (#5063).
 /// Test: `recreates_on_garbage_file` exercises the `InvalidData` path.
 fn is_incompatible(err: &DatabaseError) -> bool {
-    use redb::StorageError;
-    match err {
-        DatabaseError::UpgradeRequired(_) | DatabaseError::RepairAborted => true,
-        DatabaseError::Storage(StorageError::Corrupted(_)) => true,
-        DatabaseError::Storage(StorageError::Io(io)) => {
-            io.kind() == std::io::ErrorKind::InvalidData
-        }
-        _ => false,
-    }
+    // #5063: one classifier for the whole workspace — this crate used to carry
+    // a byte-identical copy of the four-arm match.
+    trusty_common::redb_open::is_incompatible_format(err)
 }
 
 /// Open the redb database at `path`, recreating it empty if the existing file
@@ -49,6 +51,8 @@ pub fn open_redb_or_recreate(path: &Path) -> Result<Database> {
     match Database::create(path) {
         Ok(db) => Ok(db),
         Err(e) if is_incompatible(&e) => {
+            // #5063: the policy stays here — a fixed suffix with no numbered
+            // fallback, and `anyhow` context per path.
             let mut backup = path.as_os_str().to_os_string();
             backup.push(".v2-incompatible");
             let backup = std::path::PathBuf::from(backup);
