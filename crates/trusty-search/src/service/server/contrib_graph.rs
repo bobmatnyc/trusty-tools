@@ -34,7 +34,7 @@ use super::state::SearchAppState;
 /// producer identity and staleness metadata from the #819 contract.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct IngestGraphRequest {
+pub(crate) struct IngestGraphRequest {
     /// Optional wire-schema id (e.g. `navigatsql/kggraph@1`). Logged, not
     /// enforced — the field set below is the actual contract.
     #[serde(default)]
@@ -51,7 +51,7 @@ pub(super) struct IngestGraphRequest {
 }
 
 #[derive(Debug, Serialize)]
-pub(super) struct IngestGraphResponse {
+pub(crate) struct IngestGraphResponse {
     pub producer: String,
     /// Whether this ingest replaced a prior contribution from the producer.
     pub replaced: bool,
@@ -92,7 +92,33 @@ pub(super) async fn ingest_graph_handler(
     Path(id): Path<String>,
     Json(req): Json<IngestGraphRequest>,
 ) -> Result<Json<IngestGraphResponse>, (StatusCode, Json<serde_json::Value>)> {
-    let err = |code: StatusCode, msg: String| (code, Json(serde_json::json!({ "error": msg })));
+    ingest_graph_report(&state, &id, req)
+        .await
+        .map(Json)
+        .map_err(|(status, body)| (status, Json(body)))
+}
+
+/// The body `POST /indexes/{id}/graph` serves, without the transport
+/// (#6285 slice 4).
+///
+/// Why: `search.graph.ingest` is the one write on this surface whose success
+/// arm is not the interesting one. #5505 established that a contribution which
+/// persisted but could not be MERGED answers `503 contrib_not_merged` rather
+/// than a `200` whose totals exclude it — durable-but-unqueryable reported as
+/// ingested is the fail-open shape this whole family is reviewed for. That
+/// verdict has to be one decision, not one per transport.
+/// What: [`ingest_graph_handler`]'s whole former body. The success arm stays a
+/// typed [`IngestGraphResponse`]; the socket re-encodes it the way axum writes
+/// it — see [`crate::service::rpc::as_http_body`].
+/// Test: `graph_ingest_over_the_socket_matches_the_http_body`,
+/// `an_unmerged_contribution_is_refused_identically_and_stays_unqueryable` in
+/// `crate::service::rpc::writes`.
+pub(crate) async fn ingest_graph_report(
+    state: &Arc<SearchAppState>,
+    id: &str,
+    req: IngestGraphRequest,
+) -> Result<IngestGraphResponse, (StatusCode, serde_json::Value)> {
+    let err = |code: StatusCode, msg: String| (code, serde_json::json!({ "error": msg }));
 
     if req.producer.trim().is_empty() {
         return Err(err(
@@ -166,20 +192,21 @@ pub(super) async fn ingest_graph_handler(
     // #5505: the contribution is durable but not queryable. Answering 200 with
     // totals that exclude it reports a success the caller cannot observe.
     if let Some(reason) = outcome.merge_error {
-        return Err(super::degraded::contrib_not_merged_response(
+        let (status, body) = super::degraded::contrib_not_merged_response(
             &index_id.to_string(),
             &req.producer,
             replaced,
             &reason,
             outcome.blocking_producer.as_deref(),
-        ));
+        );
+        return Err((status, body.0));
     }
     let graph = {
         let indexer = handle.indexer.read().await;
         indexer.snapshot_symbol_graph().await
     };
 
-    Ok(Json(IngestGraphResponse {
+    Ok(IngestGraphResponse {
         producer: req.producer,
         replaced,
         nodes_received,
@@ -188,7 +215,7 @@ pub(super) async fn ingest_graph_handler(
         graph_edges: graph.edge_count(),
         unknown_edge_tags_dropped: graph.unknown_edge_tags_dropped(),
         derived_graph_persist_degraded: outcome.persist_error,
-    }))
+    })
 }
 
 #[derive(Debug, Deserialize)]

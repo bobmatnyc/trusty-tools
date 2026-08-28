@@ -1,0 +1,3 @@
+Changed
+
+- **Three refusal classes get their own JSON-RPC codes instead of `internal_error`** (refs [#6285](https://github.com/bobmatnyc/trusty-tools/issues/6285)). The write surface is the first to refuse for reasons a caller can act on but did not cause by malforming its request, and all three read as "file a bug" under the old mapping: `403` (root not approved for indexing) answers `-32003`, `409` (a registry collision) answers `-32009`, and `429` (the reindex cooldown) answers `-32013`. The first two are the numbers `trusty-mpm` already uses for the same meanings. `500` is unchanged and still `internal_error` — a corpus that would not open is not something the caller could have sent differently.

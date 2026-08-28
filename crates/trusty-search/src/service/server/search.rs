@@ -46,11 +46,11 @@ pub(super) use super::search_global::global_search_handler;
 /// Test: `delete_index_without_param_preserves_data`,
 /// `delete_index_with_delete_data_true_destroys_data`.
 #[derive(Debug, Default, Deserialize)]
-pub(super) struct DeleteIndexParams {
+pub(crate) struct DeleteIndexParams {
     /// Opt in to destroying the on-disk data directory alongside the
     /// registration. Defaults to `false` — see the type's `Why`.
     #[serde(default)]
-    delete_data: bool,
+    pub(crate) delete_data: bool,
 }
 
 /// `DELETE /indexes/{id}` — deregister an index, optionally destroying its data.
@@ -80,21 +80,48 @@ pub(super) async fn delete_index_handler(
     Path(id): Path<String>,
     Query(params): Query<DeleteIndexParams>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let outcome = unregister_index(&state, &id, params.delete_data).await;
+    delete_index_report(&state, &id, params)
+        .await
+        .map(Json)
+        .map_err(|(status, body)| (status, Json(body)))
+}
+
+/// The body `DELETE /indexes/{id}` serves, without the transport (#6285 slice 4).
+///
+/// Why: `search.index.delete` is the most destructive method on the socket, and
+/// its two #6363 verdicts are exactly the ones a second implementation would get
+/// wrong: an id recorded ONLY in `indexes.toml` (the #767 allowlist gate drops it
+/// before either store sees it) still deletes, and a delete whose durable
+/// cleanup failed answers `500 ok:false` rather than a `200` that records a
+/// removal which did not happen. One core is what makes both true on the socket
+/// by construction.
+/// What: [`delete_index_handler`]'s whole former body, taking the already-parsed
+/// [`DeleteIndexParams`] so the destructive `delete_data` toggle is decoded once
+/// and never guessed at.
+/// Test: `a_delete_of_an_id_in_no_store_is_not_found_on_either_transport`,
+/// `an_allowlist_excluded_registration_deletes_over_the_socket_too`,
+/// `a_failed_delete_reports_the_failure_and_keeps_the_row_on_either_transport`
+/// in `crate::service::rpc::writes`.
+pub(crate) async fn delete_index_report(
+    state: &Arc<SearchAppState>,
+    id: &str,
+    params: DeleteIndexParams,
+) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
+    let outcome = unregister_index(state, id, params.delete_data).await;
     // #6363: absent from the hot registry, the cold store AND `indexes.toml` —
     // there is nothing here to delete, and saying so is the only answer that
     // distinguishes a typo from a delete that failed.
     if !outcome.registered {
         return Err((
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
+            serde_json::json!({
                 "id": id,
                 "error": format!("unknown index: {id}"),
                 "ok": false,
                 "removed": false,
                 "data_deleted": false,
                 "quiesced": outcome.quiesced,
-            })),
+            }),
         ));
     }
     let mut body = serde_json::json!({
@@ -124,9 +151,9 @@ pub(super) async fn delete_index_handler(
     // still in `indexes.toml`.
     if let Some(error) = outcome.error {
         body["error"] = serde_json::Value::String(error);
-        return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(body)));
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, body));
     }
-    Ok(Json(body))
+    Ok(body)
 }
 
 /// What a call to [`unregister_index`] actually did, as opposed to what its

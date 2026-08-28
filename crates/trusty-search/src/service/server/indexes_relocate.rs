@@ -64,7 +64,7 @@ use super::state::{DaemonEvent, SearchAppState};
 /// What: a single `root_path` field containing the new absolute directory path.
 /// Test: `relocate_index_updates_root_path` in `tests_index.rs`.
 #[derive(Deserialize)]
-pub(super) struct RelocateIndexRequest {
+pub(crate) struct RelocateIndexRequest {
     /// New absolute path to which the index's project directory has moved.
     pub root_path: std::path::PathBuf,
 }
@@ -98,7 +98,30 @@ pub(super) async fn relocate_index_handler(
     Path(id): Path<String>,
     Json(req): Json<RelocateIndexRequest>,
 ) -> Response {
-    let index_id = IndexId::new(id.clone());
+    match relocate_index_report(&state, &id, req).await {
+        Ok(body) => Json(body).into_response(),
+        Err((status, body)) => (status, Json(body)).into_response(),
+    }
+}
+
+/// The body `PATCH /indexes/{id}` serves, without the transport (#6285 slice 4).
+///
+/// Why: `search.index.relocate` rebinds an index over the socket. Relocation
+/// swaps a live handle and rewrites `indexes.toml`, so each refusal below is a
+/// point where the rebind must NOT happen — a socket that classified any of
+/// them differently could rebind an id the HTTP route refuses.
+/// What: [`relocate_index_handler`]'s whole former body, with each refusal as
+/// its HTTP status beside its body — the pair
+/// [`crate::service::rpc::error::rpc_error_from_http`] reads.
+/// Test: `relocate_over_the_socket_matches_the_http_body`,
+/// `a_refused_relocate_leaves_the_root_where_it_was_on_either_transport` in
+/// `crate::service::rpc::writes`.
+pub(crate) async fn relocate_index_report(
+    state: &Arc<SearchAppState>,
+    id: &str,
+    req: RelocateIndexRequest,
+) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
+    let index_id = IndexId::new(id);
     // #3049: relocate rebuilds the indexer and swaps the registered handle, so
     // it holds the teardown lock's shared side for the whole operation — a
     // concurrent DELETE must not tear the index down half way through.
@@ -108,11 +131,10 @@ pub(super) async fn relocate_index_handler(
     let existing = match state.registry.get(&index_id) {
         Some(h) => h,
         None => {
-            return (
+            return Err((
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": format!("unknown index: {id}") })),
-            )
-                .into_response();
+                serde_json::json!({ "error": format!("unknown index: {id}") }),
+            ));
         }
     };
 
@@ -122,7 +144,7 @@ pub(super) async fn relocate_index_handler(
     // #767: relocating is index creation at a new root — same opt-in gate.
     let new_root = match validate_root_path(&req.root_path, false, &state.allowlist_paths).await {
         Ok(p) => p,
-        Err(resp) => return resp,
+        Err(refusal) => return Err(refusal),
     };
 
     // Issue #2336: relocating onto the index's OWN current root is a no-op —
@@ -133,13 +155,12 @@ pub(super) async fn relocate_index_handler(
     // prevent — just against itself instead of a sibling index. Comparing
     // canonical paths (both sides of `==` are canonicalized) makes this exact.
     if new_root == existing.root_path {
-        return Json(serde_json::json!({
+        return Ok(serde_json::json!({
             "id": id,
             "relocated": true,
             "new_root_path": new_root.to_string_lossy(),
             "reason": "already at this root_path (no-op)",
-        }))
-        .into_response();
+        }));
     }
 
     // Issue #2336: reject relocating onto a root_path already owned by a
@@ -163,16 +184,16 @@ pub(super) async fn relocate_index_handler(
             new_root.display(),
             existing_id,
         );
-        return root_path_collision_response(&existing_id, &new_root);
+        return Err(root_path_collision_response(&existing_id, &new_root));
     }
 
     // Require an embedder so we can rebuild the indexer (it needs to open
     // the colocated HNSW/redb at the new location).
     let Some(embedder) = state.current_embedder().await else {
         if let Some(err) = state.current_embedder_error() {
-            return embedder_error_response(&err);
+            return Err(embedder_error_response(&err));
         }
-        return embedder_initializing_response();
+        return Err(embedder_initializing_response());
     };
 
     // Load the existing on-disk entry from indexes.toml once so we can preserve
@@ -203,7 +224,7 @@ pub(super) async fn relocate_index_handler(
     // the new root path. We preserve all other settings (filters, extensions,
     // lexical_only, etc.) so the handle stays consistent.
     let existing_entry = crate::service::persistence::PersistedIndex {
-        id: id.clone(),
+        id: id.to_string(),
         root_path: new_root.clone(),
         include_paths: existing
             .include_paths
@@ -272,11 +293,10 @@ pub(super) async fn relocate_index_handler(
                 "relocate[{id}]: failed to rebuild indexer at {}: {e}",
                 new_root.display()
             );
-            return (
+            return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": format!("indexer rebuild failed: {e}") })),
-            )
-                .into_response();
+                serde_json::json!({ "error": format!("indexer rebuild failed: {e}") }),
+            ));
         }
     };
     // Issue #3748 slice B PR 1: wire the priority-lane pool so the relocated
@@ -295,17 +315,16 @@ pub(super) async fn relocate_index_handler(
              index handle (issue #2336)",
             new_root.display()
         );
-        return (
+        return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
+            serde_json::json!({
                 "error": format!(
                     "corpus open failed for root_path {:?}; refusing to relocate to a broken \
                      index handle",
                     new_root.display()
                 )
-            })),
-        )
-            .into_response();
+            }),
+        ));
     }
 
     // Persist the updated entry to indexes.toml BEFORE replacing the handle,
@@ -401,13 +420,12 @@ pub(super) async fn relocate_index_handler(
         }
     }
 
-    state.emit(DaemonEvent::IndexRegistered { id: id.clone() });
+    state.emit(DaemonEvent::IndexRegistered { id: id.to_string() });
     tracing::info!("relocate[{id}]: rebind complete → {}", new_root.display());
 
-    Json(serde_json::json!({
+    Ok(serde_json::json!({
         "id": id,
         "relocated": true,
         "new_root_path": new_root.to_string_lossy(),
     }))
-    .into_response()
 }

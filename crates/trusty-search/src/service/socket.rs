@@ -20,8 +20,9 @@
 //! |---|---|---|
 //! | 1 | the listener itself, plus [`METHOD_HEALTH`] | landed (PR #6367) |
 //! | 2 | the READ surface — indexes, status, config, chunks, graph, call chain | landed (PR #6368), in [`crate::service::rpc::reads`] |
-//! | 3 | the QUERY surface — search and its fan-out, grep and its fan-out, similarity, typeahead | this one, in [`crate::service::rpc::queries`] |
-//! | 4+ | the write and lifecycle routes; the SSE streams | not started |
+//! | 3 | the QUERY surface — search and its fan-out, grep and its fan-out, similarity, typeahead | landed (PR #6377), in [`crate::service::rpc::queries`] |
+//! | 4 | the WRITE surface — index create, delete, relocate, the two per-file writes, the reindex trigger, contributed-graph ingest | this one, in [`crate::service::rpc::writes`] |
+//! | 5 | the SSE streams — reindex progress and the daemon status stream | not started |
 //! | retire | delete the axum surface and move the eleven dialling crates | not started |
 //!
 //! **Two doors, one daemon.** The socket serves the same `Arc<SearchAppState>`
@@ -47,7 +48,7 @@ use serde::{Deserialize, Serialize};
 use tokio::net::UnixListener;
 use trusty_common::uds::server::{serve_until, RpcRouter, RpcServeOptions};
 
-use crate::service::rpc::{queries, reads};
+use crate::service::rpc::{queries, reads, writes};
 use crate::service::server::SearchAppState;
 
 #[cfg(test)]
@@ -93,6 +94,14 @@ pub const METHODS: &[&str] = &[
     queries::METHOD_GREP_ALL,
     queries::METHOD_SIMILAR,
     queries::METHOD_TYPEAHEAD,
+    // #6285 slice 4 — the write surface.
+    writes::METHOD_INDEX_CREATE,
+    writes::METHOD_INDEX_DELETE,
+    writes::METHOD_INDEX_RELOCATE,
+    writes::METHOD_INDEX_FILE_PUT,
+    writes::METHOD_INDEX_FILE_REMOVE,
+    writes::METHOD_INDEX_REINDEX,
+    writes::METHOD_GRAPH_INGEST,
 ];
 
 /// The params of a method that takes no arguments.
@@ -160,7 +169,8 @@ fn build_router(state: &Arc<SearchAppState>) -> RpcRouter {
         },
     );
     let router = reads::register(router, state);
-    queries::register(router, state)
+    let router = queries::register(router, state);
+    writes::register(router, state)
 }
 
 /// Per-connection budgets for this listener.

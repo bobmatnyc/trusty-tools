@@ -69,6 +69,7 @@ use crate::core::indexer::SearchQuery;
 use crate::service::grep::GrepRequest;
 use crate::service::server::{GlobalSearchRequest, SearchAppState, SearchSimilarRequest};
 
+use super::as_http_body;
 use super::error::rpc_error_from_http;
 use super::reads::IndexScoped;
 
@@ -149,47 +150,6 @@ where
         .await
         .unwrap_or_else(Err)
         .map_err(|(status, refusal)| rpc_error_from_http(status, &refusal))
-}
-
-/// A typed report as the JSON axum would have written for it.
-///
-/// Why: `serde_json::to_value`, which the router applies to a typed response,
-/// WIDENS an `f32` field to `f64` — a typeahead hit's `score` of `0.001f32`
-/// becomes `0.0010000000474974513` — while axum serialises the struct straight
-/// to text and writes `0.001`. Both name the same `f32`, but they are different
-/// digits on the wire, and this surface's whole contract is that the two
-/// transports answer identically. HTTP's encoding is the one eleven crates read
-/// today, so the socket matches it rather than the reverse.
-/// What: serialise to text, then parse — the same two steps HTTP takes, in the
-/// same order, so the `f32` shortest-representation is chosen once.
-///
-/// Only the two families whose report is a TYPED struct need this.
-/// `search_report` and its two siblings already return `serde_json::Value`, and
-/// a `Value` holds the widened `f64` on BOTH transports, so they agree already.
-///
-/// # Errors
-///
-/// Never in practice: `T` is a report this daemon just built, and a report that
-/// cannot serialise cannot be sent over HTTP either. Reported as an internal
-/// error rather than unwrapped, because a panic here would take the connection
-/// down instead of answering the caller.
-/// Test: `typeahead_over_the_socket_matches_the_http_body`,
-/// `grep_over_the_socket_matches_the_http_body`.
-fn as_http_body<T: serde::Serialize>(report: T) -> Result<serde_json::Value, RpcError> {
-    let text = serde_json::to_string(&report).map_err(|e| {
-        tracing::error!(error = %e, "rpc: a query report could not be serialised");
-        RpcError::new(
-            trusty_common::uds::server::CODE_INTERNAL_ERROR,
-            format!("could not serialise the report: {e}"),
-        )
-    })?;
-    serde_json::from_str(&text).map_err(|e| {
-        tracing::error!(error = %e, "rpc: a serialised query report could not be re-read");
-        RpcError::new(
-            trusty_common::uds::server::CODE_INTERNAL_ERROR,
-            format!("could not re-read the report: {e}"),
-        )
-    })
 }
 
 /// Mount every method in [`METHODS`] onto `router`.
