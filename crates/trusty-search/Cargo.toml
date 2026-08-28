@@ -17,7 +17,14 @@ name = "trusty-search"
 # launchd-launched GUI client can spawn. `commands` is not re-exported from
 # lib.rs, so the changed `handle_setup` signature is binary-internal and no
 # published item changed — patch position.
-version = "0.49.4"
+# 0.49.5 (#6363): `DELETE /indexes/{id}` removes a registration the #767
+# allowlist excluded at warm boot, 404s an id in no store and no registry row,
+# and reports a failed durable cleanup as 500 `ok:false`. Patch position:
+# `UnregisterOutcome` and `delete_index_handler` are `pub(super)`, and the only
+# public-API change is the ADDITIVE `persistence::find_index_registry_entry` /
+# `…_at` pair — `cargo-semver-checks` against the published 0.49.4 reports
+# "no semver update required" (196 pass, 0 fail).
+version = "0.49.5"
 edition = "2021"
 description = "Machine-wide hybrid code search service: BM25 + vector + KG, zero cold-start, MCP server"
 readme = "README.md"

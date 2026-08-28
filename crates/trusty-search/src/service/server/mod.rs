@@ -72,6 +72,9 @@ mod tests_4123;
 // Issue #4715: an index-scoped 404 must rule out the cold store.
 #[cfg(test)]
 mod tests_4715;
+// #6363: a registration that exists only in `indexes.toml` must be deletable.
+#[cfg(test)]
+mod tests_6363;
 // #4951: a reindex root_path override must not empty every search result.
 #[cfg(test)]
 mod tests_4951;

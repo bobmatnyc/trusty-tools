@@ -236,7 +236,17 @@ reuses it. This is the safe deregistration verb for registry hygiene. Pass
 - **Request body**: none.
 - **Query**: `delete_data` (bool, default `false`). An unparseable value is
   rejected with `400` rather than silently defaulting either way.
-- **Response 200**: `{ "id": "my-project", "removed": true, "data_deleted": false }`
+- **Response 200**: `{ "id": "my-project", "ok": true, "removed": true, "data_deleted": false }`
+- **Response 404**: `{ "error": "unknown index: <id>", "ok": false, … }` — the id
+  is in neither in-memory store AND has no `indexes.toml` row (#6363). A row the
+  #767 allowlist excluded at warm boot is NOT this case: it exists only in
+  `indexes.toml`, and it is deleted like any other registration. Before #6363
+  both answered `200 {"removed": false}`, so an excluded row could not be
+  cleared through the API at all.
+- **Response 500**: `{ "ok": false, "error": "<what failed>", … }` — the delete's
+  durable cleanup failed (the `indexes.toml` rewrite, or the data-dir removal).
+  `removed` is `false` when nothing was removed at all. Never treat a `500` here
+  as "probably removed".
 
 ##### `GET /indexes/:id/status`
 
