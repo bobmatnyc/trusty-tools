@@ -20,8 +20,15 @@
 //! headroom, and eleven extra wrappers would have pushed it over. The split
 //! ships in the PR that forces it, per the SLOC-cap rule.
 //!
-//! Test: `super::core_tests` — the `rpc_*` and `parity_*` cases drive these
-//! through BOTH transports and compare the answers.
+//! Test: `parity_health_agrees_across_transports`,
+//! `parity_doctor_agrees_across_transports`,
+//! `parity_errors_agrees_across_transports`,
+//! `parity_report_bug_preview_agrees_across_transports`,
+//! `parity_breakers_agrees_across_transports`,
+//! `parity_optimizer_agrees_across_transports`,
+//! `parity_overseer_agrees_across_transports`,
+//! `parity_tmux_sessions_agrees_across_transports` — each drives one of these
+//! through BOTH transports and compares the answers.
 
 use std::sync::Arc;
 
