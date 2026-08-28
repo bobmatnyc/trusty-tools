@@ -8,6 +8,8 @@
   import SessionsTab from './SessionsTab.svelte';
   import ConfigTab from './ConfigTab.svelte';
   import ThemeSelector from './ThemeSelector.svelte';
+  import BrandLockup from './BrandLockup.svelte';
+  import BrandMark from './BrandMark.svelte';
 
   // ── state ────────────────────────────────────────────────────────────────
 
@@ -68,8 +70,7 @@
 <main>
   <header>
     <div class="header-left">
-      <h1>Trusty Console</h1>
-      <p class="subtitle">Unified service dashboard</p>
+      <h1><BrandLockup /></h1>
     </div>
     <ThemeSelector />
   </header>
@@ -93,7 +94,10 @@
   <div class="panel">
     {#if activeTab === 'overview'}
       {#if loading}
-        <div class="loading">Detecting services…</div>
+        <div class="loading">
+          <BrandMark size={28} />
+          <span>Detecting services…</span>
+        </div>
       {:else if error}
         <div class="error">Failed to load services: {error}</div>
       {:else}
@@ -145,18 +149,14 @@
     align-items: center;
     margin-bottom: 1.5rem;
   }
+  /* The brand lockup owns its own type scale and color (BrandLockup.svelte);
+     the heading exists for document structure only. The previous gradient
+     wordmark is gone — the Foundry identity is flat, no gradients
+     (docs/design/UI/icons/README.md). */
   h1 {
-    font-size: 2rem;
-    font-weight: 700;
-    margin: 0 0 0.25rem;
-    background: linear-gradient(135deg, var(--trusty-accent), var(--trusty-accent-hover));
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-  }
-  .subtitle {
-    color: var(--trusty-text-secondary);
     margin: 0;
+    font-size: inherit;
+    font-weight: inherit;
   }
   .header-left {
     min-width: 0;
@@ -204,6 +204,11 @@
     border-radius: 0.5rem;
     background: var(--trusty-card-bg);
     color: var(--trusty-text-secondary);
+  }
+  .loading {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
   }
   .error { color: var(--trusty-danger); }
 </style>
