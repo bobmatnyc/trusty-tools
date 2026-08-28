@@ -248,7 +248,7 @@ pub fn build_router_with_self_origins(
 /// What: the whole former body of [`build_router_with_self_origins`], taking
 /// the `Arc` instead of making it. The by-value entry point above is unchanged
 /// for every existing caller and test.
-/// Test: `both_transports_report_the_same_index_count` in
+/// Test: `health_over_the_socket_matches_the_http_body` in
 /// `service::socket::tests`.
 pub fn build_router_on(
     state_arc: Arc<SearchAppState>,
