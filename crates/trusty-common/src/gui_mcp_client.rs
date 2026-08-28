@@ -15,9 +15,11 @@
 //! The owner's ruling is that the user never types a cargo path: the installed
 //! binary writes its own, read from [`std::env::current_exe`].
 //!
-//! What: [`running_binary_path`] resolves and canonicalizes the running
-//! executable, [`build_entry`] validates a `{command, args, cwd}` registration
-//! (absolute command, existing working directory) and [`configure`] either
+//! What: [`crate::gui_mcp_client::running_binary_path`] resolves and
+//! canonicalizes the running executable,
+//! [`crate::gui_mcp_client::build_entry`] validates a `{command, args, cwd}`
+//! registration (absolute command, existing working directory) and
+//! [`crate::gui_mcp_client::configure`] either
 //! writes it to the client's own config file or hands it back for the operator
 //! to paste when the client keeps no file we can write. The JSON body is built
 //! by [`crate::claude_config::mcp_server_entry`] and written by

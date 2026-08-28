@@ -436,7 +436,8 @@ pub async fn run_doctor(
     DoctorReport::from_checks(checks)
 }
 
-/// Run the full check battery against one [`SessionManager`]'s view of the fleet.
+/// Run the full check battery against one
+/// [`crate::session_manager::SessionManager`]'s view of the fleet.
 ///
 /// Why (#6336): [`run_doctor`] takes its fleet inputs as plain values, so the
 /// daemon's `GET /api/v1/doctor` handler and the standalone `tm doctor` CLI
