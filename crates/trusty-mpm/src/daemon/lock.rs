@@ -12,15 +12,18 @@
 
 use crate::core::daemon_identity;
 
-/// Write the lock file with the actual bound address and this process's PID.
+/// Write the lock file with the actual bound address, the Unix socket, and this
+/// process's PID.
 ///
 /// Why: must be called after `TcpListener::local_addr()` is known. As of
 /// ADR-0011's loopback-only doctrine (issue #3330) the daemon never binds a
 /// second (Tailscale) listener, so the record carries no `tailscale_addr`.
+/// `socket` is the path this daemon serves alongside `addr` (#6288) — recorded
+/// so a reader can tell a socket-serving daemon from a pre-#6288 one.
 /// What: delegates to [`daemon_identity::write_lock`]; best-effort.
 /// Test: `read_lock_returns_written_record` in `core::daemon_identity`.
-pub fn write_lock(addr: &str) {
-    daemon_identity::write_lock(addr);
+pub fn write_lock(addr: &str, socket: &str) {
+    daemon_identity::write_lock(addr, socket);
 }
 
 /// Remove the lock file on clean shutdown — but only if it still names us.

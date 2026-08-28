@@ -212,6 +212,12 @@ trusty-common = { workspace = true, features = [
     # daemon router in `daemon/api.rs`. Already enabled as a dev-dependency below;
     # promoted to the main dep so the guard compiles into the production daemon.
     "axum-server",
+    # #6288 (ADR-0032): the daemon's own hardened Unix-socket listener
+    # (`daemon::socket`) — `bind_singleton_hardened` plus `uds::server`'s
+    # `RpcRouter` / `serve_until`. Reached transitively today through
+    # `catchup` → `memory-rpc` → `uds`; listed explicitly so a future change to
+    # the catch-up engine's deps cannot silently remove the daemon's transport.
+    "uds",
 ] }
 # `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
 # `console-metrics` enables `trusty_common::console_metrics` (used unconditionally by
