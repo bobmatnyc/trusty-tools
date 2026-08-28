@@ -982,7 +982,10 @@ pub fn remove_index_registry_entry_at(path: &Path, id: &str) -> Result<()> {
 /// reporting `None` — an unparseable registry must not read as "absent"
 /// (#4317, #4871), because a delete would then answer 404 for an index that
 /// is really there.
-/// Test: `finds_a_registered_entry_by_id`, `find_by_id_is_none_for_an_absent_id`.
+/// Test: `delete_of_an_allowlist_excluded_registration_removes_the_row` (the
+/// `Some` arm — the delete only reaches its cleanup because this finds the
+/// row), `delete_of_an_id_in_no_store_and_no_registry_is_404` (the `None`
+/// arm — that 404 is this returning `None`).
 pub fn find_index_registry_entry(id: &str) -> Result<Option<PersistedIndex>> {
     find_index_registry_entry_at(&indexes_toml_path()?, id)
 }
