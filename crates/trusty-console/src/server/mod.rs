@@ -595,16 +595,22 @@ async fn apply_handle_overrides(
 /// surfaces as HTTP 500 rather than an empty 200.
 /// After obtaining the base service list (from cache or fallback), applies
 /// per-service handle degraded overrides via `apply_handle_overrides` so
-/// reachable services missing `console_metrics` surface as `status: degraded`.
+/// reachable services missing `console_metrics` surface as `status: degraded`,
+/// then sorts the list with `detect::order_for_display` so the Overview grid
+/// leads with the services that are actually live (#6370).
 /// Test: `test_services_route_returns_json`,
-/// `test_services_handler_returns_500_on_panic`, and
-/// `test_services_route_handle_degraded_overlay` below.
+/// `test_services_handler_returns_500_on_panic`,
+/// `test_services_route_handle_degraded_overlay`, and
+/// `test_services_route_orders_running_before_absent` below.
 async fn services_handler(State(state): State<AppState>) -> axum::response::Response {
     let handles = state.mcp_handles();
 
     if let Some(snap) = state.poller_cache().snapshot().await {
         let mut services = snap.services;
         apply_handle_overrides(&mut services, &handles).await;
+        // #6370: sort AFTER the overrides so a service demoted to Degraded here
+        // ranks as degraded, not as the Running the poller recorded.
+        crate::detect::order_for_display(&mut services);
         return axum::Json(services).into_response();
     }
 
@@ -617,6 +623,7 @@ async fn services_handler(State(state): State<AppState>) -> axum::response::Resp
     {
         Ok(mut infos) => {
             apply_handle_overrides(&mut infos, &handles).await;
+            crate::detect::order_for_display(&mut infos); // #6370
             axum::Json(infos).into_response()
         }
         Err(e) => {

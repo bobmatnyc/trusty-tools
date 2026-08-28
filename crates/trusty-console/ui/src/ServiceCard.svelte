@@ -3,14 +3,28 @@
    * Why: Displays a single service's status card; delegates tab-awareness to
    *      the caller (App.svelte) which owns SERVICE_TAB_MAP — the single source
    *      of truth for which services have real detail tabs.
-   * What: Renders service name, status badge, optional hint, and a "View details"
-   *       button when the service appears in the caller-supplied tabbedServices set.
-   * Test: Mount with a service whose id is in tabbedServices and onViewDetails set —
-   *       assert button visible; mount without the id in the set — assert no button.
+   * What: Renders service name, status badge, optional hint, and — since #6370 —
+   *       makes the WHOLE card the click target when the card offers exactly one
+   *       action. `cardActions.js` owns that rule; a card with two or more
+   *       actions keeps a discrete button per action and stays inert itself.
+   *       A clickable card carries role="button", tabindex=0 and an
+   *       Enter/Space keydown handler, so it is reachable and operable from the
+   *       keyboard rather than being a div that only a mouse can use. Its
+   *       aria-label replaces the name the contents would compute, so
+   *       aria-describedby points back at the status badge, the version and the
+   *       hint — otherwise a screen reader announces the service and its action
+   *       and never says the card is degraded.
+   * Test: `cardActions.test.js` covers the one-action / many-action / no-action
+   *       rule, the Enter/Space key set, and the described-by composition.
+   *       Ordering of the cards themselves is
+   *       server-side — see `detect::order_for_display` and
+   *       `test_services_route_orders_running_before_absent`.
    *
    * @typedef {{ id: string, display_name: string, status: string, version?: string, url?: string, hint?: string }} Service
    * @type {{ service: Service, tabbedServices: Set<string>, onViewDetails?: (id: string) => void }}
    */
+  import { cardActivation, cardDescribedBy, isActivationKey } from './cardActions.js';
+
   let { service, tabbedServices = new Set(), onViewDetails } = $props();
 
   const STATUS_LABELS = {
@@ -40,12 +54,36 @@
   function handleViewDetails() {
     onViewDetails?.(service.id);
   }
+
+  // #6370: the card's actions, in display order. One entry today; the shape is
+  // what decides between whole-card click and discrete buttons.
+  let actions = $derived(
+    hasTab && onViewDetails
+      ? [{ id: 'details', label: 'View details →', run: handleViewDetails }]
+      : [],
+  );
+  let activation = $derived(cardActivation(actions));
+  // #6370: the elements a screen reader reads as this card's description.
+  let describedBy = $derived(cardDescribedBy(service));
+  let elementId = $derived(String(service.id).replace(/[^A-Za-z0-9_-]/g, '-'));
+
+  /**
+   * Activate the card from the keyboard.
+   *
+   * Space is prevented from its default so activating a card does not also
+   * scroll the Overview grid.
+   */
+  function handleCardKeydown(event) {
+    if (!isActivationKey(event.key)) return;
+    event.preventDefault();
+    activation.primary?.run();
+  }
 </script>
 
-<div class="card">
+{#snippet cardContents()}
   <div class="card-header">
     <h2 class="name">{service.display_name}</h2>
-    <span class="badge" style="--_s: {statusVar};">
+    <span class="badge" id="svc-{elementId}-status" style="--_s: {statusVar};">
       <span class="dot"></span>
       {statusLabel}
     </span>
@@ -54,22 +92,50 @@
   <div class="card-body">
     <p class="id">ID: <code>{service.id}</code></p>
     {#if service.version}
-      <p class="version">Version: <code>{service.version}</code></p>
+      <p class="version" id="svc-{elementId}-version">Version: <code>{service.version}</code></p>
     {/if}
     {#if service.status === 'absent'}
-      <p class="hint">Install with <code>cargo install {service.id}</code></p>
+      <p class="hint" id="svc-{elementId}-hint">Install with <code>cargo install {service.id}</code></p>
     {:else if service.status === 'available'}
-      <p class="hint">Binary found but daemon is not running.</p>
+      <p class="hint" id="svc-{elementId}-hint">Binary found but daemon is not running.</p>
     {:else if service.status === 'degraded'}
-      <p class="hint degraded-hint">{service.hint ?? 'Service reachable but its metrics tool is unavailable.'}</p>
-    {/if}
-    {#if hasTab && onViewDetails}
-      <button class="details-btn" onclick={handleViewDetails}>
-        View details →
-      </button>
+      <p class="hint degraded-hint" id="svc-{elementId}-hint">{service.hint ?? 'Service reachable but its metrics tool is unavailable.'}</p>
     {/if}
   </div>
-</div>
+{/snippet}
+
+{#if activation.mode === 'card'}
+  <!-- One action → the whole card is the button. The cue below is decorative:
+       the accessible name comes from aria-label, so a screen reader announces
+       the service and its action once, not twice. aria-describedby then adds
+       the status, version and hint the label leaves out. -->
+  <div
+    class="card card-clickable"
+    role="button"
+    tabindex="0"
+    aria-label="{service.display_name} — {activation.primary.label}"
+    aria-describedby={describedBy}
+    onclick={activation.primary.run}
+    onkeydown={handleCardKeydown}
+  >
+    {@render cardContents()}
+    <span class="details-cue" aria-hidden="true">{activation.primary.label}</span>
+  </div>
+{:else}
+  <!-- Zero actions → a static status tile. Two or more → one button each, and
+       the card itself stays non-interactive because no single action stands
+       for it. -->
+  <div class="card">
+    {@render cardContents()}
+    {#if activation.mode === 'buttons'}
+      <div class="card-actions">
+        {#each actions as action (action.id)}
+          <button class="details-btn" onclick={action.run}>{action.label}</button>
+        {/each}
+      </div>
+    {/if}
+  </div>
+{/if}
 
 <style>
   .card {
@@ -81,6 +147,22 @@
   }
   .card:hover {
     border-color: var(--trusty-border-strong);
+  }
+  /* The whole-card click target (#6370). The pointer and the accent border on
+     hover are the only signal that the body is clickable, so both are required
+     — a card that navigates but looks inert is worse than a button. */
+  .card-clickable {
+    cursor: pointer;
+    display: block;
+    width: 100%;
+    text-align: left;
+  }
+  .card-clickable:hover {
+    border-color: var(--trusty-accent);
+  }
+  .card-clickable:focus-visible {
+    outline: 2px solid var(--trusty-accent);
+    outline-offset: 2px;
   }
   .card-header {
     display: flex;
@@ -139,8 +221,20 @@
   .degraded-hint {
     color: var(--trusty-status-degraded);
   }
-  .details-btn {
+  .details-cue {
+    display: inline-block;
     margin-top: 0.75rem;
+    color: var(--trusty-accent);
+    font-size: 0.8rem;
+    font-weight: 500;
+  }
+  .card-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+  }
+  .details-btn {
     background: none;
     border: 1px solid var(--trusty-border-strong);
     border-radius: 0.4rem;
