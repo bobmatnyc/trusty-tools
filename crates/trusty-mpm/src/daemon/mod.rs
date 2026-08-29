@@ -20,7 +20,6 @@ pub mod claude_config;
 pub mod coordinator;
 /// Delegation query routes merged into the main router (#4480).
 pub mod delegation_routes;
-pub mod discover;
 pub mod discovery;
 pub mod doctor;
 pub mod error;
@@ -48,6 +47,9 @@ pub mod provisioning;
 // #6288: the method families served on the Unix socket.
 pub mod rpc;
 pub mod runtime_reap;
+// #6285: the one trusty-search client in this crate. The `discover` module that
+// read `~/.trusty-search/http_addr` retired with the daemon's HTTP listener.
+pub mod search_rpc;
 pub mod services;
 pub(crate) mod session_record_kind;
 pub mod sm_stdio;
@@ -154,12 +156,13 @@ pub async fn serve_with_shutdown(
         None => info!("tmux not found — sessions will need the PTY or SDK control model"),
     }
 
-    // Discover the trusty sidecar addresses and record them in shared state.
-    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    let addrs = discover::discover_all(&home).await;
-    // #6286: trusty-memory has no address to log — it serves a derived socket.
-    info!("trusty-search at {}", addrs.search);
-    state.set_trusty_addrs(addrs);
+    // #6285: neither sidecar has an address to discover any more — trusty-memory
+    // (#6286) and trusty-search both serve a socket derived from the data dir,
+    // so the startup banner names the path rather than a port read off disk.
+    match search_rpc::search_socket() {
+        Ok(socket) => info!("trusty-search at {}", socket.display()),
+        Err(e) => tracing::warn!("cannot resolve the trusty-search socket: {e:#}"),
+    }
 
     // Auto-discover existing Claude Code sessions — both tmux panes and native
     // Terminal.app processes — so they appear in the dashboard and the Telegram

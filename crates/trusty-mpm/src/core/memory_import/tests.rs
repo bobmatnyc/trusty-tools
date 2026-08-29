@@ -364,7 +364,7 @@ fn rpc(state: &Stub, method: &str, params: Value) -> Result<Value, RpcError> {
 }
 
 /// Start the stub on a temp Unix socket (#6286); returns the daemon + state.
-async fn start_stub() -> (crate::uds_mock::MockMemoryDaemon, Stub) {
+async fn start_stub() -> (crate::uds_mock::MockUdsDaemon, Stub) {
     let state: Stub = Arc::new(Mutex::new(StubState::default()));
     let served = Arc::clone(&state);
     let daemon = crate::uds_mock::spawn(move |method: &str, params: Value| {

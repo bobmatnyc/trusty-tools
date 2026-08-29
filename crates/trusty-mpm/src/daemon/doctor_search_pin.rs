@@ -20,20 +20,21 @@
 //!
 //! What: [`check_search_index_pin`] reads the id the session is ACTUALLY
 //! pinned to out of `.mcp.json` and resolves it against the daemon with
-//! `GET /indexes/{id}/status`. A 404 is `Fail` — the pin names an index that
-//! does not exist, so every `search` call in that session 404s. This is
-//! deliberately not a health question: asking the daemon "are you well?"
-//! reproduces the blind spot rather than closing it.
+//! `search.index.status` (#6285 — `GET /indexes/{id}/status` before ADR-0032).
+//! A not-found refusal is `Fail` — the pin names an index that does not exist,
+//! so every `search` call in that session fails. This is deliberately not a
+//! health question: asking the daemon "are you well?" reproduces the blind spot
+//! rather than closing it.
 //!
 //! Test: the `tests` module below covers every [`PinState`] / [`PinProbe`]
-//! verdict, the `.mcp.json` reader against real files, and the 404 → `Fail`
-//! path over a real HTTP socket.
+//! verdict, the `.mcp.json` reader against real files, and the
+//! not-found → `Fail` path over a real Unix socket.
 
 use std::path::Path;
 
 use crate::core::doctor::{CheckStatus, DoctorCheck};
 
-use crate::daemon::discover::{TRUSTY_SEARCH_DEFAULT_ADDR, discover_addr};
+use crate::daemon::search_rpc::{self, SearchRpcError};
 
 use super::PROBE_TIMEOUT;
 
@@ -64,24 +65,27 @@ pub(super) enum PinState {
     Pinned(String),
 }
 
-/// What `GET /indexes/{id}/status` reported for the pinned id.
+/// What `search.index.status` reported for the pinned id.
 ///
 /// Why: `UnknownIndex` is the whole point of this check (issue #5045) and must
-/// never be collapsed into the generic error case — a 404 is a definite,
-/// actionable "this pin resolves to nothing", whereas a transport failure is
-/// an absence of information.
+/// never be collapsed into the generic error case — a not-found refusal is a
+/// definite, actionable "this pin resolves to nothing", whereas a transport
+/// failure is an absence of information.
 /// What: the classified outcome of one bounded status request.
-/// Test: `probe_reports_unknown_index_on_404`, `probe_reports_resolved_on_200`.
+/// Test: `probe_reports_unknown_index_when_the_daemon_says_not_found`,
+/// `probe_reports_resolved_on_a_status_result`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum PinProbe {
     /// The daemon knows the index; `chunk_count` is its reported corpus size
     /// (`None` when the body carried no count).
     Resolved { chunk_count: Option<u64> },
-    /// 404 — the daemon has no index under that id.
+    /// [`crate::daemon::error::CODE_NOT_FOUND`] — the daemon has no index under
+    /// that id.
     UnknownIndex,
-    /// The daemon answered with some other non-2xx status.
-    HttpStatus(u16),
-    /// No trusty-search daemon address could be discovered, or the request
+    /// The daemon answered, and refused for some other reason. Carries its own
+    /// JSON-RPC code (#6285 — an HTTP status before ADR-0032).
+    RpcRefusal(i64),
+    /// The daemon's socket could not be resolved or dialled, or the request
     /// failed at the transport layer.
     Unreachable(String),
 }
@@ -95,14 +99,21 @@ pub(super) enum PinProbe {
 /// *derived* id rather than resolving the id the session will really use. This
 /// probe exists because "health reports ok" is exactly the symptom — see the
 /// module doc.
-/// What: reads the pin via [`read_pinned_index_id`], resolves the daemon
-/// address the same way [`super::doctor`]'s `search` probe does, issues one
-/// [`PROBE_TIMEOUT`]-bounded `GET /indexes/{id}/status`, and folds the two
-/// results with [`build_pin_check`]. Read-only: it never creates, reindexes,
-/// or repairs anything.
+/// What: reads the pin via [`read_pinned_index_id`], derives the daemon's
+/// socket the same way [`super::doctor`]'s `search` probe does, issues one
+/// [`PROBE_TIMEOUT`]-bounded `search.index.status`, and folds the two results
+/// with [`build_pin_check`]. Read-only: it never creates, reindexes, or repairs
+/// anything.
+///
+/// `home` is unused since #6285 — the socket is derived, not discovered under a
+/// home directory — and stays in the signature because `run_checks` threads one
+/// `home` into every check.
 /// Test: `pinned_but_missing_index_is_fail` (the full path, over a real
 /// socket), plus the `build_pin_check_*` verdict tests.
-pub(super) async fn check_search_index_pin(home: &Path, project_dir: Option<&Path>) -> DoctorCheck {
+pub(super) async fn check_search_index_pin(
+    _home: &Path,
+    project_dir: Option<&Path>,
+) -> DoctorCheck {
     let Some(project) = project_dir else {
         return DoctorCheck::new(
             CHECK,
@@ -113,15 +124,10 @@ pub(super) async fn check_search_index_pin(home: &Path, project_dir: Option<&Pat
 
     let pin = read_pinned_index_id(project);
     let probe = match &pin {
-        PinState::Pinned(id) => {
-            let dir = home.join(".trusty-search");
-            let default = TRUSTY_SEARCH_DEFAULT_ADDR
-                .parse()
-                .expect("static default is valid");
-            let env = std::env::var("TRUSTY_SEARCH_ADDR").ok();
-            let addr = discover_addr(&dir, default, env.as_deref()).await;
-            Some(probe_pinned_index(&format!("http://{addr}"), id).await)
-        }
+        PinState::Pinned(id) => Some(match search_rpc::search_socket() {
+            Ok(socket) => probe_pinned_index(&socket, id).await,
+            Err(e) => PinProbe::Unreachable(format!("{e:#}")),
+        }),
         _ => None,
     };
 
@@ -179,45 +185,47 @@ pub(super) fn read_pinned_index_id(project_dir: &Path) -> PinState {
 
 /// Ask the daemon whether `index_id` resolves.
 ///
-/// Why: `GET /indexes/{id}/status` is the cheapest endpoint that answers the
-/// exact question — it 404s for an id the daemon does not hold, which is the
-/// signature issue #5045 reproduced. `/health` and `/indexes` do not: the
-/// former reports the daemon, the latter is where the fail-open pin was
-/// already passing unnoticed.
-/// What: one `GET {base}/indexes/{index_id}/status` bounded by
-/// [`PROBE_TIMEOUT`], classified into [`PinProbe`]. A 404 maps to
-/// `UnknownIndex`; a 2xx body's `chunk_count` is carried through so the caller
-/// can distinguish "resolves and holds a corpus" from "resolves but is empty".
-/// Test: `probe_reports_unknown_index_on_404`, `probe_reports_resolved_on_200`,
+/// Why: `search.index.status` is the cheapest method that answers the exact
+/// question — it refuses with [`crate::daemon::error::CODE_NOT_FOUND`] for an id
+/// the daemon does not hold, which is the signature issue #5045 reproduced.
+/// `search.health` and `search.indexes.list` do not: the former reports the
+/// daemon, the latter is where the fail-open pin was already passing unnoticed.
+/// What (#6285): one [`PROBE_TIMEOUT`]-bounded `search.index.status` on
+/// `socket`, classified into [`PinProbe`]. A not-found refusal maps to
+/// `UnknownIndex`; a result's `chunk_count` is carried through so the caller can
+/// distinguish "resolves and holds a corpus" from "resolves but is empty". A
+/// dial failure is `Unreachable`, never a refusal — the two mean opposite
+/// things and `build_pin_check` reports them differently.
+/// Test: `probe_reports_unknown_index_when_the_daemon_says_not_found`,
+/// `probe_reports_resolved_on_a_status_result`,
 /// `probe_reports_unreachable_when_nothing_listens`.
-pub(super) async fn probe_pinned_index(base: &str, index_id: &str) -> PinProbe {
-    let client = match reqwest::Client::builder().timeout(PROBE_TIMEOUT).build() {
-        Ok(c) => c,
-        Err(e) => return PinProbe::Unreachable(e.to_string()),
-    };
-    let url = format!("{base}/indexes/{index_id}/status");
-    match client.get(&url).send().await {
-        Ok(resp) if resp.status().is_success() => {
-            let chunk_count = resp
-                .json::<serde_json::Value>()
-                .await
-                .ok()
-                .and_then(|b| b.get("chunk_count").and_then(serde_json::Value::as_u64));
-            PinProbe::Resolved { chunk_count }
-        }
-        Ok(resp) if resp.status().as_u16() == 404 => PinProbe::UnknownIndex,
-        Ok(resp) => PinProbe::HttpStatus(resp.status().as_u16()),
-        Err(e) => PinProbe::Unreachable(e.to_string()),
+pub(super) async fn probe_pinned_index(socket: &Path, index_id: &str) -> PinProbe {
+    match search_rpc::call_at(
+        socket,
+        search_rpc::METHOD_INDEX_STATUS,
+        serde_json::json!({ "index_id": index_id }),
+        PROBE_TIMEOUT,
+    )
+    .await
+    {
+        Ok(body) => PinProbe::Resolved {
+            chunk_count: body.get("chunk_count").and_then(serde_json::Value::as_u64),
+        },
+        Err(e) => match e.downcast_ref::<SearchRpcError>() {
+            Some(rpc) if rpc.is_not_found() => PinProbe::UnknownIndex,
+            Some(rpc) => PinProbe::RpcRefusal(rpc.code),
+            None => PinProbe::Unreachable(format!("{e:#}")),
+        },
     }
 }
 
 /// Fold the pin and its probe into a verdict (pure).
 ///
 /// Why: keeping the verdict logic pure makes every branch — including the one
-/// that matters, a live pin the daemon 404s — assertable without a daemon,
-/// a filesystem, or a network.
-/// What: `Fail` when a pinned id 404s (issue #5045's defect) or the daemon
-/// answers another non-2xx; `Warn` for an unpinned stub, an unreadable
+/// that matters, a live pin the daemon does not hold — assertable without a
+/// daemon, a filesystem, or a network.
+/// What: `Fail` when the daemon has no such index (issue #5045's defect) or
+/// refuses for another reason; `Warn` for an unpinned stub, an unreadable
 /// `.mcp.json`, or a pin that resolves to an EMPTY index (registered but never
 /// populated — every query still returns nothing, issue #1908's shape);
 /// `Unknown` when the daemon could not be reached, because an unanswered probe
@@ -274,17 +282,17 @@ pub(super) fn build_pin_check(pin: &PinState, probe: Option<&PinProbe>) -> Docto
             CheckStatus::Fail,
             format!(
                 "this session is pinned to trusty-search index `{id}` but the daemon has NO such \
-                 index — every `search`/`grep` call in this session returns 404 \"unknown index\", \
-                 and the `search` health check stays green because it reports the daemon, not the \
+                 index — every `search`/`grep` call in this session is refused with \"unknown \
+                 index\", and the `search` health check stays green because it reports the daemon, not the \
                  pin (issue #5045). Either the index was deleted since the pin was written, or the \
                  pin predates #5091. Run `trusty-search index create` for this project, or \
                  relaunch the session"
             ),
         ),
-        Some(PinProbe::HttpStatus(code)) => DoctorCheck::new(
+        Some(PinProbe::RpcRefusal(code)) => DoctorCheck::new(
             CHECK,
             CheckStatus::Fail,
-            format!("status of pinned trusty-search index `{id}` returned HTTP {code}"),
+            format!("status of pinned trusty-search index `{id}` was refused with code {code}"),
         ),
         Some(PinProbe::Resolved { chunk_count }) => match chunk_count {
             Some(0) => DoctorCheck::new(

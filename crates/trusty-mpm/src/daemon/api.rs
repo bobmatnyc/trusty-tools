@@ -1279,7 +1279,7 @@ pub async fn current_project(
 /// Why: rather than register every repo by hand, the operator wants trusty-mpm
 /// to enumerate the projects Claude Code already knows about and offer them for
 /// one-tap registration (the Telegram `/projects` command consumes this).
-/// What: runs [`ProjectDiscovery::discover`](crate::daemon::discover), maps each row to a
+/// What: runs [`ProjectDiscovery::discover`](crate::core::project_discovery::ProjectDiscovery::discover), maps each row to a
 /// [`DiscoveredProjectInfo`] (path as a string, last-session time as an
 /// ISO-8601 string), and returns them newest-session-first. The discovery
 /// itself never fails — an absent directory yields an empty list.

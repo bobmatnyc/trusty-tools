@@ -1089,7 +1089,7 @@ fn compose_banner_has_single_trailing_newline() {
 async fn spawn_palace_mock(
     code: i64,
 ) -> (
-    crate::uds_mock::MockMemoryDaemon,
+    crate::uds_mock::MockUdsDaemon,
     tokio::sync::watch::Receiver<bool>,
 ) {
     use crate::uds_mock::{self, RpcError};

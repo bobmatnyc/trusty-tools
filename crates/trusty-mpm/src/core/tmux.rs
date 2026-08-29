@@ -102,8 +102,8 @@ pub fn resolve_tmux_binary() -> Option<std::path::PathBuf> {
 /// [`resolve_tmux_binary`], falling back to the literal `"tmux"` (a plain
 /// `PATH` lookup at spawn time) when resolution itself comes up empty.
 ///
-/// Why: callers that do not need [`daemon::tmux::TmuxDriver::discover`](crate::daemon::discover)'s
-/// (crate::daemon::tmux) fail-fast-if-truly-absent contract — the CLI and TUI
+/// Why: callers that do not need [`TmuxDriver::discover`](crate::daemon::tmux::TmuxDriver::discover)'s
+/// fail-fast-if-truly-absent contract — the CLI and TUI
 /// client, which already surface their own "tmux command failed" error on the
 /// subsequent spawn — just want a best-effort binary name to run. Falling
 /// back to the bare string preserves their pre-#2398 behavior (trust the

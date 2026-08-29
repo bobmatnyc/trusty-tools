@@ -173,18 +173,6 @@ fn memory_pressure_is_classified() {
 }
 
 #[test]
-fn trusty_addrs_round_trip() {
-    let state = DaemonState::new();
-    assert!(state.trusty_addrs().is_none());
-    let addrs = crate::daemon::discover::TrustyAddrs {
-        search: "127.0.0.1:7878".parse().unwrap(),
-    };
-    state.set_trusty_addrs(addrs);
-    let got = state.trusty_addrs().expect("addrs stored");
-    assert_eq!(got.search, "127.0.0.1:7878".parse().unwrap());
-}
-
-#[test]
 fn reap_dead_sessions() {
     // Three registered sessions; tmux reports only two of them alive.
     // `reap_against` (the testable core of `reap_dead_sessions`) must drop

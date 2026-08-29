@@ -2,13 +2,12 @@
 //!
 //! Why: split into a sibling file so the production module stays under the
 //! 500-SLOC cap.
-//! What: covers the `.mcp.json` reader against real files, the HTTP probe
-//! against a real socket (including the 404 that defines this check), and
-//! every `build_pin_check` verdict.
+//! What: covers the `.mcp.json` reader against real files, the socket probe
+//! against a real daemon (including the not-found refusal that defines this
+//! check), and every `build_pin_check` verdict.
 //! Test: this module IS the test suite for `super`.
 
 use super::*;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Write a `.mcp.json` carrying a trusty-search stub with `args`.
 fn write_mcp_json(project: &Path, args: &serde_json::Value) {
@@ -25,23 +24,21 @@ fn write_mcp_json(project: &Path, args: &serde_json::Value) {
     .unwrap();
 }
 
-/// Serve one fixed raw HTTP response on a loopback port; returns its base URL.
+/// Serve one fixed `search.index.status` answer on a temp Unix socket (#6285).
 ///
-/// A real socket, not a mock: the 404 path is the whole point of this check,
-/// and asserting it against a hand-rolled fake response type would prove
-/// nothing about how `reqwest` classifies a real `404 Not Found`.
-async fn spawn_stub(response: &'static str) -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        while let Ok((mut sock, _)) = listener.accept().await {
-            let mut buf = [0u8; 2048];
-            let _ = sock.read(&mut buf).await;
-            let _ = sock.write_all(response.as_bytes()).await;
-            let _ = sock.flush().await;
-        }
-    });
-    format!("http://{addr}")
+/// A real socket carrying a real JSON-RPC frame, not a hand-rolled fake: the
+/// not-found path is the whole point of this check, and it now depends on
+/// [`search_rpc::call_at`] surfacing the daemon's own error code through
+/// `anyhow::Error::downcast_ref` — which a fabricated [`PinProbe`] would not
+/// exercise at all.
+async fn spawn_status_daemon(
+    answer: Result<serde_json::Value, crate::uds_mock::RpcError>,
+) -> crate::uds_mock::MockUdsDaemon {
+    crate::uds_mock::spawn(move |_method: &str, _params: serde_json::Value| {
+        let answer = answer.clone();
+        Box::pin(async move { answer })
+    })
+    .await
 }
 
 // ---------------------------------------------------------------- pin reader
@@ -104,43 +101,57 @@ fn read_pin_reports_unreadable_json() {
     ));
 }
 
-// -------------------------------------------------------------- http probing
+// ------------------------------------------------------------ socket probing
 
 #[tokio::test]
-async fn probe_reports_unknown_index_on_404() {
-    // The signature observed live in #5045:
-    // `POST /indexes/<id>/search → 404 {"error":"unknown index"}`.
-    let base = spawn_stub(
-        "HTTP/1.1 404 Not Found\r\nContent-Length: 27\r\nConnection: close\r\n\r\n\
-         {\"error\":\"unknown index\"}",
-    )
+async fn probe_reports_unknown_index_when_the_daemon_says_not_found() {
+    // The signature observed live in #5045, as trusty-search now spells it:
+    // `search.index.status` refused with `CODE_NOT_FOUND` (#6285).
+    let daemon = spawn_status_daemon(Err(crate::uds_mock::RpcError::new(
+        crate::daemon::error::CODE_NOT_FOUND,
+        "unknown index",
+    )))
     .await;
     assert_eq!(
-        probe_pinned_index(&base, "ghost-index").await,
+        probe_pinned_index(daemon.socket(), "ghost-index").await,
         PinProbe::UnknownIndex
     );
 }
 
 #[tokio::test]
-async fn probe_reports_resolved_on_200() {
-    let base = spawn_stub(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 21\r\n\
-         Connection: close\r\n\r\n{\"chunk_count\": 4210}",
-    )
-    .await;
+async fn probe_reports_resolved_on_a_status_result() {
+    let daemon = spawn_status_daemon(Ok(serde_json::json!({"chunk_count": 4210}))).await;
     assert_eq!(
-        probe_pinned_index(&base, "trusty-tools").await,
+        probe_pinned_index(daemon.socket(), "trusty-tools").await,
         PinProbe::Resolved {
             chunk_count: Some(4210)
         }
     );
 }
 
+/// Why: a refusal that is NOT "no such index" must stay distinguishable — the
+/// verdict for it names the code, and folding it into `UnknownIndex` would tell
+/// an operator to create an index that already exists.
+/// Test: itself.
+#[tokio::test]
+async fn probe_reports_another_refusal_as_an_rpc_code() {
+    let daemon = spawn_status_daemon(Err(crate::uds_mock::RpcError::internal("boom"))).await;
+    assert!(matches!(
+        probe_pinned_index(daemon.socket(), "trusty-tools").await,
+        PinProbe::RpcRefusal(_)
+    ));
+}
+
 #[tokio::test]
 async fn probe_reports_unreachable_when_nothing_listens() {
-    // Port 0 never accepts a connection.
+    // A path under a directory that cannot exist is refused by the kernel
+    // immediately, so the probe fails rather than consuming its budget.
     assert!(matches!(
-        probe_pinned_index("http://127.0.0.1:0", "trusty-tools").await,
+        probe_pinned_index(
+            std::path::Path::new("/nonexistent/trusty-search/ts.sock"),
+            "trusty-tools"
+        )
+        .await,
         PinProbe::Unreachable(_)
     ));
 }
@@ -198,10 +209,10 @@ fn build_pin_check_unreachable_is_unknown_not_ok() {
 }
 
 #[test]
-fn build_pin_check_fails_on_other_non_2xx() {
+fn build_pin_check_fails_on_another_refusal() {
     let check = build_pin_check(
         &PinState::Pinned("trusty-tools".to_string()),
-        Some(&PinProbe::HttpStatus(500)),
+        Some(&PinProbe::RpcRefusal(-32603)),
     );
     assert_eq!(check.status, CheckStatus::Fail);
 }
@@ -235,17 +246,16 @@ fn build_pin_check_ok_when_nothing_is_pinned() {
 /// The whole path, exactly as issue #5045 asks: a session whose `.mcp.json`
 /// pins an index the daemon does not have must report a FAILURE.
 ///
-/// Mutates `TRUSTY_SEARCH_ADDR`, so it is `#[serial]` against the other
-/// env-touching tests in this crate.
+/// Mutates `TRUSTY_SEARCH_SOCKET` (#6285), so it is `#[serial]` against the
+/// other env-touching tests in this crate.
 #[tokio::test]
 #[serial_test::serial]
 async fn pinned_but_missing_index_is_fail() {
-    let base = spawn_stub(
-        "HTTP/1.1 404 Not Found\r\nContent-Length: 27\r\nConnection: close\r\n\r\n\
-         {\"error\":\"unknown index\"}",
-    )
+    let daemon = spawn_status_daemon(Err(crate::uds_mock::RpcError::new(
+        crate::daemon::error::CODE_NOT_FOUND,
+        "unknown index",
+    )))
     .await;
-    let addr = base.trim_start_matches("http://").to_string();
 
     let project = tempfile::tempdir().unwrap();
     write_mcp_json(
@@ -255,11 +265,11 @@ async fn pinned_but_missing_index_is_fail() {
     let home = tempfile::tempdir().unwrap();
 
     unsafe {
-        std::env::set_var("TRUSTY_SEARCH_ADDR", &addr);
+        std::env::set_var(search_rpc::TRUSTY_SEARCH_SOCKET_ENV, daemon.socket());
     }
     let check = check_search_index_pin(home.path(), Some(project.path())).await;
     unsafe {
-        std::env::remove_var("TRUSTY_SEARCH_ADDR");
+        std::env::remove_var(search_rpc::TRUSTY_SEARCH_SOCKET_ENV);
     }
 
     assert_eq!(

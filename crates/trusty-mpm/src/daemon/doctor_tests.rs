@@ -81,17 +81,107 @@ fn expected_search_index_id_derives_from_project_dir_not_hardcoded() {
     assert_eq!(expected_search_index_id(Some(&nested)), "trusty-tools");
 }
 
-#[tokio::test]
-async fn search_unreachable_is_fail() {
-    unsafe {
-        std::env::set_var("TRUSTY_SEARCH_ADDR", "127.0.0.1:0");
+/// Point [`search_rpc::search_socket`] at `socket` for the duration of a test,
+/// and clear the override when dropped.
+///
+/// Why `Drop` rather than a pair of statements: a failing assertion strands the
+/// override pointing at a deleted `TempDir`, and the next `#[serial]` sibling
+/// then probes a socket under a directory that no longer exists.
+struct SearchSocketOverride;
+
+impl SearchSocketOverride {
+    fn point_at(socket: &std::path::Path) -> Self {
+        unsafe {
+            std::env::set_var(search_rpc::TRUSTY_SEARCH_SOCKET_ENV, socket);
+        }
+        Self
     }
+}
+
+impl Drop for SearchSocketOverride {
+    fn drop(&mut self) {
+        unsafe {
+            std::env::remove_var(search_rpc::TRUSTY_SEARCH_SOCKET_ENV);
+        }
+    }
+}
+
+/// A stand-in trusty-search daemon answering `search.health` and
+/// `search.indexes.list` (#6285).
+///
+/// Why the method names are matched by literal: trusty-mpm has no Cargo edge on
+/// trusty-search, so a rig cannot import them either. A name that drifted on
+/// either side answers `method_not_found`, which `check_search` reports as an
+/// unhealthy daemon — which is what these tests assert on.
+async fn spawn_search_daemon(indexes: serde_json::Value) -> crate::uds_mock::MockUdsDaemon {
+    crate::uds_mock::spawn(move |method: &str, _params: serde_json::Value| {
+        let indexes = indexes.clone();
+        let method = method.to_string();
+        Box::pin(async move {
+            match method.as_str() {
+                m if m == search_rpc::METHOD_HEALTH => {
+                    Ok(serde_json::json!({"status": "ok", "indexes": 1}))
+                }
+                m if m == search_rpc::METHOD_INDEXES_LIST => Ok(indexes),
+                other => Err(crate::uds_mock::RpcError::new(
+                    -32601,
+                    format!("unknown method {other:?}"),
+                )),
+            }
+        })
+    })
+    .await
+}
+
+/// Why: an absent daemon must be a clean `Fail`, not a hang — a path under a
+/// directory that cannot exist is refused by the kernel immediately (#6285).
+/// Test: itself.
+#[tokio::test]
+#[serial_test::serial]
+async fn search_unreachable_is_fail() {
+    let _override =
+        SearchSocketOverride::point_at(std::path::Path::new("/nonexistent/trusty-search/ts.sock"));
     let tmp = tempfile::tempdir().unwrap();
     let check = check_search(tmp.path(), None).await;
-    unsafe {
-        std::env::remove_var("TRUSTY_SEARCH_ADDR");
-    }
-    assert_eq!(check.status, CheckStatus::Fail);
+    assert_eq!(check.status, CheckStatus::Fail, "{}", check.message);
+}
+
+/// Why: the whole probe over a real socket — a daemon that answers
+/// `search.health` and lists the project's own index is `Ok`.
+/// Test: itself.
+#[tokio::test]
+#[serial_test::serial]
+async fn search_reports_the_expected_index() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(project.path().join(".git")).unwrap();
+    let expected = expected_search_index_id(Some(project.path()));
+
+    let daemon = spawn_search_daemon(serde_json::json!({"indexes": [expected.clone()]})).await;
+    let _override = SearchSocketOverride::point_at(daemon.socket());
+
+    let home = tempfile::tempdir().unwrap();
+    let check = check_search(home.path(), Some(project.path())).await;
+    assert_eq!(check.status, CheckStatus::Ok, "{}", check.message);
+    assert!(check.message.contains(&expected), "{}", check.message);
+}
+
+/// Why (#4003): a healthy daemon that does not hold this project's index is a
+/// `Warn`, never an `Ok` — the PM's "search before grep" rule silently returns
+/// nothing in that state.
+/// Test: itself.
+#[tokio::test]
+#[serial_test::serial]
+async fn search_without_the_expected_index_is_warn() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(project.path().join(".git")).unwrap();
+
+    let daemon = spawn_search_daemon(serde_json::json!({"indexes": ["some-other-index"]})).await;
+    let _override = SearchSocketOverride::point_at(daemon.socket());
+
+    let home = tempfile::tempdir().unwrap();
+    let check = check_search(home.path(), Some(project.path())).await;
+    assert_eq!(check.status, CheckStatus::Warn, "{}", check.message);
+    assert!(check.message.contains("missing"), "{}", check.message);
 }
 
 #[tokio::test]
@@ -559,7 +649,7 @@ async fn worktrees_without_a_reconciled_inventory_is_unknown() {
 async fn spawn_health_listener(
     body: serde_json::Value,
     delay: std::time::Duration,
-) -> crate::uds_mock::MockMemoryDaemon {
+) -> crate::uds_mock::MockUdsDaemon {
     crate::uds_mock::spawn(move |_method: &str, _params: serde_json::Value| {
         let body = body.clone();
         Box::pin(async move {
