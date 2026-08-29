@@ -61,6 +61,7 @@ pub mod hotspots;
 pub mod index;
 pub mod priority;
 pub mod quality;
+pub mod search_rpc;
 pub mod topology;
 
 #[cfg(test)]
@@ -68,25 +69,25 @@ mod grounding_tests;
 
 /// The two daemons this module drives: where they are, and what starts them.
 ///
-/// Why: every address and binary is a VALUE rather than something the functions
+/// Why: every socket and binary is a VALUE rather than something the functions
 /// read from the environment themselves. That is what lets the failure arms be
-/// tested against a dead port and a stub executable without any test touching
+/// tested against a dead socket and a stub executable without any test touching
 /// `std::env::set_var`, which is `unsafe` in edition 2024 and unsound under the
 /// parallel harness — the same split `tga::audit::AnalyzeGuard` takes.
-/// What: a binary and a base URL per daemon, plus the shared readiness budget.
+/// What: a binary and a socket per daemon, plus the shared readiness budget.
 /// Test: `super::grounding_tests`, which constructs one directly for every arm.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Tools {
     /// The `trusty-search` binary to run — indexing, and starting the daemon.
     pub search: PathBuf,
-    /// Base address of the trusty-search daemon, e.g. `http://127.0.0.1:7878`.
-    pub search_url: String,
+    /// The trusty-search daemon's Unix socket (#6285, ADR-0032).
+    pub search_socket: PathBuf,
     /// The `trusty-analyze` binary to spawn when its daemon is absent.
     pub analyze: PathBuf,
     /// The trusty-analyze daemon's Unix socket (#6287, ADR-0032).
     pub analyze_socket: PathBuf,
-    /// Wall-clock budget for a freshly-spawned daemon to bind its port or socket.
+    /// Wall-clock budget for a freshly-spawned daemon to bind its socket.
     pub bind_timeout: Duration,
     /// Wall-clock budget for a listening daemon to report itself healthy.
     pub startup_timeout: Duration,
@@ -101,16 +102,16 @@ impl Tools {
     /// them in keeps the daemon this starts and the binary the sweep checked
     /// from ever being two different installs — the same reason
     /// `tga::audit::SearchGuard` resolves its binary once at the entry point.
-    /// What: the two paths as given, with the search URL resolved by
-    /// [`daemons::search_base_url`] and the analyze socket by
-    /// [`daemons::analyze_socket`] — #6287 retired the analyze daemon's HTTP
-    /// base URL, so that half of the pair is a Unix socket path now.
+    /// What: the two paths as given, with each daemon's socket resolved by
+    /// [`daemons::search_socket`] and [`daemons::analyze_socket`] — #6287
+    /// retired the analyze daemon's HTTP base URL and #6285 retired
+    /// trusty-search's, so both halves of the pair are socket paths now.
     /// Test: `super::grounding_tests::pinned_tools_keep_the_paths_they_were_given`.
     #[must_use]
     pub fn pinned(search: PathBuf, analyze: PathBuf) -> Self {
         Self {
             search,
-            search_url: daemons::search_base_url(),
+            search_socket: daemons::search_socket(),
             analyze,
             analyze_socket: daemons::analyze_socket(),
             bind_timeout: daemons::BIND_TIMEOUT,
@@ -254,7 +255,7 @@ pub async fn ground(
     // #6082: an index id is a checkout basename, so a same-named checkout
     // elsewhere on this machine is served under it. Both legs below read that
     // index, so a wrong root poisons the evidence AND the measurements.
-    if let Err(cause) = index::root_matches(&tools.search_url, &index_id, checkout).await {
+    if let Err(cause) = index::root_matches(&tools.search_socket, &index_id, checkout).await {
         return Grounding {
             index_id: Some(index_id),
             priorities: Vec::new(),
@@ -270,13 +271,8 @@ pub async fn ground(
     // #6082: the discovery leg. It asks the index where each DD dimension's
     // evidence is, so a selected file arrives already attributed to what it is
     // evidence FOR.
-    let discovery = match evidence::HttpSearch::new(&tools.search_url, &index_id, checkout) {
-        Ok(client) => evidence::discover(&client, instructions, caps).await,
-        Err(cause) => evidence::Discovery {
-            dimensions: Vec::new(),
-            failures: vec![cause],
-        },
-    };
+    let client = evidence::SocketSearch::new(&tools.search_socket, &index_id, checkout);
+    let discovery = evidence::discover(&client, instructions, caps).await;
     // #6082: judged BEFORE the manifest backfill below, because that backfill
     // finds `Cargo.toml` in every Rust repository and would therefore create a
     // dimension on a run where search answered nothing at all. Reading the

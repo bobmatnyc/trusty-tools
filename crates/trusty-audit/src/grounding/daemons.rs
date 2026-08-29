@@ -14,10 +14,17 @@
 //!
 //! ## Nothing here is implemented twice
 //!
-//! Probing, detaching a child, and polling to readiness are
-//! [`trusty_common::daemon_guard`]'s, which is where they were promoted for
-//! exactly this kind of caller (#5670, #985). This module contributes the two
-//! addresses, the two argument vectors, and the failure text — nothing else.
+//! Detaching a child is [`trusty_common::daemon_guard`]'s, which is where it
+//! was promoted for exactly this kind of caller (#5670, #985). Dialling either
+//! daemon is [`super::search_rpc`] for one and [`analyze_is_healthy`] for the
+//! other. This module contributes the two socket paths, the two argument
+//! vectors, the readiness rule, and the failure text — nothing else.
+//!
+//! #6285: both daemons speak framed JSON-RPC over a Unix socket now, so the
+//! probe and the two-phase readiness wait are ONE implementation shared by
+//! both — see [`wait_socket_ready`]. The TCP half that trusty-search needed
+//! until this change (`probe_once`, an `accepting` connect, a base URL parsed
+//! for its authority) is gone with the listener it probed.
 //!
 //! Test: `daemon_tests`, and `super::grounding_tests` for the live arms.
 
@@ -26,9 +33,10 @@ use std::time::Duration;
 
 use std::time::Instant;
 
-use trusty_common::daemon_guard::{DaemonAddrLayout, probe_once, spawn_detached};
+use trusty_common::daemon_guard::spawn_detached;
 
 use super::Tools;
+use super::search_rpc;
 
 /// Environment variable naming the `trusty-search` binary.
 ///
@@ -56,6 +64,13 @@ pub const ENV_ANALYZE_BIN: &str = "TRUSTY_ANALYZE_BIN";
 /// configured.
 pub const ENV_ANALYZE_SOCKET: &str = "TRUSTY_ANALYZE_SOCKET";
 
+/// Environment variable overriding the trusty-search daemon's socket.
+///
+/// Re-exported from [`super::search_rpc`], which owns the whole trusty-search
+/// dial, so a caller reading this module finds both daemons' overrides in one
+/// place. See [`search_rpc::ENV_SEARCH_SOCKET`] for why the variable exists.
+pub use super::search_rpc::ENV_SEARCH_SOCKET;
+
 /// The method `trusty-analyze` answers a health probe on.
 ///
 /// Copied for the same reason [`ENV_ANALYZE_SOCKET`] is.
@@ -64,35 +79,38 @@ pub const ENV_ANALYZE_SOCKET: &str = "TRUSTY_ANALYZE_SOCKET";
 /// driving [`ensure_analyze`] against a live router rather than a stub.
 const ANALYZE_HEALTH_METHOD: &str = "analyze.health";
 
-/// Wall-clock budget for a freshly-spawned daemon to answer `/health`.
+/// Wall-clock budget for a freshly-spawned daemon to report itself healthy.
 ///
-/// Why 60s rather than `daemon_guard::DEFAULT_STARTUP_TIMEOUT`'s 30s: the HTTP
-/// port binds in about a second, but a first run on a recipient's machine with
-/// no model cache spends 15–30s in ONNX load before trusty-search answers, and
+/// Why 60s rather than `daemon_guard::DEFAULT_STARTUP_TIMEOUT`'s 30s: the socket
+/// binds in about a second, but a first run on a recipient's machine with no
+/// model cache spends 15–30s in ONNX load before trusty-search answers, and
 /// giving up at 30s would turn a slow cold start into an unassessed engagement.
 /// Matches `trusty-search`'s own guard and `tga::audit::SEARCH_STARTUP_TIMEOUT`.
 pub const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// How long a freshly-spawned daemon has to BIND its port before it is given up
-/// on. See [`wait_ready`] for why this is separate from [`STARTUP_TIMEOUT`].
+/// How long a freshly-spawned daemon has to BIND its socket before it is given
+/// up on. See [`wait_socket_ready`] for why this is separate from
+/// [`STARTUP_TIMEOUT`].
 pub const BIND_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// How long a single TCP connection attempt may take.
+/// How long a single socket connection attempt may take.
 ///
-/// Loopback, so a reachable port answers in microseconds and an unreachable one
-/// is refused immediately. This bounds the third case — a host that silently
-/// drops packets — rather than the two that matter.
+/// A reachable socket answers in microseconds and an absent one is refused
+/// immediately. This bounds the third case — a daemon that accepts and then
+/// stops reading — rather than the two that matter.
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(200);
 
-/// The trusty-search daemon's address, as every client of it resolves one.
+/// The trusty-search daemon's socket, as every client of it resolves one.
 ///
-/// Why: trusty-search binds an OS-assigned port and records it in its own
-/// discovery files, so a hard-coded `127.0.0.1:7878` would miss an auto-ported
-/// daemon and every `TRUSTY_DATA_DIR`-isolated one. [`DaemonAddrLayout`] is that
-/// resolution, promoted into `trusty-common` for sibling callers (#5670).
+/// #6285: the discovery files this used to read described a TCP listener that
+/// no longer exists. Both the daemon and this caller now DERIVE the path from
+/// [`trusty_common::daemon_socket_path`], so there is nothing published between
+/// them for a stale write to contradict. A thin forward to
+/// [`search_rpc::search_socket`], kept named here because `Tools::pinned` and
+/// the tests read better against a per-daemon resolver.
 #[must_use]
-pub fn search_base_url() -> String {
-    DaemonAddrLayout::TRUSTY_SEARCH.resolve_base_url()
+pub fn search_socket() -> PathBuf {
+    search_rpc::search_socket()
 }
 
 /// The trusty-analyze daemon's socket: [`ENV_ANALYZE_SOCKET`], else the derived
@@ -153,9 +171,31 @@ async fn analyze_is_healthy(socket: &Path, timeout: Duration) -> bool {
         == Some("ok")
 }
 
-/// The health endpoint for a base address, tolerating a trailing slash.
-fn health_url(base: &str) -> String {
-    format!("{}/health", base.trim_end_matches('/'))
+/// Is the trusty-search daemon at `socket` answering?
+///
+/// Why any result frame counts: `GET /health` on trusty-search answered 200
+/// unconditionally — `health_handler` returns a bare `Json<HealthResponse>`
+/// with no status code of its own — so `probe_once` treated a degraded daemon
+/// as reachable. Reading `status` here would newly respawn a daemon that is up
+/// and warning about one index, which is a behaviour change #6285 does not owe.
+/// The analyze probe reads `status` because its HTTP route really did answer
+/// 503 (see [`analyze_is_healthy`]).
+///
+/// What: one `search.health` frame; `true` only for a result frame. A dial
+/// failure and an error frame are both `false`, so an RPC error can never
+/// read as a healthy daemon.
+/// Test: `super::grounding_tests::{a_search_daemon_that_will_not_start_is_a_named_gap,
+/// a_reachable_search_daemon_is_not_restarted,
+/// a_search_daemon_that_refuses_health_is_not_healthy}`.
+async fn search_is_healthy(socket: &Path, timeout: Duration) -> bool {
+    search_rpc::call(
+        socket,
+        search_rpc::METHOD_HEALTH,
+        serde_json::Value::Null,
+        timeout,
+    )
+    .await
+    .is_ok()
 }
 
 /// The argument vector `trusty-search` is started with.
@@ -184,23 +224,25 @@ fn analyze_serve_args() -> [&'static str; 1] {
 ///
 /// # Errors
 ///
-/// One line, safe to show the recipient, naming the address and the binary, when
+/// One line, safe to show the recipient, naming the socket and the binary, when
 /// the binary will not spawn or the daemon never becomes ready. The caller turns
 /// it into a gap; nothing here fails a run.
 ///
 /// Test: `super::grounding_tests::{a_search_daemon_that_will_not_start_is_a_named_gap,
-/// a_reachable_search_daemon_is_not_restarted}`.
+/// a_reachable_search_daemon_is_not_restarted,
+/// a_daemon_that_binds_but_never_answers_is_a_named_gap}`.
 pub async fn ensure_search(tools: &Tools) -> Result<(), String> {
-    let health = health_url(&tools.search_url);
-    if probe_once(&health).await {
+    let socket = &tools.search_socket;
+    let at = socket.display().to_string();
+    if search_is_healthy(socket, CONNECT_TIMEOUT).await {
         return Ok(());
     }
     let binary = tools.search.display().to_string();
     spawn_detached(&tools.search, &search_start_args())
-        .map_err(|e| refusal("trusty-search", &tools.search_url, &binary, &e.to_string()))?;
-    wait_ready(&health, &tools.search_url, tools)
+        .map_err(|e| refusal("trusty-search", &at, &binary, &e.to_string()))?;
+    wait_socket_ready(socket, tools, || search_is_healthy(socket, CONNECT_TIMEOUT))
         .await
-        .map_err(|cause| refusal("trusty-search", &tools.search_url, &binary, &cause))
+        .map_err(|cause| refusal("trusty-search", &at, &binary, &cause))
 }
 
 /// Ensure the trusty-analyze daemon answers, starting it if it does not.
@@ -211,12 +253,8 @@ pub async fn ensure_search(tools: &Tools) -> Result<(), String> {
 /// reports `status: "degraded"`, so it is reported here rather than surfacing
 /// later as an empty hotspot list — see [`analyze_is_healthy`].
 ///
-/// #6287: the two-phase wait [`wait_ready`] performs for trusty-search does not
-/// apply here. Its first phase separates "the process is not there" from "the
-/// process is there and still warming up" by asking whether anything ACCEPTS a
-/// TCP connection, which is a weaker question than a health probe. A Unix socket
-/// answers that same question through `socket_is_serving`, so the two phases are
-/// kept — one budget for the bind, then the full startup budget for health.
+/// The readiness wait is [`wait_socket_ready`], shared with [`ensure_search`]
+/// since #6285.
 ///
 /// Test: `super::grounding_tests::an_analyze_daemon_that_will_not_start_is_a_named_gap`.
 pub async fn ensure_analyze(tools: &Tools) -> Result<(), String> {
@@ -227,26 +265,47 @@ pub async fn ensure_analyze(tools: &Tools) -> Result<(), String> {
     let binary = tools.analyze.display().to_string();
     spawn_detached(&tools.analyze, &analyze_serve_args())
         .map_err(|e| refusal("trusty-analyze", &at, &binary, &e.to_string()))?;
-    wait_analyze_ready(tools)
-        .await
-        .map_err(|cause| refusal("trusty-analyze", &at, &binary, &cause))
+    wait_socket_ready(&tools.analyze_socket, tools, || {
+        analyze_is_healthy(&tools.analyze_socket, CONNECT_TIMEOUT)
+    })
+    .await
+    .map_err(|cause| refusal("trusty-analyze", &at, &binary, &cause))
 }
 
-/// [`wait_ready`]'s UDS counterpart, with the same two budgets (#6287).
+/// Wait for a daemon this call just spawned, in two phases.
 ///
-/// Why the phases survive the transport change: a binary that dies immediately —
-/// which is what `trusty-analyze serve` does when trusty-search is unreachable —
-/// must cost the short bind budget, not the full 60-second startup one. In an
-/// unattended engagement that difference is a minute per repository spent
-/// waiting for a process that is already gone.
+/// Why not `trusty_common::daemon_guard::spin_until_ready`: it applies ONE
+/// budget to both of the things that can be slow, and they are slow for
+/// unrelated reasons. Binding the socket takes about a second whatever the
+/// machine; answering a health call afterwards can take 15-30s on a first run
+/// that has to load ONNX weights. Under one budget a binary that dies
+/// immediately — which is exactly what `trusty-analyze serve` does when
+/// trusty-search is unreachable — costs the FULL startup budget before anything
+/// is reported. In an unattended engagement that is 60 seconds per repository
+/// spent waiting for a process that is already gone.
 ///
-/// What: the socket must accept a connection within [`Tools::bind_timeout`], and
-/// only then does the health verdict get the full [`Tools::startup_timeout`].
-async fn wait_analyze_ready(tools: &Tools) -> Result<(), String> {
-    let socket = &tools.analyze_socket;
+/// #6285: one loop for both daemons. Until this change trusty-search took the
+/// TCP form of it (a `connect` for phase one, `probe_once` for phase two) and
+/// trusty-analyze the UDS form, and the two drifted apart by construction.
+/// Both dial a socket now, so the phases are a single implementation and
+/// `healthy` is the only thing that varies.
+///
+/// What: the socket must accept a connection within [`Tools::bind_timeout`],
+/// and only then does `healthy` get the full [`Tools::startup_timeout`].
+/// `spin_until_ready`'s spinner is dropped with it, which this crate wants
+/// anyway — it writes to the same stderr the sweep's progress relay is reading.
+///
+/// Test: `super::grounding_tests::{a_search_daemon_that_will_not_start_is_a_named_gap,
+/// a_daemon_that_binds_but_never_answers_is_a_named_gap,
+/// an_analyze_daemon_that_will_not_start_is_a_named_gap}`.
+async fn wait_socket_ready<F, Fut>(socket: &Path, tools: &Tools, healthy: F) -> Result<(), String>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
     let bound_by = Instant::now() + tools.bind_timeout;
     loop {
-        if analyze_is_healthy(socket, CONNECT_TIMEOUT).await {
+        if healthy().await {
             return Ok(());
         }
         if trusty_common::uds::socket_is_serving(socket, CONNECT_TIMEOUT).await {
@@ -263,7 +322,7 @@ async fn wait_analyze_ready(tools: &Tools) -> Result<(), String> {
     let ready_by = Instant::now() + tools.startup_timeout;
     loop {
         tokio::time::sleep(tools.poll_interval).await;
-        if analyze_is_healthy(socket, CONNECT_TIMEOUT).await {
+        if healthy().await {
             return Ok(());
         }
         if Instant::now() >= ready_by {
@@ -275,92 +334,13 @@ async fn wait_analyze_ready(tools: &Tools) -> Result<(), String> {
     }
 }
 
-/// Wait for a daemon this call just spawned, in two phases.
-///
-/// Why not `trusty_common::daemon_guard::spin_until_ready`: it applies ONE
-/// budget to both of the things that can be slow, and they are slow for
-/// unrelated reasons. Binding the port takes about a second whatever the
-/// machine; answering `/health` afterwards can take 15–30s on a first run that
-/// has to load ONNX weights. Under one budget a binary that dies immediately —
-/// which is exactly what `trusty-analyze serve` does when trusty-search is
-/// unreachable — costs the FULL startup budget before anything is reported. In
-/// an unattended engagement that is 60 seconds per repository spent waiting for
-/// a process that is already gone.
-///
-/// What: the port must accept a TCP connection within
-/// [`Tools::bind_timeout`], and only then does `/health` get the full
-/// [`Tools::startup_timeout`]. `spin_until_ready`'s spinner is dropped with it,
-/// which this crate wants anyway — it writes to the same stderr the sweep's
-/// progress relay is reading.
-/// Test: `super::grounding_tests::{a_search_daemon_that_will_not_start_is_a_named_gap,
-/// a_daemon_that_binds_but_never_answers_is_a_named_gap}`.
-async fn wait_ready(health: &str, url: &str, tools: &Tools) -> Result<(), String> {
-    let bound_by = Instant::now() + tools.bind_timeout;
-    loop {
-        if probe_once(health).await {
-            return Ok(());
-        }
-        if accepting(url).await {
-            break;
-        }
-        if Instant::now() >= bound_by {
-            return Err(format!(
-                "nothing was listening there {}s after it was started",
-                tools.bind_timeout.as_secs_f32()
-            ));
-        }
-        tokio::time::sleep(tools.poll_interval).await;
-    }
-    let ready_by = Instant::now() + tools.startup_timeout;
-    loop {
-        tokio::time::sleep(tools.poll_interval).await;
-        if probe_once(health).await {
-            return Ok(());
-        }
-        if Instant::now() >= ready_by {
-            return Err(format!(
-                "it is listening but did not answer /health within {}s",
-                tools.startup_timeout.as_secs_f32()
-            ));
-        }
-    }
-}
-
-/// Whether anything accepts a TCP connection at this address.
-///
-/// Deliberately weaker than a health probe: it separates "the process is not
-/// there" from "the process is there and still warming up", which is the
-/// distinction [`wait_ready`]'s two budgets rest on.
-async fn accepting(url: &str) -> bool {
-    let Some(authority) = authority_of(url) else {
-        return false;
-    };
-    matches!(
-        tokio::time::timeout(
-            CONNECT_TIMEOUT,
-            tokio::net::TcpStream::connect(authority.as_str()),
-        )
-        .await,
-        Ok(Ok(_))
-    )
-}
-
-/// The `host:port` of a base URL, or `None` when it names no host.
-fn authority_of(url: &str) -> Option<String> {
-    let rest = url
-        .trim_start_matches("http://")
-        .trim_start_matches("https://");
-    let authority = rest.split('/').next().unwrap_or_default();
-    (!authority.is_empty() && authority.contains(':')).then(|| authority.to_owned())
-}
-
 /// One unavailable daemon, rendered as one line the recipient can act on.
 ///
 /// Why the cause is quoted rather than replaced: the remedies differ — a binary
 /// that is not installed needs an install, a daemon that will not stay up needs
 /// its own log — and only the spawn or the readiness poll knows which fired.
-fn refusal(service: &str, url: &str, binary: &str, cause: &str) -> String {
-    format!("{service} is not reachable at {url} and `{binary}` could not start it ({cause})")
+fn refusal(service: &str, at: &str, binary: &str, cause: &str) -> String {
+    format!("{service} is not reachable at {at} and `{binary}` could not start it ({cause})")
 }
 
 #[cfg(test)]
@@ -396,10 +376,18 @@ mod daemon_tests {
         );
     }
 
+    /// #6285: the search leg's half of the same contract. The daemon derives
+    /// its socket from `daemon_socket_path("trusty-search")`
+    /// (`trusty_search::service::socket::socket_path`), so a resolver that
+    /// disagreed would dial a path nothing binds.
     #[test]
-    fn health_is_one_slash_whatever_the_base_looks_like() {
-        assert_eq!(health_url("http://x:1"), "http://x:1/health");
-        assert_eq!(health_url("http://x:1/"), "http://x:1/health");
+    fn the_search_socket_is_the_path_the_daemon_binds() {
+        assert_eq!(search_rpc::ENV_SEARCH_SOCKET, "TRUSTY_SEARCH_SOCKET");
+        assert_eq!(
+            search_socket(),
+            trusty_common::daemon_socket_path("trusty-search").unwrap_or_default(),
+            "the default must be the same path the daemon binds"
+        );
     }
 
     /// `--foreground` is the flag that keeps the spawned process and the daemon
@@ -421,12 +409,12 @@ mod daemon_tests {
     fn a_refusal_names_the_service_the_address_the_binary_and_the_cause() {
         let line = refusal(
             "trusty-analyze",
-            "http://127.0.0.1:7879",
+            "/w/sockets/trusty-analyze.sock",
             "/w/tools/trusty-analyze",
             "no such file",
         );
         assert!(line.contains("trusty-analyze"), "{line}");
-        assert!(line.contains("http://127.0.0.1:7879"), "{line}");
+        assert!(line.contains("/w/sockets/trusty-analyze.sock"), "{line}");
         assert!(line.contains("/w/tools/trusty-analyze"), "{line}");
         assert!(line.contains("no such file"), "{line}");
         assert_eq!(line.lines().count(), 1, "must stay one line: {line}");

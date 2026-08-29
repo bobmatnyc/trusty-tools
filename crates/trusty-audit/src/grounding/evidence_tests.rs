@@ -543,22 +543,31 @@ fn the_daemons_search_envelope_parses_to_relative_paths() {
     assert_eq!(hits[0].start_line, 12);
 }
 
-/// The endpoint names the index the repository was indexed under.
+/// #6285: the params name the index the repository was indexed under, and the
+/// query half stays byte-for-byte the JSON the HTTP route took — which is what
+/// keeps a malformed-query refusal identical on either transport.
 #[test]
-fn the_query_url_names_the_index() {
-    let client = HttpSearch::new(
-        "http://127.0.0.1:7878/",
+fn the_query_names_the_index_and_pins_graph_expansion() {
+    let client = SocketSearch::new(
+        std::path::Path::new("/w/sockets/trusty-search.sock"),
         "acme-api",
         std::path::Path::new("/w/repos/acme-api"),
-    )
-    .expect("a client is built");
-    assert_eq!(client.url, "http://127.0.0.1:7878/indexes/acme-api/search");
+    );
+    let params = client.params("credential handling", 12);
+    assert_eq!(params["index_id"], "acme-api");
+    assert_eq!(params["body"]["text"], "credential handling");
+    assert_eq!(params["body"]["top_k"], 12);
+    assert_eq!(params["body"]["compact"], true);
+    assert_eq!(
+        params["body"]["expand_graph"], true,
+        "#6082: a default flip must not silently drop relationship evidence"
+    );
 }
 
 /// #6082: the whole discovery pass, against the score scale the daemon really
 /// answers on.
 ///
-/// Why this is the regression: `POST /indexes/{id}/search` fuses its lanes with
+/// Why this is the regression: `search.query` fuses its lanes with
 /// Reciprocal Rank Fusion, so a hit's score is `Σ weight / (60 + rank)` and can
 /// never exceed `1/61 ≈ 0.0164`. The floor this replaced was an absolute `0.15`,
 /// which no hit of any query could ever clear — so `discover` returned an empty
@@ -614,13 +623,50 @@ fn rrf_scored_hits_still_become_evidence() {
 /// A daemon that is not listening is a reason, never a panic.
 #[test]
 fn a_dead_daemon_is_a_reason_not_a_panic() {
-    // Port 1 is never a trusty-search daemon.
-    let client = HttpSearch::new(
-        "http://127.0.0.1:1",
+    let dir = tempfile::tempdir().expect("tempdir");
+    // Nothing has ever bound this socket.
+    let client = SocketSearch::new(
+        &dir.path().join("absent.sock"),
         "acme-api",
         std::path::Path::new("/w/repos/acme-api"),
-    )
-    .expect("a client is built");
+    );
     let err = block_on(client.hits("credential handling", MIN_TOP_K)).expect_err("must fail");
     assert!(err.contains("trusty-search did not answer"), "{err}");
+}
+
+/// #6285: the fail-open arm that matters most here. A daemon that ANSWERS and
+/// refuses must reach the caller as a failure carrying the daemon's own words —
+/// an error frame read as an empty result would report "no evidence found" for
+/// a query the daemon never ran.
+#[tokio::test]
+async fn a_refused_query_is_a_reason() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("refusing.sock");
+    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind the stub socket");
+    tokio::spawn(async move {
+        while let Ok((mut conn, _)) = listener.accept().await {
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            let mut sink = Vec::new();
+            let _ = conn.read_to_end(&mut sink).await;
+            let _ = conn
+                .write_all(
+                    br#"{"jsonrpc":"2.0","id":1,"error":{"code":-32004,"message":"no such index"}}"#,
+                )
+                .await;
+            let _ = conn.write_all(b"\n").await;
+            let _ = conn.flush().await;
+        }
+    });
+
+    let client = SocketSearch::new(
+        &socket,
+        "acme-api",
+        std::path::Path::new("/w/repos/acme-api"),
+    );
+    let err = client
+        .hits("credential handling", MIN_TOP_K)
+        .await
+        .expect_err("a refusal is never an empty result");
+    assert!(err.contains("refused"), "{err}");
+    assert!(err.contains("no such index"), "{err}");
 }

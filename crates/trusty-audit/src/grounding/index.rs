@@ -33,6 +33,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::{Command, Output};
 
+use super::search_rpc;
 use crate::run::approve::approve_for_indexing;
 
 /// What became of one repository's index.
@@ -79,12 +80,15 @@ const ROOT_PROBE_BUDGET: std::time::Duration = std::time::Duration::from_secs(10
 /// and commit, and every complexity hotspot the report stamped "measured" was
 /// measured against code that was never audited.
 ///
-/// What: reads `root_path` off `GET /indexes/{id}/status` and compares it to
-/// `checkout`, canonicalising both so a symlinked or `..`-laden path still
-/// matches. A daemon that will not answer, or a response with no `root_path`,
-/// is `Ok` — this guard exists to catch a WRONG root, and every other failure
-/// already has a gap of its own; failing closed here would turn one unreadable
-/// field into a repository with no code analysis at all.
+/// What: reads `root_path` off `search.index.status` — the socket method
+/// `GET /indexes/{id}/status` became in #6285 — and compares it to `checkout`,
+/// canonicalising both so a symlinked or `..`-laden path still matches. A
+/// daemon that will not answer, a daemon that refuses, and a response with no
+/// `root_path` are all `Ok` — this guard exists to catch a WRONG root, and every
+/// other failure already has a gap of its own; failing closed here would turn
+/// one unreadable field into a repository with no code analysis at all. That
+/// fail-open arm is exactly why [`search_rpc`] keeps "unreachable" and
+/// "refused" apart: neither may ever arrive here as a root that matched.
 ///
 /// # Errors
 ///
@@ -95,25 +99,18 @@ const ROOT_PROBE_BUDGET: std::time::Duration = std::time::Duration::from_secs(10
 /// Never panics.
 ///
 /// Test: `index_tests::{same_tree_resolves_before_it_compares,
-/// an_unreachable_daemon_is_not_a_refusal}`.
-pub async fn root_matches(base_url: &str, index_id: &str, checkout: &Path) -> Result<(), String> {
-    let url = format!(
-        "{}/indexes/{index_id}/status",
-        base_url.trim_end_matches('/')
-    );
-    let Ok(client) = trusty_common::http_client::loopback_client_builder()
-        .timeout(ROOT_PROBE_BUDGET)
-        .build()
+/// an_unreachable_daemon_is_not_a_refusal, a_refused_status_is_not_a_refusal,
+/// a_mismatched_root_is_refused_over_the_socket}`.
+pub async fn root_matches(socket: &Path, index_id: &str, checkout: &Path) -> Result<(), String> {
+    // #6285: any failure to READ the root is Ok — see the doc comment.
+    let Ok(body) = search_rpc::call(
+        socket,
+        search_rpc::METHOD_INDEX_STATUS,
+        serde_json::json!({ "index_id": index_id }),
+        ROOT_PROBE_BUDGET,
+    )
+    .await
     else {
-        return Ok(());
-    };
-    let Ok(response) = client.get(&url).send().await else {
-        return Ok(());
-    };
-    if !response.status().is_success() {
-        return Ok(());
-    }
-    let Ok(body) = response.json::<serde_json::Value>().await else {
         return Ok(());
     };
     let Some(served) = body.get("root_path").and_then(|v| v.as_str()) else {
@@ -428,8 +425,67 @@ mod index_tests {
     /// whole code-analysis leg over one unreadable field.
     #[tokio::test]
     async fn an_unreachable_daemon_is_not_a_refusal() {
-        // Port 1 is never a trusty-search daemon.
-        let out = root_matches("http://127.0.0.1:1", "acme-api", Path::new("/w/a")).await;
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Nothing has ever bound this socket.
+        let out = root_matches(
+            &dir.path().join("absent.sock"),
+            "acme-api",
+            Path::new("/w/a"),
+        )
+        .await;
         assert!(out.is_ok(), "{out:?}");
+    }
+
+    /// #6285: the other half of that arm. A daemon that ANSWERS and refuses —
+    /// `search.index.status` for an id it does not hold — must also be `Ok`,
+    /// because an index the daemon never heard of has no root to disagree with.
+    #[tokio::test]
+    async fn a_refused_status_is_not_a_refusal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = stub_status(
+            dir.path(),
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32004,"message":"no such index"}}"#,
+        );
+        let out = root_matches(&socket, "acme-api", Path::new("/w/a")).await;
+        assert!(out.is_ok(), "a refusal carries no root to compare: {out:?}");
+    }
+
+    /// The backstop itself, end to end over the socket: a served root that names
+    /// a different tree is the one case that must NOT be `Ok`.
+    #[tokio::test]
+    async fn a_mismatched_root_is_refused_over_the_socket() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = stub_status(
+            dir.path(),
+            r#"{"jsonrpc":"2.0","id":1,"result":{"root_path":"/Users/masa/Projects/trusty-tools"}}"#,
+        );
+        let reason = root_matches(&socket, "trusty-tools", Path::new("/w/repos/trusty-tools"))
+            .await
+            .expect_err("a foreign root is the collision this guard exists for");
+        assert!(
+            reason.contains("/Users/masa/Projects/trusty-tools"),
+            "{reason}"
+        );
+        assert!(reason.contains("/w/repos/trusty-tools"), "{reason}");
+        assert_eq!(reason.lines().count(), 1, "must stay one line: {reason}");
+    }
+
+    /// A socket that answers `reply` to every frame, standing in for the daemon.
+    fn stub_status(dir: &Path, reply: &'static str) -> std::path::PathBuf {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let socket = dir.join(format!("status-{n}.sock"));
+        let listener = trusty_common::uds::bind_hardened(&socket).expect("bind the stub socket");
+        tokio::spawn(async move {
+            while let Ok((mut conn, _)) = listener.accept().await {
+                use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+                let mut sink = Vec::new();
+                let _ = conn.read_to_end(&mut sink).await;
+                let _ = conn.write_all(reply.as_bytes()).await;
+                let _ = conn.write_all(b"\n").await;
+                let _ = conn.flush().await;
+            }
+        });
+        socket
     }
 }

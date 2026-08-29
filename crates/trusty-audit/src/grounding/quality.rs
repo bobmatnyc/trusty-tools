@@ -36,7 +36,7 @@ use super::evidence::FileEvidence;
 /// Why RELATIVE rather than absolute (#6082): the floor shipped as an absolute
 /// `0.15`, calibrated against a run whose filler scored 0.02 and whose signal
 /// scored 0.6–0.9. The endpoint the discovery leg actually calls does not
-/// produce scores on that scale. `POST /indexes/{id}/search` fuses its lanes
+/// produce scores on that scale. `search.query` fuses its lanes
 /// with Reciprocal Rank Fusion — `Σ weight / (60 + rank)` over lane weights that
 /// sum to one — so the highest score any hit can carry is `1/61 ≈ 0.0164`, an
 /// order of magnitude BELOW the floor. Every hit of every query failed it, on

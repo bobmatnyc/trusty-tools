@@ -7,11 +7,10 @@
 //! survives into the caller's gap list — the shape a bare `Ok(())` return would
 //! hide.
 //!
-//! Nothing here reaches a real daemon or a real binary: every address is a
-//! stub server bound to an ephemeral port or a port with nothing on it, and
-//! every binary is a shell script. Nothing reads or writes the process
-//! environment either, which is what lets these run in parallel with the rest
-//! of the suite.
+//! Nothing here reaches a real daemon or a real binary: every daemon is a stub
+//! socket under a temp directory, or a path nothing has ever bound, and every
+//! binary is a shell script. Nothing reads or writes the process environment
+//! either, which is what lets these run in parallel with the rest of the suite.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -19,100 +18,91 @@ use std::time::Duration;
 
 use super::*;
 
-/// A one-connection-at-a-time HTTP stub standing in for a trusty-* daemon.
+/// A stand-in `trusty-search` socket (#6285).
 ///
-/// Answers 200 to anything whose path contains `health`, and `hotspots` (when
-/// given) to anything containing `complexity_hotspots`. `None` answers 500 —
-/// the reachable-but-broken daemon, which is a different failure from an
-/// unreachable one and gets its own test.
-async fn stub_daemon(hotspots: Option<&'static str>) -> String {
-    stub_daemon_with(hotspots, None).await
+/// Why a socket and not an HTTP listener: the search leg dials
+/// `trusty_common::daemon_socket_path("trusty-search")` now, exactly as the
+/// analyze leg has since #6287, so one stub shape serves both daemons.
+///
+/// What: binds a hardened socket under `dir` and answers two methods.
+/// `search.health` always reports `ok` — the daemon's own `GET /health`
+/// answered 200 unconditionally, and `search_is_healthy` keeps that. Queries
+/// answer `hits` as their result, or the refusal a daemon spells for an index
+/// it does not hold when `hits` is `None`, which is what the pre-#6285 stub's
+/// HTTP 404 meant.
+fn stub_search_socket(dir: &Path, hits: Option<&'static str>) -> PathBuf {
+    answering_socket(dir, "trusty-search", move |request| {
+        if request.contains("search.health") {
+            r#"{"jsonrpc":"2.0","id":1,"result":{"status":"ok","version":"0.0.0","indexes":1}}"#
+                .to_owned()
+        } else if request.contains("search.query") {
+            match hits {
+                // Compacted, not interpolated raw: the fixtures are
+                // pretty-printed and a frame is newline-terminated, so
+                // embedding one verbatim would end the frame at its first
+                // line break.
+                Some(json) => {
+                    let value: serde_json::Value =
+                        serde_json::from_str(json).expect("a valid search fixture");
+                    format!(r#"{{"jsonrpc":"2.0","id":1,"result":{value}}}"#)
+                }
+                None => {
+                    r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32004,"message":"no such index"}}"#
+                        .to_owned()
+                }
+            }
+        } else {
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"no such method"}}"#
+                .to_owned()
+        }
+    })
 }
 
-/// [`stub_daemon`], plus an answer for #6082's `/indexes/{id}/search` queries.
+/// A socket that accepts connections and refuses every health call.
 ///
-/// Why a second constructor rather than a parameter on the first: the discovery
-/// leg asks a dozen-plus queries per repository, and most tests here drive a
-/// DIFFERENT leg to failure — they want the search leg to answer quietly,
-/// without restating that at every call site.
-async fn stub_daemon_with(hotspots: Option<&'static str>, search: Option<&'static str>) -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind an ephemeral port");
-    let addr = listener.local_addr().expect("local addr");
+/// The middle case `daemons::wait_socket_ready`'s two budgets exist to
+/// separate: the socket IS bound, so this is a daemon that is starting rather
+/// than absent.
+fn unhealthy_search_socket(dir: &Path) -> PathBuf {
+    answering_socket(dir, "warming-search", |_| {
+        r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"warming up"}}"#.to_owned()
+    })
+}
+
+/// A socket path nothing has ever bound — the search equivalent of
+/// [`dead_socket`].
+fn dead_search_socket(dir: &Path) -> PathBuf {
+    dir.join("absent-search.sock")
+}
+
+/// Bind one hardened socket under `dir` and answer every frame with `reply`.
+///
+/// A distinct filename per stub: one test builds its `Tools` twice from the
+/// same temp dir, and a socket path can only be bound once.
+fn answering_socket<F>(dir: &Path, name: &str, reply: F) -> PathBuf
+where
+    F: Fn(&str) -> String + Send + Sync + 'static,
+{
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let socket = dir.join("sockets").join(format!("{name}-{n}.sock"));
+    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind the stub socket");
+    let reply = std::sync::Arc::new(reply);
     tokio::spawn(async move {
-        loop {
-            let Ok((mut socket, _)) = listener.accept().await else {
-                return;
-            };
-            let mut buffer = [0u8; 2048];
-            let read = {
-                use tokio::io::AsyncReadExt as _;
-                socket.read(&mut buffer).await.unwrap_or(0)
-            };
-            let request = String::from_utf8_lossy(&buffer[..read]).into_owned();
-            let response = if request.contains("health") {
-                body(200, "text/plain", "ok")
-            } else if request.contains("complexity_hotspots") {
-                match hotspots {
-                    Some(json) => body(200, "application/json", json),
-                    None => body(500, "text/plain", "index is not loaded"),
-                }
-            } else if request.contains("/search") {
-                match search {
-                    Some(json) => body(200, "application/json", json),
-                    None => body(404, "text/plain", "no such index"),
-                }
-            } else {
-                body(404, "text/plain", "no")
-            };
-            use tokio::io::AsyncWriteExt as _;
-            let _ = socket.write_all(response.as_bytes()).await;
-            let _ = socket.shutdown().await;
+        while let Ok((mut conn, _)) = listener.accept().await {
+            let reply = std::sync::Arc::clone(&reply);
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+                let mut sink = Vec::new();
+                let _ = conn.read_to_end(&mut sink).await;
+                let request = String::from_utf8_lossy(&sink).into_owned();
+                let _ = conn.write_all(reply(&request).as_bytes()).await;
+                let _ = conn.write_all(b"\n").await;
+                let _ = conn.flush().await;
+            });
         }
     });
-    format!("http://{addr}")
-}
-
-fn body(status: u16, content_type: &str, payload: &str) -> String {
-    format!(
-        "HTTP/1.1 {status} X\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
-        payload.len()
-    )
-}
-
-/// A listener that accepts connections and refuses every request.
-///
-/// The middle case `daemons::wait_ready`'s two budgets exist to separate: the
-/// port IS bound, so this is a daemon that is starting rather than absent.
-async fn listening_but_unhealthy() -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind an ephemeral port");
-    let addr = listener.local_addr().expect("local addr");
-    tokio::spawn(async move {
-        loop {
-            let Ok((mut socket, _)) = listener.accept().await else {
-                return;
-            };
-            use tokio::io::AsyncWriteExt as _;
-            let _ = socket
-                .write_all(body(503, "text/plain", "warming up").as_bytes())
-                .await;
-            let _ = socket.shutdown().await;
-        }
-    });
-    format!("http://{addr}")
-}
-
-/// An address with nothing listening on it: bound, read back, then released.
-async fn dead_url() -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind an ephemeral port");
-    let addr = listener.local_addr().expect("local addr");
-    drop(listener);
-    format!("http://{addr}")
+    socket
 }
 
 /// A `trusty-search` that approves and indexes whatever it is asked to.
@@ -133,10 +123,15 @@ fn stub_binary(at: &Path, name: &str, script: &str) -> PathBuf {
 }
 
 /// Tools whose budgets are short enough that no failing test waits on one.
-fn tools(search: PathBuf, search_url: String, analyze: PathBuf, analyze_socket: PathBuf) -> Tools {
+fn tools(
+    search: PathBuf,
+    search_socket: PathBuf,
+    analyze: PathBuf,
+    analyze_socket: PathBuf,
+) -> Tools {
     Tools {
         search,
-        search_url,
+        search_socket,
         analyze,
         analyze_socket,
         bind_timeout: Duration::from_millis(60),
@@ -146,10 +141,6 @@ fn tools(search: PathBuf, search_url: String, analyze: PathBuf, analyze_socket: 
 }
 
 /// A stand-in `trusty-analyze` socket (#6287).
-///
-/// Why: the analyze leg dials a Unix socket now, so [`stub_daemon`] — one HTTP
-/// listener that answered for both daemons — can no longer stand in for it. The
-/// search half stays HTTP, which is why both stubs still exist.
 ///
 /// What: binds a hardened socket under `dir` and answers two methods.
 /// `analyze.health` always reports `ok`; `analyze.complexity_hotspots` returns
@@ -215,7 +206,7 @@ const HOTSPOTS: &str = r#"{"index_id":"acme-api","top_n":60,"hotspots":[
 
 const EMPTY_HOTSPOTS: &str = r#"{"index_id":"acme-api","top_n":60,"hotspots":[]}"#;
 
-/// What #6082's `/indexes/{id}/search` answers with. The stub cannot vary its
+/// What #6082's `search.query` answers with. The stub cannot vary its
 /// answer per query, so every dimension finds the same two files — enough to
 /// assert attribution and that the leg survives a dead trusty-analyze.
 const SEARCH_HITS: &str = r#"{"results":[
@@ -245,11 +236,10 @@ fn manifest_naming(dir: &Path, checkout: &Path) -> PathBuf {
 /// it — the first leg refuses before anything is spawned or probed.
 #[tokio::test]
 async fn a_checkout_with_no_basename_never_reaches_a_daemon() {
-    let dead = dead_url().await;
     let tmp = tempfile::tempdir().expect("tempdir");
     let t = tools(
         PathBuf::from("/nonexistent/trusty-search"),
-        dead,
+        dead_search_socket(tmp.path()),
         PathBuf::from("/nonexistent/trusty-analyze"),
         dead_socket(tmp.path()),
     );
@@ -276,11 +266,10 @@ async fn a_checkout_with_no_basename_never_reaches_a_daemon() {
 /// must produce a line rather than an empty code-analysis section.
 #[tokio::test]
 async fn a_search_daemon_that_will_not_start_is_a_named_gap() {
-    let dead = dead_url().await;
     let tmp = tempfile::tempdir().expect("tempdir");
     let t = tools(
         PathBuf::from("/nonexistent/trusty-search"),
-        dead,
+        dead_search_socket(tmp.path()),
         PathBuf::from("/nonexistent/trusty-analyze"),
         dead_socket(tmp.path()),
     );
@@ -305,11 +294,11 @@ async fn a_search_daemon_that_will_not_start_is_a_named_gap() {
 #[tokio::test]
 async fn a_reachable_search_daemon_is_not_restarted() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let search_url = stub_daemon(None).await;
+    let search_socket = stub_search_socket(tmp.path(), None);
     // The binary does not exist: reaching the spawn at all would fail the leg.
     let t = tools(
         PathBuf::from("/nonexistent/trusty-search"),
-        search_url,
+        search_socket,
         PathBuf::from("/nonexistent/trusty-analyze"),
         dead_socket(tmp.path()),
     );
@@ -332,7 +321,7 @@ async fn an_unindexable_checkout_is_a_named_gap() {
     );
     let t = tools(
         search,
-        stub_daemon(None).await,
+        stub_search_socket(tmp.path(), None),
         PathBuf::from("/nonexistent/trusty-analyze"),
         dead_socket(tmp.path()),
     );
@@ -365,7 +354,7 @@ async fn an_analyze_daemon_that_will_not_start_is_a_named_gap() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let t = tools(
         approving_search(tmp.path()),
-        stub_daemon_with(None, Some(SEARCH_HITS)).await,
+        stub_search_socket(tmp.path(), Some(SEARCH_HITS)),
         PathBuf::from("/nonexistent/trusty-analyze"),
         dead_socket(tmp.path()),
     );
@@ -393,7 +382,7 @@ async fn an_analyze_daemon_that_will_not_start_is_a_named_gap() {
     );
 }
 
-/// Reachable but broken: the daemon answers `/health` and then 500s the query.
+/// Reachable but broken: the daemon reports healthy and then refuses the query.
 /// That is a different failure from an unreachable daemon and gets its own line.
 #[cfg(unix)]
 #[tokio::test]
@@ -401,7 +390,7 @@ async fn an_unreachable_hotspots_endpoint_is_a_named_gap() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let t = tools(
         approving_search(tmp.path()),
-        stub_daemon_with(None, Some(SEARCH_HITS)).await,
+        stub_search_socket(tmp.path(), Some(SEARCH_HITS)),
         PathBuf::from("/nonexistent/trusty-analyze"),
         stub_analyze_socket(tmp.path(), None),
     );
@@ -438,7 +427,7 @@ async fn an_empty_hotspot_list_is_a_named_gap() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let t = tools(
         approving_search(tmp.path()),
-        stub_daemon_with(None, Some(SEARCH_HITS)).await,
+        stub_search_socket(tmp.path(), Some(SEARCH_HITS)),
         PathBuf::from("/nonexistent/trusty-analyze"),
         stub_analyze_socket(tmp.path(), Some(EMPTY_HOTSPOTS)),
     );
@@ -467,7 +456,7 @@ async fn a_search_that_answers_nothing_is_a_named_gap() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let t = tools(
         approving_search(tmp.path()),
-        stub_daemon_with(None, Some(r#"{"results":[]}"#)).await,
+        stub_search_socket(tmp.path(), Some(r#"{"results":[]}"#)),
         PathBuf::from("/nonexistent/trusty-analyze"),
         stub_analyze_socket(tmp.path(), Some(EMPTY_HOTSPOTS)),
     );
@@ -502,7 +491,7 @@ async fn failing_evidence_queries_are_named_once_with_their_count() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let t = tools(
         approving_search(tmp.path()),
-        stub_daemon(None).await, // answers /health, 404s every query
+        stub_search_socket(tmp.path(), None), // healthy; refuses every query
         PathBuf::from("/nonexistent/trusty-analyze"),
         stub_analyze_socket(tmp.path(), Some(EMPTY_HOTSPOTS)),
     );
@@ -520,18 +509,21 @@ async fn failing_evidence_queries_are_named_once_with_their_count() {
         .filter(|g| g.contains("evidence queries failed"))
         .collect();
     assert_eq!(failures.len(), 1, "{:?}", out.gaps);
-    assert!(failures[0].contains("404"), "{failures:?}");
+    // #6285: the refusal is a JSON-RPC error frame now, and the gap must still
+    // carry the daemon's own words rather than a generic failure.
+    assert!(failures[0].contains("no such index"), "{failures:?}");
 }
 
-/// A daemon that binds its port and never becomes healthy gets the full
-/// readiness budget and then a line — the second of `wait_ready`'s two phases.
+/// A daemon that binds its socket and never becomes healthy gets the full
+/// readiness budget and then a line — the second of `wait_socket_ready`'s two
+/// phases.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_daemon_that_binds_but_never_answers_is_a_named_gap() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let t = tools(
         approving_search(tmp.path()),
-        listening_but_unhealthy().await,
+        unhealthy_search_socket(tmp.path()),
         PathBuf::from("/nonexistent/trusty-analyze"),
         dead_socket(tmp.path()),
     );
@@ -546,7 +538,7 @@ async fn a_daemon_that_binds_but_never_answers_is_a_named_gap() {
     assert!(out.priorities.is_empty());
     assert_eq!(out.gaps.len(), 1, "{:?}", out.gaps);
     assert!(
-        out.gaps[0].contains("did not answer /health"),
+        out.gaps[0].contains("did not report healthy"),
         "{:?}",
         out.gaps
     );
@@ -572,7 +564,7 @@ async fn hotspots_and_search_hits_become_ranked_inspect_priority_in_the_manifest
 
     let t = tools(
         approving_search(tmp.path()),
-        stub_daemon_with(None, Some(SEARCH_HITS)).await,
+        stub_search_socket(tmp.path(), Some(SEARCH_HITS)),
         PathBuf::from("/nonexistent/trusty-analyze"),
         stub_analyze_socket(tmp.path(), Some(payload)),
     );
@@ -672,7 +664,7 @@ async fn a_search_that_found_nothing_is_a_gap_even_when_a_manifest_backfills_it(
 
     let t = tools(
         approving_search(tmp.path()),
-        stub_daemon_with(None, Some(r#"{"results":[]}"#)).await,
+        stub_search_socket(tmp.path(), Some(r#"{"results":[]}"#)),
         PathBuf::from("/nonexistent/trusty-analyze"),
         stub_analyze_socket(tmp.path(), Some(EMPTY_HOTSPOTS)),
     );
@@ -727,7 +719,7 @@ async fn a_ranking_that_lands_after_the_render_says_so() {
     let stubs = || async {
         tools(
             approving_search(tmp.path()),
-            stub_daemon_with(None, Some(SEARCH_HITS)).await,
+            stub_search_socket(tmp.path(), Some(SEARCH_HITS)),
             PathBuf::from("/nonexistent/trusty-analyze"),
             stub_analyze_socket(tmp.path(), Some(payload)),
         )
@@ -819,11 +811,10 @@ async fn a_gap_is_recorded_in_the_manifest_the_renderer_reads() {
     let checkout = tmp.path().join("repos").join("acme-api");
     std::fs::create_dir_all(&checkout).expect("mkdir checkout");
     let manifest = manifest_naming(tmp.path(), &checkout);
-    let dead = dead_url().await;
     let tmp = tempfile::tempdir().expect("tempdir");
     let t = tools(
         PathBuf::from("/nonexistent/trusty-search"),
-        dead,
+        dead_search_socket(tmp.path()),
         PathBuf::from("/nonexistent/trusty-analyze"),
         dead_socket(tmp.path()),
     );
@@ -869,7 +860,7 @@ async fn a_manifest_that_cannot_be_written_is_a_named_gap() {
 
     let t = tools(
         approving_search(tmp.path()),
-        stub_daemon_with(None, Some(SEARCH_HITS)).await,
+        stub_search_socket(tmp.path(), Some(SEARCH_HITS)),
         PathBuf::from("/nonexistent/trusty-analyze"),
         stub_analyze_socket(tmp.path(), Some(payload)),
     );
