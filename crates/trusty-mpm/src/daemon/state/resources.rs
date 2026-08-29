@@ -1,11 +1,10 @@
 //! Resource-management methods on [`DaemonState`].
 //!
-//! Why: circuit breakers, memory usage, trusty sidecar addresses, the token
-//! optimizer, overseer, audit logger, and hook-event ring buffer are distinct
-//! resource types but all live on `DaemonState`; grouping them here keeps this
-//! module focused and under the SLOC cap.
-//! What: breakers, memory, trusty_addrs, optimizer, overseer, audit, and
-//! hook-event methods.
+//! Why: circuit breakers, memory usage, the token optimizer, overseer, audit
+//! logger, and hook-event ring buffer are distinct resource types but all live
+//! on `DaemonState`; grouping them here keeps this module focused and under the
+//! SLOC cap.
+//! What: breakers, memory, optimizer, overseer, audit, and hook-event methods.
 //! Test: see `super::tests`.
 
 use std::sync::Arc;
@@ -77,30 +76,6 @@ impl DaemonState {
     /// Latest memory usage for a session, if any has been recorded.
     pub fn memory_for(&self, session: SessionId) -> Option<MemoryUsage> {
         self.memory.get(&session).map(|e| *e.value())
-    }
-
-    // ---- trusty sidecar discovery --------------------------------------
-
-    /// Record the trusty sidecar addresses discovered at daemon startup.
-    ///
-    /// Why: discovery runs once when the HTTP daemon boots; the resolved
-    /// addresses must be visible to request handlers that proxy to the
-    /// trusty-memory / trusty-search sidecars.
-    /// What: stores the `TrustyAddrs` snapshot under the mutex.
-    /// Test: `trusty_addrs_round_trip`.
-    pub fn set_trusty_addrs(&self, addrs: crate::daemon::discover::TrustyAddrs) {
-        *self.trusty_addrs.lock() = Some(addrs);
-    }
-
-    /// Read the discovered trusty sidecar addresses, if discovery has run.
-    ///
-    /// Why: handlers need the resolved addresses; `None` means discovery has
-    /// not completed (e.g. in MCP mode, which skips it).
-    /// What: returns a clone of the stored `TrustyAddrs`.
-    /// Test: `trusty_addrs_round_trip`.
-    #[allow(dead_code)] // Read by sidecar-proxy handlers landing in a follow-up.
-    pub fn trusty_addrs(&self) -> Option<crate::daemon::discover::TrustyAddrs> {
-        self.trusty_addrs.lock().clone()
     }
 
     // ---- token-use optimizer -------------------------------------------

@@ -13,7 +13,7 @@ name = "trusty-mpm"
 # 1.5.8 (#6288): patch — 1.5.7 is published and this PR edits `src/**`. Patch
 # because the removed items (`supervisor::http`, `SupervisorConfig::metrics_addr`)
 # have no out-of-workspace consumer, and every in-workspace caller moved with them.
-version = "1.5.8"
+version = "1.5.9"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

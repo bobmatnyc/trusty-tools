@@ -11,7 +11,7 @@
 //! [`DoctorReport`]. Each network probe is bounded by [`PROBE_TIMEOUT`] so an
 //! unreachable service cannot hang the report.
 //! Test: `cargo test -p trusty-mpm-daemon doctor` exercises the filesystem
-//! probes against temp directories and the HTTP probes against an in-process
+//! probes against temp directories and the socket probes against an in-process
 //! test server.
 
 use std::path::{Path, PathBuf};
@@ -29,7 +29,7 @@ use doctor_worktrees::check_worktrees;
 pub(crate) use doctor_worktrees::gather_worktree_counts;
 pub use doctor_worktrees::{WORKTREE_REMEDIATION_COMMAND, WorktreeOrphanCounts};
 
-use super::discover::{TRUSTY_SEARCH_DEFAULT_ADDR, discover_addr};
+use super::search_rpc;
 
 // Split out to keep this file under the 500-SLOC production cap (DOC-28 R4(a)).
 #[path = "doctor_output_style.rs"]
@@ -158,7 +158,8 @@ use doctor_legacy_overrides::check_legacy_overrides;
 
 // #5045: the resolution half of `check_search` below. That probe asks the
 // daemon whether it is healthy and whether the DERIVED id appears in
-// `/indexes`; this one resolves the id the session is actually PINNED to. The
+// `search.indexes.list`; this one resolves the id the session is actually
+// PINNED to. The
 // registration path is fail-open at every step, so the pin advances even when
 // index creation failed — 4 of 75 live worktrees had an index while `search`
 // reported fine.
@@ -227,7 +228,7 @@ const PROBE_RETRY_DELAY: Duration = Duration::from_millis(500);
 /// trusty-mpm instructions actually load" gap), the `deployment` probe (issue
 /// #2158 — a full manifest-completeness diff against the canonical bundled
 /// roster, layered on top of the narrower agent/skill/output-style probes),
-/// then the memory and search HTTP probes (each bounded by [`PROBE_TIMEOUT`]),
+/// then the memory and search socket probes (each bounded by [`PROBE_TIMEOUT`]),
 /// a worktree-orphan scan (Fix 1b, #1840), the `skill_source` probe (A2,
 /// tm-skills-portfolio epic), the `gh_account` probe
 /// (#gh-account-awareness — surfaces the active github.com identity and warns
@@ -839,35 +840,42 @@ fn interpret_health(
 ///
 /// Why: code search backs the PM's "search before grep" rule; both the service
 /// being up *and* this project's index existing are required for it to work.
-/// What: resolves the service address, checks `GET /health` (a non-2xx or
-/// transport error is `Fail`), then checks `GET /indexes` for the index id
-/// [`expected_search_index_id`] resolves for `project_dir` — a healthy
-/// service missing that index is `Warn`.
-/// Test: `search_unreachable_is_fail`.
-async fn check_search(home: &Path, project_dir: Option<&Path>) -> DoctorCheck {
-    let dir = home.join(".trusty-search");
-    let default = TRUSTY_SEARCH_DEFAULT_ADDR
-        .parse()
-        .expect("static default is valid");
-    let env = std::env::var("TRUSTY_SEARCH_ADDR").ok();
-    let addr = discover_addr(&dir, default, env.as_deref()).await;
-
-    match http_get_ok(&format!("http://{addr}/health")).await {
-        Ok(true) => {}
-        Ok(false) => {
-            return DoctorCheck::new(
-                "search",
-                CheckStatus::Fail,
-                format!("trusty-search at {addr} returned a non-2xx status"),
-            );
-        }
+/// What (#6285): derives the daemon's socket — there is no address to discover
+/// and no `~/.trusty-search/http_addr` to read since ADR-0032 — calls
+/// `search.health` (a refusal or a transport failure is `Fail`), then calls
+/// `search.indexes.list` for the index id [`expected_search_index_id`] resolves
+/// for `project_dir`. A healthy service missing that index is `Warn`.
+///
+/// `home` is unused now and stays in the signature because `run_checks` threads
+/// one `home` into every check.
+/// Test: `search_unreachable_is_fail`, `search_reports_the_expected_index`,
+/// `search_without_the_expected_index_is_warn`.
+async fn check_search(_home: &Path, project_dir: Option<&Path>) -> DoctorCheck {
+    let socket = match search_rpc::search_socket() {
+        Ok(socket) => socket,
         Err(e) => {
             return DoctorCheck::new(
                 "search",
                 CheckStatus::Fail,
-                format!("trusty-search unreachable at {addr}: {e}"),
+                format!("cannot resolve the trusty-search socket: {e:#}"),
             );
         }
+    };
+    let at = socket.display().to_string();
+
+    if let Err(e) = search_rpc::call_at(
+        &socket,
+        search_rpc::METHOD_HEALTH,
+        serde_json::json!({}),
+        PROBE_TIMEOUT,
+    )
+    .await
+    {
+        return DoctorCheck::new(
+            "search",
+            CheckStatus::Fail,
+            format!("trusty-search unreachable at {at}: {e:#}"),
+        );
     }
 
     // Service is up — confirm the expected index exists. #4003: the expected
@@ -875,21 +883,28 @@ async fn check_search(home: &Path, project_dir: Option<&Path>) -> DoctorCheck {
     // `trusty-search`'s own `detect_project` use), not a hardcoded literal —
     // see `expected_search_index_id`.
     let expected_index = expected_search_index_id(project_dir);
-    match http_get_json(&format!("http://{addr}/indexes")).await {
+    match search_rpc::call_at(
+        &socket,
+        search_rpc::METHOD_INDEXES_LIST,
+        serde_json::json!({}),
+        PROBE_TIMEOUT,
+    )
+    .await
+    {
         Ok(body) if index_present(&body, &expected_index) => DoctorCheck::new(
             "search",
             CheckStatus::Ok,
-            format!("trusty-search healthy at {addr}, `{expected_index}` index present"),
+            format!("trusty-search healthy at {at}, `{expected_index}` index present"),
         ),
         Ok(_) => DoctorCheck::new(
             "search",
             CheckStatus::Warn,
-            format!("trusty-search healthy at {addr} but the `{expected_index}` index is missing"),
+            format!("trusty-search healthy at {at} but the `{expected_index}` index is missing"),
         ),
         Err(e) => DoctorCheck::new(
             "search",
             CheckStatus::Warn,
-            format!("trusty-search healthy at {addr} but listing indexes failed: {e}"),
+            format!("trusty-search healthy at {at} but listing indexes failed: {e:#}"),
         ),
     }
 }
@@ -942,38 +957,6 @@ fn index_present(body: &serde_json::Value, name: &str) -> bool {
             .iter()
             .any(|key| entry.get(key).and_then(|v| v.as_str()) == Some(name))
     })
-}
-
-/// Issue a timeout-bounded `GET` and report whether the status is 2xx.
-///
-/// Why: the memory and search health probes only need a yes/no liveness answer.
-/// What: `GET url` with a [`PROBE_TIMEOUT`] client timeout; `Ok(true)` on a 2xx
-/// response, `Ok(false)` on any other status, `Err` on a transport failure.
-/// Test: covered by `memory_unreachable_is_fail`.
-async fn http_get_ok(url: &str) -> anyhow::Result<bool> {
-    let client = reqwest::Client::builder().timeout(PROBE_TIMEOUT).build()?;
-    let resp = client.get(url).send().await?;
-    Ok(resp.status().is_success())
-}
-
-/// Issue a timeout-bounded `GET` and parse the response body as JSON.
-///
-/// Why: the search index check needs the `/indexes` payload, not just its
-/// status code.
-/// What: `GET url` with a [`PROBE_TIMEOUT`] client timeout; returns the parsed
-/// [`serde_json::Value`], `Err` on a non-2xx status or a transport / parse
-/// failure.
-/// Test: covered by `search_unreachable_is_fail`.
-async fn http_get_json(url: &str) -> anyhow::Result<serde_json::Value> {
-    let client = reqwest::Client::builder().timeout(PROBE_TIMEOUT).build()?;
-    let body = client
-        .get(url)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    Ok(body)
 }
 
 #[cfg(test)]

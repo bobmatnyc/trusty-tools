@@ -109,8 +109,6 @@ pub struct DaemonState {
     pub memory_config: MemoryConfig,
     /// Circuit-breaker tuning applied to newly-seen agents.
     pub circuit_config: CircuitConfig,
-    /// Discovered trusty sidecar service addresses, set once at startup.
-    pub(super) trusty_addrs: Mutex<Option<crate::daemon::discover::TrustyAddrs>>,
     /// Token-use optimizer config; read on every PostToolUse, updatable at
     /// runtime via the HTTP API, hence behind an `RwLock`.
     pub(super) optimizer: Arc<parking_lot::RwLock<OptimizerConfig>>,
@@ -490,7 +488,6 @@ impl DaemonState {
             hook_history: Mutex::new(VecDeque::with_capacity(HOOK_HISTORY_LIMIT)),
             memory_config: MemoryConfig::default(),
             circuit_config: CircuitConfig::default(),
-            trusty_addrs: Mutex::new(None),
             optimizer: Arc::new(parking_lot::RwLock::new(optimizer)),
             projects: Arc::new(RwLock::new(HashMap::new())),
             overseer: build.overseer,
@@ -564,7 +561,6 @@ impl DaemonState {
             hook_history: Mutex::new(VecDeque::with_capacity(HOOK_HISTORY_LIMIT)),
             memory_config: MemoryConfig::default(),
             circuit_config: CircuitConfig::default(),
-            trusty_addrs: Mutex::new(None),
             optimizer: Arc::new(parking_lot::RwLock::new(optimizer)),
             projects: Arc::new(RwLock::new(HashMap::new())),
             overseer: build.overseer,
