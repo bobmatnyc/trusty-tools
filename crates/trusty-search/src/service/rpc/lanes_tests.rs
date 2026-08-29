@@ -94,7 +94,7 @@ impl Lane {
 /// succeed. What each method ANSWERS is the business of its family's parity
 /// tests; this file reads only whether the limiter or the deadline spoke first.
 fn lanes() -> Vec<(&'static str, Lane, serde_json::Value)> {
-    use crate::service::rpc::{admin, queries, reads, streams, writes};
+    use crate::service::rpc::{admin, chat, queries, reads, streams, writes};
 
     let index = serde_json::json!({ "index_id": INDEX });
     let query = serde_json::json!({ "index_id": INDEX, "body": { "text": "anything" } });
@@ -227,6 +227,20 @@ fn lanes() -> Vec<(&'static str, Lane, serde_json::Value)> {
             Lane::Free,
             serde_json::Value::Null,
         ),
+        // Slice 5.6: both HTTP routes are in `free` too. Neither params set can
+        // succeed — this state has no shutdown driver subscribed and no chat
+        // provider configured — which is what the sweep wants: the refusal it
+        // reads is the core's own verdict rather than the limiter's.
+        (
+            admin::METHOD_ADMIN_STOP,
+            Lane::Free,
+            serde_json::Value::Null,
+        ),
+        (
+            chat::METHOD_CHAT,
+            Lane::Free,
+            serde_json::json!({ "index_id": INDEX }),
+        ),
     ]
 }
 
@@ -248,7 +262,7 @@ fn state_with(permits: usize, deadline: Duration) -> Arc<SearchAppState> {
 
 /// The whole socket router, exactly as `service::socket` assembles it.
 fn router(state: &Arc<SearchAppState>) -> RpcRouter {
-    use crate::service::rpc::{admin, queries, reads, streams, writes};
+    use crate::service::rpc::{admin, chat, queries, reads, streams, writes};
 
     let held = Arc::clone(state);
     let router = RpcRouter::new()
@@ -263,6 +277,7 @@ fn router(state: &Arc<SearchAppState>) -> RpcRouter {
     let router = queries::register(router, state);
     let router = writes::register(router, state);
     let router = admin::register(router, state);
+    let router = chat::register(router, state);
     streams::register(router, state)
 }
 

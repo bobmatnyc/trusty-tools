@@ -4,15 +4,16 @@
 //! and the SSE dashboard feed) separately from domain search logic.
 //! What: `logs_tail_handler`, `admin_stop_handler`, `get_config_handler`,
 //! `patch_config_handler`, `status_stream_handler`, `collect_status_counts`,
-//! and the transport-free cores two of them delegate to — `logs_tail_report`
-//! and `patch_config_report`, which `service::rpc::admin` serves over the socket
-//! (#6285 slice 5.5).
+//! and the transport-free cores three of them delegate to — `logs_tail_report`,
+//! `patch_config_report` and `admin_stop_report`, which `service::rpc::admin`
+//! serves over the socket (#6285 slices 5.5 and 5.6).
 //! Test: `logs_tail_returns_recent_lines`, `admin_stop_returns_ok`, and
 //! `patch_config_partial_update` in `super::tests`; the socket halves in
 //! `service::rpc::admin`'s `admin_tests.rs`.
 use axum::{
     body::Body,
     extract::{Query, State},
+    http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
@@ -121,20 +122,57 @@ pub(crate) fn logs_tail_report(
 /// shutdown path (drain in-flight requests → flush indexes → delete port file →
 /// release lock) that SIGTERM normally triggers.
 ///
-/// What: sends `true` on `state.shutdown_tx` to wake the `run_daemon` shutdown
-/// future. Returns `{ "ok": true, "message": "shutting down" }` immediately.
-/// Test: `admin_stop_triggers_graceful_shutdown` in `tests_state.rs` verifies
+/// What: delegates to [`admin_stop_report`] and renders its verdict, so the
+/// socket's `search.admin.stop` cannot answer a different thing.
+/// Test: `admin_stop_triggers_graceful_shutdown` in `tests_829.rs` verifies
 /// that the channel fires without calling `process::exit`.
-pub(super) async fn admin_stop_handler(
-    State(state): State<Arc<SearchAppState>>,
-) -> Json<serde_json::Value> {
-    tracing::warn!("admin_stop: graceful shutdown requested via POST /admin/stop");
+pub(super) async fn admin_stop_handler(State(state): State<Arc<SearchAppState>>) -> Response {
+    match admin_stop_report(&state) {
+        Ok(body) => Json(body).into_response(),
+        Err((status, body)) => (status, Json(body)).into_response(),
+    }
+}
+
+/// The shutdown `POST /admin/stop` requests, without the transport (#6285).
+///
+/// Why: `search.admin.stop` is the method trusty-mpm's TUI `[X]` key dials once
+/// the retire slice moves it off HTTP, and stopping a daemon is the one call on
+/// this surface whose answer a caller cannot verify by asking again — the daemon
+/// it would ask is the one that was supposed to go away.
+///
+/// Why it can now refuse: `run_daemon` subscribes to `shutdown_tx` before it
+/// serves and holds the receiver for the daemon's life, so a send that fails
+/// means nothing is driving shutdown and the process will keep running. The
+/// route used to discard that error and answer `ok: true` anyway, which told the
+/// TUI a daemon had stopped when it had not.
+///
+/// # Errors
+///
+/// `503` with `retryable: false` when no shutdown driver is listening. Permanent
+/// because a receiver is subscribed once at boot and never re-subscribed —
+/// retrying answers identically forever, and only a restart clears it.
+///
+/// Test: `admin_stop_over_the_socket_matches_the_http_body`,
+/// `admin_stop_is_refused_on_both_transports_when_nothing_drives_shutdown`.
+pub(crate) fn admin_stop_report(
+    state: &Arc<SearchAppState>,
+) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
+    tracing::warn!("admin_stop: graceful shutdown requested");
     // Signal run_daemon to begin the graceful-shutdown sequence (drain
-    // connections → flush indexes → clean up port/lock files). Errors are
-    // ignored: if the receiver has already been dropped (e.g. the daemon is
-    // mid-shutdown already), we still return the success response.
-    let _ = state.shutdown_tx.send(true);
-    Json(serde_json::json!({ "ok": true, "message": "shutting down" }))
+    // connections → flush indexes → clean up port/lock files).
+    if state.shutdown_tx.send(true).is_err() {
+        tracing::error!("admin_stop: no shutdown driver is listening; the daemon keeps running");
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            serde_json::json!({
+                "ok": false,
+                "error": "shutdown_unavailable",
+                "message": "no shutdown driver is listening; the daemon will keep running",
+                "retryable": false,
+            }),
+        ));
+    }
+    Ok(serde_json::json!({ "ok": true, "message": "shutting down" }))
 }
 
 /// Request body for `PATCH /config`. Any field may be omitted to leave that

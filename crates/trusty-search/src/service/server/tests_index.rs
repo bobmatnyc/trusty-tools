@@ -329,15 +329,20 @@ async fn logs_tail_clamps_n() {
 ///
 /// Why: the response shape `{ ok, message }` is the documented contract
 /// for the admin UI's stop button.
-/// What: calls `admin_stop_handler` and asserts the JSON body. It does
-/// NOT await the spawned exit task — that would terminate the test
-/// process — but the 200 ms delay before `process::exit` guarantees the
-/// test returns first.
+/// What: subscribes to the shutdown channel — which is what `run_daemon` does
+/// before it serves, and what makes the send succeed (#6285 slice 5.6) — then
+/// calls `admin_stop_handler` and asserts the JSON body.
 /// Test: this test.
 #[tokio::test]
 async fn admin_stop_returns_ok() {
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
-    let Json(body) = admin_stop_handler(State(state)).await;
+    let _driver = state.shutdown_tx.subscribe();
+    let resp = admin_stop_handler(State(state)).await;
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .expect("read the body");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
     assert_eq!(body["ok"], serde_json::Value::Bool(true));
     assert_eq!(body["message"].as_str(), Some("shutting down"));
 }
