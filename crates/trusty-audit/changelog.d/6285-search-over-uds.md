@@ -1,4 +1,3 @@
 Changed
 - The three legs that reach `trusty-search` — the readiness probe, the index-root backstop, and the per-dimension evidence queries — now speak framed JSON-RPC over the daemon's Unix socket instead of loopback HTTP (`search.health`, `search.index.status`, `search.query`). The socket path is derived from `trusty_common::daemon_socket_path("trusty-search")`, the same call the daemon binds, so there is no address to discover and no `http_addr` file for a stale write to contradict. `TRUSTY_SEARCH_SOCKET` pins it explicitly for a rig that started its own daemon.
-- `Tools::search_url` is now `Tools::search_socket`, a path rather than a base URL.
 - A daemon that answers and refuses stays distinguishable from a daemon that is not there. Both remain fail-open at every leg, as before, but an error frame can no longer read as an empty result — a refused query is reported with the daemon's own code and message rather than as "no evidence found".
