@@ -683,3 +683,83 @@ async fn an_unreadable_registry_is_refused_on_either_transport() {
         "unreadable registry",
     );
 }
+
+// ------------------------------------------------------- search.admin.stop ---
+
+/// Why: stopping the daemon is the one call on this surface whose answer a
+/// caller cannot verify by asking again — the daemon it would ask is the one that
+/// was supposed to go away. Both transports must therefore reach the SAME `watch`
+/// channel and report the success the same way. The subscribers are what make
+/// that observable: each transport's own signal has to land, so a socket that
+/// signalled a different channel fails here rather than in a TUI whose stop key
+/// silently does nothing.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn admin_stop_over_the_socket_matches_the_http_body() {
+    let _isolated = IsolatedDataDir::new();
+    let (state, http, rpc) = routers(&[]);
+
+    // Subscribe BEFORE either call: `run_daemon` holds a receiver for the
+    // daemon's life, and without one the send fails and the route refuses.
+    let mut over_http_rx = state.shutdown_tx.subscribe();
+    let over_http = http_ok(&http, "POST", "/admin/stop", serde_json::json!({})).await;
+    assert!(
+        *over_http_rx.borrow_and_update(),
+        "the HTTP route must signal the shutdown channel"
+    );
+
+    // Reset so the socket's own signal is a fresh transition rather than a value
+    // the previous call already left behind.
+    state
+        .shutdown_tx
+        .send(false)
+        .expect("the receiver above is still alive");
+    let mut over_socket_rx = state.shutdown_tx.subscribe();
+    let over_socket = rpc_ok(&rpc, admin::METHOD_ADMIN_STOP, serde_json::Value::Null).await;
+    assert!(
+        *over_socket_rx.borrow_and_update(),
+        "the socket method must signal the SAME shutdown channel"
+    );
+
+    assert_eq!(over_socket, over_http);
+    assert_eq!(over_socket["ok"], serde_json::json!(true));
+    assert_eq!(over_socket["message"], serde_json::json!("shutting down"));
+}
+
+/// Why: the failure arm is the reason this method is fallible at all. A send
+/// fails only when nothing is driving shutdown, which means the process will keep
+/// running — and the route used to discard that error and answer `ok: true`
+/// anyway, telling trusty-mpm's TUI a daemon had stopped when it had not. The
+/// refusal is permanent because the receiver is subscribed once at boot and never
+/// re-subscribed, so a caller told to retry would retry forever.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn admin_stop_is_refused_on_both_transports_when_nothing_drives_shutdown() {
+    let _isolated = IsolatedDataDir::new();
+    let (state, http, rpc) = routers(&[]);
+    // `SearchAppState::new` drops the receiver it creates, so this state carries
+    // no shutdown driver — exactly the condition the arm reports.
+    assert_eq!(
+        state.shutdown_tx.receiver_count(),
+        0,
+        "the fixture must carry no shutdown driver"
+    );
+
+    let over_http = http_err(&http, "POST", "/admin/stop", serde_json::json!({})).await;
+    let over_socket = rpc_err(&rpc, admin::METHOD_ADMIN_STOP, serde_json::Value::Null).await;
+
+    assert_eq!(over_http.0, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(over_http.1["ok"], serde_json::json!(false));
+    assert_same_refusal(
+        &over_http,
+        &over_socket,
+        crate::service::rpc::error::CODE_UNAVAILABLE_PERMANENT,
+        "no shutdown driver",
+    );
+    assert!(
+        !*state.shutdown_tx.borrow(),
+        "a refused stop must leave the shutdown flag exactly where it was"
+    );
+}

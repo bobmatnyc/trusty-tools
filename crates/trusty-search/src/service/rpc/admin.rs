@@ -1,12 +1,15 @@
-//! The operational remainder, served as JSON-RPC methods (#6285 slice 5.5).
+//! The operational remainder, served as JSON-RPC methods (#6285 slices 5.5, 5.6).
 //!
 //! Why: slices 1–5 moved health, the reads, the queries, the writes and the two
-//! streams. Four routes with a named consumer were still HTTP-only, and the
-//! retire slice cannot move that consumer onto a method the socket does not
-//! serve. This slice closes the gap the #6285 consumer map recorded: the two
-//! config WRITES the dashboard and `trusty-search config set` drive,
-//! `GET /logs/tail` (which `trusty-common`'s monitor dials), and
-//! `GET /registry/orphans` (which `trusty-console`'s cleanup tab dials, #6371).
+//! streams. Routes with a named consumer were still HTTP-only, and the retire
+//! slice cannot move that consumer onto a method the socket does not serve.
+//! Slice 5.5 closed the gap the #6285 consumer map recorded: the two config
+//! WRITES the dashboard and `trusty-search config set` drive, `GET /logs/tail`
+//! (which `trusty-common`'s monitor dials), and `GET /registry/orphans` (which
+//! `trusty-console`'s cleanup tab dials, #6371). Slice 5.6 adds
+//! `POST /admin/stop`, which that map listed as having no external consumer and
+//! PR #6388's implementation pass found trusty-mpm's TUI driving from its `[X]`
+//! key.
 //!
 //! What: the method-to-route table below, the params each method decodes, and
 //! [`register`]. Every handler is a thin adapter over a `*_report` core in
@@ -21,21 +24,25 @@
 //! | `search.config.set` | `PATCH /config` | free |
 //! | `search.logs.tail` | `GET /logs/tail` | free |
 //! | `search.registry.orphans` | `GET /registry/orphans` | free |
+//! | `search.admin.stop` | `POST /admin/stop` | free |
 //!
-//! All four HTTP routes sit in `service::server::build_router_on`'s `free`
-//! group — no admission limiter, no query deadline — and all four methods copy
-//! that. The two writes are `free` on HTTP for the same reason
+//! All five HTTP routes sit in `service::server::build_router_on`'s `free`
+//! group — no admission limiter, no query deadline — and all five methods copy
+//! that. The two config writes are `free` on HTTP for the same reason
 //! `DELETE /indexes/{id}` is (slice 4's lane table): they are registry-level,
 //! and putting them behind the limiter here would make a config edit queue
-//! behind a running reindex that the HTTP route sails past.
+//! behind a running reindex that the HTTP route sails past. `search.admin.stop`
+//! must be `free` for a stronger reason: a stop that queued behind a saturated
+//! daemon is a stop that cannot end the saturation.
 //!
-//! ## Two of these are WRITES, so each carries a failure arm that checks state
+//! ## Three of these are WRITES, so each carries a failure arm that checks state
 //!
 //! `search.index.config.set` re-registers a handle, rewrites an `indexes.toml`
 //! row and can start a background catch-up; `search.config.set` moves two
-//! process-global memory limits. The slice-4 bar applies to both: every refusal
-//! case asserts the refusal AND re-reads the thing that must not have moved —
-//! the handle's config view, the persisted row, the resolved limits.
+//! process-global memory limits; `search.admin.stop` ends the process. The
+//! slice-4 bar applies to all three: every refusal case asserts the refusal AND
+//! re-reads the thing that must not have moved — the handle's config view, the
+//! persisted row, the resolved limits, the shutdown flag.
 //!
 //! ## What guards these methods
 //!
@@ -47,8 +54,8 @@
 //! (#6277 design review, the same conclusion slices 1 and 4 recorded).
 //!
 //! Test: `admin_tests.rs` — one `*_over_the_socket_matches_the_http_body` per
-//! method plus, for each of the two writes, a failure arm proving the refusal is
-//! identical AND that neither in-memory nor on-disk state advanced behind it.
+//! method plus, for each write, a failure arm proving the refusal is identical
+//! AND that neither in-memory nor on-disk state advanced behind it.
 //!
 //! [`register`]: crate::service::rpc::admin::register
 
@@ -77,6 +84,13 @@ pub const METHOD_CONFIG_SET: &str = "search.config.set";
 pub const METHOD_LOGS_TAIL: &str = "search.logs.tail";
 /// `GET /registry/orphans` — the `indexes.toml` census of dead roots (#6371).
 pub const METHOD_REGISTRY_ORPHANS: &str = "search.registry.orphans";
+/// `POST /admin/stop` — ask the daemon to shut down gracefully (#6285 slice 5.6).
+///
+/// This is the name trusty-mpm's TUI `[X]` key dials once the retire slice moves
+/// it off HTTP. The #6285 consumer map recorded `/admin/stop` as having no
+/// external consumer; PR #6388's implementation pass found that wrong, which is
+/// why the method exists.
+pub const METHOD_ADMIN_STOP: &str = "search.admin.stop";
 
 /// Every method this slice registers, in registration order.
 ///
@@ -93,6 +107,7 @@ pub const METHODS: &[&str] = &[
     METHOD_CONFIG_SET,
     METHOD_LOGS_TAIL,
     METHOD_REGISTRY_ORPHANS,
+    METHOD_ADMIN_STOP,
 ];
 
 /// The params of [`METHOD_INDEX_CONFIG_SET`].
@@ -142,7 +157,7 @@ pub struct LogsTail {
 
 /// Mount every method in [`METHODS`] onto `router`.
 ///
-/// Why: the route-specific half of the last four routes with a named consumer,
+/// Why: the route-specific half of the operational routes with a named consumer,
 /// kept beside `reads`, `queries`, `writes` and `streams` so each slice adds one
 /// file rather than editing one.
 /// What: one `typed` registration per method, each cloning the `Arc` handle to
@@ -155,7 +170,7 @@ pub struct LogsTail {
 pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
     use crate::service::orphan_report::registry_orphans_report;
     use crate::service::server::{
-        logs_tail_report, patch_config_report, patch_index_config_report,
+        admin_stop_report, logs_tail_report, patch_config_report, patch_index_config_report,
     };
 
     // ---- the two config writes (axum's `free` group) ------------------------
@@ -193,13 +208,26 @@ pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
             }
         });
 
-    router.typed::<super::super::socket::NoParams, serde_json::Value, _, _>(
+    let router = router.typed::<super::super::socket::NoParams, serde_json::Value, _, _>(
         METHOD_REGISTRY_ORPHANS,
         move |_params| async move {
             let census: OrphanCensus = registry_orphans_report()
                 .await
                 .map_err(|(status, body)| rpc_error_from_http(status, &body))?;
             as_http_body(census)
+        },
+    );
+
+    // ---- the lifecycle write (#6285 slice 5.6, axum's `free` group) ---------
+    let held = Arc::clone(state);
+    router.typed::<super::super::socket::NoParams, serde_json::Value, _, _>(
+        METHOD_ADMIN_STOP,
+        move |_params| {
+            let state = Arc::clone(&held);
+            async move {
+                admin_stop_report(&state)
+                    .map_err(|(status, body)| rpc_error_from_http(status, &body))
+            }
         },
     )
 }

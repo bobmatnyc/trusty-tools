@@ -23,20 +23,24 @@
 //! | 3 | the QUERY surface — search and its fan-out, grep and its fan-out, similarity, typeahead | landed (PR #6377), in [`crate::service::rpc::queries`] |
 //! | 4 | the WRITE surface — index create, delete, relocate, the two per-file writes, the reindex trigger, contributed-graph ingest | landed (PR #6381), in [`crate::service::rpc::writes`] |
 //! | 5 | the STREAMS — reindex progress and the daemon status stream | landed (PR #6383), in [`crate::service::rpc::streams`] |
-//! | 5.5 | the REMAINDER with a named consumer — the two config writes, the log tail, the registry orphan census — plus the frame-cap raise | this one, in [`crate::service::rpc::admin`] |
+//! | 5.5 | the REMAINDER with a named consumer — the two config writes, the log tail, the registry orphan census — plus the frame-cap raise | landed (PR #6385), in [`crate::service::rpc::admin`] |
+//! | 5.6 | the graceful stop and the chat answer | this one, in [`crate::service::rpc::admin`] and [`crate::service::rpc::chat`] |
 //! | consumer wave | move the eleven dialling crates onto these names, one PR per crate | not started |
 //! | retire | delete the axum surface, `ui.rs`, and the `http_addr` writer | not started, gated on the consumer wave |
 //!
-//! **Slice 5.5 closes the method gap, not the migration.** Every HTTP route with
-//! a consumer outside this crate now has a method here, which is the
-//! precondition the consumer wave needs and did not have. Four routes are
-//! deliberately still HTTP-only: `POST /admin/stop`, `POST /upgrade`,
-//! `POST /chat` and `GET /api/chat/providers` have no observed external caller
-//! (chat serves the embedded `/ui` alone), and `GET /metrics` is Prometheus
-//! text, which is HTTP-shaped by nature. `GET /indexes/{id}/communities` is a
-//! DEAD route — `trusty-common`'s monitor calls it and the daemon has never
-//! served it — and is a pre-existing bug with its own ticket, not a gap this
-//! surface owes a method for.
+//! **Slice 5.6 closes the last two gaps a consumer named.** Slice 5.5 read
+//! `POST /admin/stop` and `POST /chat` as having no external caller; both
+//! readings were wrong. trusty-mpm's TUI drives the stop route from its `[X]`
+//! key (found by PR #6388's implementation pass), and #6155 moves the search UI
+//! — chat panel included — into `trusty-console`, which reaches this daemon over
+//! the socket. Two routes remain deliberately HTTP-only:
+//! `GET /api/chat/providers` is read by the UI shell alone and answers a
+//! question `search.chat`'s own `provider` field already carries per call, and
+//! `GET /metrics` is Prometheus text, which is HTTP-shaped by nature.
+//! `POST /upgrade` has no observed caller off this box.
+//! `GET /indexes/{id}/communities` is a DEAD route — `trusty-common`'s monitor
+//! calls it and the daemon has never served it — and is a pre-existing bug with
+//! its own ticket, not a gap this surface owes a method for.
 //!
 //! **Two doors, one daemon.** The socket serves the same `Arc<SearchAppState>`
 //! the axum router was built on — see
@@ -61,7 +65,7 @@ use serde::{Deserialize, Serialize};
 use tokio::net::UnixListener;
 use trusty_common::uds::server::{serve_until, RpcRouter, RpcServeOptions};
 
-use crate::service::rpc::{admin, queries, reads, streams, writes};
+use crate::service::rpc::{admin, chat, queries, reads, streams, writes};
 use crate::service::server::SearchAppState;
 
 #[cfg(test)]
@@ -127,6 +131,10 @@ pub const METHODS: &[&str] = &[
     admin::METHOD_CONFIG_SET,
     admin::METHOD_LOGS_TAIL,
     admin::METHOD_REGISTRY_ORPHANS,
+    // #6285 slice 5.6 — the last two routes with a consumer: the TUI's stop key
+    // and the search UI's chat panel. Both unary, both in the free lane.
+    admin::METHOD_ADMIN_STOP,
+    chat::METHOD_CHAT,
 ];
 
 /// The params of a method that takes no arguments.
@@ -198,6 +206,7 @@ fn build_router(state: &Arc<SearchAppState>) -> RpcRouter {
     let router = queries::register(router, state);
     let router = writes::register(router, state);
     let router = admin::register(router, state);
+    let router = chat::register(router, state);
     streams::register(router, state)
 }
 

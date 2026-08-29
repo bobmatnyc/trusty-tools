@@ -205,16 +205,56 @@ pub struct ChatMessage {
     pub content: String,
 }
 
+/// `POST /chat` — answer one grounded question, as a single JSON envelope.
+///
+/// Delegates to [`chat_report`] so `search.chat` cannot answer differently.
 pub async fn chat_handler(
     State(state): State<Arc<SearchAppState>>,
     Json(req): Json<ChatRequest>,
 ) -> Response {
+    match chat_report(&state, req).await {
+        Ok(body) => Json(body).into_response(),
+        Err((status, body)) => (status, Json(body)).into_response(),
+    }
+}
+
+/// The answer `POST /chat` serves, without the transport (#6285 slice 5.6).
+///
+/// Why: `search.chat` is the method the search UI dials once #6155 moves it into
+/// `trusty-console`, and the retire slice deletes the route this would otherwise
+/// be compared against. The provider resolution is the part that must not be
+/// re-implemented: it decides between the auto-detected local provider, a
+/// per-request `api_key`, and the daemon's env-configured OpenRouter key, and a
+/// second copy would let the two transports pick different providers for the
+/// same request.
+///
+/// What: resolves the provider, searches `index_id` for grounding context,
+/// streams the completion, and collects the deltas into the one envelope both
+/// transports return — `{reply, answer, sources, model, provider}`. The stream
+/// is internal on both doors: HTTP never streamed this route, so neither does
+/// the socket (#6285 slice 5's streaming pair is reindex progress and the daemon
+/// status feed, not this).
+///
+/// # Errors
+///
+/// `400` when neither `message` nor `question` carried text; `503` when no
+/// provider is configured at all; `502` when the provider failed or the stream
+/// reported an error; `500` when the collector task could not be joined. A
+/// search that fails is NOT an error — the question is answered without
+/// grounding context, exactly as the route always did.
+///
+/// Test: `chat_over_the_socket_matches_the_http_body`,
+/// `an_empty_message_is_refused_identically_on_both_transports`,
+/// `chat_without_a_provider_is_refused_identically_on_both_transports`.
+pub(crate) async fn chat_report(
+    state: &Arc<SearchAppState>,
+    req: ChatRequest,
+) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
     if req.message.is_empty() {
-        return (
+        return Err((
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "message (or question) is required"})),
-        )
-            .into_response();
+            serde_json::json!({"error": "message (or question) is required"}),
+        ));
     }
 
     let top_k = req.top_k.unwrap_or(5).max(1);
@@ -236,13 +276,12 @@ pub async fn chat_handler(
                 }
             });
             let Some(api_key) = api_key else {
-                return (
+                return Err((
                     StatusCode::SERVICE_UNAVAILABLE,
-                    Json(serde_json::json!({
+                    serde_json::json!({
                         "error": "no chat provider available: start a local model server (Ollama / LM Studio) or set OPENROUTER_API_KEY",
-                    })),
-                )
-                    .into_response();
+                    }),
+                ));
             };
             let model = req
                 .model
@@ -323,37 +362,33 @@ pub async fn chat_handler(
     match stream_task.await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
-            return (
+            return Err((
                 StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({"error": format!("{}: {e}", provider.name())})),
-            )
-                .into_response();
+                serde_json::json!({"error": format!("{}: {e}", provider.name())}),
+            ));
         }
         Err(e) => {
-            return (
+            return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("chat task join: {e}")})),
-            )
-                .into_response();
+                serde_json::json!({"error": format!("chat task join: {e}")}),
+            ));
         }
     }
     if let Some(e) = stream_error {
-        return (
+        return Err((
             StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": format!("{}: {e}", provider.name())})),
-        )
-            .into_response();
+            serde_json::json!({"error": format!("{}: {e}", provider.name())}),
+        ));
     }
 
     let model = provider.model().to_string();
-    Json(serde_json::json!({
+    Ok(serde_json::json!({
         "reply": reply,
         "answer": reply,
         "sources": sources,
         "model": model,
         "provider": provider.name(),
     }))
-    .into_response()
 }
 
 /// GET /api/chat/providers — report provider availability + active choice.

@@ -33,8 +33,12 @@ pub mod writes;
 pub mod streams;
 
 /// Registration for the operational remainder: the two config writes, the log
-/// tail, and the registry orphan census (#6285 slice 5.5).
+/// tail, the registry orphan census (#6285 slice 5.5), and the graceful-stop
+/// request (#6285 slice 5.6).
 pub mod admin;
+
+/// Registration for grounded conversational Q&A (#6285 slice 5.6).
+pub mod chat;
 
 /// Per-method admission and deadline lane pins for the whole socket surface
 /// (#6285 slice 5, widened in slice 5.5 to every lock-taking method).

@@ -8,7 +8,6 @@
 //! Test: `cargo test -p trusty-search -- tests_829` runs all tests in this file.
 use super::*;
 use axum::extract::State;
-use axum::Json;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
@@ -89,9 +88,14 @@ async fn admin_stop_triggers_graceful_shutdown() {
     // Subscribe to the shutdown channel BEFORE calling the handler.
     let mut shutdown_rx = state.shutdown_tx.subscribe();
 
-    let Json(resp) = admin_stop_handler(State(Arc::clone(&state))).await;
+    let resp = admin_stop_handler(State(Arc::clone(&state))).await;
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .expect("read the body");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
     assert_eq!(
-        resp.get("ok"),
+        body.get("ok"),
         Some(&serde_json::json!(true)),
         "admin_stop must return ok:true"
     );
