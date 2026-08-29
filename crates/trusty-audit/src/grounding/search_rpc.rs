@@ -121,9 +121,11 @@ pub enum SearchRpcFailure {
 impl SearchRpcFailure {
     /// True when the daemon ANSWERED and refused, rather than not answering.
     ///
-    /// Why: a caller that must not act on silence — the index-root backstop is
-    /// the one here — needs the distinction the module docs describe, and a
-    /// string comparison against [`Display`] would be a second contract.
+    /// Why: a future caller that must not act on silence needs this
+    /// distinction, and a string comparison against [`Display`] would be a
+    /// second contract. `root_matches` (see [`super::index`]) does not call
+    /// this — it discards the `Result` and stays fail-open on every variant
+    /// by design, so today this is exercised only by its own tests.
     /// Test: `search_rpc_tests::a_dead_socket_is_unreachable_not_a_refusal`.
     #[must_use]
     pub fn is_refusal(&self) -> bool {

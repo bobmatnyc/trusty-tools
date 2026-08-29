@@ -186,7 +186,7 @@ async fn analyze_is_healthy(socket: &Path, timeout: Duration) -> bool {
 /// read as a healthy daemon.
 /// Test: `super::grounding_tests::{a_search_daemon_that_will_not_start_is_a_named_gap,
 /// a_reachable_search_daemon_is_not_restarted,
-/// a_search_daemon_that_refuses_health_is_not_healthy}`.
+/// a_daemon_that_binds_but_never_answers_is_a_named_gap}`.
 async fn search_is_healthy(socket: &Path, timeout: Duration) -> bool {
     search_rpc::call(
         socket,
