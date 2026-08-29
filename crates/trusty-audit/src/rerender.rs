@@ -1759,13 +1759,13 @@ mod rerender_tests {
         (manifest, checkout)
     }
 
-    /// Addresses with nothing listening, and binaries that do not exist, so no
+    /// Sockets nothing has ever bound, and binaries that do not exist, so no
     /// test reaches a real daemon or a real install.
     fn unreachable_tools() -> grounding::Tools {
         grounding::Tools {
             search: PathBuf::from("/nonexistent/trusty-search"),
-            // Port 1 is privileged: a connect there is refused immediately.
-            search_url: "http://127.0.0.1:1".to_owned(),
+            // #6285: a path nothing has ever bound — refused immediately.
+            search_socket: PathBuf::from("/nonexistent/trusty-search.sock"),
             analyze: PathBuf::from("/nonexistent/trusty-analyze"),
             // #6287: a path nothing has ever bound — the socket equivalent of
             // port 1, refused immediately.

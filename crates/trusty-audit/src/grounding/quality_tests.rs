@@ -25,7 +25,7 @@ fn a_filler_row_beside_a_real_hit_is_dropped() {
 
 /// #6082: the floor tracks the scale the daemon actually answers on.
 ///
-/// `POST /indexes/{id}/search` fuses its lanes with RRF, so no hit can score
+/// `search.query` fuses its lanes with RRF, so no hit can score
 /// above `1/61 ≈ 0.0164`. Against the absolute `0.15` this replaced, every
 /// assertion below fails: the whole result set is rejected and the discovery leg
 /// returns nothing however good the index is.

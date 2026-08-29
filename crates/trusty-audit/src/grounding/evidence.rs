@@ -12,11 +12,12 @@
 //! handling" instead of guessed at.
 //!
 //! What: one query set per DD dimension (plus queries derived from the
-//! analyst's own instructions), each run against `POST
-//! /indexes/{id}/search`, each hit collapsed to a repo-relative file that
-//! remembers WHICH query found it. [`blend`] then interleaves the dimensions
-//! round-robin with the complexity ranking, so the budget is spent across the
-//! dimensions rather than down one of them.
+//! analyst's own instructions), each run against `search.query` on the
+//! daemon's socket (#6285 — the method `POST /indexes/{id}/search` became),
+//! each hit collapsed to a repo-relative file that remembers WHICH query found
+//! it. [`blend`] then interleaves the dimensions round-robin with the
+//! complexity ranking, so the budget is spent across the dimensions rather than
+//! down one of them.
 //!
 //! The dimension names are trusty-review's, spelled identically
 //! (`report::investigate::select::DIMENSIONS`). That is what lets the rendered
@@ -30,7 +31,7 @@
 //! Test: `super::evidence_tests`.
 
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -38,6 +39,7 @@ use serde::Deserialize;
 use super::hotspots::RankedFile;
 use super::priority::Priority;
 use super::quality;
+use super::search_rpc;
 
 /// Chunk hits requested per query at [`MIN_FILES_PER_DIMENSION`].
 const MIN_TOP_K: usize = 12;
@@ -269,7 +271,7 @@ pub struct FileEvidence {
 /// an `Err` is a reason string, never a panic, because every caller here is
 /// fail-open. The request size is a PARAMETER rather than a constant so it
 /// scales with [`Caps`] — a per-dimension cap of 17 files starves on a top-12.
-/// Test: `super::evidence_tests` drives `StubSearch`; [`HttpSearch`] is the
+/// Test: `super::evidence_tests` drives `StubSearch`; [`SocketSearch`] is the
 /// production implementation.
 pub trait SearchClient {
     /// Run one query, returning its chunk hits (possibly none).
@@ -280,66 +282,78 @@ pub trait SearchClient {
     ) -> impl Future<Output = Result<Vec<Hit>, String>> + Send;
 }
 
-/// The trusty-search daemon, over its loopback HTTP surface.
+/// The trusty-search daemon, over its hardened Unix socket (#6285).
+///
+/// Why it holds a path rather than a client: the socket is dialled per call by
+/// [`search_rpc::call_capped`], so there is no connection pool to build once and
+/// no fallible constructor — a discovery pass that could not reach the daemon
+/// now reports that per query, where the reason names the query that lost its
+/// evidence.
+/// What: the socket, the index the queries run against, and the checkout root
+/// hits are made relative to.
+/// Test: `super::evidence_tests::{the_query_names_the_index_and_pins_graph_expansion,
+/// a_dead_daemon_is_a_reason_not_a_panic, a_refused_query_is_a_reason}`.
 #[derive(Debug, Clone)]
-pub struct HttpSearch {
-    client: reqwest::Client,
-    url: String,
+pub struct SocketSearch {
+    socket: PathBuf,
+    index_id: String,
     root: String,
 }
 
-impl HttpSearch {
+impl SocketSearch {
     /// A client for one index, resolving hits against `checkout`.
-    ///
-    /// The HTTP client is built ONCE here rather than per query: a discovery
-    /// pass runs a dozen-plus queries, and each build allocates a fresh
-    /// connection pool that the next query then throws away.
-    ///
-    /// # Errors
-    ///
-    /// One line when no HTTP client can be built, which the caller turns into a
-    /// gap — the discovery leg is fail-open like every other.
-    pub fn new(base: &str, index_id: &str, checkout: &Path) -> Result<Self, String> {
-        let base = base.trim_end_matches('/');
-        let client = trusty_common::http_client::loopback_client_builder()
-            .timeout(REQUEST_BUDGET)
-            .build()
-            .map_err(|e| format!("no HTTP client could be built for {base} ({e})"))?;
-        Ok(Self {
-            client,
-            url: format!("{base}/indexes/{index_id}/search"),
+    #[must_use]
+    pub fn new(socket: &Path, index_id: &str, checkout: &Path) -> Self {
+        Self {
+            socket: socket.to_path_buf(),
+            index_id: index_id.to_owned(),
             root: checkout.to_string_lossy().replace('\\', "/"),
+        }
+    }
+
+    /// The `params` one query sends, split out so a test can read it without a
+    /// daemon.
+    ///
+    /// `body` is byte-for-byte the JSON the HTTP route took, which is what the
+    /// socket's `IndexBody` shape preserves — so a refusal the daemon spells
+    /// for a malformed query is the same refusal on either transport.
+    fn params(&self, query: &str, top_k: usize) -> serde_json::Value {
+        serde_json::json!({
+            "index_id": self.index_id,
+            "body": {
+                "text": query,
+                "top_k": top_k,
+                "compact": true,
+                // #6082: `expand_graph` already defaults true on the daemon, so
+                // this pins the behaviour the evidence leg DEPENDS on rather
+                // than inheriting it — a future default flip would otherwise
+                // silently drop relationship evidence from every audit.
+                "expand_graph": true,
+            },
         })
     }
 }
 
-impl SearchClient for HttpSearch {
+impl SearchClient for SocketSearch {
     async fn hits(&self, query: &str, top_k: usize) -> Result<Vec<Hit>, String> {
-        let url = &self.url;
-        let response = self
-            .client
-            .post(url)
-            // #6082: `expand_graph` already defaults true on the daemon, so this
-            // pins the behaviour the evidence leg DEPENDS on rather than
-            // inheriting it — a future default flip would otherwise silently
-            // drop relationship evidence from every audit.
-            .json(&serde_json::json!({
-                "text": query,
-                "top_k": top_k,
-                "compact": true,
-                "expand_graph": true,
-            }))
-            .send()
-            .await
-            .map_err(|e| format!("trusty-search did not answer {url} ({e})"))?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(format!("trusty-search answered {status} for {url}"));
-        }
-        let envelope: SearchEnvelope = response
-            .json()
-            .await
-            .map_err(|e| format!("trusty-search answered {url} with an unreadable body ({e})"))?;
+        // #6285: the raised budget, because a query response is the one bulk
+        // payload this crate moves — see `search_rpc::QUERY_MAX_FRAME_BYTES`.
+        let result = search_rpc::call_capped(
+            &self.socket,
+            search_rpc::METHOD_QUERY,
+            self.params(query, top_k),
+            REQUEST_BUDGET,
+            search_rpc::QUERY_MAX_FRAME_BYTES,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        let envelope: SearchEnvelope = serde_json::from_value(result).map_err(|e| {
+            format!(
+                "trusty-search answered {} on {} with an unreadable body ({e})",
+                search_rpc::METHOD_QUERY,
+                self.socket.display()
+            )
+        })?;
         Ok(envelope.into_hits(&self.root))
     }
 }
