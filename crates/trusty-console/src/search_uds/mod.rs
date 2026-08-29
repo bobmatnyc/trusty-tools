@@ -115,13 +115,29 @@ pub(crate) const HEALTH_TIMEOUT: Duration = Duration::from_secs(3);
 /// What: a day. Not `Duration::MAX`, which overflows tokio's timer when it is
 /// added to `Instant::now()`.
 ///
-/// The same value also bounds the dial and the request write, which is the one
-/// place it is looser than it should be — the API takes one figure for both. A
-/// socket that is absent fails the dial immediately with `ENOENT` rather than
-/// waiting, so what is left unbounded is a socket whose backlog is full.
+/// The same value also bounds the dial and the request write inside the shared
+/// helper, which takes one figure for both. [`STREAM_OPEN_TIMEOUT`] is what
+/// bounds the open, wrapped around the call rather than passed into it.
 pub(crate) const STREAM_FRAME_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// The frame budget this client applies, matching the listener's.
+/// How long opening a stream may take before the console gives up on it.
+///
+/// Why separate from [`STREAM_FRAME_TIMEOUT`]: that budget is a day, and
+/// `send_framed_stream_request_capped` applies its ONE figure to the dial, the
+/// request write, and every frame read alike. A socket whose backlog is full
+/// accepts the connect and then never reads, so the dial and the write both
+/// park — and with only the day-long figure in play the browser's reindex
+/// request would hang for a day rather than being told the daemon is
+/// unreachable. An ABSENT socket is not this case; it fails immediately with
+/// `ENOENT`.
+/// What: 60 s, wrapped around the whole open — the dial, the write, and the
+/// first frame read, which is the last step before a response head exists. Once
+/// the head is written the long per-frame budget takes over, because a reindex
+/// legitimately emits nothing for minutes.
+/// Test: `a_socket_that_never_answers_is_a_prompt_bad_gateway` in [`routes`].
+pub(crate) const STREAM_OPEN_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The frame budget this client applies — at least the listener's.
 ///
 /// Why not the shared 8 MiB default: `trusty_search::service::socket`'s
 /// `MAX_FRAME_BYTES` is 64 MiB — the figure `POST /indexes/{id}/graph` carries
@@ -131,7 +147,16 @@ pub(crate) const STREAM_FRAME_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 
 /// console proxies `search.query.all`, which can pass 8 MiB whenever a caller
 /// asks for full content at a large `top_k`, so the plain helper would fail that
 /// call after the daemon had already done the work.
-/// Test: `a_response_over_the_shared_default_is_read`.
+///
+/// The invariant is a FLOOR, not an equality: this figure must be at least the
+/// listener's. Smaller breaks a response the daemon has already produced;
+/// larger has no failure mode, because the listener refuses an oversized REQUEST
+/// on its own terms and never sends a frame past its own budget.
+///
+/// The same figure bounds the HTTP request body [`routes`] will carry, so the
+/// bridge refuses a body over the frame budget before copying 64 MiB of it.
+/// Test: `a_response_over_the_shared_default_is_read` and
+/// `the_frame_budget_is_at_least_the_listeners`.
 pub(crate) const MAX_FRAME_BYTES: u64 = 64 * 1024 * 1024;
 
 // ─── the codes trusty-search's refusals carry ────────────────────────────────
@@ -317,15 +342,24 @@ pub(crate) async fn call(
 /// has been read yet — the first frame may still be the server's refusal, which
 /// is why [`routes`] reads it before choosing an HTTP status.
 ///
+/// Why `open_timeout` wraps the helper instead of being passed to it: the helper
+/// takes ONE figure for the dial, the request write, and each frame read, and
+/// the frame read needs [`STREAM_FRAME_TIMEOUT`]'s day. Wrapping bounds only the
+/// open — a wedged listener answers in a minute — while the established stream
+/// keeps the long per-frame budget.
+///
 /// # Errors
 ///
-/// [`SearchRpcError::Unreachable`] for a dial or write failure.
+/// [`SearchRpcError::Unreachable`] for a dial or write failure, and for an open
+/// that outlasts `open_timeout`.
 ///
-/// Test: `open_stream_reports_a_dead_socket_as_unreachable`.
+/// Test: `open_stream_reports_a_dead_socket_as_unreachable`, and
+/// `a_socket_that_never_answers_is_a_prompt_bad_gateway` in [`routes`].
 pub(crate) async fn open_stream(
     socket: &Path,
     method: &str,
     params: Value,
+    open_timeout: Duration,
 ) -> Result<FramedStream<Value>, SearchRpcError> {
     let request = json!({
         "jsonrpc": "2.0",
@@ -335,14 +369,24 @@ pub(crate) async fn open_stream(
         "stream": true,
     });
 
-    trusty_common::uds::stream_client::send_framed_stream_request_capped(
-        socket,
-        &request,
-        STREAM_FRAME_TIMEOUT,
-        MAX_FRAME_BYTES,
+    let opened = tokio::time::timeout(
+        open_timeout,
+        trusty_common::uds::stream_client::send_framed_stream_request_capped(
+            socket,
+            &request,
+            STREAM_FRAME_TIMEOUT,
+            MAX_FRAME_BYTES,
+        ),
     )
     .await
-    .map_err(|e| {
+    .map_err(|_| {
+        SearchRpcError::Unreachable(format!(
+            "{SEARCH_SERVICE} did not open {method} within {}s",
+            open_timeout.as_secs_f32()
+        ))
+    })?;
+
+    opened.map_err(|e| {
         SearchRpcError::Unreachable(format!("{SEARCH_SERVICE} did not open {method}: {e}"))
     })
 }
@@ -533,10 +577,63 @@ mod tests {
             &tmp.path().join("absent.sock"),
             METHOD_STATUS_STREAM,
             json!({}),
+            STREAM_OPEN_TIMEOUT,
         )
         .await
         .expect_err("a dead socket cannot open a stream");
         assert!(matches!(err, SearchRpcError::Unreachable(_)), "{err:?}");
+    }
+
+    /// Why: [`MAX_FRAME_BYTES`] is a floor under the listener's own figure, and
+    /// nothing in a `cargo check` couples the two — trusty-console does not
+    /// depend on trusty-search, and adding a dev-dependency to compare the
+    /// constants would build tantivy, tree-sitter and ORT into this crate's test
+    /// run. Reading the declaration out of the listener's source keeps the two
+    /// coupled at the cost of one file read.
+    /// What: parses `pub const MAX_FRAME_BYTES` out of
+    /// `crates/trusty-search/src/service/socket.rs` and asserts the direction.
+    /// Fails when the declaration moves rather than passing on a missed match,
+    /// which is what makes the check worth having.
+    /// Test: this is the test.
+    #[test]
+    fn the_frame_budget_is_at_least_the_listeners() {
+        let socket_rs = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../trusty-search/src/service/socket.rs");
+        let source = std::fs::read_to_string(&socket_rs)
+            .unwrap_or_else(|e| panic!("read {}: {e}", socket_rs.display()));
+
+        let decl = source
+            .lines()
+            .find_map(|line| {
+                line.trim()
+                    .strip_prefix("pub const MAX_FRAME_BYTES: u64 = ")?
+                    .strip_suffix(';')
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "no `pub const MAX_FRAME_BYTES: u64 = …;` in {} — the listener's budget moved, \
+                     so this floor is unverified",
+                    socket_rs.display()
+                )
+            });
+
+        // `64 * 1024 * 1024` — the only shape the declaration has ever taken.
+        let listener: u64 = decl
+            .split('*')
+            .map(|factor| {
+                factor
+                    .trim()
+                    .parse::<u64>()
+                    .unwrap_or_else(|e| panic!("parse `{decl}`: {e}"))
+            })
+            .product();
+
+        assert!(
+            MAX_FRAME_BYTES >= listener,
+            "this client's frame budget ({MAX_FRAME_BYTES}) is under the listener's ({listener}); \
+             a response trusty-search already produced would come back as FrameTooLarge"
+        );
     }
 
     /// Why: the console and the daemon must compute the SAME path, or the

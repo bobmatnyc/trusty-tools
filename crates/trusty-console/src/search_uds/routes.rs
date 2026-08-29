@@ -54,15 +54,11 @@ use trusty_common::uds::UdsRpcError;
 use trusty_common::uds::stream_client::FramedStream;
 
 use super::map::{Call, map_request};
-use super::{CALL_TIMEOUT, SearchRpcError, call, json_response, open_stream};
+use super::{
+    CALL_TIMEOUT, MAX_FRAME_BYTES, STREAM_OPEN_TIMEOUT, SearchRpcError, call, json_response,
+    open_stream,
+};
 use crate::server::AppState;
-
-/// How large a request body this bridge will carry.
-///
-/// Matches `trusty_search::service::socket::MAX_FRAME_BYTES`, which is itself
-/// the `DefaultBodyLimit` the daemon's largest HTTP route carried. A body over
-/// this is refused here rather than after a 64 MiB copy has been made.
-const BODY_LIMIT: usize = 64 * 1024 * 1024;
 
 /// How often an open stream emits an SSE keep-alive comment.
 ///
@@ -100,13 +96,16 @@ pub async fn search_api_handler(
     let (parts, body) = req.into_parts();
     let query = parts.uri.query().map(str::to_owned);
 
-    let body_bytes: Bytes = match axum::body::to_bytes(body, BODY_LIMIT).await {
+    // #6285: the body becomes one request FRAME, so the frame budget is the body
+    // limit — one constant, not a second literal that can drift from it.
+    let body_limit = usize::try_from(MAX_FRAME_BYTES).unwrap_or(usize::MAX);
+    let body_bytes: Bytes = match axum::body::to_bytes(body, body_limit).await {
         Ok(b) => b,
         Err(e) => {
             warn!("search_uds: could not read the request body: {e}");
             return (
                 StatusCode::PAYLOAD_TOO_LARGE,
-                "request body exceeds the 64 MiB frame budget",
+                format!("request body exceeds the {MAX_FRAME_BYTES}-byte frame budget"),
             )
                 .into_response();
         }
@@ -142,7 +141,7 @@ pub async fn search_api_handler(
         }
         Call::Stream { method, params } => {
             debug!("search_uds: {} /{path} → {method} (stream)", parts.method);
-            stream_response(&socket, method, params).await
+            stream_response(&socket, method, params, STREAM_OPEN_TIMEOUT).await
         }
     }
 }
@@ -174,15 +173,41 @@ pub async fn deprecated_search_api_handler(
 /// reads as a finished reindex.
 /// What: peek, then either the refusal's own status or a `200` whose body starts
 /// with the peeked item.
+///
+/// `open_timeout` bounds everything up to that peek — the dial, the request
+/// write, and the first frame read. A listener whose backlog is full accepts the
+/// connection and then reads nothing, and without this bound the browser waits
+/// out [`super::STREAM_FRAME_TIMEOUT`]'s day for a response head. Abandoning the
+/// read is safe: the whole `FramedStream` is dropped on the timeout path, so no
+/// half-read line is left for anyone to resume. The parameter exists so a test
+/// need not wait the production minute.
 /// Test: `tests/search_uds_bridge.rs`'s
-/// `a_stream_refusal_before_the_first_item_is_an_http_status`.
-async fn stream_response(socket: &Path, method: &'static str, params: Value) -> Response {
-    let mut stream = match open_stream(socket, method, params).await {
+/// `a_stream_refusal_before_the_first_item_is_an_http_status`, and
+/// `a_socket_that_never_answers_is_a_prompt_bad_gateway` below.
+async fn stream_response(
+    socket: &Path,
+    method: &'static str,
+    params: Value,
+    open_timeout: std::time::Duration,
+) -> Response {
+    let mut stream = match open_stream(socket, method, params, open_timeout).await {
         Ok(s) => s,
         Err(e) => return e.into_response(),
     };
 
-    let first = match stream.next_frame().await {
+    let peeked = match tokio::time::timeout(open_timeout, stream.next_frame()).await {
+        Ok(frame) => frame,
+        Err(_) => {
+            return SearchRpcError::Unreachable(format!(
+                "{} did not answer {method} within {}s",
+                super::SEARCH_SERVICE,
+                open_timeout.as_secs_f32()
+            ))
+            .into_response();
+        }
+    };
+
+    let first = match peeked {
         Some(Ok(item)) => Some(item),
         Some(Err(e)) => return stream_error(method, e).into_response(),
         // A stream that ended with no items at all is still a well-formed empty
@@ -217,10 +242,14 @@ async fn stream_response(socket: &Path, method: &'static str, params: Value) -> 
 /// cancel-safe, since `Receiver::recv` and `Interval::tick` both are.
 ///
 /// The task also carries the disconnect signal: when the browser goes, axum
-/// drops this body, the receiver drops, the next `send` fails, and the task
-/// returns — dropping the `FramedStream` and closing the socket, which is what
-/// ends the daemon's producer (`streams`'s "a dropped client stops the
-/// producer").
+/// drops this body and the receiver drops. The read itself selects on
+/// `Sender::closed()` so the task notices immediately rather than at the next
+/// frame — a status stream can be silent for minutes, and waiting for a frame
+/// that will never come would hold the socket, and the daemon's producer behind
+/// it, open for exactly that long. The same shape the daemon's own producer uses
+/// (`trusty_search::service::rpc::streams`). Either way the task returns,
+/// dropping the `FramedStream` and closing the socket, which is what ends the
+/// producer (`streams`'s "a dropped client stops the producer").
 ///
 /// Test: `tests/search_uds_bridge.rs`'s `a_stream_reaches_the_browser_frame_for_frame`
 /// and `a_mid_stream_failure_becomes_an_error_event`.
@@ -230,7 +259,16 @@ fn sse_tail(
 ) -> impl futures_util::Stream<Item = Result<Bytes, std::convert::Infallible>> {
     let (tx, rx) = mpsc::channel::<Result<Value, UdsRpcError>>(SSE_BUFFER);
     tokio::spawn(async move {
-        while let Some(item) = stream.next_frame().await {
+        loop {
+            // Cancelling `next_frame` mid-line discards the bytes already read,
+            // which only matters to a reader that resumes. This arm never
+            // resumes: it returns, and the `FramedStream` is dropped with it.
+            let item = tokio::select! {
+                biased;
+                () = tx.closed() => return,
+                item = stream.next_frame() => item,
+            };
+            let Some(item) = item else { return };
             let terminal = item.is_err();
             if tx.send(item).await.is_err() || terminal {
                 return;
@@ -358,6 +396,47 @@ mod tests {
         );
         assert_eq!(err.status(), StatusCode::NOT_FOUND);
         assert!(err.message().contains("ghost"), "{err:?}");
+    }
+
+    /// Why: a listener that accepts and then never answers is the case the
+    /// per-frame budget cannot cover — that budget is a day, deliberately, so a
+    /// stalled reindex is not cut off. Without a separate bound on the OPEN, the
+    /// browser waits a day for a response head it will never get.
+    /// What: binds a socket that accepts, reads the request, and writes nothing,
+    /// then asks for a stream with a 300 ms open budget. The production budget
+    /// is [`STREAM_OPEN_TIMEOUT`]; the parameter is what lets this assert in
+    /// milliseconds.
+    /// Test: this is the test.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_socket_that_never_answers_is_a_prompt_bad_gateway() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let socket = tmp.path().join("silent.sock");
+        let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
+        let _accepting = tokio::spawn(async move {
+            let Ok((mut conn, _)) = listener.accept().await else {
+                return;
+            };
+            let mut sink = Vec::new();
+            // Read the request and answer nothing — the wedged-listener case.
+            let _ = tokio::io::AsyncReadExt::read_to_end(&mut conn, &mut sink).await;
+            std::future::pending::<()>().await;
+        });
+
+        let started = std::time::Instant::now();
+        let response = stream_response(
+            &socket,
+            super::super::METHOD_STATUS_STREAM,
+            json!({}),
+            std::time::Duration::from_millis(300),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the open must be bounded, not left to the per-frame budget: {:?}",
+            started.elapsed()
+        );
     }
 
     /// Why: everything that is not the daemon's own refusal is the console
