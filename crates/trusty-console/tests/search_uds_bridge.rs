@@ -393,6 +393,89 @@ async fn a_truncated_stream_becomes_an_error_event() {
     );
 }
 
+/// Why: a status stream can be silent for minutes, and the reader used to
+/// notice a departed browser only when the next frame arrived. Until then it
+/// held the socket open, and the daemon's producer behind it — so closing a
+/// quiet dashboard tab leaked a producer for as long as the stream stayed quiet.
+/// The reader now selects on the sender's closure, so the socket goes with the
+/// body.
+/// What: opens the real stream route against a stub that answers ONE item and
+/// then stays silent, reads that item to prove the stream is live, drops the
+/// response body, and waits for the stub to observe the socket closing.
+///
+/// The stub detects the close by writing, not reading: the RPC client
+/// half-closes its write side once the request frame is out, so this end is
+/// already at EOF and a read proves nothing. Each probe is a single space rather
+/// than a frame — a reader still sitting there parks on the unterminated line
+/// instead of being woken by it, which is what makes a bridge without the
+/// disconnect arm hang here rather than pass.
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_browser_disconnect_releases_the_daemon_socket() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let socket = tmp.path().join("sockets").join("quiet-stream.sock");
+    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
+    let (closed_tx, closed_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let _serving = tokio::spawn(async move {
+        let Ok((mut conn, _)) = listener.accept().await else {
+            return;
+        };
+        let mut raw = Vec::new();
+        let _ = conn.read_to_end(&mut raw).await;
+
+        let opener = format!("{}\n", item_frame(json!({ "type": "connected" })));
+        if conn.write_all(opener.as_bytes()).await.is_err() {
+            return;
+        }
+        let _ = conn.flush().await;
+
+        loop {
+            if conn.write_all(b" ").await.is_err() {
+                let _ = closed_tx.send(());
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    });
+
+    let router = build_router(AppState::new(vec![]).with_search_socket(socket));
+    let request = Request::builder()
+        .method("GET")
+        .uri("/api/search/status/stream")
+        .body(Body::empty())
+        .expect("request");
+    let response = router.oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut body = response.into_body();
+    let first = body
+        .frame()
+        .await
+        .expect("the stream carries its opener")
+        .expect("a first chunk");
+    let data = first.into_data().expect("a data frame");
+    assert!(
+        String::from_utf8_lossy(&data).contains("connected"),
+        "the opener proves the stream is live before the disconnect"
+    );
+
+    let dropped_at = std::time::Instant::now();
+    drop(body);
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), closed_rx)
+        .await
+        .expect("the daemon side must see the socket close, not wait for a frame that never comes")
+        .expect("the stub reports the close");
+    assert!(
+        dropped_at.elapsed() < std::time::Duration::from_secs(2),
+        "the socket must be released on disconnect: {:?}",
+        dropped_at.elapsed()
+    );
+}
+
 /// Why: nothing bound to the socket must fail the stream open with a status,
 /// not with an empty `200` event stream.
 /// Test: this is the test.

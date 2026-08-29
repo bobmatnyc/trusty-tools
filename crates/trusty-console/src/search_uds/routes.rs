@@ -175,27 +175,34 @@ pub async fn deprecated_search_api_handler(
 /// with the peeked item.
 ///
 /// `open_timeout` bounds everything up to that peek — the dial, the request
-/// write, and the first frame read. A listener whose backlog is full accepts the
-/// connection and then reads nothing, and without this bound the browser waits
-/// out [`super::STREAM_FRAME_TIMEOUT`]'s day for a response head. Abandoning the
-/// read is safe: the whole `FramedStream` is dropped on the timeout path, so no
+/// write, and the first frame read, which share ONE deadline computed here. A
+/// listener whose backlog is full accepts the connection and then reads nothing,
+/// and without this bound the browser waits out
+/// [`super::STREAM_FRAME_TIMEOUT`]'s day for a response head. Abandoning the read
+/// is safe: the whole `FramedStream` is dropped on the timeout path, so no
 /// half-read line is left for anyone to resume. The parameter exists so a test
 /// need not wait the production minute.
 /// Test: `tests/search_uds_bridge.rs`'s
-/// `a_stream_refusal_before_the_first_item_is_an_http_status`, and
-/// `a_socket_that_never_answers_is_a_prompt_bad_gateway` below.
+/// `a_stream_refusal_before_the_first_item_is_an_http_status`, plus
+/// `a_socket_that_never_answers_is_a_prompt_bad_gateway` and
+/// `a_slow_open_and_a_silent_first_frame_share_one_budget` below.
 async fn stream_response(
     socket: &Path,
     method: &'static str,
     params: Value,
     open_timeout: std::time::Duration,
 ) -> Response {
+    // #6285: one deadline, taken before the dial and reused for the first-frame
+    // read. Giving each step its own `open_timeout` let the two together run to
+    // twice the figure the constant names.
+    let deadline = tokio::time::Instant::now() + open_timeout;
+
     let mut stream = match open_stream(socket, method, params, open_timeout).await {
         Ok(s) => s,
         Err(e) => return e.into_response(),
     };
 
-    let peeked = match tokio::time::timeout(open_timeout, stream.next_frame()).await {
+    let peeked = match tokio::time::timeout_at(deadline, stream.next_frame()).await {
         Ok(frame) => frame,
         Err(_) => {
             return SearchRpcError::Unreachable(format!(
@@ -251,8 +258,9 @@ async fn stream_response(
 /// dropping the `FramedStream` and closing the socket, which is what ends the
 /// producer (`streams`'s "a dropped client stops the producer").
 ///
-/// Test: `tests/search_uds_bridge.rs`'s `a_stream_reaches_the_browser_frame_for_frame`
-/// and `a_mid_stream_failure_becomes_an_error_event`.
+/// Test: `tests/search_uds_bridge.rs`'s `a_stream_reaches_the_browser_frame_for_frame`,
+/// `a_mid_stream_failure_becomes_an_error_event`, and
+/// `a_browser_disconnect_releases_the_daemon_socket` for the disconnect arm.
 fn sse_tail(
     mut stream: FramedStream<Value>,
     method: &'static str,
@@ -436,6 +444,93 @@ mod tests {
             started.elapsed() < std::time::Duration::from_secs(5),
             "the open must be bounded, not left to the per-frame budget: {:?}",
             started.elapsed()
+        );
+    }
+
+    /// Bind a listener that accepts, stalls `drain_after`, then drains the
+    /// request and answers nothing at all.
+    ///
+    /// The stall is what makes the OPEN slow rather than instant: the request
+    /// frame is larger than any plausible UNIX-socket send buffer, so the
+    /// client's `write_all` cannot finish until this end starts reading.
+    fn stalls_then_drains(socket: PathBuf, drain_after: std::time::Duration) -> PathBuf {
+        let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
+        tokio::spawn(async move {
+            let Ok((mut conn, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::time::sleep(drain_after).await;
+            let mut sink = Vec::new();
+            let _ = tokio::io::AsyncReadExt::read_to_end(&mut conn, &mut sink).await;
+            std::future::pending::<()>().await;
+        });
+        socket
+    }
+
+    /// A request frame past any plausible socket send buffer.
+    fn bulky_params() -> Value {
+        json!({ "blob": "x".repeat(512 * 1024) })
+    }
+
+    /// Why: the open has two waiting steps — the dial-and-write inside
+    /// [`open_stream`] and the first frame read here — and giving each its own
+    /// full `open_timeout` made the real ceiling twice the figure
+    /// [`STREAM_OPEN_TIMEOUT`], its doc comment and the changelog all name. A
+    /// browser waiting two minutes for a bound documented as one is the defect.
+    /// What: two phases against the same stub shape, because the ceiling alone
+    /// would pass vacuously if the open happened to be fast. Phase one proves
+    /// the open both SUCCEEDS and takes about `DRAIN_AFTER`. Phase two runs the
+    /// same shape through `stream_response`, whose first-frame read then waits
+    /// for a frame that never comes: one shared deadline returns at about
+    /// `BUDGET`, two separate ones would run to `DRAIN_AFTER + BUDGET`.
+    /// Test: this is the test.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_slow_open_and_a_silent_first_frame_share_one_budget() {
+        const BUDGET: std::time::Duration = std::time::Duration::from_millis(1000);
+        const DRAIN_AFTER: std::time::Duration = std::time::Duration::from_millis(600);
+        // Above `BUDGET`, so one shared deadline clears it; below
+        // `DRAIN_AFTER + BUDGET`, so two separate deadlines cannot.
+        const CEILING: std::time::Duration = std::time::Duration::from_millis(1300);
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+
+        let slow = stalls_then_drains(tmp.path().join("slow-open.sock"), DRAIN_AFTER);
+        let started = std::time::Instant::now();
+        let opened = open_stream(
+            &slow,
+            super::super::METHOD_STATUS_STREAM,
+            bulky_params(),
+            BUDGET,
+        )
+        .await;
+        let open_took = started.elapsed();
+        assert!(opened.is_ok(), "the open must succeed, slowly: {opened:?}");
+        assert!(
+            open_took >= DRAIN_AFTER,
+            "the write must park until the peer drains, or this test proves nothing: {open_took:?}"
+        );
+        drop(opened);
+
+        let silent = stalls_then_drains(tmp.path().join("silent-frame.sock"), DRAIN_AFTER);
+        let started = std::time::Instant::now();
+        let response = stream_response(
+            &silent,
+            super::super::METHOD_STATUS_STREAM,
+            bulky_params(),
+            BUDGET,
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert!(
+            elapsed >= BUDGET,
+            "a shared deadline still spends the whole budget: {elapsed:?}"
+        );
+        assert!(
+            elapsed < CEILING,
+            "the dial, the write and the first frame read must share ONE {BUDGET:?} deadline, \
+             not take one each: {elapsed:?}"
         );
     }
 

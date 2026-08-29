@@ -130,11 +130,15 @@ pub(crate) const STREAM_FRAME_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 
 /// request would hang for a day rather than being told the daemon is
 /// unreachable. An ABSENT socket is not this case; it fails immediately with
 /// `ENOENT`.
-/// What: 60 s, wrapped around the whole open — the dial, the write, and the
-/// first frame read, which is the last step before a response head exists. Once
-/// the head is written the long per-frame budget takes over, because a reindex
-/// legitimately emits nothing for minutes.
-/// Test: `a_socket_that_never_answers_is_a_prompt_bad_gateway` in [`routes`].
+/// What: 60 s for the whole open — the dial, the write, and the first frame
+/// read, which is the last step before a response head exists. `routes`'
+/// `stream_response` takes ONE deadline before dialling and reuses it for the
+/// first-frame read, so the figure here is the total rather than a per-step
+/// budget two steps could each spend in full. Once the head is written the long
+/// per-frame budget takes over, because a reindex legitimately emits nothing for
+/// minutes.
+/// Test: `a_socket_that_never_answers_is_a_prompt_bad_gateway` and
+/// `a_slow_open_and_a_silent_first_frame_share_one_budget` in [`routes`].
 pub(crate) const STREAM_OPEN_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The frame budget this client applies — at least the listener's.
@@ -347,6 +351,12 @@ pub(crate) async fn call(
 /// the frame read needs [`STREAM_FRAME_TIMEOUT`]'s day. Wrapping bounds only the
 /// open — a wedged listener answers in a minute — while the established stream
 /// keeps the long per-frame budget.
+///
+/// `open_timeout` bounds the dial and the write only. The caller owns the rest
+/// of the open: `routes::stream_response` computes one deadline before calling
+/// this and bounds the first frame read against the same deadline, so a slow but
+/// successful open leaves the peek less than the full figure rather than a
+/// second copy of it.
 ///
 /// # Errors
 ///
