@@ -16,10 +16,10 @@
 //! production cap) rather than growing either file — this module's `impl
 //! SessionManager` block is additive, exactly like `adopt.rs`/`prune.rs`.
 //! Test: `disposable_index_id_*`, `is_orphan_index_*` in `tests` below (pure,
-//! no live daemon required); the live-HTTP paths are best-effort/fail-soft by
-//! design and are exercised the same way the shared
-//! `trusty_common::search_index` register path's daemon-down path is
-//! (integration-only).
+//! no live daemon required); the daemon-facing paths by
+//! `sweep_orphaned_search_indexes_noop_when_daemon_unreachable`,
+//! `sweep_skips_a_candidate_whose_status_probe_failed` and
+//! `sweep_makes_no_request_under_a_test_harness` in `search_gc_guard_tests`.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -31,18 +31,16 @@ use tracing::{debug, info, warn};
 use super::decommission::is_session_worktree;
 use super::index_delete_guard::{DeleteOutcome, DestructiveIndexDelete};
 use super::manager::SessionManager;
+use crate::daemon::search_rpc::{self, SearchRpcError};
 
 /// Per-request timeout for the READ-ONLY trusty-search calls in this module
 /// (the sweep's index listing and status probes).
 ///
 /// Why: these calls run off the interactive request path (decommission,
 /// periodic GC) but must still never hang the daemon indefinitely if
-/// trusty-search is wedged. The destructive DELETE carries its own timeouts
+/// trusty-search is wedged. The destructive delete carries its own timeout
 /// inside [`DestructiveIndexDelete`] (#4743).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
-/// Connect timeout, tighter than the overall request timeout so an
-/// unreachable host fails fast.
-const CONNECT_TIMEOUT: Duration = Duration::from_millis(750);
 
 /// How old a `.worktrees` root must be before a 0-chunk index rooted at it is
 /// eligible for deletion (#5065 review).
@@ -100,8 +98,8 @@ pub(super) fn disposable_workspace_index_id(
     if id.trim().is_empty() { None } else { Some(id) }
 }
 
-/// Best-effort `DELETE {base}/indexes/{index_id}` against the discovered
-/// trusty-search daemon (#2033).
+/// Best-effort `search.index.delete` against the running trusty-search daemon
+/// (#2033).
 ///
 /// Why: decommissioning a disposable managed-session workspace removes its
 /// directory from disk; leaving its trusty-search index registered is exactly
@@ -110,15 +108,15 @@ pub(super) fn disposable_workspace_index_id(
 /// teardown, so every outcome is logged and swallowed here — the caller
 /// (`decommission_with_root`) invokes this unconditionally.
 /// What: acquires the [`DestructiveIndexDelete`] capability and, when granted,
-/// issues the DELETE and logs the outcome (removed / non-2xx / transport error)
-/// at info/warn. A refused capability — daemon never started, or this is a test
-/// process (#4743) — is a no-op, logged by `acquire` itself.
+/// issues the delete and logs which of the four outcomes it got. A refused
+/// capability — no daemon socket bound, or this is a test process (#4743) — is a
+/// no-op, logged by `acquire` itself.
 /// Test: exercised via the live-daemon decommission integration path;
 /// `decommission_issues_no_request_to_a_live_daemon_under_test` pins that a
 /// test process reaches the daemon zero times.
 pub(super) async fn delete_search_index_best_effort(index_id: &str) {
-    // #4743: no base URL, no client, no `?delete_data=true` without this. A
-    // test process cannot acquire it, so the request is never built at all.
+    // #4743: no socket, no request, no `delete_data` opt-in without this. A
+    // test process cannot acquire it, so the call is never built at all.
     let Some(deleter) = DestructiveIndexDelete::acquire() else {
         return;
     };
@@ -129,11 +127,16 @@ pub(super) async fn delete_search_index_best_effort(index_id: &str) {
                 "decommission: removed trusty-search index (#2033)"
             );
         }
-        DeleteOutcome::Rejected(status) => {
+        DeleteOutcome::NotRemoved(detail) => {
             warn!(
                 index_id,
-                %status,
-                "decommission: trusty-search index delete returned non-2xx"
+                "decommission: trusty-search kept the index: {detail}"
+            );
+        }
+        DeleteOutcome::Refused { code, message } => {
+            warn!(
+                index_id,
+                code, "decommission: trusty-search index delete refused: {message}"
             );
         }
         DeleteOutcome::Transport(e) => {
@@ -145,34 +148,18 @@ pub(super) async fn delete_search_index_best_effort(index_id: &str) {
     }
 }
 
-/// Build the short-timeout `reqwest::Client` shared by the READ-ONLY
-/// search-index calls in this module.
-fn build_client() -> reqwest::Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .timeout(REQUEST_TIMEOUT)
-        .connect_timeout(CONNECT_TIMEOUT)
-        .build()
-}
-
-/// Wire shape of one row of `GET /indexes?details=true`.
+/// Wire shape of one row of `search.indexes.list` with `details`.
 #[derive(Debug, Deserialize)]
 struct IndexDetailRow {
     id: String,
     root_path: Option<String>,
 }
 
-/// Wire shape of `GET /indexes?details=true`.
+/// Wire shape of `search.indexes.list` with `details`.
 #[derive(Debug, Deserialize, Default)]
 struct IndexDetailsResponse {
     #[serde(default)]
     indexes: Vec<IndexDetailRow>,
-}
-
-/// Wire shape of the fields we need from `GET /indexes/:id/status`.
-#[derive(Debug, Deserialize, Default)]
-struct IndexStatusRow {
-    #[serde(default)]
-    chunk_count: u64,
 }
 
 /// A minimal snapshot of one registered trusty-search index, enough to decide
@@ -254,12 +241,26 @@ fn root_is_within_grace(root: &Path, grace: Duration) -> bool {
 }
 
 /// Fetch `(id, root_path)` for every index registered with the daemon.
-async fn fetch_index_details(
-    client: &reqwest::Client,
-    base: &str,
-) -> anyhow::Result<Vec<(String, PathBuf)>> {
-    let url = format!("{base}/indexes?details=true");
-    let body: IndexDetailsResponse = client.get(&url).send().await?.json().await?;
+///
+/// # Errors
+///
+/// When the daemon cannot be reached, refuses the call, or answers a body this
+/// cannot decode. The caller decides what each means — see
+/// [`SessionManager::sweep_orphaned_search_indexes`], which treats an
+/// unanswered listing as "no daemon, nothing to sweep" and a refusal as a fault
+/// worth reporting.
+/// Test: `sweep_skips_a_candidate_whose_status_probe_failed` drives the success
+/// path; `sweep_orphaned_search_indexes_noop_when_daemon_unreachable` the
+/// transport failure.
+async fn fetch_index_details(socket: &Path) -> anyhow::Result<Vec<(String, PathBuf)>> {
+    let value = search_rpc::call_at(
+        socket,
+        search_rpc::METHOD_INDEXES_LIST,
+        serde_json::json!({ "details": true }),
+        REQUEST_TIMEOUT,
+    )
+    .await?;
+    let body: IndexDetailsResponse = serde_json::from_value(value)?;
     Ok(body
         .indexes
         .into_iter()
@@ -267,21 +268,33 @@ async fn fetch_index_details(
         .collect())
 }
 
-/// Fetch `chunk_count` for one index. A non-2xx or transport error is treated
-/// as `0` (fail-open toward "looks empty, worth reconsidering") since the
-/// caller's [`is_orphan_index`] check ALSO requires the index to be
-/// `.worktrees`-scoped and unclaimed by any live session before this value
-/// can result in deletion — a genuinely populated, still-claimed index is
-/// never at risk from a flaky status probe.
-async fn fetch_chunk_count(client: &reqwest::Client, base: &str, id: &str) -> u64 {
-    let url = format!("{base}/indexes/{id}/status");
-    match client.get(&url).send().await {
-        Ok(resp) if resp.status().is_success() => resp
-            .json::<IndexStatusRow>()
-            .await
-            .map(|s| s.chunk_count)
-            .unwrap_or(0),
-        _ => 0,
+/// Read `chunk_count` for one index, or `None` when the daemon did not tell us.
+///
+/// Why `Option` (#6285): this used to answer `0` for a failed probe, on the
+/// reasoning that [`is_orphan_index`]'s other conditions would catch anything
+/// important. They do not. `0` is the value that makes an aged, unclaimed
+/// `.worktrees` index collectable, so a wedged daemon, a timed-out call or a
+/// one-off refusal read as "this index is empty" and licensed a delete on
+/// evidence that was never gathered. An unreachable daemon must never read as an
+/// absent index.
+/// What: `Some(n)` only when the daemon answered with a `chunk_count`; `None` for
+/// a refusal, a transport failure, or a result that omits the field. The caller
+/// skips a `None` candidate entirely rather than substituting a value for it.
+/// Test: `sweep_skips_a_candidate_whose_status_probe_failed`.
+async fn probe_chunk_count(socket: &Path, id: &str) -> Option<u64> {
+    match search_rpc::call_at(
+        socket,
+        search_rpc::METHOD_INDEX_STATUS,
+        serde_json::json!({ "index_id": id }),
+        REQUEST_TIMEOUT,
+    )
+    .await
+    {
+        Ok(body) => body.get("chunk_count").and_then(serde_json::Value::as_u64),
+        Err(e) => {
+            debug!(index_id = %id, "search-index-gc: status probe failed: {e:#}");
+            None
+        }
     }
 }
 
@@ -315,24 +328,31 @@ impl SessionManager {
     /// flagged hundreds of these). This is the periodic backstop, mirroring
     /// `prune::prune_orphaned_worktrees`'s "orphan == not claimed by any live
     /// session" shape.
-    /// What: lists every registered index (`GET /indexes?details=true`),
-    /// keeps only `.worktrees`-scoped candidates ([`is_session_worktree`]) not
-    /// claimed by `active_workspace_path_set`, fetches each candidate's
-    /// `chunk_count`, and applies [`is_orphan_index`]. Under `dry_run` the
-    /// matching ids are logged and returned without deleting anything
-    /// (mirrors `PruneWorktreesRequest`'s dry-run-by-default convention);
-    /// otherwise each is removed via the [`DestructiveIndexDelete`] capability,
-    /// logged individually (no silent truncation), and returned. Returns
-    /// `Ok(vec![])` without error when the daemon is undiscoverable — the sweep
-    /// is best-effort, like the rest of the orphan-GC loop.
+    /// What: lists every registered index (`search.indexes.list` with
+    /// `details`), keeps only `.worktrees`-scoped candidates
+    /// ([`is_session_worktree`]) not claimed by `active_workspace_path_set`,
+    /// reads each candidate's `chunk_count`, and applies [`is_orphan_index`].
+    /// Under `dry_run` the matching ids are logged and returned without deleting
+    /// anything (mirrors `PruneWorktreesRequest`'s dry-run-by-default
+    /// convention); otherwise each is removed via the
+    /// [`DestructiveIndexDelete`] capability, logged individually (no silent
+    /// truncation), and returned. Returns `Ok(vec![])` without error when no
+    /// daemon answers — the sweep is best-effort, like the rest of the
+    /// orphan-GC loop.
+    ///
+    /// #6285: an unreachable daemon and an absent index are held apart at both
+    /// steps. A listing that goes unanswered ends the sweep with nothing
+    /// collected; a candidate whose status probe goes unanswered is skipped
+    /// rather than assumed empty. Neither can produce a delete.
     ///
     /// #4743: a non-dry-run sweep acquires the destructive capability BEFORE
     /// listing anything, so a test process returns `Ok(vec![])` having made no
     /// request at all rather than enumerating the operator's real indexes.
     /// Test: `is_orphan_index_*` cover the pure decision; this async
-    /// orchestration is exercised via the daemon-unreachable no-op path in
-    /// `sweep_orphaned_search_indexes_noop_when_daemon_unreachable`, and the
-    /// test-process refusal by `sweep_makes_no_request_under_a_test_harness`.
+    /// orchestration is exercised by
+    /// `sweep_orphaned_search_indexes_noop_when_daemon_unreachable`,
+    /// `sweep_skips_a_candidate_whose_status_probe_failed`, and the test-process
+    /// refusal by `sweep_makes_no_request_under_a_test_harness`.
     pub async fn sweep_orphaned_search_indexes(
         &self,
         dry_run: bool,
@@ -351,13 +371,28 @@ impl SessionManager {
             }
         };
 
-        let Some(base) = trusty_common::resolve_daemon_base_url("trusty-search") else {
-            debug!("trusty-search daemon not discoverable; skipping index orphan sweep (#2033)");
-            return Ok(Vec::new());
+        let socket = match search_rpc::search_socket() {
+            Ok(socket) => socket,
+            Err(e) => {
+                debug!(
+                    "cannot resolve the trusty-search socket; skipping index orphan sweep: {e:#}"
+                );
+                return Ok(Vec::new());
+            }
         };
-        let client = build_client()?;
 
-        let details = fetch_index_details(&client, &base).await?;
+        let details = match fetch_index_details(&socket).await {
+            Ok(details) => details,
+            // #6285: an unanswered listing is "no daemon", the no-op this sweep
+            // has always been on a machine without one. A REFUSAL is different —
+            // a daemon that answered and said no is a fault the GC loop should
+            // report, not a quiet skip.
+            Err(e) if e.downcast_ref::<SearchRpcError>().is_none() => {
+                debug!("trusty-search daemon unreachable; skipping index orphan sweep: {e:#}");
+                return Ok(Vec::new());
+            }
+            Err(e) => return Err(e),
+        };
         let active_workspace_paths = self.active_workspace_path_set().await;
 
         let mut candidates = Vec::new();
@@ -367,7 +402,12 @@ impl SessionManager {
             if !is_session_worktree(&root_path) {
                 continue;
             }
-            let chunk_count = fetch_chunk_count(&client, &base, &id).await;
+            // #6285: no chunk count, no verdict. Substituting a value here is
+            // what let an unreachable daemon read as an empty index — see
+            // `probe_chunk_count`.
+            let Some(chunk_count) = probe_chunk_count(&socket, &id).await else {
+                continue;
+            };
             let snapshot = IndexSnapshot {
                 id: id.clone(),
                 root_path,
@@ -389,23 +429,25 @@ impl SessionManager {
 
         let mut removed = Vec::new();
         for id in candidates {
-            // #4743: the `?delete_data=true` opt-in that used to be formatted
-            // inline here now lives inside the capability, so this loop and the
+            // #4743: the `delete_data` opt-in that used to be formatted inline
+            // here lives inside the capability, so this loop and the
             // decommission-time delete share one destructive door instead of
             // two independently-guarded ones. Its #4123 rationale is unchanged:
             // every candidate is a worktree-scoped index with no live session,
-            // so its data is unreachable garbage a bare DELETE would leak.
+            // so its data is unreachable garbage a bare delete would leak.
             match deleter.delete(&id).await {
                 DeleteOutcome::Removed => {
                     info!(index_id = %id, "search-index-gc: removed orphaned/0-chunk index");
                     removed.push(id);
                 }
-                DeleteOutcome::Rejected(status) => {
-                    warn!(
-                        index_id = %id,
-                        %status,
-                        "search-index-gc: delete returned non-2xx"
-                    );
+                // Every arm below leaves `id` OUT of `removed`: the sweep
+                // reports what the daemon confirmed it removed, never what it
+                // was asked to remove.
+                DeleteOutcome::NotRemoved(detail) => {
+                    warn!(index_id = %id, "search-index-gc: trusty-search kept the index: {detail}");
+                }
+                DeleteOutcome::Refused { code, message } => {
+                    warn!(index_id = %id, code, "search-index-gc: delete refused: {message}");
                 }
                 DeleteOutcome::Transport(e) => {
                     warn!(index_id = %id, "search-index-gc: delete failed: {e}");

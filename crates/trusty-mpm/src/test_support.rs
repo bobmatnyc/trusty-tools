@@ -291,6 +291,64 @@ fn sweep_stale_test_dirs() {
     }
 }
 
+/// Point every trusty-* daemon lookup at a scratch data directory for the body
+/// of one `#[serial_test::serial]` test, and restore the environment on drop.
+///
+/// Why here: two suites need it — `session_manager::search_gc_guard_tests` and
+/// `session_manager::index_delete_guard::tests` — and both are asserting that a
+/// test process does NOT reach the operator's real trusty-search daemon (#4743).
+/// A per-suite copy of a guard whose whole job is to keep production state out
+/// of a test run is the wrong thing to have two of.
+///
+/// Why a guard rather than the set / call / `remove_var` sequence written inline
+/// elsewhere in this crate: a panicking assertion between the set and the remove
+/// leaks process-global state into every later test in the binary. `Drop` runs
+/// on the unwind.
+///
+/// Callers MUST be tagged `#[serial_test::serial]` — the variables are
+/// process-global, so two tests holding one of these at once see each other's
+/// values.
+/// Test: `session_manager::index_delete_guard::tests::acquire_refuses_when_no_daemon_socket_is_bound`
+/// and the other users listed above.
+pub(crate) struct DaemonHomeOverride {
+    allow_production: bool,
+}
+
+impl DaemonHomeOverride {
+    /// Resolve daemon data under `data_dir`. With `allow_production`, also lift
+    /// the #4743 refusal that stops a test process destroying real index data.
+    pub(crate) fn new(data_dir: &Path, allow_production: bool) -> Self {
+        // SAFETY: callers are `#[serial]` — no other test thread races this.
+        unsafe {
+            std::env::set_var(trusty_common::DATA_DIR_OVERRIDE_ENV, data_dir);
+            if allow_production {
+                std::env::set_var(trusty_common::test_harness::ALLOW_PRODUCTION_ENV, "1");
+            }
+        }
+        Self { allow_production }
+    }
+}
+
+impl Drop for DaemonHomeOverride {
+    fn drop(&mut self) {
+        // SAFETY: `#[serial]` — see `DaemonHomeOverride::new`.
+        unsafe {
+            std::env::remove_var(trusty_common::DATA_DIR_OVERRIDE_ENV);
+            if self.allow_production {
+                std::env::remove_var(trusty_common::test_harness::ALLOW_PRODUCTION_ENV);
+            }
+        }
+    }
+}
+
+/// An isolated daemon data directory plus the override pointing resolution at
+/// it. Both must stay alive for the test's duration.
+pub(crate) fn isolated_daemon_home(allow_production: bool) -> (TempDir, DaemonHomeOverride) {
+    let dir = hermetic_temp_dir();
+    let override_guard = DaemonHomeOverride::new(dir.path(), allow_production);
+    (dir, override_guard)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

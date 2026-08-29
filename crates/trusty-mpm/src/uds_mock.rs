@@ -13,6 +13,8 @@
 //! What: [`spawn`] binds a socket under a `TempDir`, mounts `handler` as the
 //! router's catch-all through the same [`trusty_common::uds::server`] pieces the
 //! real daemon uses, and serves until the returned [`MockUdsDaemon`] drops.
+//! [`spawn_at`] does the same at a path the caller chose, for a rig that has to
+//! bind where production discovery will look.
 //! The handler answers a `result` value directly — a rig that needs the
 //! `tools/call` envelope wraps it itself, the same way it did over HTTP.
 //!
@@ -20,7 +22,9 @@
 //!
 //! Test: every caller — `core::memory_import::tests`,
 //! `tui::coordinator::tests`, `provisioner::identity_seed::tests`,
-//! `daemon::doctor_tests`, `daemon::doctor_search_pin_tests`.
+//! `daemon::doctor_tests`, `daemon::doctor_search_pin_tests`,
+//! `session_manager::search_gc_guard_tests`,
+//! `session_manager::index_delete_guard::tests`.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -45,7 +49,9 @@ pub type MockFuture = Pin<Box<dyn Future<Output = Result<Value, RpcError>> + Sen
 /// socket with its temp directory.
 pub struct MockUdsDaemon {
     socket: PathBuf,
-    _dir: TempDir,
+    /// Held only when [`spawn`] minted the directory. [`spawn_at`] binds inside
+    /// a directory the caller owns and keeps alive.
+    _dir: Option<TempDir>,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
@@ -90,6 +96,28 @@ where
 {
     let dir = TempDir::new().expect("tempdir for the mock socket");
     let socket = dir.path().join("daemon.sock");
+    let mut daemon = spawn_at(socket, handler).await;
+    daemon._dir = Some(dir);
+    daemon
+}
+
+/// Start a mock daemon at a socket path the CALLER chose.
+///
+/// Why: a rig that exercises production socket DISCOVERY cannot take whatever
+/// path [`spawn`] minted — it has to bind where `daemon_socket_path` will look,
+/// under a `TRUSTY_DATA_DIR_OVERRIDE` the test controls. `search_gc_guard_tests`
+/// and `index_delete_guard_tests` both need that, and a second accept loop for
+/// them is the duplication this module exists to prevent (#6285).
+/// What: as [`spawn`], except the temp directory keeping the socket alive is the
+/// caller's. `bind_hardened` creates and hardens the parent directory itself.
+///
+/// # Panics
+///
+/// When the socket cannot be bound — a test-only failure with no recovery.
+pub async fn spawn_at<F>(socket: PathBuf, handler: F) -> MockUdsDaemon
+where
+    F: Fn(&str, Value) -> MockFuture + Send + Sync + 'static,
+{
     let listener = trusty_common::uds::bind_hardened(&socket).expect("bind the mock socket");
 
     let router = Arc::new(RpcRouter::new().fallback(MockFallback { handler }));
@@ -103,7 +131,7 @@ where
 
     MockUdsDaemon {
         socket,
-        _dir: dir,
+        _dir: None,
         shutdown: Some(tx),
     }
 }
