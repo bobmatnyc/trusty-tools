@@ -252,7 +252,7 @@ pub(super) async fn patch_config_handler(
 /// follow-up read. Infallible: an unparseable field is refused by the decoder
 /// ahead of this, and a resolvable one always applies.
 /// Test: `config_set_over_the_socket_matches_the_http_body`,
-/// `a_config_set_that_names_no_field_changes_nothing_on_either_transport`.
+/// `a_malformed_config_set_applies_neither_field_on_either_transport`.
 pub(crate) fn patch_config_report(req: PatchConfigRequest) -> ConfigResponse {
     use crate::core::memguard::{
         index_memory_limit_mb, memory_limit_mb, set_index_memory_limit_mb, set_memory_limit_mb,
