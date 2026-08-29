@@ -37,7 +37,7 @@ name = "tga"
 # after it, so `preflight-publish.sh` CHECK 6 (tag/publish commit parity) can
 # never be satisfied at that tag. 4.0.1 is a burned version number and the
 # release moves forward to a gate-clean commit.
-version = "4.0.2"
+version = "5.0.0"
 publish = true
 edition = "2021"
 # Aligned with the workspace MSRV (1.94) per #254. Required for

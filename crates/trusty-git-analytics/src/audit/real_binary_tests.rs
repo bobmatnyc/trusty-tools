@@ -4,7 +4,7 @@
 //! Why: every other test of [`super::ensure_analyze_daemon_with`] stands a stub
 //! where the daemon should be, so all of them would still pass if
 //! `trusty-analyze serve` stopped taking `--port`, stopped exiting when
-//! trusty-search is unreachable, or stopped answering 2xx on `/health` when it
+//! trusty-search is unreachable, or stopped reporting healthy when it
 //! is up. Those three facts are the whole contract this preflight rests on, and
 //! all three live in another crate's binary. This module is the only place they
 //! are checked against the article rather than against a copy of the belief.
@@ -13,7 +13,7 @@
 //! refusal arm (trusty-search unreachable) and the success arm (trusty-search
 //! reachable) — plus the same treatment for the two other contracts that live in
 //! `trusty-search`'s binary: the indexing CLI the repository pass builds, and the
-//! `start --foreground` / `/health` pair [`super::search_daemon`] rests on.
+//! `start --foreground` / `search.health` pair [`super::search_daemon`] rests on.
 //!
 //! Both are `#[ignore]`d because they need that binary built, which
 //! `cargo test -p tga` does not do, and the success arm additionally needs a
@@ -381,15 +381,15 @@ fn the_real_search_binary_still_takes_start_foreground() {
     );
 }
 
-/// The fast path, end to end: a running trusty-search satisfies the preflight at
-/// the address the shared layout resolves, without anything being spawned.
+/// The fast path, end to end: a running trusty-search satisfies the preflight on
+/// the socket both sides derive, without anything being spawned.
 ///
-/// This is the half no stub can stand in for. It checks three facts the guard
-/// assumes separately — that `DaemonAddrLayout::TRUSTY_SEARCH.resolve_base_url()`
-/// finds the daemon an operator actually started, that its `/health` answers 2xx
-/// rather than the `degraded` 503 the analyze daemon reports, and that
-/// [`super::SearchGuard::from_env`] therefore returns a guard that passes. The
-/// binary is a path that cannot exist, so any spawn attempt would fail the test.
+/// This is the half no stub can stand in for. #6285: it checks that
+/// `daemon_socket_path("trusty-search")` names the socket a daemon an operator
+/// actually started is bound to, that the daemon answers `search.health` with a
+/// result frame, and that [`super::SearchGuard::from_env`] therefore returns a
+/// guard that passes. The binary is a path that cannot exist, so any spawn
+/// attempt would fail the test.
 ///
 /// The spawn arm is deliberately NOT exercised against the real binary: starting
 /// a second `trusty-search` would contend with the operator's daemon for its data
@@ -411,9 +411,9 @@ async fn the_real_search_daemon_satisfies_the_preflight_without_a_spawn() {
         .await
         .unwrap_or_else(|e| {
             panic!(
-                "a running trusty-search must satisfy the preflight at the resolved address \
+                "a running trusty-search must satisfy the preflight on the derived socket \
                  `{}`: {e}",
-                guard.url
+                guard.socket.display()
             )
         });
 }

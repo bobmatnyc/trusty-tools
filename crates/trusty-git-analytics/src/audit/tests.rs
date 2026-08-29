@@ -1114,59 +1114,6 @@ pub(super) fn free_port() -> u16 {
     port
 }
 
-/// A listener standing in for `trusty-analyze`'s `/health`, answering
-/// `503 Service Unavailable` to its first `degraded_replies` callers and
-/// `200 OK` to every caller after that. Returns the port it bound.
-///
-/// 503 is not an arbitrary sad path: it is what the real daemon answers whenever
-/// trusty-search is unreachable
-/// (`crates/trusty-analyze/src/service/routes.rs`'s `health`, which returns
-/// `SERVICE_UNAVAILABLE` + `status: "degraded"`). `probe_once` counts only a
-/// 2xx, so a 503 daemon reads to the guard exactly like no daemon.
-///
-/// The counter advances on REPLIES, so this is deterministic only for
-/// assertions about replies — which probes missed, and what the guard concluded
-/// from them. An assertion about a side effect the stub performs, such as a
-/// spawn or a file write, is a different event: it can still be pending when
-/// the counter has already flipped the daemon to ready. Gate that on the effect
-/// itself — see `two_concurrent_guards_both_resolve_against_one_slow_daemon`'s
-/// spawn-log gate (#5713).
-async fn serve_health(degraded_replies: usize) -> u16 {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind an ephemeral port");
-    let port = listener
-        .local_addr()
-        .expect("read the bound address")
-        .port();
-    let served = Arc::new(AtomicUsize::new(0));
-    tokio::spawn(async move {
-        while let Ok((mut stream, _)) = listener.accept().await {
-            let served = Arc::clone(&served);
-            tokio::spawn(async move {
-                use tokio::io::AsyncWriteExt as _;
-                let nth = served.fetch_add(1, Ordering::SeqCst);
-                let reply: &[u8] = if nth < degraded_replies {
-                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n"
-                } else {
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
-                };
-                let _ = stream.write_all(reply).await;
-            });
-        }
-    });
-    port
-}
-
-/// A listener answering `HTTP/1.1 200 OK` to everything, standing in for a
-/// healthy daemon. Returns the port it bound.
-async fn serve_healthy() -> u16 {
-    serve_health(0).await
-}
-
 /// An executable stub at `dir/name` running `script`, standing in for a
 /// `trusty-analyze` binary without needing one on the machine.
 #[cfg(unix)]
@@ -1932,71 +1879,90 @@ fn a_credential_in_an_index_failure_never_reaches_the_gap_line() {
 use crate::audit::search_daemon::start_args;
 use crate::audit::{ensure_search_daemon_with, SearchGuard};
 
-/// A listener whose `/health` answers `503 Service Unavailable` while `flag` is
-/// absent and `200 OK` once it exists. Returns the port it bound.
+/// A `trusty-search` socket that refuses `search.health` while `flag` is absent
+/// and answers a result frame once it exists. Returns the socket it bound.
 ///
-/// The flag file stands in for "trusty-search is up". Both daemons in the
-/// ordering fixture below read the same flag, because that is the real coupling:
-/// `trusty-analyze`'s health is a function of trusty-search's live status
-/// (`crates/trusty-analyze/src/service/routes.rs`'s `health`), not of its own
-/// uptime. A file rather than an in-process flag, because the thing that flips it
-/// is a detached child process.
-async fn serve_health_gated_on(flag: std::path::PathBuf) -> u16 {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind an ephemeral port");
-    let port = listener
-        .local_addr()
-        .expect("read the bound address")
-        .port();
+/// #6285: a socket rather than an HTTP listener, and a JSON-RPC error frame
+/// rather than a 503. The flag file stands in for "trusty-search is up". Both
+/// daemons in the ordering fixture below read the same flag, because that is the
+/// real coupling: `trusty-analyze`'s health is a function of trusty-search's live
+/// status, not of its own uptime. A file rather than an in-process flag, because
+/// the thing that flips it is a detached child process.
+fn serve_search_health_gated_on(
+    dir: &std::path::Path,
+    flag: std::path::PathBuf,
+) -> std::path::PathBuf {
+    let socket = dir.join("sockets").join("trusty-search.sock");
+    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind the stub socket");
     tokio::spawn(async move {
-        while let Ok((mut stream, _)) = listener.accept().await {
+        while let Ok((mut conn, _)) = listener.accept().await {
             let flag = flag.clone();
             tokio::spawn(async move {
-                use tokio::io::AsyncWriteExt as _;
+                use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+                let mut sink = Vec::new();
+                let _ = conn.read_to_end(&mut sink).await;
                 let reply: &[u8] = if flag.exists() {
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+                    br#"{"jsonrpc":"2.0","id":1,"result":{"status":"ok","indexes":1}}"#
                 } else {
-                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n"
+                    br#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"not serving"}}"#
                 };
-                let _ = stream.write_all(reply).await;
+                let _ = conn.write_all(reply).await;
+                let _ = conn.write_all(b"\n").await;
+                let _ = conn.flush().await;
             });
         }
     });
-    port
+    socket
 }
 
-/// A search guard pointed at `port`, with budgets short enough for a unit test.
-fn search_guard_on(port: u16, binary: &str) -> SearchGuard {
+/// A `trusty-search` socket that always answers healthy.
+fn serve_search_healthy(dir: &std::path::Path) -> std::path::PathBuf {
+    let always = dir.join("always-up");
+    std::fs::write(&always, b"").expect("write the up-flag");
+    serve_search_health_gated_on(dir, always)
+}
+
+/// A search guard pointed at `socket`, with budgets short enough for a unit test.
+fn search_guard_on(socket: std::path::PathBuf, binary: &str) -> SearchGuard {
     SearchGuard {
-        url: format!("http://127.0.0.1:{port}"),
+        socket,
         binary: binary.to_string(),
         startup_timeout: std::time::Duration::from_millis(400),
         poll_interval: std::time::Duration::from_millis(50),
     }
 }
 
-/// The address is trusty-search's to publish, not tga's to guess.
+/// #6285: the socket is DERIVED, so caller and daemon compute one path.
 ///
-/// `trusty-search` binds an OS-assigned port and records it in its own discovery
-/// files, so a hard-coded `127.0.0.1:7878` here would miss every auto-ported and
-/// every `TRUSTY_DATA_DIR`-isolated daemon. This asserts the guard asks
-/// `DaemonAddrLayout::TRUSTY_SEARCH` — the resolver promoted into `trusty-common`
-/// for exactly this caller (#5670) — rather than carrying a second copy of those
-/// rules, and that the binary comes from the one resolver `repo_index` already
-/// owns, so the daemon this starts and the binary that indexes into it are the
-/// same install.
+/// The daemon binds `daemon_socket_path("trusty-search")`
+/// (`trusty_search::service::socket::socket_path`), and a guard that resolved
+/// any other way would dial a path nothing binds — which is exactly what the
+/// `http_addr` discovery file this replaced could do after a daemon moved. Also
+/// asserts the binary comes from the one resolver `repo_index` already owns, so
+/// the daemon this starts and the binary that indexes into it are the same
+/// install.
 #[test]
-fn the_search_guard_resolves_its_address_from_the_shared_layout() {
-    use trusty_common::daemon_guard::DaemonAddrLayout;
-
+fn the_search_guard_derives_the_socket_the_daemon_binds() {
     let guard = SearchGuard::from_env();
     assert_eq!(
-        guard.url,
-        DaemonAddrLayout::TRUSTY_SEARCH.resolve_base_url()
+        guard.socket,
+        trusty_common::daemon_socket_path("trusty-search").unwrap_or_default()
     );
     assert_eq!(guard.binary, crate::audit::resolve_search_binary());
     assert_eq!(guard.startup_timeout, crate::audit::SEARCH_STARTUP_TIMEOUT);
+}
+
+/// The socket override, asserted without touching the process environment.
+#[test]
+fn an_absent_or_empty_search_override_falls_back_to_the_derived_socket() {
+    use crate::audit::search_daemon::ENV_SEARCH_SOCKET;
+
+    assert_eq!(ENV_SEARCH_SOCKET, "TRUSTY_SEARCH_SOCKET");
+    assert_eq!(
+        SearchGuard::from_env().socket,
+        trusty_common::daemon_socket_path("trusty-search").unwrap_or_default(),
+        "with the variable unset in this process, the default is the derived path"
+    );
 }
 
 /// The argument vector is the tga→trusty-search contract, asserted without
@@ -2019,11 +1985,34 @@ fn the_search_spawn_arguments_are_start_in_the_foreground() {
 /// the operator's own.
 #[tokio::test]
 async fn a_reachable_search_daemon_is_not_restarted() {
-    let port = serve_healthy().await;
-    let guard = search_guard_on(port, "/nonexistent/trusty-search");
+    let dir = tempfile::tempdir().expect("create a temp dir");
+    let guard = search_guard_on(
+        serve_search_healthy(dir.path()),
+        "/nonexistent/trusty-search",
+    );
     ensure_search_daemon_with(&guard)
         .await
         .expect("a healthy daemon must satisfy the preflight without a spawn");
+}
+
+/// #6285: the fail-open check. A daemon that ANSWERS and refuses is not a
+/// reachable daemon — an error frame read as a result would let the audit
+/// proceed onto a daemon that cannot serve the corpus every later section needs.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_search_daemon_that_refuses_health_is_not_reachable() {
+    let dir = tempfile::tempdir().expect("create a temp dir");
+    // The flag does not exist, so the stub answers an error frame.
+    let socket = serve_search_health_gated_on(dir.path(), dir.path().join("never"));
+    let guard = search_guard_on(socket, "/nonexistent/trusty-search");
+    let err = ensure_search_daemon_with(&guard)
+        .await
+        .expect_err("an error frame is never a healthy daemon");
+    assert!(
+        err.to_string().contains("trusty-search"),
+        "{}",
+        err.to_string()
+    );
 }
 
 /// #5670, the spawn-failure arm: a machine with no trusty-search installed is a
@@ -2034,7 +2023,8 @@ async fn a_reachable_search_daemon_is_not_restarted() {
 /// `TRUSTY_SEARCH_BIN` at the engagement's pinned copy.
 #[tokio::test]
 async fn an_unspawnable_search_binary_refuses_the_audit() {
-    let guard = search_guard_on(free_port(), "/nonexistent/trusty-search");
+    let dir = tempfile::tempdir().expect("create a temp dir");
+    let guard = search_guard_on(absent_socket(dir.path()), "/nonexistent/trusty-search");
     let err = ensure_search_daemon_with(&guard)
         .await
         .expect_err("a binary that cannot be spawned must stop the audit");
@@ -2064,13 +2054,13 @@ async fn a_search_daemon_that_never_comes_up_refuses_the_audit() {
     let stub = stub_binary(dir.path(), "trusty-search-stub", "#!/bin/sh\nexit 1\n");
 
     let started = std::time::Instant::now();
-    let guard = search_guard_on(free_port(), &stub);
+    let guard = search_guard_on(absent_socket(dir.path()), &stub);
     let err = ensure_search_daemon_with(&guard)
         .await
         .expect_err("a daemon that exits at once must stop the audit");
 
     assert!(
-        err.cause.contains("did not become ready"),
+        err.cause.contains("did not report healthy"),
         "expected the readiness arm, got: {}",
         err.cause
     );
@@ -2107,9 +2097,9 @@ const _: () = assert!(ANALYZE_BUDGET.as_secs() < FORK_BUDGET.as_secs());
 /// Returns a search guard and an analyze guard sharing one "trusty-search is up"
 /// flag file. The search stub creates the flag — starting trusty-search. The
 /// analyze stub exits 1, as the real `trusty-analyze serve` does at its own
-/// trusty-search check. Both `/health` listeners answer 503 until the flag
-/// exists, which is what an analyze daemon that has been up for days does while
-/// its trusty-search is dead.
+/// trusty-search check. Both stubs report unhealthy until the flag exists, which
+/// is what an analyze daemon that has been up for days does while its
+/// trusty-search is dead.
 ///
 /// #5724: each guard's budget is a property of what THAT guard waits on, not of
 /// the direction the caller is driving. The budget used to be one per-direction
@@ -2130,7 +2120,10 @@ async fn degraded_stack(
     );
     let analyze_stub = stub_binary(dir, "trusty-analyze-stub", "#!/bin/sh\nexit 1\n");
 
-    let mut search = search_guard_on(serve_health_gated_on(flag.clone()).await, &search_stub);
+    let mut search = search_guard_on(
+        serve_search_health_gated_on(dir, flag.clone()),
+        &search_stub,
+    );
     search.startup_timeout = FORK_BUDGET;
     // #6287: the analyze half is a socket now — same gate, different transport.
     let gate = flag.clone();
@@ -2144,16 +2137,16 @@ async fn degraded_stack(
 }
 
 /// #5670, THE regression: trusty-search is down while a stale `trusty-analyze`
-/// keeps answering `503 degraded`, and only the search guard running FIRST
+/// keeps reporting itself degraded, and only the search guard running FIRST
 /// recovers it.
 ///
-/// This is the case a fresh-spawn fix misses. `trusty-analyze`'s `/health` is a
-/// function of trusty-search's LIVE status, and `probe_once` counts only a 2xx,
-/// so an analyze daemon that has been up for days on top of a trusty-search that
-/// died an hour ago fails the analyze probe every run. Its spawned replacement
-/// exits at its own search check, the original keeps answering 503, and the
-/// readiness poll refuses an audit that has nothing wrong with its analyze daemon
-/// at all.
+/// This is the case a fresh-spawn fix misses. `trusty-analyze`'s health is a
+/// function of trusty-search's LIVE status, and the probe counts only
+/// `status: "ok"`, so an analyze daemon that has been up for days on top of a
+/// trusty-search that died an hour ago fails the analyze probe every run. Its
+/// spawned replacement exits at its own search check, the original keeps
+/// reporting degraded, and the readiness poll refuses an audit that has nothing
+/// wrong with its analyze daemon at all.
 ///
 /// The test drives BOTH orders against the same fixture. Search-then-analyze
 /// leaves both preflights satisfied without the analyze daemon being touched;
