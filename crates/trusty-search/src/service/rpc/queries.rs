@@ -7,7 +7,7 @@
 //! way to reach the same body until the retire slice.
 //!
 //! What: the method-to-route table below, the params each method decodes,
-//! [`guarded`], and [`register`].
+//! `guarded`, and [`register`].
 //!
 //! ## Method → route
 //!
@@ -43,7 +43,7 @@
 //! `interactive_limited` group: admission-limited (#2845) and bounded by the
 //! interactive query deadline (#907). Both live on [`SearchAppState`] so the
 //! socket gates on the SAME semaphore and the SAME deadline rather than a
-//! second copy of each — see [`guarded`].
+//! second copy of each — see `guarded`.
 //!
 //! ## One limit that does NOT match HTTP yet
 //!
@@ -59,6 +59,10 @@
 //! Test: `queries_tests.rs` — one `*_over_the_socket_matches_the_http_body` per
 //! family, driving the real axum router and the real RPC router against one
 //! shared state, over an index holding a real corpus.
+//!
+//! [`register`]: crate::service::rpc::queries::register
+//! [`IndexBody`]: crate::service::rpc::queries::IndexBody
+//! [`SearchAppState`]: crate::service::SearchAppState
 
 use std::sync::Arc;
 
