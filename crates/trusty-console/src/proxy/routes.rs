@@ -59,7 +59,15 @@ static HOP_BY_HOP: &[&str] = &[
 /// Test: `test_service_key_mapping` below.
 fn full_id(service_key: &str) -> Option<&'static str> {
     match service_key {
-        "search" => Some("trusty-search"),
+        // #6285: NO `search` row. trusty-search moved to UDS (ADR-0032) and
+        // stopped writing the `http_addr` file this proxy resolves a base URL
+        // from — the same reason the memory and analyze rows below are gone,
+        // with the same hazard: that file predates the migration on every
+        // existing machine, so a kept row would forward `/api/search/*` to
+        // whatever now holds 7878. `/api/search/{*path}` is served by
+        // `crate::search_uds::routes` instead, which translates each request
+        // into an RPC call on the socket.
+        //
         // #6286: NO `memory` row. trusty-memory moved to UDS (ADR-0032) and
         // this proxy resolves a target's base URL from its `http_addr` file,
         // which the daemon no longer writes — and which is still on disk from
@@ -644,7 +652,11 @@ mod tests {
     /// Test: this test itself.
     #[test]
     fn test_service_key_mapping() {
-        assert_eq!(full_id("search"), Some("trusty-search"));
+        // #6285: `search` is no longer allowlisted. trusty-search serves UDS
+        // and writes no `http_addr`, so an allowlisted key could only resolve a
+        // stale one and forward `/api/search/*` to whatever now holds 7878.
+        // `crate::search_uds::routes` owns that prefix instead.
+        assert_eq!(full_id("search"), None);
         assert_eq!(
             full_id("memory"),
             None,

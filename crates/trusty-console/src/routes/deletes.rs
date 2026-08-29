@@ -13,17 +13,18 @@
 //!     on trusty-memory's Unix socket — the same transport
 //!     [`crate::detect::MemoryConnector`] already uses, so this opens no second
 //!     door to that daemon (#6286, ADR-0032).
-//!   - `/api/console/search/indexes/{id}` sends `DELETE /indexes/{id}` to the
-//!     live trusty-search daemon over the loopback HTTP address the poller cache
-//!     already resolves, through the crate's one shared `reqwest::Client`.
+//!   - `/api/console/search/indexes/{id}` dials `search.index.delete` on
+//!     trusty-search's Unix socket — since #6285 the same transport
+//!     [`crate::detect::SearchConnector`] and the `/api/search/*` bridge use, so
+//!     this opens no second door to that daemon either (ADR-0032).
 //!
 //! Neither route reports success it did not observe. A daemon that refuses, a
 //! daemon that answers a JSON-RPC error, and a daemon that skips the work and
 //! answers `removed: false` all become a NON-success verdict carrying the
 //! daemon's own words — see [`ActionVerdict`]. That last case is the one worth
-//! naming: `DELETE /indexes/{id}` answers `200 OK` with `removed: false` for an
-//! index it never had, so status code alone would report a delete that never
-//! happened as a success.
+//! naming: the delete answers successfully with `removed: false` for an index it
+//! never had, so a transport-level success alone would report a delete that
+//! never happened as one that worked.
 //!
 //! Test: `palace_delete_*`, `index_delete_*` and `validate_id_*` in the `tests`
 //! module below drive both transports against stub daemons.
@@ -96,23 +97,26 @@ pub(crate) async fn delete_palace_on_socket(socket: &Path, id: &str, force: bool
     }
 }
 
-// ─── trusty-search: DELETE /indexes/{id} on the loopback daemon ──────────────
+// ─── trusty-search: search.index.delete over the daemon socket ───────────────
 
-/// Delete a search index by calling the daemon's `DELETE /indexes/{id}`.
+/// Delete a search index by calling `search.index.delete` on the socket.
 ///
-/// Why: that route is trusty-search's own deregistration path — the same
+/// Why: that method is trusty-search's own deregistration path — it runs the
+/// same `delete_index_report` core `DELETE /indexes/{id}` wrapped, which is the
 /// `unregister_index` the `delete_index` MCP tool and the orphan reaper drive.
-/// The console sends it through the crate's single shared `reqwest::Client` so
-/// no second HTTP client exists here.
+/// #6285 moves the transport off HTTP (ADR-0032); the console dials the socket
+/// through [`crate::search_uds`] so there is one client to trusty-search here,
+/// not a second one for deletes.
 ///
-/// What: `DELETE {base_url}/indexes/{id}?delete_data={delete_data}`. Since
+/// What: one `search.index.delete` call with `{index_id, delete_data}`. Since
 /// #4123 a bare delete deregisters and PRESERVES the on-disk corpus, so
 /// `delete_data` is passed explicitly rather than left to a default either side
 /// might change. The answer is read for what it says the daemon DID:
-///   - a non-2xx status is [`ActionVerdict::Refused`] carrying the body;
-///   - `removed: false` is `Refused` even on `200` — that is the no-op an
-///     unregistered id produces, and it is the failure mode this route exists to
-///     not paper over;
+///   - a JSON-RPC `error` frame is [`ActionVerdict::Refused`] carrying the
+///     daemon's words;
+///   - `removed: false` is `Refused` even on a successful exchange — that is the
+///     no-op an unregistered id produces, and it is the failure mode this route
+///     exists to not paper over;
 ///   - `delete_data` requested but `data_deleted: false` is `Refused`, because
 ///     the registration went but the bytes stayed and reporting "deleted" would
 ///     record a corpus as reclaimed while every byte of it is still on disk
@@ -121,12 +125,11 @@ pub(crate) async fn delete_palace_on_socket(socket: &Path, id: &str, force: bool
 /// Test: `index_delete_confirms_a_real_delete`,
 /// `index_delete_reports_a_skipped_delete_as_a_failure`,
 /// `index_delete_rejects_a_confirmation_for_another_id`,
-/// `index_delete_reports_a_daemon_error_status_as_a_failure`,
+/// `index_delete_reports_a_daemon_error_frame_as_a_failure`,
 /// `index_delete_reports_undeleted_data_as_a_failure`,
 /// `index_delete_reports_a_dead_daemon_as_unreachable`.
-pub(crate) async fn delete_index_on_daemon(
-    client: &reqwest::Client,
-    base_url: &str,
+pub(crate) async fn delete_index_on_socket(
+    socket: &Path,
     id: &str,
     delete_data: bool,
 ) -> ActionVerdict {
@@ -137,50 +140,39 @@ pub(crate) async fn delete_index_on_daemon(
         };
     }
 
-    let base = crate::proxy::routes::normalize_base_url(base_url);
-    // SSRF guard, identical to the proxy's: the console is loopback-only
-    // (ADR-0018), so a non-local upstream in the cache is a bug and must not be
-    // dialled. Reusing the proxy's predicate keeps one definition of "local".
-    if !crate::proxy::routes::is_local_upstream(&base) {
-        return ActionVerdict::Unreachable {
-            id: id.to_string(),
-            reason: format!("the resolved {SEARCH_SERVICE_ID} address '{base}' is not loopback"),
-        };
-    }
-
-    // `id` is restricted to `[A-Za-z0-9._-]` by `validate_id`, so it carries no
-    // path or query metacharacter and needs no escaping here.
-    let url = format!(
-        "{}/indexes/{id}?delete_data={delete_data}",
-        base.trim_end_matches('/')
-    );
-
-    let sent = client.delete(&url).timeout(ACTION_TIMEOUT).send().await;
-    let response = match sent {
-        Ok(r) => r,
+    // #6285: no SSRF guard here any more, and none is needed. The pre-migration
+    // path dialled a base URL read off disk, which could name a non-loopback
+    // address; a socket path is derived from the data directory and dials no
+    // network at all.
+    let parsed = match crate::search_uds::call(
+        socket,
+        crate::search_uds::METHOD_INDEX_DELETE,
+        json!({ "index_id": id, "delete_data": delete_data }),
+        ACTION_TIMEOUT,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(crate::search_uds::SearchRpcError::Refused { code, message }) => {
+            return ActionVerdict::Refused {
+                id: id.to_string(),
+                reason: format!(
+                    "{SEARCH_SERVICE_ID} refused the delete (code {code}): {}",
+                    first_line(&message)
+                ),
+                detail: json!({ "code": code }),
+            };
+        }
         Err(e) => {
             return ActionVerdict::Unreachable {
                 id: id.to_string(),
-                reason: format!("{SEARCH_SERVICE_ID} did not answer the delete: {e}"),
+                reason: format!(
+                    "{SEARCH_SERVICE_ID} did not answer the delete: {}",
+                    e.message()
+                ),
             };
         }
     };
-
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    let parsed: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
-
-    if !status.is_success() {
-        return ActionVerdict::Refused {
-            id: id.to_string(),
-            reason: format!(
-                "{SEARCH_SERVICE_ID} refused the delete with HTTP {}: {}",
-                status.as_u16(),
-                first_line(&body)
-            ),
-            detail: parsed,
-        };
-    }
 
     if parsed.get("removed").and_then(Value::as_bool) != Some(true) {
         let quiesced = parsed.get("quiesced").and_then(Value::as_bool);
@@ -302,14 +294,13 @@ pub struct IndexDeleteParams {
 ///
 /// Why: the counterpart to [`delete_palace_handler`] for the Search tab's index
 /// roster.
-/// What: validates the id, then resolves trusty-search's loopback base URL from
-/// the health-poll cache —
-/// the same resolution the reverse proxy uses, so there is one answer to "where
-/// is trusty-search" — then calls [`delete_index_on_daemon`] with the crate's
-/// shared HTTP client. Refreshes the search metrics cache after a confirmed
-/// delete.
+/// What: validates the id, then resolves trusty-search's socket the way
+/// [`crate::detect::SearchConnector`] does — through `AppState`, which defers to
+/// `trusty_common::daemon_socket_path`, so there is one answer to "where is
+/// trusty-search" — then calls [`delete_index_on_socket`]. Refreshes the search
+/// metrics cache after a confirmed delete.
 /// Test: `index_route_rejects_a_bad_id`,
-/// `index_route_reports_an_unresolved_daemon_as_unreachable`.
+/// `index_route_reports_a_dead_daemon_as_unreachable`.
 pub async fn delete_index_handler(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
@@ -323,22 +314,12 @@ pub async fn delete_index_handler(
         return ActionVerdict::Invalid { id, reason }.into_response();
     }
 
-    let base_url = match state.poller_cache().snapshot().await {
-        Some(snap) => snap.url_map().get(SEARCH_SERVICE_ID).cloned(),
-        None => None,
-    };
-    let Some(base_url) = base_url else {
-        return ActionVerdict::Unreachable {
-            id,
-            reason: format!(
-                "{SEARCH_SERVICE_ID} is not reachable: the console has no live address for it"
-            ),
-        }
-        .into_response();
+    let socket: PathBuf = match state.search_socket_path() {
+        Ok(p) => p,
+        Err(reason) => return ActionVerdict::Unreachable { id, reason }.into_response(),
     };
 
-    let client = state.http_client();
-    let verdict = delete_index_on_daemon(&client, &base_url, &id, params.delete_data).await;
+    let verdict = delete_index_on_socket(&socket, &id, params.delete_data).await;
     if matches!(verdict, ActionVerdict::Succeeded { .. }) {
         refresh_metrics(&state, SEARCH_SERVICE_ID, state.search_metrics_cache()).await;
     }
@@ -375,7 +356,9 @@ pub(crate) async fn refresh_metrics(
 // ─── tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
+// `pub(crate)` (#6285): `routes::cleanup`'s tests reuse `stub_search_socket`
+// from here rather than minting a second stub for the same socket.
+pub(crate) mod tests {
     use super::*;
     use crate::routes::verdict::MAX_ID_LEN;
     use axum::body::Body;
@@ -420,33 +403,53 @@ mod tests {
         .to_string()
     }
 
-    /// Start a stub trusty-search on loopback that answers every `DELETE
-    /// /indexes/{id}` with `status` and `body`. Returns its base URL.
-    async fn stub_search_daemon(status: StatusCode, body: Value) -> String {
-        let app = axum::Router::new().route(
-            "/indexes/{id}",
-            axum::routing::delete(move || {
-                let body = body.clone();
-                async move { (status, axum::Json(body)) }
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind");
-        let addr = listener.local_addr().expect("addr");
+    /// Bind a stub trusty-search socket that answers each framed request with
+    /// whatever `respond` returns for it.
+    ///
+    /// Why a loop rather than the one-shot memory stub above: a prune batch
+    /// sends one request per id, and a stub that answered once would report
+    /// every id after the first as unreachable.
+    /// `pub(crate)` so `routes::cleanup`'s tests drive the same stub rather than
+    /// minting a second answer to what trusty-search's socket says.
+    pub(crate) fn stub_search_socket<F>(dir: &std::path::Path, respond: F) -> PathBuf
+    where
+        F: Fn(&Value) -> Value + Send + Sync + 'static,
+    {
+        let socket = dir.join("sockets").join("search.sock");
+        let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
+        let respond = std::sync::Arc::new(respond);
         tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
+            loop {
+                let Ok((mut conn, _)) = listener.accept().await else {
+                    return;
+                };
+                let respond = std::sync::Arc::clone(&respond);
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+                    let mut raw = Vec::new();
+                    let _ = conn.read_to_end(&mut raw).await;
+                    let request: Value = serde_json::from_slice(&raw).unwrap_or(Value::Null);
+                    let reply = respond(&request).to_string();
+                    let _ = conn.write_all(reply.as_bytes()).await;
+                    let _ = conn.write_all(b"\n").await;
+                    let _ = conn.flush().await;
+                });
+            }
         });
-        format!("http://{addr}")
+        socket
     }
 
-    /// The client the routes actually use.
-    ///
-    /// Built through `AppState` rather than by a second builder here: the
-    /// redirect assertion in `index_delete_does_not_follow_a_redirect` is only
-    /// worth anything if it exercises the production policy.
-    fn client() -> reqwest::Client {
-        (*AppState::new(vec![]).http_client()).clone()
+    /// A stub that answers every request with the same `result`.
+    pub(crate) fn always_result(result: Value) -> impl Fn(&Value) -> Value + Send + Sync + 'static {
+        move |_| json!({ "jsonrpc": "2.0", "id": 1, "result": result.clone() })
+    }
+
+    /// A stub that answers every request with the same JSON-RPC `error`.
+    fn always_error(
+        code: i64,
+        message: &'static str,
+    ) -> impl Fn(&Value) -> Value + Send + Sync + 'static {
+        move |_| json!({ "jsonrpc": "2.0", "id": 1, "error": { "code": code, "message": message } })
     }
 
     /// Assert a verdict is not a success and say what it carried when it is.
@@ -649,31 +652,66 @@ mod tests {
     /// Test: this is the test.
     #[tokio::test(flavor = "multi_thread")]
     async fn index_delete_confirms_a_real_delete() {
-        let base = stub_search_daemon(
-            StatusCode::OK,
-            json!({"id":"scratch","removed":true,"data_deleted":false,"quiesced":true}),
-        )
-        .await;
-        let verdict = delete_index_on_daemon(&client(), &base, "scratch", false).await;
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let socket = stub_search_socket(
+            tmp.path(),
+            always_result(
+                json!({"id":"scratch","removed":true,"data_deleted":false,"quiesced":true}),
+            ),
+        );
+        let verdict = delete_index_on_socket(&socket, "scratch", false).await;
         assert!(
             matches!(&verdict, ActionVerdict::Succeeded { id, .. } if id == "scratch"),
             "a confirmed delete must read as success: {verdict:?}"
         );
     }
 
-    /// Why (#6360, acceptance 2): `DELETE /indexes/{id}` answers `200 OK` with
-    /// `removed: false` for an id it never had. Status code alone would render
-    /// that skipped delete as a success — this is the exact recorded no-op the
-    /// route must not paper over.
+    /// Why (#6285): the request the daemon receives has to carry the id in
+    /// `index_id` and the choice in `delete_data`. Over HTTP those were a path
+    /// segment and a query parameter, and getting either wrong on the socket
+    /// deletes nothing — or deletes the corpus when the operator did not ask.
+    /// Test: this is the test.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn index_delete_sends_the_id_and_the_data_choice_as_params() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let socket = stub_search_socket(tmp.path(), |request: &Value| {
+            let params = &request["params"];
+            let ok = params["index_id"] == json!("scratch") && params["delete_data"] == json!(true);
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "id": "scratch",
+                    "removed": ok,
+                    "data_deleted": ok,
+                    "quiesced": true,
+                    "method": request["method"].clone(),
+                },
+            })
+        });
+        let verdict = delete_index_on_socket(&socket, "scratch", true).await;
+        assert!(
+            matches!(&verdict, ActionVerdict::Succeeded { detail, .. }
+                if detail["method"] == json!("search.index.delete")),
+            "the params and the method name must both reach the daemon: {verdict:?}"
+        );
+    }
+
+    /// Why (#6360, acceptance 2): the delete answers successfully with
+    /// `removed: false` for an id it never had. A transport-level success alone
+    /// would render that skipped delete as a real one — this is the exact
+    /// recorded no-op the route must not paper over.
     /// Test: this is the test.
     #[tokio::test(flavor = "multi_thread")]
     async fn index_delete_reports_a_skipped_delete_as_a_failure() {
-        let base = stub_search_daemon(
-            StatusCode::OK,
-            json!({"id":"scratch","removed":false,"data_deleted":false,"quiesced":true}),
-        )
-        .await;
-        let verdict = delete_index_on_daemon(&client(), &base, "scratch", false).await;
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let socket = stub_search_socket(
+            tmp.path(),
+            always_result(
+                json!({"id":"scratch","removed":false,"data_deleted":false,"quiesced":true}),
+            ),
+        );
+        let verdict = delete_index_on_socket(&socket, "scratch", false).await;
         assert_failure(&verdict, "skipped the delete");
 
         // The rendered body must say `ok: false` — the field the UI reads.
@@ -693,15 +731,16 @@ mod tests {
         );
     }
 
-    /// Why (#6360): a `200` whose body carries no `removed` field at all is the
-    /// same class of answer as `removed: false` — the daemon did not say it
-    /// removed anything. Reading a missing field as success is how a protocol
-    /// change or a proxy that swallowed the body turns into a phantom delete.
+    /// Why (#6360): a result carrying no `removed` field at all is the same
+    /// class of answer as `removed: false` — the daemon did not say it removed
+    /// anything. Reading a missing field as success is how a protocol change
+    /// turns into a phantom delete.
     /// Test: this is the test.
     #[tokio::test(flavor = "multi_thread")]
     async fn index_delete_reports_an_empty_body_as_a_failure() {
-        let base = stub_search_daemon(StatusCode::OK, json!({})).await;
-        let verdict = delete_index_on_daemon(&client(), &base, "scratch", false).await;
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let socket = stub_search_socket(tmp.path(), always_result(json!({})));
+        let verdict = delete_index_on_socket(&socket, "scratch", false).await;
         assert_failure(&verdict, "skipped the delete");
     }
 
@@ -710,12 +749,14 @@ mod tests {
     /// Test: this is the test.
     #[tokio::test(flavor = "multi_thread")]
     async fn index_delete_rejects_a_confirmation_for_another_id() {
-        let base = stub_search_daemon(
-            StatusCode::OK,
-            json!({"id":"someone-else","removed":true,"data_deleted":false,"quiesced":true}),
-        )
-        .await;
-        let verdict = delete_index_on_daemon(&client(), &base, "scratch", false).await;
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let socket = stub_search_socket(
+            tmp.path(),
+            always_result(
+                json!({"id":"someone-else","removed":true,"data_deleted":false,"quiesced":true}),
+            ),
+        );
+        let verdict = delete_index_on_socket(&socket, "scratch", false).await;
         assert_failure(&verdict, "not for 'scratch'");
     }
 
@@ -725,26 +766,29 @@ mod tests {
     /// Test: this is the test.
     #[tokio::test(flavor = "multi_thread")]
     async fn index_delete_names_an_abandoned_teardown() {
-        let base = stub_search_daemon(
-            StatusCode::OK,
-            json!({"id":"scratch","removed":false,"data_deleted":false,"quiesced":false}),
-        )
-        .await;
-        let verdict = delete_index_on_daemon(&client(), &base, "scratch", false).await;
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let socket = stub_search_socket(
+            tmp.path(),
+            always_result(
+                json!({"id":"scratch","removed":false,"data_deleted":false,"quiesced":false}),
+            ),
+        );
+        let verdict = delete_index_on_socket(&socket, "scratch", false).await;
         assert_failure(&verdict, "never quiesced");
     }
 
-    /// Why (#6360, acceptance 2): a 4xx/5xx from the daemon must carry the
-    /// daemon's own body, not a console-invented message.
+    /// Why (#6360, acceptance 2, carried onto the socket by #6285): a refusal
+    /// must carry the daemon's own words, not a console-invented message. Over
+    /// HTTP that was a 4xx body; here it is the JSON-RPC `error` frame.
     /// Test: this is the test.
     #[tokio::test(flavor = "multi_thread")]
-    async fn index_delete_reports_a_daemon_error_status_as_a_failure() {
-        let base = stub_search_daemon(
-            StatusCode::BAD_REQUEST,
-            json!({"error":"delete_data must be a boolean"}),
-        )
-        .await;
-        let verdict = delete_index_on_daemon(&client(), &base, "scratch", false).await;
+    async fn index_delete_reports_a_daemon_error_frame_as_a_failure() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let socket = stub_search_socket(
+            tmp.path(),
+            always_error(-32602, "delete_data must be a boolean"),
+        );
+        let verdict = delete_index_on_socket(&socket, "scratch", false).await;
         assert_failure(&verdict, "delete_data must be a boolean");
     }
 
@@ -755,84 +799,45 @@ mod tests {
     /// Test: this is the test.
     #[tokio::test(flavor = "multi_thread")]
     async fn index_delete_reports_undeleted_data_as_a_failure() {
-        let base = stub_search_daemon(
-            StatusCode::OK,
-            json!({"id":"scratch","removed":true,"data_deleted":false,"quiesced":true}),
-        )
-        .await;
-        let verdict = delete_index_on_daemon(&client(), &base, "scratch", true).await;
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let socket = stub_search_socket(
+            tmp.path(),
+            always_result(
+                json!({"id":"scratch","removed":true,"data_deleted":false,"quiesced":true}),
+            ),
+        );
+        let verdict = delete_index_on_socket(&socket, "scratch", true).await;
         assert_failure(&verdict, "did not delete its on-disk data");
     }
 
-    /// Why: nothing listening must read as unreachable, distinct from a refusal.
+    /// Why: nothing listening must read as unreachable, distinct from a refusal
+    /// — the dashboard renders the two differently and an operator acts on them
+    /// differently.
     /// Test: this is the test.
     #[tokio::test(flavor = "multi_thread")]
     async fn index_delete_reports_a_dead_daemon_as_unreachable() {
-        // Bind and immediately drop, so the port is almost certainly free.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        drop(listener);
-
+        let tmp = tempfile::TempDir::new().expect("tempdir");
         let verdict =
-            delete_index_on_daemon(&client(), &format!("http://{addr}"), "scratch", false).await;
+            delete_index_on_socket(&tmp.path().join("absent.sock"), "scratch", false).await;
         assert!(
             matches!(verdict, ActionVerdict::Unreachable { .. }),
             "a dead daemon must read as unreachable: {verdict:?}"
         );
     }
 
-    /// Why (#6360): every loopback check in this crate validates the URL it was
-    /// handed and nothing else. A followed 3xx would re-issue the DELETE, method
-    /// and all, at whatever host the `Location` names — past the guard that just
-    /// ran. The stub redirects to a public address; if the policy ever went back
-    /// to `limited(10)`, this would leave loopback.
-    /// Test: this is the test.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn index_delete_does_not_follow_a_redirect() {
-        let app = axum::Router::new().route(
-            "/indexes/{id}",
-            axum::routing::delete(|| async {
-                (
-                    StatusCode::TEMPORARY_REDIRECT,
-                    [(
-                        axum::http::header::LOCATION,
-                        "http://169.254.169.254/indexes/scratch",
-                    )],
-                )
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-
-        let verdict =
-            delete_index_on_daemon(&client(), &format!("http://{addr}"), "scratch", false).await;
-        assert_failure(&verdict, "HTTP 307");
-    }
-
-    /// Why (ADR-0018): a non-loopback upstream in the cache is a bug or a
-    /// compromise; the delete must not be sent to it.
-    /// Test: this is the test.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn index_delete_refuses_a_non_loopback_upstream() {
-        let verdict =
-            delete_index_on_daemon(&client(), "http://10.0.0.9:7878", "scratch", false).await;
-        assert!(
-            matches!(&verdict, ActionVerdict::Unreachable { reason, .. } if reason.contains("not loopback")),
-            "a remote upstream must be refused: {verdict:?}"
-        );
-    }
-
     // ── route wiring ─────────────────────────────────────────────────────────
 
+    /// Drive the real router with trusty-search pointed at a socket nothing is
+    /// bound to.
+    ///
+    /// Why the override (#6285): without it these tests resolve the REAL
+    /// trusty-search socket, and on a developer machine with the daemon running
+    /// a route test would delete a live index. The override is also what makes
+    /// the unreachable arm deterministic on a machine where the daemon IS up.
     async fn delete_through_router(uri: &str) -> (StatusCode, Value) {
-        let router = build_router(AppState::new(vec![]));
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let router =
+            build_router(AppState::new(vec![]).with_search_socket(tmp.path().join("absent.sock")));
         let req = Request::builder()
             .method("DELETE")
             .uri(uri)
@@ -855,11 +860,12 @@ mod tests {
         assert_eq!(body["ok"], json!(false));
     }
 
-    /// Why: the index route must be mounted, and with no poller snapshot yet it
-    /// must say trusty-search is unreachable rather than 500 or claim a delete.
+    /// Why: the index route must be mounted, and with nothing bound to the
+    /// socket it must say trusty-search is unreachable rather than 500 or claim
+    /// a delete.
     /// Test: this is the test.
     #[tokio::test]
-    async fn index_route_reports_an_unresolved_daemon_as_unreachable() {
+    async fn index_route_reports_a_dead_daemon_as_unreachable() {
         let (status, body) = delete_through_router("/api/console/search/indexes/scratch").await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "body: {body}");
         assert_eq!(body["ok"], json!(false));

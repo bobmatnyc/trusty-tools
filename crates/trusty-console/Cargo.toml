@@ -1,11 +1,11 @@
 [package]
 name        = "trusty-console"
-# 0.8.1 (#6371): patch — 0.8.0 was published while this PR was open and it edits
-# `src/**`. The public surface only GAINS items: the two cleanup handlers and
-# their request body. `DeleteVerdict` becoming `ActionVerdict` moves nothing
-# public — it was `pub(crate)`, as is everything else the routes refactor
-# touched.
-version     = "0.8.1"
+# 0.8.2 (#6285): patch — trusty-search moves from loopback HTTP to its Unix
+# socket. Nothing public changes shape: `AppState` GAINS `with_search_socket`
+# and the two `search_uds::routes` handlers, and the routes that changed
+# transport (`delete_index_on_socket`, `prune_indexes_on_socket`) were
+# `pub(crate)`.
+version     = "0.8.2"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true

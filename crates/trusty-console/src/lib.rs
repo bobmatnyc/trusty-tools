@@ -46,13 +46,17 @@ pub const DEFAULT_HTTP: &str = "127.0.0.1:7788";
 pub const DEFAULT_PORT: u16 = 7788;
 
 pub mod bind;
+// #6285: the console's own SPA, split out of `server` at the 500-SLOC cap.
 pub mod connector;
+pub mod console_ui;
 pub mod detect;
 pub mod mcp_handle;
 pub mod metrics_poller;
 pub mod poller;
 pub mod proxy;
 pub mod routes;
+// #6285: the console's client to trusty-search, which no longer serves HTTP.
+pub mod search_uds;
 pub mod server;
 pub mod service;
 // #6155: the trusty-search SPA, mounted under /tools/search/.
