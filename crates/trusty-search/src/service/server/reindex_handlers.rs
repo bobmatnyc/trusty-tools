@@ -436,10 +436,15 @@ pub(super) async fn reindex_stream_handler(
         .map(|r| Arc::clone(r.value()))
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    // Snapshot the replay buffer first so we don't miss the `start` event,
-    // then subscribe for live updates. New events that arrive between the
-    // snapshot and subscription will appear in both — duplicates are harmless
-    // for SSE consumers and rare in practice.
+    // Snapshot the replay buffer first so we don't miss the `start` event, then
+    // subscribe for live updates.
+    //
+    // #6285: an event that straddles the two can be delivered twice OR lost —
+    // `ReindexProgress::push` buffers under its lock and then broadcasts, so an
+    // event broadcast between this snapshot and the subscribe below reaches
+    // neither path. The earlier claim here that the race only duplicates was
+    // wrong. `service::rpc::streams::reindex_stream` copies this ordering, so both
+    // transports behave identically; correcting it is its own change.
     let replay = progress.events.lock().await.clone();
     let initial_status = progress.status.load();
     let rx = progress.sender.subscribe();

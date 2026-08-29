@@ -43,6 +43,13 @@
 //! must still be running — which is what a method wrongly moved INTO the
 //! interactive lane would stop doing.
 //!
+//! That control set can only hold methods that take the lock, which is four of
+//! the roughly nineteen non-interactive ones. The remainder are covered
+//! structurally instead:
+//! `the_query_deadline_has_exactly_one_call_site_on_the_rpc_surface` fails if a
+//! second call to the deadline wrapper is added anywhere outside
+//! `queries::guarded` (#6285 slice 5.5 review).
+//!
 //! Test: this file IS the test module for `super`.
 
 use std::sync::Arc;
@@ -87,7 +94,7 @@ impl Lane {
 /// succeed. What each method ANSWERS is the business of its family's parity
 /// tests; this file reads only whether the limiter or the deadline spoke first.
 fn lanes() -> Vec<(&'static str, Lane, serde_json::Value)> {
-    use crate::service::rpc::{queries, reads, streams, writes};
+    use crate::service::rpc::{admin, queries, reads, streams, writes};
 
     let index = serde_json::json!({ "index_id": INDEX });
     let query = serde_json::json!({ "index_id": INDEX, "body": { "text": "anything" } });
@@ -204,6 +211,22 @@ fn lanes() -> Vec<(&'static str, Lane, serde_json::Value)> {
             Lane::Free,
             index.clone(),
         ),
+        // Slice 5.5's operational remainder: every HTTP route is in `free`.
+        // `search.config.set` names no field and `search.index.config.set`
+        // carries an empty body, so neither moves anything the sweep would then
+        // have to restore — the lane is what is under test, not the update.
+        (
+            admin::METHOD_INDEX_CONFIG_SET,
+            Lane::Free,
+            serde_json::json!({ "index_id": INDEX, "body": {} }),
+        ),
+        (admin::METHOD_CONFIG_SET, Lane::Free, serde_json::json!({})),
+        (admin::METHOD_LOGS_TAIL, Lane::Free, serde_json::Value::Null),
+        (
+            admin::METHOD_REGISTRY_ORPHANS,
+            Lane::Free,
+            serde_json::Value::Null,
+        ),
     ]
 }
 
@@ -225,7 +248,7 @@ fn state_with(permits: usize, deadline: Duration) -> Arc<SearchAppState> {
 
 /// The whole socket router, exactly as `service::socket` assembles it.
 fn router(state: &Arc<SearchAppState>) -> RpcRouter {
-    use crate::service::rpc::{queries, reads, streams, writes};
+    use crate::service::rpc::{admin, queries, reads, streams, writes};
 
     let held = Arc::clone(state);
     let router = RpcRouter::new()
@@ -239,6 +262,7 @@ fn router(state: &Arc<SearchAppState>) -> RpcRouter {
     let router = reads::register(router, state);
     let router = queries::register(router, state);
     let router = writes::register(router, state);
+    let router = admin::register(router, state);
     streams::register(router, state)
 }
 
@@ -295,6 +319,10 @@ fn every_socket_method_declares_a_lane() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::serial]
 async fn every_socket_method_takes_the_admission_lane_its_http_route_takes() {
+    // #6285: the sweep now calls `search.registry.orphans`, which reads the
+    // registry FILE, and three write methods that persist rows into it. Point
+    // the data dir at a tempdir so neither reads nor writes the developer's own.
+    let _isolated = crate::service::server::tests_components::IsolatedDataDir::new();
     let state = state_with(1, Duration::from_secs(30));
     let rpc = router(&state);
 
@@ -383,4 +411,60 @@ async fn only_the_interactive_lane_is_deadline_bounded() {
              not cut by a deadline it does not have: answered {outcome:?}"
         );
     }
+}
+
+/// Why: the control set above can only stall methods that take the indexer's
+/// write lock, so it samples four of the roughly nineteen non-interactive
+/// methods. The rest — `search.index.create`, `search.config.get`,
+/// `search.status.stream` and their neighbours — have no equivalent stall point,
+/// and their "not deadline-bounded" status rests on a structural fact rather
+/// than on any running assertion: the deadline wrapper has exactly one call site
+/// on this surface, in `queries::guarded`. A second call added elsewhere would
+/// make a method deadline-bounded with nothing in this file noticing.
+///
+/// What: reads the production sources under `service/rpc/` and counts calls to
+/// the wrapper, ignoring comment lines and the `*_tests.rs` files. Exactly one
+/// call, in `queries.rs`. A source scan rather than a type-level guard because
+/// the wrapper is also called by the axum middleware in `service::query_timeout`,
+/// so it cannot be made private to `queries` (#6285 slice 5.5 review).
+/// Test: this function IS the test.
+#[test]
+fn the_query_deadline_has_exactly_one_call_site_on_the_rpc_surface() {
+    // Split so this file's own mentions of the name are not what it counts.
+    let needle = format!("with_query{}(", "_deadline");
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/service/rpc");
+
+    let mut call_sites = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("the rpc module directory must be readable") {
+        let path = entry.expect("a readable directory entry").path();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string();
+        if !name.ends_with(".rs") || name.ends_with("_tests.rs") {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).expect("a readable source file");
+        for (i, line) in source.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") || trimmed.starts_with("*") {
+                continue;
+            }
+            if line.contains(&needle) {
+                call_sites.push(format!("{name}:{}", i + 1));
+            }
+        }
+    }
+
+    assert_eq!(
+        call_sites.len(),
+        1,
+        "the query deadline must have exactly one call site on this surface; found {call_sites:?}"
+    );
+    assert!(
+        call_sites[0].starts_with("queries.rs:"),
+        "the one call site must be `queries::guarded`; found {}",
+        call_sites[0]
+    );
 }

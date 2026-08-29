@@ -16,11 +16,15 @@
 //! background catch-up job (issue #2984 Phase 1, see `super::components`).
 //!
 //! What: `index_config_handler` (GET), `patch_index_config_handler` (PATCH),
-//! and the serde request/response types. The component-toggle decision logic
-//! and catch-up spawn live in the sibling `components` module to keep this
-//! file under the 500-SLOC production cap.
+//! their transport-free cores `index_config_report` / `patch_index_config_report`
+//! — which `service::rpc` serves as `search.index.config.get` and
+//! `search.index.config.set` (#6285 slices 2 and 5.5) — and the serde
+//! request/response types. The component-toggle decision logic and catch-up
+//! spawn live in the sibling `components` module to keep this file under the
+//! 500-SLOC production cap.
 //!
-//! Test: `service::server::tests_index_config`, `service::server::tests_components`.
+//! Test: `service::server::tests_index_config`, `service::server::tests_components`;
+//! the socket halves in `service::rpc::admin`'s `admin_tests.rs`.
 
 use axum::{
     extract::{Path, State},
@@ -204,25 +208,56 @@ pub(super) async fn patch_index_config_handler(
     Path(id): Path<String>,
     Json(req): Json<PatchIndexConfigRequest>,
 ) -> Response {
+    match patch_index_config_report(&state, &id, req).await {
+        Ok(body) => Json(body).into_response(),
+        Err((status, body)) => (status, Json(body)).into_response(),
+    }
+}
+
+/// The update `PATCH /indexes/{id}/config` applies, without the transport
+/// (#6285 slice 5.5).
+///
+/// Why: `search.index.config.set` is the socket's most consequential write —
+/// it re-registers the handle, rewrites the `indexes.toml` row, and can start a
+/// background component catch-up. Every one of those steps has a guard that a
+/// second implementation would have to restate: the zero-cap rejection, the
+/// per-index mutual-exclusion permit taken BEFORE any mutation (#2984 Phase 1
+/// CRITICAL finding 2), the #3049 teardown read-guard, and the 500 that refuses
+/// to claim success when the persist failed. This is the one body both
+/// transports run, so none of them can be skipped by dialling the socket.
+///
+/// # Errors
+///
+/// `400` for a zero `data_file_max_bytes`, `404` for an unknown index, `409`
+/// when this index already has a reindex or catch-up running, and `500` when the
+/// change applied in memory but could not be persisted — the same four the route
+/// answered before this extraction, with the same bodies.
+///
+/// Test: `index_config_set_over_the_socket_matches_the_http_body`,
+/// `a_zero_data_cap_is_refused_and_changes_no_config_on_either_transport`,
+/// `a_config_set_against_an_unknown_index_is_refused_and_registers_nothing`.
+pub(crate) async fn patch_index_config_report(
+    state: &Arc<SearchAppState>,
+    id: &str,
+    req: PatchIndexConfigRequest,
+) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
     let index_id = IndexId::new(id);
 
     // Validate: a zero (or absurd) data cap would prune every data file.
     if matches!(req.data_file_max_bytes, Some(0)) {
-        return (
+        return Err((
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
+            serde_json::json!({
                 "error": "data_file_max_bytes must be greater than zero"
-            })),
-        )
-            .into_response();
+            }),
+        ));
     }
 
     let Some(existing) = state.registry.get(&index_id) else {
-        return (
+        return Err((
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": format!("unknown index '{}'", index_id.0) })),
-        )
-            .into_response();
+            serde_json::json!({ "error": format!("unknown index '{}'", index_id.0) }),
+        ));
     };
 
     // #3049 round 3: hold this id's teardown-lock SHARED side across the whole
@@ -254,18 +289,17 @@ pub(super) async fn patch_index_config_handler(
         match crate::service::reindex::index_semaphore(&index_id).try_acquire_owned() {
             Ok(p) => Some(p),
             Err(_) => {
-                return (
+                return Err((
                     StatusCode::CONFLICT,
-                    Json(serde_json::json!({
+                    serde_json::json!({
                         "error": format!(
                             "a reindex or component catch-up is already in progress for \
                              index '{}' — retry once it completes",
                             index_id.0,
                         ),
                         "index_id": index_id.0,
-                    })),
-                )
-                    .into_response();
+                    }),
+                ));
             }
         }
     } else {
@@ -364,18 +398,17 @@ pub(super) async fn patch_index_config_handler(
         state.emit(DaemonEvent::IndexRegistered {
             id: index_id.0.clone(),
         });
-        return (
+        return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
+            serde_json::json!({
                 "error": format!(
                     "config applied in memory but could not be persisted to indexes.toml: {e}. \
                      The change will be lost on the next daemon restart."
                 ),
                 "config": view,
                 "persisted": false,
-            })),
-        )
-            .into_response();
+            }),
+        ));
     }
 
     // Issue #2984 Phase 1: spawn the background catch-up now that the new
@@ -392,7 +425,7 @@ pub(super) async fn patch_index_config_handler(
         id: index_id.0.clone(),
     });
 
-    Json(serde_json::json!({
+    Ok(serde_json::json!({
         "id": index_id.0,
         "config": view,
         "reindex_required": true,
@@ -403,7 +436,6 @@ pub(super) async fn patch_index_config_handler(
             "catch_up_started": catch_up_started,
         },
     }))
-    .into_response()
 }
 
 /// Trim empties from a directory / glob list and drop blank entries.

@@ -77,14 +77,28 @@
 //!   `broadcast::recv()` ends as soon as the receiver goes rather than one event
 //!   later. Without it a disconnect would cost two events to clear instead of
 //!   one.
-//! - one event still has to arrive. Neither surface can wait long for it: the
-//!   daemon's status ticker emits every ~2 s, a running reindex emits per batch,
-//!   and a FINISHED reindex ends its stream outright rather than subscribing.
-//!   `a_client_that_drops_mid_stream_leaves_no_producer_subscribed` pins the
-//!   whole sequence over a real socket.
+//! - one event still has to arrive, and how long that takes differs per stream.
+//!   `search.status.stream` is bounded: the daemon's status ticker emits every
+//!   ~2 s whatever else is happening, so an abandoned producer clears within a
+//!   tick. `search.index.reindex.stream` is bounded only while the reindex is
+//!   PROGRESSING — it emits per batch, and a run that stalls between batches
+//!   emits nothing, so its abandoned producer stays parked for the stall's
+//!   duration. A finished reindex never parks at all; that arm returns after the
+//!   replay rather than subscribing. A run that COMPLETES while a producer is
+//!   parked ends it when the progress record is garbage-collected — 60 s after
+//!   the terminal event (`service::reindex::stages`'s `REINDEX_PROGRESS_TTL_SECS`)
+//!   — because dropping the record drops the sender the producer is waiting on.
+//!   `a_client_that_drops_mid_stream_leaves_no_producer_subscribed` pins that
+//!   sequence over a real socket for the status stream; the stalled-reindex case
+//!   is documented rather than tested, since forcing a stall needs a seam the
+//!   reindex runner does not have.
 //!
-//! Neither stream holds an admission permit for its lifetime, so an abandoned
-//! one costs the semaphore nothing even while its task is still parked.
+//! The pre-existing HTTP SSE route parks on the same broadcast with the same
+//! characteristic: its 20 s heartbeat keeps the TCP connection alive but does not
+//! unstick a stalled reindex either. So a parked producer costs one task and one
+//! broadcast subscriber slot. Neither stream holds an admission permit for its
+//! lifetime, so an abandoned one costs the semaphore nothing even while its task
+//! is still parked.
 //!
 //! Test: `streams_tests.rs`.
 
@@ -205,9 +219,23 @@ fn status_stream(state: &Arc<SearchAppState>) -> RpcStreamItems {
 ///
 /// What, in the order `reindex_stream_handler` does it: look the index's
 /// progress up and refuse when there is none, snapshot the replay buffer, read
-/// the status, then subscribe. Snapshot-before-subscribe is copied deliberately
-/// — it can duplicate an event that arrives between the two, and the reverse
-/// order can LOSE the `start` event a late subscriber connected to see.
+/// the status, then subscribe.
+///
+/// That ordering is copied from the SSE handler deliberately, and it is not
+/// race-free in either place. `ReindexProgress::push` writes the replay buffer
+/// under its lock and THEN broadcasts, while this clones the buffer under the
+/// same lock and THEN subscribes, so an event whose two halves straddle the open
+/// can be delivered TWICE (buffered before the snapshot, broadcast after the
+/// subscribe) or NOT AT ALL (buffered after the snapshot, broadcast before the
+/// subscribe). Both transports inherit it identically, which is why parity holds
+/// and why this slice copies rather than corrects it: subscribing before
+/// snapshotting would close the loss arm, but it changes the shipped SSE route's
+/// behaviour and belongs to its own change. See #6285 (slice 5.5 review).
+///
+/// The window itself is not drivable from a test — there is no await point
+/// between the snapshot and the subscribe, so it is only reachable from another
+/// thread at an instant nothing exposes. What IS pinned is the composition
+/// either side of it.
 ///
 /// A progress record whose status is no longer `Running` yields its replay and
 /// ends. Without that arm the stream would deliver the buffered `complete` event
@@ -223,6 +251,7 @@ fn status_stream(state: &Arc<SearchAppState>) -> RpcStreamItems {
 ///
 /// Test: `reindex_progress_events_match_the_sse_body_frame_for_frame`,
 /// `a_live_reindex_stream_delivers_events_in_order_as_they_are_emitted`,
+/// `an_event_either_side_of_the_stream_opening_is_delivered_exactly_once`,
 /// `an_unknown_index_is_refused_before_the_reindex_stream_opens`.
 async fn reindex_stream(
     state: &Arc<SearchAppState>,

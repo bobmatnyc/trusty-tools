@@ -3,9 +3,13 @@
 //! Why: Groups operational endpoints (log tailing, live config, graceful stop,
 //! and the SSE dashboard feed) separately from domain search logic.
 //! What: `logs_tail_handler`, `admin_stop_handler`, `get_config_handler`,
-//! `patch_config_handler`, `status_stream_handler`, `collect_status_counts`.
+//! `patch_config_handler`, `status_stream_handler`, `collect_status_counts`,
+//! and the transport-free cores two of them delegate to — `logs_tail_report`
+//! and `patch_config_report`, which `service::rpc::admin` serves over the socket
+//! (#6285 slice 5.5).
 //! Test: `logs_tail_returns_recent_lines`, `admin_stop_returns_ok`, and
-//! `patch_config_partial_update` in `super::tests`.
+//! `patch_config_partial_update` in `super::tests`; the socket halves in
+//! `service::rpc::admin`'s `admin_tests.rs`.
 use axum::{
     body::Body,
     extract::{Query, State},
@@ -45,6 +49,21 @@ fn default_logs_tail_n() -> usize {
     DEFAULT_LOGS_TAIL_N
 }
 
+impl Default for LogsTailParams {
+    /// [`DEFAULT_LOGS_TAIL_N`], the same figure the serde default supplies.
+    ///
+    /// Why it exists (#6285 slice 5.5): `search.logs.tail` accepts an absent
+    /// `n`, and a derived `Default` would give `0` — which the clamp turns into
+    /// one line rather than the route's hundred. Routing both transports through
+    /// one constant is what keeps a defaulted socket call and a bare
+    /// `GET /logs/tail` the same request.
+    fn default() -> Self {
+        Self {
+            n: DEFAULT_LOGS_TAIL_N,
+        }
+    }
+}
+
 /// `GET /logs/tail?n=200` — return the most recent N tracing log lines.
 ///
 /// Why (issue #35): operators debugging a running daemon want recent logs
@@ -60,12 +79,30 @@ pub(super) async fn logs_tail_handler(
     State(state): State<Arc<SearchAppState>>,
     Query(params): Query<LogsTailParams>,
 ) -> Json<serde_json::Value> {
+    Json(logs_tail_report(&state, &params))
+}
+
+/// The page `GET /logs/tail` serves, without the transport (#6285 slice 5.5).
+///
+/// Why: `search.logs.tail` reads the same ring buffer over the socket — it is
+/// the one gap `trusty-common`'s monitor still dials over HTTP. The clamp is the
+/// part that must not be re-implemented: a socket that skipped it would let a
+/// caller ask for more lines than the buffer holds and read a different `total`
+/// than the HTTP route reports for the same request.
+/// What: clamps `n` to `[1, MAX_LOGS_TAIL_N]` and returns the same
+/// `{lines, total}` document the handler wraps in `Json`.
+/// Test: `logs_tail_over_the_socket_matches_the_http_body`,
+/// `logs_tail_clamps_n_on_the_socket_too`.
+pub(crate) fn logs_tail_report(
+    state: &Arc<SearchAppState>,
+    params: &LogsTailParams,
+) -> serde_json::Value {
     let n = params.n.clamp(1, MAX_LOGS_TAIL_N);
     let lines = state.log_buffer.tail(n);
-    Json(serde_json::json!({
+    serde_json::json!({
         "lines": lines,
         "total": state.log_buffer.len(),
-    }))
+    })
 }
 
 /// `POST /admin/stop` — request a graceful shutdown of the daemon.
@@ -115,7 +152,7 @@ pub(super) async fn admin_stop_handler(
 /// `Option<Option<u64>>`.
 /// Test: `tests::patch_config_partial_update` exercises both arms.
 #[derive(Debug, Deserialize, Default)]
-pub(super) struct PatchConfigRequest {
+pub(crate) struct PatchConfigRequest {
     #[serde(default, deserialize_with = "deserialize_optional_option_u64")]
     memory_limit_mb: Option<Option<u64>>,
     #[serde(default, deserialize_with = "deserialize_optional_option_u64")]
@@ -198,6 +235,25 @@ pub(super) async fn patch_config_handler(
     State(_state): State<Arc<SearchAppState>>,
     Json(req): Json<PatchConfigRequest>,
 ) -> Json<ConfigResponse> {
+    Json(patch_config_report(req))
+}
+
+/// The update `PATCH /config` applies, without the transport (#6285 slice 5.5).
+///
+/// Why: `search.config.set` is the first WRITE this daemon serves that changes
+/// nothing an index owns — both limits are process-global `AtomicU64` cells in
+/// `core::memguard`. A second implementation over the socket would be a second
+/// place that decides what an absent field means against what an explicit `null`
+/// means, and the two transports would disagree about which limits a partial
+/// patch left alone.
+/// What: applies whichever of the two fields the request carried, logs each
+/// change at `INFO` exactly as the route already did, and answers the resolved
+/// post-update values — so a caller can print "before → after" without a
+/// follow-up read. Infallible: an unparseable field is refused by the decoder
+/// ahead of this, and a resolvable one always applies.
+/// Test: `config_set_over_the_socket_matches_the_http_body`,
+/// `a_malformed_config_set_applies_neither_field_on_either_transport`.
+pub(crate) fn patch_config_report(req: PatchConfigRequest) -> ConfigResponse {
     use crate::core::memguard::{
         index_memory_limit_mb, memory_limit_mb, set_index_memory_limit_mb, set_memory_limit_mb,
     };
@@ -228,10 +284,10 @@ pub(super) async fn patch_config_handler(
         );
     }
 
-    Json(ConfigResponse {
+    ConfigResponse {
         memory_limit_mb: memory_limit_mb(),
         index_memory_limit_mb: index_memory_limit_mb(),
-    })
+    }
 }
 
 /// Snapshot used by both `/health` (one-shot) and `/status/stream` (SSE tick).

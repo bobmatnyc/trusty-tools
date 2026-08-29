@@ -225,6 +225,12 @@ pub(crate) use indexes_relocate::{relocate_index_report, RelocateIndexRequest};
 pub(crate) use reindex_handlers::reindex_report;
 pub(crate) use search::{delete_index_report, DeleteIndexParams};
 
+// #6285 slice 5.5: the four routes with a named consumer that no earlier slice
+// claimed. Same contract as the blocks above; the two config cores are WRITES
+// and carry the slice-4 failure-arm bar with them.
+pub(crate) use admin::{logs_tail_report, patch_config_report, PatchConfigRequest};
+pub(crate) use index_config::{patch_index_config_report, PatchIndexConfigRequest};
+
 /// Build the axum router with the shared state.
 ///
 /// Why: Wraps `state` in an `Arc` so every handler clones the pointer cheaply.
@@ -344,10 +350,15 @@ pub fn build_router_on(
         // bounding the per-request RAM/DoS surface (PR #1129 review,
         // finding 2); revisit with a streaming ingest path if producers
         // outgrow it.
+        //
+        // #6285 slice 5.5: the figure is the socket listener's frame budget,
+        // named rather than restated. The two doors must accept the same
+        // payload, and two literals is how they stop doing so.
         .route(
             "/indexes/{id}/graph",
-            post(ingest_graph_handler)
-                .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)),
+            post(ingest_graph_handler).layer(axum::extract::DefaultBodyLimit::max(
+                crate::service::socket::MAX_FRAME_BYTES as usize,
+            )),
         )
         .route_layer(axum::middleware::from_fn(
             crate::service::concurrency::apply_limiter,
