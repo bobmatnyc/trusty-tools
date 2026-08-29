@@ -243,9 +243,9 @@ pub async fn chat_handler(
 /// search that fails is NOT an error — the question is answered without
 /// grounding context, exactly as the route always did.
 ///
-/// Test: `chat_over_the_socket_matches_the_http_body`,
-/// `an_empty_message_is_refused_identically_on_both_transports`,
-/// `chat_without_a_provider_is_refused_identically_on_both_transports`.
+/// Test: `an_empty_message_is_refused_identically_on_both_transports`,
+/// `chat_without_a_provider_is_refused_identically_on_both_transports`,
+/// `the_question_alias_decodes_on_both_transports`.
 pub(crate) async fn chat_report(
     state: &Arc<SearchAppState>,
     req: ChatRequest,

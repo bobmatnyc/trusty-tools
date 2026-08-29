@@ -34,10 +34,11 @@
 //! key (found by PR #6388's implementation pass), and #6155 moves the search UI
 //! — chat panel included — into `trusty-console`, which reaches this daemon over
 //! the socket. Two routes remain deliberately HTTP-only:
-//! `GET /api/chat/providers` is read by the UI shell alone and answers a
-//! question `search.chat`'s own `provider` field already carries per call, and
+//! `GET /api/chat/providers` and `POST /upgrade` are the same bucket: neither
+//! has an observed cross-process caller, only the browser-side UI shell reads
+//! `/api/chat/providers` today, and a method is added when a socket consumer
+//! actually needs one — not preemptively.
 //! `GET /metrics` is Prometheus text, which is HTTP-shaped by nature.
-//! `POST /upgrade` has no observed caller off this box.
 //! `GET /indexes/{id}/communities` is a DEAD route — `trusty-common`'s monitor
 //! calls it and the daemon has never served it — and is a pre-existing bug with
 //! its own ticket, not a gap this surface owes a method for.

@@ -75,8 +75,8 @@ pub const METHODS: &[&str] = &[METHOD_CHAT];
 /// JSON the HTTP route's extractor takes, so `question`/`message` aliasing and
 /// every serde default behave identically — and running [`chat_report`], the
 /// core the axum handler wraps.
-/// Test: `chat_over_the_socket_matches_the_http_body` and its two refusal
-/// siblings in `chat_tests.rs`.
+/// Test: `chat_without_a_provider_is_refused_identically_on_both_transports`
+/// and its refusal siblings in `chat_tests.rs`.
 ///
 /// [`chat_report`]: crate::service::ui::chat_report
 pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
