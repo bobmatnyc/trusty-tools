@@ -15,16 +15,19 @@
 //!   - `DELETE /api/console/memory/palaces/{id}` — delete one palace via
 //!     trusty-memory's `palace_delete` on its socket (#6360).
 //!   - `DELETE /api/console/search/indexes/{id}` — delete one index via
-//!     trusty-search's own `DELETE /indexes/{id}` (#6360).
+//!     trusty-search's own `search.index.delete` on its socket (#6360, #6285).
 //!   - `GET /api/console/metrics/analyze/indexes` — analyze index list via stdio MCP.
 //!   - `GET /api/console/metrics/analyze/visualize?index=<id>` — graph+entities+clusters.
 //!   - `…/api/console/sessions/*` — the single HTTP front door for the trusty-mpm
 //!     session manager (#1222); handlers live in `crate::routes::sessions`.
+//!   - `ANY /api/search/{*path}` — translate the request into a trusty-search
+//!     RPC call on its socket (#6285); see `crate::search_uds`.
 //!   - `ANY /api/{service}/{*path}` — reverse-proxy to live daemon via clean path
-//!     (#1849 Phase 2); `{service}` ∈ {search, memory, analyze, review, mpm}.
+//!     (#1849 Phase 2); `{service}` ∈ {review, mpm, agents}.
 //!   - `ANY /proxy/{daemon}/{*path}` — DEPRECATED alias; routes to the same
 //!     handler with a trace-level deprecation note.
-//!   - `GET /` and `GET /ui/*path` — serve the embedded Svelte SPA.
+//!   - `GET /` and `GET /ui/*path` — serve the embedded Svelte SPA; the
+//!     handlers live in `crate::console_ui` (#6285, 500-SLOC split).
 //!   - `GET /tools/search/*path` — serve the embedded trusty-search SPA
 //!     (#6155); see `crate::tools_ui`.
 //!
@@ -33,18 +36,17 @@
 //! Test: The `tests` module starts the router in a real axum test client.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
     Router,
-    body::Body,
-    extract::{Path, Query, State},
-    http::{Response, StatusCode, header},
+    extract::{Query, State},
+    http::StatusCode,
     response::IntoResponse,
     routing::{any, get, post},
 };
-use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde_json::json;
 use tower_http::cors::CorsLayer;
@@ -54,19 +56,6 @@ use crate::connector::{ServiceConnector, ServiceInfo, ServiceStatus};
 use crate::mcp_handle::{McpHandleError, McpServiceHandle};
 use crate::metrics_poller::MetricsCache;
 use crate::poller::PollerCache;
-
-// ─── embedded UI ─────────────────────────────────────────────────────────────
-
-/// Embedded Svelte SPA assets compiled by `build.rs`.
-///
-/// Why: Shipping the UI inside the binary eliminates external file dependencies
-/// and matches the pattern used by trusty-search, trusty-memory, and
-/// trusty-analyze.
-/// What: rust-embed embeds every file under `ui/dist/` at compile time.
-/// Test: The server tests assert that `GET /` returns 200.
-#[derive(RustEmbed)]
-#[folder = "ui/dist/"]
-struct UiAssets;
 
 // ─── app state ───────────────────────────────────────────────────────────────
 
@@ -132,6 +121,17 @@ pub struct AppState {
     /// for every future service.
     /// What: Populated by `AppState::new`; read by `apply_handle_overrides`.
     mcp_handles: Arc<HashMap<String, Arc<McpServiceHandle>>>,
+    /// Override for the trusty-search socket path (#6285).
+    ///
+    /// Why: `search_uds` and `detect::SearchConnector` resolve that path through
+    /// `trusty_common::daemon_socket_path`, which reads the process-global
+    /// `TRUSTY_DATA_DIR_OVERRIDE`. A test that redirected it would redirect five
+    /// sibling connectors running in the same binary at the same time, so the
+    /// override is carried here instead — the same argument
+    /// `detect::AnalyzeConnector::with_socket` records.
+    /// What: `None` in production, which resolves the real path.
+    /// Test: `tests/search_uds_bridge.rs` sets it on every case.
+    pub(crate) search_socket: Option<Arc<PathBuf>>,
 }
 
 impl AppState {
@@ -228,6 +228,7 @@ impl AppState {
             stream_client: Arc::new(stream_client),
             analyze_handle,
             mcp_handles: Arc::new(handles),
+            search_socket: None,
         }
     }
 
@@ -495,8 +496,22 @@ fn build_router_inner(
             "/api/console/metrics/analyze/visualize",
             get(analyze_visualize_handler),
         )
+        // #6285: `search` is NOT a reverse-proxy row any more. trusty-search
+        // moved onto a Unix socket (ADR-0032) and stopped writing the
+        // `http_addr` file the proxy resolves a base URL from, so this literal
+        // route takes the prefix and translates each request into an RPC call.
+        // matchit prefers the static `search` segment over the `{service}`
+        // capture below, so the two cannot collide.
+        .route(
+            "/api/search/{*path}",
+            any(crate::search_uds::routes::search_api_handler),
+        )
+        .route(
+            "/proxy/search/{*path}",
+            any(crate::search_uds::routes::deprecated_search_api_handler),
+        )
         // Primary reverse-proxy: /api/{service}/{*path} (#1849 Phase 2).
-        // {service} ∈ {search, memory, analyze, review, mpm}.
+        // {service} ∈ {review, mpm, agents}.
         // No collision with /api/console/*: axum (matchit 0.8) routes literal
         // segments before wildcard captures, so /api/console/* always wins.
         // The proxy handler also rejects service_key == "console" explicitly as // pragma: allowlist secret
@@ -518,10 +533,10 @@ fn build_router_inner(
             "/tools/search/{*path}",
             get(crate::tools_ui::search_ui_asset),
         )
-        .route("/", get(spa_index_handler))
-        .route("/ui", get(spa_index_handler))
-        .route("/ui/", get(spa_index_handler))
-        .route("/ui/{*path}", get(spa_asset_handler))
+        .route("/", get(crate::console_ui::spa_index_handler))
+        .route("/ui", get(crate::console_ui::spa_index_handler))
+        .route("/ui/", get(crate::console_ui::spa_index_handler))
+        .route("/ui/{*path}", get(crate::console_ui::spa_asset_handler))
         .with_state(state);
 
     // Webhook ingress (#5089 step 3, ADR-0034). Merged as its own state-typed
@@ -941,72 +956,6 @@ async fn analyze_visualize_handler(
         "clusters": clusters_res.unwrap_or(serde_json::Value::Null),
     });
     axum::Json(combined).into_response()
-}
-
-/// `GET /` — serve the SPA index.html.
-///
-/// Why: The root path must return the SPA shell so the browser bootstraps.
-/// What: Reads `index.html` from the embedded asset set.
-/// Test: `test_spa_root_returns_html` below.
-async fn spa_index_handler() -> impl IntoResponse {
-    serve_asset("index.html")
-}
-
-/// `GET /ui/*path` — serve SPA static assets.
-///
-/// Why: Vite emits JS/CSS/assets under hashed filenames; all are embedded and
-/// served from the `/ui/*` prefix.
-/// What: Strips the leading `/ui/` from `path` and serves the matching asset.
-/// Test: Indirectly covered by `test_spa_root_returns_html`.
-async fn spa_asset_handler(Path(path): Path<String>) -> impl IntoResponse {
-    let path = path.trim_start_matches('/');
-    serve_asset(path)
-}
-
-/// Serve one asset from the embedded `UiAssets`.
-///
-/// Why: Centralises asset serving so both the index and asset routes share the
-/// same content-type detection and 404 handling.
-/// What: Looks up the path in `UiAssets`, infers the MIME type via
-/// `mime_guess`, returns the bytes with the appropriate `Content-Type` header.
-/// On a 404 serves `index.html` (SPA client-side routing).
-/// Test: `test_spa_root_returns_html`.
-fn serve_asset(path: &str) -> Response<Body> {
-    match UiAssets::get(path) {
-        Some(content) => {
-            let mime = mime_guess::from_path(path).first_or_octet_stream();
-            Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, mime.as_ref())
-                .body(Body::from(content.data.to_vec()))
-                .unwrap_or_else(|_| {
-                    Response::builder()
-                        .status(StatusCode::INTERNAL_SERVER_ERROR)
-                        .body(Body::empty())
-                        .expect("static response")
-                })
-        }
-        None => {
-            // SPA fallback: serve index.html for unknown paths so client-side
-            // routing works when the user navigates directly to a subpath.
-            match UiAssets::get("index.html") {
-                Some(content) => Response::builder()
-                    .status(StatusCode::OK)
-                    .header(header::CONTENT_TYPE, "text/html")
-                    .body(Body::from(content.data.to_vec()))
-                    .unwrap_or_else(|_| {
-                        Response::builder()
-                            .status(StatusCode::INTERNAL_SERVER_ERROR)
-                            .body(Body::empty())
-                            .expect("static response")
-                    }),
-                None => Response::builder()
-                    .status(StatusCode::NOT_FOUND)
-                    .body(Body::from("not found"))
-                    .expect("static 404"),
-            }
-        }
-    }
 }
 
 // ─── tests ───────────────────────────────────────────────────────────────────

@@ -12,13 +12,13 @@
 //! What: two routes.
 //!   - `POST /api/console/search/prune-indexes` takes the ids an operator
 //!     CONFIRMED and deletes them one at a time through
-//!     [`crate::routes::deletes::delete_index_on_daemon`] — the same
-//!     `DELETE /indexes/{id}` a single-row delete uses, which since #6365
+//!     [`crate::routes::deletes::delete_index_on_socket`] — the same
+//!     `search.index.delete` a single-row delete uses, which since #6365
 //!     also removes a registration the warm-boot allowlist excluded. This
 //!     route discovers nothing and selects nothing: the candidate list comes
-//!     from the daemon's own `GET /registry/orphans` census, which the UI
-//!     reaches through the console's reverse proxy so there is no second answer
-//!     to "which registrations are stale".
+//!     from the daemon's own `search.registry.orphans` census, which the UI
+//!     reaches through `/api/search/registry/orphans` (#6285) so there is no
+//!     second answer to "which registrations are stale".
 //!   - `POST /api/console/memory/palaces/{id}/compact` calls trusty-memory's
 //!     `palace_compact` over its socket.
 //!
@@ -39,7 +39,7 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::routes::deletes::delete_index_on_daemon;
+use crate::routes::deletes::delete_index_on_socket;
 use crate::routes::memory_rpc;
 use crate::routes::verdict::{ActionVerdict, validate_id};
 use crate::routes::{MEMORY_SERVICE, SEARCH_SERVICE_ID};
@@ -111,7 +111,7 @@ impl PruneOutcome {
 ///
 /// Why: this is the whole prune. It holds no idea of what "stale" means — the
 /// daemon's census decides that and the operator confirms it — and it adds no
-/// deletion path, calling the same [`delete_index_on_daemon`] a single-row
+/// deletion path, calling the same [`delete_index_on_socket`] a single-row
 /// delete uses. Its one job is to not lose a per-id outcome.
 /// What: walks `ids` in order. Past `deadline` an id is not attempted and says
 /// so. Every id produces exactly one row carrying `ok` and, when it failed, the
@@ -119,9 +119,8 @@ impl PruneOutcome {
 /// Test: `prune_reports_per_item_outcomes_for_a_partial_batch`,
 /// `prune_reports_an_expired_budget_as_unattempted`,
 /// `prune_of_a_clean_batch_reports_every_id_removed`.
-pub(crate) async fn prune_indexes_on_daemon(
-    client: &reqwest::Client,
-    base_url: &str,
+pub(crate) async fn prune_indexes_on_socket(
+    socket: &Path,
     ids: &[String],
     delete_data: bool,
     deadline: Instant,
@@ -146,7 +145,7 @@ pub(crate) async fn prune_indexes_on_daemon(
             continue;
         }
 
-        let verdict = delete_index_on_daemon(client, base_url, id, delete_data).await;
+        let verdict = delete_index_on_socket(socket, id, delete_data).await;
         if verdict.succeeded() {
             outcome.removed += 1;
             outcome.rows.push(json!({ "id": verdict.id(), "ok": true }));
@@ -189,14 +188,14 @@ pub struct PruneRequest {
 /// is unusable in — dozens of dead registrations at once.
 /// What: refuses an empty or oversized list and any id outside the console's id
 /// allowlist BEFORE dialling anything, so a malformed batch never partially
-/// executes. Then resolves trusty-search's loopback address from the same
-/// poller cache the single delete uses and prunes under [`PRUNE_BUDGET`].
-/// Refreshes the search metrics cache when anything was removed, so the roster
-/// the UI re-fetches reflects the prune.
+/// executes. Then resolves trusty-search's socket the same way the single
+/// delete does (#6285) and prunes under [`PRUNE_BUDGET`]. Refreshes the search
+/// metrics cache when anything was removed, so the roster the UI re-fetches
+/// reflects the prune.
 /// Test: `prune_route_rejects_an_empty_batch`,
 /// `prune_route_rejects_a_bad_id_without_dialling`,
 /// `prune_route_rejects_an_oversized_batch`,
-/// `prune_route_reports_an_unresolved_daemon_as_unreachable`.
+/// `prune_route_reports_a_dead_daemon_on_every_row`.
 pub async fn prune_indexes_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<PruneRequest>,
@@ -221,27 +220,19 @@ pub async fn prune_indexes_handler(
         }
     }
 
-    let base_url = match state.poller_cache().snapshot().await {
-        Some(snap) => snap.url_map().get(SEARCH_SERVICE_ID).cloned(),
-        None => None,
-    };
-    let Some(base_url) = base_url else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            axum::Json(json!({
-                "ok": false,
-                "error": format!(
-                    "{SEARCH_SERVICE_ID} is not reachable: the console has no live address for it"
-                ),
-            })),
-        )
-            .into_response();
+    let socket: PathBuf = match state.search_socket_path() {
+        Ok(p) => p,
+        Err(reason) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                axum::Json(json!({ "ok": false, "error": reason })),
+            )
+                .into_response();
+        }
     };
 
-    let client = state.http_client();
-    let outcome = prune_indexes_on_daemon(
-        &client,
-        &base_url,
+    let outcome = prune_indexes_on_socket(
+        &socket,
         &req.ids,
         req.delete_data,
         Instant::now() + PRUNE_BUDGET,
@@ -400,49 +391,46 @@ mod tests {
         .to_string()
     }
 
-    /// Start a stub trusty-search whose `DELETE /indexes/{id}` answer depends on
-    /// the id: `doomed-*` is removed, anything else is a skipped no-op.
+    /// Bind a stub trusty-search socket whose `search.index.delete` answer
+    /// depends on the id: `doomed-*` is removed, anything else is a skipped
+    /// no-op.
     ///
     /// Why per-id: a batch's whole contract is that one id's failure does not
     /// change another id's row, and a stub that answers every id identically
     /// cannot show that.
-    async fn stub_search_daemon_removing_only_doomed() -> String {
-        let app = axum::Router::new().route(
-            "/indexes/{id}",
-            axum::routing::delete(
-                |axum::extract::Path(id): axum::extract::Path<String>| async move {
-                    let removed = id.starts_with("doomed-");
-                    let body = json!({
-                        "id": id,
-                        "removed": removed,
-                        "data_deleted": false,
-                        "quiesced": true,
-                    });
-                    (StatusCode::OK, axum::Json(body))
+    /// What: reuses `deletes::tests::stub_search_socket` so there is one stub
+    /// answering for trusty-search's socket in this crate, not two.
+    fn stub_search_socket_removing_only_doomed(dir: &Path) -> PathBuf {
+        crate::routes::deletes::tests::stub_search_socket(dir, |request: &Value| {
+            let id = request["params"]["index_id"].as_str().unwrap_or_default();
+            let removed = id.starts_with("doomed-");
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "id": id,
+                    "removed": removed,
+                    "data_deleted": false,
+                    "quiesced": true,
                 },
-            ),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-        format!("http://{addr}")
-    }
-
-    /// The client the routes actually use.
-    fn client() -> reqwest::Client {
-        (*AppState::new(vec![]).http_client()).clone()
+            })
+        })
     }
 
     fn ids(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
     }
 
+    /// Drive the real router with trusty-search pointed at a socket nothing is
+    /// bound to.
+    ///
+    /// Why the override (#6285): without it these tests resolve the REAL
+    /// trusty-search socket, and on a machine with the daemon running a route
+    /// test would prune live indexes.
     async fn post_through_router(uri: &str, body: Value) -> (StatusCode, Value) {
-        let router = build_router(AppState::new(vec![]));
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let router =
+            build_router(AppState::new(vec![]).with_search_socket(tmp.path().join("absent.sock")));
         let req = Request::builder()
             .method("POST")
             .uri(uri)
@@ -465,10 +453,10 @@ mod tests {
     /// Test: this is the test.
     #[tokio::test(flavor = "multi_thread")]
     async fn prune_reports_per_item_outcomes_for_a_partial_batch() {
-        let base = stub_search_daemon_removing_only_doomed().await;
-        let outcome = prune_indexes_on_daemon(
-            &client(),
-            &base,
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let socket = stub_search_socket_removing_only_doomed(tmp.path());
+        let outcome = prune_indexes_on_socket(
+            &socket,
             &ids(&["doomed-a", "survivor", "doomed-b"]),
             false,
             Instant::now() + PRUNE_BUDGET,
@@ -508,10 +496,10 @@ mod tests {
     /// Test: this is the test.
     #[tokio::test(flavor = "multi_thread")]
     async fn prune_of_a_clean_batch_reports_every_id_removed() {
-        let base = stub_search_daemon_removing_only_doomed().await;
-        let outcome = prune_indexes_on_daemon(
-            &client(),
-            &base,
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let socket = stub_search_socket_removing_only_doomed(tmp.path());
+        let outcome = prune_indexes_on_socket(
+            &socket,
             &ids(&["doomed-a", "doomed-b"]),
             false,
             Instant::now() + PRUNE_BUDGET,
@@ -529,15 +517,9 @@ mod tests {
     /// Test: this is the test.
     #[tokio::test(flavor = "multi_thread")]
     async fn prune_reports_a_dead_daemon_as_a_failure_on_every_id() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        drop(listener);
-
-        let outcome = prune_indexes_on_daemon(
-            &client(),
-            &format!("http://{addr}"),
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let outcome = prune_indexes_on_socket(
+            &tmp.path().join("absent.sock"),
             &ids(&["a", "b"]),
             false,
             Instant::now() + PRUNE_BUDGET,
@@ -562,10 +544,10 @@ mod tests {
     /// starts, so no id is attempted.
     #[tokio::test(flavor = "multi_thread")]
     async fn prune_reports_an_expired_budget_as_unattempted() {
-        let base = stub_search_daemon_removing_only_doomed().await;
-        let outcome = prune_indexes_on_daemon(
-            &client(),
-            &base,
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let socket = stub_search_socket_removing_only_doomed(tmp.path());
+        let outcome = prune_indexes_on_socket(
+            &socket,
             &ids(&["doomed-a", "doomed-b"]),
             false,
             Instant::now(),
@@ -594,10 +576,10 @@ mod tests {
     /// the underlying delete refuses only when the data was actually asked for.
     #[tokio::test(flavor = "multi_thread")]
     async fn prune_forwards_the_delete_data_choice() {
-        let base = stub_search_daemon_removing_only_doomed().await;
-        let without = prune_indexes_on_daemon(
-            &client(),
-            &base,
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let socket = stub_search_socket_removing_only_doomed(tmp.path());
+        let without = prune_indexes_on_socket(
+            &socket,
             &ids(&["doomed-a"]),
             false,
             Instant::now() + PRUNE_BUDGET,
@@ -605,9 +587,8 @@ mod tests {
         .await;
         assert_eq!(without.removed, 1, "a deregister-only prune succeeds");
 
-        let with = prune_indexes_on_daemon(
-            &client(),
-            &base,
+        let with = prune_indexes_on_socket(
+            &socket,
             &ids(&["doomed-a"]),
             true,
             Instant::now() + PRUNE_BUDGET,
@@ -662,25 +643,34 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
     }
 
-    /// Why: with no poller snapshot the route must say trusty-search is
-    /// unreachable rather than claim a prune.
+    /// Why (#6285): with nothing bound to the socket the route must fail every
+    /// row and say why, rather than answer `ok: true` for a prune that removed
+    /// nothing. Before the migration this arm was "the poller cache has no
+    /// address"; a socket path always resolves, so the daemon being down is now
+    /// observed at the dial instead.
     /// Test: this is the test.
     #[tokio::test]
-    async fn prune_route_reports_an_unresolved_daemon_as_unreachable() {
+    async fn prune_route_reports_a_dead_daemon_on_every_row() {
         let (status, body) = post_through_router(
             "/api/console/search/prune-indexes",
-            json!({ "ids": ["scratch"] }),
+            json!({ "ids": ["scratch", "other"] }),
         )
         .await;
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "body: {body}");
+        assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
         assert_eq!(body["ok"], json!(false));
-        assert!(
-            body["error"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("trusty-search"),
-            "the error must name the daemon: {body}"
-        );
+        assert_eq!(body["removed"], json!(0));
+        let rows = body["results"].as_array().expect("rows");
+        assert_eq!(rows.len(), 2, "one row per requested id: {body}");
+        for row in rows {
+            assert_eq!(row["ok"], json!(false), "{body}");
+            assert!(
+                row["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("trusty-search"),
+                "every failed row must name the daemon: {body}"
+            );
+        }
     }
 
     // ── compact ──────────────────────────────────────────────────────────────

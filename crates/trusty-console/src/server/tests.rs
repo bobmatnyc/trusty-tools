@@ -11,6 +11,8 @@
 //! Test: this module IS the test suite for `server/mod.rs`.
 
 use super::*;
+// #6285: `body::Body` left `server/mod.rs` with the SPA handlers.
+use axum::body::Body;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
@@ -313,15 +315,17 @@ async fn test_api_proxy_unknown_service_returns_400() {
 
 /// Why: the `/api/{service}/*` route for a known service that is not running
 /// must return 503 (cache cold) — proves the route reaches the proxy handler.
-/// What: issues GET /api/search/health on a fresh state (no poll),
-/// asserts 503 SERVICE_UNAVAILABLE.
+/// What: issues GET /api/review/health on a fresh state (no poll), asserts 503
+/// SERVICE_UNAVAILABLE. `review` rather than `search` since #6285: search left
+/// the proxy allowlist for its own socket-backed route, so it can no longer
+/// exercise the cold-cache arm.
 /// Test: this test itself (#1849 Phase 2 primary path).
 #[tokio::test]
 async fn test_api_proxy_known_service_cold_cache_returns_503() {
     let router = build_router(make_test_state());
 
     let req = Request::builder()
-        .uri("/api/search/health")
+        .uri("/api/review/health")
         .body(Body::empty())
         .expect("request");
     let resp = router.oneshot(req).await.expect("response");
@@ -351,22 +355,25 @@ async fn test_api_proxy_mpm_is_in_allowlist_cold_cache_returns_503() {
 
 /// Why: the deprecated `/proxy/{daemon}/*` alias must still route to the
 /// proxy handler; removing it would break external callers mid-migration.
-/// What: issues GET /proxy/search/health on the deprecated path, asserts 503
-/// (cache cold, not 404 route-miss or 400 key-rejected).
+/// What: issues GET /proxy/review/health on the deprecated path, asserts 503
+/// (cache cold, not 404 route-miss or 400 key-rejected). `review` rather than
+/// `search` since #6285 — `/proxy/search/*` now has its own literal route to
+/// the socket bridge, covered by `deprecated_alias_reaches_the_same_handler` in
+/// `tests/search_uds_bridge.rs`.
 /// Test: this test itself (backward-compat guard for #1849 Phase 2).
 #[tokio::test]
 async fn test_deprecated_proxy_alias_still_routes() {
     let router = build_router(make_test_state());
 
     let req = Request::builder()
-        .uri("/proxy/search/health")
+        .uri("/proxy/review/health")
         .body(Body::empty())
         .expect("request");
     let resp = router.oneshot(req).await.expect("response");
     assert_eq!(
         resp.status(),
         StatusCode::SERVICE_UNAVAILABLE,
-        "/proxy/search/health must return 503 via deprecated alias, not 404"
+        "/proxy/review/health must return 503 via deprecated alias, not 404"
     );
 }
 
