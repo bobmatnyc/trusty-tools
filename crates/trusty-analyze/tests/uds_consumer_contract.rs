@@ -263,7 +263,11 @@ async fn every_consumer_sees_a_live_uds_daemon_as_healthy() {
         PathBuf::from("trusty-search"),
         PathBuf::from("trusty-analyze"),
     );
-    tools.search_url = search_base.clone();
+    // #6285: trusty-audit reaches trusty-search over a socket now, and this
+    // case exercises its ANALYZE guard alone. Point the search half at a path
+    // nothing binds, so a future edit that made ensure_analyze dial it fails
+    // here rather than reaching whatever daemon the machine happens to run.
+    tools.search_socket = tmp.path().join("absent-search.sock");
     assert_eq!(
         tools.analyze_socket, socket,
         "trusty-audit must derive the same path"
