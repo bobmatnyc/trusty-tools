@@ -1,9 +1,10 @@
 [package]
 name = "trusty-installer"
-# 0.12.1 (#6288): patch — 0.12.0 is published and this PR edits `src/**`,
-# dropping `SUPERVISOR_METRICS_PORT` and `LaunchctlPort::port_guard` now that the
-# supervisor binds no port. No out-of-workspace consumer of either.
-version = "0.13.0"
+# 0.13.1 (#6285): patch — 0.13.0 is published and this PR edits `src/**`,
+# moving the trusty-search health probe onto `search.health` over UDS. Additive
+# on the public surface (`probe_http::dual_transport`); `fixed_port_for` and
+# `uds_socket_for` keep their signatures.
+version = "0.13.1"
 edition = "2021"
 description = "Thin control plane for the claude-mpm stack: install, upgrade, restart, health, and config coordination across all trusty-* tools."
 readme = "README.md"
