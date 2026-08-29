@@ -530,6 +530,81 @@ else
   pass_case "case23 inspected ${WIRED_CHECKED} in-place bundle crate(s)"
 fi
 
+# ---------------------------------------------------------------------------
+# Case 24 — #6155: one crate, two committed bundles. trusty-console packages
+# its own ui/dist AND the trusty-search SPA it serves at /tools/search/, whose
+# source lives in another crate.
+#
+# The two rows must not share a key, because stamp-ui-bundle.sh stamps by key
+# and each crate's build.rs stamps its own name after building only its own UI.
+# A shared key would have that build certify a bundle it never rebuilt.
+# So the second row is keyed `<crate>-<suffix>`, and three things follow, each
+# asserted below:
+#   a. the gate asked about `<crate>` inspects BOTH rows,
+#   b. staleness in the second bundle fails the gate asked about `<crate>` —
+#      which is what preflight-publish.sh CHECK 7 runs,
+#   c. stamping `<crate>` does NOT re-stamp the `<crate>-<suffix>` row.
+# (c) is the one that would silently launder a stale bundle if it regressed.
+# ---------------------------------------------------------------------------
+R="$(mkrepo case24)"
+add_crate "$R" cratea
+add_crate "$R" crateb
+add_ui_source "$R" cratea dark
+add_ui_source "$R" crateb light
+add_bundle "$R" cratea ui-dist AAA111
+add_bundle "$R" cratea ui-extra-dist BBB222
+add_manifest "$R" \
+  "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist" \
+  "cratea-extra${TAB}crates/crateb/ui${TAB}crates/cratea/ui-extra-dist"
+stamp "$R" cratea
+stamp "$R" cratea-extra
+commit_all "$R" "two bundles, both fresh"
+run_case "case24a --crate cratea inspects the suffixed row too" 0 "PASS: cratea-extra" "$R" cratea
+
+# The second bundle's source moves; its bundle does not.
+echo "export const APP = 'light-v2';" > "${R}/crates/crateb/ui/src/main.js"
+commit_all "$R" "crateb source moves, cratea/ui-extra-dist does not"
+run_case "case24b sibling staleness fails the cratea gate" 1 "BUNDLE-STALE" "$R" cratea
+
+# Stamping the OWN row must not clear the suffixed row's finding.
+stamp "$R" cratea
+run_case "case24c stamping cratea does not launder cratea-extra" 1 "BUNDLE-STALE" "$R" cratea
+
+# ---------------------------------------------------------------------------
+# Case 24d/24e — #6155: the MANIFEST-GAP safety net must see a SECOND bundle.
+#
+# Discovery used to collapse a bundle path to its crate name and ask "does this
+# crate have a row?" — which answers yes for a crate shipping two bundles with
+# a row for only one. Deleting or mistyping the second row then left the gate
+# inspecting one bundle and reporting OK: the #3606 shape, with no alarm.
+# 24d deletes the row; 24e keeps it but keys it where the crate-scoped gate
+# will never reach it. Both must fire MANIFEST-GAP.
+# ---------------------------------------------------------------------------
+R="$(mkrepo case24de)"
+add_crate "$R" cratea
+add_crate "$R" crateb
+add_ui_source "$R" cratea dark
+add_ui_source "$R" crateb light
+add_bundle "$R" cratea ui-dist AAA111
+add_bundle "$R" cratea ui-extra-dist BBB222
+
+# 24d — the second bundle ships with NO row at all.
+add_manifest "$R" \
+  "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist"
+stamp "$R" cratea
+commit_all "$R" "cratea ships two bundles, manifest declares one"
+run_case "case24d an undeclared second bundle fires MANIFEST-GAP" 1 "MANIFEST-GAP" "$R" cratea
+
+# 24e — the row exists and names the right bundle_dir, but its key is one the
+# crate-scoped gate never inspects, so the bundle ships unchecked anyway.
+add_manifest "$R" \
+  "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist" \
+  "crateaextra${TAB}crates/crateb/ui${TAB}crates/cratea/ui-extra-dist"
+stamp "$R" cratea
+stamp "$R" crateaextra
+commit_all "$R" "second row present but keyed out of cratea's scope"
+run_case "case24e a row keyed outside the crate's scope fires MANIFEST-GAP" 1 "MANIFEST-GAP" "$R" cratea
+
 echo
 echo "check-ui-bundle-freshness-selftest: ${PASSED} passed, ${FAILED} failed, ${SKIPPED} skipped"
 [ "$FAILED" -eq 0 ] || exit 1

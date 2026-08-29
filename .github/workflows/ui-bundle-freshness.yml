@@ -27,6 +27,8 @@ on:
     paths:
       - "crates/*/ui/**"
       - "crates/*/ui-dist/**"
+      # #6155: trusty-console packages a second bundle, the search SPA.
+      - "crates/*/ui-search-dist/**"
       - "scripts/check-ui-bundle-freshness.sh"
       - "scripts/check-ui-bundle-freshness-selftest.sh"
       - "scripts/stamp-ui-bundle.sh"
@@ -41,6 +43,8 @@ on:
     paths:
       - "crates/*/ui/**"
       - "crates/*/ui-dist/**"
+      # #6155: trusty-console packages a second bundle, the search SPA.
+      - "crates/*/ui-search-dist/**"
       - "scripts/check-ui-bundle-freshness.sh"
       - "scripts/check-ui-bundle-freshness-selftest.sh"
       - "scripts/stamp-ui-bundle.sh"

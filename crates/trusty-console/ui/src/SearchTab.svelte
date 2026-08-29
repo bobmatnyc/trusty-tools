@@ -104,6 +104,13 @@
 <div class="tab-content">
   <RefreshHeader title="Trusty Search" onRefresh={() => fetchMetrics(true)} {refreshing} />
 
+  <!-- #6155: the console now serves the full trusty-search dashboard. This card
+       stays a status summary; the link is how anyone reaches search, browse and
+       per-index configuration. -->
+  <p class="dashboard-link">
+    <a href="/tools/search/">Open the Trusty Search dashboard &rarr;</a>
+  </p>
+
   {#if loading}
     <div class="placeholder">Loading search metrics…</div>
   {:else if error}
@@ -238,4 +245,7 @@
     background: var(--trusty-surface-raised); padding: 0.1rem 0.35rem; border-radius: 0.25rem;
   }
   .empty-hint { color: var(--trusty-text-secondary); font-size: 0.85rem; }
+  .dashboard-link { margin: 0 0 1rem; font-size: 0.85rem; }
+  .dashboard-link a { color: var(--trusty-accent); text-decoration: none; }
+  .dashboard-link a:hover { text-decoration: underline; }
 </style>

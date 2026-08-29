@@ -25,6 +25,8 @@
 //!   - `ANY /proxy/{daemon}/{*path}` — DEPRECATED alias; routes to the same
 //!     handler with a trace-level deprecation note.
 //!   - `GET /` and `GET /ui/*path` — serve the embedded Svelte SPA.
+//!   - `GET /tools/search/*path` — serve the embedded trusty-search SPA
+//!     (#6155); see `crate::tools_ui`.
 //!
 //! All logs go to stderr; stdout is clean.
 //!
@@ -96,6 +98,29 @@ pub struct AppState {
     /// poller; served by `GET /api/console/metrics/mpm`.
     mpm_metrics_cache: MetricsCache,
     http_client: Arc<reqwest::Client>,
+    /// The client the proxy uses for Server-Sent Events (#6155).
+    ///
+    /// Why: `http_client` sets a 30-second whole-request timeout, which is
+    /// right for a request/response API call and fatal for a stream that is
+    /// meant to stay open — the console-served search SPA opens
+    /// `/status/stream` on every page load, and under the shared client that
+    /// connection would be cut every 30 seconds and reopened by `EventSource`
+    /// forever.
+    /// What: identical to `http_client` except the total timeout is replaced by
+    /// a 60-second read timeout, which bounds an upstream that has gone silent
+    /// without bounding one that is still sending. Both search streams stay
+    /// well inside it: `/status/stream` pushes every 2 seconds and
+    /// `/reindex/stream` heartbeats every 20.
+    ///
+    /// The absent total deadline is why `proxy_handler` does not hand this
+    /// client's body straight to the caller. `Accept` is a caller claim, so a
+    /// response the upstream did not label `text/event-stream` is read under
+    /// `NON_STREAM_BODY_TIMEOUT` instead — otherwise any proxied GET could opt
+    /// into an unbounded connection by naming that Accept type.
+    /// Test: `proxy::routes::tests::test_wants_event_stream_*` covers which
+    /// client a request gets; the timeout itself is construction, exercised by
+    /// the live `/status/stream` smoke run recorded on #6155.
+    stream_client: Arc<reqwest::Client>,
     /// Analyze stdio MCP handle — shared with the metrics poller so both the
     /// background poll and on-demand route calls reuse the same child process.
     analyze_handle: Arc<McpServiceHandle>,
@@ -150,6 +175,14 @@ impl AppState {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("reqwest client init");
+        // #6155: same connection policy, no whole-request deadline — see the
+        // `stream_client` field doc.
+        let stream_client = reqwest::Client::builder()
+            .read_timeout(Duration::from_secs(60))
+            .pool_max_idle_per_host(0)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("reqwest stream client init");
         let analyze_handle = Arc::new(McpServiceHandle::new(
             "trusty-analyze",
             vec!["mcp".to_string()],
@@ -192,6 +225,7 @@ impl AppState {
             review_metrics_cache: MetricsCache::new(),
             mpm_metrics_cache: MetricsCache::new(),
             http_client: Arc::new(client),
+            stream_client: Arc::new(stream_client),
             analyze_handle,
             mcp_handles: Arc::new(handles),
         }
@@ -295,6 +329,11 @@ impl AppState {
     /// Test: Used by `proxy_handler`.
     pub fn http_client(&self) -> Arc<reqwest::Client> {
         Arc::clone(&self.http_client)
+    }
+
+    /// The client to proxy a Server-Sent Events request with (#6155).
+    pub fn stream_client(&self) -> Arc<reqwest::Client> {
+        Arc::clone(&self.stream_client)
     }
 }
 
@@ -468,6 +507,16 @@ fn build_router_inner(
         .route(
             "/proxy/{daemon}/{*path}",
             any(crate::proxy::deprecated_proxy_handler),
+        )
+        // #6155: the trusty-search SPA, served from this binary under
+        // /tools/search/. Its API calls resolve to /api/search/*, which the
+        // proxy route above forwards — so the dashboard keeps working once
+        // trusty-search drops its own HTTP surface (#6285, ADR-0032).
+        .route("/tools/search", get(crate::tools_ui::search_ui_redirect))
+        .route("/tools/search/", get(crate::tools_ui::search_ui_index))
+        .route(
+            "/tools/search/{*path}",
+            get(crate::tools_ui::search_ui_asset),
         )
         .route("/", get(spa_index_handler))
         .route("/ui", get(spa_index_handler))

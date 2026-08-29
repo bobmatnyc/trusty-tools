@@ -230,25 +230,84 @@ if [ -n "$CRATE_INPUT" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Discovery — which crates ACTUALLY track a committed bundle at <rev>.
-# Compared against the manifest in both directions so neither a new UI crate
-# nor a vanished bundle can drop out of the gate silently.
+# Discovery — which committed BUNDLE DIRECTORIES actually exist at <rev>.
+# Compared against the manifest in both directions so neither a new UI bundle
+# nor a vanished one can drop out of the gate silently.
+#
+# #6155: keyed on the bundle directory, not on the crate. It used to ask "does
+# this crate have a row?", which answers yes for a crate that ships TWO bundles
+# and has a row for only one — trusty-console ships ui/dist AND ui-search-dist.
+# Deleting or mistyping the `trusty-console-search` row would then have left the
+# gate inspecting one bundle and reporting OK, which is the #3606 shape this
+# whole discovery pass exists to prevent. The pattern also matches any
+# `ui-*-dist`, so the next bundle of this shape is covered before it is added.
+# Test: check-ui-bundle-freshness-selftest.sh cases 24d and 24e.
 # ---------------------------------------------------------------------------
-DISCOVERED="$(g ls-tree -r --name-only "$REV" \
-  | grep -E '^crates/[^/]+/(ui-dist|ui/dist)/' \
-  | sed -E 's|^crates/([^/]+)/.*|\1|' \
+# The `s###` delimiter is deliberate: BUNDLE_DIR_RE contains `|`, so using `|`
+# as the delimiter (the habit elsewhere in this file, where paths make `/` a bad
+# choice) makes sed read the alternation as the end of the pattern and abort —
+# leaving discovery empty and the gate passing having inspected nothing.
+BUNDLE_DIR_RE='ui-[^/]*dist|ui/dist'
+DISCOVERED_BUNDLES="$(g ls-tree -r --name-only "$REV" \
+  | grep -E "^crates/[^/]+/(${BUNDLE_DIR_RE})/" \
+  | sed -E "s#^(crates/[^/]+/(${BUNDLE_DIR_RE}))/.*#\1#" \
   | sort -u || true)"
 
 manifest_row_for() {
   printf '%s\n' "$MANIFEST_ROWS" | awk -F'\t' -v c="$1" '$1 == c { print; exit }'
 }
 
-for crate in $DISCOVERED; do
+# manifest_row_for_bundle <bundle_dir> — the row that declares this directory,
+# matching on the bundle_dir column so a crate's second bundle is not covered
+# by its first row (#6155).
+manifest_row_for_bundle() {
+  printf '%s\n' "$MANIFEST_ROWS" | awk -F'\t' -v b="$1" '$3 == b { print; exit }'
+}
+
+# row_matches_target <row_crate> — whether a manifest row belongs to the crate
+# the caller asked about.
+#
+# #6155: one crate can package more than one committed bundle. trusty-console
+# ships its own ui/dist AND ui-search-dist, the trusty-search SPA it serves at
+# /tools/search/. Those two rows cannot share a key: stamp-ui-bundle.sh stamps
+# every row matching the name it is given, and the console's build.rs stamps
+# `trusty-console` after building only its own UI — a shared key would have it
+# certify a bundle it never rebuilt, which is the #3606 laundering the stamp
+# exists to prevent. So the second row is keyed `<crate>-<suffix>` and THIS
+# gate matches it when asked about `<crate>`. The stamper under-claims, the
+# gate over-checks, and preflight-publish.sh CHECK 7 for trusty-console still
+# inspects both bundles the tarball carries.
+# Test: check-ui-bundle-freshness-selftest.sh case 24.
+row_matches_target() {
+  [ -z "$TARGET_CRATE" ] && return 0
+  [ "$1" = "$TARGET_CRATE" ] && return 0
+  case "$1" in "${TARGET_CRATE}-"*) return 0 ;; esac
+  return 1
+}
+
+for bundle_dir in $DISCOVERED_BUNDLES; do
+  crate="$(printf '%s' "$bundle_dir" | sed -E 's|^crates/([^/]+)/.*|\1|')"
   [ -n "$TARGET_CRATE" ] && [ "$crate" != "$TARGET_CRATE" ] && continue
-  if [ -z "$(manifest_row_for "$crate")" ]; then
-    fail "MANIFEST-GAP — crates/${crate} tracks a committed UI bundle but has no row in" \
+  bundle_row="$(manifest_row_for_bundle "$bundle_dir")"
+  if [ -z "$bundle_row" ]; then
+    fail "MANIFEST-GAP — ${bundle_dir} is a committed UI bundle with no row in" \
       "scripts/ui-bundle-manifest.tsv, so nothing checks whether it is fresh." \
-      "Add: ${crate}<TAB>crates/${crate}/ui<TAB>crates/${crate}/<bundle dir>"
+      "Add: <key><TAB><ui source dir><TAB>${bundle_dir}" \
+      "The key is ${crate} for the crate's own UI, or ${crate}-<suffix> for a" \
+      "second bundle it packages (#6155)."
+    continue
+  fi
+  # #6155: a row can exist and still be unreachable from THIS invocation. The
+  # gate scoped to a crate inspects that crate's key and its `<crate>-<suffix>`
+  # keys, so a row keyed anything else declares the bundle without ever
+  # checking it under `check-ui-bundle-freshness.sh <crate>` — which is what
+  # preflight-publish.sh CHECK 7 runs. A mistyped key would otherwise leave the
+  # bundle silently unchecked, the same #3606 shape as a missing row.
+  bundle_row_key="$(printf '%s' "$bundle_row" | cut -f1)"
+  if ! row_matches_target "$bundle_row_key"; then
+    fail "MANIFEST-GAP — ${bundle_dir} has a row keyed '${bundle_row_key}', which" \
+      "the gate scoped to '${TARGET_CRATE}' never inspects, so this bundle ships" \
+      "unchecked. Key it '${crate}' or '${crate}-<suffix>' (#6155)."
   fi
 done
 
@@ -401,9 +460,7 @@ check_row() {
 MATCHED_ROW=0
 while IFS="$(printf '\t')" read -r crate src_dir bundle_dir _rest; do
   [ -z "${crate:-}" ] && continue
-  if [ -n "$TARGET_CRATE" ] && [ "$crate" != "$TARGET_CRATE" ]; then
-    continue
-  fi
+  row_matches_target "$crate" || continue
   MATCHED_ROW=1
   if [ -z "${src_dir:-}" ] || [ -z "${bundle_dir:-}" ]; then
     fail "MANIFEST-STALE — ${crate}: row is missing a source_dir or bundle_dir column."
