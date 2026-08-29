@@ -70,7 +70,9 @@ pub async fn search_ui_index() -> Response {
 /// `/tools/search/#/indexes` and resolves here as the index. The fallback
 /// still matters for a stale bookmark or a hand-typed path.
 /// What: looks `path` up in the embedded bundle; falls back to the shell.
-/// Test: `search_ui_serves_hashed_asset` in `tests/search_ui_mount.rs`.
+/// Test: `search_ui_serves_every_asset_the_shell_references` covers the
+/// asset-found arm and `search_ui_unknown_path_falls_back_to_the_shell` the
+/// fallback, both in `tests/search_ui_mount.rs`.
 pub async fn search_ui_asset(Path(path): Path<String>) -> Response {
     let trimmed = path.trim_start_matches('/');
     match SearchUiAssets::get(trimmed) {
