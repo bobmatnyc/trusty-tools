@@ -23,7 +23,10 @@
 //!
 //! Test: `search_socket_honours_the_env_override`,
 //! `call_at_reports_a_dead_socket_rather_than_hanging`, and end-to-end through
-//! `doctor_tests::search_*` / `doctor_search_pin_tests::pinned_but_missing_index_is_fail`.
+//! `doctor_tests::search_*` / `doctor_search_pin_tests::pinned_but_missing_index_is_fail`;
+//! the session-manager consumers through
+//! `search_gc_guard_tests::sweep_skips_a_candidate_whose_status_probe_failed` and
+//! `index_delete_guard::tests::delete_over_a_stale_socket_is_a_transport_failure`.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -61,6 +64,14 @@ pub const METHOD_INDEXES_LIST: &str = "search.indexes.list";
 /// One index's stages, capabilities and footprint. Answers
 /// [`crate::daemon::error::CODE_NOT_FOUND`] for an id the daemon does not hold.
 pub const METHOD_INDEX_STATUS: &str = "search.index.status";
+
+/// Deregister one index, and — with `delete_data: true` — destroy its on-disk
+/// data directory.
+///
+/// The only destructive method this crate names. It is reachable exclusively
+/// through `session_manager::index_delete_guard::DestructiveIndexDelete`, which
+/// holds the crate's one copy of the `delete_data` opt-in (#4743).
+pub const METHOD_INDEX_DELETE: &str = "search.index.delete";
 
 /// The daemon answered, and what it answered was an error.
 ///

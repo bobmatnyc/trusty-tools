@@ -1,72 +1,97 @@
-//! The one door a destructive trusty-search index DELETE may pass through (#4743).
+//! The one door a destructive trusty-search index delete may pass through (#4743).
 //!
 //! Why: `search_gc` had two independent sites that formatted
 //! `DELETE /indexes/{id}?delete_data=true` — the decommission-time removal and
-//! the orphan sweep's delete loop. `?delete_data=true` destroys the index's
-//! on-disk data directory (trusty-search's own
-//! `delete_index_with_delete_data_true_destroys_data` asserts exactly that;
-//! its orphan reaper deliberately passes `delete_data=false`). The daemon those
-//! requests reach is whichever one `resolve_daemon_base_url` discovers, and
-//! under `cargo test` that is the OPERATOR'S live daemon: the address comes from
-//! `~/Library/Application Support/trusty-search/http_addr`, which a test process
-//! reads exactly like production does. Fixture workspaces derive their index id
-//! from a bare `file_name()` — `full`, `sess`, `live` — so a real index sharing
-//! that basename is destroyed by a test run, silently.
+//! the orphan sweep's delete loop. Destroying the data is opt-in (#4123), and
+//! the daemon those requests reached was whichever one discovery found. Under
+//! `cargo test` that is the OPERATOR'S live daemon: a test process resolves it
+//! exactly like production does. Fixture workspaces derive their index id from
+//! a bare `file_name()` — `full`, `sess`, `live` — so a real index sharing that
+//! basename is destroyed by a test run, silently.
 //!
 //! Why a capability type rather than an `if` at each site: two review rounds on
 //! PR #4725 each found a different destructive effect that a caller had failed
 //! to gate, and the response there was the same one taken here — stop relying on
 //! every call site remembering, and make the ungated shape unrepresentable. A
-//! caller cannot build the URL, because [`DestructiveIndexDelete`] holds the
-//! only copy of the `?delete_data=true` literal and exposes no constructor that
-//! takes a base URL. The only way to obtain one is [`DestructiveIndexDelete::acquire`],
-//! which decides for itself whether the process may destroy data. A new
-//! destructive site added later inherits the refusal by construction: it has to
-//! call `acquire` to get anything it can delete with.
+//! caller cannot build the request, because [`DestructiveIndexDelete`] holds the
+//! only copy of the `delete_data` opt-in and exposes no constructor that takes a
+//! daemon address. The only way to obtain one is
+//! [`DestructiveIndexDelete::acquire`], which decides for itself whether the
+//! process may destroy data. A new destructive site added later inherits the
+//! refusal by construction: it has to call `acquire` to get anything it can
+//! delete with.
 //!
 //! Why the refusal is a RUNTIME check: the delete lands in a DIFFERENT PROCESS.
 //! Issue #4094's `cfg(test)` arm in trusty-search's `default_data_dir` isolates
 //! that daemon's own data-dir resolution, and #4255/PR #4864 extended isolation
 //! to registry writes — but neither can help here. No compile-time guard in
-//! trusty-search governs what a trusty-mpm test binary puts on the wire, and no
-//! data-dir seam moves a request that is already addressed to port 7878.
+//! trusty-search governs what a trusty-mpm test binary puts on the wire.
 //! `trusty_common::running_under_test_harness` is the process-level answer, and
 //! reusing it keeps this crate from growing a second, drifting copy of the same
 //! detection.
 //!
+//! What #6285 changed: the transport, and nothing else. The call is
+//! `search.index.delete` over the daemon's Unix socket (ADR-0032) rather than
+//! `DELETE /indexes/{id}`, sent through [`crate::daemon::search_rpc`] — this
+//! crate's one trusty-search client. Who may acquire the capability did not
+//! move: the test-harness refusal is still the first thing `acquire` evaluates,
+//! still ahead of any resolution, and the `delete_data` opt-in still exists in
+//! exactly one place.
+//!
 //! Test: `acquire_is_refused_under_a_test_harness`,
+//! `acquire_refuses_when_no_daemon_socket_is_bound`,
 //! `acquire_succeeds_when_production_state_is_explicitly_allowed`,
-//! `delete_url_opts_into_data_deletion`; end-to-end,
+//! `delete_params_opt_into_data_deletion`,
+//! `delete_over_a_stale_socket_is_a_transport_failure`,
+//! `a_refusal_is_never_reported_as_removed`,
+//! `a_result_that_did_not_remove_is_not_reported_as_removed`; end-to-end,
 //! `decommission_issues_no_request_to_a_live_daemon_under_test` in
 //! `search_gc_guard_tests`.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
+use serde_json::Value;
 use tracing::{debug, warn};
 
-/// Per-request timeout for the index DELETE.
+use crate::daemon::search_rpc::{self, SearchRpcError};
+
+/// Per-request timeout for the index delete.
 ///
 /// Why: the destructive call runs off the interactive request path
 /// (decommission, periodic GC) but must still never hang the daemon
 /// indefinitely if trusty-search is wedged.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Connect timeout, tighter than the overall request timeout so an unreachable
-/// host fails fast.
-const CONNECT_TIMEOUT: Duration = Duration::from_millis(750);
-
-/// What a destructive index DELETE did, for the caller to log in its own voice.
+/// What a destructive index delete did, for the caller to log in its own voice.
 ///
-/// Why: the two call sites want different log messages for the same three
-/// outcomes, and threading `reqwest` types back to them would leak the
-/// transport this module exists to own.
+/// Why: the two call sites want different log messages for the same outcomes,
+/// and threading the RPC types back to them would leak the transport this
+/// module exists to own.
+///
+/// Why four variants rather than worked / did not work: only [`Self::Removed`]
+/// licenses a caller to record an index as gone. The other three are distinct
+/// evidence — the daemon refused, the daemon answered but kept the index, or
+/// nothing answered at all — and collapsing them lets an unanswered call read
+/// as a completed one.
 #[derive(Debug)]
 pub(super) enum DeleteOutcome {
-    /// The daemon reported the index removed.
+    /// The daemon answered, and its answer says the registration is gone.
     Removed,
-    /// The daemon answered, but not with a 2xx.
-    Rejected(reqwest::StatusCode),
-    /// The request never got an answer.
+    /// The daemon answered, and its answer says the index is still registered.
+    ///
+    /// Reachable when an in-flight writer never released the teardown lock
+    /// (#3049): with `delete_data` requested, trusty-search abandons the delete
+    /// rather than destroying data underneath a running write.
+    NotRemoved(String),
+    /// The daemon answered with an error frame — its own code and wording.
+    Refused {
+        /// The daemon's JSON-RPC error code.
+        code: i64,
+        /// The daemon's own message.
+        message: String,
+    },
+    /// The call never got an answer.
     Transport(String),
 }
 
@@ -74,15 +99,14 @@ pub(super) enum DeleteOutcome {
 ///
 /// Why: see the module doc — holding one of these is the proof that this
 /// process is allowed to delete real data, and it is the only thing in the
-/// crate that can produce a `?delete_data=true` request.
-/// What: an acquired daemon base URL plus the short-timeout client to reach it.
-/// Both fields are private and there is no constructor other than
-/// [`Self::acquire`], so the capability cannot be forged from a base URL a
-/// caller happens to have.
+/// crate that can produce a `delete_data` request.
+/// What: the socket of a trusty-search daemon that was bound when the capability
+/// was acquired. The field is private and there is no constructor other than
+/// [`Self::acquire`], so the capability cannot be forged from a path a caller
+/// happens to have.
 /// Test: see the module doc.
 pub(super) struct DestructiveIndexDelete {
-    base: String,
-    client: reqwest::Client,
+    socket: PathBuf,
 }
 
 impl DestructiveIndexDelete {
@@ -94,153 +118,133 @@ impl DestructiveIndexDelete {
     /// call site away from being forgotten, which is precisely how the second
     /// destructive site in `search_gc` came to have no guard at all.
     /// What: `None` when (a) `trusty_common::running_under_test_harness()` says
-    /// this is a `cargo test` process, (b) no trusty-search daemon is
-    /// discoverable, or (c) the HTTP client cannot be built. `Some` otherwise.
-    /// The test refusal is checked FIRST so a test run never even resolves the
-    /// operator's daemon address.
+    /// this is a `cargo test` process, (b) the socket path cannot be resolved,
+    /// or (c) nothing is bound at it. `Some` otherwise. The test refusal is
+    /// checked FIRST so a test run never even resolves where the operator's
+    /// daemon lives.
+    ///
+    /// #6285: (c) replaces the old "no `http_addr` discovery file" arm. A bound
+    /// socket is what a running daemon leaves behind, so its absence carries the
+    /// same "there is nothing to talk to" signal, evaluated at the same point —
+    /// before any request is built. A socket file that outlived its daemon still
+    /// passes here and fails at [`Self::delete`], which reports it as
+    /// [`DeleteOutcome::Transport`] and deletes nothing.
     ///
     /// A test that genuinely needs to drive a real daemon sets
     /// `TRUSTY_ALLOW_PRODUCTION_STATE=1` (`trusty_common::test_harness::ALLOW_PRODUCTION_ENV`),
     /// which makes that intent explicit and greppable instead of ambient.
     /// Test: `acquire_is_refused_under_a_test_harness`,
+    /// `acquire_refuses_when_no_daemon_socket_is_bound`,
     /// `acquire_succeeds_when_production_state_is_explicitly_allowed`.
     pub(super) fn acquire() -> Option<Self> {
         // #4743: a `cargo test` process may not destroy index data. Checked
-        // before discovery so a test run does not even look up where the
+        // before resolution so a test run does not even look up where the
         // operator's daemon lives.
         if trusty_common::running_under_test_harness() {
             warn!(
-                "refusing a destructive trusty-search index DELETE: this is a test process \
+                "refusing a destructive trusty-search index delete: this is a test process \
                  (#4743). Set {} to override.",
                 trusty_common::test_harness::ALLOW_PRODUCTION_ENV
             );
             return None;
         }
-        let Some(base) = trusty_common::resolve_daemon_base_url("trusty-search") else {
-            debug!("trusty-search daemon not discoverable; skipping index removal (#2033)");
-            return None;
-        };
-        match reqwest::Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .connect_timeout(CONNECT_TIMEOUT)
-            .build()
-        {
-            Ok(client) => Some(Self { base, client }),
+        let socket = match search_rpc::search_socket() {
+            Ok(socket) => socket,
             Err(e) => {
-                warn!("trusty-search index-delete client build failed: {e}");
-                None
+                warn!("cannot resolve the trusty-search socket; skipping index removal: {e:#}");
+                return None;
             }
+        };
+        // #6285: nothing bound means no daemon to ask — the no-op the old
+        // `resolve_daemon_base_url` miss produced.
+        if !socket.exists() {
+            debug!(
+                socket = %socket.display(),
+                "no trusty-search daemon socket; skipping index removal (#2033)"
+            );
+            return None;
         }
+        Some(Self { socket })
     }
 
-    /// The destructive URL for `index_id` — the crate's only `?delete_data=true`.
+    /// The destructive params for `index_id` — the crate's only `delete_data`
+    /// opt-in.
     ///
-    /// Why (#4123): trusty-search's `DELETE /indexes/:id` preserves on-disk data
-    /// unless `delete_data=true` is passed. Both callers opt in deliberately:
-    /// the workspace each index describes is a disposable worktree that is
-    /// being (or has been) deleted, so preserved index data would be
-    /// unreachable garbage on disk forever.
-    /// What: `{base}/indexes/{index_id}?delete_data=true`. Private, and
-    /// reachable only through an acquired capability.
-    /// Test: `delete_url_opts_into_data_deletion`.
-    fn delete_url(&self, index_id: &str) -> String {
-        format!("{}/indexes/{index_id}?delete_data=true", self.base)
+    /// Why (#4123): trusty-search's `search.index.delete` preserves on-disk data
+    /// unless `delete_data` is `true`. Both callers opt in deliberately: the
+    /// workspace each index describes is a disposable worktree that is being (or
+    /// has been) deleted, so preserved index data would be unreachable garbage
+    /// on disk forever.
+    /// What: `{"index_id": …, "delete_data": true}`. A method rather than a free
+    /// function so it cannot be called without a capability in hand.
+    /// Test: `delete_params_opt_into_data_deletion`.
+    fn delete_params(&self, index_id: &str) -> Value {
+        serde_json::json!({ "index_id": index_id, "delete_data": true })
     }
 
-    /// Issue the DELETE and classify the result.
+    /// Issue the delete and classify the result.
     ///
-    /// What: never returns an error — every failure mode maps to a
+    /// Why: never returns an error — every failure mode maps to a
     /// [`DeleteOutcome`] variant so both callers stay fail-soft (an unreachable
     /// or erroring search daemon must not block session teardown).
-    /// Test: covered end-to-end by
+    /// What: one [`REQUEST_TIMEOUT`]-bounded `search.index.delete`. A refusal
+    /// carries the daemon's own code, an unanswered call is
+    /// [`DeleteOutcome::Transport`], and a result is believed only as far as its
+    /// own `removed` field — see [`classify_delete_result`]. No arm but a
+    /// daemon-confirmed removal produces [`DeleteOutcome::Removed`].
+    /// Test: `delete_over_a_stale_socket_is_a_transport_failure`,
+    /// `a_refusal_is_never_reported_as_removed`,
+    /// `a_result_that_did_not_remove_is_not_reported_as_removed`; end-to-end by
     /// `decommission_issues_no_request_to_a_live_daemon_under_test`, which
     /// asserts this never runs under a test harness.
     pub(super) async fn delete(&self, index_id: &str) -> DeleteOutcome {
-        match self.client.delete(self.delete_url(index_id)).send().await {
-            Ok(resp) if resp.status().is_success() => DeleteOutcome::Removed,
-            Ok(resp) => DeleteOutcome::Rejected(resp.status()),
-            Err(e) => DeleteOutcome::Transport(e.to_string()),
+        let params = self.delete_params(index_id);
+        match search_rpc::call_at(
+            &self.socket,
+            search_rpc::METHOD_INDEX_DELETE,
+            params,
+            REQUEST_TIMEOUT,
+        )
+        .await
+        {
+            Ok(body) => classify_delete_result(&body),
+            Err(e) => match e.downcast_ref::<SearchRpcError>() {
+                Some(rpc) => DeleteOutcome::Refused {
+                    code: rpc.code,
+                    message: rpc.message.clone(),
+                },
+                None => DeleteOutcome::Transport(format!("{e:#}")),
+            },
         }
     }
+}
+
+/// Read a delete result as the daemon's own verdict, not as "it answered".
+///
+/// Why: `search.index.delete` answers a RESULT — not an error — for a delete it
+/// abandoned because an in-flight writer never quiesced (#3049). Over HTTP that
+/// was a `200`, and treating any 2xx as success recorded an index as reclaimed
+/// while it was still registered and still on disk. The daemon states the
+/// outcome in the body; this reads it.
+/// What: [`DeleteOutcome::Removed`] only when the body's `removed` is `true`. A
+/// body that says otherwise — or that omits the field, which is unverifiable
+/// rather than affirmative — is [`DeleteOutcome::NotRemoved`] carrying the
+/// daemon's `quiesced` flag, the field that explains the abandonment.
+/// Test: `a_result_that_did_not_remove_is_not_reported_as_removed`,
+/// `a_result_reporting_removal_is_removed`.
+fn classify_delete_result(body: &Value) -> DeleteOutcome {
+    if body.get("removed").and_then(Value::as_bool) == Some(true) {
+        return DeleteOutcome::Removed;
+    }
+    let quiesced = match body.get("quiesced").and_then(Value::as_bool) {
+        Some(v) => v.to_string(),
+        None => "unreported".to_string(),
+    };
+    DeleteOutcome::NotRemoved(format!(
+        "the daemon did not remove the index (quiesced: {quiesced})"
+    ))
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The load-bearing assertion, made from inside the very thing it detects:
-    /// this test IS a `cargo test` process, so `acquire` must refuse it.
-    ///
-    /// Why no injection: a decision table with fabricated inputs would prove
-    /// the precedence rules (`trusty-common` already tests those) but not the
-    /// only fact that matters here — that a real trusty-mpm test binary is
-    /// classified as one. Reverting the `running_under_test_harness` branch in
-    /// `acquire` fails this on any machine with a running trusty-search daemon.
-    /// Test: this function IS the test.
-    #[test]
-    fn acquire_is_refused_under_a_test_harness() {
-        assert!(
-            DestructiveIndexDelete::acquire().is_none(),
-            "a cargo test process must never acquire the destructive-delete capability (#4743)"
-        );
-    }
-
-    /// The escape hatch works, and the guard is not over-applied into a
-    /// permanent disablement of the orphan GC.
-    ///
-    /// Why: a refusal that could never be lifted would be indistinguishable
-    /// from having deleted the feature, and nothing would notice if `acquire`
-    /// started returning `None` unconditionally.
-    /// What: with `TRUSTY_ALLOW_PRODUCTION_STATE=1` and a discoverable daemon
-    /// address written into an ISOLATED data dir, `acquire` yields a capability
-    /// pointed at that isolated address. Deliberately never calls `delete` — the
-    /// address belongs to nothing, and issuing a request is not what is under
-    /// test.
-    /// Test: this function IS the test.
-    #[serial_test::serial]
-    #[test]
-    fn acquire_succeeds_when_production_state_is_explicitly_allowed() {
-        let dir = crate::test_support::hermetic_temp_dir();
-        std::fs::create_dir_all(dir.path().join("trusty-search")).unwrap();
-        std::fs::write(
-            dir.path().join("trusty-search").join("http_addr"),
-            "127.0.0.1:59999",
-        )
-        .unwrap();
-
-        // SAFETY: `#[serial]` — no other test thread races this set/restore.
-        unsafe {
-            std::env::set_var(trusty_common::DATA_DIR_OVERRIDE_ENV, dir.path());
-            std::env::set_var(trusty_common::test_harness::ALLOW_PRODUCTION_ENV, "1");
-        }
-        let acquired = DestructiveIndexDelete::acquire();
-        let url = acquired.as_ref().map(|d| d.delete_url("some-index"));
-        unsafe {
-            std::env::remove_var(trusty_common::test_harness::ALLOW_PRODUCTION_ENV);
-            std::env::remove_var(trusty_common::DATA_DIR_OVERRIDE_ENV);
-        }
-
-        assert_eq!(
-            url.as_deref(),
-            Some("http://127.0.0.1:59999/indexes/some-index?delete_data=true"),
-            "the explicit production opt-in must still yield a working capability"
-        );
-    }
-
-    /// The opt-in that makes the call destructive must survive refactoring —
-    /// a URL that lost `?delete_data=true` would silently leak index data
-    /// forever (#4123), the failure this whole module is downstream of.
-    /// Test: this function IS the test.
-    #[serial_test::serial]
-    #[test]
-    fn delete_url_opts_into_data_deletion() {
-        let cap = DestructiveIndexDelete {
-            base: "http://127.0.0.1:7878".into(),
-            client: reqwest::Client::new(),
-        };
-        assert_eq!(
-            cap.delete_url("my-index"),
-            "http://127.0.0.1:7878/indexes/my-index?delete_data=true"
-        );
-    }
-}
+#[path = "index_delete_guard_tests.rs"]
+mod tests;
