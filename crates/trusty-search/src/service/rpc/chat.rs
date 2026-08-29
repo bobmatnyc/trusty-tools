@@ -40,6 +40,7 @@
 //!
 //! [`chat_report`]: crate::service::ui::chat_report
 //! [`register`]: crate::service::rpc::chat::register
+//! [`METHOD_CHAT`]: crate::service::rpc::chat::METHOD_CHAT
 
 use std::sync::Arc;
 

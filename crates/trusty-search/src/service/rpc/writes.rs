@@ -8,7 +8,7 @@
 //! slice.
 //!
 //! What: the method-to-route table below, the params each method decodes, the
-//! two lane wrappers ([`bulk_guarded`] and [`unguarded`]), and [`register`].
+//! two lane wrappers (`bulk_guarded` and `unguarded`), and [`register`].
 //!
 //! ## Method → route
 //!
@@ -31,8 +31,8 @@
 //! seven land in two of them. The four per-index writes are `bulk_limited`:
 //! admission-limited on the SAME `SearchAppState` semaphore the query surface
 //! uses, and deliberately NOT deadline-bounded, because a reindex or an ingest
-//! can legitimately run for minutes ([`bulk_guarded`]). The three registry-level
-//! routes are in `free`: no limiter and no deadline at all ([`unguarded`]).
+//! can legitimately run for minutes (`bulk_guarded`). The three registry-level
+//! routes are in `free`: no limiter and no deadline at all (`unguarded`).
 //!
 //! That asymmetry is copied, not invented. Slice 3 put the whole query family
 //! behind one wrapper because axum puts the whole query family behind one
@@ -74,6 +74,8 @@
 //! Test: `writes_tests.rs` — one `*_over_the_socket_matches_the_http_body` per
 //! family plus, for every mutating core, a failure arm proving the refusal is
 //! identical AND that registry / on-disk state did not advance behind it.
+//!
+//! [`register`]: crate::service::rpc::writes::register
 
 use std::sync::Arc;
 

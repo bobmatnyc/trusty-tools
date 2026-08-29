@@ -101,6 +101,8 @@
 //! is still parked.
 //!
 //! Test: `streams_tests.rs`.
+//!
+//! [`register`]: crate::service::rpc::streams::register
 
 use std::sync::Arc;
 

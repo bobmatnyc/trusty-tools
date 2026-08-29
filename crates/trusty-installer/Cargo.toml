@@ -1,10 +1,10 @@
 [package]
 name = "trusty-installer"
-# 0.13.1 (#6285): patch — 0.13.0 is published and this PR edits `src/**`,
-# moving the trusty-search health probe onto `search.health` over UDS. Additive
-# on the public surface (`probe_http::dual_transport`); `fixed_port_for` and
-# `uds_socket_for` keep their signatures.
-version = "0.13.1"
+# 0.13.2 (#6285): patch — the `trusty-installer-v0.13.1` tag is stranded at a
+# commit that cannot pass the rustdoc intra-doc-link gate, and release tags
+# are immutable here, so 0.13.1 is spent. No code change; version bump only to
+# free a publishable tag.
+version = "0.13.2"
 edition = "2021"
 description = "Thin control plane for the claude-mpm stack: install, upgrade, restart, health, and config coordination across all trusty-* tools."
 readme = "README.md"
