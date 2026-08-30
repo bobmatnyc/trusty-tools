@@ -122,16 +122,26 @@ pub(crate) async fn delete_palace_on_socket(socket: &Path, id: &str, force: bool
 ///     record a corpus as reclaimed while every byte of it is still on disk
 ///     (#3049).
 ///
+/// #6380: `expected_root_path`, when the caller has one, is forwarded so the
+/// DAEMON refuses the delete if the registration's root changed since the
+/// caller read it. An id is derived from its root path, so a path deleted and
+/// recreated between a census and this call names a different, live index under
+/// the same id; only the daemon holds the registry, so only the daemon can
+/// compare. The single-row delete passes `None` — it acts on the roster row an
+/// operator picked, live or stale, and has no census expectation to pin to.
+///
 /// Test: `index_delete_confirms_a_real_delete`,
 /// `index_delete_reports_a_skipped_delete_as_a_failure`,
 /// `index_delete_rejects_a_confirmation_for_another_id`,
 /// `index_delete_reports_a_daemon_error_frame_as_a_failure`,
 /// `index_delete_reports_undeleted_data_as_a_failure`,
-/// `index_delete_reports_a_dead_daemon_as_unreachable`.
+/// `index_delete_reports_a_dead_daemon_as_unreachable`,
+/// `index_delete_forwards_the_expected_root_path`.
 pub(crate) async fn delete_index_on_socket(
     socket: &Path,
     id: &str,
     delete_data: bool,
+    expected_root_path: Option<&str>,
 ) -> ActionVerdict {
     if let Err(reason) = validate_id(id) {
         return ActionVerdict::Invalid {
@@ -144,10 +154,14 @@ pub(crate) async fn delete_index_on_socket(
     // path dialled a base URL read off disk, which could name a non-loopback
     // address; a socket path is derived from the data directory and dials no
     // network at all.
+    let mut params = json!({ "index_id": id, "delete_data": delete_data });
+    if let Some(root) = expected_root_path {
+        params["expected_root_path"] = Value::String(root.to_string());
+    }
     let parsed = match crate::search_uds::call(
         socket,
         crate::search_uds::METHOD_INDEX_DELETE,
-        json!({ "index_id": id, "delete_data": delete_data }),
+        params,
         ACTION_TIMEOUT,
     )
     .await
@@ -319,7 +333,7 @@ pub async fn delete_index_handler(
         Err(reason) => return ActionVerdict::Unreachable { id, reason }.into_response(),
     };
 
-    let verdict = delete_index_on_socket(&socket, &id, params.delete_data).await;
+    let verdict = delete_index_on_socket(&socket, &id, params.delete_data, None).await;
     if matches!(verdict, ActionVerdict::Succeeded { .. }) {
         refresh_metrics(&state, SEARCH_SERVICE_ID, state.search_metrics_cache()).await;
     }
@@ -659,7 +673,7 @@ pub(crate) mod tests {
                 json!({"id":"scratch","removed":true,"data_deleted":false,"quiesced":true}),
             ),
         );
-        let verdict = delete_index_on_socket(&socket, "scratch", false).await;
+        let verdict = delete_index_on_socket(&socket, "scratch", false, None).await;
         assert!(
             matches!(&verdict, ActionVerdict::Succeeded { id, .. } if id == "scratch"),
             "a confirmed delete must read as success: {verdict:?}"
@@ -689,7 +703,7 @@ pub(crate) mod tests {
                 },
             })
         });
-        let verdict = delete_index_on_socket(&socket, "scratch", true).await;
+        let verdict = delete_index_on_socket(&socket, "scratch", true, None).await;
         assert!(
             matches!(&verdict, ActionVerdict::Succeeded { detail, .. }
                 if detail["method"] == json!("search.index.delete")),
@@ -711,7 +725,7 @@ pub(crate) mod tests {
                 json!({"id":"scratch","removed":false,"data_deleted":false,"quiesced":true}),
             ),
         );
-        let verdict = delete_index_on_socket(&socket, "scratch", false).await;
+        let verdict = delete_index_on_socket(&socket, "scratch", false, None).await;
         assert_failure(&verdict, "skipped the delete");
 
         // The rendered body must say `ok: false` — the field the UI reads.
@@ -740,7 +754,7 @@ pub(crate) mod tests {
     async fn index_delete_reports_an_empty_body_as_a_failure() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let socket = stub_search_socket(tmp.path(), always_result(json!({})));
-        let verdict = delete_index_on_socket(&socket, "scratch", false).await;
+        let verdict = delete_index_on_socket(&socket, "scratch", false, None).await;
         assert_failure(&verdict, "skipped the delete");
     }
 
@@ -756,7 +770,7 @@ pub(crate) mod tests {
                 json!({"id":"someone-else","removed":true,"data_deleted":false,"quiesced":true}),
             ),
         );
-        let verdict = delete_index_on_socket(&socket, "scratch", false).await;
+        let verdict = delete_index_on_socket(&socket, "scratch", false, None).await;
         assert_failure(&verdict, "not for 'scratch'");
     }
 
@@ -773,7 +787,7 @@ pub(crate) mod tests {
                 json!({"id":"scratch","removed":false,"data_deleted":false,"quiesced":false}),
             ),
         );
-        let verdict = delete_index_on_socket(&socket, "scratch", false).await;
+        let verdict = delete_index_on_socket(&socket, "scratch", false, None).await;
         assert_failure(&verdict, "never quiesced");
     }
 
@@ -788,7 +802,7 @@ pub(crate) mod tests {
             tmp.path(),
             always_error(-32602, "delete_data must be a boolean"),
         );
-        let verdict = delete_index_on_socket(&socket, "scratch", false).await;
+        let verdict = delete_index_on_socket(&socket, "scratch", false, None).await;
         assert_failure(&verdict, "delete_data must be a boolean");
     }
 
@@ -806,7 +820,7 @@ pub(crate) mod tests {
                 json!({"id":"scratch","removed":true,"data_deleted":false,"quiesced":true}),
             ),
         );
-        let verdict = delete_index_on_socket(&socket, "scratch", true).await;
+        let verdict = delete_index_on_socket(&socket, "scratch", true, None).await;
         assert_failure(&verdict, "did not delete its on-disk data");
     }
 
@@ -818,10 +832,48 @@ pub(crate) mod tests {
     async fn index_delete_reports_a_dead_daemon_as_unreachable() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let verdict =
-            delete_index_on_socket(&tmp.path().join("absent.sock"), "scratch", false).await;
+            delete_index_on_socket(&tmp.path().join("absent.sock"), "scratch", false, None).await;
         assert!(
             matches!(verdict, ActionVerdict::Unreachable { .. }),
             "a dead daemon must read as unreachable: {verdict:?}"
+        );
+    }
+
+    /// Why (#6380): the expectation only closes the recreated-root window if it
+    /// actually reaches the daemon — the daemon holds the registry, so it is the
+    /// only party that can compare. A caller that passes none must send none, or
+    /// every pre-#6380 delete would start carrying a null the daemon has to
+    /// interpret.
+    /// Test: this is the test — the stub echoes the params back.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn index_delete_forwards_the_expected_root_path() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let socket = stub_search_socket(tmp.path(), |request: &Value| {
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "id": "scratch",
+                    "removed": true,
+                    "data_deleted": false,
+                    "quiesced": true,
+                    "sent": request["params"].clone(),
+                },
+            })
+        });
+
+        let pinned = delete_index_on_socket(&socket, "scratch", false, Some("/gone/scratch")).await;
+        assert!(
+            matches!(&pinned, ActionVerdict::Succeeded { detail, .. }
+                if detail["sent"]["expected_root_path"] == json!("/gone/scratch")),
+            "the expectation must reach the daemon verbatim: {pinned:?}"
+        );
+
+        let unpinned = delete_index_on_socket(&socket, "scratch", false, None).await;
+        assert!(
+            matches!(&unpinned, ActionVerdict::Succeeded { detail, .. }
+                if detail["sent"].get("expected_root_path").is_none()),
+            "a caller with no expectation must send no field: {unpinned:?}"
         );
     }
 

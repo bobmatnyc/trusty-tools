@@ -16,6 +16,8 @@
 //! Test: each submodule carries its own `#[cfg(test)]` tests; the route wiring
 //! is exercised by `server.rs`'s integration tests.
 
+// #6380: the delete-time census re-check the batch prune applies to every id.
+pub mod census_guard;
 pub mod cleanup;
 pub mod config;
 pub mod deletes;
