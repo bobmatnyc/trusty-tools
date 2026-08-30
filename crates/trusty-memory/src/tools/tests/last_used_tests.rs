@@ -69,6 +69,62 @@ async fn dispatch_remember_and_recall_stamp_last_used() {
     );
 }
 
+/// A recall addressed through an alias stamps the CANONICAL palace (#6424).
+///
+/// Why (round-2 review): `resolve_palace` hands back the caller's raw `palace`
+/// argument, but `PalaceRegistry::open_palace_bounded` registers the handle
+/// under the alias TARGET, and `registry.peek` resolves no aliases. Keying the
+/// stamp on the raw string therefore found nothing and silently wrote nothing,
+/// on every alias-addressed call — the operation succeeded and the column never
+/// moved. This test failed before the alias resolution was added to
+/// `stamp_palace_use`.
+/// What: registers `sc` as an alias of `stamped-canonical`, recalls through the
+/// alias, and asserts the stamp landed on the canonical palace's sidecar. The
+/// alias has no directory of its own, so the canonical sidecar is the only
+/// place it can correctly land.
+/// Test: this function.
+#[tokio::test]
+async fn an_alias_addressed_recall_stamps_the_canonical_palace() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(
+        &state,
+        "palace_create",
+        json!({"name": "stamped-canonical"}),
+    )
+    .await
+    .expect("palace_create");
+    let canonical = dispatch_tool(
+        &state,
+        "palace_info",
+        json!({"palace": "stamped-canonical"}),
+    )
+    .await
+    .expect("palace_info")["id"]
+        .as_str()
+        .expect("id")
+        .to_string();
+
+    trusty_common::palace_alias::PalaceAliasStore::register_alias(
+        &state.data_root,
+        "sc",
+        &canonical,
+    )
+    .expect("register_alias");
+
+    dispatch_tool(
+        &state,
+        "memory_recall",
+        json!({"palace": "sc", "query": "anything", "top_k": 3}),
+    )
+    .await
+    .expect("memory_recall through the alias");
+
+    assert!(
+        stamp_on_disk(&state, &canonical).is_some(),
+        "an alias-addressed recall must stamp the canonical palace it actually opened"
+    );
+}
+
 /// Inspecting a palace does not count as using it (#6424).
 ///
 /// Why: `palace_info` and `console_metrics` run on every console poll, and the

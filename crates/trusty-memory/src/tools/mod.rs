@@ -122,7 +122,7 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
 /// What: the read and write verbs a caller reaches for deliberately.
 /// `memory_recall_all` is absent on purpose: it spans every palace, so it says
 /// nothing about any one of them.
-/// Test: `dispatch_recall_stamps_last_used`,
+/// Test: `dispatch_remember_and_recall_stamp_last_used`,
 /// `dispatch_palace_info_does_not_stamp_last_used` in `tools::tests`.
 const USE_STAMPING_TOOLS: &[&str] = &[
     "memory_remember",
@@ -135,17 +135,32 @@ const USE_STAMPING_TOOLS: &[&str] = &[
 ///
 /// Why: one place, so no handler can drift into its own cadence — the throttle
 /// and its cost live in [`crate::palace_last_used`].
-/// What: resolves the same palace id the handler resolved, takes its data
+/// What: resolves the same palace id the handler resolved, follows a palace
+/// alias to its target the way the handler's own open did, takes the data
 /// directory off the already-resident handle via `peek` (no open, no eviction,
 /// no I/O), and hands both to the throttled stamp. Every step is best-effort:
 /// an unresolvable palace, a handle the registry has since evicted, or a failed
 /// write all leave the column stale rather than fail the caller's operation,
 /// which has already succeeded.
-/// Test: `dispatch_recall_stamps_last_used`.
+///
+/// Dropping the alias step breaks the column outright (#6424 review), which is
+/// why it is here. `resolve_palace` returns the caller's raw `palace` argument,
+/// but
+/// `PalaceRegistry::open_palace_bounded` registers the handle under
+/// `resolve_palace_alias`'s CANONICAL id, and `peek` is a bare LRU lookup that
+/// resolves nothing. Keying on the raw string therefore missed on every
+/// alias-addressed call, and the column never advanced for as long as callers
+/// used the alias.
+/// Test: `dispatch_remember_and_recall_stamp_last_used`,
+/// `an_alias_addressed_recall_stamps_the_canonical_palace`.
 fn stamp_palace_use(state: &AppState, args: &Value, tool: &str) {
     let Ok(palace) = helpers::resolve_palace(state, args, tool) else {
         return;
     };
+    // The same rule `PalaceRegistry::resolve_palace_alias` applies, from the
+    // one place that owns it — a second spelling here is how the two drift.
+    let palace = trusty_common::palace_alias::alias_target_if_absent(&state.data_root, &palace)
+        .unwrap_or(palace);
     let id = trusty_common::memory_core::PalaceId::new(&palace);
     let Some(data_dir) = state.registry.peek(&id).and_then(|h| h.data_dir.clone()) else {
         return;
