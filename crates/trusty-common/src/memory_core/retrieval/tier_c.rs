@@ -26,11 +26,13 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
+use parking_lot::RwLock;
+use std::sync::Arc;
+use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
 
-use crate::memory_core::palace::Drawer;
-
-use super::handle::PalaceHandle;
+use crate::memory_core::palace::{Drawer, PalaceId};
+use crate::memory_core::store::kg::KnowledgeGraph;
 
 /// Default Tier C lifetime when the writer names a slot but no `expires_at`
 /// (ADR-0028 D4, retirement condition 3).
@@ -288,12 +290,15 @@ pub(super) fn retire_in_memory(drawers: &mut [Drawer], retired_id: Option<Uuid>)
 /// those steps are not atomic with respect to a concurrent writer on the same
 /// slot, two drawers end up claiming one slot, or an incumbent is retired
 /// without a replacement landing. Two things make that unreachable here.
-/// First, `remember_with_options` holds the per-palace write mutex (#154)
-/// across this whole call, so no second writer on this palace interleaves.
-/// Second — and this is the guarantee the mutex cannot give — both drawer rows
-/// are written in ONE redb transaction, so a crash between them is impossible
-/// and no reader can observe the intermediate state. The mutex orders writers;
-/// the transaction makes each write indivisible.
+/// First, [`commit_and_mirror`] holds the per-palace commit-order guard across
+/// this call AND the in-memory mirror that follows it, so no second writer on
+/// this palace interleaves. That guard, not the write mutex (#154), is what
+/// orders writers: #6366 releases the write mutex as soon as a write exhausts
+/// its budget, while the commit it already dispatched keeps running.
+/// Second — and this is the guarantee no lock can give — both drawer rows are
+/// written in ONE redb transaction, so a crash between them is impossible and
+/// no reader can observe the intermediate state. The guard orders writers; the
+/// transaction makes each write indivisible.
 ///
 /// Why the displaced drawer's own field is cleared: #4884's storage layer moves
 /// the INDEX entry to the new owner but deliberately leaves the displaced
@@ -322,29 +327,29 @@ pub(super) fn retire_in_memory(drawers: &mut [Drawer], retired_id: Option<Uuid>)
 /// `tier_c_retirement_clears_the_displaced_drawers_own_fact_key`,
 /// `concurrent_tier_c_writes_to_one_slot_leave_exactly_one_claimant`.
 pub(super) async fn persist_with_retirement(
-    handle: &PalaceHandle,
+    ctx: &CommitCtx,
     drawer: &Drawer,
 ) -> Result<Option<Uuid>> {
     let Some(key) = drawer.fact_key.as_deref() else {
-        handle.kg.upsert_drawer(drawer).await?;
+        ctx.kg.upsert_drawer(drawer).await?;
         return Ok(None);
     };
 
-    let incumbent_id = handle
+    let incumbent_id = ctx
         .kg
         .drawer_id_for_fact_key(key)
         .context("resolve current fact_key slot occupant")?
         .filter(|id| *id != drawer.id);
 
     let Some(incumbent_id) = incumbent_id else {
-        handle.kg.upsert_drawer(drawer).await?;
+        ctx.kg.upsert_drawer(drawer).await?;
         return Ok(None);
     };
 
     // The in-memory table is a complete mirror of DRAWERS (hydrated at open,
     // maintained by remember/forget), so the point lookup avoids decoding
     // every row just to rewrite one.
-    let incumbent = handle
+    let incumbent = ctx
         .drawers
         .read()
         .iter()
@@ -352,14 +357,14 @@ pub(super) async fn persist_with_retirement(
         .cloned();
     let Some(incumbent) = incumbent else {
         tracing::warn!(
-            palace = %handle.id,
+            palace = %ctx.palace,
             fact_key = %key,
             incumbent = %incumbent_id,
             "#4886: fact_key slot names a drawer absent from the in-memory \
              table; writing the newcomer only — the index still moves, so the \
              slot keeps exactly one indexed claimant"
         );
-        handle.kg.upsert_drawer(drawer).await?;
+        ctx.kg.upsert_drawer(drawer).await?;
         return Ok(None);
     };
 
@@ -370,12 +375,113 @@ pub(super) async fn persist_with_retirement(
     // Order matters: the retirement releases the index entry it owns, then the
     // newcomer's upsert claims it. Reversed, the release would evict the
     // newcomer's own entry and report an occupied slot as free.
-    handle
-        .kg
+    ctx.kg
         .upsert_drawers_atomic(vec![retired, drawer.clone()])
         .await
         .context("commit tier-c retirement and replacement")?;
     Ok(Some(incumbent_id))
+}
+
+/// The owned slice of a palace the durable commit needs (#6366).
+///
+/// Why: [`commit_and_mirror`] runs in a task the caller's write budget cannot
+/// cancel, so it must own what it touches rather than borrow a `PalaceHandle`.
+/// Every field here is already an `Arc` on the handle, so this is three clones,
+/// not a copy of the palace.
+/// What: the palace id (for diagnostics), the KG handle (the durable write),
+/// and the in-memory drawer table (the mirror).
+/// Test: `an_abandoned_commit_still_leaves_one_claimant_for_the_slot`.
+pub(super) struct CommitCtx {
+    pub palace: PalaceId,
+    pub kg: Arc<KnowledgeGraph>,
+    pub drawers: Arc<RwLock<Vec<Drawer>>>,
+    /// Test-only stall between the durable commit and the in-memory mirror.
+    ///
+    /// Why: the ordering guard only arbitrates when an abandoned commit's tail
+    /// is still running as the next writer reaches it. That is the production
+    /// shape — #6366's trigger is a slow commit on a large `kg.redb` — but a
+    /// test cannot reproduce it by timing alone, because a test palace commits
+    /// in microseconds. Without a seam the regression test passes whether or
+    /// not the guard holds anything: measured 60/60 green with the guard
+    /// released before the mirror. This is what makes it discriminating.
+    /// What: `None` in every production path. When set, `commit_and_mirror`
+    /// sleeps for it after the durable write and before the mirror, so the
+    /// window the guard covers is wide enough for a second writer to race.
+    /// Test: `an_abandoned_commit_still_leaves_one_claimant_for_the_slot`.
+    #[cfg(test)]
+    pub commit_delay: Option<std::time::Duration>,
+}
+
+/// Commit `drawer` durably and mirror the outcome into the in-memory table, as
+/// one step no caller's timeout can split (#6366).
+///
+/// Why: #6366 bounds the write pipeline so an over-budget write releases the
+/// palace write mutex. Dropping the pipeline future does NOT stop the commit it
+/// dispatched — `upsert_drawers_atomic` runs on `spawn_blocking`, which is
+/// uncancellable, and `KgWriter::upsert_drawer` hands the op to an actor task
+/// the future does not own. So the durable half landed while the in-memory
+/// mirror (`retire_in_memory` + `push`) never ran. The next writer then read
+/// the moved `DRAWERS_BY_FACT_KEY` index, failed to find that id in `drawers`,
+/// and took [`persist_with_retirement`]'s "absent from the in-memory table"
+/// branch: it wrote its own newcomer WITHOUT retiring the incumbent, leaving
+/// two drawer rows carrying one live `fact_key`. That is the two-claimant state
+/// this module's header says no reader may observe.
+///
+/// What: takes `order` — the palace's commit-order guard, acquired by the
+/// caller while still cancellable — and holds it across BOTH the durable commit
+/// and the mirror, then releases it. Running inside `tokio::spawn` makes the
+/// pair uncancellable; holding the guard across it makes the next writer's
+/// incumbent read wait for the mirror rather than race it. A write abandoned
+/// mid-commit therefore still converges: it lands in redb and in `drawers`
+/// together, and the writer behind it retires it normally.
+///
+/// Panic contract: `commit_mutex` is a `tokio::sync::Mutex` and does NOT
+/// poison. A panic between the durable commit and the mirror unwinds the task,
+/// drops the guard, and releases the mutex with no signal — leaving the write
+/// durable but unmirrored and the next writer free to walk into the fallback
+/// this function exists to close. The mirror block does no fallible work today,
+/// so this is latent. Code inserted between the commit and the mirror must stay
+/// panic-free, or must re-verify the slot on the panic path.
+///
+/// Two writers abandoned in the same window commit in guard-acquisition order,
+/// which is the order their callers reached the commit — not necessarily the
+/// order they took the write mutex. Either order leaves exactly one claimant,
+/// which is the invariant; which of the two wins the slot is not.
+/// Test: `an_abandoned_commit_still_leaves_one_claimant_for_the_slot`,
+/// `a_second_writer_waits_for_an_abandoned_commit_to_mirror`.
+pub(super) async fn commit_and_mirror(
+    ctx: CommitCtx,
+    drawer: Drawer,
+    order: OwnedMutexGuard<()>,
+) -> Result<()> {
+    let retired = persist_with_retirement(&ctx, &drawer)
+        .await
+        .context("persist drawer metadata")?;
+
+    // #6366: the seam a test uses to widen the commit window to the shape the
+    // issue is actually about. In production the trigger is a slow commit — a
+    // 326 MB `kg.redb` — so an abandoned write's tail OUTLASTS the next
+    // writer's fresh pipeline, which is the wide window this guard exists to
+    // arbitrate. A test that dispatches its abandoned writer directly, skipping
+    // the pre-commit legs the second writer must still run, closes that window
+    // by construction and would pass whether or not the guard held anything.
+    #[cfg(test)]
+    if let Some(delay) = ctx.commit_delay {
+        tokio::time::sleep(delay).await;
+    }
+
+    {
+        // #4886: mirror the retirement under the SAME lock as the push, so a
+        // reader never sees the newcomer present while the displaced drawer
+        // still claims the slot. No await inside — this is a parking_lot lock.
+        let mut drawers = ctx.drawers.write();
+        retire_in_memory(&mut drawers, retired);
+        drawers.push(drawer);
+    }
+    // #6366: explicit so the release is visibly ordered AFTER the mirror — the
+    // next writer's incumbent read must not start before this point.
+    drop(order);
+    Ok(())
 }
 
 #[cfg(test)]

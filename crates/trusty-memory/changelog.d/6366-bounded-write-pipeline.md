@@ -1,0 +1,3 @@
+Fixed
+
+- **A slow commit no longer stalls every writer on the palace.** `memory_remember`, `memory_note`, and `task_add` hold the per-palace write mutex across the whole write; nothing bounded the pipeline that ran while they held it, so one slow commit blocked the queue behind it indefinitely — three `memory_note` calls got no response for 1800 s and were aborted by the MCP client while the daemon stayed healthy, `memory_recall` kept answering, and the writes landed server-side later. `write_drawer` now passes `AppState::write_pipeline_budget` (`TRUSTY_WRITE_PIPELINE_TIMEOUT_SECS`, default 240 s) into the write, so an over-budget write fails with a named reason and releases the mutex instead of holding it ([#6366](https://github.com/bobmatnyc/trusty-tools/issues/6366))

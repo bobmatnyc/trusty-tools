@@ -221,3 +221,84 @@ fn an_exhausted_write_budget_gives_the_open_queue_leg_nothing() {
         timeouts::open_queue_timeout()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Pipeline ceiling (issue #6366). The budget above bounds the two waits BEFORE
+// the palace write mutex is held; these bound the pipeline that runs once it IS
+// held — the leg that produced the reported 1800 s client-side abort.
+// ---------------------------------------------------------------------------
+
+/// Ceiling on one write's critical section, short enough that no real pipeline
+/// fits inside it. Injected per-instance, never via
+/// `TRUSTY_WRITE_PIPELINE_TIMEOUT_SECS`, which is process-wide.
+const TEST_PIPELINE_BUDGET: Duration = Duration::ZERO;
+
+/// Build a Ready `AppState` with an injected pipeline ceiling and one palace.
+async fn pipeline_capped_state() -> (AppState, tempfile::TempDir) {
+    skip_palace_enforcement();
+    seed_embedder();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state =
+        AppState::new(tmp.path().to_path_buf()).with_write_pipeline_budget(TEST_PIPELINE_BUDGET);
+    state.set_ready();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "pipeline"}))
+        .await
+        .expect("palace_create");
+    (state, tmp)
+}
+
+/// Why (issue #6366): the daemon's write handlers are the surface the reported
+/// stall came through, so the ceiling has to be reachable from there. A bound
+/// that existed only on `PalaceHandle` and was never threaded through
+/// `write_drawer` would leave `memory_note` exactly as unbounded as before.
+/// What: drives the real `memory_note` handler against a state whose pipeline
+/// ceiling cannot be met, and asserts the error names the ceiling instead of
+/// reporting a stored drawer.
+/// Test: this test.
+#[tokio::test]
+async fn memory_note_surfaces_the_pipeline_ceiling() {
+    let (state, _tmp) = pipeline_capped_state().await;
+
+    let started = Instant::now();
+    let err = handle_memory_note(
+        &state,
+        json!({"palace": "pipeline", "content": "a curated fact that clears the content gate"}),
+    )
+    .await
+    .expect_err("a write that cannot fit its pipeline ceiling must error, not stall");
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < CEILING,
+        "the ceiling must be enforced promptly; got {elapsed:?}"
+    );
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("#6366") && msg.contains("write pipeline exceeded"),
+        "the error must name the pipeline ceiling and its issue; got: {msg}"
+    );
+}
+
+/// Why (issue #6366): the reported symptom is that ONE slow write stalls every
+/// other writer on that palace. A ceiling that fired but left the mutex held
+/// would move the stall rather than remove it.
+/// What: runs a write that trips the ceiling, then asserts the palace's write
+/// mutex is immediately available to the next caller.
+/// Test: this test.
+#[tokio::test]
+async fn a_refused_write_leaves_the_palace_write_mutex_free() {
+    let (state, _tmp) = pipeline_capped_state().await;
+
+    let _ = handle_memory_note(
+        &state,
+        json!({"palace": "pipeline", "content": "a curated fact that clears the content gate"}),
+    )
+    .await;
+
+    let write_lock = state.palace_write_lock("pipeline");
+    assert!(
+        write_lock.try_lock().is_ok(),
+        "#6366: a refused write must not leave the palace write mutex held — \
+         that would stall every writer behind it, which is the reported defect"
+    );
+}

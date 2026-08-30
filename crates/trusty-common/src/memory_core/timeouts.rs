@@ -84,6 +84,55 @@ const _: () = assert!(
     "the joint write budget must be smaller than the additive worst case it replaces (#4002)"
 );
 
+/// Total wall-clock ceiling for the embed+upsert+persist pipeline that runs
+/// while the per-palace write mutex is held (issue #6366).
+///
+/// Why: [`DEFAULT_WRITE_OP_BUDGET_SECS`] bounds only the two ACQUISITION legs.
+/// Once a writer holds the mutex, the pipeline it runs had no ceiling of any
+/// kind, so a slow commit held the mutex for as long as it took and every other
+/// writer on that palace waited behind it. Three `memory_note` calls were
+/// aborted client-side after 1800 s while the daemon stayed healthy and the
+/// writes landed later. 240 s is the operator-visible ceiling on one write's
+/// critical section: long enough that no legitimate write can trip it, short
+/// enough that a stall surfaces as a named error rather than a client abort.
+const DEFAULT_WRITE_PIPELINE_SECS: u64 = 240;
+
+/// The pipeline ceiling must clear the two embedder legs it contains, or a cold
+/// CoreML compile on an otherwise-healthy host would trip it and turn a slow
+/// first write into a failed one. Both legs run inside the critical section
+/// this budget governs, so the relationship is a build failure rather than a
+/// test failure.
+const _: () = assert!(
+    DEFAULT_WRITE_PIPELINE_SECS > DEFAULT_EMBEDDER_INIT_SECS + DEFAULT_EMBED_BATCH_SECS,
+    "the write-pipeline ceiling must exceed the embedder legs it contains (#6366)"
+);
+
+/// The ceiling governs the critical section the acquisition budget stops at. A
+/// ceiling at or below that budget would mean a write which waited its full
+/// turn for the mutex could never then be allowed to run — a different, and
+/// wrong, policy.
+const _: () = assert!(
+    DEFAULT_WRITE_PIPELINE_SECS > DEFAULT_WRITE_OP_BUDGET_SECS,
+    "the write-pipeline ceiling must exceed the acquisition budget it follows (#6366)"
+);
+
+/// Elapsed pipeline duration above which a COMPLETED write is logged as slow.
+///
+/// Why: issue #6366 found nothing in `stderr.log` for the whole 1800 s window —
+/// the stall was completely silent, so the only evidence was client-side. A
+/// write that finishes but takes seconds under the mutex is the leading
+/// indicator of the stall, and naming it costs one `warn!` per slow write.
+/// 5 s is two orders of magnitude above the "< 1 s normally" the write-mutex
+/// docs assume, so an ordinary write never logs.
+const SLOW_WRITE_WARN_SECS: u64 = 5;
+
+/// A warn threshold at or above the ceiling could never fire — the write would
+/// have failed first — which would silently retire the diagnostic.
+const _: () = assert!(
+    SLOW_WRITE_WARN_SECS < DEFAULT_WRITE_PIPELINE_SECS,
+    "the slow-write warning must be reachable below the pipeline ceiling (#6366)"
+);
+
 /// Return the `FastEmbedder::new()` init timeout.
 ///
 /// Why: Overridable via `TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS` so operators on
@@ -144,6 +193,81 @@ pub fn open_queue_timeout() -> Duration {
 /// replaces is a `const` assertion beside `DEFAULT_WRITE_OP_BUDGET_SECS`.
 pub fn write_op_budget() -> Duration {
     parse_secs_env("TRUSTY_WRITE_OP_BUDGET_SECS", DEFAULT_WRITE_OP_BUDGET_SECS)
+}
+
+/// Return the ceiling on one write's embed+upsert+persist pipeline (#6366).
+///
+/// Why: Overridable via `TRUSTY_WRITE_PIPELINE_TIMEOUT_SECS`. This is the
+/// number an operator reasons about when a palace's writes go slow — "how long
+/// may one write hold this palace's write mutex" — as distinct from
+/// [`write_op_budget`], which bounds only the waits BEFORE the mutex is held.
+/// What: Reads the env var; falls back to `DEFAULT_WRITE_PIPELINE_SECS` (240).
+/// Test: `write_pipeline_timeout_default`; its relationship to the embedder
+/// legs it contains is a `const` assertion beside `DEFAULT_WRITE_PIPELINE_SECS`.
+pub fn write_pipeline_timeout() -> Duration {
+    let configured = parse_secs_env(
+        "TRUSTY_WRITE_PIPELINE_TIMEOUT_SECS",
+        DEFAULT_WRITE_PIPELINE_SECS,
+    );
+    let floored = floor_write_pipeline(configured);
+    if floored != configured {
+        tracing::warn!(
+            configured_secs = configured.as_secs(),
+            floor_secs = WRITE_PIPELINE_FLOOR_SECS,
+            applied_secs = floored.as_secs(),
+            "#6366: TRUSTY_WRITE_PIPELINE_TIMEOUT_SECS is below the embedder \
+             legs the write pipeline contains, so every cold write would fail \
+             the moment the embedder initialises. Clamped to the compiled-in \
+             default; raise the value above the floor to set it deliberately"
+        );
+    }
+    floored
+}
+
+/// The lowest write-pipeline ceiling that can still contain the embedder legs.
+///
+/// Why: the `const` assertion beside [`DEFAULT_WRITE_PIPELINE_SECS`] protects
+/// only the compiled-in default. `TRUSTY_WRITE_PIPELINE_TIMEOUT_SECS` bypasses
+/// it entirely, so `=0` (or any value under the legs' sum) silently failed
+/// every write on every palace with no signal but the per-write error.
+const WRITE_PIPELINE_FLOOR_SECS: u64 = DEFAULT_EMBEDDER_INIT_SECS + DEFAULT_EMBED_BATCH_SECS;
+
+/// The floor is a lower bound the default must itself satisfy, or clamping
+/// would raise a correctly-configured value.
+const _: () = assert!(
+    DEFAULT_WRITE_PIPELINE_SECS > WRITE_PIPELINE_FLOOR_SECS,
+    "the compiled-in default must clear the floor it is clamped to (#6366)"
+);
+
+/// Clamp a configured write-pipeline ceiling up to the embedder legs it must
+/// contain (#6366).
+///
+/// Why: split out as a pure function so the clamp is testable without env
+/// mutation, matching how [`parse_secs_with`] separates parsing from lookup.
+/// What: returns `configured` when it strictly exceeds
+/// [`WRITE_PIPELINE_FLOOR_SECS`]; otherwise returns
+/// [`DEFAULT_WRITE_PIPELINE_SECS`] — the compiled-in value the `const`
+/// assertions already prove sound, rather than the bare floor.
+/// Test: `a_zero_pipeline_override_is_clamped_to_the_default`,
+/// `an_override_below_the_embedder_legs_is_clamped`,
+/// `an_override_above_the_floor_is_honoured`.
+pub fn floor_write_pipeline(configured: Duration) -> Duration {
+    if configured > Duration::from_secs(WRITE_PIPELINE_FLOOR_SECS) {
+        configured
+    } else {
+        Duration::from_secs(DEFAULT_WRITE_PIPELINE_SECS)
+    }
+}
+
+/// Return the elapsed time above which a completed write is logged as slow.
+///
+/// Why: Overridable via `TRUSTY_SLOW_WRITE_WARN_SECS` so an operator chasing a
+/// stall can lower it without recompiling, or raise it on a host where writes
+/// are legitimately slow and the warning is only noise.
+/// What: Reads the env var; falls back to `SLOW_WRITE_WARN_SECS` (5).
+/// Test: `slow_write_warn_threshold_default`.
+pub fn slow_write_warn_threshold() -> Duration {
+    parse_secs_env("TRUSTY_SLOW_WRITE_WARN_SECS", SLOW_WRITE_WARN_SECS)
 }
 
 /// One operation's remaining share of a joint wait budget (issue #4002).
@@ -409,6 +533,82 @@ mod tests {
         unsafe { std::env::remove_var("TRUSTY_WRITE_OP_BUDGET_SECS") };
         let t = write_op_budget();
         assert_eq!(t, Duration::from_secs(DEFAULT_WRITE_OP_BUDGET_SECS));
+    }
+
+    /// Why (issue #6366): Guard that the pipeline ceiling defaults to 240 s
+    /// when the env var is absent.
+    /// What: Hold the env mutex, unset the var, call `write_pipeline_timeout()`.
+    /// Test: itself.
+    #[test]
+    fn write_pipeline_timeout_default() {
+        let _guard = env_lock();
+        unsafe { std::env::remove_var("TRUSTY_WRITE_PIPELINE_TIMEOUT_SECS") };
+        let t = write_pipeline_timeout();
+        assert_eq!(t, Duration::from_secs(DEFAULT_WRITE_PIPELINE_SECS));
+    }
+
+    /// Why (issue #6366): `TRUSTY_WRITE_PIPELINE_TIMEOUT_SECS=0` parsed to
+    /// `Duration::ZERO` and was honoured, so `remember_within`'s zero-budget
+    /// rejection failed EVERY write on EVERY palace with nothing at startup
+    /// saying why. The `const` assertion beside `DEFAULT_WRITE_PIPELINE_SECS`
+    /// never saw the override.
+    /// What: clamps zero up to the compiled-in default.
+    /// Test: itself.
+    #[test]
+    fn a_zero_pipeline_override_is_clamped_to_the_default() {
+        assert_eq!(
+            floor_write_pipeline(Duration::ZERO),
+            Duration::from_secs(DEFAULT_WRITE_PIPELINE_SECS)
+        );
+    }
+
+    /// Why (issue #6366): a value below the embedder legs is the less obvious
+    /// half of the same defect — a cold CoreML compile alone can take 180 s, so
+    /// any ceiling under the legs' sum fails cold writes on a healthy host.
+    /// What: a value just under the floor clamps; the floor itself clamps too,
+    /// mirroring the strict `>` the const assertions use.
+    /// Test: itself.
+    #[test]
+    fn an_override_below_the_embedder_legs_is_clamped() {
+        let default = Duration::from_secs(DEFAULT_WRITE_PIPELINE_SECS);
+        assert_eq!(floor_write_pipeline(Duration::from_secs(1)), default);
+        assert_eq!(
+            floor_write_pipeline(Duration::from_secs(WRITE_PIPELINE_FLOOR_SECS - 1)),
+            default
+        );
+        assert_eq!(
+            floor_write_pipeline(Duration::from_secs(WRITE_PIPELINE_FLOOR_SECS)),
+            default
+        );
+    }
+
+    /// Why (issue #6366): the clamp must not quietly overrule an operator who
+    /// raised or lowered the ceiling deliberately but legitimately — otherwise
+    /// the knob the error message advertises would not work.
+    /// What: values above the floor pass through untouched, in both directions
+    /// relative to the default.
+    /// Test: itself.
+    #[test]
+    fn an_override_above_the_floor_is_honoured() {
+        for secs in [WRITE_PIPELINE_FLOOR_SECS + 1, 600, 3600] {
+            assert_eq!(
+                floor_write_pipeline(Duration::from_secs(secs)),
+                Duration::from_secs(secs),
+                "a {secs}s ceiling clears the floor and must be honoured"
+            );
+        }
+    }
+
+    /// Why (issue #6366): Guard that the slow-write warning defaults to 5 s.
+    /// What: Hold the env mutex, unset the var, call
+    /// `slow_write_warn_threshold()`.
+    /// Test: itself.
+    #[test]
+    fn slow_write_warn_threshold_default() {
+        let _guard = env_lock();
+        unsafe { std::env::remove_var("TRUSTY_SLOW_WRITE_WARN_SECS") };
+        let t = slow_write_warn_threshold();
+        assert_eq!(t, Duration::from_secs(SLOW_WRITE_WARN_SECS));
     }
 
     // -------------------------------------------------------------------------
