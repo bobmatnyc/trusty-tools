@@ -8,11 +8,16 @@
 //! What: for each in-scope daemon member, runs the strategy-aware health probe
 //! and the four diagnostic checks, builds a [`DoctorReport`], and renders a human
 //! drill-down or `--json` envelope. Returns exit 0 when every member is OK
-//! (binary present + not `down`), 2 otherwise.
+//! (binary present + a determined, not-`down` health), 4 when the worst member
+//! is merely undetermined, 2 otherwise.
 //!
 //! Test: `tests` covers the per-member check aggregation (`MemberDoctor::ok`),
 //! the report verdict, and the unknown-member error path; the filesystem/PATH
 //! probes are side-effecting.
+//!
+//! #4847: a member whose health is `unknown` no longer counts as OK. It is
+//! neither a pass nor a failure, so it has its own verdict (`undetermined`) and
+//! its own exit code (4), leaving exit 2 to mean a member is genuinely broken.
 
 use serde::Serialize;
 
@@ -46,15 +51,40 @@ pub struct MemberDoctor {
 }
 
 impl MemberDoctor {
+    /// Whether this member's diagnostics FAILED.
+    ///
+    /// Why: the report verdict + exit code reduce over this and
+    /// [`MemberDoctor::undetermined`].
+    /// What: failed iff the binary is missing from PATH OR its health is `down`.
+    /// Absent plist / unrecorded port are reported but not fatal (a member may
+    /// be stopped intentionally).
+    /// Test: `tests::member_ok_requires_path_and_not_down`.
+    pub fn failed(&self) -> bool {
+        !self.on_path || self.health == health_str::DOWN
+    }
+
+    /// Whether this member's health could not be determined (#4847).
+    ///
+    /// Why: `unknown` means the probe could not tell, which is neither a pass
+    /// nor a failure. Folding it into either one throws away the only fact the
+    /// row carries.
+    /// What: undetermined iff the member did not fail AND its health is
+    /// `unknown` — a member off PATH is already a failure and stays one.
+    /// Test: `tests::member_unknown_is_undetermined_not_ok`.
+    pub fn undetermined(&self) -> bool {
+        !self.failed() && self.health == health_str::UNKNOWN
+    }
+
     /// Whether this member passed its diagnostics.
     ///
-    /// Why: the report verdict + exit code reduce over this.
-    /// What: OK iff the binary is on PATH AND its health is not `down`. Absent
-    /// plist / unrecorded port are reported but not fatal (a member may be
-    /// stopped intentionally); a missing binary or a `down` daemon is the failure.
-    /// Test: `tests::member_ok_requires_path_and_not_down`.
+    /// Why: the human row and the verdict both need "passed" to mean passed —
+    /// before #4847 it also meant "we could not tell", which is what made the
+    /// green verdict unfalsifiable for an `unknown` member.
+    /// What: OK iff the member neither failed nor is undetermined.
+    /// Test: `tests::member_ok_requires_path_and_not_down`,
+    /// `tests::member_unknown_is_undetermined_not_ok`.
     pub fn ok(&self) -> bool {
-        self.on_path && self.health != health_str::DOWN
+        !self.failed() && !self.undetermined()
     }
 }
 
@@ -69,7 +99,7 @@ pub struct DoctorReport {
     pub command: &'static str,
     /// Per-member diagnostics in stable-set order.
     pub members: Vec<MemberDoctor>,
-    /// Overall verdict: `ok` | `degraded`.
+    /// Overall verdict: `ok` | `undetermined` | `degraded`.
     pub verdict: &'static str,
 }
 
@@ -77,13 +107,18 @@ impl DoctorReport {
     /// Build the report and derive the verdict.
     ///
     /// Why: one place derives the verdict so JSON + exit code agree.
-    /// What: `degraded` when any member is not `ok`, else `ok`.
-    /// Test: `tests::report_verdict_degraded`.
+    /// What: worst-wins over the per-member states — `degraded` when any member
+    /// failed, else `undetermined` when any member's health could not be
+    /// determined (#4847), else `ok`.
+    /// Test: `tests::report_verdict_degraded`,
+    /// `tests::report_verdict_undetermined`.
     fn build(members: Vec<MemberDoctor>) -> Self {
-        let verdict = if members.iter().all(MemberDoctor::ok) {
-            "ok"
-        } else {
+        let verdict = if members.iter().any(MemberDoctor::failed) {
             "degraded"
+        } else if members.iter().any(MemberDoctor::undetermined) {
+            "undetermined"
+        } else {
+            "ok"
         };
         Self {
             command: "stack doctor",
@@ -92,16 +127,19 @@ impl DoctorReport {
         }
     }
 
-    /// Process exit code: 0 ok, 2 degraded.
+    /// Process exit code: 0 ok, 2 degraded, 4 undetermined.
     ///
-    /// Why: triage scripts branch on this.
-    /// What: `2` when `degraded`, else `0`.
-    /// Test: `tests::report_verdict_degraded`.
+    /// Why: triage scripts branch on this, and the sweep that determined nothing
+    /// must not hand them a 0 (#4847). Giving `undetermined` its own code keeps
+    /// exit 2 meaning a member is actually broken.
+    /// What: `2` when `degraded`, `4` when `undetermined`, else `0`.
+    /// Test: `tests::report_verdict_degraded`,
+    /// `tests::report_verdict_undetermined`.
     fn exit_code(&self) -> i32 {
-        if self.verdict == "degraded" {
-            2
-        } else {
-            0
+        match self.verdict {
+            "degraded" => 2,
+            "undetermined" => 4,
+            _ => 0,
         }
     }
 }
@@ -237,8 +275,28 @@ mod tests {
         assert!(md("a", "healthy", true).ok());
         assert!(!md("a", "healthy", false).ok()); // not on PATH
         assert!(!md("a", "down", true).ok()); // down
-                                              // unknown health (mpm) with binary present is OK.
-        assert!(md("trusty-mpm", "unknown", true).ok());
+        assert!(md("a", "healthy", false).failed());
+        assert!(md("a", "down", true).failed());
+        assert!(!md("a", "healthy", true).failed());
+    }
+
+    /// Why: #4847 — `unknown` health used to satisfy `ok`, so a member the probe
+    /// could not read at all advanced a green verdict. It must now be its own
+    /// state: not a pass, not a failure.
+    /// What: an on-PATH member with `unknown` health is neither `ok` nor
+    /// `failed`, and IS `undetermined`. A member that is off PATH stays a
+    /// failure whatever its health word says, so it is never undetermined.
+    /// Test: This is the test.
+    #[test]
+    fn member_unknown_is_undetermined_not_ok() {
+        let m = md("trusty-mpm", "unknown", true);
+        assert!(!m.ok());
+        assert!(!m.failed());
+        assert!(m.undetermined());
+
+        let absent = md("trusty-mpm", "unknown", false);
+        assert!(absent.failed());
+        assert!(!absent.undetermined());
     }
 
     /// Why: the JSON envelope is a contract; pin its shape.
@@ -289,9 +347,33 @@ mod tests {
     fn report_verdict_ok() {
         let r = DoctorReport::build(vec![
             md("trusty-search", "healthy", true),
-            md("trusty-mpm", "unknown", true),
+            md("trusty-mpm", "healthy", true),
         ]);
         assert_eq!(r.verdict, "ok");
         assert_eq!(r.exit_code(), 0);
+    }
+
+    /// Why: #4847 — this exact sweep (every member healthy except one reporting
+    /// `unknown`) is what the issue observed exiting 0 with verdict `ok`. It
+    /// must now be visibly not-green, and it must not claim `degraded` either,
+    /// which would report a broken daemon that nobody observed.
+    /// What: healthy + unknown → `undetermined`, exit 4. Adding a `down` member
+    /// takes it to `degraded`/exit 2, so a real failure still outranks it.
+    /// Test: This is the test.
+    #[test]
+    fn report_verdict_undetermined() {
+        let r = DoctorReport::build(vec![
+            md("trusty-search", "healthy", true),
+            md("trusty-mpm", "unknown", true),
+        ]);
+        assert_eq!(r.verdict, "undetermined");
+        assert_eq!(r.exit_code(), 4);
+
+        let worse = DoctorReport::build(vec![
+            md("trusty-search", "down", true),
+            md("trusty-mpm", "unknown", true),
+        ]);
+        assert_eq!(worse.verdict, "degraded");
+        assert_eq!(worse.exit_code(), 2);
     }
 }

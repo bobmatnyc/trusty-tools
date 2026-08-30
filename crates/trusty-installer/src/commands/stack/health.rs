@@ -7,7 +7,8 @@
 //! What: probes each daemon member via `probe::probe_member_health` (an HTTP
 //! `GET /health` probe since #4246, not a `health --json` subprocess), builds a
 //! [`HealthReport`], renders a human matrix or `--json` envelope, and returns an
-//! exit code (0 ready, 2 when any daemon is `down`).
+//! exit code (0 ready, 2 when any daemon is `down`, 4 when a daemon's health is
+//! only `unknown` — #4847: an undetermined health never reports as ready).
 //!
 //! Test: `tests` covers the report shaping + verdict derivation; the probe is
 //! side-effecting (covered in `probe`).
@@ -42,7 +43,7 @@ pub struct HealthReport {
     pub command: &'static str,
     /// Per-member rows in stable-set order.
     pub members: Vec<HealthRow>,
-    /// Overall verdict: `ready` | `degraded`.
+    /// Overall verdict: `ready` | `undetermined` | `degraded`.
     pub verdict: &'static str,
 }
 
@@ -50,24 +51,37 @@ impl HealthReport {
     /// Build a report and compute the verdict.
     ///
     /// Why: one place derives the verdict so the exit code + JSON agree.
-    /// What: degrade policy — both `down` AND `not_installed` degrade the verdict
-    /// to `degraded`. A `down` daemon is the running-but-broken failure signal; a
-    /// `not_installed` member is a real gap in the resolved stable set (an
-    /// operator after a failed install must NOT see green). Only a genuinely
-    /// `unknown` member does NOT degrade — its health is undetermined, not
-    /// absent. `stale` also stays non-degrading (running, just below the version
-    /// floor). (#4925: trusty-mpm used to be this policy's one live example; it is
-    /// probed over HTTP now, so a stopped mpm degrades the verdict like any other
-    /// daemon. Whether an undetermined health should advance a green verdict at
-    /// all is #4847's open question and is untouched here.)
+    /// What: three verdicts, worst-wins. `down` or `not_installed` on any member
+    /// is `degraded` — a `down` daemon is the running-but-broken failure signal,
+    /// and a `not_installed` member is a real gap in the resolved stable set (an
+    /// operator after a failed install must NOT see green). Otherwise an
+    /// `unknown` member makes the verdict `undetermined`: the probe could not
+    /// tell, which is a different claim from `ready`. `stale` stays
+    /// non-degrading (running, just below the version floor), so an
+    /// all-healthy-or-stale sweep is `ready`.
+    ///
+    /// #4847: `unknown` used to fold into `ready`, so a sweep that determined
+    /// nothing about a member still exited 0 and a harness gating on that exit
+    /// code went green over a stack that was not up. `unknown` now carries its
+    /// own verdict and its own non-zero exit instead of counting as failure, so
+    /// a broken daemon (exit 2) stays distinguishable from one that could not be
+    /// probed (exit 4).
     /// Test: `tests::verdict_down_is_degraded`,
     /// `tests::verdict_not_installed_is_degraded`,
-    /// `tests::verdict_unknown_is_ready`.
+    /// `tests::verdict_unknown_is_undetermined`,
+    /// `tests::verdict_down_outranks_unknown`.
     fn build(members: Vec<HealthRow>) -> Self {
         let degrades = members
             .iter()
             .any(|m| m.health == health_str::DOWN || m.health == health_str::NOT_INSTALLED);
-        let verdict = if degrades { "degraded" } else { "ready" };
+        let undetermined = members.iter().any(|m| m.health == health_str::UNKNOWN);
+        let verdict = if degrades {
+            "degraded"
+        } else if undetermined {
+            "undetermined"
+        } else {
+            "ready"
+        };
         Self {
             command: "stack health",
             members,
@@ -75,16 +89,19 @@ impl HealthReport {
         }
     }
 
-    /// Process exit code: 0 ready, 2 degraded.
+    /// Process exit code: 0 ready, 2 degraded, 4 undetermined.
     ///
-    /// Why: monitoring scripts branch on this.
-    /// What: `2` when `degraded`, else `0`.
+    /// Why: monitoring scripts branch on this, so three verdicts need three
+    /// codes. A script that treats any non-zero as "not ready" is then right
+    /// about `undetermined` too, and one that discriminates can still separate a
+    /// broken daemon (2) from an unprobeable one (4) (#4847).
+    /// What: `2` when `degraded`, `4` when `undetermined`, else `0`.
     /// Test: `tests::exit_code_reflects_verdict`.
     fn exit_code(&self) -> i32 {
-        if self.verdict == "degraded" {
-            2
-        } else {
-            0
+        match self.verdict {
+            "degraded" => 2,
+            "undetermined" => 4,
+            _ => 0,
         }
     }
 }
@@ -168,29 +185,53 @@ mod tests {
         assert_eq!(r.exit_code(), 2);
     }
 
-    /// Why: an `unknown` member must NOT degrade the verdict — its health is
-    /// merely undetermined, not absent. (#4925: the `trusty-mpm` name is now just
-    /// a label on a hand-written row; mpm itself is probed and no longer reports
-    /// `unknown`. The POLICY under test is unchanged and still live.)
-    /// What: one unknown member → `ready`, exit 0. A mix of unknown + healthy
-    /// also stays ready, proving unknown never falsely degrades.
+    /// Why: #4847 — an `unknown` member must not report as `ready`. The probe
+    /// determined nothing about it, and a harness that gates on this exit code
+    /// passed a stack that was not up. `unknown` is not `degraded` either: it is
+    /// its own verdict with its own non-zero exit.
+    /// What: one unknown member → `undetermined`, exit 4. Mixing unknown with a
+    /// healthy member keeps it `undetermined`, so one determined member cannot
+    /// carry the sweep back to green.
     /// Test: This is the test.
     #[test]
-    fn verdict_unknown_is_ready() {
+    fn verdict_unknown_is_undetermined() {
         let r = HealthReport::build(vec![row("trusty-mpm", "unknown")]);
-        assert_eq!(r.verdict, "ready");
-        assert_eq!(r.exit_code(), 0);
+        assert_eq!(r.verdict, "undetermined");
+        assert_eq!(r.exit_code(), 4);
 
         let mixed = HealthReport::build(vec![
             row("trusty-search", "healthy"),
             row("trusty-mpm", "unknown"),
         ]);
-        assert_eq!(mixed.verdict, "ready");
-        assert_eq!(mixed.exit_code(), 0);
+        assert_eq!(mixed.verdict, "undetermined");
+        assert_eq!(mixed.exit_code(), 4);
+    }
+
+    /// Why: the two non-green verdicts must not mask each other. A broken daemon
+    /// is the actionable signal, so `degraded` outranks `undetermined` when both
+    /// are present (#4847).
+    /// What: down + unknown → `degraded`, exit 2. `stale` alongside unknown does
+    /// not degrade, so that mix stays `undetermined`.
+    /// Test: This is the test.
+    #[test]
+    fn verdict_down_outranks_unknown() {
+        let both = HealthReport::build(vec![
+            row("trusty-search", "down"),
+            row("trusty-mpm", "unknown"),
+        ]);
+        assert_eq!(both.verdict, "degraded");
+        assert_eq!(both.exit_code(), 2);
+
+        let stale_and_unknown = HealthReport::build(vec![
+            row("trusty-search", "stale"),
+            row("trusty-mpm", "unknown"),
+        ]);
+        assert_eq!(stale_and_unknown.verdict, "undetermined");
+        assert_eq!(stale_and_unknown.exit_code(), 4);
     }
 
     /// Why: the exit code must track the verdict.
-    /// What: asserts 0 for ready, 2 for degraded.
+    /// What: asserts 0 for ready, 2 for degraded, 4 for undetermined (#4847).
     /// Test: This is the test.
     #[test]
     fn exit_code_reflects_verdict() {
@@ -198,5 +239,7 @@ mod tests {
         assert_eq!(ready.exit_code(), 0);
         let degraded = HealthReport::build(vec![row("trusty-search", "down")]);
         assert_eq!(degraded.exit_code(), 2);
+        let undetermined = HealthReport::build(vec![row("trusty-search", "unknown")]);
+        assert_eq!(undetermined.exit_code(), 4);
     }
 }

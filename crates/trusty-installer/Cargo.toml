@@ -1,10 +1,10 @@
 [package]
 name = "trusty-installer"
-# 0.13.2 (#6285): patch — the `trusty-installer-v0.13.1` tag is stranded at a
-# commit that cannot pass the rustdoc intra-doc-link gate, and release tags
-# are immutable here, so 0.13.1 is spent. No code change; version bump only to
-# free a publishable tag.
-version = "0.13.2"
+# 0.13.3 (#4847, #4917): patch — 0.13.2 is published and this PR edits
+# `src/**`. `stack doctor`/`stack health` gain an `undetermined` verdict and
+# exit 4, and `MemberDoctor::ok` narrows (an `unknown` member no longer passes);
+# `MemberDoctor::failed`/`undetermined` are additive. No signature changes.
+version = "0.13.3"
 edition = "2021"
 description = "Thin control plane for the claude-mpm stack: install, upgrade, restart, health, and config coordination across all trusty-* tools."
 readme = "README.md"

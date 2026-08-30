@@ -192,9 +192,12 @@ impl VerifyTailReport {
     /// What: `verified = ensure_ok AND no REQUIRED member is
     /// `down`/`not_installed`` (an OPTIONAL member's health never fails this
     /// — demo-critical fix). A `stale` or `unknown` member does NOT fail
-    /// verification — mirrors `stack::health::HealthReport`'s degrade policy
+    /// verification — mirrors `stack::health::HealthReport`'s DEGRADE policy
     /// exactly (an under-the-version-floor daemon is still up; a member with no
-    /// probeable transport is not a verified gap).
+    /// probeable transport is not a verified gap). #4847 gave `stack health` a
+    /// third `undetermined` verdict ABOVE that degrade policy; this verdict is
+    /// binary, so it mirrors the degrade half only and still tolerates
+    /// `unknown`.
     ///
     /// #4925: trusty-mpm is no longer an example of the `unknown` tolerance. It
     /// is probed over HTTP now, so a stopped mpm arrives here as `down` and — it
