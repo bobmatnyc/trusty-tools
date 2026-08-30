@@ -411,6 +411,33 @@ fn security_prose_classifies_to_security() {
     assert_eq!(classify_sync("Address CVE-2023-0001").category, "security");
 }
 
+/// #4331: `kw-security` carries the bare keyword `rce`, and Tier 1 matched it
+/// as an unanchored substring. Every commit whose message contained `source`,
+/// `resource`, `commerce`, or `enforce` therefore classified as security at
+/// priority 80 and confidence 0.9, outranking the rule that should have won.
+/// Measured on the pre-fix tier: `feat(pegasus): S3 SignalStore schema for
+/// source events` returned `("security", ExactRule, 0.9)`.
+#[test]
+fn security_keywords_do_not_fire_inside_a_longer_word() {
+    for msg in [
+        "feat(pegasus): S3 SignalStore schema for source events",
+        "refactor: extract the shared resource pool",
+        "chore: bump the e-commerce sdk",
+        "feat: enforce the per-tenant rate limit",
+    ] {
+        assert_ne!(classify_sync(msg).category, "security", "{msg}");
+    }
+    // The same keywords still classify when they stand alone as words.
+    assert_eq!(
+        classify_sync("Mitigate the RCE the pentest reported").category,
+        "security"
+    );
+    assert_eq!(
+        classify_sync("Patch CVE-2024-1234 in the upload handler").category,
+        "security"
+    );
+}
+
 #[test]
 fn performance_prose_classifies_to_performance() {
     assert_eq!(
