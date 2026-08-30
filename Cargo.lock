@@ -11674,7 +11674,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-memory"
-version = "0.25.3"
+version = "0.25.4"
 dependencies = [
  "anyhow",
  "async-trait",
