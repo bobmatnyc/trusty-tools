@@ -15,7 +15,10 @@ name = "trusty-memory"
 # disk rather than only the cache-resident ones, and carries room counts.
 # Additive payload fields and metrics_schema_version 3. No public item was
 # removed or changed.
-version = "0.25.3"
+# 0.25.4 (#5044): patch — TOOL_METHODS allowlist forwards
+# palace_verify_embedded and palace_embed_sweep over raw RPC. No public item
+# was removed or changed.
+version = "0.25.4"
 edition = "2021"
 description = "MCP server (stdio + Unix socket) for trusty-memory"
 license.workspace = true

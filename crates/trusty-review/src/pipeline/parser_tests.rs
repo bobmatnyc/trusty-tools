@@ -201,17 +201,33 @@ fn parse_json_block_happy_path_request_changes() {
 
 #[test]
 fn parse_verdict_keyword_fallback_approve_star() {
+    // #4491: the scanned APPROVE* is reported in the fail-safe reason, never as
+    // the verdict — a keyword-only body carries no findings to render beside it.
     let result = parse_review_response(BODY_KEYWORD_ONLY);
-    assert!(!result.is_fail_safe);
-    assert_eq!(result.verdict, Verdict::ApproveWithReservations);
+    assert!(
+        result.is_fail_safe,
+        "a keyword-only body means the structured payload never parsed (#4491)"
+    );
+    assert_eq!(result.verdict, Verdict::Unknown);
     assert!(result.findings.is_empty());
+    let reason = result.fail_safe_reason.expect("fail-safe carries a reason");
+    assert!(
+        reason.contains("APPROVE*"),
+        "the reason must name the scanned token so the operator sees it: {reason}"
+    );
 }
 
 #[test]
 fn parse_verdict_keyword_fallback_block() {
+    // #4491: same for a BLOCK keyword — the token is context, not a verdict.
     let result = parse_review_response(BODY_BLOCK_VERDICT);
-    assert!(!result.is_fail_safe);
-    assert_eq!(result.verdict, Verdict::Block);
+    assert!(result.is_fail_safe);
+    assert_eq!(result.verdict, Verdict::Unknown);
+    let reason = result.fail_safe_reason.expect("fail-safe carries a reason");
+    assert!(
+        reason.contains("BLOCK"),
+        "reason must name the token: {reason}"
+    );
 }
 
 // ── Fail-safe path ────────────────────────────────────────────────────────
@@ -277,6 +293,97 @@ fn parse_truncated_json_object_is_unknown() {
         "truncated JSON must fail CLOSED to UNKNOWN, never parse-and-APPROVE (#1241)"
     );
     assert!(result.is_fail_safe, "truncated JSON must trigger fail-safe");
+}
+
+// ── Double-encoded findings (#4491) ──────────────────────────────────────
+
+/// The shape that cost PR #4483 its three findings: `findings` arrives as a JSON
+/// *string* holding the array, and `verdict` sits last so the tail-scan reads
+/// APPROVE — reproducing the reported `APPROVE` + `Findings: none` render.
+const BODY_DOUBLE_ENCODED_FINDINGS: &str = r#"{
+  "summary": "Bedrock streaming adapter looks sound.",
+  "grade": "A+",
+  "findings": "[{\"title\": \"StopReason may always map to Other\", \"body\": \"Streamed and buffered turns could report divergent finish reasons.\", \"severity\": \"medium\", \"confidence\": 0.60, \"file\": \"crates/trusty-common/src/inference/bedrock/stream.rs\", \"line\": 196}, {\"title\": \"slot_for both looks up and allocates\", \"body\": \"The ContentBlockDelta::ToolUse arm does two jobs.\", \"severity\": \"low\", \"confidence\": 0.55, \"file\": \"crates/trusty-common/src/inference/bedrock/stream.rs\", \"line\": 175}, {\"title\": \"missing expect on a builder\", \"body\": \"A builder call drops its Result.\", \"severity\": \"low\", \"confidence\": 0.50, \"file\": \"crates/trusty-common/src/inference/bedrock/tests.rs\", \"line\": 1003}]",
+  "verdict": "APPROVE"
+}"#;
+
+/// The same envelope carrying a findings string that does not decode.
+const BODY_UNDECODABLE_FINDINGS: &str = r#"{
+  "summary": "Looks fine.",
+  "grade": "A",
+  "findings": "[{\"title\": \"truncated mid-finding",
+  "verdict": "APPROVE"
+}"#;
+
+/// A double-encoded `findings` string is decoded a second time and its findings
+/// survive (#4491).
+///
+/// Why: pre-fix this body failed every strategy, fell through to the keyword
+/// scan, and rendered `APPROVE` with `Findings: none` while the model had
+/// actually reported three findings.
+/// What: parses the reported payload, asserts the verdict AND all three findings.
+#[test]
+fn parse_double_encoded_findings_are_recovered() {
+    let result = parse_review_response(BODY_DOUBLE_ENCODED_FINDINGS);
+    assert!(
+        !result.is_fail_safe,
+        "a decodable double-encoded payload is a successful parse"
+    );
+    assert_eq!(result.verdict, Verdict::Approve);
+    assert_eq!(
+        result.findings.len(),
+        3,
+        "all three findings must survive the second decode (#4491)"
+    );
+    assert_eq!(
+        result.findings[0].file,
+        "crates/trusty-common/src/inference/bedrock/stream.rs"
+    );
+    assert_eq!(result.findings[0].line, Some(196));
+    assert!((result.findings[0].confidence - 0.60_f32).abs() < 1e-5);
+    assert_eq!(result.findings[2].line, Some(1003));
+}
+
+/// An undecodable findings payload fails LOUD, never as an empty list (#4491).
+///
+/// Why: the whole point of #4491 — a parse failure that renders `Findings: none`
+/// is indistinguishable from a clean review, and fails in the dangerous
+/// direction.
+/// What: asserts UNKNOWN + `is_fail_safe` + a reason that names the lost findings
+/// and the scanned APPROVE token, rather than a pass-through APPROVE.
+#[test]
+fn parse_unparseable_findings_is_loud_not_silently_empty() {
+    let result = parse_review_response(BODY_UNDECODABLE_FINDINGS);
+    assert_ne!(
+        result.verdict,
+        Verdict::Approve,
+        "a lost findings payload must never render as APPROVE (#4491)"
+    );
+    assert_eq!(result.verdict, Verdict::Unknown);
+    assert!(
+        result.is_fail_safe,
+        "an unparseable findings payload must be a fail-safe, not a clean review"
+    );
+    assert!(result.findings.is_empty());
+    let reason = result.fail_safe_reason.expect("fail-safe carries a reason");
+    assert!(
+        reason.contains("findings"),
+        "the reason must say the findings were lost: {reason}"
+    );
+    assert!(
+        reason.contains("APPROVE"),
+        "the reason must report the scanned token as context: {reason}"
+    );
+}
+
+/// An empty double-encoded findings string means no findings, not a parse error.
+#[test]
+fn parse_empty_encoded_findings_string_is_no_findings() {
+    let body = r#"{"summary":"clean","findings":"","verdict":"APPROVE"}"#;
+    let result = parse_review_response(body);
+    assert!(!result.is_fail_safe);
+    assert_eq!(result.verdict, Verdict::Approve);
+    assert!(result.findings.is_empty());
 }
 
 // ── Verdict string normalization ─────────────────────────────────────────

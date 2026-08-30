@@ -35,7 +35,10 @@ name = "trusty-common"
 # (`ConsolidationProvider`, `resolve_consolidation_provider`, three consts) or a
 # default VALUE change on an existing field; no public item was removed or had
 # its type changed, so nothing here breaks a consumer at compile time.
-version = "0.45.5"
+# 0.45.6 (#6382): patch — `SearchClient::index_communities` and its
+# `CommunitiesWire` struct are removed, but both were private (no `pub`), so
+# no public item changed; nothing here breaks a consumer at compile time.
+version = "0.45.6"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -310,6 +313,10 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 # postcard: used by `memory_palace` integration test to assert DrawerType
 # serialization indices are stable (issue #1722 backward-compat guarantee).
 postcard = { workspace = true }
+# wiremock: hermetic HTTP mock server for `search_client`'s `fetch_all`
+# regression test (#6382 — proves the dead `/communities` route is no longer
+# dialled).
+wiremock = { workspace = true }
 
 [features]
 default = []
