@@ -296,6 +296,60 @@ fn empty_pin_palace_is_an_error() {
     );
 }
 
+/// Why (#6418): the pin level used to return its `palace` field verbatim while
+/// levels 1, 3 and 4 all clamped, so a dotted or traversal-shaped id could reach
+/// a palace directory name and a socket filename. Each input here came back
+/// unchanged from `resolve_palace` before the fix.
+#[test]
+#[serial_test::serial]
+fn a_pin_naming_an_invalid_palace_id_is_an_error() {
+    // The variable is cleared so the assertion is about level 2, not about the
+    // override that outranks it.
+    let _guard = EnvGuard::clear();
+    let too_long = "a".repeat(PALACE_ID_MAX_LEN + 1);
+    let cases = [
+        "tripbot.tours",
+        "../evil",
+        "..",
+        "a/b",
+        "UPPER",
+        "has_underscore",
+        "-leading-hyphen",
+        too_long.as_str(),
+    ];
+    for value in cases {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("proj");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        write_pin(&root, value);
+
+        match resolve_palace(&root) {
+            Ok(resolution) => panic!("pin {value:?} resolved to {:?}", resolution.id),
+            Err(PalaceResolveError::PinInvalid { value: got, .. }) => {
+                assert_eq!(got, value, "the error must name the rejected value");
+            }
+            Err(other) => panic!("pin {value:?} expected PinInvalid, got {other:?}"),
+        }
+    }
+}
+
+/// Why (#6418): the guard rejects an id shape, not a legitimate pin — a pin that
+/// already satisfies the daemon's format gate must still resolve, and surrounding
+/// whitespace is not a shape violation.
+#[test]
+#[serial_test::serial]
+fn a_valid_pin_still_resolves_and_is_trimmed() {
+    let _guard = EnvGuard::clear();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("proj");
+    fs::create_dir_all(root.join(".git")).unwrap();
+    write_pin(&root, "  canonical-name9  ");
+
+    let got = resolve_palace(&root).expect("a valid pin resolves");
+    assert_eq!(got.id, "canonical-name9");
+    assert_eq!(got.source, PalaceSource::PinFile);
+}
+
 /// Why: an unreadable pin (permissions) is the third untrustworthy case and
 /// must not degrade to derivation either.
 #[cfg(unix)]
