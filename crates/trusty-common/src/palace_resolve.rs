@@ -29,9 +29,12 @@
 //!   Level 4 therefore keys on the main worktree root (`git rev-parse --git-common-dir`)
 //!   rather than `--show-toplevel`, which names the worktree's own directory and
 //!   made `.claude/worktrees/agent-x` resolve to `worktrees-agent-x`.
-//! - **A pin file that exists but does not parse is an error, never a
+//! - **A pin file that exists but cannot be trusted is an error, never a
 //!   fallthrough.** Falling through hands the caller a plausible-looking derived
-//!   name and its writes land in a palace nobody chose.
+//!   name and its writes land in a palace nobody chose. "Cannot be trusted"
+//!   covers a pin that does not parse, one whose `palace` is blank, and — since
+//!   #6418 — one whose `palace` is not a valid palace id, so every level returns
+//!   an id [`crate::palace_id::palace_id_is_valid`] accepts.
 //!
 //! Test: `cargo test -p trusty-common --features palace-resolve --
 //! palace_resolve` — see `palace_resolve_tests.rs`.
@@ -41,7 +44,10 @@ use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
-use crate::palace_id::{clamp_palace_id, derive_palace_id, palace_override_from_env};
+use crate::palace_id::{
+    PALACE_ID_MAX_LEN, clamp_palace_id, derive_palace_id, palace_id_is_valid,
+    palace_override_from_env,
+};
 use crate::slug::slugify_string;
 
 /// The `.trusty-tools/` directory name, used as a project-root marker.
@@ -79,7 +85,9 @@ pub const PROJECT_MARKERS: &[&str] = &[
 /// scraping — a field that silently deserialises to the wrong type would
 /// redirect a project's memory.
 /// What: `schema_version` (always [`PIN_SCHEMA_VERSION`]), `palace` (the pinned
-/// slug, stored verbatim and never re-slugified), and an optional human `note`.
+/// slug, stored verbatim and never re-slugified — resolution rejects one that is
+/// not a valid palace id rather than rewriting it, #6418), and an optional human
+/// `note`.
 /// Test: `reads_a_valid_pin`, plus trusty-memory's `write_and_read_pin_round_trips`.
 ///
 /// `#[non_exhaustive]` because a future schema field must not be a breaking
@@ -165,9 +173,10 @@ pub struct PalaceResolution {
 /// and fall through to git derivation, so a typo in a committed pin silently
 /// redirected a project's memory to a different palace. Returning an error
 /// instead makes the caller decide, and makes the failure testable.
-/// What: three pin-trust failures plus the exhausted-derivation case.
+/// What: four pin-trust failures plus the exhausted-derivation case.
 /// Test: `malformed_pin_is_an_error_not_a_fallthrough`,
-/// `empty_pin_palace_is_an_error`, `unreadable_pin_is_an_error`.
+/// `empty_pin_palace_is_an_error`, `unreadable_pin_is_an_error`,
+/// `a_pin_naming_an_invalid_palace_id_is_an_error`.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum PalaceResolveError {
@@ -194,6 +203,18 @@ pub enum PalaceResolveError {
     PinEmpty {
         /// Path of the pin file carrying the empty field.
         path: PathBuf,
+    },
+
+    /// The pin file parses but its `palace` field is not a valid palace id.
+    #[error(
+        "palace pin {} names `{value}`, which is not a valid palace id: 1 to {PALACE_ID_MAX_LEN} bytes of lowercase letters, digits and hyphens, starting with a letter or digit",
+        path.display()
+    )]
+    PinInvalid {
+        /// Path of the pin file carrying the invalid id.
+        path: PathBuf,
+        /// The rejected `palace` value, trimmed.
+        value: String,
     },
 
     /// No precedence level yielded a usable id.
@@ -334,6 +355,39 @@ pub fn read_project_pin(root: &Path) -> Result<Option<ProjectPin>, PalaceResolve
     }
 }
 
+/// Accept a pin's `palace` field only when it is a usable palace id.
+///
+/// Why (#6418): a palace id becomes a directory name under the data root and a
+/// Unix-socket filename, and trusty-memory's creation gate enforces
+/// [`palace_id_is_valid`] on every id it is handed. Levels 1, 3 and 4 all run
+/// their result through [`clamp_palace_id`], so each satisfies that gate; the
+/// pin level returned its field verbatim and was the one way a dotted or
+/// `../`-shaped id could re-enter those names. Clamping the value instead would
+/// hand the caller a DIFFERENT palace from the one the committed file names,
+/// which is the silent redirect this module exists to prevent — so an
+/// untrustworthy pin fails closed here exactly as an unparseable or empty one
+/// does.
+/// What: trims the field, reports [`PalaceResolveError::PinEmpty`] when nothing
+/// remains and [`PalaceResolveError::PinInvalid`] when the remainder fails
+/// [`palace_id_is_valid`], otherwise returns the trimmed id.
+/// Test: `a_pin_naming_an_invalid_palace_id_is_an_error`,
+/// `empty_pin_palace_is_an_error`, `pin_beats_git_derivation`.
+fn validated_pin_palace(palace: &str, path: &Path) -> Result<String, PalaceResolveError> {
+    let trimmed = palace.trim();
+    if trimmed.is_empty() {
+        return Err(PalaceResolveError::PinEmpty {
+            path: path.to_path_buf(),
+        });
+    }
+    if !palace_id_is_valid(trimmed) {
+        return Err(PalaceResolveError::PinInvalid {
+            path: path.to_path_buf(),
+            value: trimmed.to_string(),
+        });
+    }
+    Ok(trimmed.to_string())
+}
+
 /// Resolve the palace for the project containing `start`.
 ///
 /// Why: the one place the question is answered. See the module docs for why the
@@ -354,7 +408,8 @@ pub fn resolve_palace(start: &Path) -> Result<PalaceResolution, PalaceResolveErr
 /// Precedence, highest first:
 ///
 /// 1. `TRUSTY_MEMORY_PALACE`, slugified — the operator escape hatch.
-/// 2. The committed pin file at the nearest project root, verbatim.
+/// 2. The committed pin file at the nearest project root, verbatim once
+///    [`validated_pin_palace`] accepts it.
 /// 3. The git `owner/repo` slug from `remote.origin.url`.
 /// 4. The `parent/dir` slug of the MAIN worktree root.
 ///
@@ -362,28 +417,32 @@ pub fn resolve_palace(start: &Path) -> Result<PalaceResolution, PalaceResolveErr
 /// variable wins and the disagreement is logged at WARN naming both values. A
 /// pin file that exists but cannot be parsed is never skipped; it is an error.
 ///
+/// Every level returns an id [`palace_id_is_valid`] accepts (#6418).
+///
 /// What: returns the id, the deciding [`PalaceSource`], and the detected
 /// project root.
 /// Test: `env_override_wins_over_pin_and_warns`, `pin_beats_git_derivation`,
-/// `worktree_and_main_checkout_agree`, `malformed_pin_is_an_error_not_a_fallthrough`.
+/// `worktree_and_main_checkout_agree`, `malformed_pin_is_an_error_not_a_fallthrough`,
+/// `a_pin_naming_an_invalid_palace_id_is_an_error`.
 pub fn resolve_palace_with_remote(
     start: &Path,
     explicit_remote: Option<&str>,
 ) -> Result<PalaceResolution, PalaceResolveError> {
     let project_root = find_project_root(start);
 
-    // Level 2 is read FIRST even though level 1 outranks it: an unparseable pin
-    // is an error regardless of who wins, and reading it here also gives the
-    // override path a concrete value to report in the disagreement warning.
+    // Level 2 is read and validated FIRST even though level 1 outranks it: an
+    // untrustworthy pin is an error regardless of who wins, and reading it here
+    // also gives the override path a concrete value to report in the
+    // disagreement warning.
     let pinned = match project_root.as_deref() {
         Some(root) => read_project_pin(root)?.map(|pin| (pin.palace, root.join(PIN_FILE_REL))),
         None => None,
     };
-    if let Some((palace, path)) = pinned.as_ref()
-        && palace.trim().is_empty()
-    {
-        return Err(PalaceResolveError::PinEmpty { path: path.clone() });
-    }
+    // #6418: the pin level was the one level that returned its id unvalidated.
+    let pinned = match pinned {
+        Some((palace, path)) => Some((validated_pin_palace(&palace, &path)?, path)),
+        None => None,
+    };
 
     // Level 1: the operator escape hatch.
     if let Some(raw) = palace_override_from_env() {
