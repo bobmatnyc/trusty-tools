@@ -2,6 +2,9 @@
 //!
 //! Uses the Linear GraphQL API (<https://api.linear.app/graphql>).
 //! Authentication: `Authorization: <api_key>` header (no "Bearer" prefix).
+//! The key comes from `linear.api_key` in config, or — when config is silent —
+//! from `trusty_common::credentials::resolve_key` (#5983). There is no Linear
+//! CLI on this path.
 //!
 //! Issue identifiers are matched against commit messages with the pattern
 //! `[A-Z][A-Z0-9]{0,9}-\d+` (e.g. `ENG-123`, `FE-456`).
@@ -95,18 +98,16 @@ impl std::fmt::Debug for LinearClient {
 impl LinearClient {
     /// Create a new Linear client from config.
     ///
-    /// Resolves `${LINEAR_API_KEY}` env var substitution in the `api_key` field.
+    /// Resolves the API key through [`resolve_api_key`]: `linear.api_key` from
+    /// config first (with `${LINEAR_API_KEY}` expansion), then the shared
+    /// credential resolver (#5983).
     ///
     /// # Errors
     ///
-    /// - [`CollectError::Config`] if `api_key` is missing or resolves to empty.
+    /// - [`CollectError::Config`] if no tier yields a non-empty key.
     /// - [`CollectError::Http`] if the HTTP client cannot be built.
     pub fn new(config: &LinearConfig) -> Result<Self> {
-        let raw_key = config.api_key.as_deref().unwrap_or("");
-        let api_key = expand_env_var(raw_key);
-        if api_key.is_empty() {
-            return Err(CollectError::Config("Linear api_key is required".into()));
-        }
+        let api_key = resolve_api_key(config)?;
         let client = Client::builder()
             .user_agent(USER_AGENT_VALUE)
             .timeout(std::time::Duration::from_secs(30))
@@ -408,6 +409,68 @@ fn expand_env_var(raw: &str) -> String {
     crate::collect::env_expand::expand_env_var(raw)
 }
 
+/// Provider key this client resolves its credential under.
+///
+/// The workspace registry maps it to `LINEAR_API_KEY`
+/// (`trusty_common::credentials::registry`).
+const LINEAR_CREDENTIAL_PROVIDER: &str = "linear";
+
+/// The Linear API key this client will authenticate with.
+///
+/// Why: #5983. Collection used to read `linear.api_key` and nothing else, so an
+/// operator holding the credential anywhere the rest of the workspace looks —
+/// `LINEAR_API_KEY` in the environment, `.env.local`, the OS keychain — still
+/// could not collect until they hand-edited YAML to say `${LINEAR_API_KEY}`.
+/// Config stays the first tier; the shared resolver is what answers when config
+/// is silent, which is the one entry point this repo permits for reading a
+/// secret across crates.
+/// What: delegates to [`resolve_api_key_with`] with
+/// [`trusty_common::credentials::resolve_key`] as the fallback.
+///
+/// # Errors
+///
+/// [`CollectError::Config`] when neither tier yields a non-empty key.
+fn resolve_api_key(config: &LinearConfig) -> Result<String> {
+    resolve_api_key_with(config, || {
+        trusty_common::credentials::resolve_key(LINEAR_CREDENTIAL_PROVIDER)
+    })
+}
+
+/// [`resolve_api_key`] with the fallback tier supplied by the caller.
+///
+/// Why: the production fallback reads the process environment, `.env.local`,
+/// and an OS keychain, none of which a test may depend on. A caller-supplied
+/// lookup makes both tiers and the failure provable with no global state — the
+/// same seam `collect::env_expand::expand_env_var_with` uses for #5313.
+/// What: returns the expanded `config.api_key` when it is non-empty; otherwise
+/// `fallback()`, ignoring an empty answer the same way; otherwise an error
+/// naming every place the operator may put the key.
+/// Test: `tests::config_api_key_wins_over_the_resolver`,
+/// `tests::an_absent_config_key_falls_back_to_the_resolver`,
+/// `tests::an_empty_resolver_answer_is_not_a_key`,
+/// `tests::new_rejects_missing_api_key`.
+///
+/// # Errors
+///
+/// [`CollectError::Config`] when neither tier yields a non-empty key.
+fn resolve_api_key_with(
+    config: &LinearConfig,
+    fallback: impl FnOnce() -> Option<String>,
+) -> Result<String> {
+    let configured = expand_env_var(config.api_key.as_deref().unwrap_or(""));
+    if !configured.is_empty() {
+        return Ok(configured);
+    }
+    fallback().filter(|k| !k.is_empty()).ok_or_else(|| {
+        CollectError::Config(
+            "Linear api_key is required — set `linear.api_key` in the config (a \
+             `${LINEAR_API_KEY}` reference is expanded), or provide LINEAR_API_KEY \
+             in the environment, in .env.local, or in the credential store"
+                .into(),
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,12 +498,61 @@ mod tests {
         assert!(ids.is_empty());
     }
 
+    /// #5983: asserted against [`resolve_api_key_with`], not `LinearClient::new`.
+    /// `new` now consults the shared credential resolver, which reads the real
+    /// environment, `.env.local`, and the OS keychain — so on a developer
+    /// machine that exports `LINEAR_API_KEY` this test would have started
+    /// passing the resolution it exists to prove fails.
     #[test]
     fn new_rejects_missing_api_key() {
         let cfg = LinearConfig::default();
-        let err = LinearClient::new(&cfg).expect_err("should reject empty key");
+        let err = resolve_api_key_with(&cfg, || None).expect_err("should reject empty key");
         match err {
             CollectError::Config(msg) => assert!(msg.contains("api_key")),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// #5983: config is the first tier, so a key on disk is never overridden by
+    /// whatever the environment or keychain happens to hold.
+    #[test]
+    fn config_api_key_wins_over_the_resolver() {
+        let cfg = LinearConfig {
+            api_key: Some("lin_api_from_config".into()),
+            ..LinearConfig::default()
+        };
+        let key = resolve_api_key_with(&cfg, || Some("lin_api_from_store".into())).expect("key");
+        assert_eq!(key, "lin_api_from_config");
+    }
+
+    /// #5983 (primary reproduction): before the fix this path returned
+    /// `CollectError::Config`, so an operator whose key lived in the
+    /// environment, `.env.local`, or the keychain could not collect at all.
+    #[test]
+    fn an_absent_config_key_falls_back_to_the_resolver() {
+        let cfg = LinearConfig::default();
+        let key = resolve_api_key_with(&cfg, || Some("lin_api_from_store".into())).expect("key");
+        assert_eq!(key, "lin_api_from_store");
+        // An unresolvable `${VAR}` placeholder expands to empty, which is the
+        // same "config said nothing" state and must reach the same tier.
+        let placeholder = LinearConfig {
+            api_key: Some("${TGA_LINEAR_KEY_THAT_IS_NEVER_SET}".into()),
+            ..LinearConfig::default()
+        };
+        let key =
+            resolve_api_key_with(&placeholder, || Some("lin_api_from_store".into())).expect("key");
+        assert_eq!(key, "lin_api_from_store");
+    }
+
+    /// An empty answer from the resolver is absence, not a key — otherwise the
+    /// client would send `Authorization: ` and read Linear's 401 as a defect.
+    #[test]
+    fn an_empty_resolver_answer_is_not_a_key() {
+        let cfg = LinearConfig::default();
+        let err = resolve_api_key_with(&cfg, || Some(String::new()))
+            .expect_err("empty is not a credential");
+        match err {
+            CollectError::Config(msg) => assert!(msg.contains("LINEAR_API_KEY"), "{msg}"),
             other => panic!("unexpected: {other:?}"),
         }
     }
