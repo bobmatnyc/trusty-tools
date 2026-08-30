@@ -496,53 +496,189 @@ run_case "case22 stamp with no digest" 1 "STAMP-MISSING" "$R"
 # from its Vite config. Runs against THIS repo, not a fixture.
 #
 # `build.emptyOutDir: true` deletes the tracked ui-source-hash.txt on every
-# `pnpm build`, so the crates whose bundle_dir IS the Vite outDir
-# (<src_dir>/dist) need scripts/lib/vite-stamp-bundle.mjs wired in to put it
-# back. trusty-search is exempt and must stay exempt: it builds into ui/dist
-# and mirrors to a separate ui-dist/, which its Makefile's sync-ui stamps.
+# `pnpm build`, so a row whose bundle_dir IS the Vite outDir needs
+# scripts/lib/vite-stamp-bundle.mjs wired in to put it back.
 #
 # This asserts the WIRING, not the stamping — the stamping itself is cases 20
 # and 21. #5936 recurred four times precisely because a fix that reached one
 # crate left the other two exposed, so the uniformity is what needs a gate.
+#
+# #6155: SCOPE IS DECIDED BY THE EXEMPTION LIST, NEVER BY WHAT THE CONFIG SAYS.
+# An earlier revision of this case derived candidacy from the config — skipping
+# a row whose vite.config.js was missing or whose outDir was not a literal the
+# regex matched. That moved the #5936 failure class into the selection
+# mechanism: the one row least able to answer for itself was the one that
+# quietly left the count. Membership is now a standing decision recorded below,
+# and an in-scope row that cannot be read FAILS. Cases 25a-25c drive both
+# unreadable shapes plus a positive control.
 # ---------------------------------------------------------------------------
-WIRED_CHECKED=0
-while IFS="$(printf '\t')" read -r crate src_dir bundle_dir _rest; do
-  case "${crate:-}" in '' | \#*) continue ;; esac
-  # #6155: source_dir is a comma-separated list; the CURRENT path is the one
-  # a build runs in.
-  src_dir="${src_dir%%,*}"
-  config="${REPO_ROOT}/${src_dir}/vite.config.js"
-  # Only rows whose committed bundle IS the Vite outDir are exposed to #5936 —
-  # a bundle reached by a mirror step is stamped by that step instead. #6155
-  # made the outDir a SIBLING of the project (ui-search -> ui-search-dist), so
-  # the old `bundle_dir == src_dir/dist` test silently stopped matching the one
-  # row it most needed to cover. Read the outDir the config actually declares.
-  [ -f "$config" ] || continue
-  out_dir="$(sed -n "s/.*outDir:[[:space:]]*['\"]\([^'\"]*\)['\"].*/\1/p" "$config" | head -1)"
-  [ -n "$out_dir" ] || continue
-  case "$out_dir" in
-    ../*) resolved="$(dirname "$src_dir")/${out_dir#../}" ;;
-    *) resolved="${src_dir}/${out_dir}" ;;
-  esac
-  [ "$bundle_dir" = "$resolved" ] || continue
-  WIRED_CHECKED=$((WIRED_CHECKED + 1))
-  if [ ! -f "$config" ]; then
-    fail_case "case23 ${crate}: ${src_dir}/vite.config.js is missing"
-  elif ! grep -qF "stampUiBundle('${crate}')" "$config"; then
-    fail_case "case23 ${crate}: ${src_dir}/vite.config.js does not call stampUiBundle('${crate}')" \
-      "emptyOutDir deletes ${bundle_dir}/ui-source-hash.txt and nothing re-stamps it (#5936)."
-  else
-    pass_case "case23 ${crate} re-stamps its bundle from vite.config.js"
-  fi
-done < "${SCRIPT_DIR}/ui-bundle-manifest.tsv"
+
+# Rows whose committed bundle is NOT its Vite outDir, so a mirror step owns the
+# stamp instead. Space-separated manifest row keys; everything else is in scope.
+#
+# trusty-search: ui-dist/ is a mirror of the console's ui-search-dist/, stamped
+# by `make -C crates/trusty-search sync-ui` (#6155). Its source_dir names the
+# console's Vite project, whose outDir is that OTHER bundle — so reading the
+# config would place this row out of scope for a reason that is true by
+# accident. Exempting it says so on purpose.
+STAMP_WIRING_EXEMPT="trusty-search"
+
+# stamp_wiring_report <repo_root> <manifest_path> <exempt_keys>
+#
+# Why: case 23's verdict has to be drivable against a fixture, so the two
+# unreadable-config shapes can be proven to FAIL rather than vanish (#6155).
+# What: prints one `OK <key>` or `FINDING <key> <message>` line per in-scope
+# row, then `CHECKED <n>`. Every non-exempt row is counted before it is read,
+# so no row can leave the tally by being unreadable.
+# Test: `case23` drives it against this repo; `case25a`/`case25b`/`case25c`
+# drive the missing-config, dynamic-outDir, and correct-config fixtures.
+stamp_wiring_report() {
+  local repo="$1" manifest="$2" exempt="$3"
+  local checked=0 crate src_dir bundle_dir _rest config out_dir resolved
+  while IFS="$(printf '\t')" read -r crate src_dir bundle_dir _rest; do
+    case "${crate:-}" in '' | \#*) continue ;; esac
+    case " ${exempt} " in *" ${crate} "*) continue ;; esac
+
+    # Counted FIRST. Everything below can only turn this row into a finding,
+    # never into a row that was never here.
+    checked=$((checked + 1))
+
+    if [ -z "${src_dir:-}" ] || [ -z "${bundle_dir:-}" ]; then
+      echo "FINDING ${crate} row is missing a source_dir or bundle_dir column"
+      continue
+    fi
+    # source_dir is a comma-separated list; the CURRENT path is where a build
+    # runs (#6155).
+    src_dir="${src_dir%%,*}"
+    config="${repo}/${src_dir}/vite.config.js"
+
+    if [ ! -f "$config" ]; then
+      echo "FINDING ${crate} ${src_dir}/vite.config.js is missing, so nothing can say whether ${bundle_dir} is its outDir"
+      continue
+    fi
+    out_dir="$(sed -n "s/.*outDir:[[:space:]]*['\"]\([^'\"]*\)['\"].*/\1/p" "$config" | head -1)"
+    if [ -z "$out_dir" ]; then
+      echo "FINDING ${crate} ${src_dir}/vite.config.js declares no literal build.outDir; this check cannot tell where the bundle lands"
+      continue
+    fi
+    case "$out_dir" in
+      ../*) resolved="$(dirname "$src_dir")/${out_dir#../}" ;;
+      *) resolved="${src_dir}/${out_dir}" ;;
+    esac
+    if [ "$bundle_dir" != "$resolved" ]; then
+      echo "FINDING ${crate} outDir resolves to ${resolved}, not the manifest's ${bundle_dir}; wire the stamp or record an exemption"
+      continue
+    fi
+    if ! grep -qF "stampUiBundle('${crate}')" "$config"; then
+      echo "FINDING ${crate} ${src_dir}/vite.config.js does not call stampUiBundle('${crate}') — emptyOutDir deletes ${bundle_dir}/ui-source-hash.txt and nothing re-stamps it (#5936)"
+      continue
+    fi
+    echo "OK ${crate}"
+  done < "$manifest"
+  echo "CHECKED ${checked}"
+}
+
+SW_REPORT="$(stamp_wiring_report "$REPO_ROOT" "${SCRIPT_DIR}/ui-bundle-manifest.tsv" "$STAMP_WIRING_EXEMPT")"
+WIRED_CHECKED="$(printf '%s\n' "$SW_REPORT" | awk '$1 == "CHECKED" { print $2 }')"
+
+printf '%s\n' "$SW_REPORT" | grep '^OK ' | while read -r _ crate; do
+  echo "  ok  case23 ${crate} re-stamps its bundle from vite.config.js"
+done
+# The subshell above cannot touch PASSED, so account for the OK rows here.
+SW_OK_COUNT="$(printf '%s\n' "$SW_REPORT" | grep -c '^OK ' || true)"
+PASSED=$((PASSED + SW_OK_COUNT))
+
+SW_FINDINGS="$(printf '%s\n' "$SW_REPORT" | grep '^FINDING ' || true)"
+if [ -n "$SW_FINDINGS" ]; then
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    fail_case "case23 ${line#FINDING }"
+  done <<EOF_SW
+$SW_FINDINGS
+EOF_SW
+fi
 
 # A loop that matched nothing would report all-clear having inspected nothing —
 # the vacuous-scan shape every case above exists to refuse.
-if [ "$WIRED_CHECKED" -eq 0 ]; then
-  fail_case "case23 inspected no crates — the manifest has no in-place bundle rows to check"
+if [ "${WIRED_CHECKED:-0}" -eq 0 ]; then
+  fail_case "case23 inspected no crates — every manifest row is exempt or the manifest is empty"
 else
-  pass_case "case23 inspected ${WIRED_CHECKED} in-place bundle crate(s)"
+  pass_case "case23 inspected ${WIRED_CHECKED} in-scope bundle crate(s)"
 fi
+
+# An exemption that names a row the manifest no longer has is dead text, and
+# dead text in a scope list is how a real row gets exempted by a later rename.
+SW_EXEMPT_LIVE=1
+for exempt_key in $STAMP_WIRING_EXEMPT; do
+  if ! awk -F'\t' -v k="$exempt_key" '$1 == k { found = 1 } END { exit !found }' \
+    "${SCRIPT_DIR}/ui-bundle-manifest.tsv"; then
+    fail_case "case23 STAMP_WIRING_EXEMPT names '${exempt_key}', which has no manifest row" \
+      "A stale exemption silently widens as rows are renamed. Drop it or fix the key."
+    SW_EXEMPT_LIVE=0
+  fi
+done
+[ "$SW_EXEMPT_LIVE" -eq 1 ] && pass_case "case23 every STAMP_WIRING_EXEMPT key has a live manifest row"
+
+# ---------------------------------------------------------------------------
+# Case 25 — #6155: the row-selection mechanism itself must not fail open.
+#
+# case23 decides scope from STAMP_WIRING_EXEMPT, so an in-scope row whose
+# vite.config.js cannot be read has to become a FINDING. When candidacy was
+# derived from the config instead, both shapes below left the tally silently —
+# a vacuous pass wearing the shape of a clean run. 25c is the positive control:
+# without it, 25a and 25b would also pass against a harness that never returns
+# OK at all.
+# ---------------------------------------------------------------------------
+sw_fixture() {
+  local repo="$1"
+  mkdir -p "${repo}/crates/cratea/ui"
+  add_manifest "$repo" "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui/dist"
+}
+
+# assert_sw <label> <repo> <expect: FINDING|OK> <expect_checked>
+assert_sw() {
+  local label="$1" repo="$2" expect="$3" expect_checked="$4"
+  local report checked
+  report="$(stamp_wiring_report "$repo" "${repo}/scripts/ui-bundle-manifest.tsv" "")"
+  checked="$(printf '%s\n' "$report" | awk '$1 == "CHECKED" { print $2 }')"
+  if [ "$checked" != "$expect_checked" ]; then
+    fail_case "${label}: CHECKED=${checked}, expected ${expect_checked}" \
+      "A row that leaves the count is the fail-open shape this case exists to refuse." \
+      "$report"
+  elif ! printf '%s\n' "$report" | grep -q "^${expect} "; then
+    fail_case "${label}: report has no ${expect} line" "$report"
+  else
+    pass_case "${label} -> ${expect}, CHECKED=${checked}"
+  fi
+}
+
+R="$(mkrepo case25a)"
+sw_fixture "$R"
+assert_sw "case25a missing vite.config.js is a finding, not a skip" "$R" FINDING 1
+
+R="$(mkrepo case25b)"
+sw_fixture "$R"
+cat > "${R}/crates/cratea/ui/vite.config.js" <<'VITE'
+import { defineConfig } from 'vite';
+const target = process.env.OUT || 'dist';
+export default defineConfig({
+  plugins: [stampUiBundle('cratea')],
+  build: { outDir: target, emptyOutDir: true },
+});
+VITE
+assert_sw "case25b dynamic outDir is a finding, not a skip" "$R" FINDING 1
+
+R="$(mkrepo case25c)"
+sw_fixture "$R"
+cat > "${R}/crates/cratea/ui/vite.config.js" <<'VITE'
+import { defineConfig } from 'vite';
+import { stampUiBundle } from '../../../scripts/lib/vite-stamp-bundle.mjs';
+export default defineConfig({
+  plugins: [stampUiBundle('cratea')],
+  build: { outDir: 'dist', emptyOutDir: true },
+});
+VITE
+assert_sw "case25c control: a correct config still reports OK" "$R" OK 1
 
 # ---------------------------------------------------------------------------
 # Case 24 — #6155: one crate, two committed bundles. trusty-console packages
