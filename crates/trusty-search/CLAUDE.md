@@ -236,6 +236,14 @@ reuses it. This is the safe deregistration verb for registry hygiene. Pass
 - **Request body**: none.
 - **Query**: `delete_data` (bool, default `false`). An unparseable value is
   rejected with `400` rather than silently defaulting either way.
+  `expected_root_path` (string, optional, #6380): the `root_path` the caller
+  believes this registration still has. Absent ⇒ unchecked. Present ⇒ the
+  delete is refused unless the registration's current root is exactly that
+  string. An id is derived from its root path, so a path deleted and recreated
+  between a census and the delete names a different, live index under the same
+  id; pass this to pin a delete to the root the census reported. A registration
+  the daemon cannot find, and a registry file it cannot read, are refusals too —
+  a comparison that could not run never permits the delete.
 - **Response 200**: `{ "id": "my-project", "ok": true, "removed": true, "data_deleted": false }`
 - **Response 404**: `{ "error": "unknown index: <id>", "ok": false, … }` — the id
   is in neither in-memory store AND has no `indexes.toml` row (#6363). A row the
@@ -243,10 +251,14 @@ reuses it. This is the safe deregistration verb for registry hygiene. Pass
   `indexes.toml`, and it is deleted like any other registration. Before #6363
   both answered `200 {"removed": false}`, so an excluded row could not be
   cleared through the API at all.
+- **Response 409** (#6380): `{ "ok": false, "removed": false, "error": "'<id>'
+  now points at …, not at the expected …" }` — only reachable with
+  `expected_root_path`. Nothing was touched.
 - **Response 500**: `{ "ok": false, "error": "<what failed>", … }` — the delete's
-  durable cleanup failed (the `indexes.toml` rewrite, or the data-dir removal).
-  `removed` is `false` when nothing was removed at all. Never treat a `500` here
-  as "probably removed".
+  durable cleanup failed (the `indexes.toml` rewrite, or the data-dir removal),
+  or `expected_root_path` was sent and the registry could not be read to check
+  it. `removed` is `false` when nothing was removed at all. Never treat a `500`
+  here as "probably removed".
 
 ##### `GET /registry/orphans`
 

@@ -17,6 +17,8 @@ mod contrib_graph;
 // #4087: query-time guard so a corpus-failed index fails loudly instead of
 // answering HTTP 200 with an empty result set.
 mod degraded;
+// #6380: the delete-time root-path re-check `search.index.delete` applies.
+mod delete_guard;
 mod facet_route;
 mod fanout;
 mod files;
@@ -75,6 +77,9 @@ mod tests_4715;
 // #6363: a registration that exists only in `indexes.toml` must be deletable.
 #[cfg(test)]
 mod tests_6363;
+// #6380: a delete whose expected root moved must be refused, not applied.
+#[cfg(test)]
+mod tests_6380;
 // #4951: a reindex root_path override must not empty every search result.
 #[cfg(test)]
 mod tests_4951;

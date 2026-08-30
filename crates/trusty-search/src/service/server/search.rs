@@ -51,6 +51,13 @@ pub(crate) struct DeleteIndexParams {
     /// registration. Defaults to `false` — see the type's `Why`.
     #[serde(default)]
     pub(crate) delete_data: bool,
+    /// The `root_path` the caller believes this registration still has (#6380).
+    ///
+    /// Absent ⇒ unchecked, which is what every pre-#6380 caller sends. Present ⇒
+    /// the delete is refused unless the registration's CURRENT root is this
+    /// exact string — see [`super::delete_guard::refuse_unless_root_matches`].
+    #[serde(default)]
+    pub(crate) expected_root_path: Option<String>,
 }
 
 /// `DELETE /indexes/{id}` — deregister an index, optionally destroying its data.
@@ -107,7 +114,26 @@ pub(crate) async fn delete_index_report(
     id: &str,
     params: DeleteIndexParams,
 ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
-    let outcome = unregister_index(state, id, params.delete_data).await;
+    // #6380: a fast-path refusal before anything is torn down. An id is derived
+    // from its root path, so a path deleted and recreated between a census and
+    // this call names a DIFFERENT, live index under the same id. This comparison
+    // holds no lock, so it can only refuse EARLY — `unregister_index` re-runs it
+    // under the teardown lock it acquires, and that one is authoritative.
+    if let Some(expected) = params.expected_root_path.as_deref() {
+        super::delete_guard::refuse_unless_root_matches(state, id, expected)?;
+    }
+    let outcome = unregister_index(
+        state,
+        id,
+        params.delete_data,
+        params.expected_root_path.as_deref(),
+    )
+    .await;
+    // #6380: the under-lock re-check refused, so nothing was torn down. The
+    // refusal carries the whole verdict — status and body both.
+    if let Some(refusal) = outcome.refusal {
+        return Err(refusal);
+    }
     // #6363: absent from the hot registry, the cold store AND `indexes.toml` —
     // there is nothing here to delete, and saying so is the only answer that
     // distinguishes a typo from a delete that failed.
@@ -197,6 +223,14 @@ pub(super) struct UnregisterOutcome {
     /// so no caller may record it as done. Both failures used to be a `warn!`
     /// with no representation on the wire.
     pub(super) error: Option<String>,
+    /// The under-lock `expected_root_path` refusal, if one fired (#6380).
+    ///
+    /// `Some` means the delete stopped before touching anything, so it carries
+    /// the whole verdict — status and body both — and the caller answers with it
+    /// rather than building one from the fields above. Always `None` when the
+    /// call passed no expectation, which is every caller but the HTTP/socket
+    /// delete.
+    pub(super) refusal: Option<(StatusCode, serde_json::Value)>,
 }
 
 /// How long `unregister_index` waits for in-flight writers to drain before it
@@ -274,6 +308,16 @@ const DELETE_QUIESCE_TIMEOUT: std::time::Duration = std::time::Duration::from_mi
 ///   removed, so no orphan is possible, and the orphan reaper (which runs in
 ///   exactly this mode) must stay able to drop a dead registration.
 ///
+/// #6380: `expected_root_path` is re-compared HERE, under the teardown lock this
+/// function already acquires, and that comparison is the authoritative one.
+/// `delete_index_report` compares once before calling in, but that read holds no
+/// lock and this call then waits up to [`DELETE_QUIESCE_TIMEOUT`] for the
+/// exclusive side. `relocate_index_report` takes only the SHARED side while it
+/// rewrites `root_path`, so a relocate can land inside that wait and leave the
+/// pre-call verdict describing a root the registration no longer has. A relocate
+/// that lands mid-wait therefore turns the delete into a refusal
+/// (`UnregisterOutcome::refusal`), not a success against a moved, live root.
+///
 /// Residual: `embed_deferred_chunks` still has no interior cancel checkpoint, so
 /// a delete landing during a deferred-embed pass waits for the whole pass and
 /// abandons itself if that outlasts the timeout. That is now a clean retryable
@@ -288,11 +332,14 @@ const DELETE_QUIESCE_TIMEOUT: std::time::Duration = std::time::Duration::from_mi
 /// Test: delete-path handler tests; reaper behaviour covered by `orphan_reaper`
 /// unit tests plus the `spawn_orphan_reaper_ticker` wiring; the quiesce and
 /// refusal behaviour by `service::server::tests_3049`; the registry-only,
-/// unknown-id and failed-cleanup arms by `service::server::tests_6363`.
+/// unknown-id and failed-cleanup arms by `service::server::tests_6363`; the
+/// under-lock expectation re-check by
+/// `tests_6380::a_relocate_landing_mid_quiesce_refuses_the_delete`.
 pub(super) async fn unregister_index(
     state: &Arc<SearchAppState>,
     id: &str,
     delete_data: bool,
+    expected_root_path: Option<&str>,
 ) -> UnregisterOutcome {
     let index_id = IndexId::new(id.to_string());
     // #3049: signal BEFORE waiting so a writer that is between batches stops at
@@ -344,6 +391,9 @@ pub(super) async fn unregister_index(
             // the #3049 verdict for this branch, and it is retryable rather than
             // a failed cleanup.
             error: None,
+            // Nothing was compared under a lock, and nothing was torn down. The
+            // #3049 abandon verdict is the answer here, not a #6380 refusal.
+            refusal: None,
         };
     }
     if !quiesced {
@@ -357,6 +407,39 @@ pub(super) async fn unregister_index(
              nothing to refuse (issue #3049).",
             DELETE_QUIESCE_TIMEOUT,
         );
+    }
+    // #6380: re-compare the expectation now that the wait above has resolved.
+    // The pre-call comparison in `delete_index_report` held no lock, and
+    // `relocate_index_report` rewrites `root_path` while holding only the SHARED
+    // side of this same teardown lock — so a relocate can land inside the wait
+    // and leave that verdict describing a root this registration no longer has.
+    // Under the EXCLUSIVE guard no relocate can be mid-swap, which is what makes
+    // this the authoritative comparison; on the `!quiesced` fall-through above no
+    // guard is held, so it is a tighter check than the pre-call one rather than a
+    // conclusive one. Refusing is the safe direction either way.
+    if let Some(expected) = expected_root_path {
+        if let Err(refusal) = super::delete_guard::refuse_unless_root_matches(state, id, expected) {
+            tracing::warn!(
+                "delete[{id}]: REFUSED — the registration stopped matching the expected \
+                 root path while the delete waited for in-flight work to drain; nothing \
+                 was torn down (issue #6380)"
+            );
+            // The cancel signalled above must not outlive the delete that sent
+            // it: this index survives the refusal, so its next reindex must not
+            // abort at its first checkpoint. Same obligation, same reason, as the
+            // #3049 abandon branch above.
+            crate::service::reindex::clear_index_cancel(&index_id);
+            return UnregisterOutcome {
+                removed: false,
+                data_deleted: false,
+                quiesced,
+                // The guard 404s only when it found no registration at all; every
+                // other refusal compared against one that exists.
+                registered: refusal.0 != StatusCode::NOT_FOUND,
+                error: None,
+                refusal: Some(refusal),
+            };
+        }
     }
     let (removed_hot, removed_handle) = state.registry.remove_and_get(&index_id);
     let root_path_for_cleanup = removed_handle.map(|h| h.root_path.clone());
@@ -513,6 +596,9 @@ pub(super) async fn unregister_index(
         quiesced,
         registered,
         error: (!errors.is_empty()).then(|| errors.join("; ")),
+        // Reaching here means the #6380 re-check above either passed or was never
+        // asked for, so the teardown ran and its outcome is the verdict.
+        refusal: None,
     }
 }
 

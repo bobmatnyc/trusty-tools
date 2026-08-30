@@ -116,15 +116,25 @@ impl PruneOutcome {
 /// What: walks `ids` in order. Past `deadline` an id is not attempted and says
 /// so. Every id produces exactly one row carrying `ok` and, when it failed, the
 /// daemon's own message.
+/// #6380: each id is re-checked against a FRESH census immediately before its
+/// delete, and the delete carries the root path that census reported. An
+/// operator confirms a list minutes after it was built, and an index id is
+/// derived from its root path — so a path wiped and recreated in between names
+/// a live index under the same id. A re-check that cannot run refuses the id;
+/// see [`crate::routes::census_guard`].
+///
 /// Test: `prune_reports_per_item_outcomes_for_a_partial_batch`,
 /// `prune_reports_an_expired_budget_as_unattempted`,
-/// `prune_of_a_clean_batch_reports_every_id_removed`.
+/// `prune_of_a_clean_batch_reports_every_id_removed`,
+/// `prune_refuses_an_id_the_current_census_no_longer_calls_stale`,
+/// `prune_refuses_every_remaining_id_when_the_daemon_drops_mid_batch`.
 pub(crate) async fn prune_indexes_on_socket(
     socket: &Path,
     ids: &[String],
     delete_data: bool,
     deadline: Instant,
 ) -> PruneOutcome {
+    let guard = crate::routes::census_guard::OrphanGuard::new(socket);
     let mut outcome = PruneOutcome {
         rows: Vec::with_capacity(ids.len()),
         removed: 0,
@@ -145,7 +155,20 @@ pub(crate) async fn prune_indexes_on_socket(
             continue;
         }
 
-        let verdict = delete_index_on_socket(socket, id, delete_data).await;
+        // #6380: fail closed. A re-check that could not run, and a census that
+        // no longer calls this id stale, both mean the delete does not happen.
+        let expected_root = match guard.expected_root(id).await {
+            Ok(root) => root,
+            Err(reason) => {
+                outcome.failed += 1;
+                outcome
+                    .rows
+                    .push(json!({ "id": id, "ok": false, "error": reason }));
+                continue;
+            }
+        };
+
+        let verdict = delete_index_on_socket(socket, id, delete_data, Some(&expected_root)).await;
         if verdict.succeeded() {
             outcome.removed += 1;
             outcome.rows.push(json!({ "id": verdict.id(), "ok": true }));
@@ -399,21 +422,42 @@ mod tests {
     /// change another id's row, and a stub that answers every id identically
     /// cannot show that.
     /// What: reuses `deletes::tests::stub_search_socket` so there is one stub
-    /// answering for trusty-search's socket in this crate, not two.
+    /// answering for trusty-search's socket in this crate, not two. The census
+    /// half lists `stale` (#6380), so the guard passes every id these tests
+    /// prune and the delete's own verdict stays what each case is about.
     fn stub_search_socket_removing_only_doomed(dir: &Path) -> PathBuf {
-        crate::routes::deletes::tests::stub_search_socket(dir, |request: &Value| {
-            let id = request["params"]["index_id"].as_str().unwrap_or_default();
-            let removed = id.starts_with("doomed-");
-            json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "result": {
+        stub_search_socket_with_census(dir, &["doomed-a", "doomed-b", "survivor", "a", "b"])
+    }
+
+    /// The same stub, with the census's `orphans` list named explicitly.
+    ///
+    /// Why (#6380): the prune re-censuses before each delete, so what the census
+    /// says is now half of what a prune test asserts. An id absent from `stale`
+    /// is one the daemon no longer calls stale.
+    fn stub_search_socket_with_census(dir: &Path, stale: &[&str]) -> PathBuf {
+        let stale: Vec<String> = stale.iter().map(|s| s.to_string()).collect();
+        crate::routes::deletes::tests::stub_search_socket(dir, move |request: &Value| {
+            let result = if request["method"] == json!("search.registry.orphans") {
+                json!({
+                    "orphans": stale
+                        .iter()
+                        .map(|id| json!({ "id": id, "root_path": format!("/gone/{id}") }))
+                        .collect::<Vec<_>>(),
+                    "indeterminate": [],
+                    "live_count": 0,
+                    "total": stale.len(),
+                })
+            } else {
+                let id = request["params"]["index_id"].as_str().unwrap_or_default();
+                json!({
                     "id": id,
-                    "removed": removed,
+                    "removed": id.starts_with("doomed-"),
                     "data_deleted": false,
                     "quiesced": true,
-                },
-            })
+                    "expected_root_path": request["params"]["expected_root_path"].clone(),
+                })
+            };
+            json!({ "jsonrpc": "2.0", "id": 1, "result": result })
         })
     }
 
@@ -598,6 +642,145 @@ mod tests {
             with.failed, 1,
             "asking for the data and not getting it is a failure, not a success"
         );
+    }
+
+    /// Why (#6380): the reported hazard. The operator confirmed `doomed-a` from
+    /// a census taken minutes ago; by delete time the daemon no longer lists it
+    /// as stale, because its root was recreated and the id now names a LIVE
+    /// index. Against `origin/main` the prune deletes it — the stub's delete arm
+    /// answers `removed: true` for any `doomed-*` id, so `removed` is 1 and the
+    /// row reads `ok: true`.
+    /// What: a census that lists only `doomed-b`, pruning both.
+    /// Test: this is the test.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn prune_refuses_an_id_the_current_census_no_longer_calls_stale() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let socket = stub_search_socket_with_census(tmp.path(), &["doomed-b"]);
+        let outcome = prune_indexes_on_socket(
+            &socket,
+            &ids(&["doomed-a", "doomed-b"]),
+            false,
+            Instant::now() + PRUNE_BUDGET,
+        )
+        .await;
+
+        assert_eq!(
+            outcome.removed, 1,
+            "#6380: only the id the CURRENT census still calls stale may be \
+             deleted: {outcome:?}"
+        );
+        assert_eq!(outcome.failed, 1, "{outcome:?}");
+        let body = outcome.body();
+        let rows = body["results"].as_array().expect("rows");
+        assert_eq!(rows[0]["id"], json!("doomed-a"));
+        assert_eq!(rows[0]["ok"], json!(false), "body: {body}");
+        assert!(
+            rows[0]["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no longer lists"),
+            "the refused row must say the census went out of date: {body}"
+        );
+        assert_eq!(
+            rows[1]["ok"],
+            json!(true),
+            "a still-stale id proceeds: {body}"
+        );
+    }
+
+    /// Why (#6380): the delete has to carry the root the FRESH census reported,
+    /// or the daemon has nothing to compare and the residual window between the
+    /// re-check and the delete stays open.
+    /// Test: this is the test — the stub echoes the param back in its result.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn prune_pins_each_delete_to_the_root_the_census_reported() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let socket = stub_search_socket_with_census(tmp.path(), &["doomed-a"]);
+        let outcome = prune_indexes_on_socket(
+            &socket,
+            &ids(&["doomed-a"]),
+            false,
+            Instant::now() + PRUNE_BUDGET,
+        )
+        .await;
+        assert_eq!(outcome.removed, 1, "{outcome:?}");
+
+        let echoed = crate::routes::deletes::delete_index_on_socket(
+            &socket,
+            "doomed-a",
+            false,
+            Some("/gone/doomed-a"),
+        )
+        .await;
+        assert!(
+            matches!(&echoed, ActionVerdict::Succeeded { detail, .. }
+                if detail["expected_root_path"] == json!("/gone/doomed-a")),
+            "#6380: the expectation must reach the daemon: {echoed:?}"
+        );
+    }
+
+    /// Why (#6380 closure condition 2): a daemon that stops answering partway
+    /// through a batch must refuse every remaining id rather than delete it
+    /// unchecked. Against `origin/main` the ids are deleted with no re-check at
+    /// all, so nothing distinguishes a live daemon from a dead one here.
+    /// What: the stub's listener is dropped after the first census, so every
+    /// later exchange fails in transport.
+    /// Test: this is the test.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn prune_refuses_every_remaining_id_when_the_daemon_drops_mid_batch() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let socket = tmp.path().join("sockets").join("search.sock");
+        std::fs::create_dir_all(socket.parent().expect("parent")).expect("mkdir");
+        let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
+        // Serve exactly the first census, then stop listening. Everything after
+        // that — the first delete included — hits a socket nothing accepts.
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            if let Ok((mut conn, _)) = listener.accept().await {
+                let mut raw = Vec::new();
+                let _ = conn.read_to_end(&mut raw).await;
+                let reply = json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "orphans": [
+                            { "id": "doomed-a", "root_path": "/gone/a" },
+                            { "id": "doomed-b", "root_path": "/gone/b" },
+                        ],
+                        "indeterminate": [],
+                        "live_count": 0,
+                        "total": 2,
+                    },
+                })
+                .to_string();
+                let _ = conn.write_all(reply.as_bytes()).await;
+                let _ = conn.write_all(b"\n").await;
+                let _ = conn.flush().await;
+            }
+            drop(listener);
+        });
+
+        let outcome = prune_indexes_on_socket(
+            &socket,
+            &ids(&["doomed-a", "doomed-b"]),
+            true,
+            Instant::now() + PRUNE_BUDGET,
+        )
+        .await;
+
+        assert_eq!(
+            outcome.removed, 0,
+            "#6380: a daemon that dropped confirmed no delete: {outcome:?}"
+        );
+        assert_eq!(outcome.failed, 2, "{outcome:?}");
+        let body = outcome.body();
+        for row in body["results"].as_array().expect("rows") {
+            assert_eq!(row["ok"], json!(false), "body: {body}");
+            assert!(
+                !row["error"].as_str().unwrap_or_default().is_empty(),
+                "every failed row must say why: {body}"
+            );
+        }
     }
 
     // ── prune: route wiring ──────────────────────────────────────────────────
