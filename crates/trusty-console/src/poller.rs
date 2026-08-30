@@ -192,7 +192,7 @@ pub fn start(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::connector::{ServiceInfo, ServiceStatus};
+    use crate::connector::{ServiceInfo, ServiceLifecycle, ServiceStatus};
 
     /// A stub connector for tests — always returns a fixed `ServiceInfo`.
     struct StubConnector {
@@ -219,6 +219,7 @@ mod tests {
                 version: None,
                 url: self.url.map(|u| u.to_string()),
                 hint: None,
+                lifecycle: self.lifecycle(),
             }
         }
     }
@@ -271,6 +272,7 @@ mod tests {
                     version: Some("1.0.0".to_string()),
                     url: Some("http://127.0.0.1:7878".to_string()),
                     hint: None,
+                    lifecycle: ServiceLifecycle::Daemon,
                 },
                 ServiceInfo {
                     id: "trusty-memory".to_string(),
@@ -279,6 +281,7 @@ mod tests {
                     version: None,
                     url: None,
                     hint: None,
+                    lifecycle: ServiceLifecycle::Daemon,
                 },
             ],
             refreshed_at: Instant::now(),

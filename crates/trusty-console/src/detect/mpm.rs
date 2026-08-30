@@ -16,7 +16,7 @@
 
 use std::path::PathBuf;
 
-use crate::connector::{ServiceConnector, ServiceInfo, ServiceStatus};
+use crate::connector::{ServiceConnector, ServiceInfo, ServiceLifecycle, ServiceStatus};
 
 use super::helpers::{binary_on_path, detect_service, tcp_probe};
 
@@ -149,6 +149,7 @@ impl ServiceConnector for MpmConnector {
                 version: None,
                 url: None,
                 hint: None,
+                lifecycle: ServiceLifecycle::Daemon,
             };
         }
 
@@ -183,6 +184,7 @@ impl ServiceConnector for MpmConnector {
                 hint: Some(
                     "daemon is running but pre-dates #1849 — restart to enable proxy".to_string(),
                 ),
+                lifecycle: ServiceLifecycle::Daemon,
             };
         }
 
@@ -193,6 +195,8 @@ impl ServiceConnector for MpmConnector {
             version: None,
             url: None,
             hint: None,
+            // #6416: trusty-mpm is a resident daemon; `Available` means stopped.
+            lifecycle: ServiceLifecycle::Daemon,
         }
     }
 }

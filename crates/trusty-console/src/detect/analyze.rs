@@ -14,16 +14,22 @@
 //! than corrected.
 //!
 //! What: `AnalyzeConnector::detect()` dials `analyze.health` over the socket and
-//! reads `version` off the answer.
+//! reads `version` off the answer. When nothing answers — the resting state of
+//! an on-demand server (#6350) — the verdict comes off the binary instead, the
+//! way the trusty-review connector's has since #6290.
 //! Test: `analyze_connector_reports_available_when_nothing_is_serving`,
-//! `analyze_connector_reads_the_version_off_a_live_socket`.
+//! `analyze_connector_reads_the_version_off_a_live_socket`,
+//! `analyze_reports_an_on_demand_lifecycle_on_every_verdict`.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::connector::{ServiceConnector, ServiceInfo, ServiceStatus};
+use crate::connector::{ServiceConnector, ServiceInfo, ServiceLifecycle, ServiceStatus};
 
-use super::helpers::binary_on_path;
+use super::helpers::{VersionProbe, binary_on_path, binary_version};
+
+/// The binary this connector reports on.
+const BINARY: &str = "trusty-analyze";
 
 /// How long one health dial may take, end to end.
 ///
@@ -166,13 +172,20 @@ impl ServiceConnector for AnalyzeConnector {
         "Trusty Analyze"
     }
 
+    // #6416: #6287 moved it to a socket and #6350 made that server on-demand, so
+    // a resident process is not what healthy looks like here.
+    fn lifecycle(&self) -> ServiceLifecycle {
+        ServiceLifecycle::OnDemand
+    }
+
     /// Detect trusty-analyze status.
     ///
     /// Why: the console dashboard needs to know whether the daemon is up, and
     /// `tctl` makes the same call for a different reason — so the two must
     /// agree, which they do by dialling the same method on the same derived
     /// path (#6287).
-    /// What: binary check → `analyze.health` over the socket → status. `url` is
+    /// What: binary check → `analyze.health` over the socket → status, falling
+    /// back to `trusty-analyze --version` when nothing answers. `url` is
     /// deliberately `None`: a UDS daemon has no URL, and ADR-0032 makes
     /// trusty-console the only HTTP surface in the workspace, so a synthesised
     /// `http://` address would be a link that cannot work. A socket path that
@@ -206,14 +219,16 @@ impl AnalyzeConnector {
     /// observation.
     ///
     /// What that changes about the verdicts, now that resident is not the
-    /// healthy state: `Absent` is the only bad one (the binary is not
-    /// installed). `Available` means installed and startable, which for an
-    /// on-demand service is its correct resting state, not a degradation.
-    /// `Running` means a server happens to be up right now — a client is using
-    /// it, or one has not yet reached its idle window.
+    /// healthy state: `Absent` (not installed) and `Degraded` (installed but
+    /// `--version` will not run) are the bad ones. `Available` means installed
+    /// and startable, which for an on-demand service is its correct resting
+    /// state, not a degradation. `Running` means a server happens to be up right
+    /// now — a client is using it, or one has not yet reached its idle window.
     ///
     /// Test: `analyze_connector_surfaces_an_unresolvable_socket_path_as_a_hint`,
-    /// `detect_never_starts_a_server`.
+    /// `detect_never_starts_a_server`,
+    /// `analyze_reports_an_on_demand_lifecycle_on_every_verdict`,
+    /// `analyze_reads_a_version_off_the_binary_when_nothing_is_serving`.
     fn detect_from(&self, socket: Result<PathBuf, String>) -> ServiceInfo {
         let base =
             |status: ServiceStatus, version: Option<String>, hint: Option<String>| ServiceInfo {
@@ -223,20 +238,40 @@ impl AnalyzeConnector {
                 version,
                 url: None,
                 hint,
+                // #6416: trusty-analyze serves on demand since #6287/#6350, so
+                // `Available` is its resting state and the card must not offer
+                // to start a daemon.
+                lifecycle: self.lifecycle(),
             };
 
-        if !binary_on_path("trusty-analyze") {
+        if !binary_on_path(BINARY) {
             return base(ServiceStatus::Absent, None, None);
         }
 
-        let socket = match socket {
-            Ok(p) => p,
-            Err(reason) => return base(ServiceStatus::Available, None, Some(reason)),
+        // An unresolvable socket path leaves nothing to dial, but the binary
+        // question is still answerable — so the reason rides along as the hint
+        // rather than short-circuiting the verdict.
+        let (socket_hint, dialled) = match socket {
+            Ok(path) => (None, probe_health(&path)),
+            Err(reason) => (Some(reason), None),
         };
 
-        match probe_health(&socket) {
-            Some(health) => base(ServiceStatus::Running, health.version, None),
-            None => base(ServiceStatus::Available, None, None),
+        if let Some(health) = dialled {
+            return base(ServiceStatus::Running, health.version, None);
+        }
+
+        // #6416: nothing is serving, which for an on-demand member is healthy.
+        // The verdict comes off the binary, exactly as trusty-review's does.
+        match binary_version(BINARY) {
+            VersionProbe::Ran(version) => base(ServiceStatus::Available, version, socket_hint),
+            VersionProbe::CannotExecute(why) => base(
+                ServiceStatus::Degraded,
+                None,
+                Some(format!(
+                    "{BINARY} is on PATH but did not run: {why}. Reinstall it \
+                     with `cargo install {BINARY}`."
+                )),
+            ),
         }
     }
 }
@@ -384,6 +419,51 @@ mod tests {
             !socket.exists(),
             "detect must observe, never start: {} was created",
             socket.display()
+        );
+    }
+
+    /// REGRESSION (#6416): the dashboard read "Binary found but daemon is not
+    /// running" over the Trusty Analyze card, in amber, for a service #6287 and
+    /// #6350 made on-demand — so "nothing is serving" is what healthy looks
+    /// like here and the card was rendering it as a fault.
+    ///
+    /// Why: the assertion is on the SERIALISED payload because that JSON, not
+    /// the Rust struct, is what the Svelte card branches on.
+    /// What: the nothing-is-serving verdict must carry `"on_demand"`, and so
+    /// must the not-installed one.
+    /// Test: this is the test.
+    #[test]
+    fn analyze_reports_an_on_demand_lifecycle_on_every_verdict() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        for socket in [Ok(tmp.path().join("absent.sock")), Err("nope".to_string())] {
+            let payload =
+                serde_json::to_value(AnalyzeConnector::new().detect_from(socket)).expect("json");
+            assert_eq!(
+                payload.get("lifecycle"),
+                Some(&serde_json::json!("on_demand")),
+                "the card branches on this key: {payload}"
+            );
+        }
+    }
+
+    /// Why (#6416): an on-demand row is "installed + version = healthy", and
+    /// before this the resting-state card showed no version at all — it only
+    /// ever read one off a live socket, which for an idle server is never.
+    /// What: with nothing serving, the version comes off `--version`.
+    /// Test: this is the test.
+    #[test]
+    fn analyze_reads_a_version_off_the_binary_when_nothing_is_serving() {
+        if which::which(BINARY).is_err() {
+            eprintln!("skip: trusty-analyze is not on PATH, so detect() short-circuits to Absent");
+            return;
+        }
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let info = AnalyzeConnector::new().detect_from(Ok(tmp.path().join("absent.sock")));
+
+        assert_eq!(info.status, ServiceStatus::Available);
+        assert!(
+            info.version.is_some(),
+            "an installed on-demand member renders the version it prints"
         );
     }
 }

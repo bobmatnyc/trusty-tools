@@ -42,6 +42,7 @@ impl ServiceConnector for StubConnector {
             version: None,
             url: None,
             hint: None,
+            lifecycle: self.lifecycle(),
         }
     }
 }
@@ -195,6 +196,7 @@ async fn test_services_route_returns_degraded_with_hint() {
                 version: None,
                 url: None,
                 hint: Some("reachable but `console_metrics` tool not registered".to_string()),
+                lifecycle: self.lifecycle(),
             }
         }
     }

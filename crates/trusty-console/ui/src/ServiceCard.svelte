@@ -16,11 +16,13 @@
    *       and never says the card is degraded.
    * Test: `cardActions.test.js` covers the one-action / many-action / no-action
    *       rule, the Enter/Space key set, and the described-by composition.
+   *       `statusPresentation.test.js` covers the badge label, badge color and
+   *       hint sentence, including the on-demand members (#6416).
    *       Ordering of the cards themselves is
    *       server-side — see `detect::order_for_display` and
    *       `test_services_route_orders_running_before_absent`.
    *
-   * @typedef {{ id: string, display_name: string, status: string, version?: string, url?: string, hint?: string }} Service
+   * @typedef {{ id: string, display_name: string, status: string, version?: string, url?: string, hint?: string, lifecycle?: string }} Service
    * @type {{ service: Service, tabbedServices: Set<string>, onViewDetails?: (id: string) => void }}
    */
   import {
@@ -29,30 +31,18 @@
     isActivationKey,
     sanitizeElementId,
   } from './cardActions.js';
+  import { cardPresentation } from './statusPresentation.js';
 
   let { service, tabbedServices = new Set(), onViewDetails } = $props();
 
-  const STATUS_LABELS = {
-    running: 'Running',
-    available: 'Available',
-    absent: 'Absent',
-    degraded: 'Degraded',
-  };
-
-  // Maps a service status to a theme-adaptive CSS custom property reference.
-  // The returned `var(--trusty-status-*)` resolves against the active palette at
-  // render time, so badges recolor automatically when the theme flips — no JS hex.
-  const STATUS_VARS = {
-    running: 'var(--trusty-success)',
-    available: 'var(--trusty-warning)',
-    absent: 'var(--trusty-status-absent)',
-    // Degraded uses orange to indicate partial impairment (reachable but the
-    // console_metrics tool is missing). Distinct from the amber "Available" state.
-    degraded: 'var(--trusty-status-degraded)',
-  };
-
-  let statusLabel = $derived(STATUS_LABELS[service.status] ?? service.status);
-  let statusVar = $derived(STATUS_VARS[service.status] ?? 'var(--trusty-text-muted)');
+  // #6416: label, badge color and hint sentence come from one pure function, so
+  // the "Available means a stopped daemon" reading stops being hard-coded into
+  // this markup — it is wrong for trusty-review and trusty-analyze. The toneVar
+  // it returns is a `var(--trusty-*)` reference that resolves against the active
+  // palette at render time, so badges recolor when the theme flips.
+  let presentation = $derived(cardPresentation(service));
+  let statusLabel = $derived(presentation.label);
+  let statusVar = $derived(presentation.toneVar);
   // hasTab is derived from the caller-owned tabbedServices — no local duplicate.
   let hasTab = $derived(tabbedServices.has(service.id));
 
@@ -101,12 +91,14 @@
     {#if service.version}
       <p class="version" id="svc-{elementId}-version">Version: <code>{service.version}</code></p>
     {/if}
-    {#if service.status === 'absent'}
-      <p class="hint" id="svc-{elementId}-hint">Install with <code>cargo install {service.id}</code></p>
-    {:else if service.status === 'available'}
-      <p class="hint" id="svc-{elementId}-hint">Binary found but daemon is not running.</p>
-    {:else if service.status === 'degraded'}
-      <p class="hint degraded-hint" id="svc-{elementId}-hint">{service.hint ?? 'Service reachable but its metrics tool is unavailable.'}</p>
+    {#if presentation.hint?.kind === 'install'}
+      <p class="hint" id="svc-{elementId}-hint">Install with <code>{presentation.hint.text}</code></p>
+    {:else if presentation.hint}
+      <p
+        class="hint"
+        class:degraded-hint={presentation.hint.kind === 'degraded'}
+        id="svc-{elementId}-hint"
+      >{presentation.hint.text}</p>
     {/if}
   </div>
 {/snippet}

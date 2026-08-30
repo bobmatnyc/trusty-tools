@@ -24,7 +24,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::connector::{ServiceConnector, ServiceInfo, ServiceStatus};
+use crate::connector::{ServiceConnector, ServiceInfo, ServiceLifecycle, ServiceStatus};
 
 use super::helpers::binary_on_path;
 
@@ -261,6 +261,8 @@ impl MemoryConnector {
                 version,
                 url: None,
                 hint,
+                // #6416: trusty-memory is a resident daemon; `Available` means stopped.
+                lifecycle: ServiceLifecycle::Daemon,
             };
 
         if !binary_on_path("trusty-memory") {

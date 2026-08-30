@@ -17,7 +17,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::connector::{ServiceConnector, ServiceInfo, ServiceStatus};
+use crate::connector::{ServiceConnector, ServiceInfo, ServiceLifecycle, ServiceStatus};
 use crate::search_uds::{HEALTH_TIMEOUT, METHOD_HEALTH, SEARCH_SERVICE};
 
 use super::helpers::binary_on_path;
@@ -180,6 +180,8 @@ impl SearchConnector {
                 version,
                 url: None,
                 hint,
+                // #6416: trusty-search is a resident daemon; `Available` means stopped.
+                lifecycle: ServiceLifecycle::Daemon,
             };
 
         if !binary_on_path(SEARCH_SERVICE) {
