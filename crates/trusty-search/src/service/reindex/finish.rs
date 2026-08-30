@@ -448,7 +448,9 @@ pub(super) async fn finish_reindex(
         total_chunks,
         elapsed_ms,
         peak_rss_mb,
-        mem_limit_hit,
+        // #6415: the same value the SSE payload carries, so the log and the
+        // wire frame do not disagree on a poller-only abort.
+        aborted_memory,
     );
     // #5024: the old `model_load_approx_ms` was `elapsed` minus the subsystem
     // accumulators, which lumped the hash-cache load, the carryover copy, the
@@ -493,7 +495,8 @@ pub(super) async fn finish_reindex(
         bm25_ms: total_bm25_ms,
         vector_upsert_ms: total_vector_upsert_ms,
         vector_count: total_vector_count,
-        mem_limit_hit,
+        // #6415: the payload's memory verdict now comes from `terminal_status`,
+        // which already folds in the poller's `mem_abort`.
         chunks_dropped_by_cap: total_chunks_dropped_by_cap,
         // #5024: same breakdown the log line above prints, so a client polling
         // the SSE stream sees it without scraping stderr.
