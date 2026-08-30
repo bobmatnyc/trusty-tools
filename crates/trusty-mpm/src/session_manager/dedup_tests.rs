@@ -1219,16 +1219,11 @@ async fn reconcile_warns_that_a_terminal_record_has_a_live_tmux_session() {
     use tracing::instrument::WithSubscriber;
     use tracing_subscriber::layer::SubscriberExt;
 
-    // #4181: `tracing` short-circuits every macro on a process-global
-    // MAX_LEVEL that starts at OFF and is raised only when some test installs
-    // a GLOBAL default. A thread-local dispatcher never raises it, so without
-    // this the capture below would record `[]` whenever no other test in the
-    // binary happened to run first. See
-    // `ensure_managed_config_dir_emits_the_frozen_skill_warning`.
-    static RAISE_MAX_LEVEL: std::sync::Once = std::sync::Once::new();
-    RAISE_MAX_LEVEL.call_once(|| {
-        let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
-    });
+    // #4181/#4931: `tracing` short-circuits every macro on a process-global
+    // MAX_LEVEL that starts at OFF and is raised only by a GLOBAL default
+    // subscriber, which a thread-local dispatcher is not. One entry point owns
+    // raising it for the whole binary.
+    crate::test_support::enable_event_capture();
 
     let dir = TempDir::new().unwrap();
     let ws_dir = TempDir::new().unwrap();

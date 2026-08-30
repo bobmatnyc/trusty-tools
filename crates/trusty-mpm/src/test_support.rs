@@ -349,6 +349,49 @@ pub(crate) fn isolated_daemon_home(allow_production: bool) -> (TempDir, DaemonHo
     (dir, override_guard)
 }
 
+/// Make `tracing` events reachable by a thread-local capturing subscriber, for
+/// the whole test process (#4931).
+///
+/// Why: `tracing`'s macros short-circuit on a process-global `MAX_LEVEL` that
+/// starts at `OFF` and is raised only when some subscriber is installed as the
+/// GLOBAL default. `tracing::subscriber::with_default` installs a THREAD-LOCAL
+/// one, which never raises it — so whether a capture test recorded anything
+/// depended on whether some unrelated test in the same binary had happened to
+/// install a global default first. `ensure_managed_config_dir_emits_the_frozen_skill_warning`
+/// failed that way at a measured 6-7 runs in 20, always with `Captured lines: []`,
+/// and `#[serial]` cannot help: the level is global and outlives the lock.
+///
+/// This is the ONE place that raises it. Two test modules had grown their own
+/// copy of the `Once` + `set_global_default` block; a third would be free to
+/// install a FILTERED global instead, which would clamp `MAX_LEVEL` below `WARN`
+/// and silently reintroduce the flake for every capture test in the binary. The
+/// post-condition below turns that into an immediate, named failure rather than
+/// an empty capture several frames away.
+/// What: installs a bare `tracing_subscriber::registry()` as the global default
+/// once per process (its `max_level_hint` is `None`, i.e. `TRACE`), then asserts
+/// the resulting global level admits `WARN`. A thread-local `with_default` still
+/// overrides the global for the capturing thread.
+/// Test: [`tests::event_capture_admits_warn`]; used by
+/// `core::managed_config_tests::ensure_managed_config_dir_emits_the_frozen_skill_warning`
+/// and `session_manager::dedup_tests`.
+pub(crate) fn enable_event_capture() {
+    static RAISE_MAX_LEVEL: Once = Once::new();
+    RAISE_MAX_LEVEL.call_once(|| {
+        // A global default may already be installed; that is fine as long as it
+        // does not clamp the level, which the assertion below verifies.
+        let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+    });
+    assert!(
+        tracing::level_filters::LevelFilter::current() >= tracing::Level::WARN,
+        "test_support::enable_event_capture(): the process-global tracing level \
+         is {:?}, which discards WARN events before any subscriber sees them \
+         (#4931). Some test in this binary installed a FILTERED global default \
+         subscriber; route it through this function, or give it a subscriber \
+         whose max_level_hint admits WARN.",
+        tracing::level_filters::LevelFilter::current()
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -591,5 +634,36 @@ mod tests {
     fn stale_after_is_positive_duration() {
         assert!(STALE_AFTER > Duration::from_secs(0));
         assert!(SystemTime::now().duration_since(UNIX_EPOCH).is_ok());
+    }
+
+    /// #4931: the whole point of [`super::enable_event_capture`] is that a
+    /// `tracing::warn!` reaches a thread-local subscriber afterwards. Pin both
+    /// halves — the global level admits `WARN`, and a `with_default` capture
+    /// installed after the call actually records one.
+    #[test]
+    fn event_capture_admits_warn() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        super::enable_event_capture();
+        assert!(
+            tracing::level_filters::LevelFilter::current() >= tracing::Level::WARN,
+            "the global level must admit WARN after enable_event_capture()"
+        );
+
+        let buffer = trusty_common::log_buffer::LogBuffer::new(8);
+        let subscriber = tracing_subscriber::registry().with(
+            trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!("enable-event-capture-probe");
+        });
+
+        let lines = buffer.tail(8);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("enable-event-capture-probe")),
+            "a WARN emitted under with_default must reach the capture buffer,              else every capture test in this binary is silently vacuous: {lines:#?}"
+        );
     }
 }

@@ -532,18 +532,13 @@ fn ensure_managed_config_dir_emits_the_frozen_skill_warning() {
     // belong to the run under test.
     let (config_dir, _deployed) = frozen_skill_fixture(&tmp, &fw);
 
-    // #4181: `tracing` short-circuits every macro on a process-global MAX_LEVEL
-    // that starts at OFF and is raised only when some test installs a GLOBAL
-    // default. A thread-local `with_default` never raises it, so whether this
-    // test captured anything depended on which OTHER test in the lib binary
-    // happened to run first — it captured `[]` and failed whenever none had.
-    // `#[serial]` cannot help: the level is global and outlives the lock.
-    // Installing a permissive global default once makes the capture below
-    // deterministic; `with_default` still overrides it for this thread.
-    static RAISE_MAX_LEVEL: std::sync::Once = std::sync::Once::new();
-    RAISE_MAX_LEVEL.call_once(|| {
-        let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
-    });
+    // #4181/#4931: `tracing` short-circuits every macro on a process-global
+    // MAX_LEVEL that starts at OFF and is raised only by a GLOBAL default
+    // subscriber. `with_default` is thread-local and never raises it, so this
+    // capture used to record `[]` whenever no other test had installed one.
+    // One entry point owns that now, and it FAILS rather than capturing nothing
+    // if some other test clamped the level below WARN.
+    crate::test_support::enable_event_capture();
 
     let buffer = trusty_common::log_buffer::LogBuffer::new(64);
     let subscriber = tracing_subscriber::registry().with(
