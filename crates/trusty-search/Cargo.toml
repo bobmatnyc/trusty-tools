@@ -24,7 +24,10 @@ name = "trusty-search"
 # public-API change is the ADDITIVE `persistence::find_index_registry_entry` /
 # `…_at` pair — `cargo-semver-checks` against the published 0.49.4 reports
 # "no semver update required" (196 pass, 0 fail).
-version = "0.49.6"
+# 0.49.7 (#4045): test-only regression coverage for the #4045 re-regressed
+# fixes; no source behavior change, bumped only to keep main's version-parity
+# gate green (check-pr-version-bump.sh).
+version = "0.49.7"
 edition = "2021"
 description = "Machine-wide hybrid code search service: BM25 + vector + KG, zero cold-start, MCP server"
 readme = "README.md"
