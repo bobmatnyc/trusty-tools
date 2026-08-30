@@ -333,3 +333,53 @@ fn ensure_server_up_fails_loudly_when_the_server_never_comes_up() {
         "must surface as a Protocol error: {err:?}"
     );
 }
+
+// ── #6411: the empty-server stderr classification boundary ──────────────
+
+#[test]
+fn empty_server_stderr_is_an_empty_list() {
+    // The two spellings real tmux emits when the SERVER is up and holds
+    // nothing. Both mean "there is nothing to list", so every listing maps
+    // them to an empty collection rather than an error.
+    assert!(stderr_means_empty_server(
+        "no server running on /tmp/tmux-501/default\n"
+    ));
+    assert!(stderr_means_empty_server("no sessions\n"));
+}
+
+#[test]
+fn unreachable_socket_stderr_is_not_an_empty_list() {
+    // What real tmux prints on a host where no server has EVER run: the
+    // socket path does not exist yet. That is not an empty server, and
+    // classifying it as one would let `reap_dead_sessions` see an empty live
+    // set and delete every registered tmux session, so it must stay an Err.
+    //
+    // This is the gap that made `main` red: `TmuxDriver::discover()` succeeds
+    // on such a host (the BINARY resolves) while every listing fails, so
+    // `discover().is_ok()` must never be used to predict a reap outcome.
+    assert!(!stderr_means_empty_server(
+        "error connecting to /tmp/tmux-501/default (No such file or directory)"
+    ));
+    assert!(!stderr_means_empty_server("lost server"));
+}
+
+#[test]
+fn list_sessions_errors_on_a_host_whose_tmux_server_never_ran() {
+    // The end-to-end shape of the gap, through the real method: a tmux that
+    // resolves fine but cannot reach a server. `list_sessions` must return
+    // Err, because `reap_dead_sessions` turns an Err into "reap nothing" and
+    // an Ok(empty) into "every registered tmux session is dead". A caller
+    // that gated on binary resolution alone would predict the wrong one.
+    let dir = tempfile::tempdir().unwrap();
+    let script = "#!/bin/sh\necho 'error connecting to /tmp/tmux-501/default (No such file or directory)' >&2\nexit 1\n";
+    let bin = write_fake_tmux(dir.path(), "fake-tmux-no-server", script);
+    let driver = TmuxDriver { tmux_path: bin };
+
+    let err = driver
+        .list_sessions()
+        .expect_err("an unreachable tmux server must not read as an empty session list");
+    assert!(
+        matches!(err, Error::Protocol(_)),
+        "must surface as a Protocol error: {err:?}"
+    );
+}

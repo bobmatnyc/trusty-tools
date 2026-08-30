@@ -553,10 +553,17 @@ async fn parity_sessions_reap_agrees_across_transports() {
 /// and on one without, and no test here has to start a tmux server. The victim
 /// is a tmux-origin session whose UUID-derived name no tmux server is hosting.
 ///
-/// Whether the victim is actually removed depends on tmux being reachable —
-/// `SessionService::reap` reaps NOTHING when `TmuxDriver::discover` fails,
-/// deliberately, so that a missing tmux cannot wipe the registry. So the
-/// removal is asserted under that condition and the PARITY is asserted
+/// Whether the victim is actually removed depends on what reap can SEE of
+/// tmux, and the precondition has to be the same question reap asks.
+/// `DaemonState::reap_dead_sessions` reaps nothing when `driver.list_sessions`
+/// fails, deliberately, so that an unreachable tmux cannot wipe the registry —
+/// and on a host where no tmux server has ever run that listing DOES fail,
+/// with `error connecting to <socket> (No such file or directory)`, which
+/// `TmuxDriver::list_sessions` does not classify as an empty server. A CI
+/// runner is exactly that host. Probing `TmuxDriver::discover().is_ok()`
+/// instead asks only whether the tmux BINARY resolves, which is true there and
+/// made `main` red (#6411). So the probe below runs the listing itself.
+/// The removal is asserted under that condition and the PARITY is asserted
 /// unconditionally: whatever this host let reap do, both transports did the
 /// same thing.
 ///
@@ -572,7 +579,11 @@ async fn parity_sessions_reap_removes_the_dead_and_spares_the_live_on_both_trans
     use crate::core::session::SessionHost;
 
     let (state, _dir) = hermetic();
-    let tmux_reachable = crate::daemon::tmux::TmuxDriver::discover().is_ok();
+    // #6411: ask the question reap asks — can it LIST the live set? — not the
+    // weaker "does the tmux binary resolve".
+    let reap_sees_tmux = crate::daemon::tmux::TmuxDriver::discover()
+        .and_then(|driver| driver.list_sessions())
+        .is_ok();
 
     // The survivor: native origin, so the tmux liveness rule skips it entirely.
     let survivor = SessionId::new();
@@ -599,11 +610,11 @@ async fn parity_sessions_reap_removes_the_dead_and_spares_the_live_on_both_trans
         state.session(survivor).is_some(),
         "the socket must spare it too"
     );
-    if tmux_reachable {
+    if reap_sees_tmux {
         assert_eq!(
             result["removed"],
             json!(1),
-            "with tmux reachable each transport must reap exactly its own victim: {result}"
+            "with the tmux listing readable each transport must reap exactly its own victim: {result}"
         );
         assert!(state.session(victim_http).is_none(), "HTTP must reap it");
         assert!(state.session(victim_rpc).is_none(), "the socket must too");
@@ -616,7 +627,7 @@ async fn parity_sessions_reap_removes_the_dead_and_spares_the_live_on_both_trans
         assert_eq!(
             result["removed"],
             json!(0),
-            "with tmux unreachable neither transport may reap anything: {result}"
+            "with the tmux listing unreadable neither transport may reap anything: {result}"
         );
         assert!(
             state.session(victim_http).is_some(),
