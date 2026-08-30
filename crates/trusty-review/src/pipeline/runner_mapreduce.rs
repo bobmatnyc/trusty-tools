@@ -338,17 +338,6 @@ async fn fold_reduced_into_result(
     result.grade =
         original_llm_grade.map(|g| reconcile_grade_with_verdict(g, &result.verdict).to_string());
 
-    // Grade reconciliation (#1886 parity with the unified path): mirror the final
-    // top-level grade into any JSON `"grade"` embedded in `review_body` so the two
-    // observable copies can never disagree.  In this path `review_body` is the
-    // synthesis PROSE summary (no embedded JSON grade), so this is normally a no-op;
-    // it is applied unconditionally as defence-in-depth against a future summary
-    // format that embeds a grade.
-    result.review_body = crate::pipeline::grade_reconcile::reconcile_review_body_grade(
-        &result.review_body,
-        result.grade.as_deref(),
-    );
-
     // Inline per-line comments from the RAW diff (#1414 parity).
     attach_inline_comments(result, &run.raw_diff);
 
@@ -366,6 +355,27 @@ async fn fold_reduced_into_result(
     // path's rendered `diff.len()` — the char count actually sent to the reviewers,
     // which the aggregate token spend is proportional to.
     apply_shallow_review_flag(result, run.filtered.filtered_byte_size);
+
+    // Reconciliation (#1886 grade, #1902 verdict) — mirror both final top-level
+    // values into any JSON embedded in `review_body` so the two observable
+    // copies of each can never disagree. In this path `review_body` is normally
+    // the synthesis PROSE summary with no embedded JSON, making both a no-op;
+    // they run unconditionally as defence-in-depth against a summary format
+    // that embeds either field.
+    //
+    // #1902: this runs AFTER `apply_shallow_review_flag`, not before it. The
+    // shallow cap lowers `result.grade`, so reconciling ahead of it mirrored a
+    // grade the envelope no longer carried — the same staleness #1886 fixed,
+    // reintroduced by ordering. The unified path has always reconciled after
+    // its own shallow cap (`runner.rs` step 7d).
+    result.review_body = crate::pipeline::grade_reconcile::reconcile_review_body_grade(
+        &result.review_body,
+        result.grade.as_deref(),
+    );
+    result.review_body = crate::pipeline::grade_reconcile::reconcile_review_body_verdict(
+        &result.review_body,
+        &result.verdict,
+    );
 }
 
 /// Flag and grade-cap a suspiciously shallow clean review on the map-reduce path.

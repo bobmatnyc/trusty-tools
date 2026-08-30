@@ -806,6 +806,16 @@ pub async fn run_review(
         result.grade.as_deref(),
     );
 
+    // #1902: the verdict embedded in the same raw JSON is stale for the same
+    // reason the grade was — it is the model's pre-floor lean, not the value
+    // the severity floor, coverage floor, and verification round settled on.
+    // A merge gate reading the top-level BLOCK while a human read an embedded
+    // APPROVE is the reported harm.
+    result.review_body = crate::pipeline::grade_reconcile::reconcile_review_body_verdict(
+        &result.review_body,
+        &result.verdict,
+    );
+
     // 7e: build inline per-line comments from the RAW diff (#1414).  Using the
     // pre-filter `raw_diff` (not the noise-filtered `diff` sent to the LLM) means
     // anchors map to the actual PR diff lines GitHub will accept; findings that do
