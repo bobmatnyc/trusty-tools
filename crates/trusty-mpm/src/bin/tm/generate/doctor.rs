@@ -121,6 +121,11 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
          pull requests with no unsaved work (issue #2919).",
     ),
     (
+        "base_clone",
+        "The base clone each live worktree resolves through still has its git identity — \
+         fails naming the base path and how many worktrees hang off it (issue #3605).",
+    ),
+    (
         "gh_account",
         "Active `gh` CLI identity is unambiguous — warns on multi-account ambiguity.",
     ),

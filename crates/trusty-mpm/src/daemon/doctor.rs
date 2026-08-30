@@ -29,6 +29,13 @@ use doctor_worktrees::check_worktrees;
 pub(crate) use doctor_worktrees::gather_worktree_counts;
 pub use doctor_worktrees::{WORKTREE_REMEDIATION_COMMAND, WorktreeOrphanCounts};
 
+// #3605: `check_worktrees` above counts orphaned worktree DIRECTORIES. This is
+// the opposite condition — a live worktree whose base clone stopped resolving,
+// which the 2026-07-21 incident left undetected for over half an hour.
+#[path = "doctor_base_clone.rs"]
+mod doctor_base_clone;
+use doctor_base_clone::check_base_clones;
+
 use super::search_rpc;
 
 // Split out to keep this file under the 500-SLOC production cap (DOC-28 R4(a)).
@@ -396,6 +403,10 @@ pub async fn run_doctor(
     // byte, so it read identically whether the worktree store held 4 GiB or the
     // 1.1 TiB measured on 2026-07-21. This is the disk half.
     checks.push(check_worktree_disk(repos_root, active_workspace_paths).await);
+    // #3605: and this is the identity half — a live worktree keeps its files
+    // when the base clone behind it loses its git internals, so every git
+    // command there fails while both probes above stay green.
+    checks.push(check_base_clones(active_workspace_paths));
     checks.push(check_gh_account().await);
     checks.push(check_oauth_token_config());
     let (hooks_contamination, hooks_foreign_conflict) =

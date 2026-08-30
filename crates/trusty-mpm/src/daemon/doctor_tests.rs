@@ -443,7 +443,7 @@ async fn run_doctor_produces_thirty_two_checks() {
     // twenty-seven); issue #4033 adds `binary_provenance` (twenty-seven →
     // twenty-eight); issue #5045 adds `search_index_pin` (twenty-nine →
     // thirty); the stray-`.mcp.json` probe adds `stray_mcp_json` (thirty →
-    // thirty-one).
+    // thirty-one); issue #3605 adds `base_clone` (thirty-one → thirty-two).
     // #1905's stale-skill cleanup is deliberately NOT a `run_doctor` probe
     // — see the `run_doctor` doc.
     let report = run_doctor(None, None, &[], None).await;
@@ -471,6 +471,8 @@ async fn run_doctor_produces_thirty_two_checks() {
         "search_index_pin",
         "worktrees",
         "worktree_disk",
+        // #3605: the base clone a live worktree resolves through.
+        "base_clone",
         "gh_account",
         "oauth_token",
         "hooks_contamination",

@@ -25,7 +25,8 @@ use crate::daemon::error::{CODE_CONFLICT, CODE_FORBIDDEN, CODE_GONE, CODE_NOT_FO
 /// instance it named is gone, or the instance is registered but has no
 /// attached subscriber — because the correct client reaction differs for each
 /// (start one / re-resolve the definition / retry).
-/// What: four addressing/delivery variants plus two request-validation ones.
+/// What: five addressing/delivery/registration variants plus two
+/// request-validation ones.
 /// Test: `bus_error_status_codes_map`, `instance_gone_is_410`.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum BusError {
@@ -108,6 +109,27 @@ pub enum BusError {
         kind: super::envelope::CallerKind,
     },
 
+    /// Registration could not mint an instance id that was not already live.
+    ///
+    /// Why this is an error and not a silent overwrite (#4276): the alternative
+    /// is [`super::registry::InstanceRegistry`] replacing a live instance's
+    /// entry with the newcomer's, after which every lookup of the FIRST
+    /// instance resolves to the second. That is misrouting dressed as success —
+    /// the same failure the no-fallback rule exists to prevent, reached by
+    /// registration rather than by resolution. Refusing to register is
+    /// recoverable; the caller retries and sees why.
+    #[error(
+        "could not mint a free instance id for definition '{definition_id}' \
+         after {attempts} attempts; registration refused rather than \
+         overwriting a live instance"
+    )]
+    InstanceIdCollision {
+        /// The definition whose registration was refused.
+        definition_id: String,
+        /// How many suffixes were minted and found occupied.
+        attempts: usize,
+    },
+
     /// A definition id failed validation.
     #[error("invalid definition id '{definition_id}': {reason}")]
     InvalidDefinitionId {
@@ -138,7 +160,10 @@ impl BusError {
     /// [`BusError::UnregisteredSender`] — the one failure about the caller's
     /// own identity rather than the target's.
     /// What: `403` sender unverified, `404` not-found, `410` gone, `409`
-    /// conflict, `400` bad request.
+    /// conflict, `400` bad request. [`BusError::InstanceIdCollision`] joins the
+    /// `409` row (#4276): the request was well-formed and the state of the
+    /// registry is what refused it, which is what `409 Conflict` names — and a
+    /// retry is the correct client reaction, as it is for the other `409`.
     /// Test: `bus_error_status_codes_map`, `instance_gone_is_410`,
     /// `unregistered_sender_is_403`.
     pub fn status(&self) -> StatusCode {
@@ -146,7 +171,7 @@ impl BusError {
             Self::UnregisteredSender { .. } => StatusCode::FORBIDDEN,
             Self::NoLiveInstance { .. } => StatusCode::NOT_FOUND,
             Self::InstanceGone { .. } => StatusCode::GONE,
-            Self::NoSubscriber { .. } => StatusCode::CONFLICT,
+            Self::NoSubscriber { .. } | Self::InstanceIdCollision { .. } => StatusCode::CONFLICT,
             Self::InvalidDefinitionId { .. }
             | Self::InvalidTarget(_)
             | Self::InvalidCaller(_)

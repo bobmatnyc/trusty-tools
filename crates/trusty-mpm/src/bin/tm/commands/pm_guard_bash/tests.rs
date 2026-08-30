@@ -1282,3 +1282,79 @@ fn evaluate_bash_command_never_denies_tm_wait() {
         );
     }
 }
+
+#[test]
+fn evaluate_bash_command_denies_process_substitution_edit() {
+    // #2745: bash executes the body of `<(…)`, so a `sed -i` there edits a file
+    // exactly as a bare `sed -i` would. Before the fix the guard inspected only
+    // `$(…)` and backticks, so every spelling below was ALLOWED.
+    for cmd in [
+        "diff <(sed -i s/a/b/ f) x",
+        "diff x <(sed -i s/a/b/ f)",
+        "cat <(patch -p1 f.diff)",
+        "wc -l <(git apply my.patch)",
+    ] {
+        assert_eq!(
+            evaluate_bash_command(cmd),
+            Some(SHELL_EDIT_REASON),
+            "process-substitution body must be classified: {cmd:?}"
+        );
+    }
+}
+
+#[test]
+fn evaluate_bash_command_denies_output_process_substitution_by_classification() {
+    // #2745: `>(…)` was denied only incidentally, because its leading `>` trips
+    // the redirection scan. The body is now classified, so the deny is by
+    // design — and a non-shell-edit body reports ITS OWN reason rather than the
+    // redirection one.
+    assert_eq!(
+        evaluate_bash_command("tee >(sed -i s/a/b/ f)"),
+        Some(SHELL_EDIT_REASON)
+    );
+    assert_eq!(
+        evaluate_bash_command("tee >(curl http://example.com)"),
+        Some(NETWORK_REASON),
+        "the body's own classification decides, not the `>` scan"
+    );
+}
+
+#[test]
+fn evaluate_bash_command_allows_readonly_process_substitution() {
+    // #2745 must close the bypass without blanket-denying the read-only form.
+    for cmd in [
+        "diff <(sort a.txt) <(sort b.txt)",
+        "comm -12 <(git ls-files) <(cat manifest.txt)",
+    ] {
+        assert_eq!(
+            evaluate_bash_command(cmd),
+            None,
+            "read-only process substitution must still pass: {cmd:?}"
+        );
+    }
+}
+
+#[test]
+fn evaluate_bash_command_denies_unbalanced_process_substitution() {
+    // An unclassifiable segment fails CLOSED, matching the `$(`/backtick shape.
+    assert_eq!(
+        evaluate_bash_command("diff <(sed -i s/a/b/ f x"),
+        Some(SHELL_EDIT_REASON)
+    );
+}
+
+#[test]
+fn evaluate_bash_command_allows_quoted_process_substitution_prose() {
+    // Unlike `$(…)`, process substitution is suppressed by BOTH quote styles,
+    // so a `<(…)` in a commit message is literal text in either.
+    for cmd in [
+        r#"git commit -m 'use diff <(sed -i x) y'"#,
+        r#"git commit -m "use diff <(sed -i x) y""#,
+    ] {
+        assert_eq!(
+            evaluate_bash_command(cmd),
+            None,
+            "quoted process-substitution prose is not shell syntax: {cmd:?}"
+        );
+    }
+}

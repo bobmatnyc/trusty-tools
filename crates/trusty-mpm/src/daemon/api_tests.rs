@@ -1226,6 +1226,8 @@ async fn doctor_endpoint_returns_report() {
         "search_index_pin",
         "worktrees",
         "worktree_disk",
+        // #3605: the base clone a live worktree resolves through.
+        "base_clone",
         "gh_account",
         "oauth_token",
         "hooks_contamination",
