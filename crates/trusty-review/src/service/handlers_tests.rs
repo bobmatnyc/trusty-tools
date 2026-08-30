@@ -583,6 +583,37 @@ async fn review_handler_decrements_in_flight_when_client_disconnects() {
     );
 }
 
+/// REGRESSION (#4254): `/health` reports the dry_run `handle_review` executes
+/// with, never the raw config flag.
+///
+/// Why: the same defect the MCP pair carried — a process configured live
+/// answered `dry_run: false` while every review it ran was dry and posted
+/// nothing. A caller that trusts health believed reviews reached GitHub.
+/// What: builds a state whose config says LIVE, calls `handle_health`, and
+/// asserts the reported `dry_run` is `true` with a reason naming the gate.
+/// Pre-fix this asserted `false == true` and failed.
+/// Test: this test itself.
+#[tokio::test]
+async fn health_reports_the_dry_run_the_review_path_executes() {
+    let mut config = crate::config::ReviewConfig::load(None);
+    config.dry_run = false;
+    let state = AppState::new(config, Arc::new(FakeLlm), Arc::new(FakeSearch), None);
+
+    let health = handle_health(&state).await;
+
+    assert!(
+        health.dry_run,
+        "handle_review forces dry-run, so /health must report dry_run: true"
+    );
+    let reason = health
+        .dry_run_reason
+        .expect("a forced dry-run names its gate");
+    assert!(
+        reason.contains("never posts"),
+        "the reason names the gate: {reason}"
+    );
+}
+
 // ── Inference-probe handler tests (#719) ──────────────────────────────────────
 
 /// /health includes `inference: "ok"` and `status: "ok"` when the LLM succeeds.

@@ -146,6 +146,21 @@ impl AppState {
     }
 }
 
+// ─── Posting posture (#4254) ─────────────────────────────────────────────────
+
+/// The trigger `handle_review` runs under — it never posts.
+///
+/// Why: `handle_health` reported `config.dry_run` while `handle_review` ran with
+/// these two constants, so a live-configured process answered `dry_run: false`
+/// and then posted nothing (#4254). Both paths read the constants now, so the
+/// health answer cannot drift from the review behaviour again.
+/// Test: `health_reports_the_dry_run_the_review_path_executes`.
+const REVIEW_TRIGGER: TriggerDecision = TriggerDecision::ForceDryRun;
+
+/// Whether `handle_review` may post to GitHub. It may not — see
+/// [`REVIEW_TRIGGER`].
+const REVIEW_ALLOW_POSTING: bool = false;
+
 // ─── Response shapes ──────────────────────────────────────────────────────────
 
 /// Response body for GET /health.
@@ -161,16 +176,28 @@ impl AppState {
 /// Test: `health_returns_ok_json`, `health_inference_ok_when_llm_ok`,
 /// `health_inference_auth_error_sets_degraded`,
 /// `health_required_dep_down_sets_degraded`,
-/// `health_optional_dep_down_stays_ok`.
+/// `health_optional_dep_down_stays_ok`,
+/// `health_reports_the_dry_run_the_review_path_executes`.
+///
+/// `#[non_exhaustive]`: #4254 added `dry_run_reason`, and this struct grows a
+/// field whenever the health contract does — see `HygieneCounts` for the same
+/// reasoning.
 #[derive(Debug, Serialize)]
+#[non_exhaustive]
 pub struct HealthResponse {
     /// `"ok"` when inference is healthy AND all required deps are reachable;
     /// `"degraded"` when inference is not `"ok"` OR a required dep is unreachable.
     pub status: &'static str,
     /// Pipeline version (e.g. `"tr-0.1"`).
     pub version: &'static str,
-    /// Whether the service is in dry-run mode.
+    /// Whether a review invoked through this surface runs dry (#4254).
+    ///
+    /// Not the raw `config.dry_run` flag: `handle_review` overrides it with
+    /// [`REVIEW_TRIGGER`] / [`REVIEW_ALLOW_POSTING`], so the flag reported
+    /// `false` while every review ran dry and posted nothing.
     pub dry_run: bool,
+    /// Which gate forced `dry_run`, or `None` when reviews would post (#4254).
+    pub dry_run_reason: Option<&'static str>,
     /// Configured reviewer model slug.
     pub reviewer_model: String,
     /// Inference-reachability probe result (#719).  One of: `"ok"`,
@@ -562,10 +589,19 @@ pub async fn handle_health(state: &AppState) -> HealthResponse {
     // #722: status is "degraded" when inference fails OR any required dep is down.
     let status = compute_status(inference, &deps);
 
+    // #4254: report the dry_run `handle_review` actually executes with, derived
+    // from the same posting-posture constants it passes.
+    let (dry_run, dry_run_reason) = crate::pipeline::surface_dry_run(
+        state.config.dry_run,
+        REVIEW_TRIGGER,
+        REVIEW_ALLOW_POSTING,
+    );
+
     HealthResponse {
         status,
         version: env!("CARGO_PKG_VERSION"),
-        dry_run: state.config.dry_run,
+        dry_run,
+        dry_run_reason: dry_run_reason.map(|r| r.as_str()),
         reviewer_model,
         inference,
         deps,
@@ -638,10 +674,12 @@ pub async fn handle_review(state: &AppState, req: ReviewRequest) -> Result<Revie
         write_log: false, // service callers don't write logs by default.
         print_result: false,
         // `review` never posts to GitHub — it always returns the result to
-        // the caller (push firewall + dry-run remain in force).
-        trigger: TriggerDecision::ForceDryRun,
+        // the caller (push firewall + dry-run remain in force). #4254: these
+        // two constants are what `handle_health` reads, so its `dry_run` is
+        // this path's, not the config flag's.
+        trigger: REVIEW_TRIGGER,
         run_mode: RunMode::Serve,
-        allow_posting: false,
+        allow_posting: REVIEW_ALLOW_POSTING,
         // Thread caller-supplied PR context (#1618) into the runner.  On the
         // local-diff path this is the only source of PR description / discussion /
         // referenced code (no GitHub fetch).

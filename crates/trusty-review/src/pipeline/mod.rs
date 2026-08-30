@@ -92,7 +92,9 @@ pub use letter_grade::{
 };
 pub use output::{log_json_path, print_review_result, write_review_log};
 pub use parser::{ParsedReview, parse_review_response};
-pub use post::{FinalizeAction, PostContext, decide_action, finalize_review};
+pub use post::{
+    DryRunReason, FinalizeAction, PostContext, decide_action, finalize_review, surface_dry_run,
+};
 pub use prompt::{
     ReviewContext, ReviewPrMeta, build_review_prompt, build_review_prompt_with_coverage,
     build_system_prompt, build_system_prompt_with_coverage, reviewer_system_prompt,

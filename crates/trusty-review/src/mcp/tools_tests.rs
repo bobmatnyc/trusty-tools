@@ -620,3 +620,38 @@ fn mcp_run_mode_resolves_cli_strategy() {
         AuthStrategy::Cli
     );
 }
+
+/// REGRESSION (#4254): `review_health` reports the dry_run the MCP review path
+/// executes with, never the raw config flag.
+///
+/// Why: the reported defect — `review_health` answered `"dry_run": false` while
+/// `review_pr` on the same process returned `"dry_run": true, "posted": false`
+/// and posted nothing. A caller gating on health believed reviews were reaching
+/// GitHub.
+/// What: builds a state whose config says LIVE (`dry_run = false`) — the exact
+/// configuration that produced the false answer — and asserts health reports
+/// `dry_run: true` with a reason naming the gate. Pre-fix this asserted
+/// `false == true` and failed.
+/// Test: this test itself.
+#[tokio::test]
+async fn review_health_reports_the_dry_run_the_review_path_executes() {
+    let mut config = ReviewConfig::load(None);
+    config.dry_run = false;
+    let state = AppState::new(config, Arc::new(OkLlmTool), Arc::new(FakeSearchTool), None);
+
+    let result = call_review_health(&state).await;
+    let text = result["content"][0]["text"].as_str().expect("text field");
+    let health: Value = serde_json::from_str(text).expect("valid JSON");
+
+    assert_eq!(
+        health["dry_run"], true,
+        "the MCP review tools force dry-run, so health must say so: {health}"
+    );
+    assert!(
+        health["dry_run_reason"]
+            .as_str()
+            .expect("a reason accompanies a forced dry-run")
+            .contains("never posts"),
+        "the reason names the gate: {health}"
+    );
+}
