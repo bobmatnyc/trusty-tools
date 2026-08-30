@@ -1,0 +1,2 @@
+Changed
+- The search dashboard's Svelte source now lives in this crate at `ui-search/`, and `build.rs` builds it into the committed `ui-search-dist/` bundle alongside the console's own UI. That bundle used to be a copy of a build from `crates/trusty-search/ui`, refreshed only by an explicit `make` target; nothing is copied across crates any more. The served page and its API calls are unchanged — the rebuilt bundle has the same content hashes (#6155, #6284).

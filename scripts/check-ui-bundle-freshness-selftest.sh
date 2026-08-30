@@ -508,10 +508,24 @@ run_case "case22 stamp with no digest" 1 "STAMP-MISSING" "$R"
 WIRED_CHECKED=0
 while IFS="$(printf '\t')" read -r crate src_dir bundle_dir _rest; do
   case "${crate:-}" in '' | \#*) continue ;; esac
-  # Only crates whose committed bundle is the Vite outDir are exposed.
-  [ "$bundle_dir" = "${src_dir}/dist" ] || continue
-  WIRED_CHECKED=$((WIRED_CHECKED + 1))
+  # #6155: source_dir is a comma-separated list; the CURRENT path is the one
+  # a build runs in.
+  src_dir="${src_dir%%,*}"
   config="${REPO_ROOT}/${src_dir}/vite.config.js"
+  # Only rows whose committed bundle IS the Vite outDir are exposed to #5936 —
+  # a bundle reached by a mirror step is stamped by that step instead. #6155
+  # made the outDir a SIBLING of the project (ui-search -> ui-search-dist), so
+  # the old `bundle_dir == src_dir/dist` test silently stopped matching the one
+  # row it most needed to cover. Read the outDir the config actually declares.
+  [ -f "$config" ] || continue
+  out_dir="$(sed -n "s/.*outDir:[[:space:]]*['\"]\([^'\"]*\)['\"].*/\1/p" "$config" | head -1)"
+  [ -n "$out_dir" ] || continue
+  case "$out_dir" in
+    ../*) resolved="$(dirname "$src_dir")/${out_dir#../}" ;;
+    *) resolved="${src_dir}/${out_dir}" ;;
+  esac
+  [ "$bundle_dir" = "$resolved" ] || continue
+  WIRED_CHECKED=$((WIRED_CHECKED + 1))
   if [ ! -f "$config" ]; then
     fail_case "case23 ${crate}: ${src_dir}/vite.config.js is missing"
   elif ! grep -qF "stampUiBundle('${crate}')" "$config"; then

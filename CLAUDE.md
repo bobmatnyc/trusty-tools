@@ -422,7 +422,8 @@ everywhere: ticket descriptions, build commands, conversation.
 
 - **Rust**: `rustup`, toolchain at MSRV `1.94` or later
   (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`).
-- **Node / pnpm**: only for the Svelte UIs in `trusty-search` / `trusty-memory`
+- **Node / pnpm**: only for the Svelte UIs — `trusty-console` carries two of
+  them (`ui/`, and `ui-search/` since #6155), plus `trusty-memory` and others
   (`npm i -g pnpm`).
 - **Env vars**: `RUST_LOG` and `SKIP_UI_BUILD=1` (skip the Svelte UI build in
   `build.rs`) are the day-to-day two. Full table:
