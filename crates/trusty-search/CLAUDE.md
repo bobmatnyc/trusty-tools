@@ -1031,9 +1031,9 @@ integration tests and downstream consumers can reach the internal APIs.
 ```
 trusty-search/
 ├── Cargo.toml                       single-crate manifest (lib + bin)
-├── build.rs                         Svelte UI build wrapper
-├── ui/                              Svelte 5 admin UI sources
-├── ui-dist/                         compiled UI bundle (embedded via include_dir!)
+├── build.rs                         Svelte UI build wrapper (inert since #6155)
+├── ui-dist/                         compiled UI bundle (embedded via include_dir!),
+│                                    mirrored from crates/trusty-console/ui-search-dist
 ├── CLAUDE.md                        this file
 ├── CHANGELOG.md
 ├── README.md
@@ -1091,14 +1091,21 @@ into the crate-root `ui-dist/` so `include_dir!` embeds the latest bundle.
 `cargo publish` cannot reach files outside the crate tarball, so the sync
 step is mandatory.
 
+🔴 **#6155 moved the dashboard's Svelte source out of this crate** into
+`crates/trusty-console/ui-search/`, where trusty-console builds it and serves it
+at `/tools/search/`. This crate no longer has a `ui/` tree, and `build.rs` no
+longer builds anything: `ui-dist/` is a mirror of the console's bundle, and both
+carry the same source digest. `/ui/` keeps serving exactly what it served
+before. #6285 deletes this crate's HTTP listener and `ui-dist/` with it.
+
 ```bash
-make release-prep                              # build ui/ and copy dist → ui-dist/
+make release-prep                              # rebuild via trusty-console, then mirror → ui-dist/
 cargo publish                                  # single crate (lib + bin)
 ```
 
-`make release-prep` runs `pnpm install --frozen-lockfile && pnpm build` (or
-the npm equivalent) and then mirrors `ui/dist/` into the crate-root
-`ui-dist/`.
+`make release-prep` runs `make -C crates/trusty-console search-ui` (which does
+the `pnpm install --frozen-lockfile && pnpm build`) and then mirrors
+`crates/trusty-console/ui-search-dist/` into the crate-root `ui-dist/`.
 
 🔴 **The `ui-dist-check` job this section used to cite was real, and it never
 ran once.** It lived in `crates/trusty-search/.github/workflows/ci.yml` — a
@@ -1114,8 +1121,10 @@ rejected on Vite hash instability, and would duplicate the gate below.
 What guards it now is `scripts/preflight-publish.sh` CHECK 7 at the publish
 boundary, plus `.github/workflows/ui-bundle-freshness.yml` at merge time. Both
 run `scripts/check-ui-bundle-freshness.sh`, which compares the digest recorded
-in `ui-dist/ui-source-hash.txt` against the current `ui/` source. `make
-release-prep` writes that stamp; run the gate yourself any time:
+in `ui-dist/ui-source-hash.txt` against the current source — since #6155 that
+source is `crates/trusty-console/ui-search/`, named by this crate's row in
+`scripts/ui-bundle-manifest.tsv`. `make release-prep` writes that stamp; run the
+gate yourself any time:
 
 ```bash
 bash scripts/check-ui-bundle-freshness.sh trusty-search

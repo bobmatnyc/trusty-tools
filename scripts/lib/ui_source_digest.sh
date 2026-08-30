@@ -92,6 +92,45 @@ ui_source_digest() {
   echo "${digest} ${count}"
 }
 
+# ui_source_digest_any <repo> <rev|--worktree> <src_dir_list> <bundle_dir>
+# Prints "<digest> <file-count> <src_dir_used>" for the FIRST directory in the
+# comma-separated list that holds any bundle-affecting file at <rev>. Returns 1
+# when none of them does.
+#
+# Why: a UI source directory can MOVE. #6155 moved the search dashboard from
+#   crates/trusty-search/ui to crates/trusty-console/ui-search, and the manifest
+#   is deliberately read from the working tree even under --rev — so a single
+#   source_dir would make every pre-move commit unauditable, reporting
+#   NO-SOURCES for a bundle whose source was right there under its old name.
+#   Listing the old path after the new one keeps `--rev` replay working across
+#   the move; the current path is always tried first, so HEAD is unaffected.
+# What: splits on commas, tries each in order, first non-empty wins.
+# Test: scripts/check-ui-bundle-freshness-selftest.sh case 18 replays the real
+#   #3606 publish commit, which predates the #6155 move.
+ui_source_digest_any() {
+  local repo="$1" rev="$2" list="$3" bundle_dir="$4"
+  local dir rest pair
+  rest="$list"
+  while [ -n "$rest" ]; do
+    case "$rest" in
+      *,*)
+        dir="${rest%%,*}"
+        rest="${rest#*,}"
+        ;;
+      *)
+        dir="$rest"
+        rest=""
+        ;;
+    esac
+    [ -z "$dir" ] && continue
+    if pair="$(ui_source_digest "$repo" "$rev" "$dir" "$bundle_dir")"; then
+      echo "${pair} ${dir}"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # ui_stamp_path <bundle_dir> — where the recorded digest lives.
 #
 # Inside the bundle so it travels with it: `sync-ui` mirrors the directory,

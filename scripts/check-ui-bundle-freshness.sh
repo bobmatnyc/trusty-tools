@@ -347,6 +347,11 @@ resolve_asset_ref() {
 check_row() {
   local crate="$1" src_dir="$2" bundle_dir="$3"
   local row_findings_before="$FINDINGS"
+  # #6155: the remedy names a `make -C crates/<dir>` target, and a suffixed row
+  # key (`trusty-console-search`) is not a directory — printing it produced an
+  # instruction that cannot run. The bundle path always carries the real one.
+  local crate_dir
+  crate_dir="$(printf '%s' "$bundle_dir" | sed -E 's|^crates/([^/]+)/.*|\1|')"
 
   # Bundle side: ls-tree carries the blob SHA of every file, so the content
   # hashes come out of the same read that enumerates them.
@@ -370,12 +375,15 @@ check_row() {
   # Source side: the digest over every bundle-affecting source file. The
   # selection rule and the hash both live in scripts/lib/ui_source_digest.sh so
   # the stamper and this gate can never disagree about either.
-  local src_digest_pair src_digest src_count
-  if src_digest_pair="$(ui_source_digest "$REPO_ROOT" "$DIGEST_REV" "$src_dir" "$bundle_dir")"; then
-    src_digest="${src_digest_pair%% *}"
-    src_count="${src_digest_pair##* }"
+  # #6155: src_dir is a comma-separated list, current path first, so a source
+  # tree that MOVED stays auditable at commits from before the move.
+  local src_digest_pair src_digest src_count src_used
+  if src_digest_pair="$(ui_source_digest_any "$REPO_ROOT" "$DIGEST_REV" "$src_dir" "$bundle_dir")"; then
+    src_digest="$(printf '%s' "$src_digest_pair" | awk '{ print $1 }')"
+    src_count="$(printf '%s' "$src_digest_pair" | awk '{ print $2 }')"
+    src_used="$(printf '%s' "$src_digest_pair" | awk '{ print $3 }')"
   else
-    fail "NO-SOURCES — ${crate}: ${src_dir} holds ZERO bundle-affecting files at ${REV}." \
+    fail "NO-SOURCES — ${crate}: none of ${src_dir} holds a bundle-affecting file at ${REV}." \
       "Nothing to compare the bundle against; refusing to call that fresh."
     return
   fi
@@ -396,19 +404,20 @@ check_row() {
     fail "STAMP-MISSING — ${crate}: ${stamp_rel} is absent or carries no digest at ${REV}." \
       "Without it nothing records which source this bundle was built from, and" \
       "the gate would be asserting freshness it never measured." \
-      "diagnostic: source last touched in $(g log -1 --format='%h %ci %s' "$REV" -- "$src_dir" \
-        ":(exclude)${bundle_dir}" ":(exclude,glob)${src_dir}/**/*.md" 2>/dev/null || echo '<unknown>')" \
+      "diagnostic: source last touched in $(g log -1 --format='%h %ci %s' "$REV" -- "$src_used" \
+        ":(exclude)${bundle_dir}" ":(exclude,glob)${src_used}/**/*.md" 2>/dev/null || echo '<unknown>')" \
       "diagnostic: bundle last touched in $(g log -1 --format='%h %ci %s' "$REV" -- "$bundle_dir" 2>/dev/null || echo '<unknown>')" \
-      "Remedy: rebuild, then bash scripts/stamp-ui-bundle.sh ${crate}"
+      "Remedy: rebuild, then bash scripts/stamp-ui-bundle.sh ${crate}" \
+      "        (from crates/${crate_dir}, whose Makefile owns that rebuild)"
   elif [ "$stamp_digest" != "$src_digest" ]; then
-    fail "BUNDLE-STALE — ${crate}: ${bundle_dir} was built from different source than ${src_dir} now holds." \
+    fail "BUNDLE-STALE — ${crate}: ${bundle_dir} was built from different source than ${src_used} now holds." \
       "recorded  ${stamp_digest}  (${stamp_rel})" \
       "actual    ${src_digest}  (${src_count} source file(s) at ${REV})" \
-      "source last changed in $(g log -1 --format='%h %ci %s' "$REV" -- "$src_dir" \
-        ":(exclude)${bundle_dir}" ":(exclude,glob)${src_dir}/**/*.md" 2>/dev/null || echo '<unknown>')" \
+      "source last changed in $(g log -1 --format='%h %ci %s' "$REV" -- "$src_used" \
+        ":(exclude)${bundle_dir}" ":(exclude,glob)${src_used}/**/*.md" 2>/dev/null || echo '<unknown>')" \
       "Publishing now ships a UI built from source that has since changed —" \
       "the #3606 shape (0.37.0 shipped without dark mode)." \
-      "Remedy: make -C crates/${crate} release-prep && git add ${bundle_dir}"
+      "Remedy: make -C crates/${crate_dir} release-prep && git add ${bundle_dir}"
   fi
 
   # Asset integrity: a digest match says the bundle was stamped against this
@@ -448,7 +457,7 @@ check_row() {
   ROWS_CHECKED=$((ROWS_CHECKED + 1))
 
   if [ "$FINDINGS" -eq "$row_findings_before" ]; then
-    echo "PASS: ${crate} — ${src_count} source file(s) vs ${bundle_count} bundle file(s)," \
+    echo "PASS: ${crate} — ${src_count} source file(s) from ${src_used} vs ${bundle_count} bundle file(s)," \
       "${hash_count} blob hash(es) bundle=${digest}, ${ref_count} asset ref(s) resolved;" \
       "recorded source digest ${src_digest:0:12} matches" >&2
   fi

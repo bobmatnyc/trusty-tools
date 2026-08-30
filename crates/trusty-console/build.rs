@@ -1,13 +1,21 @@
-//! build.rs — build the UI before compiling so rust-embed has assets.
+//! build.rs — build the UIs before compiling so rust-embed has assets.
 //!
-//! Why: The web console ships an embedded Svelte SPA; the source lives in
-//! `ui/src/`, and Vite produces the static bundle in `ui/dist/`. Running
-//! `pnpm build` here means a plain `cargo build` always produces a binary
-//! with up-to-date assets, with no separate UI build step.
+//! Why: The web console ships TWO embedded Svelte SPAs. Its own management UI
+//! lives in `ui/src/` and builds to `ui/dist/`; the search dashboard lives in
+//! `ui-search/src/` and builds to `ui-search-dist/`, which `src/tools_ui.rs`
+//! serves at `/tools/search/`. Running `pnpm build` here means a plain
+//! `cargo build` always produces a binary with up-to-date assets, with no
+//! separate UI build step.
+//!
+//! #6155: the search dashboard's source used to live in `crates/trusty-search`
+//! and reach this crate as a copied artefact, which is why build.rs built only
+//! one of the two bundles. The source now lives here, so both are built the
+//! same way from this crate's own tree.
 //! What: Skips entirely if `SKIP_UI_BUILD=1` (CI / first-time bootstrap
 //! when pnpm is unavailable). Otherwise runs `<pm> install [--frozen-lockfile]`
-//! followed by `<pm> run build` in `ui/`. Emits cargo:rerun directives so a
-//! `cargo build` only re-runs the JS pipeline when UI sources change.
+//! followed by `<pm> run build` in each UI directory. Emits cargo:rerun
+//! directives so a `cargo build` only re-runs the JS pipeline when UI sources
+//! change.
 //!
 //! NOTE: The core UI-build logic (SKIP_UI_BUILD guard, pnpm detection,
 //! install+build pipeline, placeholder fallback, and the #5078 committed-bundle
@@ -17,15 +25,14 @@
 //! block does not drift between these four files.
 //!
 //! Test: `SKIP_UI_BUILD=1 cargo check -p trusty-console` exits without invoking
-//! pnpm; a normal `cargo build` populates `ui/dist/index.html`.
+//! pnpm; a normal `cargo build` populates `ui/dist/index.html` and
+//! `ui-search-dist/index.html`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
     let crate_root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default());
-    let ui_dir = crate_root.join("ui");
-    let dist_dir = ui_dir.join("dist");
 
     println!("cargo:rerun-if-env-changed=SKIP_UI_BUILD");
     println!("cargo:rerun-if-env-changed=FORCE_UI_BUILD");
@@ -33,20 +40,55 @@ fn main() {
     println!("cargo:rerun-if-changed=ui/vite.config.js");
     println!("cargo:rerun-if-changed=ui/index.html");
     println!("cargo:rerun-if-changed=ui/src");
+    // #6155: the search dashboard is this crate's second UI project.
+    println!("cargo:rerun-if-changed=ui-search/package.json");
+    println!("cargo:rerun-if-changed=ui-search/vite.config.js");
+    println!("cargo:rerun-if-changed=ui-search/index.html");
+    println!("cargo:rerun-if-changed=ui-search/src");
 
-    // #5078: `cargo test -p trusty-console` used to run the UI install and
-    // build unconditionally, and both write files git tracks — `vite build`
-    // empties `ui/dist/`, taking `ui-source-hash.txt` with it. The committed
-    // bundle already matches the committed source in every checkout that is
-    // not mid-UI-edit, so rebuilding it is work that only dirties the tree.
+    // The console's own management UI, embedded from `ui/dist/`.
+    build_bundle(
+        &crate_root,
+        &crate_root.join("ui"),
+        &crate_root.join("ui").join("dist"),
+        "trusty-console",
+    );
+
+    // #6155: the search dashboard, embedded from `ui-search-dist/`. Its Vite
+    // config writes straight to that crate-root directory, so there is no
+    // mirror step and nothing is left behind under `ui-search/`.
+    build_bundle(
+        &crate_root,
+        &crate_root.join("ui-search"),
+        &crate_root.join("ui-search-dist"),
+        "trusty-console-search",
+    );
+}
+
+/// Rebuild one committed UI bundle, unless it already matches its source.
+///
+/// Why: #5078 — `cargo test -p trusty-console` used to run the UI install and
+/// build unconditionally, and both write files git tracks: `vite build` empties
+/// the bundle directory, taking `ui-source-hash.txt` with it. The committed
+/// bundle already matches the committed source in every checkout that is not
+/// mid-UI-edit, so rebuilding it is work that only dirties the tree.
+/// What: consults the freshness gate, returns early when the bundle is current,
+/// and otherwise runs the canonical build pipeline and re-stamps only when the
+/// build actually ran. `stamp_key` is the bundle's `ui-bundle-manifest.tsv` row
+/// key — `trusty-console` for `ui/dist/`, `trusty-console-search` for
+/// `ui-search-dist/`. The two keys must differ: `stamp-ui-bundle.sh` stamps
+/// every row matching the name it is given, so a shared key would have one
+/// bundle's build certify the other.
+/// Test: `git status --porcelain` is empty after `cargo test -p trusty-console`;
+/// `FORCE_UI_BUILD=1 cargo build -p trusty-console` rebuilds and re-stamps both.
+fn build_bundle(crate_root: &Path, ui_dir: &Path, dist_dir: &Path, stamp_key: &str) {
     if std::env::var("FORCE_UI_BUILD").as_deref() != Ok("1")
-        && committed_bundle_is_fresh(&crate_root, &dist_dir, "trusty-console")
+        && committed_bundle_is_fresh(crate_root, dist_dir, stamp_key)
     {
         return;
     }
-
-    if build_svelte_ui(&ui_dir, &dist_dir, "trusty-console") {
-        restamp_bundle(&crate_root, "trusty-console");
+    if build_svelte_ui(ui_dir, dist_dir, stamp_key) {
+        restamp_bundle(crate_root, stamp_key);
     }
 }
 

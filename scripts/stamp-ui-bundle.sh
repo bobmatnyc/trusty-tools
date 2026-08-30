@@ -126,12 +126,15 @@ while IFS="$(printf '\t')" read -r crate src_dir bundle_dir _rest; do
     exit 1
   fi
 
-  pair="$(ui_source_digest "$REPO_ROOT" --worktree "$src_dir" "$bundle_dir")" || {
+  # #6155: src_dir is a comma-separated list, current path first — see
+  # ui_source_digest_any. On a working tree the current path always wins, so
+  # this only matters for a checkout mid-move.
+  pair="$(ui_source_digest_any "$REPO_ROOT" --worktree "$src_dir" "$bundle_dir")" || {
     echo "stamp-ui-bundle: ERROR: ${crate}: no bundle-affecting source files under ${src_dir}" >&2
     exit 1
   }
-  digest="${pair%% *}"
-  count="${pair##* }"
+  digest="$(printf '%s' "$pair" | awk '{ print $1 }')"
+  count="$(printf '%s' "$pair" | awk '{ print $2 }')"
   stamp="${REPO_ROOT}/$(ui_stamp_path "$bundle_dir")"
 
   {
