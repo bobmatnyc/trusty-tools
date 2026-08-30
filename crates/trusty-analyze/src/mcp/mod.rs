@@ -17,6 +17,7 @@
 //! | `delete_fact`         | `analyze.facts_delete`            |
 //! | `cluster_concepts`    | `analyze.clusters`                |
 //! | `ingest_scip`         | `analyze.scip_ingest`             |
+//! | `scip_status`         | `analyze.scip_status`             |
 //! | `analyzer_health`     | `analyze.health`                  |
 //!
 //! #6287 removed the `sse` submodule along with the `POST /mcp` + `GET /mcp/sse`
@@ -335,6 +336,7 @@ impl AnalyzerMcpServer {
             "upsert_fact" => self.handle_upsert_fact(args).await,
             "delete_fact" => self.handle_delete_fact(args).await,
             "extract_graph" => self.handle_extract_graph(args).await,
+            "scip_status" => self.handle_scip_status(args).await,
             "list_entities" => self.handle_list_entities(args).await,
             "cluster_concepts" => self.handle_cluster_concepts(args).await,
             // Why (#1104 rework): proxies the index list for the console
@@ -450,6 +452,24 @@ impl AnalyzerMcpServer {
             with_index(args, optional_params(args, &["language"])),
         )
         .await
+    }
+
+    /// Handle the `scip_status` tool: forward to `analyze.scip_status`.
+    ///
+    /// #5056: `extract_graph`'s `scip_overlay` boolean says a SCIP overlay
+    /// exists but not what it contains. This tool is the MCP counterpart of
+    /// the daemon's dedicated overlay-status method — it answers `-32004
+    /// not_found` (surfaced here as a `Transport` error naming the method,
+    /// same as every other daemon error) when no overlay was ever ingested,
+    /// or the overlay's node/edge counts and ingest timestamp when one was.
+    /// That is the distinction an MCP caller could not previously make: an
+    /// index with no overlay and an index whose overlay carried zero symbols
+    /// both produce an empty `extract_graph` body, but only the latter
+    /// answers this tool with a result.
+    /// Test: `tools_list_includes_scip_status`,
+    /// `handle_scip_status_calls_the_scip_status_method`.
+    async fn handle_scip_status(&self, args: &Value) -> Result<Value, DispatchError> {
+        self.call("analyze.scip_status", index_params(args)).await
     }
 
     async fn handle_list_entities(&self, args: &Value) -> Result<Value, DispatchError> {
