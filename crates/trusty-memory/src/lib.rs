@@ -625,8 +625,10 @@ pub struct AppState {
     /// `PalaceHandle::remember_with_options_within`. Stored per-instance for
     /// the same reason as `write_op_budget`: a test can inject a short ceiling
     /// without mutating process-wide env.
-    /// Test: `retrieval::write_pipeline_tests` covers the ceiling itself;
-    /// `tools::tests::write_budget_tests` covers the acquisition budget.
+    /// Test: `tools::tests::write_budget_tests::memory_note_surfaces_the_pipeline_ceiling`
+    /// proves the ceiling reaches the daemon's own write handler; the pipeline's
+    /// behaviour under that ceiling lives in trusty-common's retrieval
+    /// write-pipeline tests.
     pub write_pipeline_budget: std::time::Duration,
 }
 
@@ -735,7 +737,7 @@ impl AppState {
     /// which is process-wide and would race any parallel test.
     /// What: consuming builder that overwrites
     /// [`AppState::write_pipeline_budget`].
-    /// Test: `tools::tests::write_budget_tests::a_write_over_the_pipeline_ceiling_is_refused`.
+    /// Test: `tools::tests::write_budget_tests::memory_note_surfaces_the_pipeline_ceiling`.
     #[must_use]
     pub fn with_write_pipeline_budget(mut self, budget: std::time::Duration) -> Self {
         self.write_pipeline_budget = budget;

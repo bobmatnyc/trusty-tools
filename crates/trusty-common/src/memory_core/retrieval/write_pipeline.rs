@@ -186,7 +186,7 @@ fn over_budget_error(handle: &PalaceHandle, budget: Duration, elapsed: Duration)
 /// line that names the likely cause.
 /// What: `metadata(<data_dir>/kg.redb).len()`, or `None` for an in-memory
 /// handle or an unreadable file. Never fails the write.
-/// Test: `kg_store_bytes_is_none_for_an_in_memory_handle`.
+/// Test: `write_pipeline_tests::tests::the_size_guard_degrades_quietly_without_a_data_dir`.
 fn kg_store_bytes(handle: &PalaceHandle) -> Option<u64> {
     let data_dir = handle.data_dir.as_ref()?;
     std::fs::metadata(data_dir.join(KG_STORE_FILENAME))
