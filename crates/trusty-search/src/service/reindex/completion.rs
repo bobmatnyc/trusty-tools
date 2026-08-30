@@ -52,7 +52,6 @@ pub(super) struct RunTotals {
     pub bm25_ms: u64,
     pub vector_upsert_ms: u64,
     pub vector_count: usize,
-    pub mem_limit_hit: bool,
     /// Issue #100: total chunks dropped by the per-index chunk cap across the
     /// whole reindex. Non-zero ⇒ the walk was truncated by the budget and the
     /// index is incomplete.
@@ -105,14 +104,15 @@ pub(super) async fn rebuild_symbol_graph_for_reindex(handle: &IndexHandle) -> Kg
 /// `terminal_status` — the status this run ends in. #6386: it is stored HERE,
 /// with the frame, rather than by the caller before it — `push_terminal` does
 /// both under one hold of the replay-buffer lock, so a stream opening now cannot
-/// read a terminal status from a buffer that lacks the terminal frame. The
-/// `status` FIELD in the payload keeps its own derivation from
-/// `totals.mem_limit_hit` and is unchanged.
+/// read a terminal status from a buffer that lacks the terminal frame. #6415: it
+/// is also the sole source of the payload's `status` and `memory_limit_hit`
+/// fields, so the wire frame and the stored enum cannot disagree.
 ///
 /// What: reads final counters from `progress`, builds the JSON event, and calls
 /// `progress.push_terminal`.
 /// Test: `complete` event shape verified in `reindex_walks_directory_and_emits_events`;
-/// the atomicity in `a_terminal_status_is_not_observable_before_its_event_is_in_the_replay`.
+/// the payload/enum agreement in `completion_tests.rs`; the atomicity in
+/// `a_terminal_status_is_not_observable_before_its_event_is_in_the_replay`.
 pub(super) async fn emit_complete_event(
     progress: &ReindexProgress,
     terminal_status: ReindexStatus,
@@ -139,7 +139,12 @@ pub(super) async fn emit_complete_event(
     let indexed_new = indexed_final.saturating_sub(skipped_final);
     // Issue #120: surface the terminal status string in the SSE payload so
     // external callers can distinguish a clean completion from a memory-abort.
-    let status_str = if totals.mem_limit_hit {
+    // #6415: derive it from the terminal status rather than from the batch
+    // loop's own `mem_limit_hit` flag — the background memory poller trips
+    // `mem_abort` without that flag, and the payload then read "complete" for a
+    // run the daemon recorded as `AbortedMemory`.
+    let aborted_memory = matches!(terminal_status, ReindexStatus::AbortedMemory);
+    let status_str = if aborted_memory {
         "aborted_memory"
     } else {
         "complete"
@@ -155,7 +160,8 @@ pub(super) async fn emit_complete_event(
         "elapsed_ms": elapsed_ms,
         "chunks_per_sec": chunks_per_sec,
         "peak_rss_mb": peak_rss_mb,
-        "memory_limit_hit": totals.mem_limit_hit,
+        // #6415: same derivation as `status` above — one flag, one meaning.
+        "memory_limit_hit": aborted_memory,
         // Issue #100: surface budget truncation.
         "walk_truncated_by_budget": totals.chunks_dropped_by_cap > 0,
         "chunks_dropped_by_cap": totals.chunks_dropped_by_cap,

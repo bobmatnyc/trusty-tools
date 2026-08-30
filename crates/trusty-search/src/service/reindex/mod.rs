@@ -290,3 +290,8 @@ mod pollers_tests;
 // orchestration tests in `tests.rs`.
 #[cfg(test)]
 mod progress_race_tests;
+// #6415: the terminal frame's `status` field must agree with the terminal status
+// stored beside it. Its own file so the payload contract is not buried in the
+// orchestration tests.
+#[cfg(test)]
+mod completion_tests;
