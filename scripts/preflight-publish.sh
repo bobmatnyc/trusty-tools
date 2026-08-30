@@ -17,7 +17,7 @@
 #   absolute stop.
 #
 # What: given a crate (by package name or crates/ directory name) and,
-#   optionally, an explicit version, runs EIGHT independent checks and exits
+#   optionally, an explicit version, runs NINE independent checks and exits
 #   nonzero if any of them fail:
 #
 #   CHECK 1 (merged-main): after `git fetch origin main`, current HEAD's
@@ -212,6 +212,27 @@
 #     that a publish bypassed the gate without recording why, and why is the
 #     whole content of the disclosure.
 #
+#   CHECK 9 (the changelog assembler actually ran, #6406): delegates to
+#     `scripts/check-changelog-assembled.sh <pkg> <version>`, which fails when
+#     `crates/<crate>/changelog.d/` still holds a fragment (STRANDED-FRAGMENTS)
+#     or `crates/<crate>/CHANGELOG.md` has no `## [<version>]` heading for the
+#     version about to ship (NO-SECTION).
+#
+#     WHY THIS IS NOT ALREADY COVERED: none of checks 1-8 reads `changelog.d/`
+#     or `CHANGELOG.md` at all. Six `trusty-audit` tags (0.8.0 -> 0.12.0) were
+#     cut by hand-editing `Cargo.toml` directly — skipping
+#     `scripts/bump-version.sh` and therefore `scripts/assemble-changelog.sh`,
+#     the only thing that ever writes a release section or deletes a consumed
+#     fragment. Fragments sat unconsumed across all six releases and every
+#     other check here — identity, clean tree, tag/commit parity, public-API
+#     SemVer, the UI bundle, the pre-publish gate — stayed green throughout
+#     (#5919, repaired by hand in PR #6400).
+#
+#     No override flag. The remedy is always the same: run the real bump path
+#     (`scripts/bump-version.sh <crate-dir> <major|minor|patch>`), which calls
+#     the assembler for you, or assemble directly at the version you intend to
+#     ship (`scripts/assemble-changelog.sh <crate-dir> <version>`).
+#
 # Crate + version resolution: accepts EITHER
 #     scripts/preflight-publish.sh <crate-name-or-dir> [version]
 #   or, when [version] is omitted, reads the version from that crate's
@@ -226,7 +247,7 @@
 #   check-publish-ready.sh does, to avoid a second, divergent lookup
 #   convention in this workspace.
 #
-#   --check-only     run all 8 checks unconditionally (never short-circuits)
+#   --check-only     run all 9 checks unconditionally (never short-circuits)
 #                     and print one [PASS]/[FAIL] line per check, then a
 #                     one-line summary. Useful to preview status without
 #                     assuming you are mid-publish. Exit code is still
@@ -287,6 +308,12 @@
 #         Case 18 runs against the real fc7f396f — the commit trusty-search
 #         0.37.0 was published from — and names #3509's commit 972171e8 as the
 #         source change the bundle never picked up.
+#     (h) BOTH modes for check 9 (#6406), via
+#         scripts/check-changelog-assembled-selftest.sh: synthetic fixtures for
+#         a stranded fragment with no section (the #5919 shape), a section
+#         written with a fragment still left behind, and a correctly-assembled
+#         crate. Plus an end-to-end run of THIS script against the real,
+#         post-#6400-repair `trusty-audit`, where check 9 reports OK.
 #   See the PR description for this script for the full raw terminal output.
 
 set -euo pipefail
@@ -1401,6 +1428,27 @@ gate_unverified() {
   return 1
 }
 
+# ===========================================================================
+# CHECK 9 — the changelog assembler actually ran for this version (#6406)
+# ===========================================================================
+# Delegated rather than inlined so the comparison has somewhere to be tested:
+# scripts/check-changelog-assembled-selftest.sh drives every finding against
+# synthetic fixtures. No override — see the header comment for why.
+check9_changelog_assembled() {
+  local log="${TMP_CHANGELOG}" rc=0
+
+  bash "${REPO_ROOT}/scripts/check-changelog-assembled.sh" "$PKG_NAME" "$VERSION" > "$log" 2>&1 || rc=$?
+
+  if [ "$rc" -eq 0 ]; then
+    echo "[PASS] changelog-assembled: $(tail -1 "$log")" >&2
+    return 0
+  fi
+
+  echo "[FAIL] changelog-assembled: the changelog assembler was bypassed for ${PKG_NAME} ${VERSION}:" >&2
+  sed 's/^/       /' "$log" >&2
+  return 1
+}
+
 # ---------------------------------------------------------------------------
 # Scratch temp file for check 4's curl response body. Created once up front
 # and cleaned up via a script-scoped EXIT trap (matches check_line_cap.sh's
@@ -1410,22 +1458,24 @@ TMP_BODY="$(mktemp "${TMPDIR:-/tmp}/preflight-publish.body.XXXXXX")"
 TMP_SEMVER="$(mktemp "${TMPDIR:-/tmp}/preflight-publish.semver.XXXXXX")"
 TMP_PARITY="$(mktemp "${TMPDIR:-/tmp}/preflight-publish.parity.XXXXXX")"
 TMP_UIBUNDLE="$(mktemp "${TMPDIR:-/tmp}/preflight-publish.uibundle.XXXXXX")"
-trap 'rm -f "$TMP_BODY" "$TMP_SEMVER" "$TMP_PARITY" "$TMP_UIBUNDLE"' EXIT
+TMP_CHANGELOG="$(mktemp "${TMPDIR:-/tmp}/preflight-publish.changelog.XXXXXX")"
+trap 'rm -f "$TMP_BODY" "$TMP_SEMVER" "$TMP_PARITY" "$TMP_UIBUNDLE" "$TMP_CHANGELOG"' EXIT
 
 # ---------------------------------------------------------------------------
-# Run all 8 checks. Always run every check (rather than short-circuiting) so
+# Run all 9 checks. Always run every check (rather than short-circuiting) so
 # --check-only and normal mode share one code path and a single run always
 # reports the full picture — a partial preflight is how gaps get missed.
 # ---------------------------------------------------------------------------
 set +e
-check1_merged_main;      [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
-check2_identity;         [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
-check3_clean_tree;       [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
-check4_version_not_live; [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
-check5_semver;           [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
-check6_tag_parity;       [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
-check7_ui_bundle;        [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
-check8_prepublish_gate;  [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
+check1_merged_main;         [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
+check2_identity;            [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
+check3_clean_tree;          [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
+check4_version_not_live;    [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
+check5_semver;              [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
+check6_tag_parity;          [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
+check7_ui_bundle;           [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
+check8_prepublish_gate;     [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
+check9_changelog_assembled; [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 set -e
 
 if [ "$FAILURES" -gt 0 ]; then
@@ -1437,18 +1487,18 @@ if [ -n "${SEMVER_NOT_VERIFIED:-}" ]; then
   # #5620: "passed all 7 checks" must not absorb a check-5 outcome that verified
   # nothing. The same distinction the check line draws, drawn again at the line
   # an operator is most likely to read on its own.
-  echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 8 checks, but the" >&2
+  echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 9 checks, but the" >&2
   echo "  public API was NOT VERIFIED: ${SEMVER_NOT_VERIFIED}. See the check 5 line above." >&2
 elif [ -n "${SEMVER_TYPES_ADVISORY:-}" ]; then
   # The type differ blocks nothing, so without this the summary would say
   # "safe to publish" over a listed set of type changes nobody has confirmed.
-  echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 8 checks." >&2
+  echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 9 checks." >&2
   echo "  ADVISORY, not blocking: ${SEMVER_TYPES_ADVISORY}. See the semver-types line above." >&2
 else
-  echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 8 checks. Safe to publish." >&2
+  echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 9 checks. Safe to publish." >&2
 fi
 if [ -n "${GATE_NOT_VERIFIED:-}" ]; then
-  # Same reasoning as the SEMVER_NOT_VERIFIED line above: "passed all 8 checks"
+  # Same reasoning as the SEMVER_NOT_VERIFIED line above: "passed all 9 checks"
   # must not absorb a check-8 outcome that read nothing.
   echo "preflight-publish: NOTE — ${GATE_NOT_VERIFIED}. See the check 8 line above." >&2
 fi
