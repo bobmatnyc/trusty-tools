@@ -88,6 +88,15 @@ documentation/API updates, the changelog fragment, and in-scope review fixes.
 - Split only when the outcomes can be reviewed, deployed, or reverted
   independently, or when risk or size makes a stack materially safer to review.
 
+**Bugfix batching is the default, not an exception.** Several open bugs
+constrained to the same file, module, or tightly-coupled area go in ONE PR —
+one engineer, one worktree, one review, one CI pass — not one PR per issue.
+Each issue keeps its own regression test and its own `Refs #N` in the PR body.
+One changelog fragment per crate may cover the whole batch, naming each issue.
+Unrelated bugs in different modules still get separate PRs. This is what "no
+two in-flight PRs share a module" means for a bug cluster: same module now
+means same PR, not a serialized queue of small ones.
+
 ## The 5-Phase Model and Its Dispatch Briefs
 
 The instruction package's CORE phase table is canonical for **whether** a phase

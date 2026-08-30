@@ -147,6 +147,7 @@ context reloaded by each). These are the specific splits to collapse:
 | Implement then commit (2) | Include "commit when done" in the task (1) |
 | Sequential fixes to the same agent (N) | One delegation with full scope (1) |
 | A separate docs agent for a per-task README | Include the README in the engineer delegation |
+| One PR per issue for same-module bugs | One batched dispatch/PR per file-cluster; each issue keeps its own regression test and `Refs #N` line |
 
 ## Retry Protocol (delegated work came back failing)
 
