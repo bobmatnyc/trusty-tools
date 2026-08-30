@@ -906,3 +906,25 @@ fn manager_state_is_provisioned() {
         "daemon startup must auto-provision the portfolio manager palace"
     );
 }
+
+/// A daemon isolated by its framework root alone must not reach live tmux
+/// (#6348).
+///
+/// Before the fix this constructor asked only whether `$HOME` had been
+/// reassigned. Under an untouched `$HOME` it resolved a real driver, and on the
+/// machine that reproduced the bug that driver listed 250 live operator panes
+/// for `reconcile_on_boot` to adopt — each adopted record carrying a real
+/// project directory. The no-op driver installed instead reports tmux
+/// UNOBSERVABLE, which is what keeps reconciliation from touching any record.
+#[tokio::test]
+async fn session_manager_refuses_tmux_on_a_scratch_framework_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = DaemonState::with_root(tmp.path().to_path_buf());
+    let mgr = state.session_manager().await;
+
+    let live = mgr.tmux_driver().list_sessions();
+    assert!(
+        live.is_err(),
+        "a scratch framework root must leave tmux unobservable, got {live:?}"
+    );
+}

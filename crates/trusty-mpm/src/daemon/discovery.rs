@@ -492,10 +492,15 @@ pub async fn discover_native_processes(state: &DaemonState) -> DiscoveryResult {
 /// project's working directory. `discover_claude_sessions` is already covered
 /// by [`super::tmux::TmuxDriver::discover`]'s own gate; the `ps`/`lsof` scan
 /// touches no tmux, so the check is repeated here to cover it.
+///
+/// The check here is the ROOT-AWARE one (#6348): this function holds the
+/// daemon's framework root, and a daemon isolated by that root alone — real
+/// `$HOME`, scratch data dir — passed the `$HOME`-only gate and adopted the
+/// operator's live panes and processes.
 /// Test: `scratch_home_daemon_does_not_spawn_tmux`; the merge is exercised by
 /// `discover_all_merges_results`.
 pub async fn discover_all(state: &DaemonState) -> DiscoveryResult {
-    let access = crate::core::host_state_gate::host_state_access();
+    let access = crate::core::host_state_gate::host_state_access_for_root(state.framework_root());
     if let Some(reason) = access.skip_reason() {
         tracing::warn!("#5784: session auto-discovery skipped — {reason}");
         return DiscoveryResult {

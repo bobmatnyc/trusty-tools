@@ -23,14 +23,26 @@
 //! [`crate::daemon::discovery::discover_all`], which also scans the host
 //! process table.
 //!
+//! `$HOME` is not the only way a daemon gets isolated (#6348). A daemon built
+//! with a scratch framework root and the operator's real `$HOME` left untouched
+//! classified as [`HostStateAccess::RealEnvironment`], resolved a real tmux
+//! driver, and adopted 250 live operator panes into a throwaway store — with
+//! the adopted records carrying the real project directories, which is how a
+//! test fixture deployed assets into real worktrees. A caller that holds a data
+//! root asks [`host_state_access_for_root`] instead, which adds the root to the
+//! comparison; [`classify_with_data_root`] is the pure decision behind it.
+//!
 //! Fail-closed, deliberately inverted from this crate's usual direction: an
 //! environment this module cannot classify is treated as scratch and skipped.
 //! A wrong skip costs a test daemon that does not adopt sessions; a wrong
 //! proceed writes into somebody's live project directories.
 //!
-//! Test: `core::host_state_gate::tests` covers [`classify`] on every arm;
-//! `scratch_home_daemon_does_not_spawn_tmux` proves
-//! the startup path spawns no tmux process under a scratch `$HOME`.
+//! Test: `core::host_state_gate::tests` covers [`classify`] and
+//! [`classify_with_data_root`] on every arm;
+//! `scratch_home_daemon_does_not_spawn_tmux` proves the startup path spawns no
+//! tmux process under a scratch `$HOME`, and
+//! `session_manager_refuses_tmux_on_a_scratch_framework_root` proves the
+//! managed-session path refuses on a scratch data root under a real `$HOME`.
 
 use std::path::{Path, PathBuf};
 
@@ -66,6 +78,14 @@ pub enum HostStateAccess {
         /// The home the OS password database records for this uid.
         passwd_home: PathBuf,
     },
+    /// `$HOME` is real, but the caller's data root is not this user's framework
+    /// root — an isolated daemon that never reassigned `$HOME` (#6348).
+    ScratchDataRoot {
+        /// The data/framework root the caller is running against.
+        data_root: PathBuf,
+        /// The framework root this user's `$HOME` implies.
+        expected_root: PathBuf,
+    },
     /// Neither home could be established, so the environment is unclassifiable.
     Indeterminate {
         /// What could not be determined.
@@ -100,6 +120,18 @@ impl HostStateAccess {
                 effective_home.display(),
                 passwd_home.display()
             )),
+            Self::ScratchDataRoot {
+                data_root,
+                expected_root,
+            } => Some(format!(
+                "this daemon's data root is {} but this user's framework root is {} — tmux and \
+                 the host process table are shared system state that a scratch data root does \
+                 not isolate, so reaching them would adopt the operator's live sessions, and \
+                 each adopted record carries a real project directory (#6348). \
+                 Set {ALLOW_HOST_STATE_ENV}=1 to allow it.",
+                data_root.display(),
+                expected_root.display()
+            )),
             Self::Indeterminate { detail } => Some(format!(
                 "cannot tell whether this is the operator's real environment ({detail}), so \
                  shared host state is left alone rather than risk touching real sessions and \
@@ -115,7 +147,7 @@ impl HostStateAccess {
 /// call sites carry only `if !access.is_allowed() { skip }` and no test needs
 /// to manufacture a password-database entry.
 /// What: the opt-in short-circuits. Otherwise both homes must be present and
-/// equal (see [`same_home`]) for [`HostStateAccess::RealEnvironment`]; present
+/// equal (see [`same_path`]) for [`HostStateAccess::RealEnvironment`]; present
 /// and different is [`HostStateAccess::ScratchEnvironment`]; either one
 /// missing is [`HostStateAccess::Indeterminate`], which blocks.
 /// Test: `classify_opt_in_allows`, `classify_matching_homes_allow`,
@@ -131,7 +163,7 @@ pub fn classify(
         return HostStateAccess::OptedIn;
     }
     match (effective_home, passwd_home) {
-        (Some(effective), Some(passwd)) if same_home(effective, passwd) => {
+        (Some(effective), Some(passwd)) if same_path(effective, passwd) => {
             HostStateAccess::RealEnvironment
         }
         (Some(effective), Some(passwd)) => HostStateAccess::ScratchEnvironment {
@@ -147,19 +179,63 @@ pub fn classify(
     }
 }
 
-/// True when two paths name the same home directory.
+/// Classify an environment from its two homes, the caller's data root, and the
+/// opt-in flag.
+///
+/// Why: [`classify`] reads `$HOME` alone, so a daemon that isolated its data
+/// root without reassigning `$HOME` classified as the operator's real
+/// environment and adopted live tmux panes (#6348). A caller that knows its own
+/// data root can close that hole, and keeping the decision pure here means the
+/// call site still carries only a `skip_reason()` check.
+/// What: the opt-in short-circuits, then the [`classify`] verdict decides; only
+/// when that verdict ALLOWS does the data root matter. `data_root` must name
+/// the framework root `effective_home` implies (`<home>/.trusty-mpm`, see
+/// [`crate::core::paths::FRAMEWORK_DIR_NAME`]) — anything else is
+/// [`HostStateAccess::ScratchDataRoot`], which blocks.
+/// Test: `classify_with_data_root_blocks_scratch_root_under_real_home`,
+/// `classify_with_data_root_allows_the_real_framework_root`,
+/// `classify_with_data_root_opt_in_allows`,
+/// `classify_with_data_root_keeps_the_home_verdict`.
+pub fn classify_with_data_root(
+    effective_home: Option<&Path>,
+    passwd_home: Option<&Path>,
+    data_root: &Path,
+    opt_in: bool,
+) -> HostStateAccess {
+    match (
+        classify(effective_home, passwd_home, opt_in),
+        effective_home,
+    ) {
+        (HostStateAccess::RealEnvironment, Some(home)) => {
+            let expected_root = home.join(crate::core::paths::FRAMEWORK_DIR_NAME);
+            if same_path(data_root, &expected_root) {
+                HostStateAccess::RealEnvironment
+            } else {
+                HostStateAccess::ScratchDataRoot {
+                    data_root: data_root.to_path_buf(),
+                    expected_root,
+                }
+            }
+        }
+        (verdict, _) => verdict,
+    }
+}
+
+/// True when two paths name the same directory.
 ///
 /// Why: `$HOME` and the password-database entry routinely differ in spelling
 /// for the same directory — a trailing separator, or a symlinked mount point
 /// (`/home/x` behind `/System/Volumes/Data/home/x`). Comparing raw strings
-/// would report a scratch environment on a perfectly real one.
+/// would report a scratch environment on a perfectly real one. The same holds
+/// for a data root, which reaches this gate through `$HOME` on one side and a
+/// stored `PathBuf` on the other.
 /// What: canonicalizes both and compares; when either canonicalization fails
 /// (the directory may not exist, which is itself normal for a scratch home),
 /// compares the paths with trailing separators trimmed. Never guesses in the
 /// direction of equality on a failed comparison.
 /// Test: `classify_trailing_separator_still_matches`,
-/// `same_home_rejects_siblings`.
-fn same_home(a: &Path, b: &Path) -> bool {
+/// `same_path_rejects_siblings`.
+fn same_path(a: &Path, b: &Path) -> bool {
     if let (Ok(a), Ok(b)) = (a.canonicalize(), b.canonicalize()) {
         return a == b;
     }
@@ -198,6 +274,33 @@ pub fn host_state_access() -> HostStateAccess {
     classify(
         effective_home().as_deref(),
         passwd_home().as_deref(),
+        opt_in_enabled(),
+    )
+}
+
+/// The verdict for THIS process running against `data_root`.
+///
+/// Why: [`host_state_access`] answers only the `$HOME` question, so a daemon
+/// isolated by its data root alone passed it (#6348). Every caller that holds a
+/// data root — the managed session manager and session auto-discovery both hold
+/// the daemon's framework root — asks this instead, so the isolation the caller
+/// actually has is the isolation the gate reads.
+/// What: reads the same three environment inputs as [`host_state_access`] and
+/// defers to [`classify_with_data_root`] with `data_root` added.
+/// Test: `core::host_state_gate::tests` covers the pure decision;
+/// `session_manager_refuses_tmux_on_a_scratch_framework_root` proves the
+/// managed-session path installs the no-op driver.
+pub fn host_state_access_for_root(data_root: &Path) -> HostStateAccess {
+    #[cfg(not(unix))]
+    {
+        let _ = data_root;
+        return host_state_access_non_unix();
+    }
+    #[cfg(unix)]
+    classify_with_data_root(
+        effective_home().as_deref(),
+        passwd_home().as_deref(),
+        data_root,
         opt_in_enabled(),
     )
 }
@@ -321,20 +424,76 @@ mod tests {
     }
 
     #[test]
-    fn same_home_rejects_siblings() {
-        assert!(!same_home(
+    fn same_path_rejects_siblings() {
+        assert!(!same_path(
             Path::new("/Users/real"),
             Path::new("/Users/rea")
         ));
-        assert!(!same_home(
+        assert!(!same_path(
             Path::new("/Users/real"),
             Path::new("/Users/real2")
         ));
     }
 
+    /// The #6348 fail-open, stated as an assertion: the `$HOME`-only classifier
+    /// ALLOWS a daemon whose only isolation is its data root, and the
+    /// root-aware one must refuse it.
+    #[test]
+    fn classify_with_data_root_blocks_scratch_root_under_real_home() {
+        let home = Path::new("/Users/real");
+        assert!(
+            classify(Some(home), Some(home), false).is_allowed(),
+            "the $HOME-only gate allows this input — that is the fail-open #6348 closes"
+        );
+
+        let access =
+            classify_with_data_root(Some(home), Some(home), Path::new("/tmp/scratch"), false);
+        assert!(
+            !access.is_allowed(),
+            "a scratch data root must block even under a real $HOME"
+        );
+        assert!(matches!(access, HostStateAccess::ScratchDataRoot { .. }));
+    }
+
+    #[test]
+    fn classify_with_data_root_allows_the_real_framework_root() {
+        let home = Path::new("/Users/real");
+        let access = classify_with_data_root(
+            Some(home),
+            Some(home),
+            &home.join(crate::core::paths::FRAMEWORK_DIR_NAME),
+            false,
+        );
+        assert_eq!(access, HostStateAccess::RealEnvironment);
+    }
+
+    #[test]
+    fn classify_with_data_root_opt_in_allows() {
+        // The hatch lifts the data-root arm the same way it lifts the $HOME one.
+        let home = Path::new("/Users/real");
+        let access =
+            classify_with_data_root(Some(home), Some(home), Path::new("/tmp/scratch"), true);
+        assert_eq!(access, HostStateAccess::OptedIn);
+        assert!(access.is_allowed());
+    }
+
+    #[test]
+    fn classify_with_data_root_keeps_the_home_verdict() {
+        // A reassigned $HOME still reports as a scratch ENVIRONMENT, so the
+        // operator reads the mismatch that actually applies.
+        let access = classify_with_data_root(
+            Some(Path::new("/tmp/scratch-home")),
+            Some(Path::new("/Users/real")),
+            Path::new("/tmp/scratch-home/.trusty-mpm"),
+            false,
+        );
+        assert!(!access.is_allowed());
+        assert!(matches!(access, HostStateAccess::ScratchEnvironment { .. }));
+    }
+
     #[test]
     fn skip_reason_names_the_hatch() {
-        // A skip an operator cannot lift is a dead end; both block arms must
+        // A skip an operator cannot lift is a dead end; every block arm must
         // name the variable that lifts them.
         for access in [
             classify(
@@ -343,6 +502,12 @@ mod tests {
                 false,
             ),
             classify(None, None, false),
+            classify_with_data_root(
+                Some(Path::new("/Users/real")),
+                Some(Path::new("/Users/real")),
+                Path::new("/tmp/scratch"),
+                false,
+            ),
         ] {
             let reason = access
                 .skip_reason()
