@@ -40,9 +40,14 @@
 //! Test: `core::host_state_gate::tests` covers [`classify`] and
 //! [`classify_with_data_root`] on every arm;
 //! `scratch_home_daemon_does_not_spawn_tmux` proves the startup path spawns no
-//! tmux process under a scratch `$HOME`, and
+//! tmux process under a scratch `$HOME`;
+//! `scratch_root_daemon_does_not_spawn_tmux` proves the same for a scratch data
+//! root under a real `$HOME`; and
 //! `session_manager_refuses_tmux_on_a_scratch_framework_root` proves the
-//! managed-session path refuses on a scratch data root under a real `$HOME`.
+//! managed-session path refuses on that root. The daemon's background loops go
+//! through `daemon::host_state_refusal`, covered by
+//! `reap_loop_leaves_the_registry_alone_on_a_scratch_framework_root` and its
+//! siblings.
 
 use std::path::{Path, PathBuf};
 
