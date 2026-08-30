@@ -51,6 +51,13 @@ pub(crate) struct DeleteIndexParams {
     /// registration. Defaults to `false` — see the type's `Why`.
     #[serde(default)]
     pub(crate) delete_data: bool,
+    /// The `root_path` the caller believes this registration still has (#6380).
+    ///
+    /// Absent ⇒ unchecked, which is what every pre-#6380 caller sends. Present ⇒
+    /// the delete is refused unless the registration's CURRENT root is this
+    /// exact string — see [`super::delete_guard::refuse_unless_root_matches`].
+    #[serde(default)]
+    pub(crate) expected_root_path: Option<String>,
 }
 
 /// `DELETE /indexes/{id}` — deregister an index, optionally destroying its data.
@@ -107,6 +114,12 @@ pub(crate) async fn delete_index_report(
     id: &str,
     params: DeleteIndexParams,
 ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
+    // #6380: before anything is torn down. An id is derived from its root path,
+    // so a path deleted and recreated between a census and this call names a
+    // DIFFERENT, live index under the same id.
+    if let Some(expected) = params.expected_root_path.as_deref() {
+        super::delete_guard::refuse_unless_root_matches(state, id, expected)?;
+    }
     let outcome = unregister_index(state, id, params.delete_data).await;
     // #6363: absent from the hot registry, the cold store AND `indexes.toml` —
     // there is nothing here to delete, and saying so is the only answer that
