@@ -13,7 +13,7 @@
 //! resolves both addressing modes, [`error`] is the §4 fail-closed contract,
 //! and [`routes`] is the HTTP surface.
 //! Test: `tests` — the module's suite covers publish, both addressing modes,
-//! the bypass failure mode, and the durable record.
+//! the bypass failure mode, the durable record, and the #4271 lag contract.
 //!
 //! ## Scope: step 1 of DOC-60 §5.3, and what it deliberately excludes
 //!
@@ -56,7 +56,9 @@ pub use envelope::{
     Recipient,
 };
 pub use error::BusError;
-pub use registry::{InstanceMeta, InstanceRegistry, LiveInstance, PeerTarget};
+pub use registry::{
+    INSTANCE_CHANNEL_CAPACITY, InstanceMeta, InstanceRegistry, LiveInstance, PeerTarget,
+};
 
 /// The daemon's peer message bus.
 ///
@@ -183,6 +185,25 @@ impl PeerBus {
     ///    silent drop — DOC-60 §7's durable inbox is what will make that case
     ///    queue instead, and it is deferred.
     ///
+    /// **The delivery guarantee, and the backpressure that buys it (#4271).**
+    /// An envelope this method records as `Delivered` stays readable by every
+    /// attached subscriber until that subscriber reads it. Nothing evicts it.
+    /// The guarantee holds because step 6 asks
+    /// [`LiveInstance::saturated_backlog`] first: when the recipient's channel
+    /// already holds [`INSTANCE_CHANNEL_CAPACITY`] envelopes its slowest
+    /// subscriber has not read, the next send could only be taken by
+    /// overwriting the oldest of them, so the NEW envelope is refused with
+    /// [`BusError::SubscriberLagged`] (503) and recorded `Dropped`.
+    ///
+    /// Before #4271 the send was made anyway. `broadcast::Sender::send` answers
+    /// `Ok` for a lagging receiver, so the log recorded `Delivered` for the
+    /// envelope that displaced an unread one, the sender got `202 Accepted`,
+    /// and the recipient was never told — a `delivered` record for a message
+    /// that reached no one. Refusing the newest message rather than silently
+    /// discarding the oldest keeps the §9 log answerable, which is the whole
+    /// reason DOC-60 §4 forbids a silent drop. A healthy subscriber never
+    /// reaches saturation and is unaffected.
+    ///
     /// **What the durable §9 log does and does not contain.** Once a sender is
     /// verified (step 3), EVERY outcome is recorded — delivered or dropped —
     /// because a log holding only successes cannot answer the question
@@ -199,7 +220,9 @@ impl PeerBus {
     /// Test: `publish_delivers_to_definition_addressed_instance`,
     /// `bypass_publish_stamps_both_ids`, `failed_publish_logs_dropped_envelope`,
     /// `publish_without_subscriber_errors`, `publish_rejects_forged_user_kind`,
-    /// `rejected_publish_writes_no_durable_record`.
+    /// `rejected_publish_writes_no_durable_record`,
+    /// `delivered_records_match_what_a_stalled_subscriber_receives`,
+    /// `saturated_publish_is_dropped_in_the_durable_log`.
     pub fn publish(
         &self,
         from: CallerIdentity,
@@ -250,6 +273,26 @@ impl PeerBus {
             in_reply_to,
             DeliveryState::Delivered,
         );
+
+        // #4271: refuse BEFORE the send when the channel can only take this
+        // envelope by discarding an unread one. `send` would answer `Ok` here —
+        // a lagging receiver is still an attached receiver — and the eviction
+        // is unobservable once it has happened.
+        if let Some(backlog) = live.saturated_backlog() {
+            envelope.delivery_state = DeliveryState::Dropped;
+            self.audit.log_record(&envelope);
+            tracing::warn!(
+                instance_id = %live.meta.instance_id,
+                backlog,
+                message_id = %envelope.message_id,
+                "peer bus refused a publish: the recipient's channel is full of \
+                 unread envelopes (#4271)"
+            );
+            return Err(BusError::SubscriberLagged {
+                instance_id: live.meta.instance_id,
+                backlog,
+            });
+        }
 
         // The durable record is written AFTER the send attempt so it states
         // what actually happened. Logging `Delivered` before knowing whether a

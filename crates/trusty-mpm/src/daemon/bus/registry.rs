@@ -67,7 +67,18 @@ use super::envelope::BusEnvelope;
 /// is right for peer messages, which are low-volume by construction —
 /// streaming token deltas stay on the existing per-crate buses and never reach
 /// this one.
-const INSTANCE_CHANNEL_CAPACITY: usize = 64;
+///
+/// Public since #4271: it is the depth at which
+/// [`LiveInstance::saturated_backlog`] refuses a publish, so it is part of the
+/// delivery contract a sender reasons about, not an implementation detail.
+/// Test: `saturated_publish_is_dropped_in_the_durable_log`.
+pub const INSTANCE_CHANNEL_CAPACITY: usize = 64;
+
+// #4271: tokio rounds a broadcast capacity UP to a power of two, so a
+// non-rounded value would give a ring deeper than this constant and
+// `saturated_backlog` would refuse a publish before an eviction was actually
+// imminent. Keeping it already-rounded makes the two exactly equal.
+const _: () = assert!(INSTANCE_CHANNEL_CAPACITY.is_power_of_two());
 
 /// Separator between the definition id and the random suffix in an instance id.
 ///
@@ -156,6 +167,31 @@ pub struct LiveInstance {
     pub meta: InstanceMeta,
     /// Sender half of this instance's own delivery channel.
     pub tx: broadcast::Sender<BusEnvelope>,
+}
+
+impl LiveInstance {
+    /// The unread backlog when one more envelope cannot be taken without loss.
+    ///
+    /// Why (#4271): `broadcast::Sender::send` answers `Ok` for a LAGGING
+    /// receiver — one still attached, whose oldest unread slot the send is
+    /// about to overwrite. A publisher reading only that `Ok` therefore cannot
+    /// tell delivery from eviction, and recorded `delivered` for envelopes the
+    /// recipient never saw. Asking BEFORE the send is the only point at which
+    /// the difference is still observable: afterwards the evicted envelope is
+    /// gone and nothing in the channel remembers it existed.
+    /// What: `Some(backlog)` when the channel holds
+    /// [`INSTANCE_CHANNEL_CAPACITY`] envelopes that some attached receiver has
+    /// not read — the state in which the next send overwrites the oldest of
+    /// them — and `None` otherwise. `broadcast::Sender::len` counts slots no
+    /// attached receiver has consumed, so the answer is driven by the SLOWEST
+    /// subscriber, which is exactly the one at risk; a fast peer draining
+    /// alongside it does not mask the lag.
+    /// Test: `delivered_records_match_what_a_stalled_subscriber_receives`,
+    /// `two_subscribers_one_lagging_account_exactly`.
+    pub fn saturated_backlog(&self) -> Option<usize> {
+        let backlog = self.tx.len();
+        (backlog >= INSTANCE_CHANNEL_CAPACITY).then_some(backlog)
+    }
 }
 
 /// The daemon's registry of live agent instances (DOC-60 §6b).
