@@ -168,6 +168,76 @@ pub fn decide_action(
     }
 }
 
+/// Why a surface's reviews run dry, when they cannot run live at all (#4254).
+///
+/// Why: a health endpoint that reports the raw `config.dry_run` answers a
+/// different question from the one the caller asked. `review_health` reported
+/// `dry_run: false` while every `review_pr` on the same process returned
+/// `dry_run: true` and posted nothing, because the MCP tools pass
+/// `allow_posting: false` and `TriggerDecision::ForceDryRun` — two gates the
+/// config flag never sees. A caller that trusts the config flag believes
+/// reviews reach GitHub when they cannot.
+/// What: the sentence a health payload carries beside an effective `dry_run` of
+/// `true`, naming which gate decided it. `None` when the surface would post.
+/// Test: `surface_dry_run_reason_names_the_deciding_gate`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DryRunReason {
+    /// The surface never posts: it hard-codes `allow_posting: false` and/or
+    /// `TriggerDecision::ForceDryRun`, regardless of configuration.
+    SurfaceNeverPosts,
+    /// The surface would post, but the operator configured dry-run
+    /// (`PR_INTELLIGENCE_DRY_RUN`).
+    ConfiguredDryRun,
+}
+
+impl DryRunReason {
+    /// The reason as the sentence a health payload renders.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SurfaceNeverPosts => {
+                "this surface never posts to GitHub — its reviews always run dry \
+                 (allow_posting=false and/or force_dry_run), independent of \
+                 PR_INTELLIGENCE_DRY_RUN"
+            }
+            Self::ConfiguredDryRun => {
+                "PR_INTELLIGENCE_DRY_RUN is set — reviews run dry and post nothing"
+            }
+        }
+    }
+}
+
+/// The `dry_run` a review invoked through one surface actually executes with.
+///
+/// Why: #4254 — `review_health` read `config.dry_run` while the review path read
+/// [`decide_action`]. Two computations of one fact drift, and this one drifted
+/// silently: nothing errored, reviews simply stopped reaching GitHub while the
+/// health endpoint kept saying they did. Every health surface now derives its
+/// answer from the SAME function, passed the SAME posting posture constants its
+/// own review path passes.
+/// What: returns the effective dry-run plus, when it is `true`, which gate
+/// decided it. `is_github_source: true` is assumed — a health endpoint is asked
+/// about the surface, not about one diff's origin, and a local diff can only
+/// make a live surface drier, never the reverse.
+/// Test: `surface_dry_run_matches_decide_action`,
+/// `surface_dry_run_reason_names_the_deciding_gate`.
+pub fn surface_dry_run(
+    config_dry_run: bool,
+    trigger: TriggerDecision,
+    allow_posting: bool,
+) -> (bool, Option<DryRunReason>) {
+    if decide_action(config_dry_run, trigger, allow_posting, true) == FinalizeAction::Post {
+        return (false, None);
+    }
+    // A surface that would post with the config flag cleared is dry only because
+    // the operator asked for it; one that stays dry either way never posts.
+    let reason = if decide_action(false, trigger, allow_posting, true) == FinalizeAction::Post {
+        DryRunReason::ConfiguredDryRun
+    } else {
+        DryRunReason::SurfaceNeverPosts
+    };
+    (true, Some(reason))
+}
+
 /// Count the findings nothing rendered a judgment on (#4459).
 ///
 /// Why: both canonical exits — `finalize_review` here and `abort_dry` in
@@ -592,6 +662,51 @@ mod tests {
         assert_eq!(
             decide_action(false, TriggerDecision::ForceDryRun, true, true),
             FinalizeAction::LogOnly
+        );
+    }
+
+    /// #4254: the health answer and the review behaviour are the SAME
+    /// computation — `surface_dry_run` agrees with `decide_action` on every
+    /// combination of the three inputs.
+    #[test]
+    fn surface_dry_run_matches_decide_action() {
+        for config_dry in [false, true] {
+            for trigger in [
+                TriggerDecision::None,
+                TriggerDecision::ForceLive,
+                TriggerDecision::ForceDryRun,
+            ] {
+                for allow in [false, true] {
+                    let (dry, _) = surface_dry_run(config_dry, trigger, allow);
+                    let posts =
+                        decide_action(config_dry, trigger, allow, true) == FinalizeAction::Post;
+                    assert_eq!(
+                        dry, !posts,
+                        "config_dry={config_dry} trigger={trigger:?} allow={allow}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// #4254: a caller told `dry_run: true` is told which gate decided it — the
+    /// surface's own hard-coded posture, or the operator's config flag.
+    #[test]
+    fn surface_dry_run_reason_names_the_deciding_gate() {
+        // The MCP / RPC review surfaces: never post, whatever the config says.
+        assert_eq!(
+            surface_dry_run(false, TriggerDecision::ForceDryRun, false),
+            (true, Some(DryRunReason::SurfaceNeverPosts))
+        );
+        // A posting surface the operator put in dry-run.
+        assert_eq!(
+            surface_dry_run(true, TriggerDecision::None, true),
+            (true, Some(DryRunReason::ConfiguredDryRun))
+        );
+        // A posting surface running live carries no reason.
+        assert_eq!(
+            surface_dry_run(false, TriggerDecision::None, true),
+            (false, None)
         );
     }
 

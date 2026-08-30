@@ -35,6 +35,22 @@ use crate::{
     },
 };
 
+// ─── Posting posture (#4254) ─────────────────────────────────────────────────
+
+/// The trigger every MCP review tool runs under.
+///
+/// Why: `review_health` used to report `state.config.dry_run` while
+/// `review_pr` ran with these two constants, so a daemon configured live
+/// answered `dry_run: false` and then posted nothing (#4254). Naming the
+/// posture once, and reading it from both the review path and the health path,
+/// is what stops the two answers from drifting again.
+/// Test: `review_health_reports_the_dry_run_the_review_path_executes`.
+const MCP_REVIEW_TRIGGER: TriggerDecision = TriggerDecision::ForceDryRun;
+
+/// Whether an MCP review tool may post to GitHub. It may not — see
+/// [`MCP_REVIEW_TRIGGER`].
+const MCP_REVIEW_ALLOW_POSTING: bool = false;
+
 // ─── Tool definitions ────────────────────────────────────────────────────────
 
 /// Return the `tools/list` payload — one descriptor per exposed tool.
@@ -218,9 +234,9 @@ async fn call_review_pr(args: &Value, state: &AppState) -> Result<Value, ToolErr
         reviewer_model: reviewer_model.clone(),
         write_log: false,
         print_result: false,
-        trigger: TriggerDecision::ForceDryRun,
+        trigger: MCP_REVIEW_TRIGGER,
         run_mode: mcp_run_mode(&state.config),
-        allow_posting: false,
+        allow_posting: MCP_REVIEW_ALLOW_POSTING,
         caller_context: crate::pipeline::runner::CallerContext::default(),
         // Search-unreachable semantics fix: the MCP tool surface can never post
         // to a real PR (`allow_posting: false` above), so a search outage
@@ -275,9 +291,9 @@ async fn call_review_diff(args: &Value, state: &AppState) -> Result<Value, ToolE
         reviewer_model: reviewer_model.clone(),
         write_log: false,
         print_result: false,
-        trigger: TriggerDecision::ForceDryRun,
+        trigger: MCP_REVIEW_TRIGGER,
         run_mode: mcp_run_mode(&state.config),
-        allow_posting: false,
+        allow_posting: MCP_REVIEW_ALLOW_POSTING,
         caller_context: crate::pipeline::runner::CallerContext::default(),
         // See the matching comment in `call_review_pr` — same rationale.
         surface: InvocationSurface::Interactive,
@@ -306,13 +322,22 @@ async fn call_review_diff(args: &Value, state: &AppState) -> Result<Value, ToolE
 /// #3658), and the inference endpoint (via the cached `InferenceProbe`);
 /// computes `status` via the shared `compute_status` helper so the HTTP and
 /// MCP paths are always consistent; returns a JSON health snapshot with
-/// `status` (`"ok"` or `"degraded"`), `inference`, `dry_run`,
+/// `status` (`"ok"` or `"degraded"`), `inference`, `dry_run`, `dry_run_reason`,
 /// `reviewer_model`, and a `deps` object with `reachable` and tri-state
 /// `state` (`"ok"`/`"unreachable"`/`"timeout"`) for each dep.  When inference
 /// is not `"ok"` OR a required dep is unreachable, `status` becomes
 /// `"degraded"`.
+///
+/// #4254: `dry_run` is the value a review invoked through THIS surface
+/// executes with — computed by `surface_dry_run` from the same
+/// [`MCP_REVIEW_TRIGGER`] / [`MCP_REVIEW_ALLOW_POSTING`] the review handlers
+/// pass — not the raw `config.dry_run` flag, which the review path overrides
+/// and which therefore told callers reviews were being posted when none were.
+/// `dry_run_reason` names the gate, so a caller reading `dry_run: true` on a
+/// live-configured daemon is told why rather than left to guess.
 /// Test: `review_health_inference_ok`, `review_health_inference_auth_error_degraded`,
-/// `review_health_required_dep_down_degraded`, `review_health_optional_dep_down_ok`.
+/// `review_health_required_dep_down_degraded`, `review_health_optional_dep_down_ok`,
+/// `review_health_reports_the_dry_run_the_review_path_executes`.
 async fn call_review_health(state: &AppState) -> Value {
     let reviewer_model = state.config.role_models.reviewer.model.clone();
 
@@ -328,10 +353,18 @@ async fn call_review_health(state: &AppState) -> Value {
     // #722: status is "degraded" when inference fails OR any required dep is down.
     let status = compute_status(inference, &deps);
 
+    // #4254: the dry_run the review path executes with, not the config flag.
+    let (dry_run, dry_run_reason) = crate::pipeline::surface_dry_run(
+        state.config.dry_run,
+        MCP_REVIEW_TRIGGER,
+        MCP_REVIEW_ALLOW_POSTING,
+    );
+
     let result = serde_json::json!({
         "status": status,
         "version": env!("CARGO_PKG_VERSION"),
-        "dry_run": state.config.dry_run,
+        "dry_run": dry_run,
+        "dry_run_reason": dry_run_reason.map(|r| r.as_str()),
         "reviewer_model": reviewer_model,
         "inference": inference,
         "deps": {

@@ -29,7 +29,15 @@
 //! quoted value, and replaces only the value.  Grade strings are ASCII with no
 //! embedded quotes, so the scan is byte-safe even amid multi-byte UTF-8 prose.
 //!
+//! #1902 generalises the same rewrite to the `"verdict"` key. The top-level
+//! `verdict` is authoritative for exactly the same reason the grade is — it is
+//! computed after the severity floor, the coverage floor, and the verification
+//! round — and `review_body` carried the model's raw pre-adjustment lean beside
+//! it. See [`reconcile_review_body_verdict`].
+//!
 //! Test: `grade_reconcile_tests.rs`.
+
+use crate::models::Verdict;
 
 /// The JSON key token whose string value is the embedded letter grade.
 ///
@@ -39,6 +47,15 @@
 /// What: the literal searched for in the body to locate each embedded grade value.
 /// Test: `reconcile_leaves_grade_justification_untouched`.
 const GRADE_KEY_TOKEN: &str = "\"grade\"";
+
+/// The JSON key token whose string value is the embedded verdict (#1902).
+///
+/// Why: the same fully-quoted-key rule as [`GRADE_KEY_TOKEN`] — matching
+/// `"verdict"` and not the bare word is what keeps `"verdict_justification"`
+/// untouched, since the byte after `verdict` there is `_`, not the closing `"`.
+/// What: the literal searched for in the body to locate each embedded verdict.
+/// Test: `reconcile_leaves_verdict_justification_untouched`.
+const VERDICT_KEY_TOKEN: &str = "\"verdict\"";
 
 /// Rewrite every JSON `"grade"` value in `review_body` to the final `grade`.
 ///
@@ -65,13 +82,55 @@ pub(crate) fn reconcile_review_body_grade(body: &str, final_grade: Option<&str>)
     let Some(new_grade) = final_grade else {
         return body.to_string();
     };
+    rewrite_json_string_values(body, GRADE_KEY_TOKEN, new_grade)
+}
 
-    let mut out = String::with_capacity(body.len() + new_grade.len());
+/// Rewrite every JSON `"verdict"` value in `review_body` to the final verdict.
+///
+/// Why: #1886 reconciled the embedded GRADE and stopped there, so the same
+/// staleness survived one field over (#1902). A `review_pr` on PR #1901
+/// returned a top-level `verdict: BLOCK` while the verdict inside `review_body`
+/// read `APPROVE`: the top-level value is the pipeline's, computed after the
+/// severity floor, the coverage floor, and the verification round, while the
+/// embedded one is the model's raw pre-adjustment lean. An automated merge gate
+/// reading the top-level `BLOCK` refused to proceed while the review a human
+/// read said APPROVE, and the disagreement cost a manual investigation.
+/// What: mirrors the authoritative verdict into the model's own JSON with the
+/// same conservative rewrite [`reconcile_review_body_grade`] uses — the key
+/// token `"verdict"` followed by a quoted value, value replaced, everything
+/// else byte-for-byte. A body with no JSON `"verdict"` key (the map-reduce
+/// prose summary) is returned unchanged; `"verdict_justification"` never
+/// matches. `UNKNOWN` is written like any other verdict: unlike a grade, it is
+/// a real assessed outcome, not the absence of one.
+/// Test: `reconcile_rewrites_direct_json_verdict`,
+/// `reconcile_rewrites_fenced_block_verdict`,
+/// `reconcile_leaves_verdict_justification_untouched`,
+/// `reconcile_verdict_prose_without_verdict_is_noop`,
+/// `reconcile_rewrites_all_verdict_occurrences`.
+pub(crate) fn reconcile_review_body_verdict(body: &str, final_verdict: &Verdict) -> String {
+    rewrite_json_string_values(body, VERDICT_KEY_TOKEN, &final_verdict.to_string())
+}
+
+/// Replace the quoted string value of every `key_token` occurrence in `body`.
+///
+/// Why: the grade (#1886) and verdict (#1902) reconciliations are one rewrite
+/// over two keys; a second copy of the scanner would drift the moment either
+/// one's edge cases changed.
+/// What: walks `body` for `key_token`, and for each occurrence whose value is a
+/// quoted string, emits everything up to the opening quote verbatim, then
+/// `new_value`, then resumes at the closing quote. An occurrence that is not
+/// followed by a quoted string value (`null`, a number, a truncated tail) is
+/// emitted untouched and the scan continues past it. The scan compares single
+/// ASCII bytes only, so it is byte-safe amid multi-byte UTF-8 prose.
+/// Test: the `reconcile_*` cases in `grade_reconcile_tests.rs`, which drive
+/// this through both public wrappers.
+fn rewrite_json_string_values(body: &str, key_token: &str, new_value: &str) -> String {
+    let mut out = String::with_capacity(body.len() + new_value.len());
     let mut cursor = 0usize;
 
-    while let Some(rel) = body[cursor..].find(GRADE_KEY_TOKEN) {
+    while let Some(rel) = body[cursor..].find(key_token) {
         let key_start = cursor + rel;
-        let key_end = key_start + GRADE_KEY_TOKEN.len();
+        let key_end = key_start + key_token.len();
 
         match string_value_span(body, key_end) {
             // `key_end..value_start` includes the `:`, any whitespace, and the
@@ -79,7 +138,7 @@ pub(crate) fn reconcile_review_body_grade(body: &str, final_grade: Option<&str>)
             // the closing quote so it (and everything after) is emitted next.
             Some((value_start, close_quote)) => {
                 out.push_str(&body[cursor..value_start]);
-                out.push_str(new_grade);
+                out.push_str(new_value);
                 cursor = close_quote;
             }
             // `"grade"` is present but not a quoted string value (e.g. `null`,
@@ -96,7 +155,7 @@ pub(crate) fn reconcile_review_body_grade(body: &str, final_grade: Option<&str>)
     out
 }
 
-/// Locate the quoted string value that follows a `"grade"` key.
+/// Locate the quoted string value that follows a rewritten key.
 ///
 /// Why: the rewrite must find exactly the value between the quotes so it can splice
 /// in the authoritative grade while preserving the key, colon, whitespace, and the

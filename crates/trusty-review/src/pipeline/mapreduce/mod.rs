@@ -93,6 +93,10 @@ pub async fn run_map_reduce(
             let findings_before = findings.len();
             crate::pipeline::finding_hygiene::sanitize_findings(findings);
             crate::pipeline::citation_check::enforce_citation_integrity(findings, &cite_index);
+            // #1873: a map call sees ONE chunk, so it cannot see the chunk that
+            // ADDS the file it is about to call missing. The whole changeset
+            // can, and refutes the claim here before it reaches the floor.
+            crate::pipeline::absence_claim::drop_refuted_absence_claims(findings, &cite_index);
             // This chunk's own `verdict` field rested on the SAME findings we
             // may have just wiped out — relax it too so a wiped-out chunk
             // cannot poison `reduce`'s stricter-of-all-chunks seed (#4042,
