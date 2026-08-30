@@ -112,6 +112,8 @@ pub mod mcp_service;
 pub mod messaging;
 pub mod openrpc;
 pub mod palace_id_derive;
+// #6424: the durable per-palace "last used" stamp the console column reads.
+pub mod palace_last_used;
 pub mod project_root;
 pub mod prompt_facts;
 pub mod prompt_log;
@@ -599,6 +601,16 @@ pub struct AppState {
     /// the same reason `PalaceRegistry::with_open_queue_timeout` exists.
     /// Test: `tools::tests::write_budget_tests`.
     pub write_op_budget: std::time::Duration,
+    /// When each palace's durable last-used stamp was last written (#6424).
+    ///
+    /// Why: the console's Last Used column needs a stamp that survives a
+    /// restart, and a durable write per recall is not worth a column measured
+    /// in days. This is the throttle's memory — see
+    /// [`palace_last_used`] for the cadence and what lagging it costs.
+    /// What: palace id -> unix seconds of the last PERSISTED stamp, not of the
+    /// last use. Empty at boot, so the first use of any palace writes.
+    /// Test: `palace_last_used::tests::stamp_throttles_within_the_window`.
+    pub palace_last_used: palace_last_used::StampCache,
 }
 
 impl AppState {
@@ -678,6 +690,9 @@ impl AppState {
             daemon_readiness: Arc::new(AtomicU8::new(DaemonReadiness::Warming as u8)),
             // #4002: one ceiling for the whole write, read once at construction.
             write_op_budget: trusty_common::memory_core::timeouts::write_op_budget(),
+            // #6424: empty at boot, so the first use of each palace after a
+            // restart always persists a stamp.
+            palace_last_used: Arc::new(dashmap::DashMap::new()),
         }
     }
 
