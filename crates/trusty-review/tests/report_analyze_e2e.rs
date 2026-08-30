@@ -218,11 +218,90 @@ async fn analyze_populates_complexity_and_findings() {
         md.contains("Extract method — a"),
         "AMBER refactor finding missing"
     );
-    // The GREEN-mapped hint diagnostic is NOT rendered.
+    assert_green_diagnostic_dropped(metrics, &md);
+}
+
+/// Assert the GREEN-mapped hint diagnostic reached neither the metrics nor the
+/// page.
+///
+/// Why: #4385/#4387 reported this check failing three times on unrelated PRs,
+/// and read it as a timing flake in the mock. It is not timing. The check was
+/// `!md.contains("H1")` over the WHOLE rendered report, and the report embeds
+/// the manifest's absolute path — `…/T/.tmpXYZabc/manifest.toml`, whose six
+/// random characters come from the full alphanumeric alphabet and land on the
+/// two-character sequence `H1` roughly once in eight hundred renders. Every
+/// sighting was that collision: a passing render and a failing one differed
+/// only in the name the OS handed the temp directory.
+/// What: checks the structured findings for the dropped code, then the two
+/// shapes the renderer would print it in — the risk-table row `H1 — meh` and
+/// the detail heading `**H1**`. Neither can appear in a filesystem path.
+/// Test: called by `analyze_populates_complexity_and_findings` and
+/// `green_diagnostic_stays_dropped_under_a_path_that_spells_its_code`.
+fn assert_green_diagnostic_dropped(metrics: &trusty_review::report::AnalyzeMetrics, md: &str) {
     assert!(
-        !md.contains("H1"),
-        "green-mapped diagnostic should be dropped"
+        !metrics.findings.iter().any(|f| f.title == "H1"),
+        "a hint diagnostic maps to GREEN and must never become a finding: {:?}",
+        metrics.findings
     );
+    assert!(
+        !md.contains("H1 — meh"),
+        "the dropped diagnostic must not reach the risk table"
+    );
+    assert!(
+        !md.contains("**H1**"),
+        "the dropped diagnostic must not reach the findings detail"
+    );
+}
+
+/// REGRESSION (#4387, recurrence of #4385): the drop check survives a workspace
+/// path that happens to spell the dropped diagnostic's code.
+///
+/// Why: this is the flake, made deterministic. Three CI failures on unrelated
+/// PRs were read as a race in the mock; the mock had already been rewritten
+/// from a raw `TcpListener` to a Unix socket (#6287) and the failures continued
+/// in the same shape, because the cause was never the transport. It was
+/// `md.contains("H1")` run over a document that embeds a random temp path. This
+/// test pins the workspace under a directory literally named `runH1x` — the
+/// collision the OS produced by chance — and asserts the check still holds.
+/// What: same fixture, mock, enrichment and render as
+/// `analyze_populates_complexity_and_findings`, rooted one directory deeper.
+/// Under the old whole-document substring check this fails every run.
+/// Test: this test itself.
+#[tokio::test]
+async fn green_diagnostic_stays_dropped_under_a_path_that_spells_its_code() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    // The name is the point: `H1` appears in the path the report prints.
+    let workspace = tmp.path().join("runH1x");
+    std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+
+    let manifest_path = write_fixture(&workspace);
+    let index_id = trusty_review::report::derive_index_id(&workspace.join(REPO_DIR))
+        .expect("the fixture checkout has a final path component");
+    let socket = spawn_mock(index_id, &workspace);
+
+    let manifest = load_manifest(&manifest_path).expect("manifest loads");
+    let template = TemplateLoader::new()
+        .load("report-technical-dd")
+        .expect("template loads");
+    let mut model =
+        ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None).expect("build");
+
+    let source = HttpAnalyzeMetricsSource::new(socket).expect("client");
+    enrich_with_analyze(&mut model, &source).await;
+
+    let metrics = model.repositories[0]
+        .metrics
+        .as_ref()
+        .expect("analyze filled metrics");
+    let reporter = Reporter::new(workspace.join("reports"));
+    let md = reporter.render(&model, &template);
+
+    assert!(
+        md.contains("runH1x"),
+        "the rendered report must embed the workspace path — otherwise this test \
+         proves nothing about the collision"
+    );
+    assert_green_diagnostic_dropped(metrics, &md);
 }
 
 /// Why: a fetch failure must fall through cleanly to scan-only output, never
