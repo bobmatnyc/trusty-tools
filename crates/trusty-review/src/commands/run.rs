@@ -128,6 +128,22 @@ pub struct RunArgs {
     /// empty success.
     #[arg(long)]
     pub json: bool,
+
+    /// Post the review live to the GitHub PR. Without this flag, `run` never
+    /// posts — the ambient `PR_INTELLIGENCE_DRY_RUN` env var is NOT consulted
+    /// for this decision (#4460).
+    ///
+    /// #4460: a run intended as a local pre-merge check published a live
+    /// REQUEST_CHANGES review with nothing at the call site signalling that
+    /// posting was enabled — the caller had merely inherited
+    /// `PR_INTELLIGENCE_DRY_RUN=false` from the shell environment. `--live`
+    /// is now the one and only per-invocation opt-in: passing it forces a
+    /// live post even if the ambient env says dry-run, and omitting it forces
+    /// a dry-run even if the ambient env says live (`--live` "beats" the
+    /// ambient value either way — see `trigger_for_live_flag`). Has no effect
+    /// on `--local-diff` / `--base` sources, which never reach GitHub anyway.
+    #[arg(long)]
+    pub live: bool,
 }
 
 // ─── handler ─────────────────────────────────────────────────────────────────
@@ -135,18 +151,26 @@ pub struct RunArgs {
 /// Execute the `run` subcommand.
 ///
 /// Why: one-shot review of a PR or local diff with the selected reviewer model.
-/// What: resolves the diff source, builds deps, runs the pipeline, prints the
-/// result to STDOUT, and optionally writes the log file.  Resolves
-/// `--source-root` (issue #2994) first — it wins over CWD auto-derive but
-/// loses to an explicit `TRUSTY_SEARCH_INDEX` — then calls `resolve_index` so
-/// the correct trusty-search index is used even when `TRUSTY_SEARCH_INDEX` is
-/// unset (issue #670 / auto-derive #661).
+/// What: prints the resolved posting mode (#4460), then resolves the diff
+/// source, builds deps, runs the pipeline, prints the result to STDOUT, and
+/// optionally writes the log file.  Resolves `--source-root` (issue #2994)
+/// first — it wins over CWD auto-derive but loses to an explicit
+/// `TRUSTY_SEARCH_INDEX` — then calls `resolve_index` so the correct
+/// trusty-search index is used even when `TRUSTY_SEARCH_INDEX` is unset
+/// (issue #670 / auto-derive #661).
 /// Test: CLI integration via `cargo run -p trusty-review -- run --help`;
 /// `resolve_index` wiring covered by
 /// `wiring_cmd_run_resolve_index_updates_before_pipeline` in
 /// `config/config_resolve_index_tests.rs`; `--source-root` wiring covered by
-/// `run_args_source_root_parses` / `run_args_source_root_absent_is_none`.
+/// `run_args_source_root_parses` / `run_args_source_root_absent_is_none`;
+/// the posting-mode gate covered by `trigger_for_live_flag_*` and
+/// `posting_mode_banner_*` below.
 pub async fn cmd_run(config: ReviewConfig, args: RunArgs) -> Result<()> {
+    // #4460: print the resolved posting mode before any network call, so the
+    // signal is visible at the moment it matters — never a silent ambient
+    // default. Stderr, not stdout, so `--json` output stays parseable.
+    eprintln!("{}", posting_mode_banner(args.live));
+
     let diff_source = resolve_diff_source_run(&config, &args).await?;
 
     let overrides = RoleCliOverrides {
@@ -207,7 +231,10 @@ pub async fn cmd_run(config: ReviewConfig, args: RunArgs) -> Result<()> {
         // written there — a caller piping this into `jq` would get prose ahead
         // of the object.
         print_result: !args.json,
-        trigger: TriggerDecision::None,
+        // #4460: never TriggerDecision::None here — that would defer live-vs-
+        // dry entirely to the ambient PR_INTELLIGENCE_DRY_RUN env var, with no
+        // call-site signal. `--live` is the only per-invocation opt-in.
+        trigger: trigger_for_live_flag(args.live),
         run_mode: RunMode::Cli,
         allow_posting: ALLOW_POSTING,
         caller_context: CallerContext::default(),
@@ -239,6 +266,51 @@ pub async fn cmd_run(config: ReviewConfig, args: RunArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+// ─── posting-mode gate (#4460) ─────────────────────────────────────────────
+
+/// Resolve the `run` subcommand's live-vs-dry trigger from the explicit
+/// `--live` flag.
+///
+/// Why: the incident behind #4460 happened because `cmd_run` passed
+/// `TriggerDecision::None`, which defers entirely to the ambient
+/// `PR_INTELLIGENCE_DRY_RUN` env var (see `effective_dry_run`) — a caller who
+/// merely inherited that var from the calling shell got no call-site signal
+/// before a review published live. Returning a forcing decision instead of
+/// `None` means `--live` is the only thing that can enable posting for this
+/// CLI surface, and it wins over the ambient env either way (present but
+/// `PR_INTELLIGENCE_DRY_RUN=true`? `--live` still posts; absent but
+/// `PR_INTELLIGENCE_DRY_RUN=false`? still dry-run).
+/// What: `true` → `TriggerDecision::ForceLive`; `false` →
+/// `TriggerDecision::ForceDryRun`. Extracted as a pure function so the gate is
+/// unit-testable without building a `ReviewConfig` or setting env vars.
+/// Test: `trigger_for_live_flag_true_forces_live`,
+/// `trigger_for_live_flag_false_forces_dry_run`,
+/// `dry_run_env_var_alone_never_enables_posting` (regression, #4460),
+/// `live_flag_posts_even_when_ambient_env_says_dry_run`.
+pub fn trigger_for_live_flag(live: bool) -> TriggerDecision {
+    if live {
+        TriggerDecision::ForceLive
+    } else {
+        TriggerDecision::ForceDryRun
+    }
+}
+
+/// Render the posting-mode line `cmd_run` prints before any network call.
+///
+/// Why: #4460's second ask — a run about to post live must say so, visibly,
+/// at the call site, before it does any work. Extracted to a pure function
+/// (rather than an inline `eprintln!`) so the exact wording is unit-testable.
+/// What: `true` → a line stating this run WILL post; `false` → a line stating
+/// this run is a dry-run and naming the flag that would change that.
+/// Test: `posting_mode_banner_live`, `posting_mode_banner_dry_run`.
+pub fn posting_mode_banner(live: bool) -> String {
+    if live {
+        "posting: enabled (--live) — this run will post a review comment to GitHub".to_string()
+    } else {
+        "posting: dry-run (default) — pass --live to post a review comment to GitHub".to_string()
+    }
 }
 
 // ─── shared helpers ──────────────────────────────────────────────────────────
@@ -464,6 +536,94 @@ pub fn apply_source_root_fallback(deps: &mut ReviewDeps, notice: Option<&str>) {
 mod tests {
     use super::*;
     use clap::Parser as _;
+    use trusty_review::pipeline::effective_dry_run;
+
+    // ── --live / posting-mode gate (#4460) ──────────────────────────────────
+
+    /// `--live` must parse and default to `false` when absent.
+    ///
+    /// Why: guards the clap wiring itself, same rationale as the other
+    /// `run_args_*_parses` tests in this module.
+    /// What: asserts the flag round-trips both ways.
+    /// Test: this test.
+    #[test]
+    fn run_args_live_flag_parses() {
+        let args = RunArgs::try_parse_from(["run", "--live"]).expect("parse");
+        assert!(args.live);
+
+        let args = RunArgs::try_parse_from(["run"]).expect("parse");
+        assert!(!args.live, "--live must default to false");
+    }
+
+    #[test]
+    fn trigger_for_live_flag_true_forces_live() {
+        assert_eq!(trigger_for_live_flag(true), TriggerDecision::ForceLive);
+    }
+
+    #[test]
+    fn trigger_for_live_flag_false_forces_dry_run() {
+        assert_eq!(trigger_for_live_flag(false), TriggerDecision::ForceDryRun);
+    }
+
+    /// REGRESSION (#4460): the ambient `PR_INTELLIGENCE_DRY_RUN=false` env var
+    /// must never, by itself, enable live posting for `trusty-review run` —
+    /// this is the exact incident that published a live review to PR #4436
+    /// with nothing at the call site signalling it would happen.
+    ///
+    /// Why: pre-fix, `cmd_run` passed `TriggerDecision::None` into
+    /// `ReviewInput`, so `effective_dry_run` deferred entirely to
+    /// `config.dry_run` (the env var) — `effective_dry_run(false,
+    /// TriggerDecision::None)` is `false` (live). This test fails against
+    /// that behaviour: it asserts the run stays dry-run even when the ambient
+    /// config says "live" (`config_dry_run = false`), as long as `--live` was
+    /// not passed.
+    /// What: `trigger_for_live_flag(false)` folded through the same
+    /// `effective_dry_run` formula the pipeline uses, with `config_dry_run =
+    /// false` (the ambient "live" env value) — asserts the result is still
+    /// dry-run.
+    /// Test: this test.
+    #[test]
+    fn dry_run_env_var_alone_never_enables_posting() {
+        let trigger = trigger_for_live_flag(false);
+        assert!(
+            effective_dry_run(false, trigger),
+            "no --live flag must stay dry-run even when the ambient env says live"
+        );
+    }
+
+    /// `--live` must post even when the ambient env says dry-run — the other
+    /// half of "beats the ambient env either way" (#4460).
+    /// Why: an operator who explicitly passes `--live` has stated intent at
+    /// the call site; a stale `PR_INTELLIGENCE_DRY_RUN=true` left over from a
+    /// different invocation must not silently override that.
+    /// What: `trigger_for_live_flag(true)` folded through `effective_dry_run`
+    /// with `config_dry_run = true` (the ambient "dry" env value) — asserts
+    /// the result is live.
+    /// Test: this test.
+    #[test]
+    fn live_flag_posts_even_when_ambient_env_says_dry_run() {
+        let trigger = trigger_for_live_flag(true);
+        assert!(
+            !effective_dry_run(true, trigger),
+            "--live must post even when the ambient env says dry-run"
+        );
+    }
+
+    #[test]
+    fn posting_mode_banner_live() {
+        assert_eq!(
+            posting_mode_banner(true),
+            "posting: enabled (--live) — this run will post a review comment to GitHub"
+        );
+    }
+
+    #[test]
+    fn posting_mode_banner_dry_run() {
+        assert_eq!(
+            posting_mode_banner(false),
+            "posting: dry-run (default) — pass --live to post a review comment to GitHub"
+        );
+    }
 
     /// Guards the `conflicts_with = "base"` wiring on `local_diff` (#2993):
     /// a field-id rename that silently drops the attribute would otherwise

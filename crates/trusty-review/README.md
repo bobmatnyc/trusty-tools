@@ -57,8 +57,11 @@ Homebrew provides:
 ### Prerequisites
 
 > **Required:** A GitHub token (`GITHUB_TOKEN`) or GitHub App credentials for PR
-> fetching and (optionally) posting review comments. Set
-> `PR_INTELLIGENCE_DRY_RUN=false` to enable comment posting (default: dry-run).
+> fetching and (optionally) posting review comments. `trusty-review run` is
+> dry-run by default; pass `--live` explicitly to post a comment — the ambient
+> `PR_INTELLIGENCE_DRY_RUN` env var alone can never enable posting for `run`
+> ([#4460](https://github.com/bobmatnyc/trusty-tools/issues/4460)). `run`
+> prints the resolved posting mode before doing any work.
 >
 > **LLM credentials:** AWS Bedrock credentials (env vars, `~/.aws/credentials`,
 > IAM role, or SSO) for the default `bedrock/` provider, or `OPENROUTER_API_KEY`
@@ -103,6 +106,10 @@ trusty-review run --base origin/main --source-root ~/code/some-other-checkout
 
 # Override the reviewer model
 trusty-review run owner repo 123 --reviewer-model bedrock/us.anthropic.claude-haiku-4-5
+
+# Post the review live to the PR — --live is required; the ambient
+# PR_INTELLIGENCE_DRY_RUN env var alone can never enable posting (#4460)
+trusty-review run owner repo 123 --live
 
 # Compare models
 trusty-review compare owner repo 123
@@ -350,7 +357,7 @@ required (`true`) everywhere unless explicitly opted out via
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `PR_INTELLIGENCE_DRY_RUN` | `true` | When `true`, no GitHub comments are posted |
+| `PR_INTELLIGENCE_DRY_RUN` | `true` | Governs the webhook/service default. Does NOT gate `trusty-review run`, which requires the explicit `--live` flag to post ([#4460](https://github.com/bobmatnyc/trusty-tools/issues/4460)) |
 | `TRUSTY_SEARCH_URL` | `http://127.0.0.1:7878` | trusty-search daemon URL |
 | `PR_INTELLIGENCE_ANALYZER_URL` | `http://127.0.0.1:7879` | trusty-analyze daemon URL |
 | `TRUSTY_REVIEW_REQUIRE_SEARCH` | per-surface (see above) | Force search required (`true`) or allow degrade (`false`) regardless of invocation surface |
