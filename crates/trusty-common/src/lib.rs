@@ -66,6 +66,31 @@ compile_error!(
      `--features unconditional-only` to test just the always-compiled surface."
 );
 
+// #4901: the guard above discounts `CARGO_FEATURE_DEFAULT`, because Cargo
+// activates `default` on every build including the bare one. That discount is
+// correct only while `default` is `[]`.
+//
+// Why: give `default = ["foo"]` its own failure instead of letting it disarm
+// the guard. Cargo would set `CARGO_FEATURE_FOO` on a bare `cargo test -p
+// trusty-common`, `build.rs` would see a real feature enabled, and the
+// zero-feature guard would stop firing — restoring the vacuous green with
+// nothing red anywhere.
+// What: `build.rs` scans the manifest for `default = []` and sets
+// `trusty_common_default_not_empty` when it does not find exactly that,
+// including when it cannot read the manifest at all. Scoped to `cfg(test)`
+// like the guard it protects, so consumer builds are untouched.
+// Test: `default_feature_set_is_empty` (`tests/feature_coverage.rs`) asserts
+// the same fact through a real TOML parse.
+#[cfg(all(test, trusty_common_default_not_empty))]
+compile_error!(
+    "crates/trusty-common/Cargo.toml no longer declares `default = []`. The #4901 \
+     zero-feature test guard discounts `CARGO_FEATURE_DEFAULT` on the assumption \
+     that `default` enables nothing; a non-empty `default` makes every bare \
+     `cargo test -p trusty-common` look like a deliberate feature selection, and \
+     the guard silently stops firing. Either keep `default` empty, or rewrite the \
+     guard in build.rs to compare the enabled set against the default set."
+);
+
 // #4901: the guard above is only as live as the build script that feeds it.
 // Deleting or short-circuiting `build.rs` would restore the silent green with
 // nothing turning red, so the absence of its unconditional marker is itself a
