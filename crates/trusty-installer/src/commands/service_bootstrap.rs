@@ -61,6 +61,15 @@
 //! [`BootstrapAction::RefusedForeignPort`], with nothing attempted and nothing
 //! changed.
 //!
+//! 🔴 (#4917) A `service install` that fails because the installed binary has
+//! no `service` subcommand is REWRITTEN before it reaches the operator. That
+//! failure is release skew — `tctl install` fetches a component's latest
+//! PUBLISHED release, so a member whose `service install` shipped later than
+//! that release cannot bootstrap itself — and clap's `unrecognized subcommand`
+//! text describes it as a bad argument instead. [`release_skew_message`] names
+//! the installed version and the remedy; the raw error is appended, not
+//! replaced.
+//!
 //! Testability: every side effect is behind the [`ServiceEnv`] seam so the
 //! decision logic is unit-tested against an in-memory fake — the tests NEVER
 //! touch `~/Library/LaunchAgents` or invoke `launchctl` against the live
@@ -616,7 +625,20 @@ impl ServiceEnv for RealServiceEnv {
         let target = service_install_target(binary, exe_path)?;
         let mut cmd = std::process::Command::new(&target);
         cmd.args(["service", "install"]);
-        run_captured(cmd, &format!("`{} service install`", target.display()))
+        run_captured(cmd, &format!("`{} service install`", target.display())).map_err(|e| {
+            // #4917: an argument-parser rejection here is release skew, not a
+            // broken service install. Name that, and only then pay for the
+            // `--version` spawn that puts a number on it.
+            let raw = e.to_string();
+            if !names_missing_service_subcommand(&raw) {
+                return e;
+            }
+            let installed = super::update_engine::installed_version(binary);
+            anyhow::anyhow!(
+                "{}",
+                release_skew_message(binary, installed.as_deref(), &raw)
+            )
+        })
     }
 
     fn is_loaded(&self, binary: &str) -> bool {
@@ -704,6 +726,63 @@ impl ServiceEnv for RealServiceEnv {
             anyhow::bail!("launchd is macOS-only")
         }
     }
+}
+
+/// Whether a failed `service install` is the binary rejecting the subcommand.
+///
+/// Why (#4917): `tctl start trusty-console` on a machine running the published
+/// trusty-console reported `exited with exit status: 2: error: unrecognized
+/// subcommand 'service'` — clap's parser output, forwarded verbatim. That text
+/// says the argument was wrong; the actual fact is that the installed release
+/// predates the subcommand, which is a different problem with a different fix.
+/// Classifying it here is what lets [`release_skew_message`] say so.
+///
+/// What: `true` when the captured text carries an argument-parser
+/// "no such subcommand" rejection AND names `service`. Both halves are
+/// required: a `service install` that fails for its own reasons (a plist it
+/// cannot write, a port it cannot bind) must keep its own error text. Matching
+/// is case-insensitive and covers clap 4's `unrecognized subcommand` and
+/// clap 3's `wasn't expected` spellings, since the failing binary is a
+/// PUBLISHED release whose clap version the installer does not choose.
+///
+/// Test: `missing_service_subcommand_detects_clap_rejections`,
+/// `missing_service_subcommand_ignores_other_failures`.
+fn names_missing_service_subcommand(err: &str) -> bool {
+    let lower = err.to_lowercase();
+    let rejected = lower.contains("unrecognized subcommand")
+        || lower.contains("unknown subcommand")
+        || lower.contains("wasn't expected");
+    rejected && lower.contains("'service'")
+}
+
+/// The operator-facing explanation for a release-skew `service install` (#4917).
+///
+/// Why: the raw parser error tells an operator their argument was wrong, which
+/// sends them looking at `tctl`. The fact they need is that this member's
+/// installed binary is too old to install its own launchd unit, so the member
+/// has no supervised service and `tctl start` cannot bring it up until a newer
+/// release lands. `vmtest run released` hit exactly this against
+/// trusty-console 0.4.0 while the working tree carried the 0.5.0 that added
+/// `service` (#2557).
+///
+/// What: names the binary, the installed version when `--version` yielded one,
+/// what the skew costs (no plist, so no supervised start), and the remedy —
+/// then appends the underlying error rather than discarding it.
+///
+/// Test: `release_skew_message_names_version_and_remedy`,
+/// `release_skew_message_without_a_version`.
+fn release_skew_message(binary: &str, installed: Option<&str>, err: &str) -> String {
+    let version = match installed {
+        Some(v) => format!(" {v}"),
+        None => String::new(),
+    };
+    format!(
+        "the installed {binary}{version} has no `service` subcommand, so it \
+         cannot install its own launchd plist — this release predates the \
+         subcommand (release skew, #4917). Without a plist the member has no \
+         supervised unit and `tctl start` cannot bring it up. Install a \
+         {binary} new enough to ship `service install`. Underlying error: {err}"
+    )
 }
 
 /// Which executable a `service install` should actually spawn.

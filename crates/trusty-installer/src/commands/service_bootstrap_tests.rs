@@ -964,3 +964,85 @@ fn retired_unit_already_absent_is_not_a_failure() {
         "the eviction must still be ATTEMPTED, even on a clean host"
     );
 }
+
+/// REGRESSION (#4917): the clap rejection that release skew produces is
+/// recognised as such.
+///
+/// Why: `vmtest run released` surfaced `exit status: 2: error: unrecognized
+/// subcommand 'service'` from trusty-console 0.4.0 — the parser's words, which
+/// point an operator at their own command line rather than at the installed
+/// release. Nothing classified that text before, so nothing could rewrite it.
+/// What: asserts the clap 4 and clap 3 spellings both match, including the full
+/// captured line `run_captured` builds.
+#[test]
+fn missing_service_subcommand_detects_clap_rejections() {
+    assert!(names_missing_service_subcommand(
+        "`trusty-console service install` exited with exit status: 2: \
+         error: unrecognized subcommand 'service'\n\n  tip: a similar \
+         subcommand exists: 'serve'"
+    ));
+    assert!(names_missing_service_subcommand(
+        "error: Found argument 'service' which wasn't expected, or isn't valid \
+         in this context"
+    ));
+    assert!(names_missing_service_subcommand(
+        "error: unknown subcommand 'service'"
+    ));
+}
+
+/// Why: the rewrite must not swallow a `service install` that failed on its own
+/// terms — a plist it could not write, a port already held. Those errors carry
+/// the only diagnosis there is, and a skew message pasted over one would send
+/// the operator after a version bump that fixes nothing.
+/// What: asserts each non-skew failure text is left unclassified, including a
+/// parser rejection naming a DIFFERENT subcommand.
+#[test]
+fn missing_service_subcommand_ignores_other_failures() {
+    assert!(!names_missing_service_subcommand(
+        "`trusty-search service install` exited with exit status: 1: \
+         error: could not write ~/Library/LaunchAgents/com.trusty.search.plist: \
+         Permission denied"
+    ));
+    assert!(!names_missing_service_subcommand(
+        "error: unrecognized subcommand 'serve'"
+    ));
+    assert!(!names_missing_service_subcommand(
+        "spawn `trusty-console service install`: No such file or directory"
+    ));
+}
+
+/// Why (#4917): the operator needs four facts the parser error gives none of —
+/// which binary, which version they are running, what the skew costs, and what
+/// to do — and needs the raw error kept so nothing is lost in the rewrite.
+/// What: asserts all four plus the underlying text appear in the message.
+#[test]
+fn release_skew_message_names_version_and_remedy() {
+    let msg = release_skew_message(
+        "trusty-console",
+        Some("0.4.0"),
+        "error: unrecognized subcommand 'service'",
+    );
+    assert!(msg.contains("trusty-console 0.4.0"), "{msg}");
+    assert!(msg.contains("release skew, #4917"), "{msg}");
+    assert!(msg.contains("`tctl start` cannot bring it up"), "{msg}");
+    assert!(msg.contains("Install a trusty-console new enough"), "{msg}");
+    assert!(
+        msg.contains("Underlying error: error: unrecognized subcommand 'service'"),
+        "{msg}"
+    );
+}
+
+/// Why: `installed_version` returns `None` whenever `<binary> --version` does
+/// not answer, and a missing version must not turn the explanation into a
+/// malformed sentence or block it entirely.
+/// What: asserts the message still reads correctly with no version, naming the
+/// binary without a stray double space.
+#[test]
+fn release_skew_message_without_a_version() {
+    let msg = release_skew_message("trusty-console", None, "error: unrecognized subcommand");
+    assert!(msg.contains("the installed trusty-console has no"), "{msg}");
+    assert!(
+        !msg.contains("  "),
+        "no doubled space where the version went: {msg}"
+    );
+}
