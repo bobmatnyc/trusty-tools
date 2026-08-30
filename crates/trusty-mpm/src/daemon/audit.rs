@@ -179,7 +179,9 @@ impl AuditLogger {
     /// could parse. Two concurrent bus publishes are an ordinary event, so the
     /// stream this daemon relies on to answer "sent, or never read?" has to
     /// survive them.
-    /// Test: `concurrent_publishers_never_evict_a_delivered_envelope`.
+    /// Test: `concurrent_publishers_lose_nothing_without_a_record` — it parses
+    /// every line the concurrent publishes produced, so an interleaved one
+    /// fails it before its accounting runs.
     fn try_log<T: Serialize>(&self, entry: &T) -> std::io::Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;

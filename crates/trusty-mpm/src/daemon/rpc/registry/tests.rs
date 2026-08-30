@@ -1404,7 +1404,7 @@ async fn parity_bus_publish_agrees_across_transports() {
         .registry()
         .register("cto-assistant", None)
         .expect("seed the target");
-    let mut rx = state
+    let rx = state
         .bus()
         .subscribe(&target.instance_id)
         .expect("attach a subscriber");
@@ -1422,7 +1422,7 @@ async fn parity_bus_publish_agrees_across_transports() {
     )
     .await;
     assert_eq!(status, StatusCode::ACCEPTED);
-    assert!(rx.try_recv().is_ok(), "the HTTP publish must deliver");
+    assert!(rx.try_recv().is_some(), "the HTTP publish must deliver");
 
     let rpc_body = rpc_ok(
         &rpc_router(&state),
@@ -1430,7 +1430,7 @@ async fn parity_bus_publish_agrees_across_transports() {
         publish_payload(&sender.instance_id, "cto-assistant"),
     )
     .await;
-    assert!(rx.try_recv().is_ok(), "the RPC publish must deliver too");
+    assert!(rx.try_recv().is_some(), "the RPC publish must deliver too");
 
     // `message_id` and `ts` are minted per envelope; everything else must match.
     assert_same(
@@ -1901,8 +1901,10 @@ fn rpc_error_codes_track_http_statuses_for_this_slice() {
 }
 
 /// Why every variant and not a sample: [`BusError`] is the enum whose whole
-/// purpose is that a sender can tell the five failures apart. A variant sharing
-/// another's code would silently undo that over the socket.
+/// purpose is that a sender can tell the failures apart. A variant sharing
+/// another's code would silently undo that over the socket. `SubscriberLagged`
+/// / `CODE_UNAVAILABLE` left the enum with #6462 — a slow subscriber is no
+/// longer a publish failure.
 /// Test: this function IS the test.
 #[test]
 fn bus_error_rpc_codes_track_http_statuses() {
@@ -1930,12 +1932,6 @@ fn bus_error_rpc_codes_track_http_statuses() {
                 instance_id: "i".into(),
             },
             CODE_CONFLICT,
-        ),
-        (
-            BusError::SubscriberLagged {
-                instance_id: "i".into(),
-            },
-            CODE_UNAVAILABLE,
         ),
         (
             BusError::InvalidTarget("neither id".into()),

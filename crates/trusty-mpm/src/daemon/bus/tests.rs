@@ -14,7 +14,6 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use tokio::sync::broadcast;
 use tower::ServiceExt;
 
 use super::routes::LAGGED_EVENT;
@@ -64,13 +63,49 @@ fn chat(text: &str) -> BusPayload {
     BusPayload::ChatText { text: text.into() }
 }
 
-/// Read every envelope written to the bus's durable JSONL stream.
-fn read_log(bus: &PeerBus) -> Vec<BusEnvelope> {
+/// Every line of the bus's durable JSONL stream, unparsed.
+///
+/// Why raw values: since #6462 the stream carries two record shapes, and which
+/// one a line is has to be decided from its own content rather than assumed.
+fn read_lines(bus: &PeerBus) -> Vec<serde_json::Value> {
     let contents = std::fs::read_to_string(bus.log_path()).unwrap_or_default();
     contents
         .lines()
-        .map(|l| serde_json::from_str(l).expect("every bus log line must parse as an envelope"))
+        .map(|l| serde_json::from_str(l).expect("every bus log line must be valid JSON"))
         .collect()
+}
+
+/// Read every envelope record written to the bus's durable JSONL stream.
+fn read_log(bus: &PeerBus) -> Vec<BusEnvelope> {
+    read_lines(bus)
+        .into_iter()
+        .filter(|v| v.get("record").is_none())
+        .map(|v| {
+            serde_json::from_value(v).expect("every non-eviction line must parse as an envelope")
+        })
+        .collect()
+}
+
+/// Read every per-client eviction record (#6462) from the same stream.
+fn read_evictions(bus: &PeerBus) -> Vec<InboxEviction> {
+    read_lines(bus)
+        .into_iter()
+        .filter(|v| v.get("record").and_then(|r| r.as_str()) == Some(INBOX_EVICTION_RECORD))
+        .map(|v| serde_json::from_value(v).expect("an eviction line must parse as one"))
+        .collect()
+}
+
+/// The next envelope a subscription holds, if it holds one.
+///
+/// Why it panics on a lag rather than skipping it: a test that asked for an
+/// envelope and silently swallowed a gap would assert the opposite of what
+/// #4271 is about.
+fn next_envelope(sub: &InboxSubscription) -> Option<BusEnvelope> {
+    match sub.try_recv() {
+        Some(InboxItem::Envelope(envelope)) => Some(*envelope),
+        Some(InboxItem::Lagged(missed)) => panic!("expected an envelope, got a lag of {missed}"),
+        None => None,
+    }
 }
 
 // ── envelope schema (DOC-60 §11) ──────────────────────────────────────────────
@@ -453,7 +488,7 @@ fn publish_bypass_to_dead_instance_does_not_deliver_to_sibling() {
     let dead = bus.registry().register("izzie", None).unwrap();
     bus.registry().deregister(&dead.instance_id);
     let sibling = bus.registry().register("izzie", None).unwrap();
-    let mut sibling_rx = bus.subscribe(&sibling.instance_id).unwrap();
+    let sibling_rx = bus.subscribe(&sibling.instance_id).unwrap();
 
     let err = bus
         .publish(
@@ -465,7 +500,7 @@ fn publish_bypass_to_dead_instance_does_not_deliver_to_sibling() {
         .unwrap_err();
     assert!(matches!(err, BusError::InstanceGone { .. }));
     assert!(
-        sibling_rx.try_recv().is_err(),
+        next_envelope(&sibling_rx).is_none(),
         "a live sibling must NOT receive a message addressed to a dead instance"
     );
 }
@@ -476,7 +511,7 @@ fn publish_bypass_to_dead_instance_does_not_deliver_to_sibling() {
 fn publish_delivers_to_definition_addressed_instance() {
     let (_dir, bus) = bus();
     let target = bus.registry().register("cto-assistant", None).unwrap();
-    let mut rx = bus.subscribe(&target.instance_id).unwrap();
+    let rx = bus.subscribe(&target.instance_id).unwrap();
 
     let sent = bus
         .publish(
@@ -487,7 +522,7 @@ fn publish_delivers_to_definition_addressed_instance() {
         )
         .unwrap();
 
-    let got = rx.try_recv().unwrap();
+    let got = next_envelope(&rx).expect("the target must hold the envelope");
     assert_eq!(got, sent);
     assert_eq!(got.delivery_state, DeliveryState::Delivered);
     assert_eq!(
@@ -526,8 +561,8 @@ fn publish_reaches_only_target_instance() {
     let (_dir, bus) = bus();
     let a = bus.registry().register("izzie", None).unwrap();
     let b = bus.registry().register("cto-assistant", None).unwrap();
-    let mut rx_a = bus.subscribe(&a.instance_id).unwrap();
-    let mut rx_b = bus.subscribe(&b.instance_id).unwrap();
+    let rx_a = bus.subscribe(&a.instance_id).unwrap();
+    let rx_b = bus.subscribe(&b.instance_id).unwrap();
 
     bus.publish(
         registered_sender(&bus, "izzie"),
@@ -537,9 +572,9 @@ fn publish_reaches_only_target_instance() {
     )
     .unwrap();
 
-    assert!(rx_b.try_recv().is_ok());
+    assert!(next_envelope(&rx_b).is_some());
     assert!(
-        rx_a.try_recv().is_err(),
+        next_envelope(&rx_a).is_none(),
         "a non-target must receive nothing"
     );
 }
@@ -717,24 +752,23 @@ fn no_subscriber_is_logged_as_dropped_not_delivered() {
     assert_eq!(log[0].delivery_state, DeliveryState::Dropped);
 }
 
-// ── subscriber lag (#4271) ────────────────────────────────────────────────────
+// ── per-client inbox delivery (#4271, re-cut per client by #6462) ────────────
 
-/// Drain every envelope a receiver can still produce, plus how much it lagged.
+/// Drain everything a subscription can still produce, plus how much it lost.
 ///
-/// Why: the two lag tests below both need "what did this subscriber ACTUALLY
-/// end up holding", and a `try_recv` loop that stops at the first `Lagged` would
-/// answer the wrong question — `Lagged` is not the end of the stream, it is a
-/// gap in the middle of one.
-fn drain(rx: &mut broadcast::Receiver<BusEnvelope>) -> (Vec<String>, u64) {
+/// Why: the tests below all need "what did this client ACTUALLY end up
+/// holding", and a loop that stopped at the first `Lagged` would answer the
+/// wrong question — a lag is a gap in the middle of a stream, not its end.
+fn drain(sub: &InboxSubscription) -> (Vec<String>, u64) {
     let mut ids = Vec::new();
     let mut missed = 0;
-    loop {
-        match rx.try_recv() {
-            Ok(envelope) => ids.push(envelope.message_id),
-            Err(broadcast::error::TryRecvError::Lagged(n)) => missed += n,
-            Err(_) => return (ids, missed),
+    while let Some(item) = sub.try_recv() {
+        match item {
+            InboxItem::Envelope(envelope) => ids.push(envelope.message_id),
+            InboxItem::Lagged(n) => missed += n,
         }
     }
+    (ids, missed)
 }
 
 /// Every `message_id` the durable log calls delivered, in write order.
@@ -746,12 +780,20 @@ fn delivered_ids(bus: &PeerBus) -> Vec<String> {
         .collect()
 }
 
+/// Every `message_id` the log records as evicted from `subscription_id`.
+fn evicted_ids(bus: &PeerBus, subscription_id: u64) -> Vec<String> {
+    read_evictions(bus)
+        .into_iter()
+        .filter(|e| e.subscription_id == subscription_id)
+        .map(|e| e.message_id)
+        .collect()
+}
+
 /// Publish `count` envelopes at one instance, ignoring refusals.
 fn burst(bus: &PeerBus, sender: &CallerIdentity, instance_id: &str, count: usize) {
     for i in 0..count {
-        // A refused publish's own record is asserted by
-        // `saturated_publish_is_dropped_in_the_durable_log`; the callers here
-        // care only about what the log and the subscriber end up agreeing on.
+        // Refusals are asserted by the tests that are about them; the callers
+        // here care only about what the log and the client end up agreeing on.
         let _ = bus.publish(
             sender.clone(),
             &PeerTarget::Instance(instance_id.to_string()),
@@ -762,49 +804,19 @@ fn burst(bus: &PeerBus, sender: &CallerIdentity, instance_id: &str, count: usize
 }
 
 #[test]
-fn delivered_records_match_what_a_stalled_subscriber_receives() {
-    // #4271, the defect itself: `broadcast::Sender::send` answers Ok for a
-    // LAGGING receiver, so a publish into a full ring evicted an envelope the
-    // recipient had never read while the §9 log recorded that envelope as
-    // `delivered`. The sender saw 202, the log said delivered, and the
-    // recipient was never told.
+fn delivered_records_account_for_everything_a_stalled_subscriber_lost() {
+    // #4271, the defect itself: an eviction the log did not record. The
+    // envelopes the log calls delivered used to include ones the recipient
+    // never saw, and nothing said which.
     //
-    // The invariant asserted here is the whole contract: the envelopes the log
-    // calls delivered are EXACTLY the envelopes the subscriber receives.
+    // The invariant asserted here is the whole contract, and it is the
+    // per-client form of it: what this client received, plus what the log says
+    // this client's inbox displaced, is EXACTLY what the log calls delivered.
+    // Nothing is lost without a record, and no record invents a loss.
     let (_dir, bus) = bus();
     let target = bus.registry().register("cto-assistant", None).unwrap();
     // Attached but stalled — the `cto-assistant~b1` inside a long LLM turn.
-    let mut stalled = bus.subscribe(&target.instance_id).unwrap();
-    let sender = registered_sender(&bus, "izzie");
-
-    burst(
-        &bus,
-        &sender,
-        &target.instance_id,
-        INSTANCE_CHANNEL_CAPACITY + 6,
-    );
-
-    let (received, missed) = drain(&mut stalled);
-    assert_eq!(
-        received,
-        delivered_ids(&bus),
-        "every envelope the durable log records as delivered must actually \
-         reach the subscriber, and no other"
-    );
-    assert_eq!(
-        missed, 0,
-        "a subscriber must not silently lose envelopes the log calls delivered"
-    );
-}
-
-#[test]
-fn saturated_publish_is_dropped_in_the_durable_log() {
-    // The other half of the contract: a refused publish is still RECORDED, as
-    // `dropped`. A log holding only successes cannot answer "was it sent, or
-    // just never read?" (DOC-60 §4).
-    let (_dir, bus) = bus();
-    let target = bus.registry().register("cto-assistant", None).unwrap();
-    let _stalled = bus.subscribe(&target.instance_id).unwrap();
+    let stalled = bus.subscribe(&target.instance_id).unwrap();
     let sender = registered_sender(&bus, "izzie");
     let overflow = 6;
 
@@ -812,55 +824,192 @@ fn saturated_publish_is_dropped_in_the_durable_log() {
         &bus,
         &sender,
         &target.instance_id,
-        INSTANCE_CHANNEL_CAPACITY + overflow,
+        CLIENT_INBOX_CAPACITY + overflow,
     );
 
-    let log = read_log(&bus);
+    let (received, missed) = drain(&stalled);
     assert_eq!(
-        log.len(),
-        INSTANCE_CHANNEL_CAPACITY + overflow,
-        "every publish past sender verification is recorded, delivered or not"
+        missed, overflow as u64,
+        "the reader must be told about every envelope its inbox displaced"
     );
-    let dropped = log
-        .iter()
-        .filter(|e| e.delivery_state == DeliveryState::Dropped)
-        .count();
+
+    let mut accounted = evicted_ids(&bus, stalled.subscription_id());
     assert_eq!(
-        dropped, overflow,
-        "the publishes the full channel could not take must be recorded dropped"
+        accounted.len(),
+        overflow,
+        "the durable log must carry one eviction record per displaced envelope"
+    );
+    accounted.extend(received);
+    accounted.sort();
+    let mut delivered = delivered_ids(&bus);
+    delivered.sort();
+    assert_eq!(
+        accounted, delivered,
+        "what the client read plus what the log says it lost must equal what \
+         the log calls delivered — no silent loss, no invented one"
     );
 }
 
+#[test]
+fn eviction_is_recorded_per_client_in_the_durable_log() {
+    // The other half of the contract: an eviction is a fact about ONE
+    // subscription, not a delivery failure, so it is recorded as its own record
+    // naming that subscription rather than as a second `delivery_state` on an
+    // envelope other clients may well have read.
+    let (_dir, bus) = bus();
+    let target = bus.registry().register("cto-assistant", None).unwrap();
+    let stalled = bus.subscribe(&target.instance_id).unwrap();
+    let sender = registered_sender(&bus, "izzie");
+    let overflow = 6;
+
+    burst(
+        &bus,
+        &sender,
+        &target.instance_id,
+        CLIENT_INBOX_CAPACITY + overflow,
+    );
+
+    let envelopes = read_log(&bus);
+    assert_eq!(
+        envelopes.len(),
+        CLIENT_INBOX_CAPACITY + overflow,
+        "every publish past sender verification is recorded"
+    );
+    assert!(
+        envelopes
+            .iter()
+            .all(|e| e.delivery_state == DeliveryState::Delivered),
+        "no publish is refused by a slow subscriber any more (#6462)"
+    );
+
+    let evictions = read_evictions(&bus);
+    assert_eq!(evictions.len(), overflow);
+    assert_eq!(stalled.evicted_total(), overflow as u64);
+    for (n, eviction) in evictions.iter().enumerate() {
+        assert_eq!(eviction.instance_id, target.instance_id);
+        assert_eq!(eviction.subscription_id, stalled.subscription_id());
+        assert_eq!(
+            eviction.missed_total,
+            n as u64 + 1,
+            "the running loss count must let a reader tell how far behind this \
+             client was at each point"
+        );
+    }
+    let displaced: Vec<&String> = evictions.iter().map(|e| &e.message_id).collect();
+    let oldest: Vec<&String> = envelopes
+        .iter()
+        .take(overflow)
+        .map(|e| &e.message_id)
+        .collect();
+    assert_eq!(
+        displaced, oldest,
+        "the OLDEST unread envelopes lose, in order — a recovering client must \
+         be able to keep reading the most recent traffic"
+    );
+}
+
+#[test]
+fn eviction_records_are_distinguishable_from_envelopes() {
+    // A §9 reader must be able to tell the two record shapes apart from the
+    // line alone. An envelope has no `record` key; an eviction always does.
+    let (_dir, bus) = bus();
+    let target = bus.registry().register("cto-assistant", None).unwrap();
+    let _stalled = bus.subscribe(&target.instance_id).unwrap();
+    let sender = registered_sender(&bus, "izzie");
+
+    burst(
+        &bus,
+        &sender,
+        &target.instance_id,
+        CLIENT_INBOX_CAPACITY + 1,
+    );
+
+    let lines = read_lines(&bus);
+    assert_eq!(lines.len(), CLIENT_INBOX_CAPACITY + 2);
+    let tagged: Vec<&serde_json::Value> =
+        lines.iter().filter(|v| v.get("record").is_some()).collect();
+    assert_eq!(tagged.len(), 1);
+    assert_eq!(tagged[0]["record"], INBOX_EVICTION_RECORD);
+    assert!(
+        lines
+            .iter()
+            .filter(|v| v.get("record").is_none())
+            .all(|v| v.get("delivery_state").is_some()),
+        "every untagged line must still be a readable envelope"
+    );
+}
+
+#[test]
+fn a_stalled_subscriber_reads_its_lag_before_the_surviving_envelopes() {
+    // The gap belongs where it happened. The eviction took envelopes from the
+    // FRONT of the queue, which is where the reader is, so the notice has to
+    // arrive before everything still queued — otherwise a client would read
+    // past its own gap and only learn of it afterwards.
+    let (_dir, bus) = bus();
+    let target = bus.registry().register("cto-assistant", None).unwrap();
+    let stalled = bus.subscribe(&target.instance_id).unwrap();
+    let sender = registered_sender(&bus, "izzie");
+
+    burst(
+        &bus,
+        &sender,
+        &target.instance_id,
+        CLIENT_INBOX_CAPACITY + 3,
+    );
+
+    assert_eq!(
+        stalled.try_recv(),
+        Some(InboxItem::Lagged(3)),
+        "the lag must be the first thing the reader sees"
+    );
+    let next = next_envelope(&stalled).expect("the surviving envelopes follow the notice");
+    assert_eq!(
+        next.message_id,
+        delivered_ids(&bus)[3],
+        "the reader resumes at the oldest envelope that was NOT displaced"
+    );
+    assert!(stalled.subscription_id() < u64::MAX);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn two_subscribers_one_lagging_account_exactly() {
-    // Condition-based, never sleep-based: the drainer parks on the channel's
-    // own waker, and the accounting proceeds the instant the counter reaches
-    // its target. The deadline exists only so a hang reports a failure.
-    const ROUNDS: usize = INSTANCE_CHANNEL_CAPACITY + 36;
+async fn a_wedged_client_does_not_refuse_publishes_for_a_healthy_co_subscriber() {
+    // #6462, the defect this change closes. Before it, one client that never
+    // polled held the instance's single shared ring full, and `publish` refused
+    // every message to that instance with `503` — for every publisher and every
+    // healthy co-subscriber, unboundedly. Against the pre-fix source this
+    // asserted `refused: left: 36, right: 0`.
+    //
+    // Condition-based, never sleep-based: the drainer parks on its inbox's own
+    // waker and the accounting proceeds the instant the count is reached. The
+    // deadline exists only so a hang reports a failure.
+    const ROUNDS: usize = CLIENT_INBOX_CAPACITY + 36;
 
     let (_dir, bus) = bus();
     let bus = Arc::new(bus);
     let target = bus.registry().register("cto-assistant", None).unwrap();
-    let mut fast = bus.subscribe(&target.instance_id).unwrap();
-    // Registered, attached, and never polled until the accounting at the end —
-    // the lagging peer. It is what holds the ring full.
-    let mut lagging = bus.subscribe(&target.instance_id).unwrap();
+    let healthy = Arc::new(bus.subscribe(&target.instance_id).unwrap());
+    // Attached and never polled until the accounting at the end.
+    let wedged = bus.subscribe(&target.instance_id).unwrap();
     let sender = registered_sender(&bus, "izzie");
 
     let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let drainer = tokio::spawn({
         let seen = Arc::clone(&seen);
+        let healthy = Arc::clone(&healthy);
         async move {
-            while let Ok(envelope) = fast.recv().await {
-                seen.lock().unwrap().push(envelope.message_id);
+            while let Some(item) = healthy.recv().await {
+                match item {
+                    InboxItem::Envelope(envelope) => seen.lock().unwrap().push(envelope.message_id),
+                    InboxItem::Lagged(n) => panic!("the healthy client must never lag: {n}"),
+                }
             }
         }
     });
 
-    let publisher = tokio::spawn({
+    let (accepted, refused) = tokio::task::spawn_blocking({
         let bus = Arc::clone(&bus);
         let instance_id = target.instance_id.clone();
-        async move {
+        move || {
             let mut accepted = Vec::new();
             let mut refused = 0usize;
             for i in 0..ROUNDS {
@@ -876,17 +1025,99 @@ async fn two_subscribers_one_lagging_account_exactly() {
             }
             (accepted, refused)
         }
-    });
-    let (accepted, refused) = publisher.await.unwrap();
+    })
+    .await
+    .unwrap();
 
-    // A fast peer's progress does not rescue the channel: the ring is gated by
-    // the SLOWEST attached subscriber, so acceptance stops at its depth exactly.
     assert_eq!(
-        accepted.len(),
-        INSTANCE_CHANNEL_CAPACITY,
-        "the lagging subscriber must gate acceptance at the ring's depth"
+        refused, 0,
+        "a wedged client must not make the instance refuse a publish"
     );
-    assert_eq!(refused, ROUNDS - INSTANCE_CHANNEL_CAPACITY);
+    assert_eq!(accepted.len(), ROUNDS);
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while seen.lock().unwrap().len() < ROUNDS {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the healthy co-subscriber never caught up: {} of {ROUNDS}",
+            seen.lock().unwrap().len()
+        );
+        tokio::task::yield_now().await;
+    }
+    drainer.abort();
+
+    assert_eq!(
+        *seen.lock().unwrap(),
+        accepted,
+        "the healthy co-subscriber must receive every envelope, in order, \
+         however far behind its neighbour fell"
+    );
+
+    // And the wedged client's own loss is fully accounted for.
+    let (late, missed) = drain(&wedged);
+    assert_eq!(late.len(), CLIENT_INBOX_CAPACITY);
+    assert_eq!(missed, (ROUNDS - CLIENT_INBOX_CAPACITY) as u64);
+    let mut accounted = evicted_ids(&bus, wedged.subscription_id());
+    accounted.extend(late);
+    accounted.sort();
+    let mut delivered = delivered_ids(&bus);
+    delivered.sort();
+    assert_eq!(
+        accounted, delivered,
+        "the wedged client's reads plus its recorded losses must still equal \
+         the delivered set"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_subscribers_one_lagging_account_exactly() {
+    // The same accounting across two clients at once: the fast one loses
+    // nothing, the lagging one loses only what the log names, and both agree on
+    // the ORDER — which is what the per-instance fan-out lock buys now that the
+    // shared ring that used to guarantee it is gone.
+    const ROUNDS: usize = CLIENT_INBOX_CAPACITY + 36;
+
+    let (_dir, bus) = bus();
+    let bus = Arc::new(bus);
+    let target = bus.registry().register("cto-assistant", None).unwrap();
+    let fast = Arc::new(bus.subscribe(&target.instance_id).unwrap());
+    let lagging = bus.subscribe(&target.instance_id).unwrap();
+    let sender = registered_sender(&bus, "izzie");
+
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let drainer = tokio::spawn({
+        let seen = Arc::clone(&seen);
+        let fast = Arc::clone(&fast);
+        async move {
+            while let Some(item) = fast.recv().await {
+                if let InboxItem::Envelope(envelope) = item {
+                    seen.lock().unwrap().push(envelope.message_id);
+                }
+            }
+        }
+    });
+
+    let accepted = tokio::task::spawn_blocking({
+        let bus = Arc::clone(&bus);
+        let instance_id = target.instance_id.clone();
+        move || {
+            let mut accepted = Vec::new();
+            for i in 0..ROUNDS {
+                let envelope = bus
+                    .publish(
+                        sender.clone(),
+                        &PeerTarget::Instance(instance_id.clone()),
+                        chat(&format!("round {i}")),
+                        None,
+                    )
+                    .expect("no publish may be refused by a lagging co-subscriber");
+                accepted.push(envelope.message_id);
+            }
+            accepted
+        }
+    })
+    .await
+    .unwrap();
 
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
     while seen.lock().unwrap().len() < accepted.len() {
@@ -905,40 +1136,53 @@ async fn two_subscribers_one_lagging_account_exactly() {
         accepted,
         "the fast subscriber must receive every accepted envelope, in order"
     );
-    let (late, missed) = drain(&mut lagging);
+
+    let (late, missed) = drain(&lagging);
     assert_eq!(
-        late, accepted,
-        "the lagging subscriber must still receive every accepted envelope once \
-         it drains — lag delays delivery here, it never discards it"
+        missed,
+        (ROUNDS - CLIENT_INBOX_CAPACITY) as u64,
+        "the lagging subscriber loses exactly what its own buffer could not hold"
     );
-    assert_eq!(missed, 0, "nothing may be evicted unread");
+    assert_eq!(
+        late,
+        accepted[ROUNDS - CLIENT_INBOX_CAPACITY..].to_vec(),
+        "and it keeps the most recent traffic, in order"
+    );
+    assert_eq!(
+        evicted_ids(&bus, lagging.subscription_id()),
+        accepted[..ROUNDS - CLIENT_INBOX_CAPACITY].to_vec(),
+        "the log names exactly the envelopes it lost, oldest first"
+    );
     assert_eq!(
         delivered_ids(&bus),
         accepted,
-        "the durable log's delivered set must equal what both subscribers got"
+        "the durable log's delivered set is every accepted envelope"
     );
 }
 
 #[test]
-fn concurrent_publishers_never_evict_a_delivered_envelope() {
-    // #4271, the concurrent arm: measuring the channel and sending into it are
-    // two separate acquisitions of the broadcast tail lock, so a check made
-    // outside a lock of our own is stale by the time the send runs. Two
-    // publishers that both observed `capacity - 1` would both send, and the
-    // second would evict an unread envelope the first had already recorded
-    // `delivered` — the same fail-open, narrowed to a window.
+fn concurrent_publishers_lose_nothing_without_a_record() {
+    // The per-client successor to #6461's
+    // `concurrent_publishers_never_evict_a_delivered_envelope`, which asserted
+    // that concurrent publishers could not push acceptance past the shared
+    // ring's depth. That ceiling is gone by design — every publish is accepted
+    // now — so the invariant is restated where it still bites: whatever order
+    // the publishers won the fan-out lock in, a stalled client's reads plus its
+    // recorded losses must equal the delivered set exactly. One unrecorded
+    // eviction breaks it, and so does one eviction record for an envelope that
+    // was never displaced.
     //
-    // Threads rather than tasks, and far more publishes than the ring can hold,
-    // so the interleaving is hit repeatedly within one run.
+    // Threads rather than tasks, and far more publishes than one inbox can
+    // hold, so the interleaving is hit repeatedly within one run.
     const PUBLISHERS: usize = 8;
     const PER_PUBLISHER: usize = 32;
 
     let (_dir, bus) = bus();
     let bus = Arc::new(bus);
     let target = bus.registry().register("cto-assistant", None).unwrap();
-    // Attached and never draining: it is what holds the ring full, so every
-    // publisher past the first `INSTANCE_CHANNEL_CAPACITY` races at the edge.
-    let mut stalled = bus.subscribe(&target.instance_id).unwrap();
+    // Attached and never draining: every publish past the first
+    // CLIENT_INBOX_CAPACITY evicts, so the eviction path races too.
+    let stalled = bus.subscribe(&target.instance_id).unwrap();
 
     let accepted = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..PUBLISHERS)
@@ -968,26 +1212,102 @@ fn concurrent_publishers_never_evict_a_delivered_envelope() {
             .fold(0usize, |n, ids| n + ids.len())
     });
 
-    // Exact accounting: the ring's depth is the ceiling no interleaving may
-    // exceed. One extra acceptance is one evicted envelope.
     assert_eq!(
-        accepted, INSTANCE_CHANNEL_CAPACITY,
-        "concurrent publishers must not accept more than the ring can hold"
+        accepted,
+        PUBLISHERS * PER_PUBLISHER,
+        "no publish may be refused, however the publishers interleaved"
     );
 
-    let (received, missed) = drain(&mut stalled);
+    let (received, missed) = drain(&stalled);
+    assert_eq!(received.len(), CLIENT_INBOX_CAPACITY);
     assert_eq!(
-        missed, 0,
-        "no envelope may be evicted unread, however the publishes interleaved"
+        missed,
+        (PUBLISHERS * PER_PUBLISHER - CLIENT_INBOX_CAPACITY) as u64,
+        "the reader must be told the exact size of its own gap"
     );
+
+    let mut accounted = evicted_ids(&bus, stalled.subscription_id());
+    accounted.extend(received);
+    accounted.sort();
     let mut delivered = delivered_ids(&bus);
-    let mut got = received;
     delivered.sort();
-    got.sort();
     assert_eq!(
-        got, delivered,
-        "the log's delivered set must equal what the subscriber received, \
-         whichever order the publishers won the gate in"
+        accounted, delivered,
+        "reads plus recorded losses must equal the log's delivered set"
+    );
+}
+
+#[tokio::test]
+async fn a_detached_subscription_stops_costing_the_instance() {
+    // The wedge's bound: a client that never polls costs the instance one
+    // buffer, and costs it nothing at all once its subscription drops. That is
+    // what makes eviction rather than refusal safe — there is no unbounded
+    // resource for a stalled client to consume, and no cleanup an operator has
+    // to perform.
+    let (_dir, bus) = bus();
+    let target = bus.registry().register("cto-assistant", None).unwrap();
+    let sender = registered_sender(&bus, "izzie");
+    let live = bus
+        .registry()
+        .resolve_instance(&target.instance_id)
+        .unwrap();
+
+    let wedged = bus.subscribe(&target.instance_id).unwrap();
+    assert_eq!(live.subscriber_count(), 1);
+    burst(
+        &bus,
+        &sender,
+        &target.instance_id,
+        CLIENT_INBOX_CAPACITY + 4,
+    );
+    assert_eq!(wedged.evicted_total(), 4);
+
+    drop(wedged);
+    assert_eq!(
+        live.subscriber_count(),
+        0,
+        "a dropped subscription must detach itself"
+    );
+    assert!(matches!(
+        bus.publish(
+            sender.clone(),
+            &PeerTarget::Instance(target.instance_id.clone()),
+            chat("after the client left"),
+            None,
+        ),
+        Err(BusError::NoSubscriber { .. })
+    ));
+}
+
+#[tokio::test]
+async fn deregister_ends_a_subscription_after_it_drains() {
+    // Deregistration used to end a stream by dropping the broadcast `Sender`.
+    // With per-client queues the end is stated explicitly, and it must not
+    // discard what the §9 log already recorded delivered — so the reader drains
+    // first and only then sees the end.
+    let (_dir, bus) = bus();
+    let target = bus.registry().register("cto-assistant", None).unwrap();
+    let sender = registered_sender(&bus, "izzie");
+    let subscription = bus.subscribe(&target.instance_id).unwrap();
+
+    let held = bus
+        .publish(
+            sender,
+            &PeerTarget::Instance(target.instance_id.clone()),
+            chat("read me before you go"),
+            None,
+        )
+        .unwrap();
+
+    assert!(bus.registry().deregister(&target.instance_id));
+
+    match subscription.recv().await {
+        Some(InboxItem::Envelope(envelope)) => assert_eq!(envelope.message_id, held.message_id),
+        other => panic!("a queued envelope must survive deregistration, got {other:?}"),
+    }
+    assert!(
+        subscription.recv().await.is_none(),
+        "and then the stream ends rather than hanging"
     );
 }
 
@@ -1038,7 +1358,7 @@ fn published_envelope_edge_is_derived() {
 fn publish_rejects_forged_user_kind() {
     let (_dir, bus) = bus();
     let target = bus.registry().register("cto-assistant", None).unwrap();
-    let mut rx = bus.subscribe(&target.instance_id).unwrap();
+    let rx = bus.subscribe(&target.instance_id).unwrap();
     let forged = CallerIdentity {
         kind: CallerKind::User,
         instance_id: None,
@@ -1057,14 +1377,14 @@ fn publish_rejects_forged_user_kind() {
             kind: CallerKind::User
         }
     );
-    assert!(rx.try_recv().is_err());
+    assert!(next_envelope(&rx).is_none());
 }
 
 #[test]
 fn publish_rejects_unregistered_sender() {
     let (_dir, bus) = bus();
     let target = bus.registry().register("cto-assistant", None).unwrap();
-    let mut rx = bus.subscribe(&target.instance_id).unwrap();
+    let rx = bus.subscribe(&target.instance_id).unwrap();
     assert_eq!(
         bus.publish(
             peer_caller("izzie~deadbeef", "izzie"),
@@ -1077,7 +1397,7 @@ fn publish_rejects_unregistered_sender() {
             instance_id: "izzie~deadbeef".into()
         }
     );
-    assert!(rx.try_recv().is_err());
+    assert!(next_envelope(&rx).is_none());
 }
 
 #[test]
@@ -1273,29 +1593,6 @@ fn bus_error_status_codes_map() {
 }
 
 #[test]
-fn subscriber_lagged_is_503() {
-    // #4271: distinct from `NoSubscriber`'s 409 because the recoveries differ —
-    // 409 means stop sending, 503 means retry once the recipient drains.
-    assert_eq!(
-        BusError::SubscriberLagged {
-            instance_id: "izzie~b1".into(),
-        }
-        .status(),
-        StatusCode::SERVICE_UNAVAILABLE
-    );
-    assert_ne!(
-        BusError::SubscriberLagged {
-            instance_id: "izzie~b1".into(),
-        }
-        .status(),
-        BusError::NoSubscriber {
-            instance_id: "izzie~b1".into()
-        }
-        .status()
-    );
-}
-
-#[test]
 fn instance_gone_is_410() {
     assert_eq!(
         BusError::InstanceGone {
@@ -1419,7 +1716,7 @@ async fn route_publish_delivers_and_returns_envelope() {
         .registry()
         .register("cto-assistant", None)
         .unwrap();
-    let mut rx = state.bus().subscribe(&target.instance_id).unwrap();
+    let rx = state.bus().subscribe(&target.instance_id).unwrap();
     let sender = state.bus().registry().register("izzie", None).unwrap();
 
     let (status, body) = call(
@@ -1439,7 +1736,7 @@ async fn route_publish_delivers_and_returns_envelope() {
     assert_eq!(status, StatusCode::ACCEPTED);
     assert_eq!(body["delivery_state"], "delivered");
     assert!(body["message_id"].as_str().is_some());
-    assert!(rx.try_recv().is_ok());
+    assert!(next_envelope(&rx).is_some());
 }
 
 #[tokio::test]
@@ -1450,7 +1747,7 @@ async fn route_publish_to_dead_instance_is_410() {
     let dead = state.bus().registry().register("izzie", None).unwrap();
     state.bus().registry().deregister(&dead.instance_id);
     let sibling = state.bus().registry().register("izzie", None).unwrap();
-    let mut sibling_rx = state.bus().subscribe(&sibling.instance_id).unwrap();
+    let sibling_rx = state.bus().subscribe(&sibling.instance_id).unwrap();
     let sender = state
         .bus()
         .registry()
@@ -1474,7 +1771,7 @@ async fn route_publish_to_dead_instance_is_410() {
     assert_eq!(status, StatusCode::GONE);
     assert!(body["error"].as_str().unwrap().contains("no longer live"));
     assert!(
-        sibling_rx.try_recv().is_err(),
+        next_envelope(&sibling_rx).is_none(),
         "supplying definition_id alongside a dead instance_id must NOT fall back"
     );
 }
@@ -1515,7 +1812,7 @@ async fn route_publish_forged_user_kind_is_400() {
         .registry()
         .register("cto-assistant", None)
         .unwrap();
-    let mut rx = state.bus().subscribe(&target.instance_id).unwrap();
+    let rx = state.bus().subscribe(&target.instance_id).unwrap();
 
     let (status, body) = call(
         &state,
@@ -1532,7 +1829,7 @@ async fn route_publish_forged_user_kind_is_400() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"].as_str().unwrap().contains("may not publish"));
     assert!(
-        rx.try_recv().is_err(),
+        next_envelope(&rx).is_none(),
         "a forged user-kind message must never reach the recipient"
     );
 }
@@ -1548,7 +1845,7 @@ async fn route_publish_unregistered_sender_is_403() {
         .registry()
         .register("cto-assistant", None)
         .unwrap();
-    let mut rx = state.bus().subscribe(&target.instance_id).unwrap();
+    let rx = state.bus().subscribe(&target.instance_id).unwrap();
 
     let (status, body) = call(
         &state,
@@ -1571,7 +1868,7 @@ async fn route_publish_unregistered_sender_is_403() {
             .unwrap()
             .contains("not a live registration")
     );
-    assert!(rx.try_recv().is_err());
+    assert!(next_envelope(&rx).is_none());
 }
 
 #[tokio::test]
@@ -1609,13 +1906,13 @@ async fn route_subscribe_to_dead_instance_is_410() {
 #[tokio::test]
 async fn subscribe_stream_reports_lag_instead_of_swallowing_it() {
     // #4271, the SSE half: a lagged subscriber used to be mapped to `None` —
-    // the frames vanished and the recipient was told nothing. It now gets a
-    // named `lagged` frame carrying the count and where to re-read from.
+    // the frames vanished and the recipient was told nothing. It gets a named
+    // `lagged` frame carrying the count, the subscription id its eviction
+    // records are keyed under, and where to re-read from.
     //
-    // The lag is induced by sending straight on the instance's channel rather
-    // than through `publish`, because `publish` now refuses a saturated
-    // channel: this arm survives only for a concurrent-publish race, and the
-    // direct send is what reproduces that state deterministically.
+    // Since #6462 the lag is produced by the ordinary publish path: the SSE
+    // body is never polled, so its own inbox fills and displaces. Nothing has
+    // to reach past the public API to stage it.
     let (_dir, state) = test_state();
     let meta = state
         .bus()
@@ -1634,25 +1931,23 @@ async fn subscribe_stream_reports_lag_instead_of_swallowing_it() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     let overflow = 36;
-    let live = state
-        .bus()
-        .registry()
-        .resolve_instance(&meta.instance_id)
-        .unwrap();
-    for i in 0..(INSTANCE_CHANNEL_CAPACITY + overflow) {
-        live.tx
-            .send(BusEnvelope::new(
-                BusEdge::AssistantAssistant,
-                peer_caller("izzie~a1", "izzie"),
-                Recipient {
-                    instance_id: Some(meta.instance_id.clone()),
-                    definition_id: Some(meta.definition_id.clone()),
-                },
-                chat(&format!("burst {i}")),
-                None,
-                DeliveryState::Delivered,
-            ))
-            .unwrap();
+    let sender = state.bus().registry().register("izzie", None).unwrap();
+    let body = serde_json::json!({
+        "from": {
+            "kind": "assistant_instance",
+            "instance_id": sender.instance_id,
+            "definition_id": sender.definition_id,
+        },
+        "to": { "instance_id": meta.instance_id },
+        "payload": { "type": "chat_text", "text": "burst" }
+    });
+    for _ in 0..(CLIENT_INBOX_CAPACITY + overflow) {
+        let (status, _) = call(&state, post("/api/v1/bus/publish", body.clone())).await;
+        assert_eq!(
+            status,
+            StatusCode::ACCEPTED,
+            "a subscriber that never reads must not make the endpoint refuse"
+        );
     }
 
     let mut body = resp.into_body();
@@ -1671,16 +1966,24 @@ async fn subscribe_stream_reports_lag_instead_of_swallowing_it() {
         "the notice must carry how many envelopes were missed, got: {text}"
     );
     assert!(
+        text.contains("\"subscription_id\":"),
+        "the notice must name the subscription its eviction records are keyed \
+         under, got: {text}"
+    );
+    assert!(
         text.contains(state.bus().log_path().to_str().unwrap()),
         "the notice must name the durable log to re-read from, got: {text}"
     );
 }
 
 #[tokio::test]
-async fn route_publish_to_a_saturated_instance_is_503() {
-    // #4271: the refusal has to reach a real client, not just `BusError`'s
-    // status table. `subscriber_lagged_is_503` pins the mapping; this pins that
-    // `POST /api/v1/bus/publish` actually answers it.
+async fn route_publish_past_a_stalled_subscriber_is_accepted() {
+    // #6462 over the real transport, replacing
+    // `route_publish_to_a_saturated_instance_is_503`. That test filled the
+    // shared ring through a stalled subscriber and asserted the endpoint then
+    // answered `503` to everyone. The endpoint now answers `202` well past the
+    // stalled client's depth, and the §9 log carries one eviction record per
+    // envelope that client lost — the same evidence, moved off the publisher.
     let (_dir, state) = test_state();
     let target = state
         .bus()
@@ -1688,8 +1991,8 @@ async fn route_publish_to_a_saturated_instance_is_503() {
         .register("cto-assistant", None)
         .unwrap();
     let sender = state.bus().registry().register("izzie", None).unwrap();
-    // Attached and stalled: the receiver is held and never read.
-    let _stalled = state.bus().subscribe(&target.instance_id).unwrap();
+    // Attached and stalled: the subscription is held and never read.
+    let stalled = state.bus().subscribe(&target.instance_id).unwrap();
 
     let body = serde_json::json!({
         "from": {
@@ -1700,22 +2003,26 @@ async fn route_publish_to_a_saturated_instance_is_503() {
         "to": { "instance_id": target.instance_id },
         "payload": { "type": "chat_text", "text": "burst" }
     });
-    for _ in 0..INSTANCE_CHANNEL_CAPACITY {
+    let overflow = 5;
+    for _ in 0..(CLIENT_INBOX_CAPACITY + overflow) {
         let (status, _) = call(&state, post("/api/v1/bus/publish", body.clone())).await;
-        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(
+            status,
+            StatusCode::ACCEPTED,
+            "a stalled subscriber must not refuse a publish over HTTP"
+        );
     }
 
-    let (status, answer) = call(&state, post("/api/v1/bus/publish", body)).await;
     assert_eq!(
-        status,
-        StatusCode::SERVICE_UNAVAILABLE,
-        "a full recipient channel must refuse over HTTP, not report 202"
+        stalled.evicted_total(),
+        overflow as u64,
+        "the stalled client absorbs its own backlog"
     );
+    let evictions = read_evictions(state.bus());
+    assert_eq!(evictions.len(), overflow);
     assert!(
-        answer["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains(&target.instance_id),
-        "the refusal must name the instance that is behind, got: {answer}"
+        evictions.iter().all(|e| e.instance_id == target.instance_id
+            && e.subscription_id == stalled.subscription_id()),
+        "every eviction record must name the client that lost the envelope"
     );
 }

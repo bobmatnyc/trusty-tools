@@ -8,8 +8,9 @@
 //! and instance-bypass validates against it.
 //! What: [`InstanceRegistry`], keyed by instance id, holding one
 //! [`LiveInstance`] per running assistant — its public [`InstanceMeta`] plus
-//! the per-instance delivery channel. Registration mints the id; resolution
-//! is fail-closed in both modes.
+//! the [`InboxSet`] holding one bounded buffer per attached subscription
+//! (`super::inbox`, #6462). Registration mints the id; resolution is
+//! fail-closed in both modes.
 //! Test: `bus::tests` — `register_mints_prefixed_id`,
 //! `resolve_definition_picks_most_recent`, `resolve_definition_missing_errors`,
 //! `bypass_to_dead_instance_errors_not_falls_back`,
@@ -50,35 +51,16 @@
 //! Gone` vs `404 Not Found`), so a client can implement the re-address
 //! recovery without parsing a message string.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
 
 use super::BusError;
 use super::envelope::BusEnvelope;
-
-/// How many envelopes a single instance's channel buffers before lagging.
-///
-/// Why: a subscriber that stalls must not block the publisher. A small buffer
-/// is right for peer messages, which are low-volume by construction —
-/// streaming token deltas stay on the existing per-crate buses and never reach
-/// this one.
-///
-/// Public since #4271: it is the depth at which [`LiveInstance::deliver`]
-/// answers [`DeliveryOutcome::Saturated`] instead of sending, so it is part of
-/// the delivery contract a sender reasons about, not an implementation detail.
-/// Test: `saturated_publish_is_dropped_in_the_durable_log`.
-pub const INSTANCE_CHANNEL_CAPACITY: usize = 64;
-
-// #4271: tokio rounds a broadcast capacity UP to a power of two, so a
-// non-rounded value would give a ring deeper than this constant and `deliver`
-// would refuse a publish before an eviction was actually imminent. Keeping it
-// already-rounded makes the two exactly equal.
-const _: () = assert!(INSTANCE_CHANNEL_CAPACITY.is_power_of_two());
+use super::inbox::{DeliveryOutcome, InboxSet, InboxSubscription};
 
 /// Separator between the definition id and the random suffix in an instance id.
 ///
@@ -159,104 +141,85 @@ pub struct InstanceMeta {
 /// recipient; consumers filter client-side after the fact"), so giving each
 /// instance its own channel is what makes this bus genuinely addressed rather
 /// than a sixth unaddressed broadcast.
-/// What: [`InstanceMeta`], the sender half of that instance's channel, and the
-/// gate [`LiveInstance::deliver`] holds to keep its saturation check and its
-/// send indivisible. Every clone of a `LiveInstance` shares that gate, so two
-/// publishers that each resolved the instance separately still serialize.
+/// What: [`InstanceMeta`] plus the [`InboxSet`] holding one bounded buffer per
+/// attached subscription. Every clone of a `LiveInstance` shares that set, so
+/// two publishers that each resolved the instance separately still fan out
+/// through the same lock and agree on an order.
 /// Test: `publish_reaches_only_target_instance`,
-/// `concurrent_publishers_never_evict_a_delivered_envelope`.
+/// `concurrent_publishers_lose_nothing_without_a_record`.
 #[derive(Debug, Clone)]
 pub struct LiveInstance {
     /// The instance's public metadata.
     pub meta: InstanceMeta,
-    /// Sender half of this instance's own delivery channel.
+    /// One [`ClientInbox`](super::inbox::ClientInbox) per attached
+    /// subscription.
     ///
-    /// Crate-internal since #4271: a send made directly on this opts out of
-    /// [`LiveInstance::deliver`]'s check, and the "no envelope recorded
-    /// `delivered` is ever evicted unread" guarantee is only as good as the
-    /// absence of such a send. Subscribing goes through
-    /// [`PeerBus::subscribe`](super::PeerBus::subscribe); publishing goes
-    /// through [`PeerBus::publish`](super::PeerBus::publish). The bus's own
-    /// tests reach for it to stage a lag the publish path now refuses to
-    /// create.
-    pub(super) tx: broadcast::Sender<BusEnvelope>,
-    /// Serializes [`LiveInstance::deliver`]'s check with the send it guards.
-    delivery_gate: Arc<Mutex<()>>,
-}
-
-/// What one delivery attempt actually did (#4271).
-///
-/// Why: the publisher must write a durable record stating what happened, and
-/// the three outcomes carry different records and different errors. Returning
-/// them as one value keeps the decision with the code that holds the gate —
-/// a caller cannot re-derive "was it saturated?" afterwards, because by then
-/// the answer has changed.
-/// What: the three terminal states of a send into an instance's channel.
-/// Test: `delivered_records_match_what_a_stalled_subscriber_receives`,
-/// `publish_without_subscriber_errors`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeliveryOutcome {
-    /// The envelope is in the channel and no unread envelope was displaced.
-    Delivered,
-    /// The channel is full of envelopes no subscriber has read; nothing sent.
-    Saturated,
-    /// The instance is registered but has no attached receiver.
-    NoSubscriber,
+    /// Private, and reachable only through [`LiveInstance::subscribe`] and
+    /// [`LiveInstance::deliver`]: #4271's defect was a send that bypassed the
+    /// delivery bookkeeping, and the "nothing is lost without a record"
+    /// guarantee is only as good as the absence of such a send. Subscribing
+    /// goes through [`PeerBus::subscribe`](super::PeerBus::subscribe);
+    /// publishing goes through [`PeerBus::publish`](super::PeerBus::publish).
+    inboxes: Arc<InboxSet>,
 }
 
 impl LiveInstance {
-    /// Send one envelope, refusing rather than displacing an unread one.
+    /// Attach a new subscription to this instance.
     ///
-    /// Why (#4271): `broadcast::Sender::send` answers `Ok` for a LAGGING
-    /// receiver — one still attached, whose oldest unread slot the send is
-    /// about to overwrite. A publisher reading only that `Ok` cannot tell
-    /// delivery from eviction, so it recorded `delivered` for envelopes the
-    /// recipient never saw. The channel must therefore be measured BEFORE the
-    /// send, which is the only point at which the difference is still
-    /// observable: afterwards the evicted envelope is gone and nothing in the
-    /// channel remembers it existed.
+    /// Why per subscription rather than per instance (#6462): the buffer IS the
+    /// delivery boundary, so giving each client its own is what stops one
+    /// stalled client from spending another's budget. See
+    /// [`super::inbox`]'s module doc.
+    /// What: mints a subscription id and returns its reader handle, which
+    /// detaches on drop.
+    /// Test: `publish_reaches_only_target_instance`,
+    /// `a_detached_subscription_stops_costing_the_instance`.
+    pub(super) fn subscribe(&self) -> InboxSubscription {
+        self.inboxes.attach(&self.meta.instance_id)
+    }
+
+    /// Deliver one envelope into every attached client's inbox.
     ///
-    /// Why the gate: `Sender::len` and `Sender::send` each take and release the
-    /// channel's tail lock, so a measurement outside a lock of our own is stale
-    /// by the time the send retakes it. Two publishers that both observed
-    /// `capacity - 1` would both send, and the second would evict — the same
-    /// fail-open narrowed to a window rather than closed. Holding
-    /// `delivery_gate` across both makes the pair indivisible. The cost is
-    /// serializing publishes to ONE instance, which is what
-    /// [`INSTANCE_CHANNEL_CAPACITY`]'s own rationale already assumes: peer
-    /// messages are low-volume by construction, and the guarded section is a
-    /// length read plus a memcpy into a ring — no IO, no await.
+    /// Why this can no longer refuse (#6462): the shared 64-slot broadcast ring
+    /// it replaced measured backlog across every attached receiver and could
+    /// not send to a subset, so keeping the §9 log truthful meant refusing the
+    /// publish — and one client that stopped reading refused every publish to
+    /// the instance. Each client now has its own buffer, so a stalled client
+    /// falls behind alone: its inbox displaces its own oldest unread envelope
+    /// and the loss is returned here to be recorded, rather than charged to the
+    /// publisher or to a healthy co-subscriber.
     ///
-    /// The guarantee is scoped to this method: an envelope sent through
-    /// `deliver` never displaces an unread one. A caller that reaches for
-    /// [`LiveInstance::tx`] directly opts out of it, which only the tests do.
+    /// The guarantee is scoped to this method and its logging caller: an
+    /// envelope recorded `delivered` is readable by every attached subscription
+    /// until that subscription reads it, UNLESS the §9 stream also carries an
+    /// [`InboxEviction`](super::inbox::InboxEviction) naming that envelope and
+    /// the subscription that lost it. Nothing else writes into an inbox.
     ///
-    /// What: locks the gate, then reports [`DeliveryOutcome::Saturated`] when
-    /// the channel already holds [`INSTANCE_CHANNEL_CAPACITY`] envelopes some
-    /// attached receiver has not read, [`DeliveryOutcome::NoSubscriber`] when
-    /// nothing is attached, and [`DeliveryOutcome::Delivered`] otherwise.
-    /// `Sender::len` counts slots no attached receiver has consumed, so
-    /// saturation is driven by the SLOWEST subscriber — a fast peer draining
-    /// alongside a stalled one does not mask the lag.
-    /// Test: `delivered_records_match_what_a_stalled_subscriber_receives`,
-    /// `two_subscribers_one_lagging_account_exactly`,
-    /// `concurrent_publishers_never_evict_a_delivered_envelope`.
+    /// What: delegates to [`InboxSet::fan_out`], which holds the instance's one
+    /// lock across the whole fan-out so concurrent publishers cannot hand two
+    /// clients the same two envelopes in opposite orders.
+    /// Test: `two_subscribers_one_lagging_account_exactly`,
+    /// `eviction_is_recorded_per_client_in_the_durable_log`,
+    /// `concurrent_publishers_lose_nothing_without_a_record`.
     pub fn deliver(&self, envelope: BusEnvelope) -> DeliveryOutcome {
-        // A panic cannot leave shared state inconsistent here — the gate guards
-        // a unit value, and the guarded section neither allocates a lock-owned
-        // invariant nor calls user code — so poisoning is recovered rather than
-        // turned into a publish failure.
-        let _gate = self
-            .delivery_gate
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if self.tx.len() >= INSTANCE_CHANNEL_CAPACITY {
-            return DeliveryOutcome::Saturated;
-        }
-        match self.tx.send(envelope) {
-            Ok(_) => DeliveryOutcome::Delivered,
-            Err(_) => DeliveryOutcome::NoSubscriber,
-        }
+        self.inboxes.fan_out(envelope)
+    }
+
+    /// How many subscriptions are attached.
+    ///
+    /// Test: `a_detached_subscription_stops_costing_the_instance`.
+    pub fn subscriber_count(&self) -> usize {
+        self.inboxes.len()
+    }
+
+    /// End every attached subscription once it has drained what it holds.
+    ///
+    /// Why: dropping the broadcast `Sender` used to do this implicitly. With
+    /// per-client queues the end has to be stated, and it must not discard what
+    /// the §9 log already recorded delivered — so the reader drains first.
+    /// Test: `deregister_ends_a_subscription_after_it_drains`.
+    fn close_subscribers(&self) {
+        self.inboxes.close_all();
     }
 }
 
@@ -368,11 +331,9 @@ impl InstanceRegistry {
                         registered_at: chrono::Utc::now().to_rfc3339(),
                         seq,
                     };
-                    let (tx, _) = broadcast::channel(INSTANCE_CHANNEL_CAPACITY);
                     vacant.insert(LiveInstance {
                         meta: meta.clone(),
-                        tx,
-                        delivery_gate: Arc::new(Mutex::new(())),
+                        inboxes: Arc::new(InboxSet::default()),
                     });
                     return Ok(meta);
                 }
@@ -394,10 +355,20 @@ impl InstanceRegistry {
     /// Why: an instance that exited must stop resolving, or definition-
     /// addressed delivery would route to a dead channel and bypass would
     /// silently succeed against a corpse.
-    /// What: removes the entry; returns whether one was present.
-    /// Test: `deregister_makes_instance_gone`.
+    /// What: removes the entry and ends its subscriptions once they have
+    /// drained ([`LiveInstance::close_subscribers`]); returns whether one was
+    /// present. The close is explicit since #6462 — a per-client inbox has no
+    /// `Sender` whose drop would end the stream for it.
+    /// Test: `deregister_makes_instance_gone`,
+    /// `deregister_ends_a_subscription_after_it_drains`.
     pub fn deregister(&self, instance_id: &str) -> bool {
-        self.instances.remove(instance_id).is_some()
+        match self.instances.remove(instance_id) {
+            Some((_, live)) => {
+                live.close_subscribers();
+                true
+            }
+            None => false,
+        }
     }
 
     /// Resolve a definition to its most-recently-registered live instance.
@@ -409,7 +380,10 @@ impl InstanceRegistry {
     /// therefore testable.
     /// What: scans live instances for `definition_id`, returning the highest
     /// [`InstanceMeta::seq`]; fails closed with [`BusError::NoLiveInstance`]
-    /// when none matches — queueing to a durable inbox is DOC-60 §7, deferred.
+    /// when none matches. #6462 built §7's inbox for a LIVE client's
+    /// subscription; §7's other half — queueing to a definition with no running
+    /// instance, without spawning one — is still deferred, so a definition that
+    /// resolves to nothing still fails rather than queues.
     /// Test: `resolve_definition_picks_most_recent`,
     /// `resolve_definition_missing_errors`.
     pub fn resolve_definition(&self, definition_id: &str) -> Result<LiveInstance, BusError> {
