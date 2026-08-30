@@ -29,6 +29,29 @@ pub(crate) fn project_segment(cwd: &str) -> Option<String> {
     if cwd.is_empty() {
         return None;
     }
+    let branch = select_branch_label(tmux_session_name(), || git_branch(cwd));
+    project_segment_with(cwd, branch.as_deref())
+}
+
+/// [`project_segment`] with the branch-position label already resolved (#4407).
+///
+/// Why: `project_segment` calls [`tmux_session_name`], a probe bounded at 100 ms
+/// that returns `None` on timeout. `project_segment_basename_fallback_non_git`
+/// used to derive its expectation by calling that probe a SECOND time and
+/// requiring the two runs to agree - under machine load either could time out
+/// independently, so the test failed on a tree it had just passed on (measured:
+/// ok / FAILED / ok across three isolated runs). CI never saw it, because the
+/// probe short-circuits on `$TMUX` and GitHub's runners do not set it. Taking
+/// the label as an argument lets the test state one deterministic input instead
+/// of hoping two timed probes agree.
+/// What: the project-identity half only - the GitHub `owner/repo` slug from the
+/// git remote, falling back to the cwd basename - composed with `branch` by
+/// [`render_project_segment`].
+/// Test: `project_segment_basename_fallback_non_git`.
+fn project_segment_with(cwd: &str, branch: Option<&str>) -> Option<String> {
+    if cwd.is_empty() {
+        return None;
+    }
     // Prefer the GitHub owner/repo slug from the git remote; fall back to the cwd
     // basename only when there is no parseable remote (non-GitHub / non-git dir).
     let project = git_owner_repo(cwd).unwrap_or_else(|| {
@@ -37,8 +60,7 @@ pub(crate) fn project_segment(cwd: &str) -> Option<String> {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default()
     });
-    let branch = select_branch_label(tmux_session_name(), || git_branch(cwd));
-    render_project_segment(project, branch.as_deref())
+    render_project_segment(project, branch)
 }
 
 /// Choose the branch-position label: prefer the tmux session name, falling
@@ -312,33 +334,40 @@ mod tests {
     }
 
     /// Why: a bare directory with no git repo must fall back to the cwd basename
-    /// and never panic. (#2031: the branch position now prefers a live tmux
-    /// session name over the git branch, so this test computes its expectation
-    /// from the SAME [`tmux_session_name`] probe the production code uses,
-    /// rather than assuming "no tmux" — it stays deterministic whether or not
-    /// the test runner itself is inside a tmux session.)
+    /// and never panic.
+    ///
+    /// #4407: this used to call [`tmux_session_name`] a second time to derive
+    /// its expectation, so it required two independent 100 ms-bounded probes to
+    /// agree - either could time out under load, and the test then failed on a
+    /// tree it had just passed on. It now drives [`project_segment_with`] with
+    /// the label stated outright, covering both arms (no label, and a live
+    /// session name) deterministically. [`project_segment`]'s own choice between
+    /// the two sources stays covered by `select_branch_label_selection_contract`.
     /// Test: itself.
     #[test]
     fn project_segment_basename_fallback_non_git() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let cwd = tmp.path().to_string_lossy().to_string();
-        let seg = project_segment(&cwd).expect("basename segment");
         let basename = tmp
             .path()
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        match tmux_session_name() {
-            Some(session) => assert_eq!(
-                seg,
-                format!("{basename} \u{2387} {session}"),
-                "inside tmux, non-git cwd → basename + tmux session label"
-            ),
-            None => {
-                assert_eq!(seg, basename, "non-git cwd → basename, no branch");
-                assert!(!seg.contains('\u{2387}'), "no branch marker for a bare dir");
-            }
-        }
+
+        let bare = project_segment_with(&cwd, None).expect("basename segment");
+        assert_eq!(bare, basename, "non-git cwd -> basename, no branch");
+        assert!(
+            !bare.contains('\u{2387}'),
+            "no branch marker for a bare dir"
+        );
+
+        let labelled =
+            project_segment_with(&cwd, Some("tm-trusty-tools-01")).expect("basename segment");
+        assert_eq!(
+            labelled,
+            format!("{basename} \u{2387} tm-trusty-tools-01"),
+            "a resolved session label -> basename + label"
+        );
     }
 
     /// Why: the leading field must resolve to the GitHub `owner/repo` slug parsed
