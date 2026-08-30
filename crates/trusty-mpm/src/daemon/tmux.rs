@@ -171,6 +171,30 @@ impl SessionInfo {
     }
 }
 
+/// True when a non-zero `tmux` listing means "the server is up but empty".
+///
+/// Why: `list-sessions` and `list-panes -a` both exit non-zero on a quiet host,
+/// and three call sites classified that stderr independently. Naming the rule
+/// once keeps them from drifting, and the name matters because the rule is
+/// NARROW on purpose. A host where no tmux server has ever run does not print
+/// `no server running`; it prints
+/// `error connecting to <socket> (No such file or directory)`, which this
+/// refuses, so the caller gets an `Err` and
+/// [`DaemonState::reap_dead_sessions`](crate::daemon::state::DaemonState::reap_dead_sessions)
+/// reaps nothing rather than mistaking an unreachable server for an empty one
+/// and deleting every registered session.
+///
+/// The consequence for callers is the one that made `main` red in #6411:
+/// `TmuxDriver::discover().is_ok()` says the BINARY resolves, which is a
+/// strictly weaker claim than "a listing will succeed". Never use the former to
+/// predict the latter.
+/// What: matches the two tmux spellings for an empty server, and nothing else.
+/// Test: `empty_server_stderr_is_an_empty_list`,
+/// `unreachable_socket_stderr_is_not_an_empty_list`.
+fn stderr_means_empty_server(stderr: &str) -> bool {
+    stderr.contains("no server running") || stderr.contains("no sessions")
+}
+
 /// Drives the `tmux` binary on behalf of the daemon's session manager.
 ///
 /// Why: hosting Claude Code inside tmux is the primary control model; the
@@ -407,7 +431,7 @@ impl TmuxDriver {
         let output = Command::new(&self.tmux_path).args(&argv).output()?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.contains("no server running") || stderr.contains("no sessions") {
+            if stderr_means_empty_server(&stderr) {
                 return Ok(Vec::new());
             }
             return Err(Error::Protocol(format!("tmux list-sessions: {stderr}")));
@@ -527,7 +551,7 @@ impl TmuxDriver {
             .output()?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.contains("no server running") || stderr.contains("no sessions") {
+            if stderr_means_empty_server(&stderr) {
                 return Ok(String::new());
             }
             return Err(Error::Protocol(format!("tmux list-panes -a: {stderr}")));
@@ -563,7 +587,7 @@ impl TmuxDriver {
             .output()?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.contains("no server running") || stderr.contains("no sessions") {
+            if stderr_means_empty_server(&stderr) {
                 return Ok(Vec::new());
             }
             return Err(Error::Protocol(format!("tmux list-panes -a: {stderr}")));
