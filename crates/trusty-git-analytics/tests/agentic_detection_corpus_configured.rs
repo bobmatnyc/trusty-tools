@@ -68,6 +68,9 @@ fn a_configured_marker_raises_the_catch_rate() {
          \x20   pattern: '(?i)Bob\\s+Matsuoka'\n",
     )
     .expect("writes the marker file");
+    // #6405: this file is a one-test binary on purpose — the process has no
+    // other thread reading the environment, so this set_var races nothing.
+    // The lazily-cached marker load is what needs its own process.
     std::env::set_var("TGA_AI_MARKERS", &path);
 
     let Some(commits) = history() else {

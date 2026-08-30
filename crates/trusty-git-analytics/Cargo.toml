@@ -37,7 +37,12 @@ name = "tga"
 # after it, so `preflight-publish.sh` CHECK 6 (tag/publish commit parity) can
 # never be satisfied at that tag. 4.0.1 is a burned version number and the
 # release moves forward to a gate-clean commit.
-version = "5.0.0"
+#
+# 5.0.0 → 5.0.1 (#6405): the unsynchronized env-mutation family closes out. The
+# credential-lookup seam is additive — every existing `pub fn` keeps its
+# signature and delegates to a `pub(crate)` `_with_creds` variant — so nothing
+# in the public API breaks. PATCH.
+version = "5.0.1"
 publish = true
 edition = "2021"
 # Aligned with the workspace MSRV (1.94) per #254. Required for

@@ -36,6 +36,9 @@ fn a_house_footer_added_at_runtime_is_detected() {
     )
     .expect("writes the marker file");
 
+    // #6405: this file is a one-test binary on purpose — the process has no
+    // other thread reading the environment, so this set_var races nothing.
+    // The lazily-cached marker load is what needs its own process.
     std::env::set_var("TGA_AI_MARKERS", &path);
 
     // Nothing in BUILTIN knows this footer; before #5414 nothing could.

@@ -26,6 +26,9 @@ fn a_rejected_marker_file_does_not_break_detection() {
     )
     .expect("writes the marker file");
 
+    // #6405: this file is a one-test binary on purpose — the process has no
+    // other thread reading the environment, so this set_var races nothing.
+    // The lazily-cached marker load is what needs its own process.
     std::env::set_var("TGA_AI_MARKERS", &path);
 
     // The shipped markers are unaffected.

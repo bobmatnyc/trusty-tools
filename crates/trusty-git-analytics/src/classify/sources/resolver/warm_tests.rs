@@ -34,8 +34,6 @@ async fn warm_cache_dedupes_ticket_key_across_distinct_messages() {
         .mount(&server)
         .await;
 
-    unsafe { std::env::set_var("JIRA_TOKEN_WARM_TEST", "test-token") };
-
     let mut issue_type_map = HashMap::new();
     issue_type_map.insert("Bug".to_string(), "bug_fix".to_string());
     let jira = JiraSourceConfig {
@@ -50,8 +48,10 @@ async fn warm_cache_dedupes_ticket_key_across_distinct_messages() {
             components: HashMap::new(),
         },
     };
+    // #6405: the token is a parameter, not a process-wide `set_var`.
     let resolver = ExternalSourceResolver::new(&[SourceConfig::Jira(jira)])
-        .with_jira_base_url(0, server.uri());
+        .with_jira_base_url(0, server.uri())
+        .with_credentials([("JIRA_TOKEN_WARM_TEST", "test-token")]);
 
     let messages = vec![
         "PROJ-7 fix the crash".to_string(),
@@ -65,7 +65,6 @@ async fn warm_cache_dedupes_ticket_key_across_distinct_messages() {
     assert_eq!(s1, s2);
     assert_eq!(s1.category, "bug_fix");
 
-    unsafe { std::env::remove_var("JIRA_TOKEN_WARM_TEST") };
     // Dropping the server asserts `.expect(1)`.
     drop(server);
 }

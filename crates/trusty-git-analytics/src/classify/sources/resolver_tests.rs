@@ -62,9 +62,6 @@ async fn resolver_returns_jira_signal_for_bug_issue_type() {
         .mount(&server)
         .await;
 
-    // Set token env var for this test.
-    unsafe { std::env::set_var("JIRA_API_TOKEN_TEST_BUG", "test-token") };
-
     let mut issue_type_map = HashMap::new();
     issue_type_map.insert("Bug".to_string(), "bug_fix".to_string());
 
@@ -80,8 +77,10 @@ async fn resolver_returns_jira_signal_for_bug_issue_type() {
             components: HashMap::new(),
         },
     };
+    // #6405: the token is a parameter, not a process-wide `set_var`.
     let resolver = ExternalSourceResolver::new(&[SourceConfig::Jira(config)])
-        .with_jira_base_url(0, server.uri());
+        .with_jira_base_url(0, server.uri())
+        .with_credentials([("JIRA_API_TOKEN_TEST_BUG", "test-token")]);
 
     let signal = resolver
         .resolve("PROJ-1234 fix null pointer")
@@ -89,8 +88,6 @@ async fn resolver_returns_jira_signal_for_bug_issue_type() {
         .expect("should have signal");
     assert_eq!(signal.category, "bug_fix");
     assert!(signal.source.contains("issue_type"));
-
-    unsafe { std::env::remove_var("JIRA_API_TOKEN_TEST_BUG") };
 }
 
 /// Why: the cache must prevent duplicate HTTP calls for the same ticket
@@ -120,8 +117,6 @@ async fn resolver_caches_jira_result_across_calls() {
         .mount(&server)
         .await;
 
-    unsafe { std::env::set_var("JIRA_API_TOKEN_CACHE_TEST", "test-token") };
-
     let mut issue_type_map = HashMap::new();
     issue_type_map.insert("Story".to_string(), "new_feature".to_string());
 
@@ -137,8 +132,10 @@ async fn resolver_caches_jira_result_across_calls() {
             components: HashMap::new(),
         },
     };
+    // #6405: the token is a parameter, not a process-wide `set_var`.
     let resolver = ExternalSourceResolver::new(&[SourceConfig::Jira(config)])
-        .with_jira_base_url(0, server.uri());
+        .with_jira_base_url(0, server.uri())
+        .with_credentials([("JIRA_API_TOKEN_CACHE_TEST", "test-token")]);
 
     // First call — should fetch from mock.
     let s1 = resolver.resolve("PROJ-99 add widget").await;
@@ -148,8 +145,6 @@ async fn resolver_caches_jira_result_across_calls() {
     // second request).
     let s2 = resolver.resolve("PROJ-99 related commit").await;
     assert_eq!(s1, s2);
-
-    unsafe { std::env::remove_var("JIRA_API_TOKEN_CACHE_TEST") };
 }
 
 /// Why: when the JIRA token env var is unset the resolver must return
@@ -159,9 +154,6 @@ async fn resolver_caches_jira_result_across_calls() {
 /// Test: no HTTP expected (token check happens before fetch).
 #[tokio::test]
 async fn resolver_skips_jira_when_token_unset() {
-    // Guarantee the env var is absent for this test.
-    unsafe { std::env::remove_var("JIRA_TOKEN_DEFINITELY_NOT_SET_XYZ") };
-
     let config = JiraSourceConfig {
         base_url: "https://acme.atlassian.net".to_string(),
         token_env: "JIRA_TOKEN_DEFINITELY_NOT_SET_XYZ".to_string(),
@@ -170,7 +162,10 @@ async fn resolver_skips_jira_when_token_unset() {
         project_keys: vec![],
         field_mappings: JiraFieldMappings::default(),
     };
-    let resolver = ExternalSourceResolver::new(&[SourceConfig::Jira(config)]);
+    // #6405: an empty credential table proves "the variable is unset" without
+    // clearing anything process-wide.
+    let resolver = ExternalSourceResolver::new(&[SourceConfig::Jira(config)])
+        .with_credentials(Vec::<(String, String)>::new());
     let result = resolver.resolve("PROJ-1234 update").await;
     assert!(result.is_none(), "missing token must yield None, not panic");
 }
@@ -195,8 +190,6 @@ async fn resolver_returns_github_signal_for_bug_label() {
         .mount(&server)
         .await;
 
-    unsafe { std::env::set_var("GITHUB_TOKEN_TEST_BUG", "test-token") };
-
     let mut label_map = HashMap::new();
     label_map.insert("bug".to_string(), "bug_fix".to_string());
 
@@ -206,8 +199,10 @@ async fn resolver_returns_github_signal_for_bug_label() {
         label_mappings: label_map,
     };
 
+    // #6405: the token is a parameter, not a process-wide `set_var`.
     let resolver = ExternalSourceResolver::new(&[SourceConfig::GithubIssues(config)])
-        .with_github_api_base(0, server.uri());
+        .with_github_api_base(0, server.uri())
+        .with_credentials([("GITHUB_TOKEN_TEST_BUG", "test-token")]);
 
     let signal = resolver
         .resolve("fix: closes #42")
@@ -215,6 +210,4 @@ async fn resolver_returns_github_signal_for_bug_label() {
         .expect("should have signal");
     assert_eq!(signal.category, "bug_fix");
     assert!(signal.source.contains("bug"));
-
-    unsafe { std::env::remove_var("GITHUB_TOKEN_TEST_BUG") };
 }

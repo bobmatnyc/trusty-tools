@@ -514,8 +514,6 @@ async fn pipeline_external_sources_dedupe_and_apply() {
         .mount(&server)
         .await;
 
-    unsafe { std::env::set_var("JIRA_TOKEN_2719", "test-token") };
-
     let mut issue_type_map = HashMap::new();
     issue_type_map.insert("Bug".to_string(), "bug_fix".to_string());
     let jira = JiraSourceConfig {
@@ -530,8 +528,10 @@ async fn pipeline_external_sources_dedupe_and_apply() {
             components: HashMap::new(),
         },
     };
+    // #6405: the token is a parameter, not a process-wide `set_var`.
     let resolver = ExternalSourceResolver::new(&[SourceConfig::Jira(jira)])
-        .with_jira_base_url(0, server.uri());
+        .with_jira_base_url(0, server.uri())
+        .with_credentials([("JIRA_TOKEN_2719", "test-token")]);
 
     let mut db = Database::open_in_memory().expect("db");
     for sha in ["sha-a", "sha-b", "sha-c"] {
@@ -564,7 +564,6 @@ async fn pipeline_external_sources_dedupe_and_apply() {
         );
     }
 
-    unsafe { std::env::remove_var("JIRA_TOKEN_2719") };
     // Dropping the server asserts `.expect(1)` — exactly one JIRA fetch.
     drop(server);
 }
@@ -606,8 +605,6 @@ async fn pipeline_external_sources_dedupe_distinct_messages_same_ticket() {
         .mount(&server)
         .await;
 
-    unsafe { std::env::set_var("JIRA_TOKEN_2719_DISTINCT", "test-token") };
-
     let mut issue_type_map = HashMap::new();
     issue_type_map.insert("Bug".to_string(), "bug_fix".to_string());
     let jira = JiraSourceConfig {
@@ -622,8 +619,10 @@ async fn pipeline_external_sources_dedupe_distinct_messages_same_ticket() {
             components: HashMap::new(),
         },
     };
+    // #6405: the token is a parameter, not a process-wide `set_var`.
     let resolver = ExternalSourceResolver::new(&[SourceConfig::Jira(jira)])
-        .with_jira_base_url(0, server.uri());
+        .with_jira_base_url(0, server.uri())
+        .with_credentials([("JIRA_TOKEN_2719_DISTINCT", "test-token")]);
 
     let mut db = Database::open_in_memory().expect("db");
     // Three DIFFERENT messages, same ticket key.
@@ -656,7 +655,6 @@ async fn pipeline_external_sources_dedupe_distinct_messages_same_ticket() {
         );
     }
 
-    unsafe { std::env::remove_var("JIRA_TOKEN_2719_DISTINCT") };
     // Dropping the server asserts `.expect(1)` — exactly one JIRA fetch,
     // regardless of how many distinct messages referenced PROJ-100.
     drop(server);

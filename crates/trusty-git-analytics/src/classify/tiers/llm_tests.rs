@@ -3,6 +3,7 @@ use crate::classify::tiers::llm::{
     SYSTEM_PROMPT,
 };
 use crate::core::config::LlmSource;
+use crate::core::creds::CredentialSource;
 use crate::core::models::ClassificationMethod;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -126,17 +127,18 @@ async fn anthropic_api_request_sets_correct_headers() {
     assert_eq!(r.category, "chore");
 }
 
-/// Why: `from_llm_config` must resolve the API key from the env var
+/// Why: `from_llm_config` must resolve the API key from the variable
 /// named by `api_key_env` for the `anthropic-api` source, not from
 /// a hardcoded var like `ANTHROPIC_API_KEY`.
-/// What: set a custom env var, build from a config with that var name,
-/// and assert the classifier has a key.
-/// Test: env-var manipulation + constructor check.
+/// What: build from a config naming a custom variable, with a credential
+/// source that answers only that name, and assert the classifier has a key.
+/// Test: this test itself.
 #[tokio::test]
 async fn from_llm_config_anthropic_api_reads_api_key_env() {
-    // Use a unique var name to avoid polluting parallel tests.
     let var_name = "TGA_TEST_ANTHROPIC_KEY_9f2e";
-    std::env::set_var(var_name, "sk-ant-from-env"); // pragma: allowlist secret
+    // #6405: the lookup is a parameter, so proving "the named variable is the
+    // one consulted" no longer means setting it process-wide.
+    let creds = CredentialSource::fixed([(var_name, "sk-ant-from-env")]); // pragma: allowlist secret
 
     let cfg = crate::core::config::LlmConfig {
         source: LlmSource::AnthropicApi,
@@ -144,23 +146,22 @@ async fn from_llm_config_anthropic_api_reads_api_key_env() {
         region: None,
         model: Some("claude-3-5-haiku-latest".to_string()),
     };
-    let result = LlmClassifier::from_llm_config(&cfg, "claude-3-5-haiku-latest").await;
-    std::env::remove_var(var_name);
+    let result =
+        LlmClassifier::from_llm_config_with_creds(&cfg, "claude-3-5-haiku-latest", &creds).await;
 
-    let llm = result.expect("should build from env var");
+    let llm = result.expect("should build from the named variable");
     assert!(llm.has_api_key());
     assert!(llm.use_anthropic_format);
 }
 
-/// Why: when the named env var is absent, from_llm_config must return
+/// Why: when the named variable is absent, from_llm_config must return
 /// an error naming the variable — no silent no-op allowed.
-/// What: call from_llm_config with an env var that does not exist and
-/// assert Err mentions the var name.
+/// What: call from_llm_config with an empty credential source and assert Err
+/// mentions the var name.
 /// Test: pure error-path check, no network.
 #[tokio::test]
 async fn from_llm_config_anthropic_api_missing_key_errors() {
     let var_name = "TGA_TEST_ANTHROPIC_MISSING_KEY_7c4b";
-    std::env::remove_var(var_name); // ensure absent
 
     let cfg = crate::core::config::LlmConfig {
         source: LlmSource::AnthropicApi,
@@ -168,7 +169,11 @@ async fn from_llm_config_anthropic_api_missing_key_errors() {
         region: None,
         model: None,
     };
-    let result = LlmClassifier::from_llm_config(&cfg, "gpt-4o-mini").await;
+    // #6405: an empty credential table is how "absent" is stated now — no
+    // `remove_var` racing the rest of the suite.
+    let result =
+        LlmClassifier::from_llm_config_with_creds(&cfg, "gpt-4o-mini", &CredentialSource::empty())
+            .await;
     assert!(result.is_err(), "missing env var must produce Err");
     let err = result.err().expect("just asserted is_err");
     assert!(
@@ -183,11 +188,12 @@ async fn from_llm_config_anthropic_api_missing_key_errors() {
 /// receives a valid model ID.
 /// What: call from_llm_config with `model: None` and `source: anthropic-api`
 /// and assert the classifier's model field equals ANTHROPIC_DEFAULT_MODEL.
-/// Test: env-var + constructor inspection.
+/// Test: constructor inspection.
 #[tokio::test]
 async fn anthropic_default_model_used_when_none_configured() {
     let var_name = "TGA_TEST_ANTHROPIC_DEFAULT_MODEL_3a8d";
-    std::env::set_var(var_name, "sk-ant-test-model"); // pragma: allowlist secret
+    // #6405: credential as a parameter, never a process-wide `set_var`.
+    let creds = CredentialSource::fixed([(var_name, "sk-ant-test-model")]); // pragma: allowlist secret
 
     let cfg = crate::core::config::LlmConfig {
         source: LlmSource::AnthropicApi,
@@ -196,10 +202,9 @@ async fn anthropic_default_model_used_when_none_configured() {
         model: None, // user did not set a model
     };
     // The pipeline passes "gpt-4o-mini" as the fallback when model is None.
-    let result = LlmClassifier::from_llm_config(&cfg, "gpt-4o-mini").await;
-    std::env::remove_var(var_name);
+    let result = LlmClassifier::from_llm_config_with_creds(&cfg, "gpt-4o-mini", &creds).await;
 
-    let llm = result.expect("build from env");
+    let llm = result.expect("build from the named variable");
     assert_eq!(
         llm.model, ANTHROPIC_DEFAULT_MODEL,
         "must substitute ANTHROPIC_DEFAULT_MODEL, not gpt-4o-mini"

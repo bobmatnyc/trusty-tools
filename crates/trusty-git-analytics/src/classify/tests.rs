@@ -836,50 +836,23 @@ async fn llm_classify_only_returns_none_when_disabled() {
     assert_eq!(engine.llm_has_api_key(), None);
 }
 
-/// Panic-safe env-var save/restore (mirrors the pattern in
-/// `core::config::validator::tests::EnvVarGuard`). Without this, a
-/// failing assertion between `remove_var` and the restore would leak
-/// the cleared state to other parallel tests in the same binary.
-struct EnvVarGuard {
-    name: &'static str,
-    original: Option<String>,
-}
-
-impl EnvVarGuard {
-    fn remove(name: &'static str) -> Self {
-        let original = std::env::var(name).ok();
-        // SAFETY: 2024-edition env mutation; cleanup guaranteed by Drop.
-        unsafe { std::env::remove_var(name) };
-        Self { name, original }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        // SAFETY: see `EnvVarGuard::remove`.
-        unsafe {
-            match self.original.as_deref() {
-                Some(v) => std::env::set_var(self.name, v),
-                None => std::env::remove_var(self.name),
-            }
-        }
-    }
-}
-
 #[tokio::test]
 async fn llm_has_api_key_signals_misconfiguration() {
-    // Issue #99 follow-up: when use_llm is on but no env key is set,
-    // the engine should expose `Some(false)` so the pipeline can warn
-    // at startup instead of silently producing no LLM verdicts.
-    let _guard = EnvVarGuard::remove("OPENAI_API_KEY");
-
-    let engine = ClassificationEngine::new(
+    // Issue #99 follow-up: when use_llm is on but no key resolves, the engine
+    // should expose `Some(false)` so the pipeline can warn at startup instead
+    // of silently producing no LLM verdicts.
+    //
+    // #6405: an empty credential table is what makes "no key resolves" true
+    // here. The `EnvVarGuard` this test used to carry cleared
+    // `OPENAI_API_KEY` process-wide, racing every other thread's `getenv`.
+    let engine = ClassificationEngine::new_with_creds(
         rules::default_rules(),
         ClassificationEngineConfig {
             use_llm: true,
             llm_provider: "openai".to_string(),
             ..Default::default()
         },
+        &crate::core::creds::CredentialSource::empty(),
     )
     .expect("engine");
     assert_eq!(engine.llm_has_api_key(), Some(false));

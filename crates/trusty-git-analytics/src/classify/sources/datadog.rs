@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use super::{DatadogSourceConfig, ExternalSignal};
+use crate::core::creds::CredentialSource;
 
 /// Default confidence for Datadog deployment-event signals.
 ///
@@ -109,9 +110,33 @@ pub async fn has_deployment_event(
     sha: &str,
     api_base_override: Option<&str>,
 ) -> bool {
-    let api_key = match std::env::var(&config.api_key_env) {
-        Ok(k) if !k.is_empty() => k,
-        _ => {
+    has_deployment_event_with_creds(
+        client,
+        config,
+        sha,
+        api_base_override,
+        &CredentialSource::from_env(),
+    )
+    .await
+}
+
+/// [`has_deployment_event`], with the credential lookup supplied by the caller.
+///
+/// Why (#6405): proving the authenticated path used to require `set_var` on
+/// both Datadog key variables, racing every other thread's `getenv`.
+/// What: identical to [`has_deployment_event`] except that `creds` replaces
+/// the `std::env::var` reads for `api_key_env` and `app_key_env`.
+/// Test: `tests::fetch_and_classify_via_wiremock`.
+pub(crate) async fn has_deployment_event_with_creds(
+    client: &reqwest::Client,
+    config: &DatadogSourceConfig,
+    sha: &str,
+    api_base_override: Option<&str>,
+    creds: &CredentialSource,
+) -> bool {
+    let api_key = match creds.get(&config.api_key_env) {
+        Some(k) => k,
+        None => {
             warn!(
                 api_key_env = %config.api_key_env,
                 "Datadog API key env var `{}` is not set — skipping Datadog lookups",
@@ -121,9 +146,9 @@ pub async fn has_deployment_event(
         }
     };
 
-    let app_key = match std::env::var(&config.app_key_env) {
-        Ok(k) if !k.is_empty() => k,
-        _ => {
+    let app_key = match creds.get(&config.app_key_env) {
+        Some(k) => k,
+        None => {
             warn!(
                 app_key_env = %config.app_key_env,
                 "Datadog app key env var `{}` is not set — skipping Datadog lookups",
@@ -200,12 +225,32 @@ pub async fn check_shas_batch(
     shas: &[String],
     api_base_override: Option<&str>,
 ) -> HashMap<String, Option<ExternalSignal>> {
+    check_shas_batch_with_creds(
+        client,
+        config,
+        shas,
+        api_base_override,
+        &CredentialSource::from_env(),
+    )
+    .await
+}
+
+/// [`check_shas_batch`], with the credential lookup supplied by the caller
+/// (#6405).
+pub(crate) async fn check_shas_batch_with_creds(
+    client: &reqwest::Client,
+    config: &DatadogSourceConfig,
+    shas: &[String],
+    api_base_override: Option<&str>,
+    creds: &CredentialSource,
+) -> HashMap<String, Option<ExternalSignal>> {
     let mut out = HashMap::new();
     for sha in shas {
         if out.contains_key(sha) {
             continue;
         }
-        let found = has_deployment_event(client, config, sha, api_base_override).await;
+        let found =
+            has_deployment_event_with_creds(client, config, sha, api_base_override, creds).await;
         let signal = if found {
             let confidence = config.confidence.unwrap_or(DATADOG_DEFAULT_CONFIDENCE);
             Some(ExternalSignal {
@@ -345,8 +390,12 @@ unknown_field: oops
             .mount(&server)
             .await;
 
-        unsafe { std::env::set_var("DD_API_KEY_WT", "test-api-key") }; // pragma: allowlist secret
-        unsafe { std::env::set_var("DD_APP_KEY_WT", "test-app-key") }; // pragma: allowlist secret
+        // #6405: the credentials are a parameter, so this test proves the
+        // authenticated path without mutating the process environment.
+        let creds = CredentialSource::fixed([
+            ("DD_API_KEY_WT", "test-api-key"), // pragma: allowlist secret
+            ("DD_APP_KEY_WT", "test-app-key"), // pragma: allowlist secret
+        ]);
 
         let config = DatadogSourceConfig {
             api_key_env: "DD_API_KEY_WT".to_string(), // pragma: allowlist secret
@@ -358,15 +407,23 @@ unknown_field: oops
         };
 
         let client = reqwest::Client::new();
-        let found = has_deployment_event(&client, &config, "abc1234", Some(&server.uri())).await;
+        let found = has_deployment_event_with_creds(
+            &client,
+            &config,
+            "abc1234",
+            Some(&server.uri()),
+            &creds,
+        )
+        .await;
         assert!(found, "deployment event should be found");
 
         // Now verify the batch helper produces the right signal.
-        let map = check_shas_batch(
+        let map = check_shas_batch_with_creds(
             &client,
             &config,
             &["abc1234".to_string()],
             Some(&server.uri()),
+            &creds,
         )
         .await;
         let signal = map.get("abc1234").and_then(|s| s.as_ref()).expect("signal");
@@ -376,9 +433,36 @@ unknown_field: oops
             "confidence should be 0.95"
         );
         assert!(signal.source.contains("abc1234"));
+    }
 
-        unsafe { std::env::remove_var("DD_API_KEY_WT") };
-        unsafe { std::env::remove_var("DD_APP_KEY_WT") };
+    /// Why: an unset API key must skip the lookup rather than issue an
+    /// unauthenticated request — the branch that used to be provable only by
+    /// clearing the variable process-wide (#6405).
+    /// What: query with an empty credential source and assert `false`, with no
+    /// HTTP server standing at all.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn has_deployment_event_is_false_when_keys_unset() {
+        let config = DatadogSourceConfig {
+            api_key_env: "DD_API_KEY_UNSET".to_string(), // pragma: allowlist secret
+            app_key_env: "DD_APP_KEY_UNSET".to_string(), // pragma: allowlist secret
+            dd_site: None,
+            service: None,
+            default_category: "devops".to_string(),
+            confidence: None,
+        };
+        let client = reqwest::Client::new();
+        assert!(
+            !has_deployment_event_with_creds(
+                &client,
+                &config,
+                "abc1234",
+                None,
+                &CredentialSource::empty()
+            )
+            .await,
+            "unset keys must skip the lookup"
+        );
     }
 
     /// Why: when no deployment event is found the batch helper must return
@@ -399,8 +483,11 @@ unknown_field: oops
             .mount(&server)
             .await;
 
-        unsafe { std::env::set_var("DD_API_KEY_EMPTY", "test-api-key") }; // pragma: allowlist secret
-        unsafe { std::env::set_var("DD_APP_KEY_EMPTY", "test-app-key") }; // pragma: allowlist secret
+        // #6405: credentials as a parameter, never a process-wide `set_var`.
+        let creds = CredentialSource::fixed([
+            ("DD_API_KEY_EMPTY", "test-api-key"), // pragma: allowlist secret
+            ("DD_APP_KEY_EMPTY", "test-app-key"), // pragma: allowlist secret
+        ]);
 
         let config = DatadogSourceConfig {
             api_key_env: "DD_API_KEY_EMPTY".to_string(), // pragma: allowlist secret
@@ -412,11 +499,12 @@ unknown_field: oops
         };
 
         let client = reqwest::Client::new();
-        let map = check_shas_batch(
+        let map = check_shas_batch_with_creds(
             &client,
             &config,
             &["deadbeef".to_string()],
             Some(&server.uri()),
+            &creds,
         )
         .await;
         let signal = map.get("deadbeef").expect("key present");
@@ -424,8 +512,5 @@ unknown_field: oops
             signal.is_none(),
             "no events should yield None signal, got {signal:?}"
         );
-
-        unsafe { std::env::remove_var("DD_API_KEY_EMPTY") };
-        unsafe { std::env::remove_var("DD_APP_KEY_EMPTY") };
     }
 }
