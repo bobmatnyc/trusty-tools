@@ -1,9 +1,9 @@
 [package]
 name = "trusty-code"
-# #6286: `TurnMemorySink` and `RecallSessionTool` take a socket path rather than
-# a base URL, and `memory_envelope::call_tool_wrapped` takes a `&Path`. Cargo's
-# 0.x rule puts a breaking change in the MINOR position.
-version = "0.4.0"
+# #5073/#6231: test-only stabilization of `daemon_autospawn_tests` — no
+# production behavior changed, so this is a PATCH bump. (0.4.0 was the MINOR
+# bump for #6286's socket-path API break, per Cargo's 0.x rule.)
+version = "0.4.1"
 edition = "2024"
 rust-version.workspace = true
 # license.workspace resolves to "MIT"; LICENSE is kept in-crate for correctness.
