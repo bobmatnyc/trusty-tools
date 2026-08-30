@@ -153,6 +153,31 @@ pub struct PalaceHandle {
     /// rather than `parking_lot::Mutex` (which would deadlock the runtime).
     /// Test: `remember_concurrent_does_not_lose_writes` in this module.
     pub write_mutex: Arc<tokio::sync::Mutex<()>>,
+    /// Orders the durable-commit tail of one write against the next writer's,
+    /// independently of [`Self::write_mutex`] (#6366).
+    ///
+    /// Why: the #6366 bound releases `write_mutex` the moment a write exhausts
+    /// its budget, which is the whole point — the queue unblocks. But the
+    /// commit that write already dispatched does not stop: a `spawn_blocking`
+    /// redb transaction runs to completion whatever happens to the future that
+    /// awaited it. That left the next writer free to run its own Tier C
+    /// read-decide-write against a `DRAWERS_BY_FACT_KEY` index the abandoned
+    /// commit was still moving, and against an in-memory table the abandoned
+    /// commit had not yet mirrored into. Its incumbent lookup then took
+    /// `persist_with_retirement`'s "slot names a drawer absent from the
+    /// in-memory table" branch, wrote its newcomer without retiring anyone, and
+    /// left two drawer rows carrying one live `fact_key` — the two-claimant
+    /// state ADR-0028 D5 forbids.
+    /// What: `Arc<tokio::sync::Mutex<()>>`, taken by
+    /// `write_pipeline::run_pipeline` immediately before the commit and held —
+    /// as an owned guard moved into an uncancellable task — across
+    /// `persist_with_retirement` AND the in-memory mirror. It therefore
+    /// outlives `write_mutex` whenever a write is abandoned mid-commit, so the
+    /// next writer's incumbent read cannot begin until the previous commit has
+    /// landed in redb and in `drawers` both. Narrower than `write_mutex` by
+    /// design: it covers only the commit, never the embed.
+    /// Test: `an_abandoned_commit_still_leaves_one_claimant_for_the_slot`.
+    pub commit_mutex: Arc<tokio::sync::Mutex<()>>,
     /// Unix-seconds timestamp of the last genuine user access (recall / remember
     /// / forget). Drives idle-to-disk eviction.
     ///
@@ -214,6 +239,24 @@ impl PalaceHandle {
         Arc::clone(&self.write_mutex)
     }
 
+    /// The owned slice of this palace a detached durable commit needs (#6366).
+    ///
+    /// Why: the commit tail runs in a task the caller's timeout cannot cancel,
+    /// so it cannot borrow the handle. Every field it touches is already
+    /// behind an `Arc`, so the tail needs a bundle of clones rather than an
+    /// `Arc<PalaceHandle>` — which would force `remember_with_options` to take
+    /// `self: &Arc<Self>` and break the in-memory `PalaceHandle::new` callers.
+    /// What: clones the palace id, the KG handle, and the in-memory drawer
+    /// table into a [`tier_c::CommitCtx`].
+    /// Test: `an_abandoned_commit_still_leaves_one_claimant_for_the_slot`.
+    pub(super) fn commit_ctx(&self) -> super::tier_c::CommitCtx {
+        super::tier_c::CommitCtx {
+            palace: self.id.clone(),
+            kg: Arc::clone(&self.kg),
+            drawers: Arc::clone(&self.drawers),
+        }
+    }
+
     /// Construct a new `PalaceHandle` with empty drawer table and L1 cache.
     ///
     /// Why: The registry creates handles eagerly when a palace is opened; the
@@ -244,6 +287,7 @@ impl PalaceHandle {
             closets: Arc::new(RwLock::new(HashMap::new())),
             is_compacting: Arc::new(AtomicBool::new(false)),
             write_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            commit_mutex: Arc::new(tokio::sync::Mutex::new(())),
             last_accessed: Arc::new(AtomicU64::new(now_epoch_secs())),
         }
     }
@@ -451,6 +495,7 @@ impl PalaceHandle {
             closets: Arc::new(RwLock::new(HashMap::new())),
             is_compacting: Arc::new(AtomicBool::new(false)),
             write_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            commit_mutex: Arc::new(tokio::sync::Mutex::new(())),
             last_accessed: Arc::new(AtomicU64::new(now_epoch_secs())),
         };
         Ok(Arc::new(handle))

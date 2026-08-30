@@ -296,6 +296,301 @@ mod tests {
         );
     }
 
+    /// A budget large enough to reach the commit but far too small to outlast a
+    /// commit-order guard the test is deliberately holding.
+    ///
+    /// Why: the point of these tests is a GENUINE `tokio::time::timeout` expiry
+    /// inside `run_pipeline`. A zero budget never gets there — `remember_within`
+    /// rejects it up front, before the pipeline or the timeout is ever polled —
+    /// so every assertion built on one describes the fast path, not
+    /// cancellation.
+    const TINY: Duration = Duration::from_millis(150);
+
+    /// The slot every Tier C test in this module contends for.
+    const SLOT: &str = "pr:6366/state";
+
+    /// Write through the real pipeline, optionally claiming a Tier C slot.
+    fn slot_opts(fact_key: Option<&str>) -> RememberOptions {
+        RememberOptions {
+            fact_key: fact_key.map(str::to_string),
+            ..opts()
+        }
+    }
+
+    /// How many drawers in `rows` still carry `SLOT` as a live claim.
+    fn claimants(rows: &[crate::memory_core::palace::Drawer]) -> usize {
+        rows.iter()
+            .filter(|d| d.fact_key.as_deref() == Some(SLOT))
+            .count()
+    }
+
+    /// Why (issue #6366, round 2): every over-budget test in this file used
+    /// `Duration::ZERO`, which `remember_within` rejects BEFORE `run_pipeline`
+    /// starts or `tokio::time::timeout` is polled. The cancellation contract
+    /// the module documents was therefore asserted by no test at all — a
+    /// refactor could have moved or broken the timeout boundary and stayed
+    /// green. This is the first test that lets the pipeline start and then cuts
+    /// it off for real.
+    /// What: holds the palace's commit-order guard so the pipeline blocks on it
+    /// mid-flight, runs a write with a small NONZERO budget, and asserts the
+    /// timeout fired (not the zero-budget fast path), the error names the
+    /// ceiling, and the write mutex came back.
+    /// Test: itself.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_mid_flight_timeout_releases_the_mutex_and_names_the_budget() {
+        let (_dir, handle) = palace().await;
+        // Held for the whole write: the pipeline reaches the commit-order guard
+        // and waits there until its budget runs out.
+        let blocker = handle.commit_mutex.clone().lock_owned().await;
+
+        let started = Instant::now();
+        let err = handle
+            .remember_with_options_within(
+                "a write cut off after the pipeline started".to_string(),
+                RoomType::General,
+                vec![],
+                0.5,
+                opts(),
+                TINY,
+            )
+            .await
+            .expect_err("#6366: a write blocked past its budget must fail");
+
+        assert!(
+            started.elapsed() >= TINY,
+            "#6366: this must be a real timeout expiry, not the zero-budget \
+             fast path — the call returned after {:?}, inside the {TINY:?} \
+             budget",
+            started.elapsed()
+        );
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("write pipeline exceeded"),
+            "error must name the pipeline ceiling: {msg}"
+        );
+        assert!(
+            handle.write_mutex_for_test().try_lock().is_ok(),
+            "#6366: a mid-flight cancellation must still release the write mutex"
+        );
+
+        drop(blocker);
+    }
+
+    /// Why (issue #6366, round 2): the queue property has to hold for a REAL
+    /// cancellation, not just for a budget rejected before the pipeline ran.
+    /// What: blocks the commit-order guard, lets one writer time out against it
+    /// mid-flight, releases the guard, and asserts a second writer with an ample
+    /// budget lands normally.
+    /// Test: itself.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_writer_queued_behind_a_mid_flight_cancellation_still_lands() {
+        let (_dir, handle) = palace().await;
+        let blocker = handle.commit_mutex.clone().lock_owned().await;
+
+        let doomed = handle
+            .remember_with_options_within(
+                "the write cut off mid-flight".to_string(),
+                RoomType::General,
+                vec![],
+                0.5,
+                opts(),
+                TINY,
+            )
+            .await;
+        assert!(doomed.is_err(), "the mid-flight write must give up");
+
+        drop(blocker);
+
+        handle
+            .remember_with_options_within(
+                "the write that must still land".to_string(),
+                RoomType::General,
+                vec![],
+                0.5,
+                opts(),
+                AMPLE,
+            )
+            .await
+            .expect("#6366: a queued writer must not inherit the cancellation");
+
+        let contents: Vec<String> = handle
+            .drawers
+            .read()
+            .iter()
+            .map(|d| d.content().to_string())
+            .collect();
+        assert!(
+            contents.contains(&"the write that must still land".to_string()),
+            "the surviving write must be in the drawer table: {contents:?}"
+        );
+    }
+
+    /// Why (issue #6366, round 2 — the CRITICAL): this encodes the exact
+    /// interleaving that made the bound unsound. Writer A's durable commit is
+    /// dispatched and its caller has already gone away — the state a mid-commit
+    /// timeout produces, because dropping the pipeline future cancels neither
+    /// the `spawn_blocking` redb transaction in `upsert_drawers_atomic` nor an
+    /// op already queued to the KG writer actor. Writer B then runs its own
+    /// Tier C read-decide-write. Before the commit-order guard, B read the
+    /// moved `DRAWERS_BY_FACT_KEY` index, failed to find A in the in-memory
+    /// table (A's mirror never ran), took `persist_with_retirement`'s "absent
+    /// from the in-memory table" fallback, and wrote its newcomer WITHOUT
+    /// retiring A — leaving A's row and B's row both carrying a live `SLOT`.
+    /// What: writes an incumbent, dispatches A's commit through
+    /// `commit_and_mirror` with the guard already held (caller abandoned), runs
+    /// B through the real public pipeline, then asserts on the DURABLE rows:
+    /// exactly one drawer claims the slot, the index agrees with it, and A —
+    /// the abandoned write — is present and retired rather than absent and
+    /// still claiming.
+    /// Test: itself.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_abandoned_commit_still_leaves_one_claimant_for_the_slot() {
+        use crate::memory_core::palace::Drawer;
+        use crate::memory_core::retrieval::tier_c;
+
+        let (_dir, handle) = palace().await;
+
+        // The incumbent A is about to displace.
+        handle
+            .remember_with_options_within(
+                "the incumbent holding the slot".to_string(),
+                RoomType::General,
+                vec![],
+                0.5,
+                slot_opts(Some(SLOT)),
+                AMPLE,
+            )
+            .await
+            .expect("incumbent write");
+        let incumbent_id = handle.drawers.read()[0].id;
+
+        // Writer A: a commit that has been dispatched while its caller is gone.
+        let room_id = handle.drawers.read()[0].room_id;
+        let mut a = Drawer::new(room_id, "the abandoned newcomer");
+        a.fact_key = Some(SLOT.to_string());
+        a.expires_at = Some(chrono::Utc::now() + chrono::Duration::hours(24));
+        let a_id = a.id;
+        let guard = handle.commit_mutex.clone().lock_owned().await;
+        let tail_a = tokio::spawn(tier_c::commit_and_mirror(handle.commit_ctx(), a, guard));
+
+        // Writer B goes through the real pipeline while A's commit is in
+        // flight. Its own commit must queue behind A's on the order guard.
+        handle
+            .remember_with_options_within(
+                "the second writer for the same slot".to_string(),
+                RoomType::General,
+                vec![],
+                0.5,
+                slot_opts(Some(SLOT)),
+                AMPLE,
+            )
+            .await
+            .expect("the second writer must land");
+        tail_a
+            .await
+            .expect("abandoned commit task")
+            .expect("the abandoned commit must still complete");
+
+        // Durable state is the one that matters: the in-memory table is
+        // rebuilt from these rows on the next open.
+        let rows = handle.kg.load_drawers().expect("load durable drawers");
+        assert_eq!(
+            claimants(&rows),
+            1,
+            "#6366: exactly one drawer may hold {SLOT} durably; found {:?}",
+            rows.iter()
+                .filter(|d| d.fact_key.is_some())
+                .map(|d| (d.id, d.content().to_string()))
+                .collect::<Vec<_>>()
+        );
+
+        let indexed = handle
+            .kg
+            .drawer_id_for_fact_key(SLOT)
+            .expect("index lookup")
+            .expect("the slot must still be occupied");
+        let live = rows
+            .iter()
+            .find(|d| d.fact_key.as_deref() == Some(SLOT))
+            .expect("one live claimant");
+        assert_eq!(
+            indexed, live.id,
+            "#6366: the index and the drawer rows must name the same claimant"
+        );
+
+        // The decisive assertion: A was abandoned by its caller, but its commit
+        // still mirrored, so B could see it and retire it. Without the order
+        // guard A is absent from the in-memory table when B reads, B takes the
+        // no-incumbent fallback, and A's row is still claiming the slot here.
+        let a_row = rows
+            .iter()
+            .find(|d| d.id == a_id)
+            .expect("the abandoned commit must be durable");
+        assert_eq!(
+            a_row.fact_key, None,
+            "#6366: the abandoned write must have been retired by the writer \
+             behind it, not left as a second claimant"
+        );
+        let incumbent_row = rows
+            .iter()
+            .find(|d| d.id == incumbent_id)
+            .expect("the incumbent row survives retirement (ADR-0028 D6)");
+        assert_eq!(
+            incumbent_row.fact_key, None,
+            "the original incumbent must have been retired too"
+        );
+
+        assert_eq!(
+            claimants(&handle.drawers.read()),
+            1,
+            "#6366: the in-memory mirror must agree with the durable rows"
+        );
+    }
+
+    /// Why (issue #6366, round 2): the ordering guarantee is what makes the
+    /// invariant above hold, so assert the mechanism directly rather than only
+    /// its consequence. A second writer's commit must not begin until an
+    /// abandoned commit has finished mirroring into the drawer table.
+    /// What: holds the order guard, starts a second writer, and asserts it has
+    /// NOT committed while the guard is held — then that it does once released.
+    /// Test: itself.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_second_writer_waits_for_an_abandoned_commit_to_mirror() {
+        let (_dir, handle) = palace().await;
+        let guard = handle.commit_mutex.clone().lock_owned().await;
+
+        let queued = {
+            let handle = handle.clone();
+            tokio::spawn(async move {
+                handle
+                    .remember_with_options_within(
+                        "queued behind the in-flight commit".to_string(),
+                        RoomType::General,
+                        vec![],
+                        0.5,
+                        opts(),
+                        AMPLE,
+                    )
+                    .await
+            })
+        };
+
+        // Give the queued writer every chance to run its pre-commit legs and
+        // reach the guard. It must still not have committed.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            handle.drawers.read().is_empty(),
+            "#6366: a writer must not commit while the order guard is held"
+        );
+
+        drop(guard);
+        queued
+            .await
+            .expect("queued writer task")
+            .expect("the queued write must land once the guard is released");
+        assert_eq!(handle.drawers.read().len(), 1);
+    }
+
     /// Why (issue #6366): the size guard reports `kg.redb` beside a slow or
     /// failed write. It must degrade quietly for a handle that has no data
     /// directory rather than failing the write it is describing.

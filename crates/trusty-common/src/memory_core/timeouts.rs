@@ -205,10 +205,58 @@ pub fn write_op_budget() -> Duration {
 /// Test: `write_pipeline_timeout_default`; its relationship to the embedder
 /// legs it contains is a `const` assertion beside `DEFAULT_WRITE_PIPELINE_SECS`.
 pub fn write_pipeline_timeout() -> Duration {
-    parse_secs_env(
+    let configured = parse_secs_env(
         "TRUSTY_WRITE_PIPELINE_TIMEOUT_SECS",
         DEFAULT_WRITE_PIPELINE_SECS,
-    )
+    );
+    let floored = floor_write_pipeline(configured);
+    if floored != configured {
+        tracing::warn!(
+            configured_secs = configured.as_secs(),
+            floor_secs = WRITE_PIPELINE_FLOOR_SECS,
+            applied_secs = floored.as_secs(),
+            "#6366: TRUSTY_WRITE_PIPELINE_TIMEOUT_SECS is below the embedder \
+             legs the write pipeline contains, so every cold write would fail \
+             the moment the embedder initialises. Clamped to the compiled-in \
+             default; raise the value above the floor to set it deliberately"
+        );
+    }
+    floored
+}
+
+/// The lowest write-pipeline ceiling that can still contain the embedder legs.
+///
+/// Why: the `const` assertion beside [`DEFAULT_WRITE_PIPELINE_SECS`] protects
+/// only the compiled-in default. `TRUSTY_WRITE_PIPELINE_TIMEOUT_SECS` bypasses
+/// it entirely, so `=0` (or any value under the legs' sum) silently failed
+/// every write on every palace with no signal but the per-write error.
+const WRITE_PIPELINE_FLOOR_SECS: u64 = DEFAULT_EMBEDDER_INIT_SECS + DEFAULT_EMBED_BATCH_SECS;
+
+/// The floor is a lower bound the default must itself satisfy, or clamping
+/// would raise a correctly-configured value.
+const _: () = assert!(
+    DEFAULT_WRITE_PIPELINE_SECS > WRITE_PIPELINE_FLOOR_SECS,
+    "the compiled-in default must clear the floor it is clamped to (#6366)"
+);
+
+/// Clamp a configured write-pipeline ceiling up to the embedder legs it must
+/// contain (#6366).
+///
+/// Why: split out as a pure function so the clamp is testable without env
+/// mutation, matching how [`parse_secs_with`] separates parsing from lookup.
+/// What: returns `configured` when it strictly exceeds
+/// [`WRITE_PIPELINE_FLOOR_SECS`]; otherwise returns
+/// [`DEFAULT_WRITE_PIPELINE_SECS`] — the compiled-in value the `const`
+/// assertions already prove sound, rather than the bare floor.
+/// Test: `a_zero_pipeline_override_is_clamped_to_the_default`,
+/// `an_override_below_the_embedder_legs_is_clamped`,
+/// `an_override_above_the_floor_is_honoured`.
+pub fn floor_write_pipeline(configured: Duration) -> Duration {
+    if configured > Duration::from_secs(WRITE_PIPELINE_FLOOR_SECS) {
+        configured
+    } else {
+        Duration::from_secs(DEFAULT_WRITE_PIPELINE_SECS)
+    }
 }
 
 /// Return the elapsed time above which a completed write is logged as slow.
@@ -497,6 +545,58 @@ mod tests {
         unsafe { std::env::remove_var("TRUSTY_WRITE_PIPELINE_TIMEOUT_SECS") };
         let t = write_pipeline_timeout();
         assert_eq!(t, Duration::from_secs(DEFAULT_WRITE_PIPELINE_SECS));
+    }
+
+    /// Why (issue #6366): `TRUSTY_WRITE_PIPELINE_TIMEOUT_SECS=0` parsed to
+    /// `Duration::ZERO` and was honoured, so `remember_within`'s zero-budget
+    /// rejection failed EVERY write on EVERY palace with nothing at startup
+    /// saying why. The `const` assertion beside `DEFAULT_WRITE_PIPELINE_SECS`
+    /// never saw the override.
+    /// What: clamps zero up to the compiled-in default.
+    /// Test: itself.
+    #[test]
+    fn a_zero_pipeline_override_is_clamped_to_the_default() {
+        assert_eq!(
+            floor_write_pipeline(Duration::ZERO),
+            Duration::from_secs(DEFAULT_WRITE_PIPELINE_SECS)
+        );
+    }
+
+    /// Why (issue #6366): a value below the embedder legs is the less obvious
+    /// half of the same defect — a cold CoreML compile alone can take 180 s, so
+    /// any ceiling under the legs' sum fails cold writes on a healthy host.
+    /// What: a value just under the floor clamps; the floor itself clamps too,
+    /// mirroring the strict `>` the const assertions use.
+    /// Test: itself.
+    #[test]
+    fn an_override_below_the_embedder_legs_is_clamped() {
+        let default = Duration::from_secs(DEFAULT_WRITE_PIPELINE_SECS);
+        assert_eq!(floor_write_pipeline(Duration::from_secs(1)), default);
+        assert_eq!(
+            floor_write_pipeline(Duration::from_secs(WRITE_PIPELINE_FLOOR_SECS - 1)),
+            default
+        );
+        assert_eq!(
+            floor_write_pipeline(Duration::from_secs(WRITE_PIPELINE_FLOOR_SECS)),
+            default
+        );
+    }
+
+    /// Why (issue #6366): the clamp must not quietly overrule an operator who
+    /// raised or lowered the ceiling deliberately but legitimately — otherwise
+    /// the knob the error message advertises would not work.
+    /// What: values above the floor pass through untouched, in both directions
+    /// relative to the default.
+    /// Test: itself.
+    #[test]
+    fn an_override_above_the_floor_is_honoured() {
+        for secs in [WRITE_PIPELINE_FLOOR_SECS + 1, 600, 3600] {
+            assert_eq!(
+                floor_write_pipeline(Duration::from_secs(secs)),
+                Duration::from_secs(secs),
+                "a {secs}s ceiling clears the floor and must be honoured"
+            );
+        }
     }
 
     /// Why (issue #6366): Guard that the slow-write warning defaults to 5 s.

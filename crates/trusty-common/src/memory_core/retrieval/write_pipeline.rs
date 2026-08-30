@@ -20,13 +20,26 @@
 //! hypothesised is visible in `stderr.log` before the ceiling is ever reached.
 //!
 //! Cancellation contract: the timeout can only drop the pipeline at an await
-//! point, and the drawer becomes durable at exactly one of them
-//! (`tier_c::persist_with_retirement`). A write cancelled before it leaves at
-//! most an orphaned vector, which `palace_compact` reclaims; a write cancelled
-//! while that commit is in flight may still land in redb, in which case the
-//! drawer is absent from the in-memory table until the palace is next opened
-//! and re-hydrates from redb. Neither loses data, and both are preferable to
-//! holding the palace's write mutex indefinitely.
+//! point, and the drawer becomes durable inside `tier_c::commit_and_mirror`.
+//! Three regions, with different outcomes:
+//!
+//! 1. Cancelled BEFORE the commit-order guard is taken — nothing was
+//!    dispatched. At most an orphaned vector, which `palace_compact` reclaims.
+//! 2. Cancelled WAITING for that guard — same as (1). The guard is acquired
+//!    inside the budget precisely so this case aborts clean.
+//! 3. Cancelled AFTER it — the commit runs to completion in a task the timeout
+//!    does not own, because dropping a future cancels neither a
+//!    `spawn_blocking` redb transaction nor an op already queued to the KG
+//!    writer actor. The caller still gets the over-budget error, but the write
+//!    lands: in redb and in the in-memory drawer table together, with the
+//!    Tier C retirement invariant intact, because the guard is held across
+//!    both and released only after the mirror.
+//!
+//! What (3) costs: the caller is told the write failed while it in fact landed,
+//! and the legs after the commit — the deferred-embed spawn, the L1 snapshot,
+//! the closet rebuild — are skipped. All three are caches the next write, the
+//! next dream cycle, or `palace_embed_sweep` rebuild. No data is lost, and none
+//! of it justifies holding the palace's write mutex indefinitely.
 //!
 //! Test: `write_pipeline_tests`.
 
@@ -315,21 +328,33 @@ async fn run_pipeline(
     // Persist drawer metadata BEFORE the in-memory push so a crash mid-op
     // cannot leave an in-memory drawer with no redb record backing it.
     // #4886: when this drawer claims a `fact_key`, the same call retires
-    // the slot's prior occupant in the SAME redb transaction — the
-    // read-decide-write sequence runs entirely under the write guard taken
-    // above, so no concurrent writer on this palace can interleave with it.
-    let retired = tier_c::persist_with_retirement(handle, &drawer)
-        .await
-        .context("persist drawer metadata")?;
-
-    {
-        let mut drawers = handle.drawers.write();
-        // #4886: mirror the retirement under the SAME lock as the push, so
-        // a reader never sees the newcomer present while the displaced
-        // drawer still claims the slot.
-        tier_c::retire_in_memory(&mut drawers, retired);
-        drawers.push(drawer);
-    }
+    // the slot's prior occupant in the SAME redb transaction.
+    //
+    // #6366: the commit and its in-memory mirror are ONE indivisible step, for
+    // the reason `tier_c::commit_and_mirror` documents — a dropped future does
+    // not stop a `spawn_blocking` redb transaction or an op already queued to
+    // the KG writer actor, so splitting them let the next writer read a moved
+    // index against an unmirrored drawer table and leave two claimants on one
+    // `fact_key`. Two things keep that unreachable:
+    //
+    //   1. The commit-order guard is taken HERE, while still inside the
+    //      caller's budget. A write that exhausts its budget waiting for it has
+    //      dispatched nothing, so it aborts cleanly with no durable trace.
+    //   2. Once taken, the guard and the commit move into a `tokio::spawn`ed
+    //      task. The caller's timeout can drop the JoinHandle, but not the
+    //      task — so an abandoned commit still lands in redb AND in
+    //      `handle.drawers`, and still holds the guard until both are done.
+    //
+    // The guard is deliberately NOT the write mutex: that one must release on
+    // timeout (it is what unblocks the queue), and this one must not.
+    let order = handle.commit_mutex.clone().lock_owned().await;
+    tokio::spawn(tier_c::commit_and_mirror(
+        handle.commit_ctx(),
+        drawer,
+        order,
+    ))
+    .await
+    .context("write pipeline commit task join")??;
 
     // #4906: spawn the background embed only now. The drawer is in redb and
     // in the in-memory table, so a failure arriving at any point from here
