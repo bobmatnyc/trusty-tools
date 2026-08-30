@@ -472,6 +472,11 @@ fn bounded_python_check_classifies_timeout_apart_from_failure() {
     );
 }
 
+// #5328: the transient-vs-permanent spawn classification and the
+// spawn-retry policy that consumes it moved to their own module
+// (`spawn_retry.rs`, tested in `spawn_retry_tests.rs`) so `bootstrap.rs`
+// stayed under the 500-SLOC production cap.
+
 /// Why (#4125): a single fixed budget under variable startup load is wrong
 /// again the moment the load changes, so an over-budget first attempt must buy
 /// a second, larger one rather than a verdict.
