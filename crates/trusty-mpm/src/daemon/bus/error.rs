@@ -36,7 +36,15 @@ use crate::daemon::error::{CODE_CONFLICT, CODE_FORBIDDEN, CODE_GONE, CODE_NOT_FO
 /// What: five addressing/delivery/registration variants plus the
 /// sender-verification and request-validation ones.
 /// Test: `bus_error_status_codes_map`, `instance_gone_is_410`.
+///
+/// `#[non_exhaustive]` since #6462: this change removes a variant from an enum
+/// that is public through `pub mod daemon` -> `pub mod bus`, and the next
+/// delivery failure DOC-60 grows will add one. Marking it now means a
+/// downstream `match` cannot be broken by either, and `preflight-publish.sh`
+/// CHECK 5 has one fewer break to weigh at every future release. In-crate
+/// matches are unaffected, so `status` stays exhaustive.
 #[derive(Debug, Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BusError {
     /// Definition-addressed delivery found no live instance (DOC-60 §5.3).
     ///

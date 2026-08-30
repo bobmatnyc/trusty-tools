@@ -346,9 +346,9 @@ pub const LAGGED_EVENT: &str = "lagged";
 /// happened, how many envelopes it missed, where to read them, and under which
 /// key. The durable §9 JSONL stream holds every envelope the bus recorded as
 /// delivered plus, since #6462, one
-/// [`InboxEviction`](crate::daemon::bus::InboxEviction) per envelope this
-/// subscription lost, keyed by `subscription_id` — so naming the path and the
-/// id makes the recovery a file read rather than a lost message.
+/// [`InboxMiss`](crate::daemon::bus::InboxMiss) per envelope this subscription
+/// lost, keyed by `subscription_id` — so naming the path and the id makes the
+/// recovery a file read rather than a lost message.
 /// What: the instance, the subscription, the count its inbox displaced, and the
 /// durable log's resolved path.
 /// Test: `subscribe_stream_reports_lag_instead_of_swallowing_it`.

@@ -80,18 +80,16 @@ fn read_log(bus: &PeerBus) -> Vec<BusEnvelope> {
     read_lines(bus)
         .into_iter()
         .filter(|v| v.get("record").is_none())
-        .map(|v| {
-            serde_json::from_value(v).expect("every non-eviction line must parse as an envelope")
-        })
+        .map(|v| serde_json::from_value(v).expect("every non-miss line must parse as an envelope"))
         .collect()
 }
 
-/// Read every per-client eviction record (#6462) from the same stream.
-fn read_evictions(bus: &PeerBus) -> Vec<InboxEviction> {
+/// Read every per-client miss record (#6462) from the same stream.
+fn read_misses(bus: &PeerBus) -> Vec<InboxMiss> {
     read_lines(bus)
         .into_iter()
-        .filter(|v| v.get("record").and_then(|r| r.as_str()) == Some(INBOX_EVICTION_RECORD))
-        .map(|v| serde_json::from_value(v).expect("an eviction line must parse as one"))
+        .filter(|v| v.get("record").and_then(|r| r.as_str()) == Some(INBOX_MISS_RECORD))
+        .map(|v| serde_json::from_value(v).expect("a miss line must parse as one"))
         .collect()
 }
 
@@ -781,8 +779,8 @@ fn delivered_ids(bus: &PeerBus) -> Vec<String> {
 }
 
 /// Every `message_id` the log records as evicted from `subscription_id`.
-fn evicted_ids(bus: &PeerBus, subscription_id: u64) -> Vec<String> {
-    read_evictions(bus)
+fn missed_ids(bus: &PeerBus, subscription_id: u64) -> Vec<String> {
+    read_misses(bus)
         .into_iter()
         .filter(|e| e.subscription_id == subscription_id)
         .map(|e| e.message_id)
@@ -833,11 +831,11 @@ fn delivered_records_account_for_everything_a_stalled_subscriber_lost() {
         "the reader must be told about every envelope its inbox displaced"
     );
 
-    let mut accounted = evicted_ids(&bus, stalled.subscription_id());
+    let mut accounted = missed_ids(&bus, stalled.subscription_id());
     assert_eq!(
         accounted.len(),
         overflow,
-        "the durable log must carry one eviction record per displaced envelope"
+        "the durable log must carry one miss record per displaced envelope"
     );
     accounted.extend(received);
     accounted.sort();
@@ -852,7 +850,7 @@ fn delivered_records_account_for_everything_a_stalled_subscriber_lost() {
 
 #[test]
 fn eviction_is_recorded_per_client_in_the_durable_log() {
-    // The other half of the contract: an eviction is a fact about ONE
+    // The other half of the contract: a miss is a fact about ONE
     // subscription, not a delivery failure, so it is recorded as its own record
     // naming that subscription rather than as a second `delivery_state` on an
     // envelope other clients may well have read.
@@ -882,20 +880,26 @@ fn eviction_is_recorded_per_client_in_the_durable_log() {
         "no publish is refused by a slow subscriber any more (#6462)"
     );
 
-    let evictions = read_evictions(&bus);
-    assert_eq!(evictions.len(), overflow);
+    let misses = read_misses(&bus);
+    assert_eq!(misses.len(), overflow);
     assert_eq!(stalled.evicted_total(), overflow as u64);
-    for (n, eviction) in evictions.iter().enumerate() {
-        assert_eq!(eviction.instance_id, target.instance_id);
-        assert_eq!(eviction.subscription_id, stalled.subscription_id());
+    for (n, miss) in misses.iter().enumerate() {
+        assert_eq!(miss.instance_id, target.instance_id);
+        assert_eq!(miss.subscription_id, stalled.subscription_id());
         assert_eq!(
-            eviction.missed_total,
+            miss.reason,
+            MissReason::Displaced,
+            "a full inbox displaces; that is not the same loss as a closed \
+             subscription"
+        );
+        assert_eq!(
+            miss.missed_total,
             n as u64 + 1,
             "the running loss count must let a reader tell how far behind this \
              client was at each point"
         );
     }
-    let displaced: Vec<&String> = evictions.iter().map(|e| &e.message_id).collect();
+    let displaced: Vec<&String> = misses.iter().map(|m| &m.message_id).collect();
     let oldest: Vec<&String> = envelopes
         .iter()
         .take(overflow)
@@ -909,9 +913,9 @@ fn eviction_is_recorded_per_client_in_the_durable_log() {
 }
 
 #[test]
-fn eviction_records_are_distinguishable_from_envelopes() {
+fn miss_records_are_distinguishable_from_envelopes() {
     // A §9 reader must be able to tell the two record shapes apart from the
-    // line alone. An envelope has no `record` key; an eviction always does.
+    // line alone. An envelope has no `record` key; a miss line always does.
     let (_dir, bus) = bus();
     let target = bus.registry().register("cto-assistant", None).unwrap();
     let _stalled = bus.subscribe(&target.instance_id).unwrap();
@@ -929,7 +933,12 @@ fn eviction_records_are_distinguishable_from_envelopes() {
     let tagged: Vec<&serde_json::Value> =
         lines.iter().filter(|v| v.get("record").is_some()).collect();
     assert_eq!(tagged.len(), 1);
-    assert_eq!(tagged[0]["record"], INBOX_EVICTION_RECORD);
+    assert_eq!(tagged[0]["record"], INBOX_MISS_RECORD);
+    assert_eq!(
+        tagged[0]["reason"], "displaced",
+        "a miss line must say WHY, so a reader can tell a slow client from a \
+         deregistered one"
+    );
     assert!(
         lines
             .iter()
@@ -1057,7 +1066,7 @@ async fn a_wedged_client_does_not_refuse_publishes_for_a_healthy_co_subscriber()
     let (late, missed) = drain(&wedged);
     assert_eq!(late.len(), CLIENT_INBOX_CAPACITY);
     assert_eq!(missed, (ROUNDS - CLIENT_INBOX_CAPACITY) as u64);
-    let mut accounted = evicted_ids(&bus, wedged.subscription_id());
+    let mut accounted = missed_ids(&bus, wedged.subscription_id());
     accounted.extend(late);
     accounted.sort();
     let mut delivered = delivered_ids(&bus);
@@ -1149,7 +1158,7 @@ async fn two_subscribers_one_lagging_account_exactly() {
         "and it keeps the most recent traffic, in order"
     );
     assert_eq!(
-        evicted_ids(&bus, lagging.subscription_id()),
+        missed_ids(&bus, lagging.subscription_id()),
         accepted[..ROUNDS - CLIENT_INBOX_CAPACITY].to_vec(),
         "the log names exactly the envelopes it lost, oldest first"
     );
@@ -1169,7 +1178,7 @@ fn concurrent_publishers_lose_nothing_without_a_record() {
     // now — so the invariant is restated where it still bites: whatever order
     // the publishers won the fan-out lock in, a stalled client's reads plus its
     // recorded losses must equal the delivered set exactly. One unrecorded
-    // eviction breaks it, and so does one eviction record for an envelope that
+    // unrecorded loss breaks it, and so does one miss record for an envelope that
     // was never displaced.
     //
     // Threads rather than tasks, and far more publishes than one inbox can
@@ -1226,7 +1235,7 @@ fn concurrent_publishers_lose_nothing_without_a_record() {
         "the reader must be told the exact size of its own gap"
     );
 
-    let mut accounted = evicted_ids(&bus, stalled.subscription_id());
+    let mut accounted = missed_ids(&bus, stalled.subscription_id());
     accounted.extend(received);
     accounted.sort();
     let mut delivered = delivered_ids(&bus);
@@ -1308,6 +1317,240 @@ async fn deregister_ends_a_subscription_after_it_drains() {
     assert!(
         subscription.recv().await.is_none(),
         "and then the stream ends rather than hanging"
+    );
+}
+
+// ── the closed-subscription fail-open (#6462 review, CRITICAL) ───────────────
+
+/// Build one envelope addressed at `target`, for tests that drive
+/// [`LiveInstance::deliver`] directly.
+///
+/// Why direct rather than through `publish`: the race under test is INSIDE
+/// `publish` — it resolves the instance, the instance is deregistered, then it
+/// delivers through the clone it already holds. Driving `deliver` on that clone
+/// reproduces the interleaving deterministically, where a threaded version
+/// would only hit it sometimes.
+fn envelope_for(from: CallerIdentity, target: &InstanceMeta, text: &str) -> BusEnvelope {
+    BusEnvelope::new(
+        BusEdge::AssistantAssistant,
+        from,
+        Recipient {
+            instance_id: Some(target.instance_id.clone()),
+            definition_id: Some(target.definition_id.clone()),
+        },
+        chat(text),
+        None,
+        DeliveryState::Delivered,
+    )
+}
+
+#[test]
+fn a_publish_racing_deregistration_is_not_recorded_delivered() {
+    // #6462 review, CRITICAL. `close` marks a subscription closed but leaves
+    // its inbox in the set — only `InboxSubscription::drop` removes it — so a
+    // publisher holding a `LiveInstance` clone resolved a moment before the
+    // deregister saw a non-empty set and a "nothing displaced" answer from
+    // every closed inbox. The outcome was `Delivered { evicted: [] }`, so the
+    // §9 log got a `delivered` record and the sender a `202` for an envelope
+    // NO inbox held, with no record naming the loss: #4271's exact shape
+    // through a new door, reachable by an ordinary publish racing an agent
+    // shutdown. Against the pre-fix source this asserted
+    // `left: Delivered { evicted: [] }, right: NoSubscriber`.
+    let (_dir, bus) = bus();
+    let target = bus.registry().register("cto-assistant", None).unwrap();
+    let sender = registered_sender(&bus, "izzie");
+    let _subscription = bus.subscribe(&target.instance_id).unwrap();
+    let stale = bus
+        .registry()
+        .resolve_instance(&target.instance_id)
+        .unwrap();
+    assert!(bus.registry().deregister(&target.instance_id));
+
+    assert_eq!(
+        stale.deliver(envelope_for(sender, &target, "racing the shutdown")),
+        DeliveryOutcome::NoSubscriber,
+        "no inbox took the envelope, so nothing may report a delivery"
+    );
+}
+
+#[test]
+fn a_publish_racing_deregistration_records_the_closed_subscriptions_miss() {
+    // The partial case the same defect produces more quietly: one subscription
+    // closed, one open. The open one takes the envelope, so the publish IS a
+    // delivery — but the closed one loses it, and that loss needs a record with
+    // its own reason, or the `delivered` line over-claims for that client.
+    let (_dir, bus) = bus();
+    let target = bus.registry().register("cto-assistant", None).unwrap();
+    let sender = registered_sender(&bus, "izzie");
+    let closing = bus.subscribe(&target.instance_id).unwrap();
+    let stale = bus
+        .registry()
+        .resolve_instance(&target.instance_id)
+        .unwrap();
+    assert!(bus.registry().deregister(&target.instance_id));
+    // A second subscription attached through the same stale clone: open, in the
+    // same set as the closed one. Only an in-crate holder of a stale clone can
+    // reach this state, which is exactly what makes it worth pinning.
+    let open = stale.subscribe();
+
+    let envelope = envelope_for(sender, &target, "one takes it, one cannot");
+    let message_id = envelope.message_id.clone();
+    let DeliveryOutcome::Delivered { missed } = stale.deliver(envelope) else {
+        panic!("the open subscription took it, so this is a delivery");
+    };
+
+    assert_eq!(missed.len(), 1, "exactly the closed subscription lost it");
+    assert_eq!(missed[0].subscription_id, closing.subscription_id());
+    assert_eq!(missed[0].reason, MissReason::SubscriptionClosed);
+    assert_eq!(
+        missed[0].envelope.message_id, message_id,
+        "a closed subscription loses THIS envelope, not a displaced older one"
+    );
+    assert!(
+        matches!(next_envelope(&open), Some(e) if e.message_id == message_id),
+        "and the open subscription holds it"
+    );
+}
+
+// ── fan-out ordering (#6462 review, MEDIUM) ──────────────────────────────────
+
+#[test]
+fn concurrent_publishers_deliver_one_order_to_every_client() {
+    // The fan-out lock's documented purpose, made falsifiable. Every doc that
+    // cites it says the lock is what stops two publishers handing two clients
+    // the same two envelopes in opposite orders — but the accounting tests
+    // either sort before comparing or use one publisher, so releasing the lock
+    // between inboxes failed none of them.
+    //
+    // Here both clients are drained only at the end and neither can lag
+    // (CLIENT_INBOX_CAPACITY is not reached), so each holds the complete
+    // sequence in fan-out order. If the fan-out were not atomic across inboxes,
+    // publisher A could reach client 1 between publisher B's two inbox writes
+    // and the two sequences would diverge. Unsorted, deliberately: sorting is
+    // what blinded the other tests to this.
+    const PUBLISHERS: usize = 4;
+    const PER_PUBLISHER: usize = CLIENT_INBOX_CAPACITY / 8;
+
+    let (_dir, bus) = bus();
+    let bus = Arc::new(bus);
+    let target = bus.registry().register("cto-assistant", None).unwrap();
+    let first = bus.subscribe(&target.instance_id).unwrap();
+    let second = bus.subscribe(&target.instance_id).unwrap();
+
+    std::thread::scope(|scope| {
+        for p in 0..PUBLISHERS {
+            let bus = Arc::clone(&bus);
+            let instance_id = target.instance_id.clone();
+            scope.spawn(move || {
+                let sender = registered_sender(&bus, &format!("izzie{p}"));
+                for i in 0..PER_PUBLISHER {
+                    bus.publish(
+                        sender.clone(),
+                        &PeerTarget::Instance(instance_id.clone()),
+                        chat(&format!("p{p} n{i}")),
+                        None,
+                    )
+                    .expect("no publish may be refused");
+                }
+            });
+        }
+    });
+
+    let (first_seen, first_missed) = drain(&first);
+    let (second_seen, second_missed) = drain(&second);
+    assert_eq!(first_missed, 0, "neither client may lag in this test");
+    assert_eq!(second_missed, 0);
+    assert_eq!(first_seen.len(), PUBLISHERS * PER_PUBLISHER);
+    assert_eq!(
+        first_seen, second_seen,
+        "both clients must observe ONE order; a divergence means the fan-out \
+         was interleaved and the lock is not doing what its doc claims"
+    );
+}
+
+// ── the durable write can fail, and the log must not over-claim ──────────────
+
+#[test]
+fn a_fully_recorded_delivery_serializes_as_a_bare_envelope() {
+    // The `losses_unrecorded` marker must cost nothing when it does not apply:
+    // a delivery whose losses were all recorded has to serialize byte-identical
+    // to the envelope itself, or every existing §9 reader and DOC-60 §11's
+    // field list would change for a case that never happened.
+    let envelope = BusEnvelope::new(
+        BusEdge::AssistantAssistant,
+        peer_caller("izzie~a1", "izzie"),
+        Recipient {
+            instance_id: Some("cto-assistant~b1".into()),
+            definition_id: Some("cto-assistant".into()),
+        },
+        chat("hi"),
+        None,
+        DeliveryState::Delivered,
+    );
+    assert_eq!(
+        serde_json::to_string(&EnvelopeRecord::new(&envelope, false)).unwrap(),
+        serde_json::to_string(&envelope).unwrap(),
+        "the marker must be absent unless a loss record failed to write"
+    );
+
+    let marked = serde_json::to_value(EnvelopeRecord::new(&envelope, true)).unwrap();
+    assert_eq!(marked["losses_unrecorded"], true);
+    assert_eq!(
+        marked["message_id"], envelope.message_id,
+        "and the marked form is still a readable envelope"
+    );
+}
+
+#[test]
+fn an_unwritable_log_never_reports_a_clean_delivery() {
+    // #6462 review, HIGH: "nothing is lost without a record" rested on
+    // `log_record`, which swallows every IO error by DOC-60 §9's
+    // never-fail-the-hot-path design. A loss record that failed to write, then
+    // an envelope record that succeeded, would leave a clean `delivered` line
+    // with nothing explaining the gap — #4271 produced by an IO failure rather
+    // than a logic bug.
+    //
+    // The sink is made unwritable by putting a FILE where the stream's
+    // directory belongs, so `create_dir_all` fails on every write. Two things
+    // must hold: the hot path still succeeds (the envelope really did reach the
+    // clients that took it), and nothing over-claims — here by writing nothing
+    // at all, which under-claims and is the safe direction.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("bus"), b"not a directory").unwrap();
+    let bus = PeerBus::new(dir.path());
+
+    let target = bus.registry().register("cto-assistant", None).unwrap();
+    let sender = registered_sender(&bus, "izzie");
+    let stalled = bus.subscribe(&target.instance_id).unwrap();
+
+    // Past the inbox's depth, so every publish after the first
+    // CLIENT_INBOX_CAPACITY produces a loss record that cannot be written.
+    for i in 0..(CLIENT_INBOX_CAPACITY + 4) {
+        bus.publish(
+            sender.clone(),
+            &PeerTarget::Instance(target.instance_id.clone()),
+            chat(&format!("burst {i}")),
+            None,
+        )
+        .expect("a failed durability write must never fail the publish");
+    }
+
+    assert_eq!(
+        stalled.evicted_total(),
+        4,
+        "the losses happened whether or not they could be recorded"
+    );
+    assert!(
+        read_lines(&bus).is_empty(),
+        "an unwritable stream holds no records at all — it must never hold a \
+         `delivered` line whose losses it could not enumerate"
+    );
+
+    // And `try_log_record` is what makes that observable to the publisher,
+    // where `log_record` would have hidden it.
+    assert!(
+        bus.log_path().parent().is_some_and(|p| p.is_file()),
+        "the sink really is unwritable in this test"
     );
 }
 
@@ -1907,7 +2150,7 @@ async fn route_subscribe_to_dead_instance_is_410() {
 async fn subscribe_stream_reports_lag_instead_of_swallowing_it() {
     // #4271, the SSE half: a lagged subscriber used to be mapped to `None` —
     // the frames vanished and the recipient was told nothing. It gets a named
-    // `lagged` frame carrying the count, the subscription id its eviction
+    // `lagged` frame carrying the count, the subscription id its miss
     // records are keyed under, and where to re-read from.
     //
     // Since #6462 the lag is produced by the ordinary publish path: the SSE
@@ -1967,7 +2210,7 @@ async fn subscribe_stream_reports_lag_instead_of_swallowing_it() {
     );
     assert!(
         text.contains("\"subscription_id\":"),
-        "the notice must name the subscription its eviction records are keyed \
+        "the notice must name the subscription its miss records are keyed \
          under, got: {text}"
     );
     assert!(
@@ -1982,7 +2225,7 @@ async fn route_publish_past_a_stalled_subscriber_is_accepted() {
     // `route_publish_to_a_saturated_instance_is_503`. That test filled the
     // shared ring through a stalled subscriber and asserted the endpoint then
     // answered `503` to everyone. The endpoint now answers `202` well past the
-    // stalled client's depth, and the §9 log carries one eviction record per
+    // stalled client's depth, and the §9 log carries one miss record per
     // envelope that client lost — the same evidence, moved off the publisher.
     let (_dir, state) = test_state();
     let target = state
@@ -2018,11 +2261,12 @@ async fn route_publish_past_a_stalled_subscriber_is_accepted() {
         overflow as u64,
         "the stalled client absorbs its own backlog"
     );
-    let evictions = read_evictions(state.bus());
-    assert_eq!(evictions.len(), overflow);
+    let misses = read_misses(state.bus());
+    assert_eq!(misses.len(), overflow);
     assert!(
-        evictions.iter().all(|e| e.instance_id == target.instance_id
-            && e.subscription_id == stalled.subscription_id()),
-        "every eviction record must name the client that lost the envelope"
+        misses.iter().all(|m| m.instance_id == target.instance_id
+            && m.subscription_id == stalled.subscription_id()
+            && m.reason == MissReason::Displaced),
+        "every miss record must name the client that lost the envelope"
     );
 }

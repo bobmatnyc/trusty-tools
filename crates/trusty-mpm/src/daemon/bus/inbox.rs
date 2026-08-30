@@ -8,12 +8,13 @@
 //! included, for as long as it stayed attached. Owner ruling on #6462: bound
 //! that. Giving each subscription its own buffer moves the delivery boundary
 //! from the instance to the client, so a stalled client's backlog is its own
-//! problem and costs the instance a fixed [`CLIENT_INBOX_CAPACITY`] envelopes
-//! of memory rather than its availability.
+//! problem and costs the instance memory rather than its availability. What it
+//! costs exactly is stated below — bounded in the availability sense that
+//! matters, but neither zero nor always self-limiting.
 //! What: [`ClientInbox`], one bounded queue per subscription; [`InboxSet`],
 //! the per-instance fan-out that owns them; [`InboxSubscription`], the reader
-//! handle that detaches on drop; and [`InboxEviction`], the §9 record that
-//! keeps an eviction from becoming a silent loss.
+//! handle that detaches on drop; and [`InboxMiss`], the §9 record that keeps a
+//! loss from being a silent one.
 //! Test: `bus::tests` — `a_wedged_client_does_not_refuse_publishes_for_a_healthy_co_subscriber`,
 //! `eviction_is_recorded_per_client_in_the_durable_log`,
 //! `concurrent_publishers_lose_nothing_without_a_record`,
@@ -43,8 +44,34 @@
 //! Recovery is unchanged from #6461 and is what makes eviction survivable: the
 //! §9 JSONL stream holds every envelope, so a client that sees a `lagged` frame
 //! re-reads the log from its last known `message_id`. The frame names the log's
-//! path and the subscription id, which is the key its [`InboxEviction`] records
-//! are written under.
+//! path and the subscription id, which is the key its [`InboxMiss`] records are
+//! written under.
+//!
+//! ## What a permanently wedged client actually costs
+//!
+//! A client that stops reading and then goes away costs nothing:
+//! [`InboxSubscription::drop`] detaches its inbox and frees what it never read.
+//!
+//! A client that stops reading and STAYS is the case #6462 was opened for, and
+//! its cost is ongoing. When an SSE peer's TCP window fills, hyper stops
+//! polling the response body but does not drop the future, so the subscription
+//! is never dropped and `Drop` never runs. From then on the instance carries
+//! that client's [`CLIENT_INBOX_CAPACITY`]-envelope buffer AND pays, on every
+//! subsequent publish to that instance, one [`InboxMiss`] line in the durable
+//! §9 stream plus one `warn!` — durable-log growth and log volume proportional
+//! to publish rate, for as long as the wedged client stays attached. That is
+//! deliberate: the alternative levers (a reaper, an idle timer, a cap on
+//! subscriptions) are the policy call #6462's review promoted to the owner,
+//! not decisions this change makes.
+//!
+//! **The operator's lever is deregistering the instance**
+//! (`DELETE /api/v1/bus/instances/{instance_id}`), which closes every
+//! subscription and stops the fan-out. The `warn!` names the instance and the
+//! subscription on every miss, so a wedged client is identifiable from the
+//! daemon log without a new diagnostic.
+//!
+//! What is gone either way is the AVAILABILITY cost: no publisher is refused
+//! and no co-subscriber is slowed, however long the wedge lasts.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -69,14 +96,14 @@ use super::envelope::BusEnvelope;
 /// Test: `eviction_is_recorded_per_client_in_the_durable_log`.
 pub const CLIENT_INBOX_CAPACITY: usize = 64;
 
-/// The `record` discriminator on an [`InboxEviction`] line in the §9 stream.
+/// The `record` discriminator on an [`InboxMiss`] line in the §9 stream.
 ///
 /// Why: the durable stream now carries two record shapes. A reader that
 /// deserializes every line as a [`BusEnvelope`] must be able to tell them apart
 /// without guessing, and an envelope record has no `record` field at all — so
 /// presence of this key IS the discriminator.
-/// Test: `eviction_records_are_distinguishable_from_envelopes`.
-pub const INBOX_EVICTION_RECORD: &str = "inbox_eviction";
+/// Test: `miss_records_are_distinguishable_from_envelopes`.
+pub const INBOX_MISS_RECORD: &str = "inbox_miss";
 
 /// What one read from an inbox yields.
 ///
@@ -96,17 +123,40 @@ pub enum InboxItem {
     Lagged(u64),
 }
 
-/// One envelope displaced unread, with everything its §9 record needs.
+/// Why one subscription did not end up holding an envelope.
 ///
-/// Why: the eviction happens inside the fan-out, under the instance's lock,
-/// but the durable write belongs to
-/// [`PeerBus::publish`](super::PeerBus::publish) — which owns the logger and
-/// the ordering. Handing the facts out as a value keeps the IO out of the
-/// guarded section without losing what was lost.
-/// What: the displaced envelope plus the subscription it was displaced from.
+/// Why two reasons and not one: they have different operator meanings and
+/// different recoveries. A displacement says the client is behind and should
+/// re-read the log; a closed subscription says its instance was deregistered
+/// out from under an in-flight publish, and there is nothing for that client to
+/// come back to. Collapsing them would put "you are behind" and "you are gone"
+/// under one word.
+/// What: the two ways an inbox can fail to end up holding an envelope.
+/// Test: `eviction_is_recorded_per_client_in_the_durable_log`,
+/// `a_publish_racing_deregistration_records_the_closed_subscriptions_miss`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MissReason {
+    /// The inbox was full, so its OLDEST unread envelope was displaced to make
+    /// room for this one. The record's `message_id` names the DISPLACED
+    /// envelope, not the one that arrived.
+    Displaced,
+    /// The subscription was closed by a deregistration before this envelope
+    /// reached it, so it took nothing. The record's `message_id` names the
+    /// envelope that arrived.
+    SubscriptionClosed,
+}
+
+/// One envelope one subscription will never read, with its §9 record's facts.
+///
+/// Why: the miss happens inside the fan-out, under the instance's lock, but the
+/// durable write belongs to [`PeerBus::publish`](super::PeerBus::publish) —
+/// which owns the logger and the ordering. Handing the facts out as a value
+/// keeps the IO out of the guarded section without losing what was lost.
+/// What: the lost envelope, the subscription that lost it, and why.
 /// Test: `eviction_is_recorded_per_client_in_the_durable_log`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvictedEnvelope {
+pub struct MissedEnvelope {
     /// The instance whose subscriber lost it.
     pub instance_id: String,
     /// Which of that instance's subscriptions lost it.
@@ -114,55 +164,61 @@ pub struct EvictedEnvelope {
     /// How many envelopes that subscription has lost in total, this one
     /// included.
     pub missed_total: u64,
-    /// The envelope itself — the §9 log already holds it as `delivered`, and
-    /// this is what says that record is no longer the whole truth.
+    /// Why it was lost.
+    pub reason: MissReason,
+    /// The envelope itself — the §9 log records this publish as `delivered`,
+    /// and this is what says that record is not the whole truth for this one
+    /// client.
     pub envelope: BusEnvelope,
 }
 
-impl EvictedEnvelope {
-    /// The §9 record for this eviction.
+impl MissedEnvelope {
+    /// The §9 record for this miss.
     ///
     /// Test: `eviction_is_recorded_per_client_in_the_durable_log`.
-    pub fn record(&self) -> InboxEviction {
-        InboxEviction {
-            record: INBOX_EVICTION_RECORD.to_string(),
+    pub fn record(&self) -> InboxMiss {
+        InboxMiss {
+            record: INBOX_MISS_RECORD.to_string(),
             ts: chrono::Utc::now().to_rfc3339(),
             instance_id: self.instance_id.clone(),
             subscription_id: self.subscription_id,
             message_id: self.envelope.message_id.clone(),
             message_ts: self.envelope.ts.clone(),
+            reason: self.reason,
             missed_total: self.missed_total,
         }
     }
 }
 
-/// The §9 record written when one client's inbox displaces an unread envelope.
+/// The §9 record written when one client will never read an envelope.
 ///
 /// Why: DOC-60 §4 forbids an outcome the sender and the operator cannot
 /// distinguish, and #4271 is what that looks like when it is violated — a
-/// `delivered` record for an envelope its recipient never saw. An eviction is
-/// not a delivery failure (co-subscribers may well have read it), so it is not
-/// a second `delivery_state` on the envelope; it is a separate fact about one
+/// `delivered` record for an envelope its recipient never saw. A miss is not a
+/// delivery failure (co-subscribers may well have read it), so it is not a
+/// second `delivery_state` on the envelope; it is a separate fact about one
 /// subscription, and it is recorded as one.
-/// What: the displaced `message_id`, the subscription that lost it, and that
+/// What: the lost `message_id`, the subscription that lost it, why, and that
 /// subscription's running loss count — enough to reconstruct exactly what any
 /// one client did and did not see by replaying the stream.
 /// Test: `eviction_is_recorded_per_client_in_the_durable_log`,
-/// `eviction_records_are_distinguishable_from_envelopes`.
+/// `miss_records_are_distinguishable_from_envelopes`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InboxEviction {
-    /// Always [`INBOX_EVICTION_RECORD`].
+pub struct InboxMiss {
+    /// Always [`INBOX_MISS_RECORD`].
     pub record: String,
-    /// RFC3339 time of the eviction.
+    /// RFC3339 time of the miss.
     pub ts: String,
     /// The instance whose subscriber lost the envelope.
     pub instance_id: String,
     /// The subscription that lost it.
     pub subscription_id: u64,
-    /// The `message_id` of the envelope displaced unread.
+    /// The `message_id` of the envelope this subscription will not read.
     pub message_id: String,
     /// That envelope's own timestamp, so a replay can seek to it.
     pub message_ts: String,
+    /// Displaced by a full inbox, or lost to a closed subscription.
+    pub reason: MissReason,
     /// How many envelopes this subscription has lost in total.
     pub missed_total: u64,
 }
@@ -233,26 +289,52 @@ impl ClientInbox {
 
     /// Take one envelope, displacing this inbox's oldest when it is full.
     ///
-    /// Why the oldest and not the newest: see the module doc's point 2.
-    /// What: pushes; when the queue already holds [`CLIENT_INBOX_CAPACITY`],
-    /// pops the front first and returns it so the caller can record the loss.
-    /// A closed inbox takes nothing — its reader is on its way out and an
-    /// envelope pushed into it would be recorded delivered and then never read.
-    /// Test: `eviction_is_recorded_per_client_in_the_durable_log`.
-    fn deliver(&self, envelope: BusEnvelope) -> Option<EvictedEnvelope> {
+    /// Why the return type is three-state and not `Option` (#6462 review): a
+    /// closed inbox and a healthy one that displaced nothing both used to
+    /// answer `None`, so [`InboxSet::fan_out`] could not tell "took it" from
+    /// "took nothing". Once a deregistration closed every subscription, a
+    /// publisher holding a stale [`LiveInstance`](super::LiveInstance) clone
+    /// saw a non-empty set, got `None` from every inbox, and reported a clean
+    /// delivery for an envelope no inbox held — #4271's shape through a new
+    /// door. Whether an inbox ACCEPTED an envelope is the fact the caller needs,
+    /// so it is the fact this returns.
+    ///
+    /// Why the oldest and not the newest, when it is full: see the module doc's
+    /// point 2.
+    /// What: [`InboxAccept::Refused`] when the subscription is closed, taking
+    /// nothing; [`InboxAccept::Displaced`] when the queue already holds
+    /// [`CLIENT_INBOX_CAPACITY`], having popped the front to make room; else
+    /// [`InboxAccept::Took`]. A refusal and a displacement both count toward
+    /// this subscription's loss total and both wake the reader, so a client
+    /// learns of either through [`InboxItem::Lagged`].
+    /// Test: `eviction_is_recorded_per_client_in_the_durable_log`,
+    /// `a_publish_racing_deregistration_is_not_recorded_delivered`.
+    fn deliver(&self, envelope: BusEnvelope) -> InboxAccept {
         let mut state = self.state();
         if state.closed {
-            return None;
-        }
-        let evicted = if state.queue.len() >= CLIENT_INBOX_CAPACITY {
-            let displaced = state.queue.pop_front();
             state.evicted_total += 1;
             state.pending_lag += 1;
-            displaced.map(|envelope| EvictedEnvelope {
+            let miss = MissedEnvelope {
                 instance_id: self.instance_id.clone(),
                 subscription_id: self.subscription_id,
                 missed_total: state.evicted_total,
+                reason: MissReason::SubscriptionClosed,
                 envelope,
+            };
+            drop(state);
+            self.signal.notify_one();
+            return InboxAccept::Refused(Box::new(miss));
+        }
+        let displaced = if state.queue.len() >= CLIENT_INBOX_CAPACITY {
+            let popped = state.queue.pop_front();
+            state.evicted_total += 1;
+            state.pending_lag += 1;
+            popped.map(|lost| MissedEnvelope {
+                instance_id: self.instance_id.clone(),
+                subscription_id: self.subscription_id,
+                missed_total: state.evicted_total,
+                reason: MissReason::Displaced,
+                envelope: lost,
             })
         } else {
             None
@@ -260,7 +342,10 @@ impl ClientInbox {
         state.queue.push_back(envelope);
         drop(state);
         self.signal.notify_one();
-        evicted
+        match displaced {
+            Some(miss) => InboxAccept::Displaced(Box::new(miss)),
+            None => InboxAccept::Took,
+        }
     }
 
     /// Stop the reader once it has drained what it already holds.
@@ -333,14 +418,36 @@ pub struct InboxSet {
 /// `eviction_is_recorded_per_client_in_the_durable_log`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeliveryOutcome {
-    /// Every attached inbox holds the envelope. `evicted` names what each one
-    /// displaced unread to make room — empty in the ordinary case.
+    /// At least one attached inbox holds the envelope. `missed` names every
+    /// subscription that will not read it and why — empty in the ordinary case.
     Delivered {
-        /// The envelopes displaced by this delivery, one entry per loss.
-        evicted: Vec<EvictedEnvelope>,
+        /// One entry per loss: an envelope displaced to make room, or this
+        /// envelope lost to a subscription that was already closed.
+        missed: Vec<MissedEnvelope>,
     },
-    /// The instance is registered but nothing is subscribed.
+    /// The instance is registered but nothing subscribed took the envelope —
+    /// nothing is attached, or every attached subscription is closed.
     NoSubscriber,
+}
+
+/// What one inbox did with one envelope.
+///
+/// Why it is not `Option<MissedEnvelope>`: see [`ClientInbox::deliver`]. The
+/// distinction between "took it" and "took nothing" is the one #6462's review
+/// found missing, and an `Option` cannot carry it.
+/// What: took it cleanly, took it by displacing its oldest, or refused it
+/// because the subscription is closed. The payload is boxed because
+/// [`MissedEnvelope`] carries a whole envelope and the common variant carries
+/// nothing.
+/// Test: `a_publish_racing_deregistration_is_not_recorded_delivered`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InboxAccept {
+    /// Queued, nothing displaced.
+    Took,
+    /// Queued, displacing the oldest unread envelope.
+    Displaced(Box<MissedEnvelope>),
+    /// Not queued — the subscription is closed.
+    Refused(Box<MissedEnvelope>),
 }
 
 impl InboxSet {
@@ -383,22 +490,48 @@ impl InboxSet {
     /// makes concurrent publishers agree on an order. The guarded section is a
     /// handful of `VecDeque` pushes with no IO and no await, which is what
     /// [`CLIENT_INBOX_CAPACITY`]'s low-volume rationale already assumes.
-    /// What: [`DeliveryOutcome::NoSubscriber`] when nothing is attached, else
-    /// [`DeliveryOutcome::Delivered`] carrying every eviction the fan-out
-    /// caused. The envelope is cloned per inbox because each client owns its
-    /// copy from here on.
+    ///
+    /// Why acceptances are COUNTED rather than inferred from the set being
+    /// non-empty (#6462 review): [`ClientInbox::close`] marks a subscription
+    /// closed but leaves it in the set — only
+    /// [`InboxSubscription::drop`] removes it — so a non-empty set does not
+    /// mean anything took the envelope. Deciding on the count instead makes the
+    /// answer track what actually happened, which is what
+    /// [`PeerBus::publish`](super::PeerBus::publish) records.
+    ///
+    /// What: [`DeliveryOutcome::NoSubscriber`] when nothing is attached OR
+    /// nothing accepted, so the §9 record for that publish reads `dropped` and
+    /// the sender gets `409`. Otherwise [`DeliveryOutcome::Delivered`] carrying
+    /// every miss the fan-out caused — displacements, and any closed
+    /// subscription that missed it — so each is recorded against the client
+    /// that lost it. The envelope is cloned per inbox because each client owns
+    /// its copy from here on.
     /// Test: `two_subscribers_one_lagging_account_exactly`,
-    /// `concurrent_publishers_lose_nothing_without_a_record`.
+    /// `concurrent_publishers_lose_nothing_without_a_record`,
+    /// `a_publish_racing_deregistration_is_not_recorded_delivered`,
+    /// `a_publish_racing_deregistration_records_the_closed_subscriptions_miss`.
     pub(super) fn fan_out(&self, envelope: BusEnvelope) -> DeliveryOutcome {
         let inboxes = self.inboxes();
-        if inboxes.is_empty() {
+        let mut accepted = 0usize;
+        let mut missed = Vec::new();
+        for inbox in inboxes.iter() {
+            match inbox.deliver(envelope.clone()) {
+                InboxAccept::Took => accepted += 1,
+                InboxAccept::Displaced(miss) => {
+                    accepted += 1;
+                    missed.push(*miss);
+                }
+                InboxAccept::Refused(miss) => missed.push(*miss),
+            }
+        }
+        if accepted == 0 {
+            // Nothing holds it, so nothing may say it was delivered. The
+            // envelope's own `dropped` record already states that it reached
+            // no one; a per-client miss record on top would double-count the
+            // same loss.
             return DeliveryOutcome::NoSubscriber;
         }
-        let evicted = inboxes
-            .iter()
-            .filter_map(|inbox| inbox.deliver(envelope.clone()))
-            .collect();
-        DeliveryOutcome::Delivered { evicted }
+        DeliveryOutcome::Delivered { missed }
     }
 
     /// End every attached subscription once it has drained.

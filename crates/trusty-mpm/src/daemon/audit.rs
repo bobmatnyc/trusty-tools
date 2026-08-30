@@ -170,6 +170,23 @@ impl AuditLogger {
         }
     }
 
+    /// [`log_record`](Self::log_record), but the caller sees the IO failure.
+    ///
+    /// Why (#6462): the peer bus's "nothing is lost without a record"
+    /// guarantee rests on a loss record reaching this stream. `log_record`
+    /// swallows an IO error by §9's deliberate never-fail-the-hot-path
+    /// discipline, which is right for a record whose absence costs only
+    /// observability — and wrong for one whose absence would leave a later
+    /// `delivered` record claiming more than the stream can back. A caller
+    /// that must not over-claim needs to know the write did not land.
+    /// What: exactly [`log_record`](Self::log_record)'s write, with the
+    /// `Result` returned instead of logged. The hot path is still the caller's
+    /// to protect — this returns an error, it does not propagate one for you.
+    /// Test: `bus::tests` — `an_unwritable_log_never_reports_a_clean_delivery`.
+    pub fn try_log_record<T: Serialize>(&self, record: &T) -> std::io::Result<()> {
+        self.try_log(record)
+    }
+
     /// Fallible core of [`log_record`](Self::log_record), separated for testability.
     ///
     /// #4271: the record and its newline go out in ONE `write_all` on an

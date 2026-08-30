@@ -60,8 +60,8 @@ pub use envelope::{
 };
 pub use error::BusError;
 pub use inbox::{
-    CLIENT_INBOX_CAPACITY, ClientInbox, DeliveryOutcome, EvictedEnvelope, INBOX_EVICTION_RECORD,
-    InboxEviction, InboxItem, InboxSet, InboxSubscription,
+    CLIENT_INBOX_CAPACITY, ClientInbox, DeliveryOutcome, INBOX_MISS_RECORD, InboxItem, InboxMiss,
+    InboxSet, InboxSubscription, MissReason, MissedEnvelope,
 };
 pub use registry::{InstanceMeta, InstanceRegistry, LiveInstance, PeerTarget};
 
@@ -168,6 +168,49 @@ impl PeerBus {
         Ok(from)
     }
 
+    /// Write one §9 record per client that lost this envelope.
+    ///
+    /// Why it returns a bool rather than swallowing (#6462 review): the
+    /// "nothing is lost without a record" guarantee is only as strong as these
+    /// writes landing, and `log_record` is designed to swallow the failure that
+    /// would break it. Reporting the failure up lets the envelope's own record
+    /// carry the caveat instead of quietly overstating what the stream holds.
+    /// What: writes each [`InboxMiss`] with
+    /// [`AuditLogger::try_log_record`](crate::daemon::audit::AuditLogger::try_log_record)
+    /// and emits one `warn!` per loss naming the client, returning `true` when
+    /// ANY write failed. A failure also gets its own `error!`, because a
+    /// durable-log write failing is an operator-visible condition and not just
+    /// a caveat on one line.
+    /// Test: `eviction_is_recorded_per_client_in_the_durable_log`,
+    /// `an_unwritable_log_never_reports_a_clean_delivery`.
+    fn record_losses(&self, missed: &[MissedEnvelope]) -> bool {
+        let mut unrecorded = false;
+        for loss in missed {
+            if let Err(e) = self.audit.try_log_record(&loss.record()) {
+                unrecorded = true;
+                tracing::error!(
+                    instance_id = %loss.instance_id,
+                    subscription_id = loss.subscription_id,
+                    message_id = %loss.envelope.message_id,
+                    error = %e,
+                    "peer bus could not record an inbox miss; the delivery record \
+                     will be marked losses_unrecorded (#6462)"
+                );
+            }
+            tracing::warn!(
+                instance_id = %loss.instance_id,
+                subscription_id = loss.subscription_id,
+                capacity = CLIENT_INBOX_CAPACITY,
+                message_id = %loss.envelope.message_id,
+                reason = ?loss.reason,
+                missed_total = loss.missed_total,
+                "peer bus inbox lost an envelope for one client: it must re-read \
+                 the durable log (#6462)"
+            );
+        }
+        unrecorded
+    }
+
     /// Publish one peer message, fail-closed.
     ///
     /// Why: this is the §5.3 delivery path and the §4 fail-closed contract in
@@ -195,12 +238,17 @@ impl PeerBus {
     /// **The delivery guarantee (#4271, re-cut per client by #6462).** An
     /// envelope this method records as `Delivered` is readable by every
     /// attached subscription until that subscription reads it, UNLESS this
-    /// method also wrote an [`InboxEviction`] naming that envelope and the one
-    /// subscription that lost it. Nothing is lost without a record. Step 6
-    /// delegates to [`LiveInstance::deliver`], which fans the envelope into one
-    /// bounded buffer per subscription under a single per-instance lock, so
-    /// concurrent publishers cannot hand two clients the same two envelopes in
-    /// opposite orders.
+    /// method also wrote an [`InboxMiss`] naming that envelope and the one
+    /// subscription that lost it — or marked the delivery record
+    /// `losses_unrecorded` because it could not. Nothing is lost without a
+    /// record, and no record is silently absent. Step 6 delegates to
+    /// [`LiveInstance::deliver`], which fans the envelope into one bounded
+    /// buffer per subscription under a single per-instance lock, so concurrent
+    /// publishers cannot hand two clients the same two envelopes in opposite
+    /// orders. A fan-out that NO inbox accepted — every attached subscription
+    /// closed by a deregistration that raced this publish — is
+    /// [`DeliveryOutcome::NoSubscriber`], recorded `Dropped` and answered
+    /// `409`, never `Delivered`.
     ///
     /// Before #4271 an eviction was invisible: `broadcast::Sender::send`
     /// answers `Ok` for a lagging receiver, so the log recorded `Delivered` for
@@ -216,18 +264,43 @@ impl PeerBus {
     /// that stopped draining made this instance refuse every publish to it,
     /// healthy co-subscribers included, unboundedly. Per-client inboxes remove
     /// the shared quantity that made that possible: a stalled client falls
-    /// behind alone, its cost to the instance is a fixed
-    /// [`CLIENT_INBOX_CAPACITY`] envelopes of memory, and it stops costing even
-    /// that when its subscription drops. No timer is needed and none is added.
-    /// The recovery for a client that fell behind is unchanged from #4271:
-    /// re-read the §9 durable log, whose path the `lagged` SSE frame carries.
+    /// behind alone, and no publisher or co-subscriber pays for it at all. The
+    /// recovery for a client that fell behind is unchanged from #4271: re-read
+    /// the §9 durable log, whose path the `lagged` SSE frame carries.
     ///
-    /// **Eviction records are written BEFORE the delivery record.** The
-    /// eviction has already happened in memory by the time either write runs,
-    /// so the ordering only decides which way a crash between them lies. This
-    /// way it under-claims — the loss is on record and the delivery that caused
-    /// it is not — where the other way round would leave a `delivered` record
-    /// with nothing explaining the gap, which is #4271 exactly.
+    /// **What a wedged client still costs, stated exactly.** A client that
+    /// disconnects costs nothing — its subscription drops and detaches. A
+    /// client that stays attached and never reads — a TCP-wedged SSE body,
+    /// where hyper stops polling the response body without dropping the future,
+    /// so `Drop` never runs — costs its instance a bounded
+    /// [`CLIENT_INBOX_CAPACITY`]-envelope buffer PLUS one [`InboxMiss`] line in
+    /// the durable log and one `warn!` per subsequent publish, for as long as
+    /// it stays attached. No timer bounds that, deliberately; the operator's
+    /// lever is deregistering the instance, and the `warn!` names which
+    /// instance and subscription. See [`inbox`]'s module doc.
+    ///
+    /// **Loss records are written BEFORE the delivery record, and their
+    /// failures are observed.** The loss has already happened in memory by the
+    /// time either write runs, so the ordering only decides which way an
+    /// interruption lies. This way it under-claims — the loss is on record and
+    /// the delivery that caused it is not — where the other way round would
+    /// leave a `delivered` record with nothing explaining the gap, which is
+    /// #4271 exactly.
+    ///
+    /// Ordering alone is not enough, because
+    /// [`AuditLogger::log_record`](crate::daemon::audit::AuditLogger::log_record)
+    /// swallows IO errors by §9's deliberate never-fail-the-hot-path design: a
+    /// loss record that failed to write, followed by an envelope record that
+    /// succeeded, would produce exactly the clean unexplained `delivered` line
+    /// this ordering exists to prevent. Loss records therefore go through
+    /// [`AuditLogger::try_log_record`](crate::daemon::audit::AuditLogger::try_log_record),
+    /// and if ANY of them fails the envelope's own record is written with
+    /// `losses_unrecorded: true` and an `error!` is emitted. A reader that sees
+    /// that flag knows this delivery lost envelopes the stream cannot
+    /// enumerate; a reader that does not see it knows the loss records for that
+    /// `message_id` are complete. The hot path is still never failed — the
+    /// sender gets its `202` either way, because the envelope did reach the
+    /// clients that took it.
     ///
     /// **What the durable §9 log does and does not contain.** Once a sender is
     /// verified (step 3), EVERY outcome is recorded — delivered or dropped —
@@ -249,6 +322,8 @@ impl PeerBus {
     /// `delivered_records_account_for_everything_a_stalled_subscriber_lost`,
     /// `eviction_is_recorded_per_client_in_the_durable_log`,
     /// `a_wedged_client_does_not_refuse_publishes_for_a_healthy_co_subscriber`,
+    /// `a_publish_racing_deregistration_is_not_recorded_delivered`,
+    /// `an_unwritable_log_never_reports_a_clean_delivery`,
     /// `concurrent_publishers_lose_nothing_without_a_record`.
     pub fn publish(
         &self,
@@ -307,22 +382,9 @@ impl PeerBus {
         // that is supposed to settle "sent or not" — #4271 is what that lie
         // looked like in practice.
         match live.deliver(envelope.clone()) {
-            DeliveryOutcome::Delivered { evicted } => {
-                // Losses first, so a crash between the two writes leaves the
-                // log under-claiming rather than repeating #4271.
-                for loss in &evicted {
-                    self.audit.log_record(&loss.record());
-                    tracing::warn!(
-                        instance_id = %loss.instance_id,
-                        subscription_id = loss.subscription_id,
-                        capacity = CLIENT_INBOX_CAPACITY,
-                        message_id = %loss.envelope.message_id,
-                        missed_total = loss.missed_total,
-                        "peer bus inbox displaced an unread envelope: this client \
-                         is behind and must re-read the durable log (#6462)"
-                    );
-                }
-                self.audit.log_record(&envelope);
+            DeliveryOutcome::Delivered { missed } => {
+                self.audit
+                    .log_record(&EnvelopeRecord::new(&envelope, self.record_losses(&missed)));
                 Ok(envelope)
             }
             DeliveryOutcome::NoSubscriber => {
@@ -332,6 +394,41 @@ impl PeerBus {
                     instance_id: live.meta.instance_id,
                 })
             }
+        }
+    }
+}
+
+/// The §9 line written for one published envelope.
+///
+/// Why a wrapper rather than a field on [`BusEnvelope`]: the envelope is
+/// DOC-60 §11's schema and travels back to the sender over HTTP; whether this
+/// daemon managed to write its companion loss records is a fact about the log,
+/// not about the message. `serde(flatten)` means a delivery whose losses were
+/// all recorded serializes byte-identically to the bare envelope, so §11
+/// fidelity and every existing reader are unaffected — the extra key appears
+/// only in the case it describes.
+/// What: the envelope's own fields, plus `losses_unrecorded: true` when a
+/// companion [`InboxMiss`] could not be written. See
+/// [`PeerBus::record_losses`].
+/// Test: `an_unwritable_log_never_reports_a_clean_delivery`,
+/// `a_fully_recorded_delivery_serializes_as_a_bare_envelope`.
+#[derive(Debug, serde::Serialize)]
+pub struct EnvelopeRecord<'a> {
+    /// The envelope, inlined so the line keeps §11's shape.
+    #[serde(flatten)]
+    pub envelope: &'a BusEnvelope,
+    /// Present only when true: this delivery lost envelopes for one or more
+    /// clients and at least one of those losses could not be written.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub losses_unrecorded: bool,
+}
+
+impl<'a> EnvelopeRecord<'a> {
+    /// Wrap `envelope` for the §9 stream.
+    pub fn new(envelope: &'a BusEnvelope, losses_unrecorded: bool) -> Self {
+        Self {
+            envelope,
+            losses_unrecorded,
         }
     }
 }

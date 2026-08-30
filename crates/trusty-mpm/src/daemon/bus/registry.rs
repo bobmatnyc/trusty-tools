@@ -192,8 +192,8 @@ impl LiveInstance {
     /// The guarantee is scoped to this method and its logging caller: an
     /// envelope recorded `delivered` is readable by every attached subscription
     /// until that subscription reads it, UNLESS the §9 stream also carries an
-    /// [`InboxEviction`](super::inbox::InboxEviction) naming that envelope and
-    /// the subscription that lost it. Nothing else writes into an inbox.
+    /// [`InboxMiss`](super::inbox::InboxMiss) naming that envelope and the
+    /// subscription that lost it. Nothing else writes into an inbox.
     ///
     /// What: delegates to [`InboxSet::fan_out`], which holds the instance's one
     /// lock across the whole fan-out so concurrent publishers cannot hand two
