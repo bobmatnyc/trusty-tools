@@ -13,7 +13,7 @@
 //! resolves both addressing modes, [`error`] is the §4 fail-closed contract,
 //! and [`routes`] is the HTTP surface.
 //! Test: `tests` — the module's suite covers publish, both addressing modes,
-//! the bypass failure mode, and the durable record.
+//! the bypass failure mode, the durable record, and the #4271 lag contract.
 //!
 //! ## Scope: step 1 of DOC-60 §5.3, and what it deliberately excludes
 //!
@@ -56,7 +56,10 @@ pub use envelope::{
     Recipient,
 };
 pub use error::BusError;
-pub use registry::{InstanceMeta, InstanceRegistry, LiveInstance, PeerTarget};
+pub use registry::{
+    DeliveryOutcome, INSTANCE_CHANNEL_CAPACITY, InstanceMeta, InstanceRegistry, LiveInstance,
+    PeerTarget,
+};
 
 /// The daemon's peer message bus.
 ///
@@ -183,6 +186,45 @@ impl PeerBus {
     ///    silent drop — DOC-60 §7's durable inbox is what will make that case
     ///    queue instead, and it is deferred.
     ///
+    /// **The delivery guarantee, and the backpressure that buys it (#4271).**
+    /// An envelope this method records as `Delivered` stays readable by every
+    /// attached subscriber until that subscriber reads it. No later publish
+    /// through this method evicts it. Step 6 delegates to
+    /// [`LiveInstance::deliver`], which holds the instance's delivery gate
+    /// across both the measurement and the send: when the recipient's channel
+    /// already holds [`INSTANCE_CHANNEL_CAPACITY`] envelopes its slowest
+    /// subscriber has not read, the next send could only be taken by
+    /// overwriting the oldest of them, so the NEW envelope is refused with
+    /// [`BusError::SubscriberLagged`] (503) and recorded `Dropped`. The gate is
+    /// what makes the guarantee hold under concurrent publishers rather than
+    /// only under one — see `deliver` for why an unguarded check is stale by
+    /// the time the send runs.
+    ///
+    /// Before #4271 the send was made anyway. `broadcast::Sender::send` answers
+    /// `Ok` for a lagging receiver, so the log recorded `Delivered` for the
+    /// envelope that displaced an unread one, the sender got `202 Accepted`,
+    /// and the recipient was never told — a `delivered` record for a message
+    /// that reached no one. Refusing the newest message rather than silently
+    /// discarding the oldest keeps the §9 log answerable, which is the whole
+    /// reason DOC-60 §4 forbids a silent drop. A healthy subscriber never
+    /// reaches saturation and is unaffected.
+    ///
+    /// **What the refusal costs, and why nothing here bounds it.** Saturation
+    /// is measured across every attached receiver, and `broadcast` cannot send
+    /// to a subset, so ONE subscriber that stops draining makes this instance
+    /// refuse every publish to it — including on behalf of healthy
+    /// co-subscribers. That wedge clears when the stalled subscriber drains,
+    /// when it drops (a client that exits closes its SSE connection, and
+    /// `Receiver::drop` drains the backlog it never read), or when an operator
+    /// deregisters the instance. Nothing puts a timer on it, deliberately: the
+    /// only sender-side lever `broadcast` offers is dropping the channel, which
+    /// would discard envelopes this log has already recorded `Delivered` and so
+    /// re-create #4271 by another route. A per-subscriber buffer that could
+    /// evict one client without touching the others is DOC-60 §7's durable
+    /// inbox, deferred to the owner. Until then the failure is loud — a `warn!`
+    /// and a 503 naming the instance on every refused publish — rather than
+    /// bounded.
+    ///
     /// **What the durable §9 log does and does not contain.** Once a sender is
     /// verified (step 3), EVERY outcome is recorded — delivered or dropped —
     /// because a log holding only successes cannot answer the question
@@ -199,7 +241,10 @@ impl PeerBus {
     /// Test: `publish_delivers_to_definition_addressed_instance`,
     /// `bypass_publish_stamps_both_ids`, `failed_publish_logs_dropped_envelope`,
     /// `publish_without_subscriber_errors`, `publish_rejects_forged_user_kind`,
-    /// `rejected_publish_writes_no_durable_record`.
+    /// `rejected_publish_writes_no_durable_record`,
+    /// `delivered_records_match_what_a_stalled_subscriber_receives`,
+    /// `saturated_publish_is_dropped_in_the_durable_log`,
+    /// `concurrent_publishers_never_evict_a_delivered_envelope`.
     pub fn publish(
         &self,
         from: CallerIdentity,
@@ -251,19 +296,38 @@ impl PeerBus {
             DeliveryState::Delivered,
         );
 
-        // The durable record is written AFTER the send attempt so it states
-        // what actually happened. Logging `Delivered` before knowing whether a
-        // subscriber existed would put a lie in the one log that is supposed
-        // to settle "sent or not".
-        if live.tx.send(envelope.clone()).is_err() {
-            envelope.delivery_state = DeliveryState::Dropped;
-            self.audit.log_record(&envelope);
-            return Err(BusError::NoSubscriber {
-                instance_id: live.meta.instance_id,
-            });
+        // The durable record is written AFTER the delivery attempt so it states
+        // what actually happened. Logging `Delivered` before knowing whether
+        // the channel could take the envelope would put a lie in the one log
+        // that is supposed to settle "sent or not" — #4271 is what that lie
+        // looked like in practice.
+        match live.deliver(envelope.clone()) {
+            DeliveryOutcome::Delivered => {
+                self.audit.log_record(&envelope);
+                Ok(envelope)
+            }
+            DeliveryOutcome::Saturated => {
+                envelope.delivery_state = DeliveryState::Dropped;
+                self.audit.log_record(&envelope);
+                tracing::warn!(
+                    instance_id = %live.meta.instance_id,
+                    capacity = INSTANCE_CHANNEL_CAPACITY,
+                    message_id = %envelope.message_id,
+                    "peer bus refused a publish: the recipient's channel is full \
+                     of unread envelopes (#4271)"
+                );
+                Err(BusError::SubscriberLagged {
+                    instance_id: live.meta.instance_id,
+                })
+            }
+            DeliveryOutcome::NoSubscriber => {
+                envelope.delivery_state = DeliveryState::Dropped;
+                self.audit.log_record(&envelope);
+                Err(BusError::NoSubscriber {
+                    instance_id: live.meta.instance_id,
+                })
+            }
         }
-        self.audit.log_record(&envelope);
-        Ok(envelope)
     }
 }
 

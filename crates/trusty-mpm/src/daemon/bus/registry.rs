@@ -50,8 +50,8 @@
 //! Gone` vs `404 Not Found`), so a client can implement the re-address
 //! recovery without parsing a message string.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
@@ -67,7 +67,18 @@ use super::envelope::BusEnvelope;
 /// is right for peer messages, which are low-volume by construction —
 /// streaming token deltas stay on the existing per-crate buses and never reach
 /// this one.
-const INSTANCE_CHANNEL_CAPACITY: usize = 64;
+///
+/// Public since #4271: it is the depth at which [`LiveInstance::deliver`]
+/// answers [`DeliveryOutcome::Saturated`] instead of sending, so it is part of
+/// the delivery contract a sender reasons about, not an implementation detail.
+/// Test: `saturated_publish_is_dropped_in_the_durable_log`.
+pub const INSTANCE_CHANNEL_CAPACITY: usize = 64;
+
+// #4271: tokio rounds a broadcast capacity UP to a power of two, so a
+// non-rounded value would give a ring deeper than this constant and `deliver`
+// would refuse a publish before an eviction was actually imminent. Keeping it
+// already-rounded makes the two exactly equal.
+const _: () = assert!(INSTANCE_CHANNEL_CAPACITY.is_power_of_two());
 
 /// Separator between the definition id and the random suffix in an instance id.
 ///
@@ -148,14 +159,105 @@ pub struct InstanceMeta {
 /// recipient; consumers filter client-side after the fact"), so giving each
 /// instance its own channel is what makes this bus genuinely addressed rather
 /// than a sixth unaddressed broadcast.
-/// What: [`InstanceMeta`] plus the sender half of that instance's channel.
-/// Test: `publish_reaches_only_target_instance`.
+/// What: [`InstanceMeta`], the sender half of that instance's channel, and the
+/// gate [`LiveInstance::deliver`] holds to keep its saturation check and its
+/// send indivisible. Every clone of a `LiveInstance` shares that gate, so two
+/// publishers that each resolved the instance separately still serialize.
+/// Test: `publish_reaches_only_target_instance`,
+/// `concurrent_publishers_never_evict_a_delivered_envelope`.
 #[derive(Debug, Clone)]
 pub struct LiveInstance {
     /// The instance's public metadata.
     pub meta: InstanceMeta,
     /// Sender half of this instance's own delivery channel.
-    pub tx: broadcast::Sender<BusEnvelope>,
+    ///
+    /// Crate-internal since #4271: a send made directly on this opts out of
+    /// [`LiveInstance::deliver`]'s check, and the "no envelope recorded
+    /// `delivered` is ever evicted unread" guarantee is only as good as the
+    /// absence of such a send. Subscribing goes through
+    /// [`PeerBus::subscribe`](super::PeerBus::subscribe); publishing goes
+    /// through [`PeerBus::publish`](super::PeerBus::publish). The bus's own
+    /// tests reach for it to stage a lag the publish path now refuses to
+    /// create.
+    pub(super) tx: broadcast::Sender<BusEnvelope>,
+    /// Serializes [`LiveInstance::deliver`]'s check with the send it guards.
+    delivery_gate: Arc<Mutex<()>>,
+}
+
+/// What one delivery attempt actually did (#4271).
+///
+/// Why: the publisher must write a durable record stating what happened, and
+/// the three outcomes carry different records and different errors. Returning
+/// them as one value keeps the decision with the code that holds the gate —
+/// a caller cannot re-derive "was it saturated?" afterwards, because by then
+/// the answer has changed.
+/// What: the three terminal states of a send into an instance's channel.
+/// Test: `delivered_records_match_what_a_stalled_subscriber_receives`,
+/// `publish_without_subscriber_errors`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryOutcome {
+    /// The envelope is in the channel and no unread envelope was displaced.
+    Delivered,
+    /// The channel is full of envelopes no subscriber has read; nothing sent.
+    Saturated,
+    /// The instance is registered but has no attached receiver.
+    NoSubscriber,
+}
+
+impl LiveInstance {
+    /// Send one envelope, refusing rather than displacing an unread one.
+    ///
+    /// Why (#4271): `broadcast::Sender::send` answers `Ok` for a LAGGING
+    /// receiver — one still attached, whose oldest unread slot the send is
+    /// about to overwrite. A publisher reading only that `Ok` cannot tell
+    /// delivery from eviction, so it recorded `delivered` for envelopes the
+    /// recipient never saw. The channel must therefore be measured BEFORE the
+    /// send, which is the only point at which the difference is still
+    /// observable: afterwards the evicted envelope is gone and nothing in the
+    /// channel remembers it existed.
+    ///
+    /// Why the gate: `Sender::len` and `Sender::send` each take and release the
+    /// channel's tail lock, so a measurement outside a lock of our own is stale
+    /// by the time the send retakes it. Two publishers that both observed
+    /// `capacity - 1` would both send, and the second would evict — the same
+    /// fail-open narrowed to a window rather than closed. Holding
+    /// `delivery_gate` across both makes the pair indivisible. The cost is
+    /// serializing publishes to ONE instance, which is what
+    /// [`INSTANCE_CHANNEL_CAPACITY`]'s own rationale already assumes: peer
+    /// messages are low-volume by construction, and the guarded section is a
+    /// length read plus a memcpy into a ring — no IO, no await.
+    ///
+    /// The guarantee is scoped to this method: an envelope sent through
+    /// `deliver` never displaces an unread one. A caller that reaches for
+    /// [`LiveInstance::tx`] directly opts out of it, which only the tests do.
+    ///
+    /// What: locks the gate, then reports [`DeliveryOutcome::Saturated`] when
+    /// the channel already holds [`INSTANCE_CHANNEL_CAPACITY`] envelopes some
+    /// attached receiver has not read, [`DeliveryOutcome::NoSubscriber`] when
+    /// nothing is attached, and [`DeliveryOutcome::Delivered`] otherwise.
+    /// `Sender::len` counts slots no attached receiver has consumed, so
+    /// saturation is driven by the SLOWEST subscriber — a fast peer draining
+    /// alongside a stalled one does not mask the lag.
+    /// Test: `delivered_records_match_what_a_stalled_subscriber_receives`,
+    /// `two_subscribers_one_lagging_account_exactly`,
+    /// `concurrent_publishers_never_evict_a_delivered_envelope`.
+    pub fn deliver(&self, envelope: BusEnvelope) -> DeliveryOutcome {
+        // A panic cannot leave shared state inconsistent here — the gate guards
+        // a unit value, and the guarded section neither allocates a lock-owned
+        // invariant nor calls user code — so poisoning is recovered rather than
+        // turned into a publish failure.
+        let _gate = self
+            .delivery_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.tx.len() >= INSTANCE_CHANNEL_CAPACITY {
+            return DeliveryOutcome::Saturated;
+        }
+        match self.tx.send(envelope) {
+            Ok(_) => DeliveryOutcome::Delivered,
+            Err(_) => DeliveryOutcome::NoSubscriber,
+        }
+    }
 }
 
 /// The daemon's registry of live agent instances (DOC-60 §6b).
@@ -270,6 +372,7 @@ impl InstanceRegistry {
                     vacant.insert(LiveInstance {
                         meta: meta.clone(),
                         tx,
+                        delivery_gate: Arc::new(Mutex::new(())),
                     });
                     return Ok(meta);
                 }
