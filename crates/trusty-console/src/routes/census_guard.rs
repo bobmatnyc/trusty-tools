@@ -27,6 +27,13 @@
 //! none of them may let a delete through. A drop partway through a batch fails
 //! every remaining id and the operator retries the batch.
 //!
+//! #6423 adds the mirror lookup for the OTHER list. A row the daemon could not
+//! check can now be reviewed and deregistered one at a time, and that action is
+//! guarded the same way: [`OrphanGuard::unjudged_root`] re-reads the census and
+//! permits the deregistration only while the daemon still declines to judge that
+//! exact root. The two lookups stay separate so neither action can reach the
+//! other's list.
+//!
 //! Test: the `guard_*` tests below.
 
 use std::path::{Path, PathBuf};
@@ -77,20 +84,7 @@ impl OrphanGuard {
     /// `guard_refuses_every_id_once_the_daemon_stops_answering`,
     /// `guard_returns_the_root_path_the_daemon_reports_now`.
     pub(crate) async fn expected_root(&self, id: &str) -> Result<String, String> {
-        let census = crate::search_uds::call(
-            &self.socket,
-            crate::search_uds::METHOD_REGISTRY_ORPHANS,
-            serde_json::json!({}),
-            ACTION_TIMEOUT,
-        )
-        .await
-        .map_err(|e| {
-            format!(
-                "not deleted: {SEARCH_SERVICE_ID} could not re-check whether '{id}' is \
-                 still stale ({})",
-                e.message()
-            )
-        })?;
+        let census = self.census(id, "not deleted", "still stale").await?;
 
         match orphan_root(&census, id) {
             Some(root) => Ok(root),
@@ -100,6 +94,110 @@ impl OrphanGuard {
             )),
         }
     }
+
+    /// The root path the daemon reports for an UNCHECKABLE `id` right now, or
+    /// why the deregistration must not proceed (#6423).
+    ///
+    /// Why a second lookup rather than a flag on [`Self::expected_root`]: the
+    /// two read DIFFERENT lists on purpose. A stale-batch delete may only touch
+    /// `orphans`; a reviewed deregistration may only touch `indeterminate`.
+    /// Sharing one lookup that reads either list is exactly the fail-open shape
+    /// the census's two-list split exists to prevent — one careless argument
+    /// would let a batch sweep the unjudged rows.
+    /// What: one `search.registry.orphans` exchange, then a lookup of `id` in
+    /// `indeterminate`. An id that has since become a plain stale candidate is
+    /// refused too, and the refusal says so: the operator reviewed a row the
+    /// daemon could not check, and it can check it now.
+    ///
+    /// # Errors
+    ///
+    /// A string naming what stopped the check. Every arm — unreachable,
+    /// refused, malformed, reclassified, absent — is an error.
+    ///
+    /// Test: `guard_refuses_a_reviewed_id_the_census_now_calls_stale`,
+    /// `guard_refuses_a_reviewed_id_that_left_the_census`,
+    /// `guard_returns_the_root_of_a_row_the_daemon_still_cannot_check`.
+    pub(crate) async fn unjudged_root(&self, id: &str) -> Result<String, String> {
+        let census = self
+            .census(id, "not deregistered", "still uncheckable")
+            .await?;
+
+        match place_in_census(&census, id) {
+            CensusPlace::Unjudged(root) => Ok(root),
+            CensusPlace::Stale => Err(format!(
+                "not deregistered: {SEARCH_SERVICE_ID} can check '{id}' now and calls it a \
+                 stale registration, so it is no longer the row that was reviewed; re-scan \
+                 and remove it with the stale batch"
+            )),
+            CensusPlace::Absent => Err(format!(
+                "not deregistered: {SEARCH_SERVICE_ID} no longer lists '{id}' as a \
+                 registration it could not check, so the review it was confirmed from is \
+                 out of date"
+            )),
+        }
+    }
+
+    /// One census exchange, with the refusal worded for the calling verb.
+    async fn census(&self, id: &str, verb: &str, claim: &str) -> Result<Value, String> {
+        crate::search_uds::call(
+            &self.socket,
+            crate::search_uds::METHOD_REGISTRY_ORPHANS,
+            serde_json::json!({}),
+            ACTION_TIMEOUT,
+        )
+        .await
+        .map_err(|e| {
+            format!(
+                "{verb}: {SEARCH_SERVICE_ID} could not re-check whether '{id}' is {claim} ({})",
+                e.message()
+            )
+        })
+    }
+}
+
+/// Which of the census's two lists holds an id right now.
+///
+/// Why an enum rather than an `Option`: a reviewed row that has MOVED and a
+/// reviewed row that VANISHED are different facts, and the operator acts on them
+/// differently — the first is now prunable through the ordinary batch, the second
+/// means the registration is gone or its root came back. Both refuse; only the
+/// message differs.
+/// Test: `guard_places_an_id_in_the_list_that_holds_it`.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CensusPlace {
+    /// The daemon still declines to judge this root; the string is its path.
+    Unjudged(String),
+    /// The daemon now calls this root gone — a plain deletion candidate.
+    Stale,
+    /// Neither list holds it: the root is live, or the registration is gone.
+    Absent,
+}
+
+/// Where `id` sits in this census.
+///
+/// Reads `indeterminate` first, then `orphans`. A malformed body places nothing,
+/// so a census that cannot be parsed can never permit an action.
+/// Test: `guard_places_an_id_in_the_list_that_holds_it`.
+pub(crate) fn place_in_census(census: &Value, id: &str) -> CensusPlace {
+    if let Some(root) = row_in(census, "indeterminate", id) {
+        return CensusPlace::Unjudged(root);
+    }
+    if row_in(census, "orphans", id).is_some() {
+        return CensusPlace::Stale;
+    }
+    CensusPlace::Absent
+}
+
+/// The `root_path` `id` carries in the named census list, if it is there.
+fn row_in(census: &Value, list: &str, id: &str) -> Option<String> {
+    census
+        .get(list)?
+        .as_array()?
+        .iter()
+        .find(|row| row.get("id").and_then(Value::as_str) == Some(id))?
+        .get("root_path")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// The `root_path` `id` carries in this census's `orphans` list, if it is there.
@@ -109,14 +207,7 @@ impl OrphanGuard {
 /// the census's two-list split exists to prevent.
 /// Test: `guard_reads_the_orphans_list_and_not_the_indeterminate_one`.
 fn orphan_root(census: &Value, id: &str) -> Option<String> {
-    census
-        .get("orphans")?
-        .as_array()?
-        .iter()
-        .find(|row| row.get("id").and_then(Value::as_str) == Some(id))?
-        .get("root_path")?
-        .as_str()
-        .map(str::to_string)
+    row_in(census, "orphans", id)
 }
 
 #[cfg(test)]
@@ -173,6 +264,76 @@ mod tests {
         for malformed in [json!({}), json!({ "orphans": "nope" }), Value::Null] {
             assert_eq!(orphan_root(&malformed, "wiped"), None, "{malformed}");
         }
+    }
+
+    /// Why (#6423): a reviewed deregistration is pinned to the root the census
+    /// reports NOW, exactly as the batch delete is. The path the operator read
+    /// in the review panel is a fact with an expiry too.
+    /// Test: this is the test.
+    #[test]
+    fn guard_returns_the_root_of_a_row_the_daemon_still_cannot_check() {
+        assert_eq!(
+            place_in_census(&census(), "unplugged"),
+            CensusPlace::Unjudged("/Volumes/x".to_string())
+        );
+    }
+
+    /// Why (#6423): a root the daemon can judge again is not the row that was
+    /// reviewed. The operator reviewed "could not check"; the answer changed
+    /// under them, so the deregistration must not ride the old review.
+    /// Test: this is the test.
+    #[test]
+    fn guard_refuses_a_reviewed_id_the_census_now_calls_stale() {
+        assert_eq!(place_in_census(&census(), "wiped"), CensusPlace::Stale);
+    }
+
+    /// Why (#6423): an id in neither list is a live root or a registration that
+    /// is already gone. Both must refuse, and a malformed census must land here
+    /// rather than in either permitting arm.
+    /// Test: this is the test.
+    #[test]
+    fn guard_refuses_a_reviewed_id_that_left_the_census() {
+        assert_eq!(
+            place_in_census(&census(), "never-seen"),
+            CensusPlace::Absent
+        );
+        for malformed in [json!({}), json!({ "indeterminate": "nope" }), Value::Null] {
+            assert_eq!(
+                place_in_census(&malformed, "unplugged"),
+                CensusPlace::Absent,
+                "{malformed}"
+            );
+        }
+    }
+
+    /// Why: the two lists must not leak into each other — that separation is
+    /// what keeps a stale batch off the unjudged rows and a review off the
+    /// stale ones.
+    /// Test: this is the test.
+    #[test]
+    fn guard_places_an_id_in_the_list_that_holds_it() {
+        assert_eq!(orphan_root(&census(), "unplugged"), None);
+        assert!(matches!(
+            place_in_census(&census(), "unplugged"),
+            CensusPlace::Unjudged(_)
+        ));
+    }
+
+    /// Why (#6423): the review path fails closed on transport too. A dead socket
+    /// says nothing about the registration, so it may not permit a delete.
+    /// Test: this is the test.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn guard_refuses_a_reviewed_id_once_the_daemon_stops_answering() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let guard = OrphanGuard::new(&tmp.path().join("absent.sock"));
+        let refusal = guard
+            .unjudged_root("unplugged")
+            .await
+            .expect_err("a dead socket must refuse the deregistration");
+        assert!(
+            refusal.contains("not deregistered") && refusal.contains("re-check"),
+            "the refusal must say the deregistration did not happen and why: {refusal}"
+        );
     }
 
     /// Why (#6380 closure condition 2): a daemon that stops answering partway

@@ -24,6 +24,8 @@ pub mod deletes;
 pub mod memory_rpc;
 pub mod origin_guard;
 pub mod sessions;
+// #6423: review and settle a registration trusty-search could not check.
+pub mod unjudged;
 pub mod verdict;
 
 use std::time::Duration;

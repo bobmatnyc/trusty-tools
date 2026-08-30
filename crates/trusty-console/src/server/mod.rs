@@ -487,6 +487,13 @@ fn build_router_inner(
             "/api/console/memory/palaces/{id}/compact",
             post(crate::routes::cleanup::compact_palace_handler),
         )
+        // #6423: settle ONE registration the daemon could not check, after the
+        // operator reviewed it. Per-row on purpose — the batch prune above
+        // reads the census's `orphans` list alone and cannot reach these.
+        .route(
+            "/api/console/search/deregister-unjudged",
+            post(crate::routes::unjudged::deregister_unjudged_handler),
+        )
         // Analyze on-demand routes — call the analyze stdio MCP directly (no /proxy).
         .route(
             "/api/console/metrics/analyze/indexes",

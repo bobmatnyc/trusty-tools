@@ -64,8 +64,14 @@ export function selectableOrphans(census) {
  * unjudged knows the daemon looked at it, which is different from the daemon
  * never having seen it.
  *
+ * #6423 gives them a per-row review instead of leaving them read-only forever,
+ * and "never selected" is unchanged by it: the review is one row at a time and
+ * `selected` is still built from [`selectableOrphans`] alone, so no bulk action
+ * can sweep an unjudged row in.
+ *
  * @param {object|null} census The parsed census body.
- * @returns {{id: string, root_path: string, reason: string}[]} The unjudged rows.
+ * @returns {{id: string, root_path: string, reason: string, colocated?: boolean,
+ *   repo_identity?: string|null}[]} The unjudged rows.
  */
 export function unjudgedRows(census) {
   return census && Array.isArray(census.indeterminate) ? census.indeterminate : [];
@@ -85,7 +91,8 @@ export function censusSummary(census) {
     return `No stale registrations. ${total} registered.`;
   }
   const parts = [`${stale} stale of ${total} registered`];
-  if (unjudged > 0) parts.push(`${unjudged} could not be checked and will not be removed`);
+  // #6423: the batch still never touches these; each is settled on its own.
+  if (unjudged > 0) parts.push(`${unjudged} could not be checked and are not in the batch`);
   return `${parts.join('; ')}.`;
 }
 
@@ -148,6 +155,96 @@ export function readPruneResult(status, body) {
     message: reported || `The prune failed (HTTP ${status}) and the daemon gave no reason.`,
     rows,
   };
+}
+
+/** The console route that settles ONE reviewed uncheckable registration. */
+export const DEREGISTER_UNJUDGED_URL = '/api/console/search/deregister-unjudged';
+
+/**
+ * What deregistering leaves behind, in the row's own terms.
+ *
+ * Why (#6423 review round 2): the confirmation used to assert "there is no index
+ * data to delete" for every row, and that is false twice over. A `colocated` row
+ * keeps its data BESIDE the root, and the daemon put the row in `indeterminate`
+ * precisely because it could not tell whether that root is gone — an unmounted
+ * volume's data is still there, waiting. A non-colocated row's data sits in
+ * trusty-search's own data directory, which is plainly on disk. Neither is
+ * deleted here, and neither is absent.
+ *
+ * The claim both cases DO share is the one worth making: the data is untouched.
+ * That is also why this flow offers no "delete the data too" checkbox where the
+ * batch above has one — the root could not be checked, so there is nothing to
+ * decide about it yet.
+ *
+ * @param {{colocated?: boolean}} row The reviewed registration.
+ * @returns {string} A clause naming where the data is and that it stays.
+ */
+function unjudgedDataFate(row) {
+  return row && row.colocated === true
+    ? 'Its index data sits beside that root and is left untouched — the root could not ' +
+        'be reached to check, so the data may well still be there.'
+    : "Its index data sits in trusty-search's own directory and is left untouched — only " +
+        'the registration is removed.';
+}
+
+/**
+ * The sentence the per-row deregister confirmation shows.
+ *
+ * Why (#6423): this is the only confirm step for a destructive action on a row
+ * the daemon could not check, so it names the PATH rather than the count. There
+ * is no batch to summarise — the operator reviewed one registration and is
+ * settling that one — and the path is what distinguishes six otherwise-identical
+ * rows under the same retired parent directory.
+ *
+ * What it must not do is overclaim. [`unjudgedDataFate`] carries that half.
+ *
+ * @param {{id: string, root_path: string, colocated?: boolean}} row The
+ *   reviewed registration.
+ * @returns {string} The confirm sentence.
+ */
+export function unjudgedConfirmMessage(row) {
+  const id = row && typeof row.id === 'string' ? row.id : '';
+  const path = row && typeof row.root_path === 'string' ? row.root_path : '(unknown path)';
+  return (
+    `Deregister "${id}"? Its root ${path} could not be checked. ` +
+    `${unjudgedDataFate(row)} This cannot be undone.`
+  );
+}
+
+/**
+ * The same fate, for the review panel's note above the two buttons.
+ *
+ * Exported so the panel and the confirmation cannot drift apart — they are two
+ * renderings of one fact, and the round-2 defect was exactly a note and a
+ * confirmation disagreeing about it.
+ *
+ * @param {{colocated?: boolean}} row The reviewed registration.
+ * @returns {string} The note.
+ */
+export function unjudgedReviewNote(row) {
+  return `Keeping leaves the registration exactly as it is. ${unjudgedDataFate(row)}`;
+}
+
+/**
+ * Whether one reviewed row was actually deregistered, and what to say.
+ *
+ * Why (#6423, fail-closed): a deregistration reported as done that did not
+ * happen leaves the operator believing a registration is gone while it keeps
+ * `warm_boot_degraded` true — the exact leak #6371 exists for. The console route
+ * reduces the daemon's answer to an `ok` field and this believes that field, not
+ * the status code, exactly as every other single-resource action does.
+ *
+ * @param {number} status HTTP status of the console's response.
+ * @param {object|null} body Parsed JSON body, or null when it did not parse.
+ * @returns {{ok: boolean, message: string}} Outcome and the text to display.
+ */
+export function readDeregisterResult(status, body) {
+  return readActionResult(
+    status,
+    body,
+    'deregistration',
+    (b) => `Deregistered "${b.id ?? ''}". Its index data was left in place.`,
+  );
 }
 
 /**
