@@ -105,6 +105,14 @@ pub struct OrphanRow {
 }
 
 /// One registration whose root could not be judged.
+///
+/// Why the metadata fields are here at all (#6423): an unjudged row used to be
+/// something an operator could only read, so the id, the path and the reason
+/// were the whole story. The console now offers to REVIEW one and settle it, and
+/// a person deciding whether a registration may go needs what a deletion
+/// candidate already carries — whether the data sits beside the absent root, and
+/// which repo the root belonged to.
+/// Test: `an_unjudged_row_carries_the_registration_metadata`.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct UnjudgedRow {
     /// The registration id.
@@ -113,6 +121,10 @@ pub struct UnjudgedRow {
     pub root_path: String,
     /// Why this daemon declined to call it gone.
     pub reason: String,
+    /// Whether the index stores its data beside the (unreachable) root.
+    pub colocated: bool,
+    /// The canonical `owner/repo` this root belonged to, when recorded.
+    pub repo_identity: Option<String>,
 }
 
 /// The census `GET /registry/orphans` answers with.
@@ -161,10 +173,15 @@ pub fn build_census(entries: &[PersistedIndex]) -> OrphanCensus {
                 colocated: entry.colocated,
                 repo_identity: entry.repo_identity.clone(),
             }),
+            // #6423: an unjudged row carries the same registration metadata an
+            // orphan row does, because the console now reviews one before
+            // settling it.
             RootState::Indeterminate(reason) => census.indeterminate.push(UnjudgedRow {
                 id: entry.id.clone(),
                 root_path,
                 reason: reason.to_string(),
+                colocated: entry.colocated,
+                repo_identity: entry.repo_identity.clone(),
             }),
         }
     }
@@ -365,6 +382,24 @@ mod tests {
     /// dead path, not only the id — so an operator can recognise what they are
     /// about to remove.
     /// Test: this is the test.
+    /// Why (#6423): the console's review mode shows an unjudged registration
+    /// and offers to deregister it, so the row has to say more than "could not
+    /// check" — a person deciding needs the same metadata a deletion candidate
+    /// carries.
+    /// Test: this is the test.
+    #[test]
+    fn an_unjudged_row_carries_the_registration_metadata() {
+        let mut entry = entry("kemono", "/Volumes/Kemono/project");
+        entry.colocated = true;
+        entry.repo_identity = Some("bobmatnyc/kemono".to_string());
+
+        let census = build_census(&[entry]);
+        let row = &census.indeterminate[0];
+        assert!(row.colocated, "the row must carry the colocation flag");
+        assert_eq!(row.repo_identity.as_deref(), Some("bobmatnyc/kemono"));
+        assert_eq!(row.root_path, "/Volumes/Kemono/project");
+    }
+
     #[test]
     fn an_orphan_row_carries_the_dead_root_path() {
         let tmp = tempfile::tempdir().expect("tempdir");

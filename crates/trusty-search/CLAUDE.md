@@ -288,7 +288,8 @@ removes nothing; `DELETE /indexes/:id` stays the one deregistration path.
     ],
     "indeterminate": [
       { "id": "kemono", "root_path": "/Volumes/Kemono/project",
-        "reason": "the root is on an external volume; …" }
+        "reason": "the root is on an external volume; …",
+        "colocated": false, "repo_identity": null }
     ],
     "live_count": 7,
     "total": 9
@@ -302,7 +303,10 @@ removes nothing; `DELETE /indexes/:id` stays the one deregistration path.
     or hangs), and a missing root whose parent is missing too, which is what an
     unmounted volume looks like. `exists()` answers `false` for a deleted
     directory and an unavailable one alike, so these are reported separately
-    rather than folded into `orphans`. A caller must never delete them.
+    rather than folded into `orphans`. A caller must never delete them in bulk.
+    Each row carries `colocated` and `repo_identity` alongside the reason
+    (#6423) so a caller offering a per-row review — trusty-console does — can
+    show what the registration is before an operator settles it.
   - `live_count` + `orphans.len()` + `indeterminate.len()` == `total`.
 - **Response 500**: `{ "error": "could not read the index registry: …" }` — an
   unreadable registry is an error, never an empty census.
