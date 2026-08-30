@@ -540,8 +540,18 @@ pub(crate) async fn write_drawer(state: &AppState, params: WriteDrawerParams<'_>
     // consumes them, so clone before the call.
     let content_for_kg = content.clone();
     let tags_for_kg = tags.clone();
+    // #6366: the write mutex is held for this whole call. Pass the daemon's
+    // configured ceiling so a slow commit fails with a named reason and
+    // releases the mutex, instead of stalling every other writer on this palace.
     let drawer_id = handle
-        .remember_with_options(content, room, tags, importance, opts)
+        .remember_with_options_within(
+            content,
+            room,
+            tags,
+            importance,
+            opts,
+            state.write_pipeline_budget,
+        )
         .await
         .context("PalaceHandle::remember_with_options")?;
     // Issue #156 + #231: opt-in BM25 lexical lane. Enqueue onto the

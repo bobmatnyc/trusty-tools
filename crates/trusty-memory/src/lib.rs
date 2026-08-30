@@ -611,6 +611,23 @@ pub struct AppState {
     /// last use. Empty at boot, so the first use of any palace writes.
     /// Test: `palace_last_used::tests::stamp_throttles_within_the_window`.
     pub palace_last_used: palace_last_used::StampCache,
+    /// Ceiling on the pipeline one write runs while holding the palace write
+    /// mutex (issue #6366).
+    ///
+    /// Why: [`AppState::write_op_budget`] bounds only the waits BEFORE the
+    /// mutex is held. The pipeline that runs once it IS held had no ceiling, so
+    /// a slow commit held the mutex for as long as it took and every other
+    /// writer on that palace queued behind it — three `memory_note` calls were
+    /// aborted client-side after 1800 s while the daemon stayed healthy.
+    /// What: defaults to
+    /// [`trusty_common::memory_core::timeouts::write_pipeline_timeout`]
+    /// (`TRUSTY_WRITE_PIPELINE_TIMEOUT_SECS`, 240 s), and is threaded into
+    /// `PalaceHandle::remember_with_options_within`. Stored per-instance for
+    /// the same reason as `write_op_budget`: a test can inject a short ceiling
+    /// without mutating process-wide env.
+    /// Test: `retrieval::write_pipeline_tests` covers the ceiling itself;
+    /// `tools::tests::write_budget_tests` covers the acquisition budget.
+    pub write_pipeline_budget: std::time::Duration,
 }
 
 impl AppState {
@@ -693,6 +710,8 @@ impl AppState {
             // #6424: empty at boot, so the first use of each palace after a
             // restart always persists a stamp.
             palace_last_used: Arc::new(dashmap::DashMap::new()),
+            // #6366: the ceiling on the critical section #4002's budget stops at.
+            write_pipeline_budget: trusty_common::memory_core::timeouts::write_pipeline_timeout(),
         }
     }
 
@@ -706,6 +725,20 @@ impl AppState {
     #[must_use]
     pub fn with_write_op_budget(mut self, budget: std::time::Duration) -> Self {
         self.write_op_budget = budget;
+        self
+    }
+
+    /// Override the write-pipeline ceiling (issue #6366).
+    ///
+    /// Why: same reason as [`AppState::with_write_op_budget`] — a test proving
+    /// the ceiling fires must not set `TRUSTY_WRITE_PIPELINE_TIMEOUT_SECS`,
+    /// which is process-wide and would race any parallel test.
+    /// What: consuming builder that overwrites
+    /// [`AppState::write_pipeline_budget`].
+    /// Test: `tools::tests::write_budget_tests::a_write_over_the_pipeline_ceiling_is_refused`.
+    #[must_use]
+    pub fn with_write_pipeline_budget(mut self, budget: std::time::Duration) -> Self {
+        self.write_pipeline_budget = budget;
         self
     }
 

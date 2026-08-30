@@ -26,6 +26,10 @@ mod scope;
 // ADR-0028 D3/D4/D5 (#4886): Tier C admission and atomic retire-on-write.
 mod tier_c;
 mod types;
+// #6366: the write critical section and its ceiling. Split out of `handle` so
+// the pipeline sits in one future a timeout can drop as a unit — and so
+// `handle.rs` stays under the 500-SLOC cap.
+mod write_pipeline;
 
 // #5902: `pub(crate)` only so `share::tests` can reuse this module's
 // always-failing `DeadEmbedder` instead of declaring its own.
@@ -37,6 +41,8 @@ mod tests;
 mod tier_c_tests;
 #[cfg(test)]
 mod timeout_tests;
+#[cfg(test)]
+mod write_pipeline_tests;
 
 // ── Public re-exports ────────────────────────────────────────────────────────
 

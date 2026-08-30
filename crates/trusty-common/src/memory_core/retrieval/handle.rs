@@ -8,24 +8,19 @@
 //! Test: `registry_create_and_open`, `cli_remember_and_recall`, and
 //! the full retrieval test suite in retrieval::tests.
 
-use super::embedder::shared_embedder;
 // #4906: the deferred-embed lane — retry, then durably record what was lost.
 use super::deferred_embed;
-// #4886: ADR-0028 Tier C admission + retire-on-write. Kept in its own module so
-// the write path's design rationale does not push this file over the SLOC cap.
-use super::tier_c;
 use super::types::{ForgetOutcome, L1_CAP, RememberOptions};
+// #6366: the bounded write critical section this handle's `remember` runs in.
+use super::write_pipeline;
 use crate::memory_core::analytics::{RecallEvent, RecallLog, query_hash};
 use crate::memory_core::decay::DecayConfig;
 use crate::memory_core::dream::extract_keywords;
-use crate::memory_core::filter::{FilterReject, check_secret, classify};
-use crate::memory_core::palace::{Drawer, DrawerType, Palace, PalaceId, RoomType};
-use crate::memory_core::room_identity::DEFAULT_WING_ID;
+use crate::memory_core::palace::{Drawer, Palace, PalaceId, RoomType};
 use crate::memory_core::store::concurrent_open::OpenIntent;
 use crate::memory_core::store::kg::KnowledgeGraph;
 use crate::memory_core::store::l1_cache::L1Cache;
 use crate::memory_core::store::palace_store::PalaceStore;
-use crate::memory_core::store::rooms::resolve_or_create_room_in_wing;
 use crate::memory_core::store::vector::{CompactionResult, UsearchStore, VectorStore};
 use crate::memory_core::timeouts;
 use anyhow::{Context, Result};
@@ -586,188 +581,54 @@ impl PalaceHandle {
         importance: f32,
         opts: RememberOptions,
     ) -> Result<Uuid> {
-        // Idle-to-disk: stamp this as a genuine user access so the idle-evict
-        // ticker does not drop a palace that is actively being written to.
-        // No-op while a dream cycle holds `is_compacting` (see `touch`).
-        self.touch();
-
-        // Issue #59: short-circuit before doing any embedding work when the
-        // palace is opened read-only. The store layer already rejects the
-        // eventual write, but returning here saves the cost of an embed
-        // and surfaces a single clear error rather than an inscrutable
-        // upsert failure stack.
-        if self.is_read_only() {
-            return Err(anyhow::anyhow!(
-                "palace '{}' is read-only: HTTP daemon holds the write lock — \
-                 route writes through the daemon's HTTP API or stop the daemon \
-                 before retrying via stdio",
-                self.id
-            ));
-        }
-
-        // Issue #154: serialise mutating ops on this palace so concurrent
-        // writers don't race on the L1 snapshot rename, vector upsert, KG
-        // row insert, or in-memory drawer push. Held across the full
-        // pipeline below. Other palaces' writes proceed in parallel.
-        // Reads (`recall`, `list_drawers`, etc.) never acquire this lock,
-        // so the write mutex doesn't impact read throughput.
-        // Issue #906: bound the lock acquisition so a stuck embedder on one
-        // writer doesn't cascade an indefinite queue of waiters.
-        let _write_guard = timeouts::lock_with_timeout(
-            &self.write_mutex,
-            timeouts::write_lock_timeout(),
-            self.id.as_str(),
+        self.remember_with_options_within(
+            content,
+            room,
+            tags,
+            importance,
+            opts,
+            timeouts::write_pipeline_timeout(),
         )
-        .await?;
+        .await
+    }
 
-        // Issue #61: signal/noise gate. `force == true` bypasses the QUALITY
-        // gates (noise patterns, short-content, non-alphabetic ratio) below.
-        // `enforce_min_tokens` lets `memory_note` keep the noise patterns
-        // while permitting short curated facts ("User prefers snake_case").
-        if !opts.force {
-            opts.filter
-                .apply(&content, opts.enforce_min_tokens)
-                .map_err(|reject| match reject {
-                    // Issue #1481: `PotentialSecret` carries the offending token
-                    // in its Display impl, so the same `{reject}` bubble names
-                    // the trigger for the caller to remediate.
-                    FilterReject::TooShort { .. }
-                    | FilterReject::NoisePattern { .. }
-                    | FilterReject::NonAlphabetic { .. }
-                    | FilterReject::PotentialSecret { .. } => anyhow::anyhow!("{reject}"),
-                })?;
-        } else if !opts.allow_secret_like {
-            // Issue #2520 (two-tier force, BLOCKER fix): `force` bypasses the
-            // quality gates above unconditionally, but must NEVER silently
-            // bypass secret detection too — an automated writer (trusty-code's
-            // per-turn recorder always sets `force: true`) would otherwise
-            // persist raw credentials with zero screening. Run the secret
-            // gate on its own here; only the separate, explicit
-            // `allow_secret_like` opt-in — never `force` alone — skips it.
-            check_secret(&content).map_err(|reject: FilterReject| anyhow::anyhow!("{reject}"))?;
-        }
-
-        // ADR-0027 T4/D4.2: the room id comes from the ROOMS registry — a
-        // lookup that creates the row when absent — never from hashing a
-        // `Debug` string. Fail-open: a registry error falls back to the legacy
-        // fold so a room problem can never fail a memory write.
-        // ADR-0027 T9: `opts.wing_id` is `None` for every caller that predates
-        // wings, which resolves in the default wing — byte-identically to the
-        // line this replaced.
-        let wing_id = opts.wing_id.unwrap_or(DEFAULT_WING_ID);
-        let room_id = resolve_or_create_room_in_wing(&self.kg, &room, wing_id).await;
-
-        let mut drawer = Drawer::new(room_id, content.clone());
-        drawer.tags = tags;
-        drawer.importance = importance.clamp(0.0, 1.0);
-        // Apply classification. The caller may pre-pin the type
-        // (`memory_note` always pins `UserFact`); otherwise we run the
-        // heuristic classifier with `Unknown` as the fallback so
-        // unclassified prose stays unlabelled rather than getting tagged
-        // as `SessionEvent` by accident.
-        let final_type = match opts.classify_as {
-            Some(t) => t,
-            None => classify(&content, DrawerType::Unknown),
-        };
-        drawer = drawer.with_type(final_type);
-
-        // #4886: ADR-0028 D3/D4 Tier C admission — the single enforcement
-        // point for the whole workspace. Runs after `with_type` so an admitted
-        // Tier C TTL overrides the `SessionEvent` type default, and fails
-        // closed, so a refusal leaves this drawer exactly as today's code would
-        // have written it. See `tier_c::apply_admission`.
-        tier_c::apply_admission(&mut drawer, &opts, &self.id);
-        let id = drawer.id;
-
-        // Embed and upsert. Use the process-wide shared embedder so we don't
-        // spin up a fresh ONNX session per call (issue #57). The
-        // OnceCell-backed `shared_embedder` guarantees at most one model load
-        // for the lifetime of the process.
-        //
-        // Issue #1970: a caller whose daemon is still warming up (embedder
-        // cold-init in progress) sets `opts.defer_embedding` so this write
-        // returns as soon as the KG/redb portion below completes instead of
-        // blocking behind a 30-120s ONNX/CoreML compile — the vector is
-        // backfilled by a background task once the embedder resolves. Text
-        // and KG indexing never depend on the embedder either way; this
-        // branch only changes *when* the drawer becomes vector-searchable.
-        //
-        // #4906: the deferred branch is SPAWNED BELOW, after the drawer reaches
-        // `self.drawers`. Spawning here raced the push: the background task
-        // refuses to record a failure for a drawer absent from that table, so a
-        // task that failed before the push wrote nothing for a drawer that was
-        // about to become durable and vector-less — the exact combination this
-        // lane exists to eliminate.
-        if !opts.defer_embedding {
-            // Issue #906: both `shared_embedder()` (cold init path) and
-            // `embed_batch` carry their own bounded timeouts — if the embedder
-            // hangs mid-batch the remember call returns an error instead of
-            // blocking the write-lock indefinitely.
-            let embedder = shared_embedder()
-                .await
-                .context("acquire shared embedder for remember")?;
-            let embed_timeout = timeouts::embed_batch_timeout();
-            let vecs = tokio::time::timeout(
-                embed_timeout,
-                // `from_ref` rather than `&[content]`: the deferred branch below
-                // still needs `content`, so this borrows instead of moving.
-                embedder.embed_batch(std::slice::from_ref(&content)),
-            )
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "embed_batch timed out after {:?} on remember path (issue #906); \
-                         increase TRUSTY_EMBED_BATCH_TIMEOUT_SECS if batches legitimately \
-                         take longer on this host",
-                    embed_timeout
-                )
-            })?
-            .context("embed drawer content")?;
-            if let Some(v) = vecs.into_iter().next() {
-                self.vector_store
-                    .upsert(id, v)
-                    .await
-                    .context("upsert drawer vector")?;
-            }
-        }
-
-        // Persist drawer metadata BEFORE the in-memory push so a crash mid-op
-        // cannot leave an in-memory drawer with no redb record backing it.
-        // #4886: when this drawer claims a `fact_key`, the same call retires
-        // the slot's prior occupant in the SAME redb transaction — the
-        // read-decide-write sequence runs entirely under the write guard taken
-        // above, so no concurrent writer on this palace can interleave with it.
-        let retired = tier_c::persist_with_retirement(self, &drawer)
-            .await
-            .context("persist drawer metadata")?;
-
-        {
-            let mut drawers = self.drawers.write();
-            // #4886: mirror the retirement under the SAME lock as the push, so
-            // a reader never sees the newcomer present while the displaced
-            // drawer still claims the slot.
-            tier_c::retire_in_memory(&mut drawers, retired);
-            drawers.push(drawer);
-        }
-
-        // #4906: spawn the background embed only now. The drawer is in redb and
-        // in the in-memory table, so a failure arriving at any point from here
-        // on finds the drawer present and gets recorded. See the branch above.
-        if opts.defer_embedding {
-            self.spawn_deferred_embed(id, content);
-        }
-
-        // L1 snapshot: re-sort the in-memory table and persist top-15.
-        if let Some(data_dir) = self.data_dir.as_ref() {
-            let snap = self.drawers.read().clone();
-            L1Cache::save_l1_cache(&snap, data_dir).context("save L1 snapshot")?;
-        }
-
-        // Refresh the closet keyword index so L2 tag-boosting picks up the
-        // new drawer without waiting for a dream cycle.
-        self.rebuild_closets();
-
-        Ok(id)
+    /// Store a new memory under an explicit ceiling on the write critical
+    /// section (issue #6366).
+    ///
+    /// Why: issue #4002 bounded the two waits that happen BEFORE this palace's
+    /// write mutex is held; nothing bounded the pipeline that runs once it IS
+    /// held. A slow commit therefore held the mutex for as long as it took and
+    /// every other writer on the palace queued behind it — three `memory_note`
+    /// calls were aborted client-side after 1800 s while the daemon stayed
+    /// healthy and answered reads throughout. This entry point makes that
+    /// ceiling explicit and injectable, so a caller with its own SLA (and the
+    /// concurrency tests) can set it without mutating process env.
+    /// What: delegates to [`write_pipeline::remember_within`]. On expiry the
+    /// pipeline future is dropped, which releases the write mutex, and the
+    /// caller gets a named error. See that module's docs for what a cancelled
+    /// write can leave behind — an orphaned vector (`palace_compact` reclaims
+    /// it) or a drawer durable in redb but not yet in the in-memory table
+    /// (re-hydrated on the next open). Neither loses data.
+    /// Test: `write_pipeline_tests`.
+    pub async fn remember_with_options_within(
+        &self,
+        content: String,
+        room: RoomType,
+        tags: Vec<String>,
+        importance: f32,
+        opts: RememberOptions,
+        pipeline_budget: std::time::Duration,
+    ) -> Result<Uuid> {
+        write_pipeline::remember_within(
+            self,
+            content,
+            room,
+            tags,
+            importance,
+            opts,
+            pipeline_budget,
+        )
+        .await
     }
 
     /// Reclaim orphaned vectors, serialised against the write pipeline.
@@ -824,7 +685,7 @@ impl PalaceHandle {
     /// leaves an orphaned vector, reclaimed by `palace_compact`.
     /// Test: `permanent_failure_writes_a_ledger_row` and
     /// `retry_succeeds_after_transient_failures` in `embed_repair_tests`.
-    fn spawn_deferred_embed(&self, id: Uuid, content: String) {
+    pub(super) fn spawn_deferred_embed(&self, id: Uuid, content: String) {
         deferred_embed::spawn(self.deferred_embed_ctx(), id, content);
     }
 
