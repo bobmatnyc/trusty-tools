@@ -9,14 +9,15 @@
 //! - `KgRebuildOutcome` — timing / count snapshot from the KG rebuild.
 //! - `RunTotals` — per-phase timing accumulators for the entire reindex run.
 //! - `rebuild_symbol_graph_for_reindex` — synchronous KG rebuild after batches.
-//! - `emit_complete_event` — build and push the terminal `complete` SSE event.
+//! - `emit_complete_event` — build the terminal `complete` SSE event and emit it
+//!   with the run's terminal status, as one step (#6386).
 //!
 //! Test: the `complete` event shape is asserted in `reindex_walks_directory_and_emits_events`.
 
 use crate::core::registry::IndexHandle;
 use std::time::Instant;
 
-use super::progress::ReindexProgress;
+use super::progress::{ReindexProgress, ReindexStatus};
 
 /// Result of the final symbol-graph rebuild.
 ///
@@ -101,11 +102,20 @@ pub(super) async fn rebuild_symbol_graph_for_reindex(handle: &IndexHandle) -> Kg
 /// reindex run (issue #282). `None` when the sidecar was not running or
 /// sampling failed for every poll tick.
 ///
-/// What: reads final counters from `progress`, builds the JSON event, and
-/// calls `progress.push`.
-/// Test: `complete` event shape verified in `reindex_walks_directory_and_emits_events`.
+/// `terminal_status` — the status this run ends in. #6386: it is stored HERE,
+/// with the frame, rather than by the caller before it — `push_terminal` does
+/// both under one hold of the replay-buffer lock, so a stream opening now cannot
+/// read a terminal status from a buffer that lacks the terminal frame. The
+/// `status` FIELD in the payload keeps its own derivation from
+/// `totals.mem_limit_hit` and is unchanged.
+///
+/// What: reads final counters from `progress`, builds the JSON event, and calls
+/// `progress.push_terminal`.
+/// Test: `complete` event shape verified in `reindex_walks_directory_and_emits_events`;
+/// the atomicity in `a_terminal_status_is_not_observable_before_its_event_is_in_the_replay`.
 pub(super) async fn emit_complete_event(
     progress: &ReindexProgress,
+    terminal_status: ReindexStatus,
     started: Instant,
     peak_rss_mb: u64,
     embedderd_peak_rss_mb: Option<u64>,
@@ -183,5 +193,5 @@ pub(super) async fn emit_complete_event(
     if let Some(n) = embedderd_peak_rss_mb {
         event["embedderd_peak_rss_mb"] = serde_json::Value::Number(n.into());
     }
-    progress.push(event).await;
+    progress.push_terminal(terminal_status, event).await;
 }

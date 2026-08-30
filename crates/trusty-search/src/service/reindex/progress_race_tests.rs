@@ -19,6 +19,16 @@
 //! deterministic composition either side of an open plus the two overflow paths
 //! the single lock hold must not have changed.
 //!
+//! A terminal event has a second, wider window of its own.
+//! [`a_terminal_status_is_not_observable_before_its_event_is_in_the_replay`] and
+//! [`a_stream_opened_across_the_terminal_transition_always_gets_the_terminal_frame`]
+//! cover it: the terminal transition used to store the status and push its frame
+//! as two unlocked steps, and on the `Complete` path an RSS poll, a git
+//! subprocess, a marker write and two `RwLock` writes sat between them. Both
+//! producers stop reading the live channel once the status is terminal, so an
+//! open in that window ended its stream with no terminal frame at all —
+//! `ReindexProgress::push_terminal` now does both under one lock hold.
+//!
 //! The race is only reachable across threads — before #6386 the window between
 //! the snapshot and the subscribe had no await point in it, so a single-threaded
 //! runtime could never schedule a push into it. That is why the regression test
@@ -52,6 +62,34 @@ const RACE_OPENERS: usize = 4;
 /// Events per trial. Deliberately below both channel bounds so a lagged
 /// subscriber or a truncated replay is a broken fixture rather than a finding.
 const RACE_EVENTS: usize = 200;
+
+/// Open-versus-terminal-transition races to run.
+const TERMINAL_RACE_TRIALS: usize = 512;
+/// Concurrent openers per terminal-transition trial, spawned either side of the
+/// emitter so some are always still opening when the transition lands.
+const TERMINAL_RACE_OPENERS: usize = 8;
+/// The `seq` the planted terminal frame carries. Far above any ordinary one so
+/// an assertion message names it unambiguously.
+const TERMINAL_SEQ: usize = 9_999;
+/// How long the lock-holding test watches for a leaked terminal status before
+/// concluding there is none. Proving an absence needs a bound; the watch returns
+/// the instant a leak appears, so only the healthy path pays this in full. A bare
+/// yield loop is NOT enough — it finishes before the emitter's worker is
+/// scheduled at all and passes vacuously, which is how this test was first
+/// written and why it went green against a reverted fix.
+const STATUS_LEAK_WATCH: std::time::Duration = std::time::Duration::from_millis(250);
+/// Gap between reads inside that watch — a real park, not a spin.
+const STATUS_LEAK_POLL: std::time::Duration = std::time::Duration::from_millis(1);
+
+/// The frame a terminal transition plants, shaped like the real `complete` event.
+fn terminal_event() -> serde_json::Value {
+    serde_json::json!({ "event": "complete", "seq": TERMINAL_SEQ })
+}
+
+/// Whether a replayed or broadcast line is the planted terminal frame.
+fn is_terminal(line: &str) -> bool {
+    seq_of(line) == TERMINAL_SEQ
+}
 
 /// The `seq` an event line carries.
 fn seq_of(line: &str) -> usize {
@@ -276,6 +314,149 @@ async fn the_replay_buffer_still_drops_its_oldest_at_the_cap() {
         MAX_REPLAY_EVENTS + overshoot - 1,
         "the newest event survives"
     );
+}
+
+/// Why: both stream producers stop reading the live channel the moment the
+/// status they opened with is terminal, so for such a subscriber the replay is
+/// the ONLY path the terminal frame can arrive on. A terminal transition used to
+/// store the status and push its frame as two unlocked steps, with an RSS poll, a
+/// git subprocess, a marker write and two `RwLock` writes between them on the
+/// `Complete` path. An open in that window read `Complete`, refused to read live,
+/// and got a replay with no terminal frame — its stream ended silently and its
+/// client waited for a completion that had already happened.
+///
+/// What: holds the replay-buffer lock, starts a real `push_terminal` against it,
+/// and checks the terminal status never becomes visible while that lock is held —
+/// which is what makes the store and the frame one step. Releasing the lock then
+/// proves the emission really did run, so the check above was not vacuous.
+/// Reverting `push_terminal` to `status.store` followed by `push` fails this
+/// immediately.
+///
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_terminal_status_is_not_observable_before_its_event_is_in_the_replay() {
+    let progress = Arc::new(ReindexProgress::new());
+    progress.push(serde_json::json!({ "seq": 0 })).await;
+
+    // Hold the replay-buffer lock: every emission and every open must wait on it.
+    let held = progress.events.lock().await;
+
+    let (at_call_tx, at_call_rx) = tokio::sync::oneshot::channel();
+    let emitter = {
+        let progress = Arc::clone(&progress);
+        tokio::spawn(async move {
+            at_call_tx
+                .send(())
+                .expect("the test outlives its emitter task");
+            progress
+                .push_terminal(ReindexStatus::Complete, terminal_event())
+                .await;
+        })
+    };
+    at_call_rx
+        .await
+        .expect("the emitter must reach its terminal emission");
+
+    // The emitter is inside `push_terminal`, waiting on the lock this test holds.
+    // Watch the status for a bounded window: a leaked store is visible as soon as
+    // the emitter's worker runs, so this returns immediately when the invariant
+    // breaks and only waits out the budget on the healthy path.
+    let leaked = tokio::time::timeout(STATUS_LEAK_WATCH, async {
+        loop {
+            let seen = progress.status.load();
+            if seen != ReindexStatus::Running {
+                return seen;
+            }
+            tokio::time::sleep(STATUS_LEAK_POLL).await;
+        }
+    })
+    .await;
+    assert!(
+        leaked.is_err(),
+        "the terminal status became visible ({:?}) while the replay buffer was \
+         still locked, so an open in this window reads a terminal status, stops \
+         reading the live channel, and never sees the terminal frame (#6386)",
+        leaked.unwrap_or(ReindexStatus::Running),
+    );
+
+    drop(held);
+    emitter.await.expect("the terminal emission must not panic");
+
+    let (replay, status, _live) = progress.subscribe_with_replay().await;
+    assert_eq!(
+        status,
+        ReindexStatus::Complete,
+        "releasing the lock must let the transition through — otherwise the \
+         assertion above proved nothing"
+    );
+    assert!(
+        replay.iter().any(|line| is_terminal(line)),
+        "the terminal status and its frame must become visible together"
+    );
+}
+
+/// Why: the production interleaving of the case above — real opens racing a real
+/// terminal transition, on the multi-threaded runtime the daemon runs on. Each
+/// opener is judged by the rule its own transport applies: an open reporting
+/// `Running` reads the live channel, one reporting a terminal status reads only
+/// the replay. Either way the terminal frame must reach it exactly once.
+///
+/// What: races `TERMINAL_RACE_OPENERS` opens against one `push_terminal` over
+/// `TERMINAL_RACE_TRIALS` trials, half the openers spawned before the emitter and
+/// half after.
+///
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stream_opened_across_the_terminal_transition_always_gets_the_terminal_frame() {
+    for trial in 0..TERMINAL_RACE_TRIALS {
+        let progress = Arc::new(ReindexProgress::new());
+        progress.push(serde_json::json!({ "seq": 0 })).await;
+
+        let open = || {
+            let progress = Arc::clone(&progress);
+            tokio::spawn(async move { progress.subscribe_with_replay().await })
+        };
+
+        let mut openers: Vec<_> = (0..TERMINAL_RACE_OPENERS / 2).map(|_| open()).collect();
+        let emitter = {
+            let progress = Arc::clone(&progress);
+            tokio::spawn(async move {
+                progress
+                    .push_terminal(ReindexStatus::Complete, terminal_event())
+                    .await;
+            })
+        };
+        openers.extend((0..TERMINAL_RACE_OPENERS / 2).map(|_| open()));
+
+        emitter.await.expect("the emitter must not panic");
+
+        for (opener_n, opener) in openers.into_iter().enumerate() {
+            let (replay, status, mut live) = opener.await.expect("no opener may panic");
+            let in_replay = replay.iter().any(|line| is_terminal(line));
+
+            if status != ReindexStatus::Running {
+                assert!(
+                    in_replay,
+                    "trial {trial} opener {opener_n}: the open read status {status:?} but its \
+                     {replay_len}-event replay held no terminal frame — both producers stop \
+                     reading the live channel on a terminal status, so this stream ends \
+                     without one (#6386)",
+                    replay_len = replay.len(),
+                );
+            }
+
+            let seen = delivered(&replay, &mut live);
+            let arrivals = seen.iter().filter(|seq| **seq == TERMINAL_SEQ).count();
+            assert_eq!(
+                arrivals,
+                1,
+                "trial {trial} opener {opener_n}: the terminal frame arrived {arrivals} times \
+                 across the replay and the live channel, not once (status was {status:?}, \
+                 replay held {replay_len})",
+                replay_len = replay.len(),
+            );
+        }
+    }
 }
 
 /// Why: the status decides whether a producer subscribes at all — a stream that

@@ -94,12 +94,14 @@ impl ReindexProgress {
     /// Caps the replay buffer at `MAX_REPLAY_EVENTS` to bound memory under
     /// pathological reindexes (e.g. one error event per file).
     ///
-    /// Why: central event emission point — all SSE events funnel through here
-    /// so the replay buffer and live broadcast channel stay in sync. The buffer
-    /// append and the broadcast happen under ONE hold of the `events` lock, which
-    /// is what makes an emission atomic with respect to
+    /// Why: central emission point for every non-terminal event — the replay
+    /// buffer and the live broadcast channel stay in sync because the append and
+    /// the broadcast happen under ONE hold of the `events` lock, which is what
+    /// makes an emission atomic with respect to
     /// [`subscribe_with_replay`](Self::subscribe_with_replay) — see #6386 and the
-    /// exactly-once argument on that method.
+    /// exactly-once argument on that method. A TERMINAL event goes through
+    /// [`push_terminal`](Self::push_terminal) instead, which stores the status
+    /// under that same hold.
     /// What: appends to the in-memory replay buffer (dropping the oldest event
     /// when over-cap) and sends on the broadcast channel (errors are benign —
     /// replay buffer retains the event for late subscribers).
@@ -109,14 +111,53 @@ impl ReindexProgress {
     pub async fn push(&self, event: serde_json::Value) {
         let line = event.to_string();
         let mut buf = self.events.lock().await;
+        self.emit_locked(&mut buf, line);
+    }
+
+    /// Store the terminal status and emit its event as ONE atomic step.
+    ///
+    /// Why: a terminal transition used to be two unlocked steps — `status.store`
+    /// followed by [`push`](Self::push) — and on the `Complete` path an RSS poll,
+    /// a git subprocess, a marker-file write and two `RwLock` writes sat between
+    /// them. A [`subscribe_with_replay`](Self::subscribe_with_replay) landing in
+    /// that window read a terminal status while the replay buffer still lacked
+    /// the terminal event. Both transports stop reading the live channel once the
+    /// status is terminal, so that subscriber's stream ended with no terminal
+    /// frame at all and its client waited on one that would never come. See
+    /// #6386.
+    /// What: takes the `events` lock once and, under that single hold, stores the
+    /// status, appends the event to the replay buffer, and broadcasts it — so no
+    /// open can observe the status and the buffer disagreeing. Identical to
+    /// `push` in every respect but the status store.
+    /// Test: `a_terminal_status_is_not_observable_before_its_event_is_in_the_replay`
+    /// and `a_stream_opened_across_the_terminal_transition_always_gets_the_terminal_frame`
+    /// in `progress_race_tests.rs`.
+    pub async fn push_terminal(&self, status: ReindexStatus, event: serde_json::Value) {
+        let line = event.to_string();
+        let mut buf = self.events.lock().await;
+        // #6386: inside the hold, so an open either predates the whole
+        // transition or sees both halves of it.
+        self.status.store(status);
+        self.emit_locked(&mut buf, line);
+    }
+
+    /// Append to the replay buffer and broadcast, under a lock the caller holds.
+    ///
+    /// Why: `push` and `push_terminal` differ only in whether they also store the
+    /// terminal status, and both must append and broadcast under ONE hold of the
+    /// `events` lock (#6386). Sharing the body keeps the two emission paths from
+    /// drifting apart.
+    /// What: evicts the oldest entry once at `MAX_REPLAY_EVENTS`, appends, then
+    /// sends on the broadcast channel. `broadcast::Sender::send` is synchronous
+    /// and never blocks on a receiver, so the caller's critical section stays
+    /// short and cannot deadlock.
+    /// Test: every test that calls `push` or `push_terminal` exercises it.
+    fn emit_locked(&self, buf: &mut Vec<String>, line: String) {
         if buf.len() >= MAX_REPLAY_EVENTS {
             // Drop the oldest event. `remove(0)` is O(n) but n ≤ 500.
             buf.remove(0);
         }
         buf.push(line.clone());
-        // #6386: broadcast while still holding the guard. `broadcast::Sender::send`
-        // is synchronous and never blocks on a receiver, so the critical section
-        // stays short and cannot deadlock.
         // Broadcast errors (no receivers) are fine — replay buffer still has it.
         let _ = self.sender.send(line);
     }
@@ -134,20 +175,29 @@ impl ReindexProgress {
     /// status, and subscribes to the broadcast channel, releasing the lock only
     /// once all three are in hand.
     ///
-    /// The exactly-once argument, given that `push` appends AND broadcasts under
-    /// the same lock: the two critical sections are ordered, so for any event
-    /// either `push` ran first — its line is in the returned buffer, and its
-    /// broadcast preceded the subscription, so the receiver never sees it — or
-    /// this ran first, and the line is absent from the buffer while the
-    /// subscription predates the broadcast. Every event lands in exactly one of
-    /// the two paths. Before #6386 the broadcast sat outside `push`'s lock and the
-    /// subscribe outside the snapshot's, so an event could land in both (a
-    /// duplicate) or in neither (a LOST event).
+    /// The exactly-once argument, for any event emitted through
+    /// [`push`](Self::push) or [`push_terminal`](Self::push_terminal), each of
+    /// which appends AND broadcasts under this same lock: the two critical
+    /// sections are ordered, so for any event either the emission ran first — its
+    /// line is in the returned buffer, and its broadcast preceded the
+    /// subscription, so the receiver never sees it — or this ran first, and the
+    /// line is absent from the buffer while the subscription predates the
+    /// broadcast. Every such event lands in exactly one of the two paths. Before
+    /// #6386 the broadcast sat outside `push`'s lock and the subscribe outside the
+    /// snapshot's, so an event could land in both (a duplicate) or in neither (a
+    /// LOST event).
     ///
-    /// The terminal frame `ReindexTerminationGuard::drop` emits is the one
-    /// emission that does NOT route through `push` — `Drop` cannot await the lock,
-    /// so it broadcasts only. A subscriber that opens after that frame reads the
-    /// `Failed` status rather than the frame; that predates #6386 and is unchanged.
+    /// A terminal event carries the status with it, so the same argument covers
+    /// the `status` returned beside the buffer: an open never reads a terminal
+    /// status from a buffer that does not yet hold the terminal frame. That
+    /// mattered because both transports stop reading the live channel on a
+    /// terminal status, so such an open ended its stream with no terminal frame.
+    ///
+    /// The terminal frame `ReindexTerminationGuard::drop` emits is the sole
+    /// remaining exception — `Drop` cannot await the lock, so it broadcasts and
+    /// stores the status without one. A subscriber that opens after that frame
+    /// reads the `Failed` status rather than the frame; that predates #6386 and is
+    /// unchanged.
     ///
     /// Test: `no_event_is_lost_or_duplicated_when_a_stream_opens_against_live_pushes`
     /// and `an_event_pushed_either_side_of_an_open_arrives_on_exactly_one_path` in

@@ -152,15 +152,14 @@ pub(super) async fn run_reindex(
             // tree the corpus was never relativized against.
             root_gate::restore_indexer_root_after_refusal(&handle, &refusal).await;
             mark_reindex_failed(&handle, &refusal.reason).await;
-            progress.status.store(ReindexStatus::Failed);
-            progress
-                .push(serde_json::json!({
-                    "event": "error",
-                    "index_id": index_id.0,
-                    "message": refusal.reason,
-                    "fatal": true,
-                }))
-                .await;
+            // #6386: status and frame in one hold — see `push_terminal`.
+            let frame = serde_json::json!({
+                "event": "error",
+                "index_id": index_id.0,
+                "message": refusal.reason,
+                "fatal": true,
+            });
+            progress.push_terminal(ReindexStatus::Failed, frame).await;
             // term_guard drops here → broadcasts error event via Drop (mirrors
             // the carryover-copy-failure abort path below).
             drop(term_guard);
@@ -260,17 +259,17 @@ pub(super) async fn run_reindex(
         // at the `InProgress` that `reset_stages_for_reindex` just set would
         // strand the index mid-walk with no reindex in flight.
         super::stages::mark_reindex_failed_before_lexical(&handle, &reason).await;
-        progress.status.store(ReindexStatus::Failed);
-        progress
-            .push(serde_json::json!({
-                "event": "error",
-                "index_id": index_id.0,
-                "message": reason,
-                "fatal": true,
-            }))
-            .await;
+        // #6386: status and frame in one hold — see `push_terminal`.
+        let frame = serde_json::json!({
+            "event": "error",
+            "index_id": index_id.0,
+            "message": reason,
+            "fatal": true,
+        });
+        progress.push_terminal(ReindexStatus::Failed, frame).await;
         // #4356 (review): the frame above is this run's ONE terminal event, and
-        // `push` also wrote it to the replay buffer, which `Drop` cannot reach.
+        // `push_terminal` also wrote it to the replay buffer, which `Drop` cannot
+        // reach.
         // Leaving the guard armed broadcasts a SECOND `fatal` frame reading
         // "exited unexpectedly (panic or cancellation)" — the CLI prints every
         // error frame it receives (`commands::reindex_engine::events`), so an
@@ -448,18 +447,17 @@ pub(super) async fn run_reindex(
                     );
                     mark_reindex_failed(&handle, "carryover copy failed — live corpus intact")
                         .await;
-                    progress.status.store(ReindexStatus::Failed);
-                    progress
-                        .push(serde_json::json!({
-                            "event": "error",
-                            "index_id": index_id.0,
-                            "message": format!(
-                                "incremental reindex aborted: failed to copy live corpus \
-                                 into staging store ({e}) — live corpus is intact"
-                            ),
-                            "fatal": true,
-                        }))
-                        .await;
+                    // #6386: status and frame in one hold — see `push_terminal`.
+                    let frame = serde_json::json!({
+                        "event": "error",
+                        "index_id": index_id.0,
+                        "message": format!(
+                            "incremental reindex aborted: failed to copy live corpus \
+                             into staging store ({e}) — live corpus is intact"
+                        ),
+                        "fatal": true,
+                    });
+                    progress.push_terminal(ReindexStatus::Failed, frame).await;
                     // term_guard drops here → broadcasts error event via Drop.
                     drop(term_guard);
                     schedule_progress_cleanup(cleanup_map, cleanup_id);
