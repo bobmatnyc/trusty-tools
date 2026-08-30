@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::Utc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::driver::ManagedTmuxDriver;
 use super::manager::{ManagedError, SessionManager};
@@ -49,27 +49,59 @@ const CWD_PROBE_BACKOFF: [Duration; 2] = [Duration::from_millis(50), Duration::f
 ///
 /// What: asks `get_pane_cwd` up to `CWD_PROBE_BACKOFF.len() + 1` times, sleeping
 /// the matching backoff between attempts, and returns the first answer that
-/// names an existing directory. A pane that is genuinely unresolvable costs the
-/// full backoff once, at boot only.
+/// names an existing directory. Only a probe that returns NO answer is retried.
+///
+/// # A stale path is an answer, not a flake (#6414)
+///
+/// `.filter(|p| p.is_dir())` used to fold both negatives into the retry, so a
+/// pane whose `pane_current_path` names a directory that has since been deleted
+/// — a reaped agent worktree — cost the full 200 ms backoff before being
+/// declined. tmux keeps reporting that recorded path, so the second and third
+/// probes read the same bytes and reach the same verdict; the sleep between
+/// them buys nothing. On a host with 276 such panes that was 55 s of pure sleep
+/// inside `reconcile_on_boot`, which `DaemonState::session_manager()` awaits
+/// before it hands the manager to its first caller — and the first caller is
+/// often the SessionEnd worktree sweep, which then reached its first gate a
+/// minute late (#6391 raised its budget to 300 s as containment).
+///
+/// The #6118 protection is unchanged in the case it was written for: `None`
+/// means tmux did not answer at all (spawn failure, non-zero exit, empty
+/// output), which a retry genuinely can turn into an answer, and that arm still
+/// gets every attempt. No pane's verdict changes — only how long a determinate
+/// negative takes to reach.
 /// Test: `flaky_cwd_probe_still_adopts_within_one_reconcile`,
-/// `unresolvable_cwd_probe_is_retried_a_bounded_number_of_times` in
-/// `naming_tests.rs`.
+/// `unresolvable_cwd_probe_is_retried_a_bounded_number_of_times`,
+/// `a_stale_pane_path_is_declined_on_the_first_probe` in `naming_tests.rs`.
 pub(super) async fn resolve_adoptable_cwd(
     tmux: &dyn ManagedTmuxDriver,
     name: &str,
 ) -> Option<PathBuf> {
     for attempt in 0..=CWD_PROBE_BACKOFF.len() {
-        if let Some(cwd) = tmux.get_pane_cwd(name).filter(|p| p.is_dir()) {
-            if attempt > 0 {
-                warn!(
-                    name = %name,
-                    attempt = attempt + 1,
-                    "reconcile: pane working directory resolved only on retry — the first probe \
-                     was a transient failure, and declining on it would have exposed a live pane \
-                     to the orphan-GC (#6118)"
-                );
+        match tmux.get_pane_cwd(name) {
+            Some(cwd) if cwd.is_dir() => {
+                if attempt > 0 {
+                    warn!(
+                        name = %name,
+                        attempt = attempt + 1,
+                        "reconcile: pane working directory resolved only on retry — the first \
+                         probe was a transient failure, and declining on it would have exposed a \
+                         live pane to the orphan-GC (#6118)"
+                    );
+                }
+                return Some(cwd);
             }
-            return Some(cwd);
+            // #6414: tmux answered; the answer just names a directory that is
+            // gone. Re-reading it returns the same path, so decide now.
+            Some(stale) => {
+                debug!(
+                    name = %name,
+                    path = %stale.display(),
+                    "reconcile: pane working directory no longer exists — declining without \
+                     retry, which cannot change a path tmux keeps reporting (#6414)"
+                );
+                return None;
+            }
+            None => {}
         }
         if let Some(backoff) = CWD_PROBE_BACKOFF.get(attempt) {
             tokio::time::sleep(*backoff).await;
