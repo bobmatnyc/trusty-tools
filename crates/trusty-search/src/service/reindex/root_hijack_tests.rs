@@ -69,17 +69,17 @@ use std::sync::Arc;
 /// a test that is green by luck is indistinguishable from a test that is
 /// green by correctness.
 /// What: allocates the throwaway data dir and defers to
-/// [`super::test_isolation::run_isolated`], which does the re-execution. The
+/// [`crate::service::test_isolation::run_isolated`], which does the re-execution. The
 /// tempdir is held alive for the whole child run and removed when this
 /// function returns. (#4721 extracted the mechanism so the #3979 resume tests
 /// could reuse it rather than clone it a third time.)
 /// Test: both tests in this module route through it.
 fn isolate_in_child_process(test_name: &str) -> bool {
-    if super::test_isolation::is_isolated_child() {
+    if crate::service::test_isolation::is_isolated_child() {
         return true;
     }
     let data_dir = tempfile::tempdir().expect("isolated data dir");
-    super::test_isolation::run_isolated(test_name, &[("TRUSTY_DATA_DIR", data_dir.path())])
+    crate::service::test_isolation::run_isolated(test_name, &[("TRUSTY_DATA_DIR", data_dir.path())])
 }
 
 /// Minimal `RawChunk` fixture — mirrors the helper duplicated across

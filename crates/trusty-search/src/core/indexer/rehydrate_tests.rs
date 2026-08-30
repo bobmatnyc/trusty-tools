@@ -210,10 +210,19 @@ async fn rehydrate_dedupes_concurrent_callers_onto_one_scan() {
 /// set both times, and that set must be the sorted-by-id prefix, not
 /// whatever redb's B-tree iteration order happens to produce.
 #[tokio::test]
-#[serial_test::serial]
 async fn rehydrate_is_deterministic_across_repeated_cycles_over_cap() {
-    let prev_cap = std::env::var("TRUSTY_BM25_CORPUS_CAP").ok();
-    unsafe { std::env::set_var("TRUSTY_BM25_CORPUS_CAP", "5") };
+    // #6369: the cap arrives from the child's spawn environment. Setting it
+    // in-process pinned a BM25 corpus cap of 5 across the whole test binary,
+    // and `#[serial]` did not fence the tests that suffered for it — a
+    // concurrent `path_filter_search::test_path_prefix_filter_recovers_bm25_\
+    // match_beyond_want` lost 11 of its 16 documents and searched an empty
+    // result set.
+    if !crate::service::test_isolation::run_isolated(
+        "core::indexer::rehydrate_tests::rehydrate_is_deterministic_across_repeated_cycles_over_cap",
+        &[("TRUSTY_BM25_CORPUS_CAP", "5")],
+    ) {
+        return;
+    }
 
     let dir = tempfile::tempdir().unwrap();
     let redb_path = dir.path().join("index.redb");
@@ -308,11 +317,6 @@ async fn rehydrate_is_deterministic_across_repeated_cycles_over_cap() {
         "the surviving subset must be the sorted-by-id prefix, not an arbitrary \
          redb-iteration-order subset (issue #3684)"
     );
-
-    match prev_cap {
-        Some(v) => unsafe { std::env::set_var("TRUSTY_BM25_CORPUS_CAP", v) },
-        None => unsafe { std::env::remove_var("TRUSTY_BM25_CORPUS_CAP") },
-    }
 }
 
 // ── Code-critic review round 2 (issue #3683): panic safety + evict race ───

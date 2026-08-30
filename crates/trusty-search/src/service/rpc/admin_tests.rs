@@ -588,6 +588,15 @@ fn plant_row(id: &str, root: impl Into<std::path::PathBuf>) {
         .expect("write the registry row");
 }
 
+/// #6369: `IsolatedDataDir` plus `#[serial]` is not isolation for a registry
+/// census. `#[serial]` excludes only other `#[serial]` tests, and this binary
+/// holds ~70 tests that write an `indexes.toml` row through
+/// `create_index_handler` without carrying the attribute. Their rows landed in
+/// this test's tempdir — the census read a `total` of 4 or 5 where it planted
+/// 3, naming `index-a` (`server::tests_2336`) and `skip-kg-reregister`
+/// (`server::tests_2984`) as the intruders.
+use crate::service::test_isolation::isolate_in_child;
+
 /// Why (#6371): this is the census `trusty-console`'s cleanup tab reads before
 /// offering rows for deletion, and its whole contract is that `orphans` and
 /// `indeterminate` do not mix. A socket that flattened them — or that re-derived
@@ -595,9 +604,13 @@ fn plant_row(id: &str, root: impl Into<std::path::PathBuf>) {
 /// console an unmounted volume's roster as deletion candidates.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
-#[serial_test::serial]
 async fn registry_orphans_over_the_socket_matches_the_http_body() {
-    let _isolated = IsolatedDataDir::new();
+    // #6369: a child process, not `IsolatedDataDir` — see `isolate_in_child`.
+    if !isolate_in_child(
+        "service::rpc::admin::tests::registry_orphans_over_the_socket_matches_the_http_body",
+    ) {
+        return;
+    }
     let live = tempfile::tempdir().expect("tempdir");
     plant_row("orphans-live", live.path());
     plant_row("orphans-wiped", live.path().join("wiped-root"));
@@ -613,7 +626,17 @@ async fn registry_orphans_over_the_socket_matches_the_http_body() {
     .await;
 
     assert_eq!(over_socket, over_http);
-    assert_eq!(over_socket["total"], serde_json::json!(3));
+    // #6369: name the intruder when a row leaks in from another test.
+    let all_ids: Vec<String> = persistence::load_index_registry()
+        .expect("read the registry back")
+        .into_iter()
+        .map(|e| format!("{}@{}", e.id, e.root_path.display()))
+        .collect();
+    assert_eq!(
+        over_socket["total"],
+        serde_json::json!(3),
+        "the census must see exactly the three planted rows, registry holds {all_ids:?}"
+    );
     assert_eq!(over_socket["live_count"], serde_json::json!(1));
     assert_eq!(
         over_socket["orphans"]
@@ -646,9 +669,15 @@ async fn registry_orphans_over_the_socket_matches_the_http_body() {
 /// registry, so it would prove nothing.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
-#[serial_test::serial]
 async fn an_unreadable_registry_is_refused_on_either_transport() {
-    let _isolated = IsolatedDataDir::new();
+    // #6369: a child process, not `IsolatedDataDir`. This test plants a
+    // DIRECTORY at `indexes.toml`, so a sibling's registry write landing in the
+    // same data dir panics that sibling rather than this test.
+    if !isolate_in_child(
+        "service::rpc::admin::tests::an_unreadable_registry_is_refused_on_either_transport",
+    ) {
+        return;
+    }
     let path = persistence::indexes_toml_path().expect("resolve the registry path");
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).expect("create the data dir");

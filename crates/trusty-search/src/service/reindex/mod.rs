@@ -263,11 +263,6 @@ pub(crate) use tokio::sync::Semaphore;
 // ── test module ──────────────────────────────────────────────────────────────
 #[cfg(test)]
 mod tests;
-// #4213 / #4721: shared "run this one test alone in a child process with the
-// environment supplied at spawn" helper — the technique that actually excludes
-// concurrent non-serial tests, unlike `#[serial]` + an in-process `set_var`.
-#[cfg(test)]
-mod test_isolation;
 // Issue #2178: isolated from `tests.rs` to keep it under the 1500-SLOC
 // test-file cap; see the module doc comment there for the incident writeup.
 #[cfg(test)]

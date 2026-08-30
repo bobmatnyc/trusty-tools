@@ -198,7 +198,7 @@ impl CodeIndexer {
 
         {
             let chunks = self.chunks.read().await;
-            let cap = super::max_chunks_per_index();
+            let cap = self.chunk_cap(); // #6369: per-index, not the process env
             if !chunks.contains_key(&id) && chunks.len() >= cap {
                 tracing::warn!(
                     "index '{}' chunk cap ({}) reached — skipping chunk {}",
@@ -373,7 +373,7 @@ impl CodeIndexer {
                  restart the daemon, or split this root across indexes, then re-send the \
                  file",
                 self.index_id,
-                super::max_chunks_per_index(),
+                self.chunk_cap(), // #6369: report the cap this index enforced
                 dropped_by_cap
             );
         }
