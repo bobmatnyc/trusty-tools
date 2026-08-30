@@ -11,6 +11,11 @@
 //! script that records its pid and argv then sleeps (a daemon that stays
 //! up), one that exits immediately (a daemon that fails to bind), and one
 //! that touches a marker file (to prove a branch never spawned anything).
+//!
+//! Because readiness here comes from `wiremock` rather than from the stub,
+//! `ensure_daemon_with` can return before the stub child has run a single
+//! line. Nothing a stub writes may therefore be read directly — go through
+//! [`SleepingStub::argv`] / [`SleepingStub::pid`], which poll (#6231, #5073).
 
 use std::path::{Path, PathBuf};
 
@@ -119,16 +124,106 @@ fn stub_binary(dir: &Path, name: &str, body: &str) -> PathBuf {
 /// `ensure_daemon_with` no longer RETURNS one: it drops the handle without
 /// signalling, which is exactly the behaviour
 /// [`the_tui_never_signals_the_daemon_on_exit`] has to observe from outside.
-fn sleeping_stub(dir: &Path, argv_log: &Path, pid_log: &Path) -> PathBuf {
-    stub_binary(
-        dir,
-        "tcode-sleep",
-        &format!(
-            "echo \"$@\" > {}\necho $$ > {}\nsleep 300",
-            argv_log.display(),
-            pid_log.display()
-        ),
-    )
+///
+/// Why a struct rather than a bare path: the stub's two records are written
+/// by a real `sh` child AFTER `spawn` returns, and readiness in these tests
+/// comes from a `wiremock` endpoint that is already healthy — so
+/// `ensure_daemon_with` returns without the child having run a single line.
+/// Reading either record straight afterwards raced the write and failed with
+/// `NotFound` under parallel load (#6231, #5073). [`SleepingStub::argv`] and
+/// [`SleepingStub::pid`] are the only supported readers, and both poll.
+/// [`Drop`] then reaps the `sleep 300` even when an assertion panicked first.
+struct SleepingStub {
+    /// The executable `sh` script `ensure_daemon_with` is pointed at.
+    path: PathBuf,
+    /// Where the stub writes `"$@"` — written FIRST, before the pid.
+    argv_log: PathBuf,
+    /// Where the stub writes `$$`.
+    pid_log: PathBuf,
+}
+
+impl SleepingStub {
+    /// Write the stub into `dir`, logging argv and pid beside it.
+    ///
+    /// The caller must keep `dir`'s `TempDir` alive longer than the returned
+    /// value: [`Drop`] reads `pid_log` out of that directory to reap the
+    /// child, so the stub has to drop FIRST (declare it after the `TempDir`).
+    fn new(dir: &Path) -> Self {
+        let argv_log = dir.join("argv");
+        let pid_log = dir.join("pid");
+        let path = stub_binary(
+            dir,
+            "tcode-sleep",
+            &format!(
+                "echo \"$@\" > {}\necho $$ > {}\nsleep 300",
+                argv_log.display(),
+                pid_log.display()
+            ),
+        );
+        Self {
+            path,
+            argv_log,
+            pid_log,
+        }
+    }
+
+    /// Block until the stub has recorded its argv, then return it.
+    ///
+    /// Non-empty is the condition, not mere existence: `sh`'s `>` redirect
+    /// creates the file before `echo` writes into it, so an existence-only
+    /// wait can still read `""` — which would make
+    /// [`spawns_projectless_when_the_tui_is_projectless`]'s
+    /// `!argv.contains("--project")` assertion pass vacuously. Every spawn
+    /// under test passes at least `serve --http`, so a non-empty read is a
+    /// complete one.
+    async fn argv(&self) -> String {
+        wait_for_record(&self.argv_log, "argv").await
+    }
+
+    /// Block until the stub has recorded its pid, then return it.
+    async fn pid(&self) -> u32 {
+        wait_for_record(&self.pid_log, "pid")
+            .await
+            .trim()
+            .parse::<u32>()
+            .expect("the stub records its pid as a bare integer")
+    }
+}
+
+impl Drop for SleepingStub {
+    /// Reap the `sleep 300` child, panic or no panic.
+    ///
+    /// Why: `ensure_daemon_with` deliberately never signals a daemon it
+    /// spawned, so nothing else will. A panicking assertion used to strand
+    /// one five-minute sleeper per failed test, and a flake investigation
+    /// re-runs the suite ~10× — the strays pile up and starve the very run
+    /// meant to prove stability. Best-effort by design: a test whose stub was
+    /// never spawned leaves no pid file, and that is not an error.
+    fn drop(&mut self) {
+        if let Ok(raw) = std::fs::read_to_string(&self.pid_log)
+            && let Ok(pid) = raw.trim().parse::<u32>()
+        {
+            kill(pid);
+        }
+    }
+}
+
+/// Poll `path` until it holds a non-empty record, then return it.
+///
+/// The budget is 2s (200 × 10ms), unchanged from the pid wait this replaces:
+/// long enough to absorb a `fork`/`exec` delayed by a saturated machine,
+/// short enough that a stub which genuinely never ran fails the test rather
+/// than hanging it. `label` names the record in the panic message.
+async fn wait_for_record(path: &Path, label: &str) -> String {
+    for _ in 0..200 {
+        if let Ok(raw) = std::fs::read_to_string(path)
+            && !raw.trim().is_empty()
+        {
+            return raw;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("the spawned stub never recorded its {label} at {path:?}");
 }
 
 /// A stub that touches `marker` — used to PROVE a branch never spawned it.
@@ -154,20 +249,6 @@ fn kill(pid: u32) {
     unsafe {
         libc::kill(pid as libc::pid_t, libc::SIGKILL);
     }
-}
-
-/// Block until `pid_log` exists and holds a pid — the stub writes it a few
-/// milliseconds after `spawn` returns.
-async fn spawned_pid(pid_log: &Path) -> u32 {
-    for _ in 0..200 {
-        if let Ok(raw) = std::fs::read_to_string(pid_log)
-            && let Ok(pid) = raw.trim().parse::<u32>()
-        {
-            return pid;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    panic!("the spawned stub never recorded its pid at {pid_log:?}");
 }
 
 /// A LIVE daemon bound to the SAME project must be attached to, never
@@ -339,21 +420,21 @@ async fn spawns_a_daemon_when_none_is_running() {
     let server = healthy_daemon(Some(&canonical)).await;
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let argv_log = dir.path().join("argv");
-    let pid_log = dir.path().join("pid");
-    let stub = sleeping_stub(dir.path(), &argv_log, &pid_log);
+    let stub = SleepingStub::new(dir.path());
 
     let url = ensure_daemon_with(
         &reqwest::Client::new(),
         Some(&canonical),
-        &stub,
+        &stub.path,
         &server.uri(),
     )
     .await
     .expect("must spawn a daemon");
     assert_eq!(url, server.uri());
 
-    let argv = std::fs::read_to_string(&argv_log).expect("stub must have recorded its argv");
+    // #6231: the stub is a real child, and readiness came from `wiremock`
+    // rather than from it — so its argv has to be waited for, not assumed.
+    let argv = stub.argv().await;
     assert!(
         argv.contains("serve") && argv.contains("--http"),
         "must spawn `serve --http`: {argv}"
@@ -362,7 +443,6 @@ async fn spawns_a_daemon_when_none_is_running() {
         argv.contains("--project") && argv.contains(canonical.to_str().expect("utf8")),
         "must forward --project to the daemon: {argv}"
     );
-    kill(spawned_pid(&pid_log).await);
 }
 
 /// A PROJECTLESS TUI must spawn a projectless daemon — `--project` is
@@ -374,20 +454,21 @@ async fn spawns_projectless_when_the_tui_is_projectless() {
     let server = healthy_daemon(None).await;
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let argv_log = dir.path().join("argv");
-    let pid_log = dir.path().join("pid");
-    let stub = sleeping_stub(dir.path(), &argv_log, &pid_log);
+    let stub = SleepingStub::new(dir.path());
 
-    ensure_daemon_with(&reqwest::Client::new(), None, &stub, &server.uri())
+    ensure_daemon_with(&reqwest::Client::new(), None, &stub.path, &server.uri())
         .await
         .expect("must spawn a daemon");
 
-    let argv = std::fs::read_to_string(&argv_log).expect("stub must have recorded its argv");
+    // #5073: reading here without waiting failed with `NotFound` under a
+    // parallel suite. An existence-only wait would be worse than the race —
+    // an empty argv passes the negative assertion below for the wrong
+    // reason — so `argv()` waits for a non-empty record.
+    let argv = stub.argv().await;
     assert!(
         !argv.contains("--project"),
         "a projectless TUI must not bind the daemon to a project: {argv}"
     );
-    kill(spawned_pid(&pid_log).await);
 }
 
 /// **The rule this module exists to guarantee.** The TUI NEVER signals the
@@ -405,36 +486,34 @@ async fn spawns_projectless_when_the_tui_is_projectless() {
 async fn the_tui_never_signals_the_daemon_on_exit() {
     let _lock = ENV_LOCK.lock().await;
 
-    // 1. A daemon we spawned ourselves.
+    // 1. A daemon we spawned ourselves. The stub lives at FUNCTION scope on
+    // purpose: its `Drop` reaps the child, and reaping it inside the block
+    // below would kill the very process the `is_alive` assertion is about.
+    // `dir` is declared first so it outlives the stub that reads out of it.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let stub = SleepingStub::new(dir.path());
     let our_pid = {
         let _env = EnvGuard::isolated(None);
         let server = healthy_daemon(None).await;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let argv_log = dir.path().join("argv");
-        let pid_log = dir.path().join("pid");
-        let stub = sleeping_stub(dir.path(), &argv_log, &pid_log);
 
-        let url = ensure_daemon_with(&reqwest::Client::new(), None, &stub, &server.uri())
+        let url = ensure_daemon_with(&reqwest::Client::new(), None, &stub.path, &server.uri())
             .await
             .expect("must spawn a daemon");
         assert_eq!(url, server.uri());
-        spawned_pid(&pid_log).await
+        stub.pid().await
         // Everything `ensure_daemon_with` produced is dropped here.
     };
     assert!(
         is_alive(our_pid),
         "a daemon the TUI spawned must OUTLIVE it (pid {our_pid} was killed)"
     );
-    kill(our_pid);
 
     // 2. Somebody else's daemon, started outside `ensure_daemon_with`.
     let server = healthy_daemon(None).await;
     let _env = EnvGuard::isolated(Some(&server.uri()));
-    let dir = tempfile::tempdir().expect("tempdir");
-    let argv_log = dir.path().join("argv");
-    let pid_log = dir.path().join("pid");
-    let stub = sleeping_stub(dir.path(), &argv_log, &pid_log);
-    let mut foreign = tokio::process::Command::new(&stub)
+    let foreign_dir = tempfile::tempdir().expect("tempdir");
+    let foreign_stub = SleepingStub::new(foreign_dir.path());
+    let mut foreign = tokio::process::Command::new(&foreign_stub.path)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -444,7 +523,7 @@ async fn the_tui_never_signals_the_daemon_on_exit() {
     ensure_daemon_with(
         &reqwest::Client::new(),
         None,
-        &stub,
+        &foreign_stub.path,
         "http://unused.invalid",
     )
     .await
