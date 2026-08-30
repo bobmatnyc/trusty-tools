@@ -398,9 +398,9 @@ impl UsearchStore {
     /// What: Delegates to `HnswStore::len`, converting its `HnswStoreError`
     /// into an `anyhow::Error` so it composes with the rest of this crate's
     /// fallible surface.
-    /// Test: `cached_field_turns_a_read_error_into_unavailable_not_zero` in
-    /// `trusty-memory`'s `console_metrics` module exercises the caller-side
-    /// contract this method exists to support.
+    /// Test: `try_index_size_surfaces_a_read_error_where_index_size_reports_zero`
+    /// (trusty-memory's `cached_field_turns_a_read_error_into_unavailable_not_zero`
+    /// exercises the caller-side contract this method exists to support).
     pub fn try_index_size(&self) -> Result<usize> {
         Ok(self.inner.len()?)
     }
