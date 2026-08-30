@@ -254,7 +254,16 @@ fn no_stray_launchd_label_literals_in_workspace_sources() {
     assert!(
         strays.is_empty(),
         "launchd label literals not owned by `trusty_common::launchd_labels` \
-         (#4919 — derive them from the registry instead of restating them):\n  {}",
+         (#4919 — derive them from the registry instead of restating them).\n\
+         CHECK THE NAMESPACE FIRST (#5438): a CODESIGN identifier is not a launchd \
+         label. Codesign identifiers keep the full binary name on purpose \
+         (`com.trusty.trusty-memory`, not `com.trusty.memory`) and must NEVER be \
+         renamed onto the registry's convention — that invalidates the binary's \
+         designated requirement and re-triggers macOS TCC prompts (#2558). Bind one \
+         to a `readonly <NAME>_IDENTIFIER=` constant instead, which is the naming \
+         `codesign_stripped` exempts and \
+         `signed_install_scripts_name_codesign_identifiers_by_convention` enforces.\n  \
+         {}",
         strays.join("\n  ")
     );
 }
@@ -902,4 +911,230 @@ fn retired_analyze_carries_both_its_labels() {
         &["com.trusty.trusty-analyze"],
         "an eviction needs the retired row's legacy list just as an install needs a live one's"
     );
+}
+
+/// The signed-install scripts whose codesign identifiers the label scan exempts.
+///
+/// Why: `codesign_stripped` exempts an identifier by NAMING — the token has to
+/// sit beside `--identifier` or an `*_IDENTIFIER=` assignment. Nothing made a
+/// script follow that naming, so #5436 had to hoist three inline identifiers in
+/// `install-trusty-memory-signed.sh` after the scan reported them as stray
+/// launchd labels and its panic text advised deriving them from the registry —
+/// the one edit that invalidates a designated requirement (#2558).
+/// What: every `scripts/install-*-signed.sh` in the repository.
+/// Test: `signed_install_scripts_name_codesign_identifiers_by_convention`.
+fn signed_install_scripts(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root.join("scripts")) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("install-") && name.ends_with("-signed.sh") {
+            out.push(entry.path());
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The variable name in `$NAME`, `${NAME}` or a quoted form of either.
+///
+/// Returns `None` for a literal argument, which needs no name: an identifier
+/// written inline already sits beside the `--identifier` marker.
+fn shell_var_name(arg: &str) -> Option<String> {
+    let arg = arg.strip_prefix('$')?;
+    let arg = arg.strip_prefix('{').unwrap_or(arg);
+    let end = arg
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(arg.len());
+    (end > 0).then(|| arg[..end].to_string())
+}
+
+/// Split a shell line into `(variable, assigned value)` pairs.
+///
+/// What: for each `=`, the name is the identifier run immediately before it and
+/// the value runs to the next `;`. `readonly`/`local`/`export` prefixes fall
+/// away because the name is read backwards from the `=`. A `--flag=value`, a
+/// `==` comparison, and a bare `=` with no name to its left all yield nothing.
+/// Test: `identifier_convention_violations_flag_an_unmarked_binding`.
+fn shell_assignments(line: &str) -> Vec<(String, String)> {
+    let bytes = line.as_bytes();
+    let mut out = Vec::new();
+    for (idx, _) in line.match_indices('=') {
+        let head = &line[..idx];
+        let name_start = head
+            .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .map_or(0, |i| i + 1);
+        let name = &head[name_start..];
+        if name.is_empty() || name.starts_with(|c: char| c.is_ascii_digit()) {
+            continue;
+        }
+        // `--identifier=…` is a flag, not a binding — rule A owns it.
+        if name_start > 0 && bytes[name_start - 1] == b'-' {
+            continue;
+        }
+        let tail = &line[idx + 1..];
+        let value = tail.split(';').next().unwrap_or(tail);
+        out.push((name.to_string(), value.to_string()));
+    }
+    out
+}
+
+/// Every way `rel`'s body binds a codesign identifier without the naming the
+/// launchd-label scan's exemption depends on.
+///
+/// Why (#5438): the exemption was convention. A script that narrates an
+/// identifier under any other name reproduces #5436's false red, where the scan
+/// reports a codesign identifier as a stray launchd label and prescribes the
+/// rename that breaks signing (#2558).
+/// What: two rules over comment-stripped lines. `--identifier` must receive a
+/// literal or a variable whose name ends in `IDENTIFIER`; and a variable bound
+/// to a label-shaped literal the scan would reject must be named
+/// `*_IDENTIFIER`. A canonical registry label is a launchd label, not an
+/// identifier, so it is left alone — as is a legacy alias named on an eviction
+/// line, which the scan already permits.
+/// Test: `identifier_convention_violations_flag_an_unmarked_binding`,
+/// `identifier_convention_violations_accept_the_repaired_shape`.
+fn identifier_convention_violations(rel: &str, body: &str) -> Vec<String> {
+    const FLAG: &str = "--identifier";
+    let mut out = Vec::new();
+    for line in production_lines(body, Kind::Hash) {
+        for (idx, _) in line.match_indices(FLAG) {
+            let arg = line[idx + FLAG.len()..].trim_start_matches([' ', '=', '"', '\'', '\t']);
+            let Some(name) = shell_var_name(arg) else {
+                continue;
+            };
+            if !name.to_ascii_uppercase().ends_with("IDENTIFIER") {
+                out.push(format!(
+                    "{rel}: `--identifier \"${name}\"` — a codesign identifier must reach the \
+                     flag through a variable whose name ends in `_IDENTIFIER`, so its binding \
+                     site is exempt from the launchd-label scan (#5438)"
+                ));
+            }
+        }
+        let evicting = line.contains("bootout") || line.contains("unload");
+        for (name, value) in shell_assignments(&line) {
+            if name.to_ascii_uppercase().ends_with("_IDENTIFIER") {
+                continue;
+            }
+            for label in extract_labels(&value) {
+                if is_canonical_label(&label) {
+                    continue;
+                }
+                if evicting && legacy_labels_for_any().contains(&label.as_str()) {
+                    continue;
+                }
+                out.push(format!(
+                    "{rel}: `{name}=\"{label}\"` — a codesign identifier must be bound to a \
+                     `readonly <NAME>_IDENTIFIER=` constant, never renamed onto the launchd \
+                     convention (#2558); if `{label}` really is a launchd label, take it from \
+                     `trusty_common::launchd_labels` instead (#5438)"
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// Why (#5438): closure condition 2 — the exemption is checked mechanically
+/// across every signed-install script instead of being observed by habit.
+/// What: no script binds a codesign identifier under a name the scan cannot
+/// see. The counts guard against a vacuous pass — a glob that matched nothing,
+/// or scripts that carry no identifier at all, would otherwise report success.
+/// Test: this is the test.
+#[test]
+fn signed_install_scripts_name_codesign_identifiers_by_convention() {
+    let root = workspace_root();
+    let scripts = signed_install_scripts(&root);
+    assert!(
+        scripts.len() >= 3,
+        "expected the signed-install scripts under {}/scripts, found {}",
+        root.display(),
+        scripts.len()
+    );
+
+    let mut bindings = 0usize;
+    let mut violations: Vec<String> = Vec::new();
+    for path in &scripts {
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(path)
+            .display()
+            .to_string();
+        let Ok(body) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        for line in production_lines(&body, Kind::Hash) {
+            bindings += shell_assignments(&line)
+                .iter()
+                .filter(|(n, _)| n.to_ascii_uppercase().ends_with("_IDENTIFIER"))
+                .count();
+        }
+        violations.extend(identifier_convention_violations(&rel, &body));
+    }
+
+    assert!(
+        bindings > 0,
+        "no `*_IDENTIFIER=` binding found in any of {} script(s) — the scan would \
+         have nothing to exempt, so the walk is reading the wrong files",
+        scripts.len()
+    );
+    assert!(
+        violations.is_empty(),
+        "codesign identifiers bound outside the `*_IDENTIFIER` naming the \
+         launchd-label scan exempts:\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+/// REGRESSION (#5438): the shape #5436 had to repair by hand is caught by name.
+///
+/// Why: before this check the binding below produced a stray-label red whose
+/// advice — derive it from the registry — breaks the binary's designated
+/// requirement (#2558). Nothing failed until a developer typed it.
+/// What: both the unmarked binding and the flag reading it are reported, and the
+/// second assertion shows the scan really would have taken that binding for a
+/// launchd label.
+/// Test: this is the test.
+#[test]
+fn identifier_convention_violations_flag_an_unmarked_binding() {
+    let body = "local mem_id=\"com.trusty.trusty-memory\"\n\
+                codesign --force --identifier \"$mem_id\" \"$bin\"\n";
+    let found = identifier_convention_violations("scripts/install-fixture-signed.sh", body);
+    assert_eq!(
+        found.len(),
+        2,
+        "the binding and the flag are both violations, got: {found:?}"
+    );
+    assert!(
+        found.iter().any(|v| v.contains("com.trusty.trusty-memory")),
+        "the failure must name the label, got: {found:?}"
+    );
+    assert!(
+        found.iter().all(|v| v.contains("IDENTIFIER")),
+        "the failure must state the expected naming, got: {found:?}"
+    );
+
+    let binding = production_lines(body, Kind::Hash).remove(0);
+    assert!(
+        !extract_labels(&codesign_stripped(&binding)).is_empty(),
+        "this is the binding the label scan reads as a stray: {binding}"
+    );
+}
+
+/// Why: the check must accept what #5436 shipped, and must not mistake a
+/// launchd label for an identifier — a plist path names a canonical label and
+/// belongs to the registry, not the codesign namespace.
+/// Test: this is the test.
+#[test]
+fn identifier_convention_violations_accept_the_repaired_shape() {
+    let body = "readonly MEMORY_IDENTIFIER=\"com.trusty.trusty-memory\"\n\
+                codesign --identifier \"$MEMORY_IDENTIFIER\" \"$bin\"\n\
+                codesign --identifier com.trusty.trusty-memory \"$bin\"\n\
+                local plist=\"$HOME/Library/LaunchAgents/com.trusty.memory.plist\"\n\
+                # local narrated=\"com.trusty.trusty-memory\"\n";
+    let found = identifier_convention_violations("scripts/install-fixture-signed.sh", body);
+    assert!(found.is_empty(), "expected no violations, got: {found:?}");
 }
