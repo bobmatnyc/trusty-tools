@@ -26,25 +26,46 @@ use clap::Subcommand;
 /// `index_remove::tests::*` cover path resolution.
 #[derive(Subcommand)]
 pub(crate) enum IndexAction {
-    /// Remove an index registration (daemon + global config + allowlist)
+    /// Remove an index registration AND its on-disk data (daemon + config + allowlist)
     ///
     /// Deletes the daemon-side registration matching the given (or
-    /// auto-detected) path via `DELETE /indexes/:id`, drops the matching
-    /// entry from `~/.config/trusty-search/config.yaml`, and also removes it
-    /// from the allowlist (`~/.config/trusty-search/indexes.toml`). The
-    /// on-disk redb / HNSW snapshot is preserved — re-registering with the
-    /// same path reuses it.
+    /// auto-detected) path via `DELETE /indexes/:id?delete_data=true`, drops
+    /// the matching entry from `~/.config/trusty-search/config.yaml`, and also
+    /// removes it from the allowlist
+    /// (`~/.config/trusty-search/indexes.toml`).
+    ///
+    /// The on-disk redb / HNSW data goes with it. Pass `--keep-data` to
+    /// deregister only and leave the corpus in place — re-registering the same
+    /// path then reuses it. Because the default destroys data, the command
+    /// asks for confirmation first; `--yes` answers it for a script.
     ///
     /// AGENT USAGE: use this when a project has been moved or deleted so the
     /// daemon stops reporting an empty/stale entry. Auto-detect from CWD when
     /// possible; pass an explicit PATH when running from outside the project.
+    /// Non-interactive callers must pass `--yes` (or `--keep-data`).
     ///
     /// Examples:
     ///   trusty-search index remove
-    ///   trusty-search index remove ~/Projects/old-app
+    ///   trusty-search index remove ~/Projects/old-app --yes
+    ///   trusty-search index remove --keep-data
     Remove {
         /// Directory of the index to remove (default: auto-detected from CWD)
         path: Option<std::path::PathBuf>,
+
+        /// Deregister only — leave the on-disk index data in place (issue #6422)
+        ///
+        /// The opt-out from the destructive default. Without it the index's
+        /// redb corpus and HNSW snapshot are deleted along with the
+        /// registration.
+        #[arg(long)]
+        keep_data: bool,
+
+        /// Answer the "this cannot be undone" confirmation with yes (issue #6422)
+        ///
+        /// Only consulted when data is about to be deleted; `--keep-data`
+        /// never prompts.
+        #[arg(long)]
+        yes: bool,
     },
 
     /// Add a path to the opt-in allowlist (issue #767)

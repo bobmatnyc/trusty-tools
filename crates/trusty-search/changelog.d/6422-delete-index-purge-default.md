@@ -1,0 +1,7 @@
+Changed
+
+- Deleting an index now deletes its on-disk data by default, and keeping the data is the explicit opt-out (owner ruling, #6422).
+  - `trusty-search index remove` sends `?delete_data=true` and asks "This cannot be undone." before it runs. `--keep-data` deregisters only and leaves the corpus; `--yes` answers the prompt for a script. A non-interactive run without either is refused rather than prompted into a hang.
+  - `index remove` now reads the daemon's answer instead of its status code. `200 {"removed": false}` is a failure, and a delete whose registration went while `data_deleted` came back `false` is a failure too — it used to print a tick, recording the corpus as reclaimed while every byte was still on disk (#3049). The local config and allowlist rows are still cleared in that case, because the registration really is gone.
+  - The `delete_index` MCP tool takes a new `delete_data` argument, absent ⇒ `true`. A present-but-non-boolean value is `InvalidParams` rather than a coerced guess. **Breaking for remote callers that wanted deregister-only**: there was no way to ask for it before, so nothing that worked stops working, but the tool's schema and description now advertise the choice.
+  - `DELETE /indexes/{id}` itself is unchanged: absent `delete_data` still means preserve (#4123). Every surface above sends the flag explicitly, so the two defaults never have to agree.

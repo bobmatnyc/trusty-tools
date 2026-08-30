@@ -19,20 +19,28 @@
  * `optionParam` is the query parameter the extra confirm checkbox toggles:
  * `force` lets trusty-memory tear down a palace that still holds drawers;
  * `delete_data` lets trusty-search destroy an index's on-disk corpus rather
- * than only deregistering it (which is what a bare delete does since #4123).
+ * than only deregistering it.
+ *
+ * `optionDefault` is where the checkbox starts, and the two kinds differ (#6422).
+ * A palace delete starts unticked: `force` widens what a delete may destroy, so
+ * a refusal on a non-empty palace is the safe answer. An index delete starts
+ * TICKED, because the owner ruling made purging the on-disk data the default and
+ * deregister-only the explicit opt-out — unticking the box is that opt-out.
  */
 export const KINDS = {
   palace: {
     noun: 'palace',
     path: '/api/console/memory/palaces',
     optionParam: 'force',
+    optionDefault: false,
     optionLabel: 'Delete even if it still holds drawers (force)',
   },
   index: {
     noun: 'index',
     path: '/api/console/search/indexes',
     optionParam: 'delete_data',
-    optionLabel: 'Also delete the on-disk data (otherwise only deregistered)',
+    optionDefault: true,
+    optionLabel: 'Delete the on-disk data too — untick to deregister only and keep the corpus',
   },
 };
 

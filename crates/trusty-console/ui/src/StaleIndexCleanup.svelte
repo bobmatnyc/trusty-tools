@@ -24,6 +24,7 @@
    */
   import {
     CENSUS_URL,
+    PRUNE_DELETE_DATA_DEFAULT,
     PRUNE_URL,
     censusSummary,
     pruneConfirmMessage,
@@ -41,8 +42,13 @@
   let census = $state(null);
   /** Ids the operator has ticked, as a plain object so Svelte tracks writes. */
   let selected = $state({});
-  /** Whether the prune also destroys each index's on-disk corpus. */
-  let deleteData = $state(false);
+  /**
+   * Whether the prune also destroys each index's on-disk corpus.
+   *
+   * #6422: starts ticked. Purging is the default and keeping the data is the
+   * explicit opt-out.
+   */
+  let deleteData = $state(PRUNE_DELETE_DATA_DEFAULT);
   /** The message from the last completed attempt, or a fetch failure. */
   let outcome = $state(null);
   /** Per-id rows from the last prune. */
@@ -191,7 +197,7 @@
       {:else}
         <label class="opt">
           <input type="checkbox" bind:checked={deleteData} disabled={stage !== 'reviewing'} />
-          Also delete the on-disk index data (otherwise only deregistered)
+          Delete the on-disk index data too — untick to deregister only and keep the corpus
         </label>
         <button class="danger" onclick={openConfirm} disabled={chosen.length === 0}>
           Remove {chosen.length} selected

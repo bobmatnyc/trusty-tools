@@ -7,24 +7,34 @@
 //!      file. The `index remove` subcommand collapses both steps into one.
 //! What: resolves PATH (explicit index id > CLI path arg > project auto-detection
 //!       from CWD), finds the matching daemon-side index id via
-//!       `GET /indexes/:id/status`, calls `DELETE /indexes/:id`, then drops the
-//!       matching entry from `~/.config/trusty-search/config.yaml`.
+//!       `GET /indexes/:id/status`, calls
+//!       `DELETE /indexes/:id?delete_data=<bool>`, then drops the matching entry
+//!       from `~/.config/trusty-search/config.yaml`.
 //!
 //! Issue #1087: when `-i`/`--index` is given it MUST override CWD auto-detection
 //! and never fall back to CWD detection. The fix passes `explicit_index_id` from
 //! the parent `Commands::Index { index_id }` field and uses it directly (skipping
 //! the path→id lookup entirely) when it is `Some`.
 //!
+//! Issue #6422: removing an index deletes its on-disk data by default, and
+//! `--keep-data` is the explicit opt-out that deregisters and keeps the corpus.
+//! The daemon's own default is still the opposite (`?delete_data` absent ⇒
+//! preserve, #4123), so this command always sends the flag rather than relying
+//! on a default either side might change.
+//!
 //! Test: `index_remove_resolves_path_*` unit tests cover the path resolution;
 //!       `index_remove_explicit_id_bypasses_path_lookup` covers the -i flag fix;
-//!       the HTTP round-trip is exercised end-to-end by the daemon integration
-//!       tests.
+//!       `delete_index_url_*`, `confirmation_*` and `delete_body_*` cover the
+//!       #6422 default and its failure paths; the HTTP round-trip is exercised
+//!       end-to-end by the daemon integration tests.
 
 use super::daemon_utils::daemon_base_url;
 use crate::config::GlobalConfig;
 use crate::detect::detect_project;
 use anyhow::{bail, Context, Result};
 use colored::Colorize;
+use serde_json::Value;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 /// Entry point for `trusty-search index remove [PATH]`.
@@ -38,13 +48,23 @@ use std::path::{Path, PathBuf};
 /// the fix for the bug where `index remove -i other` would remove the CWD
 /// index instead of `other`.
 ///
+/// Issue #6422: `keep_data` is the opt-out from the destructive default. When
+/// it is false the on-disk corpus goes with the registration and the operator
+/// is asked to confirm first, unless `yes` already answered.
+///
 /// What: see module docs.
 /// Test: `index_remove_resolves_path_*` below; `index_remove_explicit_id_*`;
+///       `delete_index_url_*` / `confirmation_*` / `delete_body_*` for #6422;
 ///       HTTP path covered by integration tests.
 pub async fn handle_index_remove(
     cli_path: Option<PathBuf>,
     explicit_index_id: Option<String>,
+    keep_data: bool,
+    yes: bool,
 ) -> Result<()> {
+    // #6422: purge by default; `--keep-data` is the explicit deregister-only
+    // opt-out.
+    let delete_data = !keep_data;
     let base = daemon_base_url();
     crate::commands::daemon_guard::ensure_daemon_running_or_exit(&base).await?;
     let client = trusty_common::server::daemon_http_client()?;
@@ -62,15 +82,57 @@ pub async fn handle_index_remove(
         find_index_by_path(&client, &base, &target_path).await?
     };
 
-    let delete_url = format!("{}/indexes/{}", base, index_id);
-    match client.delete(&delete_url).send().await {
-        Ok(resp) if resp.status().is_success() => {}
-        Ok(resp) => bail!(
-            "daemon returned {} for DELETE {}",
-            resp.status(),
-            delete_url
-        ),
+    // #6422: the confirmation gate. It runs after resolution so the prompt can
+    // name the exact index and root path the operator is about to destroy.
+    if confirmation_required(delete_data, yes) {
+        if !std::io::stdin().is_terminal() {
+            bail!(
+                "refusing to delete index \"{index_id}\" and its on-disk data without \
+                 confirmation; pass --yes to confirm, or --keep-data to deregister only"
+            );
+        }
+        if !super::confirm(&format!(
+            "Delete index \"{index_id}\" and its on-disk data ({})? This cannot be undone.",
+            registered_path.display()
+        ))? {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    let delete_url = delete_index_url(&base, &index_id, delete_data);
+    let body = match client.delete(&delete_url).send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let parsed: Value = resp.json().await.unwrap_or(Value::Null);
+            if !status.is_success() {
+                let reported = parsed.get("error").and_then(Value::as_str).unwrap_or("");
+                bail!(
+                    "daemon returned {status} for DELETE {delete_url}{}",
+                    if reported.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {reported}")
+                    }
+                );
+            }
+            parsed
+        }
         Err(e) => bail!("could not reach daemon at {}: {e}", base),
+    };
+
+    // #6422: a `200` is not proof — the daemon answers one for a delete that
+    // removed no registration. The local cleanup below runs only when the
+    // registration is confirmed gone, and it runs even when the DATA removal
+    // failed, because leaving those rows behind would strand entries for an
+    // index the daemon no longer has.
+    let removed = registration_removed(&body);
+    let data_outcome = interpret_delete_body(delete_data, &body);
+    if !removed {
+        match data_outcome {
+            Ok(_) => bail!("the daemon removed no registration for \"{index_id}\""),
+            Err(reason) => bail!("{reason}"),
+        }
     }
 
     // Drop the matching entry from the global YAML config so a future daemon
@@ -79,8 +141,8 @@ pub async fn handle_index_remove(
     // delete that already succeeded.
     match GlobalConfig::load() {
         Ok(mut cfg) => {
-            let removed = cfg.remove_collection_by_path(&registered_path);
-            if removed.is_some() {
+            let dropped = cfg.remove_collection_by_path(&registered_path);
+            if dropped.is_some() {
                 if let Err(e) = cfg.save() {
                     tracing::warn!("could not update global config after removal: {e:#}");
                 }
@@ -101,13 +163,97 @@ pub async fn handle_index_remove(
         );
     }
 
+    // #6422: report what the daemon said it DID. A registration that went while
+    // its bytes stayed is a failure, not a removal with a caveat — printing a
+    // tick there records the disk as reclaimed while every byte is still on it
+    // (#3049).
+    let data_deleted = match data_outcome {
+        Ok(v) => v,
+        Err(reason) => bail!("{reason}"),
+    };
+
     println!(
-        "{} Removed index {} ({})",
+        "{} Removed index {} ({}) — {}",
         "✓".green(),
         format!("\"{index_id}\"").bold(),
-        registered_path.display()
+        registered_path.display(),
+        if data_deleted {
+            "on-disk data deleted"
+        } else {
+            "on-disk data kept (--keep-data)"
+        }
     );
     Ok(())
+}
+
+/// The DELETE URL for one index, carrying the data choice explicitly.
+///
+/// Why (#6422): the CLI purges on-disk data by default while the daemon's own
+/// default is still the opposite (`?delete_data` absent ⇒ preserve, #4123).
+/// Sending the flag on every call means this command's default does not depend
+/// on which daemon version answers it.
+/// What: `<base>/indexes/<id>?delete_data=<true|false>`.
+/// Test: `delete_index_url_purges_by_default`,
+/// `delete_index_url_honours_keep_data`.
+pub(crate) fn delete_index_url(base: &str, id: &str, delete_data: bool) -> String {
+    format!("{base}/indexes/{id}?delete_data={delete_data}")
+}
+
+/// Whether the operator must confirm before this delete runs.
+///
+/// Why (#6422): the owner ruling made the destructive path the default and kept
+/// the confirmation. Deregister-only touches no data, so it keeps the
+/// unprompted behaviour scripts already rely on.
+/// What: true only when data is about to be deleted and `--yes` has not already
+/// answered.
+/// Test: `confirmation_is_required_only_for_a_data_delete`.
+pub(crate) fn confirmation_required(delete_data: bool, yes: bool) -> bool {
+    delete_data && !yes
+}
+
+/// Whether the daemon confirmed it removed the registration.
+///
+/// Why: `DELETE` answers `200 {"removed": false}` for a delete it declined to
+/// perform, so the status code alone cannot say whether anything happened.
+/// What: reads `removed`, treating a missing field as "not removed" — a body
+/// that never said so has not said so.
+/// Test: `delete_body_without_a_removal_is_a_failure`.
+pub(crate) fn registration_removed(body: &Value) -> bool {
+    body.get("removed").and_then(Value::as_bool) == Some(true)
+}
+
+/// What the daemon's delete body says actually happened to the data.
+///
+/// Why (#6422): a delete that removed the registration and left every byte on
+/// disk must not print as a clean removal — the operator would record the disk
+/// as reclaimed while the corpus is still there (#3049). The daemon answers
+/// `500` when the durable cleanup fails, but `200` with `data_deleted: false`
+/// is a success on the wire, so the body is read rather than the status alone.
+/// What: `Ok(true)` when the data went, `Ok(false)` when only the registration
+/// did and that is what was asked for, `Err(reason)` for every other shape.
+/// Test: `delete_body_confirms_a_purge`,
+/// `delete_body_reporting_undeleted_data_is_a_failure`,
+/// `delete_body_without_a_removal_is_a_failure`,
+/// `delete_body_of_a_keep_data_delete_reports_the_data_kept`.
+pub(crate) fn interpret_delete_body(delete_data: bool, body: &Value) -> Result<bool, String> {
+    if !registration_removed(body) {
+        return Err(format!(
+            "the daemon answered successfully but removed no registration{}",
+            match body.get("quiesced").and_then(Value::as_bool) {
+                Some(false) => " (in-flight writers never quiesced, so the teardown was abandoned)",
+                _ => "",
+            }
+        ));
+    }
+    let data_deleted = body.get("data_deleted").and_then(Value::as_bool) == Some(true);
+    if delete_data && !data_deleted {
+        return Err(
+            "the registration was removed but the on-disk data was NOT deleted; \
+             the corpus is still on disk — re-run the delete to reclaim it"
+                .to_string(),
+        );
+    }
+    Ok(data_deleted)
 }
 
 /// Resolve the path argument: CLI value wins; otherwise auto-detect from CWD.
@@ -328,5 +474,123 @@ mod tests {
             "other-project",
             "CWD fallback must not accidentally equal an explicit id string"
         );
+    }
+
+    // ── #6422: deleting an index purges its data by default ─────────────────
+
+    /// Why (#6422, closure condition 1): the owner ruling. Against the pre-fix
+    /// code this command issued `DELETE /indexes/{id}` with NO query at all,
+    /// which the daemon reads as `delete_data=false` (#4123) — so this
+    /// assertion fails there, on the substring and on the whole URL alike.
+    /// Test: this is the test.
+    #[test]
+    fn delete_index_url_purges_by_default() {
+        let url = super::delete_index_url("http://127.0.0.1:7878", "rustbot", true);
+        assert_eq!(
+            url, "http://127.0.0.1:7878/indexes/rustbot?delete_data=true",
+            "the default delete must ask the daemon for the data too"
+        );
+    }
+
+    /// Why (#6422, closure condition 2): `--keep-data` is the opt-out, and it
+    /// must send `false` EXPLICITLY rather than omit the parameter — a delete
+    /// that leans on the daemon's default is one daemon version away from
+    /// destroying the corpus it promised to keep.
+    /// Test: this is the test.
+    #[test]
+    fn delete_index_url_honours_keep_data() {
+        let url = super::delete_index_url("http://127.0.0.1:7878", "rustbot", false);
+        assert_eq!(
+            url,
+            "http://127.0.0.1:7878/indexes/rustbot?delete_data=false"
+        );
+    }
+
+    /// Why (#6422, closure condition 3): the destructive default keeps its
+    /// confirmation. Deregister-only destroys nothing, so it keeps the
+    /// unprompted behaviour scripts already rely on.
+    /// Test: this is the test.
+    #[test]
+    fn confirmation_is_required_only_for_a_data_delete() {
+        assert!(
+            super::confirmation_required(true, false),
+            "a data delete must be confirmed"
+        );
+        assert!(
+            !super::confirmation_required(true, true),
+            "--yes answers the confirmation"
+        );
+        assert!(
+            !super::confirmation_required(false, false),
+            "--keep-data destroys nothing and must not prompt"
+        );
+    }
+
+    /// Why: the success path must stay reachable and must report that the data
+    /// actually went.
+    /// Test: this is the test.
+    #[test]
+    fn delete_body_confirms_a_purge() {
+        let body = serde_json::json!({
+            "id": "rustbot", "ok": true, "removed": true, "data_deleted": true
+        });
+        assert!(super::registration_removed(&body));
+        assert_eq!(super::interpret_delete_body(true, &body), Ok(true));
+    }
+
+    /// Why (#6422 failure path, #3049): the registration went and every byte
+    /// stayed. Printing a tick there records the corpus as reclaimed while it
+    /// is still on disk, which is the silent half-deleted state this command
+    /// must never leave behind.
+    /// Test: this is the test.
+    #[test]
+    fn delete_body_reporting_undeleted_data_is_a_failure() {
+        let body = serde_json::json!({
+            "id": "rustbot", "ok": true, "removed": true, "data_deleted": false
+        });
+        let err = super::interpret_delete_body(true, &body)
+            .expect_err("undeleted data must not read as a clean removal");
+        assert!(
+            err.contains("was NOT deleted"),
+            "the failure must say the data survived: {err}"
+        );
+    }
+
+    /// Why: `200 {"removed": false}` is the daemon's honest no-op, and an
+    /// abandoned teardown (`quiesced: false`) is a distinct condition the
+    /// operator can act on by retrying.
+    /// Test: this is the test.
+    #[test]
+    fn delete_body_without_a_removal_is_a_failure() {
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({ "removed": false, "data_deleted": false }),
+        ] {
+            assert!(!super::registration_removed(&body), "body: {body}");
+            assert!(
+                super::interpret_delete_body(true, &body).is_err(),
+                "body: {body}"
+            );
+        }
+
+        let abandoned =
+            serde_json::json!({ "removed": false, "data_deleted": false, "quiesced": false });
+        let err = super::interpret_delete_body(true, &abandoned).expect_err("abandoned");
+        assert!(
+            err.contains("never quiesced"),
+            "an abandoned teardown must say so: {err}"
+        );
+    }
+
+    /// Why (#6422): the opt-out's success path. A deregister-only delete that
+    /// left the data alone is exactly what was asked for, and must read as a
+    /// success reporting the data kept.
+    /// Test: this is the test.
+    #[test]
+    fn delete_body_of_a_keep_data_delete_reports_the_data_kept() {
+        let body = serde_json::json!({
+            "id": "rustbot", "ok": true, "removed": true, "data_deleted": false
+        });
+        assert_eq!(super::interpret_delete_body(false, &body), Ok(false));
     }
 }

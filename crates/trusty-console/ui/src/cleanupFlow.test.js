@@ -9,6 +9,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  PRUNE_DELETE_DATA_DEFAULT,
   censusSummary,
   compactConfirmMessage,
   compactUrl,
@@ -186,4 +187,19 @@ test('ok:false on a 200 compaction still reads as failure', () => {
   const out = readCompactResult(200, { ok: false, id: 'x', error: 'nothing was compacted' });
   assert.equal(out.ok, false, 'the ok field decides, not the status code');
   assert.equal(out.message, 'nothing was compacted');
+});
+
+test('#6422: the prune panel starts with the on-disk data going too', () => {
+  // The owner ruling, on the batch surface. Against the pre-fix code the panel
+  // opened with the checkbox unticked, so a confirmed prune cleared dozens of
+  // registrations and reclaimed no disk at all.
+  assert.equal(PRUNE_DELETE_DATA_DEFAULT, true);
+  assert.ok(
+    pruneConfirmMessage(['a'], PRUNE_DELETE_DATA_DEFAULT).includes('will be deleted too'),
+    'the confirm must say the data goes, before anything is deleted',
+  );
+  assert.ok(
+    pruneConfirmMessage(['a'], false).includes('left in place'),
+    'the opt-out must be visible in the same sentence',
+  );
 });
