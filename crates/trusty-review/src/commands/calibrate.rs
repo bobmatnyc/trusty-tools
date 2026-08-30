@@ -26,7 +26,7 @@ use trusty_review::{
         github::{AuthStrategy, GithubClient, RunMode},
         search_client::HttpSearchClient,
     },
-    models::Finding,
+    models::{Finding, Verdict},
     pipeline::{CallerContext, DiffSource, ReviewDeps, ReviewInput, TriggerDecision, run_review},
 };
 
@@ -66,6 +66,17 @@ pub struct CorpusEntry {
     pub pr: u64,
     /// Human reviewer findings for this PR (ground truth).
     pub human_findings: Vec<HumanFinding>,
+    /// Reference reviewer's verdict for this PR, when the corpus records one
+    /// (#2974).
+    ///
+    /// Why: #1897's acceptance bars are stated over verdicts, not findings —
+    /// strict verdict agreement, RC-recall parity, and the clean-PR over-flag
+    /// rate. Without this the harness has no ground truth to compare a verdict
+    /// against, and [`compute_verdict_bars`] can only answer "not measured".
+    /// Optional and `serde(default)`: a pre-#2974 corpus loads unchanged and
+    /// simply scores no verdict bars.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_verdict: Option<Verdict>,
 }
 
 // ─── Report format ────────────────────────────────────────────────────────────
@@ -120,6 +131,10 @@ pub struct CalibrationReport {
     pub precision: f64,
     /// Per-PR metrics (one entry per corpus line).
     pub per_pr: Vec<PrMetrics>,
+    /// #1897's verdict-level acceptance bars, or `None` when the corpus records
+    /// no reference verdict to compare against (#2974).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict_bars: Option<VerdictBars>,
     /// True false-positive rate of `logic-error`/`ownership` findings on `.rs` files.
     ///
     /// Why: trusty-review false-positives HIGH on Rust semantic patterns (`move`
@@ -129,6 +144,143 @@ pub struct CalibrationReport {
     /// 1.0 = every Rust semantic finding was a false positive).  Returns 0.0 (no FPs)
     /// when no Rust semantic findings exist in the run.
     pub rust_semantic_fp_rate: f64,
+}
+
+// ─── Verdict bars (#1897 acceptance gate, wired for #2974) ───────────────────
+
+/// Strict verdict-agreement bar from #1897: at least 85% exact agreement with
+/// the reference reviewer.
+const VERDICT_AGREEMENT_MIN: f64 = 0.85;
+
+/// Clean-PR over-flag bar from #1897: under 15% of reference-APPROVE PRs may be
+/// escalated to `REQUEST_CHANGES`/`BLOCK` (down from 0.6.3's 47%).
+const CLEAN_PR_OVER_FLAG_MAX: f64 = 0.15;
+
+/// #1897's three verdict-level acceptance bars, measured over the corpus PRs
+/// that carry a reference verdict (#2974).
+///
+/// Why: the harness previously discarded `ReviewResult::verdict` entirely and
+/// reported only finding-level recall/precision, so #2974's question — does the
+/// #1897 reconciliation cap clear all three bars — had no expressible answer.
+/// Recording each bar's DENOMINATOR beside its rate is the point: a bar with an
+/// empty denominator measured nothing, and must never read as a pass.
+/// What: bar 1 is strict verdict agreement; bar 2 is the fraction of
+/// reference-RC PRs the daemon also flags (reported, not thresholded — #1897
+/// states parity with the #1876 gain and sets no number); bar 3 is the fraction
+/// of reference-clean PRs the daemon escalates.
+/// Test: `verdict_bars_pass_when_all_three_clear`,
+/// `verdict_bars_fail_on_over_flagging`,
+/// `verdict_bars_never_pass_on_an_empty_denominator`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VerdictBars {
+    /// Corpus PRs carrying a reference verdict — the agreement denominator.
+    pub scored_prs: usize,
+    /// Bar 1: fraction of scored PRs where the daemon verdict matches exactly.
+    pub verdict_agreement: f64,
+    /// Whether bar 1 clears [`VERDICT_AGREEMENT_MIN`] over a non-empty sample.
+    pub verdict_agreement_pass: bool,
+    /// Reference PRs whose verdict requests changes or blocks.
+    pub rc_reference_prs: usize,
+    /// Bar 2: fraction of those the daemon also flags. Reported, not thresholded.
+    pub rc_recall: f64,
+    /// Reference PRs whose verdict approves.
+    pub clean_reference_prs: usize,
+    /// Bar 3: fraction of those the daemon escalates to REQUEST_CHANGES/BLOCK.
+    pub clean_pr_over_flag_rate: f64,
+    /// Whether bar 3 clears [`CLEAN_PR_OVER_FLAG_MAX`] over a non-empty sample.
+    pub clean_pr_over_flag_pass: bool,
+}
+
+/// Whether a verdict flags the PR as needing change before merge.
+///
+/// What: `REQUEST_CHANGES` and `BLOCK`. `UNKNOWN` is deliberately excluded — it
+/// means the reviewer could not assess the diff, not that it objected.
+fn flags_changes(v: &Verdict) -> bool {
+    matches!(v, Verdict::RequestChanges | Verdict::Block)
+}
+
+/// Whether a verdict is a clean approval (either APPROVE form).
+fn approves(v: &Verdict) -> bool {
+    matches!(v, Verdict::Approve | Verdict::ApproveWithReservations)
+}
+
+/// Compute #1897's verdict bars from the corpus and the daemon's verdicts.
+///
+/// Why: extracted as a pure function so the bars are provable without a live
+/// GitHub or Bedrock call — the two things #2974 has been blocked on.
+/// What: scores only corpus entries carrying a `reference_verdict`; returns
+/// `None` when none do, so an unlabelled corpus reports "not measured" rather
+/// than a vacuous pass. Each `*_pass` flag requires a non-empty denominator.
+/// Test: `verdict_bars_pass_when_all_three_clear`,
+/// `verdict_bars_fail_on_over_flagging`,
+/// `verdict_bars_are_none_without_reference_verdicts`,
+/// `verdict_bars_never_pass_on_an_empty_denominator`.
+pub fn compute_verdict_bars(corpus: &[CorpusEntry], verdicts: &[Verdict]) -> Option<VerdictBars> {
+    assert_eq!(
+        corpus.len(),
+        verdicts.len(),
+        "corpus and verdicts must have the same length"
+    );
+
+    let mut scored = 0usize;
+    let mut agreed = 0usize;
+    let mut rc_total = 0usize;
+    let mut rc_flagged = 0usize;
+    let mut clean_total = 0usize;
+    let mut clean_over_flagged = 0usize;
+
+    for (entry, daemon) in corpus.iter().zip(verdicts.iter()) {
+        let Some(reference) = entry.reference_verdict.as_ref() else {
+            continue;
+        };
+        scored += 1;
+        if reference == daemon {
+            agreed += 1;
+        }
+        if flags_changes(reference) {
+            rc_total += 1;
+            if flags_changes(daemon) {
+                rc_flagged += 1;
+            }
+        }
+        if approves(reference) {
+            clean_total += 1;
+            if flags_changes(daemon) {
+                clean_over_flagged += 1;
+            }
+        }
+    }
+
+    if scored == 0 {
+        return None;
+    }
+
+    let verdict_agreement = agreed as f64 / scored as f64;
+    let rc_recall = ratio(rc_flagged, rc_total);
+    let clean_pr_over_flag_rate = ratio(clean_over_flagged, clean_total);
+
+    Some(VerdictBars {
+        scored_prs: scored,
+        verdict_agreement,
+        verdict_agreement_pass: verdict_agreement >= VERDICT_AGREEMENT_MIN,
+        rc_reference_prs: rc_total,
+        rc_recall,
+        clean_reference_prs: clean_total,
+        clean_pr_over_flag_rate,
+        // An empty clean-PR sample proves nothing about over-flagging, so it
+        // reports 0.0 and still fails the bar rather than passing vacuously.
+        clean_pr_over_flag_pass: clean_total > 0
+            && clean_pr_over_flag_rate < CLEAN_PR_OVER_FLAG_MAX,
+    })
+}
+
+/// `numerator / denominator`, or 0.0 when the denominator is empty.
+fn ratio(numerator: usize, denominator: usize) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f64 / denominator as f64
+    }
 }
 
 // ─── CLI args ─────────────────────────────────────────────────────────────────
@@ -298,6 +450,7 @@ pub fn compute_metrics(
         recall: aggregate_recall,
         precision: aggregate_precision,
         per_pr,
+        verdict_bars: None,
         rust_semantic_fp_rate,
     }
 }
@@ -328,29 +481,35 @@ pub fn load_corpus(path: &Path) -> Result<Vec<CorpusEntry>> {
 
 // ─── Pipeline runner ─────────────────────────────────────────────────────────
 
-/// Run the real review pipeline for a corpus PR and return its findings.
+/// Run the real review pipeline for a corpus PR and return its findings and
+/// verdict.
 ///
 /// Why: the calibration harness must call the REAL review pipeline to produce
 /// actual model findings — synthesising findings from the corpus ground truth
-/// would be tautological and say nothing about the model.
+/// would be tautological and say nothing about the model. The verdict rides
+/// along because #1897's acceptance bars are stated over verdicts (#2974);
+/// dropping it here is what left those bars unmeasurable.
 /// What: resolves a GitHub token, builds `DiffSource::Github`, runs `run_review`
-/// in dry-run mode (no GitHub post, no log write), and returns the findings list.
-/// Errors are fail-open: a pipeline error for one PR logs a warning and returns
-/// an empty findings list so the rest of the corpus continues.
-/// Test: called in `cmd_calibrate`; pure functions (`is_recalled`, `compute_metrics`)
-/// are tested separately in `calibrate_tests.rs` without hitting real services.
+/// in dry-run mode (no GitHub post, no log write), and returns the findings plus
+/// the final verdict. Errors are fail-open: a pipeline error for one PR logs a
+/// warning and yields no findings and `Verdict::Unknown` — which agrees with no
+/// reference verdict, so a failed PR drags the agreement bar down rather than
+/// silently shrinking the sample.
+/// Test: called in `cmd_calibrate`; pure functions (`is_recalled`,
+/// `compute_metrics`, `compute_verdict_bars`) are tested separately in
+/// `calibrate_tests.rs` without hitting real services.
 async fn run_pipeline_for_entry(
     config: &ReviewConfig,
     entry: &CorpusEntry,
     reviewer_model: &str,
     deps: ReviewDeps,
-) -> Vec<Finding> {
+) -> (Vec<Finding>, Verdict) {
     let client = match GithubClient::new() {
         Ok(c) => c,
         Err(e) => {
             warn!(pr = entry.pr, owner = %entry.owner, repo = %entry.repo,
                   "calibrate: failed to build GitHub client: {e}");
-            return Vec::new();
+            return (Vec::new(), Verdict::Unknown);
         }
     };
     let token = match AuthStrategy::select(RunMode::Cli, None)
@@ -361,7 +520,7 @@ async fn run_pipeline_for_entry(
         Err(e) => {
             warn!(pr = entry.pr, owner = %entry.owner, repo = %entry.repo,
                   "calibrate: GitHub token resolution failed: {e}");
-            return Vec::new();
+            return (Vec::new(), Verdict::Unknown);
         }
     };
 
@@ -388,7 +547,7 @@ async fn run_pipeline_for_entry(
     };
 
     let result = run_review(config, input, deps).await;
-    result.findings
+    (result.findings, result.verdict)
 }
 
 // ─── Subcommand handler ───────────────────────────────────────────────────────
@@ -434,6 +593,7 @@ pub async fn cmd_calibrate(_config: ReviewConfig, args: CalibrateArgs) -> Result
     // Run the real pipeline for each corpus PR.  Deps are rebuilt per-PR because
     // `ReviewDeps` contains `Arc<dyn LlmProvider>` which is not cheaply cloneable.
     let mut trusty_results: Vec<Vec<Finding>> = Vec::with_capacity(corpus.len());
+    let mut trusty_verdicts: Vec<Verdict> = Vec::with_capacity(corpus.len());
     for (i, entry) in corpus.iter().enumerate() {
         eprintln!(
             "calibrate: [{}/{}] {}/{}#{}",
@@ -457,15 +617,48 @@ pub async fn cmd_calibrate(_config: ReviewConfig, args: CalibrateArgs) -> Result
             Err(e) => {
                 warn!("calibrate: failed to build deps for PR {}: {e}", entry.pr);
                 trusty_results.push(Vec::new());
+                trusty_verdicts.push(Verdict::Unknown);
                 continue;
             }
         };
-        let findings = run_pipeline_for_entry(&cfg, entry, &reviewer_model, deps).await;
+        let (findings, verdict) = run_pipeline_for_entry(&cfg, entry, &reviewer_model, deps).await;
         trusty_results.push(findings);
+        trusty_verdicts.push(verdict);
     }
 
-    let report = compute_metrics(&corpus, &trusty_results);
+    let mut report = compute_metrics(&corpus, &trusty_results);
+    report.verdict_bars = compute_verdict_bars(&corpus, &trusty_verdicts);
     let json = serde_json::to_string_pretty(&report).context("serialising calibration report")?;
+
+    // #2974: say out loud when the verdict bars measured nothing. A corpus with
+    // no reference verdicts produces a report that looks complete but answers
+    // #1897's acceptance question not at all.
+    match &report.verdict_bars {
+        Some(bars) => eprintln!(
+            "calibrate: verdict bars over {} PR(s) — agreement={:.3} ({}), \
+             rc_recall={:.3} over {} RC PR(s), over_flag={:.3} ({}) over {} clean PR(s)",
+            bars.scored_prs,
+            bars.verdict_agreement,
+            if bars.verdict_agreement_pass {
+                "PASS"
+            } else {
+                "FAIL"
+            },
+            bars.rc_recall,
+            bars.rc_reference_prs,
+            bars.clean_pr_over_flag_rate,
+            if bars.clean_pr_over_flag_pass {
+                "PASS"
+            } else {
+                "FAIL"
+            },
+            bars.clean_reference_prs,
+        ),
+        None => eprintln!(
+            "calibrate: verdict bars NOT MEASURED — no corpus entry carries a \
+             `reference_verdict`, so #1897's acceptance bars are unanswered"
+        ),
+    }
 
     match &args.output {
         Some(path) => {

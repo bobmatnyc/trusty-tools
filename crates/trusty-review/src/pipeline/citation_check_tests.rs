@@ -1,9 +1,11 @@
-//! Unit tests for the citation-verification layer (#2881, extended #4042).
+//! Unit tests for the citation-verification layer (#2881, extended #4042 and
+//! #4999).
 
 use super::*;
 use crate::models::{Effort, Finding};
 use crate::pipeline::diff_analyzer::models::{
-    DroppedFile, FileDisposition, FilteredDiff, FilteredFile, FilteredHunk,
+    DroppedFile, DroppedHunk, FileDisposition, FilteredDiff, FilteredFile, FilteredHunk,
+    HunkDropReason,
 };
 use std::collections::HashMap;
 
@@ -488,5 +490,116 @@ fn extract_spans_skips_short() {
     assert!(
         extract_citations(&f).generic.is_empty(),
         "short quotes are not evidence"
+    );
+}
+
+// ─── Line-span check (#4999) ─────────────────────────────────────────────────
+
+#[test]
+fn hunk_max_line_reads_both_sides() {
+    assert_eq!(hunk_max_line("@@ -1,3 +1,9 @@"), Some(9));
+    assert_eq!(hunk_max_line("@@ -40,12 +2,2 @@ fn outer()"), Some(51));
+    // A pure-addition header: the old side contributes only its start (0).
+    assert_eq!(hunk_max_line("@@ -0,0 +1,4 @@"), Some(4));
+}
+
+#[test]
+fn hunk_max_line_defaults_count_to_one() {
+    assert_eq!(hunk_max_line("@@ -7 +7 @@"), Some(7));
+}
+
+#[test]
+fn hunk_max_line_rejects_a_malformed_header() {
+    assert_eq!(hunk_max_line("not a hunk header"), None);
+    assert_eq!(hunk_max_line("@@ -x,y +z,w @@"), None);
+}
+
+#[test]
+fn line_beyond_last_diffed_line_is_unresolvable() {
+    let index = DiffContentIndex::from_filtered(&filtered(vec![kept_file(
+        "src/index.ts",
+        vec![hunk("@@ -1,3 +1,9 @@", &["+const REGISTRY = new Map();"])],
+    )]));
+
+    let mut f = Finding::new("src/index.ts", "logic-error", "d", "s", 0.9, Effort::High);
+    f.line = Some(412);
+    assert_eq!(
+        unresolvable_reason(&f, &index),
+        Some("cited line is beyond the file's last diffed line")
+    );
+}
+
+#[test]
+fn line_inside_the_diffed_span_is_kept() {
+    let index = DiffContentIndex::from_filtered(&filtered(vec![kept_file(
+        "src/index.ts",
+        vec![hunk("@@ -1,3 +1,9 @@", &["+const REGISTRY = new Map();"])],
+    )]));
+
+    let mut f = Finding::new("src/index.ts", "logic-error", "d", "s", 0.9, Effort::High);
+    f.line = Some(9);
+    assert_eq!(
+        unresolvable_reason(&f, &index),
+        None,
+        "the last diffed line is in span"
+    );
+}
+
+#[test]
+fn a_bracket_citation_line_is_checked_without_an_excerpt() {
+    let index = DiffContentIndex::from_filtered(&filtered(vec![kept_file(
+        "src/index.ts",
+        vec![hunk("@@ -1,3 +1,9 @@", &["+const REGISTRY = new Map();"])],
+    )]));
+
+    let f = Finding::new(
+        "src/index.ts",
+        "logic-error",
+        "Story scaffolding replaced the barrel [code: `src/index.ts:412` — see the export block].",
+        "s",
+        0.9,
+        Effort::High,
+    );
+    assert_eq!(
+        unresolvable_reason(&f, &index),
+        Some("[code: …] citation's line is beyond the file's last diffed line")
+    );
+}
+
+#[test]
+fn a_file_with_no_parsable_hunk_header_fails_open() {
+    let mut file = kept_file("src/index.ts", Vec::new());
+    file.disposition = FileDisposition::SummaryOnly;
+    file.summary_line = Some("barrel updated".to_string());
+    let index = DiffContentIndex::from_filtered(&filtered(vec![file]));
+
+    let mut f = Finding::new("src/index.ts", "logic-error", "d", "s", 0.9, Effort::High);
+    f.line = Some(412);
+    assert_eq!(
+        unresolvable_reason(&f, &index),
+        None,
+        "no span is known, so the line cannot be disproved"
+    );
+}
+
+#[test]
+fn a_dropped_hunk_widens_the_span_rather_than_narrowing_it() {
+    let mut file = kept_file(
+        "src/index.ts",
+        vec![hunk("@@ -1,3 +1,9 @@", &["+const REGISTRY = new Map();"])],
+    );
+    file.dropped_hunks.push(DroppedHunk {
+        reason: HunkDropReason::ImportOnly,
+        lines_count: 2,
+        header: "@@ -400,4 +400,6 @@".to_string(),
+    });
+    let index = DiffContentIndex::from_filtered(&filtered(vec![file]));
+
+    let mut f = Finding::new("src/index.ts", "logic-error", "d", "s", 0.9, Effort::High);
+    f.line = Some(405);
+    assert_eq!(
+        unresolvable_reason(&f, &index),
+        None,
+        "a line inside a Stage-B-dropped hunk is still a real line of the diff"
     );
 }

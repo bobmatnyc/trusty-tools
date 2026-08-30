@@ -8,7 +8,7 @@
 //! Test: this is the test file.
 
 use super::*;
-use trusty_review::models::{Effort, Finding};
+use trusty_review::models::{Effort, Finding, Verdict};
 
 // ─── Shared fixture ───────────────────────────────────────────────────────────
 
@@ -99,6 +99,7 @@ fn rust_semantic_classifier_rs_but_wrong_kind() {
 fn three_pr_corpus() -> (Vec<CorpusEntry>, Vec<Vec<Finding>>) {
     let corpus = vec![
         CorpusEntry {
+            reference_verdict: None,
             owner: "acme".to_string(),
             repo: "api".to_string(),
             pr: 101,
@@ -108,6 +109,7 @@ fn three_pr_corpus() -> (Vec<CorpusEntry>, Vec<Vec<Finding>>) {
             ],
         },
         CorpusEntry {
+            reference_verdict: None,
             owner: "acme".to_string(),
             repo: "api".to_string(),
             pr: 102,
@@ -117,6 +119,7 @@ fn three_pr_corpus() -> (Vec<CorpusEntry>, Vec<Vec<Finding>>) {
             ],
         },
         CorpusEntry {
+            reference_verdict: None,
             owner: "acme".to_string(),
             repo: "api".to_string(),
             pr: 103,
@@ -230,6 +233,7 @@ fn rust_semantic_fp_rate_computed_correctly() {
 #[test]
 fn rust_semantic_fp_rate_neutral_when_no_rust_semantic_findings() {
     let corpus = vec![CorpusEntry {
+        reference_verdict: None,
         owner: "x".to_string(),
         repo: "y".to_string(),
         pr: 1,
@@ -258,6 +262,7 @@ fn rust_semantic_fp_rate_neutral_when_no_rust_semantic_findings() {
 #[test]
 fn recall_does_not_exceed_one_when_two_trusty_match_same_human_finding() {
     let corpus = vec![CorpusEntry {
+        reference_verdict: None,
         owner: "acme".to_string(),
         repo: "api".to_string(),
         pr: 200,
@@ -346,4 +351,159 @@ fn pr_label_formatted_correctly() {
     assert_eq!(report.per_pr[0].pr, "acme/api#101");
     assert_eq!(report.per_pr[1].pr, "acme/api#102");
     assert_eq!(report.per_pr[2].pr, "acme/api#103");
+}
+
+// ─── Verdict bars (#1897 acceptance gate, wired for #2974) ───────────────────
+
+/// Build a corpus entry carrying a reference verdict and no human findings.
+fn labelled(pr: u64, reference: Verdict) -> CorpusEntry {
+    CorpusEntry {
+        owner: "acme".to_string(),
+        repo: "api".to_string(),
+        pr,
+        human_findings: Vec::new(),
+        reference_verdict: Some(reference),
+    }
+}
+
+#[test]
+fn verdict_bars_pass_when_all_three_clear() {
+    // 8 PRs: 4 reference-clean (0 escalated), 4 reference-RC (4 flagged),
+    // 8/8 exact agreement.
+    let corpus = vec![
+        labelled(1, Verdict::Approve),
+        labelled(2, Verdict::Approve),
+        labelled(3, Verdict::Approve),
+        labelled(4, Verdict::Approve),
+        labelled(5, Verdict::RequestChanges),
+        labelled(6, Verdict::RequestChanges),
+        labelled(7, Verdict::RequestChanges),
+        labelled(8, Verdict::Block),
+    ];
+    let daemon = vec![
+        Verdict::Approve,
+        Verdict::Approve,
+        Verdict::Approve,
+        Verdict::Approve,
+        Verdict::RequestChanges,
+        Verdict::RequestChanges,
+        Verdict::RequestChanges,
+        Verdict::Block,
+    ];
+
+    let bars = compute_verdict_bars(&corpus, &daemon).expect("labelled corpus scores bars");
+    assert_eq!(bars.scored_prs, 8);
+    assert!((bars.verdict_agreement - 1.0).abs() < f64::EPSILON);
+    assert!(bars.verdict_agreement_pass);
+    assert_eq!(bars.rc_reference_prs, 4);
+    assert!((bars.rc_recall - 1.0).abs() < f64::EPSILON);
+    assert_eq!(bars.clean_reference_prs, 4);
+    assert!(bars.clean_pr_over_flag_rate.abs() < f64::EPSILON);
+    assert!(bars.clean_pr_over_flag_pass);
+}
+
+/// The 0.6.3 regression shape #1897 named: clean PRs escalated to
+/// REQUEST_CHANGES. Bar 3 must fail, and bar 1 must fail with it.
+#[test]
+fn verdict_bars_fail_on_over_flagging() {
+    let corpus = vec![
+        labelled(1, Verdict::Approve),
+        labelled(2, Verdict::Approve),
+        labelled(3, Verdict::Approve),
+        labelled(4, Verdict::Approve),
+    ];
+    let daemon = vec![
+        Verdict::RequestChanges,
+        Verdict::RequestChanges,
+        Verdict::Approve,
+        Verdict::Approve,
+    ];
+
+    let bars = compute_verdict_bars(&corpus, &daemon).expect("labelled corpus scores bars");
+    assert!((bars.clean_pr_over_flag_rate - 0.5).abs() < f64::EPSILON);
+    assert!(!bars.clean_pr_over_flag_pass, "50% over-flagging must fail");
+    assert!((bars.verdict_agreement - 0.5).abs() < f64::EPSILON);
+    assert!(!bars.verdict_agreement_pass);
+}
+
+/// RC-recall is reported separately, so a cap that stops over-flagging by
+/// approving everything is visible rather than hidden behind bar 3's pass.
+#[test]
+fn verdict_bars_expose_an_rc_recall_collapse() {
+    let corpus = vec![
+        labelled(1, Verdict::Approve),
+        labelled(2, Verdict::RequestChanges),
+        labelled(3, Verdict::RequestChanges),
+    ];
+    let daemon = vec![Verdict::Approve, Verdict::Approve, Verdict::Approve];
+
+    let bars = compute_verdict_bars(&corpus, &daemon).expect("labelled corpus scores bars");
+    assert!(
+        bars.clean_pr_over_flag_pass,
+        "nothing was over-flagged, so bar 3 passes"
+    );
+    assert_eq!(bars.rc_reference_prs, 2);
+    assert!(
+        bars.rc_recall.abs() < f64::EPSILON,
+        "recall collapsed to zero and must be visible"
+    );
+}
+
+#[test]
+fn verdict_bars_are_none_without_reference_verdicts() {
+    let corpus = vec![CorpusEntry {
+        owner: "acme".to_string(),
+        repo: "api".to_string(),
+        pr: 1,
+        human_findings: Vec::new(),
+        reference_verdict: None,
+    }];
+    assert!(
+        compute_verdict_bars(&corpus, &[Verdict::Approve]).is_none(),
+        "an unlabelled corpus must report `not measured`, never a vacuous pass"
+    );
+}
+
+/// #5620's lesson applied to the bars: an empty denominator and a PASS must be
+/// unreachable together.
+#[test]
+fn verdict_bars_never_pass_on_an_empty_denominator() {
+    // Every reference PR requests changes, so the clean-PR sample is empty.
+    let corpus = vec![labelled(1, Verdict::RequestChanges)];
+    let bars = compute_verdict_bars(&corpus, &[Verdict::RequestChanges]).expect("scored");
+    assert_eq!(bars.clean_reference_prs, 0);
+    assert!(
+        !bars.clean_pr_over_flag_pass,
+        "no clean PRs were measured, so the over-flag bar cannot pass"
+    );
+}
+
+/// A pipeline failure yields `Verdict::Unknown`, which agrees with no reference
+/// verdict — the PR counts against agreement rather than leaving the sample.
+#[test]
+fn a_failed_pr_counts_against_agreement() {
+    let corpus = vec![labelled(1, Verdict::Approve), labelled(2, Verdict::Approve)];
+    let bars =
+        compute_verdict_bars(&corpus, &[Verdict::Approve, Verdict::Unknown]).expect("scored");
+    assert_eq!(bars.scored_prs, 2);
+    assert!((bars.verdict_agreement - 0.5).abs() < f64::EPSILON);
+    assert!(
+        bars.clean_pr_over_flag_rate.abs() < f64::EPSILON,
+        "UNKNOWN is not an escalation"
+    );
+}
+
+/// A pre-#2974 corpus line — no `reference_verdict` key at all — still loads.
+#[test]
+fn a_corpus_line_without_a_reference_verdict_still_parses() {
+    let line = r#"{"owner":"acme","repo":"api","pr":1,"human_findings":[]}"#;
+    let entry: CorpusEntry = serde_json::from_str(line).expect("legacy corpus line parses");
+    assert!(entry.reference_verdict.is_none());
+}
+
+#[test]
+fn a_corpus_line_with_a_reference_verdict_parses_it() {
+    let line = r#"{"owner":"acme","repo":"api","pr":1,"human_findings":[],"reference_verdict":"REQUEST_CHANGES"}"#;
+    let entry: CorpusEntry = serde_json::from_str(line).expect("labelled corpus line parses");
+    assert_eq!(entry.reference_verdict, Some(Verdict::RequestChanges));
 }

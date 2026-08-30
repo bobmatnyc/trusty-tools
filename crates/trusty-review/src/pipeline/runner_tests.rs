@@ -106,7 +106,7 @@ impl FakeLlm {
                 response: r#"There is a bug.
 
 ```json
-{"verdict":"REQUEST_CHANGES","summary":"SQL injection","findings":[{"title":"SQL injection","body":"line 42","severity":"medium","confidence":0.9,"file":"src/a.rs","line":42}]}
+{"verdict":"REQUEST_CHANGES","summary":"SQL injection","findings":[{"title":"SQL injection","body":"line 1","severity":"medium","confidence":0.9,"file":"src/a.rs","line":1}]}
 ```"#
                     .to_string(),
                 error: None,
@@ -362,6 +362,11 @@ fn local_diff_source(diff: &str) -> (DiffSource, tempfile::NamedTempFile) {
 /// grade-envelope plumbing — not citation checking — need a diff whose file
 /// path actually matches the fixture finding so that unrelated machinery
 /// keeps working.
+///
+/// #4999: the hunk is `@@ -1 +1 @@`, so this diff reaches line 1 and nothing
+/// further. A fixture finding for this file must cite line 1 — a larger line is
+/// now dropped as beyond the file's last diffed line, which silently empties the
+/// findings list the test is about.
 fn local_diff_source_for_file(
     file: &str,
     added_line: &str,
@@ -1806,7 +1811,7 @@ async fn envelope_grade_tracks_verdict_after_verification_relaxation_1486() {
     let llm_response = r#"Code looks good overall, minor concern.
 
 ```json
-{"verdict":"APPROVE","grade":"B-","summary":"Looks solid","findings":[{"title":"Potential XSS","body":"line 5 unescaped","severity":"high","confidence":0.95,"file":"src/render.rs","line":5}]}
+{"verdict":"APPROVE","grade":"B-","summary":"Looks solid","findings":[{"title":"Potential XSS","body":"line 1 unescaped","severity":"high","confidence":0.95,"file":"src/render.rs","line":1}]}
 ```"#;
     let (source, _tmp) = local_diff_source_for_file(
         "src/render.rs",
@@ -1878,7 +1883,7 @@ async fn envelope_grade_stays_block_when_high_effort_confirmed_1486() {
     let llm_response = r#"Review with confirmed critical finding.
 
 ```json
-{"verdict":"APPROVE","grade":"B-","summary":"Mostly OK","findings":[{"title":"Auth bypass","body":"line 10","severity":"high","confidence":0.95,"file":"src/auth.rs","line":10,"code_provable":true}]}
+{"verdict":"APPROVE","grade":"B-","summary":"Mostly OK","findings":[{"title":"Auth bypass","body":"line 1","severity":"high","confidence":0.95,"file":"src/auth.rs","line":1,"code_provable":true}]}
 ```"#;
     let (source, _tmp) = local_diff_source_for_file("src/auth.rs", "+fn auth(t: &str) {}");
     let config = default_config();

@@ -1,4 +1,5 @@
-//! Deterministic citation verification for every emitted finding (#2881, #4042).
+//! Deterministic citation verification for every emitted finding (#2881, #4042,
+//! #4999).
 //!
 //! Why: a `code_provable: true` finding (or a `code:`-cited finding) drives the
 //! deterministic BLOCK / REQUEST_CHANGES floor unconditionally
@@ -34,6 +35,13 @@
 //!    free-text quotes contradict the cited file's real content, or whose
 //!    `[code: …]` bracket citation — INCLUDING its excerpt, no longer exempted
 //!    — is unresolvable or contradicted.
+//!  - A LINE-SPAN check (#4999): the index also records the highest line each
+//!    file's hunks reach, and a finding citing a line past it is dropped. #4999
+//!    audited 69 findings and found 5 that cite a line beyond the cited file's
+//!    last diffed line, every one of them also misattributing another file's
+//!    content. Content verification cannot reach that shape when the finding
+//!    quotes nothing substantial — the line number is then the only checkable
+//!    claim, and it is checkable without an LLM.
 //!  - A cheap, low-false-positive INTERNAL CONSISTENCY check
 //!    ([`detect_line_contradictions`]) drops any pair of findings that cite the
 //!    SAME file+line with two mutually exclusive quoted contents — at least one
@@ -47,7 +55,8 @@
 //! file-less, general observation) is exempt from path resolution entirely.
 //!
 //! Test: `citation_check_tests.rs`; end-to-end regressions in
-//! `tests/citation_2881_regression.rs` and `tests/citation_4042_regression.rs`.
+//! `tests/citation_2881_regression.rs`, `tests/citation_4042_regression.rs`, and
+//! `tests/citation_4999_regression.rs`.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -130,6 +139,9 @@ const MIN_SPAN_LEN: usize = 12;
 /// `contains_is_whitespace_tolerant`.
 pub struct DiffContentIndex {
     by_file: HashMap<String, String>,
+    /// Highest line number any hunk of that file reaches, on either side of the
+    /// diff. Absent when no `@@` header for the file could be parsed (#4999).
+    max_line: HashMap<String, u32>,
     all: String,
 }
 
@@ -152,9 +164,25 @@ impl DiffContentIndex {
     /// `index_indexes_dropped_files_with_empty_content`.
     pub fn from_filtered(filtered: &FilteredDiff) -> Self {
         let mut by_file: HashMap<String, String> = HashMap::new();
+        let mut max_line: HashMap<String, u32> = HashMap::new();
         let mut all = String::new();
 
         for file in &filtered.files {
+            // #4999: the highest line the diff reaches for this file, over BOTH
+            // kept and Stage-B-dropped hunks. Dropped hunks never reached the
+            // prompt, but counting them can only widen the span and therefore
+            // only reduce false drops.
+            let span = file
+                .hunks
+                .iter()
+                .map(|h| h.header.as_str())
+                .chain(file.dropped_hunks.iter().map(|h| h.header.as_str()))
+                .filter_map(hunk_max_line)
+                .max();
+            if let Some(span) = span {
+                max_line.insert(normalize_path(&file.filename), span);
+            }
+
             let content = match file.disposition {
                 FileDisposition::Kept => {
                     let mut buf = String::new();
@@ -187,33 +215,65 @@ impl DiffContentIndex {
             by_file.entry(normalize_path(&dropped.path)).or_default();
         }
 
-        Self { by_file, all }
+        Self {
+            by_file,
+            max_line,
+            all,
+        }
     }
 
-    /// Look up the normalized content of the file a finding cites, if present.
+    /// Resolve a cited path to the indexed key that names it, if any.
     ///
-    /// Why: findings may cite a path with an `a/`/`b/` prefix or by basename; the
-    /// lookup normalizes and falls back to a UNIQUE basename match so trivial path
-    /// spelling differences do not defeat grounding.
+    /// Why: findings may cite a path with an `a/`/`b/` prefix or by basename, and
+    /// both the content lookup and the line-span lookup need the same resolution
+    /// rule — a single resolver keeps them from drifting apart.
     /// What: exact normalized-path match first, else a basename match when exactly
-    /// one indexed file shares that basename.
+    /// one indexed file shares that basename; `None` when the basename is
+    /// ambiguous, since guessing would ground a citation against the wrong file.
     /// Test: `lookup_matches_by_basename`, `lookup_ambiguous_basename_is_none`.
-    fn lookup(&self, cited_path: &str) -> Option<&str> {
+    fn resolve_key(&self, cited_path: &str) -> Option<&str> {
         let key = normalize_path(cited_path);
-        if let Some(c) = self.by_file.get(&key) {
-            return Some(c.as_str());
+        if let Some((k, _)) = self.by_file.get_key_value(&key) {
+            return Some(k.as_str());
         }
         let base = basename(&key);
         let mut hit: Option<&str> = None;
-        for (path, content) in &self.by_file {
+        for path in self.by_file.keys() {
             if basename(path) == base {
                 if hit.is_some() {
                     return None; // ambiguous basename — refuse to guess
                 }
-                hit = Some(content.as_str());
+                hit = Some(path.as_str());
             }
         }
         hit
+    }
+
+    /// Look up the normalized content of the file a finding cites, if present.
+    ///
+    /// What: resolves the path via [`Self::resolve_key`] and returns that file's
+    /// indexed content (empty for a Stage-A-excluded file, whose path is real but
+    /// whose content the model never saw).
+    /// Test: `lookup_matches_by_basename`, `lookup_ambiguous_basename_is_none`.
+    fn lookup(&self, cited_path: &str) -> Option<&str> {
+        let key = self.resolve_key(cited_path)?;
+        self.by_file.get(key).map(String::as_str)
+    }
+
+    /// The highest line number the diff reaches for the cited file (#4999).
+    ///
+    /// Why: a citation to a line past the file's last diffed line names a
+    /// location the reviewer was never shown — the "impossible line" overlay
+    /// #4999's audit found on 5 of its 19 fabricated-or-partial findings, all of
+    /// which also carried a cross-file misattribution. Unlike content
+    /// verification, this is checkable even when the finding quotes nothing.
+    /// What: `None` when the path does not resolve, or when no `@@` header for
+    /// that file parsed — both FAIL OPEN, leaving the finding alone.
+    /// Test: `line_beyond_last_diffed_line_is_unresolvable`,
+    /// `line_inside_the_diffed_span_is_kept`.
+    fn max_diffed_line(&self, cited_path: &str) -> Option<u32> {
+        let key = self.resolve_key(cited_path)?;
+        self.max_line.get(key).copied()
     }
 
     /// Whether `cited_path` names a file this changeset touches.
@@ -308,6 +368,8 @@ pub fn enforce_citation_integrity(findings: &mut Vec<Finding>, index: &DiffConte
 ///
 /// Why: isolates the decision from the mutation so it is unit-testable.
 /// What: returns `Some(reason)` when:
+///  - `f.line` (or a `[code: …]` locator's line) is past the last line the
+///    diff reaches for that file (#4999); or
 ///  - `f.file` is not the [`UNKNOWN_FILE_PLACEHOLDER`] sentinel AND does not
 ///    resolve in `index` at all (outside the diff entirely — the
 ///    `hotelPage.ts:207` #4042 shape); or
@@ -323,6 +385,21 @@ pub fn enforce_citation_integrity(findings: &mut Vec<Finding>, index: &DiffConte
 /// Test: covered by the `drops_*` / `keeps_*` / `fail_open_*` tests.
 fn unresolvable_reason(f: &Finding, index: &DiffContentIndex) -> Option<&'static str> {
     let extracted = extract_citations(f);
+
+    // #4999: a cited line past the file's last diffed line is a location the
+    // reviewer was never shown. Checked before content, because it is the only
+    // check that fires when the finding quotes nothing verifiable.
+    if let Some(line) = f.line
+        && f.file != UNKNOWN_FILE_PLACEHOLDER
+        && index.max_diffed_line(&f.file).is_some_and(|max| line > max)
+    {
+        return Some("cited line is beyond the file's last diffed line");
+    }
+    for (path, line) in &extracted.locators {
+        if index.max_diffed_line(path).is_some_and(|max| *line > max) {
+            return Some("[code: …] citation's line is beyond the file's last diffed line");
+        }
+    }
 
     if f.file != UNKNOWN_FILE_PLACEHOLDER {
         match index.lookup(&f.file) {
@@ -443,6 +520,11 @@ struct ExtractedCitations {
     /// Free-text backtick/quote spans OUTSIDE any bracket citation, checked
     /// against `f.file`'s content.
     generic: Vec<String>,
+    /// Every `[code: …]` locator that carries a line number, whether or not the
+    /// bracket also quotes an excerpt (#4999). `code_citations` only records a
+    /// citation that HAS a verifiable excerpt, so an excerpt-free bracket would
+    /// otherwise take its line number with it.
+    locators: Vec<(String, u32)>,
 }
 
 /// Extract every citation a finding carries — structured `[code: …]` brackets
@@ -469,12 +551,16 @@ struct ExtractedCitations {
 fn extract_citations(f: &Finding) -> ExtractedCitations {
     let mut code_citations = Vec::new();
     let mut generic = Vec::new();
+    let mut locators = Vec::new();
 
     for text in [f.description.as_str(), f.consequence.as_str()] {
         for caps in CODE_CITATION_RE.captures_iter(text) {
             let locator = caps.get(1).map(|m| m.as_str().trim()).unwrap_or_default();
             let rest = caps.get(2).map(|m| m.as_str()).unwrap_or_default();
             let (path, line) = split_locator(locator);
+            if let Some(line) = line {
+                locators.push((path.clone(), line));
+            }
             let mut excerpts = Vec::new();
             collect_delimited(rest, '"', &mut excerpts);
             collect_delimited(rest, '\'', &mut excerpts);
@@ -499,6 +585,7 @@ fn extract_citations(f: &Finding) -> ExtractedCitations {
     ExtractedCitations {
         code_citations,
         generic,
+        locators,
     }
 }
 
@@ -538,6 +625,32 @@ fn collect_delimited(text: &str, delim: char, out: &mut Vec<String>) {
     }
     // If `inside` ended true, the final segment was after an unmatched delimiter and
     // was correctly treated as outside (not pushed) by the loop's last iteration.
+}
+
+/// Highest line number a `@@ -a,b +c,d @@` header reaches, on either side.
+///
+/// Why: the line-span check needs one number per hunk, and taking the max over
+/// both sides means a finding that cites the pre-change numbering is never
+/// dropped for it.
+/// What: parses each `-`/`+` side as `start[,count]` (count defaults to 1, and a
+/// zero count contributes only `start`), returning the largest `start + count - 1`.
+/// A header that does not parse returns `None`, which fails the check OPEN.
+/// Test: `hunk_max_line_reads_both_sides`, `hunk_max_line_defaults_count_to_one`,
+/// `hunk_max_line_rejects_a_malformed_header`.
+fn hunk_max_line(header: &str) -> Option<u32> {
+    let inner = header.strip_prefix("@@")?.split("@@").next()?;
+    let mut max = 0u32;
+    for token in inner.split_whitespace() {
+        let Some(spec) = token.strip_prefix('-').or_else(|| token.strip_prefix('+')) else {
+            continue;
+        };
+        let (start, count) = match spec.split_once(',') {
+            Some((s, c)) => (s.parse::<u32>().ok()?, c.parse::<u32>().ok()?),
+            None => (spec.parse::<u32>().ok()?, 1),
+        };
+        max = max.max(start + count.saturating_sub(1));
+    }
+    (max > 0).then_some(max)
 }
 
 /// Normalize text for whitespace-tolerant substring comparison.
