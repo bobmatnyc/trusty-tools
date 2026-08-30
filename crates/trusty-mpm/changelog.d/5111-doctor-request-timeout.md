@@ -1,0 +1,3 @@
+Fixed
+
+- **`/doctor` over HTTP no longer reports a healthy daemon as unreachable.** `DaemonClient::doctor` used the 10s client-level default while the handler runs the whole ~32-check battery inline — `gh auth status` alone measured 3.06s here, and the two worktree scans walk the managed workspace root. Measured against the default: 8 of 10 runs failed, every failure clustered at 10.2–10.3s and every pass at 9.6–9.7s, so Telegram `/doctor` and Slack `/doctor` answered "daemon unreachable" for a daemon that was still producing the report. The request now carries its own 120s bound, the same per-request override pattern the chat, provisioning and merged-PR-survey endpoints already use ([#5111](https://github.com/bobmatnyc/trusty-tools/issues/5111))

@@ -101,6 +101,28 @@ pub(super) const CHAT_REQUEST_TIMEOUT: Duration = Duration::from_secs(130);
 /// second copy of the constant there would be free to drift.
 pub(crate) const PROVISION_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// Per-request timeout override for `GET /api/v1/doctor` (#5111).
+///
+/// Why: the doctor handler runs the whole ~32-check battery SYNCHRONOUSLY
+/// inside the request. Several checks are unbounded in the operator's
+/// environment rather than in the daemon: `check_gh_account` shells out to
+/// `gh auth status` (measured 3.06s on this machine), and `check_worktrees` /
+/// `check_worktree_disk` walk the managed workspace root. Measured against
+/// [`DEFAULT_REQUEST_TIMEOUT`]: 8 of 10 runs failed, every failure clustered at
+/// 10.2–10.3s and every pass at 9.6–9.7s — the client was hanging up on a
+/// report the daemon was still producing, so Telegram `/doctor` and Slack
+/// `/doctor` reported "daemon unreachable" for a healthy daemon. 120s is well
+/// clear of that battery on a loaded machine and stays a hard, finite bound.
+/// What: passed to `reqwest::RequestBuilder::timeout` at the
+/// [`super::DaemonClient::doctor`] call site — a per-request override, not a
+/// change to the client-level default every other endpoint uses. Same pattern
+/// and same reason as [`CHAT_REQUEST_TIMEOUT`] and
+/// [`PROVISION_REQUEST_TIMEOUT`].
+/// Test: `tests::default_client_uses_default_bounds` pins the value;
+/// `client::executor::tests::execute_doctor_against_test_daemon` exercises the
+/// real round trip that was racing the default bound.
+pub(super) const DOCTOR_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Per-request timeout override for `POST …/managed/prune-worktrees` when the
 /// merged-PR reclaim pass is requested (#5830).
 ///
@@ -233,6 +255,14 @@ mod tests {
         assert!(
             PROVISION_REQUEST_TIMEOUT > DEFAULT_REQUEST_TIMEOUT,
             "the provisioning override must be longer than the default, not shorter"
+        );
+        // #5111: the doctor battery measured 10.2-10.3s against the 10s
+        // default, so anything at or near that bound reinstates the race.
+        assert_eq!(DOCTOR_REQUEST_TIMEOUT, Duration::from_secs(120));
+        assert!(
+            DOCTOR_REQUEST_TIMEOUT > DEFAULT_REQUEST_TIMEOUT * 2,
+            "the doctor override must clear the measured 10.2s battery by a \
+             wide margin, not sit beside it"
         );
         // #5830: the merged-PR survey outruns every other override here, so it
         // must be the longest of them — shrinking it back toward the provision

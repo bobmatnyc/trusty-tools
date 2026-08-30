@@ -742,13 +742,18 @@ impl DaemonClient {
     /// What: `GET /api/v1/doctor`, passing the caller's `project` path so the
     /// daemon can scope the instruction-pipeline probe. Returns the parsed
     /// [`DoctorReport`](crate::client::DoctorReport); `Err` on a transport or decode failure.
+    ///
+    /// #5111: carries [`config::DOCTOR_REQUEST_TIMEOUT`] rather than the
+    /// client-level default. The handler runs the full check battery inline and
+    /// measured 10.2–10.3s here, so the 10s default hung up on a healthy daemon
+    /// and every caller reported it unreachable.
     /// Test: covered by the executor's doctor test.
     pub async fn doctor(
         &self,
         project: Option<&str>,
     ) -> anyhow::Result<crate::core::doctor::DoctorReport> {
         let url = format!("{}/api/v1/doctor", self.base);
-        let mut request = self.http.get(&url);
+        let mut request = self.http.get(&url).timeout(config::DOCTOR_REQUEST_TIMEOUT);
         if let Some(project) = project {
             request = request.query(&[("project", project)]);
         }
