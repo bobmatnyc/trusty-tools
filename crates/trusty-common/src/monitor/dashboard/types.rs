@@ -43,13 +43,13 @@ pub enum Focus {
 /// Why: the search panel lists every registered index with its chunk count so
 /// the operator can see corpus sizes at a glance; the TUI also uses
 /// `disk_bytes` and `last_indexed` to drive its sort / stats panels and the
-/// inferred project name (from `root_path`) to group rows. Graph stats and
-/// community info give the operator visibility into the symbol graph and
-/// detected community structure built by the daemon.
+/// inferred project name (from `root_path`) to group rows. Graph stats give
+/// the operator visibility into the symbol graph built by the daemon.
 /// What: the index id, its chunk count, indexed root path, optional on-disk
 /// size, optional last-indexed timestamp, plus knowledge-graph node/edge
-/// counts, per-edge-kind breakdown (sorted desc by count), and community
-/// count + modularity score from community detection.
+/// counts and per-edge-kind breakdown (sorted desc by count).
+/// `community_count` / `modularity` are vestigial (see their own docs) and
+/// carry no live data.
 /// Test: `test_search_panel_renders`, `test_index_row_project`,
 /// `test_stats_lines_graph_section`.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -82,16 +82,23 @@ pub struct IndexRow {
     /// What: vector of `(kind_name, count)` from `edge_kinds`.
     /// Test: `test_stats_lines_edge_kind_bars`.
     pub edge_kinds: Vec<(String, u64)>,
-    /// Number of communities detected by community detection.
+    /// Vestigial: always `0`. Community detection was retired server-side in
+    /// trusty-search v0.10.0 (issue #152); `GET /indexes/:id/communities`
+    /// never existed on the daemon this client talks to, so nothing ever
+    /// populated this field over the wire. `SearchClient` stopped dialling
+    /// the dead route in #6382; the field stays only because
+    /// `test_stats_lines_graph_section` sets it directly to assert the
+    /// stats panel does NOT render it.
     ///
-    /// Why: surfaces high-level cluster count in the STATISTICS panel.
-    /// What: `community_count` from `/indexes/:id/communities` (0 when none).
-    /// Test: `test_stats_lines_graph_section`.
+    /// Why: kept for the regression test above, not for live data.
+    /// What: always `0` in production; `render.rs` never reads it.
+    /// Test: `test_stats_lines_graph_section`, `test_stats_lines_no_graph_section`.
     pub community_count: u64,
-    /// Modularity score of the community partition (0.0 when unknown).
+    /// Vestigial: always `0.0`. See [`Self::community_count`] — same history,
+    /// same reason it is kept.
     ///
-    /// Why: a quality signal for the detected community structure.
-    /// What: `modularity` from `/indexes/:id/communities`.
+    /// Why: kept for the regression test above, not for live data.
+    /// What: always `0.0` in production; `render.rs` never reads it.
     /// Test: `test_stats_lines_graph_section`.
     pub modularity: f64,
 }

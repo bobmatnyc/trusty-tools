@@ -11503,6 +11503,7 @@ dependencies = [
  "unicode-normalization",
  "uuid",
  "walkdir",
+ "wiremock",
 ]
 
 [[package]]

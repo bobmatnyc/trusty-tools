@@ -310,6 +310,10 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 # postcard: used by `memory_palace` integration test to assert DrawerType
 # serialization indices are stable (issue #1722 backward-compat guarantee).
 postcard = { workspace = true }
+# wiremock: hermetic HTTP mock server for `search_client`'s `fetch_all`
+# regression test (#6382 — proves the dead `/communities` route is no longer
+# dialled).
+wiremock = { workspace = true }
 
 [features]
 default = []
