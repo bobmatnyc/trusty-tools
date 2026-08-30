@@ -91,21 +91,65 @@ fn resolve_identities(
     state: &SearchAppState,
     handles: &[Arc<IndexHandle>],
 ) -> std::collections::HashMap<String, Option<String>> {
+    resolve_persisted_facts(state, handles)
+        .into_iter()
+        .map(|(id, facts)| (id, facts.repo_identity))
+        .collect()
+}
+
+/// What one `indexes.toml` row contributes to a `?details=true` entry (#6424).
+///
+/// Why: `last_used_unix` and `repo_identity` come from the same persisted row,
+/// and reading them in two passes would load and parse `indexes.toml` twice per
+/// request. The console polls this endpoint every 20 s, so the second load is
+/// pure waste on a daemon with a hundred registrations.
+/// What: the two persisted fields the details arm reports, both `None` for a
+/// registered handle with no row yet.
+/// Test: `list_indexes_details_includes_last_used_unix`.
+#[derive(Clone, Default)]
+struct PersistedFacts {
+    repo_identity: Option<String>,
+    last_used_unix: Option<u64>,
+}
+
+/// Read every registered handle's persisted row from `indexes.toml` (#6424).
+///
+/// Why: [`resolve_identities`]'s whole body, widened by one field. The reasoning
+/// on that function — one registry load per request, and never a live `git`
+/// derive per handle — governs this one and is not restated.
+/// What: one registry load; per handle, its stored `repo_identity` and
+/// `max(last_queried_unix, last_indexed_unix)`. Both halves absent ⇒
+/// `last_used_unix: None`, which is "never used", not "used at the epoch".
+/// `Option<u64>`'s own ordering does the max: `None` sorts below every `Some`.
+/// Test: `list_indexes_details_includes_last_used_unix`,
+/// `list_indexes_details_last_used_absent_when_never_used`.
+fn resolve_persisted_facts(
+    state: &SearchAppState,
+    handles: &[Arc<IndexHandle>],
+) -> std::collections::HashMap<String, PersistedFacts> {
     let loaded = match &state.registry_path_override {
         Some(path) => crate::service::persistence::load_index_registry_at(path),
         None => crate::service::persistence::load_index_registry(),
     };
-    let persisted: std::collections::HashMap<String, Option<String>> = loaded
+    let persisted: std::collections::HashMap<String, PersistedFacts> = loaded
         .unwrap_or_default()
         .into_iter()
-        .map(|e| (e.id, e.repo_identity))
+        .map(|e| {
+            (
+                e.id,
+                PersistedFacts {
+                    repo_identity: e.repo_identity,
+                    last_used_unix: e.last_queried_unix.max(e.last_indexed_unix),
+                },
+            )
+        })
         .collect();
     handles
         .iter()
         .map(|h| {
             let id = h.id.0.clone();
-            let identity = persisted.get(&id).cloned().flatten();
-            (id, identity)
+            let facts = persisted.get(&id).cloned().unwrap_or_default();
+            (id, facts)
         })
         .collect()
 }
@@ -186,11 +230,13 @@ pub(crate) fn list_indexes_report(
         // from the current project directory without N status round-trips.
         // DOC-37: also carry repo_identity so callers can group facets by repo.
         let handles = state.registry.list_handles();
-        let ids = resolve_identities(state, &handles);
+        // #6424: one registry load now carries repo_identity AND last_used_unix.
+        let facts = resolve_persisted_facts(state, &handles);
         let entries: Vec<IndexDetailEntry> = handles
             .into_iter()
             .filter_map(|handle| {
-                let repo_identity = ids.get(&handle.id.0).cloned().flatten();
+                let row = facts.get(&handle.id.0).cloned().unwrap_or_default();
+                let repo_identity = row.repo_identity;
                 if let Some(target) = &identity_filter {
                     if repo_identity.as_ref() != Some(target) {
                         return None;
@@ -205,6 +251,7 @@ pub(crate) fn list_indexes_report(
                     root_path,
                     size_bytes,
                     repo_identity,
+                    last_used_unix: row.last_used_unix,
                 })
             })
             .collect();

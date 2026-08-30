@@ -8,6 +8,15 @@
   // registered. A registration the warm-boot allowlist excluded is in neither,
   // so the cleanup panel below is the only place it is visible.
   import StaleIndexCleanup from './StaleIndexCleanup.svelte';
+  // #6424: the Last Used column and its sort. Shared with the Memory tab so
+  // both rosters agree on what a missing timestamp means.
+  import {
+    formatLastUsed,
+    lastUsedTitle,
+    nextSortDirection,
+    sortByLastUsed,
+    sortIndicator,
+  } from './lastUsed.js';
 
   /** Format bytes into a human-readable string (KB / MB / GB). */
   function formatBytes(bytes) {
@@ -99,6 +108,14 @@
     : 'var(--trusty-danger)'
   );
 
+  // #6424: `null` is the daemon's own order — the only way back once a sort has
+  // been applied, which is why the header cycles through it.
+  let lastUsedSort = $state(null);
+  let indexRows = $derived(
+    lastUsedSort
+      ? sortByLastUsed(report?.metrics?.indexes ?? [], lastUsedSort)
+      : (report?.metrics?.indexes ?? [])
+  );
 </script>
 
 <div class="tab-content">
@@ -149,17 +166,29 @@
               <th>ID</th>
               <th>Root Path</th>
               <th>Size</th>
+              <!-- #6424: click to cycle newest-first, oldest-first, daemon order. -->
+              <th class="num sortable">
+                <button
+                  type="button"
+                  class="sort-btn"
+                  aria-label="Sort by last used"
+                  onclick={() => (lastUsedSort = nextSortDirection(lastUsedSort))}
+                >
+                  Last Used <span class="sort-arrow">{sortIndicator(lastUsedSort)}</span>
+                </button>
+              </th>
               <th class="actions-head">Actions</th>
             </tr>
           </thead>
           <tbody>
-            {#each report.metrics.indexes as idx (idx.id)}
+            {#each indexRows as idx (idx.id)}
               <tr>
                 <td><code>{idx.id ?? '—'}</code></td>
                 <td class="path">{idx.root_path ?? '—'}</td>
                 <td class="num">
                   {idx.size_bytes != null ? formatBytes(idx.size_bytes) : '—'}
                 </td>
+                <td class="num" title={lastUsedTitle(idx)}>{formatLastUsed(idx)}</td>
                 <td class="actions">
                   {#if idx.id}
                     <DeleteAction kind="index" id={idx.id} onDeleted={reloadRoster} />
@@ -238,6 +267,17 @@
   td.path { font-size: 0.8rem; color: var(--trusty-text-secondary); max-width: 400px; overflow: hidden; text-overflow: ellipsis; }
   /* #6360: the delete column. Right-aligned and vertically top-anchored so the
      expanded confirm panel grows downward without shifting the row's numbers. */
+  /* #6424: the sortable header is a real button so it is keyboard-reachable;
+     it inherits the header's type so only the arrow marks it as interactive. */
+  th.sortable { padding: 0; }
+  .sort-btn {
+    width: 100%; background: none; border: none; cursor: pointer;
+    font: inherit; color: inherit; text-align: right;
+    padding: 0.5rem 0.75rem;
+  }
+  .sort-btn:hover { color: var(--trusty-text-primary); }
+  .sort-arrow { opacity: 0.6; margin-left: 0.2rem; }
+
   th.actions-head, td.actions { text-align: right; }
   td.actions { vertical-align: top; }
   code {

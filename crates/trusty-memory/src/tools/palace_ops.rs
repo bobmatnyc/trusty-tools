@@ -242,6 +242,12 @@ pub(crate) async fn handle_palace_info(state: &AppState, args: Value) -> Result<
     .await
     .context("join palace_info counts")?
     .context("count rooms and wings")?;
+    // #6424: the durable last-used stamp, null for a palace never used since
+    // the stamp shipped. Additive — no existing field moves.
+    let last_used_unix = handle
+        .data_dir
+        .as_ref()
+        .and_then(|d| crate::palace_last_used::read(d));
     Ok(json!({
         "id": handle.id.as_str(),
         "name": handle.id.as_str(),
@@ -249,6 +255,7 @@ pub(crate) async fn handle_palace_info(state: &AppState, args: Value) -> Result<
         "room_count": room_count,
         "wing_count": wing_count,
         "data_dir": data_dir,
+        "last_used_unix": last_used_unix,
     }))
 }
 

@@ -54,6 +54,26 @@ pub(super) struct IndexDetailEntry {
     /// (`list_repo_identity_tests.rs`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo_identity: Option<String>,
+    /// When this index was last searched or last indexed, whichever is later,
+    /// as unix epoch seconds (#6424).
+    ///
+    /// Why: the trusty-console index roster shows a Last Used column and sorts
+    /// by it. The daemon already persists the two halves of that answer in
+    /// `indexes.toml` — `last_queried_unix`, written at most once per
+    /// `LAST_QUERIED_WRITE_INTERVAL_SECS` per index, and `last_indexed_unix` —
+    /// because selective warm boot ranks indexes by exactly this key. Nothing
+    /// read it back out over the API, so the console had no timestamp to show.
+    /// What: `warmboot_sort_key`'s `max(last_queried_unix, last_indexed_unix)`,
+    /// reported as `None` rather than `0` when neither half was ever written.
+    /// An index registered before those fields existed, or never touched since
+    /// registration, legitimately has no timestamp; the console renders that as
+    /// "never" and sorts it last, which is not the same claim as "used at the
+    /// unix epoch".
+    /// Test: `list_indexes_details_includes_last_used_unix` and
+    /// `list_indexes_details_last_used_absent_when_never_used`
+    /// (`list_last_used_tests.rs`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_used_unix: Option<u64>,
 }
 
 #[derive(Deserialize)]

@@ -102,6 +102,79 @@ use wing_ops::{handle_wing_create, handle_wing_list, handle_wing_rename};
 /// Test: `dispatch_palace_create_persists`, `dispatch_remember_then_recall`,
 /// `dispatch_kg_assert_then_query`, `dispatch_unknown_tool_errors`.
 pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<Value> {
+    // #6424: a successful recall, remember or note is what the console's Last
+    // Used column means by "used". The args are cloned only for those four
+    // tools, since the dispatch below consumes them.
+    let stamp_args = USE_STAMPING_TOOLS.contains(&name).then(|| args.clone());
+    let result = dispatch_tool_inner(state, name, args).await;
+    if let (Ok(_), Some(args)) = (&result, &stamp_args) {
+        stamp_palace_use(state, args, name);
+    }
+    result
+}
+
+/// The tools whose success counts as using a palace (#6424).
+///
+/// Why: the column answers "when did anyone last put something in or take
+/// something out of this palace". Housekeeping — `palace_info`, `console_metrics`,
+/// the embed-audit sweeps that open every palace on disk — is not use, and
+/// stamping on it would make every palace look equally fresh forever.
+/// What: the read and write verbs a caller reaches for deliberately.
+/// `memory_recall_all` is absent on purpose: it spans every palace, so it says
+/// nothing about any one of them.
+/// Test: `dispatch_remember_and_recall_stamp_last_used`,
+/// `dispatch_palace_info_does_not_stamp_last_used` in `tools::tests`.
+const USE_STAMPING_TOOLS: &[&str] = &[
+    "memory_remember",
+    "memory_note",
+    "memory_recall",
+    "memory_recall_deep",
+];
+
+/// Record the palace a just-completed tool call used (#6424).
+///
+/// Why: one place, so no handler can drift into its own cadence — the throttle
+/// and its cost live in [`crate::palace_last_used`].
+/// What: resolves the same palace id the handler resolved, follows a palace
+/// alias to its target the way the handler's own open did, takes the data
+/// directory off the already-resident handle via `peek` (no open, no eviction,
+/// no I/O), and hands both to the throttled stamp. Every step is best-effort:
+/// an unresolvable palace, a handle the registry has since evicted, or a failed
+/// write all leave the column stale rather than fail the caller's operation,
+/// which has already succeeded.
+///
+/// Dropping the alias step breaks the column outright (#6424 review), which is
+/// why it is here. `resolve_palace` returns the caller's raw `palace` argument,
+/// but
+/// `PalaceRegistry::open_palace_bounded` registers the handle under
+/// `resolve_palace_alias`'s CANONICAL id, and `peek` is a bare LRU lookup that
+/// resolves nothing. Keying on the raw string therefore missed on every
+/// alias-addressed call, and the column never advanced for as long as callers
+/// used the alias.
+/// Test: `dispatch_remember_and_recall_stamp_last_used`,
+/// `an_alias_addressed_recall_stamps_the_canonical_palace`.
+fn stamp_palace_use(state: &AppState, args: &Value, tool: &str) {
+    let Ok(palace) = helpers::resolve_palace(state, args, tool) else {
+        return;
+    };
+    // The same rule `PalaceRegistry::resolve_palace_alias` applies, from the
+    // one place that owns it — a second spelling here is how the two drift.
+    let palace = trusty_common::palace_alias::alias_target_if_absent(&state.data_root, &palace)
+        .unwrap_or(palace);
+    let id = trusty_common::memory_core::PalaceId::new(&palace);
+    let Some(data_dir) = state.registry.peek(&id).and_then(|h| h.data_dir.clone()) else {
+        return;
+    };
+    crate::palace_last_used::stamp(
+        &state.palace_last_used,
+        &data_dir,
+        &palace,
+        crate::palace_last_used::now_unix(),
+    );
+}
+
+/// The name -> handler match, unwrapped from [`dispatch_tool`]'s stamping.
+async fn dispatch_tool_inner(state: &AppState, name: &str, args: Value) -> Result<Value> {
     match name {
         "memory_remember" => handle_memory_remember(state, args).await,
         "memory_note" => handle_memory_note(state, args).await,

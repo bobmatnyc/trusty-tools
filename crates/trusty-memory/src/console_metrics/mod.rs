@@ -53,8 +53,10 @@ pub fn descriptor() -> Value {
             so a palace that is merely closed still reports real numbers; no palace is \
             opened to be counted. Each entry carries `cached` (was it resident) and \
             `stats_source` (`cache`, `disk`, or `unavailable`); an unavailable entry \
-            carries `stats_error` and null counts. Used by the trusty-console \
-            dashboard metrics poller.",
+            carries `stats_error` and null counts. Each entry also carries \
+            `last_used_unix` — when a recall, remember or note last touched that \
+            palace, or null when none has since the stamp shipped. Used by the \
+            trusty-console dashboard metrics poller.",
         "inputSchema": {
             "type": "object",
             "properties": {},
@@ -177,7 +179,9 @@ pub async fn handle_console_metrics(state: &AppState, _args: Value) -> Result<Va
         // `total_rooms`, and per-palace `room_count` / `stats_source` /
         // `stats_error`; totals now cover every palace that could be read, not
         // only the cache-resident ones.
-        3,
+        // 3 -> 4 (#6424): added per-palace `last_used_unix`. Additive only —
+        // a console built against schema 3 reads unchanged.
+        4,
     );
 
     Ok(serde_json::to_value(&report)?)
@@ -301,6 +305,10 @@ fn collect_palace_stats(
 /// `console_metrics_marks_an_unreadable_palace_unavailable`.
 fn palace_entry(info: &trusty_common::memory_core::Palace, counts: &PalaceCounts) -> Value {
     let id = info.id.as_str().to_string();
+    // #6424: one small file read per palace, on the same blocking pool as the
+    // counts. Null for a palace never used since the stamp shipped — the tab
+    // renders that as "never" and sorts it last.
+    let last_used_unix = crate::palace_last_used::read(&info.data_dir);
     match counts {
         PalaceCounts::Counted {
             cached,
@@ -317,6 +325,7 @@ fn palace_entry(info: &trusty_common::memory_core::Palace, counts: &PalaceCounts
             "kg_triple_count": kg_triples,
             "cached": cached,
             "stats_source": if *cached { "cache" } else { "disk" },
+            "last_used_unix": last_used_unix,
         }),
         PalaceCounts::Unavailable(reason) => json!({
             "id": id,
@@ -328,6 +337,10 @@ fn palace_entry(info: &trusty_common::memory_core::Palace, counts: &PalaceCounts
             "cached": false,
             "stats_source": "unavailable",
             "stats_error": reason,
+            // #6424: the stamp is a separate file from the redb corpus, so a
+            // palace whose counts are unreadable can still report when it was
+            // last used.
+            "last_used_unix": last_used_unix,
         }),
     }
 }
@@ -371,7 +384,8 @@ mod tests {
         assert_eq!(result["display_name"], "Trusty Memory");
         assert!(result["version"].is_string());
         assert!(result["status"].is_string());
-        assert_eq!(result["metrics_schema_version"], 3);
+        // #6424: 3 -> 4 for the additive per-palace `last_used_unix`.
+        assert_eq!(result["metrics_schema_version"], 4);
         assert!(result["collected_at_unix"].is_number());
         assert_eq!(result["metrics"]["palace_count"], 0);
         assert_eq!(result["metrics"]["counted_palace_count"], 0);

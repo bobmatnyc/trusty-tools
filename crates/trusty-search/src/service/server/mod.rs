@@ -47,6 +47,8 @@ mod collision_3993_tests;
 #[cfg(test)]
 mod facet_route_tests;
 #[cfg(test)]
+mod list_last_used_tests;
+#[cfg(test)]
 mod list_repo_identity_tests;
 #[cfg(test)]
 mod test_support;

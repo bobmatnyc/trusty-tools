@@ -546,6 +546,8 @@ async fn dispatch_kg_assert_then_query() {
 
 mod embed_audit_tests;
 mod kg_retract_tests;
+// #6424: the console's Last Used column, end to end through the dispatcher.
+mod last_used_tests;
 mod write_budget_tests;
 
 /// Why: #4776 — `kg_list_subjects` is the discovery read that makes `kg_query`
