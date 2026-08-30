@@ -16,17 +16,22 @@ use axum::response::{IntoResponse, Response};
 use thiserror::Error;
 use trusty_common::uds::server::{CODE_INTERNAL_ERROR, CODE_INVALID_PARAMS, RpcError};
 
-use crate::daemon::error::{CODE_CONFLICT, CODE_FORBIDDEN, CODE_GONE, CODE_NOT_FOUND};
+use crate::daemon::error::{
+    CODE_CONFLICT, CODE_FORBIDDEN, CODE_GONE, CODE_NOT_FOUND, CODE_UNAVAILABLE,
+};
 
 /// A peer-bus publish, addressing, or registration failure.
 ///
-/// Why: the sender must be able to tell *which* of the three distinguishable
-/// bad outcomes it hit — the definition has nothing running, the specific
-/// instance it named is gone, or the instance is registered but has no
-/// attached subscriber — because the correct client reaction differs for each
-/// (start one / re-resolve the definition / retry).
-/// What: four addressing/delivery variants plus two request-validation ones.
-/// Test: `bus_error_status_codes_map`, `instance_gone_is_410`.
+/// Why: the sender must be able to tell *which* distinguishable bad outcome it
+/// hit — the definition has nothing running, the specific instance it named is
+/// gone, the instance is registered but has no attached subscriber, or it is
+/// attached but too far behind to take another envelope without discarding one
+/// — because the correct client reaction differs for each (start one /
+/// re-resolve the definition / stop sending / retry once it drains).
+/// What: six addressing/delivery/registration variants plus the
+/// sender-verification and request-validation ones.
+/// Test: `bus_error_status_codes_map`, `instance_gone_is_410`,
+/// `subscriber_lagged_is_503`.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum BusError {
     /// Definition-addressed delivery found no live instance (DOC-60 §5.3).
@@ -72,6 +77,37 @@ pub enum BusError {
         instance_id: String,
     },
 
+    /// The recipient is attached but its channel is full of unread envelopes.
+    ///
+    /// Why this is an error and not a `delivered` record (#4271): the send
+    /// would have succeeded — `broadcast::Sender::send` answers `Ok` for a
+    /// lagging receiver — while overwriting an envelope the recipient had never
+    /// read. The §9 log would then hold a `delivered` record for a message that
+    /// reached no one, which is the exact "sent, or just never read?" ambiguity
+    /// ADR-0019 and DOC-60 §4 exist to eliminate. Refusing the NEW message
+    /// instead keeps that log truthful: nothing it calls delivered has been
+    /// evicted unread.
+    ///
+    /// The backlog is deliberately NOT carried: it can only ever equal
+    /// [`INSTANCE_CHANNEL_CAPACITY`](super::INSTANCE_CHANNEL_CAPACITY), since
+    /// `Sender::len` caps at the ring length and the refusal fires at exactly
+    /// that value — a constant dressed as a measurement tells a client nothing.
+    ///
+    /// Why `503` and not [`BusError::NoSubscriber`]'s `409`: the two need
+    /// different client recoveries. `409` says nobody is listening, and the
+    /// sender's move is to stop sending. This says someone IS listening but is
+    /// behind, and the sender's move is to retry once the recipient drains —
+    /// DOC-60 §4's `BusUnavailable`-shaped answer.
+    #[error(
+        "instance '{instance_id}' cannot take another envelope without \
+         discarding one its subscriber has not read; the message was NOT \
+         delivered — retry once the recipient drains"
+    )]
+    SubscriberLagged {
+        /// The instance whose delivery channel is full of unread envelopes.
+        instance_id: String,
+    },
+
     /// The sender claimed an `instance_id` that is not a live registration.
     ///
     /// Why this is 403-class and NOT a reuse of [`BusError::InstanceGone`]:
@@ -108,6 +144,27 @@ pub enum BusError {
         kind: super::envelope::CallerKind,
     },
 
+    /// Registration could not mint an instance id that was not already live.
+    ///
+    /// Why this is an error and not a silent overwrite (#4276): the alternative
+    /// is [`super::registry::InstanceRegistry`] replacing a live instance's
+    /// entry with the newcomer's, after which every lookup of the FIRST
+    /// instance resolves to the second. That is misrouting dressed as success —
+    /// the same failure the no-fallback rule exists to prevent, reached by
+    /// registration rather than by resolution. Refusing to register is
+    /// recoverable; the caller retries and sees why.
+    #[error(
+        "could not mint a free instance id for definition '{definition_id}' \
+         after {attempts} attempts; registration refused rather than \
+         overwriting a live instance"
+    )]
+    InstanceIdCollision {
+        /// The definition whose registration was refused.
+        definition_id: String,
+        /// How many suffixes were minted and found occupied.
+        attempts: usize,
+    },
+
     /// A definition id failed validation.
     #[error("invalid definition id '{definition_id}': {reason}")]
     InvalidDefinitionId {
@@ -138,15 +195,20 @@ impl BusError {
     /// [`BusError::UnregisteredSender`] — the one failure about the caller's
     /// own identity rather than the target's.
     /// What: `403` sender unverified, `404` not-found, `410` gone, `409`
-    /// conflict, `400` bad request.
+    /// conflict, `503` recipient too far behind to take more, `400` bad
+    /// request. [`BusError::InstanceIdCollision`] joins the `409` row (#4276):
+    /// the request was well-formed and the state of the registry is what
+    /// refused it, which is what `409 Conflict` names — and a retry is the
+    /// correct client reaction, as it is for the other `409`.
     /// Test: `bus_error_status_codes_map`, `instance_gone_is_410`,
-    /// `unregistered_sender_is_403`.
+    /// `unregistered_sender_is_403`, `subscriber_lagged_is_503`.
     pub fn status(&self) -> StatusCode {
         match self {
             Self::UnregisteredSender { .. } => StatusCode::FORBIDDEN,
             Self::NoLiveInstance { .. } => StatusCode::NOT_FOUND,
             Self::InstanceGone { .. } => StatusCode::GONE,
-            Self::NoSubscriber { .. } => StatusCode::CONFLICT,
+            Self::NoSubscriber { .. } | Self::InstanceIdCollision { .. } => StatusCode::CONFLICT,
+            Self::SubscriberLagged { .. } => StatusCode::SERVICE_UNAVAILABLE,
             Self::InvalidDefinitionId { .. }
             | Self::InvalidTarget(_)
             | Self::InvalidCaller(_)
@@ -164,8 +226,8 @@ impl BusError {
 /// [`BusError::status`] table the HTTP transport reads — a second hand-written
 /// table here would let the two drift, and the drift would be silent.
 /// What: derives the code from the status, so `403` sender-unverified, `404`
-/// no-live-instance, `410` instance-gone, `409` no-subscriber, and `400`
-/// malformed each stay distinguishable. The message crosses verbatim, so it is
+/// no-live-instance, `410` instance-gone, `409` no-subscriber, `503`
+/// subscriber-lagged, and `400` malformed each stay distinguishable. The message crosses verbatim, so it is
 /// the same string the HTTP body's `error` field carries.
 /// Test: `bus_error_rpc_codes_track_http_statuses`.
 impl From<BusError> for RpcError {
@@ -176,6 +238,7 @@ impl From<BusError> for RpcError {
             StatusCode::NOT_FOUND => CODE_NOT_FOUND,
             StatusCode::CONFLICT => CODE_CONFLICT,
             StatusCode::GONE => CODE_GONE,
+            StatusCode::SERVICE_UNAVAILABLE => CODE_UNAVAILABLE,
             // Unreachable while `status` stays total over the variants above;
             // a new variant that forgets a row lands here rather than silently
             // borrowing another failure's code.

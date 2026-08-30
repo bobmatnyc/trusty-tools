@@ -171,17 +171,27 @@ impl AuditLogger {
     }
 
     /// Fallible core of [`log_record`](Self::log_record), separated for testability.
+    ///
+    /// #4271: the record and its newline go out in ONE `write_all` on an
+    /// append-only descriptor. `writeln!` issued them as separate writes — a
+    /// `File` is unbuffered, so `write_fmt` calls through once per fragment —
+    /// and two threads appending at once interleaved into a line no reader
+    /// could parse. Two concurrent bus publishes are an ordinary event, so the
+    /// stream this daemon relies on to answer "sent, or never read?" has to
+    /// survive them.
+    /// Test: `concurrent_publishers_never_evict_a_delivered_envelope`.
     fn try_log<T: Serialize>(&self, entry: &T) -> std::io::Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let line = serde_json::to_string(entry)
+        let mut line = serde_json::to_string(entry)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        line.push('\n');
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)?;
-        writeln!(file, "{line}")
+        file.write_all(line.as_bytes())
     }
 }
 

@@ -5,14 +5,15 @@
 //! can edit a file with `sed -i`, write one with `echo … > f.rs`, apply a diff
 //! with `git apply`, or run the suite with `pytest`, all of which side-step the
 //! P1–P5 prohibitions. Worse, shell *composition* (`&&`, `||`, `;`, `|`, a bare
-//! `&`, a newline) and command *substitution* (`$(…)`, backticks) are
-//! themselves bypasses: a benign leading verb can hide a forbidden one further
-//! down the line or inside a substitution. This module is the quote-unaware,
+//! `&`, a newline) and *substitution* — command (`$(…)`, backticks) and
+//! process (`<(…)`, `>(…)`, #2745) alike — are themselves bypasses: a benign
+//! leading verb can hide a forbidden one further down the line or inside a
+//! substitution body. This module is the quote-unaware,
 //! conservatively-over-blocking classifier that closes those seams; it is
 //! factored out of `pm_guard.rs` so that file stays under the 500-SLOC cap.
 //! What: [`evaluate_bash_command`] splits a command on every composition
 //! separator, classifies each segment (first-token verb, two-token
-//! `git apply` / `npm test`, and recursively any command substitution), and
+//! `git apply` / `npm test`, and recursively every substitution body), and
 //! applies a whole-command file-write redirection check. A missed deny is the
 //! dangerous direction, so ambiguous forms (unbalanced substitutions,
 //! over-deep nesting) deny. `sed`/`awk`-family verbs are classified by the
@@ -246,7 +247,38 @@ fn classify_bash_segment(segment: &str, depth: usize) -> Option<&'static str> {
     classify_command_substitutions(trimmed, depth)
 }
 
-/// Inspect `$(…)` / backtick command substitutions for hidden forbidden verbs.
+/// Whether a paren-delimited substitution opens at byte `i`, and whether it is
+/// live there given the segment's quote map.
+///
+/// Why (#2745): `$(…)`, `<(…)` and `>(…)` are one CLASS — bash executes the
+/// body of each, so each must be decomposed and classified. Naming them in one
+/// place is what makes that true by construction: a spelling added here is
+/// scanned by [`classify_command_substitutions`] with no other edit, and the
+/// gap that let `diff <(sed -i …) x` through cannot reopen one form at a time.
+/// The two forms differ in ONE respect, which is why this returns liveness
+/// rather than a bare bool: double quotes suppress process substitution
+/// (`echo "<(x)"` is literal text) but NOT command substitution
+/// (`echo "$(sed -i …)"` still runs `sed`).
+/// What: `Some(true)` when a substitution opens at `i` and is live shell
+/// syntax there, `Some(false)` when one opens but is quoted into literal text,
+/// `None` when no substitution opens at `i`. On unbalanced quotes the map is
+/// untrustworthy, so every opener reads as live — the conservative direction.
+/// Test: `evaluate_bash_command_denies_process_substitution_edit`,
+/// `evaluate_bash_command_allows_quoted_process_substitution_prose`,
+/// `evaluate_bash_command_allows_quoted_substitution_prose`.
+fn paren_substitution_live_at(scan: &QuoteScan, bytes: &[u8], i: usize) -> Option<bool> {
+    if bytes.get(i + 1).copied() != Some(b'(') {
+        return None;
+    }
+    match bytes[i] {
+        b'$' => Some(!scan.balanced || scan.allows_substitution(i)),
+        b'<' | b'>' => Some(!scan.balanced || scan.is_unquoted(i)),
+        _ => None,
+    }
+}
+
+/// Inspect every substitution in a segment — `$(…)`, `<(…)`, `>(…)`, and
+/// backticks — for hidden forbidden verbs.
 ///
 /// Why: first-token classification sees the *outer* command only, so
 /// `echo "$(sed -i s/a/b/ f)"` would pass on `echo` while the substitution
@@ -255,24 +287,31 @@ fn classify_bash_segment(segment: &str, depth: usize) -> Option<&'static str> {
 /// substitution (which would break trivial, ubiquitous forms like
 /// `echo "$(date)"`), it recursively classifies the *body* of each with
 /// [`evaluate_bash_command_inner`] — benign body allows, forbidden one denies.
-/// Unbalanced substitutions (an opening `$(` / backtick with no matching close)
-/// deny conservatively, and so does over-deep nesting: an adversarial
-/// `$($($(…` chain is bounded by [`MAX_SUBSTITUTION_DEPTH`] so it can never
-/// exhaust the stack and crash the guard process (a deny is the safe outcome).
+/// Unbalanced substitutions (an opening `$(`/`<(`/`>(`/backtick with no
+/// matching close) deny conservatively, and so does over-deep nesting: an
+/// adversarial `$($($(…` chain is bounded by [`MAX_SUBSTITUTION_DEPTH`] so it
+/// can never exhaust the stack and crash the guard process (a deny is the safe
+/// outcome).
+///
+/// #2745: process substitution used to be invisible here, so
+/// `diff <(sed -i s/a/b/ f) x` was ALLOWED while bash ran the `sed -i`, and
+/// `>(…)` denied only incidentally — its leading `>` tripped
+/// [`has_file_write_redirection`], never its body. Both now classify like every
+/// other substitution, via [`paren_substitution_live_at`].
 /// What: past the depth cap, returns [`SHELL_EDIT_REASON`] immediately.
-/// Otherwise byte-scans for `$(` (matching `)` with paren-depth tracking) and
-/// backtick pairs, recursively evaluates each balanced body at `depth + 1`, and
-/// propagates a deny; unbalanced substitutions return [`SHELL_EDIT_REASON`].
-/// Quote-aware (#2734): a `$(`/backtick inside SINGLE quotes is literal text
-/// (`git commit -m 'costs $(x)'`) and is skipped — but double quotes do NOT
-/// suppress substitution (`echo "$(sed -i …)"` still runs `sed`), so those stay
-/// scanned. On unbalanced quotes the map is untrustworthy and every position is
-/// scanned (the original conservative behaviour).
+/// Otherwise byte-scans for each paren-delimited opener (matching `)` with
+/// paren-depth tracking) and for backtick pairs, recursively evaluates each
+/// balanced body at `depth + 1`, and propagates a deny; an unbalanced
+/// substitution returns [`SHELL_EDIT_REASON`].
 /// Test: `evaluate_bash_command_denies_hidden_substitution_verb`,
 /// `evaluate_bash_command_allows_benign_substitution`,
 /// `evaluate_bash_command_denies_unbalanced_substitution`,
 /// `evaluate_bash_command_bounds_deep_substitution_nesting`,
-/// `evaluate_bash_command_allows_quoted_substitution_prose`.
+/// `evaluate_bash_command_allows_quoted_substitution_prose`,
+/// `evaluate_bash_command_denies_process_substitution_edit`,
+/// `evaluate_bash_command_denies_output_process_substitution_by_classification`,
+/// `evaluate_bash_command_allows_readonly_process_substitution`,
+/// `evaluate_bash_command_denies_unbalanced_process_substitution`.
 fn classify_command_substitutions(segment: &str, depth: usize) -> Option<&'static str> {
     if depth >= MAX_SUBSTITUTION_DEPTH {
         // Too deeply nested to safely decompose — deny conservatively rather
@@ -280,15 +319,15 @@ fn classify_command_substitutions(segment: &str, depth: usize) -> Option<&'stati
         return Some(SHELL_EDIT_REASON);
     }
     let scan = QuoteScan::new(segment);
-    let live = |i: usize| !scan.balanced || scan.allows_substitution(i);
+    let backtick_live = |i: usize| !scan.balanced || scan.allows_substitution(i);
     let bytes = segment.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if !live(i) {
-            i += 1;
-            continue;
-        }
-        if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'(' {
+        if let Some(live) = paren_substitution_live_at(&scan, bytes, i) {
+            if !live {
+                i += 1;
+                continue;
+            }
             let mut paren = 1usize;
             let mut j = i + 2;
             while j < bytes.len() && paren > 0 {
@@ -300,7 +339,7 @@ fn classify_command_substitutions(segment: &str, depth: usize) -> Option<&'stati
                 j += 1;
             }
             if paren != 0 {
-                // Unbalanced `$(` — cannot decompose; deny conservatively.
+                // Unbalanced opener — cannot decompose; deny conservatively.
                 return Some(SHELL_EDIT_REASON);
             }
             if let Some(reason) = evaluate_bash_command_inner(&segment[i + 2..j - 1], depth + 1) {
@@ -309,7 +348,7 @@ fn classify_command_substitutions(segment: &str, depth: usize) -> Option<&'stati
             i = j;
             continue;
         }
-        if bytes[i] == b'`' {
+        if bytes[i] == b'`' && backtick_live(i) {
             let mut j = i + 1;
             while j < bytes.len() && bytes[j] != b'`' {
                 j += 1;

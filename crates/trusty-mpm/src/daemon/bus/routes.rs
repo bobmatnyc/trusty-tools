@@ -33,6 +33,7 @@ use futures::Stream;
 use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::daemon::error::DaemonError;
 use crate::daemon::state::DaemonState;
@@ -268,7 +269,19 @@ pub fn list_op(state: &Arc<DaemonState>) -> ListInstancesResponse {
 /// status (`400` malformed request or a caller kind this path does not carry,
 /// `403` the claimed sender is not a live registration, `404` no live
 /// instance, `410` the named instance is gone, `409` registered but
-/// unattached) per §4's fail-closed rule.
+/// unattached, `503` attached but its channel is full of unread envelopes) per
+/// §4's fail-closed rule.
+///
+/// **`503` is terminal for this attempt, and a retry is the recovery (#4271).**
+/// The message was not delivered and not queued — DOC-60 §7's durable inbox is
+/// deferred — so a sender that wants it delivered must send it again once the
+/// recipient drains. Two consequences a client author has to plan for: the
+/// refusal is per-INSTANCE and one stalled subscriber makes every publish to
+/// that instance answer `503`, healthy co-subscribers included; and the
+/// condition persists until that subscriber drains, drops, or the instance is
+/// deregistered, so retry with backoff rather than in a tight loop. See
+/// [`PeerBus::publish`](crate::daemon::bus::PeerBus::publish) for why nothing
+/// bounds it here.
 /// What: resolves the target, publishes, and returns the stamped envelope with
 /// `202 Accepted` so the sender holds the `message_id` for threading. The
 /// `from` field is a CLAIM: [`PeerBus::publish`](crate::daemon::bus::PeerBus::publish)
@@ -301,7 +314,9 @@ pub async fn publish_message(
 ///
 /// # Errors
 ///
-/// Every [`BusError`] `PeerBus::publish` can raise, plus
+/// Every [`BusError`] `PeerBus::publish` can raise — including
+/// [`BusError::SubscriberLagged`] (`503` / `CODE_UNAVAILABLE`) when the
+/// recipient's channel is full of unread envelopes — plus
 /// [`BusError::InvalidTarget`] when the request names neither addressing mode.
 ///
 /// Test: `parity_bus_publish_agrees_across_transports`,
@@ -309,12 +324,41 @@ pub async fn publish_message(
 /// `rpc_bus_publish_rejects_an_unregistered_sender`,
 /// `rpc_bus_publish_to_a_dead_instance_is_gone`,
 /// `rpc_bus_publish_without_a_subscriber_is_conflict`,
-/// `rpc_bus_publish_without_a_target_is_invalid`.
+/// `rpc_bus_publish_without_a_target_is_invalid`,
+/// `route_publish_to_a_saturated_instance_is_503`.
 pub fn publish_op(state: &Arc<DaemonState>, req: PublishRequest) -> Result<BusEnvelope, BusError> {
     let target = req.to.to_peer_target()?;
     state
         .bus()
         .publish(req.from, &target, req.payload, req.in_reply_to)
+}
+
+/// The SSE event name a lag notice arrives under (#4271).
+///
+/// Why its own name rather than another default `message` frame: a client
+/// deserializing every frame as a [`BusEnvelope`] must not have to guess. A
+/// named event is ignored by a client that does not know it, and dispatched by
+/// one that does.
+/// Test: `subscribe_stream_reports_lag_instead_of_swallowing_it`.
+pub const LAGGED_EVENT: &str = "lagged";
+
+/// What a `lagged` SSE frame carries.
+///
+/// Why: a subscriber that fell behind needs three things to recover — that it
+/// happened, how many envelopes it missed, and where to read them. The durable
+/// §9 JSONL stream holds every envelope the bus recorded as delivered, so
+/// naming its path makes the recovery a file read rather than a lost message.
+/// What: the instance whose stream lagged, the count the channel reports, and
+/// the durable log's resolved path.
+/// Test: `subscribe_stream_reports_lag_instead_of_swallowing_it`.
+#[derive(Debug, Serialize)]
+pub struct LagNotice {
+    /// The instance whose subscription fell behind.
+    pub instance_id: String,
+    /// How many envelopes the channel dropped for this subscriber.
+    pub missed: u64,
+    /// Path to the DOC-60 §9 durable stream to re-read them from.
+    pub durable_log: String,
 }
 
 /// `GET /api/v1/bus/subscribe/{instance_id}` — an instance's inbound stream.
@@ -324,18 +368,65 @@ pub fn publish_op(state: &Arc<DaemonState>, req: PublishRequest) -> Result<BusEn
 /// identifies in the existing `/sessions/{id}/events` path.
 /// What: SSE of [`BusEnvelope`] JSON; `410 Gone` when the instance is not
 /// registered, so a client cannot sit on a stream that will never produce.
+///
+/// **Lag is reported, never swallowed (#4271).** This handler used to map
+/// `Lagged(n)` to `None`, borrowing the session SSE handlers' idiom — but those
+/// streams carry load-sheddable telemetry, which DOC-60 §3 keeps OFF this bus.
+/// Here the skipped frames were addressed messages the durable log had already
+/// recorded as delivered, so the recipient lost them and was told nothing. A
+/// lag now arrives as a [`LAGGED_EVENT`] frame carrying a [`LagNotice`], plus a
+/// `warn!`. [`PeerBus::publish`](crate::daemon::bus::PeerBus::publish) refuses a
+/// saturated channel, so a lag reaching here means concurrent publishes raced
+/// past that check — rare, and exactly the case worth announcing.
 /// Test: `subscribe_to_dead_instance_errors`,
-/// `publish_reaches_only_target_instance`.
+/// `publish_reaches_only_target_instance`,
+/// `subscribe_stream_reports_lag_instead_of_swallowing_it`.
 pub async fn subscribe_instance(
     State(state): State<Arc<DaemonState>>,
     Path(instance_id): Path<String>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, BusError> {
     let rx = state.bus().subscribe(&instance_id)?;
-    let stream = BroadcastStream::new(rx).filter_map(|msg| match msg {
-        Ok(envelope) => Event::default().json_data(envelope).ok().map(Ok),
-        // A lagged subscriber missed envelopes; skip rather than tear the
-        // stream down, matching the existing session SSE handlers.
-        Err(_) => None,
+    let durable_log = state.bus().log_path().display().to_string();
+    let stream = BroadcastStream::new(rx).filter_map(move |msg| match msg {
+        Ok(envelope) => match Event::default().json_data(&envelope) {
+            Ok(event) => Some(Ok(event)),
+            Err(e) => {
+                tracing::error!(
+                    message_id = %envelope.message_id,
+                    error = %e,
+                    "peer bus envelope could not be serialized onto the SSE stream"
+                );
+                None
+            }
+        },
+        Err(BroadcastStreamRecvError::Lagged(missed)) => {
+            tracing::warn!(
+                instance_id = %instance_id,
+                missed,
+                "peer bus subscriber lagged; envelopes were evicted unread (#4271)"
+            );
+            Some(Ok(lag_frame(&instance_id, missed, &durable_log)))
+        }
     });
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+/// Build the [`LAGGED_EVENT`] frame, keeping the count reachable either way.
+///
+/// Why the fallback: serializing three owned scalars cannot fail, but mapping a
+/// hypothetical failure to `None` would reinstate the silent skip this whole
+/// change removes. The plain-text form still carries the number that matters.
+/// Test: `subscribe_stream_reports_lag_instead_of_swallowing_it`.
+fn lag_frame(instance_id: &str, missed: u64, durable_log: &str) -> Event {
+    let notice = LagNotice {
+        instance_id: instance_id.to_string(),
+        missed,
+        durable_log: durable_log.to_string(),
+    };
+    match Event::default().event(LAGGED_EVENT).json_data(&notice) {
+        Ok(event) => event,
+        Err(_) => Event::default()
+            .event(LAGGED_EVENT)
+            .data(missed.to_string()),
+    }
 }

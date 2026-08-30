@@ -13,8 +13,11 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use http_body_util::BodyExt;
+use tokio::sync::broadcast;
 use tower::ServiceExt;
 
+use super::routes::LAGGED_EVENT;
 use super::*;
 use crate::daemon::api::router;
 use crate::daemon::state::DaemonState;
@@ -218,6 +221,75 @@ fn register_mints_prefixed_id() {
     let second = reg.register("izzie", None).unwrap();
     assert_ne!(meta.instance_id, second.instance_id);
     assert_eq!(reg.len(), 2);
+}
+
+/// A minter that hands back `suffixes` in order, then repeats the last one.
+///
+/// Why: `Uuid::new_v4` cannot be made to collide, so the collision path is
+/// reachable only through the injected suffix source. Repeating the last value
+/// is what lets one helper drive both the recover-on-retry case and the
+/// every-attempt-collides case.
+fn scripted_minter(suffixes: &[&str]) -> impl FnMut() -> String + use<> {
+    let scripted: Vec<String> = suffixes.iter().map(|s| (*s).to_string()).collect();
+    let mut next = 0usize;
+    move || {
+        let out = scripted[next.min(scripted.len() - 1)].clone();
+        next += 1;
+        out
+    }
+}
+
+#[test]
+fn register_re_mints_on_a_suffix_collision() {
+    // #4276: pre-fix this was a bare `DashMap::insert`, so the second
+    // registration REPLACED the first — `len()` stayed 1 and resolving the
+    // first instance's id reached the second instance's channel.
+    let reg = InstanceRegistry::default();
+    let first = reg
+        .register_with_minter("izzie", None, scripted_minter(&["aaaaaaaa"]))
+        .expect("first registration");
+    let second = reg
+        .register_with_minter("izzie", None, scripted_minter(&["aaaaaaaa", "bbbbbbbb"]))
+        .expect("collision must re-mint, not overwrite");
+
+    assert_eq!(first.instance_id, "izzie~aaaaaaaa");
+    assert_eq!(second.instance_id, "izzie~bbbbbbbb");
+    assert_eq!(reg.len(), 2, "the first instance must still be registered");
+    // The decisive assertion: the first id still resolves to the FIRST
+    // instance, not to the one that collided with it.
+    let resolved = reg
+        .resolve_instance(&first.instance_id)
+        .expect("still live");
+    assert_eq!(resolved.meta.seq, first.seq);
+    assert!(second.seq > first.seq, "re-minting must not reorder seq");
+}
+
+#[test]
+fn register_fails_loudly_when_every_mint_collides() {
+    // A suffix source that never yields a free id must refuse the registration
+    // rather than overwrite the live instance holding that id.
+    let reg = InstanceRegistry::default();
+    let first = reg
+        .register_with_minter("izzie", None, scripted_minter(&["aaaaaaaa"]))
+        .expect("first registration");
+
+    let err = reg
+        .register_with_minter("izzie", None, scripted_minter(&["aaaaaaaa"]))
+        .expect_err("an exhausted mint must error, not overwrite");
+    assert!(
+        matches!(err, BusError::InstanceIdCollision { .. }),
+        "expected InstanceIdCollision, got {err:?}"
+    );
+    assert_eq!(err.status(), StatusCode::CONFLICT);
+    assert_eq!(reg.len(), 1);
+    assert_eq!(
+        reg.resolve_instance(&first.instance_id)
+            .expect("survivor")
+            .meta
+            .seq,
+        first.seq,
+        "the live instance must be untouched by the refused registration"
+    );
 }
 
 #[test]
@@ -645,6 +717,280 @@ fn no_subscriber_is_logged_as_dropped_not_delivered() {
     assert_eq!(log[0].delivery_state, DeliveryState::Dropped);
 }
 
+// ── subscriber lag (#4271) ────────────────────────────────────────────────────
+
+/// Drain every envelope a receiver can still produce, plus how much it lagged.
+///
+/// Why: the two lag tests below both need "what did this subscriber ACTUALLY
+/// end up holding", and a `try_recv` loop that stops at the first `Lagged` would
+/// answer the wrong question — `Lagged` is not the end of the stream, it is a
+/// gap in the middle of one.
+fn drain(rx: &mut broadcast::Receiver<BusEnvelope>) -> (Vec<String>, u64) {
+    let mut ids = Vec::new();
+    let mut missed = 0;
+    loop {
+        match rx.try_recv() {
+            Ok(envelope) => ids.push(envelope.message_id),
+            Err(broadcast::error::TryRecvError::Lagged(n)) => missed += n,
+            Err(_) => return (ids, missed),
+        }
+    }
+}
+
+/// Every `message_id` the durable log calls delivered, in write order.
+fn delivered_ids(bus: &PeerBus) -> Vec<String> {
+    read_log(bus)
+        .into_iter()
+        .filter(|e| e.delivery_state == DeliveryState::Delivered)
+        .map(|e| e.message_id)
+        .collect()
+}
+
+/// Publish `count` envelopes at one instance, ignoring refusals.
+fn burst(bus: &PeerBus, sender: &CallerIdentity, instance_id: &str, count: usize) {
+    for i in 0..count {
+        // A refused publish's own record is asserted by
+        // `saturated_publish_is_dropped_in_the_durable_log`; the callers here
+        // care only about what the log and the subscriber end up agreeing on.
+        let _ = bus.publish(
+            sender.clone(),
+            &PeerTarget::Instance(instance_id.to_string()),
+            chat(&format!("burst {i}")),
+            None,
+        );
+    }
+}
+
+#[test]
+fn delivered_records_match_what_a_stalled_subscriber_receives() {
+    // #4271, the defect itself: `broadcast::Sender::send` answers Ok for a
+    // LAGGING receiver, so a publish into a full ring evicted an envelope the
+    // recipient had never read while the §9 log recorded that envelope as
+    // `delivered`. The sender saw 202, the log said delivered, and the
+    // recipient was never told.
+    //
+    // The invariant asserted here is the whole contract: the envelopes the log
+    // calls delivered are EXACTLY the envelopes the subscriber receives.
+    let (_dir, bus) = bus();
+    let target = bus.registry().register("cto-assistant", None).unwrap();
+    // Attached but stalled — the `cto-assistant~b1` inside a long LLM turn.
+    let mut stalled = bus.subscribe(&target.instance_id).unwrap();
+    let sender = registered_sender(&bus, "izzie");
+
+    burst(
+        &bus,
+        &sender,
+        &target.instance_id,
+        INSTANCE_CHANNEL_CAPACITY + 6,
+    );
+
+    let (received, missed) = drain(&mut stalled);
+    assert_eq!(
+        received,
+        delivered_ids(&bus),
+        "every envelope the durable log records as delivered must actually \
+         reach the subscriber, and no other"
+    );
+    assert_eq!(
+        missed, 0,
+        "a subscriber must not silently lose envelopes the log calls delivered"
+    );
+}
+
+#[test]
+fn saturated_publish_is_dropped_in_the_durable_log() {
+    // The other half of the contract: a refused publish is still RECORDED, as
+    // `dropped`. A log holding only successes cannot answer "was it sent, or
+    // just never read?" (DOC-60 §4).
+    let (_dir, bus) = bus();
+    let target = bus.registry().register("cto-assistant", None).unwrap();
+    let _stalled = bus.subscribe(&target.instance_id).unwrap();
+    let sender = registered_sender(&bus, "izzie");
+    let overflow = 6;
+
+    burst(
+        &bus,
+        &sender,
+        &target.instance_id,
+        INSTANCE_CHANNEL_CAPACITY + overflow,
+    );
+
+    let log = read_log(&bus);
+    assert_eq!(
+        log.len(),
+        INSTANCE_CHANNEL_CAPACITY + overflow,
+        "every publish past sender verification is recorded, delivered or not"
+    );
+    let dropped = log
+        .iter()
+        .filter(|e| e.delivery_state == DeliveryState::Dropped)
+        .count();
+    assert_eq!(
+        dropped, overflow,
+        "the publishes the full channel could not take must be recorded dropped"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_subscribers_one_lagging_account_exactly() {
+    // Condition-based, never sleep-based: the drainer parks on the channel's
+    // own waker, and the accounting proceeds the instant the counter reaches
+    // its target. The deadline exists only so a hang reports a failure.
+    const ROUNDS: usize = INSTANCE_CHANNEL_CAPACITY + 36;
+
+    let (_dir, bus) = bus();
+    let bus = Arc::new(bus);
+    let target = bus.registry().register("cto-assistant", None).unwrap();
+    let mut fast = bus.subscribe(&target.instance_id).unwrap();
+    // Registered, attached, and never polled until the accounting at the end —
+    // the lagging peer. It is what holds the ring full.
+    let mut lagging = bus.subscribe(&target.instance_id).unwrap();
+    let sender = registered_sender(&bus, "izzie");
+
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let drainer = tokio::spawn({
+        let seen = Arc::clone(&seen);
+        async move {
+            while let Ok(envelope) = fast.recv().await {
+                seen.lock().unwrap().push(envelope.message_id);
+            }
+        }
+    });
+
+    let publisher = tokio::spawn({
+        let bus = Arc::clone(&bus);
+        let instance_id = target.instance_id.clone();
+        async move {
+            let mut accepted = Vec::new();
+            let mut refused = 0usize;
+            for i in 0..ROUNDS {
+                match bus.publish(
+                    sender.clone(),
+                    &PeerTarget::Instance(instance_id.clone()),
+                    chat(&format!("round {i}")),
+                    None,
+                ) {
+                    Ok(envelope) => accepted.push(envelope.message_id),
+                    Err(_) => refused += 1,
+                }
+            }
+            (accepted, refused)
+        }
+    });
+    let (accepted, refused) = publisher.await.unwrap();
+
+    // A fast peer's progress does not rescue the channel: the ring is gated by
+    // the SLOWEST attached subscriber, so acceptance stops at its depth exactly.
+    assert_eq!(
+        accepted.len(),
+        INSTANCE_CHANNEL_CAPACITY,
+        "the lagging subscriber must gate acceptance at the ring's depth"
+    );
+    assert_eq!(refused, ROUNDS - INSTANCE_CHANNEL_CAPACITY);
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while seen.lock().unwrap().len() < accepted.len() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the fast subscriber never caught up: {} of {}",
+            seen.lock().unwrap().len(),
+            accepted.len()
+        );
+        tokio::task::yield_now().await;
+    }
+    drainer.abort();
+
+    assert_eq!(
+        *seen.lock().unwrap(),
+        accepted,
+        "the fast subscriber must receive every accepted envelope, in order"
+    );
+    let (late, missed) = drain(&mut lagging);
+    assert_eq!(
+        late, accepted,
+        "the lagging subscriber must still receive every accepted envelope once \
+         it drains — lag delays delivery here, it never discards it"
+    );
+    assert_eq!(missed, 0, "nothing may be evicted unread");
+    assert_eq!(
+        delivered_ids(&bus),
+        accepted,
+        "the durable log's delivered set must equal what both subscribers got"
+    );
+}
+
+#[test]
+fn concurrent_publishers_never_evict_a_delivered_envelope() {
+    // #4271, the concurrent arm: measuring the channel and sending into it are
+    // two separate acquisitions of the broadcast tail lock, so a check made
+    // outside a lock of our own is stale by the time the send runs. Two
+    // publishers that both observed `capacity - 1` would both send, and the
+    // second would evict an unread envelope the first had already recorded
+    // `delivered` — the same fail-open, narrowed to a window.
+    //
+    // Threads rather than tasks, and far more publishes than the ring can hold,
+    // so the interleaving is hit repeatedly within one run.
+    const PUBLISHERS: usize = 8;
+    const PER_PUBLISHER: usize = 32;
+
+    let (_dir, bus) = bus();
+    let bus = Arc::new(bus);
+    let target = bus.registry().register("cto-assistant", None).unwrap();
+    // Attached and never draining: it is what holds the ring full, so every
+    // publisher past the first `INSTANCE_CHANNEL_CAPACITY` races at the edge.
+    let mut stalled = bus.subscribe(&target.instance_id).unwrap();
+
+    let accepted = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..PUBLISHERS)
+            .map(|p| {
+                let bus = Arc::clone(&bus);
+                let instance_id = target.instance_id.clone();
+                scope.spawn(move || {
+                    let sender = registered_sender(&bus, &format!("izzie{p}"));
+                    let mut mine = Vec::new();
+                    for i in 0..PER_PUBLISHER {
+                        if let Ok(envelope) = bus.publish(
+                            sender.clone(),
+                            &PeerTarget::Instance(instance_id.clone()),
+                            chat(&format!("p{p} n{i}")),
+                            None,
+                        ) {
+                            mine.push(envelope.message_id);
+                        }
+                    }
+                    mine
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("no publisher thread may panic"))
+            .fold(0usize, |n, ids| n + ids.len())
+    });
+
+    // Exact accounting: the ring's depth is the ceiling no interleaving may
+    // exceed. One extra acceptance is one evicted envelope.
+    assert_eq!(
+        accepted, INSTANCE_CHANNEL_CAPACITY,
+        "concurrent publishers must not accept more than the ring can hold"
+    );
+
+    let (received, missed) = drain(&mut stalled);
+    assert_eq!(
+        missed, 0,
+        "no envelope may be evicted unread, however the publishes interleaved"
+    );
+    let mut delivered = delivered_ids(&bus);
+    let mut got = received;
+    delivered.sort();
+    got.sort();
+    assert_eq!(
+        got, delivered,
+        "the log's delivered set must equal what the subscriber received, \
+         whichever order the publishers won the gate in"
+    );
+}
+
 // ── caller verification + edge derivation (review findings #2 and #3) ─────────
 
 #[test]
@@ -923,6 +1269,29 @@ fn bus_error_status_codes_map() {
         }
         .status(),
         StatusCode::BAD_REQUEST
+    );
+}
+
+#[test]
+fn subscriber_lagged_is_503() {
+    // #4271: distinct from `NoSubscriber`'s 409 because the recoveries differ —
+    // 409 means stop sending, 503 means retry once the recipient drains.
+    assert_eq!(
+        BusError::SubscriberLagged {
+            instance_id: "izzie~b1".into(),
+        }
+        .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_ne!(
+        BusError::SubscriberLagged {
+            instance_id: "izzie~b1".into(),
+        }
+        .status(),
+        BusError::NoSubscriber {
+            instance_id: "izzie~b1".into()
+        }
+        .status()
     );
 }
 
@@ -1235,4 +1604,118 @@ async fn route_subscribe_to_dead_instance_is_410() {
     )
     .await;
     assert_eq!(status, StatusCode::GONE);
+}
+
+#[tokio::test]
+async fn subscribe_stream_reports_lag_instead_of_swallowing_it() {
+    // #4271, the SSE half: a lagged subscriber used to be mapped to `None` —
+    // the frames vanished and the recipient was told nothing. It now gets a
+    // named `lagged` frame carrying the count and where to re-read from.
+    //
+    // The lag is induced by sending straight on the instance's channel rather
+    // than through `publish`, because `publish` now refuses a saturated
+    // channel: this arm survives only for a concurrent-publish race, and the
+    // direct send is what reproduces that state deterministically.
+    let (_dir, state) = test_state();
+    let meta = state
+        .bus()
+        .registry()
+        .register("cto-assistant", None)
+        .unwrap();
+    let resp = router(Arc::clone(&state))
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/bus/subscribe/{}", meta.instance_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let overflow = 36;
+    let live = state
+        .bus()
+        .registry()
+        .resolve_instance(&meta.instance_id)
+        .unwrap();
+    for i in 0..(INSTANCE_CHANNEL_CAPACITY + overflow) {
+        live.tx
+            .send(BusEnvelope::new(
+                BusEdge::AssistantAssistant,
+                peer_caller("izzie~a1", "izzie"),
+                Recipient {
+                    instance_id: Some(meta.instance_id.clone()),
+                    definition_id: Some(meta.definition_id.clone()),
+                },
+                chat(&format!("burst {i}")),
+                None,
+                DeliveryState::Delivered,
+            ))
+            .unwrap();
+    }
+
+    let mut body = resp.into_body();
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(5), body.frame())
+        .await
+        .expect("the lag notice must arrive without waiting on a keep-alive")
+        .expect("the stream must yield a frame")
+        .unwrap();
+    let text = String::from_utf8(frame.into_data().unwrap().to_vec()).unwrap();
+    assert!(
+        text.contains(&format!("event: {LAGGED_EVENT}")),
+        "a lag must arrive under its own event name, got: {text}"
+    );
+    assert!(
+        text.contains(&format!("\"missed\":{overflow}")),
+        "the notice must carry how many envelopes were missed, got: {text}"
+    );
+    assert!(
+        text.contains(state.bus().log_path().to_str().unwrap()),
+        "the notice must name the durable log to re-read from, got: {text}"
+    );
+}
+
+#[tokio::test]
+async fn route_publish_to_a_saturated_instance_is_503() {
+    // #4271: the refusal has to reach a real client, not just `BusError`'s
+    // status table. `subscriber_lagged_is_503` pins the mapping; this pins that
+    // `POST /api/v1/bus/publish` actually answers it.
+    let (_dir, state) = test_state();
+    let target = state
+        .bus()
+        .registry()
+        .register("cto-assistant", None)
+        .unwrap();
+    let sender = state.bus().registry().register("izzie", None).unwrap();
+    // Attached and stalled: the receiver is held and never read.
+    let _stalled = state.bus().subscribe(&target.instance_id).unwrap();
+
+    let body = serde_json::json!({
+        "from": {
+            "kind": "assistant_instance",
+            "instance_id": sender.instance_id,
+            "definition_id": sender.definition_id,
+        },
+        "to": { "instance_id": target.instance_id },
+        "payload": { "type": "chat_text", "text": "burst" }
+    });
+    for _ in 0..INSTANCE_CHANNEL_CAPACITY {
+        let (status, _) = call(&state, post("/api/v1/bus/publish", body.clone())).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+    }
+
+    let (status, answer) = call(&state, post("/api/v1/bus/publish", body)).await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "a full recipient channel must refuse over HTTP, not report 202"
+    );
+    assert!(
+        answer["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(&target.instance_id),
+        "the refusal must name the instance that is behind, got: {answer}"
+    );
 }

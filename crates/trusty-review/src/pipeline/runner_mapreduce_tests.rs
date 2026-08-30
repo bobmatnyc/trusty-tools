@@ -277,6 +277,187 @@ async fn run_review_oversized_diff_mapreduce_reviews_tail_signature() {
     );
 }
 
+/// REGRESSION (#2654): caller-supplied `referenced_code` reaches EVERY per-file
+/// map prompt, not just the unified single-shot prompt.
+///
+/// Why: a downstream consumer populates `referenced_code` with multi-repo
+/// semantic context so the verdict-deciding review is not diff-only. The
+/// map-reduce path is chosen for the largest, most complex PRs — where that
+/// context matters most — and a drop there produces no error, no warning, and a
+/// weaker review that still reports success.
+/// What: runs an over-cap diff through map-reduce with a sentinel in
+/// `caller_context.referenced_code` and asserts every recorded map prompt
+/// carries it under the `## Referenced Code` heading.
+/// Test: this test itself (no network).
+#[tokio::test]
+async fn mapreduce_prompts_carry_caller_supplied_referenced_code() {
+    const SENTINEL: &str = "fn cross_repo_helper() { /* REFERENCED_CODE_SENTINEL */ }";
+
+    let (diff, _tail) = oversized_multi_file_diff();
+    let (source, _tmp) = local_source(&diff);
+
+    let reviewer = Arc::new(RecordingReviewer::approving());
+    let llm: Arc<dyn LlmProvider> = reviewer.clone();
+    let mut review_input = input(source);
+    review_input.caller_context = CallerContext {
+        referenced_code: Some(SENTINEL.to_string()),
+        ..CallerContext::default()
+    };
+    let config = ReviewConfig::load(None);
+
+    let _ = run_review(&config, review_input, deps(llm)).await;
+
+    let prompts = reviewer.prompts();
+    assert!(!prompts.is_empty(), "map-reduce must issue per-file calls");
+    // The synthesis call is not a per-file review and carries findings, not
+    // code, so only the map prompts (those carrying the diff block) are held to
+    // this.
+    let map_prompts: Vec<&String> = prompts
+        .iter()
+        .filter(|p| p.contains("## Unified diff"))
+        .collect();
+    assert!(
+        !map_prompts.is_empty(),
+        "at least one prompt must be a per-file map call"
+    );
+    for p in map_prompts {
+        assert!(
+            p.contains("## Referenced Code") && p.contains(SENTINEL),
+            "every map prompt must carry the caller's referenced code (#2654)"
+        );
+    }
+}
+
+/// #2654: the branch says so, loudly, when caller context did not reach it —
+/// and reviews with the context rather than without it.
+///
+/// Why: the failure this guards is silent by construction. A restored field
+/// that logged nothing would leave the same defect undetectable.
+/// What: hands the guard a context stripped of `referenced_code` alongside a
+/// caller that supplied one; asserts the field is named and put back.
+/// Test: this test itself.
+#[test]
+fn restore_caller_context_reports_and_restores_a_dropped_field() {
+    let caller = CallerContext {
+        referenced_code: Some("fn helper() {}".to_string()),
+        pr_description: Some("why this change".to_string()),
+        pr_discussion: None,
+    };
+    let mut context = crate::pipeline::prompt::ReviewContext::default();
+
+    let restored = super::restore_caller_context(&mut context, &caller);
+
+    assert_eq!(restored, vec!["pr_description", "referenced_code"]);
+    assert_eq!(context.referenced_code.as_deref(), Some("fn helper() {}"));
+    assert_eq!(context.pr_description.as_deref(), Some("why this change"));
+}
+
+/// #2654: the guard is silent on the healthy path — the runner threaded the
+/// context, so there is nothing to restore and nothing to report.
+#[test]
+fn restore_caller_context_is_silent_when_the_runner_threaded_it() {
+    let caller = CallerContext {
+        referenced_code: Some("fn helper() {}".to_string()),
+        ..CallerContext::default()
+    };
+    let context = crate::pipeline::prompt::ReviewContext {
+        referenced_code: Some("fn helper() {}".to_string()),
+        ..crate::pipeline::prompt::ReviewContext::default()
+    };
+    let mut context = context;
+
+    assert!(
+        super::restore_caller_context(&mut context, &caller).is_empty(),
+        "a threaded context reports nothing"
+    );
+    // And a caller who supplied nothing can never trip it.
+    let mut empty = crate::pipeline::prompt::ReviewContext::default();
+    assert!(super::restore_caller_context(&mut empty, &CallerContext::default()).is_empty());
+}
+
+/// Returns the #1873 phantom — a BLOCK whose only finding calls a file that IS
+/// in the changeset "not present in diff" — for the chunk carrying `marker`,
+/// and APPROVEs everything else.
+///
+/// Why: reproduces the cross-chunk blindness verbatim. The map call reviewing
+/// `src/file0.rs` cannot see the chunk that adds `src/big.rs`, so it reasons
+/// correctly from its own chunk to a conclusion the whole changeset refutes.
+/// What: one prompt-substring match, one hard-coded finding.
+/// Test: `mapreduce_phantom_missing_file_finding_does_not_block`.
+struct PhantomMissingFileReviewer {
+    marker: String,
+}
+
+#[async_trait]
+impl LlmProvider for PhantomMissingFileReviewer {
+    fn name(&self) -> &str {
+        "phantom-missing-file"
+    }
+    async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+        let body = req
+            .messages
+            .iter()
+            .map(|m| m.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = if body.contains(self.marker.as_str()) {
+            r#"{"verdict":"BLOCK","summary":"missing module","findings":[{"title":"module missing","body":"This file imports from src/file0.rs, which is not present in diff - possible compile break.","severity":"high","confidence":0.95,"file":"src/big.rs","line":1,"code_provable":true}]}"#
+        } else {
+            r#"{"verdict":"APPROVE","summary":"ok","findings":[]}"#
+        };
+        Ok(LlmResponse {
+            text: text.to_string(),
+            model: req.model.clone(),
+            input_tokens: 10,
+            output_tokens: 5,
+            latency_ms: 1,
+            cost_usd: 0.0,
+            finish_reason: Some("stop".to_string()),
+        })
+    }
+}
+
+/// REGRESSION (#1873): a chunk claiming a file is missing from the diff cannot
+/// BLOCK a changeset that contains that file.
+///
+/// Why: the reported harm — `review_pr` returned BLOCK / grade F on PR #1872
+/// off one 0.55-confidence finding calling `doctor_fs_checks.rs` "not present
+/// in diff", while the file was in the PR, the crate compiled, and the suite
+/// passed. It happened on two consecutive reviews and stopped the merge.
+/// What: runs an over-cap diff through map-reduce with a reviewer that emits
+/// that finding for one chunk; asserts the verdict stays APPROVE and the
+/// phantom reaches neither the findings nor the rendered review. Pre-fix the
+/// verdict was BLOCK.
+/// Test: this test itself (no network).
+#[tokio::test]
+async fn mapreduce_phantom_missing_file_finding_does_not_block() {
+    let (diff, tail_signature) = oversized_multi_file_diff();
+    let (source, _tmp) = local_source(&diff);
+
+    // Key on the tail file's distinctive signature — the one chunk marker
+    // `run_review_oversized_diff_mapreduce_reviews_tail_signature` already
+    // proves reaches exactly one map prompt.
+    let llm: Arc<dyn LlmProvider> = Arc::new(PhantomMissingFileReviewer {
+        marker: tail_signature.to_string(),
+    });
+    let config = ReviewConfig::load(None);
+
+    let result = run_review(&config, input(source), deps(llm)).await;
+
+    assert_eq!(
+        result.verdict,
+        Verdict::Approve,
+        "a claim the changeset itself refutes must not drive the verdict (#1873)"
+    );
+    assert!(
+        !result
+            .findings
+            .iter()
+            .any(|f| f.description.contains("not present in diff")),
+        "the refuted finding must not reach the rendered review (#1873)"
+    );
+}
+
 /// Selectively fails for prompts containing `fail_marker`, succeeds otherwise.
 /// Lets us inject exactly ONE LLM-error failure into a multi-chunk map-reduce
 /// run without failing every chunk.

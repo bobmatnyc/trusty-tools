@@ -106,7 +106,7 @@ impl FakeLlm {
                 response: r#"There is a bug.
 
 ```json
-{"verdict":"REQUEST_CHANGES","summary":"SQL injection","findings":[{"title":"SQL injection","body":"line 42","severity":"medium","confidence":0.9,"file":"src/a.rs","line":42}]}
+{"verdict":"REQUEST_CHANGES","summary":"SQL injection","findings":[{"title":"SQL injection","body":"line 1","severity":"medium","confidence":0.9,"file":"src/a.rs","line":1}]}
 ```"#
                     .to_string(),
                 error: None,
@@ -125,6 +125,28 @@ impl FakeLlm {
 {"verdict":"BLOCK","summary":"broken","findings":[{"title":"null deref","body":"the hotel page dereferences a null booking [code: `src/hotelPage.ts:207` — \"const booking = ctx.booking.id\"]","severity":"high","confidence":0.95,"file":"src/hotelPage.ts","line":207,"code_provable":true}]}
 ```"#
             .to_string(),
+            error: None,
+            output_tokens: None,
+        }
+    }
+
+    /// A self-assessed APPROVE carrying a High-severity finding on a file that
+    /// IS in the diff (#1902).
+    ///
+    /// Why: the severity floor escalates the pipeline's verdict well above the
+    /// model's own lean, which is exactly the divergence #1902 reports — a
+    /// top-level BLOCK beside an embedded APPROVE. Citing a real diff path
+    /// keeps the citation check from dropping the finding and relaxing the
+    /// verdict back down.
+    /// Test: `run_review_outer_and_embedded_verdict_agree_after_severity_floor`.
+    fn self_approves_with_blocking_finding() -> Self {
+        Self {
+            response: r#"Looks fine to me.
+
+```json
+{"verdict":"APPROVE","grade":"A","summary":"LGTM","findings":[{"title":"SQL injection","body":"the query is built by string interpolation","severity":"high","confidence":0.95,"file":"src/a.rs","line":1,"code_provable":true}]}
+```"#
+                .to_string(),
             error: None,
             output_tokens: None,
         }
@@ -340,6 +362,11 @@ fn local_diff_source(diff: &str) -> (DiffSource, tempfile::NamedTempFile) {
 /// grade-envelope plumbing — not citation checking — need a diff whose file
 /// path actually matches the fixture finding so that unrelated machinery
 /// keeps working.
+///
+/// #4999: the hunk is `@@ -1 +1 @@`, so this diff reaches line 1 and nothing
+/// further. A fixture finding for this file must cite line 1 — a larger line is
+/// now dropped as beyond the file's last diffed line, which silently empties the
+/// findings list the test is about.
 fn local_diff_source_for_file(
     file: &str,
     added_line: &str,
@@ -605,6 +632,60 @@ async fn run_review_outer_and_embedded_grade_agree_after_shallow_cap() {
     assert_ne!(
         embedded, "A+",
         "the stale model self-grade must have been reconciled away (#1886)"
+    );
+}
+
+/// REGRESSION (#1902): the top-level `verdict` and the verdict embedded in
+/// `review_body` agree after the severity floor moves the top-level one.
+///
+/// Why: the reported harm — `review_pr` on PR #1901 returned a top-level
+/// `BLOCK` while `review_body` said `APPROVE`. An automated merge gate
+/// correctly refused on the `BLOCK`, and the human reading the review saw an
+/// approval. #1886 fixed this class for `grade` and left `verdict` behind.
+/// What: runs a review whose model self-assesses APPROVE while reporting a
+/// High-severity finding, so the floor escalates the top-level verdict; then
+/// re-parses `review_body` and asserts the embedded verdict equals the
+/// top-level one and is no longer the stale APPROVE.
+/// Test: this test itself (no network).
+#[tokio::test]
+async fn run_review_outer_and_embedded_verdict_agree_after_severity_floor() {
+    let (source, _tmp) = local_diff_source_for_file(
+        "src/a.rs",
+        "+fn bad_query(id: &str) { db.exec(format!(\"SELECT * FROM users WHERE id={id}\")) }",
+    );
+    let config = default_config();
+    let input = ReviewInput {
+        diff_source: source,
+        reviewer_model: "openai/gpt-5.4-mini-20260317".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Cli,
+        allow_posting: false,
+        caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
+    };
+    let deps = ready_deps(
+        Arc::new(FakeLlm::self_approves_with_blocking_finding()),
+        None,
+    );
+
+    let result = run_review(&config, input, deps).await;
+
+    assert_ne!(
+        result.verdict,
+        Verdict::Approve,
+        "a High-severity finding must move the top-level verdict off the model's APPROVE"
+    );
+    let embedded = crate::pipeline::parser::parse_review_response(&result.review_body).verdict;
+    assert_eq!(
+        embedded, result.verdict,
+        "the verdict embedded in review_body must equal the authoritative one (#1902)"
+    );
+    assert_ne!(
+        embedded,
+        Verdict::Approve,
+        "the model's stale pre-floor APPROVE must have been reconciled away (#1902)"
     );
 }
 
@@ -1730,7 +1811,7 @@ async fn envelope_grade_tracks_verdict_after_verification_relaxation_1486() {
     let llm_response = r#"Code looks good overall, minor concern.
 
 ```json
-{"verdict":"APPROVE","grade":"B-","summary":"Looks solid","findings":[{"title":"Potential XSS","body":"line 5 unescaped","severity":"high","confidence":0.95,"file":"src/render.rs","line":5}]}
+{"verdict":"APPROVE","grade":"B-","summary":"Looks solid","findings":[{"title":"Potential XSS","body":"line 1 unescaped","severity":"high","confidence":0.95,"file":"src/render.rs","line":1}]}
 ```"#;
     let (source, _tmp) = local_diff_source_for_file(
         "src/render.rs",
@@ -1802,7 +1883,7 @@ async fn envelope_grade_stays_block_when_high_effort_confirmed_1486() {
     let llm_response = r#"Review with confirmed critical finding.
 
 ```json
-{"verdict":"APPROVE","grade":"B-","summary":"Mostly OK","findings":[{"title":"Auth bypass","body":"line 10","severity":"high","confidence":0.95,"file":"src/auth.rs","line":10,"code_provable":true}]}
+{"verdict":"APPROVE","grade":"B-","summary":"Mostly OK","findings":[{"title":"Auth bypass","body":"line 1","severity":"high","confidence":0.95,"file":"src/auth.rs","line":1,"code_provable":true}]}
 ```"#;
     let (source, _tmp) = local_diff_source_for_file("src/auth.rs", "+fn auth(t: &str) {}");
     let config = default_config();

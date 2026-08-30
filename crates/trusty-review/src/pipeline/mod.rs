@@ -24,6 +24,10 @@
 //!
 //! Test: each submodule carries its own unit tests.
 
+pub mod absence_claim;
+// Why: keeps the raw structured reviewer payload out of `review_body`, which
+// consumers read (and post) as the human-readable review (#4999).
+pub(crate) mod body_render;
 pub mod citation_check;
 // Why: the grounding guard for package-registry / version-existence claims
 // (#4081) — kept separate from `finding_hygiene` (self-admission markers) and
@@ -92,7 +96,9 @@ pub use letter_grade::{
 };
 pub use output::{log_json_path, print_review_result, write_review_log};
 pub use parser::{ParsedReview, parse_review_response};
-pub use post::{FinalizeAction, PostContext, decide_action, finalize_review};
+pub use post::{
+    DryRunReason, FinalizeAction, PostContext, decide_action, finalize_review, surface_dry_run,
+};
 pub use prompt::{
     ReviewContext, ReviewPrMeta, build_review_prompt, build_review_prompt_with_coverage,
     build_system_prompt, build_system_prompt_with_coverage, reviewer_system_prompt,

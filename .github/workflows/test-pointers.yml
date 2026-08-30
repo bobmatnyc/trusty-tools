@@ -69,16 +69,19 @@ jobs:
     # shape: a decision about the event, never about the diff. Whether this gate
     # does any work is now decided per-step, from the diff, below.
     runs-on: ubuntu-latest
-    # #4882: was 5. Measured 2026-08-05: the lint itself legitimately took
-    # 352s locally (close to CI's observed 303s the run that got cancelled),
-    # dominated by tens of thousands of subprocess forks in
-    # scripts/check_test_pointers.sh (dirname/tr/mktemp/grep per file, per
-    # Test: annotation, per citation — see that script's #4882 comments).
-    # Fixing those forks cut local wall time to ~201s (43% faster), but that
-    # still leaves under 2x headroom against a 5-minute cap on a runner that
-    # was already this close to timing out under normal load — not a safe
-    # margin. 10 minutes gives ~3x headroom over the post-fix measurement.
-    timeout-minutes: 10
+    # #4687: back to 5, and this time with headroom behind the number. #4882
+    # raised it to 10 because the lint still took ~201s locally after a first
+    # round of fork removal — a ceiling sized to survive a slow script rather
+    # than to bound a hung job, and one that would go on rising with the
+    # repository. scripts/check_test_pointers.sh now scans the corpus in three
+    # passes (one awk over every .rs file, one `git grep` per cited crate, one
+    # awk over the citation rows) instead of ~84,000 subprocess forks: 179.9s
+    # -> 4.9s locally over the same 27,833 citations, with byte-identical scan
+    # output. The lint step measured 128s on CI against that 179.9s local run
+    # (run 33333660178), so the whole job should now finish well inside a
+    # minute. 5 minutes is ~20x the measured job; the 5 that cancelled PR
+    # #4850 was 1.0x.
+    timeout-minutes: 5
     steps:
       # fetch-depth: 0 — the relevance classifier below needs `git merge-base`
       # against the base branch, which a shallow checkout cannot resolve.

@@ -7,7 +7,8 @@
 //! What: exercises `reconcile_review_body_grade` directly with hand-built bodies.
 //! Test: this file.
 
-use super::reconcile_review_body_grade;
+use super::{reconcile_review_body_grade, reconcile_review_body_verdict};
+use crate::models::Verdict;
 
 /// A direct-JSON body (structured-output path) has its `"grade"` value rewritten.
 ///
@@ -156,4 +157,67 @@ fn reconcile_unterminated_grade_value_is_noop() {
     let body = r#"{"grade":"B+"#; // no closing quote
     let out = reconcile_review_body_grade(body, Some("C"));
     assert_eq!(out, body);
+}
+
+// ── Verdict reconciliation (#1902) ───────────────────────────────────────────
+
+/// A direct-JSON body has its `"verdict"` value rewritten to the final verdict.
+///
+/// Why: the divergence #1902 reports — the model self-assessed APPROVE while the
+/// pipeline's floor settled on BLOCK, and both values were observable.
+/// What: asserts the embedded `"APPROVE"` becomes `"BLOCK"` and the grade,
+/// summary and findings are untouched.
+/// Test: this test.
+#[test]
+fn reconcile_rewrites_direct_json_verdict() {
+    let body = r#"{"verdict":"APPROVE","grade":"B+","summary":"LGTM","findings":[]}"#;
+    let out = reconcile_review_body_verdict(body, &Verdict::Block);
+    assert_eq!(
+        out,
+        r#"{"verdict":"BLOCK","grade":"B+","summary":"LGTM","findings":[]}"#
+    );
+}
+
+/// A fenced-block body keeps its prose and fences; only the verdict changes.
+#[test]
+fn reconcile_rewrites_fenced_block_verdict() {
+    let body = "Looks good.\n\n```json\n{\"verdict\":\"APPROVE\",\"grade\":\"A\"}\n```";
+    let out = reconcile_review_body_verdict(body, &Verdict::RequestChanges);
+    assert_eq!(
+        out,
+        "Looks good.\n\n```json\n{\"verdict\":\"REQUEST_CHANGES\",\"grade\":\"A\"}\n```"
+    );
+}
+
+/// `"verdict_justification"` is a different key and is never rewritten.
+///
+/// Why: the near-miss key is the one way a fixed-substring rewrite corrupts a
+/// body it should not touch — `"verdict"` matches only with its closing quote.
+/// What: asserts the justification prose survives while the real verdict moves.
+/// Test: this test.
+#[test]
+fn reconcile_leaves_verdict_justification_untouched() {
+    let body = r#"{"verdict":"APPROVE","verdict_justification":"APPROVE because nothing blocks"}"#;
+    let out = reconcile_review_body_verdict(body, &Verdict::Block);
+    assert_eq!(
+        out,
+        r#"{"verdict":"BLOCK","verdict_justification":"APPROVE because nothing blocks"}"#
+    );
+}
+
+/// A prose-only body (the map-reduce synthesis summary) is returned unchanged.
+#[test]
+fn reconcile_verdict_prose_without_verdict_is_noop() {
+    let body = "Map-reduce review: 3 file(s) reviewed across 4 unit(s).";
+    let out = reconcile_review_body_verdict(body, &Verdict::Block);
+    assert_eq!(out, body);
+}
+
+/// Every occurrence is rewritten — a body that repeats the field in a summary
+/// block and a JSON block cannot half-agree with the envelope.
+#[test]
+fn reconcile_rewrites_all_verdict_occurrences() {
+    let body = r#"{"verdict":"APPROVE"} … also {"verdict":"APPROVE*"}"#;
+    let out = reconcile_review_body_verdict(body, &Verdict::Unknown);
+    assert_eq!(out, r#"{"verdict":"UNKNOWN"} … also {"verdict":"UNKNOWN"}"#);
 }

@@ -1932,6 +1932,12 @@ fn bus_error_rpc_codes_track_http_statuses() {
             CODE_CONFLICT,
         ),
         (
+            BusError::SubscriberLagged {
+                instance_id: "i".into(),
+            },
+            CODE_UNAVAILABLE,
+        ),
+        (
             BusError::InvalidTarget("neither id".into()),
             CODE_INVALID_PARAMS,
         ),
