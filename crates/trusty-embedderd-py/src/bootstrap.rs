@@ -50,6 +50,8 @@ use fs4::FileExt;
 use include_dir::{include_dir, Dir};
 use sha2::{Digest, Sha256};
 
+use crate::spawn_retry::run_bounded_python_check;
+
 /// The Python project (pyproject + hashed uv.lock + `trusty_embed_sidecar`
 /// package + tests) embedded into the binary and materialized at bootstrap.
 static PY_PROJECT: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/python");
@@ -509,67 +511,6 @@ fn recheck_with_one_retry(
             check(retry, "full-import-recheck (retry)")
         }
         decided => decided,
-    }
-}
-
-/// Shared bounded spawn-and-poll helper for [`verify_venv_alive`] and
-/// [`verify_full_import_smoke`]: run `python <args>` to completion, killing it
-/// if it outlives `timeout`. `label` only tags the log lines so the call sites
-/// stay distinguishable in output.
-///
-/// #4125: returns a three-state [`RecheckOutcome`] rather than a bool. A
-/// completed run maps to `Passed`/`Failed` by exit status; a spawn or poll
-/// error is `Failed` (the venv genuinely could not be exercised); running out
-/// of budget is `Indeterminate` and is deliberately NOT reported as a failed
-/// check — it says nothing about the venv, only about how much time it was
-/// given.
-fn run_bounded_python_check(
-    python: &Path,
-    args: &[&str],
-    timeout: Duration,
-    label: &str,
-) -> RecheckOutcome {
-    let mut cmd = Command::new(python);
-    cmd.args(args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!("py-embedder: {label} failed to spawn venv python: {e}");
-            return RecheckOutcome::Failed;
-        }
-    };
-
-    let start = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                return if status.success() {
-                    RecheckOutcome::Passed
-                } else {
-                    RecheckOutcome::Failed
-                }
-            }
-            Ok(None) => {
-                if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    tracing::debug!(
-                        "py-embedder: {label} did not finish within {}s — indeterminate, \
-                         not a failed check (#4125)",
-                        timeout.as_secs()
-                    );
-                    return RecheckOutcome::Indeterminate;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) => {
-                tracing::warn!("py-embedder: {label} poll failed: {e}");
-                return RecheckOutcome::Failed;
-            }
-        }
     }
 }
 

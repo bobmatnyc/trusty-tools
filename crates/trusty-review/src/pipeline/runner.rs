@@ -630,6 +630,13 @@ pub async fn run_review(
             reason = ?parsed.fail_safe_reason,
             "verdict parsing fell back to fail-safe UNKNOWN (fail-closed, #1241)"
         );
+        // #4491: carry the reason into the rendered result and the JSON log, so a
+        // parse failure never reads as a clean review with "Findings: none".
+        let reason = parsed
+            .fail_safe_reason
+            .clone()
+            .unwrap_or_else(|| "unparseable LLM response".to_string());
+        result.error = Some(format!("review not parsed — {reason}"));
     }
 
     // ── Step 7-hyg: drop self-negated / CoT-leaking findings (#4044) ───────
