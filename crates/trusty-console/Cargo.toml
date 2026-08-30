@@ -5,7 +5,11 @@ name        = "trusty-console"
 # and the two `search_uds::routes` handlers, and the routes that changed
 # transport (`delete_index_on_socket`, `prune_indexes_on_socket`) were
 # `pub(crate)`.
-version     = "0.8.2"
+# 0.8.3 (#6380): patch — batch prune re-censuses each id against the daemon
+# immediately before deleting it, closing the TOCTOU window between the
+# operator's confirm and the delete. New `pub(crate)` module
+# (`routes::census_guard::OrphanGuard`); no public shape change.
+version     = "0.8.3"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true

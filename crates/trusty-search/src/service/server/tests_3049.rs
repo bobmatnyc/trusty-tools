@@ -91,7 +91,7 @@ async fn unregister_index_waits_for_an_in_flight_writer_to_release_the_permit() 
         drop(permit);
     });
 
-    let outcome = unregister_index(&state, ID, false).await;
+    let outcome = unregister_index(&state, ID, false, None).await;
 
     assert!(
         finished.load(Ordering::Acquire),
@@ -130,7 +130,7 @@ async fn delete_with_delete_data_refuses_removal_when_a_writer_never_quiesces() 
     // Held for the duration of the call — the exclusive wait cannot succeed.
     let _stuck_writer = index_teardown_lock(&IndexId::new(ID)).read_owned().await;
 
-    let outcome = unregister_index(&state, ID, true).await;
+    let outcome = unregister_index(&state, ID, true, None).await;
 
     assert!(
         !outcome.quiesced,
@@ -186,7 +186,7 @@ async fn a_second_delete_after_an_abandoned_one_reclaims_the_data() {
     let index_id = IndexId::new(ID);
 
     let stuck_writer = index_teardown_lock(&index_id).read_owned().await;
-    let abandoned = unregister_index(&state, ID, true).await;
+    let abandoned = unregister_index(&state, ID, true, None).await;
     assert!(!abandoned.quiesced, "the wait must have expired");
 
     // The state a retry depends on: nothing was torn down.
@@ -202,7 +202,7 @@ async fn a_second_delete_after_an_abandoned_one_reclaims_the_data() {
     );
 
     drop(stuck_writer);
-    let retry = unregister_index(&state, ID, true).await;
+    let retry = unregister_index(&state, ID, true, None).await;
 
     assert!(
         retry.quiesced,
@@ -252,7 +252,8 @@ async fn a_writer_parked_across_teardown_is_visible_to_the_next_delete() {
     let gen1 = index_teardown_lock(&index_id).read_owned().await;
 
     let delete_state = Arc::clone(&state);
-    let delete = tokio::spawn(async move { unregister_index(&delete_state, ID, false).await });
+    let delete =
+        tokio::spawn(async move { unregister_index(&delete_state, ID, false, None).await });
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Generation 2 parks on the same entry, behind the delete's pending write.
@@ -275,7 +276,7 @@ async fn a_writer_parked_across_teardown_is_visible_to_the_next_delete() {
     let _gen2 = rx.await.expect("gen-2 acquires once the delete releases");
 
     // Gen-2 is writing. A delete that would destroy the disk must be refused.
-    let second = unregister_index(&state, ID, true).await;
+    let second = unregister_index(&state, ID, true, None).await;
     assert!(
         !second.quiesced,
         "the second delete reported quiesced=true while a writer parked across the \
@@ -325,7 +326,7 @@ async fn delete_reports_data_deleted_false_when_the_removal_fails() {
     let data_path = indexes_dir.join(ID);
     std::fs::write(&data_path, b"not a directory").expect("plant file");
 
-    let outcome = unregister_index(&state, ID, true).await;
+    let outcome = unregister_index(&state, ID, true, None).await;
 
     assert!(
         outcome.quiesced,
@@ -370,7 +371,7 @@ async fn index_cancel_flag_is_evicted_so_a_recreated_index_starts_uncancelled() 
         "a fresh index must start uncancelled"
     );
 
-    let outcome = unregister_index(&state, ID, false).await;
+    let outcome = unregister_index(&state, ID, false, None).await;
     assert!(outcome.removed);
 
     assert!(
@@ -421,7 +422,7 @@ async fn delete_waits_for_an_ungated_index_file_write() {
         drop(write_guard);
     });
 
-    let outcome = unregister_index(&state, ID, true).await;
+    let outcome = unregister_index(&state, ID, true, None).await;
 
     assert!(
         write_finished.load(Ordering::Acquire),
@@ -489,7 +490,7 @@ async fn create_index_cannot_register_while_a_delete_is_tearing_the_id_down() {
     let delete_state = Arc::clone(&state);
     let delete_order = Arc::clone(&order);
     let delete = tokio::spawn(async move {
-        let outcome = unregister_index(&delete_state, ID, false).await;
+        let outcome = unregister_index(&delete_state, ID, false, None).await;
         delete_order.lock().expect("order lock").push("delete");
         outcome
     });
@@ -706,7 +707,7 @@ async fn a_timed_out_delete_leaves_the_writers_lock_reachable_to_the_next_delete
 
     // First delete: the DEFAULT mode. The wait expires, and round 3 deregistered
     // and evicted anyway.
-    let first = unregister_index(&state, ID, false).await;
+    let first = unregister_index(&state, ID, false, None).await;
     assert!(
         !first.quiesced,
         "the writer never released, so the first delete must report quiesced=false"
@@ -725,7 +726,7 @@ async fn a_timed_out_delete_leaves_the_writers_lock_reachable_to_the_next_delete
         root_path,
     ));
 
-    let second = unregister_index(&state, ID, true).await;
+    let second = unregister_index(&state, ID, true, None).await;
     assert!(
         !second.quiesced,
         "the second delete reported quiesced=true while the first writer was STILL \
@@ -781,7 +782,7 @@ async fn a_delete_cannot_destroy_an_index_mid_migration() {
     // delays the assertion rather than changing its outcome.
     tokio::time::sleep(Duration::from_millis(250)).await;
 
-    let outcome = unregister_index(&state, ID, true).await;
+    let outcome = unregister_index(&state, ID, true, None).await;
 
     assert!(
         !outcome.quiesced,

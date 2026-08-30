@@ -22,6 +22,7 @@ use serde::Deserialize;
 use tracing::warn;
 
 use super::{ExternalSignal, JiraSourceConfig, EXTERNAL_SOURCE_CONFIDENCE};
+use crate::core::creds::CredentialSource;
 
 /// Regex matching a JIRA-style ticket key (`PROJ-1234`).
 ///
@@ -210,9 +211,33 @@ pub async fn fetch_issue(
     key: &str,
     base_url_override: Option<&str>,
 ) -> Option<JiraIssue> {
-    let token = match std::env::var(&config.token_env) {
-        Ok(t) if !t.is_empty() => t,
-        _ => {
+    fetch_issue_with_creds(
+        client,
+        config,
+        key,
+        base_url_override,
+        &CredentialSource::from_env(),
+    )
+    .await
+}
+
+/// [`fetch_issue`], with the credential lookup supplied by the caller.
+///
+/// Why (#6405): proving the authenticated path used to require `set_var` on
+/// the token variable, racing every other thread's `getenv`.
+/// What: identical to [`fetch_issue`] except that `creds` replaces the
+/// `std::env::var` reads for `token_env` and `email_env`.
+/// Test: `resolver_tests::resolver_returns_jira_signal_for_bug_issue_type`.
+pub(crate) async fn fetch_issue_with_creds(
+    client: &reqwest::Client,
+    config: &JiraSourceConfig,
+    key: &str,
+    base_url_override: Option<&str>,
+    creds: &CredentialSource,
+) -> Option<JiraIssue> {
+    let token = match creds.get(&config.token_env) {
+        Some(t) => t,
+        None => {
             warn!(
                 token_env = %config.token_env,
                 "JIRA token env var `{}` is not set in the tga process environment — \
@@ -235,11 +260,11 @@ pub async fn fetch_issue(
     if let Some(username) = &config.username {
         req = req.basic_auth(username, Some(&token));
     } else if let Some(env_name) = &config.email_env {
-        match std::env::var(env_name) {
-            Ok(email) if !email.is_empty() => {
+        match creds.get(env_name) {
+            Some(email) => {
                 req = req.basic_auth(email, Some(&token));
             }
-            _ => {
+            None => {
                 warn!(
                     email_env = %env_name,
                     "JIRA email env var `{env_name}` is not set in the tga process \
@@ -296,12 +321,31 @@ pub async fn fetch_issues_batch(
     keys: &[String],
     base_url_override: Option<&str>,
 ) -> HashMap<String, Option<ExternalSignal>> {
+    fetch_issues_batch_with_creds(
+        client,
+        config,
+        keys,
+        base_url_override,
+        &CredentialSource::from_env(),
+    )
+    .await
+}
+
+/// [`fetch_issues_batch`], with the credential lookup supplied by the caller
+/// (#6405).
+pub(crate) async fn fetch_issues_batch_with_creds(
+    client: &reqwest::Client,
+    config: &JiraSourceConfig,
+    keys: &[String],
+    base_url_override: Option<&str>,
+    creds: &CredentialSource,
+) -> HashMap<String, Option<ExternalSignal>> {
     let mut out = HashMap::new();
     for key in keys {
         if out.contains_key(key) {
             continue;
         }
-        let issue = fetch_issue(client, config, key, base_url_override).await;
+        let issue = fetch_issue_with_creds(client, config, key, base_url_override, creds).await;
         let signal = issue.and_then(|iss| classify_issue(&iss, config));
         out.insert(key.clone(), signal);
     }

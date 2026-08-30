@@ -164,6 +164,12 @@ pub struct DeleteIndex {
     /// Opt in to destroying the on-disk data directory (#4123).
     #[serde(default)]
     pub delete_data: bool,
+    /// The `root_path` the caller believes this registration still has (#6380).
+    ///
+    /// Absent ⇒ unchecked. Present ⇒ the delete is refused with `CONFLICT`
+    /// unless the registration's current root is this exact string.
+    #[serde(default)]
+    pub expected_root_path: Option<String>,
 }
 
 /// The params of `search.index.reindex`.
@@ -276,6 +282,7 @@ pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
             &p.index_id,
             DeleteIndexParams {
                 delete_data: p.delete_data,
+                expected_root_path: p.expected_root_path,
             },
         )
         .await

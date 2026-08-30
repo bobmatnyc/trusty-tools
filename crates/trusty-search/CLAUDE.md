@@ -233,9 +233,26 @@ reuses it. This is the safe deregistration verb for registry hygiene. Pass
 > handler did. Callers that rely on `DELETE` reclaiming disk must now pass
 > `?delete_data=true` explicitly.
 
+> **The wire default is NOT what the operator-facing surfaces do (issue #6422).**
+> The owner ruling made purging the on-disk data the default on every
+> delete-index surface an operator drives — `trusty-search index remove`, the
+> `delete_index` MCP tool, and the trusty-console delete and prune dialogs. All
+> of them send `delete_data` EXPLICITLY on every call, so this endpoint's own
+> default stays the #4123 `false` and the two never have to agree. Deregister-
+> only survives on each surface as a labelled opt-out (`--keep-data`,
+> `delete_data: false`, unticking the confirm checkbox).
+
 - **Request body**: none.
 - **Query**: `delete_data` (bool, default `false`). An unparseable value is
   rejected with `400` rather than silently defaulting either way.
+  `expected_root_path` (string, optional, #6380): the `root_path` the caller
+  believes this registration still has. Absent ⇒ unchecked. Present ⇒ the
+  delete is refused unless the registration's current root is exactly that
+  string. An id is derived from its root path, so a path deleted and recreated
+  between a census and the delete names a different, live index under the same
+  id; pass this to pin a delete to the root the census reported. A registration
+  the daemon cannot find, and a registry file it cannot read, are refusals too —
+  a comparison that could not run never permits the delete.
 - **Response 200**: `{ "id": "my-project", "ok": true, "removed": true, "data_deleted": false }`
 - **Response 404**: `{ "error": "unknown index: <id>", "ok": false, … }` — the id
   is in neither in-memory store AND has no `indexes.toml` row (#6363). A row the
@@ -243,10 +260,14 @@ reuses it. This is the safe deregistration verb for registry hygiene. Pass
   `indexes.toml`, and it is deleted like any other registration. Before #6363
   both answered `200 {"removed": false}`, so an excluded row could not be
   cleared through the API at all.
+- **Response 409** (#6380): `{ "ok": false, "removed": false, "error": "'<id>'
+  now points at …, not at the expected …" }` — only reachable with
+  `expected_root_path`. Nothing was touched.
 - **Response 500**: `{ "ok": false, "error": "<what failed>", … }` — the delete's
-  durable cleanup failed (the `indexes.toml` rewrite, or the data-dir removal).
-  `removed` is `false` when nothing was removed at all. Never treat a `500` here
-  as "probably removed".
+  durable cleanup failed (the `indexes.toml` rewrite, or the data-dir removal),
+  or `expected_root_path` was sent and the registry could not be read to check
+  it. `removed` is `false` when nothing was removed at all. Never treat a `500`
+  here as "probably removed".
 
 ##### `GET /registry/orphans`
 
@@ -267,7 +288,8 @@ removes nothing; `DELETE /indexes/:id` stays the one deregistration path.
     ],
     "indeterminate": [
       { "id": "kemono", "root_path": "/Volumes/Kemono/project",
-        "reason": "the root is on an external volume; …" }
+        "reason": "the root is on an external volume; …",
+        "colocated": false, "repo_identity": null }
     ],
     "live_count": 7,
     "total": 9
@@ -281,7 +303,10 @@ removes nothing; `DELETE /indexes/:id` stays the one deregistration path.
     or hangs), and a missing root whose parent is missing too, which is what an
     unmounted volume looks like. `exists()` answers `false` for a deleted
     directory and an unavailable one alike, so these are reported separately
-    rather than folded into `orphans`. A caller must never delete them.
+    rather than folded into `orphans`. A caller must never delete them in bulk.
+    Each row carries `colocated` and `repo_identity` alongside the reason
+    (#6423) so a caller offering a per-row review — trusty-console does — can
+    show what the registration is before an operator settles it.
   - `live_count` + `orphans.len()` + `indeterminate.len()` == `total`.
 - **Response 500**: `{ "error": "could not read the index registry: …" }` — an
   unreadable registry is an error, never an empty census.
@@ -724,7 +749,7 @@ this table is generated from it, not maintained by hand.
 | `chat` | `index_id`, `api_key?`, `history?`, `message?`, `model?`, `question?`, `top_k?` | Ask a natural-language question about the indexed codebase. |
 | `console_metrics` | — | Return a ConsoleMetricsReport with daemon health and index aggregate statistics (index_count, warm_boot_degraded, index list with… |
 | `create_index` | `id`, `root_path`, `exclude_globs?`, `follow_links?` | Register a new (empty) index. |
-| `delete_index` | `index_id` | Delete a registered index and all its data |
+| `delete_index` | `index_id`, `delete_data?` | Delete a registered index and all its on-disk data. |
 | `get_call_chain` | `index_id`, `entry_point`, `direction?`, `include_source?`, `max_depth?` | Annotated call tree for a function entry point (issue #76). |
 | `grep` | `pattern`, `case_insensitive?`, `context?`, `context_after?`, `context_before?`, `files_with_matches?`, `fixed_strings?`, `glob?`, `index_id?`, `invert_match?`, `max_count?`, `max_results?`, `multiline?`, `word_regexp?` | Search indexed files using regex/literal patterns with ripgrep-compatible options. |
 | `index_file` | `index_id`, `path`, `content` | Add or update one file in an index |
@@ -1006,9 +1031,9 @@ integration tests and downstream consumers can reach the internal APIs.
 ```
 trusty-search/
 ├── Cargo.toml                       single-crate manifest (lib + bin)
-├── build.rs                         Svelte UI build wrapper
-├── ui/                              Svelte 5 admin UI sources
-├── ui-dist/                         compiled UI bundle (embedded via include_dir!)
+├── build.rs                         Svelte UI build wrapper (inert since #6155)
+├── ui-dist/                         compiled UI bundle (embedded via include_dir!),
+│                                    mirrored from crates/trusty-console/ui-search-dist
 ├── CLAUDE.md                        this file
 ├── CHANGELOG.md
 ├── README.md
@@ -1066,14 +1091,21 @@ into the crate-root `ui-dist/` so `include_dir!` embeds the latest bundle.
 `cargo publish` cannot reach files outside the crate tarball, so the sync
 step is mandatory.
 
+🔴 **#6155 moved the dashboard's Svelte source out of this crate** into
+`crates/trusty-console/ui-search/`, where trusty-console builds it and serves it
+at `/tools/search/`. This crate no longer has a `ui/` tree, and `build.rs` no
+longer builds anything: `ui-dist/` is a mirror of the console's bundle, and both
+carry the same source digest. `/ui/` keeps serving exactly what it served
+before. #6285 deletes this crate's HTTP listener and `ui-dist/` with it.
+
 ```bash
-make release-prep                              # build ui/ and copy dist → ui-dist/
+make release-prep                              # rebuild via trusty-console, then mirror → ui-dist/
 cargo publish                                  # single crate (lib + bin)
 ```
 
-`make release-prep` runs `pnpm install --frozen-lockfile && pnpm build` (or
-the npm equivalent) and then mirrors `ui/dist/` into the crate-root
-`ui-dist/`.
+`make release-prep` runs `make -C crates/trusty-console search-ui` (which does
+the `pnpm install --frozen-lockfile && pnpm build`) and then mirrors
+`crates/trusty-console/ui-search-dist/` into the crate-root `ui-dist/`.
 
 🔴 **The `ui-dist-check` job this section used to cite was real, and it never
 ran once.** It lived in `crates/trusty-search/.github/workflows/ci.yml` — a
@@ -1089,8 +1121,10 @@ rejected on Vite hash instability, and would duplicate the gate below.
 What guards it now is `scripts/preflight-publish.sh` CHECK 7 at the publish
 boundary, plus `.github/workflows/ui-bundle-freshness.yml` at merge time. Both
 run `scripts/check-ui-bundle-freshness.sh`, which compares the digest recorded
-in `ui-dist/ui-source-hash.txt` against the current `ui/` source. `make
-release-prep` writes that stamp; run the gate yourself any time:
+in `ui-dist/ui-source-hash.txt` against the current source — since #6155 that
+source is `crates/trusty-console/ui-search/`, named by this crate's row in
+`scripts/ui-bundle-manifest.tsv`. `make release-prep` writes that stamp; run the
+gate yourself any time:
 
 ```bash
 bash scripts/check-ui-bundle-freshness.sh trusty-search

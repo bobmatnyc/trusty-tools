@@ -423,8 +423,12 @@ const SSE_HEARTBEAT_FRAME: &str = ": heartbeat\n\n";
 /// in `Body::from_stream` and returned as `text/event-stream`.
 ///
 /// Test: `reindex_stream_handler` is exercised by the full-reindex integration
-/// path. The heartbeat interval fires independently of real events so it
-/// cannot be blocked by a stalled sidecar.
+/// path and by `reindex_progress_events_match_the_sse_body_frame_for_frame` in
+/// `service::rpc::streams_tests`, which compares it frame for frame against the
+/// socket stream that opens the same way. The heartbeat interval fires
+/// independently of real events so it cannot be blocked by a stalled sidecar.
+/// `service::reindex::progress_race_tests` covers the #6386 exactly-once open
+/// both surfaces now share.
 pub(super) async fn reindex_stream_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
@@ -436,18 +440,12 @@ pub(super) async fn reindex_stream_handler(
         .map(|r| Arc::clone(r.value()))
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    // Snapshot the replay buffer first so we don't miss the `start` event, then
-    // subscribe for live updates.
-    //
-    // #6285: an event that straddles the two can be delivered twice OR lost —
-    // `ReindexProgress::push` buffers under its lock and then broadcasts, so an
-    // event broadcast between this snapshot and the subscribe below reaches
-    // neither path. The earlier claim here that the race only duplicates was
-    // wrong. `service::rpc::streams::reindex_stream` copies this ordering, so both
-    // transports behave identically; correcting it is its own change.
-    let replay = progress.events.lock().await.clone();
-    let initial_status = progress.status.load();
-    let rx = progress.sender.subscribe();
+    // #6386: take the replay buffer, the status, and the live subscription as ONE
+    // atomic step, so no event can be buffered after the snapshot and broadcast
+    // before the subscribe (which lost it) or land in both (which repeated it).
+    // `service::rpc::streams::reindex_stream` opens through the same method, so
+    // the two transports cannot drift.
+    let (replay, initial_status, rx) = progress.subscribe_with_replay().await;
 
     fn frame(line: String) -> Result<axum::body::Bytes, std::io::Error> {
         Ok(axum::body::Bytes::from(format!("data: {line}\n\n")))

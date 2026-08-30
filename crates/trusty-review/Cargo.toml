@@ -63,7 +63,11 @@ name        = "trusty-review"
 # public item changes shape: `LlmOutputBlock`/`LlmFinding`/`FindingsField` and
 # `deserialize_findings` are crate-private, and the runner change only
 # populates an existing `result.error` field on the fail-safe path.
-version     = "0.29.1"
+#
+# #4045: PATCH bump — 0.29.1 is already published on crates.io (merged via
+# #6401) and this PR adds `src/**` regression-coverage tests, so the same gate
+# requires another re-bump.
+version     = "0.29.2"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true

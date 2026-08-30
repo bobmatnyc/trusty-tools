@@ -18,22 +18,12 @@
 //!
 //! Test: `review_connector_reports_available_when_the_binary_is_present`,
 //! `review_connector_reports_absent_when_the_binary_is_missing`,
-//! `review_connector_never_reaches_running`.
+//! `review_connector_never_reaches_running`,
+//! `review_reports_an_on_demand_lifecycle_on_every_verdict`.
 
-use std::time::Duration;
+use crate::connector::{ServiceConnector, ServiceInfo, ServiceLifecycle, ServiceStatus};
 
-use crate::connector::{ServiceConnector, ServiceInfo, ServiceStatus};
-
-use super::helpers::binary_on_path;
-
-/// How long `trusty-review --version` may take before the probe gives up.
-///
-/// A cold `trusty-review` start was measured at 191 ms (#5028) and `--version`
-/// does strictly less than that — clap prints and exits before any config,
-/// credential or network work. Two seconds is far past any honest answer and
-/// still short enough that one wedged binary cannot stall the console's whole
-/// detection pass.
-const VERSION_TIMEOUT: Duration = Duration::from_secs(2);
+use super::helpers::{VersionProbe, binary_on_path, binary_version};
 
 /// ServiceConnector for `trusty-review`.
 ///
@@ -84,88 +74,6 @@ impl Default for ReviewConnector {
     }
 }
 
-/// What running `<binary> --version` established.
-///
-/// Why: "no version string" and "the binary cannot execute" are opposite facts
-/// that a bare `Option<String>` collapses into the same `None` (#6290). The
-/// second is the exact state the spawn exists to catch, and reporting it as
-/// `Available` also puts the console at odds with `tctl`, whose
-/// `probe_presence` calls it `ProbeFailed`.
-enum VersionProbe {
-    /// `--version` ran to completion; the payload is the parsed version, which
-    /// is `None` only when the output did not have clap's `<name> <version>`
-    /// shape. The binary works either way.
-    Ran(Option<String>),
-    /// On `PATH` but not runnable — a broken signature, a truncated download, a
-    /// hang. The payload is the operator-facing reason.
-    CannotExecute(String),
-}
-
-/// Run `<binary> --version` and report what happened.
-///
-/// Why: presence on `PATH` alone would report a binary that cannot execute — a
-/// broken signature, a truncated download — as usable. Running it is the
-/// cheapest check that tells the two apart, and it yields the version the card
-/// renders anyway.
-/// What: spawns `<binary> --version`, waits up to [`VERSION_TIMEOUT`], and takes
-/// the second whitespace-separated token of the first line (clap's
-/// `<name> <version>` shape). A non-zero exit, a spawn failure, or a hang is
-/// [`VersionProbe::CannotExecute`], never a silent `None`.
-/// Test: `review_connector_reports_available_when_the_binary_is_present`,
-/// `a_binary_that_cannot_execute_is_not_available`.
-fn binary_version(binary: &str) -> VersionProbe {
-    let mut child = match std::process::Command::new(binary)
-        .arg("--version")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(e) => return VersionProbe::CannotExecute(format!("spawn `{binary} --version`: {e}")),
-    };
-
-    // `wait_timeout` is not in std; poll the child instead of blocking forever
-    // on a binary that hangs before printing.
-    let deadline = std::time::Instant::now() + VERSION_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => break,
-            Ok(Some(status)) => {
-                let _ = child.wait();
-                return VersionProbe::CannotExecute(format!(
-                    "`{binary} --version` exited {status}"
-                ));
-            }
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return VersionProbe::CannotExecute(format!(
-                    "`{binary} --version` did not exit within {VERSION_TIMEOUT:?}"
-                ));
-            }
-            Err(e) => {
-                return VersionProbe::CannotExecute(format!(
-                    "waiting on `{binary} --version`: {e}"
-                ));
-            }
-        }
-    }
-
-    match child.wait_with_output() {
-        Ok(output) => VersionProbe::Ran(
-            String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .next()
-                .and_then(|line| line.split_whitespace().nth(1))
-                .map(str::to_owned),
-        ),
-        Err(e) => VersionProbe::CannotExecute(format!("reading `{binary} --version`: {e}")),
-    }
-}
-
 impl ServiceConnector for ReviewConnector {
     fn id(&self) -> &'static str {
         "trusty-review"
@@ -173,6 +81,11 @@ impl ServiceConnector for ReviewConnector {
 
     fn display_name(&self) -> &'static str {
         "Trusty Review"
+    }
+
+    // #6416: #6290 retired the daemon, so installed IS the healthy state.
+    fn lifecycle(&self) -> ServiceLifecycle {
+        ServiceLifecycle::OnDemand
     }
 
     /// Detect trusty-review status.
@@ -186,9 +99,11 @@ impl ServiceConnector for ReviewConnector {
     /// host. Otherwise `Available` carrying whatever `--version` printed. `url`
     /// is `None`: there is no address, and ADR-0032 makes trusty-console the
     /// only HTTP surface in the workspace, so a synthesised one would be a link
-    /// that cannot work.
+    /// that cannot work. Every verdict carries
+    /// [`ServiceLifecycle::OnDemand`](crate::connector::ServiceLifecycle) so the
+    /// card stops offering to start a daemon that does not exist (#6416).
     /// Test: see the module docs;
-    /// `a_binary_that_cannot_execute_is_not_available`.
+    /// `helpers::tests::a_binary_that_cannot_execute_is_not_available`.
     fn detect(&self) -> ServiceInfo {
         let binary = self.binary();
         if !binary_on_path(binary) {
@@ -199,6 +114,9 @@ impl ServiceConnector for ReviewConnector {
                 version: None,
                 url: None,
                 hint: None,
+                // #6416: even the not-installed row must say this is not a daemon
+                // — the card's remediation text branches on it.
+                lifecycle: self.lifecycle(),
             };
         }
 
@@ -224,6 +142,9 @@ impl ServiceConnector for ReviewConnector {
             version,
             url: None,
             hint,
+            // #6416: `Available` is trusty-review's healthy resting state, not a
+            // stopped daemon; this is what stops the card rendering it as a fault.
+            lifecycle: self.lifecycle(),
         }
     }
 }
@@ -233,6 +154,7 @@ impl ServiceConnector for ReviewConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     /// REGRESSION (#6290): the console must answer for trusty-review with NO
     /// trusty-review process anywhere, and must not hang doing it.
@@ -309,29 +231,30 @@ mod tests {
         }
     }
 
-    /// REGRESSION (#6290): a binary that cannot execute is not `Available`.
+    /// REGRESSION (#6416): the dashboard read "Binary found but daemon is not
+    /// running" over a Trusty Review card that also showed a version — the card
+    /// renders that sentence for every `Available` row, and before this the
+    /// payload carried nothing saying trusty-review has no daemon to run.
     ///
-    /// Why: `binary_version` returned `None` for BOTH "no version in the output"
-    /// and "the binary exited non-zero", and `detect` reported `Available`
-    /// regardless — the exact "cannot execute" state the spawn exists to catch,
-    /// reported as usable. It also disagreed with `tctl`, whose `probe_presence`
-    /// calls the same host `ProbeFailed`.
-    /// What: points the connector at a binary that exists and always exits 1
-    /// (`/usr/bin/false`), and asserts the verdict is not `Available`.
-    #[cfg(unix)]
+    /// Why: `status` alone cannot distinguish a stopped daemon from an installed
+    /// per-invocation tool, so the presentation has to read `lifecycle`. The
+    /// assertion is on the SERIALISED payload because that JSON, not the Rust
+    /// struct, is what the Svelte card branches on.
+    /// What: both the installed and the missing-binary verdicts must serialise
+    /// `"lifecycle": "on_demand"`.
+    /// Test: this is the test.
     #[test]
-    fn a_binary_that_cannot_execute_is_not_available() {
-        let probe = binary_version("/usr/bin/false");
-        match probe {
-            VersionProbe::CannotExecute(why) => {
-                assert!(
-                    why.contains("exited"),
-                    "the operator needs the reason: {why}"
-                );
-            }
-            VersionProbe::Ran(v) => {
-                panic!("a binary exiting 1 must not read as a clean run, got {v:?}")
-            }
+    fn review_reports_an_on_demand_lifecycle_on_every_verdict() {
+        for connector in [
+            ReviewConnector::new(),
+            ReviewConnector::with_binary("trusty-review-does-not-exist-9f3a"),
+        ] {
+            let payload = serde_json::to_value(connector.detect()).expect("serialise");
+            assert_eq!(
+                payload.get("lifecycle"),
+                Some(&serde_json::json!("on_demand")),
+                "the card branches on this key: {payload}"
+            );
         }
     }
 }

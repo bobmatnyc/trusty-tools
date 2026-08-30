@@ -261,10 +261,32 @@ pub fn resolve_contributor(db_path: &Path, query: &str) -> Result<ResolvedIdenti
 /// Test: `resolve_db_path_uses_env_var`, `resolve_db_path_explicit_beats_env`,
 /// `resolve_db_path_blank_env_falls_through`.
 pub fn resolve_db_path(explicit_path: Option<&Path>) -> Result<PathBuf> {
+    // #6405: read the process env here so the precedence rule below stays pure.
+    resolve_db_path_from(explicit_path, std::env::var(ENV_TGA_DB).ok().as_deref())
+}
+
+/// [`resolve_db_path`], with the [`ENV_TGA_DB`] value supplied by the caller.
+///
+/// Why (#6405): proving the precedence used to require `set_var`, which races
+/// every other thread's `getenv`; the three `#[serial]` tests that guarded it
+/// serialized only against each other, never against a concurrent reader.
+/// What: same precedence as [`resolve_db_path`], with `env_value` standing in
+/// for the variable.
+///
+/// # Errors
+///
+/// As [`resolve_db_path`].
+///
+/// Test: `resolve_db_path_uses_env_var`, `resolve_db_path_explicit_beats_env`,
+/// `resolve_db_path_blank_env_falls_through`.
+pub(crate) fn resolve_db_path_from(
+    explicit_path: Option<&Path>,
+    env_value: Option<&str>,
+) -> Result<PathBuf> {
     if let Some(p) = explicit_path {
         return Ok(expand_path(p));
     }
-    if let Ok(val) = std::env::var(ENV_TGA_DB) {
+    if let Some(val) = env_value {
         let trimmed = val.trim();
         if !trimmed.is_empty() {
             return Ok(expand_path(Path::new(trimmed)));
@@ -282,7 +304,6 @@ pub fn resolve_db_path(explicit_path: Option<&Path>) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use rusqlite::params;
-    use serial_test::serial;
 
     fn seed_author(db: &Database, name: &str, email: &str, aliases_json: &str) {
         db.connection()
@@ -363,58 +384,36 @@ mod tests {
     }
 
     /// Why: `resolve_db_path` must honour `TGA_DB` when no explicit path is given.
-    /// What: sets the variable, calls with `None`, asserts the path matches.
-    /// Test: this test itself. `#[serial]` because it mutates the environment.
+    /// What: passes the variable's value, calls with no explicit path, asserts
+    /// the path matches.
+    /// Test: this test itself. #6405: the value is a parameter, so the
+    /// `#[serial]` and the `set_var` it guarded are both gone.
     #[test]
-    #[serial]
     fn resolve_db_path_uses_env_var() {
         let expected = "/tmp/test-tga.db";
-        // SAFETY: `#[serial]` keeps every env-mutating test in this crate off
-        // other threads for the duration, which is what `set_var` requires.
-        unsafe {
-            std::env::set_var(ENV_TGA_DB, expected);
-        }
-        let path = resolve_db_path(None).expect("resolve path");
-        unsafe {
-            std::env::remove_var(ENV_TGA_DB);
-        }
+        let path = resolve_db_path_from(None, Some(expected)).expect("resolve path");
         assert_eq!(path, PathBuf::from(expected));
     }
 
     /// Why: an explicit path must beat the environment, or a `--db` flag would
     /// be silently ignored in a shell that exports `TGA_DB`.
-    /// What: sets the variable, passes an explicit path, asserts explicit wins.
-    /// Test: this test itself. `#[serial]` because it mutates the environment.
+    /// What: supplies both, asserts explicit wins.
+    /// Test: this test itself.
     #[test]
-    #[serial]
     fn resolve_db_path_explicit_beats_env() {
-        // SAFETY: see `resolve_db_path_uses_env_var`.
-        unsafe {
-            std::env::set_var(ENV_TGA_DB, "/tmp/env-tga.db");
-        }
         let explicit = Path::new("/tmp/explicit-tga.db");
-        let path = resolve_db_path(Some(explicit)).expect("resolve path");
-        unsafe {
-            std::env::remove_var(ENV_TGA_DB);
-        }
+        let path =
+            resolve_db_path_from(Some(explicit), Some("/tmp/env-tga.db")).expect("resolve path");
         assert_eq!(path, explicit.to_path_buf());
     }
 
     /// Why: an exported-but-empty `TGA_DB` is a common shell accident and must
     /// fall through to the convention default rather than resolving to `""`.
-    /// What: sets the variable to whitespace, asserts the result is not empty.
-    /// Test: this test itself. `#[serial]` because it mutates the environment.
+    /// What: supplies a whitespace-only value, asserts the convention default.
+    /// Test: this test itself.
     #[test]
-    #[serial]
     fn resolve_db_path_blank_env_falls_through() {
-        // SAFETY: see `resolve_db_path_uses_env_var`.
-        unsafe {
-            std::env::set_var(ENV_TGA_DB, "   ");
-        }
-        let path = resolve_db_path(None).expect("resolve path");
-        unsafe {
-            std::env::remove_var(ENV_TGA_DB);
-        }
+        let path = resolve_db_path_from(None, Some("   ")).expect("resolve path");
         assert!(
             path.ends_with("tga/tga.db"),
             "blank env must fall through to the convention default, got {}",

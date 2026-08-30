@@ -516,6 +516,64 @@ async fn a_failed_delete_reports_the_failure_and_keeps_the_row_on_either_transpo
     );
 }
 
+/// Why: #6380 — an id is derived from its `root_path`, so a path deleted and
+/// recreated between a census and the delete names a DIFFERENT, live index under
+/// the same id. `expected_root_path` is what the console's prune sends to pin
+/// the delete to the root it listed, and it reaches the daemon as a query
+/// parameter over HTTP and as a params field over the socket. A refusal changes
+/// nothing, so both transports are pointed at ONE registration.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn a_delete_whose_expected_root_moved_is_refused_on_either_transport() {
+    let isolated = crate::service::server::tests_components::IsolatedDataDir::new();
+    let live = safe_root("delete-moved-live");
+    let (_state, http, rpc) = empty_state(isolated.path(), &[]).await;
+    persistence::upsert_index_registry_entry(persistence::PersistedIndex::new(
+        "delete-moved",
+        &live,
+    ))
+    .expect("seed indexes.toml");
+
+    let stale = live.join("recreated-elsewhere");
+    let over_http = http_bodyless(
+        &http,
+        "DELETE",
+        &format!(
+            "/indexes/delete-moved?expected_root_path={}",
+            stale.display().to_string().replace('/', "%2F")
+        ),
+    )
+    .await;
+    assert_eq!(
+        over_http.0,
+        StatusCode::CONFLICT,
+        "a registration that moved must refuse the delete: {}",
+        over_http.1
+    );
+    assert_eq!(over_http.1["removed"], serde_json::json!(false));
+
+    let over_socket = rpc_err(
+        &rpc,
+        writes::METHOD_INDEX_DELETE,
+        serde_json::json!({
+            "index_id": "delete-moved",
+            "expected_root_path": stale.display().to_string(),
+        }),
+    )
+    .await;
+    assert_same_refusal(
+        &over_http,
+        &over_socket,
+        CODE_CONFLICT,
+        "a root that moved between the census and the delete",
+    );
+    assert!(
+        row_exists("delete-moved"),
+        "#6380: neither transport may remove the row behind a refused expectation"
+    );
+}
+
 /// Why: #6363's other half — an id in no store and no registry row is a 404, not
 /// a `200` that reports it did nothing. That ambiguity is what hid the bug on a
 /// live daemon, so the socket must not reintroduce it.

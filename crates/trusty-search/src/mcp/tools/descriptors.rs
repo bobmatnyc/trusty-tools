@@ -251,12 +251,17 @@ pub fn tool_descriptors() -> Value {
         },
         {
             "name": "delete_index",
-            "description": "Delete a registered index and all its data",
+            // #6422: the destructive default, and the opt-out beside it.
+            "description": "Delete a registered index and all its on-disk data. \
+                            Pass delete_data: false to deregister the index only \
+                            and leave its corpus on disk for a later \
+                            re-registration.",
             "inputSchema": {
                 "type": "object",
                 "required": ["index_id"],
                 "properties": {
-                    "index_id": { "type": "string" }
+                    "index_id":    { "type": "string" },
+                    "delete_data": { "type": "boolean", "default": true }
                 }
             }
         },
@@ -396,7 +401,8 @@ pub fn tool_descriptors() -> Value {
         {
             "name": "console_metrics",
             "description": "Return a ConsoleMetricsReport with daemon health and index aggregate \
-                            statistics (index_count, warm_boot_degraded, index list with id/root_path/size_bytes). \
+                            statistics (index_count, warm_boot_degraded, index list with \
+                            id/root_path/size_bytes/last_used_unix). \
                             Used by the trusty-console dashboard metrics poller (epic #1104).",
             "inputSchema": {
                 "type": "object",

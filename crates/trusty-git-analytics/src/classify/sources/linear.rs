@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use super::{ExternalSignal, LinearSourceConfig, EXTERNAL_SOURCE_CONFIDENCE};
+use crate::core::creds::CredentialSource;
 
 /// Linear-specific confidence — same as the global constant (issue type is
 /// very authoritative).
@@ -231,9 +232,33 @@ pub async fn fetch_issue(
     key: &str,
     base_url_override: Option<&str>,
 ) -> Option<LinearIssue> {
-    let token = match std::env::var(&config.api_key_env) {
-        Ok(t) if !t.is_empty() => t,
-        _ => {
+    fetch_issue_with_creds(
+        client,
+        config,
+        key,
+        base_url_override,
+        &CredentialSource::from_env(),
+    )
+    .await
+}
+
+/// [`fetch_issue`], with the credential lookup supplied by the caller.
+///
+/// Why (#6405): proving the authenticated path used to require `set_var` on
+/// the API-key variable, racing every other thread's `getenv`.
+/// What: identical to [`fetch_issue`] except that `creds` replaces the
+/// `std::env::var` read for `api_key_env`.
+/// Test: `tests::fetch_and_classify_via_wiremock`.
+pub(crate) async fn fetch_issue_with_creds(
+    client: &reqwest::Client,
+    config: &LinearSourceConfig,
+    key: &str,
+    base_url_override: Option<&str>,
+    creds: &CredentialSource,
+) -> Option<LinearIssue> {
+    let token = match creds.get(&config.api_key_env) {
+        Some(t) => t,
+        None => {
             warn!(
                 api_key_env = %config.api_key_env,
                 "Linear API key env var `{}` is not set — did you `export {}` before running tga?",
@@ -302,12 +327,31 @@ pub async fn fetch_issues_batch(
     keys: &[String],
     base_url_override: Option<&str>,
 ) -> HashMap<String, Option<ExternalSignal>> {
+    fetch_issues_batch_with_creds(
+        client,
+        config,
+        keys,
+        base_url_override,
+        &CredentialSource::from_env(),
+    )
+    .await
+}
+
+/// [`fetch_issues_batch`], with the credential lookup supplied by the caller
+/// (#6405).
+pub(crate) async fn fetch_issues_batch_with_creds(
+    client: &reqwest::Client,
+    config: &LinearSourceConfig,
+    keys: &[String],
+    base_url_override: Option<&str>,
+    creds: &CredentialSource,
+) -> HashMap<String, Option<ExternalSignal>> {
     let mut out = HashMap::new();
     for key in keys {
         if out.contains_key(key) {
             continue;
         }
-        let issue = fetch_issue(client, config, key, base_url_override).await;
+        let issue = fetch_issue_with_creds(client, config, key, base_url_override, creds).await;
         let signal = issue.and_then(|iss| classify_issue(&iss, config));
         out.insert(key.clone(), signal);
     }
@@ -574,7 +618,9 @@ field_mappings:
             .mount(&server)
             .await;
 
-        unsafe { std::env::set_var("LINEAR_API_TOKEN_WT", "test-token") }; // pragma: allowlist secret
+        // #6405: the credential is a parameter, so this test proves the
+        // authenticated path without mutating the process environment.
+        let creds = CredentialSource::fixed([("LINEAR_API_TOKEN_WT", "test-token")]); // pragma: allowlist secret
 
         use std::collections::HashMap;
         let config = LinearSourceConfig {
@@ -592,14 +638,37 @@ field_mappings:
         };
 
         let client = reqwest::Client::new();
-        let issue = fetch_issue(&client, &config, "ENG-99", Some(&server.uri()))
+        let issue = fetch_issue_with_creds(&client, &config, "ENG-99", Some(&server.uri()), &creds)
             .await
             .expect("fetch should succeed");
 
         let signal = classify_issue(&issue, &config).expect("should classify");
         assert_eq!(signal.category, "bug_fix");
         assert!(signal.source.contains("issue_type"));
+    }
 
-        unsafe { std::env::remove_var("LINEAR_API_TOKEN_WT") };
+    /// Why: an unset API key must skip the lookup rather than issue an
+    /// unauthenticated request — the branch that used to be provable only by
+    /// clearing the variable process-wide (#6405).
+    /// What: fetch with an empty credential source and assert `None`, with no
+    /// HTTP server standing at all.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn fetch_issue_returns_none_when_token_unset() {
+        use std::collections::HashMap;
+        let config = LinearSourceConfig {
+            api_key_env: "LINEAR_API_TOKEN_UNSET".to_string(), // pragma: allowlist secret
+            team_keys: vec![],
+            field_mappings: crate::classify::sources::LinearFieldMappings {
+                issue_type: HashMap::new(),
+                labels: HashMap::new(),
+                cycle: HashMap::new(),
+            },
+        };
+        let client = reqwest::Client::new();
+        let issue =
+            fetch_issue_with_creds(&client, &config, "ENG-1", None, &CredentialSource::empty())
+                .await;
+        assert!(issue.is_none(), "unset token must skip the lookup");
     }
 }

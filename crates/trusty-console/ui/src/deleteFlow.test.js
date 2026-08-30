@@ -24,6 +24,30 @@ test('two ids that differ produce two different confirm sentences', () => {
   assert.notEqual(confirmMessage('index', 'alpha'), confirmMessage('index', 'beta'));
 });
 
+test('#6422: an index delete starts with the on-disk data going, a palace does not', () => {
+  // The owner ruling. Against the pre-fix code `KINDS.index` carried no
+  // `optionDefault` at all and the checkbox started unticked, so a confirmed
+  // delete deregistered and left the corpus — this assertion fails there.
+  assert.equal(
+    KINDS.index.optionDefault,
+    true,
+    'deleting an index must purge its on-disk data by default',
+  );
+  assert.equal(
+    KINDS.palace.optionDefault,
+    false,
+    'force widens what a palace delete may destroy and stays opt-in',
+  );
+});
+
+test('#6422: the index option is labelled as the keep-the-data opt-out', () => {
+  // A ticked box whose label only says what ticking does leaves the operator
+  // no way to read what unticking means.
+  const label = KINDS.index.optionLabel;
+  assert.ok(/untick/i.test(label), `the label must name the opt-out gesture: ${label}`);
+  assert.ok(/deregister/i.test(label), `the label must name what unticking does: ${label}`);
+});
+
 test('the delete URL targets the owning route and encodes the id', () => {
   assert.equal(
     deleteUrl('palace', 'scratch', false),

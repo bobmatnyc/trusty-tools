@@ -9,7 +9,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  PRUNE_DELETE_DATA_DEFAULT,
   censusSummary,
+  readDeregisterResult,
+  unjudgedConfirmMessage,
+  unjudgedReviewNote,
   compactConfirmMessage,
   compactUrl,
   pruneConfirmMessage,
@@ -25,7 +29,13 @@ const census = {
     { id: 'tmp-b', root_path: '/private/var/folders/x/T/tmp-b' },
   ],
   indeterminate: [
-    { id: 'ext-1', root_path: '/Volumes/Kemono/project', reason: 'on an external volume' },
+    {
+      id: 'ext-1',
+      root_path: '/Volumes/Kemono/project',
+      reason: 'on an external volume',
+      colocated: false,
+      repo_identity: null,
+    },
   ],
   live_count: 7,
   total: 10,
@@ -186,4 +196,125 @@ test('ok:false on a 200 compaction still reads as failure', () => {
   const out = readCompactResult(200, { ok: false, id: 'x', error: 'nothing was compacted' });
   assert.equal(out.ok, false, 'the ok field decides, not the status code');
   assert.equal(out.message, 'nothing was compacted');
+});
+
+test('#6422: the prune panel starts with the on-disk data going too', () => {
+  // The owner ruling, on the batch surface. Against the pre-fix code the panel
+  // opened with the checkbox unticked, so a confirmed prune cleared dozens of
+  // registrations and reclaimed no disk at all.
+  assert.equal(PRUNE_DELETE_DATA_DEFAULT, true);
+  assert.ok(
+    pruneConfirmMessage(['a'], PRUNE_DELETE_DATA_DEFAULT).includes('will be deleted too'),
+    'the confirm must say the data goes, before anything is deleted',
+  );
+  assert.ok(
+    pruneConfirmMessage(['a'], false).includes('left in place'),
+    'the opt-out must be visible in the same sentence',
+  );
+});
+
+// ── #6423: reviewing and settling an uncheckable registration ───────────────
+
+test('an unjudged row is still kept out of every bulk selection', () => {
+  // #6423 adds a per-row review, and this is the rule it must not weaken: the
+  // batch reads `orphans` alone, so nothing an operator ticks can reach a row
+  // the daemon declined to judge.
+  const ids = selectableOrphans(census).map((r) => r.id);
+  assert.ok(!ids.includes('ext-1'), 'a reviewable row is still never selectable');
+  assert.deepEqual(
+    unjudgedRows(census).map((r) => r.id),
+    ['ext-1'],
+    'the row is reviewable, which is a different list from the selectable one',
+  );
+});
+
+test('the deregister confirmation names the path, not a count', () => {
+  const message = unjudgedConfirmMessage(unjudgedRows(census)[0]);
+  assert.ok(message.includes('/Volumes/Kemono/project'), message);
+  assert.ok(message.includes('ext-1'), message);
+  assert.ok(message.includes('cannot be undone'), message);
+});
+
+test('a colocated row is never told its data is already gone', () => {
+  // Round-2 defect: the confirmation asserted "there is no index data to
+  // delete" for every row. A colocated row keeps its data BESIDE the root, and
+  // the daemon put the row in `indeterminate` because it could not tell whether
+  // that root is gone — an unmounted volume's data is still there. The one
+  // claim that holds either way is that nothing is deleted.
+  const message = unjudgedConfirmMessage({ id: 'x', root_path: '/Volumes/K/p', colocated: true });
+  assert.ok(message.includes('beside that root'), message);
+  assert.ok(message.includes('may well still be there'), message);
+  assert.ok(message.includes('left untouched'), message);
+  assert.ok(!message.includes('no index data to delete'), message);
+});
+
+test('a non-colocated row is told where its data actually lives', () => {
+  // The other half of the same defect: this data sits in trusty-search's own
+  // directory, which is plainly on disk. It is not deleted either.
+  const message = unjudgedConfirmMessage({ id: 'x', root_path: '/gone/x', colocated: false });
+  assert.ok(message.includes("trusty-search's own directory"), message);
+  assert.ok(message.includes('left untouched'), message);
+  assert.ok(message.includes('only the registration is removed'), message);
+});
+
+test('a row with no colocated flag is read as not colocated', () => {
+  const message = unjudgedConfirmMessage({ id: 'x', root_path: '/gone/x' });
+  assert.ok(message.includes("trusty-search's own directory"), message);
+});
+
+test('the review note and the confirmation agree about the data', () => {
+  // They are two renderings of one fact, and the round-2 defect was exactly a
+  // note and a confirmation disagreeing about it.
+  for (const colocated of [true, false]) {
+    const row = { id: 'x', root_path: '/p', colocated };
+    const fate = colocated ? 'may well still be there' : "trusty-search's own directory";
+    assert.ok(unjudgedReviewNote(row).includes(fate), `note, colocated=${colocated}`);
+    assert.ok(unjudgedConfirmMessage(row).includes(fate), `confirm, colocated=${colocated}`);
+  }
+});
+
+test('the deregister confirmation offers no delete-data choice at all', () => {
+  // The batch above defaults to deleting the data (#6422); this flow never
+  // offers that, because the root could not be checked.
+  for (const colocated of [true, false]) {
+    const message = unjudgedConfirmMessage({ id: 'x', root_path: '/p', colocated });
+    assert.ok(!/delete the data|deleted too/.test(message), message);
+    assert.ok(message.includes('cannot be undone'), message);
+  }
+});
+
+test('the confirmation survives a row missing its path rather than throwing', () => {
+  const message = unjudgedConfirmMessage({ id: 'x' });
+  assert.ok(message.includes('(unknown path)'), message);
+});
+
+test('a confirmed deregistration reads as done and says the data was left', () => {
+  const out = readDeregisterResult(200, { ok: true, id: 'ext-1' });
+  assert.equal(out.ok, true);
+  assert.ok(out.message.includes('ext-1'), out.message);
+  assert.ok(out.message.includes('left in place'), out.message);
+});
+
+test('a refused deregistration is a failure carrying the daemon message', () => {
+  // Fail-closed: the console route refused, so nothing was removed. Reading
+  // this as done leaves the operator believing a registration is gone.
+  const out = readDeregisterResult(409, {
+    ok: false,
+    id: 'ext-1',
+    error: "not deregistered: trusty-search no longer lists 'ext-1'",
+  });
+  assert.equal(out.ok, false);
+  assert.ok(out.message.includes('no longer lists'), out.message);
+});
+
+test('ok:false on a 200 deregistration still reads as failure', () => {
+  const out = readDeregisterResult(200, { ok: false, id: 'ext-1', error: 'nothing was removed' });
+  assert.equal(out.ok, false, 'the ok field decides, not the status code');
+  assert.equal(out.message, 'nothing was removed');
+});
+
+test('an unparseable deregister answer is a failure, never a silent success', () => {
+  const out = readDeregisterResult(502, null);
+  assert.equal(out.ok, false);
+  assert.ok(out.message.includes('502'), out.message);
 });

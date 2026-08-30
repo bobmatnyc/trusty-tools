@@ -14,7 +14,7 @@
 //! Test: `agents_connector_absent_binary`, `agents_connector_no_addr_file`,
 //! `agents_connector_surfaces_url_via_http_addr` below.
 
-use crate::connector::{ServiceConnector, ServiceInfo, ServiceStatus};
+use crate::connector::{ServiceConnector, ServiceInfo, ServiceLifecycle, ServiceStatus};
 
 use super::helpers::{binary_on_path, detect_service};
 
@@ -94,6 +94,9 @@ impl ServiceConnector for AgentsConnector {
             version: None,
             url: None,
             hint: None,
+            // #6416: trusty-agents is a resident daemon — `Available` here means
+            // installed but stopped, which is what the card should say.
+            lifecycle: ServiceLifecycle::Daemon,
         }
     }
 }

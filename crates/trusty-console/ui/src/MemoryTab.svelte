@@ -10,6 +10,15 @@
   // #6372: which of the three ways a row's counts were obtained decides how it
   // renders. The decision is a tested pure function, not template logic.
   import { countCell, sourceBadge, statsSource } from './palaceRows.js';
+  // #6424: the Last Used column and its sort. Shared with the Search tab so
+  // both rosters agree on what a missing timestamp means.
+  import {
+    formatLastUsed,
+    lastUsedTitle,
+    nextSortDirection,
+    sortByLastUsed,
+    sortIndicator,
+  } from './lastUsed.js';
 
   let report = $state(null);
   let loading = $state(true);
@@ -93,6 +102,15 @@
     : report?.status === 'degraded' ? 'var(--trusty-warning)'
     : 'var(--trusty-danger)'
   );
+
+  // #6424: `null` is the daemon's own order — the only way back once a sort has
+  // been applied, which is why the header cycles through it.
+  let lastUsedSort = $state(null);
+  let sortedPalaces = $derived(
+    lastUsedSort
+      ? sortByLastUsed(report?.metrics?.palaces ?? [], lastUsedSort)
+      : (report?.metrics?.palaces ?? [])
+  );
 </script>
 
 <div class="tab-content">
@@ -160,11 +178,22 @@
               <th>Vectors</th>
               <th>Rooms</th>
               <th>KG Triples</th>
+              <!-- #6424: click to cycle newest-first, oldest-first, daemon order. -->
+              <th class="num sortable">
+                <button
+                  type="button"
+                  class="sort-btn"
+                  aria-label="Sort by last used"
+                  onclick={() => (lastUsedSort = nextSortDirection(lastUsedSort))}
+                >
+                  Last Used <span class="sort-arrow">{sortIndicator(lastUsedSort)}</span>
+                </button>
+              </th>
               <th class="actions-head">Actions</th>
             </tr>
           </thead>
           <tbody>
-            {#each report.metrics.palaces as p (p.id)}
+            {#each sortedPalaces as p (p.id)}
               <tr class:row-uncached={statsSource(p) === 'unavailable'}>
                 <td><code>{p.id}</code></td>
                 <td>
@@ -177,6 +206,7 @@
                 <td class="num">{countCell(p, 'vector_count')}</td>
                 <td class="num">{countCell(p, 'room_count')}</td>
                 <td class="num">{countCell(p, 'kg_triple_count')}</td>
+                <td class="num" title={lastUsedTitle(p)}>{formatLastUsed(p)}</td>
                 <td class="actions">
                   <div class="row-actions">
                     <CompactAction id={p.id} onCompacted={reloadRoster} />
@@ -246,6 +276,17 @@
   td.num { text-align: right; font-variant-numeric: tabular-nums; }
   /* #6360: the delete column. Right-aligned and vertically top-anchored so the
      expanded confirm panel grows downward without shifting the row's numbers. */
+  /* #6424: the sortable header is a real button so it is keyboard-reachable;
+     it inherits the header's type so only the arrow marks it as interactive. */
+  th.sortable { padding: 0; }
+  .sort-btn {
+    width: 100%; background: none; border: none; cursor: pointer;
+    font: inherit; color: inherit; text-align: right;
+    padding: 0.5rem 0.75rem;
+  }
+  .sort-btn:hover { color: var(--trusty-text-primary); }
+  .sort-arrow { opacity: 0.6; margin-left: 0.2rem; }
+
   th.actions-head, td.actions { text-align: right; }
   td.actions { vertical-align: top; }
   /* #6371: compact sits beside delete. They wrap rather than force the table

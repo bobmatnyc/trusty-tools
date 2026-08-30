@@ -235,6 +235,40 @@ pub async fn decommission_handler(
     call(&state, "session_decommission", json!({ "session_id": id })).await
 }
 
+/// Body for the record-only bulk delete (#6431).
+#[derive(Deserialize)]
+pub struct BulkDeleteBody {
+    /// Session ids the operator confirmed. Never a filter — see the handler.
+    session_ids: Vec<String>,
+}
+
+/// `POST /api/console/sessions/bulk-delete` — record-only bulk delete (#6431).
+///
+/// Why: the Sessions tab buckets every record with a missing or unrecognised
+/// `state` under "unknown", and an operator needs one action to clear it. The
+/// route takes the ids the confirmation dialog listed rather than a predicate
+/// the server re-evaluates, so the set that is deleted is exactly the set the
+/// operator saw. #1511 (a prune that `rm -rf`'d a live workspace) is why the
+/// tool behind it deletes records and never touches a worktree or workspace.
+/// What: forwards `session_ids` to the `session_delete_records` MCP tool and
+/// returns its `{ requested, deleted, failed, results }` verbatim, so the UI
+/// renders per-session outcomes and a partial run reads as partial. Argument
+/// validation (empty list, non-string element) lives in the tool, which returns
+/// a tool error the shared mapper surfaces.
+/// Test: `bulk_delete_absent_binary_does_not_500`,
+/// `bulk_delete_route_is_not_shadowed`.
+pub async fn bulk_delete_handler(
+    State(state): State<AppState>,
+    axum::Json(body): axum::Json<BulkDeleteBody>,
+) -> axum::response::Response {
+    call(
+        &state,
+        "session_delete_records",
+        json!({ "session_ids": body.session_ids }),
+    )
+    .await
+}
+
 /// Body for the auto-resume toggle.
 #[derive(Deserialize)]
 pub struct AutoResumeBody {
@@ -349,6 +383,12 @@ mod tests {
         assert_not_500("POST", "/api/console/sessions/supervisor/auto-resume", body).await;
     }
 
+    #[tokio::test]
+    async fn bulk_delete_absent_binary_does_not_500() {
+        let body = Body::from(json!({ "session_ids": ["abc"] }).to_string());
+        assert_not_500("POST", "/api/console/sessions/bulk-delete", body).await;
+    }
+
     /// Why: the shared mapper must convert a missing-tool error into a clean 503
     /// with a hint, never a 502 — the regression class from #1170.
     /// Test: this test.
@@ -461,6 +501,31 @@ mod tests {
             hint.contains("auto_resume_set"),
             "auto-resume route must reach auto_resume_handler (hint should name \
              auto_resume_set); got: {hint}"
+        );
+    }
+
+    /// Why: `POST /api/console/sessions/bulk-delete` must reach
+    /// `bulk_delete_handler` (calls `session_delete_records`), not the `{id}`
+    /// capture — a shadowed route would silently do nothing on a destructive
+    /// action. The discriminator is the tool name in the 503 hint.
+    /// Test: this test.
+    #[tokio::test]
+    async fn bulk_delete_route_is_not_shadowed() {
+        let router = router_primed_missing_tools().await;
+        let body = Body::from(json!({ "session_ids": ["abc"] }).to_string());
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/console/sessions/bulk-delete")
+            .header("content-type", "application/json")
+            .body(body)
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let hint = hint_of(resp).await;
+        assert!(
+            hint.contains("session_delete_records"),
+            "bulk-delete route must reach bulk_delete_handler (hint should name \
+             session_delete_records); got: {hint}"
         );
     }
 

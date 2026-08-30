@@ -90,6 +90,12 @@ pub(super) const CONVERSATIONS_REPLIES: &str = "conversations.replies";
 pub(super) const CONVERSATIONS_LIST: &str = "conversations.list";
 pub(super) const CONVERSATIONS_CREATE: &str = "conversations.create";
 pub(super) const CONVERSATIONS_MEMBERS: &str = "conversations.members";
+/// Bot-scope, requires `channels:read` (+ `groups:`/`im:`/`mpim:read` for
+/// non-public channel types): reads a single channel's metadata, including
+/// `properties.canvas.file_id` when the channel already has a channel canvas
+/// (issue #5161). Used only to name the existing canvas on a
+/// `channel_canvas_already_exists` collision — never on the create happy path.
+pub(super) const CONVERSATIONS_INFO: &str = "conversations.info";
 pub(super) const USERS_LIST: &str = "users.list";
 pub(super) const USERS_INFO: &str = "users.info";
 /// User-scope-only: reached through the client's **user** token.

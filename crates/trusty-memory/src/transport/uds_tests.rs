@@ -16,12 +16,18 @@
 //! Test naming: `rpc_*` for the wire, `stream_*` for `memory.chat`.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use serde_json::{json, Value};
+use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 use trusty_common::uds::server::{RpcResponse, CODE_METHOD_NOT_FOUND};
-use trusty_common::uds::{send_framed_request_capped, send_framed_stream_request_capped};
+use trusty_common::uds::{
+    send_framed_request_capped, send_framed_stream_request_capped, verify_socket_for_connect,
+};
+use trusty_common::{ChatEvent, ChatMessage, ChatProvider, ToolDef};
 
 use super::{
     build_router, dispatcher_method_count, serve_with_shutdown, socket_path, FOLDED_METHODS,
@@ -33,11 +39,38 @@ use crate::AppState;
 /// socket answers in microseconds.
 const CALL_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Build a fresh `AppState` rooted in an ephemeral tempdir.
+/// Build a fresh `AppState` rooted in an ephemeral tempdir, with NO chat
+/// provider.
 ///
 /// The tempdir is leaked so the directory outlives the borrow without the test
 /// holding it; tests are short and the process reaps it.
+///
+/// #6315: pinning the provider is the fix, not a convenience.
+/// [`AppState::chat_provider`] reads the developer's real
+/// `~/.trusty-memory/config.toml` and probes a live Ollama on
+/// `localhost:11434`, so on a machine that has either one `memory.chat` opened
+/// a real LLM stream and the assertions below described that machine rather
+/// than this crate. Two shapes of the same failure were reported: a `tool_call`
+/// item where an error frame was expected, and — when the model was slower than
+/// [`CALL_TIMEOUT`] — `Timeout { timeout: 20s }`.
 fn test_state() -> AppState {
+    test_state_with_chat_provider(None)
+}
+
+/// [`test_state`], with `provider` pinned as the resolved chat provider.
+///
+/// Why (#6315): `AppState::chat_provider` is a `OnceCell`, so seeding it before
+/// first use is what makes provider selection a stated premise instead of a
+/// property of the machine the suite runs on. `None` means "no provider
+/// configured"; `Some(_)` hands `memory.chat` a stub whose behaviour the test
+/// chooses.
+fn test_state_with_chat_provider(provider: Option<Arc<dyn ChatProvider>>) -> AppState {
+    // #6315: the server logs why it drops a connection —
+    // `uds rpc connection failed; nothing was answered` — and with no subscriber
+    // installed that line went nowhere, so a client-side `Socket is not
+    // connected` was all anyone had to go on. `warn` by default, `RUST_LOG`
+    // raises it, and `try_init` keeps it idempotent across the module.
+    trusty_common::init_tracing(0);
     // Seed the process-wide `retrieval::shared_embedder()` cell with the mock.
     // Under `cargo nextest run` each test gets a virgin cell and would
     // otherwise reach for the real ONNX model and fail on the HuggingFace
@@ -56,6 +89,12 @@ fn test_state() -> AppState {
     let state = AppState::new(root);
     // #911: flip past the warming preflight so handlers run.
     state.set_ready();
+    // #6315: seed the cell before anything can call `chat_provider()`, so the
+    // auto-detect that reads `$HOME` and dials `localhost:11434` never runs.
+    state
+        .chat_provider
+        .set(provider)
+        .unwrap_or_else(|_| panic!("a fresh AppState's chat provider cell must be unset"));
     state
 }
 
@@ -72,28 +111,60 @@ struct Daemon {
 }
 
 impl Daemon {
-    /// Bind a temp socket, serve `state` on it, and wait until it answers.
+    /// Bind a temp socket, serve `state` on it, and wait until it answers a
+    /// hardened dial.
+    ///
+    /// #6315: the gate asks for what a client needs, not for connectability.
+    /// `socket_is_serving` is a bare `connect`, and `bind_hardened` binds before
+    /// it chmods, so a probe landing in that window reports the daemon ready
+    /// while the socket is still `0755`; the first real call then dies in
+    /// `connect_hardened` with `socket is mode 0755, not 0600`. Requiring
+    /// `verify_socket_for_connect` in the same iteration closes the window.
+    ///
+    /// The gate also no longer gives up quietly. It used to fall through after
+    /// 200 misses and let the failure surface 20 seconds later as a client
+    /// timeout on the first call, which is the shape #6315 was reported in.
     async fn start(state: AppState) -> Self {
         let tmp = tempfile::tempdir().expect("tempdir");
         let socket = tmp.path().join("sockets").join("trusty-memory.sock");
         std::mem::forget(tmp);
         let (stop, shutdown) = oneshot::channel::<()>();
         let serve_socket = socket.clone();
+        // #6315: the serve error was discarded, so a refused bind was silent.
+        let failure = Arc::new(std::sync::Mutex::new(None::<String>));
+        let serve_failure = Arc::clone(&failure);
         let joined = tokio::spawn(async move {
-            let _ = serve_with_shutdown(state, &serve_socket, async {
+            if let Err(e) = serve_with_shutdown(state, &serve_socket, async {
                 let _ = shutdown.await;
             })
-            .await;
+            .await
+            {
+                *serve_failure.lock().expect("serve failure slot") = Some(format!("{e:#}"));
+            }
         });
 
         // Poll rather than sleep a fixed interval: the bind is fast but a
         // loaded machine is not, and a fixed wait is either flaky or slow.
+        let mut ready = false;
         for _ in 0..200 {
-            if trusty_common::uds::socket_is_serving(&socket, Duration::from_millis(200)).await {
+            if trusty_common::uds::socket_is_serving(&socket, Duration::from_millis(200)).await
+                && verify_socket_for_connect(&socket).is_ok()
+            {
+                ready = true;
                 break;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
+        assert!(
+            ready,
+            "daemon never became dialable at {}: {}",
+            socket.display(),
+            failure
+                .lock()
+                .expect("serve failure slot")
+                .clone()
+                .unwrap_or_else(|| "the serve task reported no error".to_string()),
+        );
 
         Self {
             socket,
@@ -880,11 +951,15 @@ async fn rpc_chat_refuses_a_unary_call_naming_the_stream_requirement() {
 }
 
 /// Why: this is the Fail-Open branch the whole streaming extension exists to
-/// close. `memory.chat` opens no stream when no provider is configured — which
-/// is the state of a test machine — and that failure must reach the client as
-/// the terminal ERROR frame. The SSE version it replaces wrote
-/// `data: {"error": …}` and then ended normally, which a reader could not tell
-/// from a completed answer.
+/// close. `memory.chat` opens no stream when no provider is configured, and
+/// that failure must reach the client as the terminal ERROR frame. The SSE
+/// version it replaces wrote `data: {"error": …}` and then ended normally,
+/// which a reader could not tell from a completed answer.
+///
+/// #6315: "no provider is configured" is now pinned by [`test_state`] rather
+/// than assumed of the machine. It covers the refusal BEFORE the stream opens —
+/// zero items, then the error. The mid-stream half is
+/// `rpc_chat_reports_a_midstream_provider_failure_as_the_terminal_error_frame`.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread")]
 async fn rpc_chat_reports_a_provider_failure_as_the_terminal_error_frame() {
@@ -908,11 +983,108 @@ async fn rpc_chat_reports_a_provider_failure_as_the_terminal_error_frame() {
         .next_frame()
         .await
         .expect("a failed open is a terminal frame, never an empty end");
-    let error = first.expect_err("no provider is configured on a test machine");
+    let error = first.expect_err("the fixture pinned no chat provider");
     assert!(
         matches!(error, trusty_common::uds::UdsRpcError::Stream { .. }),
         "expected the server's terminal error frame, got {error:?}"
     );
+    assert!(
+        stream.next_frame().await.is_none(),
+        "the failure is reported once, then the stream is done"
+    );
+    daemon.shutdown().await;
+}
+
+/// A `ChatProvider` that streams `deltas`, then fails.
+///
+/// Why (#6315): the mid-stream failure path — the one the module docs call the
+/// Fail-Open branch this extension closed — had no test that did not depend on
+/// a real LLM being reachable and slow.
+struct FailingChatProvider {
+    deltas: Vec<String>,
+    error: String,
+}
+
+#[async_trait]
+impl ChatProvider for FailingChatProvider {
+    fn name(&self) -> &str {
+        "failing-stub"
+    }
+
+    fn model(&self) -> &str {
+        "failing-stub"
+    }
+
+    async fn chat_stream(
+        &self,
+        _messages: Vec<ChatMessage>,
+        _tools: Vec<ToolDef>,
+        tx: Sender<ChatEvent>,
+    ) -> anyhow::Result<()> {
+        for delta in &self.deltas {
+            let _ = tx.send(ChatEvent::Delta(delta.clone())).await;
+        }
+        let _ = tx.send(ChatEvent::Error(self.error.clone())).await;
+        Ok(())
+    }
+}
+
+/// Why (#6315): a provider that fails AFTER emitting tokens is the case a
+/// reader cannot diagnose on its own — the items look like a normal answer, so
+/// only the frame the stream ENDS on says whether it finished or was cut off.
+/// The pre-open refusal above never reaches this path, and until the provider
+/// was pinned nothing could drive it without a real upstream.
+/// What: pins a stub that streams one delta and then errors, and asserts the
+/// delta arrives as an item, the failure as the terminal error frame, and
+/// nothing after it.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn rpc_chat_reports_a_midstream_provider_failure_as_the_terminal_error_frame() {
+    let provider = Arc::new(FailingChatProvider {
+        deltas: vec!["partial ".to_string()],
+        error: "upstream refused mid-stream".to_string(),
+    }) as Arc<dyn ChatProvider>;
+    let daemon = Daemon::start(test_state_with_chat_provider(Some(provider))).await;
+
+    let mut stream = send_framed_stream_request_capped::<_, Value>(
+        daemon.socket(),
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "memory.chat",
+            "stream": true,
+            "params": {"message": "hello"},
+        }),
+        CALL_TIMEOUT,
+        MAX_FRAME_BYTES,
+    )
+    .await
+    .expect("the stream opens — this provider fails after it is open");
+
+    let item = stream
+        .next_frame()
+        .await
+        .expect("the delta the stub produced before failing")
+        .expect("a delta is an item, not the terminal error");
+    assert_eq!(
+        item["delta"], "partial ",
+        "the token frame must carry the delta verbatim, got {item}"
+    );
+
+    let error = stream
+        .next_frame()
+        .await
+        .expect("a mid-stream failure ends the stream with an error, never cleanly")
+        .expect_err("the stub failed, so this frame is the failure");
+    match error {
+        trusty_common::uds::UdsRpcError::Stream { ref error, .. } => assert!(
+            error.message.contains("upstream refused mid-stream"),
+            "the terminal frame must carry the provider's own reason, got {}",
+            error.message
+        ),
+        other => panic!("expected the server's terminal error frame, got {other:?}"),
+    }
+
     assert!(
         stream.next_frame().await.is_none(),
         "the failure is reported once, then the stream is done"

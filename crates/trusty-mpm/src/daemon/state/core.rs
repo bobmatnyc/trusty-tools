@@ -773,7 +773,18 @@ impl DaemonState {
     /// with a [`crate::daemon::tmux::TmuxDriver`] and caches the `Arc`; returns
     /// the shared handle. Falls back to an in-memory temp dir if store load fails
     /// so a transient I/O error never poisons the OnceCell permanently.
-    /// Test: `managed_routes` handler tests drive this via the router.
+    ///
+    /// Scratch-data-root gate (#6348): [`crate::daemon::tmux::TmuxDriver::discover`]
+    /// asks only whether `$HOME` was reassigned, so a daemon isolated by its
+    /// framework root alone resolved a real driver and let `reconcile_on_boot`
+    /// adopt the operator's live panes into a throwaway store. This asks
+    /// [`crate::core::host_state_gate::host_state_access_for_root`] with the
+    /// root this daemon actually runs against, and installs the same no-op
+    /// driver the missing-tmux path installs when it refuses — that driver
+    /// reports tmux UNOBSERVABLE rather than empty, so `reconcile_on_boot`
+    /// leaves every record alone instead of reading a scratch store as proof.
+    /// Test: `managed_routes` handler tests drive this via the router;
+    /// `session_manager_refuses_tmux_on_a_scratch_framework_root`.
     pub async fn session_manager(&self) -> std::sync::Arc<crate::session_manager::SessionManager> {
         self.managed_sessions
             .get_or_init(|| async {
@@ -781,13 +792,26 @@ impl DaemonState {
                 // Use the real tmux-backed driver when available; fall back to a
                 // no-op driver when `tmux` is not installed so the API still
                 // responds (operations that need tmux will surface a typed error).
+                // #6348: a scratch framework root refuses here too, not just a
+                // scratch $HOME.
+                let refusal =
+                    crate::core::host_state_gate::host_state_access_for_root(&self.framework_root)
+                        .skip_reason();
                 let tmux: std::sync::Arc<dyn crate::session_manager::ManagedTmuxDriver> =
-                    match crate::session_manager::RealTmuxDriver::discover() {
-                        Ok(d) => std::sync::Arc::new(d),
-                        Err(e) => {
-                            tracing::warn!("tmux unavailable for managed sessions: {e}");
+                    match refusal {
+                        Some(reason) => {
+                            tracing::warn!("#6348: managed-session tmux refused — {reason}");
                             std::sync::Arc::new(crate::session_manager::real_tmux::NoopTmuxDriver)
                         }
+                        None => match crate::session_manager::RealTmuxDriver::discover() {
+                            Ok(d) => std::sync::Arc::new(d),
+                            Err(e) => {
+                                tracing::warn!("tmux unavailable for managed sessions: {e}");
+                                std::sync::Arc::new(
+                                    crate::session_manager::real_tmux::NoopTmuxDriver,
+                                )
+                            }
+                        },
                     };
                 let mgr = match crate::session_manager::SessionManager::new(&data_dir, tmux.clone())
                     .await

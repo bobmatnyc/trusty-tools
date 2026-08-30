@@ -1,13 +1,14 @@
-//! Argument parsing + routing for the eleven session-lifecycle MCP tools
-//! (#1221 + #1508 + #2012 + the PM pause/resume context tools).
+//! Argument parsing + routing for the twelve session-lifecycle MCP tools
+//! (#1221 + #1508 + #2012 + #6431 + the PM pause/resume context tools).
 //!
 //! Why: the session-lifecycle tools more than half-again the catalog; routing
 //! them inline in `mcp/mod.rs`'s `dispatch_tool_call` would push that file over
 //! the 500-SLOC production cap. Extracting the parse-and-call arms into a sibling
 //! module keeps `mod.rs` focused on the handshake + core tools and gives the
 //! session tools one auditable home.
-//! What: [`try_dispatch`] matches a tool name against the eleven session tools
-//! (seven per-session #1221 + #2012 ops + the two fleet-wide #1508 teardown
+//! What: [`try_dispatch`] matches a tool name against the twelve session tools
+//! (seven per-session #1221 + #2012 ops, #6431's `session_delete_records`, the
+//! two fleet-wide #1508 teardown
 //! verbs + the two PM pause/resume context tools, `session_context_catchup` /
 //! `session_context_pause` — a DIFFERENT concept, the calling PM session's own
 //! snapshot/digest, not managed-sub-session lifecycle); when it matches it
@@ -20,7 +21,7 @@
 
 use serde_json::Value;
 
-use super::{OrchestratorBackend, required_str};
+use super::{OrchestratorBackend, required_str, required_str_array};
 
 /// Default trailing-pane line count for `session_activity` when unspecified.
 ///
@@ -34,8 +35,9 @@ const DEFAULT_ACTIVITY_LINES: u32 = 60;
 ///
 /// Why: a single entry point lets `dispatch_tool_call` delegate every
 /// session-tool name in one arm, keeping the core dispatch match small.
-/// What: returns `Some(Result)` for the nine session tool names — the seven
-/// per-session ops (including #2012's `session_delete`) plus the two
+/// What: returns `Some(Result)` for every session tool name — the seven
+/// per-session ops (including #2012's `session_delete`), #6431's
+/// `session_delete_records`, plus the two
 /// fleet-wide #1508 verbs (`session_decommission_ephemeral`, `session_prune`)
 /// — parsing args and calling the matching backend method, or `None` when
 /// `name` is not a session tool — signalling the caller to fall through to its
@@ -68,6 +70,11 @@ pub async fn try_dispatch<B: OrchestratorBackend>(
                 let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
                 backend.session_delete(&id, force).await
             }
+            Err(e) => Err(e),
+        },
+        // #6431: record-only bulk delete over an explicit id list.
+        "session_delete_records" => match required_str_array(args, "session_ids") {
+            Ok(ids) => backend.session_delete_records(&ids).await,
             Err(e) => Err(e),
         },
         "session_activity" => match required_str(args, "session_id") {

@@ -211,7 +211,7 @@ unreachable.
 ## MCP Tools
 
 <!-- BEGIN GENERATED: mcp-tools -->
-The MCP server registers **20 tools** with default features, **23 tools** with `--features review`. Authoritative source: `trusty_analyze::mcp::tool_descriptors + trusty_analyze::mcp::descriptors::review_tool_descriptors` —
+The MCP server registers **21 tools** with default features, **24 tools** with `--features review`. Authoritative source: `trusty_analyze::mcp::tool_descriptors + trusty_analyze::mcp::descriptors::review_tool_descriptors` —
 this table is generated from it, not maintained by hand.
 
 | Tool | Available | Arguments | Summary |
@@ -234,6 +234,7 @@ this table is generated from it, not maintained by hand.
 | `review_diff` | always | `diff`, `index_id` | Review a unified git diff and return a structured quality report (per-file complexity, code smells, grade A-F, recommendations). |
 | `review_github_pr` | always | `owner`, `repo`, `pr`, `index_id`, `post_comment?` | Fetch a GitHub pull request's unified diff and run a structured quality review against a trusty-search index. |
 | `run_diagnostics` | always | `index?`, `index_id?`, `language?`, `limit?`, `offset?`, `tools?` | Run available external static-analysis tools (clippy, ruff, biome, staticcheck, pmd, rubocop, phpstan, swiftlint, detekt, clang-tidy,… |
+| `scip_status` | always | `index?`, `index_id?` | Report whether a SCIP overlay has been ingested for an index. |
 | `suggest_refactors` | always | `file?`, `index?`, `index_id?`, `min_severity?`, `top_k?` | Suggest concrete refactoring actions (extract method, reduce nesting, ...) ranked by severity, derived from complexity metrics and code… |
 | `tr_review_diff` | `--features review` | `diff`, `context?`, `reviewer_model?` | LLM-backed review of a raw unified diff string via the embedded trusty-review pipeline. |
 | `tr_review_health` | `--features review` | — | Probe the embedded trusty-review pipeline's liveness and configuration (dry_run mode, reviewer model, dependency URLs). |
@@ -266,6 +267,7 @@ ADR-0032 moved the daemon onto a socket.
 | `upsert_fact` | `analyze.facts_upsert` |
 | `delete_fact` | `analyze.facts_delete` |
 | `ingest_scip` | `analyze.scip_ingest` |
+| `scip_status` | `analyze.scip_status` |
 | `cluster_concepts` | `analyze.clusters` |
 | `extract_graph` | `analyze.graph` |
 | `extract_ner` | `analyze.ner` (optional ONNX) |

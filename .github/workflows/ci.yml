@@ -1721,8 +1721,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: trusty-search
-            dir: crates/trusty-search/ui
+          # #6155: the search dashboard's source moved into trusty-console as
+          # its second UI project. The matrix name follows the directory so a
+          # failure names the tree to open. Not a required context, so renaming
+          # it wedges no open PR.
+          - name: trusty-console-search
+            dir: crates/trusty-console/ui-search
             command: pnpm run test
           - name: trusty-agents
             dir: crates/trusty-agents/ui

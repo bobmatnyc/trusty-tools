@@ -10262,7 +10262,7 @@ dependencies = [
 
 [[package]]
 name = "tga"
-version = "5.0.0"
+version = "5.0.1"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -11239,7 +11239,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-analyze"
-version = "0.12.2"
+version = "0.12.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11508,7 +11508,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-console"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -11715,7 +11715,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm"
-version = "1.5.10"
+version = "1.5.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11811,7 +11811,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-review"
-version = "0.29.1"
+version = "0.29.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11847,7 +11847,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-search"
-version = "0.49.6"
+version = "0.49.7"
 dependencies = [
  "anyhow",
  "arc-swap",

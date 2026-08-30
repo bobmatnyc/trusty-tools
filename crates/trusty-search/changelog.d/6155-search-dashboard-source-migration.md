@@ -1,0 +1,2 @@
+Changed
+- The dashboard's Svelte source moved out of this crate to `crates/trusty-console/ui-search/`, where trusty-console builds it and serves it at `/tools/search/`. `/ui` still serves the same bytes: the crate-root `ui-dist/` bundle stays committed and embedded, now mirrored from the console's build by `make -C crates/trusty-search sync-ui`. `build.rs` no longer builds anything and reports a stale bundle instead of rebuilding it (#6155, #6284).

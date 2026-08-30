@@ -285,3 +285,13 @@ mod contrib_survival_tests;
 // #5047: poller shutdown latency — teardown must not wait out the current tick.
 #[cfg(test)]
 mod pollers_tests;
+// #6386: the stream open must be exactly-once against a live reindex. Its own
+// file because the regression is a race loop, not a case that belongs beside the
+// orchestration tests in `tests.rs`.
+#[cfg(test)]
+mod progress_race_tests;
+// #6415: the terminal frame's `status` field must agree with the terminal status
+// stored beside it. Its own file so the payload contract is not buried in the
+// orchestration tests.
+#[cfg(test)]
+mod completion_tests;

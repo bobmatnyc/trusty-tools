@@ -835,26 +835,65 @@ async fn settle(
 
 /// Poll until `path` is gone, or fail with what is still there.
 ///
-/// Why: the two tests that still use this go through `HookService::process`,
+/// Why: the three tests that still use this go through `HookService::process`,
 /// which drops the sweep's handle — that is the point, since the defect was that
 /// the pipeline reached no reap at all. With no handle to await, a POSITIVE
 /// assertion has to poll the condition. The negative tests do have a handle and
 /// await it instead; polling cannot prove a removal that must never happen.
 ///
-/// The budget is 60 s and not the 10 s it started at. One reap shells out to
-/// `git status`, `git worktree remove` and a system-wide `lsof` that costs about
-/// a second on an idle machine; inside a 5000-test parallel run competing with
-/// other builds it costs far more. At 10 s these tests passed alone and failed
-/// in the full suite — a timing artifact, not a reap that declined. A correct
-/// implementation still finishes in well under a second, so a wider budget
-/// costs a passing run nothing and only changes how long a genuine failure
-/// takes to report.
+/// The budget is 300 s, raised from 60 s and originally 10 s. The 60 s figure
+/// was never the comfortable margin it reads as, and #6391 is what that costs.
+/// Measured on an IDLE machine, one test at a time:
+///
+/// - `reap_worktree` called directly (`reap_removes_a_clean_pushed_worktree`):
+///   0.64 s. The gate stack is not the cost — `lsof` alone is 0.22-0.44 s.
+/// - `session_end_reaps_a_worktree_whose_agent_never_stopped`, the same reap
+///   reached through the sweep: 53.74 s, against a 60 s budget.
+/// - `paths_in_use_protects_a_terminal_delegations_worktree`, which does nothing
+///   but build the state and call `paths_in_use`: 53.59 s.
+///
+/// So the whole gap is `paths_in_use`'s `DaemonState::session_manager()`, which
+/// every sweep awaits before its first gate. These tests were passing with 10%
+/// of the budget to spare on the best hardware conditions available, which is
+/// why a slower machine failed all three deterministically and nothing else in
+/// the module went red: the three that failed are precisely this function's
+/// three callers.
+///
+/// The 300 s here is the containment, not the cure. Making the sweep's own
+/// startup cost 53 s is a defect in its own right and is tracked separately;
+/// when that lands this budget can come back down. Widening removes no coverage
+/// — the assertion, the gate stack and the positive requirement are unchanged —
+/// and only changes how long a genuine failure takes to report.
+///
+/// # The timeout has to say WHY (#6391)
+///
+/// The reap reports every refusal to a `warn!` and to nothing else, so a
+/// dropped-handle test that timed out could only say `was never removed`. Three
+/// of these went red on one machine and the investigation had no gate name, no
+/// git stderr, and no environment to work from. The panic now carries the
+/// ambient repository redirects, because that is the condition under which every
+/// gate passes against the real worktree and the removal alone resolves a
+/// different repository — the shape #6391 fixed.
 async fn await_gone(path: &std::path::Path) {
-    for _ in 0..600 {
+    // #6391: 3000 polls x 100 ms = 300 s. See this function's doc for the
+    // measurement that retired the 60 s budget.
+    for _ in 0..3000 {
         if !path.exists() {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    panic!("{} was never removed", path.display());
+    let redirects: Vec<String> = crate::session_manager::worktree_safety::GIT_ENV_REDIRECTS
+        .iter()
+        .filter_map(|k| std::env::var(k).ok().map(|v| format!("{k}={v}")))
+        .collect();
+    panic!(
+        "{} was never removed; ambient git repository redirects: {}",
+        path.display(),
+        if redirects.is_empty() {
+            "none".to_string()
+        } else {
+            redirects.join(" ")
+        }
+    );
 }

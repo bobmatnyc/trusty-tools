@@ -200,6 +200,8 @@ pub(super) async fn dispatch_misc_tool(
 /// What: Probes `GET /health` for daemon liveness, index count, and
 /// warm_boot_degraded status; also calls `GET /indexes?details=true` for
 /// the per-index list. Builds a `ConsoleMetricsReport` via `make_report()`.
+/// #6424: schema 1 -> 2 adds `last_used_unix` to each index entry; nothing is
+/// removed or renamed, so a console built against schema 1 reads unchanged.
 /// Returns a raw `serde_json::Value` (not the MCP content envelope) —
 /// the dispatcher's `wrap_tool_result()` applies the envelope.
 /// Test: The dispatcher routes `"console_metrics"` to this arm; covered by
@@ -236,6 +238,11 @@ async fn handle_console_metrics(server: &McpServer) -> Result<Value, DispatchErr
                         "id":        e.get("id").cloned().unwrap_or(Value::Null),
                         "root_path": e.get("root_path").cloned().unwrap_or(Value::Null),
                         "size_bytes":e.get("size_bytes").cloned().unwrap_or(Value::Null),
+                        // #6424: the console's Last Used column. Null for an
+                        // index never searched and never indexed since it was
+                        // registered; the tab renders that as "never".
+                        "last_used_unix":
+                            e.get("last_used_unix").cloned().unwrap_or(Value::Null),
                     })
                 })
                 .collect()
@@ -254,7 +261,7 @@ async fn handle_console_metrics(server: &McpServer) -> Result<Value, DispatchErr
         env!("CARGO_PKG_VERSION"),
         status,
         metrics,
-        1,
+        2,
     );
 
     serde_json::to_value(&report).map_err(|e| DispatchError::Transport(e.to_string()))

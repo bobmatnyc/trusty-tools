@@ -2,8 +2,14 @@
 //!
 //! Why: We ship a single `trusty-search` binary that serves the management
 //! UI without requiring users to run a separate static-file server. The
-//! Svelte build output (`ui/dist/`) is baked into the binary at compile time
-//! via `include_dir!`, so the daemon is fully self-contained.
+//! Svelte build output is baked into the binary at compile time via
+//! `include_dir!`, so the daemon is fully self-contained.
+//!
+//! #6155: the dashboard's Svelte source now lives in
+//! `crates/trusty-console/ui-search/`, which trusty-console builds and serves
+//! at `/tools/search/`. The crate-root `ui-dist/` this module embeds is a
+//! mirror of that bundle, refreshed by `make -C crates/trusty-search sync-ui`.
+//! Nothing about what `/ui` answers changed. #6285 removes this listener.
 //!
 //! What: Two route handlers serving the SPA:
 //!   - `GET /ui`       → index.html with runtime config injected
@@ -34,8 +40,7 @@ use trusty_common::{ChatEvent, ChatMessage as CommonChatMessage};
 /// source so it is available during `cargo publish` packaging).
 /// What: `UI_DIR` is a static reference to the compiled tree.
 /// Test: `cargo build` produces a binary that, when run, serves `/ui` with
-/// the SPA shell. To regenerate: `npm run build` in `ui/`, then
-/// `cp -r ui/dist crates/trusty-search-service/ui-dist`.
+/// the SPA shell. To regenerate: `make -C crates/trusty-search release-prep`.
 static UI_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/ui-dist");
 
 /// Inject runtime configuration into index.html before serving.

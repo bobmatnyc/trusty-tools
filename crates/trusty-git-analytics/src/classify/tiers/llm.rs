@@ -24,6 +24,7 @@ use tracing::{debug, info, warn};
 use crate::classify::tiers::bedrock::BedrockClassifier;
 use crate::classify::tiers::ClassificationResult;
 use crate::core::config::{LlmConfig, LlmSource};
+use crate::core::creds::CredentialSource;
 use crate::core::models::ClassificationMethod;
 
 /// OpenAI-compatible chat completion endpoint.
@@ -180,10 +181,37 @@ impl LlmClassifier {
         model: &str,
         openrouter_api_key: Option<String>,
     ) -> Result<Self, String> {
+        Self::from_provider_with_creds(
+            provider,
+            model,
+            openrouter_api_key,
+            &CredentialSource::from_env(),
+        )
+    }
+
+    /// [`Self::from_provider`], with the credential lookup supplied by the
+    /// caller.
+    ///
+    /// Why (#6405): proving the "provider is configured but no key resolves"
+    /// arm used to require clearing `OPENAI_API_KEY` process-wide, racing every
+    /// other thread's `getenv`.
+    /// What: identical to [`Self::from_provider`] except that `creds` replaces
+    /// the `std::env::var` reads.
+    /// Test: `classify::tests::llm_has_api_key_signals_misconfiguration`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::from_provider`].
+    pub(crate) fn from_provider_with_creds(
+        provider: &str,
+        model: &str,
+        openrouter_api_key: Option<String>,
+        creds: &CredentialSource,
+    ) -> Result<Self, String> {
         let normalized = provider.trim().to_ascii_lowercase();
         match normalized.as_str() {
-            "openrouter" => Ok(Self::build_openrouter(model, openrouter_api_key)),
-            "openai" => Ok(Self::new(model, std::env::var("OPENAI_API_KEY").ok())),
+            "openrouter" => Ok(Self::build_openrouter(model, openrouter_api_key, creds)),
+            "openai" => Ok(Self::new(model, creds.get("OPENAI_API_KEY"))),
             "bedrock" => {
                 // Bedrock requires async SDK initialization. Direct sync
                 // callers get a clear error so they know to use
@@ -206,15 +234,14 @@ impl LlmClassifier {
                 }
             }
             "auto" | "" => {
-                let or_key = openrouter_api_key.or_else(|| {
-                    std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).ok()
-                });
+                let or_key = openrouter_api_key
+                    .or_else(|| creds.get(trusty_common::env_vars::ENV_OPENROUTER_API_KEY));
                 if or_key.is_some() {
                     info!("LLM provider auto-selected: openrouter");
-                    Ok(Self::build_openrouter(model, or_key))
+                    Ok(Self::build_openrouter(model, or_key, creds))
                 } else {
                     info!("LLM provider auto-selected: openai");
-                    Ok(Self::new(model, std::env::var("OPENAI_API_KEY").ok()))
+                    Ok(Self::new(model, creds.get("OPENAI_API_KEY")))
                 }
             }
             other => {
@@ -222,7 +249,7 @@ impl LlmClassifier {
                     provider = %other,
                     "unknown LLM provider; falling back to OpenAI endpoint"
                 );
-                Ok(Self::new(model, std::env::var("OPENAI_API_KEY").ok()))
+                Ok(Self::new(model, creds.get("OPENAI_API_KEY")))
             }
         }
     }
@@ -282,12 +309,33 @@ impl LlmClassifier {
     /// - Key-based source with unset / empty env var → error naming the
     ///   missing variable and how to set it.
     pub async fn from_llm_config(cfg: &LlmConfig, model: &str) -> Result<Self, String> {
+        Self::from_llm_config_with_creds(cfg, model, &CredentialSource::from_env()).await
+    }
+
+    /// [`Self::from_llm_config`], with the credential lookup supplied by the
+    /// caller.
+    ///
+    /// Why (#6405): proving that the key comes from the variable named by
+    /// `api_key_env` used to require `set_var` on that variable, racing every
+    /// other thread's `getenv`.
+    /// What: identical to [`Self::from_llm_config`] except that `creds`
+    /// replaces the `std::env::var` read.
+    /// Test: `llm_tests::from_llm_config_anthropic_api_reads_api_key_env`,
+    /// `llm_tests::from_llm_config_anthropic_api_missing_key_errors`,
+    /// `llm_tests::anthropic_default_model_used_when_none_configured`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::from_llm_config`].
+    pub(crate) async fn from_llm_config_with_creds(
+        cfg: &LlmConfig,
+        model: &str,
+        creds: &CredentialSource,
+    ) -> Result<Self, String> {
         match &cfg.source {
             LlmSource::Openrouter => {
-                // Read key from the named env var; fail loudly if unset.
-                let key = std::env::var(&cfg.api_key_env)
-                    .ok()
-                    .filter(|k| !k.is_empty());
+                // Read key from the named variable; fail loudly if unset.
+                let key = creds.get(&cfg.api_key_env);
                 if key.is_none() {
                     return Err(format!(
                         "LLM source 'openrouter' requires an API key but the environment \
@@ -301,7 +349,7 @@ impl LlmClassifier {
                     api_key_env = %cfg.api_key_env,
                     "LLM provider: openrouter (from llm: config section)"
                 );
-                Ok(Self::build_openrouter(model, key))
+                Ok(Self::build_openrouter(model, key, creds))
             }
             LlmSource::Bedrock => {
                 info!(
@@ -321,10 +369,8 @@ impl LlmClassifier {
                 })
             }
             LlmSource::AnthropicApi => {
-                // Read key from the named env var; fail loudly if unset.
-                let key = std::env::var(&cfg.api_key_env)
-                    .ok()
-                    .filter(|k| !k.is_empty());
+                // Read key from the named variable; fail loudly if unset.
+                let key = creds.get(&cfg.api_key_env);
                 if key.is_none() {
                     return Err(format!(
                         "LLM source 'anthropic-api' requires an API key but the environment \
@@ -356,9 +402,10 @@ impl LlmClassifier {
 
     /// Internal helper: build an OpenRouter-configured classifier with
     /// attribution headers set.
-    fn build_openrouter(model: &str, api_key: Option<String>) -> Self {
-        let key =
-            api_key.or_else(|| std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).ok());
+    fn build_openrouter(model: &str, api_key: Option<String>, creds: &CredentialSource) -> Self {
+        // #6405: the fallback lookup is a parameter, so a test never has to set
+        // or clear `OPENROUTER_API_KEY` process-wide to reach either arm.
+        let key = api_key.or_else(|| creds.get(trusty_common::env_vars::ENV_OPENROUTER_API_KEY));
         let mut headers = HeaderMap::new();
         // These are static, valid ASCII strings — `from_static` cannot panic
         // on them at runtime.

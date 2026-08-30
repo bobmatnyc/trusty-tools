@@ -348,16 +348,18 @@ impl SessionManager {
             // shell with no live child is KILLED after two 60-second sweeps
             // (a pane running an agent is kept and warned about instead). The
             // probe therefore decides a pane's life, which is why
-            // `resolve_adoptable_cwd` retries a failed one — see its doc.
+            // `resolve_adoptable_cwd` retries an UNANSWERED one — see its doc.
             let Some(resolved_cwd) = super::adopt::resolve_adoptable_cwd(&*self.tmux, name).await
             else {
+                // #6414: "on any attempt" over-claimed — a pane whose recorded
+                // path is simply gone is now decided on the first probe.
                 warn!(
                     name = %name,
                     "reconcile: declining external-adopt — the pane's working directory did not \
-                     resolve on any attempt, so there is nothing to track, resume or attach to \
-                     (#6118). The pane is left to the orphan-GC, which kills it only if it is an \
-                     idle shell with no live child on two consecutive sweeps; `tmux attach -t \
-                     <name>` still reaches it until then"
+                     resolve to a directory that exists, so there is nothing to track, resume or \
+                     attach to (#6118). The pane is left to the orphan-GC, which kills it only if \
+                     it is an idle shell with no live child on two consecutive sweeps; `tmux \
+                     attach -t <name>` still reaches it until then"
                 );
                 report.adoption_declined.push(name.clone());
                 continue;

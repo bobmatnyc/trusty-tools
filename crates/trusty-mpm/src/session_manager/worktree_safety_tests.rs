@@ -644,6 +644,79 @@ fn git_command_strips_repository_redirecting_env() {
     }
 }
 
+/// #6391 REGRESSION: the REMOVAL is subject to the same redirect its gates are
+/// hardened against, and until #6391 it was the one call that was not.
+///
+/// Why: `git worktree` resolves its repository from `GIT_DIR` ahead of `-C`.
+/// Measured directly: with `GIT_DIR`/`GIT_WORK_TREE` naming another repository,
+/// `git -C <repo> worktree list` lists that OTHER repository's worktrees, and
+/// operating on one of `<repo>`'s own worktrees exits 128 with
+/// `is not a working tree`. Every gate ahead of the removal goes through
+/// [`super::git_command`] and so examines the real worktree; the removal used a
+/// bare `Command::new("git")` and did not. The result is a reap that passes
+/// every gate, deletes nothing, and reports the refusal to a `warn!` no test
+/// reads — `agent_worktree_reap_tests::await_gone` then panics with
+/// `was never removed` and no reason (#6391, and the `is not a working tree`
+/// text #6099 recorded).
+///
+/// Against the pre-fix body this fails outright: a bare command removes no
+/// variables at all, so `removed` is empty.
+#[test]
+fn worktree_remove_command_strips_repository_redirecting_env() {
+    let cmd = super::worktree_remove_command(
+        std::path::Path::new("/r"),
+        std::path::Path::new("/r/.claude/worktrees/agent-x"),
+    );
+    let removed: Vec<&str> = cmd
+        .get_envs()
+        .filter(|(_, v)| v.is_none())
+        .filter_map(|(k, _)| k.to_str())
+        .collect();
+    for key in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_CONFIG_COUNT",
+    ] {
+        assert!(
+            removed.contains(&key),
+            "{key} must be removed from the removal's child environment; removed: {removed:?}"
+        );
+    }
+}
+
+/// The hardening must not reorder the command: `--force` still precedes the
+/// target, and the target is still the last argument.
+///
+/// Why: [`super::git_command`] appends its own pinned globals and `-C <dir>`
+/// before the caller's arguments, so routing the removal through it is only
+/// correct if the subcommand and its operand still land in that order. A
+/// silently reordered `git worktree remove <path> --force` is a different
+/// command.
+#[test]
+fn worktree_remove_command_ends_in_the_target_path() {
+    let target = std::path::Path::new("/r/.claude/worktrees/agent-x");
+    let cmd = super::worktree_remove_command(std::path::Path::new("/r"), target);
+    let args: Vec<String> = cmd
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        args.ends_with(&[
+            "worktree".to_string(),
+            "remove".to_string(),
+            "--force".to_string(),
+            target.display().to_string(),
+        ]),
+        "the removal must end in `worktree remove --force <path>`; args: {args:?}"
+    );
+    assert!(
+        args.windows(2).any(|w| w[0] == "-C" && w[1] == "/r"),
+        "the repository root must still be named by `-C`; args: {args:?}"
+    );
+}
+
 /// Every git invocation must carry the pins, not just the ones someone
 /// remembered — that is the point of routing them through one builder.
 #[test]

@@ -180,8 +180,9 @@ enum Commands {
     ///
     /// With `remove`: deletes the daemon-side registration matching the given
     /// (or auto-detected) path AND drops the matching entry from
-    /// `~/.config/trusty-search/config.yaml`. The on-disk redb data is left
-    /// intact — re-registering reuses it.
+    /// `~/.config/trusty-search/config.yaml`. The on-disk redb data goes with
+    /// it (issue #6422) after a confirmation prompt; pass `--keep-data` to
+    /// deregister only and re-register against the same corpus later.
     ///
     /// When run with no PATH argument, trusty-search looks for a
     /// `.trusty-search.yaml` file in the current directory and uses its
@@ -199,8 +200,9 @@ enum Commands {
     ///   trusty-search index ~/Projects/myapp
     ///   trusty-search index --force           # full reindex even if up-to-date
     ///   trusty-search index --exclude data/ --exclude "*.db"
-    ///   trusty-search index remove            # remove registration for CWD's project
-    ///   trusty-search index remove ~/Projects/old-app
+    ///   trusty-search index remove            # remove CWD's index AND its on-disk data
+    ///   trusty-search index remove --keep-data # deregister only, keep the corpus
+    ///   trusty-search index remove ~/Projects/old-app --yes
     #[command(
         alias = "idx",
         display_order = 4,
@@ -1253,8 +1255,14 @@ async fn run() -> Result<()> {
             no_kg,
             action,
         } => match action {
-            Some(IndexAction::Remove { path: rm_path }) => {
-                commands::index_remove::handle_index_remove(rm_path, cli.index).await?;
+            // #6422: the on-disk data goes by default; `--keep-data` opts out.
+            Some(IndexAction::Remove {
+                path: rm_path,
+                keep_data,
+                yes,
+            }) => {
+                commands::index_remove::handle_index_remove(rm_path, cli.index, keep_data, yes)
+                    .await?;
             }
             Some(IndexAction::Add {
                 path: add_path,

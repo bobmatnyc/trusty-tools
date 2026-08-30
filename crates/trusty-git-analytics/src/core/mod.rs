@@ -6,6 +6,8 @@
 //! ## Submodules
 //!
 //! - [`config`] — YAML configuration loading and types
+//! - `creds` — credential lookup passed as a parameter instead of read from
+//!   the process environment (#6405)
 //! - [`db`] — SQLite database wrapper with WAL mode and versioned migrations
 //! - [`errors`] — crate-wide error enum and `Result` alias
 //! - [`models`] — domain structs for commits, authors, classifications, etc.
@@ -14,6 +16,7 @@
 //! - [`revert`] — shared commit-message revert detection
 
 pub mod config;
+pub(crate) mod creds;
 pub mod db;
 pub mod effort;
 pub mod effort_percentile;

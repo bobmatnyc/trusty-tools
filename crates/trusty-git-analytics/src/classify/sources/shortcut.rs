@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use super::{ExternalSignal, ShortcutSourceConfig, EXTERNAL_SOURCE_CONFIDENCE};
+use crate::core::creds::CredentialSource;
 
 /// Regex matching the `[ch1234]` bracket reference form.
 ///
@@ -170,9 +171,33 @@ pub async fn fetch_story(
     id: u64,
     base_url_override: Option<&str>,
 ) -> Option<ShortcutStory> {
-    let token = match std::env::var(&config.api_token_env) {
-        Ok(t) if !t.is_empty() => t,
-        _ => {
+    fetch_story_with_creds(
+        client,
+        config,
+        id,
+        base_url_override,
+        &CredentialSource::from_env(),
+    )
+    .await
+}
+
+/// [`fetch_story`], with the credential lookup supplied by the caller.
+///
+/// Why (#6405): proving the authenticated path used to require `set_var` on
+/// the API-token variable, racing every other thread's `getenv`.
+/// What: identical to [`fetch_story`] except that `creds` replaces the
+/// `std::env::var` read for `api_token_env`.
+/// Test: `tests::fetch_and_classify_via_wiremock`.
+pub(crate) async fn fetch_story_with_creds(
+    client: &reqwest::Client,
+    config: &ShortcutSourceConfig,
+    id: u64,
+    base_url_override: Option<&str>,
+    creds: &CredentialSource,
+) -> Option<ShortcutStory> {
+    let token = match creds.get(&config.api_token_env) {
+        Some(t) => t,
+        None => {
             warn!(
                 api_token_env = %config.api_token_env,
                 "Shortcut API token env var `{}` is not set — did you `export {}` before running tga?",
@@ -229,13 +254,32 @@ pub async fn fetch_stories_batch(
     ids: &[u64],
     base_url_override: Option<&str>,
 ) -> HashMap<String, Option<ExternalSignal>> {
+    fetch_stories_batch_with_creds(
+        client,
+        config,
+        ids,
+        base_url_override,
+        &CredentialSource::from_env(),
+    )
+    .await
+}
+
+/// [`fetch_stories_batch`], with the credential lookup supplied by the caller
+/// (#6405).
+pub(crate) async fn fetch_stories_batch_with_creds(
+    client: &reqwest::Client,
+    config: &ShortcutSourceConfig,
+    ids: &[u64],
+    base_url_override: Option<&str>,
+    creds: &CredentialSource,
+) -> HashMap<String, Option<ExternalSignal>> {
     let mut out = HashMap::new();
     for &id in ids {
         let key = id.to_string();
         if out.contains_key(&key) {
             continue;
         }
-        let story = fetch_story(client, config, id, base_url_override).await;
+        let story = fetch_story_with_creds(client, config, id, base_url_override, creds).await;
         let signal = story.and_then(|s| classify_story(&s, config));
         out.insert(key, signal);
     }
@@ -468,7 +512,9 @@ field_mappings:
             .mount(&server)
             .await;
 
-        unsafe { std::env::set_var("SHORTCUT_TOKEN_WT", "test-token") }; // pragma: allowlist secret
+        // #6405: the credential is a parameter, so this test proves the
+        // authenticated path without mutating the process environment.
+        let creds = CredentialSource::fixed([("SHORTCUT_TOKEN_WT", "test-token")]); // pragma: allowlist secret
 
         use std::collections::HashMap;
         let config = ShortcutSourceConfig {
@@ -486,14 +532,36 @@ field_mappings:
         };
 
         let client = reqwest::Client::new();
-        let story = fetch_story(&client, &config, 55, Some(&server.uri()))
+        let story = fetch_story_with_creds(&client, &config, 55, Some(&server.uri()), &creds)
             .await
             .expect("fetch should succeed");
 
         let signal = classify_story(&story, &config).expect("should classify");
         assert_eq!(signal.category, "bug_fix");
         assert!(signal.source.contains("story_type"));
+    }
 
-        unsafe { std::env::remove_var("SHORTCUT_TOKEN_WT") };
+    /// Why: an unset API token must skip the lookup rather than issue an
+    /// unauthenticated request — the branch that used to be provable only by
+    /// clearing the variable process-wide (#6405).
+    /// What: fetch with an empty credential source and assert `None`, with no
+    /// HTTP server standing at all.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn fetch_story_returns_none_when_token_unset() {
+        use std::collections::HashMap;
+        let config = ShortcutSourceConfig {
+            api_token_env: "SHORTCUT_TOKEN_UNSET".to_string(), // pragma: allowlist secret
+            workspace_id: "myco".to_string(),
+            field_mappings: crate::classify::sources::ShortcutFieldMappings {
+                story_type: HashMap::new(),
+                labels: HashMap::new(),
+                workflow_state: HashMap::new(),
+            },
+        };
+        let client = reqwest::Client::new();
+        let story =
+            fetch_story_with_creds(&client, &config, 55, None, &CredentialSource::empty()).await;
+        assert!(story.is_none(), "unset token must skip the lookup");
     }
 }

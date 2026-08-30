@@ -427,7 +427,10 @@ pub(super) fn spawn_orphan_reaper_ticker(state: Arc<SearchAppState>) {
                 // a false-positive detection stays recoverable by re-registering.
                 // #3049: `unregister_index` now reports what it did rather than
                 // a bare bool; the reaper only ever cares about deregistration.
-                if super::search::unregister_index(&state, &id, false)
+                // #6380: no expectation. The reaper reads the registration and
+                // deletes it in the same pass, so it has no earlier census whose
+                // root could have gone stale.
+                if super::search::unregister_index(&state, &id, false, None)
                     .await
                     .removed
                 {

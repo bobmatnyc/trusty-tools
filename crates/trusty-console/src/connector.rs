@@ -33,6 +33,34 @@ pub enum ServiceStatus {
     Degraded,
 }
 
+/// How a service is meant to run when it is healthy.
+///
+/// Why (#6416): `ServiceStatus::Available` means "the binary is installed and
+/// nothing is serving", and the console rendered that one sentence for every
+/// member: "Binary found but daemon is not running." For trusty-review, which
+/// #6290 retired the daemon of, and trusty-analyze, which #6287 moved to an
+/// on-demand socket server, that IS the healthy resting state — so the console
+/// was rendering the correct state as a fault, in amber, with remediation text
+/// for a daemon the operator cannot start. `status` alone cannot tell those two
+/// cases apart; this says which reading applies.
+///
+/// What: a per-member constant, not an observation. A connector picks it once
+/// and every `ServiceInfo` it builds carries it, `Absent` rows included.
+/// Test: `service_lifecycle_serialises_to_snake_case`,
+/// `on_demand_members_are_exactly_review_and_analyze`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceLifecycle {
+    /// A resident daemon. `Running` is the healthy state and `Available` means
+    /// it is installed but stopped.
+    #[default]
+    Daemon,
+    /// A per-invocation binary or an on-demand server. Installed IS healthy:
+    /// `Available` is the resting state and `Running` merely means a server
+    /// happens to be up right now.
+    OnDemand,
+}
+
 /// All facts gathered about a service in one detection pass.
 ///
 /// Why: The API handler turns this struct directly into JSON for
@@ -41,7 +69,9 @@ pub enum ServiceStatus {
 /// readable; `status` is the current runtime state; `version` is the version
 /// string from `/health` when the daemon is running (absent otherwise);
 /// `url` is the daemon base URL when reachable; `hint` is an optional
-/// actionable remediation message surfaced when `status` is `Degraded`.
+/// actionable remediation message surfaced when `status` is `Degraded`;
+/// `lifecycle` says whether a stopped daemon or an installed on-demand binary
+/// is the healthy reading of that status (#6416).
 /// Test: Tested via the server integration test in `server.rs`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceInfo {
@@ -62,6 +92,12 @@ pub struct ServiceInfo {
     /// `serve --stdio` wiring / restart the daemon".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+    /// Whether this member runs as a resident daemon or on demand (#6416).
+    ///
+    /// Serialised unconditionally — the UI branches on it — and `#[serde(default)]`
+    /// so a payload written before #6416 still deserialises, as a daemon.
+    #[serde(default)]
+    pub lifecycle: ServiceLifecycle,
 }
 
 /// Per-service adapter contract.
@@ -88,6 +124,17 @@ pub trait ServiceConnector: Send + Sync {
     /// What: Returns a `'static str`.
     /// Test: Asserted by the connector construction tests.
     fn display_name(&self) -> &'static str;
+
+    /// How this member runs when it is healthy (#6416).
+    ///
+    /// Why: a roster-level test can read this without probing sockets or
+    /// spawning binaries, so "which members are on-demand" is assertable as the
+    /// constant it is rather than inferred from a live detection pass.
+    /// What: defaults to `Daemon`; the de-daemonized members override it.
+    /// Test: `on_demand_members_are_exactly_review_and_analyze`.
+    fn lifecycle(&self) -> ServiceLifecycle {
+        ServiceLifecycle::Daemon
+    }
 
     /// Detect the current runtime status of this service.
     ///
@@ -133,5 +180,31 @@ mod tests {
             serde_json::json!("degraded"),
             "Degraded must serialise to \"degraded\""
         );
+    }
+
+    /// Why (#6416): the Svelte card branches on this string. A rename that only
+    /// changed the Rust identifier would leave every on-demand row rendering the
+    /// daemon sentence again, with nothing red anywhere to say so.
+    /// What: asserts both variants' wire spellings and that an older payload
+    /// with no `lifecycle` key still reads as a daemon.
+    /// Test: this test.
+    #[test]
+    fn service_lifecycle_serialises_to_snake_case() {
+        assert_eq!(
+            serde_json::to_value(ServiceLifecycle::Daemon).unwrap(),
+            serde_json::json!("daemon")
+        );
+        assert_eq!(
+            serde_json::to_value(ServiceLifecycle::OnDemand).unwrap(),
+            serde_json::json!("on_demand")
+        );
+
+        let legacy: ServiceInfo = serde_json::from_value(serde_json::json!({
+            "id": "trusty-search",
+            "display_name": "Trusty Search",
+            "status": "available",
+        }))
+        .expect("a payload predating #6416 must still deserialise");
+        assert_eq!(legacy.lifecycle, ServiceLifecycle::Daemon);
     }
 }

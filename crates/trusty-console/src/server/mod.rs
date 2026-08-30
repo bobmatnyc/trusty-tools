@@ -439,6 +439,12 @@ fn build_router_inner(
             "/api/console/sessions/supervisor/auto-resume",
             axum::routing::post(crate::routes::sessions::auto_resume_handler),
         )
+        // #6431: record-only bulk delete. A static segment, so it wins over the
+        // `{id}` capture below — pinned by `bulk_delete_route_is_not_shadowed`.
+        .route(
+            "/api/console/sessions/bulk-delete",
+            axum::routing::post(crate::routes::sessions::bulk_delete_handler),
+        )
         .route(
             "/api/console/sessions/{id}",
             get(crate::routes::sessions::get_handler)
@@ -486,6 +492,13 @@ fn build_router_inner(
         .route(
             "/api/console/memory/palaces/{id}/compact",
             post(crate::routes::cleanup::compact_palace_handler),
+        )
+        // #6423: settle ONE registration the daemon could not check, after the
+        // operator reviewed it. Per-row on purpose — the batch prune above
+        // reads the census's `orphans` list alone and cannot reach these.
+        .route(
+            "/api/console/search/deregister-unjudged",
+            post(crate::routes::unjudged::deregister_unjudged_handler),
         )
         // Analyze on-demand routes — call the analyze stdio MCP directly (no /proxy).
         .route(

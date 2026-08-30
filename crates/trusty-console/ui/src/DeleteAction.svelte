@@ -31,14 +31,24 @@
 
   /** 'idle' | 'confirm' | 'busy' | 'error' — 'idle' is the only one-click state. */
   let stage = $state('idle');
-  /** Whether the kind's extra option (force / delete_data) is enabled. */
+  /**
+   * Whether the kind's extra option (force / delete_data) is enabled.
+   *
+   * #6422: `openConfirm` sets it to the KIND's default before the checkbox is
+   * ever rendered — an index delete starts with `delete_data` ticked, so
+   * unticking it is the explicit deregister-only opt-out. The initializer stays
+   * a literal because reading `kind` here would capture only its first value,
+   * which Svelte 5 flags.
+   */
   let option = $state(false);
   /** The daemon's own message from the last failed attempt. */
   let failure = $state('');
 
   function openConfirm() {
     stage = 'confirm';
-    option = false;
+    // #6422: back to the kind's default, not to false — a cancelled confirm
+    // must not silently turn the next delete into a deregister-only one.
+    option = spec?.optionDefault === true;
     failure = '';
   }
 

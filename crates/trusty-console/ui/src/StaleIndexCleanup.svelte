@@ -18,19 +18,30 @@
    * about what is stale; it renders what trusty-search reports and sends back
    * the subset the operator confirmed.
    *
+   * #6423 adds a second, separate flow for the rows the daemon declined to
+   * judge, because one class of them can never become valid again and listing
+   * them forever was the only thing on offer. That flow is per-row: review one,
+   * then keep it or deregister it behind its own confirmation. It shares no
+   * state with the batch above — `selected` is still built from the census's
+   * `orphans` alone — so "shown, never selected" is unchanged.
+   *
    * Test: the pure decisions live in `cleanupFlow.js` and are covered by
    * `cleanupFlow.test.js`; the batch route's per-item outcomes are covered by
    * `routes::cleanup` in the Rust crate.
    */
   import {
     CENSUS_URL,
+    DEREGISTER_UNJUDGED_URL,
+    PRUNE_DELETE_DATA_DEFAULT,
     PRUNE_URL,
     censusSummary,
     pruneConfirmMessage,
+    readDeregisterResult,
     readPruneResult,
     selectableOrphans,
     unjudgedRows,
   } from './cleanupFlow.js';
+  import UnjudgedReview from './UnjudgedReview.svelte';
 
   /** @type {{ onPruned: () => void }} */
   let { onPruned } = $props();
@@ -41,12 +52,31 @@
   let census = $state(null);
   /** Ids the operator has ticked, as a plain object so Svelte tracks writes. */
   let selected = $state({});
-  /** Whether the prune also destroys each index's on-disk corpus. */
-  let deleteData = $state(false);
+  /**
+   * Whether the prune also destroys each index's on-disk corpus.
+   *
+   * #6422: starts ticked. Purging is the default and keeping the data is the
+   * explicit opt-out.
+   */
+  let deleteData = $state(PRUNE_DELETE_DATA_DEFAULT);
   /** The message from the last completed attempt, or a fetch failure. */
   let outcome = $state(null);
   /** Per-id rows from the last prune. */
   let rows = $state([]);
+  /**
+   * What the operator decided about each reviewed uncheckable row (#6423).
+   *
+   * `'kept'` and `'gone'` are set only after the decision is made — `'gone'`
+   * only after the daemon confirmed the deregistration, so a failed attempt
+   * leaves the row exactly where it was and offers the action again.
+   *
+   * @type {Record<string, 'kept' | 'gone'>}
+   */
+  let disposed = $state({});
+  /** Per-id outcome of the last deregister attempt. */
+  let unjudgedOutcomes = $state({});
+  /** The id whose deregistration is in flight, or null. */
+  let deregistering = $state(null);
 
   let candidates = $derived(selectableOrphans(census));
   let unjudged = $derived(unjudgedRows(census));
@@ -72,8 +102,80 @@
     // Every candidate starts ticked: the operator asked for a cleanup, and the
     // list they are about to confirm is the daemon's own. Untick, not tick, is
     // the exception.
+    //
+    // #6423: this reads `selectableOrphans` and nothing else, which is what
+    // keeps an uncheckable row out of every bulk action. A fresh scan also
+    // clears the per-row dispositions, because they were decisions about the
+    // previous census.
     selected = Object.fromEntries(selectableOrphans(census).map((c) => [c.id, true]));
+    disposed = {};
+    unjudgedOutcomes = {};
     stage = 'reviewing';
+  }
+
+  /**
+   * Record that the operator reviewed a row and chose to leave it registered.
+   *
+   * Nothing is sent: keeping is the default state, so this only stops the panel
+   * offering the row as something still to decide (#6423 closure condition 3).
+   *
+   * @param {string} id The reviewed registration id.
+   */
+  function keepUnjudged(id) {
+    disposed = { ...disposed, [id]: 'kept' };
+    unjudgedOutcomes = { ...unjudgedOutcomes, [id]: null };
+  }
+
+  /**
+   * Deregister one reviewed row, and believe only what the response says.
+   *
+   * Fail-closed (#6423): the row is marked `'gone'` only when the console route
+   * confirmed the removal. Anything else — a refusal, an unreachable daemon, a
+   * body that did not parse — leaves the row where it was, with the reason shown
+   * beside it, so a failed deregistration is never counted as done.
+   *
+   * @param {{id: string, root_path: string}} row The reviewed registration.
+   */
+  async function deregisterUnjudged(row) {
+    // #6423 review round 2: single-flight per row. The confirm button's
+    // `disabled` reads a prop that has not re-rendered yet when the click lands,
+    // so a fast double-click sends two requests for the same id. The loser gets
+    // the daemon's "no registration was removed" and the row reads as failed
+    // when it in fact succeeded.
+    if (deregistering === row.id) return;
+    deregistering = row.id;
+    let status = 0;
+    let body = null;
+    try {
+      const resp = await fetch(DEREGISTER_UNJUDGED_URL, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id: row.id, root_path: row.root_path }),
+      });
+      status = resp.status;
+      body = await resp.json().catch(() => null);
+    } catch (e) {
+      deregistering = null;
+      const failed = {
+        ok: false,
+        message: `The console could not reach its own deregister route: ${e.message}`,
+      };
+      unjudgedOutcomes = { ...unjudgedOutcomes, [row.id]: failed };
+      outcome = failed;
+      return;
+    }
+
+    const result = readDeregisterResult(status, body);
+    deregistering = null;
+    unjudgedOutcomes = { ...unjudgedOutcomes, [row.id]: result };
+    // Also at panel level: a successful deregistration re-reads the census, and
+    // the row it was shown on is gone from the answer along with its message.
+    outcome = result;
+    if (result.ok) {
+      disposed = { ...disposed, [row.id]: 'gone' };
+      await scanAfterPrune();
+      onPruned();
+    }
   }
 
   function openConfirm() {
@@ -141,7 +243,8 @@
   </div>
   <p class="lede">
     Registrations whose root directory is gone. trusty-search decides which
-    those are; roots it cannot check are listed but never removed.
+    those are. Roots it cannot check are never part of the batch; each one can
+    be reviewed and settled on its own.
   </p>
 
   {#if outcome}
@@ -191,7 +294,7 @@
       {:else}
         <label class="opt">
           <input type="checkbox" bind:checked={deleteData} disabled={stage !== 'reviewing'} />
-          Also delete the on-disk index data (otherwise only deregistered)
+          Delete the on-disk index data too — untick to deregister only and keep the corpus
         </label>
         <button class="danger" onclick={openConfirm} disabled={chosen.length === 0}>
           Remove {chosen.length} selected
@@ -201,13 +304,20 @@
 
     {#if unjudged.length > 0}
       <h4 class="unjudged-title">Could not be checked ({unjudged.length})</h4>
+      <p class="unjudged-lede">
+        Never selected and never swept by the batch above. Review one to see its
+        full path and decide: keep it registered, or deregister it.
+      </p>
       <ul class="unjudged">
         {#each unjudged as u (u.id)}
-          <li>
-            <code>{u.id}</code>
-            <span class="path">{u.root_path}</span>
-            <span class="reason">{u.reason}</span>
-          </li>
+          <UnjudgedReview
+            row={u}
+            disposition={disposed[u.id] ?? 'none'}
+            busy={deregistering === u.id}
+            outcome={unjudgedOutcomes[u.id] ?? null}
+            onKeep={() => keepUnjudged(u.id)}
+            onDeregister={() => deregisterUnjudged(u)}
+          />
         {/each}
       </ul>
     {/if}
@@ -226,6 +336,7 @@
   h3 { margin: 0; font-size: 1rem; font-weight: 600; color: var(--trusty-text-primary); }
   h4 { font-size: 0.8rem; font-weight: 600; color: var(--trusty-text-secondary); margin: 0.9rem 0 0.35rem; }
   .lede { margin: 0.35rem 0 0.75rem; font-size: 0.8rem; color: var(--trusty-text-secondary); }
+  .unjudged-lede { margin: 0 0 0.4rem; font-size: 0.76rem; color: var(--trusty-text-muted); }
   .summary { margin: 0.5rem 0; font-size: 0.85rem; color: var(--trusty-text-primary); font-weight: 600; }
 
   button { font: inherit; cursor: pointer; border-radius: 0.35rem; border: 1px solid transparent; }
@@ -251,7 +362,6 @@
     font-size: 0.78rem; color: var(--trusty-text-secondary); cursor: pointer;
   }
   .path { color: var(--trusty-text-secondary); overflow-wrap: anywhere; }
-  .reason { color: var(--trusty-text-muted); font-style: italic; overflow-wrap: anywhere; }
   code {
     font-family: 'JetBrains Mono', monospace; font-size: 0.75rem;
     background: var(--trusty-surface-raised); padding: 0.1rem 0.35rem; border-radius: 0.25rem;

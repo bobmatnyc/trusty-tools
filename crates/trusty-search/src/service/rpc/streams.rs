@@ -219,25 +219,16 @@ fn status_stream(state: &Arc<SearchAppState>) -> RpcStreamItems {
 /// `search.index.reindex.stream` — the item sequence
 /// `GET /indexes/{id}/reindex/stream` writes.
 ///
-/// What, in the order `reindex_stream_handler` does it: look the index's
-/// progress up and refuse when there is none, snapshot the replay buffer, read
-/// the status, then subscribe.
+/// What: look the index's progress up and refuse when there is none, then open
+/// the stream through [`ReindexProgress::subscribe_with_replay`], which hands
+/// back the replay buffer, the status, and the live subscription together.
 ///
-/// That ordering is copied from the SSE handler deliberately, and it is not
-/// race-free in either place. `ReindexProgress::push` writes the replay buffer
-/// under its lock and THEN broadcasts, while this clones the buffer under the
-/// same lock and THEN subscribes, so an event whose two halves straddle the open
-/// can be delivered TWICE (buffered before the snapshot, broadcast after the
-/// subscribe) or NOT AT ALL (buffered after the snapshot, broadcast before the
-/// subscribe). Both transports inherit it identically, which is why parity holds
-/// and why this slice copies rather than corrects it: subscribing before
-/// snapshotting would close the loss arm, but it changes the shipped SSE route's
-/// behaviour and belongs to its own change. See #6285 (slice 5.5 review).
-///
-/// The window itself is not drivable from a test — there is no await point
-/// between the snapshot and the subscribe, so it is only reachable from another
-/// thread at an instant nothing exposes. What IS pinned is the composition
-/// either side of it.
+/// #6386: that ONE call is what makes the open exactly-once. It used to be three
+/// statements here — snapshot, read status, subscribe — copied by hand from the
+/// SSE handler, and an event whose buffer write and broadcast straddled them
+/// could arrive twice or not at all. The SSE route now opens through the same
+/// method, so parity holds by construction rather than by two hand-kept copies;
+/// the argument for why nothing can straddle it is on that method.
 ///
 /// A progress record whose status is no longer `Running` yields its replay and
 /// ends. Without that arm the stream would deliver the buffered `complete` event
@@ -254,6 +245,7 @@ fn status_stream(state: &Arc<SearchAppState>) -> RpcStreamItems {
 /// Test: `reindex_progress_events_match_the_sse_body_frame_for_frame`,
 /// `a_live_reindex_stream_delivers_events_in_order_as_they_are_emitted`,
 /// `an_event_either_side_of_the_stream_opening_is_delivered_exactly_once`,
+/// `a_stream_opening_against_live_pushes_loses_and_repeats_nothing`,
 /// `an_unknown_index_is_refused_before_the_reindex_stream_opens`.
 async fn reindex_stream(
     state: &Arc<SearchAppState>,
@@ -273,9 +265,9 @@ async fn reindex_stream(
             )
         })?;
 
-    let replay = progress.events.lock().await.clone();
-    let live = progress.status.load() == ReindexStatus::Running;
-    let mut events = progress.sender.subscribe();
+    // #6386: one atomic open — no event can straddle the snapshot and the subscribe.
+    let (replay, status, mut events) = progress.subscribe_with_replay().await;
+    let live = status == ReindexStatus::Running;
 
     let (tx, items) = mpsc::channel(STREAM_BUFFER);
     tokio::spawn(async move {

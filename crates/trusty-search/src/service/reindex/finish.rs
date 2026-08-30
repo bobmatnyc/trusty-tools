@@ -304,17 +304,20 @@ pub(super) async fn finish_reindex(
             embed_failure_count,
         );
         mark_reindex_failed(&handle, reason).await;
-        progress.status.store(ReindexStatus::Failed);
+        // #6386: status and frame in one hold — see `push_terminal`.
         progress
-            .push(serde_json::json!({
-                "event": "error",
-                "index_id": index_id.0,
-                "message": reason,
-                "embed_failure_count": embed_failure_count,
-                "walked_files": total,
-                "vector_count": total_vector_count,
-                "fatal": true,
-            }))
+            .push_terminal(
+                ReindexStatus::Failed,
+                serde_json::json!({
+                    "event": "error",
+                    "index_id": index_id.0,
+                    "message": reason,
+                    "embed_failure_count": embed_failure_count,
+                    "walked_files": total,
+                    "vector_count": total_vector_count,
+                    "fatal": true,
+                }),
+            )
             .await;
         term_guard.disarm();
         stop_pollers(
@@ -398,13 +401,19 @@ pub(super) async fn finish_reindex(
 
     // Issue #120: distinguish memory-abort from clean completion.
     let aborted_memory = mem_limit_hit || mem_abort.load(AtomicOrdering::Acquire);
-    if aborted_memory {
-        progress.status.store(ReindexStatus::AbortedMemory);
+    // #6386: decide the terminal status here but do not STORE it — the store
+    // rides with the terminal frame in `emit_complete_event` below, under one
+    // hold of the replay-buffer lock. Everything this run must record therefore
+    // completes before any subscriber can observe the run as finished, which is
+    // the stronger order: the git call, the marker write and both handle stamps
+    // used to sit AFTER the status flip, so a `GET /indexes/:id/status` in that
+    // window read `Complete` beside a stale `last_indexed_at`.
+    let terminal_status = if aborted_memory {
         if let Some(map) = aborted_map.as_ref() {
             map.insert(index_id.clone(), Instant::now());
         }
+        ReindexStatus::AbortedMemory
     } else {
-        progress.status.store(ReindexStatus::Complete);
         // Issue #75: refresh the captured HEAD SHA.
         let new_sha = crate::core::git::head_sha(&handle.root_path);
         // #4391: the in-memory stamp dies with the handle — persist it so the
@@ -413,7 +422,8 @@ pub(super) async fn finish_reindex(
         *handle.indexed_head_sha.write().await = new_sha;
         // Issue #878: stamp the authoritative last-indexed timestamp.
         *handle.last_indexed_at.write().await = Some(now_rfc3339());
-    }
+        ReindexStatus::Complete
+    };
 
     // Final synchronous RSS poll so the peak reflects post-KG memory.
     if let Some(rss) = current_rss_mb() {
@@ -438,7 +448,9 @@ pub(super) async fn finish_reindex(
         total_chunks,
         elapsed_ms,
         peak_rss_mb,
-        mem_limit_hit,
+        // #6415: the same value the SSE payload carries, so the log and the
+        // wire frame do not disagree on a poller-only abort.
+        aborted_memory,
     );
     // #5024: the old `model_load_approx_ms` was `elapsed` minus the subsystem
     // accumulators, which lumped the hash-cache load, the carryover copy, the
@@ -483,7 +495,8 @@ pub(super) async fn finish_reindex(
         bm25_ms: total_bm25_ms,
         vector_upsert_ms: total_vector_upsert_ms,
         vector_count: total_vector_count,
-        mem_limit_hit,
+        // #6415: the payload's memory verdict now comes from `terminal_status`,
+        // which already folds in the poller's `mem_abort`.
         chunks_dropped_by_cap: total_chunks_dropped_by_cap,
         // #5024: same breakdown the log line above prints, so a client polling
         // the SSE stream sees it without scraping stderr.
@@ -492,6 +505,7 @@ pub(super) async fn finish_reindex(
     };
     emit_complete_event(
         &progress,
+        terminal_status,
         started,
         peak_rss_mb,
         embedderd_peak_rss_mb,

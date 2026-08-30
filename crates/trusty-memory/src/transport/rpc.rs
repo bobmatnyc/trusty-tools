@@ -184,6 +184,13 @@ impl JsonRpcResponse {
 /// parsing.
 /// What: a sorted, exhaustive list of every method name routed through
 /// `dispatch_tool`. Adding a tool requires extending this constant.
+///
+/// #6397: #149 wrote this constant and only targeted fixes ever extended it, so
+/// every tool added afterwards that nobody patched in by hand was absent for no
+/// reason — the room, wing, task, and dream surfaces, `kg_list_subjects`,
+/// `kg_retract_triple`, and `palace_update`. They are forwarded here. What
+/// stayed off the raw path, and why, is `tests::UNFORWARDED_TOOLS`.
+///
 /// Test: `dispatch_palace_list_returns_empty_array_initially` confirms
 /// the forwarding works end-to-end;
 /// `every_registered_tool_is_forwarded_or_listed_unforwarded` holds this
@@ -192,11 +199,16 @@ const TOOL_METHODS: &[&str] = &[
     "add_alias",
     "console_metrics",
     "discover_aliases",
+    "dream_consolidate_room",
     "get_prompt_context",
     "kg_assert",
     "kg_bootstrap",
     "kg_gaps",
+    // #4776: the subject census that makes `kg_query` — forwarded since #149 —
+    // usable without already knowing an exact subject string.
+    "kg_list_subjects",
     "kg_query",
+    "kg_retract_triple",
     "list_prompt_facts",
     "memory_forget",
     "memory_list",
@@ -208,6 +220,7 @@ const TOOL_METHODS: &[&str] = &[
     "memory_send_message",
     "palace_compact",
     "palace_create",
+    "palace_dream",
     // #5044: `tm memory import --refresh` calls `palace_verify_embedded` by raw
     // name and got -32601 — #6328 registered both tools but not here.
     "palace_embed_sweep",
@@ -215,8 +228,18 @@ const TOOL_METHODS: &[&str] = &[
     "palace_list",
     "palace_reembed",
     "palace_unalias",
+    "palace_update",
     "palace_verify_embedded",
     "remove_prompt_fact",
+    "room_create",
+    "room_list",
+    "room_rename",
+    "task_add",
+    "task_complete",
+    "task_list",
+    "wing_create",
+    "wing_list",
+    "wing_rename",
 ];
 
 /// The protocol arms [`dispatch`] answers before it reaches [`TOOL_METHODS`].
@@ -245,8 +268,9 @@ const PROTOCOL_METHODS: &[&str] = &[
 /// print this count, which turns "the fallback is mounted" from an assumption
 /// into something an operator reads.
 ///
-/// It counts NAMES this function routes, not tools reachable: 47 tool names sit
-/// behind the single `tools/call` envelope and are enumerated by `tools/list`.
+/// It counts NAMES this function routes, not tools reachable: the whole tool
+/// registry sits behind the single `tools/call` envelope and is enumerated by
+/// `tools/list`, whether or not [`TOOL_METHODS`] also spells it out.
 ///
 /// Test: `method_names_covers_every_dispatched_arm`.
 pub fn method_names() -> Vec<&'static str> {
@@ -523,7 +547,7 @@ mod tests {
         );
     }
 
-    /// Registry tools the raw-JSON-RPC path does not forward.
+    /// Registry tools the raw-JSON-RPC path does not forward, and why not.
     ///
     /// Why: `TOOL_METHODS` is an allowlist, so a tool added to the registry and
     /// nowhere else is unreachable by raw name with nothing saying so — #5044,
@@ -531,12 +555,26 @@ mod tests {
     /// `palace_verify_embedded` while `tools/call` reached the same tool. Paired
     /// with `TOOL_METHODS` this list is exhaustive over the registry, so a new
     /// tool has to be entered in one of the two.
-    /// What: names `tools/list` publishes and `TOOL_METHODS` omits. A row
-    /// records that the omission was seen; it is not a claim that the tool
-    /// should stay off the raw path. `chat_*` is the one omission with a
-    /// documented reason — see `uds_consumer_contract.rs`.
-    /// Test: `every_registered_tool_is_forwarded_or_listed_unforwarded`.
+    ///
+    /// What: names `tools/list` publishes and `TOOL_METHODS` omits. #6397
+    /// classified all twenty-three rows this list once held: fourteen carried no
+    /// reason beyond `TOOL_METHODS` never being extended and are now forwarded,
+    /// and every row left here states why it stays. A row is a reason, not a
+    /// record that the omission was noticed.
+    ///
+    /// A row is about the SPELLING of the surface, never about authority:
+    /// `tools/call` already reaches every registered tool over the same socket,
+    /// so forwarding a name adds a second way to say it and no new capability.
+    ///
+    /// Test: `every_registered_tool_is_forwarded_or_listed_unforwarded`,
+    /// `dispatch_refuses_the_deliberately_unforwarded_tools_by_raw_name`.
     const UNFORWARDED_TOOLS: &[&str] = &[
+        // Contract-locked to the `tools/call` envelope.
+        // `uds_consumer_contract.rs`'s
+        // `shared_client_reaches_a_chat_tool_through_the_tools_call_envelope`
+        // asserts a direct `chat_session_create` answers METHOD_NOT_FOUND, and
+        // both consumers send the envelope: trusty-agents' `persona_memory` and
+        // trusty-code's `memory_sink`. Forwarding any of these fails that test.
         "chat_session_add_turn",
         "chat_session_create",
         "chat_session_delete",
@@ -544,22 +582,17 @@ mod tests {
         "chat_session_list",
         "chat_session_recall",
         "chat_turn_append",
-        "dream_consolidate_room",
-        "kg_list_subjects",
-        "kg_retract_triple",
+        // #6397, held for the owner: whole-palace teardown. Its one caller,
+        // trusty-console's `delete_palace_on_socket`, sends `tools/call` and
+        // documents the bare name as unrouted in three doc comments. Open
+        // question: does deleting a palace want a second, shorter spelling?
         "palace_delete",
-        "palace_dream",
-        "palace_update",
-        "room_create",
-        "room_list",
-        "room_rename",
-        "task_add",
-        "task_complete",
-        "task_list",
+        // #6397, held for the owner: not a memory operation — `upgrade`
+        // downloads a build, installs it, and restarts the daemon mid-
+        // connection. trusty-console's search proxy refuses the sibling
+        // daemon's `upgrade` as an unmapped path (`search_uds/map.rs`). Open
+        // question: should a raw-RPC name restart the daemon?
         "upgrade",
-        "wing_create",
-        "wing_list",
-        "wing_rename",
     ];
 
     /// Why: #5044. #6328 registered `palace_verify_embedded` and
@@ -647,6 +680,88 @@ mod tests {
                     error.message
                 );
             }
+        }
+    }
+
+    /// Why: #6397 moved fourteen names out of `UNFORWARDED_TOOLS` and into
+    /// `TOOL_METHODS`. The partition test guards the constant's SHAPE and would
+    /// pass just as well if `dispatch` never reached `dispatch_tool` for any of
+    /// them — #5044's symptom was exactly a name `tools/list` published and the
+    /// raw path refused.
+    /// What: dispatches each newly-forwarded name by raw name against a fresh
+    /// state and asserts none answers `METHOD_NOT_FOUND`. Empty params make each
+    /// handler fail its own palace or argument resolution first, so the routing
+    /// is proven without any of them writing.
+    /// Test: this is the test.
+    #[tokio::test]
+    async fn dispatch_forwards_the_reclassified_tools_by_raw_name() {
+        let state = test_state();
+        for method in [
+            "dream_consolidate_room",
+            "kg_list_subjects",
+            "kg_retract_triple",
+            "palace_dream",
+            "palace_update",
+            "room_create",
+            "room_list",
+            "room_rename",
+            "task_add",
+            "task_complete",
+            "task_list",
+            "wing_create",
+            "wing_list",
+            "wing_rename",
+        ] {
+            let req = JsonRpcRequest {
+                jsonrpc: Some("2.0".to_string()),
+                id: Some(json!(1)),
+                method: method.to_string(),
+                params: Some(json!({})),
+            };
+            let resp = dispatch(&state, req).await;
+            if let Some(error) = resp.error {
+                assert_ne!(
+                    error.code,
+                    error_codes::METHOD_NOT_FOUND,
+                    "{method} is in TOOL_METHODS but the raw-name path refuses \
+                     it: {}",
+                    error.message
+                );
+            }
+        }
+    }
+
+    /// Why: the two rows #6397 left in `UNFORWARDED_TOOLS` for the owner are a
+    /// decision, and a decision nothing asserts is indistinguishable from the
+    /// drift the issue set out to close. trusty-console's `memory_rpc` module
+    /// and `delete_palace_on_socket` both document `palace_delete` as unrouted
+    /// by bare name and send `tools/call` because of it, in a crate with no
+    /// Cargo edge on this one.
+    /// What: dispatches both by raw name and asserts each answers
+    /// `METHOD_NOT_FOUND`. Forwarding either one has to update this test, which
+    /// is where the open question is written down. `chat_*` is covered instead
+    /// by `uds_consumer_contract.rs` over a real socket.
+    /// Test: this is the test.
+    #[tokio::test]
+    async fn dispatch_refuses_the_deliberately_unforwarded_tools_by_raw_name() {
+        let state = test_state();
+        for method in ["palace_delete", "upgrade"] {
+            let req = JsonRpcRequest {
+                jsonrpc: Some("2.0".to_string()),
+                id: Some(json!(1)),
+                method: method.to_string(),
+                params: Some(json!({})),
+            };
+            let resp = dispatch(&state, req).await;
+            let error = resp
+                .error
+                .unwrap_or_else(|| panic!("{method} must not be dispatchable by raw name"));
+            assert_eq!(
+                error.code,
+                error_codes::METHOD_NOT_FOUND,
+                "{method} is held off the raw path on purpose (#6397); \
+                 forwarding it is an owner decision, not a drift fix"
+            );
         }
     }
 

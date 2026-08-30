@@ -28,7 +28,7 @@
 //! - the terminal `data:` framing of a failure. A mid-stream failure becomes one
 //!   `{"type":"error","message":…}` event before the body closes, because the
 //!   SPA reads a closed reindex stream as a COMPLETED reindex
-//!   (`crates/trusty-search/ui/src/lib/views/Indexes.svelte`) and a silent close
+//!   (`crates/trusty-console/ui-search/src/lib/views/Indexes.svelte`) and a silent close
 //!   would report a broken reindex as a finished one.
 //!
 //! A refusal that arrives BEFORE the first item — the reindex stream's "no

@@ -215,7 +215,7 @@ const ENFORCED = [
     // Plain CSS `--trusty-*: #hex`, light under `:root`, dark under
     // `[data-theme='dark']` (#3487).
     name: "trusty-search",
-    file: "crates/trusty-search/ui/src/lib/styles/tokens.css",
+    file: "crates/trusty-console/ui-search/src/lib/styles/tokens.css",
     mode: "hex",
     lightSelector: /:root\s*\{([\s\S]*?)\n\}/,
     darkSelector: /\[data-theme=(['"])dark\1\]\s*\{([\s\S]*?)\n\}/,
