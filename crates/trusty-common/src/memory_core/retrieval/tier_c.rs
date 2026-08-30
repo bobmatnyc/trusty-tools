@@ -395,6 +395,21 @@ pub(super) struct CommitCtx {
     pub palace: PalaceId,
     pub kg: Arc<KnowledgeGraph>,
     pub drawers: Arc<RwLock<Vec<Drawer>>>,
+    /// Test-only stall between the durable commit and the in-memory mirror.
+    ///
+    /// Why: the ordering guard only arbitrates when an abandoned commit's tail
+    /// is still running as the next writer reaches it. That is the production
+    /// shape — #6366's trigger is a slow commit on a large `kg.redb` — but a
+    /// test cannot reproduce it by timing alone, because a test palace commits
+    /// in microseconds. Without a seam the regression test passes whether or
+    /// not the guard holds anything: measured 60/60 green with the guard
+    /// released before the mirror. This is what makes it discriminating.
+    /// What: `None` in every production path. When set, `commit_and_mirror`
+    /// sleeps for it after the durable write and before the mirror, so the
+    /// window the guard covers is wide enough for a second writer to race.
+    /// Test: `an_abandoned_commit_still_leaves_one_claimant_for_the_slot`.
+    #[cfg(test)]
+    pub commit_delay: Option<std::time::Duration>,
 }
 
 /// Commit `drawer` durably and mirror the outcome into the in-memory table, as
@@ -420,6 +435,14 @@ pub(super) struct CommitCtx {
 /// mid-commit therefore still converges: it lands in redb and in `drawers`
 /// together, and the writer behind it retires it normally.
 ///
+/// Panic contract: `commit_mutex` is a `tokio::sync::Mutex` and does NOT
+/// poison. A panic between the durable commit and the mirror unwinds the task,
+/// drops the guard, and releases the mutex with no signal — leaving the write
+/// durable but unmirrored and the next writer free to walk into the fallback
+/// this function exists to close. The mirror block does no fallible work today,
+/// so this is latent. Code inserted between the commit and the mirror must stay
+/// panic-free, or must re-verify the slot on the panic path.
+///
 /// Two writers abandoned in the same window commit in guard-acquisition order,
 /// which is the order their callers reached the commit — not necessarily the
 /// order they took the write mutex. Either order leaves exactly one claimant,
@@ -434,6 +457,19 @@ pub(super) async fn commit_and_mirror(
     let retired = persist_with_retirement(&ctx, &drawer)
         .await
         .context("persist drawer metadata")?;
+
+    // #6366: the seam a test uses to widen the commit window to the shape the
+    // issue is actually about. In production the trigger is a slow commit — a
+    // 326 MB `kg.redb` — so an abandoned write's tail OUTLASTS the next
+    // writer's fresh pipeline, which is the wide window this guard exists to
+    // arbitrate. A test that dispatches its abandoned writer directly, skipping
+    // the pre-commit legs the second writer must still run, closes that window
+    // by construction and would pass whether or not the guard held anything.
+    #[cfg(test)]
+    if let Some(delay) = ctx.commit_delay {
+        tokio::time::sleep(delay).await;
+    }
+
     {
         // #4886: mirror the retirement under the SAME lock as the push, so a
         // reader never sees the newcomer present while the displaced drawer

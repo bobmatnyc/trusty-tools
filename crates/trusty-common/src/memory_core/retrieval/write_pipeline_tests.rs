@@ -309,6 +309,15 @@ mod tests {
     /// The slot every Tier C test in this module contends for.
     const SLOT: &str = "pr:6366/state";
 
+    /// How long an abandoned commit's tail is held open between its durable
+    /// write and its in-memory mirror, so a second writer provably races it.
+    ///
+    /// Why this size: it must exceed the second writer's whole pre-commit
+    /// pipeline, which on a temp-dir palace is sub-millisecond. 250 ms is ~50x
+    /// that, so the ordering the test asserts is decided by the guard rather
+    /// than by which task the scheduler happened to poll first.
+    const COMMIT_STALL: Duration = Duration::from_millis(250);
+
     /// Write through the real pipeline, optionally claiming a Tier C slot.
     fn slot_opts(fact_key: Option<&str>) -> RememberOptions {
         RememberOptions {
@@ -442,6 +451,17 @@ mod tests {
     /// exactly one drawer claims the slot, the index agrees with it, and A —
     /// the abandoned write — is present and retired rather than absent and
     /// still claiming.
+    ///
+    /// Why the [`COMMIT_STALL`] seam is load-bearing, not decoration: A is
+    /// dispatched directly, skipping the pre-commit legs (room resolution,
+    /// classification, admission) B must still run. Without the stall, A's tail
+    /// always finishes before B reaches the guard, so the assertion passes by
+    /// construction — measured 60/60 green with the guard released before the
+    /// mirror, and 60/60 with the guard made a complete no-op. The stall
+    /// restores the production timing regime #6366 is about, where a slow
+    /// commit on a large `kg.redb` makes the abandoned tail OUTLAST the next
+    /// writer's fresh pipeline. With it, the broken-guard variants fail on this
+    /// test's own two-claimant assertion.
     /// Test: itself.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn an_abandoned_commit_still_leaves_one_claimant_for_the_slot() {
@@ -471,7 +491,10 @@ mod tests {
         a.expires_at = Some(chrono::Utc::now() + chrono::Duration::hours(24));
         let a_id = a.id;
         let guard = handle.commit_mutex.clone().lock_owned().await;
-        let tail_a = tokio::spawn(tier_c::commit_and_mirror(handle.commit_ctx(), a, guard));
+        // The stall is what makes this test discriminating — see the doc above.
+        let mut ctx = handle.commit_ctx();
+        ctx.commit_delay = Some(COMMIT_STALL);
+        let tail_a = tokio::spawn(tier_c::commit_and_mirror(ctx, a, guard));
 
         // Writer B goes through the real pipeline while A's commit is in
         // flight. Its own commit must queue behind A's on the order guard.

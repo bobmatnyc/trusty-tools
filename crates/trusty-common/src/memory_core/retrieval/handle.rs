@@ -254,6 +254,9 @@ impl PalaceHandle {
             palace: self.id.clone(),
             kg: Arc::clone(&self.kg),
             drawers: Arc::clone(&self.drawers),
+            // Never stalled in production; a test opts in per commit.
+            #[cfg(test)]
+            commit_delay: None,
         }
     }
 
@@ -613,7 +616,11 @@ impl PalaceHandle {
     /// `force == true`), THEN — unless `allow_secret_like == true` — always
     /// runs [`check_secret`] regardless of `force`, classifies the content,
     /// sets the appropriate TTL when the result is a `SessionEvent`, then
-    /// runs the original embed/upsert/persist pipeline.
+    /// runs the original embed/upsert/persist pipeline under the default
+    /// write-pipeline ceiling.
+    ///
+    /// **An over-budget error does not mean the write did not land** — see
+    /// [`Self::remember_with_options_within`] for the retry contract (#6366).
     /// Test: `remember_rejects_short_content`,
     /// `remember_force_bypasses_filter`, `remember_classifies_session_events`,
     /// `remember_force_still_blocks_secret`,
@@ -650,10 +657,20 @@ impl PalaceHandle {
     /// concurrency tests) can set it without mutating process env.
     /// What: delegates to [`write_pipeline::remember_within`]. On expiry the
     /// pipeline future is dropped, which releases the write mutex, and the
-    /// caller gets a named error. See that module's docs for what a cancelled
-    /// write can leave behind — an orphaned vector (`palace_compact` reclaims
-    /// it) or a drawer durable in redb but not yet in the in-memory table
-    /// (re-hydrated on the next open). Neither loses data.
+    /// caller gets a named error.
+    ///
+    /// **An over-budget error does not mean the write did not land.** Once the
+    /// durable commit has been dispatched it runs to completion regardless of
+    /// the caller's budget — a dropped future cancels neither the
+    /// `spawn_blocking` redb transaction nor an op already queued to the KG
+    /// writer actor — so the drawer can become durable, and visible to
+    /// `recall`, after this call has already returned `Err`. Retrying blind
+    /// therefore DUPLICATES content that carries no `fact_key`; a slotted
+    /// (Tier C) write is idempotent per slot and safe to retry, because the
+    /// retry retires whatever the first attempt left. A caller that must not
+    /// duplicate should re-read before retrying rather than resubmit.
+    /// A write cancelled BEFORE the commit leaves at most an orphaned vector,
+    /// which `palace_compact` reclaims. Neither case loses data.
     /// Test: `write_pipeline_tests`.
     pub async fn remember_with_options_within(
         &self,
