@@ -25,9 +25,13 @@
 //!   immediately before the delete, and the request carries the path the
 //!   operator actually read so a root that moved refuses instead of deleting.
 //! - **The data is never destroyed.** `delete_data` is passed explicitly
-//!   `false`. The root is not on disk, so there is nothing beside it to reclaim,
-//!   and an explicit argument cannot be moved by a change to the daemon's own
-//!   default.
+//!   `false`, so an explicit argument cannot be moved by a change to the
+//!   daemon's own default. That data is not absent — it is untouched. A
+//!   `colocated` index keeps its corpus BESIDE the root, and the daemon
+//!   declined to judge that root precisely because it could not tell whether it
+//!   is gone, so an unmounted volume's data is still there; a non-colocated
+//!   index's corpus sits in trusty-search's own directory, plainly on disk.
+//!   This route removes the registration and nothing else.
 //!
 //! Test: the `deregister_*` tests below, plus
 //! `deregister_route_rejects_a_traversal_id` for the pre-dial guard.
@@ -73,7 +77,7 @@ pub struct DeregisterUnjudgedRequest {
 /// Test: `deregister_settles_a_row_the_daemon_still_cannot_check`,
 /// `deregister_refuses_a_row_whose_root_moved_since_the_review`,
 /// `deregister_refuses_a_row_the_census_now_calls_stale`,
-/// `deregister_reports_a_dead_daemon_as_unreachable`.
+/// `deregister_refuses_when_the_daemon_cannot_be_reached`.
 pub(crate) async fn deregister_unjudged_on_socket(
     socket: &Path,
     id: &str,
@@ -111,9 +115,9 @@ pub(crate) async fn deregister_unjudged_on_socket(
         };
     }
 
-    // #6423: `delete_data` is false EXPLICITLY. A root that is not on disk has
-    // no data beside it to destroy, and an explicit argument cannot be moved by
-    // a change to the daemon's default.
+    // #6423: `delete_data` is false EXPLICITLY, so a change to the daemon's
+    // default cannot move it. The corpus is left where it is — see the module
+    // docs for why "left" is not "absent".
     delete_index_on_socket(socket, id, false, Some(&current_root)).await
 }
 
@@ -127,7 +131,7 @@ pub(crate) async fn deregister_unjudged_on_socket(
 /// metrics cache on success so the roster the UI re-fetches reflects the change.
 /// Test: `deregister_route_rejects_a_traversal_id`,
 /// `deregister_route_rejects_an_empty_reviewed_path`,
-/// `deregister_route_reports_an_unreachable_daemon`.
+/// `deregister_route_refuses_when_the_daemon_cannot_be_reached`.
 pub async fn deregister_unjudged_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<DeregisterUnjudgedRequest>,
@@ -269,10 +273,12 @@ mod tests {
 
     /// Why (#6423): a failed deregistration is reported as failed. A daemon that
     /// never answered has not removed anything, and reading that as done leaves
-    /// the operator believing a registration is gone.
+    /// the operator believing a registration is gone. The verdict is `Refused`
+    /// rather than `Unreachable` because the guard, not the delete, is what
+    /// declined — the reason carries the transport failure that stopped it.
     /// Test: this is the test.
     #[tokio::test(flavor = "multi_thread")]
-    async fn deregister_reports_a_dead_daemon_as_unreachable() {
+    async fn deregister_refuses_when_the_daemon_cannot_be_reached() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let verdict =
             deregister_unjudged_on_socket(&tmp.path().join("absent.sock"), "retired", "/retired/x")
@@ -315,6 +321,26 @@ mod tests {
             post_through_router(json!({ "id": "../etc", "root_path": "/gone" })).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert_eq!(body["ok"], json!(false));
+    }
+
+    /// Why (#6423): the route's own unreachable path. A well-formed request
+    /// that clears both pre-dial guards still must not read as done when
+    /// nothing answers — the id and the path were fine, and the registration is
+    /// still registered.
+    /// Test: this is the test.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deregister_route_refuses_when_the_daemon_cannot_be_reached() {
+        let (status, body) =
+            post_through_router(json!({ "id": "retired", "root_path": "/gone/retired" })).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["ok"], json!(false));
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not deregistered"),
+            "the body must say the deregistration did not happen: {body}"
+        );
     }
 
     /// Why (#6423): without the reviewed path there is nothing to check the
