@@ -1,0 +1,73 @@
+# Zero-tests-ran gate for the trusty-tools workspace (issue #4307).
+#
+# `cargo test` with a filter that matches zero tests exits 0 and prints `ok`.
+# Where a test module's file path differs from its module path via `#[path]`,
+# the natural filter — the one derived from the file name — silently matches
+# nothing and the run reports green having proved nothing.
+# `scripts/check_test_count.sh` wraps a test invocation and refuses an aggregate
+# of zero.
+#
+# This job does not merely run the guard's fixtures. It runs the guard around
+# two REAL cargo invocations — the mistyped filter and the correct one from the
+# issue — and asserts each verdict, so the gate is proven against live cargo
+# output every run rather than against a captured string that can go stale.
+#
+# Not a required branch-protection context: adding one wedges every open PR that
+# predates it (#5962). Promote it deliberately, not as a side effect.
+name: Test count
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    # Explicit activity types (#4179). `edited` is NOT in GitHub's default set
+    # (opened/synchronize/reopened) and is the event a base-branch RETARGET
+    # fires, so without it a stacked PR retargeted onto main never re-triggers
+    # and can merge with zero checks — PR #3838 did exactly that.
+    # `ready_for_review` covers a draft being marked ready. Matches ci.yml.
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+    branches: [main]
+
+# Per-COMMIT concurrency group on push so a merge never cancels the previous
+# merge's verification (#4179); per-ref group on pull_request so a new push
+# still supersedes the superseded run. Matches ci.yml.
+concurrency:
+  group: test-count-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'edited' }}
+
+jobs:
+  test-count:
+    name: Refuse a test run that ran nothing
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@1.94
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test-count
+
+      # Fixtures first. A guard whose refusing branch is never exercised is
+      # untested code — and this guard exists precisely because "green" was
+      # printed by something that did nothing.
+      - name: Guard selftest (fixtures, no toolchain)
+        run: bash scripts/check_test_count_selftest.sh
+
+      # `trusty-progress` is the smallest crate in the workspace (two
+      # dependencies), so both live cases below compile once and run in seconds.
+      - name: A real zero-match filter must be refused (exit 3)
+        run: |
+          set +e
+          bash scripts/check_test_count.sh -- \
+            cargo test -p trusty-progress --lib no_such_test_name_4307
+          status=$?
+          set -e
+          if [ "$status" -ne 3 ]; then
+            echo "::error::the guard let a zero-match filter through (exit $status)"
+            exit 1
+          fi
+
+      - name: A real matching run must pass (exit 0)
+        run: bash scripts/check_test_count.sh -- cargo test -p trusty-progress --lib
