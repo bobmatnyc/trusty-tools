@@ -108,6 +108,7 @@ pub fn order_for_display(services: &mut [ServiceInfo]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connector::ServiceLifecycle;
 
     /// Why: the registry must return exactly six connectors in order (search,
     /// memory, analyze, review, mpm — #1222; agents — #3331 for the
@@ -126,6 +127,42 @@ mod tests {
         assert_eq!(cs[5].id(), "trusty-agents");
     }
 
+    /// REGRESSION (#6416): the de-daemonized members must be exactly
+    /// trusty-review (#6290 retired its daemon) and trusty-analyze (#6287 and
+    /// #6350 made its socket server on-demand). Every other member is a resident
+    /// daemon whose `Available` really does mean "installed but stopped".
+    ///
+    /// Why: this reads the per-member constant off the trait rather than running
+    /// a detection pass, so it asserts the roster without dialling a socket or
+    /// spawning a binary.
+    /// What: partitions `all_connectors()` by lifecycle and names both halves.
+    /// Test: this test itself.
+    #[test]
+    fn on_demand_members_are_exactly_review_and_analyze() {
+        let connectors = all_connectors();
+        let on_demand: Vec<&str> = connectors
+            .iter()
+            .filter(|c| c.lifecycle() == ServiceLifecycle::OnDemand)
+            .map(|c| c.id())
+            .collect();
+        assert_eq!(on_demand, vec!["trusty-analyze", "trusty-review"]);
+
+        let daemons: Vec<&str> = connectors
+            .iter()
+            .filter(|c| c.lifecycle() == ServiceLifecycle::Daemon)
+            .map(|c| c.id())
+            .collect();
+        assert_eq!(
+            daemons,
+            vec![
+                "trusty-search",
+                "trusty-memory",
+                "trusty-mpm",
+                "trusty-agents"
+            ]
+        );
+    }
+
     /// Build a `ServiceInfo` carrying only the two fields ordering reads.
     fn info(id: &str, status: ServiceStatus) -> ServiceInfo {
         ServiceInfo {
@@ -135,6 +172,7 @@ mod tests {
             version: None,
             url: None,
             hint: None,
+            lifecycle: ServiceLifecycle::Daemon,
         }
     }
 

@@ -13,6 +13,8 @@
  * `crates/trusty-console/ui`.
  */
 
+import { cardPresentation } from './statusPresentation.js';
+
 /**
  * Does this key activate a `role="button"` element?
  *
@@ -71,17 +73,6 @@ export function sanitizeElementId(value) {
 }
 
 /**
- * The statuses whose card renders an explanatory hint paragraph.
- *
- * Why: the hint is the sentence telling an operator what to DO about a card
- * that is not running, so it belongs in the card's accessible description.
- * The three entries mirror the three hint branches in `ServiceCard.svelte` —
- * a status added to one must be added to the other, or a screen reader loses
- * the sentence a sighted user can see.
- */
-const STATUSES_WITH_HINT = new Set(['absent', 'available', 'degraded']);
-
-/**
  * Element ids that describe a card, for its `aria-describedby`.
  *
  * Why: #6370 — a clickable card takes its accessible NAME from `aria-label`,
@@ -94,17 +85,19 @@ const STATUSES_WITH_HINT = new Set(['absent', 'available', 'degraded']);
  * visible one.
  *
  * What: always the status badge; the version when the service reports one;
- * the hint paragraph for the statuses that render one. Ids are derived from
- * `service.id`, which is unique per card, with anything outside
- * `[A-Za-z0-9_-]` replaced so the result is a usable id.
+ * the hint paragraph when the card renders one. Whether it does is asked of
+ * `cardPresentation` (#6416) rather than kept as a second list of statuses
+ * here — a list that drifts is how a screen reader loses a sentence a sighted
+ * user can see. Ids are derived from `service.id`, which is unique per card,
+ * with anything outside `[A-Za-z0-9_-]` replaced so the result is a usable id.
  *
- * @param {{ id: string, status: string, version?: string }} service
+ * @param {{ id: string, status: string, version?: string, lifecycle?: string }} service
  * @returns {string} A space-separated id list, in reading order.
  */
 export function cardDescribedBy(service) {
   const sid = sanitizeElementId(service?.id);
   const ids = [`svc-${sid}-status`];
   if (service?.version) ids.push(`svc-${sid}-version`);
-  if (STATUSES_WITH_HINT.has(service?.status)) ids.push(`svc-${sid}-hint`);
+  if (cardPresentation(service).hint) ids.push(`svc-${sid}-hint`);
   return ids.join(' ');
 }
