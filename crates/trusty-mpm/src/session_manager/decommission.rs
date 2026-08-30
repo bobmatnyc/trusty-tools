@@ -26,7 +26,7 @@ use super::search_gc;
 use super::workspace_guard::is_safe_to_remove;
 use super::worktree_protection;
 use super::worktree_registry;
-use super::worktree_safety::{DirtyWorktree, inspect_dirt};
+use super::worktree_safety::{DirtyWorktree, inspect_dirt, worktree_remove_command};
 
 /// Sentinel file written by [`create_session_worktree`] into every SM-created
 /// per-session git worktree (#1845 item 5).
@@ -318,13 +318,10 @@ pub(super) fn remove_session_worktree(path: &Path) -> WorktreeRemoval {
     };
     let repo_root = repo_root.as_path();
     // Step 1: git worktree remove --force <path> (run from repo root).
-    // Pass repo_root as an OsStr-safe Path arg to avoid lossy UTF-8 coercion (#1840).
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(repo_root)
-        .args(["worktree", "remove", "--force"])
-        .arg(path)
-        .output();
+    // #6391: through the hardened builder, which keeps the #1840 OsStr-safe
+    // Path args and additionally strips the env vars that would point
+    // `git worktree` at a different repository than `-C` names.
+    let out = worktree_remove_command(repo_root, path).output();
     match out {
         Ok(o) if o.status.success() => {
             info!(path = %path.display(), "decommission: git worktree removed (incl. ref)");
