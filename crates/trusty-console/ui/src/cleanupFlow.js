@@ -28,6 +28,17 @@ export const CENSUS_URL = '/api/search/registry/orphans';
 export const PRUNE_URL = '/api/console/search/prune-indexes';
 
 /**
+ * Where the prune panel's "delete the on-disk data too" checkbox starts.
+ *
+ * `true` since #6422: the owner ruling made purging the data the default on
+ * every delete-index surface, and keeping it the explicit opt-out. A stale
+ * registration's corpus is the disk this whole panel exists to reclaim, so
+ * unticking the box is the exception. Exported rather than written inline in
+ * `StaleIndexCleanup.svelte` so the default is covered by `cleanupFlow.test.js`.
+ */
+export const PRUNE_DELETE_DATA_DEFAULT = true;
+
+/**
  * The registrations this UI may offer for deletion.
  *
  * Why (#6371): the census reports two lists for a reason. `orphans` is what the

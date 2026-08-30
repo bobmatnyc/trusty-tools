@@ -671,3 +671,143 @@ async fn create_index_omits_malformed_exclude_globs() {
          that entry and narrow the index by less than the caller asked: {mixed:?}"
     );
 }
+
+// ----------------------------------------------------------------
+// Issue #6422 — delete_index purges on-disk data by default
+// ----------------------------------------------------------------
+
+/// Dispatch `delete_index` against a mock daemon and return the DELETE it made.
+///
+/// Why: the whole #6422 change on this surface is which query string leaves the
+/// tool, and only the daemon's view of the request can prove it. The mock
+/// answers the shape `DELETE /indexes/{id}` really answers so the dispatcher
+/// takes its success path.
+/// What: returns the full request URI (path plus query) the daemon received.
+/// Test: used by the `delete_index_*` tests below.
+async fn captured_delete_index_uri(args: Value) -> String {
+    use axum::routing::delete;
+    use axum::{Json, Router};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let captured_clone = Arc::clone(&captured);
+
+    async fn delete_handler(
+        axum::extract::State(captured): axum::extract::State<Arc<Mutex<Option<String>>>>,
+        uri: axum::http::Uri,
+    ) -> Json<Value> {
+        *captured.lock().await = Some(uri.to_string());
+        Json(serde_json::json!({
+            "id": "idx", "ok": true, "removed": true, "data_deleted": true
+        }))
+    }
+
+    let app = Router::new()
+        .route("/indexes/{id}", delete(delete_handler))
+        .with_state(captured_clone);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let server = McpServer::new(format!("http://{addr}"));
+    let resp = server.dispatch(req("delete_index", args)).await;
+    assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+    let uri = captured.lock().await.clone();
+    uri.expect("no DELETE captured")
+}
+
+/// Why (#6422, closure condition 1): the owner ruling, on the MCP surface. A
+/// caller that names only the index gets the destructive default, and the flag
+/// is sent EXPLICITLY rather than left to the daemon's own default, which is
+/// still the opposite (#4123).
+/// Test: this is the test.
+#[tokio::test]
+async fn delete_index_purges_data_by_default() {
+    let uri = captured_delete_index_uri(serde_json::json!({ "index_id": "idx" })).await;
+    assert_eq!(
+        uri, "/indexes/idx?delete_data=true",
+        "an argument-free delete_index must ask for the on-disk data too"
+    );
+}
+
+/// Why (#6422, closure condition 2): deregister-only survives as the explicit
+/// opt-out. Against the pre-fix code this argument did not exist at all and the
+/// tool sent `delete_data=true` regardless, so a caller asking to keep the
+/// corpus destroyed it — this assertion fails there.
+/// Test: this is the test.
+#[tokio::test]
+async fn delete_index_honours_the_deregister_only_opt_out() {
+    let uri =
+        captured_delete_index_uri(serde_json::json!({ "index_id": "idx", "delete_data": false }))
+            .await;
+    assert_eq!(uri, "/indexes/idx?delete_data=false");
+
+    let explicit_true =
+        captured_delete_index_uri(serde_json::json!({ "index_id": "idx", "delete_data": true }))
+            .await;
+    assert_eq!(explicit_true, "/indexes/idx?delete_data=true");
+}
+
+/// Why (#4123's rule, carried into #6422): a destructive toggle is never
+/// guessed at. Coercing `"false"` to the default would destroy the corpus the
+/// caller asked to keep, and dropping it silently would do the same.
+/// Test: this is the test — no daemon is needed, the error precedes the call.
+#[tokio::test]
+async fn delete_index_rejects_a_non_boolean_delete_data() {
+    let server = McpServer::new("http://127.0.0.1:1");
+    for bad in [
+        serde_json::json!("false"),
+        serde_json::json!(0),
+        serde_json::json!([]),
+    ] {
+        let resp = server
+            .dispatch(req(
+                "delete_index",
+                serde_json::json!({ "index_id": "idx", "delete_data": bad }),
+            ))
+            .await;
+        let err = resp
+            .error
+            .expect("a non-boolean delete_data must be refused");
+        assert_eq!(err.code, error_codes::INVALID_PARAMS, "{bad}");
+        assert!(
+            err.message.contains("delete_data"),
+            "the refusal must name the field: {}",
+            err.message
+        );
+    }
+}
+
+/// Why (#6422): the schema is what a remote caller reads to learn the opt-out
+/// exists. A default flipped in the dispatcher and not advertised here is a
+/// change no caller can see.
+/// Test: this is the test.
+#[tokio::test]
+async fn delete_index_schema_advertises_the_opt_out() {
+    let server = McpServer::new("http://127.0.0.1:1");
+    let resp = server.dispatch(req("tools/list", Value::Null)).await;
+    let result = resp.result.expect("expected result");
+    let tools = result
+        .get("tools")
+        .and_then(Value::as_array)
+        .expect("array");
+    let tool = tools
+        .iter()
+        .find(|t| t.get("name").and_then(Value::as_str) == Some("delete_index"))
+        .expect("delete_index missing from tools/list");
+    assert_eq!(
+        tool["inputSchema"]["properties"]["delete_data"]["default"],
+        serde_json::json!(true),
+        "the schema must say the data goes by default: {tool}"
+    );
+    assert!(
+        tool["description"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("delete_data: false"),
+        "the description must name the opt-out: {tool}"
+    );
+}

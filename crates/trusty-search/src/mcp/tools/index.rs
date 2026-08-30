@@ -55,6 +55,33 @@ fn string_array(args: &Value, key: &str) -> Option<Vec<Value>> {
     (!items.is_empty() && items.iter().all(Value::is_string)).then(|| items.clone())
 }
 
+/// Read `delete_index`'s `delete_data` opt-out.
+///
+/// Why (#6422): the owner ruling made purging the on-disk data the default on
+/// every delete-index surface, so an absent argument means DELETE THE DATA and
+/// `false` is the explicit deregister-only opt-out. This is a deliberate
+/// behaviour change for remote callers: an argument-free `delete_index` used to
+/// reach `?delete_data=true` too, but the schema now advertises the choice, so
+/// the value a caller sends has to be read rather than assumed.
+///
+/// What: absent or `null` ⇒ `true`. A boolean is honoured. Anything else is an
+/// `InvalidParams` error rather than a coerced value — #4123 established that a
+/// destructive toggle is never guessed at, and coercing `"false"` to the
+/// default would destroy the corpus a caller asked to keep.
+/// Test: `delete_index_purges_data_by_default`,
+/// `delete_index_honours_the_deregister_only_opt_out`,
+/// `delete_index_rejects_a_non_boolean_delete_data`.
+fn delete_data_arg(args: &Value) -> Result<bool, DispatchError> {
+    match args.get("delete_data") {
+        None | Some(Value::Null) => Ok(true),
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(other) => Err(DispatchError::InvalidParams(format!(
+            "delete_data must be a boolean (true deletes the on-disk data, \
+             false deregisters only); got {other}"
+        ))),
+    }
+}
+
 /// Route one of the eight index-management tool names to the correct daemon
 /// call.
 ///
@@ -145,14 +172,16 @@ pub(super) async fn dispatch_index_tool(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            // Issue #4123: `DELETE /indexes/:id` now preserves on-disk data
-            // unless `delete_data=true` is passed. This tool's descriptor
-            // promises "Delete a registered index and all its data", so it
-            // opts in explicitly to keep that contract — without this the
-            // tool would silently stop reclaiming disk.
+            // #6422: the on-disk data goes by default, and `delete_data: false`
+            // is the explicit deregister-only opt-out. The daemon's own default
+            // is still the opposite (#4123), so the flag is always sent.
+            let delete_data = match delete_data_arg(args) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             Some(
                 server
-                    .delete(&format!("/indexes/{index_id}?delete_data=true"))
+                    .delete(&format!("/indexes/{index_id}?delete_data={delete_data}"))
                     .await,
             )
         }

@@ -586,7 +586,7 @@ this table is generated from it, not maintained by hand.
 | `chat` | `index_id`, `api_key?`, `history?`, `message?`, `model?`, `question?`, `top_k?` | Ask a natural-language question about the indexed codebase. |
 | `console_metrics` | — | Return a ConsoleMetricsReport with daemon health and index aggregate statistics (index_count, warm_boot_degraded, index list with… |
 | `create_index` | `id`, `root_path`, `exclude_globs?`, `follow_links?` | Register a new (empty) index. |
-| `delete_index` | `index_id` | Delete a registered index and all its data |
+| `delete_index` | `index_id`, `delete_data?` | Delete a registered index and all its on-disk data. |
 | `get_call_chain` | `index_id`, `entry_point`, `direction?`, `include_source?`, `max_depth?` | Annotated call tree for a function entry point (issue #76). |
 | `grep` | `pattern`, `case_insensitive?`, `context?`, `context_after?`, `context_before?`, `files_with_matches?`, `fixed_strings?`, `glob?`, `index_id?`, `invert_match?`, `max_count?`, `max_results?`, `multiline?`, `word_regexp?` | Search indexed files using regex/literal patterns with ripgrep-compatible options. |
 | `index_file` | `index_id`, `path`, `content` | Add or update one file in an index |

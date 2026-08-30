@@ -186,18 +186,22 @@ pub(crate) async fn prune_indexes_on_socket(
 }
 
 /// The body `POST /api/console/search/prune-indexes` takes.
-#[derive(Debug, Default, Deserialize)]
+///
+/// No `Default` derive (#6422): a derived one would answer `delete_data: false`
+/// while the serde default answers `true`, which is two answers to the one
+/// question this type exists to settle.
+#[derive(Debug, Deserialize)]
 pub struct PruneRequest {
     /// The registration ids the operator confirmed, from the daemon's census.
     #[serde(default)]
     ids: Vec<String>,
     /// Destroy each index's on-disk corpus as well as its registration.
     ///
-    /// Absent ⇒ `false`, matching trusty-search's own contract since #4123: a
-    /// bare delete deregisters and preserves the data. A stale registration's
-    /// data is usually worth reclaiming too, but that is the operator's call to
-    /// make in the confirm step, not this route's default.
-    #[serde(default)]
+    /// Absent ⇒ `true` (#6422) — see
+    /// [`crate::routes::deletes::purge_data_by_default`]. A stale
+    /// registration's data is the disk the prune exists to reclaim, so the
+    /// operator's call in the confirm step is whether to KEEP it.
+    #[serde(default = "crate::routes::deletes::purge_data_by_default")]
     delete_data: bool,
 }
 
@@ -854,6 +858,56 @@ mod tests {
                 "every failed row must name the daemon: {body}"
             );
         }
+    }
+
+    /// Why (#6422, closure condition 1): the owner ruling, on the batch prune.
+    /// A body naming only `ids` reclaims the disk. Against `origin/main` the
+    /// absent field defaulted to `false` and every delete deregistered while
+    /// leaving the corpus, so this assertion fails there.
+    /// What: drives the real router against a stub that records the params of
+    /// the `search.index.delete` it receives, with a census that still lists the
+    /// id so the #6380 re-check passes.
+    /// Test: this is the test.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn prune_route_purges_by_default() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Value::Null));
+        let recorder = std::sync::Arc::clone(&seen);
+        let socket = crate::routes::deletes::tests::stub_search_socket(
+            tmp.path(),
+            move |request: &Value| {
+                let result = if request["method"] == json!("search.registry.orphans") {
+                    json!({
+                        "orphans": [{ "id": "doomed-a", "root_path": "/gone/doomed-a" }],
+                        "indeterminate": [], "live_count": 0, "total": 1,
+                    })
+                } else {
+                    if let Ok(mut slot) = recorder.lock() {
+                        *slot = request["params"].clone();
+                    }
+                    json!({ "id": "doomed-a", "removed": true, "data_deleted": true,
+                            "quiesced": true })
+                };
+                json!({ "jsonrpc": "2.0", "id": 1, "result": result })
+            },
+        );
+
+        let router = build_router(AppState::new(vec![]).with_search_socket(socket));
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/console/search/prune-indexes")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "ids": ["doomed-a"] }).to_string()))
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::OK, "the stub confirms the prune");
+
+        let params = seen.lock().expect("lock").clone();
+        assert_eq!(
+            params["delete_data"],
+            json!(true),
+            "a prune body with no delete_data must reclaim the disk: {params}"
+        );
     }
 
     // ── compact ──────────────────────────────────────────────────────────────

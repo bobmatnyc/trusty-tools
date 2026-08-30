@@ -293,14 +293,28 @@ pub async fn delete_palace_handler(
     verdict.into_response()
 }
 
+/// Whether an absent `delete_data` destroys the on-disk corpus (#6422).
+///
+/// Why: the owner ruling made purging the data the default on every
+/// delete-index surface, so the console's own route answers to it too — a
+/// caller that omits the parameter gets the purge, and `delete_data=false` is
+/// the explicit deregister-only opt-out. This deliberately does NOT match
+/// trusty-search's own wire default, which is still the #4123 `false`; the
+/// console always sends the flag explicitly, so the two never have to agree.
+/// Test: `index_delete_route_purges_by_default`,
+/// `prune_route_purges_by_default`.
+pub(crate) fn purge_data_by_default() -> bool {
+    true
+}
+
 /// Query parameters for the index-delete route.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct IndexDeleteParams {
     /// Destroy the index's on-disk corpus as well as its registration.
     ///
-    /// Absent ⇒ `false`, matching trusty-search's own contract since #4123: a
-    /// bare delete deregisters and preserves the data.
-    #[serde(default)]
+    /// Absent ⇒ `true` (#6422) — see [`purge_data_by_default`]. Send
+    /// `delete_data=false` to deregister only.
+    #[serde(default = "purge_data_by_default")]
     delete_data: bool,
 }
 
@@ -947,6 +961,73 @@ pub(crate) mod tests {
         assert!(
             body["error"].as_str().unwrap_or_default().contains('/'),
             "the error must name the offending character: {body}"
+        );
+    }
+
+    /// Drive the real router against a stub trusty-search socket and return the
+    /// `search.index.delete` params the daemon actually received.
+    ///
+    /// Why (#6422): the console route's default is only observable in the
+    /// request that leaves it. Reading the deserialized struct would test serde,
+    /// not the route.
+    async fn params_seen_by_the_daemon(uri: &str) -> Value {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Value::Null));
+        let recorder = std::sync::Arc::clone(&seen);
+        let socket = stub_search_socket(tmp.path(), move |request: &Value| {
+            if let Ok(mut slot) = recorder.lock() {
+                *slot = request["params"].clone();
+            }
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": { "id": request["params"]["index_id"].clone(), "removed": true,
+                            "data_deleted": true, "quiesced": true },
+            })
+        });
+        let router = build_router(AppState::new(vec![]).with_search_socket(socket));
+        let req = Request::builder()
+            .method("DELETE")
+            .uri(uri)
+            .body(Body::empty())
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "the stub confirms the delete"
+        );
+        seen.lock().expect("lock").clone()
+    }
+
+    /// Why (#6422, closure condition 1): the owner ruling, on the console's own
+    /// route. A `DELETE` with no query purges the corpus. Against `origin/main`
+    /// the absent parameter defaulted to `false` and the daemon received
+    /// `delete_data: false`, so this assertion fails there.
+    /// Test: this is the test.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn index_delete_route_purges_by_default() {
+        let params = params_seen_by_the_daemon("/api/console/search/indexes/scratch").await;
+        assert_eq!(
+            params["delete_data"],
+            json!(true),
+            "an unqualified console delete must take the on-disk data too: {params}"
+        );
+    }
+
+    /// Why (#6422, closure condition 2): deregister-only survives as the
+    /// explicit opt-out, and the console must forward it verbatim rather than
+    /// re-deriving it.
+    /// Test: this is the test.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn index_delete_route_honours_the_deregister_only_opt_out() {
+        let params =
+            params_seen_by_the_daemon("/api/console/search/indexes/scratch?delete_data=false")
+                .await;
+        assert_eq!(
+            params["delete_data"],
+            json!(false),
+            "the opt-out must reach the daemon: {params}"
         );
     }
 
