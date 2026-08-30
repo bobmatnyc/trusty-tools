@@ -215,6 +215,19 @@ impl DiffContentIndex {
         }
         hit
     }
+
+    /// Whether `cited_path` names a file this changeset touches.
+    ///
+    /// Why: #1873 — a finding can assert a file is ABSENT from the diff, and
+    /// refuting that assertion needs the changeset's file list, not its
+    /// content. The index already holds every touched path (including Stage-A
+    /// exclusions), so the absence check reuses it rather than rebuilding one.
+    /// What: `true` when [`Self::lookup`] resolves the path, exactly (after
+    /// normalization) or by unique basename.
+    /// Test: `refutes_a_missing_file_claim_when_the_file_is_in_the_diff`.
+    pub fn contains_path(&self, cited_path: &str) -> bool {
+        self.lookup(cited_path).is_some()
+    }
 }
 
 // ─── Public entry point ─────────────────────────────────────────────────────────

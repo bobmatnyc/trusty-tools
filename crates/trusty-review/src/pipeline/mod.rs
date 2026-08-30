@@ -24,6 +24,7 @@
 //!
 //! Test: each submodule carries its own unit tests.
 
+pub mod absence_claim;
 pub mod citation_check;
 // Why: the grounding guard for package-registry / version-existence claims
 // (#4081) — kept separate from `finding_hygiene` (self-admission markers) and

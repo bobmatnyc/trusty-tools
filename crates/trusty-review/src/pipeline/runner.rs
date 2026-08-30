@@ -654,6 +654,12 @@ pub async fn run_review(
     let cite_index = crate::pipeline::citation_check::DiffContentIndex::from_filtered(&filtered);
     crate::pipeline::citation_check::enforce_citation_integrity(&mut parsed.findings, &cite_index);
 
+    // ── Step 7-absent: refute "this file is not in the diff" claims (#1873) ─
+    // A render truncation can hide a file's content from this path's single
+    // prompt the way chunking hides it from a map call, so the claim is checked
+    // against the changeset here too.
+    crate::pipeline::absence_claim::drop_refuted_absence_claims(&mut parsed.findings, &cite_index);
+
     // ── Step 7-relax: the model's own raw verdict/grade rested on the SAME
     // findings we may have just wiped out entirely — relax it too (#4042,
     // #4044). See `finding_hygiene::relax_verdict_if_evidence_wiped` doc for

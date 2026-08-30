@@ -277,6 +277,89 @@ async fn run_review_oversized_diff_mapreduce_reviews_tail_signature() {
     );
 }
 
+/// Returns the #1873 phantom — a BLOCK whose only finding calls a file that IS
+/// in the changeset "not present in diff" — for the chunk carrying `marker`,
+/// and APPROVEs everything else.
+///
+/// Why: reproduces the cross-chunk blindness verbatim. The map call reviewing
+/// `src/file0.rs` cannot see the chunk that adds `src/big.rs`, so it reasons
+/// correctly from its own chunk to a conclusion the whole changeset refutes.
+/// What: one prompt-substring match, one hard-coded finding.
+/// Test: `mapreduce_phantom_missing_file_finding_does_not_block`.
+struct PhantomMissingFileReviewer {
+    marker: String,
+}
+
+#[async_trait]
+impl LlmProvider for PhantomMissingFileReviewer {
+    fn name(&self) -> &str {
+        "phantom-missing-file"
+    }
+    async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+        let body = req
+            .messages
+            .iter()
+            .map(|m| m.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = if body.contains(self.marker.as_str()) {
+            r#"{"verdict":"BLOCK","summary":"missing module","findings":[{"title":"module missing","body":"This file imports from src/file0.rs, which is not present in diff - possible compile break.","severity":"high","confidence":0.95,"file":"src/big.rs","line":1,"code_provable":true}]}"#
+        } else {
+            r#"{"verdict":"APPROVE","summary":"ok","findings":[]}"#
+        };
+        Ok(LlmResponse {
+            text: text.to_string(),
+            model: req.model.clone(),
+            input_tokens: 10,
+            output_tokens: 5,
+            latency_ms: 1,
+            cost_usd: 0.0,
+            finish_reason: Some("stop".to_string()),
+        })
+    }
+}
+
+/// REGRESSION (#1873): a chunk claiming a file is missing from the diff cannot
+/// BLOCK a changeset that contains that file.
+///
+/// Why: the reported harm — `review_pr` returned BLOCK / grade F on PR #1872
+/// off one 0.55-confidence finding calling `doctor_fs_checks.rs` "not present
+/// in diff", while the file was in the PR, the crate compiled, and the suite
+/// passed. It happened on two consecutive reviews and stopped the merge.
+/// What: runs an over-cap diff through map-reduce with a reviewer that emits
+/// that finding for one chunk; asserts the verdict stays APPROVE and the
+/// phantom reaches neither the findings nor the rendered review. Pre-fix the
+/// verdict was BLOCK.
+/// Test: this test itself (no network).
+#[tokio::test]
+async fn mapreduce_phantom_missing_file_finding_does_not_block() {
+    let (diff, tail_signature) = oversized_multi_file_diff();
+    let (source, _tmp) = local_source(&diff);
+
+    // Key on the tail file's distinctive signature — the one chunk marker
+    // `run_review_oversized_diff_mapreduce_reviews_tail_signature` already
+    // proves reaches exactly one map prompt.
+    let llm: Arc<dyn LlmProvider> = Arc::new(PhantomMissingFileReviewer {
+        marker: tail_signature.to_string(),
+    });
+    let config = ReviewConfig::load(None);
+
+    let result = run_review(&config, input(source), deps(llm)).await;
+
+    assert_eq!(
+        result.verdict,
+        Verdict::Approve,
+        "a claim the changeset itself refutes must not drive the verdict (#1873)"
+    );
+    assert!(
+        !result
+            .findings
+            .iter()
+            .any(|f| f.description.contains("not present in diff")),
+        "the refuted finding must not reach the rendered review (#1873)"
+    );
+}
+
 /// Selectively fails for prompts containing `fail_marker`, succeeds otherwise.
 /// Lets us inject exactly ONE LLM-error failure into a multi-chunk map-reduce
 /// run without failing every chunk.
