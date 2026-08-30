@@ -216,6 +216,44 @@ async fn deep_analysis_calls_the_daemon_method() {
     }
 }
 
+// ── #5056: MCP counterpart of `analyze.scip_status` ──────────────────────
+
+#[tokio::test]
+async fn tools_list_includes_scip_status() {
+    let server = AnalyzerMcpServer::new("http://127.0.0.1:1");
+    let resp = server.dispatch(req("tools/list", Value::Null)).await;
+    let result = resp.result.expect("expected result");
+    let tools = result
+        .get("tools")
+        .and_then(Value::as_array)
+        .expect("array");
+    let names: Vec<&str> = tools
+        .iter()
+        .filter_map(|t| t.get("name").and_then(Value::as_str))
+        .collect();
+    assert!(names.contains(&"scip_status"), "got {names:?}");
+}
+
+#[tokio::test]
+async fn handle_scip_status_calls_the_scip_status_method() {
+    // Daemon unreachable — a Transport error naming `analyze.scip_status`
+    // proves the handler picked the dedicated overlay-status method rather
+    // than reusing `analyze.graph`, which is the #5056 regression: before
+    // this tool existed, an MCP caller had no way to reach
+    // `analyze.scip_status` at all.
+    let server = AnalyzerMcpServer::new("/nonexistent/trusty-analyze.sock");
+    let err = server
+        .handle_scip_status(&serde_json::json!({ "index_id": "my-idx" }))
+        .await
+        .expect_err("daemon unreachable");
+    match err {
+        DispatchError::Transport(msg) => {
+            assert!(msg.contains("analyze.scip_status"), "got {msg}");
+        }
+        other => panic!("expected Transport, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn resources_list_returns_envelope() {
     // Daemon unreachable → GET /indexes fails → empty resource list, but

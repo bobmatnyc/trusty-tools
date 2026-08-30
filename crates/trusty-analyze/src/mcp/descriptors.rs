@@ -175,6 +175,17 @@ pub fn base_tool_descriptors() -> Value {
             }
         },
         {
+            "name": "scip_status",
+            "description": "Report whether a SCIP overlay has been ingested for an index. Distinguishes 'never ingested' (this tool errors) from 'ingested but contributed zero symbols' (this tool returns node/edge counts of 0), which extract_graph's own scip_overlay flag cannot do on its own. Returns node count, edge count, and the ingest timestamp for the overlay.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "index":    { "type": "string" },
+                    "index_id": { "type": "string" }
+                }
+            }
+        },
+        {
             "name": "extract_ner",
             "description": "Extract named entities from doc comments for a code index using NER",
             "inputSchema": {
