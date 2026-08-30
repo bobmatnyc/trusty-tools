@@ -18,7 +18,8 @@ use tracing::{debug, error, info, warn};
 use super::runner_coverage::load_coverage_contrib;
 use super::runner_helpers::{
     DedupClaim, abort_dry, apply_grade_and_floor, attach_inline_comments, build_author_rationale,
-    fetch_github_pr_meta, finalize_run, mark_no_head_sha_abort, resolve_diff_token,
+    fetch_github_pr_meta, finalize_run, ground_parsed_findings, mark_no_head_sha_abort,
+    resolve_diff_token,
 };
 use crate::{
     config::{
@@ -639,38 +640,11 @@ pub async fn run_review(
         result.error = Some(format!("review not parsed — {reason}"));
     }
 
-    // ── Step 7-hyg: drop self-negated / CoT-leaking findings (#4044) ───────
-    // A finding that withdraws itself in its own text, or leaks raw mid-
-    // reasoning deliberation, must never reach the rendered review or the
-    // verdict floor — see `finding_hygiene` module doc.
-    let findings_before_hygiene = parsed.findings.len();
-    crate::pipeline::finding_hygiene::sanitize_findings(&mut parsed.findings);
-
-    // ── Step 7-cite: enforce citation integrity BEFORE grading (#2881, #4042) ─
-    // Every finding's cited path (and, where quoted, content) must verifiably
-    // exist in the diff; a finding that fails is DROPPED (never downgraded-but-
-    // kept) so a fabrication can never fail-close a clean PR nor survive into
-    // the rendered review.
-    let cite_index = crate::pipeline::citation_check::DiffContentIndex::from_filtered(&filtered);
-    crate::pipeline::citation_check::enforce_citation_integrity(&mut parsed.findings, &cite_index);
-
-    // ── Step 7-absent: refute "this file is not in the diff" claims (#1873) ─
-    // A render truncation can hide a file's content from this path's single
-    // prompt the way chunking hides it from a map call, so the claim is checked
-    // against the changeset here too.
-    crate::pipeline::absence_claim::drop_refuted_absence_claims(&mut parsed.findings, &cite_index);
-
-    // ── Step 7-relax: the model's own raw verdict/grade rested on the SAME
-    // findings we may have just wiped out entirely — relax it too (#4042,
-    // #4044). See `finding_hygiene::relax_verdict_if_evidence_wiped` doc for
-    // why this is safe and does not touch `derive_verdict`'s shared floor
-    // semantics.
-    crate::pipeline::finding_hygiene::relax_verdict_if_evidence_wiped(
-        &mut parsed.verdict,
-        &mut parsed.grade,
-        findings_before_hygiene,
-        &parsed.findings,
-    );
+    // ── Step 7-hyg/cite/absent/relax: output hygiene + grounding ──────────
+    // Self-negated findings, ungrounded citations, refuted diff-absence claims,
+    // and a self-reported verdict left resting on findings this run removed —
+    // all four run before grading. See `ground_parsed_findings`.
+    ground_parsed_findings(&mut parsed, &filtered);
 
     // ── Step 7b–7e: grade derivation, coverage floor, verification, reconcile ─
     // `original_llm_grade` is the pre-floor LLM grade; it is held separately so

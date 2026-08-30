@@ -387,6 +387,45 @@ pub(super) async fn finalize_run(
     .await
 }
 
+/// Run every output-hygiene and grounding pass over a freshly parsed review.
+///
+/// Why: four passes must all run BEFORE grading, in this order, and they moved
+/// here together when the #1873 pass pushed `runner.rs` over the 500-SLOC cap.
+/// Keeping them in one function is also what keeps the unified path's ordering
+/// visible beside the map-reduce path's, which runs the same four in
+/// `mapreduce/mod.rs`.
+/// What, in order:
+///   1. `finding_hygiene::sanitize_findings` — drop self-negated / CoT-leaking
+///      findings and demote the speculative ones (#4043, #4044, #4081, #5309).
+///   2. `citation_check::enforce_citation_integrity` — drop any finding whose
+///      cited path or quoted content the diff does not contain (#2881, #4042).
+///   3. `absence_claim::drop_refuted_absence_claims` — drop any finding whose
+///      premise is that a file is missing from a diff that contains it (#1873).
+///   4. `finding_hygiene::relax_verdict_if_evidence_wiped` — when 1–3 removed
+///      every finding, the model's own verdict rested on the same evidence and
+///      is relaxed with it (#4042, #4044).
+///
+/// Test: `run_review_outer_and_embedded_verdict_agree_after_severity_floor`,
+/// `unified_path_emits_no_finding_citing_a_path_outside_the_diff`.
+pub(super) fn ground_parsed_findings(
+    parsed: &mut crate::pipeline::parser::ParsedReview,
+    filtered: &crate::pipeline::diff_analyzer::models::FilteredDiff,
+) {
+    let findings_before = parsed.findings.len();
+    crate::pipeline::finding_hygiene::sanitize_findings(&mut parsed.findings);
+
+    let cite_index = crate::pipeline::citation_check::DiffContentIndex::from_filtered(filtered);
+    crate::pipeline::citation_check::enforce_citation_integrity(&mut parsed.findings, &cite_index);
+    crate::pipeline::absence_claim::drop_refuted_absence_claims(&mut parsed.findings, &cite_index);
+
+    crate::pipeline::finding_hygiene::relax_verdict_if_evidence_wiped(
+        &mut parsed.verdict,
+        &mut parsed.grade,
+        findings_before,
+        &parsed.findings,
+    );
+}
+
 // ─── Unit tests ───────────────────────────────────────────────────────────────
 // Split into a sibling file to keep this file under the 500-line cap.
 
