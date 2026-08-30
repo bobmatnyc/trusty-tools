@@ -114,6 +114,22 @@ impl FakeLlm {
             }
     }
 
+    /// A BLOCK whose single finding cites `src/hotelPage.ts:207` — a path that
+    /// is not in the diff at all (#4042's own nonexistent-path shape).
+    ///
+    /// Why: this is the fabrication the citation check exists to drop. Used by
+    /// `unified_path_emits_no_finding_citing_a_path_outside_the_diff` (#4045).
+    fn fabricates_citation_outside_diff() -> Self {
+        Self {
+            response: r#"```json
+{"verdict":"BLOCK","summary":"broken","findings":[{"title":"null deref","body":"the hotel page dereferences a null booking [code: `src/hotelPage.ts:207` — \"const booking = ctx.booking.id\"]","severity":"high","confidence":0.95,"file":"src/hotelPage.ts","line":207,"code_provable":true}]}
+```"#
+            .to_string(),
+            error: None,
+            output_tokens: None,
+        }
+    }
+
     fn errors(msg: impl Into<String>) -> Self {
         Self {
             response: String::new(),
@@ -2590,5 +2606,57 @@ async fn run_review_local_source_without_dedup_store_is_not_blocked() {
         result.verdict,
         Verdict::Approve,
         "the review itself must still run to completion"
+    );
+}
+
+// ── #4045: the citation check is wired into the UNIFIED emit path ──────
+
+/// Why (#4045, ask A): #2882 fixed the fabricated-citation defect and #4042
+/// reported it back on 0.10.1. Both times the invariant — every emitted
+/// finding cites a path that exists in the diff — was asserted over the
+/// checking HELPER, so `citation_check_tests.rs` stayed green while production
+/// emitted fabrications. This asserts it over the review the runner actually
+/// RETURNS: dropping the `enforce_citation_integrity` call from `runner.rs`
+/// then fails a test rather than a user's PR.
+///
+/// What: a one-file diff reviewed by a model that reports BLOCK on a finding
+/// citing `src/hotelPage.ts:207` — #4042's own nonexistent-path shape, a file
+/// absent from the diff entirely. The emitted review must carry no such
+/// finding, and the fabricated BLOCK must not survive as the verdict.
+/// Test: this test.
+#[tokio::test]
+async fn unified_path_emits_no_finding_citing_a_path_outside_the_diff() {
+    let (source, _tmp) = local_diff_source_for_file("src/real.rs", "+fn real() -> u32 { 7 }");
+
+    let input = ReviewInput {
+        diff_source: source,
+        reviewer_model: "openai/gpt-5.4-mini-20260317".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Cli,
+        allow_posting: false,
+        caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
+    };
+    let deps = ready_deps(Arc::new(FakeLlm::fabricates_citation_outside_diff()), None);
+
+    let result = run_review(&default_config(), input, deps).await;
+
+    let leaked: Vec<_> = result
+        .findings
+        .iter()
+        .filter(|f| f.file.contains("hotelPage.ts"))
+        .map(|f| (f.file.clone(), f.line))
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "a finding citing a file absent from the diff reached the emitted review — the \
+         citation check is not wired into the unified path (#2881 / #4042 / #4045): {leaked:?}"
+    );
+    assert!(
+        result.findings.is_empty(),
+        "the fabricated finding was the only one, so nothing may be emitted: {:?}",
+        result.findings
     );
 }
