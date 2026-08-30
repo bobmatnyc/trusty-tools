@@ -85,6 +85,18 @@ impl FakeLlm {
         }
     }
 
+    /// A structured response whose `findings` string does not decode (#4491).
+    /// The verdict token sits last so the tail scan reads APPROVE — pre-fix this
+    /// rendered `APPROVE` with `Findings: none` and no error at all.
+    fn unparseable_findings() -> Self {
+        Self {
+            response: r#"{"summary":"looks fine","findings":"[{\"title\": \"truncated","verdict":"APPROVE"}"#
+                .to_string(),
+            error: None,
+            output_tokens: None,
+        }
+    }
+
     fn request_changes() -> Self {
         // Severity is "high" which maps to Effort::High → BLOCK floor.
         // Use "medium" here so the severity floor produces REQUEST_CHANGES,
@@ -682,6 +694,47 @@ async fn run_review_truncated_output_is_unknown() {
     assert!(
         err.contains("truncat"),
         "error must explain the truncation: {err}"
+    );
+}
+
+/// A findings-parse failure reaches the rendered result as an error (#4491).
+///
+/// Why: the parser failing closed is only half the fix — if the reason never
+/// leaves the tracing log, the run still prints `Findings: none` with nothing
+/// telling the reader the review did not parse.
+/// What: drives a response whose findings payload cannot be decoded, asserts the
+/// verdict is UNKNOWN and `result.error` names the parse failure (which
+/// `print_review_result` renders as a `Pipeline error:` line).
+#[tokio::test]
+async fn run_review_findings_parse_failure_sets_error() {
+    let (source, _tmp) = local_diff_source("+fn x() {}\n");
+    let config = default_config();
+    let input = ReviewInput {
+        diff_source: source,
+        reviewer_model: "openai/gpt-5.4-mini-20260317".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Cli,
+        allow_posting: false,
+        caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
+    };
+    let deps = ready_deps(Arc::new(FakeLlm::unparseable_findings()), None);
+
+    let result = run_review(&config, input, deps).await;
+    assert_eq!(
+        result.verdict,
+        Verdict::Unknown,
+        "a lost findings payload must fail CLOSED, never render APPROVE (#4491)"
+    );
+    assert!(result.findings.is_empty());
+    let err = result
+        .error
+        .expect("a findings-parse failure must set an actionable error (#4491)");
+    assert!(
+        err.contains("findings"),
+        "the error must say the findings were not parsed: {err}"
     );
 }
 
