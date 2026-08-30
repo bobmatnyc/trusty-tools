@@ -588,6 +588,11 @@ pub async fn run_review(
         "LLM reviewer call complete"
     );
     result.apply_llm_response(&llm_resp);
+    // #4999: `apply_llm_response` copies the response text verbatim, and under
+    // forced structured output that text IS the JSON payload. Render it to prose
+    // here — before the banner, the truncation guard, and every abort path — so
+    // no consumer can ever read the wire payload as the review.
+    result.review_body = crate::pipeline::body_render::render_review_body(&result.review_body);
 
     // ── Degraded labelling (#590) ─────────────────────────────────────────
     // When an operator opted out of a required dependency, the review still ran
