@@ -2,7 +2,7 @@
 
 Generated from `trusty_mpm::mcp::tools::tool_catalog()` — trusty-mpm's own MCP tool surface (`tools/list` over the `serve --stdio` bridge), in catalog order. Regenerate with `tm generate capabilities`.
 
-33 tools.
+34 tools.
 
 ## `session_list`
 
@@ -127,6 +127,14 @@ Hard-delete a managed session's RECORD from the store — distinct from `session
 |---|---|---|
 | `force` | `boolean` | no |
 | `session_id` | `string` | yes |
+
+## `session_delete_records`
+
+Delete a caller-supplied set of session RECORDS, and nothing else (#6431). Each id is routed to whichever registry owns it: a managed record is soft-deleted via the same path as `session_delete`, and a legacy in-memory registry entry (the records that carry `status` and no `state`, which the console buckets as "unknown") is dropped from the registry. NEVER removes a worktree, a workspace directory, or any other filesystem state, and never kills a tmux host. FAIL-CLOSED: a session that is still RUNNING is REFUSED in both registries (there is no `force` — stop it, or use `session_delete`), a liveness probe that cannot reach a verdict refuses too, and a malformed, unknown, or refused id is reported as one failed row rather than counted as a deletion. Takes explicit ids, never a filter, so the set an operator confirmed is exactly the set that is deleted. When a deleted legacy entry shares its tmux name with a live managed record, that record is REPORTED as `managed_sibling` and left untouched — this tool never deletes a record the caller did not name. Returns `{ requested, deleted, failed, results }`.
+
+| Parameter | Type | Required |
+|---|---|---|
+| `session_ids` | `array` | yes |
 
 ## `session_activity`
 

@@ -104,6 +104,30 @@ impl OrchestratorBackend for MockBackend {
         }
         Ok(json!({ "id": session_id, "state": "stopped", "deleted": true }))
     }
+    /// #6431 mock: mirrors the real fail-closed reporting — the sentinel
+    /// `"running-id"` is refused and reported failed, everything else deletes.
+    async fn session_delete_records(&self, session_ids: &[String]) -> Result<Value, String> {
+        let mut deleted = 0;
+        let mut failed = 0;
+        let results: Vec<Value> = session_ids
+            .iter()
+            .map(|id| {
+                if id == "running-id" {
+                    failed += 1;
+                    json!({ "session_id": id, "kind": "managed", "deleted": false, "error": "session is active" })
+                } else {
+                    deleted += 1;
+                    json!({ "session_id": id, "kind": "legacy", "deleted": true, "error": Value::Null })
+                }
+            })
+            .collect();
+        Ok(json!({
+            "requested": results.len(),
+            "deleted": deleted,
+            "failed": failed,
+            "results": results,
+        }))
+    }
     async fn session_activity(&self, session_id: &str, lines: u32) -> Result<Value, String> {
         Ok(json!({ "id": session_id, "lines": lines, "raw_pane": "" }))
     }
@@ -375,9 +399,10 @@ async fn dispatch_initialize_returns_server_info() {
 
 #[tokio::test]
 async fn dispatch_tools_list_returns_full_catalog() {
-    // 9 core + 11 session-lifecycle + 5 console + 4 project + 4 proxy = 33
+    // 9 core + 12 session-lifecycle + 5 console + 4 project + 4 proxy = 34
     // (#1222 + the two #1220 config tools + the two #1508 fleet-teardown tools
-    // + #2012 session_delete + the three #1519 project-registry tools + #1517
+    // + #2012 session_delete + #6431 session_delete_records + the three #1519
+    // project-registry tools + #1517
     // WI-5 project_resolve + the four #2550 session-manager proxy tools + the
     // two PM pause/resume context tools `session_context_catchup` /
     // `session_context_pause`).
@@ -389,7 +414,50 @@ async fn dispatch_tools_list_returns_full_catalog() {
     };
     let resp = dispatch(&MockBackend, req).await;
     let tools = resp.result.unwrap()["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 33);
+    assert_eq!(tools.as_array().unwrap().len(), 34);
+}
+
+/// Why: #6431's bulk delete must route through dispatch and report per-session
+/// results, with a refused session counted as failed rather than deleted.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_session_delete_records_tool() {
+    let resp = dispatch(
+        &MockBackend,
+        call(
+            "session_delete_records",
+            json!({ "session_ids": ["a-id", "running-id"] }),
+        ),
+    )
+    .await;
+    let result = resp.result.expect("tool call result");
+    assert_eq!(result["isError"], false, "{result}");
+    let text = result["content"][0]["text"].as_str().expect("text content");
+    let value: Value = serde_json::from_str(text).expect("tool result is JSON");
+    assert_eq!(value["requested"], json!(2), "{value}");
+    assert_eq!(value["deleted"], json!(1), "{value}");
+    assert_eq!(value["failed"], json!(1), "{value}");
+}
+
+/// Why: a destructive tool must reject a malformed argument rather than
+/// silently deleting nothing (or, worse, part of a mis-typed list).
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_session_delete_records_rejects_bad_arguments() {
+    for args in [
+        json!({}),
+        json!({ "session_ids": [] }),
+        json!({ "session_ids": "a-id" }),
+        json!({ "session_ids": ["a-id", 7] }),
+    ] {
+        let resp = dispatch(&MockBackend, call("session_delete_records", args.clone())).await;
+        let result = resp.result.expect("tool call returns a result envelope");
+        assert_eq!(
+            result["isError"],
+            json!(true),
+            "must reject {args}: {result}"
+        );
+    }
 }
 
 /// Why: the console Config tab calls `config_read`; dispatch must route it and

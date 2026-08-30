@@ -439,6 +439,12 @@ fn build_router_inner(
             "/api/console/sessions/supervisor/auto-resume",
             axum::routing::post(crate::routes::sessions::auto_resume_handler),
         )
+        // #6431: record-only bulk delete. A static segment, so it wins over the
+        // `{id}` capture below — pinned by `bulk_delete_route_is_not_shadowed`.
+        .route(
+            "/api/console/sessions/bulk-delete",
+            axum::routing::post(crate::routes::sessions::bulk_delete_handler),
+        )
         .route(
             "/api/console/sessions/{id}",
             get(crate::routes::sessions::get_handler)

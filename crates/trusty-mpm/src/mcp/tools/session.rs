@@ -8,9 +8,10 @@
 //! existing [`crate::session_manager::SessionManager`] lifecycle ops that the
 //! HTTP `…/managed/*` routes already use, so the behaviour is identical across
 //! transports.
-//! What: [`session_tools`] returns the eleven `{ name, description, inputSchema }`
+//! What: [`session_tools`] returns the twelve `{ name, description, inputSchema }`
 //! descriptors — `session_new`, `session_stop`, `session_resume`,
-//! `session_decommission`, `session_delete` (#2012), `session_activity`,
+//! `session_decommission`, `session_delete` (#2012),
+//! `session_delete_records` (#6431), `session_activity`,
 //! `session_send`, the #1508 fleet-wide `session_decommission_ephemeral` +
 //! `session_prune`, and the PM pause/resume context tools
 //! `session_context_catchup` + `session_context_pause` (replace the bash
@@ -24,7 +25,7 @@ use serde_json::{Value, json};
 
 use super::tool;
 
-/// Build the eleven session-lifecycle tool descriptors.
+/// Build the twelve session-lifecycle tool descriptors.
 ///
 /// Why: spawning, stopping, resuming, decommissioning, hard-deleting,
 /// observing, and driving a managed session are the operations the driver
@@ -33,15 +34,18 @@ use super::tool;
 /// throwaway test sessions and purge legacy tombstones without scraping the
 /// CLI; #2012 adds `session_delete` — a single-record hard-delete distinct
 /// from `session_decommission` (which stops the runtime and may remove the
-/// workspace but always leaves a tombstone). The PM pause/resume context tools
+/// workspace but always leaves a tombstone); #6431 adds
+/// `session_delete_records`, the record-only bulk delete the console's Sessions
+/// tab drives. The PM pause/resume context tools
 /// (`session_context_catchup`, `session_context_pause`) are a DIFFERENT
 /// concept — PM session snapshot/digest, not managed-sub-session lifecycle —
 /// kept here anyway to avoid a third tool-group file for two tools. Keeping
 /// them in their own builder keeps `tools/core.rs` and this file each well
 /// under the 500-SLOC cap.
-/// What: returns the eleven descriptors in catalog order. `session_new` takes the
+/// What: returns the twelve descriptors in catalog order. `session_new` takes the
 /// repo/ref/task spawn inputs (plus optional `ephemeral`); the per-session tools
 /// take a `session_id` (`session_delete` also takes optional `force`);
+/// `session_delete_records` takes a non-empty `session_ids` array;
 /// `session_decommission_ephemeral` takes no args; `session_prune` takes a
 /// `state` filter plus `dry_run`/`include_active`; `session_context_catchup`
 /// takes a required `project_dir` plus optional `session_id`/`all_projects`/
@@ -175,6 +179,40 @@ pub(super) fn session_tools() -> Vec<Value> {
                     }
                 },
                 "required": ["session_id"],
+                "additionalProperties": false
+            }),
+        ),
+        tool(
+            "session_delete_records",
+            "Delete a caller-supplied set of session RECORDS, and nothing else \
+             (#6431). Each id is routed to whichever registry owns it: a managed \
+             record is soft-deleted via the same path as `session_delete`, and a \
+             legacy in-memory registry entry (the records that carry `status` \
+             and no `state`, which the console buckets as \"unknown\") is \
+             dropped from the registry. NEVER removes a worktree, a workspace \
+             directory, or any other filesystem state, and never kills a tmux \
+             host. FAIL-CLOSED: a session that is still RUNNING is REFUSED in \
+             both registries (there is no `force` — stop it, or use \
+             `session_delete`), a liveness probe that cannot reach a verdict \
+             refuses too, and a malformed, unknown, or refused id is reported \
+             as one failed row rather than counted as a deletion. Takes \
+             explicit ids, never a filter, so the set an operator confirmed is \
+             exactly the set that is deleted. When a deleted legacy entry \
+             shares its tmux name with a live managed record, that record is \
+             REPORTED as `managed_sibling` and left untouched — this tool never \
+             deletes a record the caller did not name. Returns \
+             `{ requested, deleted, failed, results }`.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "session_ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "minItems": 1,
+                        "description": "Session ids (UUIDs) to delete records for. Duplicates are collapsed."
+                    }
+                },
+                "required": ["session_ids"],
                 "additionalProperties": false
             }),
         ),
