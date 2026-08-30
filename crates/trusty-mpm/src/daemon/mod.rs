@@ -124,6 +124,29 @@ pub async fn serve_http(
     serve_with_shutdown(state, listener, rpc, trusty_common::shutdown_signal()).await
 }
 
+/// This daemon's host-state refusal, read against the root it actually runs on.
+///
+/// Why: every background path in this module holds an `Arc<DaemonState>` and so
+/// holds the daemon's framework root, but each one asked
+/// [`crate::core::host_state_gate::host_state_access`], which reads `$HOME`
+/// alone. A daemon isolated by its root under an untouched `$HOME` therefore
+/// passed, and `reap_loop`, `orphan_gc_loop`, and the shutdown reap all shelled
+/// `tmux list-sessions` / `list-panes` at the operator's real server every tick
+/// (#6348 review round 2). Routing all three through one named helper is what
+/// keeps them from drifting apart again — a new loop that forgets the root now
+/// has to reach past this function to do it.
+/// What: defers to
+/// [`crate::core::host_state_gate::host_state_access_for_root`] with
+/// [`DaemonState::framework_root`], returning the operator-facing sentence when
+/// the environment blocks and `None` when it allows.
+/// Test: `host_state_refusal_blocks_a_scratch_framework_root`,
+/// `reap_loop_leaves_the_registry_alone_on_a_scratch_framework_root`;
+/// `scratch_root_daemon_does_not_spawn_tmux` proves the whole quadrant
+/// end-to-end with a real spawn instrument.
+fn host_state_refusal(state: &DaemonState) -> Option<String> {
+    crate::core::host_state_gate::host_state_access_for_root(state.framework_root()).skip_reason()
+}
+
 /// [`serve_http`]'s body, with the shutdown future supplied by the caller.
 ///
 /// Why: [`serve_http`] waits on SIGTERM/SIGINT, which a test cannot deliver to
@@ -337,8 +360,19 @@ pub async fn serve_with_shutdown(
 /// for each. One kill failing (the session may already be gone) never aborts the
 /// rest — every name is attempted. Idempotent: re-running it after a clean sweep
 /// simply finds nothing live. Logs a one-line summary at info level to stderr.
-/// Test: `reap_all_live_sessions_is_safe_when_empty` (empty / tmux-absent no-op).
+///
+/// Host-state gate (#6348 review round 2): this was the one tmux path in this
+/// module with NO gate — not even the `$HOME`-only one — so a daemon isolated by
+/// its framework root reached the operator's real tmux server here and issued
+/// `kill_session` for every name in its own registry. It asks
+/// [`host_state_refusal`] first, and a refusal returns before a driver exists.
+/// Test: `reap_all_live_sessions_is_safe_when_empty` (empty / tmux-absent no-op);
+/// `reap_all_live_sessions_refuses_on_a_scratch_framework_root`.
 async fn reap_all_live_sessions(state: Arc<DaemonState>) {
+    if let Some(reason) = host_state_refusal(&state) {
+        tracing::warn!("graceful shutdown: legacy session reap skipped — {reason}");
+        return;
+    }
     let Ok(driver) = tmux::TmuxDriver::discover() else {
         info!("graceful shutdown: tmux unavailable; no sessions to reap");
         return;
@@ -499,9 +533,9 @@ async fn reap_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cancellati
                 // #5784: a gated environment used to fall through this
                 // `if let` silently, every tick, forever. Name it once per
                 // sweep so the operator sees the reason and the hatch.
-                if let Some(reason) =
-                    crate::core::host_state_gate::host_state_access().skip_reason()
-                {
+                // #6348: root-aware, not $HOME-only — this loop holds the
+                // daemon's framework root, so it asks about the root it has.
+                if let Some(reason) = host_state_refusal(&state) {
                     tracing::warn!("reap_loop: skipped — {reason}");
                 } else if let Ok(driver) = tmux::TmuxDriver::discover() {
                     let result = state.reap_dead_sessions(&driver);
@@ -707,9 +741,8 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
                     }
                 }
                 // #5784: same silent-`continue` trap as `reap_loop` above.
-                if let Some(reason) =
-                    crate::core::host_state_gate::host_state_access().skip_reason()
-                {
+                // #6348: and root-aware for the same reason it is there.
+                if let Some(reason) = host_state_refusal(&state) {
                     tracing::warn!("orphan-GC: skipped — {reason}");
                     continue;
                 }
@@ -896,8 +929,155 @@ pub async fn run_mcp(state: Arc<DaemonState>) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod shutdown_reaper_tests {
-    use super::{DaemonState, reap_all_live_sessions, reap_loop};
+    use super::{DaemonState, host_state_refusal, reap_all_live_sessions, reap_loop};
     use std::sync::Arc;
+
+    /// A `DaemonState` rooted at a throwaway directory, plus the directory.
+    ///
+    /// The `$HOME` is left exactly as the test binary inherited it — that is the
+    /// #6348 quadrant, and reassigning it would silence the root arm behind the
+    /// `$HOME` arm that already worked.
+    fn scratch_root_state() -> (Arc<DaemonState>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("scratch framework root");
+        let state = Arc::new(DaemonState::with_root(dir.path().to_path_buf()));
+        (state, dir)
+    }
+
+    /// A tmux-origin session whose tmux name is certainly not live.
+    fn dead_session() -> crate::core::session::Session {
+        use crate::core::session::{ControlModel, Session, SessionId, SessionStatus};
+        let mut s = Session::new(SessionId::new(), "/tmp/p", ControlModel::Tmux, None);
+        s.tmux_name = format!("tmpm-6348-absent-{}", std::process::id());
+        s.status = SessionStatus::Active;
+        s
+    }
+
+    /// A scratch framework root is refused, whatever `$HOME` says.
+    ///
+    /// Why: this is the single gate the three background tmux paths in this
+    /// module now share, so its refusal is what stops all three (#6348 review
+    /// round 2).
+    /// What: builds a state on a temp root and asserts the refusal exists and
+    /// names the hatch. When the ambient environment is the operator's real one
+    /// — the exact quadrant #6348 is about — it additionally asserts the
+    /// sentence names the scratch ROOT rather than a `$HOME` mismatch, so the
+    /// test cannot pass on the pre-existing `$HOME` arm alone.
+    /// Test: this is the test.
+    #[test]
+    fn host_state_refusal_blocks_a_scratch_framework_root() {
+        let (state, dir) = scratch_root_state();
+        let reason = host_state_refusal(&state).expect("a scratch framework root must be refused");
+        assert!(
+            reason.contains(crate::core::host_state_gate::ALLOW_HOST_STATE_ENV),
+            "a refusal an operator cannot lift is a dead end; got: {reason}"
+        );
+        if crate::core::host_state_gate::host_state_access().is_allowed() {
+            assert!(
+                reason.contains(&dir.path().display().to_string()),
+                "under a real $HOME the refusal must be the DATA-ROOT arm, naming {}; got: {reason}",
+                dir.path().display()
+            );
+        }
+    }
+
+    /// `reap_loop` reaps nothing on a scratch framework root.
+    ///
+    /// Why: the loop ticks immediately on spawn and then every
+    /// [`super::REAP_INTERVAL_SECS`] seconds for the life of the daemon. Before
+    /// this fix it passed the `$HOME`-only gate and swept a scratch daemon's
+    /// registry against the operator's REAL tmux server, deleting every entry
+    /// that server did not host.
+    /// What: registers one tmux-origin session whose tmux name cannot be live,
+    /// lets exactly one tick run, cancels, and asserts the entry survived. On a
+    /// host with tmux installed, removing the gate fails this assertion.
+    /// Test: this is the test.
+    #[tokio::test]
+    async fn reap_loop_leaves_the_registry_alone_on_a_scratch_framework_root() {
+        let (state, _dir) = scratch_root_state();
+        let session = dead_session();
+        let id = session.id;
+        state.register_session(session);
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let handle = tokio::spawn(reap_loop(Arc::clone(&state), cancel.child_token()));
+        // `tokio::time::interval` fires its first tick immediately, so one sweep
+        // has run by the time this yields back.
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        cancel.cancel();
+        handle.await.expect("reap_loop must not panic");
+
+        assert!(
+            state.session(id).is_some(),
+            "a refused sweep must reap nothing — the registry entry was removed"
+        );
+    }
+
+    /// The shutdown reap refuses on a scratch framework root.
+    ///
+    /// Why: this path had no host-state gate at all and issued `kill_session`
+    /// against the real tmux server for every name in its own registry, so a
+    /// scratch daemon's shutdown could kill a live operator session that merely
+    /// shared a name.
+    /// What: registers one session on a scratch-rooted state and runs the reap,
+    /// asserting it returns without panicking and leaves the registry intact —
+    /// the refusal returns before a driver is ever discovered.
+    /// Test: this is the test.
+    #[tokio::test]
+    async fn reap_all_live_sessions_refuses_on_a_scratch_framework_root() {
+        let (state, _dir) = scratch_root_state();
+        let session = dead_session();
+        let id = session.id;
+        state.register_session(session);
+
+        reap_all_live_sessions(Arc::clone(&state)).await;
+
+        assert!(
+            state.session(id).is_some(),
+            "the shutdown reap must not mutate the registry"
+        );
+        assert!(
+            host_state_refusal(&state).is_some(),
+            "the fixture must actually be in the refused quadrant"
+        );
+    }
+
+    /// `orphan_gc_loop` completes a refused tick on a scratch framework root.
+    ///
+    /// Why: the loop is on by default and its sweep asks the real tmux server
+    /// for every managed pane, then kills the ones no registry claims. A scratch
+    /// daemon has an empty registry, so every real managed pane the operator was
+    /// running looked orphaned to it.
+    /// What: drives one tick on a scratch-rooted state and asserts the loop
+    /// exits cleanly and the registry is untouched. It is a liveness pin, NOT a
+    /// discriminating one: the sweep's kills already route through the session
+    /// manager's driver, which a scratch root makes a no-op, so this test also
+    /// passes with the gate removed. What actually pins the refusal is
+    /// [`super::host_state_refusal`], covered by
+    /// `host_state_refusal_blocks_a_scratch_framework_root`, and the absence of
+    /// a tmux spawn, covered end-to-end by
+    /// `scratch_root_daemon_does_not_spawn_tmux`.
+    /// Test: this is the test.
+    #[tokio::test]
+    async fn orphan_gc_loop_ticks_cleanly_on_a_scratch_framework_root() {
+        let (state, _dir) = scratch_root_state();
+        let session = dead_session();
+        let id = session.id;
+        state.register_session(session);
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let handle = tokio::spawn(super::orphan_gc_loop(
+            Arc::clone(&state),
+            cancel.child_token(),
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        cancel.cancel();
+        handle.await.expect("orphan_gc_loop must not panic");
+
+        assert!(
+            state.session(id).is_some(),
+            "a refused sweep must leave the registry alone"
+        );
+    }
 
     /// The shutdown reaper is a safe no-op on an empty daemon.
     ///
