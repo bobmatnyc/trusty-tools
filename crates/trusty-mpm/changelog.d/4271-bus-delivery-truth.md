@@ -16,3 +16,7 @@ Fixed
   session SSE handlers that carry load-sheddable telemetry — which DOC-60 §3
   keeps off this bus. It now emits an `event: lagged` frame carrying the missed
   count and the durable log's path to re-read from, plus a `warn!`.
+- The bus's durable JSONL stream no longer interleaves two records into an
+  unparseable line when two publishes land at once. `AuditLogger::try_log` wrote
+  the record and its newline as separate unbuffered writes; it now appends both
+  in one `write_all`.

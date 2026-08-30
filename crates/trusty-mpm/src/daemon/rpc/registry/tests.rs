@@ -1934,7 +1934,6 @@ fn bus_error_rpc_codes_track_http_statuses() {
         (
             BusError::SubscriberLagged {
                 instance_id: "i".into(),
-                backlog: 64,
             },
             CODE_UNAVAILABLE,
         ),

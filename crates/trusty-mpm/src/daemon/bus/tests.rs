@@ -919,6 +919,78 @@ async fn two_subscribers_one_lagging_account_exactly() {
     );
 }
 
+#[test]
+fn concurrent_publishers_never_evict_a_delivered_envelope() {
+    // #4271, the concurrent arm: measuring the channel and sending into it are
+    // two separate acquisitions of the broadcast tail lock, so a check made
+    // outside a lock of our own is stale by the time the send runs. Two
+    // publishers that both observed `capacity - 1` would both send, and the
+    // second would evict an unread envelope the first had already recorded
+    // `delivered` — the same fail-open, narrowed to a window.
+    //
+    // Threads rather than tasks, and far more publishes than the ring can hold,
+    // so the interleaving is hit repeatedly within one run.
+    const PUBLISHERS: usize = 8;
+    const PER_PUBLISHER: usize = 32;
+
+    let (_dir, bus) = bus();
+    let bus = Arc::new(bus);
+    let target = bus.registry().register("cto-assistant", None).unwrap();
+    // Attached and never draining: it is what holds the ring full, so every
+    // publisher past the first `INSTANCE_CHANNEL_CAPACITY` races at the edge.
+    let mut stalled = bus.subscribe(&target.instance_id).unwrap();
+
+    let accepted = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..PUBLISHERS)
+            .map(|p| {
+                let bus = Arc::clone(&bus);
+                let instance_id = target.instance_id.clone();
+                scope.spawn(move || {
+                    let sender = registered_sender(&bus, &format!("izzie{p}"));
+                    let mut mine = Vec::new();
+                    for i in 0..PER_PUBLISHER {
+                        if let Ok(envelope) = bus.publish(
+                            sender.clone(),
+                            &PeerTarget::Instance(instance_id.clone()),
+                            chat(&format!("p{p} n{i}")),
+                            None,
+                        ) {
+                            mine.push(envelope.message_id);
+                        }
+                    }
+                    mine
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("no publisher thread may panic"))
+            .fold(0usize, |n, ids| n + ids.len())
+    });
+
+    // Exact accounting: the ring's depth is the ceiling no interleaving may
+    // exceed. One extra acceptance is one evicted envelope.
+    assert_eq!(
+        accepted, INSTANCE_CHANNEL_CAPACITY,
+        "concurrent publishers must not accept more than the ring can hold"
+    );
+
+    let (received, missed) = drain(&mut stalled);
+    assert_eq!(
+        missed, 0,
+        "no envelope may be evicted unread, however the publishes interleaved"
+    );
+    let mut delivered = delivered_ids(&bus);
+    let mut got = received;
+    delivered.sort();
+    got.sort();
+    assert_eq!(
+        got, delivered,
+        "the log's delivered set must equal what the subscriber received, \
+         whichever order the publishers won the gate in"
+    );
+}
+
 // ── caller verification + edge derivation (review findings #2 and #3) ─────────
 
 #[test]
@@ -1207,7 +1279,6 @@ fn subscriber_lagged_is_503() {
     assert_eq!(
         BusError::SubscriberLagged {
             instance_id: "izzie~b1".into(),
-            backlog: INSTANCE_CHANNEL_CAPACITY,
         }
         .status(),
         StatusCode::SERVICE_UNAVAILABLE
@@ -1215,7 +1286,6 @@ fn subscriber_lagged_is_503() {
     assert_ne!(
         BusError::SubscriberLagged {
             instance_id: "izzie~b1".into(),
-            backlog: INSTANCE_CHANNEL_CAPACITY,
         }
         .status(),
         BusError::NoSubscriber {
@@ -1603,5 +1673,49 @@ async fn subscribe_stream_reports_lag_instead_of_swallowing_it() {
     assert!(
         text.contains(state.bus().log_path().to_str().unwrap()),
         "the notice must name the durable log to re-read from, got: {text}"
+    );
+}
+
+#[tokio::test]
+async fn route_publish_to_a_saturated_instance_is_503() {
+    // #4271: the refusal has to reach a real client, not just `BusError`'s
+    // status table. `subscriber_lagged_is_503` pins the mapping; this pins that
+    // `POST /api/v1/bus/publish` actually answers it.
+    let (_dir, state) = test_state();
+    let target = state
+        .bus()
+        .registry()
+        .register("cto-assistant", None)
+        .unwrap();
+    let sender = state.bus().registry().register("izzie", None).unwrap();
+    // Attached and stalled: the receiver is held and never read.
+    let _stalled = state.bus().subscribe(&target.instance_id).unwrap();
+
+    let body = serde_json::json!({
+        "from": {
+            "kind": "assistant_instance",
+            "instance_id": sender.instance_id,
+            "definition_id": sender.definition_id,
+        },
+        "to": { "instance_id": target.instance_id },
+        "payload": { "type": "chat_text", "text": "burst" }
+    });
+    for _ in 0..INSTANCE_CHANNEL_CAPACITY {
+        let (status, _) = call(&state, post("/api/v1/bus/publish", body.clone())).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+    }
+
+    let (status, answer) = call(&state, post("/api/v1/bus/publish", body)).await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "a full recipient channel must refuse over HTTP, not report 202"
+    );
+    assert!(
+        answer["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(&target.instance_id),
+        "the refusal must name the instance that is behind, got: {answer}"
     );
 }

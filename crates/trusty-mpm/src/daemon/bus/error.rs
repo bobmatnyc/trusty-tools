@@ -88,21 +88,24 @@ pub enum BusError {
     /// instead keeps that log truthful: nothing it calls delivered has been
     /// evicted unread.
     ///
+    /// The backlog is deliberately NOT carried: it can only ever equal
+    /// [`INSTANCE_CHANNEL_CAPACITY`](super::INSTANCE_CHANNEL_CAPACITY), since
+    /// `Sender::len` caps at the ring length and the refusal fires at exactly
+    /// that value — a constant dressed as a measurement tells a client nothing.
+    ///
     /// Why `503` and not [`BusError::NoSubscriber`]'s `409`: the two need
     /// different client recoveries. `409` says nobody is listening, and the
     /// sender's move is to stop sending. This says someone IS listening but is
     /// behind, and the sender's move is to retry once the recipient drains —
     /// DOC-60 §4's `BusUnavailable`-shaped answer.
     #[error(
-        "instance '{instance_id}' has {backlog} unread envelopes queued and \
-         cannot take another without discarding one; the message was NOT \
+        "instance '{instance_id}' cannot take another envelope without \
+         discarding one its subscriber has not read; the message was NOT \
          delivered — retry once the recipient drains"
     )]
     SubscriberLagged {
-        /// The instance whose channel is saturated.
+        /// The instance whose delivery channel is full of unread envelopes.
         instance_id: String,
-        /// How many envelopes it has queued and unread.
-        backlog: usize,
     },
 
     /// The sender claimed an `instance_id` that is not a live registration.

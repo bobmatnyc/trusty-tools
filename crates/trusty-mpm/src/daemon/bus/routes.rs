@@ -269,7 +269,19 @@ pub fn list_op(state: &Arc<DaemonState>) -> ListInstancesResponse {
 /// status (`400` malformed request or a caller kind this path does not carry,
 /// `403` the claimed sender is not a live registration, `404` no live
 /// instance, `410` the named instance is gone, `409` registered but
-/// unattached) per §4's fail-closed rule.
+/// unattached, `503` attached but its channel is full of unread envelopes) per
+/// §4's fail-closed rule.
+///
+/// **`503` is terminal for this attempt, and a retry is the recovery (#4271).**
+/// The message was not delivered and not queued — DOC-60 §7's durable inbox is
+/// deferred — so a sender that wants it delivered must send it again once the
+/// recipient drains. Two consequences a client author has to plan for: the
+/// refusal is per-INSTANCE and one stalled subscriber makes every publish to
+/// that instance answer `503`, healthy co-subscribers included; and the
+/// condition persists until that subscriber drains, drops, or the instance is
+/// deregistered, so retry with backoff rather than in a tight loop. See
+/// [`PeerBus::publish`](crate::daemon::bus::PeerBus::publish) for why nothing
+/// bounds it here.
 /// What: resolves the target, publishes, and returns the stamped envelope with
 /// `202 Accepted` so the sender holds the `message_id` for threading. The
 /// `from` field is a CLAIM: [`PeerBus::publish`](crate::daemon::bus::PeerBus::publish)
@@ -302,7 +314,9 @@ pub async fn publish_message(
 ///
 /// # Errors
 ///
-/// Every [`BusError`] `PeerBus::publish` can raise, plus
+/// Every [`BusError`] `PeerBus::publish` can raise — including
+/// [`BusError::SubscriberLagged`] (`503` / `CODE_UNAVAILABLE`) when the
+/// recipient's channel is full of unread envelopes — plus
 /// [`BusError::InvalidTarget`] when the request names neither addressing mode.
 ///
 /// Test: `parity_bus_publish_agrees_across_transports`,
@@ -310,7 +324,8 @@ pub async fn publish_message(
 /// `rpc_bus_publish_rejects_an_unregistered_sender`,
 /// `rpc_bus_publish_to_a_dead_instance_is_gone`,
 /// `rpc_bus_publish_without_a_subscriber_is_conflict`,
-/// `rpc_bus_publish_without_a_target_is_invalid`.
+/// `rpc_bus_publish_without_a_target_is_invalid`,
+/// `route_publish_to_a_saturated_instance_is_503`.
 pub fn publish_op(state: &Arc<DaemonState>, req: PublishRequest) -> Result<BusEnvelope, BusError> {
     let target = req.to.to_peer_target()?;
     state
