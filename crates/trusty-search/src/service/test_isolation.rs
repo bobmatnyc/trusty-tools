@@ -16,7 +16,8 @@
 //! The child runs that one test alone, so its environment is inviolate for the
 //! whole run.
 //!
-//! Test: used by `root_hijack_tests`, `checkpoint_tests`, and `resume_tests`;
+//! Test: used by `root_hijack_tests`, `checkpoint_tests`, `resume_tests`, and
+//! (#6369) the registry-census tests in `rpc::admin_tests`;
 //! the guard's own vacuum-failure mode is covered by the "exactly one test"
 //! assertion below.
 
@@ -31,8 +32,32 @@ const CHILD_MARKER: &str = "TRUSTY_SEARCH_ISOLATED_CHILD";
 /// Why: lets a caller skip building spawn-only fixtures (a throwaway data dir)
 /// when there is nothing left to spawn.
 /// Test: `root_hijack_tests::isolate_in_child_process`.
-pub(super) fn is_isolated_child() -> bool {
+pub(crate) fn is_isolated_child() -> bool {
     std::env::var_os(CHILD_MARKER).is_some()
+}
+
+/// Run `test_name` alone in a child process with a private `TRUSTY_DATA_DIR`,
+/// and return `true` only inside that child.
+///
+/// Why (#6369): the common case of [`run_isolated`] — a test whose correctness
+/// depends on process-global state no in-process lock can fence. Two shapes hit
+/// it: a registry census, which ~70 non-`#[serial]` tests can write a row into,
+/// and a reading of a process-global gauge such as
+/// `reindex::deferred_embed_queue`'s `QUEUE_DEPTH`, which a detached task from
+/// an already-finished test can still move. A child process starts with the
+/// gauge at zero and an empty data dir, so both become exact.
+/// What: `false` in the parent (the child has already run the body), `true` in
+/// the child. `test_name` is the test's full `module::path::name`; a stale one
+/// fails [`run_isolated`]'s "exactly one test" assertion rather than silently
+/// skipping the body.
+/// Test: `rpc::admin_tests`'s two registry-census tests and
+/// `server::tests_stall::health_reports_the_deferred_embed_queue_depth_end_to_end`.
+pub(crate) fn isolate_in_child(test_name: &str) -> bool {
+    if is_isolated_child() {
+        return true;
+    }
+    let data_dir = tempfile::tempdir().expect("child data dir");
+    run_isolated(test_name, &[("TRUSTY_DATA_DIR", data_dir.path())])
 }
 
 /// Run the calling test alone in a child process with `envs` applied at spawn.
@@ -53,7 +78,7 @@ pub(super) fn is_isolated_child() -> bool {
 /// replaces.
 /// Test: every caller routes through it; a stale name fails the "exactly one
 /// test" assertion.
-pub(super) fn run_isolated<K, V>(test_name: &str, envs: &[(K, V)]) -> bool
+pub(crate) fn run_isolated<K, V>(test_name: &str, envs: &[(K, V)]) -> bool
 where
     K: AsRef<OsStr>,
     V: AsRef<OsStr>,

@@ -19,7 +19,7 @@ use crate::core::chunker::RawChunk;
 use crate::core::entity::RawEntity;
 use crate::core::symbol_graph::SymbolGraph;
 
-use super::super::{max_chunks_per_index, CodeIndexer, CommitTimings, ParsedBatch};
+use super::super::{CodeIndexer, CommitTimings, ParsedBatch};
 
 impl CodeIndexer {
     /// Phase 3+4 of the bulk pipeline: commit a [`ParsedBatch`] into the index.
@@ -71,7 +71,7 @@ impl CodeIndexer {
         // Issue #82 (180GB RSS fix): enforce the per-index chunk cap BEFORE
         // ingesting anything into BM25, HNSW, or the embedding cache. Without
         // this pre-filter, dropped chunks leaked into every downstream structure.
-        let cap = max_chunks_per_index();
+        let cap = self.chunk_cap(); // #6369: per-index, not the process env
         let pre_filter_dropped = {
             let corpus = self.chunks.read().await;
             let mut keep_mask: Vec<bool> = Vec::with_capacity(all_chunks.len());
@@ -328,7 +328,7 @@ impl CodeIndexer {
     #[must_use = "the cap-drop count is the only report that part of the batch \
                   did not land; discarding it reports data loss as success"]
     pub(crate) async fn commit_corpus(&self, chunks: &mut Vec<RawChunk>) -> usize {
-        let cap = max_chunks_per_index();
+        let cap = self.chunk_cap(); // #6369: per-index, not the process env
         let mut corpus = self.chunks.write().await;
         let mut dropped = 0usize;
         for chunk in chunks.drain(..) {

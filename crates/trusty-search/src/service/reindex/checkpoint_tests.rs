@@ -302,7 +302,7 @@ fn checkpoint_max_age_from_parses() {
 /// Test: this test.
 #[test]
 fn env_knob_names_are_wired_up() {
-    if !super::super::test_isolation::run_isolated(
+    if !crate::service::test_isolation::run_isolated(
         "service::reindex::checkpoint::tests::env_knob_names_are_wired_up",
         &[
             ("TRUSTY_REINDEX_RESUME", "0"),

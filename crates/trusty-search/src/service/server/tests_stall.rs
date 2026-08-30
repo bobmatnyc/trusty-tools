@@ -270,6 +270,15 @@ fn health_response_omits_last_ok_when_none() {
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread")]
 async fn health_reports_the_deferred_embed_queue_depth_end_to_end() {
+    // #6369: `QUEUE_DEPTH` is a process-global gauge, and a detached embed pass
+    // from an already-finished sibling test still moves it — the drain poll then
+    // watched the depth fall BELOW `baseline` and never equal it. A child
+    // process owns the gauge outright, so `baseline` is a real zero.
+    if !crate::service::test_isolation::isolate_in_child(
+        "service::server::tests_stall::health_reports_the_deferred_embed_queue_depth_end_to_end",
+    ) {
+        return;
+    }
     let (state, _tracker) = ready_state_with_tracker();
 
     let Json(baseline_resp) = health_handler(State(Arc::clone(&state))).await;

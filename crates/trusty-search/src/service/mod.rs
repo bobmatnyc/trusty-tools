@@ -46,6 +46,13 @@ pub mod timeout_recovery;
 pub mod ui;
 pub mod walker;
 pub mod warm_boot;
+// #4213 / #4721: shared "run this one test alone in a child process with the
+// environment supplied at spawn" helper — the technique that actually excludes
+// concurrent non-serial tests, unlike `#[serial]` + an in-process `set_var`.
+// #6369 hoisted it from `reindex` to `service` so the registry-census tests in
+// `rpc::admin` can reach it too.
+#[cfg(test)]
+pub(crate) mod test_isolation;
 pub mod watch_loop;
 pub mod watch_rescan;
 #[cfg(test)]

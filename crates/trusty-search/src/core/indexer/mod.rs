@@ -469,6 +469,21 @@ pub struct CodeIndexer {
     /// Test: `core::indexer::tests::branch_and_corpus::skip_vector_index_file_never_embeds`,
     /// `skip_vector_false_index_file_still_embeds`.
     pub skip_vector: bool,
+
+    /// This index's hard chunk cap, resolved once at construction.
+    ///
+    /// Why (#6369): the cap is a per-index quantity but its only source was
+    /// `max_chunks_per_index()`, an env read performed on every insert. A test
+    /// that needed a small cap had to pin `TRUSTY_MAX_CHUNKS` process-wide,
+    /// which silently truncated every OTHER index alive at that moment — the
+    /// leak behind the rotating parallel-run failures in
+    /// `tests_cursor` and `eviction_kg_paths`. Holding the value per instance
+    /// makes the cap what it claims to be and removes the env read from the
+    /// insert path.
+    /// What: defaults to `max_chunks_per_index()` in [`Self::new`]; overridden
+    /// per instance by [`Self::with_chunk_cap`].
+    /// Test: `core::indexer::tests::chunk_cap` (every test in that module).
+    chunk_cap: usize,
 }
 
 /// Coalescing state for `spawn_incremental_persist`.
@@ -586,7 +601,29 @@ impl CodeIndexer {
             hnsw_load_failed: false,
             skip_kg: false,
             skip_vector: false,
+            // #6369: resolve the cap once here, not on every insert.
+            chunk_cap: max_chunks_per_index(),
         }
+    }
+
+    /// Pin this index's chunk cap, ignoring `TRUSTY_MAX_CHUNKS`.
+    ///
+    /// Why (#6369): the cap is per-index, so setting one must not reach any
+    /// other index. Before this, the only way to choose a cap was to write the
+    /// process-global env var, which corrupted every concurrently-running
+    /// test that indexed more chunks than the pinned value.
+    /// What: overwrites [`Self::chunk_cap`] and returns `self`. A `cap` of `0`
+    /// is raised to `1` — a zero cap accepts nothing and is never intended.
+    /// Test: `core::indexer::tests::chunk_cap`.
+    #[must_use]
+    pub fn with_chunk_cap(mut self, cap: usize) -> Self {
+        self.chunk_cap = cap.max(1);
+        self
+    }
+
+    /// This index's chunk cap. See [`Self::chunk_cap`].
+    pub(crate) fn chunk_cap(&self) -> usize {
+        self.chunk_cap
     }
 
     /// Record that this index was just queried or ingested.
