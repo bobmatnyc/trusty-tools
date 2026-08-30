@@ -277,6 +277,104 @@ async fn run_review_oversized_diff_mapreduce_reviews_tail_signature() {
     );
 }
 
+/// REGRESSION (#2654): caller-supplied `referenced_code` reaches EVERY per-file
+/// map prompt, not just the unified single-shot prompt.
+///
+/// Why: a downstream consumer populates `referenced_code` with multi-repo
+/// semantic context so the verdict-deciding review is not diff-only. The
+/// map-reduce path is chosen for the largest, most complex PRs — where that
+/// context matters most — and a drop there produces no error, no warning, and a
+/// weaker review that still reports success.
+/// What: runs an over-cap diff through map-reduce with a sentinel in
+/// `caller_context.referenced_code` and asserts every recorded map prompt
+/// carries it under the `## Referenced Code` heading.
+/// Test: this test itself (no network).
+#[tokio::test]
+async fn mapreduce_prompts_carry_caller_supplied_referenced_code() {
+    const SENTINEL: &str = "fn cross_repo_helper() { /* REFERENCED_CODE_SENTINEL */ }";
+
+    let (diff, _tail) = oversized_multi_file_diff();
+    let (source, _tmp) = local_source(&diff);
+
+    let reviewer = Arc::new(RecordingReviewer::approving());
+    let llm: Arc<dyn LlmProvider> = reviewer.clone();
+    let mut review_input = input(source);
+    review_input.caller_context = CallerContext {
+        referenced_code: Some(SENTINEL.to_string()),
+        ..CallerContext::default()
+    };
+    let config = ReviewConfig::load(None);
+
+    let _ = run_review(&config, review_input, deps(llm)).await;
+
+    let prompts = reviewer.prompts();
+    assert!(!prompts.is_empty(), "map-reduce must issue per-file calls");
+    // The synthesis call is not a per-file review and carries findings, not
+    // code, so only the map prompts (those carrying the diff block) are held to
+    // this.
+    let map_prompts: Vec<&String> = prompts
+        .iter()
+        .filter(|p| p.contains("## Unified diff"))
+        .collect();
+    assert!(
+        !map_prompts.is_empty(),
+        "at least one prompt must be a per-file map call"
+    );
+    for p in map_prompts {
+        assert!(
+            p.contains("## Referenced Code") && p.contains(SENTINEL),
+            "every map prompt must carry the caller's referenced code (#2654)"
+        );
+    }
+}
+
+/// #2654: the branch says so, loudly, when caller context did not reach it —
+/// and reviews with the context rather than without it.
+///
+/// Why: the failure this guards is silent by construction. A restored field
+/// that logged nothing would leave the same defect undetectable.
+/// What: hands the guard a context stripped of `referenced_code` alongside a
+/// caller that supplied one; asserts the field is named and put back.
+/// Test: this test itself.
+#[test]
+fn restore_caller_context_reports_and_restores_a_dropped_field() {
+    let caller = CallerContext {
+        referenced_code: Some("fn helper() {}".to_string()),
+        pr_description: Some("why this change".to_string()),
+        pr_discussion: None,
+    };
+    let mut context = crate::pipeline::prompt::ReviewContext::default();
+
+    let restored = super::restore_caller_context(&mut context, &caller);
+
+    assert_eq!(restored, vec!["pr_description", "referenced_code"]);
+    assert_eq!(context.referenced_code.as_deref(), Some("fn helper() {}"));
+    assert_eq!(context.pr_description.as_deref(), Some("why this change"));
+}
+
+/// #2654: the guard is silent on the healthy path — the runner threaded the
+/// context, so there is nothing to restore and nothing to report.
+#[test]
+fn restore_caller_context_is_silent_when_the_runner_threaded_it() {
+    let caller = CallerContext {
+        referenced_code: Some("fn helper() {}".to_string()),
+        ..CallerContext::default()
+    };
+    let context = crate::pipeline::prompt::ReviewContext {
+        referenced_code: Some("fn helper() {}".to_string()),
+        ..crate::pipeline::prompt::ReviewContext::default()
+    };
+    let mut context = context;
+
+    assert!(
+        super::restore_caller_context(&mut context, &caller).is_empty(),
+        "a threaded context reports nothing"
+    );
+    // And a caller who supplied nothing can never trip it.
+    let mut empty = crate::pipeline::prompt::ReviewContext::default();
+    assert!(super::restore_caller_context(&mut empty, &CallerContext::default()).is_empty());
+}
+
 /// Returns the #1873 phantom — a BLOCK whose only finding calls a file that IS
 /// in the changeset "not present in diff" — for the chunk carrying `marker`,
 /// and APPROVEs everything else.

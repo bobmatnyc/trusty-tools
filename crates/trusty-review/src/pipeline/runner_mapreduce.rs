@@ -19,7 +19,7 @@
 //! Test: `run_review_oversized_diff_mapreduce_reviews_tail_signature`,
 //! `run_review_mapreduce_chunk_request_changes_propagates` (runner_tests.rs).
 
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::{
     config::{MapReduceConfig, ReviewConfig},
@@ -31,7 +31,7 @@ use crate::{
         mapreduce::{MapContext, ReducedReview, run_map_reduce},
         parser::ParsedReview,
         prompt::{ReviewContext, ReviewPrMeta},
-        runner::{ReviewDeps, ReviewInput},
+        runner::{CallerContext, ReviewDeps, ReviewInput},
         runner_helpers::{
             DedupClaim, abort_dry, apply_grade_and_floor, attach_inline_comments,
             build_author_rationale, finalize_run,
@@ -85,8 +85,20 @@ pub(super) async fn run_mapreduce_branch(
     deps: &ReviewDeps,
     mr_config: &MapReduceConfig,
     mut result: ReviewResult,
-    run: MapReduceRun,
+    mut run: MapReduceRun,
 ) -> ReviewResult {
+    // #2654: the caller's context reaches the per-file prompts only because
+    // `run_review` copied it into `context` several steps above this call. That
+    // coupling is invisible from here, so a drop would strip the context from
+    // exactly the largest PRs and say nothing.
+    for field in restore_caller_context(&mut run.context, &input.caller_context) {
+        error!(
+            field,
+            "map-reduce: caller-supplied context did not reach this branch — \
+             restored it, but the runner's threading is broken (#2654)"
+        );
+    }
+
     let voice_config = build_voice_config(config);
     let ctx = MapContext {
         owner: &result.owner,
@@ -233,6 +245,57 @@ pub(super) async fn run_mapreduce_branch(
     }
 
     finalize_run(result, config, input, deps.dedup.as_ref()).await
+}
+
+/// Put back any caller-supplied context field that did not reach this branch,
+/// and name what was put back (#2654).
+///
+/// Why: `referenced_code` is the caller's semantic context — a downstream
+/// consumer populates it with multi-repo code the diff depends on, and the
+/// largest PRs are exactly where a diff-only review is weakest. It reaches the
+/// per-file prompts through a field assignment in `run_review`, and losing that
+/// assignment would cost nothing observable: no error, no warning, just weaker
+/// reviews. This is the Fail-Open shape the issue names — the context would
+/// disappear while the review advanced and reported success.
+/// What: for each of the three [`CallerContext`] fields, restores the caller's
+/// value when the caller supplied a non-blank one and `context` carries none,
+/// and returns the names of the fields restored. An empty return is the healthy
+/// state, and the ONLY state a caller who supplied nothing can produce.
+/// Test: `restore_caller_context_reports_and_restores_a_dropped_field`,
+/// `restore_caller_context_is_silent_when_the_runner_threaded_it`.
+pub(super) fn restore_caller_context(
+    context: &mut ReviewContext,
+    caller: &CallerContext,
+) -> Vec<&'static str> {
+    let mut restored = Vec::new();
+    let fields: [(&'static str, &Option<String>, &mut Option<String>); 3] = [
+        (
+            "pr_description",
+            &caller.pr_description,
+            &mut context.pr_description,
+        ),
+        (
+            "pr_discussion",
+            &caller.pr_discussion,
+            &mut context.pr_discussion,
+        ),
+        (
+            "referenced_code",
+            &caller.referenced_code,
+            &mut context.referenced_code,
+        ),
+    ];
+    for (name, supplied, carried) in fields {
+        let Some(value) = supplied.as_ref().filter(|v| !v.trim().is_empty()) else {
+            continue;
+        };
+        if carried.as_ref().is_some_and(|v| !v.trim().is_empty()) {
+            continue;
+        }
+        *carried = Some(value.clone());
+        restored.push(name);
+    }
+    restored
 }
 
 /// Apply the post-LLM grade/verify/inline chain to a reduced parse.
