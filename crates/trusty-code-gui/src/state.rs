@@ -6,9 +6,12 @@
 //! struct avoids re-reading the env var on every IPC call.
 //! What: `GuiState` carries the resolved tcode daemon base URL; it is
 //! registered once via `tauri::Manager::manage`.
-//! Test: Construct `GuiState::new()` with `TRUSTY_CODE_URL` unset and assert
-//! `daemon_url` equals `DEFAULT_DAEMON_URL`; set the env var and assert it is
-//! honored (see `state::tests`).
+//! `GuiState::new` reads `TRUSTY_CODE_URL` once and delegates to
+//! `GuiState::from_url_override`, which resolves the value without touching
+//! the process env — the seam that keeps the tests off shared global state
+//! (#6310).
+//! Test: `state::tests::{default_url_when_env_unset, env_override_is_trimmed,
+//! default_daemon_url_matches_tcode_default_http_port}`.
 
 /// Default daemon REST endpoint when `TRUSTY_CODE_URL` is not set.
 ///
@@ -40,12 +43,33 @@ impl GuiState {
     ///
     /// Why: Lets ops point the desktop app at a non-local daemon without a
     /// rebuild by exporting `TRUSTY_CODE_URL`.
-    /// What: Reads `TRUSTY_CODE_URL` (falling back to the default), trims any
-    /// trailing slash.
-    /// Test: Unset the env var → `daemon_url == DEFAULT_DAEMON_URL`.
+    /// What: Reads `TRUSTY_CODE_URL` and hands the raw value to
+    /// [`GuiState::from_url_override`], which owns the fallback and trimming.
+    /// Test: `from_url_override`'s tests cover both branches; this function
+    /// is the one-line env read above them.
     pub fn new() -> Self {
-        let daemon_url = std::env::var("TRUSTY_CODE_URL")
-            .unwrap_or_else(|_| DEFAULT_DAEMON_URL.to_string())
+        // #6310: this is the ONLY read of the process env in this module, and
+        // it is deliberately the whole of `new`. Tests drive
+        // `from_url_override` directly rather than mutating `TRUSTY_CODE_URL`,
+        // which raced across parallel test threads in one process.
+        Self::from_url_override(std::env::var("TRUSTY_CODE_URL").ok())
+    }
+
+    /// Resolve the daemon base URL from an already-read `TRUSTY_CODE_URL`.
+    ///
+    /// Why: `cargo test` runs a target's tests as threads in ONE process, so
+    /// a test that sets `TRUSTY_CODE_URL` and a sibling that removes it race
+    /// each other — that race failed the required `trusty-code-gui clippy`
+    /// check on unrelated PRs (#6310). Taking the value as an argument moves
+    /// the env read to the single caller above and leaves the resolution
+    /// logic pure, mirroring the `daemon_url_from` seam in
+    /// `crate::commands`.
+    /// What: `None` (or an unset var) yields [`DEFAULT_DAEMON_URL`]; any
+    /// value has its trailing slashes trimmed.
+    /// Test: `default_url_when_env_unset`, `env_override_is_trimmed`.
+    fn from_url_override(raw: Option<String>) -> Self {
+        let daemon_url = raw
+            .unwrap_or_else(|| DEFAULT_DAEMON_URL.to_string())
             .trim_end_matches('/')
             .to_string();
         Self { daemon_url }
@@ -64,31 +88,30 @@ mod tests {
 
     /// Why: pins the documented default so a future daemon port change is a
     /// deliberate, visible edit here rather than a silent drift.
-    /// What: with `TRUSTY_CODE_URL` unset, `GuiState::new().daemon_url` must
-    /// equal `DEFAULT_DAEMON_URL`.
+    /// What: an unset `TRUSTY_CODE_URL` (`None`) must yield
+    /// `DEFAULT_DAEMON_URL`.
     #[test]
     fn default_url_when_env_unset() {
-        // Safety: test runs single-threaded per-process env mutation is fine
-        // for this crate's tiny test suite.
-        unsafe {
-            std::env::remove_var("TRUSTY_CODE_URL");
-        }
-        assert_eq!(GuiState::new().daemon_url, DEFAULT_DAEMON_URL);
+        // #6310: the unset case is passed as `None` rather than produced by
+        // `remove_var`, so this test cannot be perturbed by — or perturb — a
+        // parallel sibling sharing the process env.
+        assert_eq!(
+            GuiState::from_url_override(None).daemon_url,
+            DEFAULT_DAEMON_URL
+        );
     }
 
     /// Why: confirms the override path ops rely on to point the desktop app
     /// at a non-local daemon.
-    /// What: setting `TRUSTY_CODE_URL` with a trailing slash yields a
-    /// trimmed `daemon_url`.
+    /// What: a `TRUSTY_CODE_URL` value with a trailing slash yields a trimmed
+    /// `daemon_url`.
     #[test]
     fn env_override_is_trimmed() {
-        unsafe {
-            std::env::set_var("TRUSTY_CODE_URL", "http://example.test:9999/");
-        }
-        assert_eq!(GuiState::new().daemon_url, "http://example.test:9999");
-        unsafe {
-            std::env::remove_var("TRUSTY_CODE_URL");
-        }
+        // #6310: the override is passed as an argument, never written to the
+        // process env, so `default_url_when_env_unset` can no longer clear it
+        // between this call and its assertion.
+        let state = GuiState::from_url_override(Some("http://example.test:9999/".to_string()));
+        assert_eq!(state.daemon_url, "http://example.test:9999");
     }
 
     /// Cross-crate default-port pinning contract (#3364).
