@@ -175,7 +175,11 @@ const GIT_PINNED_GLOBAL_ARGS: &[&str] = &[
 /// because env-injected config would otherwise compete with
 /// [`GIT_PINNED_GLOBAL_ARGS`].
 /// Test: `git_command_strips_repository_redirecting_env`.
-const GIT_ENV_REDIRECTS: &[&str] = &[
+///
+/// `pub(crate)` since #6391 so a failing worktree removal can name which of
+/// these the ambient environment carried, instead of reporting only that the
+/// directory is still there.
+pub(crate) const GIT_ENV_REDIRECTS: &[&str] = &[
     "GIT_DIR",
     "GIT_WORK_TREE",
     "GIT_INDEX_FILE",
@@ -702,6 +706,32 @@ pub(crate) fn git_command(dir: &Path, args: &[&str]) -> Command {
     for key in GIT_ENV_REDIRECTS {
         cmd.env_remove(key);
     }
+    cmd
+}
+
+/// Build the one `git worktree remove --force` invocation this crate runs
+/// (#6391).
+///
+/// Why: `git worktree` resolves its repository from `GIT_DIR` ahead of its own
+/// `-C`, so an ambient redirect aims the removal at a DIFFERENT repository than
+/// the one every gate before it just examined. Those gates all route through
+/// [`git_command`], which strips [`GIT_ENV_REDIRECTS`]; the removal did not,
+/// because each of its two call sites spelt the command out with a bare
+/// `Command::new("git")`. That left the one call that actually deletes as the
+/// only unhardened one. What an operator sees is a reap in which every gate
+/// passes, `git` then exits 128 with `is not a working tree` (the text #6099
+/// recorded), the refusal reaches nothing but a `warn!`, and the directory is
+/// still on disk. A git hook exports `GIT_DIR` and `GIT_INDEX_FILE` to
+/// everything it launches, so a daemon or test run descended from one inherits
+/// exactly that redirect.
+/// What: [`git_command`] plus `worktree remove --force <path>`. `path` is passed
+/// as a `Path` rather than a `&str` so a non-UTF-8 name is not coerced lossily
+/// (#1840).
+/// Test: `worktree_remove_command_strips_repository_redirecting_env`,
+/// `worktree_remove_command_ends_in_the_target_path`.
+pub(crate) fn worktree_remove_command(repo_root: &Path, path: &Path) -> Command {
+    let mut cmd = git_command(repo_root, &["worktree", "remove", "--force"]);
+    cmd.arg(path);
     cmd
 }
 

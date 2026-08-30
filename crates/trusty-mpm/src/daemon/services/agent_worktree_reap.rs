@@ -95,7 +95,9 @@ use crate::session_manager::worktree_ownership::{
     AgentDelegationState, AgentWorktreeOwner, SentinelOwner, find_agent_worktree,
     is_harness_agent_worktree, read_sentinel_owner,
 };
-use crate::session_manager::worktree_safety::{DirtyWorktreePolicy, dirt_blocks_removal};
+use crate::session_manager::worktree_safety::{
+    DirtyWorktreePolicy, dirt_blocks_removal, worktree_remove_command,
+};
 
 /// What happened to one registered agent worktree.
 ///
@@ -295,12 +297,11 @@ pub(crate) fn reap_worktree(path: &Path, agent_id: &str, in_use: &[PathBuf]) -> 
     if let Some(refusal) = ownership_unconfirmed(path, agent_id) {
         return ReapOutcome::Refused(refusal);
     }
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&registry_root)
-        .args(["worktree", "remove", "--force"])
-        .arg(path)
-        .output();
+    // #6391: through the hardened builder, not a bare `Command::new("git")`.
+    // `git worktree` honours `GIT_DIR` over `-C`, so an ambient redirect aimed
+    // the removal at another repository while every gate above it examined the
+    // real one — the reap reported a refusal and the directory stayed.
+    let out = worktree_remove_command(&registry_root, path).output();
     match out {
         Ok(o) if o.status.success() => {
             tracing::info!(
