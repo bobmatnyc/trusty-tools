@@ -17,7 +17,7 @@
 //! whole run.
 //!
 //! Test: used by `root_hijack_tests`, `checkpoint_tests`, `resume_tests`, and
-//! (#6369) the registry-census tests in `rpc::admin_tests`;
+//! (#6369) the registry-census tests in `rpc::admin::tests`;
 //! the guard's own vacuum-failure mode is covered by the "exactly one test"
 //! assertion below.
 
@@ -50,8 +50,9 @@ pub(crate) fn is_isolated_child() -> bool {
 /// the child. `test_name` is the test's full `module::path::name`; a stale one
 /// fails [`run_isolated`]'s "exactly one test" assertion rather than silently
 /// skipping the body.
-/// Test: `rpc::admin_tests`'s two registry-census tests and
-/// `server::tests_stall::health_reports_the_deferred_embed_queue_depth_end_to_end`.
+/// Test: `registry_orphans_over_the_socket_matches_the_http_body`,
+/// `an_unreadable_registry_is_refused_on_either_transport`, and
+/// `health_reports_the_deferred_embed_queue_depth_end_to_end`.
 pub(crate) fn isolate_in_child(test_name: &str) -> bool {
     if is_isolated_child() {
         return true;
