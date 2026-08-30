@@ -39,6 +39,12 @@ mod tests;
 #[cfg(test)]
 mod tests_4846;
 
+// #4045: single-registration-per-corpus, asserted on the registry that warm
+// boot populates and driven through the colocated discovery scan — the path
+// #3929 came in through, which the #2305 / #2336 call-site guards do not sit on.
+#[cfg(test)]
+mod tests_4045;
+
 // Epic #3524 slice 7: repeated ort<->python swap-back cycle bench/soak
 // coverage (fast deterministic tests + an opt-in real-hardware soak). A
 // sibling of `tests` rather than folded into it because `tests.rs` is

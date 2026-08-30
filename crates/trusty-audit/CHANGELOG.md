@@ -10,6 +10,310 @@ edit this file by hand (see
 
 ---
 
+## [0.12.0] — 2026-08-29
+
+### Breaking
+
+- `grounding::Tools::search_url: String` is now `grounding::Tools::search_socket: PathBuf` — the trusty-search half of the pair names a Unix socket rather than a base URL.
+- `grounding::evidence::HttpSearch` is now `grounding::evidence::SocketSearch`, and its constructor takes a socket path and is infallible: there is no HTTP client left to fail to build.
+- `grounding::daemons::search_base_url` is removed. `grounding::daemons::search_socket` replaces it, forwarding to the new `grounding::search_rpc::search_socket`.
+
+### Fixed
+
+- Resolved a broken rustdoc intra-doc link in `grounding::search_rpc` (a bare
+  `[`Display`]` now points at `std::fmt::Display`), unblocking the rustdoc
+  intra-doc-link publish gate. No behavior change (#6285).
+
+### Changed
+
+- The three legs that reach `trusty-search` — the readiness probe, the index-root backstop, and the per-dimension evidence queries — now speak framed JSON-RPC over the daemon's Unix socket instead of loopback HTTP (`search.health`, `search.index.status`, `search.query`). The socket path is derived from `trusty_common::daemon_socket_path("trusty-search")`, the same call the daemon binds, so there is no address to discover and no `http_addr` file for a stale write to contradict. `TRUSTY_SEARCH_SOCKET` pins it explicitly for a rig that started its own daemon.
+- A daemon that answers and refuses stays distinguishable from a daemon that is not there. Both remain fail-open at every leg, as before, but an error frame can no longer read as an empty result — a refused query is reported with the daemon's own code and message rather than as "no evidence found".
+
+## [0.11.1] — 2026-08-28
+
+### Fixed
+
+- A run's child logs go into `logs/<run>/` — one directory per launch — instead
+  of straight into `logs/<NN>-<repo>.log`, which `File::create` truncated. Before
+  this, starting a second audit destroyed the record of the first before it had
+  produced anything to replace it, so an operator comparing a failing run against
+  the one that worked had nothing left to compare against; an external engagement
+  reported the same loss independently. The directory is named for the local time
+  and the process id and is created exclusively, so two launches in one second get
+  their own; a repository carried over by the checkpoint keeps the log path from
+  the run that actually audited it, and the run index links whichever that is. The
+  twenty most recent runs are kept and older directories are removed as each run
+  starts, so persistence does not become unbounded growth — a run that dies never
+  reaches an end, so pruning at the end would not be retention (#6137)
+- A repository's output directory carries an `audit-complete.toml` marker,
+  written last and only for a repository the run got all the way through, and a
+  re-run re-collects any recorded output that does not have one. `manifest.toml`
+  was the only evidence a directory held, and it is written by the `tga audit`
+  child before the grounding pass and the inference stamp edit it — so a run
+  killed in between left real collection data and a report that was never
+  finished, which `verify_output` accepts and a re-run carried over as complete.
+  Completion was recorded only in `state/run-progress.toml`, one document for the
+  whole sweep, so nothing about the directory itself said which it was; the
+  marker makes that answer travel with the data, for a directory copied,
+  inspected or re-rendered on its own. The re-collection is announced with its
+  reason rather than being silent, and a record written before the marker existed
+  is re-collected once — the same direction `RunProgress::complete` takes for the
+  same reason (#6141)
+- The `tga` stub the run tests install writes its invocation log to an absolute
+  path under the test's work directory, and `invocations()` panics when that log
+  is absent instead of reading it as an empty list. The stub used to append to
+  `invocations.txt` relative to the child's own working directory — which only
+  `run::child::spawn_tga` sets — so the same script installed behind
+  `trusty-analyze` and `trusty-review` wrote into whatever directory the test
+  binary started in, and every `assert_eq!(invocations(&work).len(), n)` then
+  compared zero against a count nothing had recorded. Running the suite from the
+  crate directory put the log in the checkout, which is how 49 blank lines of it
+  were committed and then ignored (`f3ec62545`); that `.gitignore` entry is
+  removed with the leak (#6293)
+
+### Changed
+
+- `grounding`'s analyze guard and hotspot fetch dial trusty-analyze's Unix
+  socket instead of port 7879 (#6287, ADR-0032). As in `tga`, the health verdict
+  is explicit — only `status: "ok"` passes — because a JSON-RPC health call
+  answers with a result frame whether or not trusty-search is reachable, and a
+  degraded daemon serves an empty hotspot list that reads as "nothing complex".
+- `TRUSTY_ANALYZE_URL` becomes `TRUSTY_ANALYZE_SOCKET`. The value it carries is
+  a filesystem path now, and a variable still saying URL would leave an operator
+  setting `http://…` and getting a dial failure naming a socket they never
+  configured.
+
+### Documentation
+
+- `Tools::pinned`'s doc links `daemons::analyze_socket` instead of the
+  `daemons::analyze_base_url` that #6287 removed, and says the resolved pair is
+  a search URL plus an analyze socket path. The broken link failed Gate 1 of
+  the pre-publish workflow.
+
+## [0.10.0] — 2026-08-25
+
+### Added
+
+- `trusty-audit init` writes the first `engagement.toml` with no terminal
+  involved, reading the key from `OPENROUTER_API_KEY`. Only the interactive
+  cold start ever wrote that file, so the README's documented sequence failed at
+  `add repo` with `NoEngagementConfig` for every scripted and CI caller, whose
+  workaround was faking a pty with `script -q /dev/null`. Re-running it over an
+  existing engagement is a no-op, so it can sit at the top of a script.
+
+### Fixed
+
+- `render` now refuses when the engagement's own `tools/trusty-review` is at a
+  different version from the engagement's `trusty-review` pin, naming both. It
+  used to render at whatever that copy happened to be and exit 0. `install`,
+  `run` and `guided` all reconcile pins; `render` never did, and its default
+  renderer IS that engagement-local copy — so bumping a pin and re-rendering
+  silently produced the report at the old version, with the only trace a version
+  in the report metadata, read after the report had been believed.
+- The reconciliation covers only the engagement's copy. `--review-bin` stays the
+  escape hatch and is never reconciled, and a `PATH`-resolved renderer keeps the
+  disclosure it already carried rather than gaining a refusal. A re-render where
+  no `engagement.toml` loads pins nothing and is unaffected.
+- The `gh` login now reaches the child's git transport. The sweep already read
+  `gh auth token` once and handed it over as `TRUSTY_AUDIT_GITHUB_TOKEN`, which
+  only tga's `github:` config section references; the fetch that runs before
+  every collection reads `GITHUB_TOKEN`. A recipient logged in with `gh` and
+  nothing else had every fetch fail and got a header-only `pr-metrics.csv` per
+  repository, over a usable credential this process was holding. An
+  operator-exported token is never replaced — the forward happens only when the
+  `gh` login is the sole source.
+- A sweep with no non-interactive git credential at all refuses before any child
+  runs, naming how many repositories would have been fetched and every way to
+  supply one (`gh auth login`, `GITHUB_TOKEN`/`GH_TOKEN`, an SSH key,
+  `ssh-agent`). It fires only when the selected checkouts provably name a
+  `github.com` remote, so an engagement over paths on disk still runs. Before
+  this the run reported success having collected no pull-request data at all,
+  and said so only in one repeated line inside each repository's own manifest.
+- A repository that failed now leaves a trace in the return package. Each one
+  ships its child's own log as `failures/<stem>.log`, copied through the same
+  symlink, hardlink and credential guards every other member goes through, and a
+  generated `failures/index.md` names the repository, what went wrong, how long
+  it ran, and the gaps it stated before it stopped. A failure with no log says
+  so rather than being absent. Before this a failed target left nothing at all —
+  "failed" and "never attempted" were the same observation from the outside, and
+  diagnosing either meant re-running the sweep on the machine that had it.
+- The generated members are scanned for the engagement's credentials before they
+  are written, rather than trusted because this crate wrote them. The failure
+  record quotes reason strings, and a reason can carry text a child produced.
+- An engagement config key this version does not act on is declared instead of
+  discarded. The keys are captured at parse time, named in `package.toml` as
+  `config_not_acted_on` (always emitted, so an empty array is a positive claim
+  of full coverage), and stated in the return package's README and in the
+  `excluded` lines a front end prints. Before this, a config requesting extra
+  export families — per-commit tables, CODEOWNERS metadata, branch-protection
+  metadata — produced output byte-identical to a run that requested none, with
+  no skip or unsupported marker anywhere, so the operator was left inferring
+  silence as "the config did nothing".
+- The limit is stated rather than implied: this covers TOP-LEVEL keys. A stray
+  key written after a table header belongs to that table in TOML and is still
+  absorbed by that table's own type.
+- The investigation budget an engagement declares now reaches the process that
+  samples the files. `engagement.toml` gains a `[report]` section carrying
+  `investigate_max_files` / `investigate_max_bytes`; the sweep resolves the
+  budget ONCE from it (declared key > environment override > default, per key,
+  with an absent byte budget derived from the file count) and hands that one
+  value both to every `tga audit` child and to the grounding pass that records
+  it. Before this the child read the environment inside its own spawn while the
+  manifest was written from a second, later resolution — so a run could hand
+  back a manifest declaring 240 files beside a report whose coverage section
+  claimed 40.
+
+## [0.9.0] — 2026-08-22
+
+### Added
+
+- A grounding leg measures the crate topology of any audited repository whose
+  root `Cargo.toml` declares a `[workspace]`, and writes it into that
+  repository's `manifest.toml` as a `crate_topology` table: member count, each
+  member's direct internal dependencies and how many members depend on it, the
+  total edge count, and any dependency cycle over those edges. It runs
+  `cargo metadata --no-deps --format-version 1` — no dependency resolution, no
+  network — and reads three keys out of the result, so it adds no dependency to
+  the crate. `trusty-review` renders those numbers as a deterministic table in
+  Code Quality & Architecture and states them to the architecture paragraph, so
+  that paragraph comments on the workspace's real shape instead of inferring one
+  from complexity buckets and a language list.
+- Dev-dependencies are deliberately not counted as architecture edges: cargo
+  permits a dev-dependency cycle, so counting them would report a routine
+  test-only arrangement as a cycle. A cycle over the edges that remain is one
+  cargo itself rejects, which the report states as such.
+- A repository that is not a Cargo workspace is a declared skip, not a gap — it
+  has no crate topology to miss, and its report is unchanged. A repository that
+  IS a workspace whose metadata could not be read is a named gap, naming the
+  repository and what its report therefore will not carry.
+
+### Fixed
+
+- Evidence discovery scores hits against a share of their own query's best hit
+  instead of an absolute 0.15 floor. `POST /indexes/{id}/search` fuses its lanes
+  with Reciprocal Rank Fusion, so a hit's score is `Σ weight / (60 + rank)` and
+  can never exceed `1/61 ≈ 0.0164` — an order of magnitude below the floor. Every
+  hit of every query was therefore dropped on every run, and the discovery leg
+  produced nothing whatever the index held: the 2026-08-22 dogfood audit searched
+  an 85 840-chunk index and wrote zero search-derived evidence rows. The relative
+  floor drops the same filler beside a strong hit and can no longer empty a
+  result set, because the best hit always clears it.
+- A search leg that matched nothing now states its gap even when the repository
+  has a build manifest. The deterministic `Cargo.toml` enumeration ran before the
+  gap check read the dimension list, so it created a dimension on a run where
+  search answered nothing at all — and the manifest then declared
+  `attributed_only = true`, telling `trusty-review` to decline its path-name
+  top-up over a sample with no search evidence in it. Both the gap line and
+  `attributed_only` are now decided by the search result alone.
+- The investigation budget reaches the renderer through the `tga audit` child's
+  environment as well as through the manifest. `tga audit` renders from the
+  manifest in the same process that wrote it, and this crate's grounding pass
+  edits that file only after the child exits — so the recorded budget reached a
+  re-render and never the sweep's own report. The 2026-08-22 run shipped a
+  manifest declaring `investigate_max_files = 240` over an investigation that
+  recorded `max_files: 40`. An explicit flag and a declared manifest key both
+  still win.
+- A ranking written into a manifest that has already been rendered from now says
+  so on the console, and names `taudit render` as the recovery. That degradation
+  previously had no line anywhere: the same run shipped 37 ranked paths beside an
+  investigation whose every examined file read "path-name heuristic".
+
+### Changed
+
+- `grounding::quality::MIN_EVIDENCE_SCORE` is replaced by `MIN_EVIDENCE_SHARE`,
+  and `is_evidence` takes the floor its query earned as a second argument.
+  `evidence_floor` derives that floor from the query's best hit.
+
+## [0.8.1] — 2026-08-22
+
+### Fixed
+
+- The grounding pass indexes each audited checkout under an id derived from its
+  canonical path (`trusty_common::derive_checkout_index_id`) instead of the
+  checkout basename, so a machine already serving an index of the same name for
+  a different tree no longer collides. The confirmation run of 2026-08-21 hit
+  exactly that: the engagement clone at `…/repos/local/trusty-tools` derived
+  `trusty-tools`, the daemon was serving `~/Projects/trusty-tools` under it, and
+  the root-mismatch guard correctly refused — which cost the report both its
+  evidence discovery and its complexity hotspots. That guard stays, as the
+  backstop for an index registered under the old scheme or a tree that has since
+  moved. Existing indexes registered under a bare basename are not renamed;
+  the first audit of a checkout re-indexes it under the new id.
+- The investigation budget reaches `[report].investigate_max_files` /
+  `investigate_max_bytes` even when both grounding legs degrade. The budget is
+  configuration, not evidence, and it used to be written only alongside a
+  non-empty ranking — so a run that lost its index also lost its 240-file budget
+  and trusty-review fell back to its own 40-file default, compounding one
+  failure into two.
+
+## [0.8.0] — 2026-08-22
+
+### Added
+
+- The manifest declares `[report].attributed_only = true` when the search leg produced per-dimension evidence. trusty-review then reads only the declared ranking instead of topping the file budget up with path-name heuristics. On every degraded path — no index, a dead daemon, a complexity-only ranking — the key is not written and the existing gap line names why.
+- A minimum relevance floor for search evidence. A hybrid search returns its top-N whether or not it found anything, so an empty-handed query returned filler rows that the ranking then promoted as headline evidence — the graded self-audit's "authentication & secrets" dimension led with a call-graph test file at score 0.02 while the real middleware went unread. Hits below the floor are dropped.
+- Test-file demotion. For every dimension except "test coverage", a path matching the repo's test classification (`tests/`, `_test.rs`, `tests.rs`, `.test.ts`, `_test.go`, `benches/`, …) sorts behind every production file, so a test never outranks the file it tests. Demotion, not exclusion: a repository whose only auth-adjacent file is a test still surfaces it, last. Under "test coverage" test files stay first-class.
+- The dependencies dimension now leads with the build manifests actually present in the tree — root and member `Cargo.toml`, `deny.toml`, `package.json`, `go.mod`, `pyproject.toml` and friends — enumerated by a bounded directory walk that skips `node_modules/`, `target/`, and `vendor/`. Finding a manifest needs no index and no LLM, and the previous semantic-only answer produced a false "no manifest-declared dependencies" claim on a 134-dependency workspace. Semantic hits keep their place behind the manifests; a tree with no build file is left alone rather than given an invented entry.
+- An index-root guard. The trusty-search index id is the checkout BASENAME, so two checkouts of one repository collide on a single id — a sweep measured its complexity hotspots against a different clone, on a different branch and commit, and stamped them "measured". Grounding now compares the served index's `root_path` to the audited checkout, resolving symlinks and `..`. A mismatch is the named gap `complexity data unavailable: index root mismatch`, naming both roots, and both index-reading legs degrade rather than importing another checkout's measurements. A daemon that will not answer is not a refusal — that failure already has a gap of its own.
+- The audit now discovers evidence by ASKING the repository's trusty-search index, not only by measuring complexity: one query set per due-diligence dimension (credential handling, swallowed errors, lock/cache consistency, scaling limits, tests), plus queries derived from the engagement's own `instructions` brief. The hits are interleaved round-robin with the complexity hotspots, so the report's inference budget is spent across the dimensions rather than down whichever one complexity concentrates in.
+- Each `inspect_priority` entry the audit writes now records WHY that file is ranked — the dimension it is evidence for and the query (with its score) that found it — which the rendered Investigation Coverage section states per dimension.
+- The audit asks for a wider investigation budget through the manifest: `investigate_max_files = 120` / `investigate_max_bytes = 1200 KiB`, written per key and only where the manifest declares none, and overridable per machine with `TRUSTY_AUDIT_INVESTIGATE_MAX_FILES` / `TRUSTY_AUDIT_INVESTIGATE_MAX_BYTES`.
+- The sweep writes the run's inference identity — provider plus the three role
+  model ids — into each repository's `manifest.toml` as an `[inference]` table,
+  beside the ranking it already writes there. `trusty-review` resolves from that
+  section ahead of the host's own config, so `trusty-audit render` on a
+  recipient's machine reproduces the provider the engagement ran on instead of
+  inheriting whatever that machine is pinned to (owner ruling 2026-08-21: "In
+  audit mode, trusty review should use the same provider as audit to make it
+  portable. From the manifest."). The same values still go to the child as
+  `TRUSTY_REVIEW_*` variables; the manifest is authoritative when present. The
+  section carries identity and never a credential — the key stays in the
+  environment. A manifest that cannot be written is a named gap, not a failed
+  repository, exactly as a ranking that cannot be written is.
+- `index.md` gains an Inference section stating which provider and models
+  produced the reports in that directory, and which layer selected them. A
+  re-render reads it from the manifests it renders, since those outrank anything
+  the run itself injects.
+
+### Fixed
+
+- A local-path target now audits under the `owner/repo` its checkout's `origin` remote names on github.com, instead of the synthetic `local/<name>` that made every work-item lookup 404 (3152 of 3152 on the trusty-tools self-audit) and stopped the audit before it could package. The on-disk identity is unchanged — a checkout is still acquired under `repos/local/<name>`; only the GitHub-issue identity handed to tga is resolved from the remote. A checkout with no remote, or one that names a non-GitHub host, generates a `github:` section declaring the work-item leg absent with the reason, so the run completes, packages, and names the gap in its report. Port-qualified remotes (`ssh://git@github.com:22/owner/repo`, `https://github.com:443/owner/repo`) resolve to the same slug their portless forms do, and a `git` that cannot be run is reported as a remote that could not be READ rather than as one that names no GitHub repository.
+- The investigation byte budget now derives from the file budget at 10 KiB per
+  file unless the environment or the manifest declares one. `trusty-review`
+  stops selecting at whichever of the two caps binds first, so raising
+  `TRUSTY_AUDIT_INVESTIGATE_MAX_FILES` alone read fewer files than it asked for
+  and reported nothing about it — a 120-file lap read 76 files because the fixed
+  1.2 MiB cap bound first. An explicit `TRUSTY_AUDIT_INVESTIGATE_MAX_BYTES`, or
+  a declared `[report].investigate_max_bytes`, still wins outright.
+- The default investigation budget is 240 files and 2.4 MiB per repository, up
+  from 120 files and 1.2 MiB: 120 sampled about 1.8% of a workspace-sized
+  repository, below the coverage a due-diligence report is expected to reach.
+  The evidence caps follow it — 240 ranked paths and 34 files per dimension.
+
+### Changed
+
+- A search hit that the knowledge graph reached, rather than the query text, now says so in its reason: `via knowledge-graph expansion`. trusty-search labels the lane itself (`match_reason: "hybrid+kg"`); the evidence leg now reads that label instead of discarding it, so the report can distinguish "this file mentions credentials" from "this file is one call hop from the credential handler".
+- The evidence queries pin `expand_graph: true` explicitly. It is already the daemon's default, so behaviour is unchanged — the pin keeps a future default flip from silently dropping relationship evidence from every audit.
+- The evidence caps now scale with the investigation budget. `TRUSTY_AUDIT_INVESTIGATE_MAX_FILES` used to raise how many files trusty-review read while the priority list stayed 60 and each due-diligence dimension stayed 8, so everything past the 60th file reached the investigation with no dimension and no reason. The ranked list now tracks the budget (floor 60), each dimension may contribute the total split across the seven dimensions that fill it (floor 8), and each search query asks for chunks in proportion so a raised per-dimension cap is not starved by a top-12 request. At the default 120-file budget the list is 120 paths and 17 files per dimension; a budget at or under 60 behaves exactly as before.
+- The budget is resolved once, from the manifest's own `[report].investigate_max_files` when it declares one and from the environment otherwise, so the caps size for what trusty-review will actually read rather than for a second value.
+- The two ranking legs are now independent: a trusty-analyze daemon that will not start costs the complexity ranking and the `--analyze` enrichment, no longer the search-derived evidence as well.
+- A search index that answers nothing, or query failures, are named gaps naming the repository and what the report therefore does not carry — never a silent fall back to path names.
+- The complexity leg keeps the function it measured. `/complexity_hotspots`
+  ranks chunks — one function each, with a name, a line range and a cyclomatic
+  count — and the reader here parsed the file path and the count only, so
+  collapsing chunks to files threw away the part that says WHERE in a 900-line
+  file the complexity is. Each `inspect_priority` entry the complexity leg
+  produces now carries a nested `hotspot = { function, start_line, end_line,
+  cyclomatic }` table naming that file's worst function, and its `reason` line
+  names it too. The file-level collapse is unchanged: one entry per file, the
+  winning chunk's measurement recorded, the losing chunks still dropped.
+  trusty-review reads the new key to point the investigation prompt at the
+  function rather than the file (#6146).
+- A manifest written before this parses exactly as it did — the key is absent,
+  and an entry that has nothing else to say is still a bare path string. A
+  daemon that ranks a chunk without locating it still ranks that chunk's file;
+  the measurement is an addition to the entry, never a precondition for it.
+
 ## [0.7.0] — 2026-08-20
 
 ### Added
