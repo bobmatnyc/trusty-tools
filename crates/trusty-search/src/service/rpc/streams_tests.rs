@@ -314,20 +314,16 @@ async fn a_live_reindex_stream_delivers_events_in_order_as_they_are_emitted() {
     );
 }
 
-/// Why: `reindex_stream` snapshots the replay buffer and THEN subscribes, and
-/// `ReindexProgress::push` buffers under the same lock and THEN broadcasts — so
-/// an event whose two halves straddle the open can be delivered twice or lost.
-/// That instant is not drivable: `reindex_stream` has no await point between the
-/// snapshot and the subscribe, so the window is only reachable from another
-/// thread with no seam to stop at.
+/// Why: `reindex_stream` opens through `ReindexProgress::subscribe_with_replay`,
+/// which takes the replay buffer and the live subscription under one lock hold
+/// that `push` also takes across its append and its broadcast — so no event can
+/// straddle an open (#6386). This pins the two orderings a consumer depends on:
+/// an event pushed strictly BEFORE the open arrives once, from the replay; one
+/// pushed strictly AFTER arrives once, live. A rewrite that replayed twice or
+/// dropped the replay changes one of those two counts.
 ///
-/// What this pins is the composition either side of it — the two orderings that
-/// ARE deterministic. An event pushed strictly BEFORE the open arrives once, from
-/// the replay; one pushed strictly AFTER arrives once, live. A rewrite that
-/// subscribed before snapshotting, replayed twice, or dropped the replay changes
-/// one of those two counts, so it fails here even though the race itself is not
-/// reproducible. The window is inherited from the SSE handler and accepted, not
-/// introduced by this slice (#6285).
+/// The concurrent case — an event pushed WHILE the stream opens — is
+/// `a_stream_opening_against_live_pushes_loses_and_repeats_nothing` below.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_event_either_side_of_the_stream_opening_is_delivered_exactly_once() {
@@ -363,6 +359,77 @@ async fn an_event_either_side_of_the_stream_opening_is_delivered_exactly_once() 
     let latest = serde_json::json!({ "event": "complete", "indexed": 2, "elapsed_ms": 3 });
     progress.push(latest.clone()).await;
     assert_eq!(take_items(&mut items, 1).await, vec![latest]);
+}
+
+/// Why: #6386 end to end, on the transport a dashboard actually reads. The unit
+/// coverage in `reindex::progress_race_tests` proves `subscribe_with_replay` is
+/// exactly-once; this proves the socket producer built on it delivers that
+/// sequence whole — replay first, live after, nothing dropped between them — while
+/// a reindex is emitting. Before the fix an event pushed inside the open reached
+/// neither path, and a dashboard's progress simply skipped a batch with no error
+/// anywhere.
+///
+/// What: opens the real stream while eight writers push a known set through the
+/// real `ReindexProgress::push`, then reads exactly as many items as were pushed
+/// and checks the delivered `seq` values are that set — a lost event shows up as a
+/// missing one, a repeated event as a missing one plus a duplicate.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stream_opening_against_live_pushes_loses_and_repeats_nothing() {
+    /// Below the 256-slot broadcast channel and the 500-event replay cap, so a
+    /// lag or a truncation here would be a broken fixture rather than a finding.
+    const EVENTS: usize = 120;
+    const WRITERS: usize = 8;
+
+    let (state, _http, rpc) = routers(&["rs"]).await;
+    let progress = plant_progress(&state, "rs", ReindexStatus::Running, &[]).await;
+    let next = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let writers: Vec<_> = (0..WRITERS)
+        .map(|_| {
+            let progress = Arc::clone(&progress);
+            let next = Arc::clone(&next);
+            tokio::spawn(async move {
+                loop {
+                    let seq = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if seq >= EVENTS {
+                        return;
+                    }
+                    progress.push(serde_json::json!({ "seq": seq })).await;
+                }
+            })
+        })
+        .collect();
+
+    // Opened while the writers are mid-run, which is the whole point.
+    let mut items = open_stream(
+        &rpc,
+        streams::METHOD_INDEX_REINDEX_STREAM,
+        serde_json::json!({ "index_id": "rs" }),
+    )
+    .await;
+
+    let delivered = take_items(&mut items, EVENTS).await;
+    for writer in writers {
+        writer.await.expect("no writer may panic");
+    }
+
+    let seen: std::collections::BTreeSet<u64> = delivered
+        .iter()
+        .map(|item| {
+            item["seq"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("every item must be a planted event, got {item}"))
+        })
+        .collect();
+    let expected: std::collections::BTreeSet<u64> = (0..EVENTS as u64).collect();
+    let missing: Vec<u64> = expected.difference(&seen).copied().collect();
+    assert!(
+        missing.is_empty(),
+        "{count} of the first {EVENTS} items were not the {EVENTS} pushed events — seq \
+         {missing:?} never arrived, so the open either lost them or repeated something else",
+        count = missing.len(),
+    );
 }
 
 /// Why: the SSE route answers `404` for an index with no recorded reindex, and a
