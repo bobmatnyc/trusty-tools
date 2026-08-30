@@ -456,6 +456,57 @@ async fn unresolvable_cwd_probe_is_retried_a_bounded_number_of_times() {
     );
 }
 
+/// #6414 REGRESSION: a pane whose recorded path is GONE is declined on the
+/// first probe, not after the full backoff.
+///
+/// Why: `resolve_adoptable_cwd` folded "tmux did not answer" and "tmux named a
+/// directory that no longer exists" into one retry. Only the first is a flake.
+/// tmux keeps reporting the path it recorded, so probes two and three read the
+/// same bytes and reach the same verdict — and on a host with 276 panes left
+/// over from reaped agent worktrees, that identical verdict cost 55 s of sleep
+/// inside `reconcile_on_boot`, which every `DaemonState::session_manager()`
+/// caller awaits (#6391 raised the SessionEnd sweep's budget to 300 s to
+/// contain it).
+///
+/// What: one live pane whose `get_pane_cwd` always answers with a path that
+/// does not exist. Asserts the probe ran EXACTLY once — against the pre-fix
+/// body it runs 3 times and this fails — and that the verdict is byte-for-byte
+/// the one the retry produced: declined, no record, nothing adopted. The count
+/// is the assertion because it is the cause; wall-clock is not asserted.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_stale_pane_path_is_declined_on_the_first_probe() {
+    let dir = TempDir::new().unwrap();
+    let _home = set_home(dir.path());
+    // A path under the temp dir that was never created — the shape a reaped
+    // agent worktree leaves behind in a still-live pane.
+    let reaped = dir.path().join("reaped-worktree");
+    assert!(!reaped.exists(), "the fixture path must not exist");
+
+    let fake = std::sync::Arc::new(FlakyPaneCwdTmux {
+        alive: vec!["tm-stale-01".into()],
+        pane_cwd: Some(reaped),
+        flaky_for: 0,
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        pane_id: None,
+    });
+
+    let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
+    let report = mgr.reconcile_on_boot(false).await.expect("reconcile");
+
+    assert_eq!(
+        fake.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a path tmux keeps reporting cannot become a directory by being read again"
+    );
+    // The verdict is unchanged — the point of the fix is that it costs less,
+    // not that it decides differently.
+    assert_eq!(report.adoption_declined, vec!["tm-stale-01".to_string()]);
+    assert!(report.external_adopted.is_empty());
+    assert_eq!(mgr.list().await.len(), 0);
+}
+
 /// #6118: a live pane whose cwd will not resolve is NOT adopted.
 ///
 /// Why: #2158 adopted it as an `Active` record with a `/unknown` cwd and an
