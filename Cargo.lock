@@ -11568,7 +11568,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-embedderd-py"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "fs4 0.8.4",

@@ -1,6 +1,6 @@
 [package]
 name = "trusty-embedderd-py"
-version = "0.1.3"
+version = "0.1.4"  # bump for the #5328 spawn-retry fix release
 publish = true
 edition = "2021"
 license.workspace = true
