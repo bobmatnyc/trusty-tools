@@ -7,22 +7,33 @@
 //! `delete_guard::refuse_unless_root_matches`: a moved root refuses, a matching
 //! root proceeds, and the two arms that could not make the comparison at all —
 //! an absent registration and an unreadable registry — refuse rather than
-//! proceed.
+//! proceed. One more pins the comparison's ATOMICITY: a relocate that lands
+//! while the delete waits to quiesce must refuse it, because the pre-lock
+//! comparison and the teardown it authorises are not one step.
 //!
-//! What: drives the real router with `oneshot`, so the `?expected_root_path=`
-//! extractor and the status code are exercised alongside the guard. Every test
-//! points `TRUSTY_DATA_DIR` at a `TempDir` and is `#[serial_test::serial]`,
-//! because that env var is process-wide.
+//! What: most tests drive the real router with `oneshot`, so the
+//! `?expected_root_path=` extractor and the status code are exercised alongside
+//! the guard. The interleaving test calls `delete_index_report` directly instead,
+//! because it needs one `SearchAppState` shared between the delete and the
+//! relocate. Every test points `TRUSTY_DATA_DIR` at a `TempDir` and is
+//! `#[serial_test::serial]`, because that env var is process-wide.
 //!
 //! Test: this module. Run with `cargo test -p trusty-search tests_6380`.
 
 use super::build_router;
-use crate::core::registry::IndexRegistry;
+use super::search::{delete_index_report, DeleteIndexParams};
+use crate::core::indexer::CodeIndexer;
+use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use crate::service::persistence;
+use crate::service::reindex::{index_cancel_flag, index_teardown_lock};
 use crate::service::server::SearchAppState;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::RwLock;
 use tower::ServiceExt;
 
 /// Id used throughout. `[a-z0-9-]` only, so `persistence::sanitize_id` is the
@@ -242,6 +253,144 @@ async fn an_unreadable_registry_refuses_an_expected_root_delete() {
     assert!(
         row_exists(INDEX_ID),
         "#6380: nothing may be removed behind a comparison that never ran"
+    );
+}
+
+/// The id the interleaving test below uses. Distinct from [`INDEX_ID`] on
+/// purpose: the teardown lock and cancel flag are process-global maps keyed by
+/// id, and that test's coordination reads the cancel flag as a happens-after
+/// marker. A value another test in this binary already set would let the poll
+/// return before this delete had even started.
+const RACE_INDEX_ID: &str = "midquiesce-6380";
+
+/// A registered handle at `root`, matching `tests_3049::state_with_index`.
+fn bare_handle(id: &str, root: &Path) -> IndexHandle {
+    IndexHandle::bare(
+        IndexId::new(id),
+        Arc::new(RwLock::new(CodeIndexer::new(id, root.to_path_buf()))),
+        root.to_path_buf(),
+    )
+}
+
+/// Poll `id`'s cancel flag until the delete has signalled it, or give up.
+///
+/// Why: `unregister_index` signals the cancel AFTER `delete_index_report`'s
+/// pre-lock comparison and BEFORE it parks on the exclusive teardown wait, so
+/// the flag reading `true` is the one observable that proves the pre-lock
+/// comparison already ran and passed. Swapping the root before that point would
+/// be refused by the fast path instead, which proves nothing about the under-lock
+/// check. The deadline is well inside the 1.5s `cfg(test)` quiesce timeout, so a
+/// delete that is going to abandon itself is not what this waits for.
+async fn await_cancel_signal(id: &IndexId) {
+    let flag = index_cancel_flag(id);
+    let deadline = std::time::Instant::now() + Duration::from_millis(400);
+    while std::time::Instant::now() < deadline {
+        if flag.load(Ordering::Acquire) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    panic!("the delete never signalled its cancel flag — it never reached the quiesce wait");
+}
+
+/// #6380: a relocate landing while the delete waits to quiesce must turn the
+/// delete into a REFUSAL, not a success against the moved root.
+///
+/// Why: the pre-lock comparison and the teardown it authorises are not one
+/// atomic step. `relocate_index_report` rewrites `root_path` while holding only
+/// the SHARED side of the same teardown lock the delete waits on exclusively, so
+/// a relocate fits entirely inside the window between the two. Against the branch
+/// head this fails as a real assertion failure: the comparison is never re-run,
+/// so the delete answers `200 removed:true` and destroys the data directory of a
+/// live index at a root the caller never named.
+/// What: holds the shared guard the way a relocate does, starts the delete with
+/// an expectation naming the OLD root, waits on the cancel flag until the delete
+/// is provably past its pre-lock check, then lands the relocate's two observable
+/// effects — the `indexes.toml` rewrite and the hot-handle swap — and releases
+/// the guard. The delete then acquires the exclusive side and must refuse.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+#[serial_test::serial]
+async fn a_relocate_landing_mid_quiesce_refuses_the_delete() {
+    let isolated = super::tests_components::IsolatedDataDir::new();
+    let old_root = isolated.path().join("old-root");
+    let new_root = isolated.path().join("new-root");
+    std::fs::create_dir_all(&old_root).expect("create old root");
+    std::fs::create_dir_all(&new_root).expect("create new root");
+    let data_dir = register(RACE_INDEX_ID, &old_root, isolated.path());
+
+    let registry = IndexRegistry::new();
+    registry.register(bare_handle(RACE_INDEX_ID, &old_root));
+    let state = Arc::new(SearchAppState::new(registry));
+    let index_id = IndexId::new(RACE_INDEX_ID);
+
+    // The relocate's own guard: `relocate_index_report` takes the SHARED side and
+    // holds it across the rebuild, the registry rewrite and the handle swap.
+    let relocate_guard = index_teardown_lock(&index_id).read_owned().await;
+
+    let delete_state = Arc::clone(&state);
+    let expected = old_root.display().to_string();
+    let delete = tokio::spawn(async move {
+        delete_index_report(
+            &delete_state,
+            RACE_INDEX_ID,
+            DeleteIndexParams {
+                delete_data: true,
+                expected_root_path: Some(expected),
+            },
+        )
+        .await
+    });
+
+    await_cancel_signal(&index_id).await;
+
+    // The relocate lands, in the order `relocate_index_report` does it: registry
+    // file first, hot handle second, guard released last.
+    persistence::upsert_index_registry_entry(persistence::PersistedIndex::new(
+        RACE_INDEX_ID,
+        &new_root,
+    ))
+    .expect("relocate rewrites indexes.toml");
+    state
+        .registry
+        .register(bare_handle(RACE_INDEX_ID, &new_root));
+    drop(relocate_guard);
+
+    let (status, body) = delete
+        .await
+        .expect("delete task")
+        .expect_err("#6380: a delete whose root moved mid-quiesce must not succeed");
+
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "#6380: the under-lock re-check must refuse a root that moved while the \
+         delete waited. Body: {body}"
+    );
+    assert_eq!(body["removed"], false, "body: {body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|e| e.contains(&new_root.display().to_string())),
+        "the refusal must name the root the registration has NOW. Body: {body}"
+    );
+    assert!(
+        row_exists(RACE_INDEX_ID),
+        "#6380: the relocated row must survive a refused delete"
+    );
+    assert!(
+        state.registry.get(&index_id).is_some(),
+        "#6380: the live handle must survive a refused delete"
+    );
+    assert!(
+        data_dir.join("corpus.marker").exists(),
+        "#6380: `delete_data=true` must not reach the data dir behind a refusal: {}",
+        data_dir.display()
+    );
+    assert!(
+        !index_cancel_flag(&index_id).load(Ordering::Acquire),
+        "#6380: a refused delete must clear the cancel it signalled, or the \
+         surviving index aborts its next reindex"
     );
 }
 
