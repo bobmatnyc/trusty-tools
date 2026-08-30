@@ -16,9 +16,8 @@
 //!     known board grade tokens (BLOCK, REQUEST_CHANGES, APPROVE*, APPROVE,
 //!     UNKNOWN) per spec REV-112.
 //!
-//! If ALL THREE strategies fail (e.g. a genuine LLM/transport error produced
-//! empty or unparseable output), the function returns a fail-safe `ParsedReview`
-//! with `verdict = UNKNOWN` and an empty findings list.
+//! If strategies 1 and 2 fail the response is fail-safe UNKNOWN, whether or not
+//! the keyword scan recovered a token — see the fail-CLOSED note below.
 //!
 //! ## Fail-CLOSED posture (#1241 — supersedes spec REV-130)
 //! Spec REV-130 originally specified a fail-OPEN APPROVE here: any parse/LLM
@@ -30,11 +29,23 @@
 //! "could not review" state and never posts a green merge-approval.  See
 //! `docs/specs/` REV-130 (marked SUPERSEDED) for the rationale.
 //!
+//! ## The keyword scan no longer passes a verdict through (#4491)
+//! Strategy 3 used to return the scanned verdict with an empty findings list and
+//! `is_fail_safe = false`, so a lost findings payload rendered as `Findings:
+//! none` — indistinguishable from a clean review.  It now feeds the fail-safe
+//! reason instead of the verdict: the scanned token is reported to the operator,
+//! never trusted as a review outcome.  The most common cause of that lost
+//! payload — a double-encoded `findings` string — is now decoded rather than
+//! rejected, so the evidence usually survives in the first place.
+//!
 //! Test: `parse_direct_json_happy_path`, `parse_json_block_happy_path`,
-//! `parse_verdict_keyword_fallback`, `parse_fail_safe_unknown_on_empty_response`,
-//! `parse_fail_safe_unknown_on_malformed_json`.
+//! `parse_verdict_keyword_fallback_approve_star`,
+//! `parse_fail_safe_unknown_on_empty_response`,
+//! `parse_fail_safe_unknown_on_malformed_json`,
+//! `parse_double_encoded_findings_are_recovered`,
+//! `parse_unparseable_findings_is_loud_not_silently_empty`.
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, de};
 use tracing::{debug, warn};
 
 use crate::models::{Effort, Finding, FindingCategory, Verdict};
@@ -60,8 +71,54 @@ struct LlmOutputBlock {
     grade_justification: String,
     #[serde(default)]
     summary: String,
-    #[serde(default)]
+    // #4491: accepts a double-encoded findings string as well as a real array.
+    #[serde(default, deserialize_with = "deserialize_findings")]
     findings: Vec<LlmFinding>,
+}
+
+/// The two shapes a model actually emits for `findings`.
+///
+/// Why: a provider occasionally returns the findings array **double-encoded** —
+/// a JSON *string* whose contents are the array — instead of the array itself
+/// (#4491).  Serde rejects that as a type mismatch, the whole block fails to
+/// deserialize, and the evidence is lost.
+/// What: an untagged enum that accepts either shape; `deserialize_findings`
+/// decodes the string variant a second time.
+/// Test: `parse_double_encoded_findings_are_recovered`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum FindingsField {
+    /// The schema-conformant shape: a real JSON array.
+    Array(Vec<LlmFinding>),
+    /// The double-encoded shape: a JSON string holding the array (#4491).
+    Encoded(String),
+}
+
+/// Deserialize `findings`, tolerating one layer of double encoding (#4491).
+///
+/// Why: dropping the whole block over an encoding quirk cost PR #4483 three
+/// findings that were reported as `Findings: none`.
+/// What: passes a real array through; decodes a string variant once more, mapping
+/// an empty string to no findings.  A second decode failure is propagated as a
+/// deserialization error so the caller fails CLOSED rather than reporting zero
+/// findings for a payload that carried some.
+/// Test: `parse_double_encoded_findings_are_recovered`,
+/// `parse_unparseable_findings_is_loud_not_silently_empty`.
+fn deserialize_findings<'de, D>(deserializer: D) -> Result<Vec<LlmFinding>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match FindingsField::deserialize(deserializer)? {
+        FindingsField::Array(findings) => Ok(findings),
+        FindingsField::Encoded(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Ok(Vec::new());
+            }
+            warn!("findings arrived double-encoded as a JSON string — decoding again (#4491)");
+            serde_json::from_str(trimmed).map_err(de::Error::custom)
+        }
+    }
 }
 
 /// A single finding from the LLM JSON output block.
@@ -184,14 +241,18 @@ impl ParsedReview {
 ///   1. Direct JSON parse — succeeds when forced structured output (Bedrock
 ///      tool-use / OpenRouter json_schema) is active; body IS the clean JSON.
 ///   2. JSON-block extraction — legacy free-text path with fenced JSON block.
-///   3. Verdict-keyword scan — last-resort spec REV-112 fallback.
+///   3. Verdict-keyword scan — last-resort spec REV-112 fallback, which now only
+///      annotates the fail-safe reason (#4491).
 ///
-/// If ALL THREE fail, returns fail-safe UNKNOWN (fail-CLOSED; genuine error path
-/// only — not expected in normal operation with structured output enforced).
-/// Ticket #1241 supersedes spec REV-130: the fail-safe is UNKNOWN, not APPROVE.
+/// If strategies 1 and 2 fail, returns fail-safe UNKNOWN (fail-CLOSED) — the
+/// findings are unrecoverable at that point, and a verdict rendered without them
+/// reads as a clean review (#4491).  Ticket #1241 supersedes spec REV-130: the
+/// fail-safe is UNKNOWN, not APPROVE.
 ///
 /// Test: `parse_direct_json_happy_path`, `parse_json_block_happy_path`,
-/// `parse_verdict_keyword_fallback`, `parse_fail_safe_unknown_on_empty_response`.
+/// `parse_verdict_keyword_fallback_approve_star`,
+/// `parse_fail_safe_unknown_on_empty_response`,
+/// `parse_double_encoded_findings_are_recovered`.
 pub fn parse_review_response(body: &str) -> ParsedReview {
     if body.trim().is_empty() {
         warn!("LLM returned empty response — applying fail-safe UNKNOWN (fail-closed, #1241)");
@@ -211,30 +272,25 @@ pub fn parse_review_response(body: &str) -> ParsedReview {
         return parsed;
     }
 
-    // Strategy 3: Verdict keyword scan in the last 20% of the body.
-    if let Some(verdict) = scan_verdict_keyword(body) {
-        warn!(
-            ?verdict,
-            "JSON parse failed — fell back to verdict keyword scan (spec REV-112)"
-        );
-        return ParsedReview {
-            verdict,
-            grade: None,
-            grade_pre_floor: None,
-            summary: String::new(),
-            findings: Vec::new(),
-            is_fail_safe: false,
-            fail_safe_reason: None,
-        };
-    }
-
-    // All three strategies failed — genuine error, not a parse failure.
+    // Strategy 3: the structured payload did not parse, so the FINDINGS are gone.
+    // #4491: a keyword-scanned verdict beside an empty findings list is
+    // byte-for-byte indistinguishable from a genuinely clean review, so the
+    // scanned token is reported as context in the fail-safe reason and never as
+    // the review's own verdict.
+    let reason = match scan_verdict_keyword(body) {
+        Some(verdict) => format!(
+            "findings could not be parsed from the LLM response; the trailing \
+             keyword scan read {verdict}, which is not trusted as a review outcome \
+             (spec REV-112 fallback, #4491)"
+        ),
+        None => "no parseable verdict or findings in LLM response".to_string(),
+    };
     warn!(
         body_len = body.len(),
-        "failed to parse verdict from LLM response — applying fail-safe UNKNOWN \
-         (fail-closed; #1241 supersedes spec REV-130)"
+        reason,
+        "failed to parse the LLM response — applying fail-safe UNKNOWN (fail-closed, #4491)"
     );
-    ParsedReview::fail_safe("no parseable verdict in LLM response")
+    ParsedReview::fail_safe(reason)
 }
 
 // ─── Strategy 1: Direct JSON parse (structured output) ───────────────────────
