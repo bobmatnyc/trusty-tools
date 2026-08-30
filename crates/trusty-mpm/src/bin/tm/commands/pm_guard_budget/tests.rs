@@ -310,6 +310,26 @@ fn with_session_lock_clears_a_stale_lock() {
     );
 }
 
+/// Staleness threshold used only by
+/// `with_session_lock_concurrent_stale_clear_is_race_free`, in place of the
+/// production [`STALE_LOCK_SECS`] (5s).
+///
+/// Why (#6339): the test races two threads against a pre-staled lock to prove
+/// the atomic-rename claim in `try_clear_if_stale` lets at most one racer win.
+/// That race normally settles in low single-digit milliseconds, but nothing
+/// bounds how long the OS scheduler can preempt a racer mid-call — under real
+/// load one was observed landing past the production 5s window. When that
+/// happens the "loser" clearing the lock is not a bug: by then the winner's
+/// own fresh lock genuinely IS more than 5s old, so reclaiming it is correct
+/// per [`STALE_LOCK_SECS`]'s design. The test was asserting a stronger
+/// property ("exactly one winner") than a 5s threshold can promise once a
+/// descheduling delay is allowed to approach that same 5s. Widening the
+/// threshold to one hour keeps the exact same atomic-rename logic under test
+/// while making a false failure require a racer thread to be starved of CPU
+/// for a full hour — not a real machine-load scenario, so the assertion no
+/// longer depends on a tight wall-clock window holding under load.
+const RACE_TEST_STALE_SECS: u64 = 3600;
+
 #[test]
 fn with_session_lock_concurrent_stale_clear_is_race_free() {
     // Reproduces the TOCTOU race code-critic flagged (PR #2928 MEDIUM, round
@@ -322,10 +342,10 @@ fn with_session_lock_concurrent_stale_clear_is_race_free() {
     let dir = crate::test_support::hermetic_temp_dir();
     let lock_path = std::sync::Arc::new(dir.path().join("sess.lock"));
 
-    // Pre-stale the lock: simulate an abandoned lock left by a crashed/killed
-    // `tm hook --pm-guard` process.
+    // Pre-stale the lock relative to `RACE_TEST_STALE_SECS`, not the
+    // production `STALE_LOCK_SECS` — see that constant's doc comment (#6339).
     let file = std::fs::File::create(lock_path.as_path()).expect("create lock");
-    let stale_time = SystemTime::now() - Duration::from_secs(STALE_LOCK_SECS + 1);
+    let stale_time = SystemTime::now() - Duration::from_secs(RACE_TEST_STALE_SECS + 1);
     file.set_modified(stale_time).expect("set_modified");
     drop(file);
 
@@ -336,7 +356,7 @@ fn with_session_lock_concurrent_stale_clear_is_race_free() {
             let barrier = std::sync::Arc::clone(&barrier);
             std::thread::spawn(move || {
                 barrier.wait();
-                with_session_lock(&lock_path)
+                with_session_lock_with_stale_threshold(&lock_path, RACE_TEST_STALE_SECS)
             })
         })
         .collect();

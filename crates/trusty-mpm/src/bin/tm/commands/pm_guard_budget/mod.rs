@@ -428,6 +428,28 @@ impl Drop for SessionLock {
 /// `with_session_lock_clears_a_stale_lock`,
 /// `with_session_lock_concurrent_stale_clear_is_race_free`.
 fn with_session_lock(lock_path: &Path) -> Option<SessionLock> {
+    with_session_lock_with_stale_threshold(lock_path, STALE_LOCK_SECS)
+}
+
+/// Why (test-only seam, #6339): the concurrent-race test threads its own
+/// staleness threshold through here instead of calling [`with_session_lock`]
+/// directly. That test cannot let its assertion depend on both racer threads
+/// finishing inside the production `STALE_LOCK_SECS` (5s) window — under real
+/// scheduler load a descheduled racer can legitimately outlive 5s, at which
+/// point the winner's own fresh lock is ALSO genuinely stale and a correct
+/// clear-and-reacquire looks like a second winner (#6339). The atomic-rename
+/// claim in [`try_clear_if_stale`] is what the test verifies, not the literal
+/// 5-second window, so the test instead calls this with a threshold no
+/// realistic scheduling delay will reach (`tests.rs::RACE_TEST_STALE_SECS`),
+/// while every production caller keeps going through [`with_session_lock`]
+/// unaffected.
+/// What: identical acquisition loop to [`with_session_lock`], parameterized on
+/// the staleness threshold instead of hardcoding [`STALE_LOCK_SECS`].
+/// Test: `with_session_lock_concurrent_stale_clear_is_race_free`.
+fn with_session_lock_with_stale_threshold(
+    lock_path: &Path,
+    stale_secs: u64,
+) -> Option<SessionLock> {
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent).ok()?;
     }
@@ -444,7 +466,7 @@ fn with_session_lock(lock_path: &Path) -> Option<SessionLock> {
                 });
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                try_clear_if_stale(lock_path);
+                try_clear_if_stale(lock_path, stale_secs);
             }
             Err(_) => return None,
         }
@@ -489,7 +511,11 @@ fn with_session_lock(lock_path: &Path) -> Option<SessionLock> {
 /// caller's normal retry loop takes over.
 /// Test: `with_session_lock_clears_a_stale_lock`,
 /// `with_session_lock_concurrent_stale_clear_is_race_free`.
-fn try_clear_if_stale(lock_path: &Path) {
+///
+/// `stale_secs` is [`STALE_LOCK_SECS`] for every production caller; the
+/// concurrent-race test overrides it (#6339) — see
+/// [`with_session_lock_with_stale_threshold`] for why.
+fn try_clear_if_stale(lock_path: &Path, stale_secs: u64) {
     let Ok(metadata) = std::fs::metadata(lock_path) else {
         return;
     };
@@ -499,7 +525,7 @@ fn try_clear_if_stale(lock_path: &Path) {
     let age = SystemTime::now()
         .duration_since(modified)
         .unwrap_or(Duration::ZERO);
-    if age < Duration::from_secs(STALE_LOCK_SECS) {
+    if age < Duration::from_secs(stale_secs) {
         return;
     }
     let claim_path = unique_claim_path(lock_path);
