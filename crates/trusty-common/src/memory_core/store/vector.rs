@@ -385,7 +385,24 @@ impl UsearchStore {
     /// thread a `Result` through purely informational call sites.
     /// Test: Indirectly via `PalaceHandle::open` warnings.
     pub fn index_size(&self) -> usize {
-        self.inner.len().unwrap_or(0)
+        self.try_index_size().unwrap_or(0)
+    }
+
+    /// Number of live vectors currently in the index, or the read error.
+    ///
+    /// Why (#6376): `index_size` degrades any read failure to `0`, which is
+    /// correct for the purely-informational callers it was built for but
+    /// wrong for a health/metrics surface — trusty-memory's `console_metrics`
+    /// needs to tell a genuinely empty index apart from one it could not
+    /// read. `index_size` stays as-is for its existing callers.
+    /// What: Delegates to `HnswStore::len`, converting its `HnswStoreError`
+    /// into an `anyhow::Error` so it composes with the rest of this crate's
+    /// fallible surface.
+    /// Test: `try_index_size_surfaces_a_read_error_where_index_size_reports_zero`
+    /// (trusty-memory's `cached_field_turns_a_read_error_into_unavailable_not_zero`
+    /// exercises the caller-side contract this method exists to support).
+    pub fn try_index_size(&self) -> Result<usize> {
+        Ok(self.inner.len()?)
     }
 
     /// Reset the HNSW index to an empty state and discard all vectors.

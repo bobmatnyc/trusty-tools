@@ -150,6 +150,50 @@ async fn reset_clears_index() {
     assert!(hits.is_empty(), "search after reset should be empty");
 }
 
+/// Why (#6376): `index_size` degrades every read failure to `0`, so a
+/// health/metrics caller that uses it cannot tell a broken index apart from
+/// an empty one. `try_index_size` exists to hand that caller the raw error.
+/// What: Seeds one vector and confirms both methods agree on `1`, then
+/// deletes the `VECTORS` table out from under the open store so every later
+/// `HnswStore::len` read fails with redb's `TableDoesNotExist`. Asserts
+/// `try_index_size` surfaces that error while `index_size` still reports
+/// `0` — the confusion the new method removes.
+/// Test: this test.
+#[tokio::test]
+async fn try_index_size_surfaces_a_read_error_where_index_size_reports_zero() {
+    let dir = tempdir().unwrap();
+    let store = UsearchStore::new(dir.path().join("test.usearch"), 384).unwrap();
+    store
+        .upsert(Uuid::new_v4(), unit_vec(384, 3))
+        .await
+        .unwrap();
+    assert_eq!(store.try_index_size().unwrap(), 1);
+    assert_eq!(store.index_size(), 1);
+
+    // Break the read at its source: drop the table `HnswStore::len` opens.
+    // The store keeps its handle to the same `Database`, so the next read
+    // fails rather than observing an empty index.
+    {
+        let wtx = store.db_state.db.begin_write().unwrap();
+        assert!(
+            wtx.delete_table(crate::memory_core::store::kg_store::VECTORS)
+                .unwrap(),
+            "VECTORS table should have existed before this test deleted it"
+        );
+        wtx.commit().unwrap();
+    }
+
+    let err = store
+        .try_index_size()
+        .expect_err("a failed table read must surface as Err, never as a count");
+    assert_eq!(
+        store.index_size(),
+        0,
+        "index_size keeps degrading the same failure to 0 — the reason \
+         try_index_size exists (error was: {err:#})"
+    );
+}
+
 // -- Issue #59 / #1152: cross-process lock + snapshot fallback -------------
 // `UsearchStore::new` uses `OpenIntent::ReadOnlyClient` so that when another
 // process holds the redb exclusive lock, we fall back to a read-only snapshot

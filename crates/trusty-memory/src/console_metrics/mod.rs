@@ -203,22 +203,7 @@ fn count_palace(
     info: &trusty_common::memory_core::Palace,
 ) -> PalaceCounts {
     match registry.peek(&info.id) {
-        Some(handle) => PalaceCounts::Counted {
-            cached: true,
-            drawers: handle.drawers.read().len(),
-            vectors: handle.vector_store.index_size(),
-            // ADR-0027: rooms are registered at open, so a resident palace's
-            // room list is authoritative and costs one small redb read.
-            rooms: list_room_summaries(&handle.kg.store())
-                .map(|r| r.len())
-                .unwrap_or_else(|e| {
-                    tracing::warn!(palace = %info.id, "room_list unavailable: {e:#}");
-                    0
-                }),
-            // #5384: same diagnostic degrade the status roll-up uses — the
-            // report has no field for "count unavailable".
-            kg_triples: crate::service::helpers::kg_triple_count_or_zero(&handle),
-        },
+        Some(handle) => cached_counts(info, &handle),
         None => match disk_stats::read(&info.data_dir) {
             Ok(s) => PalaceCounts::Counted {
                 cached: false,
@@ -233,6 +218,104 @@ fn count_palace(
             }
         },
     }
+}
+
+/// Count a resident palace's stats, without degrading any field's read
+/// failure to zero.
+///
+/// Why (#6376): this arm used to collapse three fallible reads —
+/// `list_room_summaries`, `count_active_triples`, and the vector index size
+/// — into `0` on error, via `unwrap_or_else`/`unwrap_or(0)` and the
+/// deliberately-degrading `kg_triple_count_or_zero` helper (correct for its
+/// own callers — see its doc — but wrong for a metrics surface whose whole
+/// point is telling a broken read apart from an empty palace, the same
+/// failure #6372 already fixed for the disk arm below). `try_index_size`
+/// exists specifically to give this caller the raw `Result` `index_size`
+/// throws away.
+/// What: Reads `drawers` directly (an `RwLock` length — no I/O, no failure
+/// mode). Reads `vectors`, `rooms`, and `kg_triples` through [`cached_field`];
+/// the first one to fail turns the whole entry `Unavailable`, matching
+/// [`disk_stats::read`]'s granularity — a palace that failed halfway
+/// through is reported as unknown, never as partially zero.
+/// Test: `cached_field_turns_a_read_error_into_unavailable_not_zero` covers
+/// the rule this applies; `console_metrics_uses_cache_only_and_does_not_evict`
+/// and `console_metrics_reports_room_counts_for_every_palace` cover this
+/// function's success path end-to-end.
+fn cached_counts(
+    info: &trusty_common::memory_core::Palace,
+    handle: &trusty_common::memory_core::PalaceHandle,
+) -> PalaceCounts {
+    let drawers = handle.drawers.read().len();
+
+    let vectors = match cached_field(
+        &info.id,
+        "vector index",
+        handle.vector_store.try_index_size(),
+    ) {
+        Ok(n) => n,
+        Err(reason) => return PalaceCounts::Unavailable(reason),
+    };
+
+    // ADR-0027: rooms are registered at open, so a resident palace's room
+    // list is authoritative and costs one small redb read.
+    let rooms = match cached_field(
+        &info.id,
+        "room list",
+        list_room_summaries(&handle.kg.store()).map(|r| r.len()),
+    ) {
+        Ok(n) => n,
+        Err(reason) => return PalaceCounts::Unavailable(reason),
+    };
+
+    let kg_triples = match cached_field(
+        &info.id,
+        "kg_triple count",
+        handle.kg.count_active_triples(),
+    ) {
+        Ok(n) => n,
+        Err(reason) => return PalaceCounts::Unavailable(reason),
+    };
+
+    PalaceCounts::Counted {
+        cached: true,
+        drawers,
+        vectors,
+        rooms,
+        kg_triples,
+    }
+}
+
+/// Apply the cached arm's "unavailable, never zero" rule to one field's read.
+///
+/// Why (#6376): the three cached-arm fields need identical log-then-format
+/// handling, and taking the already-performed read as a parameter — rather
+/// than performing the I/O in here — is the same technique
+/// `service::helpers::triple_count_or_zero` uses to put a real
+/// trusty-common read failure under an in-crate test: inducing one for real
+/// needs a live write transaction against the *same already-open* `Database`
+/// (see `count_active_triples_surfaces_read_failure` in trusty-common),
+/// which needs `KgStoreRedb::db()` / an equivalent on the vector store —
+/// both stay `pub(super)`, unreachable from this crate. An OS-level write to
+/// the backing file while the store stays open does not reach this either:
+/// redb serves reads from its own already-validated in-memory state rather
+/// than by re-scanning the file, so overwriting the file's bytes on disk out
+/// from under an already-open `Database` was tried and left every read
+/// succeeding — not the deterministic failure a regression test needs.
+/// What: `Ok(n)` passes through unchanged. `Err` is logged at warn against
+/// the palace id and becomes `Err("<field> unavailable: <error>")` — a
+/// distinguishable failure, never a bare `0`.
+/// Test: `cached_field_turns_a_read_error_into_unavailable_not_zero`,
+/// `cached_field_passes_a_successful_read_through`.
+fn cached_field(
+    palace: &trusty_common::memory_core::PalaceId,
+    field: &str,
+    read: anyhow::Result<usize>,
+) -> Result<usize, String> {
+    read.map_err(|e| {
+        let reason = format!("{field} unavailable: {e:#}");
+        tracing::warn!(palace = %palace, "{reason}");
+        reason
+    })
 }
 
 /// Aggregate drawer / vector / room / KG statistics over every palace on disk.
@@ -694,5 +777,63 @@ mod tests {
             result["metrics"]["counted_palace_count"], 0,
             "a palace that could not be read did not contribute to the totals"
         );
+    }
+
+    /// Why (#6376 regression guard): before this fix, `count_palace`'s cached
+    /// arm read `room_count`/`kg_triples`/`vectors` through
+    /// `unwrap_or_else(|_| 0)`, `kg_triple_count_or_zero`, and
+    /// `index_size()`'s `unwrap_or(0)` — every one of those degrades an
+    /// `Err` into a bare `0`, indistinguishable from a genuinely empty
+    /// count. This pins the rule [`cached_field`] now applies instead: an
+    /// `Err` must become a named `Err(reason)`, never `Ok(0)`. Inducing a
+    /// genuine redb read failure on an already-open, resident store needs a
+    /// live write transaction against that same `Database` (see
+    /// `count_active_triples_surfaces_read_failure` in trusty-common), which
+    /// needs `db()` accessors trusty-common keeps `pub(super)` — unreachable
+    /// from here, matching the boundary that test's own doc already notes.
+    /// Taking the read as a parameter, exactly as
+    /// `service::helpers::triple_count_or_zero` does for the same reason,
+    /// puts the branch this ticket cares about under a fast, deterministic
+    /// in-crate test instead.
+    /// What: feeds a synthetic `Err` in for each of the three field names
+    /// `cached_counts` uses, and asserts none of them collapse to a count.
+    /// Test: This test.
+    #[test]
+    fn cached_field_turns_a_read_error_into_unavailable_not_zero() {
+        use trusty_common::memory_core::PalaceId;
+
+        let palace = PalaceId::new("hot");
+        for field in ["vector index", "room list", "kg_triple count"] {
+            let result = cached_field(&palace, field, Err(anyhow::anyhow!("redb read failed")));
+            let reason = match result {
+                Err(reason) => reason,
+                Ok(n) => panic!("field {field:?} must surface its read error, not {n}"),
+            };
+            assert!(
+                reason.contains(field),
+                "the reason must name the field that failed: {reason}"
+            );
+            assert!(
+                reason.contains("redb read failed"),
+                "the reason must carry the underlying error: {reason}"
+            );
+        }
+    }
+
+    /// Why (#6376): the error path above must not come at the cost of the
+    /// success path — a real count has to pass through unchanged, and
+    /// `cached_counts`' end-to-end success coverage
+    /// (`console_metrics_uses_cache_only_and_does_not_evict`,
+    /// `console_metrics_reports_room_counts_for_every_palace`) exercises
+    /// this indirectly, through real reads. This pins the same property
+    /// directly against the shared helper.
+    /// What: feeds `Ok(7)` in and asserts it comes back unchanged.
+    /// Test: This test.
+    #[test]
+    fn cached_field_passes_a_successful_read_through() {
+        use trusty_common::memory_core::PalaceId;
+
+        let palace = PalaceId::new("hot");
+        assert_eq!(cached_field(&palace, "vector index", Ok(7)), Ok(7));
     }
 }
