@@ -417,6 +417,12 @@ impl OrchestratorBackend for StateBackend {
         super::mcp_session::session_delete(&self.state, session_id, force).await
     }
 
+    // #6431: record-only bulk delete; see `mcp_session_bulk` for why it is a
+    // separate path from `session_delete` and from the legacy `remove_session`.
+    async fn session_delete_records(&self, session_ids: &[String]) -> Result<Value, String> {
+        super::mcp_session_bulk::session_delete_records(&self.state, session_ids).await
+    }
+
     async fn session_activity(&self, session_id: &str, lines: u32) -> Result<Value, String> {
         super::mcp_session::session_activity(&self.state, session_id, lines).await
     }

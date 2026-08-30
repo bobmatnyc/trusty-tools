@@ -36,6 +36,8 @@ pub mod mcp_context;
 pub mod mcp_project;
 pub mod mcp_proxy;
 pub mod mcp_session;
+// #6431: record-only bulk deletion for the console's unknown-state bucket.
+pub mod mcp_session_bulk;
 pub mod openapi;
 pub mod optimizer;
 pub mod orphan_gc;
