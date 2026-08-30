@@ -218,6 +218,13 @@ pub struct ReviewConfig {
     // ── Pipeline flags ─────────────────────────────────────────────────────
     /// `PR_INTELLIGENCE_DRY_RUN` (default: true). When true, no comments are
     /// posted to GitHub.
+    ///
+    /// #4460: the CLI `run` subcommand does NOT consult this field for its
+    /// live-vs-dry decision — it always passes a forcing `TriggerDecision`
+    /// derived from the explicit `--live` flag (see
+    /// `commands::run::trigger_for_live_flag`), so an ambient env var alone
+    /// can never make `run` post. This field still governs the webhook/service
+    /// default (no per-request signal available there) and status reporting.
     pub dry_run: bool,
 
     // ── Repo gating ────────────────────────────────────────────────────────

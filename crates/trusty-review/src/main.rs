@@ -40,8 +40,9 @@ use commands::run::{RunArgs, cmd_run};
 /// from trusty-search, and produces structured review verdicts.
 ///
 /// Reviews are dry-run by default (no comments posted to GitHub). `run` posts
-/// live when posting is enabled — set `PR_INTELLIGENCE_DRY_RUN=false` to allow
-/// live PR comments.
+/// live only when `--live` is passed explicitly — the ambient
+/// `PR_INTELLIGENCE_DRY_RUN` env var alone can never enable posting for this
+/// command (#4460).
 ///
 /// #6290: there is no review daemon. Every review is one invocation of this
 /// binary; `run --json` returns the same structured result the retired
@@ -70,8 +71,10 @@ enum Commands {
     /// Run a single PR review with the default (or overridden) reviewer model.
     ///
     /// Fetches the PR diff from GitHub and runs the LLM review pipeline.
-    /// Dry-run by default (no comment posted). Posts the review live to the PR
-    /// when posting is enabled — set `PR_INTELLIGENCE_DRY_RUN=false` to allow it.
+    /// Dry-run by default (no comment posted). Pass `--live` to post the
+    /// review to the PR — the ambient `PR_INTELLIGENCE_DRY_RUN` env var alone
+    /// can never enable posting (#4460); the resolved mode is printed before
+    /// any work begins.
     ///
     /// Use --local-diff to review a local unified diff file without GitHub
     /// (pass `-` to read the diff from stdin instead of a file), or --base
