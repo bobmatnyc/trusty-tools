@@ -1,20 +1,22 @@
-//! The trusty-search SPA, served from the console under `/tools/search/`.
+//! The search dashboard SPA, served from the console under `/tools/search/`.
 //!
 //! Why: ADR-0032 makes the console the only HTTP surface in the workspace, and
 //! #6285 deletes trusty-search's HTTP server — including the `/ui` mount that
 //! is the only way to reach its dashboard today. The dashboard has to be
 //! reachable somewhere else BEFORE that deletion, so the console carries the
 //! bundle and serves it (#6155).
-//! What: `rust_embed` embeds `ui-search-dist/`, a committed copy of the Vite
-//! output from `crates/trusty-search/ui`. Three routes serve it:
+//! What: `rust_embed` embeds `ui-search-dist/`, the Vite output of this crate's
+//! own `ui-search/` project — build.rs builds it alongside `ui/`. It used to be
+//! a copy of a bundle built from `crates/trusty-search/ui`; #6155 moved that
+//! source here, so nothing is copied across crates any more. Three routes serve
+//! it:
 //!   - `GET /tools/search`        → redirect to `/tools/search/`
 //!   - `GET /tools/search/`       → index.html with the API base injected
 //!   - `GET /tools/search/{*path}` → static asset, index.html on a miss
 //!
-//! The SPA's own `src/lib/base.js` reads `window.__SEARCH_BASE__` first, so
-//! pointing every API call at the console's reverse proxy is one injected
-//! global — no fork of the SPA, no build-time base-path knob, no change to
-//! trusty-search.
+//! The SPA's own `ui-search/src/lib/base.js` reads `window.__SEARCH_BASE__`
+//! first, so pointing every API call at the console's reverse proxy is one
+//! injected global — no fork of the SPA and no build-time base-path knob.
 //! Test: `tests` below cover the injection and the path/MIME resolution;
 //! `tests/search_ui_mount.rs` drives the three routes through the real router.
 
@@ -26,13 +28,15 @@ use axum::{
 };
 use rust_embed::RustEmbed;
 
-/// The trusty-search SPA bundle, committed under `ui-search-dist/`.
+/// The search dashboard bundle, committed under `ui-search-dist/`.
 ///
-/// Why: a published `trusty-console` tarball cannot reach into a sibling crate,
-/// so the bytes have to live inside this crate. `ui-search-dist/` is refreshed
-/// by `make -C crates/trusty-console search-ui` and gated by
-/// `scripts/check-ui-bundle-freshness.sh` (manifest row `trusty-console-search`).
+/// Why: a published `trusty-console` tarball ships only what the crate's
+/// `include` list names, so the bytes have to be committed inside this crate.
 /// What: rust-embed embeds every file under `ui-search-dist/` at compile time.
+/// build.rs rebuilds it from `ui-search/` whenever that source moves, `make -C
+/// crates/trusty-console search-ui` forces the rebuild, and
+/// `scripts/check-ui-bundle-freshness.sh` gates it (manifest row
+/// `trusty-console-search`).
 /// Test: `search_index_is_embedded` below.
 #[derive(RustEmbed)]
 #[folder = "ui-search-dist/"]
@@ -96,7 +100,7 @@ fn serve_search_index() -> Response {
     let Some(index) = SearchUiAssets::get("index.html") else {
         return (
             StatusCode::NOT_FOUND,
-            "trusty-search UI assets not bundled — run `make -C crates/trusty-console search-ui`.",
+            "search dashboard assets not bundled — run `make -C crates/trusty-console search-ui`.",
         )
             .into_response();
     };

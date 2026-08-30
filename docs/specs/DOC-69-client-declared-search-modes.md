@@ -459,7 +459,7 @@ the full migration surface.
 
 | Consumer | Site | What it does with the score | Migration |
 |---|---|---|---|
-| trusty-search UI | `crates/trusty-search/ui/src/lib/views/Search.svelte:266-268` | renders `{(r.score ?? 0).toFixed(3)}` under a literal `score` label to a human — **the only live human exposure** | Remove the score display. The lane label replaces it as the thing the reader needs. Highest-visibility change in this table. |
+| trusty-search UI | `crates/trusty-console/ui-search/src/lib/views/Search.svelte:266-268` | renders `{(r.score ?? 0).toFixed(3)}` under a literal `score` label to a human — **the only live human exposure** | Remove the score display. The lane label replaces it as the thing the reader needs. Highest-visibility change in this table. |
 | trusty-review | `crates/trusty-review/src/integrations/search_client.rs:105-119` | deserializes it into `SearchResult.score` (field at `:119`), described as "the combined BM25+vector relevance score" at `:108` and "Combined relevance score" at `:117` | Drop the field, or repoint it at the lane label. Both doc lines are factual claims that stop being true. |
 | trusty-review | `crates/trusty-review/src/integrations/apex_context.rs:127` | copies it into `ApexContextResult.score` | Follows `search_client.rs`. Mechanical. |
 | trusty-review | `crates/trusty-review/src/pipeline/prompt_user_msg.rs` | **never reads it** — takes the top 10 on faith (`grep score` over the file returns nothing) | No change. Already dead as prompt content, which is evidence the score was not doing the job attributed to it. |

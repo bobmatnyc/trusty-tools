@@ -1,14 +1,20 @@
 # trusty-search Makefile
 #
 # Why: `cargo publish` requires the embedded Svelte UI assets to live inside
-# the crate-root `ui-dist/` (post-consolidation single-crate layout).
-# The UI source lives at `ui/`; without an explicit sync step a developer who
-# rebuilds the UI can easily publish stale assets. These targets make the sync
-# step a single, well-named command.
-# What: `build-ui` runs the Svelte/Vite build; `sync-ui` mirrors `ui/dist/`
-# into `ui-dist/`; `release-prep` chains the two and is the documented
-# prerequisite for `cargo publish`.
-# Test: `make release-prep` populates `ui-dist/index.html` and the `assets/` tree.
+# the crate-root `ui-dist/`, which `src/service/ui.rs` embeds with `include_dir!`
+# to serve `/ui/`. #6155 moved the dashboard's Svelte source out of this crate
+# into `crates/trusty-console/ui-search/`, so there is nothing left here to
+# build: `ui-dist/` is now a mirror of the bundle the console builds, and
+# `sync-ui` is the one command that refreshes it.
+# What: `sync-ui` mirrors `crates/trusty-console/ui-search-dist/` into
+# `ui-dist/` and re-stamps it; `release-prep` is the documented prerequisite for
+# `cargo publish`. Both bundles are stamped against the same source digest, so
+# the freshness gate reads them as one.
+# Test: `make release-prep` populates `ui-dist/index.html` and the `assets/`
+# tree; `bash scripts/check-ui-bundle-freshness.sh trusty-search` then passes.
+#
+# #6285 deletes this crate's HTTP listener, and `ui-dist/` with it. Until then
+# `/ui/` keeps answering exactly what it answers today.
 
 CLOSES      ?=
 # Why: paths must resolve to this crate dir regardless of the invoking CWD, so
@@ -16,31 +22,27 @@ CLOSES      ?=
 # correct `ui-dist/` (not a nested `ui-dist/dist/`) — see issue #1540.
 # What: anchor every UI path to the directory containing THIS Makefile.
 MAKEFILE_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
-UI_DIR      := $(MAKEFILE_DIR)ui
-UI_DIST     := $(UI_DIR)/dist
+REPO_ROOT   := $(MAKEFILE_DIR)../..
+UI_SOURCE   := $(REPO_ROOT)/crates/trusty-console/ui-search-dist
 UI_EMBED    := $(MAKEFILE_DIR)ui-dist
 
 .PHONY: ui build-ui sync-ui release-prep install patch reinstall deploy check clippy test smoke
 
-## Build Svelte UI (pnpm preferred, npm fallback)
+## Rebuild the search dashboard bundle, which trusty-console now owns.
 build-ui:
-	@if command -v pnpm >/dev/null 2>&1; then \
-		echo ">> pnpm install && pnpm build (in $(UI_DIR))"; \
-		cd $(UI_DIR) && pnpm install --frozen-lockfile && pnpm build; \
-	else \
-		echo ">> npm ci && npm run build (in $(UI_DIR))"; \
-		cd $(UI_DIR) && npm ci && npm run build; \
-	fi
+	$(MAKE) -C $(REPO_ROOT)/crates/trusty-console search-ui
 
-## Sync ui/dist → ui-dist (no rebuild)
+## Mirror the console's search bundle into ui-dist (no rebuild)
 sync-ui:
-	@test -d $(UI_DIST) || (echo "ERROR: $(UI_DIST) missing — run 'make build-ui' first" && exit 1)
+	@test -f $(UI_SOURCE)/index.html || (echo "ERROR: $(UI_SOURCE) missing — run 'make build-ui' first" && exit 1)
 	rm -rf $(UI_EMBED)
-	cp -r $(UI_DIST) $(UI_EMBED)
-	@echo ">> synced $(UI_DIST) → $(UI_EMBED)"
+	cp -r $(UI_SOURCE) $(UI_EMBED)
+	@echo ">> synced $(UI_SOURCE) → $(UI_EMBED)"
 	# #3606: the mirror above wipes ui-dist/, so the stamp recording which source
-	# this bundle came from is written after it, never before.
-	@bash $(MAKEFILE_DIR)../../scripts/stamp-ui-bundle.sh trusty-search
+	# this bundle came from is written after it, never before. It also overwrites
+	# the console bundle's own stamp, which names the same digest — rewriting it
+	# under this crate's row keeps the two rows independently verifiable.
+	@bash $(REPO_ROOT)/scripts/stamp-ui-bundle.sh trusty-search
 
 ## Build UI + sync (required before cargo publish)
 release-prep: build-ui sync-ui

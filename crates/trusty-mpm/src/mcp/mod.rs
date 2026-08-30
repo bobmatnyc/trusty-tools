@@ -201,6 +201,27 @@ pub trait OrchestratorBackend: Send + Sync {
     ///       `dispatch_session_delete_refuses_running_without_force` (mock).
     async fn session_delete(&self, session_id: &str, force: bool) -> Result<Value, String>;
 
+    /// Back `session_delete_records`: record-only bulk deletion (#6431).
+    ///
+    /// Why: the console's Sessions tab buckets every record with a missing or
+    ///      unrecognised `state` under "unknown" — in practice the daemon's
+    ///      legacy in-memory registry entries, which carry `status` and no
+    ///      `state` at all. Clearing that bucket needs ONE call that deletes a
+    ///      RECORD from whichever registry owns each id. #1511 (a prune that
+    ///      `rm -rf`'d a live workspace) is why this deletes records and never
+    ///      touches a worktree, workspace, or any other filesystem state.
+    /// What: takes an explicit id list — never a server-side filter, so the set
+    ///       the operator confirmed is exactly the set that is deleted —
+    ///       deduplicates it, and routes each id to `delete_record` (managed) or
+    ///       the legacy registry drop. Fail-closed: a malformed id, an unknown
+    ///       id, and a RUNNING managed session (refused, because a bulk action
+    ///       never forces) are each ONE failed row, never counted as a deletion.
+    ///       Returns `{ requested, deleted, failed, results }`.
+    /// Test: `dispatch_session_delete_records_tool`,
+    ///       `dispatch_session_delete_records_rejects_bad_arguments` (mock);
+    ///       behaviour in `crate::daemon::mcp_session_bulk`'s tests.
+    async fn session_delete_records(&self, session_ids: &[String]) -> Result<Value, String>;
+
     /// Back `session_activity`: capture pane + lifecycle state.
     ///
     /// Why: the driver must reason about whether a session is working / idle /
@@ -724,6 +745,35 @@ pub(crate) fn required_str(args: &Value, key: &str) -> Result<String, String> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| format!("missing required string argument: `{key}`"))
+}
+
+/// Extract a required NON-EMPTY array-of-strings argument (#6431).
+///
+/// Why: `session_delete_records` is destructive, so a caller that sends the
+/// wrong shape — a bare string, an empty array, an array with a non-string in
+/// it — must get a clear error instead of a silent no-op or a partial delete of
+/// whatever happened to parse.
+/// What: `Ok(Vec<String>)` when `key` is an array of at least one element and
+/// EVERY element is a string; a descriptive error otherwise.
+/// Test: `dispatch_session_delete_records_rejects_bad_arguments` in `tests.rs`,
+/// which drives every rejected shape — missing, empty, bare string, and an
+/// array with a non-string element.
+pub(crate) fn required_str_array(args: &Value, key: &str) -> Result<Vec<String>, String> {
+    let items = args
+        .get(key)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("missing required array argument: `{key}`"))?;
+    if items.is_empty() {
+        return Err(format!("`{key}` must name at least one session"));
+    }
+    items
+        .iter()
+        .map(|v| {
+            v.as_str()
+                .map(str::to_string)
+                .ok_or_else(|| format!("`{key}` must contain only strings"))
+        })
+        .collect()
 }
 
 /// Extract a required unsigned-integer argument or produce a descriptive error.

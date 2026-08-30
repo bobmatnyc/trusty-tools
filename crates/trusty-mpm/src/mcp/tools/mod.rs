@@ -9,7 +9,7 @@
 //! #1519 / #1517), and the session-manager proxy tools ([`proxy`], #2550) — so
 //! this is a thin facade that re-exports all and concatenates their descriptors,
 //! keeping each leaf file well under the 500-SLOC production cap.
-//! What: [`tool_catalog`] builds the thirty-three MCP tool descriptors (nine core +
+//! What: [`tool_catalog`] builds the thirty-four MCP tool descriptors (nine core +
 //! eleven session + five console + four project + four proxy — #1222 / #1220 /
 //! #1508 / #1519 / #1517 WI-5 / #2012 / #2550 / session-context tools); [`TOOL_CATALOG`]
 //! lists their names for tests and the startup log; [`tool`] is the shared
@@ -30,12 +30,12 @@ pub mod session;
 /// Why: tests, the daemon's startup log, and the loopback-`/rpc` audit all want
 /// the authoritative list without re-parsing the JSON schema. Keeping it exact
 /// resolves the #1221 review nit about ambiguous existing-vs-new counts.
-/// What: a static slice of the thirty-three tool names — the nine core/bug tools,
-/// the eleven session-lifecycle tools, the five console-facing tools, the four
+/// What: a static slice of the thirty-four tool names — the nine core/bug tools,
+/// the twelve session-lifecycle tools, the five console-facing tools, the four
 /// project-registry + NL-resolver tools (#1519 WI-2, #1517 WI-5), and the four
 /// session-manager proxy tools (#2550).
 /// Test: `catalog_names_match_constant`.
-pub const TOOL_CATALOG: [&str; 33] = [
+pub const TOOL_CATALOG: [&str; 34] = [
     // ── 9 pre-existing tools (core.rs) ───────────────────────────────────────
     "session_list",
     "session_status",
@@ -46,13 +46,15 @@ pub const TOOL_CATALOG: [&str; 33] = [
     "list_recent_errors",
     "preview_bug_report",
     "report_bug",
-    // ── 11 session-lifecycle tools (#1221 + #1508 + #2012 + session-context, session.rs) ──
+    // ── 12 session-lifecycle tools (#1221 + #1508 + #2012 + #6431 + session-context, session.rs) ──
     "session_new",
     "session_stop",
     "session_resume",
     "session_decommission",
     // #2012: hard-delete the record (distinct from decommission).
     "session_delete",
+    // #6431: record-only bulk delete over an explicit id list.
+    "session_delete_records",
     "session_activity",
     "session_send",
     // #1508 bulk teardown + by-state prune.
@@ -86,10 +88,10 @@ pub const TOOL_CATALOG: [&str; 33] = [
 /// keeps the schemas and the dispatch argument-parsing in lockstep across all
 /// tool groups.
 /// What: concatenates [`core::core_tools`] (nine descriptors),
-/// [`session::session_tools`] (eleven descriptors), [`console::console_tools`]
+/// [`session::session_tools`] (twelve descriptors), [`console::console_tools`]
 /// (five descriptors), [`project::project_tools`] (four descriptors, WI-5 adds
 /// `project_resolve`), and [`proxy::proxy_tools`] (four descriptors, #2550) in
-/// catalog order, returning thirty-three `{ name, description, inputSchema }`
+/// catalog order, returning thirty-four `{ name, description, inputSchema }`
 /// objects.
 /// Test: `catalog_has_expected_tool_count` and `every_tool_has_input_schema`.
 pub fn tool_catalog() -> Vec<Value> {
@@ -121,13 +123,14 @@ mod tests {
 
     #[test]
     fn catalog_has_expected_tool_count() {
-        // 9 core + 11 session-lifecycle + 5 console + 4 project + 4 proxy = 33.
+        // 9 core + 12 session-lifecycle + 5 console + 4 project + 4 proxy = 34.
         // (WI-5 adds project_resolve to the 3 WI-2 tools → 4 total project tools;
         // #2012 adds session_delete → 9 session-lifecycle tools;
         // #2550 adds the 4 session-manager proxy tools;
-        // session-context tools add session_context_catchup + session_context_pause → 11)
-        assert_eq!(tool_catalog().len(), 33);
-        assert_eq!(TOOL_CATALOG.len(), 33);
+        // session-context tools add session_context_catchup + session_context_pause → 11;
+        // #6431 adds session_delete_records → 12)
+        assert_eq!(tool_catalog().len(), 34);
+        assert_eq!(TOOL_CATALOG.len(), 34);
     }
 
     #[test]
@@ -167,6 +170,7 @@ mod tests {
             "session_resume",
             "session_decommission",
             "session_delete",
+            "session_delete_records",
             "session_activity",
             "session_send",
             "session_context_catchup",

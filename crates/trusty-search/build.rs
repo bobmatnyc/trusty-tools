@@ -5,6 +5,15 @@
 //! lives in the `Makefile`'s `release-prep` target, which is the documented
 //! prerequisite for `cargo publish`. Keeping `build.rs` as a thin wrapper
 //! avoids duplicate logic and shrinks the publish-time surface.
+//!
+//! #6155: this crate no longer HAS a `ui/` tree — the dashboard's Svelte source
+//! moved to `crates/trusty-console/ui-search/`, and `ui-dist/` is now a mirror
+//! of the bundle the console builds, refreshed by `make -C crates/trusty-search
+//! sync-ui`. So every build path below short-circuits: the committed bundle is
+//! embedded as-is, and a stale one is reported rather than rebuilt, because
+//! rebuilding it would mean reaching into a crate this one does not own. The
+//! canonical block is retained verbatim for `scripts/check_buildrs_sync.sh`
+//! (#987) and stays live on the fallback path.
 //! What: emits `cargo:rerun` directives so UI source changes still trigger a
 //! rebuild, then either honours `SKIP_UI_BUILD=1` (CI / `cargo publish`
 //! flow where `make release-prep` has already populated `ui-dist/`) or
@@ -68,9 +77,17 @@ fn main() {
         return;
     }
 
-    // Step 2: no `ui/` tree at all (e.g. running build.rs inside an extracted
-    // crate tarball that already shipped `ui-dist/`) → nothing to build.
+    // Step 2: no `ui/` tree at all → nothing to build. Since #6155 that is the
+    // normal case in this repo, not just inside an extracted crate tarball: the
+    // source lives in `crates/trusty-console/ui-search/`. Reaching there from
+    // here would build a second Node project inside a tree this crate does not
+    // own, so a stale bundle is named instead of silently embedded.
     if !ui_dir.join("package.json").exists() {
+        println!(
+            "cargo:warning=trusty-search: ui-dist/ is stale and there is no ui/ \
+             source here to rebuild it from (#6155) — run \
+             `make -C crates/trusty-search release-prep` to remirror it."
+        );
         ensure_placeholder(&dist_dir, "trusty-search");
         return;
     }

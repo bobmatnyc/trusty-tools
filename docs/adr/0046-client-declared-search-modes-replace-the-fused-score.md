@@ -242,7 +242,7 @@ bare query. That cost is accepted. It costs no intent inference.
   §5.5 and Q8.
 - **Five consumers read the `score` field** and must be migrated. The migration
   table is in DOC-69 §8; the only live human exposure is
-  `crates/trusty-search/ui/src/lib/views/Search.svelte:266-268`, which renders
+  `crates/trusty-console/ui-search/src/lib/views/Search.svelte:266-268`, which renders
   `{(r.score ?? 0).toFixed(3)}` under a literal "score" label.
 - **The response envelope changes shape**, from a flat result list to labelled
   sets. Every deserializer changes with it.

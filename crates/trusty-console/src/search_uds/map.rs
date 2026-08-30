@@ -9,7 +9,7 @@
 //! What: [`map_request`] turns a method, a path and a query string into one
 //! [`Call`]. The table covers every endpoint the two SPAs served from this
 //! binary actually call — the trusty-search dashboard at `/tools/search/`
-//! (`crates/trusty-search/ui/src/lib/api.js` plus the two `EventSource`s) and
+//! (`crates/trusty-console/ui-search/src/lib/api.js` plus the two `EventSource`s) and
 //! the console's own cleanup flow (`ui/src/cleanupFlow.js`).
 //!
 //! ## Two endpoints the SPA calls have no method to map to

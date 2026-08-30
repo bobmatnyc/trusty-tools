@@ -112,7 +112,7 @@
 
 # trusty-search runtime artifacts
 crates/trusty-search/.claude-mpm/
-crates/trusty-search/ui/node_modules/
+crates/trusty-console/ui-search/node_modules/
 
 # trusty-memory runtime artifacts
 crates/trusty-memory/ui/node_modules/
@@ -132,7 +132,7 @@ crates/trusty-console/ui/node_modules/
 crates/trusty-analyze/ui/package-lock.json
 crates/trusty-console/ui/package-lock.json
 crates/trusty-memory/ui/package-lock.json
-crates/trusty-search/ui/package-lock.json
+crates/trusty-console/ui-search/package-lock.json
 
 # Temp directories and analytics databases
 claude-mpm-patch/

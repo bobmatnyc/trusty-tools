@@ -108,7 +108,7 @@ pub(crate) const HEALTH_TIMEOUT: Duration = Duration::from_secs(3);
 /// and `search.index.reindex.stream` emits per batch. A reindex whose embedder
 /// sidecar stalls emits nothing for the length of the stall, and the SPA reads a
 /// closed stream as "the reindex finished"
-/// (`crates/trusty-search/ui/src/lib/views/Indexes.svelte`) — so a budget short
+/// (`crates/trusty-console/ui-search/src/lib/views/Indexes.svelte`) — so a budget short
 /// enough to cut a stall would report a still-running reindex as complete. That
 /// is the same trade #6155 recorded when it gave the proxy's stream client a
 /// silence bound rather than a total one.
