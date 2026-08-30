@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use chrono::Utc;
 
 use super::summary::checked_summaries_with;
-use super::summary::{reconcile_against_tmux, reconcile_live_state, stale_assets_for_many};
+use super::summary::{reconcile_against_tmux, reconcile_live_state, stale_assets_for_many_under};
 use super::{checked_summaries, record_to_json, record_to_summary};
 use crate::session_manager::{
     InjectionStatus, ManagedError, ManagedSessionId, ManagedSessionState, ManagedTmuxDriver,
@@ -654,6 +654,26 @@ impl Drop for HomeGuard {
 /// `pub(super)` so the sibling `staleness_bench_tests` module isolates its
 /// fixture exactly as the unit tests do — a benchmark that read the
 /// developer's real `~/.trusty-mpm` would measure an uncontrolled tree.
+/// A throwaway framework base for the tests that reach the staleness path
+/// through an `_under` entry point (#5040).
+///
+/// Why: [`fake_home`] below points the PROCESS-GLOBAL `$HOME` at a temp dir,
+/// which is what made the `stale_assets_for_many_*` family order-dependent —
+/// `#[serial_test::serial]` orders `#[serial]` tests against each other, not
+/// against the rest of the binary, and under `cargo nextest`'s per-test
+/// processes it orders nothing at all. `staleness_inputs_under` /
+/// `stale_assets_for_many_under` take the base as an argument, so a test using
+/// this fixture reads no environment variable, mutates none, and needs no
+/// serial guard.
+/// What: a bare `TempDir` used as BOTH the framework base (`<dir>/.trusty-mpm`)
+/// and the parent of each fixture workspace — the same two roles the redirected
+/// `$HOME` played.
+/// Test: used by `staleness_inputs_computes_one_catalog_per_source_pair_shared_by_arc`
+/// and the three `stale_assets_for_many_*` cases.
+fn fake_base() -> tempfile::TempDir {
+    tempfile::TempDir::new().unwrap()
+}
+
 pub(super) fn fake_home() -> (tempfile::TempDir, HomeGuard) {
     let home = tempfile::TempDir::new().unwrap();
     let prior = std::env::var("HOME").ok();
@@ -858,13 +878,16 @@ async fn checked_summaries_does_not_probe_stopped_sessions() {
 /// receives a POINTER-EQUAL handle proves there is exactly one compute per
 /// group — and that no second one exists for a spawned task to perform. Move
 /// `CatalogHashes::compute` inside the fan-out and this fails immediately.
+///
+/// #5040: takes its framework base from [`fake_base`] rather than redirecting
+/// `$HOME`, so it reads and writes no process-global state and carries no
+/// `#[serial]`.
 #[tokio::test]
-#[serial_test::serial]
 async fn staleness_inputs_computes_one_catalog_per_source_pair_shared_by_arc() {
-    let (home, _guard) = fake_home();
+    let base = fake_base();
     let records: Vec<SessionRecord> = (0..3)
         .map(|i| {
-            let ws = home.path().join(format!("shared-catalog-{i}"));
+            let ws = base.path().join(format!("shared-catalog-{i}"));
             std::fs::create_dir_all(&ws).unwrap();
             let mut r = make_record(None);
             r.state = ManagedSessionState::Active;
@@ -873,7 +896,7 @@ async fn staleness_inputs_computes_one_catalog_per_source_pair_shared_by_arc() {
         })
         .collect();
 
-    let inputs = super::summary::staleness_inputs(records);
+    let inputs = super::summary::staleness_inputs_under(records, base.path());
 
     assert_eq!(inputs.len(), 3, "one input per record, in input order");
     assert!(
@@ -886,7 +909,7 @@ async fn staleness_inputs_computes_one_catalog_per_source_pair_shared_by_arc() {
 }
 
 /// Issue #4326 review, HIGH (empirically proven): the pin above only ever
-/// called [`super::summary::staleness_inputs`] directly — it never exercised
+/// called [`super::summary::staleness_inputs_under`] directly — it never exercised
 /// [`stale_assets_for_many`], the function `checked_summaries` (and therefore
 /// `tm ls`) actually calls. The critic proved this gap by moving
 /// `CatalogHashes::compute` INSIDE `stale_assets_for_many`'s per-session
@@ -897,7 +920,7 @@ async fn staleness_inputs_computes_one_catalog_per_source_pair_shared_by_arc() {
 /// Why this test closes the gap: it calls `stale_assets_for_many` itself (the
 /// real hot path) with three records that all resolve to the SAME
 /// `(agent_source, skill_source)` pair (the shared default, anchored at this
-/// test's `fake_home()`-scoped `$HOME`), and asserts via
+/// test's own [`fake_base`] temp dir), and asserts via
 /// [`crate::core::update_check::compute_calls_for`] — a call LOG keyed by the
 /// exact catalog paths, not a bare counter, so unrelated tests reaching
 /// `CatalogHashes::compute` through their own unrelated temp paths can never
@@ -905,24 +928,30 @@ async fn staleness_inputs_computes_one_catalog_per_source_pair_shared_by_arc() {
 /// Reinstating the per-session compose inside the fan-out (the critic's
 /// mutation) makes this assert `3`, not `1`, and fail.
 /// What: resets the log, resolves this test's own catalog source pair via
-/// `FrameworkPaths::default()` (identical resolution `staleness_inputs` uses
-/// internally), runs the real fan-out, and asserts one compute for that pair.
+/// `FrameworkPaths::under(base)` (identical resolution `staleness_inputs_under`
+/// uses internally), runs the real fan-out, and asserts one compute for that
+/// pair.
 /// Test: this function; mutation-verified per the PR report (temporarily
 /// reinstating the per-task compute reproduces the critic's failure, then
 /// reverted).
+///
+/// #5040: base injected via [`fake_base`], so no `$HOME` redirect and no
+/// `#[serial]`.
 #[tokio::test]
-#[serial_test::serial]
 async fn stale_assets_for_many_computes_catalog_exactly_once_per_source_pair() {
-    let (home, _guard) = fake_home();
-    crate::core::update_check::reset_compute_call_log();
+    let base = fake_base();
+    // #5040: no `reset_compute_call_log()` — the log is process-global, so a
+    // clear from one test erases another's entries. `compute_calls_for` filters
+    // to the source pair built under THIS test's temp base, which is zero
+    // before the fan-out below by construction.
 
-    let fw = crate::core::paths::FrameworkPaths::default();
+    let fw = crate::core::paths::FrameworkPaths::under(base.path());
     let agent_source = fw.agent_source_dir();
     let skill_source = fw.skill_source_dir();
 
     let records: Vec<SessionRecord> = (0..3)
         .map(|i| {
-            let ws = home.path().join(format!("hot-path-shared-catalog-{i}"));
+            let ws = base.path().join(format!("hot-path-shared-catalog-{i}"));
             std::fs::create_dir_all(&ws).unwrap();
             let mut r = make_record(None);
             r.state = ManagedSessionState::Active;
@@ -931,7 +960,7 @@ async fn stale_assets_for_many_computes_catalog_exactly_once_per_source_pair() {
         })
         .collect();
 
-    let result = stale_assets_for_many(records).await;
+    let result = stale_assets_for_many_under(records, base.path().to_path_buf()).await;
 
     assert_eq!(result.len(), 3, "every record gets a result");
     assert_eq!(
@@ -1103,8 +1132,8 @@ async fn checked_summaries_stale_assets_independent_per_session_sharing_one_cata
 /// Why: the #4322 fleet tests all need the same shape — one machine-global
 /// agent deploy dir (#4409) plus N per-workspace skill trees — and building it
 /// inline three times would let the three tests drift apart.
-fn fleet_with_deployed_skills(home: &std::path::Path, count: usize) -> Vec<SessionRecord> {
-    let fw = crate::core::paths::FrameworkPaths::default();
+fn fleet_with_deployed_skills(base: &std::path::Path, count: usize) -> Vec<SessionRecord> {
+    let fw = crate::core::paths::FrameworkPaths::under(base);
     let bundled_agents = fw.agent_source_dir();
     let bundled_skills = fw.skill_source_dir();
     std::fs::create_dir_all(&bundled_agents).unwrap();
@@ -1120,9 +1149,9 @@ fn fleet_with_deployed_skills(home: &std::path::Path, count: usize) -> Vec<Sessi
 
     (0..count)
         .map(|i| {
-            let ws = home.join(format!("fleet-ws-{i}"));
+            let ws = base.join(format!("fleet-ws-{i}"));
             std::fs::create_dir_all(&ws).unwrap();
-            let ws_fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&ws);
+            let ws_fw = crate::core::paths::FrameworkPaths::for_managed_workspace_under(base, &ws);
             crate::core::skill_tiers::deploy_all_skill_tiers(
                 &bundled_skills,
                 &fw.user_skill_source_dir(),
@@ -1161,20 +1190,24 @@ fn fleet_with_deployed_skills(home: &std::path::Path, count: usize) -> Vec<Sessi
 /// filtered `cargo test -- detect` run reproducibly observed 25 where this
 /// expected 5. Counts are therefore taken with
 /// `deployed_reads_under(<prefix>)`, scoped to directories that exist only
-/// inside THIS test's `fake_home()` temp dir, so no other test's reads can
-/// land under them. `#[serial_test::serial]` remains for the `$HOME` mutation
-/// it has always been required for, but correctness of the count no longer
-/// depends on it.
+/// inside THIS test's own temp base, so no other test's reads can land under
+/// them.
+///
+/// #5040: the base is now injected via [`fake_base`] and
+/// `stale_assets_for_many_under`, so the test mutates no `$HOME` and carries no
+/// `#[serial]` — it was the OTHER tests' `$HOME` writes that made this one
+/// report 25 reads where it expected 1.
 #[tokio::test]
-#[serial_test::serial]
 async fn stale_assets_for_many_reads_shared_agent_dir_once_for_the_whole_fleet() {
-    let (home, _guard) = fake_home();
-    let records = fleet_with_deployed_skills(home.path(), 4);
-    let fw = crate::core::paths::FrameworkPaths::default();
+    let base = fake_base();
+    let records = fleet_with_deployed_skills(base.path(), 4);
+    let fw = crate::core::paths::FrameworkPaths::under(base.path());
     let agents_dir = fw.agent_deploy_dir();
 
-    crate::core::update_check::reset_deployed_read_log();
-    let result = stale_assets_for_many(records).await;
+    // #5040: no `reset_deployed_read_log()` — a process-global clear from one
+    // test erases another's entries. `deployed_reads_under` filters to this
+    // test's own temp base, which is zero before the call below.
+    let result = stale_assets_for_many_under(records, base.path().to_path_buf()).await;
     let agent_reads = crate::core::update_check::deployed_reads_under(&agents_dir);
 
     assert_eq!(result.len(), 4, "every session must still get a verdict");
@@ -1186,9 +1219,10 @@ async fn stale_assets_for_many_reads_shared_agent_dir_once_for_the_whole_fleet()
          removed"
     );
     for i in 0..4 {
-        let ws = home.path().join(format!("fleet-ws-{i}"));
+        let ws = base.path().join(format!("fleet-ws-{i}"));
         let skills_dir =
-            crate::core::paths::FrameworkPaths::for_managed_workspace(&ws).claude_skills_dir();
+            crate::core::paths::FrameworkPaths::for_managed_workspace_under(base.path(), &ws)
+                .claude_skills_dir();
         assert_eq!(
             crate::core::update_check::deployed_reads_under(&skills_dir),
             1,
@@ -1212,12 +1246,11 @@ async fn stale_assets_for_many_reads_shared_agent_dir_once_for_the_whole_fleet()
 /// What: fresh fleet reports not-stale; the catalog then moves under it; the
 /// very next call reports stale.
 #[tokio::test]
-#[serial_test::serial]
 async fn stale_assets_for_many_sees_an_agent_change_on_the_very_next_call() {
-    let (home, _guard) = fake_home();
-    let records = fleet_with_deployed_skills(home.path(), 3);
+    let base = fake_base();
+    let records = fleet_with_deployed_skills(base.path(), 3);
 
-    let before = stale_assets_for_many(records.clone()).await;
+    let before = stale_assets_for_many_under(records.clone(), base.path().to_path_buf()).await;
     assert!(
         records.iter().all(|r| !before[&r.id]),
         "a freshly deployed fleet must start out fresh, else the assertion \
@@ -1225,14 +1258,14 @@ async fn stale_assets_for_many_sees_an_agent_change_on_the_very_next_call() {
     );
 
     // The catalog moves under the live process — no restart, no cache reset.
-    let fw = crate::core::paths::FrameworkPaths::default();
+    let fw = crate::core::paths::FrameworkPaths::under(base.path());
     std::fs::write(
         fw.agent_source_dir().join("rust-engineer.md"),
         "agent v2 — catalog moved",
     )
     .unwrap();
 
-    let after = stale_assets_for_many(records.clone()).await;
+    let after = stale_assets_for_many_under(records.clone(), base.path().to_path_buf()).await;
     assert!(
         records.iter().all(|r| after[&r.id]),
         "the NEXT call must observe the change immediately — sharing the \
@@ -1254,10 +1287,9 @@ async fn stale_assets_for_many_sees_an_agent_change_on_the_very_next_call() {
 /// What: 6 sessions, alternating drifted/fresh skill deployments, run through
 /// the real concurrent fan-out; each id must map to its own correct verdict.
 #[tokio::test]
-#[serial_test::serial]
 async fn stale_assets_for_many_keeps_per_session_verdicts_correct_under_concurrency() {
-    let (home, _guard) = fake_home();
-    let fw = crate::core::paths::FrameworkPaths::default();
+    let base = fake_base();
+    let fw = crate::core::paths::FrameworkPaths::under(base.path());
     let bundled_skills = fw.skill_source_dir();
     std::fs::create_dir_all(&bundled_skills).unwrap();
 
@@ -1272,9 +1304,10 @@ async fn stale_assets_for_many_keeps_per_session_verdicts_correct_under_concurre
         // Deploy every workspace from the CURRENT catalog, then move the
         // catalog on only for the ones that must end up stale.
         std::fs::write(bundled_skills.join("tm-doctor.md"), format!("skill v{i}")).unwrap();
-        let ws = home.path().join(format!("mixed-ws-{i}"));
+        let ws = base.path().join(format!("mixed-ws-{i}"));
         std::fs::create_dir_all(&ws).unwrap();
-        let ws_fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&ws);
+        let ws_fw =
+            crate::core::paths::FrameworkPaths::for_managed_workspace_under(base.path(), &ws);
         crate::core::skill_tiers::deploy_all_skill_tiers(
             &bundled_skills,
             &fw.user_skill_source_dir(),
@@ -1304,8 +1337,9 @@ async fn stale_assets_for_many_keeps_per_session_verdicts_correct_under_concurre
         .iter()
         .enumerate()
         .map(|(i, id)| {
-            let ws = home.path().join(format!("mixed-ws-{i}"));
-            let ws_fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&ws);
+            let ws = base.path().join(format!("mixed-ws-{i}"));
+            let ws_fw =
+                crate::core::paths::FrameworkPaths::for_managed_workspace_under(base.path(), &ws);
             let deployed =
                 std::fs::read_to_string(ws_fw.claude_skills_dir().join("tm-doctor/SKILL.md"))
                     .unwrap_or_default();
@@ -1313,7 +1347,7 @@ async fn stale_assets_for_many_keeps_per_session_verdicts_correct_under_concurre
         })
         .collect();
 
-    let got = stale_assets_for_many(records).await;
+    let got = stale_assets_for_many_under(records, base.path().to_path_buf()).await;
 
     assert!(
         expected.iter().any(|(_, stale)| *stale) && expected.iter().any(|(_, stale)| !*stale),

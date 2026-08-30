@@ -413,6 +413,33 @@ pub fn create_managed_session(
     name: &str,
     workdir: Option<&str>,
 ) -> std::io::Result<ManagedSessionOutcome> {
+    let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
+    let opts = crate::core::trusty_tools_config::resolve_tmux_options(&config);
+    create_managed_session_with_options(tmux_bin, name, workdir, opts)
+}
+
+/// [`create_managed_session`] with the resolved tmux options supplied by the
+/// caller instead of loaded from `~/.trusty-mpm/config.toml` (#5040).
+///
+/// Why: `TrustyToolsConfig::load()` reads a `$HOME`-derived path, so a test that
+/// wanted to assert on the applied options had to resolve them ITSELF and then
+/// trust that the second resolution inside `create_managed_session` saw the same
+/// `$HOME`. It does not: a concurrently-running test that redirects `$HOME` —
+/// and this crate has more than ten that do — makes the two sides of the
+/// assertion answer to different environments, which is how
+/// `create_managed_session_confirms_server_before_applying_options` failed with
+/// no change to any file it touches. Injecting the options means ONE resolution
+/// per call, so the two sides cannot diverge.
+/// What: everything `create_managed_session` does apart from the config load —
+/// the host-state gate, the binary resolution, the #3386 apply-and-verify cycle,
+/// and `new-session`.
+/// Test: `create_managed_session_confirms_server_before_applying_options`.
+pub fn create_managed_session_with_options(
+    tmux_bin: Option<&str>,
+    name: &str,
+    workdir: Option<&str>,
+    opts: crate::core::trusty_tools_config::ResolvedTmuxOptions,
+) -> std::io::Result<ManagedSessionOutcome> {
     // #5784: refuse once, loudly, at the entry point. `host_state_guard` also
     // guards every spawn below, but this is the operation an operator asked
     // for by name, so it is the one that earns a `warn!` — and refusing here
@@ -435,8 +462,6 @@ pub fn create_managed_session(
         }
     };
 
-    let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
-    let opts = crate::core::trusty_tools_config::resolve_tmux_options(&config);
     let commands = managed_session_command_sequence(
         name,
         workdir,

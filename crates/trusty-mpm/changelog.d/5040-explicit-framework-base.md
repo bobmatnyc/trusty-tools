@@ -1,0 +1,3 @@
+Changed
+
+- **The batch asset-staleness path takes its framework base as an argument.** `FrameworkPaths::for_managed_workspace_under`, `session_assets::session_plan_under` and `managed_routes::summary::stale_assets_for_many_under` accept the directory the framework install nests under; the existing entry points pass `FrameworkPaths::home_base()` and behave exactly as before. `core::tmux::create_managed_session_with_options` does the same for the resolved `tmux:` options. Both remove a `$HOME`-derived read that only tests needed to redirect ([#5040](https://github.com/bobmatnyc/trusty-tools/issues/5040))

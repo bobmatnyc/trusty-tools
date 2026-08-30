@@ -355,14 +355,20 @@ fn create_managed_session_confirms_server_before_applying_options() {
     // create_session` → `TmuxDriver::create_session`) routes through, so
     // asserting the recorded order here proves the fix for that path too.
     //
-    // The expected history-limit is read via the SAME config-resolution
-    // path `create_managed_session` itself uses (rather than a hardcoded
-    // constant) so this test stays correct regardless of the host's own
-    // `~/.trusty-mpm` config.
+    // #5040: the options are CONSTRUCTED here and injected, not resolved from
+    // `~/.trusty-mpm/config.toml` on both sides. Reading the host config twice —
+    // once here for the expectation, once inside `create_managed_session` for
+    // the actual — let any concurrently-running test that redirects `$HOME`
+    // answer the two reads from different environments, and this test failed
+    // with no change to a single file it exercises. One value, passed in, cannot
+    // diverge from itself.
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("calls.log");
-    let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
-    let opts = crate::core::trusty_tools_config::resolve_tmux_options(&config);
+    let opts = crate::core::trusty_tools_config::ResolvedTmuxOptions {
+        history_limit: 123_456,
+        mouse: true,
+        alternate_screen: false,
+    };
     let script = format!(
         "#!/bin/sh\necho \"$1\" >> '{log}'\ncase \"$1\" in\n{show_options}esac\nexit 0\n",
         log = log.display(),
@@ -373,8 +379,9 @@ fn create_managed_session_confirms_server_before_applying_options() {
     );
     let bin = write_fake_tmux(dir.path(), "fake-tmux-order", &script);
 
-    let outcome = create_managed_session(Some(&bin), "tmpm-3386-order-test", None)
-        .expect("fake tmux always exits 0");
+    let outcome =
+        create_managed_session_with_options(Some(&bin), "tmpm-3386-order-test", None, opts)
+            .expect("fake tmux always exits 0");
 
     assert!(
         outcome.options_verified,
