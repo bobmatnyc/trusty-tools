@@ -68,16 +68,16 @@ use super::envelope::BusEnvelope;
 /// streaming token deltas stay on the existing per-crate buses and never reach
 /// this one.
 ///
-/// Public since #4271: it is the depth at which
-/// [`LiveInstance::saturated_backlog`] refuses a publish, so it is part of the
-/// delivery contract a sender reasons about, not an implementation detail.
+/// Public since #4271: it is the depth at which [`LiveInstance::deliver`]
+/// answers [`DeliveryOutcome::Saturated`] instead of sending, so it is part of
+/// the delivery contract a sender reasons about, not an implementation detail.
 /// Test: `saturated_publish_is_dropped_in_the_durable_log`.
 pub const INSTANCE_CHANNEL_CAPACITY: usize = 64;
 
 // #4271: tokio rounds a broadcast capacity UP to a power of two, so a
-// non-rounded value would give a ring deeper than this constant and
-// `saturated_backlog` would refuse a publish before an eviction was actually
-// imminent. Keeping it already-rounded makes the two exactly equal.
+// non-rounded value would give a ring deeper than this constant and `deliver`
+// would refuse a publish before an eviction was actually imminent. Keeping it
+// already-rounded makes the two exactly equal.
 const _: () = assert!(INSTANCE_CHANNEL_CAPACITY.is_power_of_two());
 
 /// Separator between the definition id and the random suffix in an instance id.
@@ -170,7 +170,16 @@ pub struct LiveInstance {
     /// The instance's public metadata.
     pub meta: InstanceMeta,
     /// Sender half of this instance's own delivery channel.
-    pub tx: broadcast::Sender<BusEnvelope>,
+    ///
+    /// Crate-internal since #4271: a send made directly on this opts out of
+    /// [`LiveInstance::deliver`]'s check, and the "no envelope recorded
+    /// `delivered` is ever evicted unread" guarantee is only as good as the
+    /// absence of such a send. Subscribing goes through
+    /// [`PeerBus::subscribe`](super::PeerBus::subscribe); publishing goes
+    /// through [`PeerBus::publish`](super::PeerBus::publish). The bus's own
+    /// tests reach for it to stage a lag the publish path now refuses to
+    /// create.
+    pub(super) tx: broadcast::Sender<BusEnvelope>,
     /// Serializes [`LiveInstance::deliver`]'s check with the send it guards.
     delivery_gate: Arc<Mutex<()>>,
 }

@@ -213,10 +213,10 @@ impl PeerBus {
     /// is measured across every attached receiver, and `broadcast` cannot send
     /// to a subset, so ONE subscriber that stops draining makes this instance
     /// refuse every publish to it — including on behalf of healthy
-    /// co-subscribers. That wedge clears when the stalled receiver drops
-    /// (a client that exits closes its SSE connection, and `Receiver::drop`
-    /// drains the backlog it never read) or when an operator deregisters the
-    /// instance. Nothing in this daemon puts a timer on it, deliberately: the
+    /// co-subscribers. That wedge clears when the stalled subscriber drains,
+    /// when it drops (a client that exits closes its SSE connection, and
+    /// `Receiver::drop` drains the backlog it never read), or when an operator
+    /// deregisters the instance. Nothing puts a timer on it, deliberately: the
     /// only sender-side lever `broadcast` offers is dropping the channel, which
     /// would discard envelopes this log has already recorded `Delivered` and so
     /// re-create #4271 by another route. A per-subscriber buffer that could

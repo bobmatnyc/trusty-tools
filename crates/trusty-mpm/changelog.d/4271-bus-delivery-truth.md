@@ -11,6 +11,16 @@ Fixed
   sending and refuses the new message with `SubscriberLagged` (`503`, or
   `CODE_UNAVAILABLE` over the socket), recording it `dropped`. What the log
   calls delivered is now exactly what the subscriber receives.
+
+  Operationally this trades a silent loss for a visible refusal, and the
+  refusal is per-instance: a subscriber that stops draining makes every publish
+  to its instance answer `503` — healthy co-subscribers included — until it
+  drains, disconnects, or the instance is deregistered. `broadcast` offers no
+  way to evict one subscriber without dropping the channel, and dropping it
+  would discard envelopes the log has already recorded delivered; the
+  per-subscriber buffer that would bound this is DOC-60 §7's durable inbox,
+  deferred. Senders should retry with backoff, and an operator seeing repeated
+  `503`s should look at the recipient, which the `warn!` names.
 - `GET /api/v1/bus/subscribe/{instance_id}` reports a lag instead of swallowing
   it. The handler mapped `Lagged(n)` to `None`, borrowing an idiom from the
   session SSE handlers that carry load-sheddable telemetry — which DOC-60 §3
