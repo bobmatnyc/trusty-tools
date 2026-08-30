@@ -737,3 +737,92 @@ async fn run_review_mapreduce_substantive_review_not_flagged() {
         "a review with plausible aggregate token spend must NOT be flagged shallow"
     );
 }
+
+// ── #4045: the citation check is wired into the MAP-REDUCE emit path ───────
+
+/// A per-chunk reviewer that fabricates on exactly one chunk.
+///
+/// Why: the map-reduce path applies the citation check per map outcome, and a
+/// reviewer that fabricated on every chunk (synthesis included) would not
+/// isolate which stage dropped the finding. Keying on `marker` puts the
+/// fabrication in ONE chunk's output and leaves every other call — including
+/// the synthesis call, whose prompt does not carry the marker — clean.
+/// What: any prompt containing `marker` returns a BLOCK citing
+/// `src/hotelPage.ts:207`, a path absent from the diff; all others APPROVE.
+/// Test: used by `mapreduce_path_emits_no_finding_citing_a_path_outside_the_diff`.
+struct FabricatingReviewer {
+    marker: String,
+}
+
+#[async_trait]
+impl LlmProvider for FabricatingReviewer {
+    fn name(&self) -> &str {
+        "fabricating-reviewer"
+    }
+    async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+        let body = req
+            .messages
+            .iter()
+            .map(|m| m.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = if body.contains(self.marker.as_str()) {
+            r#"{"verdict":"BLOCK","summary":"broken","findings":[{"title":"null deref","body":"the hotel page dereferences a null booking [code: `src/hotelPage.ts:207` — \"const booking = ctx.booking.id\"]","severity":"high","confidence":0.95,"file":"src/hotelPage.ts","line":207,"code_provable":true}]}"#
+        } else {
+            r#"{"verdict":"APPROVE","summary":"ok","findings":[]}"#
+        };
+        Ok(LlmResponse {
+            text: text.to_string(),
+            model: req.model.clone(),
+            input_tokens: 10,
+            output_tokens: 5,
+            latency_ms: 1,
+            cost_usd: 0.0,
+            finish_reason: Some("stop".to_string()),
+        })
+    }
+}
+
+/// Why (#4045, ask B's lesson applied to ask A): #3929 came back because the
+/// double-registration guard sat on two call sites rather than on the resource,
+/// and a new path walked around it. trusty-review's citation check has the same
+/// shape — `runner.rs` and `mapreduce/mod.rs` each call
+/// `enforce_citation_integrity` themselves. The unified path's guard therefore
+/// proves nothing about this one, so map-reduce gets its own assertion over the
+/// review it EMITS.
+///
+/// What: an over-cap multi-file diff routed to map-reduce, where the chunk
+/// carrying the tail signature reports a BLOCK citing `src/hotelPage.ts:207` —
+/// a file absent from the diff. That finding must not reach the merged review,
+/// and the fabricated BLOCK must not survive as the verdict.
+/// Test: this test.
+#[tokio::test]
+async fn mapreduce_path_emits_no_finding_citing_a_path_outside_the_diff() {
+    let (diff, tail_signature) = oversized_multi_file_diff();
+    let (source, _tmp) = local_source(&diff);
+
+    let llm: Arc<dyn LlmProvider> = Arc::new(FabricatingReviewer {
+        marker: tail_signature.to_string(),
+    });
+    let config = ReviewConfig::load(None);
+
+    let result = run_review(&config, input(source), deps(llm)).await;
+
+    let leaked: Vec<_> = result
+        .findings
+        .iter()
+        .filter(|f| f.file.contains("hotelPage.ts"))
+        .map(|f| (f.file.clone(), f.line))
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "a finding citing a file absent from the diff reached the merged review — the \
+         citation check is not wired into the map-reduce path (#4042 / #4045): {leaked:?}"
+    );
+    assert_eq!(
+        result.verdict,
+        Verdict::Approve,
+        "the only non-APPROVE chunk rested on the fabricated finding, so the merged \
+         verdict must relax to APPROVE rather than block a clean diff"
+    );
+}
