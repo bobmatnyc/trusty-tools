@@ -1281,6 +1281,91 @@ async fn canvas_create_channel_endpoint_error_names_the_endpoint() {
     }
 }
 
+// #5161: `channel_canvas_already_exists` on its own is a dead end for the
+// caller — a channel holds at most one channel canvas, and repeat delivery to
+// the same destination is this tool's normal pattern. The error must name the
+// canvas that already exists.
+#[tokio::test]
+async fn channel_canvas_already_exists_names_the_existing_canvas() {
+    let server = MockServer::start().await;
+    mount_ok(
+        &server,
+        "conversations.canvases.create",
+        json!({ "ok": false, "error": "channel_canvas_already_exists" }),
+    )
+    .await;
+    Mock::given(method("POST"))
+        .and(path("/conversations.info"))
+        .and(body_partial_json(json!({ "channel": "C1" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "channel": {
+                "id": "C1",
+                "properties": { "canvas": { "file_id": "F456" } },
+            },
+        })))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let err = dispatch(
+        &client,
+        "slack_canvas_create",
+        json!({ "markdown": "# Runbook", "channel_id": "C1" }),
+    )
+    .await
+    .expect_err("channel_canvas_already_exists must still error");
+    match err {
+        ToolCallError::Slack(SlackError::Api(message)) => {
+            assert_eq!(
+                message,
+                "channel_canvas_already_exists (from conversations.canvases.create) \
+                 — channel C1 already has canvas F456; use slack_canvas_push to update it"
+            );
+        }
+        other => panic!("expected ToolCallError::Slack(SlackError::Api(_)), got {other:?}"),
+    }
+}
+
+// #5161: the `conversations.info` lookup is a courtesy on top of the original
+// failure, never a replacement — a lookup failure (or an absent `file_id`)
+// must degrade to the bare endpoint-named slug rather than masking
+// `channel_canvas_already_exists` with something less actionable.
+#[tokio::test]
+async fn channel_canvas_already_exists_degrades_when_lookup_fails() {
+    let server = MockServer::start().await;
+    mount_ok(
+        &server,
+        "conversations.canvases.create",
+        json!({ "ok": false, "error": "channel_canvas_already_exists" }),
+    )
+    .await;
+    mount_ok(
+        &server,
+        "conversations.info",
+        json!({ "ok": false, "error": "channel_not_found" }),
+    )
+    .await;
+
+    let client = client_for(&server);
+    let err = dispatch(
+        &client,
+        "slack_canvas_create",
+        json!({ "markdown": "# Runbook", "channel_id": "C1" }),
+    )
+    .await
+    .expect_err("channel_canvas_already_exists must still error");
+    match err {
+        ToolCallError::Slack(SlackError::Api(message)) => {
+            assert_eq!(
+                message,
+                "channel_canvas_already_exists (from conversations.canvases.create)"
+            );
+        }
+        other => panic!("expected ToolCallError::Slack(SlackError::Api(_)), got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn canvas_create_surfaces_slack_api_error() {
     // Slack errors like `missing_scope` / `canvas_creation_failed` /

@@ -34,6 +34,14 @@
 //! updated (see the PR description / README) — note this can require an app
 //! **reinstall**, not just an updated manifest, before newly-declared scopes
 //! carry through to the live token (issue #3744 research pass).
+//! Already-exists diagnostics (issue #5161): a channel holds at most one
+//! channel canvas, so a repeat [`create_canvas`]/[`canvas_create`] against a
+//! channel that already has one fails with `channel_canvas_already_exists`.
+//! [`post_create_canvas`] follows up that specific failure with a
+//! `conversations.info` lookup (needs `channels:read`, or its
+//! `groups:`/`im:`/`mpim:read` counterpart for non-public channels) to name
+//! the existing canvas's file id in the error, so the caller has something to
+//! act on instead of a dead end — see [`name_existing_canvas`].
 //! Canvas-read design note (issue #3612): as of this writing Slack has never
 //! shipped a public "read the full canvas markdown" method — `canvases.create`
 //! /`canvases.edit` are write-only, and `canvases.sections.lookup` returns only
@@ -77,6 +85,8 @@
 //! `::canvas_create_without_channel_uses_standalone_endpoint`,
 //! `::both_create_paths_return_the_same_structure`,
 //! `::canvas_create_channel_endpoint_error_names_the_endpoint`,
+//! `::channel_canvas_already_exists_names_the_existing_canvas`,
+//! `::channel_canvas_already_exists_degrades_when_lookup_fails`,
 //! `::update_canvas_replaces_content`,
 //! `::read_canvas_downloads_and_escapes_content`,
 //! `::read_canvas_without_download_url_returns_empty_content`,
@@ -92,7 +102,7 @@ use super::args::{opt_str, opt_str_array, require_str};
 use super::clean::field_str;
 use super::{
     CANVASES_CREATE, CANVASES_EDIT, CANVASES_SECTIONS_LOOKUP, CONVERSATIONS_CANVASES_CREATE,
-    FILES_INFO,
+    CONVERSATIONS_INFO, FILES_INFO,
 };
 use crate::slack::api::client::BaseClient;
 use crate::slack::api::error::SlackError;
@@ -105,6 +115,17 @@ fn document_content(markdown: &str) -> Value {
     json!({ "type": "markdown", "markdown": markdown })
 }
 
+/// Format a Slack API error slug together with the method that produced it.
+///
+/// Why: shared by [`with_endpoint`] and [`name_existing_canvas`] so the
+/// `"<slug> (from <method>)"` shape can't drift between the generic
+/// endpoint-naming path and the `channel_canvas_already_exists` path that
+/// appends further detail onto the same base string.
+/// What: `format!("{slug} (from {method})")`, no further shaping.
+fn slug_with_endpoint(method: &str, slug: &str) -> String {
+    format!("{slug} (from {method})")
+}
+
 /// Name the Slack method a canvas-create failure came from.
 ///
 /// Why: #5155 — the two create endpoints fail for different reasons
@@ -113,17 +134,74 @@ fn document_content(markdown: &str) -> Value {
 /// `team_tier_cannot_create_channel_canvases` only ever come from
 /// `conversations.canvases.create`). A bare slug forces the next person
 /// diagnosing this to read the source to work out which call ran.
-/// What: appends `(from <method>)` to a `SlackError::Api` slug, leaving the
-/// slug itself as the leading token and every other variant untouched.
+/// What: appends `(from <method>)` to a `SlackError::Api` slug via
+/// [`slug_with_endpoint`], leaving the slug itself as the leading token and
+/// every other variant untouched.
 /// Test: `tests/tools_http.rs::canvas_create_surfaces_slack_api_error`,
 /// `::canvas_create_channel_endpoint_error_names_the_endpoint`.
 fn with_endpoint(method: &str, err: SlackError) -> ToolCallError {
     match err {
         SlackError::Api(slug) => {
-            ToolCallError::from(SlackError::Api(format!("{slug} (from {method})")))
+            ToolCallError::from(SlackError::Api(slug_with_endpoint(method, &slug)))
         }
         other => ToolCallError::from(other),
     }
+}
+
+/// Look up the `file_id` of a channel's existing canvas via `conversations.info`.
+///
+/// Why: #5161 — `channel_canvas_already_exists` on its own is a dead end for a
+/// caller doing the normal thing here (repeat delivery to the same
+/// destination): they know a canvas exists but not which one, so they can't
+/// act on it. Slack's `conversations.info` returns the channel's canvas at
+/// `channel.properties.canvas.file_id` (see
+/// <https://api.slack.com/types/conversations>) — one extra read call turns
+/// that into something actionable.
+/// What: `None` on any failure to resolve an id — a transport error, an
+/// `ok:false` response, or a present-but-empty/absent `file_id` — so the
+/// caller can degrade to the bare slug rather than propagate a *second*
+/// failure in place of the original one.
+/// Test: `tests/tools_http.rs::channel_canvas_already_exists_names_the_existing_canvas`,
+/// `::channel_canvas_already_exists_degrades_when_lookup_fails`.
+async fn lookup_existing_canvas_id(client: &BaseClient, channel_id: &str) -> Option<String> {
+    let body = json!({ "channel": channel_id });
+    let resp = client.call_method(CONVERSATIONS_INFO, &body).await.ok()?;
+    let id = field_str(
+        resp.get("channel")?.get("properties")?.get("canvas")?,
+        "file_id",
+    );
+    (!id.is_empty()).then_some(id)
+}
+
+/// Build the `channel_canvas_already_exists` error, naming the existing
+/// canvas when [`lookup_existing_canvas_id`] can resolve one.
+///
+/// Why: isolates the one Slack error slug this module treats specially so
+/// [`post_create_canvas`]'s main path stays a plain `map_err`. Per issue
+/// #5161's acceptance criteria, the lookup is a courtesy on top of the
+/// original failure, never a replacement for it — a lookup failure must not
+/// mask `channel_canvas_already_exists` with some other, less actionable
+/// error.
+/// What: always includes [`slug_with_endpoint`]'s `"channel_canvas_already_exists
+/// (from conversations.canvases.create)"` base; when the lookup finds a
+/// `file_id`, appends `" — channel <channel_id> already has canvas <file_id>;
+/// use slack_canvas_push to update it"` naming the concrete next step.
+/// Test: `tests/tools_http.rs::channel_canvas_already_exists_names_the_existing_canvas`,
+/// `::channel_canvas_already_exists_degrades_when_lookup_fails`.
+async fn name_existing_canvas(
+    client: &BaseClient,
+    method: &str,
+    channel_id: &str,
+) -> ToolCallError {
+    let base = slug_with_endpoint(method, "channel_canvas_already_exists");
+    let message = match lookup_existing_canvas_id(client, channel_id).await {
+        Some(existing_id) => format!(
+            "{base} — channel {channel_id} already has canvas {existing_id}; \
+             use slack_canvas_push to update it"
+        ),
+        None => base,
+    };
+    ToolCallError::from(SlackError::Api(message))
 }
 
 /// POST a canvas-creation request and shape the response, choosing the
@@ -147,29 +225,40 @@ fn with_endpoint(method: &str, err: SlackError) -> ToolCallError {
 /// `canvas_id` key, and this is the single place that reads it, so callers get
 /// an identical `{ok, canvas_id}` either way and never learn which ran.
 /// Failures surface through [`SlackError::Api`] as before, with the attempted
-/// method named by [`with_endpoint`].
+/// method named by [`with_endpoint`] — except `channel_canvas_already_exists`
+/// (issue #5161), which additionally names the existing canvas via
+/// [`name_existing_canvas`] since a channel holds at most one channel canvas
+/// and a repeat `create` against it is this tool's normal usage pattern.
 /// Test: `tests/tools_http.rs::create_canvas_with_channel_and_markdown`,
 /// `::create_canvas_without_channel_uses_standalone_endpoint`,
 /// `::canvas_create_posts_document_content_and_channel`,
 /// `::canvas_create_without_channel_uses_standalone_endpoint`,
-/// `::both_create_paths_return_the_same_structure`.
+/// `::both_create_paths_return_the_same_structure`,
+/// `::channel_canvas_already_exists_names_the_existing_canvas`,
+/// `::channel_canvas_already_exists_degrades_when_lookup_fails`.
 async fn post_create_canvas(
     client: &BaseClient,
     mut body: Value,
     channel_id: Option<String>,
 ) -> Result<Value, ToolCallError> {
-    let method = match channel_id {
-        Some(channel_id) => {
-            body["channel_id"] = json!(channel_id);
+    let method = match &channel_id {
+        Some(id) => {
+            body["channel_id"] = json!(id);
             CONVERSATIONS_CANVASES_CREATE
         }
         None => CANVASES_CREATE,
     };
-    let resp = client
-        .call_method(method, &body)
-        .await
-        .map_err(|e| with_endpoint(method, e))?;
-    Ok(json!({ "ok": true, "canvas_id": field_str(&resp, "canvas_id") }))
+    match client.call_method(method, &body).await {
+        Ok(resp) => Ok(json!({ "ok": true, "canvas_id": field_str(&resp, "canvas_id") })),
+        // `channel_id` is always `Some` here: this slug is only ever raised by
+        // `conversations.canvases.create`, which `method` only selects when a
+        // channel was named.
+        Err(SlackError::Api(slug)) if slug == "channel_canvas_already_exists" => {
+            let channel_id = channel_id.unwrap_or_default();
+            Err(name_existing_canvas(client, method, &channel_id).await)
+        }
+        Err(e) => Err(with_endpoint(method, e)),
+    }
 }
 
 /// Create a canvas (requires `canvases:write`).
