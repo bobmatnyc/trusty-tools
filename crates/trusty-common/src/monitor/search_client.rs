@@ -107,20 +107,6 @@ struct GraphStatsWire {
     edge_kinds: std::collections::HashMap<String, u64>,
 }
 
-/// Wire shape of `GET /indexes/:id/communities` from the trusty-search daemon.
-///
-/// Why: the STATISTICS panel surfaces the community count and modularity
-/// score; the full `communities` array is intentionally ignored.
-/// What: top-level community count and modularity score.
-/// Test: deserialisation is exercised live by the trusty-search daemon suite.
-#[derive(Debug, Deserialize)]
-struct CommunitiesWire {
-    #[serde(default)]
-    community_count: u64,
-    #[serde(default)]
-    modularity: f64,
-}
-
 /// Wire shape of `GET /indexes/:id/status` from the trusty-search daemon.
 ///
 /// Why: the dashboard now surfaces last-indexed time and on-disk size in
@@ -242,8 +228,14 @@ impl SearchClient {
                     }
                 }
             };
-            // Graph stats and community info are best-effort: a failure leaves
-            // the corresponding counters at zero so the panel can still render.
+            // Graph stats are best-effort: a failure leaves the corresponding
+            // counters at zero so the panel can still render.
+            // #6382: no `communities` probe here — trusty-search never served
+            // `GET /indexes/:id/communities` (the Louvain pipeline was
+            // retired server-side in v0.10.0, issue #152); this crate kept
+            // dialling it anyway, so every call 404'd. `IndexRow.community_count`
+            // / `.modularity` stay on the struct (existing TUI tests exercise
+            // them directly) but nothing populates them from the daemon.
             match self.index_graph_stats(&id).await {
                 Ok(stats) => {
                     row.node_count = stats.node_count;
@@ -254,15 +246,6 @@ impl SearchClient {
                 }
                 Err(e) => {
                     tracing::debug!("graph stats probe failed for {id}: {e}");
-                }
-            }
-            match self.index_communities(&id).await {
-                Ok(c) => {
-                    row.community_count = c.community_count;
-                    row.modularity = c.modularity;
-                }
-                Err(e) => {
-                    tracing::debug!("communities probe failed for {id}: {e}");
                 }
             }
             indexes.push(row);
@@ -316,26 +299,6 @@ impl SearchClient {
             .json()
             .await?;
         Ok(stats)
-    }
-
-    /// Fetch the community-detection summary for an index from `/communities`.
-    ///
-    /// Why: the STATISTICS panel reports the top-level community count and
-    /// modularity score; the full `communities` array is ignored to keep
-    /// the wire payload small.
-    /// What: GETs `/indexes/:id/communities` and returns the parsed wire
-    /// struct.
-    /// Test: covered by the trusty-search daemon suite.
-    async fn index_communities(&self, id: &str) -> anyhow::Result<CommunitiesWire> {
-        let c: CommunitiesWire = self
-            .http
-            .get(format!("{}/indexes/{id}/communities", self.base))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        Ok(c)
     }
 
     /// Fetch the N most-recent daemon log lines from `GET /logs/tail`.
@@ -715,6 +678,82 @@ mod tests {
         assert_eq!(
             url, "http://127.0.0.1:59321",
             "resolve_search_url must discover a registered non-default-port address"
+        );
+    }
+
+    /// Regression for #6382: `fetch_all` used to also GET
+    /// `/indexes/:id/communities` per index — a route trusty-search has never
+    /// served (the Louvain community-detection pipeline was retired
+    /// server-side in v0.10.0, issue #152), so every such call 404'd.
+    ///
+    /// Why safe: talks only to a local wiremock server, never a real daemon.
+    /// What: serves `/health`, `/indexes`, `/indexes/:id/status`, and
+    /// `/indexes/:id/graph/stats`, but registers no mock for `.../communities`
+    /// and asserts no request ever reached that path. Before the fix this
+    /// failed: `fetch_all` issued a GET to `/indexes/demo/communities` that
+    /// wiremock's request log would show.
+    /// Test: this function.
+    #[tokio::test]
+    async fn fetch_all_never_requests_communities_route() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "version": "0.1.0",
+                "uptime_secs": 5,
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/indexes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "indexes": ["demo"],
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/indexes/demo/status"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "root_path": "/tmp/demo",
+                "chunk_count": 3,
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/indexes/demo/graph/stats"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "node_count": 1,
+                "edge_count": 0,
+                "edge_kinds": {},
+            })))
+            .mount(&server)
+            .await;
+
+        let client = SearchClient::new(server.uri());
+        let data = client
+            .fetch_all()
+            .await
+            .expect("fetch_all should succeed with no communities mock registered");
+        assert_eq!(data.indexes.len(), 1);
+        assert_eq!(data.indexes[0].id, "demo");
+
+        let received = server
+            .received_requests()
+            .await
+            .expect("wiremock request recording is on by default");
+        assert!(
+            !received
+                .iter()
+                .any(|req| req.url.path().ends_with("communities")),
+            "fetch_all must never request /indexes/:id/communities (#6382): got {:?}",
+            received.iter().map(|r| r.url.path()).collect::<Vec<_>>()
         );
     }
 
