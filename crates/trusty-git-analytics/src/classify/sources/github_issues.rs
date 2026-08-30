@@ -23,6 +23,7 @@ use tracing::warn;
 use super::{ExternalSignal, GithubIssuesSourceConfig, EXTERNAL_SOURCE_CONFIDENCE};
 use crate::collect::github::budget::{FetchBudget, MAX_REFERENCE_LOOKUPS};
 use crate::collect::github::retry::retry_send;
+use crate::core::creds::CredentialSource;
 
 /// A parsed GitHub issue reference extracted from a commit message.
 ///
@@ -174,9 +175,34 @@ pub async fn fetch_issue(
     api_base_override: Option<&str>,
     budget: &FetchBudget,
 ) -> crate::collect::errors::Result<Option<GitHubIssue>> {
-    let token = std::env::var(&config.token_env)
-        .ok()
-        .filter(|t| !t.is_empty());
+    fetch_issue_with_creds(
+        client,
+        config,
+        owner_repo,
+        number,
+        api_base_override,
+        budget,
+        &CredentialSource::from_env(),
+    )
+    .await
+}
+
+/// [`fetch_issue`], with the credential lookup supplied by the caller (#6405).
+///
+/// # Errors
+///
+/// As [`fetch_issue`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn fetch_issue_with_creds(
+    client: &reqwest::Client,
+    config: &GithubIssuesSourceConfig,
+    owner_repo: &str,
+    number: u64,
+    api_base_override: Option<&str>,
+    budget: &FetchBudget,
+    creds: &CredentialSource,
+) -> crate::collect::errors::Result<Option<GitHubIssue>> {
+    let token = creds.get(&config.token_env);
 
     let base = api_base_override.unwrap_or("https://api.github.com");
     let url = format!("{base}/repos/{owner_repo}/issues/{number}");
@@ -242,6 +268,27 @@ pub async fn fetch_issues_batch(
     api_base_override: Option<&str>,
     budget: &FetchBudget,
 ) -> IssueBatch {
+    fetch_issues_batch_with_creds(
+        client,
+        config,
+        refs,
+        api_base_override,
+        budget,
+        &CredentialSource::from_env(),
+    )
+    .await
+}
+
+/// [`fetch_issues_batch`], with the credential lookup supplied by the caller
+/// (#6405).
+pub(crate) async fn fetch_issues_batch_with_creds(
+    client: &reqwest::Client,
+    config: &GithubIssuesSourceConfig,
+    refs: &[GitHubRef],
+    api_base_override: Option<&str>,
+    budget: &FetchBudget,
+    creds: &CredentialSource,
+) -> IssueBatch {
     let mut out = IssueBatch::default();
     let mut looked_up = 0usize;
 
@@ -263,13 +310,14 @@ pub async fn fetch_issues_batch(
         }
 
         looked_up += 1;
-        match fetch_issue(
+        match fetch_issue_with_creds(
             client,
             config,
             repo,
             gh_ref.number,
             api_base_override,
             budget,
+            creds,
         )
         .await
         {

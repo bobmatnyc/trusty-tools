@@ -29,6 +29,7 @@ use super::{
     github_issues::{self, GitHubRef},
     jira, linear, shortcut, ExternalSignal, SourceConfig,
 };
+use crate::core::creds::CredentialSource;
 
 mod warm;
 
@@ -95,6 +96,9 @@ pub struct ExternalSourceResolver {
     /// issues one lookup per unique `#N` in commit history, so the bound that
     /// matters spans calls rather than sitting inside any one of them.
     github_budget: crate::collect::github::budget::FetchBudget,
+    /// #6405: where every source's token comes from. The process environment
+    /// in production; a fixed table in tests, so no test has to `set_var`.
+    creds: CredentialSource,
 }
 
 impl ExternalSourceResolver {
@@ -146,12 +150,39 @@ impl ExternalSourceResolver {
             client,
             sources: states,
             github_budget: crate::collect::github::budget::FetchBudget::new(),
+            creds: CredentialSource::from_env(),
         }
     }
 
     /// The GitHub fetch budget this resolver's sources share (#6084).
     pub(crate) fn github_budget(&self) -> &crate::collect::github::budget::FetchBudget {
         &self.github_budget
+    }
+
+    /// The credential lookup this resolver's sources share (#6405).
+    pub(crate) fn creds(&self) -> &CredentialSource {
+        &self.creds
+    }
+
+    /// Resolve every source's token from a fixed `(name, value)` table
+    /// instead of the process environment.
+    ///
+    /// Why (#6405): a test that needs an authenticated source used to
+    /// `set_var` the token, which races every other thread's `getenv` and is
+    /// the likely mechanism behind the #2613 SIGSEGV. This is the same
+    /// injection seam as `with_jira_base_url`, applied to credentials.
+    /// What: replaces the resolver's [`CredentialSource`]; names not listed
+    /// read as unset.
+    /// Test: used by every credential-dependent resolver and pipeline test.
+    #[cfg(test)]
+    pub fn with_credentials<K, V, I>(mut self, pairs: I) -> Self
+    where
+        K: Into<String>,
+        V: Into<String>,
+        I: IntoIterator<Item = (K, V)>,
+    {
+        self.creds = CredentialSource::fixed(pairs);
+        self
     }
 
     /// Resolve a commit message against all configured sources.
@@ -222,11 +253,12 @@ impl ExternalSourceResolver {
                 }
 
                 // Fetch misses.
-                let fetched = jira::fetch_issues_batch(
+                let fetched = jira::fetch_issues_batch_with_creds(
                     &self.client,
                     config,
                     &misses.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
                     base_url_override.as_deref(),
+                    &self.creds,
                 )
                 .await;
 
@@ -271,12 +303,13 @@ impl ExternalSourceResolver {
                 }
 
                 // Fetch misses.
-                let fetched = github_issues::fetch_issues_batch(
+                let fetched = github_issues::fetch_issues_batch_with_creds(
                     &self.client,
                     config,
                     &refs,
                     api_base_override.as_deref(),
                     &self.github_budget,
+                    &self.creds,
                 )
                 .await;
 
@@ -336,11 +369,12 @@ impl ExternalSourceResolver {
                 }
 
                 // Fetch misses.
-                let fetched = linear::fetch_issues_batch(
+                let fetched = linear::fetch_issues_batch_with_creds(
                     &self.client,
                     config,
                     &filtered,
                     api_base_override.as_deref(),
+                    &self.creds,
                 )
                 .await;
 
@@ -382,11 +416,12 @@ impl ExternalSourceResolver {
                 }
 
                 // Fetch misses.
-                let fetched = shortcut::fetch_stories_batch(
+                let fetched = shortcut::fetch_stories_batch_with_creds(
                     &self.client,
                     config,
                     &ids,
                     api_base_override.as_deref(),
+                    &self.creds,
                 )
                 .await;
 
@@ -429,11 +464,12 @@ impl ExternalSourceResolver {
                 }
 
                 // Fetch misses.
-                let fetched = confluence::fetch_pages_batch(
+                let fetched = confluence::fetch_pages_batch_with_creds(
                     &self.client,
                     config,
                     &ids,
                     api_base_override.as_deref(),
+                    &self.creds,
                 )
                 .await;
 
@@ -475,11 +511,12 @@ impl ExternalSourceResolver {
                 }
 
                 // Fetch misses.
-                let fetched = datadog::check_shas_batch(
+                let fetched = datadog::check_shas_batch_with_creds(
                     &self.client,
                     config,
                     &shas,
                     api_base_override.as_deref(),
+                    &self.creds,
                 )
                 .await;
 

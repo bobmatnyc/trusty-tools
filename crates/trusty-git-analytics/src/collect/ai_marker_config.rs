@@ -277,11 +277,25 @@ impl MarkerConfig {
 /// resolved, never required — an absent file is the normal case.
 /// Test: `tests::env_var_overrides_default_path`.
 pub fn marker_file_path() -> PathBuf {
-    let raw = match std::env::var(ENV_AI_MARKERS) {
-        Ok(v) if !v.trim().is_empty() => v,
-        _ => DEFAULT_MARKER_FILE.to_string(),
+    // #6405: read the process env here so the rule below stays pure.
+    marker_file_path_from(std::env::var(ENV_AI_MARKERS).ok().as_deref())
+}
+
+/// [`marker_file_path`], with the [`ENV_AI_MARKERS`] value supplied by the
+/// caller.
+///
+/// Why (#6405): proving the override and the blank-is-unset rule used to
+/// require `set_var`, which races every other thread's `getenv`. A
+/// caller-supplied value makes both provable with no global state.
+/// What: `raw` when present and not whitespace-only, else
+/// [`DEFAULT_MARKER_FILE`]; either way a leading `~` is expanded.
+/// Test: `tests::env_var_overrides_default_path`.
+pub(crate) fn marker_file_path_from(raw: Option<&str>) -> PathBuf {
+    let raw = match raw {
+        Some(v) if !v.trim().is_empty() => v,
+        _ => DEFAULT_MARKER_FILE,
     };
-    expand_path(Path::new(&raw))
+    expand_path(Path::new(raw))
 }
 
 #[cfg(test)]
@@ -411,37 +425,19 @@ mod tests {
     /// Why: the env var is the "without a code change" half of #5414; if it
     /// were ignored, only the fixed default path would be configurable.
     ///
-    /// Serialised against the other env-touching test in this module by a
-    /// module-local mutex, since env vars are process-global.
+    /// #6405: the value is a parameter now, so the module-local `env_lock` and
+    /// the `set_var` / restore dance it guarded are both gone.
     #[test]
     fn env_var_overrides_default_path() {
-        let _guard = env_lock();
-        let prev = std::env::var(ENV_AI_MARKERS).ok();
-
-        std::env::set_var(ENV_AI_MARKERS, "/tmp/tga-markers-5414.yaml");
         assert_eq!(
-            marker_file_path(),
+            marker_file_path_from(Some("/tmp/tga-markers-5414.yaml")),
             PathBuf::from("/tmp/tga-markers-5414.yaml")
         );
 
         // Blank is treated as unset, so an exported-but-empty var does not
         // point detection at "".
-        std::env::set_var(ENV_AI_MARKERS, "   ");
-        assert!(marker_file_path().ends_with(".config/tga/ai-markers.yaml"));
+        assert!(marker_file_path_from(Some("   ")).ends_with(".config/tga/ai-markers.yaml"));
 
-        std::env::remove_var(ENV_AI_MARKERS);
-        assert!(marker_file_path().ends_with(".config/tga/ai-markers.yaml"));
-
-        match prev {
-            Some(v) => std::env::set_var(ENV_AI_MARKERS, v),
-            None => std::env::remove_var(ENV_AI_MARKERS),
-        }
-    }
-
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        assert!(marker_file_path_from(None).ends_with(".config/tga/ai-markers.yaml"));
     }
 }

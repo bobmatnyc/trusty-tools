@@ -437,6 +437,11 @@ fn from_slug_with_store_builds_an_adapter_for_a_stored_credential() {
 #[test]
 #[serial]
 fn from_slug_with_store_errors_when_no_credential_resolves() {
+    // #6405: the LAST unsynchronized-env-mutation site in this crate. The env
+    // tier lives in `trusty_common::credentials::resolver::env_tier`, which
+    // takes no lookup parameter, so the seam cannot move from tga — every
+    // other site in the crate is parameterized instead. `#[serial]` is the
+    // fallback the issue allows here.
     let saved = std::env::var("OPENROUTER_API_KEY").ok();
     // SAFETY: `#[serial]` keeps every env-mutating test in this crate off other
     // threads for the duration, which is what `remove_var` requires.

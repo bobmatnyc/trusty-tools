@@ -18,6 +18,7 @@ use crate::classify::tiers::override_tier::OverrideTier;
 use crate::classify::tiers::regex_tier::RegexMatcher;
 use crate::classify::tiers::weighted_sum::WeightedSumClassifier;
 use crate::classify::tiers::ClassificationResult;
+use crate::core::creds::CredentialSource;
 use crate::core::models::ClassificationMethod;
 
 /// Runtime configuration for the [`ClassificationEngine`].
@@ -211,6 +212,62 @@ impl ClassificationEngine {
         jira_confidence: Option<f64>,
         override_conn: Option<Arc<Mutex<Connection>>>,
     ) -> Result<Self> {
+        Self::build(
+            ruleset,
+            config,
+            custom_taxonomy,
+            jira_project_mappings,
+            jira_confidence,
+            override_conn,
+            &CredentialSource::from_env(),
+        )
+    }
+
+    /// [`Self::new`] with the LLM tier's credential lookup supplied by the
+    /// caller.
+    ///
+    /// Why (#6405): the "LLM enabled but no key resolves" arm used to be
+    /// provable only by clearing `OPENAI_API_KEY` process-wide, racing every
+    /// other thread's `getenv`.
+    /// What: builds the same engine as [`Self::new`], with `creds` replacing
+    /// the process environment for the LLM tier's key resolution.
+    /// Test: `classify::tests::llm_has_api_key_signals_misconfiguration`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::new`].
+    #[cfg(test)]
+    pub(crate) fn new_with_creds(
+        ruleset: RuleSet,
+        config: ClassificationEngineConfig,
+        creds: &CredentialSource,
+    ) -> Result<Self> {
+        Self::build(
+            ruleset,
+            config,
+            Vec::new(),
+            HashMap::new(),
+            None,
+            None,
+            creds,
+        )
+    }
+
+    /// The one place the engine is actually assembled.
+    ///
+    /// Why: every public constructor above is a defaulting wrapper; keeping the
+    /// assembly in one private function is what lets the credential lookup be a
+    /// parameter without adding it to four public signatures (#6405).
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        ruleset: RuleSet,
+        config: ClassificationEngineConfig,
+        custom_taxonomy: Vec<SubcategoryDef>,
+        jira_project_mappings: HashMap<String, String>,
+        jira_confidence: Option<f64>,
+        override_conn: Option<Arc<Mutex<Connection>>>,
+        creds: &CredentialSource,
+    ) -> Result<Self> {
         let exact = ExactMatcher::new(&ruleset.rules)?;
         let regex = RegexMatcher::new(&ruleset.rules)?;
         // Tier 2.5: weighted-sum classifier. Active regardless of
@@ -229,10 +286,11 @@ impl ClassificationEngine {
             None
         };
         let llm = if config.use_llm {
-            match LlmClassifier::from_provider(
+            match LlmClassifier::from_provider_with_creds(
                 &config.llm_provider,
                 &config.llm_model,
                 config.openrouter_api_key.clone(),
+                creds,
             ) {
                 Ok(c) => Some(c),
                 Err(e) => {

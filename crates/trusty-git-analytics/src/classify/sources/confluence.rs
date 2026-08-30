@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use super::{ConfluenceSourceConfig, ExternalSignal};
+use crate::core::creds::CredentialSource;
 
 /// Default confidence for Confluence label signals.
 ///
@@ -184,9 +185,33 @@ pub async fn fetch_page(
     id: u64,
     base_url_override: Option<&str>,
 ) -> Option<ConfluencePage> {
-    let token = match std::env::var(&config.token_env) {
-        Ok(t) if !t.is_empty() => t,
-        _ => {
+    fetch_page_with_creds(
+        client,
+        config,
+        id,
+        base_url_override,
+        &CredentialSource::from_env(),
+    )
+    .await
+}
+
+/// [`fetch_page`], with the credential lookup supplied by the caller.
+///
+/// Why (#6405): proving the authenticated path used to require `set_var` on
+/// the two credential variables, racing every other thread's `getenv`.
+/// What: identical to [`fetch_page`] except that `creds` replaces the
+/// `std::env::var` reads for `token_env` and `email_env`.
+/// Test: `tests::fetch_and_classify_via_wiremock`.
+pub(crate) async fn fetch_page_with_creds(
+    client: &reqwest::Client,
+    config: &ConfluenceSourceConfig,
+    id: u64,
+    base_url_override: Option<&str>,
+    creds: &CredentialSource,
+) -> Option<ConfluencePage> {
+    let token = match creds.get(&config.token_env) {
+        Some(t) => t,
+        None => {
             warn!(
                 token_env = %config.token_env,
                 "Confluence token env var `{}` is not set — skipping Confluence lookups",
@@ -196,9 +221,9 @@ pub async fn fetch_page(
         }
     };
 
-    let email = match std::env::var(&config.email_env) {
-        Ok(e) if !e.is_empty() => e,
-        _ => {
+    let email = match creds.get(&config.email_env) {
+        Some(e) => e,
+        None => {
             warn!(
                 email_env = %config.email_env,
                 "Confluence email env var `{}` is not set — skipping Confluence lookups",
@@ -254,13 +279,32 @@ pub async fn fetch_pages_batch(
     ids: &[u64],
     base_url_override: Option<&str>,
 ) -> HashMap<String, Option<ExternalSignal>> {
+    fetch_pages_batch_with_creds(
+        client,
+        config,
+        ids,
+        base_url_override,
+        &CredentialSource::from_env(),
+    )
+    .await
+}
+
+/// [`fetch_pages_batch`], with the credential lookup supplied by the caller
+/// (#6405).
+pub(crate) async fn fetch_pages_batch_with_creds(
+    client: &reqwest::Client,
+    config: &ConfluenceSourceConfig,
+    ids: &[u64],
+    base_url_override: Option<&str>,
+    creds: &CredentialSource,
+) -> HashMap<String, Option<ExternalSignal>> {
     let mut out = HashMap::new();
     for &id in ids {
         let key = id.to_string();
         if out.contains_key(&key) {
             continue;
         }
-        let page = fetch_page(client, config, id, base_url_override).await;
+        let page = fetch_page_with_creds(client, config, id, base_url_override, creds).await;
         let signal = page.and_then(|p| classify_page(&p, config));
         out.insert(key, signal);
     }
@@ -501,8 +545,12 @@ label_mappings: {}
             .mount(&server)
             .await;
 
-        unsafe { std::env::set_var("CONF_TOKEN_WT", "test-token") }; // pragma: allowlist secret
-        unsafe { std::env::set_var("CONF_EMAIL_WT", "test@example.com") };
+        // #6405: the credentials are a parameter, so this test proves the
+        // authenticated path without mutating the process environment.
+        let creds = CredentialSource::fixed([
+            ("CONF_TOKEN_WT", "test-token"), // pragma: allowlist secret
+            ("CONF_EMAIL_WT", "test@example.com"),
+        ]);
 
         use std::collections::HashMap;
         let config = ConfluenceSourceConfig {
@@ -517,15 +565,33 @@ label_mappings: {}
         };
 
         let client = reqwest::Client::new();
-        let page = fetch_page(&client, &config, 99, Some(&server.uri()))
+        let page = fetch_page_with_creds(&client, &config, 99, Some(&server.uri()), &creds)
             .await
             .expect("fetch should succeed");
 
         let signal = classify_page(&page, &config).expect("should classify");
         assert_eq!(signal.category, "devops");
         assert!((signal.confidence - CONFLUENCE_CONFIDENCE).abs() < f64::EPSILON);
+    }
 
-        unsafe { std::env::remove_var("CONF_TOKEN_WT") };
-        unsafe { std::env::remove_var("CONF_EMAIL_WT") };
+    /// Why: an unset token must skip the lookup rather than issue an
+    /// unauthenticated request — the branch that used to be provable only by
+    /// clearing the variable process-wide (#6405).
+    /// What: resolve with an empty credential source and assert `None`, with
+    /// no HTTP server standing at all.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn fetch_page_returns_none_when_token_unset() {
+        use std::collections::HashMap;
+        let config = ConfluenceSourceConfig {
+            base_url: "https://acme.atlassian.net".to_string(),
+            token_env: "CONF_TOKEN_UNSET".to_string(), // pragma: allowlist secret
+            email_env: "CONF_EMAIL_UNSET".to_string(),
+            label_mappings: HashMap::new(),
+        };
+        let client = reqwest::Client::new();
+        let page =
+            fetch_page_with_creds(&client, &config, 1, None, &CredentialSource::empty()).await;
+        assert!(page.is_none(), "unset token must skip the lookup");
     }
 }

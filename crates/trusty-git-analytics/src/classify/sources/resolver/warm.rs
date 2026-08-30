@@ -36,6 +36,7 @@ use tracing::warn;
 use super::{confluence, datadog, github_issues, jira, linear, shortcut};
 use super::{Cache, ExternalSignal, ExternalSourceResolver, GitHubRef, SourceState};
 use crate::collect::github::budget::FetchBudget;
+use crate::core::creds::CredentialSource;
 
 impl ExternalSourceResolver {
     /// Pre-resolve every ticket key referenced across `messages`, for every
@@ -59,6 +60,7 @@ impl ExternalSourceResolver {
                 messages,
                 concurrency,
                 self.github_budget(),
+                self.creds(),
             )
             .await;
         }
@@ -80,6 +82,7 @@ async fn warm_source(
     messages: &[String],
     concurrency: usize,
     github_budget: &FetchBudget,
+    creds: &CredentialSource,
 ) {
     match state {
         SourceState::Jira {
@@ -107,11 +110,12 @@ async fn warm_source(
                 keys,
                 |k: &String| k.clone(),
                 |k: String| async move {
-                    let mut result = jira::fetch_issues_batch(
+                    let mut result = jira::fetch_issues_batch_with_creds(
                         client,
                         config,
                         std::slice::from_ref(&k),
                         base_url_override,
+                        creds,
                     )
                     .await;
                     result.remove(&k)
@@ -146,12 +150,13 @@ async fn warm_source(
                 |r: GitHubRef| async move {
                     let repo = r.repo.clone().unwrap_or_else(|| config.repo.clone());
                     let key = format!("{repo}#{}", r.number);
-                    let mut result = github_issues::fetch_issues_batch(
+                    let mut result = github_issues::fetch_issues_batch_with_creds(
                         client,
                         config,
                         std::slice::from_ref(&r),
                         api_base_override,
                         github_budget,
+                        creds,
                     )
                     .await;
                     if let Some(reason) = &result.stopped_early {
@@ -182,11 +187,12 @@ async fn warm_source(
                 keys,
                 |k: &String| k.clone(),
                 |k: String| async move {
-                    let mut result = linear::fetch_issues_batch(
+                    let mut result = linear::fetch_issues_batch_with_creds(
                         client,
                         config,
                         std::slice::from_ref(&k),
                         api_base_override,
+                        creds,
                     )
                     .await;
                     result.remove(&k)
@@ -214,11 +220,12 @@ async fn warm_source(
                 |id: &u64| id.to_string(),
                 |id: u64| async move {
                     let key = id.to_string();
-                    let mut result = shortcut::fetch_stories_batch(
+                    let mut result = shortcut::fetch_stories_batch_with_creds(
                         client,
                         config,
                         std::slice::from_ref(&id),
                         api_base_override,
+                        creds,
                     )
                     .await;
                     result.remove(&key)
@@ -246,11 +253,12 @@ async fn warm_source(
                 |id: &u64| id.to_string(),
                 |id: u64| async move {
                     let key = id.to_string();
-                    let mut result = confluence::fetch_pages_batch(
+                    let mut result = confluence::fetch_pages_batch_with_creds(
                         client,
                         config,
                         std::slice::from_ref(&id),
                         api_base_override,
+                        creds,
                     )
                     .await;
                     result.remove(&key)
@@ -277,11 +285,12 @@ async fn warm_source(
                 shas,
                 |s: &String| s.clone(),
                 |s: String| async move {
-                    let mut result = datadog::check_shas_batch(
+                    let mut result = datadog::check_shas_batch_with_creds(
                         client,
                         config,
                         std::slice::from_ref(&s),
                         api_base_override,
+                        creds,
                     )
                     .await;
                     result.remove(&s)
