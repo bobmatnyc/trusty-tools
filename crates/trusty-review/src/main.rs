@@ -111,10 +111,16 @@ enum Commands {
     /// against human findings by (file, kind), and emits a JSON report:
     ///
     ///   {recall, precision, per_pr:[{pr, recall, precision, false_positives:[...]}],
-    ///    rust_semantic_fp_rate}
+    ///    verdict_bars, rust_semantic_fp_rate}
     ///
     /// `rust_semantic_fp_rate` measures precision of logic-error/ownership findings
     /// on `.rs` files — the known Rust false-positive hotspot.
+    ///
+    /// `verdict_bars` reports #1897's three verdict-level acceptance bars —
+    /// strict agreement, RC-recall, and the clean-PR over-flag rate — over the
+    /// corpus entries carrying a `reference_verdict`. It is absent when no entry
+    /// carries one, so an unlabelled corpus reads as "not measured" rather than
+    /// as a pass (#2974).
     ///
     /// Always dry-run safe: never posts to GitHub.
     Calibrate(CalibrateArgs),
