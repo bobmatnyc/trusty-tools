@@ -66,6 +66,22 @@ cargo test -p trusty-common --features unconditional-only                 # only
 - `cargo build` / `cargo check -p trusty-common` are unaffected.
   `--all-features` is unavailable — the `embedder-*` ORT variants are mutually
   exclusive.
+- 🔴 **Naming a feature covers that feature and nothing else (#4474).** A run
+  that names one is a deliberate, visible choice, and the guard above lets it
+  through — but `--features inference-client` never compiled
+  `inference::bedrock`, which sits behind `bedrock-client`. What full coverage
+  means is stated in `[package.metadata.trusty-test-coverage]` in
+  `crates/trusty-common/Cargo.toml`: four lanes (`unconditional`, `core`,
+  `inference`, `symgraph`) plus exemptions that each say why no lane runs them.
+  `tests/feature_coverage.rs` fails when a declared feature is in neither, so
+  the statement cannot rot. Run every lane at a hardening boundary — it builds a
+  bundled ONNX Runtime, so it is not an inner-loop command:
+
+  ```bash
+  bash scripts/test_trusty_common_lanes.sh          # every lane
+  bash scripts/test_trusty_common_lanes.sh core     # one lane by name
+  ```
+
 - 🟡 Other crates hide the same trap: before trusting a crate-scoped green, check
   whether the module you edited sits behind a non-default feature.
 

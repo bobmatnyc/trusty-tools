@@ -49,6 +49,71 @@ keywords = ["mcp", "utilities", "cli", "openrouter"]
 categories = ["command-line-utilities"]
 homepage = "https://github.com/bobmatnyc/trusty-tools"
 
+# #4474: which feature sets constitute full test coverage of this crate, stated
+# where a machine can read it.
+#
+# Why: `default = []` and 47 opt-in features mean no single `cargo test -p
+# trusty-common` run covers the crate. Which combination does was tribal
+# knowledge, so a new feature could ship with tests nothing ever ran —
+# `inference-client` missed `inference::bedrock`, and `credentials`,
+# `session-naming` and `memory-core` each went unrun for a whole PR.
+# What: `lanes` are the feature sets that together cover every declared
+# feature; `exempt` names the features no lane can run, each with the reason.
+# `tests/feature_coverage.rs` resolves every lane's transitive feature closure
+# from the `[features]` table below and fails when the union plus `exempt` is
+# not exactly that table, so adding a feature without placing it fails a test.
+# `scripts/test_trusty_common_lanes.sh` reads these same rows and runs them, so
+# the runner cannot drift from the statement.
+# Test: `every_declared_feature_is_covered_by_a_lane_or_exempted`,
+# `lanes_and_exemptions_name_only_declared_features`,
+# `every_exemption_states_a_reason` (`tests/feature_coverage.rs`).
+[package.metadata.trusty-test-coverage]
+lanes = [
+    { name = "unconditional", features = [
+        "unconditional-only",
+    ] },
+    { name = "core", features = [
+        "memory-core",
+        "embedder-test-support",
+        "embedder-client",
+        "catchup",
+        "monitor-tui",
+        "search-index",
+        "uds-supervisor",
+        "webhook-relay",
+        "bm25",
+        "migrations",
+        "docgen",
+        "cli-help",
+        "crate-config",
+        "codex-config",
+        "console-metrics",
+        "update-check",
+        "bug-capture",
+        "session-naming",
+        "rpc",
+    ] },
+    { name = "inference", features = [
+        "bedrock-client",
+        "config-cli",
+        "tickets",
+        "intent-source",
+        "keyring-store",
+        "bedrock",
+        "axum-server",
+    ] },
+    { name = "symgraph", features = [
+        "symgraph-server",
+    ] },
+]
+exempt = [
+    { feature = "default", reason = "Empty by design, and `build.rs` fails the build if it stops being empty — it is the precondition the #4901 zero-feature guard rests on, not a module." },
+    { feature = "embedder-cuda", reason = "Links ORT against a CUDA host runtime. Mutually exclusive with `embedder-bundled-ort`, which the `core` lane runs, and unbuildable on this workspace's macOS and ubuntu runners." },
+    { feature = "embedder-load-dynamic", reason = "Selects ORT's load-dynamic linking for AL2023; gates no `cfg` site anywhere in `src/`, so it changes how `embedder` links and not what it does. `core` runs the embedder tests." },
+    { feature = "embedder-coreml", reason = "Documented no-op alias for `embedder`, kept for backward compatibility; gates no `cfg` site anywhere in `src/`." },
+    { feature = "embedder-candle", reason = "Every test it gates is `#[ignore]`d — they download ~90 MB from HuggingFace. Run them deliberately: `cargo test -p trusty-common --features embedder-candle -- --ignored`." },
+]
+
 [lib]
 crate-type = ["rlib"]
 
