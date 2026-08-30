@@ -20,7 +20,7 @@ use axum::http::StatusCode;
 
 use crate::core::manifest::HarnessPlan;
 use crate::core::paths::FrameworkPaths;
-use crate::core::session_assets::session_plan;
+use crate::core::session_assets::session_plan_under;
 use crate::core::update_check::{CatalogHashes, DeployedAgentHashes};
 use crate::session_manager::{
     InjectionStatus, ManagedSessionId, ManagedSessionState, ManagedTmuxDriver, NumberedSlot,
@@ -384,7 +384,17 @@ fn probe_staleness_in_list(state: &ManagedSessionState) -> bool {
 /// `checked_summaries_stale_assets_independent_per_session_sharing_one_catalog`,
 /// `checked_summaries_flags_stale_assets_only_for_relevant_states` in
 /// `super::tests`.
-pub(super) fn staleness_inputs(records: Vec<SessionRecord>) -> Vec<StalenessInput> {
+///
+/// #5040: `base` — the directory the framework install nests under — is an
+/// argument rather than a `$HOME` read, for the reason
+/// [`crate::core::session_assets::session_plan_under`] gives. This is the batch
+/// half of that seam, so a test of the fan-out below is hermetic without
+/// redirecting the process-global `$HOME`. Production passes
+/// `FrameworkPaths::home_base()` from [`stale_assets_for_many`].
+pub(super) fn staleness_inputs_under(
+    records: Vec<SessionRecord>,
+    base: &std::path::Path,
+) -> Vec<StalenessInput> {
     let mut cache: HashMap<(PathBuf, PathBuf), Arc<CatalogHashes>> = HashMap::new();
     // #4322: the second shared half. `fw.agent_deploy_dir()` is ONE
     // machine-global directory for every session (#4409 exempted it from the
@@ -396,7 +406,7 @@ pub(super) fn staleness_inputs(records: Vec<SessionRecord>) -> Vec<StalenessInpu
     let mut agents: HashMap<(PathBuf, PathBuf, PathBuf), Arc<DeployedAgentHashes>> = HashMap::new();
     let mut out = Vec::with_capacity(records.len());
     for record in records {
-        let (fw, plan) = session_plan(&record);
+        let (fw, plan) = session_plan_under(&record, base);
         let key = (plan.agent_source.clone(), plan.skill_source.clone());
         let catalog = cache
             .entry(key.clone())
@@ -451,7 +461,7 @@ type StalenessInput = (
 /// `JoinSet` pattern, `spawn_blocking` instead of `spawn` because the work is
 /// synchronous filesystem I/O rather than `tokio::fs`.
 /// What: resolves every session's plan and computes one [`CatalogHashes`] per
-/// distinct source pair in ONE blocking task ([`staleness_inputs`] — the
+/// distinct source pair in ONE blocking task ([`staleness_inputs_under`] — the
 /// sharing that must NOT be parallelized, or each task would redundantly
 /// recompose the same catalog), then spawns one blocking task per session for
 /// the cheap deployed-side [`session_asset_staleness_with_catalog`] half. A
@@ -460,7 +470,7 @@ type StalenessInput = (
 /// Test: `checked_summaries_stale_assets_independent_per_session_sharing_one_catalog`,
 /// `checked_summaries_flags_stale_assets_only_for_relevant_states`,
 /// `stale_assets_for_many_computes_catalog_exactly_once_per_source_pair`
-/// (issue #4326 review HIGH: the prior pin only exercised [`staleness_inputs`]
+/// (issue #4326 review HIGH: the prior pin only exercised [`staleness_inputs_under`]
 /// directly, never this actual hot path, and stayed green when
 /// `CatalogHashes::compute` was moved into the fan-out below) in
 /// `super::tests`. `pub(super)` (rather than private) so that regression test
@@ -470,7 +480,31 @@ type StalenessInput = (
 pub(super) async fn stale_assets_for_many(
     records: Vec<SessionRecord>,
 ) -> HashMap<ManagedSessionId, bool> {
-    let inputs = tokio::task::spawn_blocking(move || staleness_inputs(records))
+    stale_assets_for_many_under(records, crate::core::paths::FrameworkPaths::home_base()).await
+}
+
+/// [`stale_assets_for_many`] with the framework install's base directory
+/// supplied by the caller instead of read from `$HOME` (#5040).
+///
+/// Why: the three `stale_assets_for_many_*` tests each deployed a fixture into
+/// `FrameworkPaths::default()` under a `fake_home()` guard, so their correctness
+/// depended on no other test in the binary rewriting `$HOME` mid-run.
+/// `#[serial_test::serial]` does not provide that — it orders `#[serial]` tests
+/// against each other only, and under `cargo nextest`'s per-test processes it
+/// orders nothing. Passing the base in removes the dependency instead of
+/// guarding it: the tests hand over their own temp dir and mutate no
+/// environment, so no concurrent test can reach them.
+/// What: identical to [`stale_assets_for_many`], with `base` threaded to
+/// [`staleness_inputs_under`]. Owned rather than borrowed because the resolve
+/// step runs inside `spawn_blocking`.
+/// Test: `stale_assets_for_many_reads_shared_agent_dir_once_for_the_whole_fleet`,
+/// `stale_assets_for_many_sees_an_agent_change_on_the_very_next_call`,
+/// `stale_assets_for_many_keeps_per_session_verdicts_correct_under_concurrency`.
+pub(super) async fn stale_assets_for_many_under(
+    records: Vec<SessionRecord>,
+    base: PathBuf,
+) -> HashMap<ManagedSessionId, bool> {
+    let inputs = tokio::task::spawn_blocking(move || staleness_inputs_under(records, &base))
         .await
         .unwrap_or_default();
     let mut probes = tokio::task::JoinSet::new();

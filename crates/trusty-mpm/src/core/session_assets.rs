@@ -100,8 +100,28 @@ pub fn session_asset_staleness(record: &SessionRecord) -> StalenessReport {
 /// never a catalog directory scan or agent compose.
 /// Test: `session_plan_resolves_default_bundled_source`.
 pub fn session_plan(record: &SessionRecord) -> (FrameworkPaths, HarnessPlan) {
+    session_plan_under(record, &FrameworkPaths::home_base())
+}
+
+/// [`session_plan`] with the framework install's base directory supplied by the
+/// caller instead of read from `$HOME` (#5040).
+///
+/// Why: everything below this function resolves from `FrameworkPaths`, so `$HOME`
+/// enters the staleness comparison at exactly one point —
+/// [`FrameworkPaths::for_managed_workspace`]. That single read is what forced
+/// every test of the batch staleness path to redirect the PROCESS-GLOBAL `$HOME`
+/// and carry `#[serial_test::serial]`, which orders those tests against each
+/// other but not against the rest of the binary; a concurrent test reading a
+/// `$HOME`-derived path then observed the redirect and produced a wrong answer
+/// (#5040's `left: 25, right: 1`). Taking the base as an argument lets a test be
+/// hermetic without touching the environment at all.
+/// What: identical to [`session_plan`] except that the workspace-scoped
+/// [`FrameworkPaths`] is built with
+/// [`FrameworkPaths::for_managed_workspace_under`] against `base`.
+/// Test: `session_plan_under_matches_session_plan_at_home`.
+pub fn session_plan_under(record: &SessionRecord, base: &Path) -> (FrameworkPaths, HarnessPlan) {
     let workdir = session_workdir(record);
-    let fw = FrameworkPaths::for_managed_workspace(workdir);
+    let fw = FrameworkPaths::for_managed_workspace_under(base, workdir);
     let catalog_root = crate::content::catalog_root_for(&fw.root);
     let sources = crate::core::manifest::ManifestSources::resolve(workdir, &catalog_root);
     let manifest = crate::core::manifest::resolve_manifest(&sources);
@@ -258,6 +278,24 @@ mod tests {
         let ws = PathBuf::from("/workspace");
         let record = make_record(Some(ws.clone()), PathBuf::from("/cwd"));
         assert_eq!(session_workdir(&record), ws.as_path());
+    }
+
+    /// #5040: the explicit-base form must be the same resolution
+    /// [`session_plan`] performs, so a test built on `session_plan_under`
+    /// proves what production actually does.
+    #[test]
+    fn session_plan_under_matches_session_plan_at_home() {
+        let record = make_record(
+            Some(PathBuf::from("/some/workspace")),
+            PathBuf::from("/some/cwd"),
+        );
+        let (fw_default, plan_default) = session_plan(&record);
+        let (fw_explicit, plan_explicit) =
+            session_plan_under(&record, &FrameworkPaths::home_base());
+
+        assert_eq!(fw_default, fw_explicit);
+        assert_eq!(plan_default.agent_source, plan_explicit.agent_source);
+        assert_eq!(plan_default.skill_source, plan_explicit.skill_source);
     }
 
     #[test]

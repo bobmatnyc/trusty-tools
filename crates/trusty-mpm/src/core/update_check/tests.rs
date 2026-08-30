@@ -724,7 +724,11 @@ fn single_target_detect_reads_only_selected_agents() {
     }
     write_skill(&catalog_skills, "tm-doctor", "v1");
 
-    super::reset_deployed_read_log();
+    // #5040: deliberately NO `reset_deployed_read_log()`. The log is
+    // process-global, so a clear performed by one test erases entries another
+    // test has already recorded. Isolation here comes from
+    // `deployed_reads_under`'s prefix filter against this test's own temp dir,
+    // which is zero before the call below by construction.
     let _ = detect_staleness(
         &catalog_agents,
         &catalog_skills,

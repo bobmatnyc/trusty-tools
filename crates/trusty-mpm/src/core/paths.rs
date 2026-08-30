@@ -132,8 +132,23 @@ impl FrameworkPaths {
     /// `default_is_a_single_global_path_never_project_relative`.
     #[allow(clippy::should_implement_trait)] // Intentional: no meaningful Default without I/O.
     pub fn default() -> Self {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        Self::under(home)
+        Self::under(Self::home_base())
+    }
+
+    /// The base directory [`default`](Self::default) resolves against.
+    ///
+    /// Why (#5040): a caller that wants to STAY on the production layout but
+    /// hand the base to a function taking one explicitly — the shape
+    /// `session_plan_under` / `stale_assets_for_many_under` use so their tests
+    /// can supply a temp dir instead of mutating the process-global `$HOME` —
+    /// needs the same answer `default()` computes, from one place. A second
+    /// `dirs::home_dir().unwrap_or(".")` at each such call site is exactly the
+    /// drift the common-entry-point rule forbids.
+    /// What: `dirs::home_dir()`, falling back to `.` when the home directory
+    /// cannot be determined — the identical resolution `default()` performs.
+    /// Test: `home_base_is_what_default_resolves_against`.
+    pub fn home_base() -> PathBuf {
+        dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
     }
 
     /// Resolve the framework layout under an arbitrary base directory.
@@ -277,7 +292,30 @@ impl FrameworkPaths {
     /// Test: `for_managed_workspace_targets_workspace_local_claude_dirs`,
     /// `for_managed_workspace_keeps_framework_source_at_default_root`.
     pub fn for_managed_workspace(workspace_dir: impl AsRef<Path>) -> Self {
-        Self::for_managed_project(Self::default().root, workspace_dir)
+        Self::for_managed_workspace_under(Self::home_base(), workspace_dir)
+    }
+
+    /// [`for_managed_workspace`](Self::for_managed_workspace) with the base the
+    /// framework root nests under supplied explicitly (#5040).
+    ///
+    /// Why: `for_managed_workspace` reads `$HOME` through
+    /// [`default`](Self::default), so every test exercising a code path that
+    /// reaches it had to point the PROCESS-GLOBAL `$HOME` at a temp dir first.
+    /// `#[serial_test::serial]` only orders those tests against each other, not
+    /// against the rest of the binary, so any concurrently-running test reading
+    /// a `$HOME`-derived path observed the redirected one (#5040, #4931) — and
+    /// under `cargo nextest`'s per-test processes the guard does nothing at all.
+    /// Taking the base as an argument removes the process-global step entirely:
+    /// the test passes its own temp dir and mutates no environment.
+    /// What: `for_managed_project(Self::under(base).root, workspace_dir)` — the
+    /// same composition `for_managed_workspace` performs, with `base` in place
+    /// of the home directory.
+    /// Test: `for_managed_workspace_under_matches_for_managed_workspace_at_home`.
+    pub fn for_managed_workspace_under(
+        base: impl AsRef<Path>,
+        workspace_dir: impl AsRef<Path>,
+    ) -> Self {
+        Self::for_managed_project(Self::under(base).root, workspace_dir)
     }
 
     /// Path of the token-optimizer policy file (`hooks/optimizer.toml`).
@@ -743,6 +781,33 @@ mod tests {
         // Only the deploy destinations diverge from the real-home default.
         assert_ne!(workspace_paths.claude_agents, default_paths.claude_agents);
         assert_ne!(workspace_paths.claude_skills, default_paths.claude_skills);
+    }
+
+    /// #5040: `for_managed_workspace_under` must be the same construction
+    /// `for_managed_workspace` performs, differing only in where the base comes
+    /// from — otherwise a test built on the explicit form would prove something
+    /// production never does.
+    ///
+    /// Needs no `$HOME` redirect and no `#[serial]`: both sides read the same
+    /// `home_base()` within one expression, so a concurrent `$HOME` mutation
+    /// cannot make them disagree in a way that means anything.
+    #[test]
+    fn for_managed_workspace_under_matches_for_managed_workspace_at_home() {
+        let base = FrameworkPaths::home_base();
+        assert_eq!(
+            FrameworkPaths::for_managed_workspace_under(&base, "/some/workspace"),
+            FrameworkPaths::for_managed_workspace("/some/workspace"),
+        );
+    }
+
+    /// #5040: `home_base` must be exactly the base `default` nests under, so a
+    /// caller threading the base explicitly stays on the production layout.
+    #[test]
+    fn home_base_is_what_default_resolves_against() {
+        assert_eq!(
+            FrameworkPaths::under(FrameworkPaths::home_base()),
+            FrameworkPaths::default(),
+        );
     }
 
     #[test]

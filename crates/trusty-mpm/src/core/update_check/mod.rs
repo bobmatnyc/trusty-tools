@@ -611,21 +611,16 @@ pub struct CatalogHashes {
 /// unrelated tests that also reach `compute` (directly or via
 /// `detect_staleness`) concurrently in the same binary.
 /// What: a process-wide `Mutex<Vec<(PathBuf, PathBuf)>>`, appended to by
-/// every real `compute()` call; [`reset_compute_call_log`] clears it and
-/// [`compute_calls_for`] counts entries matching one specific pair.
+/// every real `compute()` call; [`compute_calls_for`] counts entries matching
+/// one specific pair. #5040 removed the companion clear: a process-global reset
+/// from one test erases entries another has already recorded, and the pair
+/// filter is what provides isolation.
 /// Test: `stale_assets_for_many_computes_catalog_exactly_once_per_source_pair`
 /// in `daemon::managed_routes::tests`.
 #[cfg(test)]
 pub(crate) static COMPUTE_CALL_LOG: std::sync::LazyLock<
     std::sync::Mutex<Vec<(std::path::PathBuf, std::path::PathBuf)>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
-
-/// Clear [`COMPUTE_CALL_LOG`] — call before the fan-out under test so earlier
-/// tests' entries can never be mistaken for this test's calls.
-#[cfg(test)]
-pub(crate) fn reset_compute_call_log() {
-    COMPUTE_CALL_LOG.lock().unwrap().clear();
-}
 
 /// Count logged [`CatalogHashes::compute`] calls for exactly one
 /// `(catalog_agents, catalog_skills)` pair.
