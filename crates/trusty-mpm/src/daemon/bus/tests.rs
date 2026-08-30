@@ -220,6 +220,75 @@ fn register_mints_prefixed_id() {
     assert_eq!(reg.len(), 2);
 }
 
+/// A minter that hands back `suffixes` in order, then repeats the last one.
+///
+/// Why: `Uuid::new_v4` cannot be made to collide, so the collision path is
+/// reachable only through the injected suffix source. Repeating the last value
+/// is what lets one helper drive both the recover-on-retry case and the
+/// every-attempt-collides case.
+fn scripted_minter(suffixes: &[&str]) -> impl FnMut() -> String + use<> {
+    let scripted: Vec<String> = suffixes.iter().map(|s| (*s).to_string()).collect();
+    let mut next = 0usize;
+    move || {
+        let out = scripted[next.min(scripted.len() - 1)].clone();
+        next += 1;
+        out
+    }
+}
+
+#[test]
+fn register_re_mints_on_a_suffix_collision() {
+    // #4276: pre-fix this was a bare `DashMap::insert`, so the second
+    // registration REPLACED the first — `len()` stayed 1 and resolving the
+    // first instance's id reached the second instance's channel.
+    let reg = InstanceRegistry::default();
+    let first = reg
+        .register_with_minter("izzie", None, scripted_minter(&["aaaaaaaa"]))
+        .expect("first registration");
+    let second = reg
+        .register_with_minter("izzie", None, scripted_minter(&["aaaaaaaa", "bbbbbbbb"]))
+        .expect("collision must re-mint, not overwrite");
+
+    assert_eq!(first.instance_id, "izzie~aaaaaaaa");
+    assert_eq!(second.instance_id, "izzie~bbbbbbbb");
+    assert_eq!(reg.len(), 2, "the first instance must still be registered");
+    // The decisive assertion: the first id still resolves to the FIRST
+    // instance, not to the one that collided with it.
+    let resolved = reg
+        .resolve_instance(&first.instance_id)
+        .expect("still live");
+    assert_eq!(resolved.meta.seq, first.seq);
+    assert!(second.seq > first.seq, "re-minting must not reorder seq");
+}
+
+#[test]
+fn register_fails_loudly_when_every_mint_collides() {
+    // A suffix source that never yields a free id must refuse the registration
+    // rather than overwrite the live instance holding that id.
+    let reg = InstanceRegistry::default();
+    let first = reg
+        .register_with_minter("izzie", None, scripted_minter(&["aaaaaaaa"]))
+        .expect("first registration");
+
+    let err = reg
+        .register_with_minter("izzie", None, scripted_minter(&["aaaaaaaa"]))
+        .expect_err("an exhausted mint must error, not overwrite");
+    assert!(
+        matches!(err, BusError::InstanceIdCollision { .. }),
+        "expected InstanceIdCollision, got {err:?}"
+    );
+    assert_eq!(err.status(), StatusCode::CONFLICT);
+    assert_eq!(reg.len(), 1);
+    assert_eq!(
+        reg.resolve_instance(&first.instance_id)
+            .expect("survivor")
+            .meta
+            .seq,
+        first.seq,
+        "the live instance must be untouched by the refused registration"
+    );
+}
+
 #[test]
 fn register_rejects_bad_definition() {
     let reg = InstanceRegistry::default();

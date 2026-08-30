@@ -54,6 +54,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
@@ -81,6 +82,24 @@ const INSTANCE_CHANNEL_CAPACITY: usize = 64;
 /// RFC 3986 *unreserved* separator that is safe in a path, a query, and a
 /// fragment alike.
 pub const INSTANCE_ID_SEPARATOR: char = '~';
+
+/// How many suffixes [`InstanceRegistry::register`] mints before refusing.
+///
+/// Why (#4276): a bounded retry is what turns a collision into a re-mint
+/// instead of an overwrite, and the bound is what stops a pathological suffix
+/// source from spinning forever inside a registration. Eight is generous
+/// against a 32-bit space — reaching it means the source is not random, which
+/// is a condition to report, not to retry through.
+const MAX_INSTANCE_ID_MINT_ATTEMPTS: usize = 8;
+
+/// One random 8-hex-character instance-id suffix.
+///
+/// Why a named function rather than an inline expression: it is the production
+/// argument [`InstanceRegistry::register_with_minter`] takes, so the seam a
+/// test substitutes has exactly one real implementation.
+fn mint_instance_suffix() -> String {
+    uuid::Uuid::new_v4().simple().to_string()[..8].to_string()
+}
 
 /// The publicly observable facts about one live instance.
 ///
@@ -188,30 +207,83 @@ impl InstanceRegistry {
     /// `<definition_id>~<8 hex>` ([`INSTANCE_ID_SEPARATOR`]), creates the
     /// instance's delivery channel, and inserts it.
     /// Test: `register_mints_prefixed_id`, `register_rejects_bad_definition`,
-    /// `instance_id_is_url_path_safe`.
+    /// `instance_id_is_url_path_safe`,
+    /// `register_re_mints_on_a_suffix_collision`,
+    /// `register_fails_loudly_when_every_mint_collides`.
     pub fn register(
         &self,
         definition_id: &str,
         project: Option<String>,
     ) -> Result<InstanceMeta, BusError> {
+        self.register_with_minter(definition_id, project, mint_instance_suffix)
+    }
+
+    /// [`register`](Self::register) against an explicit suffix source.
+    ///
+    /// Why (#4276): registration used to `insert` unconditionally, and
+    /// `DashMap::insert` REPLACES on a duplicate key. Two instances that drew
+    /// the same 32-bit suffix would therefore collapse into one entry, and
+    /// every later lookup of the first instance would resolve to the second —
+    /// the one way instance-addressed delivery could reach an instance the
+    /// sender did not name, defeating the no-fallback guarantee this module is
+    /// built around by a route the module doc does not cover. The suffix source
+    /// is a parameter because a collision cannot be provoked through
+    /// `Uuid::new_v4`, so the guard would otherwise be untestable.
+    /// What: mints, then claims the key through `entry` — a VACANT entry
+    /// inserts and returns, an OCCUPIED one logs and re-mints, up to
+    /// [`MAX_INSTANCE_ID_MINT_ATTEMPTS`]. Exhausting those returns
+    /// [`BusError::InstanceIdCollision`] rather than overwriting a live
+    /// instance: refusing to register is recoverable, silently stealing another
+    /// instance's id is not. `seq` is drawn once per call, so a re-mint does
+    /// not perturb the registration ordering
+    /// [`resolve_definition`](Self::resolve_definition) tie-breaks on.
+    /// Test: `register_re_mints_on_a_suffix_collision`,
+    /// `register_fails_loudly_when_every_mint_collides`.
+    pub(super) fn register_with_minter(
+        &self,
+        definition_id: &str,
+        project: Option<String>,
+        mut mint: impl FnMut() -> String,
+    ) -> Result<InstanceMeta, BusError> {
         validate_definition_id(definition_id)?;
-        let short = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
-        let meta = InstanceMeta {
-            instance_id: format!("{definition_id}{INSTANCE_ID_SEPARATOR}{short}"),
-            definition_id: definition_id.to_string(),
-            project,
-            registered_at: chrono::Utc::now().to_rfc3339(),
-            seq: self.next_seq.fetch_add(1, Ordering::SeqCst),
-        };
-        let (tx, _) = broadcast::channel(INSTANCE_CHANNEL_CAPACITY);
-        self.instances.insert(
-            meta.instance_id.clone(),
-            LiveInstance {
-                meta: meta.clone(),
-                tx,
-            },
+        let seq = self.next_seq.fetch_add(1, Ordering::SeqCst);
+        for attempt in 1..=MAX_INSTANCE_ID_MINT_ATTEMPTS {
+            let instance_id = format!("{definition_id}{INSTANCE_ID_SEPARATOR}{}", mint());
+            match self.instances.entry(instance_id.clone()) {
+                Entry::Occupied(_) => {
+                    tracing::warn!(
+                        %instance_id,
+                        attempt,
+                        "bus: minted instance id already live — re-minting rather than \
+                         overwriting the registered instance"
+                    );
+                }
+                Entry::Vacant(vacant) => {
+                    let meta = InstanceMeta {
+                        instance_id,
+                        definition_id: definition_id.to_string(),
+                        project,
+                        registered_at: chrono::Utc::now().to_rfc3339(),
+                        seq,
+                    };
+                    let (tx, _) = broadcast::channel(INSTANCE_CHANNEL_CAPACITY);
+                    vacant.insert(LiveInstance {
+                        meta: meta.clone(),
+                        tx,
+                    });
+                    return Ok(meta);
+                }
+            }
+        }
+        tracing::error!(
+            definition_id,
+            attempts = MAX_INSTANCE_ID_MINT_ATTEMPTS,
+            "bus: could not mint a free instance id — registration refused"
         );
-        Ok(meta)
+        Err(BusError::InstanceIdCollision {
+            definition_id: definition_id.to_string(),
+            attempts: MAX_INSTANCE_ID_MINT_ATTEMPTS,
+        })
     }
 
     /// Remove an instance, making it no longer addressable.
