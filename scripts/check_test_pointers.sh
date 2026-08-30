@@ -24,7 +24,7 @@
 #   (`` `name` ``, separated by whitespace/`,`/`;`/`&`/"and"/"plus", or a
 #   `(parenthetical)` remark immediately attached to a citation, e.g. "`name`
 #   (macOS-only);") is scanned — extraction stops dead at the first token
-#   that is none of those (see candidate_names' doc comment for why: real
+#   that is none of those (see SCAN_AWK's doc comment for why: real
 #   annotations routinely continue past the test-name list into prose that
 #   ALSO backtick-quotes unrelated symbols). Each surviving span is then
 #   classified:
@@ -36,7 +36,7 @@
 #     - a citation whose final segment is otherwise the same shape but
 #       contains one or more `*` glob wildcards (`disclaimed_stderr_*`) is a
 #       GLOB candidate — resolved by pattern match against the crate's name
-#       cache (see name_glob_exists_in_crate) rather than dropped. A glob
+#       cache (see RESOLVE_AWK) rather than dropped. A glob
 #       that matches nothing is exactly as dangling as an exact citation
 #       that matches nothing, and is reported the same way.
 #     - anything else (bare module/type references (`` `tests` ``,
@@ -50,7 +50,7 @@
 #   as a hard parse-error violation (never allowlist-suppressible) rather
 #   than silently truncating the scan.
 #   Each surviving EXACT/GLOB candidate is checked with `git grep` (cached
-#   per crate — see the name cache section) for a `fn <name>(` (or
+#   per crate — see build_crate_caches) for a `fn <name>(` (or
 #   `fn <name><...>(` for a generic fn) OR a `mod <name>;` / `mod <name> {`
 #   definition anywhere under the citing file's own crate (the nearest
 #   ancestor directory containing a Cargo.toml; falls back to the whole tree
@@ -151,77 +151,38 @@ SCRIPT_PATH="${BASH_SOURCE[0]}"
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 
 # ---------------------------------------------------------------------------
-# Doc-comment "Test:" block extraction, shared by both scan() and the
-# self-test. Reads a single file on stdin-free `awk -f`-style invocation via
-# a shell function so it can be reused without spawning a child script.
+# SCAN_AWK — doc-comment "Test:" extraction AND citation parsing, in ONE awk
+# process for the whole corpus (#4687).
 #
-# Output: one row per Test: annotation found: "<line>\t<blob>" where <blob>
-# is the concatenated text of the annotation (first line + any continuation
-# lines), backtick spans intact.
-# ---------------------------------------------------------------------------
-EXTRACT_AWK='
-function is_doc(line) { return (line ~ /^[ \t]*(\/\/\/|\/\/!)/) }
-function strip(line,    s) {
-  s = line
-  sub(/^[ \t]*(\/\/\/|\/\/!)[ \t]?/, "", s)
-  return s
-}
-BEGIN { collecting = 0; buf = ""; bufstart = "" }
-{
-  line = $0
-  handled = 0
-  if (collecting) {
-    if (is_doc(line)) {
-      content = strip(line)
-      if (content ~ /^Test:/) {
-        print bufstart "\t" buf
-        buf = content; bufstart = NR
-        handled = 1
-      } else if (content ~ /^(Why|What):/ || content == "") {
-        print bufstart "\t" buf
-        collecting = 0; buf = ""; bufstart = ""
-        handled = 1
-      } else {
-        buf = buf " " content
-        handled = 1
-      }
-    } else {
-      print bufstart "\t" buf
-      collecting = 0; buf = ""; bufstart = ""
-    }
-  }
-  if (!handled && !collecting) {
-    if (is_doc(line)) {
-      content = strip(line)
-      if (content ~ /^Test:/) {
-        collecting = 1
-        buf = content
-        bufstart = NR
-      }
-    }
-  }
-}
-END { if (collecting) print bufstart "\t" buf }
-'
-
-extract_test_blocks() {
-  awk "$EXTRACT_AWK" "$1"
-}
-
-# ---------------------------------------------------------------------------
-# candidate_names: given a Test: blob, print one "<KIND>\t<value>" row per
-# candidate/error found (may print duplicates; caller de-dupes if it cares).
-# KIND is one of:
-#   NAME  — an exact lowercase snake_case final-segment candidate.
-#   GLOB  — a final segment shaped like NAME but containing `*` wildcard(s);
-#           resolved by pattern match, not exact match, by the caller.
-#   ERR   — the annotation could not be interpreted (unterminated backtick or
-#           parenthetical). The caller must treat this as a hard failure, not
-#           a skip — this is the failure mode issue #3581 exists to close.
+# Why: extraction ran as one awk per FILE and citation parsing as one awk per
+#   ANNOTATION, with the shell looping between them. At ~3,650 `.rs` files and
+#   ~27,800 citations that is ~29,000 forks before a single citation is
+#   resolved, and the job was cancelled at its CI timeout on two innocent PRs
+#   (#4687). Both stages read the same annotation text and emit the same rows
+#   whether they run in one process or thirty thousand, so they run in one.
 #
-# Critically, this only walks the LEADING run of the citation list
-# immediately after "Test:": backtick-quoted spans, each optionally followed
-# by its own `(parenthetical)` aside (e.g. "`name` (macOS-only);"), joined by
+# What: reads the `<path><TAB><crate-root>` map named by MAP — one row per file
+#   to scan, in the caller's enumeration order, with unreadable and
+#   EXCLUDE_PREFIXES paths already dropped — then for every file in it:
+#     - collects each `Test:` annotation — a `///`/`//!` line whose stripped
+#       content starts with the literal `Test:`, plus any immediately-following
+#       `///`/`//!` continuation lines up to the next blank comment line, a new
+#       `Why:`/`What:` tag, or the end of the doc block;
+#     - parses its citations (see the leading-run rules below) and writes one
+#       `<path><TAB><line><TAB><KIND><TAB><name>` row per DISTINCT citation to
+#       CHECKED, KIND being NAME (exact lowercase snake_case final segment) or
+#       GLOB (the same shape carrying `*` wildcards, resolved by pattern match
+#       in RESOLVE_AWK rather than dropped — issue #3581);
+#     - writes `<path><TAB><line><TAB><message>` to ERRF for an annotation it
+#       cannot interpret at all (unterminated backtick or parenthetical). The
+#       caller must treat that as a hard failure, not a skip — it is the
+#       failure mode issue #3581 exists to close.
+#   Finally it writes every crate root owning at least one citation to CRATESF,
+#   so the caller builds a name cache for exactly those crates and no others.
+#
+# Citation extraction only walks the LEADING run of the list immediately after
+# "Test:": backtick-quoted spans, each optionally followed by its own
+# `(parenthetical)` aside (e.g. "`name` (macOS-only);"), joined by
 # whitespace/`,`/`;`/`&`/"and"/"plus" — and stops at the first token that
 # isn't one of those. Real-world annotations routinely continue past the
 # test-name list into prose that ALSO backtick-quotes unrelated symbols —
@@ -244,21 +205,37 @@ extract_test_blocks() {
 # prose starting with any other token still stops the scan exactly as
 # before (see "trailing prose after real name" in the self-test fixture).
 # ---------------------------------------------------------------------------
-CANDIDATES_AWK='
-function emit(nm,    parts, k, final) {
+SCAN_AWK='
+function is_doc(line) { return (line ~ /^[ \t]*(\/\/\/|\/\/!)/) }
+function strip(line,    s) {
+  s = line
+  sub(/^[ \t]*(\/\/\/|\/\/!)[ \t]?/, "", s)
+  return s
+}
+
+# One citation span, already unwrapped from its backticks. Matched on its
+# FINAL `::`-separated segment; de-duplicated within the annotation it came
+# from, exactly as the shell loop this replaced de-duplicated on KIND:name.
+function emit(f, ln, nm,    parts, k, final, kind, key) {
   k = split(nm, parts, "::")
   final = parts[k]
   if (final == "") return
-  if (final ~ /^[a-z][a-z0-9_]*$/ && final ~ /_/) { print "NAME\t" final; return }
-  if (final ~ /^[a-z][a-z0-9_*]*$/ && index(final, "*") > 0 && final ~ /_/) {
-    print "GLOB\t" final
-    return
-  }
-  # Not a candidate shape at all (bare module/type ref, CamelCase, no
-  # underscore) — deliberately skipped, not an error.
+  if (final ~ /^[a-z][a-z0-9_]*$/ && final ~ /_/) kind = "NAME"
+  else if (final ~ /^[a-z][a-z0-9_*]*$/ && index(final, "*") > 0 && final ~ /_/) kind = "GLOB"
+  else return
+  # Anything else is not a candidate shape at all (bare module/type ref,
+  # CamelCase, no underscore) — deliberately skipped, not an error.
+  key = kind ":" final
+  if (key in seen) return
+  seen[key] = 1
+  print (f "\t" ln "\t" kind "\t" final) > CHECKED
+  needed[cur_crate] = 1
 }
-{
-  s = $0
+
+function parse_block(f, ln, blob,    s, n, i, c, j, rest, depth, cc, jj, errflag) {
+  if (ln == "") return
+  split("", seen)
+  s = blob
   sub(/^Test:[ \t]*/, "", s)
   n = length(s)
   i = 1
@@ -268,11 +245,11 @@ function emit(nm,    parts, k, final) {
     if (c == "`") {
       j = index(substr(s, i + 1), "`")
       if (j == 0) {
-        print "ERR\tunterminated backtick citation"
+        print (f "\t" ln "\tunterminated backtick citation") > ERRF
         errflag = 1
         break
       }
-      emit(substr(s, i + 1, j - 1))
+      emit(f, ln, substr(s, i + 1, j - 1))
       i = i + 1 + j
     } else if (c == " " || c == "\t" || c == "," || c == ";" || c == "&") {
       i++
@@ -293,7 +270,7 @@ function emit(nm,    parts, k, final) {
         if (cc == "`") {
           jj = index(substr(s, i + 1), "`")
           if (jj == 0) {
-            print "ERR\tunterminated backtick inside parenthetical"
+            print (f "\t" ln "\tunterminated backtick inside parenthetical") > ERRF
             errflag = 1
             i = n + 1
             depth = 0
@@ -312,7 +289,7 @@ function emit(nm,    parts, k, final) {
       }
       if (errflag) break
       if (depth > 0) {
-        print "ERR\tunterminated parenthetical after citation"
+        print (f "\t" ln "\tunterminated parenthetical after citation") > ERRF
         errflag = 1
         break
       }
@@ -324,22 +301,73 @@ function emit(nm,    parts, k, final) {
     }
   }
 }
-'
 
-candidate_names() {
-  # #4882: a here-string feeds awk's stdin without forking a separate
-  # `printf` process the way `printf ... | awk ...` did — same trailing
-  # newline, same $0 content, one less fork per call. This function is
-  # invoked once per Test: annotation (tens of thousands workspace-wide), so
-  # the extra fork was a measurable share of total runtime.
-  awk "$CANDIDATES_AWK" <<< "$1"
+function scan_file(f,    line, nr, content, handled) {
+  collecting = 0; buf = ""; bufstart = ""
+  nr = 0
+  while ((getline line < f) > 0) {
+    nr++
+    handled = 0
+    if (collecting) {
+      if (is_doc(line)) {
+        content = strip(line)
+        if (content ~ /^Test:/) {
+          parse_block(f, bufstart, buf)
+          buf = content; bufstart = nr
+          handled = 1
+        } else if (content ~ /^(Why|What):/ || content == "") {
+          parse_block(f, bufstart, buf)
+          collecting = 0; buf = ""; bufstart = ""
+          handled = 1
+        } else {
+          buf = buf " " content
+          handled = 1
+        }
+      } else {
+        parse_block(f, bufstart, buf)
+        collecting = 0; buf = ""; bufstart = ""
+      }
+    }
+    if (!handled && !collecting) {
+      if (is_doc(line)) {
+        content = strip(line)
+        if (content ~ /^Test:/) {
+          collecting = 1
+          buf = content
+          bufstart = nr
+        }
+      }
+    }
+  }
+  close(f)
+  if (collecting) parse_block(f, bufstart, buf)
+  collecting = 0; buf = ""; bufstart = ""
 }
 
+BEGIN {
+  while ((getline ml < MAP) > 0) {
+    t = index(ml, "\t")
+    if (t == 0) continue
+    cur_crate = substr(ml, t + 1)
+    scan_file(substr(ml, 1, t - 1))
+  }
+  close(MAP)
+  for (c in needed) print c > CRATESF
+}
+'
+
 # ---------------------------------------------------------------------------
-# crate_root_for: print the nearest ancestor directory (relative to the repo
-# root, cwd) containing a Cargo.toml for a given repo-relative file path.
-# Falls back to "." (workspace root) if none is found above it.
+# crate_root_for: set CRATE_ROOT to the nearest ancestor directory (relative to
+# the repo root, cwd) containing a Cargo.toml for a given repo-relative file
+# path. Falls back to "." (workspace root) if none is found above it.
+#
+# #4687: assigns a global rather than printing. The caller needs this once per
+# file (~3,650 times), and reading a printed answer costs a `$(...)` command
+# substitution — a forked subshell each time — which is the very cost #4882
+# removed from the body of this function.
 # ---------------------------------------------------------------------------
+CRATE_ROOT=""
+
 crate_root_for() {
   # #4882: bash-builtin parameter expansion instead of external `dirname` —
   # called once per file plus once per ancestor directory walked (thousands
@@ -354,7 +382,7 @@ crate_root_for() {
   [ -z "$dir" ] && dir="/"
   while [ "$dir" != "." ] && [ "$dir" != "/" ]; do
     if [ -f "$dir/Cargo.toml" ]; then
-      printf '%s\n' "$dir"
+      CRATE_ROOT="$dir"
       return 0
     fi
     case "$dir" in
@@ -363,7 +391,7 @@ crate_root_for() {
     esac
     [ -z "$dir" ] && dir="/"
   done
-  printf '%s\n' "."
+  CRATE_ROOT="."
 }
 
 # ---------------------------------------------------------------------------
@@ -376,64 +404,122 @@ crate_root_for() {
 # ---------------------------------------------------------------------------
 CRATE_FN_CACHE_DIR=""
 
+CRATE_CACHE_FILE=""
+
 crate_cache_file() {
-  # #4882: this runs once per CITATION (~21k times workspace-wide), not once
-  # per crate — only the git-grep build below is crate-scoped. `tr` forked a
-  # process on every call; bash's own `//` pattern substitution does the
-  # same character-class replacement without a fork.
+  # #4882: `tr` forked a process on every call; bash's own `//` pattern
+  # substitution does the same character-class replacement without a fork.
   local crate="$1" key
   key="${crate//[^A-Za-z0-9]/_}"
-  printf '%s/%s.fns\n' "$CRATE_FN_CACHE_DIR" "$key"
+  CRATE_CACHE_FILE="$CRATE_FN_CACHE_DIR/${key}.fns"
 }
 
 # ---------------------------------------------------------------------------
-# ensure_crate_cache: build (if not already cached) and print the path to
-# the crate root $1's `fn`/`mod` name-cache file. Shared by
-# name_exists_in_crate (exact match) and name_glob_exists_in_crate (pattern
-# match) so the cache is only ever built once per crate per scan() run.
-# ---------------------------------------------------------------------------
-ensure_crate_cache() {
-  local crate="$1" cache
-  cache="$(crate_cache_file "$crate")"
-  if [ ! -f "$cache" ]; then
-    git grep -ohE '(fn|mod)[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*[(<{;]' -- "${crate}/*.rs" 2>/dev/null \
-      | sed -E -e 's/^(fn|mod)[[:space:]]+//' -e 's/[[:space:]]*[(<{;]$//' \
-      | sort -u > "$cache" || : > "$cache"
-  fi
-  printf '%s\n' "$cache"
-}
-
-# ---------------------------------------------------------------------------
-# name_exists_in_crate: 0 (true) if `fn <name>` (as a whole identifier,
-# followed by `(` or `<` for a generic fn) OR `mod <name>` (followed by `;`
-# or `{`) is defined anywhere among tracked .rs files under crate root $1.
-# Builds/reuses the crate's name cache.
+# build_crate_caches: for each crate root listed in file $1, grep it ONCE for
+# every `fn <ident>` / `mod <ident>` declaration and write the sorted name set
+# to a cache file, appending a `<crate-root><TAB><cache-path>` row to file $2.
 #
-# Module citations are an established convention in this codebase (e.g.
-# "Test: `ctrl::tests::pm_task_tests` covers ..." citing a whole test
-# module, not a single test fn) — a citation naming a real `mod` block is
-# just as valid a pointer as one naming a real `fn`.
+# Only the crate roots SCAN_AWK reported as owning a citation appear in $1, so
+# a crate nobody cites is never grepped — the same laziness the previous
+# per-citation `ensure_crate_cache` gave, at one git grep per crate instead of
+# a `$(...)` subshell per citation.
 # ---------------------------------------------------------------------------
-name_exists_in_crate() {
-  local crate="$1" name="$2" cache
-  cache="$(ensure_crate_cache "$crate")"
-  grep -qxF "$name" "$cache"
+build_crate_caches() {
+  local crates_in="$1" cachemap_out="$2" crate
+  : > "$cachemap_out"
+  while IFS= read -r crate; do
+    [ -n "$crate" ] || continue
+    crate_cache_file "$crate"
+    if [ ! -f "$CRATE_CACHE_FILE" ]; then
+      git grep -ohE '(fn|mod)[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*[(<{;]' -- "${crate}/*.rs" 2>/dev/null \
+        | sed -E -e 's/^(fn|mod)[[:space:]]+//' -e 's/[[:space:]]*[(<{;]$//' \
+        | sort -u > "$CRATE_CACHE_FILE" || : > "$CRATE_CACHE_FILE"
+    fi
+    printf '%s\t%s\n' "$crate" "$CRATE_CACHE_FILE" >> "$cachemap_out"
+  done < "$crates_in"
 }
 
 # ---------------------------------------------------------------------------
-# name_glob_exists_in_crate: 0 (true) if at least one cached `fn`/`mod` name
-# in crate root $1 matches glob pattern $2 (`*` = any run of chars, the only
-# wildcard this codebase's citations use). issue #3581: a glob citation with
-# zero matches is exactly as dangling as an exact citation with zero
-# matches — it must be resolved, not silently dropped from the candidate
-# list the way the pre-fix parser dropped it.
+# RESOLVE_AWK — decide, for every citation SCAN_AWK recorded, whether the cited
+# name is defined in the citing file's own crate; print the ones that are not.
+#
+# Why: this was a shell loop doing a `$(ensure_crate_cache ...)` command
+#   substitution plus a `grep` fork PER CITATION — ~56,000 forks for ~27,800
+#   citations, the single largest remaining cost after #4882 (#4687). The
+#   answers are pure lookups against a name set that is already materialised on
+#   disk, so one awk process answers all of them.
+#
+# What: reads the `<path><TAB><crate-root>` map named by MAP and the
+#   `<crate-root><TAB><cache-path>` map named by CACHEMAP, then for each
+#   `<path><TAB><line><TAB><KIND><TAB><name>` row on stdin/ARGV loads that
+#   crate cache once (lazily, on first citation for the crate) and prints
+#   `<path><TAB><line><TAB><name><TAB><crate-root>` when the name is absent.
+#
+#   A NAME citation resolves when `fn <name>` (as a whole identifier, followed
+#   by `(` or `<` for a generic fn) OR `mod <name>` (followed by `;` or `{`) is
+#   declared anywhere among tracked .rs files under that crate root — a whole
+#   cache LINE equal to the name, which is what `grep -qxF` used to ask.
+#   Module citations are an established convention in this codebase (e.g.
+#   "Test: `ctrl::tests::pm_task_tests` covers ..." citing a whole test module,
+#   not a single test fn), so a citation naming a real `mod` block is just as
+#   valid a pointer as one naming a real `fn`.
+#
+#   A GLOB citation resolves when at least one cached name matches the pattern
+#   with `*` read as any run of characters — the anchored `^...$` ERE
+#   `grep -qE` used to ask. issue #3581: a glob citation with zero matches is
+#   exactly as dangling as an exact citation with zero matches, so it must be
+#   resolved, not silently dropped the way the pre-fix parser dropped it.
 # ---------------------------------------------------------------------------
-name_glob_exists_in_crate() {
-  local crate="$1" pattern="$2" cache regex
-  cache="$(ensure_crate_cache "$crate")"
-  regex="^$(printf '%s' "$pattern" | sed 's/\*/.*/g')$"
-  grep -qE -- "$regex" "$cache"
+RESOLVE_AWK='
+function load(c,    nm) {
+  if (c in loaded) return
+  loaded[c] = 1
+  ncount[c] = 0
+  if (!(c in cachefile)) return
+  while ((getline nm < cachefile[c]) > 0) {
+    if (nm == "") continue
+    names[c, nm] = 1
+    nlist[c, ++ncount[c]] = nm
+  }
+  close(cachefile[c])
 }
+
+function glob_hit(c, pat,    re, i) {
+  re = globre[pat]
+  if (re == "") {
+    re = pat
+    gsub(/\*/, ".*", re)
+    re = "^" re "$"
+    globre[pat] = re
+  }
+  for (i = 1; i <= ncount[c]; i++) if (nlist[c, i] ~ re) return 1
+  return 0
+}
+
+BEGIN {
+  FS = "\t"
+  while ((getline ml < MAP) > 0) {
+    t = index(ml, "\t")
+    if (t == 0) continue
+    crate_of[substr(ml, 1, t - 1)] = substr(ml, t + 1)
+  }
+  close(MAP)
+  while ((getline ml < CACHEMAP) > 0) {
+    t = index(ml, "\t")
+    if (t == 0) continue
+    cachefile[substr(ml, 1, t - 1)] = substr(ml, t + 1)
+  }
+  close(CACHEMAP)
+}
+
+$1 != "" {
+  c = crate_of[$1]
+  load(c)
+  if ($3 == "GLOB") ok = glob_hit(c, $4)
+  else ok = ((c SUBSEP $4) in names)
+  if (!ok) print ($1 "\t" $2 "\t" $4 "\t" c)
+}
+'
 
 # ---------------------------------------------------------------------------
 # EXCLUDE_PREFIXES: repo-relative path prefixes skipped entirely by the
@@ -462,7 +548,7 @@ is_excluded_path() {
 # ("<path>\t<line>\t<message>") to $3. All three files are truncated first.
 # Returns nothing (caller inspects the files).
 #
-# Parse errors (unterminated backtick/parenthetical — see candidate_names)
+# Parse errors (unterminated backtick/parenthetical — see SCAN_AWK)
 # are NEVER allowlist-suppressible: they represent syntax the parser could
 # not interpret at all, not a dangling-but-understood citation, so ratcheting
 # them into `.test-pointer-allowlist.tsv` would defeat issue #3581's whole
@@ -493,7 +579,7 @@ scan() {
   CRATE_FN_CACHE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tpfncache.XXXXXX")"
 
   local allowlist=".test-pointer-allowlist.tsv"
-  local raw rslist
+  local raw rslist cratemap crates cachemap
   raw="$(mktemp "${TMPDIR:-/tmp}/tpraw.XXXXXX")"
   : > "$raw"
 
@@ -515,58 +601,39 @@ scan() {
     exit 1
   fi
 
-  # #4882: both nested loops below used to read from a `cmd | while ...`
-  # pipe, which forces bash to fork a subshell to run the loop body on the
-  # PRODUCER side of every pipe (once per file for the block loop, once per
-  # Test: annotation — ~25k times workspace-wide — for the candidate loop).
-  # Everything the loop bodies do is written straight to the *_out files
-  # rather than to shell variables, so nothing here actually depends on
-  # subshell isolation; switching to `< <(cmd)` process substitution runs
-  # both loops in the *current* shell and removes that fork entirely, on
-  # top of removing the awk-script/`dirname`/`tr` forks fixed above. This
-  # was the single largest contributor to the ~350s measured runtime.
+  # #4687: one pure-bash pass turns the enumeration into the
+  # `<path><TAB><crate-root>` map SCAN_AWK consumes. `-f` (git listed a path
+  # that is already gone) and EXCLUDE_PREFIXES were per-file shell tests
+  # before, and stay per-file shell tests — applying them here keeps awk's
+  # input to exactly the files that get scanned. `crate_root_for` assigns
+  # CRATE_ROOT rather than printing, so this loop forks nothing at all.
+  cratemap="$(mktemp "${TMPDIR:-/tmp}/tpmap.XXXXXX")"
+  : > "$cratemap"
+  local f
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     [ -f "$f" ] || continue
     is_excluded_path "$f" && continue
-    local crate
-    crate="$(crate_root_for "$f")"
-    while IFS=$'\t' read -r line blob; do
-      [ -n "${line:-}" ] || continue
-      # #4882: in-shell dedup (newline-delimited string + `case`) instead of
-      # a per-block `mktemp` file plus a `grep -qxF` fork per candidate —
-      # same whole-entry exact-match semantics, zero forks.
-      local seen=$'\n'
-      while IFS=$'\t' read -r kind name; do
-        [ -n "$kind" ] || continue
-        case "$kind" in
-          ERR)
-            printf '%s\t%s\t%s\n' "$f" "$line" "$name" >> "$err_out"
-            continue
-            ;;
-        esac
-        [ -n "$name" ] || continue
-        # De-dupe within a single annotation (same name cited twice in one blob).
-        case "$seen" in
-          *$'\n'"${kind}:${name}"$'\n'*) continue ;;
-        esac
-        seen="${seen}${kind}:${name}"$'\n'
-        # #4618: one row per citation this gate actually resolved. "0 dangling
-        # pointers" over 0 resolved citations is a broken scan, not a clean tree.
-        printf '%s\t%s\t%s\t%s\n' "$f" "$line" "$kind" "$name" >> "$checked_out"
-        if [ "$kind" = "GLOB" ]; then
-          if ! name_glob_exists_in_crate "$crate" "$name"; then
-            printf '%s\t%s\t%s\t%s\n' "$f" "$line" "$name" "$crate" >> "$raw"
-          fi
-        else
-          if ! name_exists_in_crate "$crate" "$name"; then
-            printf '%s\t%s\t%s\t%s\n' "$f" "$line" "$name" "$crate" >> "$raw"
-          fi
-        fi
-      done < <(candidate_names "$blob")
-    done < <(extract_test_blocks "$f")
-  done < "$rslist"
+    crate_root_for "$f"
+    printf '%s\t%s\n' "$f" "$CRATE_ROOT"
+  done < "$rslist" > "$cratemap"
   rm -f "$rslist"
+
+  # #4687: the extract-per-file / parse-per-annotation / resolve-per-citation
+  # shell nest below used to fork roughly 84,000 processes and ran for ~180s
+  # locally against a job GitHub had already cancelled twice at its timeout.
+  # It is now three passes with a bounded fork count: one awk over the whole
+  # corpus, one `git grep` per CITED crate, one awk over the citation rows.
+  crates="$(mktemp "${TMPDIR:-/tmp}/tpcrates.XXXXXX")"
+  : > "$crates"
+  awk -v MAP="$cratemap" -v CHECKED="$checked_out" -v ERRF="$err_out" \
+      -v CRATESF="$crates" "$SCAN_AWK" < /dev/null
+
+  cachemap="$(mktemp "${TMPDIR:-/tmp}/tpcachemap.XXXXXX")"
+  build_crate_caches "$crates" "$cachemap"
+
+  awk -v MAP="$cratemap" -v CACHEMAP="$cachemap" "$RESOLVE_AWK" "$checked_out" > "$raw"
+  rm -f "$cratemap" "$crates" "$cachemap"
 
   if [ -f "$allowlist" ]; then
     # Build the (path, name) allowlist key set once.
@@ -576,28 +643,30 @@ scan() {
 
     # Violations = raw dangling citations whose (path, name) key is NOT
     # allowlisted.
-    while IFS=$'\t' read -r p l n c; do
-      [ -n "${p:-}" ] || continue
-      if grep -F -q -x -- "$(printf '%s\t%s' "$p" "$n")" "$allow_keys"; then
-        : # allowlisted — suppress
-      else
-        printf '%s\t%s\t%s\t%s\n' "$p" "$l" "$n" "$c" >> "$viol_out"
-      fi
-    done < "$raw"
+    #
+    # #4687: an awk join, not a `grep -F -q -x` fork per row on each side
+    # (~1,700 forks). The key set is loaded in BEGIN rather than as a first
+    # ARGV file, because `NR == FNR` silently mis-classifies the SECOND file
+    # when the first one is empty — and either file legitimately can be.
+    awk -F'\t' -v ALLOW="$allow_keys" '
+      BEGIN { while ((getline k < ALLOW) > 0) if (k != "") allow[k] = 1; close(ALLOW) }
+      $1 != "" && !(($1 "\t" $3) in allow) { print }
+    ' "$raw" > "$viol_out"
 
     # Stale = allowlist keys with NO matching raw dangling citation anywhere
     # in that file anymore (fixed, renamed away, or the doc line was
     # dropped) — must be pruned via --update.
-    local raw_keys
-    raw_keys="$(mktemp "${TMPDIR:-/tmp}/tprawkeys.XXXXXX")"
-    awk -F'\t' '{print $1"\t"$3}' "$raw" | sort -u > "$raw_keys"
-    while IFS=$'\t' read -r p n; do
-      [ -n "${p:-}" ] || continue
-      if ! grep -F -q -x -- "$(printf '%s\t%s' "$p" "$n")" "$raw_keys"; then
-        printf '%s\t%s\n' "$p" "$n" >> "$stale_out"
-      fi
-    done < "$allow_keys"
-    rm -f "$allow_keys" "$raw_keys"
+    awk -F'\t' -v RAW="$raw" '
+      BEGIN {
+        while ((getline r < RAW) > 0) {
+          if (split(r, a, "\t") < 3) continue
+          dangling[a[1] "\t" a[3]] = 1
+        }
+        close(RAW)
+      }
+      $1 != "" && !(($1 "\t" $2) in dangling) { print ($1 "\t" $2) }
+    ' "$allow_keys" > "$stale_out"
+    rm -f "$allow_keys"
   else
     cat "$raw" > "$viol_out"
   fi
@@ -974,7 +1043,7 @@ if [ "${CITATIONS_CHECKED:-0}" -lt "$MIN_CITATIONS" ]; then
   exit 1
 fi
 
-# Parse errors (unterminated backtick/parenthetical — see candidate_names)
+# Parse errors (unterminated backtick/parenthetical — see SCAN_AWK)
 # are a hard, unconditional, non-allowlistable failure in EVERY mode,
 # including --seed and --update: issue #3581 exists because "the parser
 # couldn't interpret this so it quietly produced nothing" was allowed to
