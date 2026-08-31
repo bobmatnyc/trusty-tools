@@ -385,3 +385,43 @@ pub enum BatchOpResult {
 /// What: Type alias for `redb::Table<'txn, &'static [u8], &'static [u8]>`.
 /// Test: Indirect via `apply_batch` and batch helper callers.
 pub(super) type Tbl<'txn> = redb::Table<'txn, &'static [u8], &'static [u8]>;
+
+/// Rebuild a `Drawer` from one `DRAWERS` row's stored value (#6438).
+///
+/// Why: two readers now hydrate a drawer row — the whole-table
+/// `load_drawers_with_skipped` and the single-row `load_drawer` that the Tier C
+/// retirement path consults before deciding a slot is free. Sharing one decoder
+/// keeps them from drifting: a row the table scan can hydrate is exactly a row
+/// the point-read can hydrate, which is what lets `persist_with_retirement`
+/// read "the point-read returned a drawer" as "this incumbent can be retired".
+/// What: walks the postcard migration chain via [`decode_drawer_record`],
+/// parses `room_id` and `created_at_ms`, and rebuilds through `Drawer::new` so
+/// the content digest is derived rather than stored (#5902), then overwrites
+/// the identity fields the constructor generates. Every failure returns `Err`
+/// naming the offending field; the caller decides whether to skip the row
+/// (table scan) or fail the read (point-read).
+/// Test: `an_on_disk_incumbent_absent_from_the_mirror_is_still_retired`,
+/// `an_undecodable_incumbent_row_fails_the_write_instead_of_admitting_a_second_claimant`,
+/// `drawer_load_degraded_true_on_partial_row_corruption`.
+pub(super) fn drawer_from_row(id: Uuid, value: &[u8]) -> Result<Drawer> {
+    let record: DrawerRecord =
+        decode_drawer_record(value).map_err(|e| anyhow::anyhow!("malformed drawer value: {e}"))?;
+    let room_id = Uuid::parse_str(&record.room_id).context("invalid room_id")?;
+    let created_at =
+        DateTime::from_timestamp_millis(record.created_at_ms).context("invalid created_at_ms")?;
+    let mut drawer = Drawer::new(room_id, record.content);
+    drawer.id = id;
+    drawer.importance = record.importance;
+    drawer.source_file = record.source_file.map(PathBuf::from);
+    drawer.created_at = created_at;
+    drawer.tags = record.tags;
+    drawer.drawer_type = parse_drawer_type(record.drawer_type.as_deref());
+    drawer.expires_at = record
+        .expires_at_ms
+        .and_then(DateTime::from_timestamp_millis);
+    drawer.completed_at = record
+        .completed_at_ms
+        .and_then(DateTime::from_timestamp_millis);
+    drawer.fact_key = record.fact_key;
+    Ok(drawer)
+}

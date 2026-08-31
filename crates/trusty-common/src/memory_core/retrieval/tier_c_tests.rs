@@ -464,3 +464,238 @@ async fn expired_tier_c_drawer_survives_the_open_time_sweep() {
         "the surviving fact keeps its slot"
     );
 }
+
+// ── The incumbent-absent fallback (#6438) ───────────────────────────────────
+
+/// Every drawer row in `rows` whose own `fact_key` still claims [`SLOT`].
+fn slot_claimants(rows: &[Drawer]) -> Vec<Uuid> {
+    rows.iter()
+        .filter(|d| d.fact_key.as_deref() == Some(SLOT))
+        .map(|d| d.id)
+        .collect()
+}
+
+/// Seed a `kg.db` that `make_handle` will later open, run `mutate` against the
+/// raw redb file once the store is closed, and hand back the seeded drawer id.
+///
+/// Why: the two fallback edge cases — a dangling index entry, and an index
+/// entry naming a row that exists but cannot be hydrated — are states no public
+/// API produces, because every write path maintains `DRAWERS` and
+/// `DRAWERS_BY_FACT_KEY` together. Reaching them means writing the row through
+/// the store, then editing `DRAWERS` behind the index's back.
+/// What: opens `KgStoreRedb` on `<dir>/kg.redb` — the file `KnowledgeGraph`
+/// derives from the `kg.db` path `make_handle` passes — upserts a drawer
+/// claiming [`SLOT`] (which also writes its index entry), drops the store so
+/// the file lock releases, then calls `mutate` with the drawer's id and an
+/// exclusive `Database`. The index entry is never touched, so it keeps naming
+/// the id.
+/// Test: `a_fact_key_index_naming_no_row_still_admits_the_newcomer`,
+/// `an_undecodable_incumbent_row_fails_the_write_instead_of_admitting_a_second_claimant`.
+fn seed_slot_then_edit_row(
+    dir: &std::path::Path,
+    mutate: impl FnOnce(Uuid, &mut redb::Table<'_, &[u8], &[u8]>),
+) -> Uuid {
+    use crate::memory_core::store::kg_redb::KgStoreRedb;
+    use crate::memory_core::store::kg_store::DRAWERS;
+    use redb::Database;
+
+    let kg_path = dir.join("kg.redb");
+    let mut seeded = Drawer::new(Uuid::new_v4(), "the incumbent the index still names");
+    seeded.fact_key = Some(SLOT.to_string());
+    let seeded_id = seeded.id;
+    {
+        let store = KgStoreRedb::open(&kg_path).expect("open kg store to seed the slot");
+        store
+            .upsert_drawer(&seeded)
+            .expect("seed the incumbent row and its index entry");
+    }
+    {
+        let db = Database::create(&kg_path).expect("reopen kg.db exclusively");
+        let wtx = db
+            .begin_write()
+            .expect("begin write to edit the drawer row");
+        {
+            let mut table = wtx.open_table(DRAWERS).expect("open drawers table");
+            mutate(seeded_id, &mut table);
+        }
+        wtx.commit().expect("commit the row edit");
+    }
+    seeded_id
+}
+
+/// The incumbent is on disk but missing from the in-memory table: the newcomer
+/// must retire it, not join it (#6438).
+///
+/// Why: `persist_with_retirement` used to read the in-memory drawer table as
+/// the whole truth about who holds a slot. Two production paths leave that
+/// table short of a row redb still holds — an abandoned commit whose mirror
+/// never ran (#6366), and a degraded open that skipped rows (#6201). On both,
+/// the fallback wrote the newcomer without retiring anyone, so two drawer rows
+/// carried a live `SLOT`. That is the state the module's one-live-claimant
+/// invariant forbids, and no later write repairs it: the index names only the
+/// newcomer, so the stranded row is never picked as an incumbent again.
+/// What: writes the incumbent straight through `kg.upsert_drawer` — durable,
+/// indexed, and never mirrored into `handle.drawers` — then runs a newcomer
+/// through the real `remember_with_options` pipeline and asserts on the DURABLE
+/// rows. Pre-fix this fails at `slot_claimants`, reporting both ids.
+/// Test: this test.
+#[tokio::test]
+async fn an_on_disk_incumbent_absent_from_the_mirror_is_still_retired() {
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+
+    let mut incumbent = Drawer::new(Uuid::new_v4(), "PR #4818 is in flight at head d3963848");
+    incumbent.fact_key = Some(SLOT.to_string());
+    incumbent.expires_at = Some(Utc::now() + Duration::hours(24));
+    let incumbent_id = incumbent.id;
+    handle
+        .kg
+        .upsert_drawer(&incumbent)
+        .await
+        .expect("seed the durable incumbent");
+
+    assert!(
+        handle.drawers.read().is_empty(),
+        "anti-vacuous guard: the incumbent must be absent from the in-memory \
+         table, otherwise this exercises the ordinary retirement path"
+    );
+    assert_eq!(
+        handle.kg.drawer_id_for_fact_key(SLOT).unwrap(),
+        Some(incumbent_id),
+        "precondition: the index names the durable incumbent"
+    );
+
+    let newcomer = write(
+        &handle,
+        "PR #4818 merged as squash 4c412ae1, superseding the earlier SHA",
+        Some(SLOT),
+        None,
+    )
+    .await
+    .expect("the newcomer write must land");
+
+    let rows = handle.kg.load_drawers().unwrap();
+    assert_eq!(
+        slot_claimants(&rows),
+        vec![newcomer],
+        "#6438: exactly one drawer may claim {SLOT} durably; rows: {:?}",
+        rows.iter()
+            .map(|d| (d.id, d.fact_key.clone()))
+            .collect::<Vec<_>>()
+    );
+    let retired = rows
+        .iter()
+        .find(|d| d.id == incumbent_id)
+        .expect("the incumbent row survives retirement (ADR-0028 D6)");
+    assert_eq!(
+        retired.expires_at, None,
+        "a demoted Tier C drawer must not keep the TTL that would delete it"
+    );
+    assert_eq!(
+        handle.kg.drawer_id_for_fact_key(SLOT).unwrap(),
+        Some(newcomer),
+        "the index and the drawer rows must name the same claimant"
+    );
+}
+
+/// A `fact_key` index entry naming no row at all still admits the newcomer.
+///
+/// Why: the durable point-read must distinguish "no incumbent exists" from
+/// "the in-memory table is short a row". Only the first is a free slot. If the
+/// fix treated a dangling index entry as a reason to fail or to stall, every
+/// write to a slot whose row was lost would be permanently blocked — a worse
+/// outcome than the two-claimant bug, since the newcomer's own write is what
+/// re-points the index and repairs the dangle.
+/// What: seeds a row claiming the slot, deletes ONLY the `DRAWERS` row so the
+/// index entry keeps naming it, then writes a newcomer. The write must succeed
+/// and leave one claimant.
+/// Test: this test.
+#[tokio::test]
+async fn a_fact_key_index_naming_no_row_still_admits_the_newcomer() {
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let ghost_id = seed_slot_then_edit_row(dir.path(), |id, table| {
+        table
+            .remove(id.into_bytes().as_slice())
+            .expect("remove the drawer row, leaving the index entry dangling");
+    });
+    let handle = make_handle(dir.path());
+    assert_eq!(
+        handle.kg.drawer_id_for_fact_key(SLOT).unwrap(),
+        Some(ghost_id),
+        "precondition: the index still names the removed row"
+    );
+
+    let newcomer = write(
+        &handle,
+        "the newcomer claiming a dangling slot",
+        Some(SLOT),
+        None,
+    )
+    .await
+    .expect("#6438: a dangling index entry must not block the write");
+
+    let rows = handle.kg.load_drawers().unwrap();
+    assert_eq!(
+        slot_claimants(&rows),
+        vec![newcomer],
+        "the newcomer is the only claimant, and the dangle is repaired"
+    );
+    assert_eq!(
+        handle.kg.drawer_id_for_fact_key(SLOT).unwrap(),
+        Some(newcomer),
+        "the newcomer's write re-points the index at itself"
+    );
+}
+
+/// An incumbent row that exists but cannot be hydrated fails the write.
+///
+/// Why: this is the fail-open arm the fix must NOT take. A `DRAWERS` row the
+/// decoder rejects is still a row holding the slot — it is exactly what a
+/// degraded open (#6201) skips, which is how the incumbent went missing from
+/// the in-memory table in the first place. Reading that error as absence would
+/// reproduce the very bug: the newcomer lands, the corrupt row keeps its live
+/// `fact_key`, and nothing can retire it afterwards because the index has moved
+/// on. Refusing the write keeps the durable state to one claimant and surfaces
+/// the corruption instead of burying it.
+/// What: seeds a row claiming the slot, overwrites its value with bytes no
+/// `DrawerRecord` shape decodes, then writes a newcomer. The write must fail,
+/// and the index must still name the corrupt incumbent — no newcomer admitted.
+/// Test: this test.
+#[tokio::test]
+async fn an_undecodable_incumbent_row_fails_the_write_instead_of_admitting_a_second_claimant() {
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let corrupt_id = seed_slot_then_edit_row(dir.path(), |id, table| {
+        table
+            .insert(id.into_bytes().as_slice(), [0xFFu8; 4].as_slice())
+            .expect("overwrite the drawer value with undecodable bytes");
+    });
+    let handle = make_handle(dir.path());
+
+    let err = write(
+        &handle,
+        "the newcomer that must be refused",
+        Some(SLOT),
+        None,
+    )
+    .await
+    .expect_err("#6438: an unreadable incumbent must fail the write");
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("durable point-read of the fact_key slot incumbent"),
+        "the failure must name the point-read that refused, got: {rendered}"
+    );
+
+    assert_eq!(
+        handle.kg.drawer_id_for_fact_key(SLOT).unwrap(),
+        Some(corrupt_id),
+        "the slot must still name the incumbent — no newcomer may have claimed it"
+    );
+    assert!(
+        slot_claimants(&handle.kg.load_drawers().unwrap()).is_empty(),
+        "no readable row may claim {SLOT}: the only claimant is the corrupt \
+         row load_drawers skips"
+    );
+}

@@ -207,6 +207,22 @@ impl KnowledgeGraph {
         self.store.drawer_id_for_fact_key(fact_key)
     }
 
+    /// Fetch one drawer by id straight from redb (#6438).
+    ///
+    /// Why: the Tier C retirement path needs the incumbent named by the
+    /// `fact_key` index, and the in-memory drawer table can be missing a row
+    /// redb still holds. Reading the durable row is what stops that gap from
+    /// admitting a second live claimant for one slot.
+    /// What: forwards to `KgStoreRedb::load_drawer`. Synchronous for the same
+    /// reason as `drawer_id_for_fact_key` — one redb read transaction, taken
+    /// while the caller already holds the per-palace commit-order guard.
+    /// `Ok(None)` is a dangling index entry; `Err` is a row present but
+    /// unreadable, which the caller must not treat as absence.
+    /// Test: `an_on_disk_incumbent_absent_from_the_mirror_is_still_retired`.
+    pub fn load_drawer(&self, id: Uuid) -> Result<Option<Drawer>> {
+        self.store.load_drawer(id)
+    }
+
     /// Remove a drawer's metadata by ID.
     ///
     /// Why: Forgetting must clear both the vector index and the persistent
