@@ -18,7 +18,11 @@ name = "trusty-memory"
 # 0.25.4 (#5044): patch — TOOL_METHODS allowlist forwards
 # palace_verify_embedded and palace_embed_sweep over raw RPC. No public item
 # was removed or changed.
-version = "0.25.4"
+# 0.25.5 (#6464): patch — picks up trusty-common 0.46.0, which the `^0.45`
+# requirement here could not resolve. 0.25.4 was tagged but never published, so
+# this is the version that reaches crates.io. No public item was removed or
+# changed.
+version = "0.25.5"
 edition = "2021"
 description = "MCP server (stdio + Unix socket) for trusty-memory"
 license.workspace = true
@@ -94,7 +98,7 @@ trusty-mcp = { workspace = true }  # JSON-RPC / MCP primitives (ADR-0040, #5803)
 # supplies the bind, the peer check, the framing and the accept loop, and
 # `uds::stream_client` the reader `memory.chat` needs. It replaces
 # `axum-server`, which was here for the retired HTTP listener.
-trusty-common = { path = "../trusty-common", version = "0.45", default-features = false, features = ["memory-core", "monitor-tui", "bm25", "cli-help", "update-check", "bug-capture", "console-metrics", "config-cli", "crate-config", "palace-resolve", "codex-config", "uds"] }
+trusty-common = { path = "../trusty-common", version = "0.46", default-features = false, features = ["memory-core", "monitor-tui", "bm25", "cli-help", "update-check", "bug-capture", "console-metrics", "config-cli", "crate-config", "palace-resolve", "codex-config", "uds"] }
 # `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
 # Why (issue #1318): the `trusty-console` dependency was REMOVED. The console
 # is no longer bundled into trusty-memory (single-owner-per-binary); the
@@ -186,7 +190,7 @@ serial_test = { workspace = true }
 # `memory-rpc` (#6286): `tests/uds_consumer_contract.rs` drives the SHARED
 # client against a real daemon on a temp socket — the one place the two halves
 # of this migration are proven to agree.
-trusty-common = { path = "../trusty-common", version = "0.45", default-features = false, features = ["memory-core", "embedder-test-support", "docgen", "memory-rpc"] }
+trusty-common = { path = "../trusty-common", version = "0.46", default-features = false, features = ["memory-core", "embedder-test-support", "docgen", "memory-rpc"] }
 chrono = { workspace = true }
 
 [features]

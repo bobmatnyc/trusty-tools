@@ -6,6 +6,339 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.46.0] — 2026-08-31
+
+### Breaking
+
+- **`memory_rpc` dials trusty-memory's Unix socket instead of an HTTP base URL** (#6286, ADR-0032). `resolve_memory_base_url`, `resolve_memory_base_url_or_unreachable` and `TRUSTY_MEMORY_URL_ENV` are replaced by `resolve_memory_socket`, `resolve_memory_socket_or_unreachable` and `TRUSTY_MEMORY_SOCKET_ENV`; `call_memory_tool_at` takes a `&Path` rather than a `&str` base URL, and `call_memory_tool_at_with_timeout` is new. The `memory-rpc` feature now implies `uds`
+- **`CatchupOptions::memory_url: String` is `memory_socket: PathBuf`**, and `catchup::palace::fetch_recent_palace_drawers` takes a `&Path`
+- **`monitor::memory_client` speaks JSON-RPC over the socket.** `MemoryClient::new` takes a socket path; `base_url`/`set_base_url` are `socket`/`set_socket`; `resolve_memory_url`, `normalize_url`, `DEFAULT_MEMORY_URL` and `parse_palaces` are removed, and `monitor-tui` now implies `memory-rpc`
+- **`monitor::memory_tui::run_with_url(String)` is `run_with_socket(PathBuf)`**, and `MemoryTuiState::base_url` is `daemon_addr`
+
+### Added
+
+- `redb_open`, behind the new light `redb-open` feature, is the workspace's
+  single redb corruption / obsolete-format classifier (#5063). Five crates each
+  carried a byte-identical copy of the four-arm `match` that decides whether an
+  unopenable redb file may be quarantined, so a safety change to that decision
+  had to land five times. The module also carries the quarantine-path helper
+  (`INCOMPATIBLE_SUFFIX`, `incompatible_backup_path`,
+  `backup_incompatible_file`) that two of them duplicated verbatim, numbered
+  anti-clobber rule included. `redb-open` gates only `dep:redb` — the classifier
+  used to sit under `memory-core`, which pulls in usearch, git2 and a bundled
+  ORT embedder, which is why no consumer reused it. `memory-core` enables the
+  new feature, and `memory_core::store::redb_open` re-exports every item
+  unchanged, so no existing path moves. Each store's recovery POLICY stays in
+  its own crate: they diverge for recorded reasons (#4227, #5064) and are
+  deliberately not collapsed.
+- `session_naming::RESERVED_TEST_PREFIX` (`tm-xtest-`) and
+  `is_reserved_test_session_name`, the namespace trusty-mpm's adoption sweep
+  refuses (#6116). It sits inside the managed `tm-` prefix, so a session in it
+  is still recognised by `is_managed_session_name` and still reapable by the
+  orphan-GC; what changes is that no automatic path adopts it into the session
+  store. The constant lives here because the daemon that refuses such a name and
+  the test fixture that mints one both read it, and a second copy would drift.
+  Its doc states what a project legitimately named `xtest-…` pays: no automatic
+  adoption of its sessions, and — on a machine running trusty-mpm's own suite —
+  a tmux-level sweep that kills such a session after 30 minutes.
+- `SymbolGraph::resolve_symbol` returns `SymbolMatch::{Unique, Ambiguous,
+  NotFound}` for a caller-supplied name (#6170), so a consumer anchoring a trace
+  can report which definition it took and what else matched instead of silently
+  taking whichever was registered first.
+- **`daemon_socket_path(app_name)`** — the UDS counterpart of `read_daemon_addr`, returning `<data dir>/<app>.sock`. The socket path is a cross-crate contract: `trusty-review` binds it while `trusty-console` and `trusty-installer` dial it, and neither consumer has a Cargo edge on the daemon to import a constant from. Deriving it in three places is the drift that produces a daemon that is up and a probe that reports it down. Unconditional rather than behind the `uds` feature, so a caller that only wants the path does not compile the socket machinery (ADR-0032, [#6277](https://github.com/bobmatnyc/trusty-tools/issues/6277))
+- `uds::server` serves the other end of `uds::rpc`: a caller registers method
+  names against handlers over its own request and response types
+  (`RpcRouter::typed`), and `RpcServer::run` binds through `bind_hardened`,
+  checks the peer uid on every accepted connection, dispatches each in its own
+  task, and unlinks the socket on shutdown (#6277). An unknown method answers a
+  JSON-RPC method-not-found frame rather than dropping the connection, so a
+  drifted client reads the reason instead of a transport failure, and a handler
+  that panics is logged by name instead of vanishing with its task. Existing
+  callers are unaffected — `webhook_relay` keeps its own single-method listener.
+- **`monitor::memory_client::ActivityFeed`** — a live subscription to `memory.activity_stream`, draining onto a background task so the TUI's render tick can take what arrived without blocking. The monitor's activity log consumes it instead of the 2-second `memory.activity` poll, so an event appears as it happens ([#6286](https://github.com/bobmatnyc/trusty-tools/issues/6286))
+  - a stream that ends — a daemon restart, a socket that went away, a terminal error frame — flips `is_live()` and records why on `last_error()`. The TUI says so in the log and falls back to polling, then retries the stream on the next tick so a restarted daemon re-attaches with no operator action. Blanking the log instead would present a live daemon as an idle one
+  - the poll's cursor advances on every tick whether or not the feed is live, so a fallback resumes where the stream left off rather than replaying
+- `uds::server::RpcRouter::fallback` mounts a service's own generic
+  `(method, params)` dispatcher as the router's catch-all, so a daemon with an
+  existing dispatch table serves it whole instead of re-registering every method
+  by name (#6286). The fallback is consulted only after the registered-method
+  lookup misses, so a name registered with `RpcRouter::method` still wins, and an
+  error it returns crosses the wire as a JSON-RPC error frame with its own code
+  and message intact. A router that sets no fallback is unchanged: an unknown
+  method still answers method-not-found naming the methods it does serve.
+- A UDS RPC method can now answer in many frames instead of one, so a daemon
+  migrating to `uds::server` keeps a token stream rather than buffering it
+  (#6286). `RpcRouter::typed_stream` registers a handler that returns a
+  `tokio::sync::mpsc::Receiver` of items — the shape `trusty-memory`'s chat
+  handler already produces — and `uds::send_framed_stream_request` reads the
+  reply frame by frame as a `FramedStream`, which yields items through
+  `next_frame()` or adapts into a `futures_util::Stream`.
+- Streaming is opt-in per request, through one optional `"stream": true` field
+  on the existing JSON-RPC request frame. Without it the protocol is byte-for-byte
+  what it was, so an old client against a new server, and a new client calling a
+  method that does not stream, behave exactly as before.
+- A stream terminates on a frame, never on EOF: exactly one `"stream":"end"` or
+  `"stream":"error"` frame is written on every path, including a handler that
+  fails mid-stream, one that fails to open, and an item too large for
+  `RpcServeOptions::max_frame_bytes` (which now applies per frame). A client that
+  reaches EOF without a terminal frame reports it rather than returning a
+  truncated answer as a complete one.
+- The two protocol mismatches fail immediately in the shape the caller reads,
+  rather than hanging: a request without the flag against a streaming method gets
+  one ordinary response frame carrying `CODE_STREAM_REQUIRED`, and a streaming
+  request against anything that does not stream gets one terminal error frame
+  carrying `CODE_STREAM_UNSUPPORTED`, naming the methods this listener does
+  stream.
+- `launchd_labels::EvictionOutcome` and `LabelEviction` report per label whether
+  a launchd unit was evicted, was already absent, or FAILED to go down.
+- `LaunchdConfig::evict_legacy_detailed` returns those outcomes. `evict_legacy`
+  keeps its signature and now reports only labels that were genuinely evicted.
+- `launchd_labels::RETIRED_SERVICES` records units a current install must EVICT
+  but never write, with `retired_service_for_member` and
+  `retired_labels_for_member` to read it.
+- `trusty-review`'s row moved there from `SERVICES` (#6290): the daemon is
+  retired, but `com.trusty.review` is still loaded on every host that ran the
+  old binary, so the row has to survive for anything to boot it out.
+- `gui_mcp_client` renders the MCP registration a GUI client launched by
+  launchd needs: the absolute path of the running binary, read from
+  `current_exe` and canonicalized, plus a working directory that exists
+  (#6307). A GUI app started by launchd inherits
+  `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, which holds neither `~/.cargo/bin` nor
+  any shim directory, so an entry whose `command` is the bare name
+  `trusty-memory` exits 127 before the server speaks a byte of MCP and the
+  client reports only that no tools were found. `build_entry` rejects both
+  failing shapes — a relative command and a working directory that does not
+  exist — before anything is written or printed. `configure` writes the client's
+  own config file through `claude_config::patch_mcp_server` when the client
+  keeps one, and hands the values back to be printed when it does not; ChatGPT
+  desktop is the latter, so nothing on disk is touched for it.
+- `uds::server::serve_until_idle` and `uds::server::IdleTracker` give a UDS
+  service an idle-exit policy: the accept loop returns `ServeExit::Idle` once no
+  connection has ANSWERED anything for the configured window. A bare
+  connect-and-close liveness probe does not restart the window, so a status page
+  polling a service cannot pin it resident (#6350).
+- `uds::OnDemandAnalyze` is the single entry point every client uses to start
+  `trusty-analyze` before dialling it. Its spawn gate keeps two concurrent
+  callers in one process from starting two servers, and every failure — no
+  binary, a refused spawn, a socket that never appeared — is returned rather than
+  degraded to a success (#6350).
+- `SupervisorConfig::with_detached` spawns children without `kill_on_drop` and
+  keeps them out of the population map, so a short-lived CLI does not SIGKILL a
+  server another client is mid-request against (#6350).
+- **`PalaceHandle::remember_with_options_within`** — the same write with an explicit ceiling on its critical section, so a caller with its own SLA (and the concurrency tests) can set one without mutating process-wide env. `remember_with_options` delegates to it with `write_pipeline_timeout()` ([#6366](https://github.com/bobmatnyc/trusty-tools/issues/6366))
+- **`write_pipeline_timeout()` and `slow_write_warn_threshold()`** in `memory_core::timeouts` — the ceiling on one write's critical section and the elapsed time above which a completed write is logged as slow ([#6366](https://github.com/bobmatnyc/trusty-tools/issues/6366))
+- `UsearchStore::try_index_size()` returns the live vector count as a `Result`, for a caller that needs to tell a read failure apart from a genuinely empty index. `index_size()` keeps its existing `unwrap_or(0)` degrade for its purely-informational callers and now delegates to this new method ([#6376](https://github.com/bobmatnyc/trusty-tools/issues/6376))
+
+### Fixed
+
+- Two broken intra-doc links that failed the pre-publish rustdoc gate
+  (`scripts/check_rustdoc_links.sh`): `secret::check_secret`'s doc comment
+  pointed at `[\`FilterConfig::apply\`]` without `FilterConfig` in scope, and
+  `KgStoreRedb::load_drawers`'s doc comment pointed at
+  `[\`load_drawers_with_skipped\`]` without the `Self::` qualifier its sibling
+  method needs. Both now resolve — the first via the fully-qualified path
+  `crate::memory_core::filter::FilterConfig::apply`, the second via
+  `Self::load_drawers_with_skipped`.
+- **A non-empty `default` can no longer disarm the zero-feature test guard.**
+  The #4901 guard reads Cargo's `CARGO_FEATURE_*` env vars and discounts
+  `CARGO_FEATURE_DEFAULT`, because Cargo activates `default` on every build.
+  That discount is correct only while `default` is `[]` — setting
+  `default = ["docgen"]` made a bare `cargo test -p trusty-common` look like a
+  deliberate feature selection, and the run went green over 407 of the crate's
+  ~2062 tests with nothing red anywhere. `build.rs` now reads the manifest and
+  a non-empty `default` is a `cfg(test)` `compile_error!`, so the guard says it
+  went inert instead of going quiet. `cargo build` / `cargo check` and every
+  consumer crate are untouched ([#4901](https://github.com/bobmatnyc/trusty-tools/issues/4901))
+- **Which feature sets constitute full coverage is now a manifest fact a test
+  checks.** `default = []` and 47 opt-in features mean no single
+  `cargo test -p trusty-common` run covers the crate, and which combination
+  does was tribal knowledge: `--features inference-client` looked thorough
+  while never compiling `inference::bedrock`, and `credentials`,
+  `session-naming` and `memory-core` each shipped a PR whose prescribed gate
+  never ran their tests. `[package.metadata.trusty-test-coverage]` in
+  `Cargo.toml` now names four coverage lanes — `unconditional`, `core`,
+  `inference`, `symgraph` — plus five exemptions that each state why no lane
+  can run them. `tests/feature_coverage.rs` resolves every lane's transitive
+  feature closure from the `[features]` table and fails when the union plus the
+  exemptions is not exactly that table, so a feature added without a lane is a
+  test failure rather than a silent coverage hole. That test target declares no
+  `required-features`, so every invocation runs it — it cannot be gated out by
+  the mechanism it polices. `scripts/test_trusty_common_lanes.sh` reads the same
+  rows through `cargo metadata` and runs them, so the runner cannot drift from
+  the statement ([#4474](https://github.com/bobmatnyc/trusty-tools/issues/4474))
+- Memory-palace vector search is now exact for every palace this fleet holds.
+  `HnswStore::search` scans every point up to 4096 live drawers (was 1024), so
+  the sizes that still went through the HNSW graph are answered exactly.
+  Measured on this repo's own palace embeddings, queries losing a true top-10
+  neighbour fell from 28.1% to 0% at 1025 live vectors, 14.9% to 0% at 1354,
+  14.9% to 0% at 2048 and 20.5% to 0% at 2879 — the largest palace on this
+  machine holds about 2900. The scan is linear, so a query over 4096 points
+  costs about 1.4ms against 0.43ms over 1024; above 4096 the graph arm is still
+  approximate. Nothing migrates: no graph is persisted, and every palace open
+  rebuilds the index from its stored vectors. (#5179)
+- Memory-palace vector search no longer loses true nearest neighbours as a
+  palace grows past 256 drawers. `HnswStore::search` now answers exactly by
+  scanning every point up to 1024 live drawers (was 256), and above that scales
+  its HNSW `ef_search` with the live-drawer count instead of holding it at 64.
+  Measured on this repo's own palace embeddings, recall@10 misses fell from
+  17.4% of queries to 0% at 512 drawers, from 24.5% to 0% at 1024, and from
+  23.3% to 17.7% at 2048. Recall above 1024 drawers is improved, not closed —
+  and the wider search costs more per query there, roughly 0.5ms to 2.2ms at
+  2900 drawers. (#5179)
+- A palace above the exhaustive threshold that has deleted drawers within a
+  session can no longer return fewer results than asked for. The graph arm cut
+  its candidate list to `2k` before filtering tombstoned ids, so deleted drawers
+  spent the caller's result slots and a palace whose nearest neighbours had been
+  deleted could return nothing at all while live neighbours sat in the index.
+  Tombstones are now filtered before the candidate pool is judged deep enough,
+  and the pool widens until `k` live drawers survive. (#5179)
+- **Dream semantic consolidation is opt-in and never falls back to a local model endpoint.** `SemanticConsolidationConfig::default().enabled` and `DreamConfig::default().local_model_enabled` are both `false` now. Backend selection moved out of `build_consolidator_from_config`'s "no OpenRouter key, so use Ollama" branch and into the new `resolve_consolidation_provider`: only an `ollama/` or `local/` prefix on `semantic.model` selects a local model server, and `local_model_enabled` merely permits that choice. With the phase enabled and no usable provider, the cycle logs one `warn!` naming the provider and parks for the `Dreamer`'s lifetime instead of retrying — it no longer opens a connection to `http://localhost:11434`. The local base URL now honours `OLLAMA_HOST`, matching the rest of the workspace. `SemanticConsolidator::consolidate` also parks the whole run on the first batch that errors rather than spending all 20 per-cycle calls against a backend that just failed, each blocking until the 120 s request timeout ([#5188](https://github.com/bobmatnyc/trusty-tools/issues/5188))
+- The launchd-label scan now enforces its codesign-identifier exemption instead
+  of assuming it. `signed_install_scripts_name_codesign_identifiers_by_convention`
+  fails when a `scripts/install-*-signed.sh` binds an identifier under a name
+  `codesign_stripped` cannot see, naming the script, the variable, the label and
+  the `*_IDENTIFIER=` expectation. The stray-label panic message now tells a
+  developer to check the namespace first: deriving a CODESIGN hit from the
+  registry invalidates the binary's designated requirement and re-triggers macOS
+  TCC prompts (#2558) — the rename #5436 had to undo by hand
+  ([#5438](https://github.com/bobmatnyc/trusty-tools/issues/5438)).
+- `find_project_root` no longer stops at a linked git worktree. Its marker check
+  asked only whether `.git` existed, which is true for the pointer FILE git
+  writes in a worktree as well as for a checkout's `.git` directory, so a
+  worktree answered with its own path while its main checkout answered with the
+  checkout — two project roots for one project, against ADR-0012 §1. A `.git`
+  file is now followed through its `gitdir:` pointer and the `commondir` file in
+  the admin directory it names, and the main checkout is returned. Callers that
+  read or lazily WRITE `.trusty-tools/trusty-memory.yaml` from inside a worktree
+  now reach the checkout's pin instead of creating a second one on the worktree
+  branch. A submodule or `--separate-git-dir` checkout carries a `.git` file of
+  the same shape but no `commondir`; those directories are still their own root,
+  and any unreadable or unresolvable `.git` file leaves the previous answer
+  unchanged. (#5888)
+- `symgraph::SymbolGraph` no longer resolves a callee against one global
+  bare-name map, first write wins (#6170) — the same defect PR #6169 fixed in
+  trusty-search's parallel graph. A definition is now keyed `<file>::<symbol>`,
+  and a call becomes an edge only when one scope around the CALLER holds exactly
+  one candidate: the caller's own file, then each ancestor directory, then the
+  whole corpus. Two crates defining `run` is no longer grounds for an edge to
+  either, and a call no longer binds across languages — `.ts` and `.tsx` count
+  as one language, so twins in both keep each other ambiguous instead of one
+  looking unique. In the reverse direction, a callee beside the caller now wins
+  over a same-named definition that was merely registered first — `upsert`
+  calling `write` used to land in whichever crate sorted earliest.
+- A call no longer resolves to a symbol that cannot be called. The same-file
+  shortcut used to answer before the callable check, so a `Calls` edge could
+  land on a struct or an import sitting in the caller's own file; two symbols
+  sharing one `<file>::<symbol>` key now resolve to neither rather than to
+  whichever was inserted last.
+- `callers_of`, `callees_of` and `context_for` anchor through that same
+  resolution: `<path>::<symbol>` now anchors on the file it names — matched
+  against each candidate's own file, so a partial path suffix works too — and a
+  bare name that several definitions answer to picks the most-connected one
+  rather than the first registered.
+- The Jira tickets backend's `get_milestone_issues` now resolves a milestone id
+  to its version name before querying (#6198). JQL matches a quoted
+  `fixVersion = "…"` term against the version NAME; only the unquoted form
+  matches a numeric version id. The injection fix quoted every JQL term, so a
+  milestone-by-id lookup silently returned no issues — or, worse, the issues of
+  a version whose name happened to equal the id. The backend now reads
+  `GET /project/{key}/versions`, maps the id to that version's name, and builds
+  the same escaped, quoted term from the name. A caller that already passes a
+  name still works, and an id matching no version is a hard error rather than an
+  empty issue list, which would be indistinguishable from a real but empty
+  milestone. Unquoting was never an option: it would reopen the injection.
+- The GitHub tickets backend's `search_issues` no longer lets a caller-supplied
+  filter inject a second search qualifier (#6216). GitHub separates issue-search
+  qualifiers by whitespace, so an `assignee` or free-text `query` containing a
+  space could add a live `is:`, `archived:` or `repo:` qualifier and change
+  which issues came back. Verified against the live API: searching
+  `repo:torvalds/linux bug repo:microsoft/vscode` returned 111,406 issues drawn
+  from vscode, and `crash is:closed` versus `crash is:open` split 48,001 against
+  3,592. Free-text terms are now quoted individually, so an embedded qualifier
+  matches as literal text (both cases return 0 and 2 respectively) while
+  independent-term matching is unaffected — `crash startup` returns the same
+  1,663 issues it did before. `assignee` is validated against the GitHub
+  username grammar (plus the `*` and `@me` sentinels) because that qualifier
+  takes a bare value, and a `label` is checked for the characters that would
+  close its `label:"..."` wrapper.
+- A `query` or `label` carrying a `"` or a control character, and an `assignee`
+  that is not username-shaped, are now rejected with a specific error rather
+  than escaped: GitHub documents backslash escaping only for code search and
+  states that the syntax for issues is not the same, and a trailing backslash
+  before a closing quote was confirmed live to have no escaping effect. A
+  backslash is left alone, being an ordinary literal in this grammar.
+- `search_issues`'s MCP tool description now states these matching semantics, so
+  callers can tell that `query` takes literal terms rather than search syntax.
+- **Events emitted while the activity stream was down reached neither the stream nor the poll.** The tick that noticed a dead feed also re-opened it, and the poll then judged itself against the re-opened feed — which is live — so it discarded that tick's events while advancing its cursor past them. A re-subscribed `broadcast::Receiver` replays nothing, so the death window was simply lost. The decision now reads the feed's state from the start of the tick, and `rotate_feed` returns that captured value so the ordering cannot be expressed wrongly ([#6286](https://github.com/bobmatnyc/trusty-tools/issues/6286))
+- **A lag notice on a live feed never rendered.** The daemon tells a reader that fell behind how many events it dropped, but the TUI read that slot only when the stream had already died — so on a working feed the hole stayed invisible. It is taken on every tick now, and taking clears it, so each notice renders exactly once
+- **The monitor's memory panel could show more palaces than it had rows for.** `MemoryClient::palaces` fanned out one `memory.palace_get` per id and dropped a palace whose call failed at `debug!`, so "12 palaces" over nine rows was a reachable state with nothing saying which three were missing or why. It makes one `memory.palaces_list` call now, and a row the daemon could not read is rendered with `counts_unknown` and the daemon's reason rather than skipped ([#6286](https://github.com/bobmatnyc/trusty-tools/issues/6286))
+- `evict_legacy` discarded `bootout()`'s error and read a failed `remove_file`
+  as "nothing was there" (#6290), so a unit that would not go down was
+  indistinguishable from one that was never there. It now verifies launchd
+  actually let go after `bootout` instead of trusting its exit code.
+- Seven broken intra-doc links that failed the pre-publish rustdoc gate
+  (`scripts/check_rustdoc_links.sh`) and, because `lib.rs` carries
+  `#![deny(rustdoc::broken_intra_doc_links)]`, failed `cargo doc -p
+  trusty-common` outright — which also took down the pre-publish contract gate,
+  since it reads rustdoc JSON from the same build. `gui_mcp_client` and
+  `redb_open` each carry an outer `///` doc on their `pub mod` line in `lib.rs`
+  and an inner `//!` block in their own file; rustdoc resolves the whole
+  combined doc in the outer attribute's scope, so the inner block's bare
+  `[\`running_binary_path\`]`, `[\`build_entry\`]`, `[\`configure\`]`,
+  `[\`is_incompatible_format\`]`, `[\`INCOMPATIBLE_SUFFIX\`]`,
+  `[\`incompatible_backup_path\`]` and `[\`backup_incompatible_file\`]` were
+  looked up at the crate root and found nothing. All seven are now
+  `crate::`-qualified, which resolves from either scope.
+- An idle-exiting UDS server now drains the kernel accept backlog for 50ms
+  before giving up its listener, so a client that connected microseconds before
+  the idle window elapsed is served rather than reset (#6350).
+- **A write can no longer hold a palace's write mutex without a ceiling.** `PalaceHandle::remember_with_options` acquired the per-palace write mutex and then ran embed → vector upsert → KG persist → L1 snapshot → closet rebuild with nothing bounding that work. [#4002](https://github.com/bobmatnyc/trusty-tools/issues/4002) bounded only the two waits *before* the mutex is held, so a slow commit held it for as long as it took and every other writer on that palace queued behind it — three `memory_note` calls were aborted client-side after 1800 s while the daemon stayed healthy and kept serving reads. The pipeline now runs under `write_pipeline_timeout()` (`TRUSTY_WRITE_PIPELINE_TIMEOUT_SECS`, default 240 s, a `const`-asserted margin above the 180 s + 30 s embedder legs it contains). On expiry the pipeline future is dropped, which releases the mutex, and the caller gets an error naming the palace, the ceiling, the `kg.redb` size, and the override knob. A write that completes but exceeds `TRUSTY_SLOW_WRITE_WARN_SECS` (default 5 s) logs the same detail at `warn` — the 1800 s window in the report left nothing at all in `stderr.log` ([#6366](https://github.com/bobmatnyc/trusty-tools/issues/6366))
+- `SearchClient::fetch_all` (the monitor dashboard's trusty-search poller) no
+  longer GETs `/indexes/:id/communities` — trusty-search has never served that
+  route (the Louvain community-detection pipeline was retired server-side in
+  v0.10.0, issue #152), so every call 404'd. `index_communities` and its
+  `CommunitiesWire` wire struct are removed; `IndexRow.community_count` /
+  `.modularity` stay on the struct (existing TUI tests exercise them directly)
+  but nothing populates them from the daemon. (#6382)
+- `resolve_palace` / `resolve_palace_with_remote` no longer return a pin file's
+  `palace` field unvalidated. The env-override, git `owner/repo`, and
+  `parent/dir` levels all run their result through `clamp_palace_id`, so each
+  returns an id `palace_id_is_valid` accepts; the pin level returned its field
+  verbatim, which was the one way an id the daemon's creation gate would refuse —
+  a dotted `tripbot.tours`, a `../evil` traversal shape, an over-long slug —
+  could reach a palace directory name and a Unix-socket filename. The pin's value
+  is now trimmed and checked before any level decides, and an id that fails the
+  check is reported as the new `PalaceResolveError::PinInvalid`, naming the pin
+  file and the rejected value. The pin is never rewritten to a different palace:
+  an untrustworthy pin fails closed here exactly as an unparseable or empty one
+  already did. Every well-formed pin resolves unchanged. (#6418)
+- **An abandoned write can no longer leave two live claimants on one Tier C `fact_key`.** Bounding the write pipeline released the palace write mutex on expiry, but dropping the pipeline future stopped neither the `spawn_blocking` redb transaction in `upsert_drawers_atomic` nor an op already queued to the `KgWriter` actor. The durable commit therefore landed while its in-memory mirror never ran, and the next writer — reading a `DRAWERS_BY_FACT_KEY` index that had already moved but a drawer table that had not — took `persist_with_retirement`'s "incumbent absent from the in-memory table" fallback and wrote its newcomer *without* retiring the previous one, leaving two drawer rows carrying one live slot. The durable commit and its mirror are now one step: they run in a task the caller's timeout cannot cancel, under a per-palace commit-order guard that is deliberately narrower than the write mutex and outlives it. A write abandoned mid-commit still lands in redb and in the drawer table together, and the writer behind it retires it normally ([#6366](https://github.com/bobmatnyc/trusty-tools/issues/6366))
+- **`TRUSTY_WRITE_PIPELINE_TIMEOUT_SECS` below the embedder legs is clamped, not honoured.** `0` — or any value under the 180 s + 30 s the pipeline contains — parsed straight through, so every write on every palace failed with nothing at startup saying why; the `const` assertion protecting the compiled-in default never saw the override. Such a value now clamps to the default and logs a `warn` naming the configured value, the floor, and what was applied ([#6366](https://github.com/bobmatnyc/trusty-tools/issues/6366))
+
+### Changed
+
+- The monitor's activity log no longer shows an event up to a tick late, and no longer misses one evicted from the activity log between two ticks. A daemon that predates `memory.activity_stream` still works: the failed open is reported and the poll carries the log
+- The monitor TUI's activity log polls `memory.activity` on its 2-second tick instead of subscribing to the daemon's `/sse` stream, which #6286 retired. An event appears on the next tick rather than as it happens, and the first read seeds the cursor rather than replaying history into the log (`MemoryClient::recent_events`)
+- The monitor's palace table asks `palace_list` for the ids and then `memory.palace_get` per palace, because no method answers the bulk list with counts. The rows are real measurements rather than the placeholder zeros the peek-based route reported for an unresident palace (#4682); the first poll pays one cold open per palace
+- Version 0.45.3. The `trusty-common-v0.45.2` tag is stranded at `e8a74389f`,
+  the commit these links are broken on, and release tags here are immutable
+  (#6178), so 0.45.2 is spent and 0.45.3 supersedes it.
+- `launchd_labels` splits its registry in two: `SERVICES` is what an install
+  writes, `RETIRED_SERVICES` is what an upgrade must clear. `com.trusty.analyze`
+  moves to the second table — named so a migration can still evict a unit an
+  older installer left loaded, separate so nothing installs it again.
+  `retired_labels_for_member` returns that eviction set, canonical label first
+  (#6350).
+
+### Documentation
+
+- `launchd_labels`'s module header links `RETIRED_SERVICES` again. The header is
+  merged with the `///` doc on `pub mod launchd_labels;` in `lib.rs`, so rustdoc
+  resolves it in the crate root, where a bare `RETIRED_SERVICES` does not exist —
+  the link rendered as dead literal text and denied the crate's `cargo doc` build.
+  It now has the same `crate::`-rooted reference definition `SERVICES` and
+  `canonical_label` were given in #5753.
+
 ## [0.43.0] — 2026-08-23
 
 ### Breaking

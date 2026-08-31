@@ -1,3 +1,0 @@
-Fixed
-
-- `serve --stdio`'s error for an unreachable daemon now carries the id of the request that caused it. It was built with `id: None`, and `mcp::Response` omits an absent id when it serialises, so the frame reached the client belonging to no pending call — a JSON-RPC client matches by id, so it kept waiting and the session read as hung with no response or progress. That is what a session saw after its daemon was upgraded underneath it: the bridge had answered, and nobody could tell. The error also names the socket it could not reach, and a gone endpoint answers well inside the 30 s cap ([#6309](https://github.com/bobmatnyc/trusty-tools/issues/6309))

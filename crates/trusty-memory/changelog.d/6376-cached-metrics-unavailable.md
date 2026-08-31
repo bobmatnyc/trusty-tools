@@ -1,3 +1,0 @@
-Fixed
-
-- `console_metrics`'s cached-palace arm no longer reports `room_count`, `kg_triple_count`, or `vector_count` as `0` when the underlying read actually failed. It previously read rooms via `list_room_summaries(...).unwrap_or_else(|_| 0)` and KG triples via the deliberately-degrading `kg_triple_count_or_zero` helper, and had no fallible accessor at all for the vector count — three different ways the same failure collapsed to a silent zero, indistinguishable from a genuinely empty palace. Any one of the three failing now marks the whole entry `unavailable` with null counts and a `stats_error`, the same contract the disk-read arm (#6372) already gives an uncached palace ([#6376](https://github.com/bobmatnyc/trusty-tools/issues/6376))

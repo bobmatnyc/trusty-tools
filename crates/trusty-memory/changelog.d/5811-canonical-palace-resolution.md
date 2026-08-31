@@ -1,3 +1,0 @@
-Fixed
-
-- `cwd_palace_slug_at` and the `project_root` pin helpers now route through `trusty_common::palace_resolve` instead of inlining their own four-step order and their own `git rev-parse` probes. A pin file that exists but cannot be parsed or read no longer falls through to the directory basename — `project_slug_at`, `project_slug_at_readonly` and `pinned_slug_at` return `None` and `cwd_palace_slug_at` returns an error, so a typo in a committed pin can no longer redirect a project's memory to a palace nobody chose. An ABSENT pin still falls through as before ([#5811](https://github.com/bobmatnyc/trusty-tools/issues/5811))

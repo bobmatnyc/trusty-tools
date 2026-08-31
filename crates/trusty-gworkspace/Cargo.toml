@@ -15,7 +15,7 @@ name = "trusty-gworkspace-mcp"
 path = "src/bin/trusty-gworkspace-mcp.rs"
 
 [dependencies]
-trusty-common = { path = "../trusty-common", version = "0.45" }
+trusty-common = { path = "../trusty-common", version = "0.46" }
 # JSON-RPC / MCP primitives, extracted from `trusty_common::mcp` by ADR-0040 (#5803).
 trusty-mcp = { workspace = true }
 anyhow = { workspace = true }
