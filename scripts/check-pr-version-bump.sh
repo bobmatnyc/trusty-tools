@@ -99,17 +99,63 @@ cd "${REPO_ROOT}"
 
 BASE="${PR_VERSION_BUMP_BASE:-origin/main}"
 
-# manifest_field <file> <field> — first literal `field = "value"` in [package].
+# PACKAGE_FIELD_AWK — read one [package] field of a Cargo manifest in ONE
+# process. Every manifest read in this file goes through it.
+#
+# Why: the three readers this replaced each piped
+#   `sed -n '/^\[package\]/,/^\[[^p]/p'` into a `grep` that exits early. grep
+#   leaves on its first match, sed's remaining writes land on a closed pipe, and
+#   `set -o pipefail` (line 93) turns that into a failed pipeline: GNU sed
+#   reports the failed flush as exit 4, BSD sed dies on SIGPIPE (141). The gate
+#   then aborted mid-run, before printing any verdict, as soon as a crate's
+#   `[package]` block outgrew the buffer between the two processes —
+#   trusty-common's reached 6755 bytes and did exactly that (#6478). awk opens
+#   the manifest itself, so there is no pipe to break.
+# What: prints the value of the first `<field> = <value>` line inside
+#   `[package]`, then stops. The block ends at the first following table whose
+#   name does not start with `p`, which is the range the sed form matched — so
+#   `[package.metadata]` still counts as inside. A double-quoted value is
+#   unquoted; a bare value (`publish = false`) has its trailing comment and
+#   whitespace trimmed. Absent field: no output, exit 0.
+# Test: scripts/check-ci-helpers-selftest.sh, the two
+#   `check-pr-version-bump: oversized [package] block ...` cases, whose fixture
+#   manifests are large enough to have tripped the old pipe.
+PACKAGE_FIELD_AWK='
+  /^\[package\]/ { in_pkg = 1; next }
+  in_pkg && /^\[[^p]/ { exit }
+  in_pkg && $0 ~ "^" field "[ \t]*=" {
+    sub("^" field "[ \t]*=[ \t]*", "")
+    if (substr($0, 1, 1) == "\"") { sub(/^"/, ""); sub(/".*/, "") }
+    else { sub(/[ \t]*#.*$/, ""); sub(/[ \t]+$/, "") }
+    print
+    exit
+  }
+'
+
+# manifest_field <file> <field> — first `field = value` in [package], or empty.
 manifest_field() {
-  sed -n '/^\[package\]/,/^\[[^p]/p' "$1" 2>/dev/null |
-    grep -m1 -E "^${2}[[:space:]]*=[[:space:]]*\"" |
-    sed -E 's/^[^"]*"([^"]*)".*/\1/'
+  [ -r "$1" ] || return 0
+  awk -v field="$2" "${PACKAGE_FIELD_AWK}" "$1"
+}
+
+# manifest_field_of_text <field> — the same scan over manifest text on stdin.
+# Feed it a here-string, never a pipe: the `exit` above would close a pipe on
+# the writer exactly the way the sed form was closed on (#6478).
+manifest_field_of_text() {
+  awk -v field="$1" "${PACKAGE_FIELD_AWK}"
 }
 
 # manifest_is_unpublishable <file> — true when [package] carries publish = false.
+#
+# #6478: fails CLOSED — an unreadable manifest reports unpublishable, because
+# the other arm asserts "publishable" about a file this function never read.
+# The stderr line keeps the resulting [SKIP] from being silent.
 manifest_is_unpublishable() {
-  sed -n '/^\[package\]/,/^\[[^p]/p' "$1" 2>/dev/null |
-    grep -qE '^publish[[:space:]]*=[[:space:]]*false'
+  if [ ! -r "$1" ]; then
+    echo "check-pr-version-bump: cannot read $1 — treating it as publish = false" >&2
+    return 0
+  fi
+  [ "$(manifest_field "$1" publish)" = "false" ]
 }
 
 # sparse_index_path <crate-name> — crates.io sparse-index route for a name.
@@ -203,7 +249,7 @@ main() {
     return 0
   fi
 
-  local failures=0 warnings=0 crate manifest name version base_version
+  local failures=0 warnings=0 crate manifest name version base_manifest base_version
   while IFS= read -r crate; do
     [ -n "${crate}" ] || continue
     manifest="crates/${crate}/Cargo.toml"
@@ -225,12 +271,10 @@ main() {
       continue
     fi
 
-    base_version="$(
-      git show "${merge_base}:${manifest}" 2>/dev/null |
-        sed -n '/^\[package\]/,/^\[[^p]/p' |
-        grep -m1 -E '^version[[:space:]]*=[[:space:]]*"' |
-        sed -E 's/^[^"]*"([^"]*)".*/\1/'
-    )" || true
+    # #6478: same one-process read as manifest_field, via a here-string rather
+    # than a pipe. Missing at the merge base means a new crate, handled below.
+    base_manifest="$(git show "${merge_base}:${manifest}" 2>/dev/null || true)"
+    base_version="$(manifest_field_of_text version <<<"${base_manifest}")"
 
     if [ -z "${base_version}" ]; then
       echo "[ OK ] ${name} — new crate on this branch, nothing published to drift from"

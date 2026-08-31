@@ -88,8 +88,14 @@ mod stamp;
 /// persona set (`assistant`, `ctrl`, `pm`, `cto-assistant`, `izzie`) and the
 /// specialist roster (`python-engineer`, `qa-agent`, …) — into the compiled
 /// binary at build time.
+/// #5226: an allowlist, so a stray local file cannot ship inside the binary.
+/// See [`is_bundled_asset`] for why the filter is an allowlist and not a
+/// denylist, and for the second layer that repeats it at deploy time.
 #[derive(rust_embed::RustEmbed)]
 #[folder = ".trusty-agents/agents/"]
+#[include = "*.toml"]
+#[include = "*.md"]
+#[include = "*.json"]
 struct BundledAgents;
 
 /// Embeds this crate's own `.trusty-agents/workflows/` tree — the prescriptive
@@ -103,9 +109,77 @@ struct BundledAgents;
 /// What: same `rust-embed` mechanism as [`BundledAgents`], deployed by
 /// [`ensure_bundled_workflows_deployed`] through the SAME stamp/lock/refresh
 /// path — see [`reprovision_embedded_locked`].
+/// #5226: same allowlist as [`BundledAgents`] — see [`is_bundled_asset`].
 #[derive(rust_embed::RustEmbed)]
 #[folder = ".trusty-agents/workflows/"]
+#[include = "*.toml"]
+#[include = "*.md"]
+#[include = "*.json"]
 struct BundledWorkflows;
+
+/// Is `rel` a file the bundle is allowed to ship and deploy? (#5226)
+///
+/// Why: `rust-embed` embeds whatever physically sits in the folder at build
+/// time and ignores `.gitignore`, so a stray local file left in
+/// `.trusty-agents/agents/` before a release build ships inside the
+/// distributed `tagent` binary and — because that tree is deployed to
+/// `~/.trusty-agents/agents/` — gets written into every user's home. A `.env`
+/// is the worst case; `state_writer::atomic_write` leaves a `<file>.lock`
+/// sidecar beside every file it writes, so a `.lock` reaching a source asset
+/// directory is realistic rather than hypothetical. This is an ALLOWLIST, not
+/// a denylist, so a stray file of a kind nobody anticipated is excluded by
+/// default: a bundled file that fails to ship is loud (the agent does not
+/// resolve), a secret that ships is silent.
+/// What: accepts a path whose extension is one of the three the bundle
+/// actually uses — `toml`, `md`, `json` — and whose every path component is
+/// dotless. It repeats, at deploy time, what the `#[include]` globs on
+/// [`BundledAgents`] and [`BundledWorkflows`] already do at build time; a
+/// binary built before that filter existed still cannot write a stray file
+/// into a user's home.
+/// Test: `bundled_asset_predicate_fails_closed`,
+/// `stray_files_in_the_asset_tree_are_never_deployed`,
+/// `embedded_trees_carry_only_bundled_assets` (tests.rs).
+fn is_bundled_asset(rel: &str) -> bool {
+    let mut components = rel.split('/').peekable();
+    let mut last = "";
+    for component in components.by_ref() {
+        if component.is_empty() || component.starts_with('.') {
+            return false;
+        }
+        last = component;
+    }
+    matches!(
+        last.rsplit_once('.').map(|(_, ext)| ext),
+        Some("toml") | Some("md") | Some("json")
+    )
+}
+
+/// Every `(path, bytes)` pair the bundle `E` actually contributes (#5226).
+///
+/// Why: the stamp and the write loop both have to agree on what "the bundle"
+/// is — a stray file that changed the stamp but was never written would make
+/// every startup see a stale stamp and refresh forever. One filtered read
+/// keeps them from drifting.
+/// What: walks `E::iter()`, drops anything [`is_bundled_asset`] rejects with a
+/// `warn` naming it, and returns the rest.
+/// Test: `stray_files_in_the_asset_tree_are_never_deployed`,
+/// `stray_files_do_not_move_the_bundle_stamp` (tests.rs).
+fn bundled_assets<E: rust_embed::RustEmbed>() -> Result<Vec<(String, Vec<u8>)>> {
+    let mut out = Vec::new();
+    for rel in E::iter() {
+        if !is_bundled_asset(rel.as_ref()) {
+            tracing::warn!(
+                asset = %rel,
+                "ignoring a file in the embedded asset tree that is not a bundled asset"
+            );
+            continue;
+        }
+        let file =
+            E::get(&rel).with_context(|| format!("embedded bundled asset vanished: {rel}"))?;
+        out.push((rel.to_string(), file.data.into_owned()));
+    }
+    Ok(out)
+}
 
 /// Outcome of one (re)provision pass over the bundled agent set (#3556).
 ///
@@ -223,10 +297,9 @@ fn reprovision_embedded_locked<E: rust_embed::RustEmbed>(
     refresh_stale: bool,
 ) -> Result<ReprovisionReport> {
     let mut report = ReprovisionReport::default();
-    for rel in E::iter() {
-        let dest = target_dir.join(rel.as_ref());
-        let file =
-            E::get(&rel).with_context(|| format!("embedded bundled asset vanished: {rel}"))?;
+    // #5226: a path the bundle does not own is never materialised here.
+    for (rel, bytes) in bundled_assets::<E>()? {
+        let dest = target_dir.join(&rel);
 
         if dest.exists() {
             if !refresh_stale {
@@ -234,7 +307,7 @@ fn reprovision_embedded_locked<E: rust_embed::RustEmbed>(
             }
             let current = std::fs::read(&dest)
                 .with_context(|| format!("failed to read existing {}", dest.display()))?;
-            if current == file.data.as_ref() {
+            if current == bytes {
                 continue;
             }
             // #4461: the backup name carries the digest of the bytes being
@@ -256,13 +329,13 @@ fn reprovision_embedded_locked<E: rust_embed::RustEmbed>(
                 );
                 report.backed_up += 1;
             }
-            crate::state_writer::atomic_write(&dest, file.data.as_ref())
+            crate::state_writer::atomic_write(&dest, &bytes)
                 .with_context(|| format!("failed to refresh {}", dest.display()))?;
             report.refreshed += 1;
             continue;
         }
 
-        crate::state_writer::atomic_write(&dest, file.data.as_ref())
+        crate::state_writer::atomic_write(&dest, &bytes)
             .with_context(|| format!("failed to write {}", dest.display()))?;
         report.written += 1;
     }
@@ -322,13 +395,9 @@ fn stale_backup_path(dest: &Path, content: &[u8]) -> PathBuf {
 /// Test: `stamp_changes_when_content_changes`,
 /// `stamp_stable_regardless_of_input_order` (`stamp`'s own tests).
 fn current_bundle_stamp<E: rust_embed::RustEmbed>() -> Result<String> {
-    let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
-    for rel in E::iter() {
-        let file =
-            E::get(&rel).with_context(|| format!("embedded bundled asset vanished: {rel}"))?;
-        entries.push((rel.to_string(), file.data.into_owned()));
-    }
-    Ok(stamp::compute(entries))
+    // #5226: the same filtered view the write loop uses, so a stray file can
+    // never make the stamp disagree with what actually gets deployed.
+    Ok(stamp::compute(bundled_assets::<E>()?))
 }
 
 /// Hermetic core of [`ensure_bundled_agents_deployed`] — takes `target_dir`

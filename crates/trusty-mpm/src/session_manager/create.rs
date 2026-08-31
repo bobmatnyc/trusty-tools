@@ -29,6 +29,16 @@ use tracing::{info, warn};
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 
+/// How many names [`SessionManager::create_with_resolved_name`] may have tmux
+/// refuse before it gives up (#3707).
+///
+/// Why: each refusal proves another creator won that exact name in the last
+/// few instructions. A handful of retries absorbs the burst of concurrent
+/// creates this window is made of; an unbounded loop would turn a genuinely
+/// wedged server into a spin, and `resolve_session_name`'s own allocator
+/// already bounds its attempts the same way.
+const MAX_CREATE_ATTEMPTS: usize = 4;
+
 impl SessionManager {
     /// Create a new managed session with a caller-supplied session id.
     ///
@@ -186,17 +196,20 @@ impl SessionManager {
     /// TOCTOU window), and `create_with_reserved_name` trusts a name reserved
     /// even earlier; re-checking here narrows that window to a few
     /// instructions.
-    /// Residual (ACCEPTED, tracked as issue #3707 — #3698 round-2 decision):
-    /// the narrowed window is NOT closed, and because `create_session` runs
-    /// `tmux new-session -A -d`, two truly concurrent creators that compute
-    /// the SAME deduped name both "succeed" — `-A` silently ATTACHES the
-    /// loser to the winner's physical session and two records get persisted
-    /// aliasing one pane. A rename-style re-verify-under-lock cannot fix
-    /// this here: the loser never created anything it may safely destroy,
-    /// and the armed [`super::session_guard::TmuxSessionGuard`] below would
-    /// reap the WINNER's live session on a detected conflict. The real fix
-    /// (fail-loud non-`-A` create + guard-aware retry) is scoped in #3707.
-    /// Test: `create_with_reserved_name_suffixes_stale_reservation` in
+    /// #3707 closes what that dedupe alone could not. The create runs through
+    /// [`super::driver::ManagedTmuxDriver::create_session_exclusive`], whose
+    /// `new-session` carries no `-A`, so a creator that loses the name gets a
+    /// refusal rather than an attach to the winner's pane — the failure mode
+    /// was two persisted records driving one terminal, with no error anywhere.
+    /// The refusal is retried [`MAX_CREATE_ATTEMPTS`] times, each attempt
+    /// re-deduping with every name already refused folded in, so a name the
+    /// stale snapshot keeps proposing cannot spin. The
+    /// [`super::session_guard::TmuxSessionGuard`] is armed only after a create
+    /// that actually created something, so a loser can never reap the winner's
+    /// session — the hazard that made a post-create re-verify unworkable.
+    /// Test: `two_creators_of_one_name_never_share_a_pane`,
+    /// `create_gives_up_after_repeated_name_refusals`,
+    /// `create_with_reserved_name_suffixes_stale_reservation` in
     /// `super::naming_tests`; covered transitively by every
     /// `create_with_id`/`create_with_reserved_name` test.
     #[allow(clippy::too_many_arguments)]
@@ -219,19 +232,46 @@ impl SessionManager {
         // into existence, so a reservation gone stale never yields a second
         // live session under an already-taken name.
         let resolved_name = tmux_name;
-        let tmux_name = self.dedupe_session_name(&resolved_name, None).await?;
-        if tmux_name != resolved_name {
-            warn!(
-                id = %id,
-                requested = %resolved_name,
-                actual = %tmux_name,
-                "resolved/reserved session name went stale before the tmux create; auto-suffixed (#3692)"
-            );
-        }
         let workdir = cwd.to_string_lossy().to_string();
-        self.tmux
-            .create_session(&tmux_name, &workdir)
-            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
+        // #3707: names tmux refused on an earlier attempt, remembered across
+        // the loop so a stale snapshot cannot keep proposing one of them.
+        let mut refused: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let tmux_name = loop {
+            let candidate = self
+                .dedupe_session_name(&resolved_name, None, &refused)
+                .await?;
+            if candidate != resolved_name {
+                warn!(
+                    id = %id,
+                    requested = %resolved_name,
+                    actual = %candidate,
+                    "resolved/reserved session name went stale before the tmux create; auto-suffixed (#3692)"
+                );
+            }
+            // #3707: no `-A`, so a lost race refuses instead of attaching this
+            // record to somebody else's pane.
+            match self.tmux.create_session_exclusive(&candidate, &workdir) {
+                Ok(()) => break candidate,
+                Err(ManagedError::NameCollision(why))
+                    if refused.len() + 1 < MAX_CREATE_ATTEMPTS =>
+                {
+                    warn!(
+                        id = %id,
+                        name = %candidate,
+                        "tmux refused the session name to a concurrent creator; retrying under a \
+                         fresh name (#3707): {why}"
+                    );
+                    refused.insert(candidate);
+                }
+                Err(ManagedError::NameCollision(why)) => {
+                    return Err(ManagedError::NameCollision(format!(
+                        "could not claim a tmux session name for `{resolved_name}` in \
+                         {MAX_CREATE_ATTEMPTS} attempts (sustained concurrent creates): {why}"
+                    )));
+                }
+                Err(e) => return Err(ManagedError::TmuxUnavailable(e.to_string())),
+            }
+        };
 
         // Capture the freshly-created pane's stable tmux `pane_id` (#2453
         // review finding 1, round 2) — best-effort; `None` when the driver

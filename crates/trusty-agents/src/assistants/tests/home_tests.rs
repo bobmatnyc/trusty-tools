@@ -24,6 +24,11 @@ use crate::assistants::{
 ///
 /// Mirrors the crate's established `#[serial]` + guard convention (see
 /// `workflow::engine::executor::tests::checkpoint_resume`).
+///
+/// #6089: `#[serial]` alone is NOT enough when the variable is `HOME` — the
+/// crate's ~30 other `$HOME` mutators serialize on `test_env::HOME_LOCK`, a
+/// different mutex, so every test here that touches `HOME` takes that lock too.
+/// `tests::home_lock_discipline` is what keeps that true.
 pub(super) struct EnvVarGuard {
     key: &'static str,
     prev: Option<String>,
@@ -32,7 +37,8 @@ pub(super) struct EnvVarGuard {
 impl EnvVarGuard {
     pub(super) fn set(key: &'static str, value: &Path) -> Self {
         let prev = std::env::var(key).ok();
-        // SAFETY: serialized against other env-mutating tests by `#[serial]`.
+        // SAFETY: serialized by `#[serial]`, and for `HOME` by the caller's
+        // `test_env::HOME_LOCK` guard as well (#6089).
         unsafe { std::env::set_var(key, value) };
         Self { key, prev }
     }
@@ -115,6 +121,10 @@ fn for_instance_validates_the_id() {
 #[test]
 #[serial]
 fn default_root_is_dotless_under_the_user_home() {
+    // #6089: declared first so it outlives the guards that restore $HOME.
+    let _home_lock = crate::test_env::HOME_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
     let _no_override = EnvVarGuard::clear(ASSISTANTS_DIR_ENV);
     let _home = EnvVarGuard::set("HOME", tmp.path());
@@ -134,6 +144,12 @@ fn default_root_is_dotless_under_the_user_home() {
 #[test]
 #[serial]
 fn okg_store_path_matches_the_owners_spelling() {
+    // #6089: this is the test that flaked — it compared paths under two
+    // different tempdirs because a HOME_LOCK holder ran between its set and
+    // its read.
+    let _home_lock = crate::test_env::HOME_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
     let _no_override = EnvVarGuard::clear(ASSISTANTS_DIR_ENV);
     let _home = EnvVarGuard::set("HOME", tmp.path());
@@ -159,6 +175,10 @@ fn okg_store_path_matches_the_owners_spelling() {
 #[test]
 #[serial]
 fn env_override_wins_over_the_user_home() {
+    // #6089: same lock discipline as its two siblings above.
+    let _home_lock = crate::test_env::HOME_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
     let elsewhere = tmp.path().join("elsewhere");
     let _home = EnvVarGuard::set("HOME", tmp.path());

@@ -143,6 +143,14 @@ impl SessionManager {
         &self,
         auto_resume: bool,
     ) -> Result<ReconcileReport, ManagedError> {
+        // #6469: a tmux server tm did not start has none of tm's server
+        // globals. tmux-resurrect restores sessions with its own bare
+        // `new-session`, which never passes through `create_managed_session`,
+        // so restored panes sit on the factory 2000-line history-limit and can
+        // enter the alternate screen. Re-assert the globals here, before any
+        // pane this daemon goes on to create.
+        self.tmux.apply_scrollback_options();
+
         // #5856: an unobservable tmux is not an empty tmux. `None` means tmux
         // was never successfully asked — it is NOT a set of zero live
         // sessions, and no record's state may be derived from it.

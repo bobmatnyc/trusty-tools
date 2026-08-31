@@ -146,6 +146,10 @@ pub struct FakeTmuxDriver {
     /// already-typed `ManagedError::TmuxUnavailable` — the shape that let
     /// #3886's callers double the `tmux error:` prefix by re-wrapping it.
     pub list_sessions_should_fail: Mutex<bool>,
+    /// Count of `apply_scrollback_options` calls (#6469) — asserts the boot
+    /// reconcile re-asserts tm's server globals on a tmux server it did not
+    /// start (a tmux-resurrect restore).
+    pub scrollback_option_calls: Mutex<u32>,
 }
 
 impl FakeTmuxDriver {
@@ -172,6 +176,7 @@ impl FakeTmuxDriver {
             ensure_server_up_should_fail: Mutex::new(false),
             cold_tmux_host: Mutex::new(false),
             list_sessions_should_fail: Mutex::new(false),
+            scrollback_option_calls: Mutex::new(0),
         })
     }
 }
@@ -187,6 +192,12 @@ impl ManagedTmuxDriver for FakeTmuxDriver {
             ));
         }
         Ok(())
+    }
+
+    /// Records the call so `reconcile_on_boot_reapplies_the_scrollback_server_options`
+    /// can assert the daemon re-asserts tm's tmux globals at boot (#6469).
+    fn apply_scrollback_options(&self) {
+        *self.scrollback_option_calls.lock().unwrap() += 1;
     }
 
     fn create_session(&self, name: &str, workdir: &str) -> Result<(), ManagedError> {
@@ -1188,6 +1199,37 @@ pub(super) fn make_active_test_record(tmux_name: &str, task: &str, ws_path: &str
 /// another (simulating reboot), runs reconcile, asserts: live → Active,
 /// gone → Stopped (not Orphaned).
 /// Test: this function IS the test.
+/// #6469: the boot reconcile re-asserts tm's tmux server globals.
+///
+/// Why: a tmux server restart with tmux-continuum restore recreates every
+/// `tm-*` session through resurrect's own bare `new-session`, which never
+/// passes through `create_managed_session` — so the server carries none of the
+/// `history-limit`/`mouse`/`alternate-screen` options tm specifies, and every
+/// restored pane sits on the factory 2000-line scrollback. Boot reconcile is
+/// the one pass that runs against a server tm did not start.
+/// What: runs `reconcile_on_boot` against a fake driver that counts the calls,
+/// and asserts the options were applied exactly once for the pass.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn reconcile_on_boot_reapplies_the_scrollback_server_options() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let fake = FakeTmuxDriver::new();
+    fake.seeded_names
+        .lock()
+        .unwrap()
+        .push("tm-restored-01".into());
+    let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
+
+    mgr.reconcile_on_boot(false).await.expect("reconcile");
+
+    assert_eq!(
+        *fake.scrollback_option_calls.lock().unwrap(),
+        1,
+        "boot reconcile must re-apply tm's tmux server globals (#6469) — a \
+         tmux-resurrect restore leaves them unset"
+    );
+}
+
 #[tokio::test]
 async fn manager_reconcile_gone_tmux_yields_stopped() {
     let dir = crate::test_support::hermetic_temp_dir();

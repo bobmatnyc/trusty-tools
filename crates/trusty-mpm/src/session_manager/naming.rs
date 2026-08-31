@@ -63,18 +63,14 @@ impl SessionManager {
     /// if every attempt in the bounded window (`MAX_NAME_ALLOCATION_ATTEMPTS`)
     /// collides.
     ///
-    /// Residual race window (KNOWN, not closed by this loop, unchanged from the
-    /// pre-#2032 behaviour): there is still a gap between THIS check and the
-    /// caller's actual `create_session`/`git worktree add` a few lines later.
-    /// `create_session` shells out to `tmux new-session -A -d`, and `-A` makes
-    /// tmux ATTACH to an existing session of the same name instead of failing,
-    /// so a lost race is an ALIASING risk — two persisted records driving one
-    /// physical session — not a crash. `create_with_resolved_name`'s final
-    /// pre-create dedupe (#3692) narrows this window to a few instructions
-    /// but does NOT close it; the residual is accepted and tracked as issue
-    /// #3707 (fixing it properly needs `-A` fail-loud semantics plus a
-    /// `TmuxSessionGuard` reaper that can never kill the race winner's
-    /// session).
+    /// Residual race window (KNOWN, and narrowed twice since #2032): there is
+    /// still a gap between THIS check and the caller's actual
+    /// `create_session`/`git worktree add` a few lines later.
+    /// `create_with_resolved_name`'s final pre-create dedupe (#3692) narrows
+    /// it to a few instructions, and #3707 stopped a lost race from aliasing:
+    /// that path now creates without `-A`, so tmux refuses a name it does not
+    /// win and the create re-dedupes and retries instead of attaching to the
+    /// winner's pane. The `git worktree add` half of the window is unchanged.
     ///
     /// Server-up guarantee (#3823 contract, moved here by #3886): this
     /// function's very first action is a `list-sessions` probe
@@ -223,32 +219,33 @@ impl SessionManager {
     /// plus [`Self::dedupe_name_against`] directly (calling this here would
     /// deadlock on the store lock, and a snapshot would reintroduce the
     /// #3692 race for two concurrent stopped-session renames).
-    /// Residual (ACCEPTED, tracked as issue #3707): because this is a
-    /// lock-free snapshot and `create_session` shells out to
-    /// `tmux new-session -A -d`, two truly concurrent creators that compute
-    /// the same deduped name both "succeed" — `-A` silently ATTACHES the
-    /// loser to the winner's session, persisting two records that alias one
-    /// physical pane. Closing that needs `-A` semantics + `TmuxSessionGuard`
-    /// reaper changes (the loser must never kill the winner's session) — see
-    /// #3707 for the plan; the docs here exist so the acceptance is loud,
-    /// not silent.
+    /// A snapshot this lock-free can still go stale between the read and the
+    /// tmux create, which is why `create_with_resolved_name` no longer trusts
+    /// it alone: since #3707 that path creates WITHOUT `-A`, so a name it
+    /// loses comes back as a refusal rather than as a silent attach to
+    /// somebody else's pane. `also_taken` is how that refusal is remembered —
+    /// feeding only the snapshot back in would re-propose the same name and
+    /// spin, so the caller passes every name tmux has already refused it.
     /// What: [`Self::taken_name_set`] over a fresh tmux `list_sessions`
     /// snapshot (fetched BEFORE `self.list()` takes the store lock — never
-    /// under it, #3698 round-2 HIGH-A) + a fresh `self.list()` snapshot,
-    /// then [`Self::dedupe_name_against`].
+    /// under it, #3698 round-2 HIGH-A) + a fresh `self.list()` snapshot, union
+    /// `also_taken`, then [`Self::dedupe_name_against`].
     /// Test: `create_with_reserved_name_suffixes_stale_reservation` in
-    /// `super::naming_tests`.
+    /// `super::naming_tests`; `two_creators_of_one_name_never_share_a_pane` in
+    /// `super::create_race_tests` covers the `also_taken` path.
     pub(crate) async fn dedupe_session_name(
         &self,
         candidate: &str,
         exclude_id: Option<&ManagedSessionId>,
+        also_taken: &HashSet<String>,
     ) -> Result<String, ManagedError> {
         // #3886: propagate, never re-wrap — `list_sessions` already returns a
         // `ManagedError`, so `TmuxUnavailable(e.to_string())` doubled its own
         // `tmux error:` prefix.
         let live_names = self.tmux.list_sessions()?;
         let records = self.list().await;
-        let taken = Self::taken_name_set(&live_names, &records, exclude_id);
+        let mut taken = Self::taken_name_set(&live_names, &records, exclude_id);
+        taken.extend(also_taken.iter().cloned());
         Ok(Self::dedupe_name_against(candidate, &taken))
     }
 }

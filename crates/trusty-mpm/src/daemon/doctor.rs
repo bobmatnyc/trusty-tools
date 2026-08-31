@@ -186,6 +186,12 @@ use doctor_session_store::check_session_store;
 #[path = "doctor_stray_mcp.rs"]
 mod doctor_stray_mcp;
 use doctor_stray_mcp::check_stray_mcp_json;
+// #6469: a tmux server tm did not start carries none of tm's server globals —
+// a tmux-resurrect restore leaves every restored pane on the factory 2000-line
+// scrollback. Read-only: it reads options, never sets one.
+#[path = "doctor_tmux_options.rs"]
+mod doctor_tmux_options;
+use doctor_tmux_options::check_tmux_options;
 
 /// Per-probe network timeout.
 ///
@@ -444,6 +450,10 @@ pub async fn run_doctor(
         project_dir,
         &home,
     ));
+    // #6469: whether the live tmux server's globals still match tm's spec. Says
+    // nothing about panes already created — `history-limit` is captured at pane
+    // creation and cannot be grown in place.
+    checks.push(check_tmux_options());
 
     DoctorReport::from_checks(checks)
 }

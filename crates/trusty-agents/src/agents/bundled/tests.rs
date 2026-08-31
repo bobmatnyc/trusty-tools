@@ -758,3 +758,323 @@ fn agent_and_workflow_bundles_hash_differently() {
         current_bundle_stamp::<BundledWorkflows>().unwrap()
     );
 }
+
+/// A synthetic embed tree standing in for a source asset directory that
+/// picked up stray local files before a build (#5226).
+///
+/// Why: `RustEmbed` embeds whatever physically sits in the folder at build
+/// time and ignores `.gitignore`, so a `.env`, an editor backup, or one of
+/// `state_writer::atomic_write`'s `<file>.lock` sidecars left in
+/// `.trusty-agents/agents/` ships inside the distributed `tagent` binary and
+/// is then written into every user's home. A committed fixture directory
+/// cannot express that — `.env*` and `*.bak` are gitignored — so the file set
+/// is stated in code instead.
+/// What: a hand-written `RustEmbed` impl (no derive, no folder) over four
+/// paths: one legitimate bundled agent and three strays.
+/// Test: `stray_files_in_the_asset_tree_are_never_deployed`.
+struct StrayAssetTree;
+
+/// `(path, bytes)` pairs [`StrayAssetTree`] serves.
+const STRAY_TREE: &[(&str, &[u8])] = &[
+    ("assistant/agent.toml", b"[agent]\nname = \"assistant\"\n"),
+    (".env", b"OPENROUTER_API_KEY=sk-or-should-never-ship\n"),
+    // Deliberately NOT `assistant/agent.toml.lock`: `atomic_write` leaves its
+    // own sidecar at exactly that path when it writes the bundled file, so the
+    // stray has to name a file this fixture never deploys.
+    ("ctrl.toml.lock", b"lock-sidecar\n"),
+    ("assistant/persona.md.bak", b"editor backup\n"),
+];
+
+impl rust_embed::RustEmbed for StrayAssetTree {
+    fn get(file_path: &str) -> Option<rust_embed::EmbeddedFile> {
+        STRAY_TREE
+            .iter()
+            .find(|(path, _)| *path == file_path)
+            .map(|(_, bytes)| rust_embed::EmbeddedFile {
+                data: std::borrow::Cow::Borrowed(bytes),
+                // `Metadata` has no public constructor; this doc-hidden one is
+                // what the derive macro itself emits.
+                metadata: rust_embed::Metadata::__rust_embed_new([0u8; 32], None, None),
+            })
+    }
+
+    fn iter() -> impl Iterator<Item = std::borrow::Cow<'static, str>> + 'static {
+        STRAY_TREE
+            .iter()
+            .map(|(path, _)| std::borrow::Cow::Borrowed(*path))
+    }
+}
+
+/// Why (#5226): the deploy loop wrote every path the embed tree offered, so a
+/// stray file that reached the build reached the user's `$HOME` too — a `.env`
+/// among them. The filter is what stops a non-bundled path from ever being
+/// materialised.
+/// What: deploys [`StrayAssetTree`] into a tempdir and asserts the legitimate
+/// agent file landed while none of the three strays did, and that the report
+/// counts only the file actually written.
+/// Test: itself.
+#[test]
+fn stray_files_in_the_asset_tree_are_never_deployed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let guard = lock::acquire(tmp.path()).unwrap();
+    let report = reprovision_embedded_locked::<StrayAssetTree>(&guard, tmp.path(), false).unwrap();
+
+    assert!(
+        tmp.path().join("assistant/agent.toml").is_file(),
+        "the legitimate bundled agent must still deploy"
+    );
+    for stray in [".env", "ctrl.toml.lock", "assistant/persona.md.bak"] {
+        assert!(
+            !tmp.path().join(stray).exists(),
+            "{stray} must never be materialised under the deploy target"
+        );
+    }
+    assert_eq!(report.written, 1, "only the bundled file counts as written");
+}
+
+/// Why (#5226): the allowlist is the whole defence, so its edges are pinned
+/// directly — a dotfile, a lock sidecar, an editor backup and a dotted
+/// directory component must all be rejected, and the three extensions the
+/// bundle actually uses must all be accepted at any depth.
+/// Test: itself.
+#[test]
+fn bundled_asset_predicate_fails_closed() {
+    for accepted in [
+        "pm.toml",
+        "assistant/agent.toml",
+        "assistant/persona.md",
+        "izzie/events/gmail.md",
+        "prescriptive.json",
+    ] {
+        assert!(is_bundled_asset(accepted), "{accepted} must be bundled");
+    }
+    for rejected in [
+        ".env",
+        ".env.local",
+        "assistant/.env",
+        "assistant/agent.toml.lock",
+        "assistant/persona.md.bak",
+        ".DS_Store",
+        ".gitignore",
+        "assistant/agent.toml.stale.abc123.bak",
+        "notes",
+        "script.sh",
+    ] {
+        assert!(!is_bundled_asset(rejected), "{rejected} must be rejected");
+    }
+}
+
+/// Every file under `dir`, as a `/`-joined path relative to it.
+fn source_tree_paths(dir: &Path) -> Vec<String> {
+    fn walk(dir: &Path, prefix: &str, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let rel = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            if entry.path().is_dir() {
+                walk(&entry.path(), &rel, out);
+            } else {
+                out.push(rel);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, "", &mut out);
+    out.sort();
+    out
+}
+
+/// Why (#5226): the `#[include]` globs are the build-time half of the filter.
+/// Nothing that fails [`is_bundled_asset`] may reach the embedded set — and the
+/// globs must not have quietly dropped part of the real roster while excluding
+/// strays, which an anchor-file spot check would miss.
+/// What: compares each embedded set against the source tree it is built from,
+/// filtered by the same predicate — so the assertion states the whole expected
+/// file list without hard-coding one that rots on the next roster change. A
+/// stray file a developer happens to have locally is filtered out of BOTH
+/// sides, so it cannot fail this test spuriously.
+/// Test: itself.
+#[test]
+fn embedded_trees_carry_only_bundled_assets() {
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join(".trusty-agents");
+
+    for (tree, embedded) in [
+        ("agents", {
+            let mut v: Vec<String> = BundledAgents::iter().map(|r| r.to_string()).collect();
+            v.sort();
+            v
+        }),
+        ("workflows", {
+            let mut v: Vec<String> = BundledWorkflows::iter().map(|r| r.to_string()).collect();
+            v.sort();
+            v
+        }),
+    ] {
+        let expected: Vec<String> = source_tree_paths(&source_root.join(tree))
+            .into_iter()
+            .filter(|rel| is_bundled_asset(rel))
+            .collect();
+        assert!(!expected.is_empty(), "{tree}: no source assets found");
+        assert_eq!(
+            embedded, expected,
+            "{tree}: the embedded set does not match the bundled source files"
+        );
+    }
+}
+
+/// Why (#5226): the stamp and the write loop must read the SAME bundle. A
+/// stray file that moved the stamp but was never written would leave every
+/// startup seeing a stale stamp and refreshing forever.
+/// What: hashes the stray tree and asserts the digest equals the one its single
+/// bundled file alone produces.
+/// Test: itself.
+#[test]
+fn stray_files_do_not_move_the_bundle_stamp() {
+    let bundled_only = stamp::compute(vec![(
+        "assistant/agent.toml".to_string(),
+        b"[agent]\nname = \"assistant\"\n".to_vec(),
+    )]);
+    assert_eq!(
+        current_bundle_stamp::<StrayAssetTree>().unwrap(),
+        bundled_only,
+        "the stamp must hash the bundled file set, not the raw embed tree"
+    );
+}
+
+/// Every entry under `dir` — files AND directories — as a `/`-joined path
+/// relative to `dir`, paired with its own `symlink_metadata` (#5226).
+///
+/// Why: [`source_tree_paths`] answers "which files are here" and follows
+/// symlinks to do it, so a link is indistinguishable from the file it names.
+/// The two tests below need the opposite: the link ITSELF, unresolved.
+/// What: reads each directory entry, stats it with `symlink_metadata` (which
+/// never traverses the final component), and descends only into a real
+/// directory — so a symlinked directory is reported once and never walked.
+/// Test: `no_symlink_reaches_the_embedded_asset_trees`,
+/// `every_source_file_is_a_bundled_asset_or_known_junk`.
+fn source_tree_entries(
+    dir: &Path,
+    prefix: &str,
+    out: &mut Vec<(String, std::fs::Metadata)>,
+) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let rel = if prefix.is_empty() {
+            name
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let meta = std::fs::symlink_metadata(entry.path())?;
+        let descend = !meta.is_symlink() && meta.is_dir();
+        out.push((rel.clone(), meta));
+        if descend {
+            source_tree_entries(&entry.path(), &rel, out)?;
+        }
+    }
+    Ok(())
+}
+
+/// The two embedded source trees, as `(name, absolute path)` (#5226).
+fn embedded_source_trees() -> [(&'static str, PathBuf); 2] {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(".trusty-agents");
+    [
+        ("agents", root.join("agents")),
+        ("workflows", root.join("workflows")),
+    ]
+}
+
+/// Why (#5226): [`is_bundled_asset`] and the `#[include]` globs both match on
+/// the NAME, and `rust-embed-utils` walks the folder with `.follow_links(true)`
+/// (8.11.0, `lib.rs:18`). A symlink named `persona.md` planted in
+/// `.trusty-agents/agents/` before a release build therefore passes both
+/// filters and embeds its TARGET's bytes into the shipped binary — which is
+/// then written into every user's `~/.trusty-agents/`. A link to `~/.ssh/id_rsa`
+/// is the worst case, and the allowlist cannot see it: only the file type can.
+/// What: walks both source trees without resolving links and fails naming every
+/// entry that is itself a symlink, file and directory alike. A symlinked
+/// directory would embed its whole target subtree, so it is caught the same way.
+/// Test: itself.
+#[test]
+fn no_symlink_reaches_the_embedded_asset_trees() {
+    let mut offenders: Vec<String> = Vec::new();
+    for (tree, dir) in embedded_source_trees() {
+        let mut entries = Vec::new();
+        source_tree_entries(&dir, "", &mut entries)
+            .unwrap_or_else(|e| panic!("{tree}: cannot walk {}: {e}", dir.display()));
+        assert!(!entries.is_empty(), "{tree}: no source entries found");
+        for (rel, meta) in entries {
+            if meta.is_symlink() {
+                offenders.push(format!("{tree}/{rel}"));
+            }
+        }
+    }
+    offenders.sort();
+
+    assert!(
+        offenders.is_empty(),
+        "these entries in the embedded asset trees are symlinks, so a release \
+         build would embed their targets' bytes and write them into every \
+         user's home — replace each with a real file (#5226): {offenders:?}"
+    );
+}
+
+/// Names a stray file is allowed to carry without failing the tripwire below.
+///
+/// Why (#5226): the strays that actually reach these trees are editor and tool
+/// droppings, and they must not be mistaken for a new asset kind nobody wired
+/// up. Everything else — including `.DS_Store` and any dotfile — is either a
+/// bundled asset or a mistake.
+/// What: dotfiles (which covers `.env`, `.gitignore`, `.DS_Store`), `*.bak`
+/// editor backups, and the `*.lock` sidecars `state_writer::atomic_write` drops.
+/// Test: `every_source_file_is_a_bundled_asset_or_known_junk`.
+fn is_known_junk(rel: &str) -> bool {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    name.starts_with('.') || name.ends_with(".bak") || name.ends_with(".lock")
+}
+
+/// Why (#5226): `embedded_trees_carry_only_bundled_assets` filters BOTH of its
+/// comparands through [`is_bundled_asset`], so a real new asset kind — a
+/// `roster.yaml`, say — is subtracted from the embedded set and from the
+/// expected set alike, and that test stays green while the asset silently never
+/// ships. Filtering both sides can only prove the two filters agree; it can
+/// never notice a file neither side was asked about.
+/// What: walks both source trees UNFILTERED and requires every file to be
+/// either accepted by [`is_bundled_asset`] or matched by [`is_known_junk`]. An
+/// unrecognised real extension fails here, at the point where a human can
+/// decide whether to add it to the allowlist and the `#[include]` globs or to
+/// delete it.
+/// Test: itself.
+#[test]
+fn every_source_file_is_a_bundled_asset_or_known_junk() {
+    let mut unrecognised: Vec<String> = Vec::new();
+    for (tree, dir) in embedded_source_trees() {
+        let mut entries = Vec::new();
+        source_tree_entries(&dir, "", &mut entries)
+            .unwrap_or_else(|e| panic!("{tree}: cannot walk {}: {e}", dir.display()));
+        assert!(!entries.is_empty(), "{tree}: no source entries found");
+        for (rel, meta) in entries {
+            if meta.is_dir() {
+                continue;
+            }
+            if !is_bundled_asset(&rel) && !is_known_junk(&rel) {
+                unrecognised.push(format!("{tree}/{rel}"));
+            }
+        }
+    }
+    unrecognised.sort();
+
+    assert!(
+        unrecognised.is_empty(),
+        "these source files are neither bundled assets nor recognised strays, \
+         so they are silently absent from the shipped binary — extend \
+         `is_bundled_asset` and the `#[include]` globs if they belong in the \
+         bundle, or delete them (#5226): {unrecognised:?}"
+    );
+}

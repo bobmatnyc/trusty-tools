@@ -112,7 +112,7 @@
 
 # trusty-search runtime artifacts
 crates/trusty-search/.claude-mpm/
-crates/trusty-console/ui-search/node_modules/
+crates/trusty-search/ui/node_modules/
 
 # trusty-memory runtime artifacts
 crates/trusty-memory/ui/node_modules/
@@ -132,7 +132,7 @@ crates/trusty-console/ui/node_modules/
 crates/trusty-analyze/ui/package-lock.json
 crates/trusty-console/ui/package-lock.json
 crates/trusty-memory/ui/package-lock.json
-crates/trusty-console/ui-search/package-lock.json
+crates/trusty-search/ui/package-lock.json
 
 # Temp directories and analytics databases
 claude-mpm-patch/
@@ -178,3 +178,11 @@ docs/certificates/*.mobileprovision
 # trusty-audit engagement manifests carry provider keys — never commit
 /engagement.toml
 /engagement.toml.lock
+
+# >>> tracked session snapshots (owner ruling 2026-08-31) >>>
+# Session snapshots are shared history/intent for other sessions and harnesses.
+# This re-include must stay BELOW `**/.trusty-mpm/*` and the auto-managed
+# scaffolding block above — last match wins. Covers the ROOT store only;
+# crate-level `.trusty-mpm/` dirs stay ignored.
+!.trusty-mpm/sessions/
+# <<< tracked session snapshots <<<

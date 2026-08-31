@@ -363,6 +363,27 @@ fn unreachable_socket_stderr_is_not_an_empty_list() {
     assert!(!stderr_means_empty_server("lost server"));
 }
 
+/// #3707: tmux's refusal to reuse a live name is the retryable outcome the
+/// managed create path keys on.
+#[test]
+fn duplicate_session_stderr_is_recognised() {
+    assert!(stderr_means_duplicate_session(
+        "duplicate session: tm-proj-01\n"
+    ));
+}
+
+/// #3707: any OTHER non-zero exit stays an error. Reading every failure as a
+/// name collision would send the caller round a rename-and-retry loop against
+/// a server that is actually broken.
+#[test]
+fn unrelated_stderr_is_not_a_name_collision() {
+    assert!(!stderr_means_duplicate_session(
+        "error connecting to /tmp/tmux-501/default (No such file or directory)"
+    ));
+    assert!(!stderr_means_duplicate_session("no server running"));
+    assert!(!stderr_means_duplicate_session("can't create socket"));
+}
+
 #[test]
 fn list_sessions_errors_on_a_host_whose_tmux_server_never_ran() {
     // The end-to-end shape of the gap, through the real method: a tmux that

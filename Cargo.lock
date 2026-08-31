@@ -11508,7 +11508,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-console"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -11715,7 +11715,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm"
-version = "1.5.11"
+version = "1.5.12"
 dependencies = [
  "anyhow",
  "async-trait",

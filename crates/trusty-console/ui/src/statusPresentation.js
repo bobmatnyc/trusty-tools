@@ -7,7 +7,9 @@
  * `available` IS the healthy resting state and the card was reporting the
  * correct state as a fault, with remediation text for a daemon the operator
  * cannot start. `status` alone cannot separate the two readings; the payload's
- * `lifecycle` field does.
+ * `lifecycle` field does. A follow-up (#6416) then dropped the explanatory
+ * hint sentence the fix first shipped with — the plain success badge, the
+ * same one every other ready tool gets, was ruled sufficient on its own.
  *
  * What: one pure function, no DOM and no Svelte, so the wording rule is testable
  * without a browser and `cardDescribedBy` can ask it whether a hint exists
@@ -38,16 +40,17 @@ export function isOnDemand(service) {
 /**
  * The badge label, badge color and hint sentence for one service card.
  *
- * Why: an on-demand member at rest is healthy, so it gets the success color and
- * a sentence that does not mention a daemon. A stopped daemon keeps the amber
- * badge and the sentence it had — that reading was never wrong for a daemon.
+ * Why: an on-demand member at rest is healthy, so it gets the same success
+ * badge and no-hint presentation a running daemon gets. A stopped daemon
+ * keeps the amber badge and the sentence it had — that reading was never
+ * wrong for a daemon.
  *
  * What: `hint.kind` tells the markup which shape to render — `install` carries a
  * command the card sets in a `<code>`, the rest are plain sentences — and
  * `degraded` is the only one that takes the warning color. `null` means the card
  * shows no hint at all.
  *
- * @typedef {{ kind: 'install' | 'stopped' | 'on-demand' | 'degraded', text: string }} CardHint
+ * @typedef {{ kind: 'install' | 'stopped' | 'degraded', text: string }} CardHint
  * @param {{ id?: string, status?: string, hint?: string, lifecycle?: string }} service
  * @returns {{ label: string, toneVar: string, hint: CardHint | null }}
  */
@@ -79,16 +82,13 @@ export function cardPresentation(service) {
 
   if (status === 'available') {
     // #6416: the whole point of the lifecycle field. An on-demand member with
-    // its binary installed has nothing left to start, so this is not a warning.
+    // its binary installed has nothing left to start, so this is not a
+    // warning — it gets the same success badge a running daemon gets, and no
+    // hint sentence, same as `running` below. #6416 (follow-up): the owner
+    // ruled the explanatory hint unnecessary — the plain success badge reads
+    // as ready on its own.
     return isOnDemand(service)
-      ? {
-          label: 'Ready',
-          toneVar: 'var(--trusty-success)',
-          hint: {
-            kind: 'on-demand',
-            text: 'Installed and ready. This tool runs on demand — there is no daemon to start.',
-          },
-        }
+      ? { label: 'Ready', toneVar: 'var(--trusty-success)', hint: null }
       : {
           label: 'Available',
           toneVar: 'var(--trusty-warning)',

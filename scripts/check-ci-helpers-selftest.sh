@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # check-ci-helpers-selftest.sh — regression fixtures for the CI helper scripts
-# (issues #4179, #4468, #4421, #4688, #5407).
+# (issues #4179, #4468, #4421, #4688, #5407, #6478).
 #
 # Why: the three helpers this covers each encode a decision that is invisible
 #   until it is WRONG in production — a cancelled run reported as green, a
@@ -18,7 +18,9 @@
 #                        the #4688 attribution pair — one tree run twice, once
 #                        from a frozen stale base (misattributes) and once from
 #                        the live base branch (does not) — and the workflow
-#                        wiring that decides which of the two CI gets.
+#                        wiring that decides which of the two CI gets, plus the
+#                        #6478 oversized-[package] pair, whose manifests are
+#                        large enough to break a sed-into-grep pipe.
 #   ci.yml `changes` job: that every gate verdict comes from a diff, never from
 #                        the PR activity type, and that the push path's
 #                        no-before-SHA arms still fail closed (#5407).
@@ -254,7 +256,7 @@ chmod +x "${STUB_DIR}/published.sh" "${STUB_DIR}/notpublished.sh" \
 
 # Build a throwaway repo so the gate sees a real merge base and a real diff.
 make_fixture_repo() {
-  local dir="$1" version_at_head="$2" publish_line="$3"
+  local dir="$1" version_at_head="$2" publish_line="$3" pad_lines="${4:-0}"
   rm -rf "${dir}"
   mkdir -p "${dir}/crates/pinned-crate/src"
   git -C "${dir}" init -q
@@ -266,6 +268,16 @@ name = "pinned-crate"
 version = "1.0.0"
 ${publish_line}
 EOF
+  # #6478: filler INSIDE the [package] block. The readers this gate used to
+  # carry piped sed into an early-exiting grep, and the pipe only broke once
+  # the block outgrew the buffer between the two processes — so a fixture that
+  # bites has to exceed it. GNU sed flushes at 4 KiB; the pipe buffer itself is
+  # 64 KiB on both Linux and macOS, which is what BSD sed needs to fail too.
+  if [ "${pad_lines}" -gt 0 ]; then
+    awk -v n="${pad_lines}" \
+      'BEGIN { for (i = 0; i < n; i++) print "# release-note filler that grows the [package] block" }' \
+      >>"${dir}/crates/pinned-crate/Cargo.toml"
+  fi
   echo "// base" >"${dir}/crates/pinned-crate/src/lib.rs"
   git -C "${dir}" add -A
   git -C "${dir}" commit -qm base
@@ -317,6 +329,54 @@ assert_eq "publish = false -> skipped, pass" "0" \
 make_fixture_repo "${STUB_DIR}/offline" "1.0.0" ""
 assert_eq "registry unreachable -> warn, pass" "0" \
   "$(run_gate "${STUB_DIR}/offline" "${STUB_DIR}/unreachable.sh")"
+
+# --- Oversized [package] block (#6478) ----------------------------------------
+# The gate read manifests through `sed -n '/^\[package\]/,/^\[[^p]/p' | grep`.
+# grep exits on its first match, sed's remaining writes hit the closed pipe, and
+# `set -o pipefail` promotes that to a failed pipeline — exit 4 from GNU sed,
+# 141 from BSD sed. The gate died mid-run, before any verdict, once a crate's
+# [package] block outgrew the buffer between the two: trusty-common's hit 6755
+# bytes and took PR #6474's required check down twice. Exit code alone is not
+# the assertion — a gate can exit 0 having printed nothing — so each case also
+# demands the verdict line the crate has earned.
+#
+# 4000 filler lines is ~216 KiB, past the 64 KiB pipe buffer, so these bite on
+# BSD sed as well as GNU sed rather than passing on a developer's Mac.
+PAD_LINES=4000
+
+# gate_output <dir> <stub> — the gate's combined output for one fixture repo.
+gate_output() {
+  local dir="$1" stub="$2"
+  mkdir -p "${dir}/scripts/lib"
+  cp scripts/check-pr-version-bump.sh "${dir}/scripts/check-pr-version-bump.sh"
+  cp scripts/lib/source_class.sh "${dir}/scripts/lib/source_class.sh"
+  (
+    cd "${dir}" &&
+      PR_VERSION_BUMP_BASE=base-ref \
+        PR_VERSION_BUMP_REGISTRY_STUB="${stub}" \
+        bash scripts/check-pr-version-bump.sh 2>&1
+  )
+}
+
+make_fixture_repo "${STUB_DIR}/oversized" "1.0.1" "" "${PAD_LINES}"
+assert_eq "oversized [package] block -> pass, not exit 4" "0" \
+  "$(run_gate "${STUB_DIR}/oversized" "${STUB_DIR}/published.sh")"
+assert_eq "oversized [package] block -> bump verdict printed" "1" \
+  "$(gate_output "${STUB_DIR}/oversized" "${STUB_DIR}/published.sh" |
+    grep -c 'version bumped 1.0.0 -> 1.0.1' || true)"
+
+make_fixture_repo "${STUB_DIR}/oversized-private" "1.0.0" "publish = false" "${PAD_LINES}"
+assert_eq "oversized [package] block, publish = false -> skip verdict" "1" \
+  "$(gate_output "${STUB_DIR}/oversized-private" "${STUB_DIR}/published.sh" |
+    grep -c 'SKIP.*publish = false' || true)"
+
+# Closure condition 1 of #6478, asserted on the shape as well as the behavior:
+# no manifest read may reintroduce the sed-into-grep pipe at a size that happens
+# to fit the buffer. Comment lines are stripped first — the gate's own header
+# quotes the retired sed range to explain why it went.
+assert_eq "no sed-into-grep manifest read remains" "0" \
+  "$(grep -vE '^[[:space:]]*#' scripts/check-pr-version-bump.sh |
+    grep -cF 'package\]/,/' || true)"
 
 # --- Attribution (#4688) ------------------------------------------------------
 # The shape that failed docs-only PR #4666: the base branch itself changes a

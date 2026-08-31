@@ -138,6 +138,9 @@ pub mod push_guard;
 // `tm reinstall`: the two-hop asset redeploy across every deploy destination,
 // and the install-provenance route its `--binary` flag takes.
 pub mod binary_reinstall;
+// #4462: whether a `--path` install source is behind `origin/main` — the one
+// global `tm` binary regresses every session at once when it is.
+pub mod install_freshness;
 pub mod reinstall;
 pub mod scaffold_gitignore;
 pub mod session;
