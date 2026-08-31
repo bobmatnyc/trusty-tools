@@ -67,23 +67,24 @@ use tracing::warn;
 use crate::models::{Finding, UNKNOWN_FILE_PLACEHOLDER};
 use crate::pipeline::diff_analyzer::models::{FileDisposition, FilteredDiff};
 
-/// The five inline bracket-citation forms the system prompt mandates
-/// (`[code: … ]`, `[jira: … ]`, `[gh: … ]`, `[apex: … ]`, `[confluence: … ]`).
+/// The four inline bracket-citation forms the system prompt mandates
+/// (`[code: … ]`, `[jira: … ]`, `[gh: … ]`, `[confluence: … ]`).
 ///
 /// Why: used to strip ALL bracket citations before the generic backtick/quote
 /// scan, so a citation's `path:line` locator token is never mistaken for a
-/// free-text code quote. `jira:`/`gh:`/`apex:`/`confluence:` citations ground
-/// in context (ticket/PR/spec/wiki-page text) this module has no index for and
+/// free-text code quote. `jira:`/`gh:`/`confluence:` citations ground
+/// in context (ticket/PR/wiki-page text) this module has no index for and
 /// are left untouched (fail-open); `code:` citations are extracted and verified
 /// SEPARATELY, before this strip runs (see [`CODE_CITATION_RE`]).
 /// This list and the prompt's grammar section
 /// (`assets/prompts/system_prompt_stock.md`) must stay in step — a form the
 /// prompt permits but this regex omits is scanned as an ungrounded quote.
+/// #4999: the `apex:` form was dropped when APEX retrieval was removed.
 /// Test: `extract_spans_skips_prompt_mandated_citation_grammar`,
 /// `extract_spans_skips_confluence_citation_form`.
 static BRACKET_CITATION_RE: LazyLock<Regex> = LazyLock::new(|| {
-    // #5022: `confluence:` is the fifth form — code-intelligence emits it.
-    Regex::new(r"(?i)\[(?:code|jira|gh|apex|confluence):[^\]]*\]")
+    // #5022: `confluence:` is a form code-intelligence emits.
+    Regex::new(r"(?i)\[(?:code|jira|gh|confluence):[^\]]*\]")
         .expect("bracket-citation regex is a valid literal")
 });
 
@@ -542,7 +543,7 @@ struct ExtractedCitations {
 /// What: for each `[code: `path:line` — "excerpt"]` match, splits the locator
 /// into path + optional line and pulls the excerpt from the remainder via
 /// quote-delimited scanning; then strips ALL FOUR bracket forms (`code`,
-/// `jira`, `gh`, `apex`) and scans the remainder for backtick/double/single
+/// `jira`, `gh`, `confluence`) and scans the remainder for backtick/double/single
 /// quoted spans ≥ [`MIN_SPAN_LEN`] chars. `suggested_replacement` and
 /// `suggestion` are deliberately excluded (as before #4042) — they are the
 /// PROPOSED fix, which by design need not appear in the diff.

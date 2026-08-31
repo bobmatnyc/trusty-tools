@@ -132,7 +132,7 @@ Status tags:
 | **Confluence context source** | ✅ | `integrations/context/confluence.rs`; fail-open |
 | **GitHub Issues context source** | ✅ | `integrations/context/github_issues.rs`; fail-open |
 | **Intent/method-conformance context source** | ✅ | `integrations/context/conformance.rs`; checks PR intent vs method spec |
-| **APEX indexed path** | ✅ | `integrations/apex_context.rs`; APEX queried via trusty-search `apex_index` config |
+| **APEX indexed path** | ❌ removed (#4999) | Dropped by owner ruling — APEX context was cited 0/69 audited findings at ~0.001 relevance. See `crates/trusty-review/changelog.d/4999-drop-apex-retrieval.md` |
 | **Voice packages + universal principles** (3-layer prompt composition) | ✅ | Reviewer system prompt includes voice layer + universal engineering principles |
 | JIRA REST client (full upsert/tracker) | 🔵 | Tracked in #550 |
 | Slack notifications | 🔵 | Tracked in #550 |
@@ -261,7 +261,7 @@ An implementation is spec-conformant only when ALL of the following hold:
 - [ ] Noisy fixtures collapsed at diff-fetch stage; Stage A/B/C diff filtering present. (L12)
 - [ ] Cross-reference blast-radius search in parallel context retrieval. (L13)
 - [ ] LLM provider trait with co-equal Bedrock + OpenRouter, per-run/per-role model selection. (binding decision #2)
-- [ ] APEX treated as a repo in the primary search index. (binding decision #3)
+- [x] ~~APEX treated as a repo in the primary search index. (binding decision #3)~~ — shipped then removed by owner ruling (#4999): 0/69 citations at ~0.001 relevance.
 - [ ] Runs as both CLI one-shot and webhook server from one binary. (binding decision #4)
 
 ---
@@ -280,7 +280,7 @@ An implementation is spec-conformant only when ALL of the following hold:
 | **Tracker issue** | One GitHub issue per PR, upserted on each re-review, carrying the verdict in its title |
 | **Suppression** | Mechanism to silence findings by pattern (label-driven or repo-config). Fail-open |
 | **Blast radius / cross-reference** | Searching unchanged files that reference symbols a PR deleted/modified |
-| **APEX-as-repo** | APEX product specs indexed alongside code repos in trusty-search, queried via the same index |
+| **APEX-as-repo** | APEX product specs indexed alongside code repos in trusty-search, queried via the same index (retrieval removed in #4999) |
 | **Inference profile prefix** | `us.` prefix required on Bedrock cross-region model IDs (e.g. `us.anthropic.claude-sonnet-4-6`) |
 | **Compile-break BLOCK rule** | Any `High`-effort finding (including deleted-symbol compile breaks) triggers BLOCK floor via grade derivation |
 

@@ -485,10 +485,10 @@ pub async fn run_review(
             }
         };
 
-    // ── Step 5: gather context in parallel (search/analyze/APEX + external) ──
+    // ── Step 5: gather context in parallel (search/analyze + external) ──
     // All sources are FAIL-OPEN: errors contribute nothing, never block the review
-    // (distinct from the #590 required gate above).  APEX (#550 PR-B) is gated by
-    // config.apex_index: empty = disabled.
+    // (distinct from the #590 required gate above).
+    // #4999: APEX retrieval was dropped by owner ruling (0/69 citations).
     let title = &pr_meta.title;
     let body = &pr_meta.body;
     let (mut context, external_context) = tokio::join!(

@@ -1,7 +1,7 @@
 //! Shared test helpers for the review prompt test suite.
 //!
 //! Why: `sample_meta()`, `empty_context()`, and `stock_voice()` were duplicated
-//! across `prompt_tests.rs`, `prompt_tests_apex.rs`, and `prompt_voice_tests.rs`.
+//! across `prompt_tests.rs` and `prompt_voice_tests.rs`.
 //! Duplication meant a change to `ReviewPrMeta` required three edits; it also
 //! inflated each file toward the 500-line cap.  A single shared module eliminates
 //! the duplication and is the canonical source for these fixtures.
@@ -32,7 +32,7 @@ pub(super) fn sample_meta() -> ReviewPrMeta {
 
 /// Empty `ReviewContext` with all optional slices defaulted to empty.
 ///
-/// Why: most prompt tests do not care about search/hotspot/smell/apex context;
+/// Why: most prompt tests do not care about search/hotspot/smell context;
 /// this helper makes the intent explicit and saves per-test boilerplate.
 /// What: returns `ReviewContext::default()`.
 /// Test: exercised by every test that passes this to `build_review_prompt`.

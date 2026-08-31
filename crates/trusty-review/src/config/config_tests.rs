@@ -234,68 +234,36 @@ fn load_github_installations_parses_known_orgs() {
     }
 }
 
-// ── APEX config tests (Phase 6 PR-B, REV-420, #550) ─────────────────────
+// ── APEX retrieval removed (#4999) ──────────────────────────────────────
 
-/// Verify `apex_index` defaults to empty when env var is unset.
+/// #4999: the former APEX config env vars are inert — a deployment still
+/// exporting them loads a normal config and their values reach no field.
 ///
-/// Why: REV-420 — empty `apex_index` means APEX is disabled; the pipeline must
-/// not query any index when the operator has not configured one.
-/// What: loads config with no env override; asserts `apex_index` is empty.
-/// Test: this test; no network.
+/// Why: the owner ruling (2026-08-31) dropped APEX retrieval; the config keys
+/// `TRUSTY_SEARCH_APEX_INDEX` / `TRUSTY_REVIEW_APEX_PATH_PREFIXES` are no longer
+/// read.  Operators whose environment still sets them must not crash or see the
+/// value bleed into an unrelated field (e.g. `search_index`).
+/// What: sets both APEX env vars to sentinel values, loads the config, and
+/// asserts it builds and that no observable string field equals the sentinel.
+/// Test: this test; `#[serial_test::serial]` for env isolation, no network.
 #[test]
-fn apex_index_defaults_to_empty() {
-    // Unset env var → empty string → APEX disabled.
-    // (We cannot guarantee the var is absent in all CI contexts, but we can
-    // assert the *shape* of whatever value is present is a string.)
+#[serial_test::serial]
+fn apex_env_vars_are_ignored() {
+    const SENTINEL: &str = "apex-removed-#4999-sentinel";
+    unsafe {
+        std::env::set_var("TRUSTY_SEARCH_APEX_INDEX", SENTINEL);
+        std::env::set_var("TRUSTY_REVIEW_APEX_PATH_PREFIXES", "apex/,specs/");
+    }
     let config = ReviewConfig::from_env_and_file(None, None);
-    assert!(
-        config.apex_index.is_empty(),
-        "apex_index must default to empty"
-    );
-}
-
-/// Verify `apex_path_prefixes` parses a comma-separated env var correctly.
-///
-/// Why: REV-420 operators set `TRUSTY_REVIEW_APEX_PATH_PREFIXES=apex/,specs/`
-/// to scope APEX retrieval to specific corpus sub-paths; this must parse
-/// correctly into a `Vec<String>`.
-/// What: exercises `load_apex_path_prefixes` logic directly via string splitting.
-/// Test: this test; no network.
-#[test]
-fn apex_path_prefixes_parses_csv() {
-    // Mirror the parsing logic without touching env vars (safe for parallel
-    // test runners).
-    let raw = "apex/,specs/ , docs/adr/ , , ";
-    let parsed: Vec<String> = raw
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    assert_eq!(
-        parsed,
-        vec!["apex/", "specs/", "docs/adr/"],
-        "comma-separated prefixes must be trimmed and empty entries dropped"
-    );
-}
-
-/// Verify `apex_path_prefixes` is empty when the env var is unset or blank.
-///
-/// Why: no prefix filtering means all hits from `apex_index` are treated as
-/// APEX; the operator opts into prefix filtering by setting the env var.
-/// What: asserts that loading from env with no var set returns an empty vec.
-/// Test: this test; no network.
-#[test]
-fn apex_path_prefixes_defaults_to_empty() {
-    // The `load_apex_path_prefixes` function returns empty when the var is
-    // absent.  We test the parsing helper directly.
-    let result: Vec<String> = ""
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    assert!(
-        result.is_empty(),
-        "empty input must produce empty prefix list"
+    unsafe {
+        std::env::remove_var("TRUSTY_SEARCH_APEX_INDEX");
+        std::env::remove_var("TRUSTY_REVIEW_APEX_PATH_PREFIXES");
+    }
+    // The APEX index env var must not have been consumed as the code-search
+    // index (or any other string field we can observe).
+    assert_ne!(
+        config.search_index, SENTINEL,
+        "TRUSTY_SEARCH_APEX_INDEX must be ignored, not routed into search_index"
     );
 }
 

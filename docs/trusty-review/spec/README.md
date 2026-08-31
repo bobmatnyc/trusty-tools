@@ -9,7 +9,7 @@
 > implementation state. Several features previously marked 🔵 (designed-not-built)
 > or absent are now marked ✅ (implemented): per-finding LLM verification round,
 > verifier liveness gate + `verification_model_error` alarm, JIRA/Confluence/GitHub
-> Issues/conformance context sources, APEX indexed path, 3-layer prompt composition,
+> Issues/conformance context sources, 3-layer prompt composition,
 > 3-layer dedup (in-process + per-SHA + redb), live GitHub PR review comment posting,
 > review footer (#728), fail-closed on parse/truncation (#1241), MCP server
 > (`review_pr`/`review_diff`/`review_health`), full longitudinal contributor profile

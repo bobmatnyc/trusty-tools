@@ -218,8 +218,8 @@ use crate::pipeline::letter_grade::{Grade, reconcile_grade_with_verdict, verdict
 /// Why: the original #PR84 fix accepted ANY non-blank `source_citation` string,
 /// so a model could re-open the BLOCK floor with a junk/vague string (e.g. "see
 /// the docs", "trust me") that carries no verifiable grounding. Requiring the
-/// citation to match one of the four grammar shapes the prompt actually teaches
-/// (`code:`, `jira:`, `apex:`, `gh:` — see the inline citation grammar in the
+/// citation to match one of the grammar shapes the prompt actually teaches
+/// (`code:`, `jira:`, `gh:` — see the inline citation grammar in the
 /// system prompt) closes that reopening. This is a SHAPE check only — it does
 /// NOT cross-reference the cited identifier against the actual diff/context
 /// (that would require plumbing the diff/context into `derive_verdict`, a much

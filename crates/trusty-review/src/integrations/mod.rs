@@ -17,8 +17,8 @@
 //!     `null_search_client` by the same `--source-root` diff-only fallback
 //!     (#2994).
 //!   - `context` — pluggable external context sources (JIRA / Confluence /
-//!     GitHub Issues today; APEX/knowledgebase in PR-B).  Best-effort / fail-open
-//!     enrichment, distinct from the REQUIRED search/analyze gate (#550, #590).
+//!     GitHub Issues).  Best-effort / fail-open enrichment, distinct from the
+//!     REQUIRED search/analyze gate (#550, #590).
 //!   - `subprocess_analyze_client` — on-demand `AnalyzeClient` that spawns
 //!     `trusty-analyze` as a subprocess instead of calling a running daemon.
 //!     (closes #632)
@@ -28,7 +28,6 @@
 //! Test: each submodule carries its own unit tests.
 
 pub mod analyze_client;
-pub mod apex_context;
 pub mod context;
 pub mod github;
 pub mod health;
@@ -43,7 +42,6 @@ pub use analyze_client::{
     AnalyzeClient, AnalyzeClientError, AnalyzeHealthResponse, AnalyzeIndexInfo, ComplexityHotspot,
     Smell,
 };
-pub use apex_context::{ApexContextResult, fetch_apex_context};
 pub use context::{
     ConfluenceSource, ContextSection, ContextSnippet, ContextSource, ContextSourceError,
     ContextSourcesConfig, ContextSourcesFileConfig, GithubIssuesSource, JiraSource, RetrievalMode,

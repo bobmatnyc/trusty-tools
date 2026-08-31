@@ -193,7 +193,7 @@ pub struct ContextFileConfig {
     /// is unavailable.
     pub require_analyze: Option<bool>,
     /// `[context.sources.*]` — per-source enable/mode for the external context
-    /// sources (JIRA / Confluence / GitHub Issues; APEX in PR-B).  Defaults to an
+    /// sources (JIRA / Confluence / GitHub Issues).  Defaults to an
     /// all-default (auto-disable-without-creds) configuration when absent.
     #[serde(default)]
     pub sources: ContextSourcesFileConfig,

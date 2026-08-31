@@ -100,7 +100,6 @@ crates/trusty-review/
     │   └── prompt_tests.rs
     ├── integrations/
     │   ├── mod.rs
-    │   ├── apex_context.rs fetch_apex_context() — APEX indexed path ✅
     │   ├── search_client.rs  HttpSearchClient (trusty-search :7878)
     │   ├── analyze_client.rs HttpAnalyzeClient (trusty-analyze :7879)
     │   ├── context/        context orchestrator (JIRA / Confluence / GitHub Issues / conformance) ✅

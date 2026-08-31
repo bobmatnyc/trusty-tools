@@ -402,7 +402,7 @@ fn code_citation_re_captures_path_line_and_excerpt() {
 #[test]
 fn extract_spans_skips_prompt_mandated_citation_grammar() {
     // The non-`code:` bracket forms are stripped before generic quote
-    // extraction — `jira`/`gh`/`apex` citations are out of this module's scope.
+    // extraction — `jira`/`gh`/`confluence` citations are out of this module's scope.
     let f = Finding::new(
         "f",
         "k",
