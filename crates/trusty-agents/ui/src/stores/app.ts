@@ -433,6 +433,28 @@ export function hydrateMessages(projectId: string, history: Message[]): boolean 
  * What: prepends `older` to `projectId`'s list. No-op for an empty page.
  * Test: `prependMessages_puts_older_turns_first` in `app.hydrate.test.ts`.
  */
+/**
+ * Why (#4278): the "load earlier" control needs three facts the chat view
+ * cannot derive from `messages` — whose history is being paged, how far back
+ * the client has already read, and whether anything older exists. Keeping them
+ * in one store means `ChatView` renders the affordance off `hasMore` without
+ * knowing anything about the history API.
+ * What: `null` until rehydration runs. `start` is the ABSOLUTE index the server
+ * reported for the oldest message held, which is exactly what the next request
+ * passes as `until`.
+ */
+export interface ChatHistoryCursor {
+  agentId: string;
+  speaker: string;
+  start: number;
+  hasMore: boolean;
+}
+
+export const chatHistoryCursor = writable<ChatHistoryCursor | null>(null);
+
+/** True while a "load earlier" fetch is in flight, to disable the control. */
+export const loadingOlderChat = writable<boolean>(false);
+
 export function prependMessages(projectId: string, older: Message[]): void {
   if (older.length === 0) return;
   messages.update((map) => {

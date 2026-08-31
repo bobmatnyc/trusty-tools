@@ -29,7 +29,12 @@ import {
   resolveRehydrationTarget,
   type ChatHistoryPage,
 } from './chatHistory';
-import { addMessage, messages, type Message } from '../stores/app';
+import {
+  addMessage,
+  chatHistoryCursor,
+  messages,
+  type Message,
+} from '../stores/app';
 
 /** A backend page as the route serializes it. */
 function page(overrides: Partial<ChatHistoryPage> = {}): ChatHistoryPage {
@@ -39,6 +44,7 @@ function page(overrides: Partial<ChatHistoryPage> = {}): ChatHistoryPage {
       { role: 'user', content: 'what did we decide?' },
       { role: 'assistant', content: 'we shipped the fragment gate' },
     ],
+    start: 0,
     total: 2,
     has_more: false,
     updated_at: '2026-08-30T12:00:00Z',
@@ -51,9 +57,9 @@ function page(overrides: Partial<ChatHistoryPage> = {}): ChatHistoryPage {
  * reads back as a `string` — `svelte-check` rejects indexing an untyped mock's
  * empty-tuple call args.
  */
-function stubFetch(body: unknown, ok = true) {
+function stubFetch(body: unknown, ok = true, status = ok ? 200 : 503) {
   const spy = vi.fn((_url: string, _init?: RequestInit) =>
-    Promise.resolve({ ok, json: async () => body }),
+    Promise.resolve({ ok, status, json: async () => body }),
   );
   vi.stubGlobal('fetch', spy);
   return spy;
@@ -61,6 +67,7 @@ function stubFetch(body: unknown, ok = true) {
 
 beforeEach(() => {
   messages.set(new Map());
+  chatHistoryCursor.set(null);
   vi.unstubAllGlobals();
 });
 
@@ -74,13 +81,45 @@ describe('rehydrateChat', () => {
 
     const result = await rehydrateChat('izzie', 'Izzie', 'ctrl');
 
-    expect(result).toEqual({ seeded: 2, hasMore: false });
+    expect(result).toEqual({ seeded: 2, hasMore: false, reason: undefined });
     const restored = get(messages).get('ctrl') ?? [];
     expect(restored.map((m) => m.content)).toEqual([
       'what did we decide?',
       'we shipped the fragment gate',
     ]);
     expect(restored.map((m) => m.role)).toEqual(['user', 'assistant']);
+  });
+
+  test('rehydrateChat_surfaces_the_backend_reason', async () => {
+    // Without this the caller cannot tell a first-run empty conversation from a
+    // broken one — every failure mode renders identically.
+    stubFetch(
+      page({
+        available: false,
+        messages: [],
+        reason: 'this agent binds no memory palace',
+      }),
+    );
+    const result = await rehydrateChat('plain', 'Assistant', 'ctrl');
+    expect(result.reason).toBe('this agent binds no memory palace');
+  });
+
+  test('rehydrateChat_surfaces_a_transport_failure_as_a_reason', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new Error('ECONNREFUSED');
+      }),
+    );
+    const result = await rehydrateChat('izzie', 'Izzie', 'ctrl');
+    expect(result.seeded).toBe(0);
+    expect(result.reason).toContain('unreachable');
+  });
+
+  test('rehydrateChat_surfaces_an_http_error_as_a_reason', async () => {
+    stubFetch({}, false);
+    const result = await rehydrateChat('izzie', 'Izzie', 'ctrl');
+    expect(result.reason).toContain('HTTP 503');
   });
 
   test('rehydrateChat_is_a_noop_when_nothing_is_persisted', async () => {
@@ -90,7 +129,8 @@ describe('rehydrateChat', () => {
 
     const result = await rehydrateChat('plain', 'Assistant', 'ctrl');
 
-    expect(result).toEqual({ seeded: 0, hasMore: false });
+    expect(result.seeded).toBe(0);
+    expect(result.hasMore).toBe(false);
     expect(get(messages).get('ctrl')).toBeUndefined();
   });
 
@@ -113,7 +153,7 @@ describe('rehydrateChat', () => {
 
   test('rehydrateChat_reports_more_when_older_turns_remain', async () => {
     stubFetch(page({ has_more: true, total: 400 }));
-    await expect(rehydrateChat('izzie', 'Izzie', 'ctrl')).resolves.toEqual({
+    await expect(rehydrateChat('izzie', 'Izzie', 'ctrl')).resolves.toMatchObject({
       seeded: 2,
       hasMore: true,
     });
@@ -121,24 +161,31 @@ describe('rehydrateChat', () => {
 });
 
 describe('loadOlderChat', () => {
+  /** Arm the cursor the way a completed `rehydrateChat` would. */
+  function armCursor(start: number, hasMore = true) {
+    chatHistoryCursor.set({ agentId: 'izzie', speaker: 'Izzie', start, hasMore });
+  }
+
   test('loadOlderChat_prepends_the_previous_page', async () => {
     addMessage('ctrl', {
-      id: 'history-0',
+      id: 'history-4',
       role: 'user',
       content: 'newest',
       timestamp: 1,
     });
+    armCursor(4);
     stubFetch(
       page({
         messages: [{ role: 'user', content: 'older' }],
-        total: 3,
+        start: 3,
+        total: 5,
         has_more: true,
       }),
     );
 
-    const result = await loadOlderChat('izzie', 'Izzie', 'ctrl', 1);
+    const result = await loadOlderChat('ctrl');
 
-    expect(result).toEqual({ seeded: 1, hasMore: true });
+    expect(result).toMatchObject({ seeded: 1, hasMore: true });
     // Older turns must land ABOVE what is already rendered.
     expect((get(messages).get('ctrl') ?? []).map((m) => m.content)).toEqual([
       'older',
@@ -146,10 +193,80 @@ describe('loadOlderChat', () => {
     ]);
   });
 
+  test('loadOlderChat_advances_the_cursor', async () => {
+    armCursor(4);
+    stubFetch(
+      page({ messages: [{ role: 'user', content: 'older' }], start: 3, has_more: true }),
+    );
+
+    await loadOlderChat('ctrl');
+
+    // The next request must ask for the window ending where this one began.
+    expect(get(chatHistoryCursor)).toEqual({
+      agentId: 'izzie',
+      speaker: 'Izzie',
+      start: 3,
+      hasMore: true,
+    });
+  });
+
+  test('loadOlderChat_sends_the_cursor_as_until', async () => {
+    armCursor(6);
+    const spy = stubFetch(page({ messages: [{ role: 'user', content: 'x' }], start: 2 }));
+    await loadOlderChat('ctrl');
+    expect(spy.mock.calls[0][0]).toContain('until=6');
+  });
+
+  test('loadOlderChat_is_a_noop_without_a_cursor', async () => {
+    const spy = stubFetch(page());
+    await expect(loadOlderChat('ctrl')).resolves.toEqual({ seeded: 0, hasMore: false });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  test('loadOlderChat_is_a_noop_once_the_cursor_is_exhausted', async () => {
+    armCursor(0, false);
+    const spy = stubFetch(page());
+    await loadOlderChat('ctrl');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  test('loadOlderChat_disarms_the_cursor_at_the_start_of_history', async () => {
+    armCursor(2);
+    stubFetch(page({ messages: [{ role: 'user', content: 'oldest' }], start: 0, has_more: false }));
+    await loadOlderChat('ctrl');
+    expect(get(chatHistoryCursor)?.hasMore).toBe(false);
+  });
+
   test('loadOlderChat_ids_do_not_collide_with_the_first_page', async () => {
-    stubFetch(page({ messages: [{ role: 'user', content: 'older' }], total: 3 }));
-    await loadOlderChat('izzie', 'Izzie', 'ctrl', 2);
-    expect((get(messages).get('ctrl') ?? [])[0].id).toBe('history-2-0');
+    armCursor(4);
+    stubFetch(page({ messages: [{ role: 'user', content: 'older' }], start: 3 }));
+    await loadOlderChat('ctrl');
+    expect((get(messages).get('ctrl') ?? [])[0].id).toBe('history-3-0');
+  });
+});
+
+describe('the cursor rehydrateChat arms', () => {
+  test('rehydrateChat_arms_the_cursor_from_the_served_start', async () => {
+    stubFetch(page({ start: 98, total: 100, has_more: true }));
+    await rehydrateChat('izzie', 'Izzie', 'ctrl');
+    expect(get(chatHistoryCursor)).toEqual({
+      agentId: 'izzie',
+      speaker: 'Izzie',
+      start: 98,
+      hasMore: true,
+    });
+  });
+
+  test('rehydrateChat_does_not_arm_the_cursor_when_the_seed_was_refused', async () => {
+    // Live messages won the bucket, so paging older into it would interleave a
+    // restored conversation with an unrelated live one.
+    addMessage('ctrl', { id: 'live-1', role: 'user', content: 'typed', timestamp: 1 });
+    stubFetch(page({ start: 98, has_more: true }));
+
+    const result = await rehydrateChat('izzie', 'Izzie', 'ctrl');
+
+    expect(result.hasMore).toBe(false);
+    expect(get(chatHistoryCursor)).toBeNull();
   });
 });
 
@@ -164,7 +281,19 @@ describe('fetchChatHistory', () => {
     const url = spy.mock.calls[0][0];
     expect(url).toContain('/api/agents/izzie/chat-history');
     expect(url).toContain(`limit=${DEFAULT_HISTORY_LIMIT}`);
-    expect(url).toContain('before=0');
+  });
+
+  test('fetchChatHistory_sends_until_only_when_paging_back', async () => {
+    // The newest page must NOT pin an index — omitting `until` is what lets the
+    // server serve the true newest page including turns that landed since.
+    const first = stubFetch(page());
+    await fetchChatHistory('izzie');
+    expect(first.mock.calls[0][0]).not.toContain('until=');
+
+    const second = stubFetch(page());
+    await fetchChatHistory('izzie', 50, 0);
+    // `until=0` is a real cursor value (the start of history), not "unset".
+    expect(second.mock.calls[0][0]).toContain('until=0');
   });
 
   test('fetchChatHistory_encodes_the_agent_name', async () => {
@@ -200,13 +329,13 @@ describe('fetchChatHistory', () => {
     // The route's contract is a shape, but a proxy or a version skew can hand
     // back something else; a missing `messages` array must not throw.
     stubFetch({ available: true });
-    await expect(fetchChatHistory('izzie')).resolves.toEqual({
+    await expect(fetchChatHistory('izzie')).resolves.toMatchObject({
       available: true,
       messages: [],
+      start: 0,
       total: 0,
       has_more: false,
       updated_at: null,
-      reason: undefined,
     });
   });
 });

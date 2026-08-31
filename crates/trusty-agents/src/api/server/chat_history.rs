@@ -49,6 +49,7 @@
 //! Test: `super::tests::chat_history`.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use axum::{
     Json,
@@ -62,8 +63,7 @@ use serde_json::{Value, json};
 use super::agent_kg::{describe_failure, parse_stores};
 use super::agent_patch::resolve_agent_paths;
 use super::state::AppState;
-use crate::ctrl::pm_task::dispatch::persona_memory::session_id_for;
-use crate::stores::status::PROBE_TIMEOUT;
+use crate::ctrl::pm_task::session_id_for;
 
 /// Messages returned when the client names no `limit` — roughly 50 turns.
 const DEFAULT_LIMIT: usize = 100;
@@ -71,17 +71,22 @@ const DEFAULT_LIMIT: usize = 100;
 /// render an unbounded session in one paint.
 const MAX_LIMIT: usize = 500;
 
-/// `?limit=<n>&before=<n>`.
+/// `?limit=<n>&until=<absolute exclusive end index>`.
 ///
-/// `before` is the number of most-recent messages the client ALREADY holds —
-/// an offset counted from the newest end, not a timestamp. A cursor counted
-/// from the end is stable under appends: new turns land beyond the window the
-/// client is paging backwards through, so lazy-loading older messages cannot
-/// skip or duplicate one because a turn arrived mid-scroll.
+/// `until` is an ABSOLUTE index into the session history, not an offset from
+/// the newest end. That distinction is the whole correctness argument: the
+/// history is append-only, so an existing message's index never moves, and a
+/// page addressed by absolute index returns the same messages no matter how
+/// many turns arrived since the client last asked. An offset-from-the-end
+/// cursor does NOT have that property — k appends between two requests shift
+/// the window by k and replay k messages the client already holds.
+///
+/// Omit `until` for the newest page. The response reports the `start` index it
+/// used, which is exactly what the client passes back as the next `until`.
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct HistoryQuery {
     limit: Option<usize>,
-    before: Option<usize>,
+    until: Option<usize>,
 }
 
 /// `GET /api/agents/:name/chat-history` — HTTP entry point.
@@ -97,7 +102,7 @@ pub(super) async fn agent_chat_history_route(
             .ok()
             .as_deref(),
         q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT),
-        q.before.unwrap_or(0),
+        q.until,
     )
     .await
 }
@@ -114,17 +119,18 @@ pub(super) async fn agent_chat_history_route(
 /// means "nothing to rehydrate", which the chat view renders as an empty
 /// conversation rather than an error.
 /// Test: `chat_history_returns_bounded_newest_slice`,
-/// `chat_history_before_cursor_pages_backwards`,
+/// `chat_history_until_cursor_pages_backwards`,
 /// `chat_history_empty_when_no_palace_bound`,
 /// `chat_history_empty_when_session_absent`,
 /// `chat_history_degrades_when_memory_unreachable`,
+/// `chat_history_reports_a_malformed_session`,
 /// `chat_history_unknown_agent_404`, `chat_history_rejects_traversal_name`.
 pub(super) async fn chat_history_at(
     dirs: &[PathBuf],
     name: &str,
     memory_socket: Option<&Path>,
     limit: usize,
-    before: usize,
+    until: Option<usize>,
 ) -> Response {
     if name.is_empty() || name.contains(['/', '\\']) || name == "." || name == ".." {
         return (
@@ -170,7 +176,7 @@ pub(super) async fn chat_history_at(
     match session {
         Err(reason) => unavailable(Some(palace), &session_id, &reason, config_error),
         Ok(session) => {
-            let mut body = page(&palace, &session_id, &session, limit, before);
+            let mut body = page(&palace, &session_id, &session, limit, until);
             if let Some(err) = config_error {
                 body["config_error"] = Value::String(err);
             }
@@ -205,53 +211,90 @@ fn unavailable(
     (StatusCode::OK, Json(body)).into_response()
 }
 
-/// Slice the newest `limit` messages ending `before` from the end.
+/// A decoded session: the validated history plus the only timestamp it carries.
+///
+/// Why it exists rather than passing the raw `Value` on: making [`fetch_session`]
+/// produce this is what forces the `history` array to be validated at decode
+/// time. A raw `Value` invites a `.get("history").unwrap_or_default()` at the
+/// use site, which renders a malformed payload as a healthy empty session — the
+/// "confidently incomplete history" the owner ruled worse than none.
+struct Session {
+    history: Vec<Value>,
+    updated_at: Value,
+}
+
+/// Slice `limit` messages ending at the absolute index `until`.
 ///
 /// Why: the owner's volume requirement — a continuous session that never rolls
-/// over must not hydrate in full on launch. The window is
-/// `[total - before - limit, total - before)`, clamped, so `before` walks
-/// backwards one page at a time and `has_more` says whether anything older
-/// remains.
-/// What: pure over the decoded session value; a `history` that is absent or
-/// not an array reads as an empty session rather than an error, because the
-/// daemon's own contract already guarantees the field.
+/// over must not hydrate in full on launch. Absolute indexing (see
+/// [`HistoryQuery`]) is what makes paging backwards append-stable.
+/// What: the window is `[end - limit, end)` where `end` is `until` clamped to
+/// `total`, defaulting to `total` for the newest page. Returns the `start` it
+/// used, which the client passes back as the next `until`. `has_more` reports
+/// whether anything older remains. Pure, and panic-free: `end` is clamped to
+/// `total` before `start` is derived from it by saturating subtraction, so the
+/// range is always in bounds and non-inverted.
 /// Test: `chat_history_returns_bounded_newest_slice`,
-/// `chat_history_before_cursor_pages_backwards`.
-fn page(palace: &str, session_id: &str, session: &Value, limit: usize, before: usize) -> Value {
-    let history = session
-        .get("history")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let total = history.len();
-    let end = total.saturating_sub(before);
+/// `chat_history_until_cursor_pages_backwards`,
+/// `chat_history_clamps_an_out_of_range_until`.
+fn page(
+    palace: &str,
+    session_id: &str,
+    session: &Session,
+    limit: usize,
+    until: Option<usize>,
+) -> Value {
+    let total = session.history.len();
+    let end = until.unwrap_or(total).min(total);
     let start = end.saturating_sub(limit);
     json!({
         "available": true,
         "palace": palace,
         "session_id": session_id,
-        "messages": history[start..end].to_vec(),
+        "messages": session.history[start..end].to_vec(),
+        "start": start,
         "total": total,
         "has_more": start > 0,
-        "updated_at": session.get("updated_at").cloned().unwrap_or(Value::Null),
+        "updated_at": session.updated_at.clone(),
     })
 }
 
-/// Fetch the session, collapsing every failure into the reason a client renders.
+/// Bound on the whole-session socket read.
+///
+/// Why not [`PROBE_TIMEOUT`]: that constant is a 2s LIVENESS budget, sized so a
+/// hung daemon degrades a status pane fast. This call is a bulk read — the
+/// upstream `chat_session_recall` takes no `limit`, so the daemon ships the
+/// entire session, and a live `persona-izzie` already holds 2000+ messages.
+/// Sizing a growing bulk transfer with a liveness budget makes rehydration fail
+/// permanently once the session outgrows 2s. Bounded generously, because the
+/// failure mode this guards is a hung socket, not a slow one.
+const SESSION_READ_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// The wording `handle_chat_session_recall` uses for a session that does not
+/// exist. Matched exactly rather than on a bare "not found", which a MISSING
+/// PALACE also produces — reporting an absent palace as an absent session would
+/// send an operator looking in the wrong place.
+const SESSION_ABSENT_MARKER: &str = "session not found";
+
+/// Fetch and decode the session, collapsing every failure into a client reason.
 ///
 /// Why: `chat_session_recall` is absent from trusty-memory's direct-dispatch
-/// `TOOL_METHODS` allow-list, so it is only reachable wrapped in `tools/call`
-/// — the same envelope `persona_memory::call_memory_tool` writes through. That
-/// arm answers `result.content[0].text` as a JSON STRING, so the payload needs
-/// decoding back out; it also reports EVERY tool failure as `-32603`, so a
-/// session that simply does not exist yet cannot be told apart by code and is
-/// matched on the daemon's own "session not found" wording instead.
-/// What: `Ok(session)` when the daemon answers; `Err(reason)` for an absent
-/// session, any other refusal, or a transport failure. Bounded by
-/// [`PROBE_TIMEOUT`], the ceiling every cross-daemon read in this crate uses.
+/// `TOOL_METHODS` allow-list, so it is only reachable wrapped in `tools/call` —
+/// the same envelope `persona_memory::call_memory_tool` writes through. That arm
+/// answers `result.content[0].text` as a JSON STRING, so the payload needs
+/// decoding back out, and it reports EVERY tool failure as `-32603`, so the
+/// absent-session case is identified by the daemon's own message rather than by
+/// code (see [`SESSION_ABSENT_MARKER`]).
+/// What: `Ok(Session)` when the daemon answers with a decodable payload whose
+/// `history` is an array. `Err(reason)` for an absent session, any other
+/// refusal, a transport failure, an undecodable body, or a payload missing that
+/// array — the last of which names the field, because a malformed answer and an
+/// empty conversation must never render the same way.
 /// Test: `chat_history_empty_when_session_absent`,
-/// `chat_history_degrades_when_memory_unreachable`.
-async fn fetch_session(socket: &Path, palace: &str, session_id: &str) -> Result<Value, String> {
+/// `chat_history_degrades_when_memory_unreachable`,
+/// `chat_history_reports_a_malformed_session`,
+/// `chat_history_absent_palace_is_not_reported_as_absent_session`.
+async fn fetch_session(socket: &Path, palace: &str, session_id: &str) -> Result<Session, String> {
     let answer = trusty_common::memory_rpc::call_memory_tool_at_with_timeout(
         socket,
         "tools/call",
@@ -259,15 +302,17 @@ async fn fetch_session(socket: &Path, palace: &str, session_id: &str) -> Result<
             "name": "chat_session_recall",
             "arguments": { "palace": palace, "session_id": session_id },
         }),
-        PROBE_TIMEOUT,
+        SESSION_READ_TIMEOUT,
     )
     .await
     .map_err(|e| {
-        let described = describe_failure(&e, palace);
-        if described.contains("not found") || described.contains("does not exist") {
+        let absent = e
+            .downcast_ref::<trusty_common::memory_rpc::MemoryRpcError>()
+            .is_some_and(|rpc| rpc.message.contains(SESSION_ABSENT_MARKER));
+        if absent {
             format!("no persisted chat session `{session_id}` yet")
         } else {
-            described
+            describe_failure(&e, palace)
         }
     })?;
 
@@ -277,6 +322,24 @@ async fn fetch_session(socket: &Path, palace: &str, session_id: &str) -> Result<
         .ok_or_else(|| {
             "trusty-memory answered chat_session_recall without `content[0].text`".to_string()
         })?;
-    serde_json::from_str::<Value>(text)
-        .map_err(|e| format!("trusty-memory returned an undecodable chat session: {e}"))
+    let decoded: Value = serde_json::from_str(text)
+        .map_err(|e| format!("trusty-memory returned an undecodable chat session: {e}"))?;
+
+    let history = decoded
+        .get("history")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| {
+            format!("chat session `{session_id}` has no `history` array to rehydrate from")
+        })?;
+    tracing::debug!(
+        palace,
+        session_id,
+        messages = history.len(),
+        "chat_history: decoded persona session"
+    );
+    Ok(Session {
+        history,
+        updated_at: decoded.get("updated_at").cloned().unwrap_or(Value::Null),
+    })
 }

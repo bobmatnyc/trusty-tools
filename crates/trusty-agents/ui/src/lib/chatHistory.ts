@@ -25,10 +25,14 @@
 //
 // Test: `chatHistory.test.ts`.
 
+import { get } from 'svelte/store';
+
 import { apiBase } from './api-config';
 import {
+  chatHistoryCursor,
   getCurrentApiToken,
   hydrateMessages,
+  loadingOlderChat,
   prependMessages,
   type Message,
 } from '../stores/app';
@@ -49,6 +53,11 @@ export interface ChatHistoryPage {
    */
   available: boolean;
   messages: ChatHistoryMessage[];
+  /**
+   * ABSOLUTE index of this page's first message. Passed straight back as the
+   * next `until` to page backwards — see `fetchChatHistory`.
+   */
+  start: number;
   /** Total messages in the session, not in this page. */
   total: number;
   /** Whether older messages exist before this page's oldest. */
@@ -64,14 +73,22 @@ export interface ChatHistoryPage {
  */
 export const DEFAULT_HISTORY_LIMIT = 100;
 
-/** The shape every failure path returns, so callers branch only on `available`. */
-const EMPTY_PAGE: ChatHistoryPage = {
-  available: false,
-  messages: [],
-  total: 0,
-  has_more: false,
-  updated_at: null,
-};
+/**
+ * The shape every failure path returns, so callers branch only on `available`.
+ * Built per call rather than shared, so a `reason` can be attached without
+ * mutating a module-level object every later caller would then see.
+ */
+function emptyPage(reason: string): ChatHistoryPage {
+  return {
+    available: false,
+    messages: [],
+    start: 0,
+    total: 0,
+    has_more: false,
+    updated_at: null,
+    reason,
+  };
+}
 
 function authHeaders(): Record<string, string> {
   const token = getCurrentApiToken();
@@ -83,36 +100,40 @@ function authHeaders(): Record<string, string> {
  * its socket. A throw here would surface as an unhandled rejection during
  * bootstrap and leave the chat blank anyway, so every failure degrades to the
  * same empty page the backend returns for "nothing persisted yet".
- * What: `GET /api/agents/:name/chat-history?limit=&before=`. `before` is the
- * count of most-recent messages the caller already holds — an offset from the
- * newest end, which is stable while new turns append.
+ * What: `GET /api/agents/:name/chat-history?limit=&until=`. `until` is an
+ * ABSOLUTE exclusive end index, omitted for the newest page. Absolute indexing
+ * is what makes paging backwards stable while new turns append — an
+ * offset-from-the-end cursor shifts by the number of appends and replays them.
  * Test: `fetchChatHistory_returns_empty_page_on_http_error`,
  * `fetchChatHistory_returns_empty_page_on_network_failure`,
- * `fetchChatHistory_requests_the_bounded_window`.
+ * `fetchChatHistory_requests_the_bounded_window`,
+ * `fetchChatHistory_sends_until_only_when_paging_back`.
  */
 export async function fetchChatHistory(
   agent: string,
   limit = DEFAULT_HISTORY_LIMIT,
-  before = 0,
+  until?: number,
 ): Promise<ChatHistoryPage> {
+  const cursor = until === undefined ? '' : `&until=${until}`;
   try {
     const r = await fetch(
       `${apiBase()}/api/agents/${encodeURIComponent(agent)}/chat-history` +
-        `?limit=${limit}&before=${before}`,
+        `?limit=${limit}${cursor}`,
       { headers: authHeaders() },
     );
-    if (!r.ok) return EMPTY_PAGE;
+    if (!r.ok) return emptyPage(`chat history request failed (HTTP ${r.status})`);
     const body = (await r.json()) as Partial<ChatHistoryPage>;
     return {
       available: body.available === true,
       messages: Array.isArray(body.messages) ? body.messages : [],
+      start: typeof body.start === 'number' ? body.start : 0,
       total: typeof body.total === 'number' ? body.total : 0,
       has_more: body.has_more === true,
       updated_at: typeof body.updated_at === 'string' ? body.updated_at : null,
       reason: body.reason,
     };
-  } catch {
-    return EMPTY_PAGE;
+  } catch (e) {
+    return emptyPage(`chat history unreachable: ${e}`);
   }
 }
 
@@ -182,12 +203,19 @@ export function resolveRehydrationTarget(
   return { agentId, speaker };
 }
 
-/** How many older messages a project already holds, for the `before` cursor. */
 export interface RehydrateResult {
   /** Messages seeded into the store. 0 when nothing was persisted. */
   seeded: number;
-  /** Whether older messages remain, for a "load earlier" affordance. */
+  /** Whether older messages remain, for the "load earlier" affordance. */
   hasMore: boolean;
+  /**
+   * Why the load produced nothing, when it produced nothing. Every
+   * `available: false` path — no palace bound, no session yet, daemon down,
+   * malformed payload — arrives here, and all four render as an identically
+   * empty chat. Without this the caller cannot tell a first-run empty
+   * conversation from a broken one, so a real failure is invisible.
+   */
+  reason?: string;
 }
 
 /**
@@ -209,39 +237,59 @@ export async function rehydrateChat(
   projectId: string,
   limit = DEFAULT_HISTORY_LIMIT,
 ): Promise<RehydrateResult> {
-  const page = await fetchChatHistory(agentId, limit, 0);
+  const page = await fetchChatHistory(agentId, limit);
   if (!page.available || page.messages.length === 0) {
-    return { seeded: 0, hasMore: false };
+    chatHistoryCursor.set(null);
+    return { seeded: 0, hasMore: false, reason: page.reason };
   }
   const restored = historyToMessages(page, speaker, Date.now());
   const seeded = hydrateMessages(projectId, restored);
-  return { seeded: seeded ? restored.length : 0, hasMore: page.has_more };
+  // Only arm "load earlier" against history actually on screen. A refused seed
+  // means live messages won the bucket, so paging older into it would interleave
+  // a restored conversation with an unrelated live one.
+  chatHistoryCursor.set(
+    seeded ? { agentId, speaker, start: page.start, hasMore: page.has_more } : null,
+  );
+  return { seeded: seeded ? restored.length : 0, hasMore: seeded && page.has_more };
 }
 
 /**
  * Why: the owner's volume requirement pairs a bounded initial load with lazy
  * loading of older turns on demand — without this, a bounded load is just
- * truncation.
- * What: fetches the page ending `before` messages from the newest end and
- * PREPENDS it, so older turns land above what is already rendered. `before` is
- * the count the caller already holds.
- * Test: `loadOlderChat_prepends_the_previous_page`.
+ * truncation. Driven by `ChatView`'s "Load earlier messages" control, which
+ * renders off `chatHistoryCursor.hasMore`.
+ * What: reads the cursor for who and how far back, fetches the page ending at
+ * that absolute index, PREPENDS it so older turns land above what is already
+ * rendered, and advances the cursor. A no-op when nothing is armed. Bare ids
+ * are namespaced by the page's absolute `start`, so a prepended page can never
+ * collide with the seeded one.
+ * Test: `loadOlderChat_prepends_the_previous_page`,
+ * `loadOlderChat_advances_the_cursor`,
+ * `loadOlderChat_is_a_noop_without_a_cursor`,
+ * `loadOlderChat_disarms_the_cursor_at_the_start_of_history`.
  */
 export async function loadOlderChat(
-  agentId: string,
-  speaker: string,
   projectId: string,
-  before: number,
   limit = DEFAULT_HISTORY_LIMIT,
 ): Promise<RehydrateResult> {
-  const page = await fetchChatHistory(agentId, limit, before);
-  if (!page.available || page.messages.length === 0) {
-    return { seeded: 0, hasMore: false };
+  const cursor = get(chatHistoryCursor);
+  if (!cursor || !cursor.hasMore) return { seeded: 0, hasMore: false };
+
+  loadingOlderChat.set(true);
+  try {
+    const page = await fetchChatHistory(cursor.agentId, limit, cursor.start);
+    if (!page.available || page.messages.length === 0) {
+      chatHistoryCursor.set({ ...cursor, hasMore: false });
+      return { seeded: 0, hasMore: false, reason: page.reason };
+    }
+    const older = historyToMessages(page, cursor.speaker, Date.now()).map((m, i) => ({
+      ...m,
+      id: `history-${page.start}-${i}`,
+    }));
+    prependMessages(projectId, older);
+    chatHistoryCursor.set({ ...cursor, start: page.start, hasMore: page.has_more });
+    return { seeded: older.length, hasMore: page.has_more };
+  } finally {
+    loadingOlderChat.set(false);
   }
-  const older = historyToMessages(page, speaker, Date.now()).map((m, i) => ({
-    ...m,
-    id: `history-${before}-${i}`,
-  }));
-  prependMessages(projectId, older);
-  return { seeded: older.length, hasMore: page.has_more };
 }

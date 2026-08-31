@@ -323,14 +323,20 @@
   let prevApiReady = false;
   function refetchPickerCatalogsOnReady(ready: boolean) {
     if (shouldRefetchCatalogs(prevApiReady, ready)) {
-      fetchAgentCatalog().catch((e) =>
+      const catalog = fetchAgentCatalog().catch((e) =>
         console.error('[App] fetchAgentCatalog failed:', e),
       );
       fetchModelCatalog().catch((e) =>
         console.error('[App] fetchModelCatalog failed:', e),
       );
       refreshOverlayAgents();
-      rehydrateChatOnReady();
+      // #4278: rehydration reads the roster for the speaker label, and the
+      // roster is derived from this catalog — starting both at once left it
+      // empty at read time, so every restored assistant bubble fell back to
+      // "Assistant". Chaining off the catalog (settled, not resolved — a failed
+      // fetch must still rehydrate, just with the fallback label) is what makes
+      // the label correct.
+      catalog.then(rehydrateChatOnReady);
     }
     prevApiReady = ready;
   }
@@ -357,9 +363,15 @@
       get(activeAgentId),
       get(agentRoster),
     );
-    rehydrateChat(agentId, speaker, get(activeProjectId)).catch((e) =>
-      console.error('[App] chat rehydration failed:', e),
-    );
+    rehydrateChat(agentId, speaker, get(activeProjectId))
+      .then((result) => {
+        // Every failure mode renders as an empty chat, so an unreported reason
+        // makes a broken history indistinguishable from a first run.
+        if (result.reason) {
+          console.warn('[App] chat not rehydrated:', result.reason);
+        }
+      })
+      .catch((e) => console.error('[App] chat rehydration failed:', e));
   }
 
   onMount(() => {
