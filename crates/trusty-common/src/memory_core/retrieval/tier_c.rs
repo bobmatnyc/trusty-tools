@@ -271,6 +271,9 @@ pub(super) fn apply_admission(
 /// together or not at all.
 /// What: clears `fact_key` and `expires_at` on the retired drawer, matching the
 /// record `persist_with_retirement` committed. No-op when nothing was retired.
+/// The table is not guaranteed to hold every retired id (#6438) — a redb-only
+/// incumbent leaves this call a no-op even though the durable retirement
+/// happened.
 /// Test: `tier_c_retirement_clears_the_displaced_drawers_own_fact_key`.
 pub(super) fn retire_in_memory(drawers: &mut [Drawer], retired_id: Option<Uuid>) {
     let Some(retired_id) = retired_id else {
