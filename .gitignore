@@ -47,6 +47,14 @@
 # repo root only, leaving every crate-level copy un-ignored.
 **/.claude/agents/
 
+# claude-mpm project state (session dumps, PM instructions, correlations,
+# templates) is machine-local deployment cruft, not source. The `.claude-mpm/*`
+# rule above only ignores the root copy; a crate-level `.claude-mpm/` slipped in
+# with the 2026-05 monorepo import and was tracked (#4696, #4700). The `**/`
+# prefix ignores the directory at any depth, the same anchoring subtlety as
+# `**/.claude/agents/` above.
+**/.claude-mpm/
+
 # Claude Code's native `isolation: "worktree"` agent worktrees are
 # machine-local, not a deliverable (issue #3972). `.claude/` is broadly
 # re-included just above for the paths we DO want tracked (settings.json,
