@@ -1,3 +1,0 @@
-Fixed
-- The `memory.health` probe sends `params: {}` instead of omitting `params` entirely (#6356). trusty-memory binds `HealthQuery`, whose derived `Deserialize` refuses the `null` an absent `params` decodes to, so every dial answered `-32602` and the trusty-memory row read "Available — Binary found but daemon is not running" against a live daemon
-- A daemon that answers `memory.health` with an error now reports `Degraded` carrying that error, rather than being indistinguishable from a daemon that answered nothing at all. An error answer still never reads as `Running` and never carries a version

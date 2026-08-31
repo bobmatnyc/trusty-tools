@@ -1,7 +1,0 @@
-Added
-
-- **`trusty-search serve`'s `TRUSTY_INDEX` precedence is now pinned by tests, so one argless `["serve"]` MCP declaration can be shared across projects** ([#4181](https://github.com/bobmatnyc/trusty-tools/issues/4181)). No behaviour change: `serve` already read `TRUSTY_INDEX`, with an explicit `--index` outranking it and the `--project` fallback of [#1373](https://github.com/bobmatnyc/trusty-tools/issues/1373) intact when neither is set. Verified end to end against the binary on all four combinations before anything was written
-  - the source read as though it did not work, which is what earned the tests: `Serve` declares `#[arg(long)] index` with no `env`, looking like a second argument that shadows the `global = true, env = "TRUSTY_INDEX"` field on `Cli`. Both spell the same clap id, so clap propagates the one argument, environment value included
-  - dropping `global` from `Cli::index`, renaming either field, or giving `Serve` an id of its own would break the argless declaration silently; `commands::serve::index_env_tests` now fails instead — confirmed by making that exact edit and watching `env_alone_pins_the_index` report `left: None`
-  - the environment rows run in a child process, because clap reads `env` from the live process environment and mutating it in-process would race the rest of the binary's tests
-  - `main`'s `Serve` arm now calls `commands::serve::resolve_pinned_index`, so the precedence is one function the tests can call rather than a match arm they would have to re-implement

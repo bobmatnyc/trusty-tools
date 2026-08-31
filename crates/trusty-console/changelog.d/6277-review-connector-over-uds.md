@@ -1,4 +1,0 @@
-Changed
-
-- **`ReviewConnector` dials trusty-review's Unix socket instead of probing a TCP port.** It calls `review.health` and reads the version off the answer, resolving the path through `trusty_common::daemon_socket_path` — the same call the daemon binds through. The `~/.trusty-review/http_addr` read is gone with the file, and so is the `127.0.0.1:7880` fallback, which was two port moves stale and had been trusty-mpm's daemon port since #2566: a running `tm` made this report trusty-review as Running. A service card for trusty-review no longer carries a `url`, because a UDS daemon has none (ADR-0032, [#6277](https://github.com/bobmatnyc/trusty-tools/issues/6277))
-- trusty-review is removed from the port-collision guard table — it binds no TCP port, so reserving 7891 against it would only forbid a future daemon a free port ([#6277](https://github.com/bobmatnyc/trusty-tools/issues/6277))

@@ -9,7 +9,11 @@ name        = "trusty-console"
 # immediately before deleting it, closing the TOCTOU window between the
 # operator's confirm and the delete. New `pub(crate)` module
 # (`routes::census_guard::OrphanGuard`); no public shape change.
-version     = "0.8.3"
+# 0.9.0 (#6464): minor — `ServiceInfo` gains the public field `lifecycle`
+# (`src/connector.rs:100`). The struct was exhaustively constructible through
+# the public API, so a struct literal downstream stops compiling. Cargo's 0.x
+# rule puts a break in the MINOR position.
+version     = "0.9.0"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true

@@ -1,2 +1,0 @@
-Added
-- `calibrate` measures #1897's three verdict-level acceptance bars: strict verdict agreement, RC-recall, and the clean-PR over-flag rate. The harness previously discarded `ReviewResult::verdict` and reported only finding-level recall/precision, so those bars had no expressible answer. A corpus entry opts in with `reference_verdict`; a corpus with none reports "not measured", and no bar can pass on an empty denominator (#2974).
