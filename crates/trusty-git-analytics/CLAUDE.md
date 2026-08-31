@@ -170,7 +170,3 @@ All specification documents are in `docs/trusty-git-analytics/requirements/`:
 - No `unwrap()` or `expect()` in library code — propagate errors with `?`
 - Use `rayon::par_iter()` for CPU-bound batch operations (commit classification)
 - All async functions use `tokio` — no mixing of async runtimes
-
-## Claude MPM Configuration
-
-See `.claude-mpm/` for claude-mpm project configuration.
