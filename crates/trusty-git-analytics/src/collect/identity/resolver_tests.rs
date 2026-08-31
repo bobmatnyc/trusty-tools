@@ -901,3 +901,203 @@ team:
     let r = IdentityResolver::from_config(&cfg);
     assert_eq!(r.canonical_domain(), Some("duettoresearch.com"));
 }
+
+// ---------------------------------------------------------------------------
+// Issue #4293 — identity-resolution determinism.
+// ---------------------------------------------------------------------------
+
+/// Why: #4293 — `from_alias_map` pushed members in `HashMap` iteration order,
+/// which std randomises per map instance, so two resolvers built from the same
+/// roster in the same process held different `members` slices.
+/// What: rebuilds the map and the resolver from scratch and asserts the
+/// `members` slice, and one fuzzy resolution over it, are identical every time.
+#[test]
+fn member_order_is_deterministic_across_rebuilds() {
+    fn build() -> IdentityResolver {
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        for (name, email) in [
+            ("Joshua Lepage", "joshua.lepage@acme.com"),
+            ("Joshua Mccartney", "joshua.mccartney@acme.com"),
+            ("Joshua Renner", "joshua.renner@acme.com"),
+            ("Joshua Vance", "joshua.vance@acme.com"),
+            ("Joshua Whitlock", "joshua.whitlock@acme.com"),
+            ("Joshua Ackley", "joshua.ackley@acme.com"),
+        ] {
+            map.insert(name.to_string(), vec![email.to_string()]);
+        }
+        IdentityResolver::from_alias_map(&map)
+    }
+
+    // Sorted by (canonical_email, canonical_name), not by declaration order.
+    let expected_members: Vec<(String, String)> = [
+        ("Joshua Ackley", "joshua.ackley@acme.com"),
+        ("Joshua Lepage", "joshua.lepage@acme.com"),
+        ("Joshua Mccartney", "joshua.mccartney@acme.com"),
+        ("Joshua Renner", "joshua.renner@acme.com"),
+        ("Joshua Vance", "joshua.vance@acme.com"),
+        ("Joshua Whitlock", "joshua.whitlock@acme.com"),
+    ]
+    .iter()
+    .map(|(n, e)| ((*n).to_string(), (*e).to_string()))
+    .collect();
+
+    let expected_resolution = build().resolve("josh", "josh@unaffiliated.test");
+    for i in 0..100 {
+        let r = build();
+        assert_eq!(
+            r.members, expected_members,
+            "members order differs on rebuild {i}"
+        );
+        assert_eq!(
+            r.resolve("josh", "josh@unaffiliated.test"),
+            expected_resolution,
+            "resolution differs on rebuild {i}"
+        );
+    }
+}
+
+/// Why: #4293 — both fuzzy tiers kept the incumbent on an exact score tie, so
+/// two roster members scoring identically were separated by declaration order.
+/// What: two members share a canonical name and differ only by email, which
+/// makes their Jaro-Winkler scores exactly equal; the resolver must pick the
+/// lower `(canonical_email, canonical_name)` key in either declaration order.
+#[test]
+fn fuzzy_tie_breaks_on_stable_key() {
+    fn team(order: [(&str, &str); 2]) -> TeamConfig {
+        TeamConfig {
+            members: order
+                .iter()
+                .map(|(n, e)| TeamMember {
+                    name: (*n).to_string(),
+                    email: (*e).to_string(),
+                    aliases: vec![],
+                })
+                .collect(),
+            aliases: HashMap::new(),
+            canonical_domain: None,
+        }
+    }
+
+    let a = ("Sam Taylor", "a.taylor@acme.com");
+    let b = ("Sam Taylor", "b.taylor@acme.com");
+    let inbound_name = "Sam Taylorr";
+    let inbound_email = "sam@unaffiliated.test";
+
+    // Precondition: the two members score an EXACT tie for this inbound pair.
+    // An exact tie is the trigger condition for the defect.
+    let score_a = jaro_winkler(&inbound_name.to_lowercase(), &a.0.to_lowercase());
+    let score_b = jaro_winkler(&inbound_name.to_lowercase(), &b.0.to_lowercase());
+    assert_eq!(score_a, score_b, "precondition: scores must tie exactly");
+    assert!(
+        score_a >= DEFAULT_SIMILARITY_THRESHOLD,
+        "precondition: the tied score must clear the Tier-3 threshold"
+    );
+
+    for order in [[a, b], [b, a]] {
+        let r = IdentityResolver::new(Some(&team(order)));
+        let (n, e) = r.resolve(inbound_name, inbound_email);
+        assert_eq!(n, "Sam Taylor");
+        assert_eq!(
+            e, "a.taylor@acme.com",
+            "tie must go to the lowest (email, name) key; declared order was {order:?}"
+        );
+    }
+}
+
+/// Why: #4293 — an alias claimed by two canonical identities was resolved
+/// last-writer-wins over `HashMap` iteration order, so it mapped to a different
+/// person between two resolvers built from identical input.
+/// What: rebuilds a map in which both identities declare `jr` and asserts the
+/// same canonical identity every time — the first claimant in sorted
+/// canonical-name order keeps the alias.
+#[test]
+fn alias_collision_resolves_deterministically() {
+    fn build() -> IdentityResolver {
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        map.insert(
+            "Jane Roe".to_string(),
+            vec!["jane.roe@acme.com".into(), "jr".into()],
+        );
+        map.insert(
+            "John Roe".to_string(),
+            vec!["john.roe@acme.com".into(), "jr".into()],
+        );
+        IdentityResolver::from_alias_map(&map)
+    }
+
+    for i in 0..200 {
+        let (n, e) = build().resolve("jr", "jr@unaffiliated.test");
+        assert_eq!(n, "Jane Roe", "alias collision flipped on rebuild {i}");
+        assert_eq!(
+            e, "jane.roe@acme.com",
+            "alias collision flipped on rebuild {i}"
+        );
+    }
+}
+
+/// A `TeamConfig` carrying both collision shapes #4293 covers on the `team:`
+/// path: two members declaring the alias `jr`, and two free-form `team.aliases`
+/// keys that both lower-case to `jr2`. Rebuilt per call so each iteration gets
+/// a fresh `HashMap` with its own iteration order.
+fn colliding_team_resolver() -> IdentityResolver {
+    let mut aliases = HashMap::new();
+    // Two keys that collide once lowercased. "JR2" sorts before "jr2".
+    aliases.insert("JR2".to_string(), "John Roe".to_string());
+    aliases.insert("jr2".to_string(), "Jane Roe".to_string());
+    let team = TeamConfig {
+        members: vec![
+            TeamMember {
+                name: "Jane Roe".into(),
+                email: "jane.roe@acme.com".into(),
+                aliases: vec!["jr".into()],
+            },
+            TeamMember {
+                name: "John Roe".into(),
+                email: "john.roe@acme.com".into(),
+                aliases: vec!["jr".into()],
+            },
+        ],
+        aliases,
+        canonical_domain: None,
+    };
+    IdentityResolver::new(Some(&team))
+}
+
+/// Why: #4293 — `new()` wrote member aliases with a raw `HashMap::insert`, so a
+/// contested alias went to the LAST member declared: the opposite policy from
+/// `from_alias_map`'s first-claimant-wins.
+/// What: two members declare `jr`; the lowest `(email, name)` member must claim
+/// it, not the one declared last.
+#[test]
+fn team_member_alias_collision_goes_to_the_first_claimant() {
+    for i in 0..200 {
+        let (n, e) = colliding_team_resolver().resolve("jr", "jr@unaffiliated.test");
+        assert_eq!(
+            n, "Jane Roe",
+            "member alias collision flipped on rebuild {i}"
+        );
+        assert_eq!(
+            e, "jane.roe@acme.com",
+            "member alias collision flipped on rebuild {i}"
+        );
+    }
+}
+
+/// Why: #4293 — `team.aliases` is a `HashMap`, so two keys differing only by
+/// case raced for the same lowercased slot and the last writer took it.
+/// What: `JR2` and `jr2` both lower-case to `jr2`; the first in sorted key order
+/// must claim it on every rebuild.
+#[test]
+fn team_free_form_alias_case_collision_goes_to_the_first_claimant() {
+    for i in 0..200 {
+        let (n, e) = colliding_team_resolver().resolve("jr2", "jr2@unaffiliated.test");
+        assert_eq!(
+            n, "John Roe",
+            "team.aliases case collision flipped on rebuild {i}"
+        );
+        assert_eq!(
+            e, "john.roe@acme.com",
+            "team.aliases case collision flipped on rebuild {i}"
+        );
+    }
+}

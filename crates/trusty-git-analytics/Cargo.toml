@@ -42,7 +42,11 @@ name = "tga"
 # credential-lookup seam is additive — every existing `pub fn` keeps its
 # signature and delegates to a `pub(crate)` `_with_creds` variant — so nothing
 # in the public API breaks. PATCH.
-version = "5.0.1"
+# 5.0.1 → 5.0.2 (#4293): deterministic-ordering fix for alias collisions in
+# identity resolution, plus routing the team-config constructor through the
+# same alias contract. No public signature changes — `cargo-semver-checks`
+# reports no semver update required. PATCH.
+version = "5.0.2"
 publish = true
 edition = "2021"
 # Aligned with the workspace MSRV (1.94) per #254. Required for
