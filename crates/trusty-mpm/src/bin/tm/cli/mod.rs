@@ -352,7 +352,14 @@ pub(crate) enum Command {
     },
     /// Report daemon health: reachability, catalog freshness, and a fleet summary.
     Health,
-    /// Launch the ratatui multi-session TUI dashboard.
+    /// Launch the ratatui multipane TUI dashboard (projects / sessions /
+    /// activity / actions).
+    ///
+    /// Why: #6483 — this used to open the single-pane coordinator chat, which
+    /// is now behind `--single-pane`. The multipane `project_ctl` dashboard is
+    /// the default surface.
+    /// What: routes through `trusty_mpm::tui::initial_view`.
+    /// Test: `cli_parses_tui_defaults`, `cli_parses_tui_single_pane_opt_in`.
     Tui {
         /// Base URL of the trusty-mpm daemon. `Option<String>`, no
         /// `default_value` (#2487) — resolved via `resolve_daemon_url`, which
@@ -362,6 +369,10 @@ pub(crate) enum Command {
         /// Poll interval in milliseconds.
         #[arg(long, default_value_t = 1000)]
         interval_ms: u64,
+        /// Open the single-pane coordinator chat instead of the multipane
+        /// dashboard (#6483 opt-in).
+        #[arg(long)]
+        single_pane: bool,
     },
     /// Launch the Tauri desktop GUI (or open the web build in the browser
     /// when Tauri is unavailable).
@@ -645,7 +656,7 @@ pub(crate) enum Command {
         dir: Option<String>,
     },
     /// Attach to an existing session by ID, name prefix, or project path.
-    /// Opens the TUI focused on the matched session.
+    /// Opens the multipane TUI focused on the matched session (#6483).
     Attach {
         /// Session ID, name prefix, or project directory path.
         target: String,
@@ -653,6 +664,11 @@ pub(crate) enum Command {
         /// Print session JSON and exit (no TUI).
         #[arg(long)]
         json: bool,
+
+        /// Open the single-pane coordinator chat instead of the multipane
+        /// dashboard (#6483 opt-in).
+        #[arg(long)]
+        single_pane: bool,
     },
     /// Inspect or configure the token-use optimizer.
     Optimizer {

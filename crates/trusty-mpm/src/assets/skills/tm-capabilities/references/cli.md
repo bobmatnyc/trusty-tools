@@ -7,7 +7,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `agent` — Inspect the deployed agent roster's declared skills (DOC-42, issue #2889)
   - `list` — List every deployed agent with its declared skills
   - `show` — Show one agent's metadata and per-skill resolution
-- `attach` — Attach to an existing session by ID, name prefix, or project path. Opens the TUI focused on the matched session
+- `attach` — Attach to an existing session by ID, name prefix, or project path. Opens the multipane TUI focused on the matched session (#6483)
 - `auth` — Manage the tm-managed `CLAUDE_CODE_OAUTH_TOKEN` store (issue #2246)
   - `clear-token` — Remove the stored token, if present
   - `set-token` — Store a `CLAUDE_CODE_OAUTH_TOKEN` for managed sessions to use
@@ -202,7 +202,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `status` — Show Telegram bot pairing status
   - `stop` — Stop the Telegram bot process if running
 - `ticket` — One-shot issue → branch → PR → close workflow (#1237)
-- `tui` — Launch the ratatui multi-session TUI dashboard
+- `tui` — Launch the ratatui multipane TUI dashboard (projects / sessions / activity / actions)
 - `update` — Refresh a loaded alias — pull latest and re-deploy managed config (DOC-24)
 - `validate` — Validate a workspace's deployed `.claude/{agents,skills}` payload and `settings.json` against the canonical bundled roster (issue #2158)
 - `wait` — Wait for a condition, in-turn, without blocking past the harness ceiling

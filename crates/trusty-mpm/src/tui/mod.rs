@@ -58,6 +58,69 @@ pub enum Screen {
     Health,
 }
 
+/// Which top-level TUI surface a `tm tui` / `tm attach` invocation opens.
+///
+/// Why: both entry points used to call [`run`]/[`run_focused`] directly, which
+/// hard-wires the single-pane coordinator chat; the multipane `project_ctl`
+/// dashboard was reachable ONLY from a bare `tm projects` on a TTY. Opening or
+/// attaching a session through the tm TUI therefore always landed in the
+/// single-pane view. #6483 makes the multipane dashboard the default and
+/// demotes the chat surface to an explicit `--single-pane` opt-in. A typed
+/// enum plus [`initial_view`] keeps that routing decision pure and testable
+/// instead of an inline `if` duplicated at two call sites.
+/// What: `Multipane` is the default — [`project_ctl::run_focused`];
+/// `SinglePane` is the coordinator chat dashboard — [`run_focused`].
+/// Test: `initial_view_defaults_to_multipane`,
+/// `initial_view_honours_single_pane_opt_in`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TuiView {
+    /// The multipane `project_ctl` dashboard (projects / sessions / activity
+    /// / action bar) — the default since #6483.
+    #[default]
+    Multipane,
+    /// The single-pane coordinator chat dashboard — `--single-pane` opt-in.
+    SinglePane,
+}
+
+/// Resolve which surface to open from the `--single-pane` opt-in flag.
+///
+/// Why: the ONE place the default lives, so flipping it is a one-line change
+/// and the regression test has a pure seam to assert against.
+/// What: returns [`TuiView::SinglePane`] only when the operator explicitly
+/// asked for it; otherwise [`TuiView::default`] — the multipane dashboard.
+/// Test: `initial_view_defaults_to_multipane`,
+/// `initial_view_honours_single_pane_opt_in`.
+pub fn initial_view(single_pane: bool) -> TuiView {
+    // #6483: multipane is the default view; single-pane is opt-in only.
+    if single_pane {
+        TuiView::SinglePane
+    } else {
+        TuiView::default()
+    }
+}
+
+/// Open whichever surface [`initial_view`] resolves to, optionally focused.
+///
+/// Why: `tm tui` and `tm attach` make the identical routing decision; one
+/// helper keeps it single-sourced and keeps `main.rs` a thin bootstrap.
+/// What: [`project_ctl::run_focused`] for [`TuiView::Multipane`],
+/// [`run_focused`] for [`TuiView::SinglePane`]. `focus_id` is the session the
+/// surface should open on (`None` for a plain `tm tui`).
+/// Test: the routing decision is unit-tested through [`initial_view`]
+/// (`initial_view_defaults_to_multipane`); this await glue is exercised by
+/// launching the TUI.
+pub async fn run_initial_view(
+    url: String,
+    interval_ms: u64,
+    focus_id: Option<String>,
+    single_pane: bool,
+) -> anyhow::Result<()> {
+    match initial_view(single_pane) {
+        TuiView::Multipane => project_ctl::run_focused(url, interval_ms, focus_id).await,
+        TuiView::SinglePane => run_focused(url, interval_ms, focus_id).await,
+    }
+}
+
 /// Status-bar hint listing the screen-switch and global keys.
 ///
 /// Why: the health screen's footer must always show how to switch screens and

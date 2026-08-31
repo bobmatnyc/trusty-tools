@@ -712,13 +712,17 @@ pub(crate) async fn optimizer(
 /// operators type a short name or path rather than a full UUID.
 /// What: Fetches `/sessions`, resolves via `resolve_target`, then either
 /// serialises to JSON (`--json`) or launches the TUI pre-focused on the match.
-/// Test: Resolution logic is tested in `trusty-mpm-core::connect`; here we
-/// test CLI flag parsing only (see unit tests).
+/// #6483: that TUI is the multipane `project_ctl` dashboard by default;
+/// `--single-pane` (threaded in as `single_pane`) opts back into the
+/// coordinator chat.
+/// Test: Resolution logic is tested in `trusty-mpm-core::connect`;
+/// `cli_parses_attach_single_pane_opt_in` covers the flag.
 pub(crate) async fn attach_cmd(
     client: &reqwest::Client,
     url: &str,
     target: &str,
     json: bool,
+    single_pane: bool,
 ) -> anyhow::Result<()> {
     use trusty_mpm::core::{ResolveResult, SessionSummary, resolve_target};
 
@@ -758,9 +762,10 @@ pub(crate) async fn attach_cmd(
                 }
                 return Ok(());
             }
-            // Launch the TUI focused on this session.
+            // Launch the TUI focused on this session. #6483: the multipane
+            // dashboard is the default; the single-pane chat is opt-in.
             let resolved_url = trusty_mpm::core::resolve_daemon_url(Some(url));
-            trusty_mpm::tui::run_focused(resolved_url, 1000, Some(id)).await
+            trusty_mpm::tui::run_initial_view(resolved_url, 1000, Some(id), single_pane).await
         }
         ResolveResult::Ambiguous(ids) => {
             eprintln!(

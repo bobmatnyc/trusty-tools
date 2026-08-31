@@ -461,11 +461,13 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Tui {
             url: tui_url,
             interval_ms,
+            single_pane,
         }) => {
             let resolved = trusty_mpm::core::resolve_daemon_url(tui_url.as_deref());
-            trusty_mpm::tui::run(resolved, interval_ms).await
+            // #6483: multipane by default; `--single-pane` opts into the chat.
+            trusty_mpm::tui::run_initial_view(resolved, interval_ms, None, single_pane).await
         }
-        Some(Command::Gui) => launch_gui(),
+        Some(Command::Gui) => commands::gui::launch_gui(),
         Some(Command::Telegram { cmd }) => telegram(&url, cmd).await,
         Some(Command::Slack { cmd }) => slack(cmd).await,
         Some(Command::Install {
@@ -514,7 +516,11 @@ async fn main() -> anyhow::Result<()> {
             // placement: ADR-0037's rule applies here and only here (#5836).
         }) => launch(&client, &url, dir, style, worktree, LaunchDir::OperatorCwd).await,
         Some(Command::Connect { dir }) => connect(&client, &url, dir).await,
-        Some(Command::Attach { target, json }) => attach_cmd(&client, &url, &target, json).await,
+        Some(Command::Attach {
+            target,
+            json,
+            single_pane,
+        }) => attach_cmd(&client, &url, &target, json, single_pane).await,
         Some(Command::Optimizer { action }) => optimizer(&client, &url, action).await,
         Some(Command::Overseer { action }) => overseer(&client, &url, action).await,
         Some(Command::Coordinator { message, action }) => {
@@ -758,68 +764,4 @@ async fn dispatch_watch(
             .await
         }
     }
-}
-
-/// Launch the Tauri desktop GUI by shelling out to the `trusty-mpm-gui` binary.
-///
-/// Why: the GUI lives in the separate, publish=false `trusty-mpm-gui` crate
-/// (it owns Tauri's `build.rs` + `tauri.conf.json`, which cannot be published
-/// cleanly to crates.io). Declaring it as an optional Cargo dependency blocks
-/// `cargo publish` for trusty-mpm, so `tm gui` instead launches a separately
-/// installed `trusty-mpm-gui` binary — matching the Single-Install convention.
-/// What: resolves the `trusty-mpm-gui` executable next to the running `tm`
-/// binary (via `current_exe().parent()`), falling back to a bare `trusty-mpm-gui`
-/// name so the OS resolves it on `PATH`. Spawns it and waits for it to exit,
-/// returning an actionable error if the binary is not installed.
-/// Test: the not-found → install-hint mapping is covered by `tests.rs`
-/// (`gui_not_found_error_has_install_hint`), which exercises `gui_status_to_result`
-/// directly with a synthetic `NotFound` error.
-fn launch_gui() -> anyhow::Result<()> {
-    let program = resolve_gui_binary();
-    gui_status_to_result(std::process::Command::new(&program).status())
-}
-
-/// Map the outcome of spawning `trusty-mpm-gui` to a CLI-friendly result.
-///
-/// Why: factoring the result mapping out of `launch_gui` keeps the actionable
-/// "not installed" hint unit-testable without actually spawning a GUI process.
-/// What: success → `Ok`; non-zero exit → error with the status; `NotFound`
-/// spawn error → the install hint; any other spawn error → a context error.
-/// Test: `tests.rs::gui_not_found_error_has_install_hint`.
-fn gui_status_to_result(status: std::io::Result<std::process::ExitStatus>) -> anyhow::Result<()> {
-    match status {
-        Ok(status) if status.success() => Ok(()),
-        Ok(status) => anyhow::bail!("trusty-mpm-gui exited with status: {status}"),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => anyhow::bail!(
-            "trusty-mpm-gui is not installed.\n\
-             Install it with: cargo install trusty-mpm-gui\n\
-             (the desktop GUI ships as a separate Tauri crate; `tm gui` launches it)"
-        ),
-        Err(err) => Err(anyhow::Error::new(err).context("failed to launch trusty-mpm-gui")),
-    }
-}
-
-/// Resolve the path to the `trusty-mpm-gui` executable.
-///
-/// Why: a `cargo install`-based deployment lands every trusty-* binary in the
-/// same directory (`~/.cargo/bin`), so the sibling-of-`tm` lookup is the most
-/// reliable. We fall back to the bare binary name so a `PATH`-installed GUI is
-/// still found when `current_exe()` is unavailable or the sibling is missing.
-/// What: returns `<dir-of-current-exe>/trusty-mpm-gui` when that file exists,
-/// otherwise the bare `trusty-mpm-gui` name (resolved by the OS via `PATH`).
-/// Test: indirectly exercised by `launch_gui`'s missing-binary test; the
-/// sibling-exists branch is environment-dependent and not unit-tested.
-fn resolve_gui_binary() -> std::path::PathBuf {
-    const GUI_BIN: &str = "trusty-mpm-gui";
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        // Include the platform executable suffix (`.exe` on Windows; "" on
-        // macOS/Linux) so the sibling lookup finds the GUI binary on every OS.
-        let sibling = dir.join(format!("{GUI_BIN}{}", std::env::consts::EXE_SUFFIX));
-        if sibling.is_file() {
-            return sibling;
-        }
-    }
-    std::path::PathBuf::from(GUI_BIN)
 }

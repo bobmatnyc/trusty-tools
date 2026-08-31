@@ -545,6 +545,48 @@ impl ProjectCtlState {
         self.focus = Pane::Sessions;
     }
 
+    /// Select the project and session row owning `session_id`, focusing Sessions.
+    ///
+    /// Why: #6483 routes `tm attach <target>` at this multipane dashboard
+    /// instead of the single-pane chat. That command resolves a session id and
+    /// expects the TUI to open ON that session; without this the operator
+    /// would land on whichever project happens to sort first and have to hunt
+    /// for the session they just named.
+    /// What: scans `projects` in registry order for the first project whose
+    /// `sessions_by_project` entry contains `session_id`, syncs and points both
+    /// navs at it, and moves keyboard focus to [`Pane::Sessions`]. Returns
+    /// `false` (leaving every selection untouched) when the id is unknown —
+    /// the fleet may not have polled it yet, and a silent no-op is better than
+    /// a misleading selection.
+    /// Test: `focus_session_selects_owning_project_and_row`,
+    /// `focus_session_is_a_noop_for_an_unknown_id`.
+    pub fn focus_session(&mut self, session_id: &str) -> bool {
+        let Some((project_idx, session_idx)) = self.locate_session(session_id) else {
+            return false;
+        };
+        self.projects_nav.sync_len(self.projects.len());
+        self.projects_nav.select(project_idx);
+        self.sessions_nav.sync_len(self.current_sessions().len());
+        self.sessions_nav.select(session_idx);
+        self.focus = Pane::Sessions;
+        true
+    }
+
+    /// Locate `session_id` as a `(project index, session index)` pair.
+    ///
+    /// Why: keeps [`Self::focus_session`]'s search separate from its mutation
+    /// so the borrow of `self` ends before the navs are written.
+    /// What: the first match scanning `projects` in order; `None` when no
+    /// project's session list holds the id.
+    /// Test: covered through `focus_session_*`.
+    fn locate_session(&self, session_id: &str) -> Option<(usize, usize)> {
+        self.projects.iter().enumerate().find_map(|(pi, project)| {
+            let sessions = self.sessions_by_project.get(&project.name)?;
+            let si = sessions.iter().position(|s| s.id == session_id)?;
+            Some((pi, si))
+        })
+    }
+
     /// Set the transient action-bar notice.
     pub fn set_notice(&mut self, msg: impl Into<String>) {
         self.notice = Some(msg.into());
@@ -870,5 +912,44 @@ mod tests {
             DeliverableLinkState::Dangling,
             "a Some(list) that does not contain the id is a CONFIRMED dangling ref"
         );
+    }
+
+    #[test]
+    fn focus_session_selects_owning_project_and_row() {
+        // #6483: `tm attach <target>` opens THIS dashboard, so the resolved
+        // session id must select its owning project AND its row, with keyboard
+        // focus on the Sessions pane.
+        let mut state = ProjectCtlState {
+            projects: vec![row("a"), row("b")],
+            ..Default::default()
+        };
+        state
+            .sessions_by_project
+            .insert("a".to_string(), vec![session("aaaaaaaa1111")]);
+        state.sessions_by_project.insert(
+            "b".to_string(),
+            vec![session("bbbbbbbb1111"), session("bbbbbbbb2222")],
+        );
+
+        assert!(state.focus_session("bbbbbbbb2222"));
+        assert_eq!(state.selected_project().unwrap().name, "b");
+        assert_eq!(state.selected_session().unwrap().id, "bbbbbbbb2222");
+        assert_eq!(state.focus, Pane::Sessions);
+    }
+
+    #[test]
+    fn focus_session_is_a_noop_for_an_unknown_id() {
+        // An id the fleet has not polled yet leaves every selection alone.
+        let mut state = ProjectCtlState {
+            projects: vec![row("a"), row("b")],
+            ..Default::default()
+        };
+        state
+            .sessions_by_project
+            .insert("a".to_string(), vec![session("aaaaaaaa1111")]);
+
+        assert!(!state.focus_session("cccccccc9999"));
+        assert_eq!(state.selected_project().unwrap().name, "a");
+        assert_eq!(state.focus, Pane::Projects);
     }
 }

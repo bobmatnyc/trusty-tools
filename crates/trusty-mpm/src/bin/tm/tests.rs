@@ -997,9 +997,36 @@ fn cli_parses_tui_defaults() {
     // `interval_ms` has no env binding, so its default is asserted bare.
     let cli = Cli::try_parse_from(["trusty-mpm", "tui", "--url", DEFAULT_URL]).unwrap();
     match cli.command.unwrap() {
-        Command::Tui { url, interval_ms } => {
+        Command::Tui {
+            url,
+            interval_ms,
+            single_pane,
+        } => {
             assert_eq!(url.as_deref(), Some(DEFAULT_URL));
             assert_eq!(interval_ms, 1000);
+            // #6483: bare `tm tui` opts into nothing — the multipane
+            // project_ctl dashboard is what `initial_view(false)` resolves to.
+            assert!(!single_pane);
+            assert_eq!(
+                trusty_mpm::tui::initial_view(single_pane),
+                trusty_mpm::tui::TuiView::Multipane
+            );
+        }
+        other => panic!("expected Tui, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_tui_single_pane_opt_in() {
+    // #6483: the single-pane coordinator chat is still reachable, explicitly.
+    let cli = Cli::try_parse_from(["trusty-mpm", "tui", "--single-pane"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Tui { single_pane, .. } => {
+            assert!(single_pane);
+            assert_eq!(
+                trusty_mpm::tui::initial_view(single_pane),
+                trusty_mpm::tui::TuiView::SinglePane
+            );
         }
         other => panic!("expected Tui, got {other:?}"),
     }
@@ -1774,7 +1801,7 @@ fn gui_not_found_error_has_install_hint() {
     // What: feeds a synthetic `NotFound` spawn error into the result mapper and
     // asserts the error string carries the `cargo install trusty-mpm-gui` hint.
     let not_found = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
-    let err = crate::gui_status_to_result(Err(not_found))
+    let err = crate::commands::gui::gui_status_to_result(Err(not_found))
         .expect_err("NotFound spawn error must map to an Err");
     let msg = err.to_string();
     assert!(
@@ -1793,7 +1820,7 @@ fn gui_binary_resolution_falls_back_to_bare_name() {
     // the resolver must fall back to the bare name so the OS resolves it on PATH
     // (Single-Install convention). The test binary's dir has no such sibling.
     // What: asserts the resolved path's file name is exactly `trusty-mpm-gui`.
-    let resolved = crate::resolve_gui_binary();
+    let resolved = crate::commands::gui::resolve_gui_binary();
     assert_eq!(
         resolved.file_name().and_then(|n| n.to_str()),
         Some("trusty-mpm-gui"),

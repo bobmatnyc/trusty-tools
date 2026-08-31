@@ -135,3 +135,21 @@ async fn coordinator_send_without_daemon_reports_error() {
         state.chat_history[1].content
     );
 }
+
+// #6483: the initial-view routing for a new/attached session. The multipane
+// project_ctl dashboard is the DEFAULT; the single-pane coordinator chat is
+// reachable only through the explicit `--single-pane` opt-in.
+
+#[test]
+fn initial_view_defaults_to_multipane() {
+    // No opt-in flag: `tm tui` / `tm attach` must resolve to the multipane
+    // project_ctl dashboard, not the single-pane chat.
+    assert_eq!(initial_view(false), TuiView::Multipane);
+    assert_eq!(TuiView::default(), TuiView::Multipane);
+}
+
+#[test]
+fn initial_view_honours_single_pane_opt_in() {
+    // The pre-#6483 surface stays reachable — explicitly.
+    assert_eq!(initial_view(true), TuiView::SinglePane);
+}
