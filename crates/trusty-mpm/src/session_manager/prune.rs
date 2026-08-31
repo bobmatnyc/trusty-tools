@@ -17,7 +17,7 @@
 //! Test: `prune_*` in `super::tests`.
 
 use chrono::{Duration, Utc};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::driver::ManagedTmuxDriver;
 use super::manager::{ManagedError, SessionManager};
@@ -345,6 +345,107 @@ pub struct OrphanSweepOutcome {
     /// reported as unreclaimable.
     /// Test: `prune_orphaned_worktrees_skips_an_agent_owned_worktree`.
     pub agent_owned: Vec<std::path::PathBuf>,
+}
+
+/// Per-sweep classification counts for the orphan sweep's one log line (#4323).
+///
+/// Why: the classification loop logged one `info!` per candidate on every
+/// candidate, on every 60s sweep. The backlog it reports is durable by design —
+/// an owner-unknown worktree is never auto-deleted — so 193 of them wrote
+/// 208,308 identical lines into a single day's log (61 MB). A count is the whole
+/// signal an operator acts on; the paths themselves are a `debug!` away and are
+/// reported structurally in [`OrphanSweepOutcome`] regardless. Kept as a pure
+/// value with a pure renderer so the suppression rule is testable without a
+/// tracing subscriber.
+/// What: the six counts one classification pass produces. [`summary`](Self::summary)
+/// renders the line, or `None` when there were no candidates at all — the idle
+/// case, where even one line per minute is noise.
+/// Test: `sweep_summary_is_silent_without_candidates`,
+/// `sweep_summary_names_every_count`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SweepClassification {
+    /// Registered worktrees not claimed by any live session this pass.
+    candidates: usize,
+    /// Candidates whose ownership sentinel named no resolvable owner (#3649).
+    owner_unknown: usize,
+    /// Candidates attributed to a dispatched agent (#4311).
+    agent_owned: usize,
+    /// Candidates whose owner is still live/resumable, or too young to rule out
+    /// a creation race — the arm [`OrphanSweepOutcome`] does not report.
+    skipped_live: usize,
+    /// Candidates holding uncommitted or unpushed work (#4091).
+    skipped_dirty: usize,
+    /// Candidates that cleared every gate.
+    reclaimable: usize,
+}
+
+impl SweepClassification {
+    /// Render the one-line sweep summary, or `None` when there was nothing to
+    /// classify.
+    ///
+    /// Why: see [`SweepClassification`]. Returning `Option` rather than logging
+    /// keeps the "idle sweep says nothing" rule assertable.
+    /// What: `None` when `candidates == 0`; otherwise one line naming every
+    /// count.
+    /// Test: `sweep_summary_is_silent_without_candidates`,
+    /// `sweep_summary_names_every_count`.
+    fn summary(&self) -> Option<String> {
+        if self.candidates == 0 {
+            return None;
+        }
+        Some(format!(
+            "prune-worktrees: classified {} candidate(s) — {} reclaimable, \
+             {} owner-unknown, {} agent-owned, {} owner-live, {} dirty \
+             (per-path detail at debug; #4323)",
+            self.candidates,
+            self.reclaimable,
+            self.owner_unknown,
+            self.agent_owned,
+            self.skipped_live,
+            self.skipped_dirty,
+        ))
+    }
+}
+
+#[cfg(test)]
+mod sweep_summary_tests {
+    use super::SweepClassification;
+
+    /// #4323: an idle daemon must log nothing here — a line per minute for a
+    /// sweep that found nothing is the same accumulation in slower motion.
+    #[test]
+    fn sweep_summary_is_silent_without_candidates() {
+        assert_eq!(SweepClassification::default().summary(), None);
+    }
+
+    /// #4323: every classification the loop makes must appear in the one line
+    /// that replaced the per-path logs — including `skipped_live`, which
+    /// `OrphanSweepOutcome` does not carry, so this line is its only report.
+    #[test]
+    fn sweep_summary_names_every_count() {
+        let line = SweepClassification {
+            candidates: 200,
+            owner_unknown: 193,
+            agent_owned: 3,
+            skipped_live: 2,
+            skipped_dirty: 1,
+            reclaimable: 1,
+        }
+        .summary()
+        .expect("a sweep with candidates reports");
+        for (label, count) in [
+            ("candidate(s)", "200"),
+            ("owner-unknown", "193"),
+            ("agent-owned", "3"),
+            ("owner-live", "2"),
+            ("dirty", "1"),
+        ] {
+            assert!(
+                line.contains(count) && line.contains(label),
+                "summary must name {label}={count}: {line}"
+            );
+        }
+    }
 }
 
 impl SessionManager {
@@ -849,10 +950,18 @@ impl SessionManager {
         let mut agent_owned = Vec::new();
         let mut skipped_dirty: Vec<DirtyWorktree> = Vec::new();
         let mut reclaimable = Vec::new();
+        // #4323: counted, not logged per path — see `SweepClassification`.
+        let mut skipped_live = 0usize;
+        let total_candidates = candidates.len();
         for candidate in candidates {
             match super::worktree_ownership::read_sentinel_owner(&candidate) {
                 SentinelOwner::Unknown => {
-                    info!(
+                    // #4323: `debug!`, not `info!`. This arm fires once per
+                    // owner-unknown worktree on EVERY 60s sweep, and the backlog
+                    // is durable by design — 193 of them wrote 208,308 identical
+                    // lines into one day's log. The count survives at info in
+                    // the summary below.
+                    debug!(
                         path = %candidate.display(),
                         "prune-worktrees: owner-unknown sentinel — never auto-deleting; \
                          run `tm doctor` or inspect manually (#3649)"
@@ -866,7 +975,8 @@ impl SessionManager {
                 // the live-owner arm below: owned, and reclaimed by
                 // `daemon::services::agent_worktree_reap` on the agent's exit.
                 SentinelOwner::Agent(agent, _) => {
-                    info!(
+                    // #4323: `debug!` for the same reason as the arm above.
+                    debug!(
                         path = %candidate.display(),
                         agent_id = %agent.agent_id,
                         "prune-worktrees: owned by a dispatched agent — reclaimed when that \
@@ -876,12 +986,15 @@ impl SessionManager {
                 }
                 SentinelOwner::Known(owner, created_at) => {
                     if !self.resolve_ownerless_with_grace(owner, created_at).await {
-                        info!(
+                        // #4323: `debug!` for the same reason. This arm is the
+                        // one nothing else counted — hence `skipped_live`.
+                        debug!(
                             path = %candidate.display(),
                             owner = %owner,
                             "prune-worktrees: owner is still live/resumable, or the sentinel \
                              is too young to rule out a creation race — skipping (#3649)"
                         );
+                        skipped_live += 1;
                         continue;
                     }
                     if !git_worktree_list_agrees(&candidate) {
@@ -900,6 +1013,21 @@ impl SessionManager {
                     reclaimable.push(candidate);
                 }
             }
+        }
+
+        // #4323: ONE line per sweep carrying every classification count,
+        // replacing the per-path `info!`s above. Suppressed entirely when the
+        // sweep found no candidates, so an idle daemon logs nothing here.
+        let classification = SweepClassification {
+            candidates: total_candidates,
+            owner_unknown: owner_unknown.len(),
+            agent_owned: agent_owned.len(),
+            skipped_live,
+            skipped_dirty: skipped_dirty.len(),
+            reclaimable: reclaimable.len(),
+        };
+        if let Some(summary) = classification.summary() {
+            info!("{summary}");
         }
 
         if dry_run {

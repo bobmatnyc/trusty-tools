@@ -742,6 +742,23 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
                         Err(e) => tracing::warn!("record retention sweep failed: {e}"),
                     }
                 }
+                // #4323: reclaim empty `~/.trusty-mpm/sessions/<id>/` holders.
+                // Placed beside the retention sweep and ahead of the tmux probe
+                // for the same reason: it touches only the framework state dir,
+                // so tying it to tmux discoverability would be an unrelated
+                // dependency. Logs ONE count per sweep — the per-path shape is
+                // what put 208K lines/day in the operator's log. Fail-closed
+                // and non-recursive; see `core::session_store`.
+                match crate::core::session_store::reap_empty_session_dirs() {
+                    Ok(sweep) if !sweep.is_empty() => info!(
+                        removed = sweep.removed,
+                        skipped = sweep.skipped,
+                        failed = sweep.failed,
+                        "empty session-dir sweep"
+                    ),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("empty session-dir sweep failed: {e}"),
+                }
                 // #5784: same silent-`continue` trap as `reap_loop` above.
                 // #6348: and root-aware for the same reason it is there.
                 if let Some(reason) = host_state_refusal(&state) {

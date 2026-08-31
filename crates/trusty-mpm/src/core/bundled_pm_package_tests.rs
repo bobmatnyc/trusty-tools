@@ -20,8 +20,8 @@
 use super::*;
 use crate::core::instruction_overrides::{
     FILE_AGENT_DELEGATION, FILE_INSTRUCTIONS, FILE_MEMORY, FILE_WORKFLOW, OVERRIDE_DIR_NAME,
-    PromptSource, assemble_sections, delegation_with_roster,
-    resolve_pm_prompt_with_roster, resolve_pm_prompt_with_source,
+    PromptSource, assemble_sections, delegation_with_roster, resolve_pm_prompt_with_roster,
+    resolve_pm_prompt_with_source,
 };
 use crate::core::instruction_package::{
     BlockBody, CustomizationTier, Generator, InstructionBlock, OverrideTier, SCHEMA_VERSION,
@@ -561,38 +561,50 @@ fn the_roster_source_is_consulted_exactly_once() {
 }
 
 #[test]
-fn resolve_pm_prompt_wrapper_matches_the_source_reporting_form() {
-    // #4766: the resolver must be a pure function of its inputs — resolving the
-    // same project with the same roster twice must return byte-identical prompts.
-    // The logging wrapper `resolve_pm_prompt` adds only an `info!` line over
-    // `resolve_pm_prompt_with_source`; it may not alter the prompt bytes.
+fn a_changed_roster_changes_the_resolved_prompt() {
+    // #4766. This test used to be `resolve_pm_prompt_wrapper_matches_the_source_
+    // reporting_form`: it called `resolve_pm_prompt_with_source` and
+    // `resolve_pm_prompt` back-to-back and compared the two prompts. Each call
+    // re-scanned the live `~/.claude/agents` tiers through
+    // `deployed_roster_section`, so a concurrent change between the two scans
+    // made them diverge — ~1 red in 4 full-suite runs on a provisioned
+    // workstation, invisible in CI where no ambient tier exists.
     //
-    // This used to call `resolve_pm_prompt_with_source` and `resolve_pm_prompt`
-    // back-to-back, each independently re-scanning the live `~/.claude/agents`
-    // tiers via `deployed_roster_section`. A concurrent change between the two
-    // scans made them diverge — a flake, ~1 red in 4 full-suite runs on a
-    // provisioned workstation, invisible in CI where no ambient tier exists.
-    // Both entry points delegate to `resolve_pm_prompt_with_roster`, so pinning
-    // the roster with one fixed closure exercises the same wrapper contract
-    // without touching ambient machine state.
+    // Renamed rather than merely rewritten, because the seam changes WHAT is
+    // under test. `resolve_pm_prompt_with_roster` takes the roster as an
+    // argument, so nothing here reaches the logging wrapper any more; a test
+    // still named for that wrapper would claim coverage it does not have. The
+    // wrapper's byte-equality is now structural instead of asserted:
+    // `resolve_pm_prompt` is `resolve_pm_prompt_with_source(dir).0` plus one
+    // `info!`, with no transformation between. Asserting it would require a
+    // second live tier scan, which is the flake itself — the one thing #4766
+    // rules out.
+    //
+    // What this keeps is the half nothing else covers: the roster is not
+    // decoration. `gate_is_deterministic_across_repeated_runs` owns repeated
+    // byte-equality for a FIXED roster (32 rounds); without the assertion below
+    // that determinism would hold just as well if the roster never reached the
+    // prompt at all.
     let tmp = TempDir::new().expect("tempdir");
 
-    let first = resolve_pm_prompt_with_roster(tmp.path(), || Some(FIXED_ROSTER.to_string())).0;
-    let second = resolve_pm_prompt_with_roster(tmp.path(), || Some(FIXED_ROSTER.to_string())).0;
-    assert_byte_identical(&first, &second);
-
-    // Non-vacuous: the equality above only means something if the roster reaches
-    // the prompt. A DIFFERENT roster must produce a DIFFERENT prompt — which is
-    // exactly what made the old back-to-back live-scan diverge when the ambient
-    // tiers changed between the two calls.
+    let fixed = resolve_pm_prompt_with_roster(tmp.path(), || Some(FIXED_ROSTER.to_string())).0;
     let divergent_roster = "## Delegation Authority\n\n\
          ### ticketing\n\nHandles ticketing work. Model: opus.";
-    assert_ne!(FIXED_ROSTER, divergent_roster, "the two rosters must differ");
+    assert_ne!(
+        FIXED_ROSTER, divergent_roster,
+        "the two rosters must differ"
+    );
     let divergent =
         resolve_pm_prompt_with_roster(tmp.path(), || Some(divergent_roster.to_string())).0;
+
     assert_ne!(
-        first, divergent,
-        "a changed roster must change the prompt, else the byte-equality above is vacuous"
+        fixed, divergent,
+        "a changed roster must change the prompt, else every fixed-roster \
+         byte-equality assertion in this file is vacuous"
+    );
+    assert!(
+        divergent.contains("Handles ticketing work."),
+        "the supplied roster must reach the composed prompt verbatim"
     );
 }
 

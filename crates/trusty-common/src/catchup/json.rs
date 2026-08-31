@@ -262,6 +262,24 @@ fn sessions_payload(filtered: FilteredSessions) -> (Vec<PausedSessionJson>, usiz
 /// Test: `generate_catchup_json_returns_structured_fields`,
 /// `generate_catchup_json_respects_watermark`.
 pub async fn generate_catchup_json(opts: &CatchupOptions) -> CatchupJson {
+    generate_catchup_json_in(opts, None).await
+}
+
+/// [`generate_catchup_json`] with the framework state root supplied by the
+/// caller.
+///
+/// Why (#4323): the watermark READ resolves `~/.trusty-mpm/projects/` from the
+/// home directory, so a test against a temp project still consulted the
+/// operator's real state dir. Same seam as
+/// [`super::generate_catchup_context_in`]; this function still persists nothing.
+/// What: identical to [`generate_catchup_json`] except that `state_root`
+/// replaces the `.trusty-mpm` framework root; `None` is the production
+/// home-relative default.
+/// Test: `generate_catchup_json_respects_watermark`.
+pub async fn generate_catchup_json_in(
+    opts: &CatchupOptions,
+    state_root: Option<&std::path::Path>,
+) -> CatchupJson {
     // #5811: an unresolvable palace used to become the shared literal
     // `"unknown-project"`, so this read a watermark another project had written
     // and reported "nothing new" for activity that was genuinely new. With no
@@ -279,7 +297,7 @@ pub async fn generate_catchup_json(opts: &CatchupOptions) -> CatchupJson {
     };
 
     let watermark: Option<DateTime<Utc>> = match (opts.full, palace_id.as_deref()) {
-        (false, Some(id)) => load_catchup_state(id).map(|s| s.last_catchup_at),
+        (false, Some(id)) => load_catchup_state(id, state_root).map(|s| s.last_catchup_at),
         _ => None,
     };
 
@@ -434,7 +452,11 @@ mod tests {
             palace_id: palace_id.clone(),
             last_git_sha: None,
         };
-        save_catchup_state(&palace_id, &state).unwrap();
+        // #4323: `state` is the framework state root, NOT the project dir — this
+        // test used to write a `2099-01-01` watermark into the operator's real
+        // `~/.trusty-mpm/projects/t-tmpXXXX/`, where it outlived the tempdir.
+        let state_root = tmp.path().join("state");
+        save_catchup_state(&palace_id, &state, Some(&state_root)).unwrap();
 
         let opts = CatchupOptions {
             project_dir: tmp.path().to_path_buf(),
@@ -447,7 +469,7 @@ mod tests {
             full: false,
         };
 
-        let json = generate_catchup_json(&opts).await;
+        let json = generate_catchup_json_in(&opts, Some(&state_root)).await;
         assert!(
             json.recent_commits.is_empty(),
             "future watermark should exclude all commits: {:?}",
@@ -491,6 +513,8 @@ mod tests {
         .unwrap();
 
         let palace_id = derive_palace_id_for(tmp.path()).expect("a temp dir resolves to a palace");
+        // #4323: watermark under the tempdir, not the operator's real state dir.
+        let state_root = tmp.path().join("state");
         save_catchup_state(
             &palace_id,
             &CatchupState {
@@ -498,6 +522,7 @@ mod tests {
                 palace_id: palace_id.clone(),
                 last_git_sha: None,
             },
+            Some(&state_root),
         )
         .unwrap();
 
@@ -511,7 +536,7 @@ mod tests {
             full: false,
         };
 
-        let json = generate_catchup_json(&opts).await;
+        let json = generate_catchup_json_in(&opts, Some(&state_root)).await;
         assert!(
             json.sessions.is_empty(),
             "a snapshot with no derivable timestamp must not survive a watermark \
@@ -550,6 +575,8 @@ mod tests {
         .unwrap();
 
         let palace_id = derive_palace_id_for(tmp.path()).expect("a temp dir resolves to a palace");
+        // #4323: watermark under the tempdir, not the operator's real state dir.
+        let state_root = tmp.path().join("state");
         save_catchup_state(
             &palace_id,
             &CatchupState {
@@ -557,6 +584,7 @@ mod tests {
                 palace_id: palace_id.clone(),
                 last_git_sha: None,
             },
+            Some(&state_root),
         )
         .unwrap();
 
@@ -570,7 +598,7 @@ mod tests {
             full: false,
         };
 
-        let json = generate_catchup_json(&opts).await;
+        let json = generate_catchup_json_in(&opts, Some(&state_root)).await;
         assert!(json.sessions.is_empty());
         assert_eq!(
             json.undatable_sessions_dropped, 0,
