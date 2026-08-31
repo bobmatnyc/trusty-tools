@@ -188,8 +188,15 @@ async fn build_router_at(
     let mut workstream_store = WorkstreamStore::load_for_binding(data_dir, &binding)
         .await
         .context("loading workstream store")?;
+    // #4579: the registry is in-memory, so at boot it is empty and every
+    // persisted session_id is dangling — reconciliation prunes them against
+    // the live set. Deriving the set from `sessions` (rather than passing an
+    // empty one) keeps this correct if a future boot path pre-populates the
+    // registry before reconciling.
+    let live_session_ids: std::collections::HashSet<String> =
+        sessions.list().into_iter().map(|s| s.id).collect();
     workstream_store
-        .reconcile_on_boot()
+        .reconcile_on_boot(&live_session_ids)
         .await
         .context("reconciling workstream store on boot")?;
     let workstreams = Arc::new(Mutex::new(workstream_store));

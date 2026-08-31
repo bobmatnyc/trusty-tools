@@ -17,6 +17,7 @@
 //! the active pointer or clears it if the target vanished).
 //! Test: `store_tests`.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -117,15 +118,20 @@ struct FileSig {
 /// Why: the daemon boot path needs to log/report what reconciliation found
 /// without re-deriving it from before/after store snapshots.
 /// What: how many workstream records were loaded, the active id restored (if
-/// any), and whether a stale pointer (referencing a now-nonexistent
-/// workstream) was cleared.
+/// any), whether a stale pointer (referencing a now-nonexistent workstream)
+/// was cleared, and how many dangling `session_ids` were pruned across all
+/// records (#4579).
 /// Test: `store_tests::reconcile_restores_active_pointer`,
-/// `store_tests::reconcile_clears_active_when_target_missing`.
+/// `store_tests::reconcile_clears_active_when_target_missing`,
+/// `store_tests::reconcile_prunes_dangling_session_ids`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReconcileOutcome {
     pub workstream_count: usize,
     pub active_restored: Option<WorkstreamId>,
     pub active_cleared: bool,
+    /// #4579: total count of `session_ids` entries dropped on boot because no
+    /// matching session is present in the (in-memory) `SessionRegistry`.
+    pub sessions_pruned: usize,
 }
 
 /// Async, file-backed store for [`Workstream`] records (DOC-48 §3).
@@ -494,27 +500,47 @@ impl WorkstreamStore {
         Ok(())
     }
 
-    /// Boot-time reconciliation (DOC-48 §3.3, AC-1.4, AC-6.1, AC-6.2).
+    /// Boot-time reconciliation (DOC-48 §3.3, AC-1.4, AC-6.1, AC-6.2; #4579).
     ///
     /// Why: a daemon restart must never silently change which workstream is
     /// active (§3.2), and must never delete a workstream record (§3.3,
-    /// AC-6.1) — session liveness plays NO part in this (§3.3: "does NOT
-    /// determine active/idle state").
-    /// What: reloads from disk, then: if the persisted active pointer still
-    /// references an existing workstream, leaves it untouched (restored);
-    /// if it references a workstream that no longer exists, clears it to
-    /// `None` and persists that single change; if there was no pointer,
-    /// does nothing. Every workstream record is preserved either way — this
-    /// method never removes an entry from `workstreams`.
+    /// AC-6.1) — session liveness plays NO part in the active/idle STATE a
+    /// record reports (§3.3: "does NOT determine active/idle state"). #4579:
+    /// but the `SessionRegistry` is in-memory only, so after a restart every
+    /// persisted `session_id` names a session that no longer exists. Left in
+    /// place those references dangle forever — the workstream event
+    /// aggregation layer (§3, "fan-outs over the workstream's bound
+    /// `session_ids`") would keep resolving them against an empty registry.
+    /// Per owner ruling (2026-08-31, PRUNE ON BOOT), reconciliation drops each
+    /// `session_id` absent from the live registry. This prunes stale entries
+    /// from a record's list; it never removes a record, and never changes the
+    /// active/idle state a record reports — so it is still non-destructive in
+    /// the sense §3.3/AC-6.1 require. It is the one exception to §2.1's
+    /// append-only `session_ids`, scoped to boot only.
+    /// What: reloads from disk, then (1) if the persisted active pointer still
+    /// references an existing workstream, leaves it untouched (restored); if
+    /// it references a workstream that no longer exists, clears it to `None`;
+    /// if there was no pointer, does nothing. (2) Retains, in every record's
+    /// `session_ids`, only ids present in `live_session_ids`; a live id is
+    /// always kept. Persists once iff anything changed. Every workstream
+    /// record is preserved either way — this method never removes an entry
+    /// from `workstreams`. `updated_at` is deliberately NOT touched by a
+    /// prune, so a restart does not silently reorder records by recency.
     /// Test: `store_tests::reconcile_restores_active_pointer`,
     /// `store_tests::reconcile_clears_active_when_target_missing`,
-    /// `store_tests::reconcile_is_noop_with_no_active_pointer`.
-    pub async fn reconcile_on_boot(&mut self) -> Result<ReconcileOutcome, StoreError> {
+    /// `store_tests::reconcile_is_noop_with_no_active_pointer`,
+    /// `store_tests::reconcile_prunes_dangling_session_ids`,
+    /// `store_tests::reconcile_keeps_live_session_ids`.
+    pub async fn reconcile_on_boot(
+        &mut self,
+        live_session_ids: &HashSet<String>,
+    ) -> Result<ReconcileOutcome, StoreError> {
         self.reload_if_changed().await?;
         let mut outcome = ReconcileOutcome {
             workstream_count: self.data.workstreams.len(),
             ..Default::default()
         };
+        let mut changed = false;
         match self.data.active_workstream_id {
             Some(id) if self.data.workstreams.iter().any(|w| w.id == id) => {
                 outcome.active_restored = Some(id);
@@ -522,9 +548,22 @@ impl WorkstreamStore {
             Some(_) => {
                 self.data.active_workstream_id = None;
                 outcome.active_cleared = true;
-                self.save().await?;
+                changed = true;
             }
             None => {}
+        }
+        // #4579: prune session_ids whose session is gone from the in-memory
+        // registry, keeping every live one.
+        for ws in &mut self.data.workstreams {
+            let before = ws.session_ids.len();
+            ws.session_ids.retain(|sid| live_session_ids.contains(sid));
+            outcome.sessions_pruned += before - ws.session_ids.len();
+        }
+        if outcome.sessions_pruned > 0 {
+            changed = true;
+        }
+        if changed {
+            self.save().await?;
         }
         Ok(outcome)
     }
