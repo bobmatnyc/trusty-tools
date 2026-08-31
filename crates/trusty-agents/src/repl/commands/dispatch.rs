@@ -180,28 +180,11 @@ impl TrustyAgentsRepl {
                 Ok(true)
             }
             "/version" => {
-                // #buildinfo-erofs: use the already-resolved `project_dir`
-                // (set via `detect_self_project`/`/connect`, never a bare
-                // `std::env::current_dir()`) so this never attempts to
-                // create `.trusty-agents/state` under an unwritable cwd —
-                // the REPL only reaches this path once interactive startup
-                // has already succeeded, but resolving through the same
-                // primitive as the CLI paths keeps the invariant obvious
-                // and removes the last caller of the raw-cwd
-                // `BuildInfo::load_and_increment()`.
-                let state_dir = self.project_dir.join(".trusty-agents").join("state");
-                match crate::build_info::BuildInfo::load_and_increment_in(&state_dir).await {
-                    Ok(info) => {
-                        let _ = writeln!(out, "{}", info.display_string());
-                    }
-                    Err(_) => {
-                        let _ = writeln!(
-                            out,
-                            "trusty-agents v{} (build info unavailable)",
-                            env!("CARGO_PKG_VERSION")
-                        );
-                    }
-                }
+                // #4260: report the artifact's own provenance. This used to
+                // bump the on-disk run counter (and so had to resolve a
+                // writable state dir), which made repeated `/version` calls
+                // in one session disagree about the "build" they named.
+                let _ = writeln!(out, "{}", crate::build_info::version_string());
                 Ok(true)
             }
             "/projects" => {

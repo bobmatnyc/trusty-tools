@@ -1,12 +1,16 @@
-//! Build and version tracking.
+//! Build provenance and per-run tracking — two different questions, kept
+//! apart.
 //!
-//! Why: We need a monotonic build counter that increments on every process
-//! start, independent of the semver version. The combined `vX.Y.Z build #N`
-//! string lets us correlate log lines and performance telemetry with the
-//! exact binary invocation that produced them. Keeping the counter on disk
-//! (rather than baked into the binary) lets a single `cargo build` produce
-//! many distinct "builds" across repeated `cargo run` invocations during
-//! development — which is exactly when we need the disambiguation.
+//! Why: "which SOURCE produced this binary" is answered by the compile-time
+//! constants below (version, git SHA, commit date, dirty flag) and never
+//! changes for a given artifact. "which RUN of that binary am I reading logs
+//! from" is answered by the on-disk counter in [`BuildInfo`], which increments
+//! on every process start. Conflating them is #4260: the counter used to
+//! render as `build #N` in `--version`, so the same installed binary reported
+//! `build #2435` then `build #2440` and could not be cited as install
+//! evidence. The counter now renders as `run #N` and appears only where a
+//! per-invocation discriminator is the point — the startup log line and
+//! performance telemetry filenames.
 //!
 //! What: Reads `<dir>/build.json` for a caller-resolved `dir` (always
 //! `<project>/.trusty-agents/state`, never a bare cwd — see
@@ -40,13 +44,65 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Test: `version_string_contains_version` confirms both fields render.
 pub const GIT_HASH: &str = env!("GIT_COMMIT_HASH");
 
-/// Human-readable banner used by the CTRL REPL and `--version` output.
+/// Full 40-character git commit hash captured at build time by `build.rs`.
 ///
-/// Why: One canonical format keeps log grep and support reports consistent.
-/// What: Returns `trusty-agents vX.Y.Z (<git-hash>)`.
-/// Test: `version_string_contains_version` checks both substrings render.
+/// Why: Short SHAs collide across repositories, so a support report or a
+/// remote `/api/health` probe needs the unambiguous form (#4260).
+/// What: `git rev-parse HEAD`, or `"unknown"` when git is unavailable.
+/// Test: `provenance_constants_are_populated`.
+pub const GIT_HASH_FULL: &str = env!("GIT_COMMIT_HASH_FULL");
+
+/// Committer date of [`GIT_HASH`], in strict ISO 8601.
+///
+/// Why: Answers "is this binary older than that merge?" without a filesystem
+/// mtime comparison — the forensic exercise #4260 was filed over.
+/// What: `git log -1 --format=%cI`, or `"unknown"` when git is unavailable.
+/// Test: `provenance_constants_are_populated`.
+pub const GIT_COMMIT_DATE: &str = env!("GIT_COMMIT_DATE");
+
+/// Whether the working tree carried uncommitted or untracked changes when
+/// this binary was compiled.
+///
+/// Why: A SHA describes a dirty build only approximately; saying so out loud
+/// stops a local experiment from being mistaken for the merged commit.
+/// What: `"1"` when `git status --porcelain` printed anything at build time,
+/// `"0"` otherwise. Read it through [`is_dirty`].
+/// Test: `provenance_constants_are_populated`.
+pub const GIT_DIRTY: &str = env!("GIT_DIRTY");
+
+/// True when the working tree was dirty at build time.
+pub fn is_dirty() -> bool {
+    GIT_DIRTY == "1"
+}
+
+/// Human-readable banner used by the CTRL REPL, `--version`, and the startup
+/// log line.
+///
+/// Why: One canonical format keeps log grep and support reports consistent,
+/// and — since #4260 — every token in it is a property of the ARTIFACT, so
+/// two invocations of one binary print identical bytes.
+/// What: `trusty-agents vX.Y.Z (<short-sha>[-dirty], <commit-date>)`.
+/// Test: `version_string_contains_version`, `version_string_is_stable`,
+/// `commit_mark_matches_the_dirty_flag`.
 pub fn version_string() -> String {
-    format!("trusty-agents v{VERSION} ({GIT_HASH})")
+    format!(
+        "trusty-agents v{VERSION} ({}, {GIT_COMMIT_DATE})",
+        commit_mark()
+    )
+}
+
+/// The short SHA, suffixed with `-dirty` when the build tree was not clean.
+///
+/// Why: Callers that render provenance (banner, `/api/health`) must not each
+/// re-derive the dirty suffix — #4260 is a duplication-of-truth bug already.
+/// What: `<short-sha>` or `<short-sha>-dirty`.
+/// Test: `commit_mark_matches_the_dirty_flag`.
+pub fn commit_mark() -> String {
+    if is_dirty() {
+        format!("{GIT_HASH}-dirty")
+    } else {
+        GIT_HASH.to_string()
+    }
 }
 
 /// On-disk shape of `.trusty-agents/state/build.json`.
@@ -62,15 +118,15 @@ struct PersistedBuild {
     started_at: String,
 }
 
-/// Runtime build metadata surfaced to logs, the `--version` flag, and
-/// downstream instrumentation.
+/// Per-RUN metadata surfaced to the startup log line and downstream
+/// instrumentation. Not build identity — see the module docs.
 ///
-/// Why: Centralizes "which binary + which invocation" so later instrumentation
-/// (issue #47) can tag every telemetry event with the same build stamp the
-/// startup log line shows.
-/// What: Holds the compile-time semver, the incremented build counter, and
-/// the ISO8601 UTC start timestamp.
-/// Test: `display_string` returns `trusty-agents vX.Y.Z build #N`.
+/// Why: Lets instrumentation (issue #47) tag every telemetry event with the
+/// same run stamp the startup log line shows, so two concurrent processes of
+/// one binary stay distinguishable in a merged log.
+/// What: Holds the compile-time semver, the incremented run counter, and the
+/// ISO8601 UTC start timestamp.
+/// Test: `display_string` returns `<version-string> run #N`.
 #[derive(Debug, Clone)]
 pub struct BuildInfo {
     pub version: &'static str,
@@ -123,13 +179,16 @@ impl BuildInfo {
         })
     }
 
-    /// Human-readable banner used by the startup log line and `--version`.
+    /// Human-readable banner used by the startup log line.
     ///
     /// Why: Single canonical format so grep/tooling can match it uniformly.
-    /// What: `trusty-agents vX.Y.Z build #N`.
-    /// Test: Asserted directly in unit tests.
+    /// #4260: the counter is labelled `run #N`, never `build #N` — it names
+    /// this invocation, and calling it a build made a stale binary look
+    /// current.
+    /// What: `trusty-agents vX.Y.Z (<sha>, <date>) run #N`.
+    /// Test: `display_string_format`.
     pub fn display_string(&self) -> String {
-        format!("trusty-agents v{} build #{}", self.version, self.build)
+        format!("{} run #{}", version_string(), self.build)
     }
 }
 
@@ -282,6 +341,9 @@ mod tests {
         assert_eq!(info.build, 1, "corrupt file should be treated as build=0");
     }
 
+    /// Why: #4260 — the counter must be labelled as an invocation, and the
+    /// artifact provenance must lead. `build #N` must not reappear anywhere.
+    /// Test: itself.
     #[tokio::test]
     async fn display_string_format() {
         let info = BuildInfo {
@@ -289,7 +351,12 @@ mod tests {
             build: 42,
             started_at: "2026-04-22T17:31:30Z".to_string(),
         };
-        assert_eq!(info.display_string(), "trusty-agents v0.1.0 build #42");
+        let s = info.display_string();
+        assert_eq!(s, format!("{} run #42", version_string()));
+        assert!(
+            !s.contains("build #"),
+            "counter must not read as build: {s}"
+        );
     }
 
     #[test]
@@ -299,6 +366,43 @@ mod tests {
         assert!(s.contains(VERSION));
         // GIT_HASH is either a short hash or "unknown"; rendered in parens.
         assert!(s.contains(GIT_HASH));
+        assert!(s.contains(GIT_COMMIT_DATE));
+    }
+
+    /// Why: #4260 — the whole point is that repeated asks of one binary get
+    /// one answer. Nothing in `version_string` may read the clock, the disk,
+    /// or the environment.
+    /// Test: itself.
+    #[test]
+    fn version_string_is_stable() {
+        assert_eq!(version_string(), version_string());
+        assert_eq!(version_string(), version_string());
+    }
+
+    /// Why: the dirty suffix is the difference between "this SHA is the whole
+    /// binary" and "mostly"; it must track the flag `build.rs` recorded rather
+    /// than being decorative.
+    /// Test: itself.
+    #[test]
+    fn commit_mark_matches_the_dirty_flag() {
+        let mark = commit_mark();
+        assert!(mark.starts_with(GIT_HASH), "got: {mark}");
+        assert_eq!(
+            mark.ends_with("-dirty"),
+            is_dirty(),
+            "dirty suffix must follow GIT_DIRTY={GIT_DIRTY}: {mark}"
+        );
+    }
+
+    /// Why: an `env!` that `build.rs` forgot to emit is a compile error, but
+    /// one it emits empty is a silent hole in every provenance report.
+    /// Test: itself.
+    #[test]
+    fn provenance_constants_are_populated() {
+        assert!(!GIT_HASH.is_empty());
+        assert!(!GIT_HASH_FULL.is_empty());
+        assert!(!GIT_COMMIT_DATE.is_empty());
+        assert!(GIT_DIRTY == "0" || GIT_DIRTY == "1", "got: {GIT_DIRTY}");
     }
 
     #[tokio::test]

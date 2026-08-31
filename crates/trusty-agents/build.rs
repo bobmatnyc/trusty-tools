@@ -9,10 +9,12 @@
 //! in `src/api/server.rs` always finds a directory to scan — without this,
 //! a missing `ui/dist/` (e.g. fresh clone with no pnpm installed) yields the
 //! 3 compile errors tracked in #112.
-//! What: Queries `git rev-parse --short HEAD` at build time and exposes it
-//! as the `GIT_COMMIT_HASH` environment variable to the compiled crate via
-//! `cargo:rustc-env`. Falls back to `"unknown"` when git isn't available or
-//! the directory isn't a git repo. Then attempts a real `pnpm build` of the
+//! What: Queries git at build time and exposes the results to the compiled
+//! crate via `cargo:rustc-env` — `GIT_COMMIT_HASH` (short SHA),
+//! `GIT_COMMIT_HASH_FULL`, `GIT_COMMIT_DATE` (strict ISO 8601 committer
+//! date), and `GIT_DIRTY` (`"1"` when the working tree had uncommitted or
+//! untracked changes at build time). Falls back to `"unknown"` when git isn't
+//! available or the directory isn't a git repo. Then attempts a real `pnpm build` of the
 //! Svelte UI; if pnpm is unavailable or `SKIP_UI_BUILD=1`, falls back to
 //! writing a placeholder `ui/dist/index.html` so `rust-embed` still compiles.
 //! Test: After `cargo build`, `build_info::GIT_HASH` should be non-empty and
@@ -39,8 +41,11 @@ fn main() {
     println!("cargo:rerun-if-changed=ui/package.json");
     println!("cargo:rerun-if-env-changed=SKIP_UI_BUILD");
 
+    // #4260: watch the index too so a `git add` refreshes the dirty flag.
+    println!("cargo:rerun-if-changed=.git/index");
+
     ensure_ui_dist();
-    emit_git_hash();
+    emit_git_provenance();
 }
 
 /// Run the Svelte UI build (or fall back to a placeholder `ui/dist/index.html`).
@@ -151,30 +156,50 @@ fn ensure_placeholder(ui_dist: &Path) {
     }
 }
 
-/// Capture the short git SHA at build time and expose it via `cargo:rustc-env`.
+/// Capture the git provenance of this build and expose it via `cargo:rustc-env`.
 ///
 /// Why: Bug reports and log lines need a deterministic identifier for the
 /// running binary — `CARGO_PKG_VERSION` alone collapses every commit on a
-/// dev branch into the same version string.
-/// What: Runs `git rev-parse --short HEAD`, exposes the result as
-/// `GIT_COMMIT_HASH`, or falls back to `"unknown"` if git is unavailable.
-/// Test: After `cargo build`, the compiled binary's startup banner should
-/// include either a 7-char hash or the literal `"unknown"`.
-fn emit_git_hash() {
-    let git_hash = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                String::from_utf8(o.stdout).ok()
-            } else {
-                None
-            }
-        })
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "unknown".to_string());
+/// dev branch into the same version string, which is how a ~3.5h-stale
+/// `tagent` was reported as a code bug (#4260). The commit date answers "is
+/// this binary older than that merge?" directly, and the dirty flag says
+/// whether the SHA describes the whole binary or only most of it.
+/// What: Runs `git rev-parse --short HEAD`, `git rev-parse HEAD`,
+/// `git log -1 --format=%cI`, and `git status --porcelain`, exposing them as
+/// `GIT_COMMIT_HASH`, `GIT_COMMIT_HASH_FULL`, `GIT_COMMIT_DATE`, and
+/// `GIT_DIRTY` (`"1"`/`"0"`). Each git value falls back to `"unknown"` (dirty
+/// to `"0"`) when git is unavailable or this is not a repo. The dirty flag
+/// describes the tree as of the last build-script run: the
+/// `cargo:rerun-if-changed` paths above are repo-root-relative and so never
+/// exist next to this crate, which makes cargo re-run this script on every
+/// build and keeps the flag current.
+/// Test: `crates/trusty-agents/tests/version_provenance.rs` asserts the
+/// binary's `--version` carries `GIT_COMMIT_HASH`;
+/// `build_info::commit_mark_matches_the_dirty_flag` covers the rendering.
+fn emit_git_provenance() {
+    let short = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".to_string());
+    let full = git(&["rev-parse", "HEAD"]).unwrap_or_else(|| "unknown".to_string());
+    let date = git(&["log", "-1", "--format=%cI"]).unwrap_or_else(|| "unknown".to_string());
+    // #4260: `--porcelain` prints one line per changed or untracked path, so
+    // any output at all means the tree does not match the SHA above.
+    let dirty = match git(&["status", "--porcelain"]) {
+        Some(_) => "1",
+        None => "0",
+    };
 
-    println!("cargo:rustc-env=GIT_COMMIT_HASH={git_hash}");
+    println!("cargo:rustc-env=GIT_COMMIT_HASH={short}");
+    println!("cargo:rustc-env=GIT_COMMIT_HASH_FULL={full}");
+    println!("cargo:rustc-env=GIT_COMMIT_DATE={date}");
+    println!("cargo:rustc-env=GIT_DIRTY={dirty}");
+}
+
+/// Run `git` with `args`, returning trimmed stdout, or `None` when the command
+/// fails or produces no output.
+fn git(args: &[&str]) -> Option<String> {
+    let out = Command::new("git").args(args).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    if s.is_empty() { None } else { Some(s) }
 }

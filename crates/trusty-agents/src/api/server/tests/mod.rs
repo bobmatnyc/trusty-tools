@@ -64,6 +64,16 @@ async fn health_returns_ok_and_version() {
         body.get("ppid").is_some(),
         "health must include a ppid field"
     );
+    // #4260: a running daemon must be identifiable by commit over HTTP —
+    // `version` alone repeats across every build between two releases.
+    assert_eq!(
+        body["commit"].as_str().map(str::to_string),
+        Some(crate::build_info::commit_mark()),
+        "health must report the build's short commit: {body}"
+    );
+    assert_eq!(body["commit_full"], crate::build_info::GIT_HASH_FULL);
+    assert_eq!(body["commit_date"], crate::build_info::GIT_COMMIT_DATE);
+    assert_eq!(body["dirty"], crate::build_info::is_dirty());
 }
 
 #[tokio::test]

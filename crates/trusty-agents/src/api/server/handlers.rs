@@ -124,6 +124,19 @@ pub(super) struct TaskSubmittedBody {
 pub(super) struct HealthBody {
     status: &'static str,
     version: &'static str,
+    /// Short commit SHA this daemon was built from, `-dirty`-suffixed when the
+    /// build tree was not clean.
+    ///
+    /// Why: #4260 — `version` alone cannot tell a stale daemon from a current
+    /// one, since both report the same semver between releases. The Svelte
+    /// header reads this field (`ui/src/lib/buildInfo.ts::parseHealthBody`).
+    commit: String,
+    /// Full commit SHA, for reports where a short SHA is ambiguous.
+    commit_full: &'static str,
+    /// Committer date of `commit_full`, strict ISO 8601.
+    commit_date: &'static str,
+    /// Whether the build tree carried uncommitted changes.
+    dirty: bool,
     /// This sidecar process's own pid.
     pid: u32,
     /// This sidecar's parent pid (`getppid`), or `None` off unix.
@@ -146,18 +159,24 @@ pub(super) fn projects_config_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(".trusty-agents/projects")
 }
 
-/// `GET /api/health` — liveness + version + parentage probe.
+/// `GET /api/health` — liveness + build provenance + parentage probe.
 ///
 /// Why: Beyond liveness, a GUI sidecar caller uses `pid`/`ppid` to verify it is
 /// talking to the sidecar it spawned rather than a reparented orphan on the same
-/// fixed port (#3734 adoption race).
-/// What: Returns `status`/`version` plus this process's `pid` and, on unix, its
-/// `getppid()`.
-/// Test: `health_returns_ok_and_version` (asserts the pid field is present).
+/// fixed port (#3734 adoption race). #4260 adds the commit fields so a running
+/// daemon can be identified over HTTP — a stale build and a current one both
+/// report the same `version` between releases.
+/// What: Returns `status`/`version`/`commit`/`commit_full`/`commit_date`/`dirty`
+/// plus this process's `pid` and, on unix, its `getppid()`.
+/// Test: `health_returns_ok_and_version` (asserts pid and the commit fields).
 pub(super) async fn health() -> Json<HealthBody> {
     Json(HealthBody {
         status: "ok",
-        version: env!("CARGO_PKG_VERSION"),
+        version: crate::build_info::VERSION,
+        commit: crate::build_info::commit_mark(),
+        commit_full: crate::build_info::GIT_HASH_FULL,
+        commit_date: crate::build_info::GIT_COMMIT_DATE,
+        dirty: crate::build_info::is_dirty(),
         pid: std::process::id(),
         ppid: parent_pid(),
     })
