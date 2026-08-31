@@ -20,7 +20,7 @@
 use super::*;
 use crate::core::instruction_overrides::{
     FILE_AGENT_DELEGATION, FILE_INSTRUCTIONS, FILE_MEMORY, FILE_WORKFLOW, OVERRIDE_DIR_NAME,
-    PromptSource, assemble_sections, delegation_with_roster, resolve_pm_prompt,
+    PromptSource, assemble_sections, delegation_with_roster,
     resolve_pm_prompt_with_roster, resolve_pm_prompt_with_source,
 };
 use crate::core::instruction_package::{
@@ -562,20 +562,38 @@ fn the_roster_source_is_consulted_exactly_once() {
 
 #[test]
 fn resolve_pm_prompt_wrapper_matches_the_source_reporting_form() {
-    // The public entry point must return exactly what the seam returns — the
-    // logging wrapper may not alter the prompt.
+    // #4766: the resolver must be a pure function of its inputs — resolving the
+    // same project with the same roster twice must return byte-identical prompts.
+    // The logging wrapper `resolve_pm_prompt` adds only an `info!` line over
+    // `resolve_pm_prompt_with_source`; it may not alter the prompt bytes.
     //
-    // Deliberately asserts NOTHING about which source ran. Both calls scan the
-    // ambient agent tiers independently, so the source is a property of the
-    // machine (populated `~/.claude/agents` -> Package; a bare CI runner ->
-    // Legacy), not of the wiring under test. Pinning it here would pass on a
-    // provisioned workstation and fail in CI — the environment-dependence that
-    // `resolve_pm_prompt_with_roster` was introduced to keep out of the gates.
-    // The contract under test is byte-equality of the two entry points.
+    // This used to call `resolve_pm_prompt_with_source` and `resolve_pm_prompt`
+    // back-to-back, each independently re-scanning the live `~/.claude/agents`
+    // tiers via `deployed_roster_section`. A concurrent change between the two
+    // scans made them diverge — a flake, ~1 red in 4 full-suite runs on a
+    // provisioned workstation, invisible in CI where no ambient tier exists.
+    // Both entry points delegate to `resolve_pm_prompt_with_roster`, so pinning
+    // the roster with one fixed closure exercises the same wrapper contract
+    // without touching ambient machine state.
     let tmp = TempDir::new().expect("tempdir");
 
-    let (with_source, _) = resolve_pm_prompt_with_source(tmp.path());
-    assert_byte_identical(&resolve_pm_prompt(tmp.path()), &with_source);
+    let first = resolve_pm_prompt_with_roster(tmp.path(), || Some(FIXED_ROSTER.to_string())).0;
+    let second = resolve_pm_prompt_with_roster(tmp.path(), || Some(FIXED_ROSTER.to_string())).0;
+    assert_byte_identical(&first, &second);
+
+    // Non-vacuous: the equality above only means something if the roster reaches
+    // the prompt. A DIFFERENT roster must produce a DIFFERENT prompt — which is
+    // exactly what made the old back-to-back live-scan diverge when the ambient
+    // tiers changed between the two calls.
+    let divergent_roster = "## Delegation Authority\n\n\
+         ### ticketing\n\nHandles ticketing work. Model: opus.";
+    assert_ne!(FIXED_ROSTER, divergent_roster, "the two rosters must differ");
+    let divergent =
+        resolve_pm_prompt_with_roster(tmp.path(), || Some(divergent_roster.to_string())).0;
+    assert_ne!(
+        first, divergent,
+        "a changed roster must change the prompt, else the byte-equality above is vacuous"
+    );
 }
 
 #[test]
