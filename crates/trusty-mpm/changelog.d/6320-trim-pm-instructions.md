@@ -1,3 +1,0 @@
-Changed
-
-- **The PM instruction sections and the `trusty-mpm` output style are rules as bullets, not prose.** Rationale paragraphs, incident narrative, and worked examples that only restated the rule above them are gone, and a rule stated in both surfaces is now stated once — the output style owns the voice rules, the sections own workflow and enforcement. Every rule, table, `<!-- ... -->` marker, section name, and `Skill(skill="tm-*")` pointer is preserved; no rule was replaced by a pointer to a skill (the #6320 owner ruling). `PM_INSTRUCTIONS_VERSION` is 0023 and the three composed-prompt goldens are regenerated ([#6320](https://github.com/bobmatnyc/trusty-tools/pull/6320))

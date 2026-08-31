@@ -1,3 +1,0 @@
-Fixed
-
-- `tm doctor`'s `skill_staleness` check now states the drift remedy per deploy tier. It claimed every finding was "REPAIRABLE by `tm install`", but `tm install` writes only the operator-home tier — so an operator re-ran it against managed-config and project-tier drift and watched the count refuse to move. Managed-config and project-tier drift now name the writer that actually refreshes them, plus `tm doctor --fix-skills`. Severity is unchanged: conventions-bearing drift still escalates to `Fail` at every tier ([#5865](https://github.com/bobmatnyc/trusty-tools/issues/5865))

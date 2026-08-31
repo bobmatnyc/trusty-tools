@@ -6,6 +6,915 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.5.12] — 2026-08-31
+
+### Added
+
+- **The launch path warns when a checkout carries another harness's (claude-mpm) hook wiring**, reusing `tm doctor`'s own `hooks_foreign_conflict` detector so the finding lands when the session starts rather than only when someone runs the diagnostic. Report-only — tm never removes another harness's hooks
+- The `TM <ver>` text in `tm statusline` is now a clickable link to the
+  trusty-console. Cmd-click (macOS) or Ctrl-click opens the dashboard on the
+  port the console is actually selected for — read from its discovery file,
+  falling back to the default `7788` when no console is configured. The link is
+  an OSC 8 escape sequence, the form Claude Code's status line documents for
+  clickable text, so the port lives in the escape and no rendered column gets
+  wider or gains a port that #6304 removed. A terminal without hyperlink
+  support shows the same `TM <ver> ●` text it showed before.
+- `discovery::console_addr` and `discovery::console_base_url` are the single
+  entry point for the console's selected address. The gateway resolver's
+  inline discovery-file read moved into them, so the statusline and
+  `resolve_daemon_url_via_gateway` now resolve the console the same way instead
+  of keeping two copies of the fallback rule. Neither probes the network.
+- An agent worktree is now a registered, reapable child of the delegation that dispatched it (#4311). The agent reports its own worktree path on its first tool call — every subagent hook payload already carries `agent_id` beside the `cwd` it is standing in — and the daemon records it on the delegation. trusty-mpm still creates no worktrees; what it gains is an owner for one the harness made, which is the condition ADR-0020's fail-closed rule needs before anything may remove it.
+- `SubagentStop` now reaps that worktree, behind six refusal gates: the tree survives if the harness already reclaimed it, if it is not a `.claude/worktrees/<name>` leaf, if a live session or an unfinished sibling delegation still holds it, if no git registry claims it, if it holds unsaved work, or if `git worktree remove --force` does not succeed. The unsaved-work gate is #4091's own implementation, not a second copy, and there is no path through which this reap can reach the force-discard policy. The branch is never deleted, and there is no `remove_dir_all` fallback. A `Stale` delegation is not reaped — that status means tracking lost the agent, not that it exited.
+- Agent worktrees are now attributed on disk, so ownership survives a daemon restart (#4311, DOC-66 §1.3). The `.trusty-mpm-worktree` sentinel payload widens from `{owner_session_id, created_at}` to also carry an `agent` block — the subagent's `agent_id`, its delegation id, and the dispatching session id. It is written when the agent's first tool call reports its working tree, which is the only moment the harness-chosen path is knowable. `DaemonState::delegations` is a `DashMap` built empty at every boot with no load path, so before this a restart dropped every registration permanently; `SubagentStop` now falls back to reading the sentinels under `.claude/worktrees/` and matching the exact `agent_id`, which is the from-disk rebuild ADR-0023 point 4 requires.
+- Four claims stand in front of that write, because the `cwd` an agent reports is `std::env::current_dir()` of its own `tm hook` process and moves wherever the agent `cd`s. The path must be a `.claude/worktrees/<name>` leaf (the same predicate the reap uses, reused rather than restated); the store it sits in must belong to the dispatching session's own checkout; its existing sentinel must be absent or already this agent's; and no other running delegation may already register it. The last claim is what covers a peer worktree carrying no sentinel — which is every directory in the store until they acquire one. An agent that steps into its main checkout, a scratch directory, another project's store, or a peer's worktree now writes nothing there and registers nothing.
+- The reap reads the target's sentinel and refuses unless it names the exiting agent — once before the expensive gates, and again immediately before the removal, following the #4118 precedent that the authoritative verdict is the one adjacent to the deletion. The path it is handed comes from the delegation registry or from the disk scan; neither is a claim made by the directory itself, and the sentinel sitting in the target is the only one that cannot have been redirected on the way there.
+- A live-process gate now guards the removal. Every other gate reads a registry — what trusty-mpm recorded, or what git recorded — and neither sees a process nobody registered; on 2026-08-15 a `trusty-memory serve --foreground` started by hand inside an agent worktree ran for a day in exactly that blind spot. The new gate runs one `lsof -d cwd` and refuses when any process's working directory is inside the tree. It fails toward IN USE (ADR-0045), and proves it can see at all by requiring the listing to report the probing process itself — without root `lsof` returns only the caller's own processes and exits 0, so a partial listing would otherwise read as a clean negative. It catches long-running commands an agent started from inside its tree; it does not reliably catch the agent process itself, whose cwd is normally a project root, and which the registry covers instead.
+- **`tm reinstall --binary` refuses a source behind `origin/main`.** `tm` is one
+  global binary shared by every managed session on the machine, and the `--path`
+  reinstall route rebuilds it from whatever source directory cargo's ledger
+  recorded — so installing from a worktree that predates a fix regressed that
+  fix for every session at once, silently, because the binary's own version
+  number does not move when its source is merely stale. The command now fetches
+  and compares `HEAD` against `origin/main`, refusing when it is behind and
+  naming `TRUSTY_MPM_ALLOW_STALE_INSTALL=1` as the deliberate override. It
+  refuses on positive evidence only: a source that is not a git repository, has
+  no `origin/main`, or has no usable `git` warns and installs
+  ([#4462](https://github.com/bobmatnyc/trusty-tools/issues/4462))
+- `tm memory import --refresh` (#5044) replaces a drifted drawer with the
+  file's current text — `memory_forget` then `memory_remember`, since
+  trusty-memory has no update-in-place tool — instead of reporting the drift
+  and leaving the stale copy in the palace. The plain run is unchanged and
+  still refuses to touch a drifted drawer; its skip reason now names
+  `--refresh`. Two new report statuses, `refreshed` and `would-refresh`, and a
+  `refreshed` count in the JSON report and the summary line.
+- Under `--refresh`, every file whose drawer the run names is put through
+  `palace_verify_embedded` (#6328) and fails unless that drawer is retrievable
+  right now. The `#4834` flow deletes source files on a clean exit, so a drawer
+  that is stored but absent from vector search — or a gate that could not run
+  at all — blocks the run rather than passing it. `--dry-run --refresh` reports
+  the same verdicts without writing.
+- A refresh that removes the stale drawer and then fails to write its
+  replacement reports `DATA LOSS`, names the removed drawer, and says not to
+  delete the source. A refresh whose `memory_forget` fails reports that nothing
+  changed. The two arms never read alike.
+- `git pull`, `git merge` and `git rebase` are now denied in a project's main checkout when the daemon reports another agent writing in that same directory (ADR-0048 decision 10). All three move the shared git HEAD under whoever else is standing on it, and git reports no error when they do. The rule binds the PM and every agent it dispatches. A pull in a worktree, a pull in a checkout nobody else is writing in, `git fetch`, and the `--abort`/`--continue` family stay allowed, and the denial names `git fetch` and a worktree as the two remedies.
+- A worktree the guard grants a dispatched writer is now reported to the daemon, so the dispatch's delegation record carries the isolation it was given. Without it the daemon's own tracker recorded the original unisolated payload, every granted writer stayed named as writing in the shared checkout, and the new HEAD-move rule then denied `git pull` there for six hours on an agent that had already been moved out — blocking the release flow's fast-forward of the main checkout.
+- A dispatch made from a main checkout is denied, rather than granted a worktree, when the daemon reports another agent already writing in that checkout. The grant used to return before the concurrent-dispatch check ran at all, so a second unisolated writer that would previously have been denied was admitted whenever the harness did not apply the rewritten dispatch input.
+- A dispatched agent that may write files is now granted its own worktree when the session is standing in a project's main checkout: `tm hook --pm-guard` rewrites the dispatch to declare `isolation: "worktree"`, so the harness provisions and reclaims the tree (ADR-0048). An agent this binary cannot classify is treated as a writer there rather than trusted.
+- The ADR-0044 write boundary is enforced. In a main checkout, an edit tool targeting a source file and `git commit` are denied for the PM and for every agent it dispatches; documents, configuration, and everything in a worktree stay writable. Each denial names the remedy.
+- The interactive picker can ask for an isolated session: `n <name> --worktree` (the flag also leads, and works alone) sends the same `worktree` request `tm launch --worktree` sends, so a long refactor or a risky rebase no longer needs a different command. Without the flag nothing changes — the launch still lands in the project's main checkout.
+- A launch that joins a checkout other live sessions are already standing in prints one line naming them, the ordinal, and the `--worktree` alternative. It states where the session lands; it does not warn, prompt, or refuse, and the first session in a project sees nothing.
+- A project can now decline the dispatched-agent worktree grant. Set `agent_worktree = false` in the project's committed `.trusty-mpm.toml` and every agent dispatched there stays in the main checkout: no worktree is created, and none needs reclaiming (#5814). The dispatch's prompt is annotated with the workflow that replaces isolation — edit in place, commit on the branch the checkout already has, push. Isolation stays the default everywhere else; an absent, malformed, or unreadable config keeps ADR-0048's grant exactly as it was.
+- `agent_worktree` is a separate key from `worktree`, which decides where a managed SESSION runs. Setting one does not move the other. The opt-out exempts the dispatch from the worktree grant only: the ADR-0044 main-checkout write boundary is unchanged, and a second concurrent writer in the same checkout is still refused.
+- `/tm-init` now adds a **Build Performance** pointer to a Rust project's
+  scaffolded or refreshed `CLAUDE.md` (keyed off the same `Cargo.toml` marker
+  `rust-engineer` deploys on), so build-performance discipline is part of
+  standard project setup instead of something reached only after a build
+  already feels slow. The pointer references the bundled
+  `rust-build-performance` skill and directs a new contributor to
+  `cargo build --timings` for a measured baseline. It deliberately does not
+  assert that `sccache` (or any shared compilation cache) makes builds
+  faster: for a workspace's own path/member crates — the common
+  multi-worktree cold-build scenario — sccache under its default config gets
+  zero benefit, since cargo's dev profile builds those crates incrementally
+  and sccache cannot cache incremental output. `CARGO_INCREMENTAL=0` is
+  named as the only lever for a cross-worktree hit on path crates, without
+  recommending it — that tradeoff is unmeasured. Whether sccache pays off on
+  a workspace's external, non-path dependencies stays a separate, unanswered
+  question the pointer directs the operator to measure (`sccache
+  --show-stats`) rather than assume.
+- `tm wait` — a condition-based wait an agent can run in-turn. Foreground `sleep` is rejected by the guards and the harness auto-backgrounds a foreground call near ~120s, so an agent facing a cold build measured at 1h04m ended its turn and lost the work. `tm wait` polls a condition instead: `--for run` (a PID or a file-backed job handle), `--for file` (a sentinel's existence, or a literal it must contain), and `--for check` (a PR's checks settling, through one-shot `gh pr view` reads — never `--watch`, and never trusting `bucket` or an empty rollup). One invocation returns before the harness ceiling with `status=pending` and exit 75, carrying the remaining budget and the exact command to re-issue; `status=met` exits 0 and `status=timeout` exits 1. The hard `--timeout` spans re-runs, so re-issuing the command does not reset the agent's own deadline ([#5843](https://github.com/bobmatnyc/trusty-tools/issues/5843))
+- `tm projects register --gh-config-dir <dir>`, beside the existing `--gh-account`, so one command sets both keys per-project `gh` selection requires — `github.config_dir` and `github.account`. #5851
+- `tm doctor --fix` now redeploys drifted or missing output styles under `~/.claude/output-styles/`, honouring the existing dry-run-by-default / `--yes` convention. A file that cannot be read is refused rather than overwritten ([#5866](https://github.com/bobmatnyc/trusty-tools/issues/5866))
+- `tm ls --no-prune` and `tm sessions ls --no-prune` make a listing a pure
+  read: no dead-record decommission, no confirmation-marker write, no prune
+  notice (refs [#5950](https://github.com/bobmatnyc/trusty-tools/issues/5950)).
+  Auto-pruning every listing stays the default (#4702) and is now stated in
+  both commands' `--help` rather than only in a doc comment. The prune's
+  operator lines were already on stderr, so `--json` stdout is parseable JSON
+  either way.
+- The PM instruction package's workflow section now states merge-queue ownership: one
+  session owns a repository's merge queue at a time, a merge authorization is scoped to
+  the PRs presented when it was given, an outstanding review verdict (a `code-critic`
+  BLOCK, a requested-changes review, a hold label) blocks a merge that green required
+  contexts would otherwise permit, and a hold is marked in GitHub state rather than
+  announced by message. Procedure in the `tm-workflow` skill; pointer from
+  `tm-delegation-patterns`' Cross-Workstream Coordination.
+- `tm session prune --state unresolvable` selects managed records that name no
+  resolvable workspace — `cwd` is the `/unknown` sentinel and there is no
+  `workspace_path`
+  (refs [#6118](https://github.com/bobmatnyc/trusty-tools/issues/6118)).
+  These are the adoption ghosts #6126 stopped minting; nothing could select the
+  ones already in the store. On the reporting host 23 of them sat `Active`:
+  every existing `--state` value selected 0, `prune-idle` skipped all 23 on an
+  `errored` verdict, and the only command that reached them — `--state all
+  --include-active` — also selected 32 healthy working sessions including the
+  operator's own. The new filter is the one selector whose choice ignores tmux
+  liveness, because a live pane is what made the class unreachable; it needs no
+  `--include-active` and is not widened by it. Such a record has no
+  `workspace_path`, so this path can delete no file: it reclaims the leaked pane
+  and the store row. Two records sharing one pane (the #6117 race) are both
+  tombstoned in one pass.
+- `tm session decommission-ephemeral --dry-run` previews the sweep instead of
+  performing it. Preview and real sweep are one call differing in one boolean, so
+  they cannot select different sets. The daemon echoes `dry_run` and the CLI
+  refuses to report a preview the daemon did not confirm — a daemon predating
+  this change drops the unknown query param and sweeps for real while still
+  returning 200.
+- `tm` and `tm launch` in a directory that is not a git repository now run
+  `git init` there and carry on, instead of stopping at "not in a git project"
+  or "no git origin remote found"
+  ([#6274](https://github.com/bobmatnyc/trusty-tools/issues/6274)). The
+  repository lands in the invocation directory, a one-line
+  `tm: initialized git in <path>` notice says so, and everything after that runs
+  exactly as it does for a git repository with no origin remote. Three
+  directories are left alone: the home directory and the filesystem root refuse
+  with a stated reason, and a directory that already has a repository — its own,
+  an ancestor's work tree, or a bare repo — is untouched. A missing `git`
+  executable is a prerequisite error naming git; nothing is written in that case.
+- `TRUSTY_SEARCH_SOCKET` pins the trusty-search daemon's socket path for a probe,
+  replacing `TRUSTY_SEARCH_ADDR`. It exists for a test rig or a CI job pointing
+  at a daemon it started itself; `TRUSTY_DATA_DIR_OVERRIDE` is process-global and
+  would redirect every other trusty-* client in the same process.
+- The daemon binds a hardened Unix socket at `<data dir>/trusty-mpm.sock`
+  alongside `127.0.0.1:7880`, through the same
+  `trusty_common::uds::bind_singleton_hardened` entry point trusty-memory,
+  trusty-review, and trusty-analyze use — a `0600` socket in a `0700` directory,
+  with a peer-uid check on every accepted connection. The listener serves an
+  `RpcRouter` with no registered methods, so every request answers
+  `method_not_found` until slice 2 moves the first route across; both listeners
+  drain on the same SIGTERM/SIGINT and the socket file is unlinked before the
+  listener is dropped. A socket that cannot be bound fails startup with an error
+  naming the path rather than degrading to an HTTP-only daemon. No HTTP route
+  moved and nothing was removed (slice 1 of
+  [#6288](https://github.com/bobmatnyc/trusty-tools/issues/6288), ADR-0032).
+- `daemon::socket` — `socket_path`, `bind`, and `serve_until_shutdown`, the
+  listener's bind and serve halves, split so a test can drive the real path with
+  its own shutdown future.
+- The daemon serves its health, doctor, error-list, bug-report, breaker, optimizer, overseer, LLM-chat, tmux and claude-config routes as JSON-RPC methods on the Unix socket, under `mpm.<family>.<verb>` names. HTTP still serves all twenty routes unchanged; each route now has one shared body both transports call. (#6288)
+- Sixteen more JSON-RPC methods on the daemon's Unix socket: the legacy session
+  registry (`mpm.sessions.list` / `.register` / `.connect` / `.discover` /
+  `.reap` / `.get` / `.delete` / `.pause` / `.resume` / `.command` / `.output` /
+  `.pane` / `.set_pid` / `.events_poll`), the hook relay (`mpm.hooks.ingest`),
+  and the polled event feed (`mpm.events.poll`). The HTTP routes they mirror are
+  unchanged and still served; the socket is an additional way to reach the same
+  body. The SSE streams `/events` and `/sessions/{id}/events` stay HTTP-only for
+  now ([#6288](https://github.com/bobmatnyc/trusty-tools/issues/6288)).
+- The daemon's managed-session lifecycle, SESSCTL control-plane, and L2 proxy routes are now also served as JSON-RPC methods on the Unix socket (`mpm.managed.*`, `mpm.control.*`, `mpm.proxy.*`). HTTP is unchanged and every route still answers on it; each method and its HTTP route share one implementation, so the two transports cannot drift.
+- The #6197 input validation and caller check moved into that shared implementation, so neither transport can reach a control-plane spawn without them. The socket's own peer-uid check is stricter than the loopback guard it stands in for.
+- `mpm.control.connect` answers as a frame stream, carrying the same session events the SSE route's `data:` lines carry.
+- The daemon serves its registry-B project, deliverable/milestone, L3 manager, peer-bus, pairing and delegation-query routes as JSON-RPC methods on the Unix socket, alongside the unchanged HTTP surface (33 methods, `mpm.projects.*` through `mpm.delegation.*`).
+- The peer bus's SSE `subscribe` leg is deliberately not among them — it needs the streaming seam a later slice adds, and its HTTP handler is untouched.
+- `session_delete_records` MCP tool: record-only bulk deletion over an explicit
+  session-id list. Each id routes to whichever registry owns it — the managed
+  store's `delete_record`, or the legacy in-memory registry — and the call never
+  removes a worktree, a workspace directory, or any other filesystem state, and
+  never kills a tmux host. Fail-closed: a session that is still running is
+  refused in both registries (there is no `force`), a liveness probe that cannot
+  reach a verdict refuses too, and a malformed, unknown, or refused id is
+  reported as one failed row rather than counted as a deletion. A deleted legacy
+  entry that shares its tmux name with a live managed record reports that record
+  as `managed_sibling` and leaves it untouched (#6431).
+
+### Fixed
+
+- **A launch with no worktree request now runs in the managed checkout (`<workspace-root>/<owner>/<repo>`), not in whatever directory `tm` was typed in** — launching from an unmanaged clone switches to the managed checkout and provisions it when absent. The unmanaged tree is never written to, and a managed checkout that cannot be provisioned fails the launch instead of falling back to it (ADR-0037 terminology clarification)
+- **An explicit `--worktree` launch whose worktree cannot be established now fails** — it previously logged a warning and spawned a session with no worktree at all, reporting success for a placement nobody asked for
+- `tm hook --pm-guard` now classifies process-substitution bodies. `<(…)` and
+  `>(…)` join `$(…)` and backticks as one class of substitution the guard
+  decomposes, so `diff <(sed -i s/a/b/ f) x` — which bash executes, and which
+  the guard allowed — is refused, and `>(…)` is denied by its body rather than
+  incidentally by the `>` redirection scan. An unbalanced opener fails closed,
+  matching the `$(`/backtick shape; a quoted `<(…)` in a commit message stays
+  literal text. (Refs #2745)
+- `tm doctor` gained a `base_clone` check. A linked worktree keeps every source
+  file when the clone behind it loses its git internals, and then every git
+  command there fails with `fatal: not a git repository` — the 2026-07-21 state
+  that went unnoticed for over half an hour across 70 worktrees while both
+  worktree probes stayed green. The check reads each live session workspace's
+  `.git` pointer and Fails naming the base path, what is missing, and how many
+  live worktrees hang off it. Detection only: it never repairs, moves, or
+  deletes, and its remediation text keeps the existing quarantine-never-delete
+  discipline. (Refs #3605)
+- Deploy diagnostics now reach the operator on every in-process CLI path. Bare
+  `tm` (including the in-place relaunch), `tm doctor --fix-skills`, and
+  `tm catalog apply` each run a deploy that legitimately declines files — a
+  checksum-frozen skill, an unreadable ledger, a raced merge — and each decline
+  was written to a `tracing` subscriber that was never registered, so the file
+  stayed stale forever with no signal. All three now install the same
+  stderr-only subscriber `tm sessions instructions` uses, at the `warn` default
+  so a clean run stays quiet. Registration is `try_init`, so a second
+  installation returns an error instead of aborting the process. (Refs #4878)
+- Peer-bus registration no longer overwrites a live instance on an instance-id
+  suffix collision. `DashMap::insert` replaced the existing entry, after which
+  every lookup of the first instance resolved to the second — instance-addressed
+  delivery reaching an instance the sender did not name. Registration now claims
+  the key through `entry`, re-minting up to eight times and logging each
+  collision, and returns the new `BusError::InstanceIdCollision` (HTTP 409)
+  rather than displacing a registered instance. (Refs #4276)
+- `~/.trusty-mpm/daemon.lock` is no longer deleted by a process that does not
+  own it (closes [#1731](https://github.com/bobmatnyc/trusty-tools/issues/1731)).
+  The daemon has written the file at startup since #1731 first closed, but the
+  `daemon::lock` unit test called `write_lock` then `remove_lock` against the
+  real path to prove they do not panic — so every `cargo test -p trusty-mpm` run
+  overwrote a live daemon's record with the test process's PID and then removed
+  it, leaving a running daemon with no lock file. Removal is now
+  ownership-checked in both the daemon's shutdown handler and `tm stop`, so an
+  outgoing daemon cannot delete a successor's record either, and that test is
+  hermetic.
+- `PATCH /api/v1/projects/{name}` no longer stores a `gh_user` that `gh` has
+  never heard of
+  (closes [#2121](https://github.com/bobmatnyc/trusty-tools/issues/2121)).
+  The endpoint accepted and persisted whatever string it was handed, so a
+  typo'd or not-yet-authenticated login returned 200 and surfaced much later as
+  a delegated-agent failure. Setting the field now runs one bounded
+  `gh auth status` and rejects the whole request with 400 when the login is not
+  one of the logged-in accounts, naming the field, the rejected login, and the
+  accounts that would be accepted; an accepted login is stored in `gh`'s own
+  spelling, so the byte-for-byte comparison `ensure_gh_account_in_dir` makes
+  later cannot disagree with it. A probe that cannot answer — no `gh` on PATH,
+  or a timeout — is 503, never a silent accept and never a 400. Clearing with
+  `null` and any request that does not mention `gh_user` run no probe at all.
+- **Two sessions can no longer share one tmux pane.** The managed create path
+  ran `tmux new-session -A`, and `-A` attaches to an existing session of that
+  name instead of failing — so two creators that computed the same name both
+  returned success, and two session records were persisted driving one
+  terminal, with no error at any step. The create now runs without `-A`: a
+  creator that loses the name gets a refusal, folds that name into its taken
+  set, and retries under a fresh one, up to four attempts before failing with a
+  name collision. The orphan-reaping guard is armed only after a create that
+  actually created something, so a loser can never reap the winner's session
+  ([#3707](https://github.com/bobmatnyc/trusty-tools/issues/3707))
+- A `SubagentStop` that reached the daemon before the `PostToolUse` teaching its
+  `agent_id` no longer strands its delegation `Running` for six hours. The stop
+  is held in a bounded, TTL'd ledger and applied the moment the id is taught, so
+  the two arrival orders converge on one record. Resolution still matches only
+  the exact `agent_id` the stop quoted — nothing guesses at a "most recent"
+  delegation, and an entry the ledger drops leaves the delegation to the
+  staleness sweep exactly as before (#4142).
+- **A session provisioned from a repo URL no longer leaks its git branch.** `provisioner::workspace::provision_in` named the worktree's branch bare (`<session-id>`) while `session_manager::decommission::remove_session_worktree` force-deletes `session/<session-id>`, so the delete missed and one branch accumulated in the base clone per session. The provisioner now names the branch through `core::worktree_naming::worktree_branch_for`, the single convention both sides read ([#4165](https://github.com/bobmatnyc/trusty-tools/issues/4165))
+- **The worktree reclaim guard no longer reads CLEAN on a candidate holding a nested BARE repository.** It decided "is this a repository root" by matching an entry named literally `.git`, which a bare repository does not have — so a worktree whose gitignored `scratch/salvage.git` held the only copy of a commit reported `dirty_files = 0` and was deleted. A root is now recognised by that entry OR by the `HEAD` + `objects/` + `refs/` triple, and the hit is routed through the same object-store discriminator as any other nested repository, so a bare repo whose store survives the candidate is still not counted as dirt. Stopping at the root also stops the walk spending its 50k-entry scan budget inside `objects/`. A short list of gitignored names that are unrecoverable if deleted — `.env*`, `*.bak`, `*.orig` — now counts as unsaved work as well; anything under a disposable build directory (`target/`, `node_modules/`, …) stays excused, so a candidate whose only ignored content is build output is still reclaimable. Measured read-only across 27 live worktree leaves: 1 becomes newly dirty, naming a real pre-edit `settings.json.bak` ([#4166](https://github.com/bobmatnyc/trusty-tools/issues/4166))
+- **A tracked file deleted from `.trusty-mpm/` is counted again.** Pass 1 skips every `.trusty-mpm/`-scoped status line on the promise that pass 2 owns them, and pass 2 returned 0 without running git whenever the directory was absent — which is exactly what deleting the last file under it produces, so the deletion was counted by neither pass ([#4166](https://github.com/bobmatnyc/trusty-tools/issues/4166))
+- The peer bus no longer records an envelope as `delivered` when a lagging
+  subscriber never saw it
+  ([#4271](https://github.com/bobmatnyc/trusty-tools/issues/4271)).
+  `broadcast::Sender::send` answers `Ok` for a receiver that is attached but
+  behind, so publishing into a full 64-deep instance channel overwrote an unread
+  envelope while the DOC-60 §9 durable log wrote `delivery_state: "delivered"`
+  for the one that displaced it — the sender saw `202 Accepted` and the
+  recipient was never told. `PeerBus::publish` now checks the channel before
+  sending and refuses the new message with `SubscriberLagged` (`503`, or
+  `CODE_UNAVAILABLE` over the socket), recording it `dropped`. What the log
+  calls delivered is now exactly what the subscriber receives.
+
+  Operationally this trades a silent loss for a visible refusal, and the
+  refusal is per-instance: a subscriber that stops draining makes every publish
+  to its instance answer `503` — healthy co-subscribers included — until it
+  drains, disconnects, or the instance is deregistered. `broadcast` offers no
+  way to evict one subscriber without dropping the channel, and dropping it
+  would discard envelopes the log has already recorded delivered; the
+  per-subscriber buffer that would bound this is DOC-60 §7's durable inbox,
+  deferred. Senders should retry with backoff, and an operator seeing repeated
+  `503`s should look at the recipient, which the `warn!` names.
+- `GET /api/v1/bus/subscribe/{instance_id}` reports a lag instead of swallowing
+  it. The handler mapped `Lagged(n)` to `None`, borrowing an idiom from the
+  session SSE handlers that carry load-sheddable telemetry — which DOC-60 §3
+  keeps off this bus. It now emits an `event: lagged` frame carrying the missed
+  count and the durable log's path to re-read from, plus a `warn!`.
+- The bus's durable JSONL stream no longer interleaves two records into an
+  unparseable line when two publishes land at once. `AuditLogger::try_log` wrote
+  the record and its newline as separate unbuffered writes; it now appends both
+  in one `write_all`.
+- ADR-0036's "Related Decisions" cited "DOC-66 §3's per-worktree sentinel extension". The content is in §1.3; §3 is "Refreshing the tm checkout" and has no sentinel content.
+- `.trusty-mpm-worktree` is now gitignored. The daemon writes it INTO a worktree, so it surfaced there as an untracked file and tripped the clean-tree guard in `scripts/check-publish-ready.sh`.
+- A dispatched agent's worktree is now reclaimed when the session that dispatched it ends, not only when its `SubagentStop` arrives. `SubagentStop` was the reap's only trigger, so an agent killed by a session exit or restart, an interrupt, or a dropped hook POST left its worktree registered and owner-known — and the orphan sweep skips agent-owned trees by design, so nothing else ever reclaimed it.
+- A reap that keeps a worktree is now logged at `warn!` rather than `info!`. The refusal is the only notice anyone gets that a tree needs a human, and nothing retries it.
+- A session-end sweep now reports how many trees it removed, how many were already gone, and how many it kept. It reported two numbers before, counting a tree the harness had already reclaimed as one this sweep removed — which overstated the only number an operator reads to judge whether the reap is doing anything.
+- **`/doctor` over HTTP no longer reports a healthy daemon as unreachable.** `DaemonClient::doctor` used the 10s client-level default while the handler runs the whole ~32-check battery inline — `gh auth status` alone measured 3.06s here, and the two worktree scans walk the managed workspace root. Measured against the default: 8 of 10 runs failed, every failure clustered at 10.2–10.3s and every pass at 9.6–9.7s, so Telegram `/doctor` and Slack `/doctor` answered "daemon unreachable" for a daemon that was still producing the report. The request now carries its own 120s bound, the same per-request override pattern the chat, provisioning and merged-PR-survey endpoints already use ([#5111](https://github.com/bobmatnyc/trusty-tools/issues/5111))
+- `tm hook --pm-guard` no longer charges a read-only here-document command
+  against the PM's per-turn file-change budget
+  (closes [#5356](https://github.com/bobmatnyc/trusty-tools/issues/5356)).
+  The redirection check treated any unquoted `>` as a file write, and its quote
+  scan knows only `'` and `"` — so a `>` in here-document body text, such as a
+  `len(k) > 3` comparison in a `python3 <<'PY'` script or an `->` arrow in
+  `cat <<EOF` prose, read as a redirect. Three such reads were allowed silently
+  while consuming the budget, and the fourth was denied as "PM file-change
+  budget 3/3 used this turn" with zero files changed. Only the body is treated
+  as data: `python3 <<'PY' > out.rs` is still a file write, still consumes the
+  budget, and still exhausts it.
+- The launchd probe no longer reads an unreadable `~/Library/LaunchAgents` as
+  "no launchd unit is registered"
+  (closes [#5623](https://github.com/bobmatnyc/trusty-tools/issues/5623)).
+  `daemon_launchd_label_in` mapped every `read_dir` error to the same answer as
+  an empty directory, and `tm start`, `tm restart` and the MCP stdio bridge all
+  read that answer as permission to spawn — creating the unsupervised orphan
+  daemon of #2486/#4230. It now answers in three states, and both spawn sites
+  and `tm doctor`'s `daemon_orphan` check treat "could not determine" as
+  "launchd may own this" rather than as absence. A home with no `LaunchAgents`
+  directory still resolves to "no unit registered" (ADR-0045 §3).
+- The `tm-issues-prune` skill no longer presents a truncated backlog as the
+  whole one. Its scan and prioritize passes hardcoded
+  `gh issue list --limit 500` against a repo with 745 open issues; they now
+  paginate to exhaustion and report retrieved-vs-total, so a short read
+  announces itself.
+- `tm doctor`'s `asset_tier` check no longer prints
+  `no tm-owned agent files outside the canonical tier … (scanned: <dir>)` for a
+  directory whose scan failed (#5626, ADR-0045). A tier it cannot enumerate is
+  reported as UNDETERMINED and downgrades an otherwise-clean run to `Warn`; the
+  `scanned:` list now names only directories that were actually read. A
+  confirmed shadowing still outranks it and keeps its `Fail`.
+- Every `SkillManifest::load` call site now handles an unreadable ledger
+  explicitly instead of proceeding on the empty default: the skill deploy, prune,
+  retire, repair and adopt paths refuse to act, and the read-only probes
+  (`skill_drift`, `skill_staleness`, `stale_skills`, `deploy_validate`,
+  `doctor_scaffold_tracking`, `session_assets`, `update_check`) report the
+  failure rather than "nothing is owned here".
+- `tm session prune-worktrees --merged-prs --force` deleted live dispatched agents' worktrees. The merged-PR reclaim path never read the ownership sentinel: its liveness gate checks `SessionRecord.workspace_path`, which an agent has none of, and its ownership gate only asked whether a sentinel file EXISTS. A worktree carrying an agent sentinel on a branch whose PR had merged therefore passed every gate. `worktree_reclaim::classify` and `recheck_before_delete` now consult `SentinelOwner`, and reclaim an agent-owned worktree only when the delegation registry positively reports that agent's delegation ended — a registry that has no record of the agent refuses, because a delegation map rebuilt empty at daemon boot cannot tell a finished agent from a working one (ADR-0045). A sentinel inside `.claude/worktrees/` that is empty, malformed or unreadable refuses too, for the same reason. Session-owned `.worktrees/<name>` reclamation is unchanged. Closes #5661.
+- Stopped four `spawn_disclaim` doc comments from linking into the macOS-gated
+  `macos` submodule (`resolve_disclaim_fn`, `spawn_stderr_piped_disclaimed`,
+  `spawn_stdout_piped_disclaimed`, `wait_for`), which rustdoc cannot resolve on
+  Linux. docs.rs builds on Linux once per release and never rebuilds.
+- `Explore` and `Plan` are no longer moved into their own worktree when dispatched from a main checkout. Both are read-only, and a granted worktree is cut from a commit — so they read a tree without the session's uncommitted work and answered about the wrong one. `general-purpose` is unchanged: it carries the full tool set and is also what a failed named-agent dispatch degrades into.
+- The HEAD-move rule now keys its writer query by the main checkout's root as well as the directory the command resolves to. `cd crates/foo && git pull` keyed a subdirectory no delegation record was ever written at, so the query matched nothing and the move was allowed.
+- `git merge -m "--continue" origin/main` is no longer exempt from the HEAD-move rule. The in-progress carve-out (`--abort`, `--continue`, …) scanned the whole argument list, so any command mentioning one of those strings exempted itself; it now matches the first argument only, which is where git accepts them.
+- The HEAD-move denial attributes its claim to the daemon's delegation records instead of asserting that another agent is writing without a worktree. A record can outlive its agent, and a grant whose isolation report failed describes an isolated agent as unisolated.
+- A dispatch denied because another agent already holds the main checkout now carries its own explanation instead of the concurrent-dispatch one, which offered `isolation: "worktree"` as the remedy — the exact rewrite the guard had already built and then declined to emit.
+- The guard warns on stderr when it grants a worktree and the daemon records nothing. An empty writer list means both "the checkout is free" and "the daemon declined to record", and only the second leaves the delegation record uncorrected; a daemon older than the new route answers that way. The grant is still emitted, since failing closed on version skew would block every dispatch from a main checkout.
+- The concurrent shared-worktree guard is no longer blind across sessions. `live_shared_tree_writers` filtered on the asking session first, so agents dispatched from different sessions into one checkout could not see each other — the exact shape of the reported incident. It is now keyed by directory, which is what a shared git HEAD belongs to.
+- Regenerated `tm-capabilities/references/cli.md` and `mcp-tools.md`, which had drifted from `main` since v1.5.0 (#5769) added a daemon route and changed the guard surface. `mcp-tools.md`'s `session_new` entry now reflects the ADR-0037 reversal: a local `repo_url` runs the session on that main checkout itself, only a remote URL is cloned into a freshly-provisioned workspace.
+- A daemon started under a throwaway `$HOME` no longer reaches the real tmux server. tmux is keyed to the OS user, not to `$HOME`, so a scratch daemon's startup auto-discovery still listed the operator's live panes, adopted them, and — because an adopted record carries the real project's working directory — refreshed `.claude/skills/` inside real project checkouts, one of them in a different repository. `TmuxDriver::discover` (the crate's only constructor for a tmux-backed driver) and `discovery::discover_all` (which also scans the host process table) now compare `$HOME` against the home the OS password database records for this uid, and refuse when the two differ. The check fails closed: an environment it cannot classify is refused too, and every refusal is logged with its reason. `TRUSTY_MPM_ALLOW_HOST_STATE=1` lifts it for anyone deliberately testing tmux adoption.
+- `tm launch` and `tm connect` are covered too. They create and kill sessions through `core::tmux::create_managed_session` and `run_tmux` without ever constructing a `TmuxDriver`, so the check also sits at `run_tmux_with_bin`/`run_tmux_argv_with_bin` — the crate's single tmux-spawning point.
+- A refused tmux path now says so. `daemon::services::tmux_service` returned `SessionNotFound` (HTTP 404, "that session does not exist") for a gated environment, and the reap and orphan-GC loops skipped silently every 60 s; all four now carry the gate's reason. `POST /sessions/discover` gained a `skipped` field, so a refused scan is no longer byte-identical to one that found nothing.
+- The boot `inproject-hygiene` sweep is gated. `repos_root()` is only `$HOME`-scoped when nothing overrode it — `TRUSTY_MPM_REPOS_ROOT` and `TRUSTY_MPM_WORKSPACE_ROOT` outrank `$HOME`, and a scratch daemon launched from the operator's shell inherits those exports.
+- The agent-worktree reap no longer removes a worktree the harness can still resume an agent into (#5800). A `SubagentStop` reports a turn boundary rather than an agent's exit, so it no longer triggers a reap; a session's end, which does prove its agents are gone, is now the sole trigger.
+- A finished delegation's registered worktree is protected from another agent's reap — a terminal status records that trusty-mpm watched the delegation end, not that the harness released the directory.
+- A worktree whose agent is stamped on two directories is kept rather than guessed at, so an ambiguous ownership claim reclaims neither tree.
+- Session launch now resolves the palace it exports as `TRUSTY_MEMORY_PALACE` through `trusty_common::palace_resolve` rather than the pure `derive_palace_id` core. The core never reads `.trusty-tools/trusty-memory.yaml`, so the exported variable carried a git-derived name — and because the variable is the highest-precedence level, that name outranked the committed pin it was meant to lose to: this repo's sessions resolved `bobmatnyc-trusty-tools` while its pin said `trusty-tools`. Palace-alias registration also skips projects carrying a pin, since the aliased-from name is no longer resolved by anything ([#5811](https://github.com/bobmatnyc/trusty-tools/issues/5811))
+- `tm session prune-worktrees --merged-prs` spared a live dispatched agent's worktree without saying so. The gate that protects it has refused since #5661, but a candidate blocked during classification appeared in none of the lists the prune route returns, so a run that protected an agent's tree printed `reclaimed 0 worktree(s)` — output identical to a run that found nothing to reclaim. The route now returns `spared_agent_owned`, and the CLI prints one line per spared worktree naming the agent it was spared for.
+- `--merged-prs` help text said the pass "still refuses any worktree a session claims or that holds unsaved work", which reads as covering dispatched agents. It does not: an agent has no session record, and an agent that has committed and pushed has a clean tree. The text now states that a separate gate covers agent-owned worktrees, and that a delegation registry which cannot answer refuses.
+- `tm session prune-worktrees --merged-prs` no longer fails with "operation timed out" on every invocation. The merged-PR survey runs synchronously inside the daemon handler and takes minutes — over 600 seconds byte-walking 46 worktrees on a large workspace — while the request inherited the client's 10-second default bound, so the CLI hung up before the daemon could ever answer. The request now carries a 1800-second per-request override (`RECLAIM_SURVEY_REQUEST_TIMEOUT`), and prints a one-line notice up front so a long silent wait is distinguishable from a wedged daemon. Only the `--merged-prs` opt-in raises the bound; the orphan-only sweep keeps failing fast at 10 seconds (Refs #5830).
+- **The daemon-unreachable fallback's session now runs in the worktree it provisioned, not in the shared base clone** — `tm launch`'s managed-checkout redirect fired on every caller, including the ones that had already resolved placement themselves, so the fallback's fresh worktree and branch were abandoned and two concurrent fallback sessions landed in one tree. A caller that resolved placement says so (`LaunchDir::CallerResolved`) and the redirect is skipped
+- Per-project `gh` account enforcement now confirms the identity with
+  `gh api user`, not by parsing `gh auth status` text
+  (refs [#5849](https://github.com/bobmatnyc/trusty-tools/issues/5849)).
+  `gh auth status` echoes whatever the scoped `GH_CONFIG_DIR`'s `hosts.yml`
+  claims, so a `hosts.yml` naming an account that exists nowhere on the machine
+  printed a green checkmark, live token scopes and `Active account: true` — and
+  `ensure_gh_account_in_dir` / `ensure_gh_account_for_project` reported success
+  for an identity nobody had verified. Both now compare the expected account
+  against `gh api user --jq .login`, the login GitHub attributes to the
+  credential the scoped `gh` actually resolves, and every probe failure —
+  `gh` missing, a non-zero exit, blank output, or the 5s bound — is a
+  verification failure rather than a pass — including a lost network, which now
+  blocks enforcement instead of passing it (every operation it gates needs the
+  network anyway). A failed probe also stops before `gh auth switch`, so a blip
+  cannot rewrite the project's config dir. Enforcement additionally refuses
+  outright when an ambient `GH_TOKEN`/`GITHUB_TOKEN` is set: that token outranks
+  `GH_CONFIG_DIR` for every later `gh` call, so no scoped probe can speak for
+  what those calls will do — including a whitespace-only token, which `gh`
+  selects rather than ignores. Enforcement also now runs on the project's
+  configured `github.host` instead of assuming github.com, so a project pointed
+  at an enterprise instance is verified on the host its work actually uses;
+  `configured_account_pair` returns an `AccountTarget` carrying that host
+  alongside the config dir and account. When the transcript and the
+  credential name different accounts (the divergence tracked in
+  [#5656](https://github.com/bobmatnyc/trusty-tools/issues/5656)) the API
+  answer decides and the disagreement is logged at WARN.
+- A session in a project pinned to a non-default `gh` account no longer runs as whoever is globally active. Spawn used to mint its credential with `gh auth token -u <account>`, and on a keyring-backed host that flag does not discriminate — `-u bobmatnyc` and `-u bob-duetto` return the identical value. A project that sets `github.config_dir` is now pinned with `GH_CONFIG_DIR`, which does select the account, and no `GH_TOKEN` is emitted alongside it (an env token outranks the scoped config in `gh`'s own resolution order). A project with no `config_dir` keeps the previous token-minting behaviour. #5851
+- A pinned `gh` config dir that holds no credential stays pinned and logs a warning naming the directory and the `GH_CONFIG_DIR=<dir> gh auth login` that fixes it. Falling back to the machine-global account would be the wrong-identity bug itself. #5851
+- A live, attached session is no longer decommissioned at daemon boot because tmux could not be reached. `dedup_stale_duplicates` built its live-session set with `list_sessions().unwrap_or_default()`, and `plan_workspace_duplicates` reads an empty live set as proof every candidate record is dead — it picks a survivor by recency and decommissions the rest. `decommission` is irreversible: it tombstones the record, clears `workspace_path`, and the picker hides `decommissioned` rows, so the operator's own session vanished from the picker while they sat in the pane. The liveness query now runs the `ensure_server_up` guard and propagates `list_sessions()`'s error instead of defaulting it; a failure to observe tmux logs a warning and skips the whole pass, decommissioning nothing.
+- `reconcile_on_boot` no longer marks a running session `Stopped` because tmux could not be reached. It built its live set with `list_sessions().unwrap_or_else(warn, Vec::new)` — the same fail-open shape, forty lines above the dedup call it feeds — so an unobservable tmux sent every live record down the "session is gone" arm, and under `auto_resume` queued each one for a relaunch it did not need. It now routes through the same refusing liveness query and skips every liveness-derived decision when tmux cannot be observed: no record changes state, nothing is adopted. The skip is not an early return — the dedup, deploy-validate and auto-resume tail still runs.
+- `NoopTmuxDriver::list_sessions` reports `TmuxUnavailable` instead of zero sessions. The daemon installs that driver exactly when `RealTmuxDriver::discover()` failed — tmux off PATH, or the #5784 host-state gate refusing tmux access on a reassigned `$HOME` — so it has never asked tmux anything, and `Ok(vec![])` made "tmux is unreachable" byte-identical to "tmux is running zero sessions". No error handling at the call site could catch that, because there was no error. The remaining consumer, the trait's `session_exists` default, maps `Err` to `false` and is unchanged (#5859).
+- `reconcile_on_boot` now reports a terminal record whose tmux session is live, naming the reactivate call that resolves it. It does not auto-revive: the contradiction cannot be told apart from the #2777 case of a correctly decommissioned session whose pane lingers as a bare shell, and `decommission` has already cleared `workspace_path`, so a silent revive would restore a record the picker keys on incomplete fields.
+- A tmux liveness probe that fails now refuses `tm session delete`, `tm session
+  prune`/`decommission`, and `tm session resume` instead of reading the session
+  as dead. Previously a transient `list-sessions` failure (or the no-op driver
+  installed when tmux cannot be discovered) let an unforced prune tear down a
+  live session and let resume kill and rebuild a live pane (#5859).
+- `tm doctor`'s `skill_staleness` check now states the drift remedy per deploy tier. It claimed every finding was "REPAIRABLE by `tm install`", but `tm install` writes only the operator-home tier — so an operator re-ran it against managed-config and project-tier drift and watched the count refuse to move. Managed-config and project-tier drift now name the writer that actually refreshes them, plus `tm doctor --fix-skills`. Severity is unchanged: conventions-bearing drift still escalates to `Fail` at every tier ([#5865](https://github.com/bobmatnyc/trusty-tools/issues/5865))
+- The `output_style_staleness` and `output_style` checks no longer tell the operator to run `tm install`, which has no output-style step — the deployed file kept its mtime across a full install run. Both now name `tm doctor --fix --yes`, and the drift scan behind the report is the same one the repair acts on ([#5866](https://github.com/bobmatnyc/trusty-tools/issues/5866))
+- `tm doctor` no longer treats an arbitrary working directory as a managed workspace. `run_doctor` applied the workspace path layout to whatever `project` the CLI sent, which pointed the operator-home skill tier at `<cwd>/.claude/skills` — the same path as the project tier — so the deploy-tier dedup dropped one of them, `~/.claude/skills` went unaudited, and project-tier findings were reported under the "operator home" label. The workspace layout now applies only to a directory a live session was provisioned into ([#5867](https://github.com/bobmatnyc/trusty-tools/issues/5867))
+- One output style that cannot be read no longer makes a different style report `Failed` after `tm doctor --fix` correctly rewrote it. `deploy_output_styles` aborted the whole batch on the first IO error, discarding every write it had already completed in that call, so the repair reported a file it had just refreshed to bundled content as a failure — the same report-contradicts-disk defect [#5865](https://github.com/bobmatnyc/trusty-tools/issues/5865) is about, reintroduced by the [#5866](https://github.com/bobmatnyc/trusty-tools/issues/5866) fix. Each style now carries its own outcome: one that was written reports written, one that could not be read reports its own reason, and neither contaminates the other ([#5874](https://github.com/bobmatnyc/trusty-tools/pull/5874))
+- `tm session prune` now frees the slot number behind every tombstone it compacts, so `NUM` stops climbing. `prune_managed`'s compaction branch removed the record from the store and left the slot registry still holding its number; `numbered_snapshot` walks the slots the registry HOLDS and tombstones any whose record has vanished, so each pruned session kept rendering as a `-- deleted --` row and its number was never handed out again. One machine accumulated 44 such rows with new sessions still being assigned into the 130s. `SlotRegistry::release` had exactly one caller, the retention sweep, which is why only sessions whose worktrees had already left the disk ever got their numbers back. The release is gated on the same `workspace_needs_protection` predicate that sweep uses, so a record whose `.worktrees/<uuid>` directory and `.trusty-mpm-worktree` sentinel are still on disk is compacted but keeps its slot — handing that number to a newly-spawned session whose worktree already exists is worse than a cosmetic tombstone row, and the shared predicate keeps the two paths from drifting apart again. Compaction remains a store operation: it removes no directory, and a dry run releases nothing. Both conditions are read from the record the store holds at the moment of removal, not from the snapshot prune took before its loop: a session revived in place while that prune was still tearing other sessions down keeps its number rather than having it handed to the next spawn.
+- `tm session prune` no longer deletes the store record of a session that was reactivated while the prune was running. The reload that decides whether the slot is safe to free now decides the removal as well; previously it gated only the slot, and the record was removed unconditionally before that check ran. A session revived through `tm session resume` mid-prune correctly kept its number and still lost its record, so `tm session status` and every lookup by id answered `SessionNotFound` for a live, running session and `tm ls` rendered it as a `-- deleted --` phantom. A record that is no longer a tombstone at reload time now keeps both its record and its slot, and prune omits it from the reported outcome rather than claiming it was removed.
+- `tm session decommission <id>` no longer reports "workspace removed" when the
+  workspace is still on disk
+  (closes [#5899](https://github.com/bobmatnyc/trusty-tools/issues/5899)).
+  The daemon's `workspace_removed` verdict was dropped client-side — the response
+  decoded into `ManagedSessionSummary`, which has no field for it, so serde
+  discarded it silently — and the CLI printed a hardcoded success line for every
+  decommission, including adopted and local-path workspaces it never touched. The
+  verdict now rides a purpose-built `ManagedDecommissionOutcome` through the
+  executor to one shared message helper: it reports removal only when the daemon
+  says the removal happened, says the workspace is still on disk when it says
+  otherwise, and says the outcome is unreported when an older daemon sends no
+  verdict. `tm ls` tombstone rows also need
+  [#5897](https://github.com/bobmatnyc/trusty-tools/issues/5897) to clear.
+- `tm hook --pm-guard` no longer admits a concurrent shared-worktree dispatch
+  when the daemon fails to answer
+  (closes [#5923](https://github.com/bobmatnyc/trusty-tools/issues/5923)).
+  `post_shared_tree` returned the same "nobody else is here" for all five of its
+  failures, so a request timeout, a 5xx and an unparseable body allowed the
+  dispatch the guard exists to deny — and the 2 s budget is reachable on an idle
+  machine, which put the guard off under exactly the load that makes two
+  concurrent dispatches likely. The failures now split by what they say about
+  the daemon: a daemon that is listening and does not answer usably DENIES, with
+  a message naming the failure and the remedies that need no daemon; a daemon
+  that is not listening, or that 404s the route because it predates it, still
+  allows and now says on stderr that the guard is not enforcing.
+- The ADR-0048 worktree grant applies the same split. That call computes the
+  #4480 concurrency verdict before the grant rather than skipping it — "a
+  dispatch made into a checkout another writer holds is denied, and only an
+  empty answer is granted" — so a running daemon that leaves it unanswered now
+  denies there too. The grant it would otherwise emit is a rewrite of the
+  dispatch's arguments that `tm` cannot confirm the harness applies, and in a
+  main checkout ADR-0048 states the cost: a false allow corrupts another
+  session's branch. An absent daemon still grants, and now warns on stderr that
+  the check did not run.
+- The read-only writer query behind the `git merge` / `git rebase` /
+  docs-commit rules keeps its fail-open contract. A deny there blocks ordinary
+  git work on the operator's own checkout rather than admitting a second agent.
+- `tm hook --pm-guard` now denies a `git worktree add` under
+  `/private/var/folders`, the spelling macOS's `/var` symlink resolves to
+  (refs [#5924](https://github.com/bobmatnyc/trusty-tools/issues/5924)).
+  The denylist carried `/var/folders` only, and `current_dir()` inside
+  `$TMPDIR` returns the `/private/var/...` form — so a worktree target given
+  relative to a `$TMPDIR` working directory matched nothing and the guard let
+  it through. `/tmp` and `/private/tmp` were already paired this way; `/var`
+  now is too.
+- `tm project list` reads the persistent project registry
+  (`GET /api/v1/projects`) instead of the daemon's in-memory, session-derived
+  project map (refs
+  [#5994](https://github.com/bobmatnyc/trusty-tools/issues/5994)). That map is
+  rebuilt on every daemon start and seeded only from `config.yaml` and session
+  history, so the command reported "no projects registered" on a host whose
+  `projects.json`, `project_list` MCP tool, and `/api/v1/projects` route all
+  listed five. Rows now render like `tm projects list` (name, repo URL,
+  default branch) and keep the `[mcp-trusted]` marker, resolved through the
+  local project-path alias store.
+- `tm doctor`'s `worktrees` check counted every git-registered worktree no live session claimed as an orphan, reporting 198 where `tm session prune-worktrees` and `tm session reconcile-worktrees` both found zero. It now reports the ORPHANED count from the reconciled inventory those two verbs already share, so an agent-owned, locked, dirty, or sentinel-less worktree is no longer called an orphan (#5947).
+- That check's remediation hint named `tm session prune --worktrees`, a flag that does not exist — `tm session prune` takes `--state` only. It now names `tm session prune-worktrees`, and a test parses the hint against the real CLI so a renamed flag cannot leave it pointing at nothing (#5947).
+- Decommissioning a tm-owned worktree through the MCP `session_decommission`
+  tool or the idle reaper no longer leaves a stale entry in `git worktree list`
+  (refs [#5949](https://github.com/bobmatnyc/trusty-tools/issues/5949)). Both
+  call `SessionManager::decommission` in-process, below the client layer that
+  carried the repair for the routed HTTP paths, so the owned-workspace branch
+  removed the directory with `remove_dir_all` and git kept listing it — the
+  reaper unattended. The repair now runs inside `decommission_with_root`, which
+  every caller reaches regardless of transport, and it targets the checkout git
+  itself reports as owning the worktree rather than the parent directory.
+- `tm services` reports the PID of the process bound to a service's port, not
+  the first `pgrep -f` name match
+  (closes [#5951](https://github.com/bobmatnyc/trusty-tools/issues/5951)).
+  The manifest's `process_match: "trusty-mpm"` is a substring every sibling
+  process shares, so `trusty-mpm-daemon` was reported with a
+  `trusty-mpm serve --stdio` bridge's PID while `launchctl list`, `ps`, the
+  daemon's own `/health` and the console gateway all named the daemon. Since
+  this repo's guidance sends operators to `tm services` instead of raw
+  `ps`/`lsof`, that PID is one somebody signals. Name matching remains the
+  fallback for portless services such as `trusty-embedderd`, for a port nothing
+  is listening on, and for a host without `lsof`.
+- `tm services status`, `list`, `port`, `url`, `health`, and `log` no longer
+  panic before printing anything in a debug build
+  (closes [#5965](https://github.com/bobmatnyc/trusty-tools/issues/5965)).
+  `RealHttpProber::get_health` built a `reqwest::blocking` client directly on
+  the caller's thread, and `tm`'s `main` is `#[tokio::main]` — so every health
+  probe constructed reqwest's internal runtime inside the async runtime and
+  aborted with "Cannot drop a runtime in a context where blocking is not
+  allowed". Release builds only appeared healthy because the guard that raises
+  that panic is compiled in under `debug_assertions`; the call still parked the
+  thread it ran on from inside `poll`. The client now runs on a dedicated OS
+  thread that is joined for its result, matching
+  `trusty_common::search_index::best_effort_create_index`. `init` and `restart`
+  were unaffected — they never probe.
+- The `claude --version` probe behind output-style detection now gives up after 5 seconds, killing and reaping the probe child, instead of waiting forever — a wedged `claude` binary used to hang session launch and every prompt-composition path and leave orphaned probe processes behind (#5969).
+- `tm launch` no longer walks the entire home directory before starting a
+  session ([#5875](https://github.com/bobmatnyc/trusty-tools/issues/5875),
+  [#6070](https://github.com/bobmatnyc/trusty-tools/issues/6070)). Step 8 calls
+  `remove_global_trusty_mpm_hooks`, which reached `~/.claude/settings.json` and
+  `~/.claude/settings.local.json` by recursing eight levels into `$HOME`. On a
+  real developer machine one `opendir()` inside that walk blocked indefinitely,
+  so the launch never returned; a stack sample showed 2328 of 2328 samples in a
+  single `open$NOCANCEL`. The strip now names the two global files directly.
+  Project settings files elsewhere under `$HOME` are no longer rewritten as a
+  side effect of launching — `tm hooks clean` owns that machine-wide sweep, the
+  same split `tm install` adopted in #2940.
+- The eight `guided_fallback_*` tests in `--bin tm` terminate again. They drive
+  `launch()` end to end, so they inherited the hang, and because they hold the
+  process-wide `serial_test` lock while stuck they starved every other
+  `#[serial]` test in the binary — which is why `cargo test -p trusty-mpm`
+  needed `--skip guided_fallback` to complete at all. That workaround is no
+  longer required.
+- `remove_global_trusty_mpm_hooks_at` takes the home directory as a parameter,
+  which gives the removal path its first real test coverage. Four doc comments
+  cited `test_remove_global_trusty_mpm_hooks_removes_only_mpm_entries`, a test
+  that did not exist.
+- The Session Manager no longer sends a model id to a provider that has never
+  heard of it. A tier model with no routing prefix took the configured
+  `provider` whatever it looked like, so a `us.anthropic.*` inference profile
+  under `provider = "openrouter"` — or an OpenRouter slug under an `auto` chain
+  that picked Anthropic — went upstream unchanged.
+  `core::sm::providers::resolve_provider_and_model` now infers the provider from
+  an unambiguous id shape before the default or the credential precedence chain
+  gets it, and returns `SmLlmError::Validation` naming both the id and the
+  provider when they disagree. Credentials decide which provider is reachable,
+  never which model the operator asked for. An explicit `anthropic/` /
+  `bedrock/` / `openrouter/` prefix still wins, is still stripped before the
+  shape is read, and is overruled only by a shape that belongs to exactly one
+  provider's catalogue — never by the dotted `vendor.model` guess, so
+  `openrouter/anthropic.claude-x` keeps working. The function is now fallible.
+- A rejected model id no longer suggests a `provider` value the config parser
+  refuses. When the id belongs to a provider the SM has no client for, the error
+  says so and names the accepted set instead of telling the operator to set
+  `provider = "fireworks"`. `ProviderKind::parse`, its error, and the
+  shape-mismatch remedy all read one list (`ProviderKind::ALL`), so the accepted
+  values and the routing-prefix hint cannot drift from what the parser takes.
+- The daemon's boot adoption sweep no longer adopts a tmux session named under
+  the reserved test namespace `tm-xtest-` (#6116). A test that spawns a real
+  tmux session leaks it whenever the test process dies without unwinding — a
+  SIGKILL, a `cargo test` timeout, an aborted run — so PR #6125's kill-on-drop
+  guard, which covers the panic path, cannot cover that one. Three sessions
+  leaked that way on 2026-08-24, adoption turned each into a managed record, and
+  the session picker grew three `(active)` ghosts that outlived the tmux
+  sessions themselves. The refusal decides from the name alone, so it holds for
+  every leak shape whether or not any test-side cleanup ran, and it also returns
+  the leaked pane to `daemon::orphan_gc` — an untracked idle shell with no live
+  child is killed there after two sweeps, whereas being adopted made it
+  permanent.
+- An ADOPTED reserved-namespace record is now tombstoned by boot
+  reconciliation, whether its pane is live or gone, and no automatic path
+  resumes one (#6116). A record adopted by a daemon build predating the refusal
+  survives in the durable store, and leaving it alone had two outcomes: a gone
+  pane left a `Stopped` picker row nothing could resume — the state that forced
+  a manual `session_delete force` — while a LIVE one sustained a loop, since
+  re-adopting it restored its orphan-GC immunity, the reaper then stamped it
+  auto-resumable, the supervisor recreated the tmux session, and the next boot
+  re-adopted it. The daemon log shows that cycle three times in one day. Both
+  rules ask for an adopted provenance as well as a reserved name, so a session
+  the daemon CREATED for a project named `xtest-…` keeps ordinary stop, resume
+  and list behavior. An ordinary session's gone-tmux handling is unchanged:
+  still `Stopped`, still resumable.
+- The boot-reconcile summary log now counts refused and swept test sessions, so
+  a boot whose only finding was one of those no longer prints nothing.
+- The `#3873` dead-runtime fixture now mints its real tmux session inside that
+  namespace, and the test-support guard sweeps reserved-namespace sessions older
+  than 30 minutes once per test process, so the next run on a machine reaps what
+  a hard-killed run left behind. Neither mechanism survives a SIGKILL on its
+  own; the daemon-side refusal is what makes a leak harmless while it lasts.
+- Boot reconciliation adopts a live tmux pane under an id derived from the
+  pane's tmux name, so one pane can only ever occupy one store row
+  ([#6117](https://github.com/bobmatnyc/trusty-tools/issues/6117)). The
+  external-adopt loop decides from a snapshot of store names taken once, before
+  the loop; a second adopter holding its own copy saw the same pane as unknown
+  and wrote a second record under a fresh random id. The store is keyed by id,
+  so both survived — 11 tmux names carried two records apiece in the reporting
+  store, several pairs written 30-60 ms apart. A name-derived id makes the
+  second write land on the first's key instead of beside it.
+- Boot reconciliation no longer adopts a pane whose working directory it cannot
+  resolve ([#6118](https://github.com/bobmatnyc/trusty-tools/issues/6118)). Such
+  a pane used to become an `Active` record with a `/unknown` cwd and an
+  `unmanaged` note in `task`, and that record could never be retired: the
+  `tm ls` auto-prune keeps any record whose tmux name is live, and the orphan-GC
+  keeps any pane a registry names — so adopting the pane is precisely what made
+  it permanent. 55 of the 103 records in the reporting store were these. The
+  pane is now left untracked and named in the daemon's boot log, which hands it
+  to the orphan-GC: it kills a managed-prefix pane only when the pane is an idle
+  shell with no live child process, seen idle on two consecutive sweeps, and it
+  keeps one still running an agent. Adoption of a pane whose cwd does resolve is
+  unchanged.
+- The working-directory probe behind that decision retries before giving up. It
+  is a kill decision now — a declined pane is orphan-GC input — and
+  `TmuxDriver::pane_current_path` reports a failed spawn, a non-zero exit and
+  empty output all as `None` with no retry, while boot reconciliation runs once
+  per daemon process. One flaky answer would have cost a live pane inside two
+  minutes.
+- `ReconcileReport` carries `adoption_declined`, the tmux names reconciliation
+  declined this pass, and the daemon's boot summary logs the count and fires on
+  it, so a pane that stops appearing in `tm ls` is accounted for rather than
+  silently absent.
+- **`PruneFilter::Unresolvable`'s doc comment now links to a symbol that actually exists.** The link pointed to `super::record::SessionRecord::workspace_unresolvable`, but `prune_types.rs` loads as the `types` submodule of `prune` (via `#[path = "prune_types.rs"]`), so `super` resolved to `prune`, which has no `record` submodule — `cargo doc`'s broken-intra-doc-link gate failed deterministically. The link now uses the crate-absolute path `crate::session_manager::record::SessionRecord::workspace_unresolvable` ([#6118](https://github.com/bobmatnyc/trusty-tools/issues/6118))
+- No prune path can select the session it was invoked from. The CLI now sends
+  `$TM_MANAGED_SESSION_ID` as `invoking_session`, and the prune engine excludes
+  that record for every filter, `--include-active` included. A present but
+  unparseable value is rejected with 400 rather than dropped, so the sweep never
+  runs with the self-exclusion silently switched off.
+- **A session you stop or kill stays stopped.** `Stopped` said only that the runtime was not running, so both automatic relaunch paths — the supervisor's per-tick sweep and boot reconciliation — treated an operator's `tmux kill-session` and `tm session stop` as sessions to revive; two leaked sessions killed at the tmux level came back within seconds, and only `tm session decommission` (which deletes the workspace) made them stay down. Every transition into `Stopped` now records why. `tm session stop`, the HTTP and MCP stop routes, and the idle auto-stop record a deliberate stop, as does the reaper when it finds one session's tmux target gone while the tmux server is still up — and the automatic paths leave those records alone. Everything that cannot be attributed to a decision still auto-resumes: a runtime that exited on its own, a session whose tmux target vanished while the daemon was down, and the loss of the whole tmux server (`tmux kill-server`, a crash, a logout), which `tmux list-sessions` reports the same way as an empty host and which must not strand the entire fleet. The post-reboot fleet restore is unchanged. `tm session resume` still revives a deliberately stopped session — the gate is on automatic resume, not on resume. Records written before this field existed load unchanged and keep the auto-resume behavior they had ([#6194](https://github.com/bobmatnyc/trusty-tools/issues/6194))
+- The orphan-index sweep no longer reads a failed status probe as an empty
+  index. It substituted `chunk_count: 0` for a refusal or an unanswered call, and
+  `0` is exactly the reading that makes an aged, unclaimed `.worktrees` index
+  collectable — so a wedged or restarting daemon could license a delete on
+  evidence that was never gathered. A candidate whose chunk count cannot be read
+  is now skipped, and a listing that goes unanswered ends the sweep with nothing
+  collected rather than erroring.
+- A destructive index delete is reported as removed only when the daemon says the
+  registration is gone. Any success answer used to count, including the #3049
+  body that reports `removed: false` because an in-flight writer never quiesced —
+  so the sweep recorded an index as reclaimed while it was still registered and
+  still on disk.
+- **The health screen's PALACES panel silently dropped a palace it could not read.** `memory_collections` fanned out one `memory.palace_get` per id and skipped any that failed, so the panel could list fewer palaces than the daemon has with nothing saying which or why. It makes one `memory.palaces_list` call now; a row carrying an error renders with `✗` and the daemon's reason, exempt from the empty-palace filter — a palace whose counts could not be read is not a palace holding nothing ([#6286](https://github.com/bobmatnyc/trusty-tools/issues/6286))
+- `console_metrics` and `supervisor_status` now report the supervisor's real `run_stats` — sweeps, auto-resumes, resume failures, classifications — instead of a permanent zero. A missing, corrupt, or stale snapshot is reported in a new `supervisor_metrics` field rather than as a silent zero. Staleness is measured against the supervisor's own configured sweep interval (three sweeps, floored at 300s), so a slow overnight cadence is not reported as a dead supervisor (Refs #6288).
+- **`tm doctor` is a standalone diagnostic and no longer needs a daemon.** It fetched the whole report from the daemon's `GET /api/v1/doctor`, so with nothing running it printed `doctor failed: daemon unreachable: …` and ran none of the 27 purely local checks — it refused to diagnose at exactly the moment an operator needs a diagnosis. The battery now runs in-process through `daemon::doctor::run_doctor_for_manager`, which the HTTP route also calls, so both surfaces report the same checks. Daemon reachability is one appended row — `trusty-mpm daemon: reachable / not running / unresponsive` — computed by a bounded probe of the URL the CLI already resolved through gateway/lock-file discovery, never a hardcoded port and never a start. The `daemon_version` (#2332) and `daemon_orphan` (#4230) checks are comparisons about a daemon's answer, so with no answer they are skipped rather than reported. The "port 7880 unreachable" wording is gone ([#6336](https://github.com/bobmatnyc/trusty-tools/issues/6336))
+- A daemon isolated by its data root alone no longer reaches the real tmux server. The #5784 gate compared `$HOME` against the OS password database and nothing else, so a `DaemonState` built with a scratch framework root and the operator's real `$HOME` left untouched classified as the real environment: `session_manager()` resolved a real tmux driver, and `reconcile_on_boot` adopted the operator's live panes into a throwaway store — each adopted record carrying a real project directory, which is how a test fixture deployed assets into real worktrees. On the machine that reproduced it, 250 live sessions were reachable that way. `host_state_gate::host_state_access_for_root` adds the caller's data root to the comparison, and every daemon path that holds that root now asks it: `DaemonState::session_manager`, `discovery::discover_all`, and — through the new `daemon::host_state_refusal` choke point — the `reap_loop` and orphan-GC background sweeps and the shutdown-time legacy reap. Those three ran against the operator's real tmux server every tick, and the shutdown reap had no host-state gate at all, so a scratch daemon's shutdown could `kill_session` a live operator session that merely shared a name. A refused session manager gets the same no-op driver the missing-tmux path gets, which reports tmux unobservable rather than empty, so reconciliation leaves every record alone. `TRUSTY_MPM_ALLOW_HOST_STATE=1` lifts this arm exactly as it lifts the `$HOME` one.
+- `git worktree remove --force` is now built by one hardened helper that strips the environment variables pointing git at a different repository. `git worktree` resolves its repository from `GIT_DIR` ahead of its own `-C`, and the removal was the last git call in the agent-worktree reap and session-decommission paths still spelt out with a bare `Command::new("git")` — every gate ahead of it already went through the hardened builder. Under an ambient redirect (a git hook exports `GIT_DIR` and `GIT_INDEX_FILE` to everything it launches) the gates examined the real worktree, the removal resolved a different repository and exited 128 with `is not a working tree`, and the directory stayed on disk with the refusal reaching nothing but a `warn!`. A timed-out reap assertion now also names the ambient redirects instead of reporting only that the directory is still there ([#6391](https://github.com/bobmatnyc/trusty-tools/issues/6391))
+- The tmux reap-parity test no longer predicts reap's behaviour from whether the
+  `tmux` binary resolves
+  (refs [#6411](https://github.com/bobmatnyc/trusty-tools/issues/6411)).
+  `DaemonState::reap_dead_sessions` reaps nothing when `list-sessions` fails, and
+  on a host where no tmux server has ever run that listing fails with
+  `error connecting to <socket> (No such file or directory)` — a string
+  `TmuxDriver::list_sessions` deliberately does not classify as an empty server,
+  so a registry is never wiped by an unreachable tmux. `TmuxDriver::discover()`
+  succeeds on that same host, because the binary is installed, so gating on it
+  expected a removal that could not happen and turned `main` red. The probe now
+  runs the listing itself.
+- The `no server running` / `no sessions` stderr classification is one named
+  function, `stderr_means_empty_server`, instead of the same pair of `contains`
+  calls at three listing sites, so the boundary between an empty server and an
+  unreachable one cannot drift between them.
+- Boot reconciliation no longer sleeps through a retry that cannot change its
+  answer. A live tmux pane whose recorded working directory has been deleted — a
+  reaped agent worktree — was probed three times with the full 200 ms backoff
+  before being declined, even though tmux keeps reporting the same recorded path
+  on every probe. On a host with 276 such panes that was 55 s of sleep inside
+  `reconcile_on_boot`, which `DaemonState::session_manager()` awaits before it
+  hands the manager to its first caller; the SessionEnd worktree sweep is often
+  that caller and reached its first gate a minute late. The retry still runs in
+  full when tmux returns no answer at all, which is the transient failure it was
+  added for (#6118), and no pane's verdict changes — measured on 294 live
+  sessions, 60.65 s to 2.12 s (#6414).
+- **A restored tmux server gets tm's scrollback settings back.** A tmux server
+  restart with tmux-continuum restore recreates every `tm-*` session through
+  tmux-resurrect's own bare `new-session`, which never passes through tm's
+  session-creation choke point — so the server carried none of the
+  `history-limit`, `mouse` or `alternate-screen` options tm specifies, and
+  restored panes sat on tmux's factory 2000-line scrollback. The daemon now
+  re-asserts those server globals when it reconciles sessions at boot, and a new
+  `tmux_options` doctor check reports drift between the live server and tm's
+  spec — warning per option, and reporting UNKNOWN rather than OK when no option
+  could be read. A green check means NEW panes will be correct: `history-limit`
+  is captured when a pane is created and cannot be grown in place, so an
+  affected session still has to be restarted
+  ([#6469](https://github.com/bobmatnyc/trusty-tools/issues/6469))
+
+### Changed
+
+- **`git pull` is no longer denied in a main checkout** — `tm hook --pm-guard` classified `pull`, `merge` and `rebase` alike as HEAD moves and refused all three beside another live writer, so the only update path it left was `git fetch`, which never advances local `main`. A pull now runs whether or not another session shares the tree, and it never reaches the daemon's live-writer query. `git merge` and `git rebase` are unchanged and still denied there — either can leave the shared tree conflicted or rewritten. Source edits and source commits in a main checkout are unchanged and still denied (ADR-0053, amending ADR-0048 decision 10)
+- The daemon lock file carries a `product = "trusty-mpm"` field and readers
+  reject any record without it
+  (see [#1731](https://github.com/bobmatnyc/trusty-tools/issues/1731)).
+  `daemon.lock` is not a unique filename — Claude Code writes one too, at a path
+  containing "trusty-mpm" — and a reader that trusts the path alone can hand an
+  operator an unrelated PID. A daemon started by an older binary writes no such
+  field, so its record is ignored until that daemon restarts; discovery falls
+  back to the console gateway probe and the default URL meanwhile, and
+  `tm daemon` now also probes the address it is about to bind so it cannot spawn
+  a duplicate during that window.
+- The orphan-GC no longer reports agent worktrees as owner-unknown, and still never deletes them. A `Known` sentinel owner is resolved through a session-store lookup, which an agent has no record in — so resolving agent worktrees that way would report every one of them reclaimable once past the 10-minute grace window, and that sweep's chain carries no liveness check. Agent-owned is a third answer: attributed, and reclaimed only by the agent's own exit. They stay visible: `OrphanSweepOutcome` gains `agent_owned`, the prune HTTP route gains `agent_owned_paths`, and the daemon logs the count separately, so attributing a directory never costs an operator the view of it. `tm doctor`'s reconcile report names the owning agent instead of saying no sentinel exists.
+- A sentinel write that fails now registers nothing. The in-memory record is what grants the reaper authority to run `git worktree remove --force`; writing it after a failed sentinel write would hand out deletion authority with nothing on disk backing it. Declining leaves the tree owner-unknown, which nothing auto-deletes, and registration is retried on the agent's next tool call. It is never fatal to the hook.
+- The reap's in-use set now covers every session's non-terminal delegations, not just the stopping agent's own session. A session is not an isolation boundary for "is an agent still working in this directory" — a sibling dispatched from another session is exactly as live, and the narrower read let a reap approve a path that sibling held.
+- `find_agent_worktree` returns a directory only when exactly one sentinel names the agent. Nothing deletes a stale sentinel and registration re-fires on every tool call, so one `agent_id` can come to name several directories; returning the first `read_dir` hit made the deletion target depend on filesystem enumeration order. Ambiguity resolves to none (ADR-0045).
+- `tm-workflow`'s escape hatch for "I need a clean tree to run one command" is
+  now a throwaway worktree
+  (`git worktree add .claude/worktrees/baseline-$$ origin/main`) rather than
+  stashing the main checkout and restoring it afterwards. The
+  worktree needs no main checkout, and a command that dies partway through
+  leaves every other tree as it was instead of stranding uncommitted work in a
+  stash entry someone has to find (#4730).
+- The bundled `git-workflow` skill gained the same throwaway-worktree recipe for
+  getting a temporary clean tree, and its "Stashing Work" section now saves
+  under a named ref and restores by that ref rather than a bare `git stash`
+  followed by a blind `pop` (#4730).
+- **The batch asset-staleness path takes its framework base as an argument.** `FrameworkPaths::for_managed_workspace_under`, `session_assets::session_plan_under` and `managed_routes::summary::stale_assets_for_many_under` accept the directory the framework install nests under; the existing entry points pass `FrameworkPaths::home_base()` and behave exactly as before. `core::tmux::create_managed_session_with_options` does the same for the resolved `tmux:` options. Both remove a `$HOME`-derived read that only tests needed to redirect ([#5040](https://github.com/bobmatnyc/trusty-tools/issues/5040))
+- A second session launching on the same main checkout logs at `info` rather than `warn`, and `session_new`'s tool description no longer claims every session gets a freshly-cloned workspace. With writers isolated and the write boundary enforced, sharing a read-only checkout is expected rather than hazardous.
+- `tm hook --pm-guard` now decides a `git commit` in a main checkout on what is STAGED rather than on the verb (ADR-0049). A staged set of documents and configuration commits there, provided the daemon reports no other live writer sharing that HEAD; any staged source file denies, and the refusal names the offending paths. A commit whose staged set does not describe it keeps the previous unconditional deny: nothing staged, an unreadable index, `-a`/`--amend`/`--include`/`--only`/a pathspec, or a command that chains anything but `cd` — one index read describes one commit, and only when nothing between the read and the commit can restage. The index is read with `diff.relative=false` and `--no-renames` so a subdirectory `cwd` and a staged `git mv` of source into a document cannot hide the source side. `git add` and `git mv` stay ungated: neither moves a ref. #5782, #5781
+- `tm hook --pm-guard` now denies a dispatched agent's `git worktree remove` and names the PM's replacement: `tm session prune-worktrees --merged-prs --force`. Removing a merged worktree could not be delegated at all — an unisolated dispatch is denied as a second writer on the shared HEAD (#4480) and an isolated agent's git operations are confined to its own worktree, so it cannot act on the shared registry — while `BASE-AGENT.md` told every agent to do it anyway. The owner ruled on 2026-08-19 that the PM confirms the work is done and runs the removal itself, and the guard now enforces that. The PM is never denied, `git worktree list` and `git worktree prune` are never denied, and an indeterminate caller context fails open. `tm-workflow`, `git-workflow`, and `rust-build-performance` carry the same rule; `rust-build-performance` also stops calling merged-PR reclamation unshipped, which it has been since #2919 (Refs #5791).
+- **MCP protocol primitives now come from the `trusty-mcp` crate instead of `trusty_common::mcp`** — imports move from `trusty_common::mcp::…` to `trusty_mcp::…`, and the `trusty-common/mcp` feature is replaced by a direct `trusty-mcp` dependency. The trusty-memory client is a separate case: `trusty_common::mcp::memory_rpc` became `trusty_common::memory_rpc`, still reached through the `catchup` feature. No behaviour change (ADR-0040, [#5803](https://github.com/bobmatnyc/trusty-tools/issues/5803))
+- `fetch_managed_session_until_stopped` (bare-`tm` in-place relaunch) takes its
+  retry budget as a parameter instead of reading `FETCH_RETRY_BUDGET` directly.
+  The one production call site passes the same 400ms, so the in-place relaunch
+  path behaves exactly as before; the parameter exists so the retry tests can
+  drive a budget no loopback round trip can consume, which is what made
+  `fetch_until_stopped_gives_up_after_budget_when_never_stopped` flaky under CI
+  load (#5840).
+- The `tm projects` TUI's `[d]` decommission hotkey now routes through the same
+  shared implementation as every other entry point, so it too repairs the base
+  repo's worktree bookkeeping. It called the daemon endpoint directly and left a
+  stale `git worktree list` entry behind — the same bug the rest of #5913 closes.
+- Every decommission entry point now routes through one implementation,
+  `CommandExecutor::decommission_managed_id`
+  (closes [#5913](https://github.com/bobmatnyc/trusty-tools/issues/5913)). The
+  bulk prune sweep used to reach the endpoint through its own hand-rolled
+  `reqwest` POST, independent of the routed `tm session decommission <id>` verb;
+  that split is what let #5899's wording divergence exist, and it carried a
+  second divergence with it — only the bulk path repaired the base repo's
+  worktree bookkeeping. `tm session decommission <id>` now runs
+  `git worktree prune` on the same signal the sweep always used, so
+  decommissioning a tm-owned worktree interactively no longer leaves a stale
+  entry in `git worktree list`.
+- A 404 from the decommission endpoint is mapped to an error naming the session
+  once, in `DaemonClient::decommission_managed_session`, rather than at each
+  entry point. `tm session prune-idle`'s fail-closed sweep still records a
+  missing session as a failed row, and no longer depends on which caller issued
+  the request.
+- `tm ls` and `tm sessions ls` no longer print a `-- deleted --` row for every held slot whose record has left the store (#5952). On the reporting machine those placeholders were 44 rows in a listing of ~130. They now follow the `--all` opt-in that already governs decommissioned records (#1809) and sweep-classified dead records (#4994): `--all` lists every tombstone, at its original slot number and in slot order. The interactive picker shares the same filter, so both views of `tm ls` answer the same way.
+- Nothing about slot allocation changed. The registry, slot release, and `SessionManager::numbered_snapshot` are untouched, so a slot number is still never reused or reassigned (#3034); a hidden slot shows as a gap in the table's NUM column, and `--all` brings the row back. `--json` output is unchanged — a script parsing it sees every row it saw before.
+- `tm` and `tm launch` in a git repository with no origin remote now start a
+  session in that checkout instead of stopping at "no git origin remote found"
+  / "not auto-managing this project"
+  ([#6276](https://github.com/bobmatnyc/trusty-tools/issues/6276)). A two-line
+  notice still says there is no remote and that no managed clone is made, and
+  then the session runs. This is the end-state #6274's auto-`git init` left
+  open: a first-ever `tm` run in a plain directory created the repository and
+  the very next step refused it. Repositories that HAVE an origin remote are
+  unchanged — a GitHub remote still gets the protected managed clone, and a
+  non-GitHub remote is still refused with the live checkout untouched.
+- The managed-session search-index GC and the destructive index-delete capability
+  call the trusty-search daemon over its Unix socket (#6285, ADR-0032) —
+  `search.indexes.list`, `search.index.status` and `search.index.delete` in place
+  of `GET /indexes?details=true`, `GET /indexes/{id}/status` and
+  `DELETE /indexes/{id}?delete_data=true`. Both route through
+  `daemon::search_rpc`, this crate's one trusty-search client, so there is no
+  second address resolver and no second HTTP client to keep in step.
+- `DestructiveIndexDelete` refuses to hand out the capability when no daemon
+  socket is bound, which replaces the old "no `http_addr` discovery file" refusal
+  at the same point — before any request is built, and still after the #4743
+  test-process refusal that is checked first.
+- `tm doctor`'s `search` and `search_index_pin` checks call the trusty-search
+  daemon over its Unix socket (#6285, ADR-0032) — `search.health`,
+  `search.indexes.list` and `search.index.status` in place of `GET /health`,
+  `GET /indexes` and `GET /indexes/{id}/status`. Both derive the socket through
+  `trusty_common::daemon_socket_path("trusty-search")`, the same call the daemon
+  binds, so there is no address to discover and no stale `http_addr` to disagree
+  with.
+- The daemon's startup banner names the trusty-search socket path instead of a
+  port read off disk.
+- `search_index_pin` reports a pin the daemon does not hold off the JSON-RPC
+  not-found code where it used to read a 404 status; another refusal is reported
+  with the daemon's own code rather than an HTTP status.
+- Every trusty-memory call goes over the daemon's Unix socket (#6286, ADR-0032). `tm doctor`'s memory check, the TUI health panel, the startup banner's palace assertion, `tm memory import`, catch-up and the identity seeder all dial the derived socket instead of reading `~/.trusty-memory/http_addr`
+- `tm memory import --memory-url` is `--memory-socket`, and takes a path
+- The banner creates the `user` palace only on a genuine not-found, read off the JSON-RPC error code where it used to be read off a 404 status
+- The `tm supervisor` process no longer serves HTTP on `127.0.0.1:7881`. It publishes each sweep's snapshot to `~/.trusty-mpm/supervisor-metrics.json`, which the daemon reads (Refs #6288).
+- `SupervisorConfig.metrics_addr`, `TRUSTY_MPM_SUPERVISOR_ADDR`, and `tm supervisor --addr` are removed; a leftover value in an operator's environment is ignored.
+- `DaemonLock` gains a `socket_path` field recording the socket the writing
+  daemon serves; `addr` is unchanged. The field is `#[serde(default)]`, so a
+  lock written by a pre-#6288 daemon still parses, with an empty `socket_path`
+  meaning HTTP only. `daemon::lock::write_lock` and
+  `core::daemon_identity::write_lock` / `write_lock_at` take the socket path as
+  a second argument
+  ([#6288](https://github.com/bobmatnyc/trusty-tools/issues/6288)).
+- `daemon::serve_http` waits for the shutdown signal through
+  `trusty_common::shutdown_signal` and fans it out to both listeners, replacing
+  a private line-for-line copy of that helper.
+- `daemon::run_http` and `run_daemon` bind the RPC socket before the daemon
+  publishes anything. `daemon::serve_http` takes the pre-bound socket rather than
+  binding it, so a bind failure aborts before the lock file is written instead of
+  leaving a record naming a daemon that never started
+  ([#6288](https://github.com/bobmatnyc/trusty-tools/issues/6288)).
+- The bodies of the legacy session, hook, and polled-event routes moved from
+  `daemon::api` into `daemon::rpc::sessions_legacy_ops`, and the axum handlers
+  now delegate to them, so one route has one implementation across both
+  transports. The handler signatures, paths, status codes, and response bodies
+  are unchanged ([#6288](https://github.com/bobmatnyc/trusty-tools/issues/6288)).
+- `daemon::api::session_start_correlation` and its two hook handlers are
+  `pub(crate)` rather than `pub(super)`, so the shared `ingest_hook` body can
+  reach them from `daemon::rpc`.
+- 1.5.7 supersedes the stranded 1.5.6 tag; ships #6343 (statusline console link)
+  and #6288 slice 1 (UDS listener alongside HTTP).
+- `tm statusline` no longer renders the daemon's TCP port
+  ([#6304](https://github.com/bobmatnyc/trusty-tools/issues/6304)). The port was
+  not actionable from a status bar and invited port-based connection attempts;
+  its only other job was implicit, since it appeared only while the daemon was
+  reachable. That one bit is kept as a bare `●` after the version, so the
+  lead-in segment now reads `TM <ver> ●` when the daemon is up and `TM <ver>`
+  when it is not.
+- The statusline names the Claude Code account the session runs under, as
+  `✻<email>` between the `@<gh>` and model segments (#6304). Claude Code's
+  `statusLine` stdin payload carries session, cwd, model, cost, context-window
+  and rate-limit fields but no account, so the email is read from
+  `$CLAUDE_CONFIG_DIR/.claude.json` — the relocated personal tier every
+  daemon-managed session runs under — falling back to `~/.claude.json`. A
+  missing, unreadable, or malformed config, or one with no login recorded,
+  omits the segment rather than rendering a placeholder. The read is bounded at
+  100 ms on a detached thread, matching the sibling `gh` probe, so it can cost
+  the segment but never the render.
+- **The PM instruction sections and the `trusty-mpm` output style are rules as bullets, not prose.** Rationale paragraphs, incident narrative, and worked examples that only restated the rule above them are gone, and a rule stated in both surfaces is now stated once — the output style owns the voice rules, the sections own workflow and enforcement. Every rule, table, `<!-- ... -->` marker, section name, and `Skill(skill="tm-*")` pointer is preserved; no rule was replaced by a pointer to a skill (the #6320 owner ruling). `PM_INSTRUCTIONS_VERSION` is 0023 and the three composed-prompt goldens are regenerated ([#6320](https://github.com/bobmatnyc/trusty-tools/pull/6320))
+- The peer bus's delivery boundary moved from the instance to the client
+  ([#6462](https://github.com/bobmatnyc/trusty-tools/issues/6462), DOC-60 §7).
+  Every subscriber of one instance used to share a single 64-slot broadcast
+  ring, which is why #4271's fix had to refuse the publish to stay truthful: one
+  client that stopped reading made `POST /api/v1/bus/publish` (and
+  `mpm.bus.publish`) answer `503` for every publisher and every healthy
+  co-subscriber, until that client drained, disconnected, or the instance was
+  deregistered. **That instance-wide wedge is gone.** Each subscription now has
+  its own 64-envelope inbox, so a stalled client falls behind alone: publishes
+  are accepted, co-subscribers keep receiving, and the stalled client's own
+  inbox displaces its oldest unread envelope to make room.
+- `BusError::SubscriberLagged` and the `503` / `CODE_UNAVAILABLE` answer are
+  retired from the publish path — a slow subscriber is no longer a publish
+  failure, so there is nothing for a sender to retry. The `400` / `403` / `404`
+  / `409` / `410` statuses are unchanged, and `BusError` is now
+  `#[non_exhaustive]`.
+- Every loss is recorded. The DOC-60 §9 durable stream now carries a second
+  record shape alongside the envelope records — `{"record":"inbox_miss",…}`,
+  naming the lost `message_id`, the `instance_id`, the `subscription_id` that
+  lost it, and that subscription's running loss count. Readers of
+  `logs/bus/*.jsonl` must tolerate it: an envelope line has no `record` key, a
+  miss line always does. Nothing recorded `delivered` is lost without a matching
+  miss record.
+- A publish that no inbox accepted is recorded `dropped` and answered `409`,
+  never `delivered`. This is reachable when a deregistration closes every
+  subscription while a publisher is mid-flight.
+- A subscription that attaches after its instance was deregistered ends
+  immediately instead of hanging. `subscribe` resolves the instance and then
+  attaches, so an attach could land after the deregistration had already closed
+  every inbox present — leaving one that nothing would ever close, whose SSE
+  stream stayed open on keep-alives forever. An instance's inbox set is now
+  terminal once closed, under the same lock the attach takes.
+- When a miss record cannot be written — the durable sink is failing, and §9's
+  logger swallows that by design — the delivery's own record carries
+  `losses_unrecorded: true` and an `error!` is emitted, so no line claims a
+  clean delivery the stream cannot back. The field is absent in every other
+  case, so an ordinary record is byte-identical to what it was.
+- `GET /api/v1/bus/subscribe/{instance_id}`'s `event: lagged` frame now also
+  carries `subscription_id`, which is the key to find that client's miss
+  records in the durable log. Recovery is unchanged: re-read the log named in
+  the frame from your last known `message_id`.
+- A dropped subscription detaches itself, so a client that disconnects stops
+  being fanned out to and stops holding envelopes nobody will read. A client
+  that stays attached and never reads — a TCP-wedged SSE body, where the
+  subscription is never dropped — costs its instance a bounded buffer plus one
+  miss record and one `warn!` per subsequent publish, for as long as it stays
+  attached. No publisher or co-subscriber pays for it; the operator's lever is
+  deregistering the instance, and the `warn!` names which one.
+
+### Removed
+
+- The `trusty-bm25-daemon` entry in the bundled service manifest. #5329 moved BM25 inside trusty-memory, so `tm services` has no separate process to discover under that name.
+- The `daemon::discover` module, `TrustyAddrs`, `TRUSTY_SEARCH_DEFAULT_ADDR` (the
+  compiled-in `127.0.0.1:7878`), and `DaemonState::{set_trusty_addrs,
+  trusty_addrs}`. trusty-search has no port to discover since ADR-0032, nothing
+  read the stored addresses, and `~/.trusty-search/http_addr` is stale on every
+  machine that ran the old daemon.
+- `TrustyAddrs::memory`, `TRUSTY_MEMORY_DEFAULT_ADDR`, and the `~/.trusty-memory/http_addr` read in `daemon::discover`. trusty-memory has no port to discover since ADR-0032; nothing read the field, and the file it read is stale on every machine that ran the old daemon
+
+### Security
+
+- Control-plane session routes (`/api/v1/control/sessions/*`) now reject non-loopback callers with 403, mirroring the `/rpc` guard, and `ctl_run_session` validates all three caller-supplied spawn inputs before spawning: `claude_cmd` (only the default `claude` is accepted over HTTP), `prompt_file` (absolute, no `..`, no shell metacharacters, existing file), and `workdir` (absolute, no `..`, existing directory). The tmux backend additionally shell-quotes both interpolated fields (`claude_cmd` and the `prompt_file` path) at the sink via `shlex`, so a value with shell metacharacters typed into the pane shell is inert regardless of caller-side validation — closing a command-injection hole (Refs #6197).
+
+### Documentation
+
+- **Bugfix batching is now the default for same-module bug clusters.** The `tm-workflow` skill's "One Outcome, One PR" section states that several open bugs constrained to the same file, module, or tightly-coupled area go in one PR — one engineer, one worktree, one review, one CI pass — instead of one PR per issue, with each issue keeping its own regression test and `Refs #N`. `tm-delegation-patterns` adds the matching anti-pattern row: one PR per issue for same-module bugs is the anti-pattern; the fix is one batched dispatch/PR per file-cluster.
+- Regenerated the `tm-capabilities` CLI reference so it carries `ls`'s `--no-prune` help text from [#6069](https://github.com/bobmatnyc/trusty-tools/pull/6069), clearing the drift-check gate that PR left red on main
+- Regenerated the `tm-capabilities` bundled skill so its doctor check table
+  and count carry the `base_clone` check added in #6457, clearing the
+  drift-check gate that PR left red on main. (Refs #3605)
+- Repaired every broken rustdoc intra-doc link in this crate and added
+  `#![deny(rustdoc::broken_intra_doc_links)]` to its crate root(s), so a new
+  one fails the build instead of shipping as dead text on docs.rs (#5744).
+- **`tm-workflow`'s Worktree Discipline section now points at BASE-AGENT for the post-merge cleanup rule instead of restating it**, and drops the unconditional `git branch -D` it previously recommended — verified that plain instruction leaves every local branch undeleted on this repo, since every merge here is a squash merge ([#5768](https://github.com/bobmatnyc/trusty-tools/pull/5768))
+- `session_new`'s MCP trait doc comment (`mcp/mod.rs`) no longer describes every managed session as an isolated clone; it now names the main-checkout default and the write boundary (ADR-0037, ADR-0044), matching the sibling tool description in `mcp/tools/session.rs`.
+- **The resident PM prompt now states that a dispatch brief carries findings, evidence and constraints rather than the implementation mechanism**, and that a reviewer's suggested fix is relayed as a suggestion to verify rather than as an instruction — five lines in `core.md`'s "Delegating Well", added after a session where a PM prescribed mechanisms in five briefs from descriptions of code and was overruled every time by an agent that read the source ([#5792](https://github.com/bobmatnyc/trusty-tools/pull/5792))
+- **An acceptance criterion must now be written so a wrong implementation fails it**, with `tm-delegation-patterns` carrying the five worked failures and a weak-vs-stronger criterion table; its "Delegation Best Practices" items on context and acceptance criteria are reworded to carry both rules, and the Structural Delegation Brief template gains a `Findings` field ([#5792](https://github.com/bobmatnyc/trusty-tools/pull/5792))
+- `tm-delegation-patterns.md`'s "Long-Wait Delegation" and "PM Re-Engagement"
+  sections now name `tm wait --for run|file|check --timeout <secs>` as the
+  sanctioned in-turn wait for an agent's own condition, and as a bounded
+  one-shot-plus-rerun alternative for CI when a brief explicitly wants the
+  agent to hold its own turn. PM-side re-engagement stays the default CI
+  pattern, since a CI settle notification still is not agent-visible
+  (refs [#5843](https://github.com/bobmatnyc/trusty-tools/issues/5843),
+  closure condition 2).
+- `resolve_gh_account_env_for_registry` still pointed at
+  `find_pinned_gh_account`, which #5864 renamed to `find_pinned_gh_identity`.
+  The doc names the current function now (#5973).
+- `PickerChoice::LaunchNew` linked `LaunchIsolation::OwnWorktree` by bare name,
+  but `session_picker` never imports that type — it re-exports four other items
+  from `picker_launch_new` and not this one. The link carries the full path now.
+  The failing lib doc had been hiding it: rustdoc never reached the `tm` binary
+  while `gh_account.rs` still failed (#5973).
+- `doctor_worktrees.rs`'s `[`run_doctor`]` intra-doc link no longer breaks
+  `cargo doc` for the workspace. `run_doctor` lives in the sibling module
+  `daemon::doctor` and was never imported into `doctor_worktrees.rs`, so the
+  bare link did not resolve; it now reads
+  `[`crate::daemon::doctor::run_doctor`]`.
+- The `daemon::rpc` module headers link their own items again. Each submodule
+  carries a `///` doc on its `pub mod` line, which merges with the module's `//!`
+  header and makes rustdoc resolve the whole doc in `daemon::rpc` — so `register`,
+  `METHODS`, `DaemonError` and every `super::` path written inside a header
+  rendered as dead literal text and denied `cargo doc`. Each header now ends with
+  `crate::`-rooted reference definitions. `api.rs`'s links to
+  `TmuxService::spawn_claude` and `PairingService::reset` are qualified the same
+  way; `daemon::socket`'s private `build_router` is a code span, since docs.rs
+  cannot link a private item.
+- One broken intra-doc link on `daemon::doctor::run_doctor_for_manager`, which
+  failed the pre-publish rustdoc gate (`scripts/check_rustdoc_links.sh`).
+  `SessionManager` is referred to by its full path in the signature and never
+  imported, so the doc link now says `crate::session_manager::SessionManager`.
+- Regenerated the `tm-capabilities` bundled skill so its doctor check table
+  and count carry the `tmux_options` check added in #6475, clearing the
+  drift-check gate that PR left red on main. (Refs #6469)
+
 ## [1.4.1] — 2026-08-14
 
 ### Fixed

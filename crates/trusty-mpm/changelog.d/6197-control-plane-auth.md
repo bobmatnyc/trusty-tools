@@ -1,3 +1,0 @@
-Security
-
-- Control-plane session routes (`/api/v1/control/sessions/*`) now reject non-loopback callers with 403, mirroring the `/rpc` guard, and `ctl_run_session` validates all three caller-supplied spawn inputs before spawning: `claude_cmd` (only the default `claude` is accepted over HTTP), `prompt_file` (absolute, no `..`, no shell metacharacters, existing file), and `workdir` (absolute, no `..`, existing directory). The tmux backend additionally shell-quotes both interpolated fields (`claude_cmd` and the `prompt_file` path) at the sink via `shlex`, so a value with shell metacharacters typed into the pane shell is inert regardless of caller-side validation — closing a command-injection hole (Refs #6197).
