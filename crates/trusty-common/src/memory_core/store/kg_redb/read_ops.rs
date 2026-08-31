@@ -4,25 +4,24 @@
 //! keeps each file under the 500-SLOC cap while remaining a coherent unit.
 //! What: `impl KgStoreRedb` for `query_active`, `list_subjects`,
 //! `list_subjects_with_counts`, `list_active`, `count_active_triples`,
-//! `checkpoint`, `load_drawers`, `load_drawer_ids`, and `dump_all_triples`.
+//! `checkpoint`, `load_drawers`, `load_drawer`, `load_drawer_ids`, and
+//! `dump_all_triples`.
 //! Test: `assert_then_query_returns_triple`, `list_subjects_returns_distinct_active_subjects`,
 //! `count_active_triples_returns_live_only`, `upsert_drawer_then_load_drawers_round_trips`.
 
 use crate::memory_core::palace::Drawer;
 use crate::memory_core::store::kg_store::{
-    ACTIVE_SUBJECT_COUNTS, DRAWERS, DRAWERS_BY_FACT_KEY, DrawerRecord, TRIPLES, TripleValue,
-    decode_triple_key, decode_u64, decode_value, prefix_range_end, subject_prefix,
+    ACTIVE_SUBJECT_COUNTS, DRAWERS, DRAWERS_BY_FACT_KEY, TRIPLES, TripleValue, decode_triple_key,
+    decode_u64, decode_value, prefix_range_end, subject_prefix,
 };
 use anyhow::{Context, Result};
-use chrono::DateTime;
 use redb::{ReadableDatabase, ReadableTable};
 use std::collections::HashSet;
-use std::path::PathBuf;
 use uuid::Uuid;
 
 use super::super::kg::Triple;
 use super::store::KgStoreRedb;
-use super::types::{decode_drawer_record, parse_drawer_type, triple_from_parts};
+use super::types::{drawer_from_row, triple_from_parts};
 
 impl KgStoreRedb {
     /// Return all currently active triples for `subject`.
@@ -287,59 +286,55 @@ impl KgStoreRedb {
             let mut id_arr = [0u8; 16];
             id_arr.copy_from_slice(id_bytes);
             let id = Uuid::from_bytes(id_arr);
-            // #4884: the migration chain moved into `decode_drawer_record` so
-            // the index-maintenance path in `write_ops` reads a row's prior
-            // `fact_key` through the same walk instead of a second copy.
-            let record: DrawerRecord = match decode_drawer_record(v.value()) {
-                Ok(r) => r,
+            // #6438: hydration lives in `drawer_from_row`, shared with the
+            // single-row `load_drawer`. A row this scan skips is exactly a row
+            // the point-read reports as undecodable, so the Tier C retirement
+            // path never reads an unreadable incumbent as an absent one.
+            match drawer_from_row(id, v.value()) {
+                Ok(drawer) => out.push(drawer),
                 Err(e) => {
-                    tracing::warn!(id = %id, "skip drawer with malformed value: {e}");
+                    tracing::warn!(id = %id, "skip unreadable drawer row: {e:#}");
                     skipped += 1;
-                    continue;
                 }
-            };
-            let room_id = match Uuid::parse_str(&record.room_id) {
-                Ok(u) => u,
-                Err(e) => {
-                    tracing::warn!(id = %id, "skip drawer with invalid room_id: {e}");
-                    skipped += 1;
-                    continue;
-                }
-            };
-            let created_at = match DateTime::from_timestamp_millis(record.created_at_ms) {
-                Some(dt) => dt,
-                None => {
-                    tracing::warn!(id = %id, "skip drawer with invalid created_at_ms");
-                    skipped += 1;
-                    continue;
-                }
-            };
-            let drawer_type = parse_drawer_type(record.drawer_type.as_deref());
-            let expires_at = record
-                .expires_at_ms
-                .and_then(DateTime::from_timestamp_millis);
-            let completed_at = record
-                .completed_at_ms
-                .and_then(DateTime::from_timestamp_millis);
-            // #5902: the content digest is DERIVED from the row's content, never
-            // stored in `DrawerRecord` — one source of truth, and no postcard
-            // positional migration for a value that is already recomputable.
-            // `Drawer::new` is what derives it, which is why hydration builds
-            // through the constructor and then overwrites the identity fields
-            // rather than assembling a struct literal.
-            let mut drawer = Drawer::new(room_id, record.content);
-            drawer.id = id;
-            drawer.importance = record.importance;
-            drawer.source_file = record.source_file.map(PathBuf::from);
-            drawer.created_at = created_at;
-            drawer.tags = record.tags;
-            drawer.drawer_type = drawer_type;
-            drawer.expires_at = expires_at;
-            drawer.completed_at = completed_at;
-            drawer.fact_key = record.fact_key;
-            out.push(drawer);
+            }
         }
         Ok((out, skipped))
+    }
+
+    /// Point-read one drawer row by id (#6438).
+    ///
+    /// Why: `persist_with_retirement` resolves a `fact_key` slot's occupant
+    /// through the index, then has to fetch that drawer to retire it. Its only
+    /// source was the in-memory drawer table, so an incumbent that table was
+    /// missing — a mirror that never ran (#6366), or a degraded open that
+    /// skipped rows (#6201) — read as "no incumbent" and the newcomer was
+    /// admitted without retiring anyone, leaving two rows carrying one live
+    /// `fact_key`. Asking redb settles the question against the durable state
+    /// the invariant is about. `load_drawers` answers it too, at the cost of
+    /// decoding every row in the palace on every Tier C write.
+    /// What: point-reads `DRAWERS` at the id's 16 bytes. `Ok(None)` means no
+    /// such row exists — the index is dangling. `Err` means a row IS there and
+    /// could not be hydrated, deliberately NOT collapsed into `Ok(None)`: the
+    /// caller must be able to tell "nobody holds this slot" from "somebody
+    /// holds it and I cannot retire them".
+    /// Test: `an_on_disk_incumbent_absent_from_the_mirror_is_still_retired`,
+    /// `a_fact_key_index_naming_no_row_still_admits_the_newcomer`,
+    /// `an_undecodable_incumbent_row_fails_the_write_instead_of_admitting_a_second_claimant`.
+    pub fn load_drawer(&self, id: Uuid) -> Result<Option<Drawer>> {
+        let rtx = self.db().begin_read().context("begin load_drawer txn")?;
+        let drawers = rtx
+            .open_table(DRAWERS)
+            .context("open drawers table for load_drawer")?;
+        let key = id.into_bytes();
+        let Some(guard) = drawers
+            .get(key.as_slice())
+            .context("point-read drawer row")?
+        else {
+            return Ok(None);
+        };
+        drawer_from_row(id, guard.value())
+            .map(Some)
+            .with_context(|| format!("hydrate drawer row {id}"))
     }
 
     /// Load just the set of drawer IDs.

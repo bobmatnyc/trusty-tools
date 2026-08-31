@@ -271,6 +271,9 @@ pub(super) fn apply_admission(
 /// together or not at all.
 /// What: clears `fact_key` and `expires_at` on the retired drawer, matching the
 /// record `persist_with_retirement` committed. No-op when nothing was retired.
+/// The table is not guaranteed to hold every retired id (#6438) — a redb-only
+/// incumbent leaves this call a no-op even though the durable retirement
+/// happened.
 /// Test: `tier_c_retirement_clears_the_displaced_drawers_own_fact_key`.
 pub(super) fn retire_in_memory(drawers: &mut [Drawer], retired_id: Option<Uuid>) {
     let Some(retired_id) = retired_id else {
@@ -319,13 +322,19 @@ pub(super) fn retire_in_memory(drawers: &mut [Drawer], retired_id: Option<Uuid>)
 /// Otherwise looks the slot up via `drawer_id_for_fact_key`, and when a
 /// different drawer holds it, commits `[retired_incumbent, newcomer]` through
 /// `upsert_drawers_atomic`. Returns the retired drawer's id so the caller can
-/// mirror the change into the in-memory drawer table. An incumbent the index
-/// names but the in-memory table does not hold is logged and skipped: the
-/// newcomer's write still moves the index, so the slot is never left with two
-/// indexed claimants.
+/// mirror the change into the in-memory drawer table. An incumbent the
+/// in-memory table does not hold is fetched from redb via `kg.load_drawer`
+/// (#6438) and retired like any other; only an incumbent absent from redb TOO
+/// — a dangling index entry — is logged and skipped, and there the newcomer's
+/// write still moves the index, so the slot keeps one indexed claimant. A row
+/// present in redb but unreadable fails the write instead: admitting the
+/// newcomer would leave a second live claimant nothing later retires.
 /// Test: `tier_c_write_retires_the_prior_slot_occupant`,
 /// `tier_c_retirement_clears_the_displaced_drawers_own_fact_key`,
-/// `concurrent_tier_c_writes_to_one_slot_leave_exactly_one_claimant`.
+/// `concurrent_tier_c_writes_to_one_slot_leave_exactly_one_claimant`,
+/// `an_on_disk_incumbent_absent_from_the_mirror_is_still_retired`,
+/// `a_fact_key_index_naming_no_row_still_admits_the_newcomer`,
+/// `an_undecodable_incumbent_row_fails_the_write_instead_of_admitting_a_second_claimant`.
 pub(super) async fn persist_with_retirement(
     ctx: &CommitCtx,
     drawer: &Drawer,
@@ -346,23 +355,34 @@ pub(super) async fn persist_with_retirement(
         return Ok(None);
     };
 
-    // The in-memory table is a complete mirror of DRAWERS (hydrated at open,
-    // maintained by remember/forget), so the point lookup avoids decoding
-    // every row just to rewrite one.
-    let incumbent = ctx
+    // The in-memory table is normally a complete mirror of DRAWERS (hydrated at
+    // open, maintained by remember/forget), so try the cheap lookup first.
+    let mirrored = ctx
         .drawers
         .read()
         .iter()
         .find(|d| d.id == incumbent_id)
         .cloned();
+    // #6438: a miss here is not proof of absence — a mirror that never ran
+    // (#6366) or a degraded open that skipped rows (#6201) leaves the table
+    // missing a row redb still holds. Ask redb before concluding the slot is
+    // unoccupied. An Err means the row exists and cannot be hydrated, which
+    // must fail the write rather than admit a second live claimant.
+    let incumbent = match mirrored {
+        Some(d) => Some(d),
+        None => ctx
+            .kg
+            .load_drawer(incumbent_id)
+            .context("durable point-read of the fact_key slot incumbent")?,
+    };
     let Some(incumbent) = incumbent else {
         tracing::warn!(
             palace = %ctx.palace,
             fact_key = %key,
             incumbent = %incumbent_id,
-            "#4886: fact_key slot names a drawer absent from the in-memory \
-             table; writing the newcomer only — the index still moves, so the \
-             slot keeps exactly one indexed claimant"
+            "#6438: fact_key slot names a drawer that exists neither in the \
+             in-memory table nor in redb; writing the newcomer only — the \
+             index still moves, so the slot keeps exactly one indexed claimant"
         );
         ctx.kg.upsert_drawer(drawer).await?;
         return Ok(None);
