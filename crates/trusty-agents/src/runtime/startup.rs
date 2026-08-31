@@ -81,24 +81,20 @@ use build_info::BuildInfo;
 pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
     // Handle --version / -V before anything else (no env/tracing/etc.).
     // Why: `--version` must be cheap and side-effect-free so it's safe to
-    // run in CI or scripts without an OPENROUTER_API_KEY. It still bumps
-    // the build counter so CI runs are disambiguated in logs.
+    // run in CI or scripts without an OPENROUTER_API_KEY.
+    //
+    // #4260: it prints ONLY compile-time provenance and touches no disk. It
+    // used to resolve a state dir and bump the per-run counter, so the same
+    // installed binary answered `build #2435` then `build #2440` — a number
+    // that changes per ask cannot be cited as install evidence.
     //
     // Note: We probe argv directly here (not via clap) so the version path
     // doesn't depend on clap successfully parsing every other flag. Clap's
     // own version-handling is disabled (`disable_version_flag = true` on
-    // `Cli`) so we control formatting + the build-counter bump.
+    // `Cli`) so we control the formatting.
     let raw_args: Vec<String> = std::env::args().collect();
     if raw_args.iter().any(|a| a == "--version" || a == "-V") {
-        // Resolve project dir so `.trusty-agents/state` lands in the project root
-        // even when invoked from a subdirectory.
-        let state_dir = ctrl::detect_self_project()
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-            .join(".trusty-agents")
-            .join("state");
-        tokio::fs::create_dir_all(&state_dir).await?;
-        let info = BuildInfo::load_and_increment_in(&state_dir).await?;
-        println!("{}", info.display_string());
+        println!("{}", build_info::version_string());
         return Ok(false);
     }
 

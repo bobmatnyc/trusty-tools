@@ -58,17 +58,22 @@ cd ui && pnpm dev
 # Vite proxies /api/* to http://localhost:7654
 ```
 
-## Build counter
+## Build provenance and the run counter
 
-`build.rs` runs at compile time, captures the git commit hash, and bakes
-it into the binary. At runtime, every invocation increments
-`.open-mpm/state/build.json` so each run has a unique build number you
-can correlate with `docs/performance/runs/*.json`.
+`build.rs` runs at compile time and bakes four values into the binary: the
+short and full git commit hashes, that commit's date, and whether the working
+tree was dirty. `--version` prints them and nothing else, so two invocations of
+one binary print identical bytes (#4260).
 
 ```bash
 cargo run -- --version
-# open-mpm v0.1.37 (abc1234) build #189
+# trusty-agents v0.39.0 (abc1234, 2026-08-31T09:12:44-04:00)
 ```
+
+Separately, each process start increments `.trusty-agents/state/build.json`.
+That counter names the RUN, not the build — it renders as `run #N` in the
+startup log line and lets you correlate a run with
+`docs/performance/runs/*.json`. It never appears in `--version`.
 
 ## Cross-compilation
 
