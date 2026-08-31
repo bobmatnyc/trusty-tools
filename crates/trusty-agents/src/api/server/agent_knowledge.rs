@@ -59,7 +59,10 @@ use serde_json::{Value, json};
 use super::agent_patch::resolve_agent_paths;
 use super::state::AppState;
 use crate::agents::{SkillsConfig, ToolsConfig};
-use crate::ctrl::pm_task::match_any_glob;
+// #4520/#4054: the panes display availability with the SAME predicate the
+// persona-chat dispatch gate uses, so a `*` allow cannot advertise an L0 or
+// exfil tool the real gate denies.
+use crate::ctrl::pm_task::tool_authz::persona_surface_grants_tool;
 use crate::mcp::config::McpService;
 use crate::skills::manifest::{SkillCatalog, SkillKind, effective_tool_patterns};
 use crate::stores::{StoresConfig, resolve_store_statuses};
@@ -220,7 +223,7 @@ fn knowledge_tool_cards(
         .filter(|m| m.kind == SkillKind::Knowledge)
         .filter_map(|m| {
             let tool = m.tool()?;
-            let available = patterns.is_some_and(|p| match_any_glob(tool, p));
+            let available = patterns.is_some_and(|p| persona_surface_grants_tool(tool, p));
             let bound_store = if tool == "vector_search" {
                 stores.primary().map(|b| b.name.clone())
             } else {
@@ -334,8 +337,9 @@ fn knowledge_mcp_connections(
 /// **This is a per-agent CAPABILITY signal, not a live routing fact** — the
 /// module doc's honest gap still holds: today's memory/search tools dispatch
 /// in-process, not through these endpoints, even when this returns `true`.
-/// What: `true` iff `patterns` matches at least one tool in the connection's
-/// mapped set via the SAME `match_any_glob` the dispatch gate uses. An
+/// What: `true` iff `patterns` grants at least one tool in the connection's
+/// mapped set via the SAME `persona_surface_grants_tool` predicate the dispatch
+/// gate uses (#4520/#4054). An
 /// unknown connection name (an operator's own, unrelated endpoint) never
 /// reaches this function — the caller only invokes it for connections
 /// already classified as knowledge-relevant.
@@ -368,7 +372,7 @@ fn agent_reaches_connection(name: &str, patterns: Option<&[String]>) -> bool {
     };
     backing_tools
         .iter()
-        .any(|tool| match_any_glob(tool, patterns))
+        .any(|tool| persona_surface_grants_tool(tool, patterns))
 }
 
 /// `reason` text for a connection given its enabled/granted state — shared

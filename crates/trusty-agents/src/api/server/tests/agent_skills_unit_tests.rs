@@ -70,6 +70,59 @@ fn granted_ids_include_tool_less_skills_named_by_id() {
     assert!(granted.contains("handoff-protocol"));
 }
 
+/// Why: `granted_skill_ids` is the only advisory pane whose OUTPUT changes with
+/// #4520/#4054. It used a bare `match_any_glob`, so `[tools].allow = ["*"]`
+/// marked the L0 shell skill and the exfiltration-capable Google skills granted
+/// while the dispatch gate denied them. This test fails on `b16a56a07`.
+/// What: under a `*` allow, no builtin skill wrapping `l0_shell_exec` or one of
+/// the seven exfil-capable tools is granted, and an ordinary tool-wrapping skill
+/// still is.
+/// Test: this test.
+#[test]
+fn granted_ids_exclude_l0_and_exfil_skills_under_a_wildcard_allow() {
+    // Literal names rather than `is_exfil_capable_tool`: asserting against the
+    // production predicate would still pass if the set were emptied.
+    const DENIED_TOOLS: &[&str] = &[
+        "l0_shell_exec",
+        "compose_email",
+        "manage_file_permissions",
+        "manage_gmail_settings",
+        "manage_gmail_filters",
+        "modify_gmail_messages",
+        "manage_events",
+        "manage_drive_file",
+    ];
+
+    let catalog = SkillCatalog::builtin();
+    let wildcard = vec!["*".to_string()];
+    let granted = granted_skill_ids(&catalog, Some(&wildcard), None);
+
+    let mut covered = std::collections::BTreeSet::new();
+    for manifest in catalog.manifests() {
+        let Some(tool) = manifest.tool() else {
+            continue;
+        };
+        if DENIED_TOOLS.contains(&tool) {
+            covered.insert(tool);
+            assert!(
+                !granted.contains(&manifest.id),
+                "`{}` wraps `{tool}`, which the dispatch gate denies under `*`",
+                manifest.id
+            );
+        }
+    }
+    assert_eq!(
+        covered,
+        DENIED_TOOLS.iter().copied().collect(),
+        "every denied tool needs a builtin skill wrapping it, or the loop above proves nothing"
+    );
+
+    assert!(
+        granted.contains("mta-train-time"),
+        "an ordinary tool-wrapping skill is still granted under `*`"
+    );
+}
+
 #[test]
 fn unmatched_patterns_flags_a_pattern_no_skill_wraps() {
     let catalog = SkillCatalog::builtin();

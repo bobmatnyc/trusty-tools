@@ -73,13 +73,17 @@ fn allow_patterns_grant_tool_wildcard_still_grants_non_l0() {
 
 #[test]
 fn exfil_set_matches_the_ruling() {
-    // Pinned so a well-meaning edit that drops one of the five is caught.
+    // Pinned so a well-meaning edit that drops one of the seven is caught.
+    // Extended from five to seven by the owner ruling 2026-08-31 (manage_events,
+    // manage_drive_file).
     let mut set = EXFIL_CAPABLE_TOOLS.to_vec();
     set.sort_unstable();
     assert_eq!(
         set,
         vec![
             "compose_email",
+            "manage_drive_file",
+            "manage_events",
             "manage_file_permissions",
             "manage_gmail_filters",
             "manage_gmail_settings",
@@ -95,6 +99,9 @@ fn is_exfil_capable_tool_matches_the_set() {
     assert!(is_exfil_capable_tool("manage_gmail_settings"));
     assert!(is_exfil_capable_tool("manage_gmail_filters"));
     assert!(is_exfil_capable_tool("modify_gmail_messages"));
+    // Owner ruling 2026-08-31 extension.
+    assert!(is_exfil_capable_tool("manage_events"));
+    assert!(is_exfil_capable_tool("manage_drive_file"));
 }
 
 #[test]
@@ -148,4 +155,32 @@ fn strip_exfil_available_is_a_noop() {
         kept, names,
         "with confirmation available the gate must pass exfil tools through"
     );
+}
+
+// --- display-drift predicate (#4520 + #4054 composed) --------------------
+
+#[test]
+fn persona_surface_grants_tool_excludes_l0_and_exfil_under_wildcard() {
+    let wildcard = vec!["*".to_string()];
+    // L0 execution grant: literal-only, so a wildcard does not display it.
+    assert!(!persona_surface_grants_tool(
+        crate::tools::l0_exec::L0_SHELL_EXEC,
+        &wildcard
+    ));
+    // Exfil-capable tools: fail closed with no confirmation channel.
+    assert!(!persona_surface_grants_tool("compose_email", &wildcard));
+    assert!(!persona_surface_grants_tool("manage_events", &wildcard));
+    assert!(!persona_surface_grants_tool("manage_drive_file", &wildcard));
+    // Ordinary and read-only tools are still displayed as granted.
+    assert!(persona_surface_grants_tool("web_search", &wildcard));
+    assert!(persona_surface_grants_tool(
+        "get_gmail_message_content",
+        &wildcard
+    ));
+    // A literal name still grants the L0 shell.
+    let literal = vec![crate::tools::l0_exec::L0_SHELL_EXEC.to_string()];
+    assert!(persona_surface_grants_tool(
+        crate::tools::l0_exec::L0_SHELL_EXEC,
+        &literal
+    ));
 }

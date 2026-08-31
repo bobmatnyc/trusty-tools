@@ -495,7 +495,29 @@ async fn skills_route_rolls_up_group_provider_requirements() {
     let body = body_json(skills_at(&[dir.path().to_path_buf()], "gworker", dir.path()).await).await;
 
     let gw = group(&body, "google-workspace");
-    assert_eq!(gw["granted_state"], "all");
+    // #4054: two members wrap exfiltration-capable tools, which the persona-chat
+    // gate denies while no confirmation channel exists. The pane reports what
+    // dispatch does, so the bundle rolls up to `"some"` — it read `"all"` until
+    // the panes were repointed at the real gate, which was the display drift.
+    assert_eq!(gw["granted_state"], "some");
+    let denied: Vec<&str> = vec!["gmail-compose", "gmail-labels-apply"];
+    let granted_members: Vec<&str> = gw["granted_members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    for id in &denied {
+        assert!(
+            !granted_members.contains(id),
+            "`{id}` wraps an exfil-capable tool: {granted_members:?}"
+        );
+    }
+    assert_eq!(
+        granted_members.len(),
+        gw["members"].as_array().unwrap().len() - denied.len(),
+        "every OTHER member is still granted: {granted_members:?}"
+    );
     let providers = gw["providers"].as_array().unwrap();
     assert_eq!(
         providers.len(),
