@@ -581,9 +581,8 @@ fn a_changed_roster_changes_the_resolved_prompt() {
     // rules out.
     //
     // What this keeps is the half nothing else covers: the roster is not
-    // decoration. `gate_is_deterministic_across_repeated_runs` owns repeated
-    // byte-equality for a FIXED roster (32 rounds); without the assertion below
-    // that determinism would hold just as well if the roster never reached the
+    // decoration. Every other byte-equality assertion in this file pins a FIXED
+    // roster, and each would hold just as well if the roster never reached the
     // prompt at all.
     let tmp = TempDir::new().expect("tempdir");
 

@@ -139,7 +139,21 @@ pub fn clear_pause_in(base: &Path, id: &SessionId) -> std::io::Result<()> {
 /// What: `<base>/.trusty-mpm/sessions`, the parent of every [`pause_path_in`].
 /// Test: `sessions_root_is_the_pause_path_grandparent`.
 pub fn sessions_root_in(base: &Path) -> PathBuf {
-    base.join(".trusty-mpm").join("sessions")
+    sessions_root_under(&base.join(".trusty-mpm"))
+}
+
+/// The sessions directory under an already-resolved framework root.
+///
+/// Why (#4323): the daemon holds `state.framework_root()` — a temp dir under
+/// test, `~/.trusty-mpm` in production — not the base it was derived from.
+/// Joining `.trusty-mpm` again would double-nest, and resolving the home
+/// directory instead would point a deleting sweep at a directory the daemon
+/// does not own.
+/// What: `<framework_root>/sessions`. [`sessions_root_in`] is this function
+/// after one `.trusty-mpm` join, so the two cannot drift.
+/// Test: `sessions_root_in_is_sessions_root_under_the_framework_root`.
+pub fn sessions_root_under(framework_root: &Path) -> PathBuf {
+    framework_root.join("sessions")
 }
 
 /// What one [`reap_empty_session_dirs_in`] sweep did.
@@ -196,12 +210,32 @@ impl SessionDirSweep {
 /// Test: `reap_removes_only_empty_uuid_dirs`, `reap_skips_what_it_cannot_prove`,
 /// `reap_missing_root_is_not_an_error`, `reap_unreadable_root_is_an_error`.
 pub fn reap_empty_session_dirs_in(base: &Path) -> std::io::Result<SessionDirSweep> {
-    let root = sessions_root_in(base);
+    reap_empty_session_dirs_at(&sessions_root_in(base))
+}
+
+/// [`reap_empty_session_dirs_in`], taking the sessions directory directly.
+///
+/// Why (#4323): the daemon must sweep ITS OWN root
+/// ([`sessions_root_under`]`(state.framework_root())`), never a home-resolved
+/// path. An earlier revision of this module also exposed a
+/// `reap_empty_session_dirs()` that called `dirs::home_dir()`; the daemon used
+/// it, and a scratch-rooted daemon in a test consequently deleted an empty
+/// session directory out of the operator's real `~/.trusty-mpm/sessions/`.
+/// There is deliberately no home-resolving wrapper any more — the caller names
+/// the directory it owns.
+/// What: the fail-closed sweep described on [`reap_empty_session_dirs_in`],
+/// against `sessions_dir` exactly as given.
+/// Test: `reap_removes_only_empty_uuid_dirs`, `reap_skips_what_it_cannot_prove`,
+/// `reap_missing_root_is_not_an_error`, `reap_unreadable_root_is_an_error`,
+/// and `orphan_gc_loop_leaves_the_home_session_dirs_alone_on_a_scratch_root`
+/// in `daemon::mod`.
+pub fn reap_empty_session_dirs_at(sessions_dir: &Path) -> std::io::Result<SessionDirSweep> {
+    let root = sessions_dir;
     if !root.exists() {
         return Ok(SessionDirSweep::default());
     }
     let mut sweep = SessionDirSweep::default();
-    for entry in std::fs::read_dir(&root)? {
+    for entry in std::fs::read_dir(root)? {
         // A per-entry read error is a question the sweep cannot answer.
         let Ok(entry) = entry else {
             sweep.skipped += 1;
@@ -215,11 +249,15 @@ pub fn reap_empty_session_dirs_in(base: &Path) -> std::io::Result<SessionDirSwee
                 continue;
             }
         }
-        // Only OUR directories: `save_pause_in` names them by session UUID.
-        let is_session_dir = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| uuid::Uuid::parse_str(n).is_ok());
+        // Only OUR directories: `save_pause_in` names them `id.0.to_string()`,
+        // which is `Uuid`'s HYPHENATED spelling and nothing else. #4323:
+        // `parse_str` alone also accepts the simple 32-hex, braced and urn
+        // forms, so it would have admitted three directory names this code can
+        // never have written — a widened delete gate for no gain. Round-tripping
+        // through `hyphenated()` narrows it back to what we produce.
+        let is_session_dir = path.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+            uuid::Uuid::parse_str(n).is_ok_and(|u| u.hyphenated().to_string() == n)
+        });
         if !is_session_dir {
             sweep.skipped += 1;
             continue;
@@ -245,22 +283,6 @@ pub fn reap_empty_session_dirs_in(base: &Path) -> std::io::Result<SessionDirSwee
         }
     }
     Ok(sweep)
-}
-
-/// [`reap_empty_session_dirs_in`] against the operator's real home directory.
-///
-/// Why: the daemon holds no base path; the framework root is home-relative.
-/// What: resolves the home directory and delegates. An unresolvable home is an
-/// error rather than a sweep of `./.trusty-mpm/sessions`, which would point a
-/// deleting sweep at whatever directory the daemon happened to start in.
-/// Test: the sweep itself is covered against a temp base by
-/// `reap_removes_only_empty_uuid_dirs` and its siblings; the error arm this
-/// wrapper adds is the same one `reap_unreadable_root_is_an_error` pins.
-pub fn reap_empty_session_dirs() -> std::io::Result<SessionDirSweep> {
-    let home = dirs::home_dir().ok_or_else(|| {
-        std::io::Error::other("could not resolve the home directory for the session-dir sweep")
-    })?;
-    reap_empty_session_dirs_in(&home)
 }
 
 /// Remove the pause file for a session (called on resume or stop).
@@ -436,18 +458,41 @@ mod tests {
         std::fs::create_dir_all(root.join("not-a-session-id")).expect("seed foreign dir");
         std::fs::write(root.join("stray.md"), b"# notes").expect("seed loose file");
 
+        // #4323: `Uuid::parse_str` also accepts the simple 32-hex spelling, but
+        // `save_pause_in` only ever writes the hyphenated one — so a 32-hex
+        // directory is somebody else's and must be skipped.
+        let simple = SessionId::new().0.simple().to_string();
+        assert_eq!(simple.len(), 32, "the simple form carries no hyphens");
+        std::fs::create_dir_all(root.join(&simple)).expect("seed 32-hex dir");
+
         let sweep = reap_empty_session_dirs_in(tmp.path()).expect("sweep");
         assert_eq!(
             sweep,
             SessionDirSweep {
                 removed: 0,
-                skipped: 3,
+                skipped: 4,
                 failed: 0
             }
         );
         assert!(root.join(&populated).join("pause.json").is_file());
         assert!(root.join("not-a-session-id").is_dir());
         assert!(root.join("stray.md").is_file());
+        assert!(
+            root.join(&simple).is_dir(),
+            "a 32-hex name is not a spelling this code writes; it must survive"
+        );
+    }
+
+    /// #4323: the two derivations must not drift — `sessions_root_in` is
+    /// `sessions_root_under` after one `.trusty-mpm` join, and the daemon uses
+    /// the latter against its own `framework_root()`.
+    #[test]
+    fn sessions_root_in_is_sessions_root_under_the_framework_root() {
+        let base = Path::new("/home/op");
+        assert_eq!(
+            sessions_root_in(base),
+            sessions_root_under(&base.join(".trusty-mpm"))
+        );
     }
 
     /// #4323: a sessions root that was never created is a zero-count success,

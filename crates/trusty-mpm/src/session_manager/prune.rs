@@ -360,6 +360,15 @@ pub struct OrphanSweepOutcome {
 /// What: the six counts one classification pass produces. [`summary`](Self::summary)
 /// renders the line, or `None` when there were no candidates at all — the idle
 /// case, where even one line per minute is noise.
+///
+/// One knowing loss: `skipped_live` is a bare count, so the PATHS of
+/// still-live-owner candidates are reachable at `debug` only. The other four
+/// classifications keep their paths in [`OrphanSweepOutcome`], which the HTTP
+/// route, the MCP tool and `tm doctor` all read; this arm has no such carrier
+/// and is deliberately not given one — a live owner's worktree is not a backlog
+/// an operator acts on, and adding a field to that public struct would churn
+/// its literal constructions for a diagnostic that `RUST_LOG=debug` already
+/// answers.
 /// Test: `sweep_summary_is_silent_without_candidates`,
 /// `sweep_summary_names_every_count`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
