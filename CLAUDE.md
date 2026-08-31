@@ -133,8 +133,13 @@ change's blast radius. Risk labels map onto the rungs (1–2 Low, 3–4 Normal,
 - 🟡 A PR proves every test target COMPILES; test EXECUTION defers to `main`, so
   run the ladder rung your change earns before merging. Full suite on a branch:
   Actions → CI → "Run workflow".
-- 🟡 **A red `main` files an issue** — `notify-main-failure` opens or comments on
-  the `ci-red-main`-labelled tracking issue, then fails the run.
+- 🟡 **A red `main` files an issue** — `ci.yml`'s `notify-main-failure` opens or
+  comments on the `ci-red-main`-labelled tracking issue, then fails the run. A
+  `needs:` list cannot cross workflow files, so every OTHER push-to-main
+  workflow is watched by `red-main-notify.yml` over `workflow_run` instead
+  (#5657). Adding a push-to-main workflow means adding its `name:` to that
+  list — `scripts/check-red-main-coverage.sh` fails the `changes` job until you
+  do.
 - 🟡 **A `BEHIND` branch merges fine** — use `gh pr merge --squash
   --delete-branch --auto`
   ([#5958](https://github.com/bobmatnyc/trusty-tools/pull/5958)). What blocks is

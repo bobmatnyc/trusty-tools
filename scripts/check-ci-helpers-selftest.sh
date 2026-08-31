@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # check-ci-helpers-selftest.sh — regression fixtures for the CI helper scripts
-# (issues #4179, #4468, #4421, #4688, #5407, #6478).
+# (issues #4179, #4468, #4421, #4688, #5407, #5657, #6478).
 #
 # Why: the three helpers this covers each encode a decision that is invisible
 #   until it is WRONG in production — a cancelled run reported as green, a
@@ -24,6 +24,10 @@
 #   ci.yml `changes` job: that every gate verdict comes from a diff, never from
 #                        the PR activity type, and that the push path's
 #                        no-before-SHA arms still fail closed (#5407).
+#   check-red-main-coverage: which trigger shapes count as push-to-main, the
+#                        fail-closed answer for a trigger block it cannot parse,
+#                        and that the live repo leaves no push-to-main workflow
+#                        unwatched by a red-main notifier (#5657).
 #
 # Usage: bash scripts/check-ci-helpers-selftest.sh
 # Exit: 0 when every case matches; 1 on the first mismatch, printing both sides.
@@ -117,30 +121,142 @@ assert_eq "a cancelled shard is not laundered into red (#5998)" "1" \
   "$(grep -cF "needs['test-shard'].result == 'cancelled'" <<<"${notify_job}" || true)"
 
 # #5657: `notify-main-failure`'s `needs:` cannot name a job in another workflow
-# file, so `test-pointers.yml` was invisible to it — the doc-pointer lint sat red
-# on main for over 24 hours (runs 31587713536 to 31688534235) and no
-# `ci-red-main` issue was ever filed. That workflow now carries its own notifier,
-# on the same label and through the same classifier. Asserted by grep for the
-# same reason the ci.yml wiring above is: the script being correct proves
-# nothing while no workflow calls it.
-pointers_notify="$(sed -n '/^  notify-main-failure:/,$p' .github/workflows/test-pointers.yml)"
-assert_eq "test-pointers.yml has its own notifier (#5657)" "1" \
-  "$(grep -c '^  notify-main-failure:$' .github/workflows/test-pointers.yml || true)"
-assert_eq "it waits on the lint job itself" "1" \
-  "$(grep -cF "needs: [test-pointers]" <<<"${pointers_notify}" || true)"
+# file, so every sibling with its own `push: branches: [main]` trigger is
+# invisible to it. `test-pointers.yml` sat red on main for over 24 hours (runs
+# 31587713536 to 31688534235) with no `ci-red-main` issue; `capabilities-drift.yml`
+# repeated it on 2026-08-31 (run 33395306170). One notifier now watches all of
+# them over `workflow_run`, which is the one trigger that crosses workflow files.
+# Asserted by grep for the same reason the ci.yml wiring above is: the script
+# being correct proves nothing while no workflow calls it.
+red_main_notify=".github/workflows/red-main-notify.yml"
+assert_eq "the sibling notifier exists (#5657)" "1" \
+  "$([ -f "${red_main_notify}" ] && echo 1 || echo 0)"
+assert_eq "it triggers on workflow_run, the only cross-file trigger" "1" \
+  "$(grep -c '^  workflow_run:$' "${red_main_notify}" || true)"
+assert_eq "on completion, so a failure is seen at all" "1" \
+  "$(grep -cF 'types: [completed]' "${red_main_notify}" || true)"
 assert_eq "it classifies through classify-ci-results.sh" "1" \
-  "$(grep -c 'bash scripts/classify-ci-results\.sh' <<<"${pointers_notify}" || true)"
-assert_eq "it feeds the lint's own conclusion, unlaundered" "1" \
-  "$(grep -cF "test-pointers=\${{ needs['test-pointers'].result }}" <<<"${pointers_notify}" || true)"
+  "$(grep -c 'bash scripts/classify-ci-results\.sh' "${red_main_notify}" || true)"
 assert_eq "it files on the same ci-red-main label" "1" \
-  "$(grep -cF "const label = 'ci-red-main';" <<<"${pointers_notify}" || true)"
-# `always()` or the notifier itself is skipped by the very failure it reports.
-assert_eq "it runs even when the lint did not succeed" "1" \
-  "$(grep -c "if: always() && github.event_name == 'push'" <<<"${pointers_notify}" || true)"
+  "$(grep -cF "const label = 'ci-red-main';" "${red_main_notify}" || true)"
+# Not-success is not success: the job must fire on cancelled and skipped too,
+# never on an equality test against 'failure' alone (#4179).
+assert_eq "it fires on any non-success conclusion" "1" \
+  "$(grep -cF "github.event.workflow_run.conclusion != 'success'" "${red_main_notify}" || true)"
+assert_eq "it scopes to push-to-main runs" "1" \
+  "$(grep -cF "github.event.workflow_run.head_branch == 'main'" "${red_main_notify}" || true)"
 # And the run's own conclusion must follow the verdict, the same rule ci.yml's
-# notifier enforces — otherwise a cancelled lint still ends the run green.
+# notifier enforces — otherwise a notifier that just reported a red sibling ends
+# green itself.
 assert_eq "it fails the run on a non-green verdict" "1" \
-  "$(grep -c 'Fail this job on any non-green verdict' <<<"${pointers_notify}" || true)"
+  "$(grep -c 'Fail this job on any non-green verdict' "${red_main_notify}" || true)"
+# The two workflows deliberately absent from its list notify themselves. Both
+# must still carry the job that earns the exemption, or the coverage gate below
+# is asserting a hole.
+assert_eq "ci.yml still notifies itself" "1" \
+  "$(grep -c '^  notify-main-failure:$' .github/workflows/ci.yml || true)"
+assert_eq "version-parity.yml still notifies itself" "1" \
+  "$(grep -c '^  notify-main-drift:$' .github/workflows/version-parity.yml || true)"
+# test-pointers.yml's own notifier is GONE, and must stay gone: it is watched
+# centrally now, and keeping both would file twice for one red lint.
+assert_eq "test-pointers.yml no longer notifies separately" "0" \
+  "$(grep -c '^  notify-main-failure:$' .github/workflows/test-pointers.yml || true)"
+# The gate that keeps the list honest has to actually run somewhere.
+assert_eq "ci.yml runs the coverage gate on every PR" "1" \
+  "$(grep -c 'bash scripts/check-red-main-coverage\.sh' .github/workflows/ci.yml || true)"
+
+# ---------------------------------------------------------------------------
+# check-red-main-coverage.sh
+#
+# The `--detect` half, over fixtures. The audit's whole verdict rests on which
+# workflows it calls push-to-main, and that decision is a line-based parser, so
+# it is exercised against the shapes this repo actually contains plus the
+# malformed ones it must refuse to wave through.
+# ---------------------------------------------------------------------------
+echo
+echo "check-red-main-coverage:"
+
+# No EXIT trap here: STUB_DIR further down sets one, and a second `trap ... EXIT`
+# replaces the first rather than adding to it. This section removes its own
+# fixtures at the end instead.
+RMC_TMP="$(mktemp -d)"
+
+detect_field() {
+  bash scripts/check-red-main-coverage.sh --detect "$1" 2>/dev/null |
+    sed -n "s/^$2=//p"
+}
+
+printf 'name: Bare push\non:\n  push:\njobs: {}\n' >"${RMC_TMP}/bare.yml"
+printf 'name: Branches main\non:\n  push:\n    branches: [main]\njobs: {}\n' >"${RMC_TMP}/inline-main.yml"
+printf 'name: Branches list\non:\n  push:\n    branches:\n      - main\n      - release\njobs: {}\n' >"${RMC_TMP}/list-main.yml"
+printf 'name: Other branch\non:\n  push:\n    branches: [release]\njobs: {}\n' >"${RMC_TMP}/other-branch.yml"
+printf 'name: Tags only\non:\n  push:\n    tags:\n      - "*-v*"\njobs: {}\n' >"${RMC_TMP}/tags.yml"
+printf 'name: PR only\non:\n  pull_request:\n    branches: [main]\njobs: {}\n' >"${RMC_TMP}/pr.yml"
+printf 'name: Paths under main\non:\n  push:\n    branches: [main]\n    paths:\n      - "src/**"\n  pull_request:\n    branches: [main]\njobs: {}\n' >"${RMC_TMP}/paths.yml"
+printf 'name: Inline on\non: [push, pull_request]\njobs: {}\n' >"${RMC_TMP}/inline-on.yml"
+printf 'name: No triggers\njobs: {}\n' >"${RMC_TMP}/no-on.yml"
+printf 'name: Ignore list\non:\n  push:\n    branches-ignore: [gh-pages]\njobs: {}\n' >"${RMC_TMP}/ignore.yml"
+printf 'name: "Quoted name"\non:\n  push:\n    branches: [main]\njobs: {}\n' >"${RMC_TMP}/quoted.yml"
+
+assert_eq "bare push: covers main"            "true"  "$(detect_field "${RMC_TMP}/bare.yml" push_main)"
+assert_eq "branches: [main]"                  "true"  "$(detect_field "${RMC_TMP}/inline-main.yml" push_main)"
+assert_eq "multi-line branch list with main"  "true"  "$(detect_field "${RMC_TMP}/list-main.yml" push_main)"
+assert_eq "another branch only"               "false" "$(detect_field "${RMC_TMP}/other-branch.yml" push_main)"
+assert_eq "tags-only push is not push-to-main" "false" "$(detect_field "${RMC_TMP}/tags.yml" push_main)"
+assert_eq "pull_request only"                 "false" "$(detect_field "${RMC_TMP}/pr.yml" push_main)"
+assert_eq "paths filter does not hide main"   "true"  "$(detect_field "${RMC_TMP}/paths.yml" push_main)"
+# Fail closed. An unreadable trigger block is a parse failure, and a parse
+# failure that answered `false` is exactly the silence #5657 is about.
+assert_eq "inline on: form (fail closed)"     "true"  "$(detect_field "${RMC_TMP}/inline-on.yml" push_main)"
+assert_eq "no on: block at all (fail closed)" "true"  "$(detect_field "${RMC_TMP}/no-on.yml" push_main)"
+assert_eq "branches-ignore (fail closed)"     "true"  "$(detect_field "${RMC_TMP}/ignore.yml" push_main)"
+# workflow_run matches on the NAME, so the name has to come out exactly.
+assert_eq "name is read verbatim"             "Branches main" "$(detect_field "${RMC_TMP}/inline-main.yml" name)"
+assert_eq "a quoted name is unquoted"         "Quoted name"   "$(detect_field "${RMC_TMP}/quoted.yml" name)"
+
+# The audit itself, against the real workflow directory. This is the assertion
+# that catches a new sibling: it fails the moment one is added unwatched.
+bash scripts/check-red-main-coverage.sh >/dev/null 2>&1
+assert_eq "the live repo has no uncovered push-to-main workflow" "0" "$?"
+
+# MUTATION CASES. A gate that cannot fail makes its own green meaningless —
+# same rule as the scan-floor selftest test-pointers.yml runs before its lint.
+# Each mutation copies the real workflow directory and breaks exactly one thing.
+audit_exit() {
+  RED_MAIN_WORKFLOWS_DIR="$1" bash scripts/check-red-main-coverage.sh >/dev/null 2>&1
+  echo "$?"
+}
+
+RMC_COPY="${RMC_TMP}/wf"
+cp -R .github/workflows "${RMC_COPY}"
+assert_eq "an unmodified copy still passes" "0" "$(audit_exit "${RMC_COPY}")"
+
+# 1. The #5657 bug itself, recurring: a new sibling nobody watches.
+cp -R .github/workflows "${RMC_TMP}/new-sibling"
+printf 'name: Brand new gate\non:\n  push:\n    branches: [main]\njobs: {}\n' \
+  >"${RMC_TMP}/new-sibling/brand-new-gate.yml"
+assert_eq "a new unwatched push-to-main workflow fails the gate" "1" \
+  "$(audit_exit "${RMC_TMP}/new-sibling")"
+
+# 2. A rename. `workflow_run` matches on name, so renaming a watched workflow
+#    drops its coverage silently — the gate has to say so.
+cp -R .github/workflows "${RMC_TMP}/renamed"
+sed -i.bak 's/^name: Line cap$/name: Line cap v2/' "${RMC_TMP}/renamed/line-cap.yml"
+rm -f "${RMC_TMP}/renamed/line-cap.yml.bak"
+assert_eq "renaming a watched workflow fails the gate" "1" \
+  "$(audit_exit "${RMC_TMP}/renamed")"
+
+# 3. A self-notifying workflow that loses its own notify job. It is exempt from
+#    the watch list only because it reports for itself; without that job it is
+#    unwatched by anything.
+cp -R .github/workflows "${RMC_TMP}/no-self-notify"
+sed -i.bak 's/^  notify-main-failure:$/  notify-something-else:/' \
+  "${RMC_TMP}/no-self-notify/ci.yml"
+rm -f "${RMC_TMP}/no-self-notify/ci.yml.bak"
+assert_eq "ci.yml losing its own notifier fails the gate" "1" \
+  "$(audit_exit "${RMC_TMP}/no-self-notify")"
+
+rm -rf "${RMC_TMP}"
 
 # ---------------------------------------------------------------------------
 # detect-docs-only.sh
@@ -926,10 +1042,11 @@ for entry in "test-pointers.yml test-pointers" "semver-checks.yml semver-checks"
     "$(grep -cE "^      - name: No .* — nothing to (lint|compare)$" <<<"${gate}" || true)"
 done
 
-# The other half of that scoping: every job-level `if:` left in
-# test-pointers.yml belongs to the notifier, so the ban above cannot be evaded
-# by moving a condition onto a new job.
-assert_eq "test-pointers.yml: only the notifier carries a job-level if:" "1" \
+# The other half of that scoping: the ban above cannot be evaded by moving the
+# condition onto a new job. The count was 1 while the file carried its own
+# notifier; that job moved to red-main-notify.yml (#5657), so no job-level `if:`
+# belongs in this file at all any more.
+assert_eq "test-pointers.yml: no job-level if: anywhere" "0" \
   "$(grep -cE '^    if:' .github/workflows/test-pointers.yml || true)"
 
 assert_eq "semver-checks runs on pull requests at all" "1" \

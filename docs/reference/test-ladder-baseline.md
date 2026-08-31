@@ -189,7 +189,9 @@ published is always a tree the shards have run against.
 **A failing check still blocks at every stage.** Deferring *when* the workspace
 suite runs changes nothing about what a red one means. On `main` a failure opens
 or updates the `ci-red-main` tracking issue via `ci.yml`'s `notify-main-failure`
-job and fails the run.
+job and fails the run. A sibling workflow's failure does the same through
+`.github/workflows/red-main-notify.yml`, which watches every other push-to-main
+workflow over `workflow_run` — `needs:` cannot cross workflow files (#5657).
 
 🔴 **Scoping down by stage is a claim you must be able to prove**, exactly as
 scoping down by rung is. It is never licence to make a red gate green by

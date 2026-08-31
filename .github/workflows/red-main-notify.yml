@@ -1,0 +1,205 @@
+# Red-main notifier for every SIBLING workflow (issue #5657).
+#
+# Why: `ci.yml`'s `notify-main-failure` job is the repo's red-main detector, and
+#   a `needs:` list cannot name a job in another workflow file. Every workflow
+#   with its own `push: branches: [main]` trigger is therefore structurally
+#   invisible to it — the notifier reports green while a sibling is red. That is
+#   not a theory and not a one-off:
+#     - `test-pointers.yml` sat red on main for over 24 hours (runs 31587713536
+#       to 31688534235, 2026-08-12/13). No `ci-red-main` issue was ever filed; a
+#       human found it by hand and opened #5520.
+#     - `capabilities-drift.yml` went red on main on 2026-08-31 (run 33395306170,
+#       commit 3c43a9e6d). It sat untracked for over an hour and surfaced only
+#       when unrelated PR #6474 inherited the drift through `update-branch`.
+#   The first recurrence was patched by copying a notify job into the one
+#   workflow that had broken. The second proves that shape does not generalise:
+#   nobody adds the job to the NEXT workflow, and the hand-maintained audit table
+#   in #5657 was already missing four push-to-main workflows when it was written.
+#
+# What: one workflow, triggered by `workflow_run` on the COMPLETION of every
+#   push-to-main sibling, that files or comments on the same `ci-red-main`
+#   tracking issue `ci.yml` uses, through the same `scripts/classify-ci-results.sh`
+#   verdict mapping. `workflow_run` crosses workflow files, which is the one
+#   mechanism `needs:` cannot provide.
+#
+# ONE MECHANISM PER WORKFLOW, never two racing. Two workflows are deliberately
+#   absent from the list below because they notify themselves, and adding them
+#   here would file twice for one failure:
+#     - `ci.yml` — its `notify-main-failure` classifies the SHARD matrix results
+#       directly, so a shard cancelled by concurrency reads `inconclusive`
+#       instead of red (#5998). A `workflow_run` trigger sees only the run's
+#       single aggregate conclusion and cannot make that distinction.
+#     - `version-parity.yml` — its `notify-main-drift` (#4688) files a different
+#       label (`version-drift-main`) with drift-specific remediation, and also
+#       fires on the schedule trigger, where drift appears with no new commit.
+#   `scripts/check-red-main-coverage.sh` holds that split in place: it fails when
+#   a push-to-main workflow is neither listed here nor one of those two, when a
+#   listed name matches no workflow file (a rename silently drops coverage,
+#   because `workflow_run` matches on NAME), and when a self-notifying workflow
+#   loses its own notify job. It runs in `ci.yml`'s `changes` job, so a PR adding
+#   a new sibling cannot merge until that sibling is covered.
+#
+# HOW A NEW SIBLING GETS COVERED: add its `name:` to the `workflows:` list below.
+#   Until you do, the coverage gate fails on your PR and names the file.
+#
+# LIMITS, stated so nobody assumes otherwise:
+#   - `workflow_run` fires only for a workflow file that is on the DEFAULT
+#     branch, so this notifier does nothing until it is merged to `main`. Its
+#     first real exercise is post-merge, not on this PR.
+#   - A workflow that never STARTS produces no `workflow_run` event. A skipped
+#     path filter is correct (nothing ran, nothing failed); a workflow whose YAML
+#     fails to parse is not, and stays invisible here.
+#   - This notifier does not watch itself. It cannot: `workflow_run` on your own
+#     completion recurses (GitHub caps the chain at three levels).
+#   - Every watched completion creates a run of this workflow, green or not. The
+#     job is skipped on a green one and consumes no runner, but the Actions list
+#     shows the entry. That noise buys a signal for all 18 siblings at once.
+name: Red main notifier
+
+on:
+  workflow_run:
+    # Sorted by workflow FILE name. Every entry is a workflow `name:`, which is
+    # what `workflow_run` matches on — see the rename hazard above.
+    workflows:
+      - "Agent assets" # agent-assets.yml
+      - "AL2023 load-dynamic build gate" # al2023-build.yml
+      - "build.rs sync" # buildrs-sync.yml
+      - "Capabilities drift" # capabilities-drift.yml
+      - "Doc numbers" # doc-numbers.yml
+      - "Generation artifact lint" # generation-artifact-lint.yml
+      - "Homebrew formula" # homebrew-formula.yml
+      - "Line cap" # line-cap.yml
+      - "SLD lint" # sld-lint.yml
+      - "Tag/publish parity" # tag-publish-parity.yml
+      - "Teardown guard" # teardown-guard.yml
+      - "Test count" # test-count.yml
+      - "Test pointers" # test-pointers.yml
+      - "Token drift" # token-drift.yml
+      - "trusty-audit installer" # trusty-audit-install.yml
+      - "UI bundle freshness" # ui-bundle-freshness.yml
+      - "vmtest harness" # vmtest-harness.yml
+      - "Website tests" # website-tests.yml
+    types: [completed]
+
+# Read-only by default; the one job that needs to write issues asks for it.
+permissions: {}
+
+# Keyed to the WATCHED run, so two siblings failing on the same commit each get
+# their own notification instead of one cancelling the other. Never
+# cancel-in-progress: a cancelled notifier is silence, which is the bug.
+concurrency:
+  group: red-main-notify-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    name: Notify on red main (sibling workflow)
+    # Push-to-main only, matching `ci.yml`'s notifier. A red PR run is already
+    # visible on the PR; a red `workflow_dispatch` run is somebody watching it.
+    # `conclusion != 'success'` covers failure, cancelled, timed_out, skipped and
+    # every future value — not-success is never treated as success (#4179).
+    if: >-
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.conclusion != 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      # Checks out the default branch (that is what `workflow_run` gives), which
+      # is where the classifier lives. The failing commit is read from the event
+      # payload below, never from this checkout.
+      - uses: actions/checkout@v5
+
+      # The same mapping `ci.yml` and `version-parity.yml` use, fed the watched
+      # run's own conclusion: `failure`/`timed_out` are red, `cancelled`/
+      # `skipped`/anything-else are inconclusive, only `success` is green.
+      # The classifier's key is space-separated, and workflow names contain
+      # spaces, so the workflow FILE stem is the key.
+      - name: Classify the watched run's conclusion
+        id: verdict
+        env:
+          WORKFLOW_PATH: ${{ github.event.workflow_run.path }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        run: |
+          key="$(basename "${WORKFLOW_PATH}" .yml)"
+          CI_JOB_RESULTS="${key}=${RUN_CONCLUSION}" \
+            bash scripts/classify-ci-results.sh > /dev/null
+
+      - name: File or update tracking issue
+        if: steps.verdict.outputs.verdict != 'green'
+        uses: actions/github-script@v7
+        env:
+          CI_VERDICT: ${{ steps.verdict.outputs.verdict }}
+          CI_SUMMARY: ${{ steps.verdict.outputs.summary }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          WORKFLOW_PATH: ${{ github.event.workflow_run.path }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        with:
+          script: |
+            const label = 'ci-red-main';
+            const title = 'CI red on main';
+            const verdict = process.env.CI_VERDICT;
+            const workflow = process.env.WORKFLOW_NAME;
+            const path = process.env.WORKFLOW_PATH;
+            const sha = process.env.HEAD_SHA;
+            const body = [
+              verdict === 'red'
+                ? `\`${workflow}\` FAILED on a push to \`main\` at ${sha}.`
+                : `\`${workflow}\` did NOT conclude successfully on a push to \`main\` at ${sha} (verdict: ${verdict}).`,
+              '',
+              `Workflow: \`${path}\``,
+              `Run conclusion: ${process.env.CI_SUMMARY}`,
+              '',
+              `Run: ${process.env.RUN_URL}`,
+              '',
+              verdict === 'red'
+                ? 'Anyone branching off `main` right now inherits this breakage. The failing step in the run above names the gate and its remediation.'
+                : 'This commit has NO verdict from that gate. Cancelled and skipped runs prove nothing; re-run the workflow before treating `main` as green.',
+              '',
+              'Reported by `.github/workflows/red-main-notify.yml`, which watches every',
+              'push-to-main sibling workflow that `ci.yml`\'s `needs:` list cannot reach',
+              '(issue #5657).',
+            ].join('\n');
+
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: label,
+            });
+
+            if (existing.data.length > 0) {
+              const issue = existing.data[0];
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body,
+              });
+              core.notice(`Updated existing tracking issue #${issue.number}`);
+            } else {
+              const created = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: [label],
+              });
+              core.notice(`Filed new tracking issue #${created.data.number}`);
+            }
+
+      # This run's own conclusion must match what it just reported, the same rule
+      # `ci.yml`'s notifier enforces — a green notifier over a red sibling is the
+      # exact false all-clear this workflow exists to end.
+      - name: Fail this job on any non-green verdict
+        if: steps.verdict.outputs.verdict != 'green'
+        env:
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          CI_VERDICT: ${{ steps.verdict.outputs.verdict }}
+          CI_SUMMARY: ${{ steps.verdict.outputs.summary }}
+        run: |
+          echo "::error::${WORKFLOW_NAME} verdict on main: ${CI_VERDICT} — ${CI_SUMMARY}"
+          exit 1

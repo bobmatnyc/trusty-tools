@@ -10,11 +10,12 @@
 # Pure text scanning — no Rust toolchain or build needed, so this runs as
 # its own lightweight job (matches ci.yml / line-cap.yml's checkout style).
 #
-# On a push to main the `notify-main-failure` job at the bottom files or
-# comments on the `ci-red-main` tracking issue when the lint does not come out
-# green. `ci.yml`'s notifier cannot do that for this workflow — a `needs:` list
-# cannot cross workflow files — and for 24 hours in August 2026 that meant a red
-# lint on main with no alarm at all (#5657).
+# On a push to main a non-green result files or comments on the `ci-red-main`
+# tracking issue. That reporting used to live in a `notify-main-failure` job at
+# the bottom of this file; it now comes from `.github/workflows/red-main-notify.yml`,
+# which watches this workflow — and every other push-to-main sibling — over
+# `workflow_run`. `ci.yml`'s notifier still cannot see any of them, because a
+# `needs:` list cannot cross workflow files (#5657).
 name: Test pointers
 
 # `push` stays path-filtered to the lint's actual inputs.
@@ -144,111 +145,3 @@ jobs:
           echo "the gate scripts, or this workflow), so scripts/check_test_pointers.sh"
           echo "would report exactly what it reported on the base branch."
           echo "Reporting success rather than not reporting at all — see #5311."
-
-  # Loudness on main (#5657). `ci.yml`'s `notify-main-failure` is the repo's
-  # only red-main detector, and a `needs:` list cannot name a job in another
-  # workflow file — so this workflow's result was structurally invisible to it.
-  # That is not a theory: this lint was red on `main` continuously from run
-  # 31587713536 (2026-08-12 10:30) to 31688534235 (2026-08-13 09:52), over 24
-  # hours spanning every PR opened in that window, and no `ci-red-main` issue
-  # was ever filed. A human eventually found it by hand and opened #5520.
-  #
-  # WHY ITS OWN NOTIFY JOB rather than folding the lint into `ci.yml`. The two
-  # workflows disagree on every structural choice this job depends on: this one
-  # keeps a `paths:` filter on `push` (`ci.yml` has none, so the lint would run
-  # on every merge), carries its own per-commit concurrency group, and its job
-  # name is the REQUIRED branch-protection context "Doc-comment pointer lint
-  # (Why/What/Test)" — a move would have to preserve that string exactly while
-  # inheriting a trigger set built for a different question. `version-parity.yml`
-  # already answered this the other way with `notify-main-drift` (#4688), so
-  # copying that shape is the change the existing structure supports, and it
-  # generalises: the other 13 push-to-main workflows can each take this job.
-  #
-  # It files on the SAME `ci-red-main` label `ci.yml` uses, so a red lint lands
-  # on the one tracking issue a reader already watches instead of a second one.
-  # `always()` so a cancelled or skipped lint still reports — a non-green
-  # verdict is never silence.
-  notify-main-failure:
-    name: Notify on red main
-    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [test-pointers]
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      issues: write
-    steps:
-      - uses: actions/checkout@v5
-
-      # Same classifier `ci.yml` uses, fed this workflow's own job conclusion:
-      # `failure`/`timed_out` are red, `cancelled`/`skipped` are inconclusive,
-      # and only `success` is green (#4179).
-      - name: Classify the lint's conclusion
-        id: verdict
-        env:
-          CI_JOB_RESULTS: test-pointers=${{ needs['test-pointers'].result }}
-        run: bash scripts/classify-ci-results.sh > /dev/null
-
-      - name: File or update tracking issue
-        if: steps.verdict.outputs.verdict != 'green'
-        uses: actions/github-script@v7
-        env:
-          CI_VERDICT: ${{ steps.verdict.outputs.verdict }}
-          CI_SUMMARY: ${{ steps.verdict.outputs.summary }}
-        with:
-          script: |
-            const label = 'ci-red-main';
-            const title = 'CI red on main';
-            const verdict = process.env.CI_VERDICT;
-            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            const body = [
-              verdict === 'red'
-                ? `The doc-comment pointer lint FAILED on a push to \`main\` at ${context.sha}.`
-                : `The doc-comment pointer lint did NOT conclude successfully on a push to \`main\` at ${context.sha} (verdict: ${verdict}).`,
-              '',
-              `Job conclusions: ${process.env.CI_SUMMARY}`,
-              '',
-              `Run: ${runUrl}`,
-              '',
-              'A `Test:` doc-comment pointer cites a test that does not exist in the',
-              'citing file’s crate, or an allowlisted pointer is no longer dangling.',
-              'Run `bash scripts/check_test_pointers.sh` locally for the exact lines.',
-              '',
-              'This lint runs in its own workflow, so `ci.yml`’s notifier cannot see it',
-              'and reports green regardless (issue #5657).',
-            ].join('\n');
-
-            const existing = await github.rest.issues.listForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'open',
-              labels: label,
-            });
-
-            if (existing.data.length > 0) {
-              const issue = existing.data[0];
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: issue.number,
-                body,
-              });
-              core.notice(`Updated existing tracking issue #${issue.number}`);
-            } else {
-              const created = await github.rest.issues.create({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                title,
-                body,
-                labels: [label],
-              });
-              core.notice(`Filed new tracking issue #${created.data.number}`);
-            }
-
-      # The run's own conclusion must match what the lint actually did, the same
-      # rule `ci.yml`'s notifier enforces: without this a cancelled lint still
-      # ends the run green and `gh run view` reports a verified commit.
-      - name: Fail this job on any non-green verdict
-        if: steps.verdict.outputs.verdict != 'green'
-        run: |
-          echo "::error::pointer lint verdict on main: ${{ steps.verdict.outputs.verdict }}"
-          exit 1
