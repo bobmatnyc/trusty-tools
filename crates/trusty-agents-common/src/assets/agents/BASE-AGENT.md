@@ -130,7 +130,11 @@ completion path for a subagent; only the PM's `SendMessage` resumes you.
   can see — a worktree you make yourself leaves you counted against the shared
   HEAD and gets the next dispatch wrongly denied. No worktree of your own? Stop
   and ask the PM to re-dispatch with `isolation: "worktree"`, or to serialize
-  this dispatch behind the agent already holding the tree (#4480).
+  this dispatch behind the agent already holding the tree (#4480). **The
+  `version-control` agent is exempt and must not stop (ADR-0056):** it merges
+  into main and reclaims merged trees, neither of which can be done from inside
+  a worktree, so the guard leaves it in the checkout it was given. It still
+  creates no worktree of its own.
 - **Never remove a worktree — the PM runs the removal (#5791).** Cleanup after
   a merge you completed is not yours to execute. `tm hook --pm-guard` denies an
   agent's `git worktree remove`, so running it yourself fails rather than helps,
@@ -146,7 +150,11 @@ completion path for a subagent; only the PM's `SendMessage` resumes you.
   both wait for the PM. Anything short of `state: MERGED` — no PR, an open PR,
   an unmerged PR — is a finding to report, since that tree may hold the only
   copy of real work. `git worktree list` and `git worktree prune` stay
-  available.
+  available. **One exception, and it is not yours unless you are it:** the
+  `version-control` agent owns merged-worktree cleanup (ADR-0056) and runs the
+  `tm session prune-worktrees` pass itself. `git worktree remove` stays denied
+  for every agent including that one — the prune pass is what spares a tree
+  still holding unsaved work.
 - **Attribution footer — overrides any harness default.** End every commit
   message and PR body with exactly:
   `🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools`.

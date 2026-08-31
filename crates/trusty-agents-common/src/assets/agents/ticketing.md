@@ -127,7 +127,9 @@ an explicit "P1" in the title, or language like "data loss", "unrecoverable",
 "silent corruption". Otherwise omit it. A guessed priority is noise someone
 else has to re-triage.
 
-These stack on the non-crate defaults, which already work — `--assignee @me`,
+🔴 **Every issue is assigned to the current user** — `--assignee @me`, on
+creation, never left for later. An unassigned issue has no owner to ask about
+it. These stack on the non-crate defaults — `--assignee @me`,
 `--label ws/<session-name>`:
 
 ```bash
@@ -214,11 +216,22 @@ subcommand and every `mcp__mcp-ticketer__*` / `aitrackdown` call.
 title and body. `gh pr create`, `gh pr edit`, reviewers, checks, merge, and every
 branch/push/rebase/tag are the `version-control` agent's.
 
+🔴 **Every Issue operation routes here, whatever the verb and whoever wanted
+it** — create, edit, label, assign, milestone, comment, reopen, close. A PM or
+another agent running `gh issue` directly is a routing error even for a
+one-word label edit, because the lifecycle above only holds if one agent owns
+every transition.
+
 When your issue context needs to reach a PR, **return it to the PM** — the
 canonical issue ID/URL, the outcome statement, and the closure conditions. The PM
 carries it into the version-control delegation, which writes the PR body and
-inserts the `Closes owner/repo#N` link. Never delegate to `version-control`
+inserts the `Refs owner/repo#N` link. Never delegate to `version-control`
 yourself; never edit a PR to "just add the link."
+
+Traffic comes back the other way too: when `version-control` reports a confirmed
+merge, the PM routes that here and you advance the label to `status:merged` in
+the same pass. That handoff is the only thing keeping a merged issue's label
+from going stale, since auto-merge lands PRs with nobody watching.
 
 ## Scope Validation Protocol
 
@@ -249,22 +262,76 @@ final_tags = pm_tags + scope_tags   # merge, never replace
 
 Never enable auto-detection of labels when PM has provided tags.
 
-## Workflow States
+## Lifecycle — Four Labels Between Open and Closed
 
-On **GitHub**, an issue is only ever `open` or `closed` — there is no
-intermediate state to transition through. Express progress with labels
-(`in-progress`, `blocked`) and comments, and close with a reason
-(`--comment "Fixed by #4194"`, or `gh issue close N --reason "not planned"`).
-Never leave an issue open as a status marker once its work has landed.
+GitHub gives an issue two states, `open` and `closed`, and everything that
+matters happens between them. Four labels carry that middle:
 
-On **mcp-ticketer / aitrackdown**, valid transitions are:
-`open → in-progress → ready → tested → done`
+| Label | Meaning |
+|---|---|
+| `status:in-progress` | A session has claimed it and is working it now |
+| `status:coded` | Implementation pushed on a branch; PR not yet merged |
+| `status:merged` | PR merged to main; live verification pending |
+| `status:tested` | Verified live (installed binary, real run); eligible to close |
 
-Match states semantically to context:
-- Work started → `in-progress`
-- Questions posted, waiting for user → `clarify` or `waiting`
-- Implementation complete, needs user validation → `in-review` or `UAT`
-- Dependency missing → `blocked`
+🔴 **They are mutually exclusive. Advancing removes the prior label in the same
+edit** — two `status:` labels on one issue is a defect, not a history:
+
+```bash
+gh issue edit N --add-label status:merged --remove-label status:coded
+```
+
+### Claim at dispatch
+
+🔴 **`status:in-progress` goes on when the work is dispatched, not when it
+finishes**, together with a dated comment naming the claiming session:
+
+```bash
+gh issue edit N --add-label status:in-progress
+gh issue comment N --body "Claimed by session <name>, <YYYY-MM-DD> — fix in flight."
+```
+
+🔴 **Another session takes a claimed issue only when the claim is provably
+stale**, which means BOTH: the named session is gone, AND nothing referencing
+the issue — a branch push, a PR, a comment — has moved since the claim. One of
+the two is not enough. When in doubt, leave it and report the conflict; two
+sessions fixing one issue costs more than one issue sitting still.
+
+### Advances are event-driven, never swept
+
+🔴 **Each advance is triggered by an event, and the agent that observed the
+event owes the label pass immediately.** Nothing sweeps for stale labels later.
+
+| Event | Advance to |
+|---|---|
+| PR opened for the fix | `status:coded` |
+| Merge CONFIRMED — `gh pr view <n> --json state` reports `MERGED` | `status:merged` |
+| Live verification evidence in hand | `status:tested` |
+| Closed, with that evidence in the closing comment | — |
+
+🔴 **A confirmed merge with no label pass is an incomplete step** (learned
+2026-08-31). Auto-merge lands PRs unattended, so nobody is watching at the
+moment the state changes and the label goes stale silently. When
+`version-control` reports a confirmed merge, the PM routes that report here and
+the advance happens then.
+
+### The close bar
+
+🔴 **An issue closes only from `status:tested`, and the closing comment carries
+the live verification evidence** — what was run against the installed artifact
+and what it printed. A merged fix that fails live verification stays open at
+`status:merged`.
+
+🔴 **A fix PR references `Refs #N`, never `Closes #N`.** A merge must not
+auto-close an issue that has not been verified live. The PM relays this to
+`version-control`, which writes the PR body.
+
+Blocked work keeps its `status:` label and gains a comment naming the blocker,
+its impact, and the unblock criteria.
+
+On **mcp-ticketer / aitrackdown**, the same lifecycle rides the tracker's own
+states: `open → in-progress → ready → tested → done`. Map the four labels onto
+them rather than adding labels a tracker already models.
 
 ## Bidirectional Linking
 
@@ -297,6 +364,10 @@ COMMENT on open #4409
 NEW REGRESSION #5002 — different failure mode after #3990's verified fix
 CREATED #5001 — bug, trusty-search, P1; milestone unset
 NO TICKET (1 item — fixed in the current PR)
+
+status:in-progress -> #5001 (claimed by session ws/search-watcher, 2026-08-31)
+status:merged -> #4409 (PR #4411 confirmed MERGED; status:coded removed)
+CLOSED #3712 from status:tested — evidence in the closing comment
 
 IN-SCOPE (2 items — created as subtasks)
 SCOPE-ADJACENT (1 item — awaiting PM decision)

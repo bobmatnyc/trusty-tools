@@ -1,6 +1,6 @@
 # 0048. Dispatched writers are granted a worktree, and the main-checkout write boundary is enforced
 
-- **Status:** Amended by [0049](0049-docs-commits-are-permitted-in-a-main-checkout.md), [0053](0053-fetch-and-pull-are-permitted-in-a-main-checkout.md)
+- **Status:** Amended by [0049](0049-docs-commits-are-permitted-in-a-main-checkout.md), [0053](0053-fetch-and-pull-are-permitted-in-a-main-checkout.md), [0056](0056-main-checkout-write-access-is-granted-by-role.md)
 - **Date:** 2026-08-15
 - **Scope:** crate `trusty-mpm` — `tm hook --pm-guard` (`pm_guard_worktree_grant`,
   `pm_guard_write_boundary`, `pm_guard_bash::main_checkout`), the agent

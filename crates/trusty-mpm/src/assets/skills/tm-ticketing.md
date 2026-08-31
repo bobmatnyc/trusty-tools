@@ -218,28 +218,60 @@ A milestone is not a label and not a project view. An issue holds many labels an
 exactly one milestone, so parking a workstream or a theme there evicts the real
 release slot. `ws/<session-name>` is always a label.
 
-## Lifecycle
+## Lifecycle — open → in-progress → coded → merged → tested → closed
 
-When a ticket or issue reference is detected (an ID pattern, a URL, "work on
-issue #123"), the PM delegates:
+Four mutually exclusive labels carry the middle of an issue's life, between
+GitHub's native `open` and `closed`:
 
-1. **Work start** — mark in progress and comment with initial findings: for bugs
-   the root cause or hypothesis, for features a brief scope summary, plus any
-   user workaround.
-2. **Each phase** — a progress comment at meaningful state transitions
-   (diagnosis confirmed, fix pushed, review verdict received, blocked). Not
-   per-poll spam. Include deliverables and links to commits/PRs.
-3. **Work complete** — close with the fix SHA/version, verification evidence, and
-   the merged PR link. The PM hands `ticketing` the merged PR and squash SHA that
-   `version-control` reported.
-4. **Blockers** — mark blocked and comment with the blocker, its impact, and the
-   unblock criteria.
+| Label | Meaning |
+|---|---|
+| `status:in-progress` | A session has claimed it and is working it now |
+| `status:coded` | Implementation pushed on a branch; PR not yet merged |
+| `status:merged` | PR merged to main; live verification pending |
+| `status:tested` | Verified live (installed binary, real run); eligible to close |
 
-In-flight visibility is standard practice where tracking artifacts exist.
-Projects without formal tracking workflows are not subject to it.
+Advancing a state removes the prior label in the same edit —
+`gh issue edit N --add-label status:merged --remove-label status:coded`. Two
+`status:` labels on one issue is a defect. The `ticketing` agent runs every one
+of these edits; the PM never runs `gh issue` itself.
+
+**Claim at dispatch.** `status:in-progress` goes on when the work is dispatched,
+with a dated comment naming the claiming session ("Claimed by session `<name>`,
+`<date>` — fix in flight"). Another session takes a claimed issue only when the
+claim is provably stale: the named session is gone AND nothing referencing the
+issue — branch push, PR, comment — has moved since the claim. Either alone is
+not enough. When in doubt, leave it.
+
+**Advances are event-driven, not swept.** The agent that observed the event owes
+the label pass then and there:
+
+| Event | Advance to |
+|---|---|
+| PR opened for the fix | `status:coded` |
+| Merge CONFIRMED (`gh pr view <n> --json state` reports `MERGED`) | `status:merged` |
+| Live verification evidence in hand | `status:tested` |
+
+A confirmed merge with no label pass is an incomplete step, not a tidy-up for
+later (learned 2026-08-31: auto-merge lands PRs unattended, so nothing is
+watching at the moment the state changes). `version-control` reports the
+confirmed merge and flags the advance it owes; the PM routes that report to
+`ticketing`, which makes the edit.
+
+**The close bar.** An issue closes only from `status:tested`, with the live
+verification evidence in the closing comment — what ran against the installed
+artifact and what it printed. A merged fix that fails live verification stays
+open at `status:merged`. A fix PR carries `Refs #N`, never `Closes #N`, so a
+merge cannot auto-close something nobody has verified.
+
+**Comments along the way.** A progress comment at each meaningful transition —
+diagnosis confirmed, fix pushed, review verdict received, blocked — carrying
+deliverables and links. Not per-poll spam. Blocked work keeps its `status:`
+label and gains a comment naming the blocker, its impact, and the unblock
+criteria.
 
 Every delegation in this chain carries the ticket context, so downstream agents
-can reference it in their own output.
+can reference it in their own output. Projects without formal tracking workflows
+are not subject to any of this.
 
 ### Attribution on Issues and Comments
 

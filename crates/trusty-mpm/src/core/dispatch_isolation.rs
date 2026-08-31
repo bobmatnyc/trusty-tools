@@ -59,6 +59,19 @@
 //! main checkout a false allow corrupts another session's branch and a false
 //! deny costs one worktree.
 //!
+//! **One role is granted the shared checkout outright (ADR-0056).** Both
+//! policies above ask whether an agent writes. `version-control` does — and the
+//! writes are a merge into main, a branch delete, and the removal of a merged
+//! worktree, none of which can be performed from inside a worktree. Isolating
+//! it removes the tree the work needs, so the guard was denying the work rather
+//! than protecting anything. [`permitted_in_shared_checkout`] names that grant,
+//! [`requires_own_worktree_in_main_checkout`] and [`blocked_by_shared_tree`]
+//! honour it, and [`agent_write_risk`] does NOT: the agent still answers
+//! `Writes`, so it still OCCUPIES a tree and an engineer dispatched beside it is
+//! still denied. Admission and occupancy are separate questions from here on.
+//! The grant is keyed by name and reaches exactly one agent; engineer
+//! source-write confinement is untouched.
+//!
 //! Test: the `#[cfg(test)]` suite below.
 //!
 //! [`isolation_separates_working_tree`]: crate::core::dispatch_isolation::isolation_separates_working_tree
@@ -66,6 +79,8 @@
 //! [`shares_the_callers_tree`]: crate::core::dispatch_isolation::shares_the_callers_tree
 //! [`agent_write_risk`]: crate::core::dispatch_isolation::agent_write_risk
 //! [`requires_own_worktree_in_main_checkout`]: crate::core::dispatch_isolation::requires_own_worktree_in_main_checkout
+//! [`permitted_in_shared_checkout`]: crate::core::dispatch_isolation::permitted_in_shared_checkout
+//! [`blocked_by_shared_tree`]: crate::core::dispatch_isolation::blocked_by_shared_tree
 
 use serde_json::Value;
 use trusty_agents_common::agents::metadata::agent_metadata_from_str;
@@ -146,6 +161,34 @@ const FILE_MUTATING_NAMES: &[&str] = &["qa", "web-qa", "api-qa"];
 /// could never be shadowed by one of these names without also colliding on it.
 /// Test: `read_only_harness_builtins_are_not_isolated`.
 const READ_ONLY_HARNESS_AGENTS: &[&str] = &["Explore", "Plan"];
+
+/// Bundled agent `name:`s that write, and are still permitted to do so in a
+/// checkout they do not own (ADR-0056).
+///
+/// Why: every other entry in this module classifies an agent by WHETHER it
+/// writes. This one is the exception the ruling of 2026-08-31 carved out, and it
+/// turns on WHAT the write is. `version-control` merges into main, deletes
+/// merged branches, and reclaims merged worktrees — operations on the
+/// repository the checkout points at, not edits to the source tree the write
+/// boundary protects. None of them can be performed from inside a worktree: a
+/// merge into main needs main's checkout, and a tree cannot remove itself. The
+/// observed harm is the guard denying the work rather than protecting it —
+/// `version-control` was denied twice on 2026-08-31 for pure push/PR dispatches
+/// and had to be worked around with isolation, whose fences hid a branch ref
+/// badly enough that the push had to be issued by SHA.
+///
+/// Keyed by NAME, not by role, and deliberately not folded into
+/// [`FILE_MUTATING_ROLES`]. This is a grant, so it must not widen by accident:
+/// a future agent that declares `role: version-control` inherits nothing from
+/// this list, and [`agent_write_risk`] still answers
+/// [`AgentWriteRisk::Writes`] for every name here — the exemption changes who
+/// may be dispatched into an occupied tree, never what the agent is.
+/// What: matched case-sensitively against the dispatch's `subagent_type`, by
+/// [`permitted_in_shared_checkout`].
+/// Test: `version_control_operates_without_a_worktree_of_its_own`.
+// ADR-0056 narrows #4480 and #5650 for this one name; engineer source-write
+// confinement (ADR-0044, ADR-0048) is untouched.
+const SHARED_CHECKOUT_PERMITTED_NAMES: &[&str] = &["version-control"];
 
 /// The `extends:` base whose descendants are engineer-tier regardless of role.
 ///
@@ -290,6 +333,41 @@ pub fn agent_write_risk(agent: &str) -> AgentWriteRisk {
 pub fn requires_own_worktree_in_main_checkout(agent: &str, isolation: Option<&str>) -> bool {
     !isolation_separates_working_tree(isolation)
         && agent_write_risk(agent) != AgentWriteRisk::ReadsOnly
+        // ADR-0056: a role whose write IS the repository operation.
+        && !permitted_in_shared_checkout(agent)
+}
+
+/// May `agent` be dispatched into a checkout it does not own (ADR-0056)?
+///
+/// Why: the two policies above ask whether an agent writes. This asks whether
+/// its writing is a reason to move it, and for one role the answer is no.
+/// `version-control` merges into main and reclaims merged worktrees; both need
+/// the checkout it was handed, so isolating it removes the tree the work
+/// requires. Kept as its own predicate rather than a third
+/// [`AgentWriteRisk`] variant so the classification stays honest: the agent
+/// still `Writes`, and every consumer that asks what it is gets the true
+/// answer.
+/// What: `true` when `agent` is in [`SHARED_CHECKOUT_PERMITTED_NAMES`].
+/// Test: `version_control_operates_without_a_worktree_of_its_own`.
+pub fn permitted_in_shared_checkout(agent: &str) -> bool {
+    SHARED_CHECKOUT_PERMITTED_NAMES.contains(&agent)
+}
+
+/// Must this dispatch be DENIED because another writer holds the caller's tree?
+///
+/// Why: [`shares_the_callers_tree`] answers who OCCUPIES a tree, and the guard
+/// used that one answer for two questions — who is standing here, and who may
+/// be admitted. ADR-0056 separates them, because `version-control` is both an
+/// occupant (it commits, so an engineer beside it is still denied) and
+/// admissible (its work is the merge into the tree it was given). Composed
+/// here so the guard and the daemon cannot compose it differently.
+/// What: `true` when the dispatch [`shares_the_callers_tree`] AND the agent is
+/// not [`permitted_in_shared_checkout`].
+/// Test: `version_control_operates_without_a_worktree_of_its_own`,
+/// `allows_version_control_alongside_a_live_writer`,
+/// `denies_a_file_writing_non_engineer_alongside_an_engineer`.
+pub fn blocked_by_shared_tree(agent: &str, isolation: Option<&str>) -> bool {
+    shares_the_callers_tree(agent, isolation) && !permitted_in_shared_checkout(agent)
 }
 
 /// The `subagent_type` an Agent-tool `tool_input` names, when it names one.
@@ -517,6 +595,46 @@ mod tests {
         // The read-only classification must not leak into #4480's question:
         // these were already allowed to share a tree, and still are.
         assert!(!shares_the_callers_tree("Explore", None));
+    }
+
+    #[test]
+    fn version_control_operates_without_a_worktree_of_its_own() {
+        // ADR-0056, owner ruling 2026-08-31: `version-control` merges into main
+        // and reclaims merged worktrees, and neither can be done from inside a
+        // worktree. It is still a WRITER — it commits — so it still occupies a
+        // tree for everyone else; what the ruling changes is that its OWN
+        // dispatch is no longer denied or diverted for declaring no isolation.
+        assert_eq!(agent_write_risk("version-control"), AgentWriteRisk::Writes);
+        assert!(
+            !requires_own_worktree_in_main_checkout("version-control", None),
+            "version-control merges into main and must not be moved out of it"
+        );
+        assert!(
+            shares_the_callers_tree("version-control", None),
+            "version-control still occupies the tree, so an engineer beside it is still denied"
+        );
+        assert!(
+            !blocked_by_shared_tree("version-control", None),
+            "occupancy and admission are separate questions from ADR-0056 on"
+        );
+        // The exemption is one agent wide. Every other writer is unchanged.
+        for agent in ["rust-engineer", "documentation", "qa", "custom-agent", ""] {
+            assert!(
+                requires_own_worktree_in_main_checkout(agent, None),
+                "{agent:?} is not exempt and must still be isolated in a main checkout"
+            );
+        }
+        for agent in ["rust-engineer", "documentation", "qa", "web-qa", "api-qa"] {
+            assert!(
+                blocked_by_shared_tree(agent, None),
+                "{agent} must still be denied a tree another writer holds"
+            );
+        }
+        // The grant is not a bypass of isolation itself: declaring a worktree
+        // still separates the tree, for version-control as for anyone.
+        assert!(!blocked_by_shared_tree("version-control", Some("worktree")));
+        assert!(permitted_in_shared_checkout("version-control"));
+        assert!(!permitted_in_shared_checkout("rust-engineer"));
     }
 
     #[test]

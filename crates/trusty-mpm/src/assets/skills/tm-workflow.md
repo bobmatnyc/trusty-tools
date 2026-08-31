@@ -29,7 +29,7 @@ below.
 | Core PM instructions | Detect the work shape, load this skill and `tm-ticketing`, preserve user authority, route the resulting actions | Tracker, git, or PR mechanics |
 | **`tm-workflow`** (here) | The delivery sequence and its policy: phases/gates, worktree/branch conventions, changelog, PR body requirements, review, merge, cleanup, handoffs | Creating or mutating issues, branches, commits, or PRs |
 | `tm-ticketing` + the `ticketing` agent | Whether an issue should exist; search/dedup; issue title and body; labels, assignee, milestone, comments, state, parent/child links | Any git operation, and any PR mutation — including PR title and body |
-| The `version-control` agent | Branch/worktree/commit/push mechanics and the whole PR lifecycle: create, title/body, issue-closing links, reviewers, checks, update-branch, merge, branch cleanup | Authoring workflow policy, deciding whether an issue is warranted, changing issue metadata or state |
+| The `version-control` agent | Branch/worktree/commit/push mechanics and the whole PR lifecycle: create, title/body, issue links, reviewers, checks, update-branch, arming auto-merge, the merge into main, post-merge verification against the exact head SHA, and reclaiming merged worktrees and their local branches | Authoring workflow policy, deciding whether an issue is warranted, changing issue metadata or state — including the `status:` advance its own merge just made due |
 
 **The rule is the artifact, not "bookkeeping versus mechanics."** Every Issue API
 operation (`gh issue …`, `mcp__mcp-ticketer__*`, `aitrackdown`) routes to
@@ -49,7 +49,11 @@ two agents was the defect this replaced.
    writes the PR body and inserts the correct `Closes owner/repo#N` (or a
    non-closing relationship link when the PR does not finish the issue).
 3. **After merge, PM → `ticketing`**: the merged PR number and squash SHA, for
-   the completion comment or the close.
+   the completion comment and the `status:` advance. `version-control` confirms
+   the merge and FLAGS the advance it owes — "#4409 owes `status:coded` ->
+   `status:merged`" — because it may not make that edit itself. The PM routing
+   that flag to `ticketing` is the only thing that keeps the label from going
+   stale, since auto-merge lands PRs with nobody watching.
 
 **Neither specialist delegates to the other.** The PM carries context between
 them. A `ticketing` dispatch that ends "…then have version-control open the PR"
@@ -322,17 +326,26 @@ The dispatch still forbids leaving the assigned tree into the main checkout, and
 forbids `git reset --hard`, `git checkout .`, and `git stash` against main.
 
 **Who counts as file-mutating** (#5650): every engineer-tier agent, plus
-`documentation`, `version-control`, and the three QA agents that author tests —
-`qa`, `web-qa`, `api-qa`. Each gets its own worktree, same as an engineer. A
-dispatch that only reads does not: `research`, `code-analyzer`, `ticketing`, and
-`code-critic`, which shares `role: qa` with the QA writers but recommends rather
-than edits. The guard reads this from the bundled agent's own frontmatter
+`documentation` and the three QA agents that author tests — `qa`, `web-qa`,
+`api-qa`. Each gets its own worktree, same as an engineer. A dispatch that only
+reads does not: `research`, `code-analyzer`, `ticketing`, and `code-critic`,
+which shares `role: qa` with the QA writers but recommends rather than edits.
+The guard reads this from the bundled agent's own frontmatter
 (`dispatch_isolation.rs`), so a custom or project-local agent it does not ship is
 never denied — declare `isolation: "worktree"` for one that writes.
 
-🔴 **Cleanup after merge is the PM's to run, not the agent's (#5791, owner
-ruling 2026-08-19).** The agent reports the merged PR, the worktree path, and
-the branch, then stops; the PM confirms the work is done and reclaims the tree:
+🔴 **`version-control` is the one writer that keeps the checkout it is given
+(ADR-0056, owner ruling 2026-08-31).** It merges into main and reclaims merged
+worktrees, and neither can be done from inside a worktree — isolating it removes
+the tree the work needs. The guard therefore neither diverts it in a main
+checkout nor denies it beside another writer. It still counts as an OCCUPANT: an
+engineer dispatched into the same directory beside it is denied exactly as
+before, and engineer source-write confinement is untouched.
+
+🔴 **Cleanup after merge belongs to `version-control` or the PM, never to the
+agent that did the work (#5791, ADR-0056).** An engineer reports the merged PR,
+the worktree path, and the branch, then stops. `version-control` — or the PM —
+confirms `state: MERGED` per PR and reclaims the trees:
 
 ```bash
 tm session prune-worktrees --merged-prs            # preview, the default
@@ -347,10 +360,13 @@ and the remote branch is usually already gone via `gh pr merge --delete-branch`.
 command as the remedy, so an agent that reaches for it gets redirected rather
 than silently blocked. BASE-AGENT's Git Workflow section states the agent's half.
 
-Two guards made this undelegable before the ruling and still do: an unisolated
-dispatch is denied as a second writer on the shared HEAD (#4480), and an
-isolated agent's git operations are confined to its own worktree, so it cannot
-act on the shared registry at all.
+Two guards made this undelegable to any agent, and ADR-0056 lifted both for
+`version-control` alone: its unisolated dispatch is no longer denied as a second
+writer on the shared HEAD (#4480), and it is no longer diverted into a worktree
+whose fences would keep it off the shared registry. Every other agent is still
+held by both, and `git worktree remove` is still denied to all of them — the
+prune pass above is the cleanup path precisely because it spares a tree that
+still holds work.
 
 **Escape hatch — a throwaway worktree.** If you genuinely need a clean tree to
 run one command — a baseline check, a bisect, a build against `origin/main` —
