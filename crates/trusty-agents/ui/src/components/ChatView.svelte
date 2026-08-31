@@ -11,7 +11,7 @@
     streamDeltaIntoTask,
     isRunning,
     activeTaskId,
-    chatHistoryCursor,
+    canLoadOlderChat,
     loadingOlderChat,
   } from '../stores/app';
   import { loadOlderChat } from '../lib/chatHistory';
@@ -153,10 +153,11 @@
   let pinnedToBottom = true;
 
   // #4278: page one more window of persisted history in above what is rendered.
-  // `loadOlderChat` reads the armed cursor itself, so this only names the
-  // project bucket to prepend into.
+  // `loadOlderChat` reads the armed cursor for the agent, the speaker, AND the
+  // bucket, so this passes nothing — a stale cursor cannot be pointed at the
+  // wrong conversation from here.
   async function loadEarlier() {
-    const result = await loadOlderChat(get(activeProjectId));
+    const result = await loadOlderChat();
     if (result.reason) {
       console.warn('[ChatView] could not load earlier messages:', result.reason);
     }
@@ -199,9 +200,12 @@
   <div class="mx-auto flex max-w-3xl flex-col gap-3 font-sans">
     <!-- #4278: the other half of the bounded initial load. Rehydration seeds
          only the newest page of a `persona-{agent}` session that never rolls
-         over, so without this control the bound would just be truncation. Only
-         rendered when the server reported older messages behind the cursor. -->
-    {#if $chatHistoryCursor?.hasMore}
+         over, so without this control the bound would just be truncation.
+         `canLoadOlderChat` — not the cursor's `hasMore` — is the gate: the
+         cursor is global and survives an agent or project switch, and a
+         continuous persona session always reports more history, so gating on
+         `hasMore` alone left the button offering another agent's turns. -->
+    {#if $canLoadOlderChat}
       <div class="flex justify-center">
         <button
           type="button"

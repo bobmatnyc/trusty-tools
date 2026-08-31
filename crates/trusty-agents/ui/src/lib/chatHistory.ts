@@ -29,6 +29,7 @@ import { get } from 'svelte/store';
 
 import { apiBase } from './api-config';
 import {
+  canLoadOlderChat,
   chatHistoryCursor,
   getCurrentApiToken,
   hydrateMessages,
@@ -248,7 +249,9 @@ export async function rehydrateChat(
   // means live messages won the bucket, so paging older into it would interleave
   // a restored conversation with an unrelated live one.
   chatHistoryCursor.set(
-    seeded ? { agentId, speaker, start: page.start, hasMore: page.has_more } : null,
+    seeded
+      ? { agentId, speaker, projectId, start: page.start, hasMore: page.has_more }
+      : null,
   );
   return { seeded: seeded ? restored.length : 0, hasMore: seeded && page.has_more };
 }
@@ -258,22 +261,25 @@ export async function rehydrateChat(
  * loading of older turns on demand — without this, a bounded load is just
  * truncation. Driven by `ChatView`'s "Load earlier messages" control, which
  * renders off `chatHistoryCursor.hasMore`.
- * What: reads the cursor for who and how far back, fetches the page ending at
- * that absolute index, PREPENDS it so older turns land above what is already
- * rendered, and advances the cursor. A no-op when nothing is armed. Bare ids
- * are namespaced by the page's absolute `start`, so a prepended page can never
- * collide with the seeded one.
+ * What: takes no target — the cursor names the agent, the speaker, and the
+ * bucket, so this cannot page one conversation into another's view. Gated on
+ * `canLoadOlderChat`, so a cursor left over from a different agent or project
+ * is refused here as well as hidden in the view. Fetches the page ending at the
+ * cursor's absolute index, PREPENDS it so older turns land above what is
+ * already rendered, and advances the cursor. Ids are namespaced by the page's
+ * absolute `start`, so a prepended page cannot collide with the seeded one.
  * Test: `loadOlderChat_prepends_the_previous_page`,
  * `loadOlderChat_advances_the_cursor`,
  * `loadOlderChat_is_a_noop_without_a_cursor`,
+ * `loadOlderChat_refuses_a_cursor_from_another_agent`,
+ * `loadOlderChat_prepends_into_the_cursors_own_project`,
  * `loadOlderChat_disarms_the_cursor_at_the_start_of_history`.
  */
 export async function loadOlderChat(
-  projectId: string,
   limit = DEFAULT_HISTORY_LIMIT,
 ): Promise<RehydrateResult> {
   const cursor = get(chatHistoryCursor);
-  if (!cursor || !cursor.hasMore) return { seeded: 0, hasMore: false };
+  if (!cursor || !get(canLoadOlderChat)) return { seeded: 0, hasMore: false };
 
   loadingOlderChat.set(true);
   try {
@@ -286,7 +292,10 @@ export async function loadOlderChat(
       ...m,
       id: `history-${page.start}-${i}`,
     }));
-    prependMessages(projectId, older);
+    // The cursor's own bucket, never the currently-active one — the two can
+    // differ, and prepending into the active one is how a restored conversation
+    // leaks into an unrelated view.
+    prependMessages(cursor.projectId, older);
     chatHistoryCursor.set({ ...cursor, start: page.start, hasMore: page.has_more });
     return { seeded: older.length, hasMore: page.has_more };
   } finally {

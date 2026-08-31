@@ -1,19 +1,29 @@
-// `hydrateMessages` / `prependMessages` store contracts (#4278).
+// Chat-rehydration store contracts (#4278).
 //
-// Why: rehydration writes into the same store live chat appends to, so the
-// seeding rules are what keep a restored conversation from destroying a live
-// one. `hydrateMessages` refusing a non-empty bucket is the guard that makes a
-// late-arriving history harmless; `prependMessages` putting older turns FIRST
-// is what makes lazy loading read as history rather than as new messages.
+// Why: rehydration writes into the same store live chat appends to, and the
+// cursor it arms outlives the view it was armed for. Three guards keep a
+// restored conversation from damaging a live one, and each is pinned here.
+// `hydrateMessages` refusing a non-empty bucket makes a late-arriving history
+// harmless. `prependMessages` putting older turns FIRST makes lazy loading read
+// as history rather than as new messages. `canLoadOlderChat` comparing the
+// cursor against live identity is what stops the "load earlier" control from
+// paging one agent's conversation into another's view — a continuous
+// `persona-{agent}` session always reports more history, so the affordance
+// never withdraws on its own.
 //
 // What: seed into an empty bucket, refuse a non-empty one, ignore an empty
-// page, and the prepend ordering.
+// page; the prepend ordering; and the cursor gate across agent and project
+// switches, including recovery on switching back.
 
 import { beforeEach, describe, expect, test } from 'vitest';
 import { get } from 'svelte/store';
 
 import {
+  activeAgentId,
+  activeProjectId,
   addMessage,
+  canLoadOlderChat,
+  chatHistoryCursor,
   hydrateMessages,
   messages,
   prependMessages,
@@ -26,6 +36,9 @@ function msg(id: string, content: string): Message {
 
 beforeEach(() => {
   messages.set(new Map());
+  chatHistoryCursor.set(null);
+  activeAgentId.set(null);
+  activeProjectId.set('ctrl');
 });
 
 describe('hydrateMessages', () => {
@@ -58,6 +71,93 @@ describe('hydrateMessages', () => {
     hydrateMessages('other', [msg('h-0', 'b')]);
     expect((get(messages).get('ctrl') ?? [])[0].content).toBe('a');
     expect((get(messages).get('other') ?? [])[0].content).toBe('b');
+  });
+});
+
+describe('canLoadOlderChat', () => {
+  /** Arm the cursor the way a successful seed for izzie/ctrl would. */
+  function seedCursor(hasMore = true) {
+    chatHistoryCursor.set({
+      agentId: 'izzie',
+      speaker: 'Izzie',
+      projectId: 'ctrl',
+      start: 100,
+      hasMore,
+    });
+  }
+
+  test('canLoadOlderChat_is_true_for_the_view_the_cursor_was_armed_for', () => {
+    activeAgentId.set('izzie');
+    activeProjectId.set('ctrl');
+    seedCursor();
+    expect(get(canLoadOlderChat)).toBe(true);
+  });
+
+  test('canLoadOlderChat_goes_false_when_the_agent_switches', () => {
+    // The regression: `persona-izzie` runs to thousands of messages and always
+    // reports more history, so a cursor gated on `hasMore` alone kept offering
+    // izzie's conversation after the user moved to another agent.
+    activeAgentId.set('izzie');
+    activeProjectId.set('ctrl');
+    seedCursor();
+    expect(get(canLoadOlderChat)).toBe(true);
+
+    activeAgentId.set('cto-assistant');
+
+    expect(get(canLoadOlderChat)).toBe(false);
+    expect(get(chatHistoryCursor)?.hasMore).toBe(true);
+  });
+
+  test('canLoadOlderChat_goes_false_when_the_project_switches', () => {
+    activeAgentId.set('izzie');
+    activeProjectId.set('ctrl');
+    seedCursor();
+
+    activeProjectId.set('other-project');
+
+    expect(get(canLoadOlderChat)).toBe(false);
+  });
+
+  test('canLoadOlderChat_recovers_when_the_user_switches_back', () => {
+    // Nothing resets the cursor, so returning to the same view re-qualifies it
+    // — the history is still on screen and still pageable.
+    activeAgentId.set('izzie');
+    activeProjectId.set('ctrl');
+    seedCursor();
+
+    activeAgentId.set('cto-assistant');
+    expect(get(canLoadOlderChat)).toBe(false);
+    activeAgentId.set('izzie');
+
+    expect(get(canLoadOlderChat)).toBe(true);
+  });
+
+  test('canLoadOlderChat_maps_the_null_selection_to_ctrl', () => {
+    // `activeAgentId` is null for the base ctrl session; the cursor records the
+    // resolved id, so the two must compare equal.
+    activeAgentId.set(null);
+    activeProjectId.set('ctrl');
+    chatHistoryCursor.set({
+      agentId: 'ctrl',
+      speaker: 'Concierge',
+      projectId: 'ctrl',
+      start: 10,
+      hasMore: true,
+    });
+    expect(get(canLoadOlderChat)).toBe(true);
+  });
+
+  test('canLoadOlderChat_is_false_without_a_cursor', () => {
+    activeAgentId.set('izzie');
+    chatHistoryCursor.set(null);
+    expect(get(canLoadOlderChat)).toBe(false);
+  });
+
+  test('canLoadOlderChat_is_false_at_the_start_of_history', () => {
+    activeAgentId.set('izzie');
+    activeProjectId.set('ctrl');
+    seedCursor(false);
+    expect(get(canLoadOlderChat)).toBe(false);
   });
 });
 

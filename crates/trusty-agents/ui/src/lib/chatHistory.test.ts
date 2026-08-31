@@ -30,6 +30,8 @@ import {
   type ChatHistoryPage,
 } from './chatHistory';
 import {
+  activeAgentId,
+  activeProjectId,
   addMessage,
   chatHistoryCursor,
   messages,
@@ -68,6 +70,8 @@ function stubFetch(body: unknown, ok = true, status = ok ? 200 : 503) {
 beforeEach(() => {
   messages.set(new Map());
   chatHistoryCursor.set(null);
+  activeAgentId.set('izzie');
+  activeProjectId.set('ctrl');
   vi.unstubAllGlobals();
 });
 
@@ -163,7 +167,13 @@ describe('rehydrateChat', () => {
 describe('loadOlderChat', () => {
   /** Arm the cursor the way a completed `rehydrateChat` would. */
   function armCursor(start: number, hasMore = true) {
-    chatHistoryCursor.set({ agentId: 'izzie', speaker: 'Izzie', start, hasMore });
+    chatHistoryCursor.set({
+      agentId: 'izzie',
+      speaker: 'Izzie',
+      projectId: 'ctrl',
+      start,
+      hasMore,
+    });
   }
 
   test('loadOlderChat_prepends_the_previous_page', async () => {
@@ -183,7 +193,7 @@ describe('loadOlderChat', () => {
       }),
     );
 
-    const result = await loadOlderChat('ctrl');
+    const result = await loadOlderChat();
 
     expect(result).toMatchObject({ seeded: 1, hasMore: true });
     // Older turns must land ABOVE what is already rendered.
@@ -199,12 +209,13 @@ describe('loadOlderChat', () => {
       page({ messages: [{ role: 'user', content: 'older' }], start: 3, has_more: true }),
     );
 
-    await loadOlderChat('ctrl');
+    await loadOlderChat();
 
     // The next request must ask for the window ending where this one began.
     expect(get(chatHistoryCursor)).toEqual({
       agentId: 'izzie',
       speaker: 'Izzie',
+      projectId: 'ctrl',
       start: 3,
       hasMore: true,
     });
@@ -213,34 +224,67 @@ describe('loadOlderChat', () => {
   test('loadOlderChat_sends_the_cursor_as_until', async () => {
     armCursor(6);
     const spy = stubFetch(page({ messages: [{ role: 'user', content: 'x' }], start: 2 }));
-    await loadOlderChat('ctrl');
+    await loadOlderChat();
     expect(spy.mock.calls[0][0]).toContain('until=6');
   });
 
   test('loadOlderChat_is_a_noop_without_a_cursor', async () => {
     const spy = stubFetch(page());
-    await expect(loadOlderChat('ctrl')).resolves.toEqual({ seeded: 0, hasMore: false });
+    await expect(loadOlderChat()).resolves.toEqual({ seeded: 0, hasMore: false });
     expect(spy).not.toHaveBeenCalled();
   });
 
   test('loadOlderChat_is_a_noop_once_the_cursor_is_exhausted', async () => {
     armCursor(0, false);
     const spy = stubFetch(page());
-    await loadOlderChat('ctrl');
+    await loadOlderChat();
     expect(spy).not.toHaveBeenCalled();
   });
 
   test('loadOlderChat_disarms_the_cursor_at_the_start_of_history', async () => {
     armCursor(2);
     stubFetch(page({ messages: [{ role: 'user', content: 'oldest' }], start: 0, has_more: false }));
-    await loadOlderChat('ctrl');
+    await loadOlderChat();
     expect(get(chatHistoryCursor)?.hasMore).toBe(false);
+  });
+
+  test('loadOlderChat_refuses_a_cursor_from_another_agent', async () => {
+    // The user switched to another agent after a successful seed. A continuous
+    // persona session always reports more history, so nothing about the cursor
+    // itself would have stopped this.
+    armCursor(4);
+    activeAgentId.set('cto-assistant');
+    const spy = stubFetch(page());
+
+    await expect(loadOlderChat()).resolves.toEqual({ seeded: 0, hasMore: false });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  test('loadOlderChat_refuses_a_cursor_from_another_project', async () => {
+    armCursor(4);
+    activeProjectId.set('other-project');
+    const spy = stubFetch(page());
+
+    await expect(loadOlderChat()).resolves.toEqual({ seeded: 0, hasMore: false });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  test('loadOlderChat_prepends_into_the_cursors_own_project', async () => {
+    // Even if the gate let a request through, the page must land in the bucket
+    // the cursor names — never in whichever project happens to be active.
+    armCursor(4);
+    stubFetch(page({ messages: [{ role: 'user', content: 'older' }], start: 3 }));
+
+    await loadOlderChat();
+
+    expect((get(messages).get('ctrl') ?? []).map((m) => m.content)).toEqual(['older']);
+    expect(get(messages).get('other-project')).toBeUndefined();
   });
 
   test('loadOlderChat_ids_do_not_collide_with_the_first_page', async () => {
     armCursor(4);
     stubFetch(page({ messages: [{ role: 'user', content: 'older' }], start: 3 }));
-    await loadOlderChat('ctrl');
+    await loadOlderChat();
     expect((get(messages).get('ctrl') ?? [])[0].id).toBe('history-3-0');
   });
 });
@@ -252,6 +296,7 @@ describe('the cursor rehydrateChat arms', () => {
     expect(get(chatHistoryCursor)).toEqual({
       agentId: 'izzie',
       speaker: 'Izzie',
+      projectId: 'ctrl',
       start: 98,
       hasMore: true,
     });

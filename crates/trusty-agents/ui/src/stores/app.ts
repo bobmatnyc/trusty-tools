@@ -433,19 +433,31 @@ export function hydrateMessages(projectId: string, history: Message[]): boolean 
  * What: prepends `older` to `projectId`'s list. No-op for an empty page.
  * Test: `prependMessages_puts_older_turns_first` in `app.hydrate.test.ts`.
  */
+export function prependMessages(projectId: string, older: Message[]): void {
+  if (older.length === 0) return;
+  messages.update((map) => {
+    const next = new Map(map);
+    next.set(projectId, [...older, ...(next.get(projectId) ?? [])]);
+    return next;
+  });
+}
+
 /**
- * Why (#4278): the "load earlier" control needs three facts the chat view
- * cannot derive from `messages` — whose history is being paged, how far back
- * the client has already read, and whether anything older exists. Keeping them
- * in one store means `ChatView` renders the affordance off `hasMore` without
- * knowing anything about the history API.
- * What: `null` until rehydration runs. `start` is the ABSOLUTE index the server
- * reported for the oldest message held, which is exactly what the next request
- * passes as `until`.
+ * Why (#4278): the "load earlier" control needs facts the chat view cannot
+ * derive from `messages` — WHOSE history is being paged, into WHICH bucket, how
+ * far back the client has read, and whether anything older exists. The identity
+ * half is not bookkeeping: the cursor is one global store, and the user can
+ * switch agent (`AgentSwitcher`, `ChatHeader`, `Sidebar`) or project
+ * (`ProjectsView`) at any time. Recording who a cursor belongs to is what lets
+ * `canLoadOlderChat` refuse a cursor that no longer matches the view.
+ * What: `null` until rehydration seeds a conversation. `start` is the ABSOLUTE
+ * index the server reported for the oldest message held, which is exactly what
+ * the next request passes as `until`.
  */
 export interface ChatHistoryCursor {
   agentId: string;
   speaker: string;
+  projectId: string;
   start: number;
   hasMore: boolean;
 }
@@ -455,14 +467,32 @@ export const chatHistoryCursor = writable<ChatHistoryCursor | null>(null);
 /** True while a "load earlier" fetch is in flight, to disable the control. */
 export const loadingOlderChat = writable<boolean>(false);
 
-export function prependMessages(projectId: string, older: Message[]): void {
-  if (older.length === 0) return;
-  messages.update((map) => {
-    const next = new Map(map);
-    next.set(projectId, [...older, ...(next.get(projectId) ?? [])]);
-    return next;
-  });
-}
+/**
+ * Why: the cursor outlives the view it was armed for. Gating the control on
+ * `hasMore` alone let a stale cursor page agent A's conversation into agent B's
+ * chat, attributed to A — a continuous `persona-{agent}` session always reports
+ * `has_more`, so the affordance never disappeared on its own. Deriving the
+ * answer from live identity is why no reset is needed anywhere: a cursor that
+ * does not match the current view simply stops qualifying, and re-qualifies
+ * untouched if the user switches back.
+ *
+ * Chosen over a subscription that nulls the cursor on every switch because a
+ * subscription is a side effect racing the click handler, while this cannot be
+ * stale — it is recomputed from the same stores the view renders from.
+ *
+ * What: true only when a cursor exists, reports more history, and names both
+ * the active agent and the active project. `activeAgentId` is null for the base
+ * ctrl session, matching `resolveRehydrationTarget`'s mapping.
+ * Test: `canLoadOlderChat_*` in `app.hydrate.test.ts`.
+ */
+export const canLoadOlderChat = derived(
+  [chatHistoryCursor, activeAgentId, activeProjectId],
+  ([$cursor, $activeAgentId, $activeProjectId]) =>
+    !!$cursor &&
+    $cursor.hasMore &&
+    $cursor.agentId === ($activeAgentId ?? 'ctrl') &&
+    $cursor.projectId === $activeProjectId,
+);
 
 /**
  * Why: Progress events arrive while a task is running; we find the assistant
