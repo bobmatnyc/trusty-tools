@@ -376,6 +376,13 @@ async fn two_racing_server_processes_leave_exactly_one() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 
+    // #6411: probe while the winner is still RUNNING. Asking after the kills
+    // below measures the kill, not the race — a SIGKILLed winner stops serving
+    // and leaves its path behind, so the old check passed only when the connect
+    // beat signal delivery and failed ~20% of the time on a loaded CI runner.
+    let winner_still_serving =
+        trusty_common::uds::socket_is_serving(&socket, Duration::from_secs(1)).await;
+
     let _ = first.kill();
     let _ = second.kill();
 
@@ -383,10 +390,14 @@ async fn two_racing_server_processes_leave_exactly_one() {
         alive, 1,
         "exactly one server may hold the socket; {alive} processes survived the race"
     );
+    // A bare "still serving" is what the property needs, and it is stricter than
+    // the tolerate-a-missing-path form this replaces: an unlinked socket with
+    // the winner still alive IS the defect under test, so accepting it as a pass
+    // let the one outcome this test exists to catch through.
     assert!(
-        !socket.exists()
-            || trusty_common::uds::socket_is_serving(&socket, Duration::from_secs(1)).await,
-        "the loser must not have unlinked the winner's socket"
+        winner_still_serving,
+        "the loser must not have unlinked the winner's socket: {} is no longer served",
+        socket.display()
     );
 }
 
