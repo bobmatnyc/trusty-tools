@@ -21,9 +21,15 @@ use crate::commands::session::{
 fn cli_parses_attach() {
     let cli = Cli::try_parse_from(["trusty-mpm", "attach", "frontend"]).unwrap();
     match cli.command.unwrap() {
-        Command::Attach { target, json } => {
+        Command::Attach {
+            target,
+            json,
+            single_pane,
+        } => {
             assert_eq!(target, "frontend");
             assert!(!json);
+            // #6483: no flag means the multipane dashboard.
+            assert!(!single_pane);
         }
         other => panic!("expected Attach, got {other:?}"),
     }
@@ -33,10 +39,21 @@ fn cli_parses_attach() {
 fn cli_parses_attach_with_json() {
     let cli = Cli::try_parse_from(["trusty-mpm", "attach", "abc-123", "--json"]).unwrap();
     match cli.command.unwrap() {
-        Command::Attach { target, json } => {
+        Command::Attach { target, json, .. } => {
             assert_eq!(target, "abc-123");
             assert!(json);
         }
+        other => panic!("expected Attach, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_attach_single_pane_opt_in() {
+    // #6483: the pre-existing single-pane coordinator chat stays reachable
+    // through an explicit opt-in flag.
+    let cli = Cli::try_parse_from(["trusty-mpm", "attach", "frontend", "--single-pane"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Attach { single_pane, .. } => assert!(single_pane),
         other => panic!("expected Attach, got {other:?}"),
     }
 }

@@ -79,9 +79,41 @@ const KEY_POLL: Duration = Duration::from_millis(50);
 /// Test: terminal glue is exercised by launching the TUI; the loop's pure
 /// pieces are unit-tested in their own modules.
 pub async fn run(url: String, interval_ms: u64) -> anyhow::Result<()> {
+    run_focused(url, interval_ms, None).await
+}
+
+/// Launch the multipane dashboard, optionally pre-selecting one session.
+///
+/// Why (#6483): `tm tui` and `tm attach <target>` now open THIS surface by
+/// default instead of the single-pane coordinator chat. `tm attach` resolves a
+/// session id first and expects the TUI to open on that session, so the entry
+/// point needs the same `focus_id` seam `tui::run_focused` already had.
+/// What: same client/prime/terminal-guard sequence as [`run`]; after the
+/// priming poll it calls [`ProjectCtlState::focus_session`], which selects the
+/// owning project and session row (and is a no-op for an id the fleet does not
+/// know). A missed focus sets a notice rather than failing the launch — the
+/// session may simply not have been polled yet.
+/// Test: the focus selection itself is unit-tested
+/// (`focus_session_selects_owning_project_and_row`); this terminal glue is
+/// exercised by launching the TUI.
+pub async fn run_focused(
+    url: String,
+    interval_ms: u64,
+    focus_id: Option<String>,
+) -> anyhow::Result<()> {
     let mut client = DaemonClient::new(url);
     let mut state = ProjectCtlState::default();
     project_ctl_poll_daemon(&mut state, &mut client).await;
+    if let Some(id) = focus_id.as_deref() {
+        // #6483: a `tm attach` target that the priming poll has not surfaced
+        // yet leaves the selection alone and says so, rather than silently
+        // opening on an unrelated project.
+        if state.focus_session(id) {
+            state.set_notice(format!("attached to {id}"));
+        } else {
+            state.set_notice(format!("session {id} not in the polled fleet yet"));
+        }
+    }
 
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
