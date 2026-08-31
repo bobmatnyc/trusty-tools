@@ -122,8 +122,11 @@ impl TcodeConnector {
 /// or the target is not loopback — the caller then reads the daemon's `401`
 /// as an ordinary `ConnectorError`, which is a clearer failure than a client
 /// that refused to be constructed.
-/// Test: `connector_e2e`'s live-daemon arms exercise the credentialed path;
-/// the loopback gate is covered in `tui_client::discovery`'s tests.
+/// Test: `create_session_full_lifecycle`,
+/// `list_sessions_empty_fleet_returns_empty_vec` (both in
+/// `tests/connector_e2e.rs`) exercise the credentialed path against a live
+/// daemon; the loopback gate is covered by
+/// `credential_is_withheld_from_a_non_loopback_url` in `tui_client::discovery`.
 fn credentialed_client(daemon_url: &str) -> reqwest::Client {
     match crate::tui_client::discovery::daemon_credential_for(daemon_url) {
         Some(token) => client_presenting(&token),

@@ -273,7 +273,8 @@ async fn rpc_handler(State(state): State<HttpState>, body: Bytes) -> Json<Respon
 /// unchanged. Always HTTP 200 either way; a health route must not turn a
 /// missing credential into a failure, or every liveness poller would read a
 /// live daemon as down.
-/// Test: `http_health_anonymous_discloses_only_liveness`,
+/// Test: `health_is_public_but_discloses_only_liveness`,
+/// `health_with_a_credential_still_reports_pid_and_binding`,
 /// `http_health_matches_jsonrpc_health_payload`,
 /// `http_health_reports_the_daemons_project_binding`.
 async fn health_handler(
