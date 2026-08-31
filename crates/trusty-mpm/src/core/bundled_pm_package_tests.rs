@@ -20,8 +20,8 @@
 use super::*;
 use crate::core::instruction_overrides::{
     FILE_AGENT_DELEGATION, FILE_INSTRUCTIONS, FILE_MEMORY, FILE_WORKFLOW, OVERRIDE_DIR_NAME,
-    PromptSource, assemble_sections, delegation_with_roster, resolve_pm_prompt,
-    resolve_pm_prompt_with_roster, resolve_pm_prompt_with_source,
+    PromptSource, assemble_sections, delegation_with_roster, resolve_pm_prompt_with_roster,
+    resolve_pm_prompt_with_source,
 };
 use crate::core::instruction_package::{
     BlockBody, CustomizationTier, Generator, InstructionBlock, OverrideTier, SCHEMA_VERSION,
@@ -561,21 +561,50 @@ fn the_roster_source_is_consulted_exactly_once() {
 }
 
 #[test]
-fn resolve_pm_prompt_wrapper_matches_the_source_reporting_form() {
-    // The public entry point must return exactly what the seam returns — the
-    // logging wrapper may not alter the prompt.
+fn a_changed_roster_changes_the_resolved_prompt() {
+    // #4766. This test used to be `resolve_pm_prompt_wrapper_matches_the_source_
+    // reporting_form`: it called `resolve_pm_prompt_with_source` and
+    // `resolve_pm_prompt` back-to-back and compared the two prompts. Each call
+    // re-scanned the live `~/.claude/agents` tiers through
+    // `deployed_roster_section`, so a concurrent change between the two scans
+    // made them diverge — ~1 red in 4 full-suite runs on a provisioned
+    // workstation, invisible in CI where no ambient tier exists.
     //
-    // Deliberately asserts NOTHING about which source ran. Both calls scan the
-    // ambient agent tiers independently, so the source is a property of the
-    // machine (populated `~/.claude/agents` -> Package; a bare CI runner ->
-    // Legacy), not of the wiring under test. Pinning it here would pass on a
-    // provisioned workstation and fail in CI — the environment-dependence that
-    // `resolve_pm_prompt_with_roster` was introduced to keep out of the gates.
-    // The contract under test is byte-equality of the two entry points.
+    // Renamed rather than merely rewritten, because the seam changes WHAT is
+    // under test. `resolve_pm_prompt_with_roster` takes the roster as an
+    // argument, so nothing here reaches the logging wrapper any more; a test
+    // still named for that wrapper would claim coverage it does not have. The
+    // wrapper's byte-equality is now structural instead of asserted:
+    // `resolve_pm_prompt` is `resolve_pm_prompt_with_source(dir).0` plus one
+    // `info!`, with no transformation between. Asserting it would require a
+    // second live tier scan, which is the flake itself — the one thing #4766
+    // rules out.
+    //
+    // What this keeps is the half nothing else covers: the roster is not
+    // decoration. Every other byte-equality assertion in this file pins a FIXED
+    // roster, and each would hold just as well if the roster never reached the
+    // prompt at all.
     let tmp = TempDir::new().expect("tempdir");
 
-    let (with_source, _) = resolve_pm_prompt_with_source(tmp.path());
-    assert_byte_identical(&resolve_pm_prompt(tmp.path()), &with_source);
+    let fixed = resolve_pm_prompt_with_roster(tmp.path(), || Some(FIXED_ROSTER.to_string())).0;
+    let divergent_roster = "## Delegation Authority\n\n\
+         ### ticketing\n\nHandles ticketing work. Model: opus.";
+    assert_ne!(
+        FIXED_ROSTER, divergent_roster,
+        "the two rosters must differ"
+    );
+    let divergent =
+        resolve_pm_prompt_with_roster(tmp.path(), || Some(divergent_roster.to_string())).0;
+
+    assert_ne!(
+        fixed, divergent,
+        "a changed roster must change the prompt, else every fixed-roster \
+         byte-equality assertion in this file is vacuous"
+    );
+    assert!(
+        divergent.contains("Handles ticketing work."),
+        "the supplied roster must reach the composed prompt verbatim"
+    );
 }
 
 #[test]

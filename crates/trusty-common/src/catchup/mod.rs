@@ -8,7 +8,7 @@
 //! fail-open on every source); [`run_catchup`](crate::catchup::run_catchup) wraps it and optionally advances
 //! the watermark. [`CatchupOptions`](crate::catchup::CatchupOptions) controls which sources are active.
 //! Test: `generate_catchup_context_renders_all_sections`,
-//! `run_catchup_no_advance_does_not_panic`, `run_catchup_advance_writes_state`.
+//! `run_catchup_no_advance_does_not_panic`, `run_catchup_advance_writes_under_the_state_root`.
 //!
 // CUTOVER BRIDGE — remove post-migration (#1762)
 
@@ -27,7 +27,10 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 
-pub use json::{CatchupJson, PausedSessionJson, RecentMemoryJson, generate_catchup_json};
+pub use json::{
+    CatchupJson, PausedSessionJson, RecentMemoryJson, generate_catchup_json,
+    generate_catchup_json_in,
+};
 
 use self::{
     git::git_commits_since,
@@ -124,7 +127,7 @@ fn palace_resolution_failed_section(e: &crate::palace_resolve::PalaceResolveErro
 ///
 /// Why: storing the HEAD SHA lets future enhancements do SHA-bounded git ranges.
 /// What: runs `git -C <repo> rev-parse HEAD`; returns None on any error.
-/// Test: covered indirectly by `run_catchup_advance_writes_state`.
+/// Test: covered indirectly by `run_catchup_advance_writes_under_the_state_root`.
 fn probe_head_sha(project_dir: &Path) -> Option<String> {
     let out = std::process::Command::new("git")
         .arg("-C")
@@ -189,6 +192,25 @@ fn render_sessions_section(filtered: &session_finder::FilteredSessions) -> Strin
 /// Test: `generate_catchup_context_renders_all_sections`,
 /// `malformed_pin_renders_a_resolution_failure_section`.
 pub async fn generate_catchup_context(opts: &CatchupOptions) -> String {
+    generate_catchup_context_in(opts, None).await
+}
+
+/// [`generate_catchup_context`] with the framework state root supplied by the
+/// caller.
+///
+/// Why (#4323): the watermark READ is keyed by palace id under
+/// `~/.trusty-mpm/projects/`, so a test running against a temp project still
+/// consulted the operator's real state dir — and a stale watermark there
+/// silently changed what the digest reported. Taking the root explicitly is the
+/// same seam [`run_catchup_in`] uses for the write.
+/// What: identical to [`generate_catchup_context`] except that `state_root`
+/// replaces the `.trusty-mpm` framework root; `None` is the production
+/// home-relative default.
+/// Test: `run_catchup_advance_writes_under_the_state_root`.
+pub async fn generate_catchup_context_in(
+    opts: &CatchupOptions,
+    state_root: Option<&Path>,
+) -> String {
     // #5811: no palace, no watermark — see `palace_resolution_failed_section`.
     let palace_id = match derive_palace_id_for(&opts.project_dir) {
         Ok(id) => id,
@@ -199,7 +221,7 @@ pub async fn generate_catchup_context(opts: &CatchupOptions) -> String {
     let watermark: Option<DateTime<Utc>> = if opts.full {
         None
     } else {
-        load_catchup_state(&palace_id).map(|s| s.last_catchup_at)
+        load_catchup_state(&palace_id, state_root).map(|s| s.last_catchup_at)
     };
 
     let mut out = String::new();
@@ -289,9 +311,30 @@ pub async fn generate_catchup_context(opts: &CatchupOptions) -> String {
 /// What: calls [`generate_catchup_context`] to produce the context string,
 /// then — when `advance_watermark` is true — calls [`save_catchup_state`] with
 /// the current timestamp and the HEAD git SHA. Returns the digest string.
-/// Test: `run_catchup_no_advance_does_not_panic`, `run_catchup_advance_writes_state`.
+/// Test: `run_catchup_no_advance_does_not_panic`, `run_catchup_advance_writes_under_the_state_root`.
 pub async fn run_catchup(opts: &CatchupOptions, advance_watermark: bool) -> String {
-    let context = generate_catchup_context(opts).await;
+    run_catchup_in(opts, advance_watermark, None).await
+}
+
+/// [`run_catchup`] with the framework state root supplied by the caller.
+///
+/// Why (#4323): `run_catchup(&opts, true)` is the ONE catch-up call that writes,
+/// and it resolved `~/.trusty-mpm/projects/<palace-id>/` unconditionally. Every
+/// test exercising the advancing path therefore created a directory in the
+/// operator's real state dir named after its own tempdir — the `t-tmpXXXX`
+/// entries that grew to 39,749 of 39,910. A temp `$HOME` did not help, because
+/// this path resolves the home directory itself rather than taking a base.
+/// What: identical to [`run_catchup`] except that `state_root` replaces the
+/// `.trusty-mpm` framework root for both the watermark read and the write;
+/// `None` is the production home-relative default.
+/// Test: `run_catchup_advance_writes_under_the_state_root`,
+/// `run_catchup_advance_leaves_the_home_state_dir_alone`.
+pub async fn run_catchup_in(
+    opts: &CatchupOptions,
+    advance_watermark: bool,
+    state_root: Option<&Path>,
+) -> String {
+    let context = generate_catchup_context_in(opts, state_root).await;
     if advance_watermark {
         // #5811: the watermark file is named by the palace id, so an
         // unresolvable palace must not write one — the shared placeholder made
@@ -311,7 +354,7 @@ pub async fn run_catchup(opts: &CatchupOptions, advance_watermark: bool) -> Stri
             palace_id: palace_id.clone(),
             last_git_sha: sha,
         };
-        if let Err(e) = save_catchup_state(&palace_id, &state) {
+        if let Err(e) = save_catchup_state(&palace_id, &state, state_root) {
             eprintln!("catchup: warning: could not save watermark state: {e}");
         }
     }
@@ -455,10 +498,20 @@ mod tests {
         assert!(!ctx.is_empty(), "context should not be empty");
     }
 
+    /// Why: #4323 — this test used to call `run_catchup(&opts, true)`, whose
+    /// write resolved `~/.trusty-mpm/projects/<palace-id>/` from the real home
+    /// directory. The palace id derives from the tempdir, so every run left one
+    /// more `t-tmpXXXX` directory behind: 39,749 of the operator's 39,910.
+    /// What: runs the advancing path against a temp state root and asserts the
+    /// watermark landed THERE. The assertion is what makes the seam load-free
+    /// to verify — the old test asserted only that the context was non-empty,
+    /// which stayed true no matter where the file went.
+    /// Test: itself.
     #[tokio::test]
-    async fn run_catchup_advance_writes_state() {
+    async fn run_catchup_advance_writes_under_the_state_root() {
         let tmp = TempDir::new().unwrap();
         init_git_repo(&tmp);
+        let state_root = TempDir::new().unwrap();
 
         let opts = CatchupOptions {
             project_dir: tmp.path().to_path_buf(),
@@ -470,12 +523,62 @@ mod tests {
             full: true,
         };
 
-        // Advance=true triggers save_catchup_state (writes to real ~/.trusty-mpm).
-        // Just verify no panic and context is non-empty.
-        let ctx = run_catchup(&opts, true).await;
+        let ctx = run_catchup_in(&opts, true, Some(state_root.path())).await;
         assert!(
             !ctx.is_empty(),
             "context should not be empty when advancing"
+        );
+
+        let palace_id = derive_palace_id_for(tmp.path()).expect("a temp dir resolves to a palace");
+        assert!(
+            state_root
+                .path()
+                .join("projects")
+                .join(&palace_id)
+                .join("catchup-state.json")
+                .is_file(),
+            "the advanced watermark must land under the supplied state root"
+        );
+    }
+
+    /// #4323: the companion assertion — advancing against a state root must
+    /// leave the home-relative state dir untouched. Reads the home path
+    /// directly rather than trusting the write above, so a regression that
+    /// ignored `state_root` and wrote to BOTH would still fail here.
+    #[tokio::test]
+    async fn run_catchup_advance_leaves_the_home_state_dir_alone() {
+        let tmp = TempDir::new().unwrap();
+        init_git_repo(&tmp);
+        let state_root = TempDir::new().unwrap();
+
+        let opts = CatchupOptions {
+            project_dir: tmp.path().to_path_buf(),
+            memory_socket: PathBuf::from("/nonexistent/catchup-test.sock"),
+            include_git: false,
+            include_palace: false,
+            git_limit: 10,
+            drawer_limit: 5,
+            full: true,
+        };
+
+        let palace_id = derive_palace_id_for(tmp.path()).expect("a temp dir resolves to a palace");
+        let Some(home) = dirs::home_dir() else {
+            return; // No home dir resolvable: nothing to assert about.
+        };
+        let home_dir = home.join(".trusty-mpm").join("projects").join(&palace_id);
+        assert!(
+            !home_dir.exists(),
+            "precondition: a fresh tempdir's palace must not already have a \
+             watermark dir at {}",
+            home_dir.display()
+        );
+
+        let _ = run_catchup_in(&opts, true, Some(state_root.path())).await;
+
+        assert!(
+            !home_dir.exists(),
+            "advancing against a state root must not touch {}",
+            home_dir.display()
         );
     }
 

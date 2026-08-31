@@ -748,6 +748,37 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
                     tracing::warn!("orphan-GC: skipped — {reason}");
                     continue;
                 }
+                // #4323: reclaim empty `<framework root>/sessions/<id>/` holders.
+                // Scoped to `state.framework_root()` — the daemon's OWN state
+                // dir — never `dirs::home_dir()`. A scratch-rooted daemon and
+                // the operator's real `$HOME` are different directories, and a
+                // sweep that resolved home would delete the operator's session
+                // dirs from a test process (#6348's quadrant).
+                //
+                // Below `host_state_refusal` for the same reason every other
+                // sweep in this loop is, and above `TmuxDriver::discover()`
+                // because it needs no tmux: tying a state-dir sweep to tmux
+                // discoverability would be an unrelated dependency. Note this
+                // is NOT the retention sweep's placement — that one runs above
+                // the gate because it goes through `state.session_manager()`,
+                // which is root-scoped by construction; this one is not
+                // analogous and must not be moved up beside it.
+                //
+                // Logs ONE count per sweep — the per-path shape is what put
+                // 208K lines/day in the operator's log. Fail-closed and
+                // non-recursive; see `core::session_store`.
+                let sessions_dir =
+                    crate::core::session_store::sessions_root_under(state.framework_root());
+                match crate::core::session_store::reap_empty_session_dirs_at(&sessions_dir) {
+                    Ok(sweep) if !sweep.is_empty() => info!(
+                        removed = sweep.removed,
+                        skipped = sweep.skipped,
+                        failed = sweep.failed,
+                        "empty session-dir sweep"
+                    ),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("empty session-dir sweep failed: {e}"),
+                }
                 let Ok(driver) = tmux::TmuxDriver::discover() else {
                     continue;
                 };
@@ -1078,6 +1109,64 @@ mod shutdown_reaper_tests {
         assert!(
             state.session(id).is_some(),
             "a refused sweep must leave the registry alone"
+        );
+    }
+
+    /// The empty-session-dir sweep never touches `$HOME` (#4323, #6348).
+    ///
+    /// Why: the sweep DELETES directories. Its first revision called a
+    /// home-resolving wrapper and ran above `host_state_refusal`, so a
+    /// scratch-rooted daemon — which `scratch_root_state` deliberately leaves
+    /// with the inherited `$HOME`, the #6348 quadrant — swept the operator's
+    /// real `~/.trusty-mpm/sessions/`. A canary planted there was deleted by one
+    /// tick of this loop. Unlike
+    /// `orphan_gc_loop_ticks_cleanly_on_a_scratch_framework_root`, this test is
+    /// DISCRIMINATING: it fails against that revision.
+    /// What: plants an empty UUID-named directory under the real home sessions
+    /// dir, drives one tick on a scratch-rooted state, and asserts the canary
+    /// survived. Two independent things must hold for that: the sweep resolves
+    /// `state.framework_root()` rather than the home directory, and it sits
+    /// below the host-state gate.
+    /// Test: this is the test.
+    #[tokio::test]
+    async fn orphan_gc_loop_leaves_the_home_session_dirs_alone_on_a_scratch_root() {
+        let Some(home) = dirs::home_dir() else {
+            return; // No home to protect; nothing to assert.
+        };
+        let (state, dir) = scratch_root_state();
+        assert!(
+            host_state_refusal(&state).is_some(),
+            "the fixture must be in the refused quadrant for this to discriminate"
+        );
+        assert_ne!(
+            dir.path(),
+            home.join(".trusty-mpm"),
+            "the scratch root must not BE the home root, or the test proves nothing"
+        );
+
+        // A canary the sweep would find reclaimable: empty, hyphenated-UUID
+        // named, directly under the real home sessions dir.
+        let canary = crate::core::session_store::sessions_root_in(&home)
+            .join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&canary).expect("plant the canary");
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let handle = tokio::spawn(super::orphan_gc_loop(
+            Arc::clone(&state),
+            cancel.child_token(),
+        ));
+        // `tokio::time::interval` fires its first tick immediately.
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        cancel.cancel();
+        handle.await.expect("orphan_gc_loop must not panic");
+
+        let survived = canary.is_dir();
+        // Clean up before asserting, so a failure does not also leave litter.
+        let _ = std::fs::remove_dir(&canary);
+        assert!(
+            survived,
+            "a scratch-rooted daemon deleted {} out of the operator's real home",
+            canary.display()
         );
     }
 
