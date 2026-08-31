@@ -6,6 +6,140 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [5.0.2] — 2026-08-31
+
+### Breaking
+
+- `SearchGuard::url: String` is now `SearchGuard::socket: PathBuf`, and `SearchDaemonUnavailable::url` is now `SearchDaemonUnavailable::socket`. `tga audit`'s trusty-search preflight speaks framed JSON-RPC over the daemon's Unix socket (`search.health`) rather than probing `GET /health` over loopback HTTP, so the field that named an address now names a path. A caller constructing either type by hand updates the field; `SearchGuard::from_env()` is unchanged.
+- `audit` stops re-exporting `DEFAULT_ANALYZE_PORT`, `DEFAULT_ANALYZE_URL` and
+  `ENV_ANALYZE_URL`. All three named a TCP endpoint that no longer exists;
+  `default_analyze_socket` and `ENV_ANALYZE_SOCKET` replace them.
+- `AnalyzeGuard::from_env` returns `anyhow::Result<Self>` instead of `Self`. A
+  derived socket path can fail to resolve where a string literal could not, and
+  guessing one would send the audit at a socket the daemon never binds.
+- `AnalyzeGuard::socket` replaces its `url` field.
+- These move the version to 4.0.0 rather than 3.4.0. `tga` is past 1.0, so the
+  breaking position is MAJOR — unlike the 0.x crates in this workspace, where it
+  is MINOR. `cargo-semver-checks` hard-stops the publish at any lesser bump.
+
+### Added
+
+- `github.work_items_unavailable` declares the GitHub work-item leg absent for a run and says why. With it set, no GitHub adapter is built, the reason is logged, and `tga audit` adds a Gaps & Caveats line stating the leg was not attempted and that the sections it feeds are unassessed. Without it, nothing changes: a configured `github.repo` whose fetch fails still fails the `collect` stage closed. It is a reason string, never a boolean — an empty value declares nothing.
+- `tga audit --no-render` writes the manifest and stops. tga renders the report
+  in the same process that writes the manifest, so a caller that grounds the
+  manifest afterwards — trusty-audit does — could only ever ground a file the
+  report had already been built from. This flag lets that caller ground first
+  and render second. A bare `tga audit` still renders.
+
+### Fixed
+
+- **A short security keyword no longer matches inside a longer word (#4331)** —
+  the Tier-1 exact matcher is an Aho-Corasick substring search, so
+  `kw-security`'s three-letter `rce` keyword fired inside `source`, `resource`,
+  `commerce`, and `enforce`. Any commit carrying one of those words classified
+  as `security` at priority 80 and confidence 0.9, outranking the rule that
+  should have won — measured on `feat(pegasus): S3 SignalStore schema for source
+  events`, which returned `("security", ExactRule, 0.9)`. A match now has to sit
+  on a word boundary, and which of a keyword's two edges are checked comes from
+  the keyword's own spelling, so `cve-` still matches `CVE-2024-1234`.
+- **Linear collection reads its API key through the shared credential resolver
+  (#5983)** — `LinearClient::new` consulted `linear.api_key` and nothing else,
+  so an operator holding the key where the rest of the workspace looks for it
+  (`LINEAR_API_KEY` in the environment, `.env.local`, the OS keychain) could not
+  collect until they hand-edited YAML. Config stays the first tier; when it is
+  silent or expands to empty, resolution falls through to
+  `trusty_common::credentials::resolve_key("linear")`. No CLI is involved on
+  this path, and the error now names every place the key may live.
+- **A test invocation that ran nothing is refused (#4307)** — `cargo test` with
+  a filter matching zero tests exits 0 and prints `ok`, so a filter derived from
+  a `#[path]` module's FILE name reports green having proved nothing.
+  `scripts/check_test_count.sh` wraps a test invocation, sums its
+  `running N tests` lines, and fails when the aggregate across the invocation is
+  zero, passing the command's own exit status through otherwise.
+  `.github/workflows/test-count.yml` runs it against two real cargo invocations
+  each build, alongside `scripts/check_test_count_selftest.sh`'s fixtures.
+- **#4251 needed no change** — the Tier-3/4 fuzzy-fallback gate it asks for
+  landed in PR #4291 (`IdentityResolver::fuzzy_fallback`, the
+  `fuzzy_identity_fallback` config key, and the `ISSUE_4251_MISATTRIBUTIONS`
+  reproduction in `resolver_tests`). Recorded here because the issue was in this
+  batch; the code is unchanged.
+- Identity resolution no longer varies between runs on identical input: canonical members are kept sorted by `(canonical_email, canonical_name)` instead of `HashMap` iteration order, and an exact fuzzy-score tie breaks on that same key rather than on arrival order (#4293).
+- An alias claimed by two canonical identities now goes to the first claimant in a stable order and logs a warning, instead of silently going to whichever identity was written last. This applies to both constructors — sorted canonical-name order for a `developer_aliases` map, sorted `(email, name)` member order for a `team:` config, where member canonical emails and member aliases both still outrank a free-form `team.aliases` entry (#4293).
+- Six config credentials no longer serialize in the clear. `LinearConfig.api_key`, `GithubConfig.token`, `JiraConfig.token`, `BitbucketConfig.app_password` and `.token`, `AzureDevOpsConfig.pat`, and `ClassificationConfig.openrouter_api_key` were written verbatim by a derived `Serialize`, so `serde_json`/`serde_yaml`/`toml` of a config section — or of the whole `Config`, which embeds all of them — put live tokens into a file, a manifest, or a response body. #5770 fixed the `Debug` half of this; this is the half that reaches disk. Each struct now has a hand-written `Serialize` in `core::config::credential_serialize` that writes every non-credential field unchanged and writes the credential as the fixed `<redacted>` marker — the same constant and the same mask helpers the `Debug` impls use, so the two paths cannot drift. An unset `Option` still serializes as null, so "is a credential configured at all" survives redaction. Every impl destructures `Self` exhaustively with no `..`, so a field added to any of these structs fails compilation until the impl names it, and a field named but not written trips `unused_variables` under `-D warnings`. The consequence is deliberate and one-way: a serialized config read back carries the literal `<redacted>` where a credential was. Nothing in this workspace writes a config out today, and the marker authenticates with no provider, so a future reload fails at authentication rather than silently as the wrong identity.
+- The authorship artifact's monthly trajectory counts commits per month, not
+  file touches ([#6082](https://github.com/bobmatnyc/trusty-tools/issues/6082)).
+  The source query joins `files`, so it returns one row per file a commit
+  touched, and the month counter incremented once per row. On a repository
+  whose commits average ten files each, a month with 824 commits reported 9416.
+  `active_authors` was always a distinct-set count and is unchanged.
+- **GitHub collection is bounded under secondary rate limits (#6084)** — both
+  fetch paths could sustain a 429 storm indefinitely: PR-review collection
+  retried each of 2625 pull requests on a fixed 1s/2s/4s ladder that never read
+  `Retry-After`, and `fetch_on_reference` (default `true`) issued one Issues-API
+  call per unique `#N` in commit history — 3681 of them on this repository —
+  swallowing each rate-limit response as "this issue carries no classification
+  signal". Nothing carried state between requests, so every remaining item paid
+  four more rejected calls; a self-audit sat in that loop for 45+ minutes. Both
+  paths now share a run-wide `FetchBudget`: `Retry-After` (and a drained
+  `x-ratelimit-remaining`) drives the wait, each wait is clamped to 60s and
+  charged against a 120s per-run allowance, and exhausting the allowance latches
+  a breaker so every later call fails immediately without sending a request.
+  Paginated walks stop at 100 pages and reference lookups at 500 per batch.
+  Every cap and every early stop is reported — as a `CollectionFault` on the PR
+  and reviewer passes, and as `IssueBatch::stopped_early` on the reference path —
+  so a trimmed result is never presented as a complete one. A rate-limited
+  reference is no longer cached as a resolved "no signal".
+- `tga audit` indexes each repository under the per-checkout id
+  `trusty_common::derive_checkout_index_id` derives, the same function
+  trusty-review's renderer now calls, instead of a copy of the basename rule.
+  Two checkouts of one repository used to collide on a single id, so the sweep
+  indexed one tree and the renderer read the other's measurements. The agreement
+  between the two crates is a call now rather than a copied rule.
+- `tga audit --output <dir>` folds its manifest into a `manifest.toml` that is
+  already there instead of replacing the file. trusty-audit's grounding pass
+  writes `inspect_priority`, `crate_topology`, and the `investigate_*` budget
+  into that same file, and a second `tga audit` into a live engagement used to
+  discard all of it silently — one run collapsed from 226 findings to 31. tga
+  now rewrites only the keys it produces; an existing manifest it cannot parse
+  is refused rather than overwritten.
+- **Credentials resolve through a lookup the caller supplies, not the process
+  environment (#6405)** — 42 `set_var`/`remove_var` sites across ten files
+  mutated the environment while 50+ reader threads, plus reqwest and rustls,
+  called `getenv` under `cargo test -p tga`. `setenv` can reallocate the
+  environment array mid-`getenv`, the likely mechanism behind the #2613 SIGSEGV.
+  Every JIRA, GitHub Issues, Linear, Shortcut, Confluence and Datadog fetch
+  helper now has a `_with_creds` variant carrying a `CredentialSource`, and
+  `ExternalSourceResolver` threads one through `resolve` and `warm_cache`; the
+  LLM tier's `from_provider` and `from_llm_config` take one too. Every existing
+  public function keeps its signature and delegates with the environment-backed
+  lookup, so no caller changes. `marker_file_path` and `resolve_db_path` take
+  their variable's value as a parameter, retiring a module-local mutex and three
+  `#[serial]` attributes. One site remains, in `batch_reviewer_tests`, because
+  the env tier it exercises lives in `trusty_common` and takes no lookup — it
+  stays `#[serial]` with that reason recorded at the call site.
+
+### Changed
+
+- The trusty-search socket is derived from `trusty_common::daemon_socket_path("trusty-search")`, the same call the daemon binds, rather than read from its `http_addr` discovery file. There is no address to discover and nothing published between the two for a stale write to contradict. `TRUSTY_SEARCH_SOCKET` pins it explicitly for a rig that started its own daemon — the same variable trusty-mpm and trusty-audit read.
+- The refusal names the socket and points at `TRUSTY_SEARCH_SOCKET` rather than `TRUSTY_DATA_DIR`, so an operator reading it can act on the address the guard actually dialled. A daemon that answers and refuses the health call is still refused: only a result frame counts as reachable, so an RPC error can never read as a live daemon.
+- `tga audit`'s analyze guard dials trusty-analyze's Unix socket instead of
+  port 7879 (#6287, ADR-0032), and spawns a bare `serve` — the daemon derives
+  its socket path, so passing one would start a daemon the renderer does not
+  dial.
+- The health verdict is now explicit. Under HTTP a degraded daemon answered 503
+  and failed the probe for free; a JSON-RPC health call answers with a result
+  frame either way, so the guard reads `status` and accepts only `"ok"`. That
+  keeps the audit's trusty-search dependency hard on every run rather than only
+  on a fresh spawn.
+- Version skipped from 4.0.1 to 4.0.2 with no code change, and tga's row in
+  `scripts/semver-checks-crate-exclusions.tsv` is removed. The row claimed no
+  workspace package links tga as a library; #6294 made tga a dev-dependency of
+  trusty-analyze, so the gate refused the skip and `check_semver.sh --crate tga`
+  exited 3 with no verdict on every tga branch. tga is compared against the
+  registry like any other crate now. The `tga-v4.0.1` tag is pinned to the
+  commit that predates this fix, and #6178 makes a release tag here immovable,
+  so 4.0.1 is spent.
+
 ## [3.2.0] — 2026-08-19
 
 ### Fixed

@@ -6,6 +6,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.5.14] — 2026-08-31
+
+### Fixed
+
+- `clear_pause_in` now reclaims the `~/.trusty-mpm/sessions/<id>/` directory it emptied instead of leaving a permanent empty holder behind, and the daemon's orphan-GC loop sweeps the existing backlog once per tick. The sweep is fail-closed and non-recursive: it removes only a directory whose name is a session UUID in the hyphenated spelling `save_pause_in` actually writes, and whose listing is completely empty, using `remove_dir` so the kernel refuses anything that gained content between the check and the removal (#4323).
+- The sweep is scoped to the daemon's own `state.framework_root()` and runs below the `host_state_refusal` gate. Resolving `dirs::home_dir()` above that gate let a scratch-rooted daemon delete empty session directories out of the operator's real `~/.trusty-mpm/sessions/` — the #6348 quadrant, where a test process inherits the real `$HOME`. There is no home-resolving wrapper any more; the caller names the directory it owns (#4323).
+- The orphaned-worktree sweep logs one classification-count line per sweep instead of one line per candidate path. The owner-unknown, agent-owned and owner-still-live arms fire on every 60s tick for a backlog that is durable by design, which put 208,308 identical lines (61 MB) into a single day's log; the per-path detail is now at `debug` and the counts, including the owner-still-live arm nothing previously reported, are in the summary line (#4323).
+- `a_changed_roster_changes_the_resolved_prompt` (was `resolve_pm_prompt_wrapper_matches_the_source_reporting_form`) no longer scans the live `~/.claude/agents` tiers twice and compares the results — a concurrent change between the two scans failed the test for reasons unrelated to the code under test. It pins the roster through the `resolve_pm_prompt_with_roster` seam and asserts the half nothing else covers: a different roster produces a different prompt (#4766).
+- the managed-routes staleness probe takes its framework base as an argument all the way up to `checked_summaries` and `record_to_summary_checked`, so no test of that path redirects the process-global `$HOME` any more. Six unit tests and the `#[ignore]`d staleness benchmark previously pointed `$HOME` at a temp dir behind an RAII restore guard; the guard IS the race, because a concurrently-running test that reads live `$HOME` sees the temp dir between the write and the restore, and `#[serial_test::serial]` orders `#[serial]` tests only against each other (and under `cargo nextest`'s per-test processes, against nothing). Production resolution is unchanged — `checked_summaries`, `checked_summaries_with` and `record_to_summary_checked` keep their signatures and pass `FrameworkPaths::home_base()` — and the `$HOME`-reading `stale_assets_for_many` wrapper is gone, its callers now passing the base explicitly (#5040)
+- `parity_doctor_agrees_across_transports` no longer flakes when a concurrent managed session writes `sessions.json` between its two transport reads: the `session_store` doctor check's live-sampled message (record count and byte length) now joins `worktree_disk`/`worktrees` in the parity comparison's host-sampled allowlist, while its status is still compared so a real cross-transport verdict divergence still fails (#6490).
+
+### Changed
+
+- Every tm-managed Claude Code launch now provisions `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` by default, so a managed pane starts on the classic renderer and keeps both native terminal scrollback and tmux copy-mode history ([#6495](https://github.com/bobmatnyc/trusty-tools/issues/6495)). The fullscreen renderer captures the mouse wheel, which operators reported as "one window that will not scroll". The new `core::alt_screen` module carries the single default: the shell launch lines (`runtime::claude_code::env_bin_prefix` for the daemon spawn/resume panes, `core::model_inject`'s `build_claude_command_with`, `build_inplace_session_command` and `build_client_session_command`) emit the `${NAME-1}` `env` operand, and the exec paths (the bare-`tm` in-place relaunch, `tm run`) set it on the `Command`. An operator value already present in the launch environment is never overridden, and tm writes the variable into no settings file.
+
 ## [1.5.13] — 2026-08-31
 
 ### Changed

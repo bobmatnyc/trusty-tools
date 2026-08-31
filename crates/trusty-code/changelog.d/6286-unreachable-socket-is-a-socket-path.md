@@ -1,3 +1,0 @@
-Fixed
-
-- The catch-up tests' unreachable-daemon constant is a socket path. `UNREACHABLE_MEMORY_SOCKET` still held `"http://127.0.0.1:1"` after the trusty-memory HTTP-to-UDS migration; `pm_catchup_context_with_socket` takes a `PathBuf`, so that string coerced into the working-directory-relative path `http:/127.0.0.1:1`. The dial failed either way, but by accident of the working directory rather than by the guarantee the doc comment claimed. It now uses `/nonexistent/trusty-memory/trusty-memory.sock`, the same literal `memory_rpc::UNREACHABLE_PLACEHOLDER` and `run_task::tests::isolate_ambient_daemons` use ([#6286](https://github.com/bobmatnyc/trusty-tools/issues/6286))

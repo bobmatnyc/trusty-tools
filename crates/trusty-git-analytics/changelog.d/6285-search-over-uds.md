@@ -1,2 +1,0 @@
-Breaking
-- `SearchGuard::url: String` is now `SearchGuard::socket: PathBuf`, and `SearchDaemonUnavailable::url` is now `SearchDaemonUnavailable::socket`. `tga audit`'s trusty-search preflight speaks framed JSON-RPC over the daemon's Unix socket (`search.health`) rather than probing `GET /health` over loopback HTTP, so the field that named an address now names a path. A caller constructing either type by hand updates the field; `SearchGuard::from_env()` is unchanged.

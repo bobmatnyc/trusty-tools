@@ -6,6 +6,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.46.3] — 2026-08-31
+
+### Added
+
+- `daemon_token` (behind the new `daemon-token` feature): the local-client credential a loopback daemon and its clients share through a `0600` file. `ensure_token` reads or mints one on the server side and publishes it atomically (tmp-plus-rename, so a concurrent reader never sees an empty file and two daemons starting together cannot overwrite each other's mint); `read_token` is the best-effort client side; `credentials_match` is the constant-time comparison every verifier must use instead of `==`, and refuses an expected value below `MIN_TOKEN_LEN` so an empty credential can never authenticate a bare `Authorization: Bearer `. A `0600` file is an OS-user and browser-origin boundary, not isolation from an untrusted process running as the same uid — the module's honesty clause says so, and callers must not describe it as more ([#5439](https://github.com/bobmatnyc/trusty-tools/issues/5439))
+- `daemon_token::url_targets_loopback` and `daemon_token::credential_for`: the one gate and the one resolution path every client uses. The gate parses with WHATWG rules (the `url` crate) and rejects any userinfo, because `server::origin_guard::origin_is_loopback` reads an `Origin` HEADER — it splits the authority at the first `:` and so reads `http://127.0.0.1:7882@attacker.example` as loopback, while the HTTP client dialling that URL reaches `attacker.example`. Resolving through one function also removes the second copy of the loopback-gate/override/file-read sequence that each consuming crate had grown ([#5439](https://github.com/bobmatnyc/trusty-tools/issues/5439))
+- `server::bearer_auth` (with `daemon-token` and `axum-server` both on): the router-wide `require_bearer` guard the origin guard deliberately is not. `guard_write_origin` passes every request that sends no `Origin` at all, so a loopback daemon still served any local process; this adds the caller check. `DaemonAuth::new` names the paths that stay public and refuses a credential below `MIN_TOKEN_LEN` outright, so a weak token is a visible startup failure rather than a daemon that `401`s every real client. Its SSE tickets — for browser `EventSource`, which cannot send an `Authorization` header — are single-use, expire in 30 seconds, and are bound at issue time to one path and the `GET` method, so a ticket read from a trace log buys that one stream rather than an arbitrary authenticated request ([#5439](https://github.com/bobmatnyc/trusty-tools/issues/5439))
+
+### Fixed
+
+- Catch-up's watermark read and write take a `state_root` override, so a test can point the `.trusty-mpm` framework root at a temp directory. `run_catchup(&opts, true)` resolved `~/.trusty-mpm/projects/<palace-id>/` from the home directory with no seam, and the palace id derives from the project directory — so every test exercising the advancing path left one more directory in the operator's real state dir (39,749 of 39,910 were test artifacts, one carrying a `2099-01-01` watermark). `load_catchup_state` and `save_catchup_state` gain the parameter; `run_catchup_in`, `generate_catchup_context_in` and `generate_catchup_json_in` are the base-taking entry points, with the existing three unchanged and delegating with `None` (#4323).
+
 ## [0.46.2] — 2026-08-31
 
 ### Fixed

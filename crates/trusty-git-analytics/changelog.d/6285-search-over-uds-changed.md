@@ -1,3 +1,0 @@
-Changed
-- The trusty-search socket is derived from `trusty_common::daemon_socket_path("trusty-search")`, the same call the daemon binds, rather than read from its `http_addr` discovery file. There is no address to discover and nothing published between the two for a stale write to contradict. `TRUSTY_SEARCH_SOCKET` pins it explicitly for a rig that started its own daemon — the same variable trusty-mpm and trusty-audit read.
-- The refusal names the socket and points at `TRUSTY_SEARCH_SOCKET` rather than `TRUSTY_DATA_DIR`, so an operator reading it can act on the address the guard actually dialled. A daemon that answers and refuses the health call is still refused: only a result frame counts as reachable, so an RPC error can never read as a live daemon.
