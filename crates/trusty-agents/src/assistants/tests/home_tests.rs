@@ -106,7 +106,11 @@ fn two_instances_get_separate_homes() {
     assert_eq!(cto.okg_dir(), root.join("cto-assistant").join(OKG_DIR));
 }
 
+// #4611: `EnvVarGuard`'s own safety comment assumes this serialization. A
+// sibling clearing `ASSISTANTS_DIR_ENV` mid-body sent `for_instance` to the
+// real `$HOME` root — 5 failures in 40 parallel runs before this line.
 #[test]
+#[serial]
 fn for_instance_validates_the_id() {
     let tmp = tempfile::tempdir().unwrap();
     let _guard = EnvVarGuard::set(ASSISTANTS_DIR_ENV, tmp.path());

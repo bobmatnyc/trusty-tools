@@ -544,7 +544,9 @@ pub async fn run_pm_task_with_history(
         allowed_tools,
         pm_cfg.llm.temperature,
         pm_cfg.llm.max_tokens,
-        4,
+        // #3835: was a hardcoded `4` — the literal #3806 already replaced on
+        // the persona path.
+        delegation_max_turns(&pm_cfg.llm),
         false,
         None,
         false,
@@ -646,6 +648,24 @@ fn ctrl_delegate_posture(
         .map(|s| s.to_string())
         .collect();
     (Some(taint), Some(roles), declared_tier)
+}
+
+/// Effective `max_turns` ceiling for `run_pm_task_with_history`'s tool-armed
+/// delegation call.
+///
+/// Why: #3835 — this call site hardcoded `4`, the same literal #3806 replaced
+/// on the persona path after a turn doing two sequential tool calls plus a
+/// summary exhausted the budget and failed with `chat_with_tools exceeded
+/// max_turns`. This path backs Slack/Telegram/API delegation, where multi-tool
+/// asks are routine, so it reads the same config field rather than its own
+/// literal.
+/// What: Defers to `persona_gate::persona_max_turns` with `has_tools = true` —
+/// the registry at this call site is always tool-armed. Honours
+/// `[llm].persona_max_turns` when declared, else 8.
+/// Test: `delegation_max_turns_defaults_to_eight_not_four`,
+/// `delegation_max_turns_honors_config_override`.
+fn delegation_max_turns(llm: &crate::agents::LlmParams) -> u32 {
+    super::persona_gate::persona_max_turns(true, llm)
 }
 
 /// Compute `chat_with_tools_gated`'s `allowed_tools` argument from an

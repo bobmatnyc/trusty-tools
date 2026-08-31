@@ -29,15 +29,18 @@ Exact input schemas live in `manifest.json`, which
 one `ToolExecutor` per tool and register them (via `AgentPlugin` +
 `install_plugins`) against the `cto-assistant` persona declared above.
 
-## Data source — FIXTURE by default, read this before trusting a number
+## Data source — read this before trusting a number
 
-By default this skill queries a **fixture** SQLite database
-(`python/fixtures/cto_fixture.db`) containing invented sample data. The
-real database (`~/Duetto/cto/data/cto.db`, a Duetto-internal file on Bob's
-machine) is not reachable from this environment. Set `CTO_DB_PATH` to the
-real file's path to use it instead — see `python/README.md` for details.
-Every response should be treated as fixture output until that swap is made
-and verified.
+This skill refuses to answer unless a database is configured (#4860). Set
+`CTO_DB_PATH` to the real database (`~/Duetto/cto/data/cto.db`, a
+Duetto-internal file on Bob's machine, not reachable from this environment).
+Setting `CTO_DB_USE_FIXTURE=1` instead serves a bundled **fixture**
+(`python/fixtures/cto_fixture.db`) of invented sample data — useful for tests
+and local development, never a source of real figures. With neither set, all
+four tools return a JSON error rather than a fabricated answer.
+
+Every successful response carries `db_path` and `is_fixture`, so fixture
+output stays identifiable. See `python/README.md` for details.
 
 ## Invocation contract
 

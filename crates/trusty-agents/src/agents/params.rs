@@ -294,10 +294,12 @@ pub struct LlmParams {
     /// routinely exhausted the 4-turn budget and failed with
     /// `chat_with_tools exceeded max_turns`. This field lets an operator raise
     /// the tool-using-persona ceiling per agent without a rebuild.
-    /// What: Only consulted by `dispatch::persona::persona_max_turns` for the
+    /// What: Consulted by `dispatch::persona_gate::persona_max_turns` for the
     /// tool-using branch; the no-tools branch is unaffected (stays 2). When
     /// `None` (default), that branch uses 8 turns — raised from the prior
-    /// hardcoded 4.
+    /// hardcoded 4. #3835: `dispatch::history::delegation_max_turns` reads it
+    /// through the same function for the ctrl/Slack/Telegram/API delegation
+    /// turn, which carried its own hardcoded 4 until then.
     /// Test: `llm_params_persona_max_turns_defaults_to_none`,
     /// `llm_params_persona_max_turns_parses_override` (`tests.rs`);
     /// `persona_max_turns_with_tools_defaults_to_eight`,

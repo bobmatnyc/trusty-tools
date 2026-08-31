@@ -360,3 +360,52 @@ fn ctrl_delegate_posture_assistant_role_always_gates_target_roles() {
         "controller must NOT be a directly delegatable role, got: {roles:?}"
     );
 }
+
+// --- #3835: the tool-armed delegation turn budget ------------------------
+
+/// Builds a minimal parsed `LlmParams`, optionally declaring
+/// `persona_max_turns`, for the `delegation_max_turns` tests below.
+fn llm_params(persona_max_turns: Option<u32>) -> crate::agents::LlmParams {
+    let override_line = persona_max_turns
+        .map(|v| format!("persona_max_turns = {v}"))
+        .unwrap_or_default();
+    let toml_str = format!(
+        r#"
+[agent]
+name = "ctrl"
+role = "controller"
+model = "x"
+description = "x"
+
+[llm]
+temperature = 0.0
+max_tokens = 1024
+{override_line}
+
+[system_prompt]
+content = "base"
+"#
+    );
+    let cfg: crate::agents::AgentConfig = toml::from_str(&toml_str).expect("parses");
+    cfg.llm
+}
+
+/// #3835: the delegation call site hardcoded `4`, so a Slack/Telegram ask
+/// needing two sequential tool calls plus a summary died on
+/// `chat_with_tools exceeded max_turns`. It now inherits the same budget
+/// #3806 gave the persona path.
+#[test]
+fn delegation_max_turns_defaults_to_eight_not_four() {
+    let llm = llm_params(None);
+    let turns = super::delegation_max_turns(&llm);
+    assert_ne!(turns, 4, "the pre-#3835 hardcoded ceiling must be gone");
+    assert_eq!(turns, 8);
+}
+
+/// An operator can retune the ceiling via `[llm].persona_max_turns` without a
+/// rebuild — the whole point of sourcing it from config.
+#[test]
+fn delegation_max_turns_honors_config_override() {
+    assert_eq!(super::delegation_max_turns(&llm_params(Some(12))), 12);
+    assert_eq!(super::delegation_max_turns(&llm_params(Some(3))), 3);
+}

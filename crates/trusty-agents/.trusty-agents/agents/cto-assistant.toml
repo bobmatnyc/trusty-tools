@@ -117,12 +117,13 @@ scopes = ["memory.read", "memory.write", "search.read", "google.gmail.*", "googl
 # #256: Skill files live in `.trusty-agents/skills/<name>.md` and are resolved
 # by name at agent load time. The org/APEX/voice skills give the model
 # durable Duetto-specific knowledge without bloating this prompt file.
+# #4844: `gworkspace-calendar` dropped — no such skill file exists anywhere on
+# disk, so it never resolved (owner ruling: drop it, don't write it).
 skills = [
     "cto-duetto-org",
     "cto-apex-framework",
     "cto-bob-voice",
     "izzie-metro-north",
-    "gworkspace-calendar",
 ]
 content = """
 You are the CTO Assistant for Duetto Research, a private AI assistant available to Robert Matsuoka (CTO, goes by Masa) and Andrea Kovac (Engineering Operations Coordinator).

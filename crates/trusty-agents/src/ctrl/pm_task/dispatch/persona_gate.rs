@@ -184,6 +184,9 @@ pub(super) const DEFAULT_PERSONA_TOOL_MAX_TURNS: u32 = 8;
 /// Test: `persona_max_turns_no_tools_is_two`,
 /// `persona_max_turns_with_tools_defaults_to_eight`,
 /// `persona_max_turns_with_tools_honors_config_override`.
+///
+/// #3835: `history::delegation_max_turns` is the second caller — the
+/// ctrl/Slack/Telegram/API delegation turn, always `has_tools = true`.
 pub(super) fn persona_max_turns(has_tools: bool, llm: &crate::agents::LlmParams) -> u32 {
     if !has_tools {
         return 2;
