@@ -260,7 +260,7 @@ export async function rehydrateChat(
  * Why: the owner's volume requirement pairs a bounded initial load with lazy
  * loading of older turns on demand — without this, a bounded load is just
  * truncation. Driven by `ChatView`'s "Load earlier messages" control, which
- * renders off `chatHistoryCursor.hasMore`.
+ * renders off `canLoadOlderChat`.
  * What: takes no target — the cursor names the agent, the speaker, and the
  * bucket, so this cannot page one conversation into another's view. Gated on
  * `canLoadOlderChat`, so a cursor left over from a different agent or project
