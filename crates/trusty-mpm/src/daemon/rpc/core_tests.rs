@@ -22,11 +22,16 @@
 //!   reconciled inventory classified — "14 live, 265 not reclaimable" on one
 //!   call and "266" on the next, because every agent on the machine adds and
 //!   removes worktrees while the test runs (#6358).
+//! - the `session_store` check's `message`, which reports the live record count
+//!   and byte length of `~/.trusty-mpm/session-manager/sessions.json` — "43
+//!   session record(s), 59773 byte(s)" on one call and "44 … 60950" on the
+//!   next, because a concurrent managed session writes that file between the two
+//!   reads (#6490).
 //!
-//! Both worktree probes rescan the host's live worktree tree per call, which is
-//! what makes their two messages the only host-sampled strings in the report.
-//! Their `name` and `status` are still compared, so a check that vanished or
-//! changed verdict between the transports still fails — see
+//! All three probes sample host state the daemon re-reads per call, which is
+//! what makes their messages the only host-sampled strings in the report. Their
+//! `name` and `status` are still compared, so a check that vanished or changed
+//! verdict between the transports still fails — see
 //! [`HOST_SAMPLED_MESSAGE_CHECKS`] and [`blank_host_sampled_messages`].
 //!
 //! Nothing else is excused. Every other method is compared whole, `pid`
@@ -349,21 +354,31 @@ async fn parity_doctor_agrees_across_transports() {
     );
 }
 
-/// The doctor checks whose `message` samples live host state, by name (#6358).
+/// The doctor checks whose `message` samples live host state, by name (#6358,
+/// #6490).
 ///
-/// Why exactly these two: both rescan the machine's worktree tree on every
-/// call, and both put what that scan found into their message —
-/// `worktree_disk` reports how far it got against a 3-second deadline
-/// ("6.2 GiB … 268 worktree(s) went unmeasured" on one call, "6.8 GiB … 267" on
-/// the next), and `worktrees` reports the reconciled inventory's counts
-/// ("14 live, 265 not reclaimable" against "266"). Both strings therefore
-/// change whenever an agent elsewhere on the machine adds or removes a
-/// worktree between this test's two calls, which is the PROBE varying, not the
-/// transports disagreeing. Every other check's message reads config on disk or
-/// a daemon's own answer, and is compared whole.
+/// Why exactly these three: each puts live host state the daemon re-reads per
+/// call into its message. `worktree_disk` reports how far it got against a
+/// 3-second deadline ("6.2 GiB … 268 worktree(s) went unmeasured" on one call,
+/// "6.8 GiB … 267" on the next) and `worktrees` reports the reconciled
+/// inventory's counts ("14 live, 265 not reclaimable" against "266"), both
+/// changing whenever an agent elsewhere on the machine adds or removes a
+/// worktree between this test's two calls. `session_store` reports the record
+/// count and byte length of `sessions.json` ("43 session record(s), 59773
+/// byte(s)" against "44 … 60950"), which change whenever a concurrent managed
+/// session writes that file between the two reads (#6490). All three are the
+/// PROBE varying, not the transports disagreeing. Only the MESSAGE is host-
+/// sampled: each check's `status` is a stable verdict (`session_store` stays
+/// `Ok` while only its counts churn), so it is still compared — a store that
+/// went `Fail` over one transport but not the other is a real finding this
+/// test must still catch. Every other check's message reads config on disk or a
+/// daemon's own answer, and is compared whole.
 /// What: the names [`blank_host_sampled_messages`] blanks.
-/// Test: [`parity_doctor_agrees_across_transports`].
-const HOST_SAMPLED_MESSAGE_CHECKS: &[&str] = &["worktree_disk", "worktrees"];
+/// Test: [`parity_doctor_agrees_across_transports`],
+/// [`session_store_message_is_excluded_from_parity_but_its_status_is_not`].
+const HOST_SAMPLED_MESSAGE_CHECKS: &[&str] =
+    // #6490: session_store's message samples sessions.json's live record count.
+    &["worktree_disk", "worktrees", "session_store"];
 
 /// Blank each [`HOST_SAMPLED_MESSAGE_CHECKS`] message, keeping name and status.
 ///
@@ -395,6 +410,58 @@ fn blank_host_sampled_messages(mut report: Value) -> Value {
         );
     }
     report
+}
+
+/// Pin what adding `session_store` to the allowlist bought (#6490): its live-
+/// sampled MESSAGE is dropped from the parity comparison, while its STATUS is
+/// not — so the count/bytes churn that flaked the test is excused, but a genuine
+/// cross-transport verdict divergence still fails.
+///
+/// Why a hand-built pair rather than the live parity test: the flake needs
+/// another process to write `sessions.json` between the two reads, which cannot
+/// be forced deterministically. Feeding [`blank_host_sampled_messages`] two
+/// reports directly reproduces both the churn (message differs, status same) and
+/// the real break (status differs) with no host dependency, and proves the
+/// exclusion is not vacuous — the exact bar #6358's fix was held to.
+/// Test: this function IS the test.
+#[test]
+fn session_store_message_is_excluded_from_parity_but_its_status_is_not() {
+    // Every host-sampled check is present, so the presence assertion inside
+    // `blank_host_sampled_messages` is satisfied and only the exclusion is tested.
+    let report = |session_store_status: &str, session_store_message: &str| {
+        json!({
+            "checks": [
+                {"name": "worktree_disk", "status": "ok", "message": "6.2 GiB measured"},
+                {"name": "worktrees", "status": "ok", "message": "14 live, 265 not reclaimable"},
+                {"name": "session_store", "status": session_store_status, "message": session_store_message},
+            ]
+        })
+    };
+
+    // The #6490 case: a concurrent session grew `sessions.json` between the two
+    // reads, so only the message differs. After blanking, the transports agree.
+    let http = blank_host_sampled_messages(report(
+        "ok",
+        "…/sessions.json loads cleanly — 43 session record(s), 59773 byte(s)",
+    ));
+    let socket = blank_host_sampled_messages(report(
+        "ok",
+        "…/sessions.json loads cleanly — 44 session record(s), 60950 byte(s)",
+    ));
+    assert_eq!(
+        http, socket,
+        "a session_store message that churned between the reads must not fail parity"
+    );
+
+    // Non-vacuous: a real verdict divergence survives the blanking, so the
+    // parity assertion still fails on it. A store one transport called healthy
+    // and the other called corrupt is a finding, not noise.
+    let http = blank_host_sampled_messages(report("ok", "loads cleanly"));
+    let socket = blank_host_sampled_messages(report("fail", "loads cleanly"));
+    assert_ne!(
+        http, socket,
+        "a session_store STATUS divergence must still fail parity"
+    );
 }
 
 /// Why an unknown fingerprint: it exercises the whole route — argument decode,
