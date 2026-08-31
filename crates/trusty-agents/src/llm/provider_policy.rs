@@ -12,7 +12,10 @@
 //! hardcoded per template, which would have to be re-decided in seven files
 //! and re-applied after every reprovision.
 //! What: the `[providers] default_provider_id` key of the crate's existing
-//! operator config (`~/.trusty-agents/config.toml`). UNSET is the default and
+//! operator config (`~/.trusty-agents/config.toml`), modelled as a typed
+//! section on [`crate::mcp::GlobalConfig`] alongside `[mcp]`, `[git]` and the
+//! rest — never parsed independently, because `GlobalConfig::save()` drops
+//! whatever it does not declare. UNSET is the default and
 //! means "keep today's ambient behaviour, byte for byte". When set, it is
 //! adopted as the `provider_id` of every agent that declares neither a pin nor
 //! a provider in its model slug ([`applies_to`]), which routes it through the
@@ -60,32 +63,27 @@ pub fn applies_to(declared_provider_id: Option<&str>, model: &str) -> bool {
 
 /// Extract `[providers] default_provider_id` from an operator config body.
 ///
-/// Why: the parse is separated from the file read so the policy's meaning can
-/// be tested without touching `$HOME` — a process-global mutation that would
-/// leak a policy into every other test loading an agent concurrently.
+/// Why: reads through [`GlobalConfig`] — the crate's one modelled schema for
+/// this file — rather than a private struct of its own. A second parser would
+/// work for reading and silently lose the key on every write:
+/// `GlobalConfig::save()` re-serializes only its declared fields, so any
+/// unrelated mutator (`/local on`, `mcp_add`) would drop an unmodelled
+/// `[providers]` table from disk. Keeping the function itself pure over a
+/// string also lets the policy's meaning be tested without redirecting the
+/// process-global `$HOME`, which would leak a policy into every other test
+/// loading an agent concurrently.
 /// What: returns the trimmed value, or `None` for an absent table, an absent
-/// key, a blank value, or a body that does not parse. Failing SOFT here is
+/// key, a blank value, or a body that does not parse. Failing SOFT is
 /// deliberate and is not a hole: an unreadable config yields "no policy", i.e.
 /// today's ambient behaviour, whereas a policy that IS read but names an
 /// unusable provider still fails closed at
-/// [`crate::llm::provider_pin::resolve`]. Unknown keys are ignored so this
-/// composes with the rest of `config.toml`, matching every other section
-/// loader in this crate.
+/// [`crate::llm::provider_pin::resolve`].
 /// Test: `parse_reads_the_configured_provider`, `parse_ignores_other_tables`,
 /// `parse_treats_a_blank_value_as_unset`, `parse_tolerates_a_malformed_body`.
+///
+/// [`GlobalConfig`]: crate::mcp::GlobalConfig
 pub fn parse(config_toml: &str) -> Option<String> {
-    #[derive(serde::Deserialize, Default)]
-    struct Providers {
-        #[serde(default)]
-        default_provider_id: Option<String>,
-    }
-    #[derive(serde::Deserialize, Default)]
-    struct Wrapper {
-        #[serde(default)]
-        providers: Providers,
-    }
-
-    toml::from_str::<Wrapper>(config_toml)
+    crate::mcp::GlobalConfig::from_toml_str(config_toml)
         .ok()?
         .providers
         .default_provider_id

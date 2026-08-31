@@ -38,7 +38,9 @@ use serde::{Deserialize, Serialize};
 
 use defaults::DEFAULT_CONFIG_TOML;
 
-pub use types::{GitConfig, LocalInferenceConfig, McpSection, McpService, McpTool};
+pub use types::{
+    GitConfig, LocalInferenceConfig, McpSection, McpService, McpTool, ProvidersSection,
+};
 
 /// Roots of the global config tree (`~/.trusty-agents/config.toml`).
 const CONFIG_DIR_NAME: &str = ".trusty-agents";
@@ -110,6 +112,21 @@ pub struct GlobalConfig {
     /// `crate::tools::registry::tests::builder_with_no_endpoints_returns_empty`.
     #[serde(default)]
     pub tool_registry: Option<crate::tools::registry::config::ToolRegistryConfig>,
+
+    /// `[providers]` section (#3766) — the default inference provider for
+    /// agents that declare no pin of their own.
+    ///
+    /// Why: this section MUST be modelled here, not parsed independently.
+    /// `save()` re-serializes only the fields declared on this struct, so a
+    /// `[providers]` table it does not know about is dropped from disk by any
+    /// unrelated write — `/local on` and the four `mcp_*` mutators all
+    /// load-mutate-save.
+    /// What: see [`ProvidersSection`]. Absent means unset, which is today's
+    /// ambient behaviour.
+    /// Test: `providers_section_survives_an_unrelated_save`,
+    /// `providers_section_defaults_to_unset`.
+    #[serde(default)]
+    pub providers: ProvidersSection,
 
     /// `[[listeners]]` — harness-level eventstream listener definitions
     /// (#3820, DOC-54 SPEC-AGENTS-06 §7.5), stage-one (ingestion) filter.

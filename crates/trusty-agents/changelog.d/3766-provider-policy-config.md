@@ -16,3 +16,5 @@ Added
   message naming the config key — and it lives in the operator config rather
   than in the template files, so refreshing a bundled template cannot revert
   it. Leaving the key unset keeps the previous ambient behaviour exactly.
+  `[providers]` is a typed section of `GlobalConfig`, so `/local on|off` and
+  the `mcp_*` tools preserve it when they rewrite the file.
