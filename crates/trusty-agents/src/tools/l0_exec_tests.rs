@@ -411,3 +411,33 @@ fn l0_grant_does_not_alias_an_existing_shell_tool_name() {
         );
     }
 }
+
+/// #4520: the execution-grant name predicate matches the shell grant and
+/// nothing else, so the wildcard-exclusion classifier that reads it stays
+/// scoped to the privileged surface.
+#[test]
+fn is_l0_execution_tool_matches_the_shell_grant() {
+    assert!(is_l0_execution_tool(L0_SHELL_EXEC));
+    assert!(!is_l0_execution_tool("web_search"));
+    assert!(!is_l0_execution_tool("gh_pr_view"));
+    assert!(!is_l0_execution_tool("run_bash"));
+}
+
+/// #4520: `L0_EXECUTION_TOOL_NAMES` must name exactly what
+/// `l0_execution_tools` constructs for an L0 agent, so the wildcard-exclusion
+/// set can never drift from the tools actually registered.
+#[test]
+fn l0_execution_tool_names_match_the_factory_output() {
+    let mut produced: Vec<String> =
+        l0_execution_tools(AgentTier::L0Orchestration, PathBuf::from("."))
+            .iter()
+            .map(|t| t.name().to_string())
+            .collect();
+    produced.sort_unstable();
+    let mut expected: Vec<String> = L0_EXECUTION_TOOL_NAMES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    expected.sort_unstable();
+    assert_eq!(produced, expected);
+}

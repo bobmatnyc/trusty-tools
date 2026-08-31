@@ -224,12 +224,14 @@ allow = [
 # `okg_ingest_drive`, `get_gmail_message_content`, `web_search` above all pull
 # in an inbound mail body, a shared Drive doc, or a web page). The
 # exfiltration-capable subset of the allowlist is `compose_email`,
-# `manage_file_permissions`, `manage_gmail_settings`, `manage_gmail_filters`
-# and `modify_gmail_messages` — the allow-list bounds WHICH tools exist, not
-# what an injected model chooses to do with them. A confirmation gate for
-# exactly those five is tracked in #4054 (it needs either #3074/#3075's
-# `user_authority` field or an interim read site for
-# `[[permissions.grants]] mode = "ask"`, neither of which exists yet).
+# `manage_file_permissions`, `manage_gmail_settings`, `manage_gmail_filters`,
+# `modify_gmail_messages`, `manage_events` (invite-to-anyone) and
+# `manage_drive_file` (move/copy/trash) — the allow-list bounds WHICH tools
+# exist, not what an injected model chooses to do with them. #4054 gates exactly
+# these seven: `filter_persona_tool_names_for_tier` strips every one on the
+# persona-chat path when no human-confirmation channel is available (the current
+# state — fail closed), via `ctrl::pm_task::tool_authz::EXFIL_CAPABLE_TOOLS`.
+# The set was extended from five to seven by the owner ruling 2026-08-31.
 #
 # THE ALLOW-LIST REMAINS THE BINDING CONSTRAINT. `filter_persona_tool_names`
 # intersects `[tools].allow` (by NAME) AND `[tools].scopes` (by CAPABILITY) —

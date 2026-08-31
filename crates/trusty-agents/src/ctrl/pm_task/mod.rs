@@ -13,6 +13,9 @@
 
 mod dispatch;
 mod helpers;
+// #4520 / #4054: tool-authorization classification (L0 wildcard gate,
+// exfiltration confirmation gate) shared by both persona dispatch paths.
+pub(crate) mod tool_authz;
 
 // Internal re-export — preserve `super::pm_task::run_pm_task` used by the PM
 // actor loop in state.rs.

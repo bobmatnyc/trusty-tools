@@ -1353,6 +1353,60 @@ fn l0_grant_present_in_l0_assistant_registry() {
     );
 }
 
+/// #4520: even for an L0 persona — where the shell grant IS registered — a
+/// `[tools].allow = ["*"]` must NOT resolve `l0_shell_exec`. A wildcard grants
+/// all NON-L0 tools; the L0-gated surface is reachable only by literal name.
+/// This exercises the real L0 registry plus the real glob-scoping gate
+/// (`scope_assistant_allowed_tools`); it FAILS before the fix, when `*` matched
+/// `l0_shell_exec` as a glob.
+#[test]
+fn l0_persona_wildcard_allow_does_not_grant_the_shell() {
+    let reg = build_registry_for_agent(
+        "orchestration-assistant",
+        "assistant",
+        None,
+        None,
+        empty_skill_registry(),
+        empty_tag_registry(),
+        None,
+        crate::agents::AgentTier::L0Orchestration,
+        None,
+    )
+    .expect("assistant-tier agent builds a registry");
+    // Sanity: the tool really is registered for this L0 persona, so the
+    // wildcard exclusion below is a live gate, not a vacuous pass.
+    assert!(reg.contains(crate::tools::l0_exec::L0_SHELL_EXEC));
+
+    let wildcard = vec!["*".to_string()];
+    let kept =
+        scope_assistant_allowed_tools(true, None, Some(&wildcard), Some(&reg)).unwrap_or_default();
+    assert!(
+        !kept
+            .iter()
+            .any(|n| n == crate::tools::l0_exec::L0_SHELL_EXEC),
+        "a wildcard must not pull the unsandboxed L0 shell into an L0 persona's \
+         callable set, got: {kept:?}"
+    );
+    // A wildcard still grants the non-L0 surface — the gate is targeted, not a
+    // blanket denial.
+    assert!(
+        kept.iter().any(|n| n == "web_search"),
+        "a wildcard must still grant ordinary (non-L0) tools, got: {kept:?}"
+    );
+
+    // Naming the L0 tool literally still grants it — the escape hatch the owner
+    // ruling preserves.
+    let literal = vec![crate::tools::l0_exec::L0_SHELL_EXEC.to_string()];
+    let kept_literal =
+        scope_assistant_allowed_tools(true, None, Some(&literal), Some(&reg)).unwrap_or_default();
+    assert!(
+        kept_literal
+            .iter()
+            .any(|n| n == crate::tools::l0_exec::L0_SHELL_EXEC),
+        "an L0 tool named literally must still be granted, got: {kept_literal:?}"
+    );
+}
+
 /// THE requirement: an L1 persona that DECLARES the grant in `[tools].allow`
 /// — by exact name, or by a wildcard that would match it — still does not
 /// receive it. Exercised through the real glob-scoping gate and then through

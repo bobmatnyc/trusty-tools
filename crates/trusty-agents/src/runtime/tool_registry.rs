@@ -793,7 +793,10 @@ pub(crate) fn scope_assistant_allowed_tools(
                 .and_then(|n| n.as_str())
                 .map(String::from)
         })
-        .filter(|n| crate::ctrl::pm_task::match_any_glob(n, patterns))
+        // #4520: a wildcard grants every non-L0 tool, but an L0-gated tool
+        // (the unsandboxed shell, the gh/session-state surface) is reachable
+        // ONLY when named literally — never via `*` or a prefix glob.
+        .filter(|n| crate::ctrl::pm_task::tool_authz::allow_patterns_grant_tool(n, patterns))
         .collect();
     Some(kept)
 }

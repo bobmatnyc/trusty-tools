@@ -62,6 +62,32 @@ use crate::tools::traits::{ToolExecutor, ToolResult};
 /// drifting apart by a typo.
 pub const L0_SHELL_EXEC: &str = "l0_shell_exec";
 
+/// Every tool name the L0 EXECUTION grant registers, in stable order.
+///
+/// Why (#4520): the execution grant is the privileged, unsandboxed capability
+/// the #4520 owner ruling protects — a wildcard `[tools].allow` must never pull
+/// it in, only a literal name may. `crate::ctrl::pm_task::tool_authz::
+/// is_l0_gated_tool` classifies exactly this set as literal-only. Naming it once
+/// here (rather than a hand-copied `"l0_shell_exec"` at the classifier) means a
+/// second execution tool added to [`l0_execution_tools`] is auto-covered by the
+/// wildcard exclusion the moment its name joins this list. This is deliberately
+/// the EXECUTION surface only: the read-only L0 surfaces (`gh_*`, the
+/// session-state tools) keep the wildcard-reachability #4170/#4171 designed for
+/// them.
+/// Test: `is_l0_execution_tool_matches_the_shell_grant`,
+/// `l0_execution_tool_names_match_the_factory_output`.
+pub const L0_EXECUTION_TOOL_NAMES: &[&str] = &[L0_SHELL_EXEC];
+
+/// Whether `name` is a tool in the L0 EXECUTION grant (#4520).
+///
+/// Why: a named predicate reads better than an inline `.contains()` at the
+/// wildcard-exclusion call site and gives the tests one thing to pin.
+/// What: exact-name membership in [`L0_EXECUTION_TOOL_NAMES`].
+/// Test: `is_l0_execution_tool_matches_the_shell_grant`.
+pub fn is_l0_execution_tool(name: &str) -> bool {
+    L0_EXECUTION_TOOL_NAMES.contains(&name)
+}
+
 /// Per-command wall-clock budget.
 ///
 /// Why: `run_bash`'s 30s is tuned for coordinator one-liners (`git status`)
