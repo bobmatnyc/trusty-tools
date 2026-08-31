@@ -14,8 +14,9 @@
 //! **It refuses only on positive evidence.** A directory that is not a git
 //! repository, has no `origin/main`, or has no usable `git` reports
 //! [`SourceFreshness::Unknown`] and the install proceeds with a warning. The
-//! answer is also only as current as the repository's `origin/main` ref, which
-//! is why the probe fetches first and says so when the fetch failed.
+//! answer is also only as current as the repository's `origin/main` ref: the
+//! probe fetches first on a best-effort basis, and a failed fetch is neither
+//! fatal nor reported — the comparison then runs against the cached ref.
 //!
 //! **Installing from a feature branch stays possible.** That is an ordinary
 //! dev-loop action; the guard exists to make it deliberate, not impossible.

@@ -76,7 +76,7 @@ pub trait ManagedTmuxDriver: Send + Sync {
     /// [`super::real_tmux::RealTmuxDriver`] overrides it with a `new-session`
     /// that carries no `-A`, so tmux itself decides the race atomically.
     /// Test: `two_creators_of_one_name_never_share_a_pane` in
-    /// `super::naming_tests`; `RealTmuxDriver`'s override is exercised by the
+    /// `super::create_race_tests`; `RealTmuxDriver`'s override is exercised by the
     /// `#[ignore]` live tmux tests.
     fn create_session_exclusive(&self, name: &str, workdir: &str) -> Result<(), ManagedError> {
         if self.session_exists_checked(name)? {
