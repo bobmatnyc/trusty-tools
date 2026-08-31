@@ -835,6 +835,115 @@ fn persona_tier_gate_keeps_session_state_for_l0() {
     assert_eq!(kept, all_names);
 }
 
+/// #4054: the exfiltration confirmation gate. The base `assistant` declares the
+/// write/exfil-capable Google tools in `[tools].allow`, and the first four
+/// gates admit them, but the persona-chat path has no confirmation channel — so
+/// `filter_persona_tool_names_for_tier` must STRIP every exfil-capable tool
+/// (fail closed) while leaving read-only Gmail/Drive tools and unrelated tools
+/// untouched. Pre-fix these names survived, so this FAILS before the gate.
+#[test]
+fn persona_tier_gate_strips_exfil_tools_pending_confirmation() {
+    let all_names: Vec<String> = vec![
+        // exfil-capable — must be stripped
+        "compose_email".to_string(),
+        "manage_gmail_settings".to_string(),
+        "manage_gmail_filters".to_string(),
+        "modify_gmail_messages".to_string(),
+        "manage_file_permissions".to_string(),
+        // read-only / ingest — must survive
+        "get_gmail_message_content".to_string(),
+        "search_gmail_messages".to_string(),
+        "web_search".to_string(),
+    ];
+    let patterns = vec!["*".to_string()];
+    let allowed_by_tier: std::collections::HashSet<String> = all_names.iter().cloned().collect();
+
+    // L0Orchestration so the session-state strip is a no-op and only the exfil
+    // gate is under test (the base assistant is L0 by kind derivation anyway).
+    let kept = super::super::persona_gate::filter_persona_tool_names_for_tier(
+        all_names,
+        &patterns,
+        &allowed_by_tier,
+        &std::collections::HashMap::new(),
+        &[],
+        crate::agents::AgentTier::L0Orchestration,
+    );
+
+    for exfil in [
+        "compose_email",
+        "manage_gmail_settings",
+        "manage_gmail_filters",
+        "modify_gmail_messages",
+        "manage_file_permissions",
+    ] {
+        assert!(
+            !kept.iter().any(|n| n == exfil),
+            "{exfil} must be denied without a confirmation channel, got: {kept:?}"
+        );
+    }
+}
+
+/// #4054 counter-test: read-only Gmail/Drive tools ingest untrusted content but
+/// move nothing out, so the confirmation gate must leave them reachable — the
+/// gate is a targeted deny of the exfil subset, not a blanket Google shutdown.
+#[test]
+fn persona_tier_gate_keeps_read_only_gworkspace_tools() {
+    let all_names: Vec<String> = vec![
+        "get_gmail_message_content".to_string(),
+        "search_gmail_messages".to_string(),
+        "get_drive_file_content".to_string(),
+        "web_search".to_string(),
+    ];
+    let patterns = vec!["*".to_string()];
+    let allowed_by_tier: std::collections::HashSet<String> = all_names.iter().cloned().collect();
+
+    let kept = super::super::persona_gate::filter_persona_tool_names_for_tier(
+        all_names.clone(),
+        &patterns,
+        &allowed_by_tier,
+        &std::collections::HashMap::new(),
+        &[],
+        crate::agents::AgentTier::L0Orchestration,
+    );
+
+    assert_eq!(
+        kept, all_names,
+        "read-only gworkspace tools must be unaffected by the exfil gate"
+    );
+}
+
+/// #4520 on the persona-chat path: `filter_persona_tool_names` shares the
+/// literal-only rule, so a persona's `allow = ["*"]` must not surface the
+/// registered L0 shell grant. Pre-fix `*` matched it as a glob.
+#[test]
+fn persona_gate_wildcard_does_not_grant_the_l0_shell() {
+    let all_names: Vec<String> = vec![
+        crate::tools::l0_exec::L0_SHELL_EXEC.to_string(),
+        "web_search".to_string(),
+    ];
+    let patterns = vec!["*".to_string()];
+    let allowed_by_tier: std::collections::HashSet<String> = all_names.iter().cloned().collect();
+
+    let kept = filter_persona_tool_names(
+        all_names,
+        &patterns,
+        &allowed_by_tier,
+        &std::collections::HashMap::new(),
+        &[],
+    );
+
+    assert!(
+        !kept
+            .iter()
+            .any(|n| n == crate::tools::l0_exec::L0_SHELL_EXEC),
+        "a wildcard must not surface the L0 shell on the persona-chat path, got: {kept:?}"
+    );
+    assert!(
+        kept.iter().any(|n| n == "web_search"),
+        "the wildcard must still grant ordinary tools, got: {kept:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // #4201: the delegation gate on the PERSONA dispatch path.
 //

@@ -27,8 +27,6 @@ use std::sync::Arc;
 use crate::tools::registry::scope::{Scope, ScopePattern, agent_can_use};
 use crate::tools::{AgentRunner, delegate::DelegateToAgentTool};
 
-use super::super::helpers::match_any_glob;
-
 /// Build the `delegate_to_agent` tool the persona-chat dispatch path arms,
 /// with BOTH delegation gates applied (#4201).
 ///
@@ -147,7 +145,10 @@ pub(super) fn filter_persona_tool_names(
     all_names
         .into_iter()
         .filter(|name| {
-            match_any_glob(name, patterns)
+            // #4520: an L0-gated tool is granted only when named literally, so a
+            // persona's `allow = ["*"]` cannot silently reach the unsandboxed
+            // shell (or the gh/session-state surface) it holds at L0 tier.
+            super::super::tool_authz::allow_patterns_grant_tool(name, patterns)
                 && allowed_by_tier.contains(name)
                 && match tool_scopes.get(name) {
                     Some(scope) => agent_can_use(agent_scope_patterns, &Scope::new(scope.clone())),
@@ -232,16 +233,23 @@ pub(super) fn persona_allowed_tools(names: Vec<String>) -> Option<Vec<String>> {
 /// `persona_tests.rs`) untouched while giving the composition one name the
 /// dispatch path calls.
 /// What: applies `filter_persona_tool_names`, then
-/// `tools::session_state::retain_tier_permitted`, which is DENY-ONLY — it can
-/// remove a name, never add one, so an L0 persona still gets exactly what it
-/// declares. Fail-closed on an indeterminate tier: `AgentInfo::tier()`
+/// `tools::session_state::retain_tier_permitted`, then (#4054) the
+/// exfiltration confirmation strip
+/// (`tool_authz::strip_exfil_pending_confirmation`) — all three DENY-ONLY, so
+/// each can remove a name but never add one, and an L0 persona still gets
+/// exactly what it declares minus any exfiltration-capable tool that lacks a
+/// confirmation channel. Fail-closed on an indeterminate tier: `AgentInfo::tier()`
 /// (#4168/#4200) resolves an absent, blank or unrecognized `tier = …` to
-/// `AgentTier::L1Standard`, which is the stripping arm.
+/// `AgentTier::L1Standard`, which is the session-state stripping arm; the
+/// persona-chat path always passes `ConfirmationCapability::Unavailable`, which
+/// is the exfil stripping arm.
 /// Test: `l1_persona_declaring_session_state_tools_gets_none`,
 /// `l0_persona_declaring_session_state_tools_gets_them`,
 /// `indeterminate_tier_fails_closed_to_no_session_state_tools`,
 /// `persona_tier_gate_strips_session_state_for_l1`,
-/// `persona_tier_gate_keeps_session_state_for_l0`.
+/// `persona_tier_gate_keeps_session_state_for_l0`,
+/// `persona_tier_gate_strips_exfil_tools_pending_confirmation`,
+/// `persona_tier_gate_keeps_read_only_gworkspace_tools`.
 pub(super) fn filter_persona_tool_names_for_tier(
     all_names: Vec<String>,
     patterns: &[String],
@@ -250,14 +258,27 @@ pub(super) fn filter_persona_tool_names_for_tier(
     agent_scope_patterns: &[ScopePattern],
     tier: crate::agents::AgentTier,
 ) -> Vec<String> {
-    crate::tools::session_state::retain_tier_permitted(
-        filter_persona_tool_names(
-            all_names,
-            patterns,
-            allowed_by_tier,
-            tool_scopes,
-            agent_scope_patterns,
+    // #4054: the exfiltration confirmation gate — the FIFTH, DENY-ONLY gate.
+    // The persona-chat path has no interactive tool-confirmation channel, so
+    // `ConfirmationCapability::Unavailable` is the fail-closed signal: every
+    // exfiltration-capable Google tool (compose_email, manage_gmail_settings,
+    // manage_gmail_filters, modify_gmail_messages, manage_file_permissions) is
+    // removed rather than silently executed against untrusted content ingested
+    // in the same turn. Read-only Gmail/Drive tools are untouched. Applied to
+    // the same resolved list that feeds both the advertised schema list AND
+    // `ToolRegistry::dispatch_gated`, so a stripped name can neither be seen nor
+    // called.
+    super::super::tool_authz::strip_exfil_pending_confirmation(
+        crate::tools::session_state::retain_tier_permitted(
+            filter_persona_tool_names(
+                all_names,
+                patterns,
+                allowed_by_tier,
+                tool_scopes,
+                agent_scope_patterns,
+            ),
+            tier,
         ),
-        tier,
+        super::super::tool_authz::ConfirmationCapability::Unavailable,
     )
 }

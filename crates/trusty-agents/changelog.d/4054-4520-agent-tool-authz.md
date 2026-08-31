@@ -1,0 +1,3 @@
+Security
+
+- Closed two persona tool-authorization escalation paths (owner rulings 2026-08-31). A user-authored assistant persona's `[tools].allow = ["*"]` no longer reaches the unsandboxed L0 shell `l0_shell_exec`; the L0 execution grant is reachable only when named literally ([#4520](https://github.com/bobmatnyc/trusty-tools/issues/4520)). The exfiltration-capable Google tools (`compose_email`, `manage_gmail_settings`, `manage_gmail_filters`, `modify_gmail_messages`, `manage_file_permissions`) now require explicit human confirmation before executing on the persona-chat path and fail closed (deny) where no confirmation channel exists ([#4054](https://github.com/bobmatnyc/trusty-tools/issues/4054)). Read-only tools and non-wildcard grants are unaffected.
