@@ -27,6 +27,7 @@ mod http;
 pub mod inference_bridge;
 pub mod inference_client;
 pub mod provider_pin;
+pub mod provider_policy;
 mod single_turn;
 pub mod stream;
 pub mod thinking_classifier;

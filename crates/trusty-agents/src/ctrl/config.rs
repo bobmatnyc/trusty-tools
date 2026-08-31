@@ -106,10 +106,14 @@ pub(crate) fn resolve_overridden_credentials(
     if let (Some(pinned), Some(requested)) = (cfg.agent.provider_id.as_deref(), provider_override)
         && !pinned.eq_ignore_ascii_case(requested)
     {
+        // #3766: the pin may come from the agent's own TOML or from the
+        // operator's `[providers] default_provider_id`, so name both.
         anyhow::bail!(
-            "agent '{}' pins [agent].provider_id = '{}'; a session provider \
-             override to '{}' contradicts it and is refused. Change the pin in \
-             the agent's TOML, or clear it to allow per-session provider \
+            "agent '{}' is pinned to provider '{}'; a session provider \
+             override to '{}' contradicts it and is refused. Change \
+             [agent].provider_id in the agent's TOML — or, if the agent \
+             declares none, [providers].default_provider_id in \
+             ~/.trusty-agents/config.toml — to allow per-session provider \
              switching.",
             cfg.agent.name,
             pinned,
@@ -524,6 +528,9 @@ pub(crate) fn apply_credential_routing(
     // exactly the silent-fallback the pin exists to prevent — e.g. an agent
     // pinned to `atlascloud` would be flipped to Anthropic-direct merely
     // because an `ANTHROPIC_API_KEY` happens to be present.
+    // #3766: the loader also sets `provider_id` from `[providers]
+    // .default_provider_id` for an agent that declares no pin, so this same
+    // skip is what makes the configured policy survive ambient probing.
     if cfg.agent.provider_id.is_some() {
         tracing::debug!(
             agent = %cfg.agent.name,

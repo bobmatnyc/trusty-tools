@@ -209,3 +209,29 @@ pub struct McpTool {
     pub name: String,
     pub description: String,
 }
+
+/// `[providers]` section (#3766) — the default inference provider for agents
+/// that pin none of their own.
+///
+/// Why: the bundled agent templates ship bare model slugs
+/// (`model = "claude-sonnet-4-6"`) and no `[agent].provider_id`, so which
+/// provider served them was decided by whichever ambient credential the
+/// harness happened to find first. The owner's ruling on #3766 puts that
+/// choice in configuration. It is a field on [`super::GlobalConfig`] rather
+/// than a second parser over the same file because `GlobalConfig::save()`
+/// re-serializes only its declared fields: an unmodelled `[providers]` table
+/// would be erased from disk by any unrelated write — `/local on`
+/// (`repl::commands::routing`) and the four `mcp_*` mutators all
+/// load-mutate-save.
+/// What: `default_provider_id` names a provider from
+/// `trusty_common::inference::registry`. Absent (the default) means UNSET and
+/// preserves the ambient behaviour exactly. The precedence rules live in
+/// [`crate::llm::provider_policy`], which reads this field.
+/// Test: `providers_section_survives_an_unrelated_save`,
+/// `providers_section_defaults_to_unset`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ProvidersSection {
+    /// The provider that unpinned, provider-agnostic agents default to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_provider_id: Option<String>,
+}

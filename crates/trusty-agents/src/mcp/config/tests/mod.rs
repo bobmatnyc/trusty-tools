@@ -243,6 +243,85 @@ async fn save_and_reload_roundtrip() {
     assert!(reloaded.mcp.services[0].enabled);
 }
 
+/// #3766: `[providers] default_provider_id` must survive a save driven by an
+/// unrelated setting.
+///
+/// Why: `save()` re-serializes only the fields declared on `GlobalConfig`, so
+/// a `[providers]` table parsed by some OTHER reader would be silently erased
+/// the next time anything wrote this file. That is not hypothetical — the
+/// ordinary `/local on` / `/local off` commands
+/// (`repl::commands::routing::handle_local_command_into`) and the four `mcp_*`
+/// mutators all load, mutate one field, and save. This test drives that exact
+/// sequence, so it fails if the section is ever demoted back out of the
+/// modelled schema.
+/// Test: itself.
+#[tokio::test]
+async fn providers_section_survives_an_unrelated_save() {
+    let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempdir();
+    unsafe {
+        std::env::set_var("HOME", &home);
+    }
+
+    // An operator sets the policy by hand.
+    let dir = home.join(".trusty-agents");
+    std::fs::create_dir_all(&dir).expect("create config dir");
+    std::fs::write(
+        dir.join("config.toml"),
+        "[providers]\ndefault_provider_id = \"bedrock\"\n",
+    )
+    .expect("write config");
+
+    let mut cfg = GlobalConfig::load_or_create().await.expect("load config");
+    assert_eq!(
+        cfg.providers.default_provider_id.as_deref(),
+        Some("bedrock"),
+        "the hand-written policy must be read back"
+    );
+
+    // What `/local on` does: mutate one unrelated field, then save.
+    cfg.local_inference.enabled = !cfg.local_inference.enabled;
+    cfg.save().await.expect("save should succeed");
+
+    let reloaded = GlobalConfig::load().await;
+    assert_eq!(
+        reloaded.providers.default_provider_id.as_deref(),
+        Some("bedrock"),
+        "an unrelated save must not erase the operator's provider policy"
+    );
+    // The on-disk text is what the next process parses, so assert it directly.
+    let on_disk = std::fs::read_to_string(dir.join("config.toml")).expect("read saved config");
+    assert!(
+        on_disk.contains("default_provider_id"),
+        "the saved file dropped [providers]:\n{on_disk}"
+    );
+}
+
+/// #3766: an absent `[providers]` table is unset, not an error.
+///
+/// Why: every existing `config.toml` predates the section, and the shipped
+/// default leaves it commented out. Absent must round-trip as "no policy".
+/// Test: itself.
+#[tokio::test]
+async fn providers_section_defaults_to_unset() {
+    let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempdir();
+    unsafe {
+        std::env::set_var("HOME", &home);
+    }
+
+    let cfg = GlobalConfig::load_or_create()
+        .await
+        .expect("create default");
+    assert_eq!(cfg.providers.default_provider_id, None);
+
+    cfg.save().await.expect("save should succeed");
+    assert_eq!(
+        GlobalConfig::load().await.providers.default_provider_id,
+        None
+    );
+}
+
 #[tokio::test]
 async fn save_publishes_by_rename_leaving_the_old_file_intact() {
     // audit 2026-08-19: `save()` documented an atomic write but ran a plain
