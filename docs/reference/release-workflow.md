@@ -127,6 +127,17 @@ downgrades both guard failures to a loud warning and exits 0 instead of
 failing. Use it only when you have a specific, understood reason to publish
 from an unmerged commit; the default path is always "merge to main first."
 
+**The same rule applies to LOCAL installs (issue #4462)**: `tm reinstall
+--binary` re-runs `cargo install --path <dir>` against whatever source
+directory cargo's ledger recorded, and `tm` is ONE global binary shared by
+every managed session on the machine — installing from a worktree that predates
+a fix regresses that fix for all of them at once, silently, because the binary's
+own version number does not move when its source is merely stale. The command
+now refuses when the source's `HEAD` is behind `origin/main`, and names
+`TRUSTY_MPM_ALLOW_STALE_INSTALL=1` as the deliberate override. It refuses on
+positive evidence only: a source that is not a git repository, has no
+`origin/main`, or has no usable `git` warns and installs.
+
 **Independently enforced in CI (issue #3366)**: this same rule is now also a
 mechanical gate on the tag-triggered binary-release pipeline itself, not just
 something a human is instructed to check before `cargo publish`.

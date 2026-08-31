@@ -108,8 +108,14 @@ fn managed_session_command_sequence_matches_shared_layer() {
     // semantics) with the same parameters — proving trusty-mpm's
     // session creation genuinely routes through the shared layer
     // rather than a local re-implementation drifting from it.
-    let got =
-        managed_session_command_sequence("tmpm-sess", Some("/tmp/proj"), 100_000, true, false);
+    let got = managed_session_command_sequence(
+        "tmpm-sess",
+        Some("/tmp/proj"),
+        100_000,
+        true,
+        false,
+        true,
+    );
     let want = trusty_common::tmux::managed_session_commands(
         "tmpm-sess",
         Some("/tmp/proj"),
@@ -122,9 +128,27 @@ fn managed_session_command_sequence_matches_shared_layer() {
     assert_eq!(got, want);
 }
 
+/// #3707: the exclusive create must not render `-A`, because `-A` is exactly
+/// what turns a lost create race into two records sharing one pane.
+#[test]
+fn exclusive_command_sequence_omits_the_attach_flag() {
+    let cmds =
+        managed_session_command_sequence("tm-sess", Some("/tmp/p"), 100_000, true, false, false);
+    let TmuxCommand::NewSession { idempotent, .. } = cmds.last().expect("ends with new-session")
+    else {
+        panic!("the sequence must end with NewSession");
+    };
+    assert!(!idempotent, "the exclusive create must not pass -A");
+    let argv = trusty_common::tmux::tmux_argv(cmds.last().expect("ends with new-session"));
+    assert!(
+        !argv.contains(&"-A".to_string()),
+        "argv still carries -A: {argv:?}"
+    );
+}
+
 #[test]
 fn managed_session_command_sequence_applies_options_before_new_session() {
-    let cmds = managed_session_command_sequence("tmpm-sess", None, 50_000, false, false);
+    let cmds = managed_session_command_sequence("tmpm-sess", None, 50_000, false, false, true);
     assert_eq!(cmds.len(), 4);
     assert!(matches!(cmds[0], TmuxCommand::SetGlobalOption { .. }));
     assert!(matches!(cmds[1], TmuxCommand::SetGlobalOption { .. }));

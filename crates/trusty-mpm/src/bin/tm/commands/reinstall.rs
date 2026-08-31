@@ -167,10 +167,14 @@ fn counts(c: &AssetCounts) -> String {
 /// `trusty_common::update::{check_crates_io, upgrade_and_restart}` — which may
 /// NOT RETURN, calling `std::process::exit(1)` after a successful install when
 /// the process is launchd-supervised. `Path` re-runs `cargo install --path <dir>
-/// --locked` and health-gates the result. `Refuse` prints the reason and errors.
-/// Without `yes`, both routes confirm on the terminal first.
-/// Test: the route decision is covered in `core::binary_reinstall_tests`; this
-/// function is process execution.
+/// --locked` and health-gates the result — after refusing a source whose HEAD
+/// is behind `origin/main` (#4462: one global binary, every managed session
+/// regressed at once, and no version number moving to show it), which
+/// `TRUSTY_MPM_ALLOW_STALE_INSTALL=1` lifts. `Refuse` prints the reason and
+/// errors. Without `yes`, both routes confirm on the terminal first.
+/// Test: the route decision is covered in `core::binary_reinstall_tests`, the
+/// staleness guard in `core::install_freshness`'s tests; this function is
+/// process execution.
 async fn reinstall_binary(yes: bool) -> anyhow::Result<()> {
     let exe = std::env::current_exe().context("could not resolve the running executable")?;
     let bin_name = exe
@@ -229,6 +233,23 @@ async fn reinstall_binary(yes: bool) -> anyhow::Result<()> {
                 "\nBinary: `{bin_name}` was installed with `cargo install --path` from {}",
                 dir.display()
             );
+            // #4462: a path source behind `origin/main` regresses every managed
+            // session on this machine at once, and nothing else would say so.
+            let freshness = trusty_mpm::core::install_freshness::probe_source_freshness(&dir);
+            if let Some(reason) = trusty_mpm::core::install_freshness::stale_install_refusal(
+                &dir,
+                &freshness,
+                trusty_mpm::core::install_freshness::stale_install_override(),
+            ) {
+                eprintln!("\n{} {reason}", "✗".red());
+                anyhow::bail!("refusing to reinstall the binary from a source behind origin/main");
+            }
+            if let trusty_mpm::core::install_freshness::SourceFreshness::Unknown(why) = &freshness {
+                println!(
+                    "  {} could not tell whether this source is current ({why}) — installing anyway",
+                    "!".yellow()
+                );
+            }
             if !confirm(yes, &format!("Reinstall {package} from {}", dir.display()))? {
                 return Ok(());
             }

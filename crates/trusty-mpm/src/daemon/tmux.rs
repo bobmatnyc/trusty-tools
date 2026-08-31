@@ -195,6 +195,37 @@ fn stderr_means_empty_server(stderr: &str) -> bool {
     stderr.contains("no server running") || stderr.contains("no sessions")
 }
 
+/// True when a failed `new-session` (issued WITHOUT `-A`) failed because the
+/// name is already live (#3707).
+///
+/// Why: [`TmuxDriver::create_session_exclusive`] must tell a lost create race
+/// apart from a real tmux failure. Reading every non-zero exit as "the name is
+/// taken" would send the caller into a rename-and-retry loop over a server that
+/// is actually broken; reading none of them that way puts the aliasing bug back.
+/// What: matches tmux's `duplicate session: <name>` spelling and nothing else.
+/// Test: `duplicate_session_stderr_is_recognised`,
+/// `unrelated_stderr_is_not_a_name_collision`.
+fn stderr_means_duplicate_session(stderr: &str) -> bool {
+    stderr.contains("duplicate session")
+}
+
+/// Whether [`TmuxDriver::create_session_exclusive`] created the pane or lost
+/// the name to somebody else (#3707).
+///
+/// Why: "the name was taken" is an ordinary, retryable outcome of a concurrent
+/// create, not an error — modelling it as one would force every caller to
+/// pattern-match on an error string to find out which failure it had.
+/// What: two variants; `NameTaken` carries no payload because the caller
+/// already knows the name it asked for.
+/// Test: `duplicate_session_stderr_is_recognised`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExclusiveCreate {
+    /// tmux created the session; the caller now owns it.
+    Created,
+    /// A session of that name already existed; nothing was created.
+    NameTaken,
+}
+
 /// Drives the `tmux` binary on behalf of the daemon's session manager.
 ///
 /// Why: hosting Claude Code inside tmux is the primary control model; the
@@ -363,6 +394,46 @@ impl TmuxDriver {
                 "tmux new-session for {name} failed: {stderr}"
             ))))
         }
+    }
+
+    /// Create a detached tmux session named `name` that FAILS when the name is
+    /// already live (#3707).
+    ///
+    /// Why: [`Self::create_session`] renders `-A`, which attaches to an
+    /// existing session instead of failing. That makes a lost create race
+    /// invisible: both creators return success and two session records end up
+    /// driving one pane. The managed create path needs the opposite — a refusal
+    /// it can retry under a fresh name — and tmux gives exactly that when `-A`
+    /// is absent, decided atomically by the server rather than by a probe the
+    /// caller ran a moment earlier.
+    /// What: [`crate::core::tmux::create_managed_session_exclusive`], which
+    /// applies the same #2398 option ordering and then issues `new-session`
+    /// without `-A`. A non-zero exit whose stderr says the name is a duplicate
+    /// becomes [`ExclusiveCreate::NameTaken`]; any other non-zero exit is an
+    /// error, so a real tmux failure is never mistaken for a lost race.
+    /// Test: `duplicate_session_stderr_is_recognised`,
+    /// `unrelated_stderr_is_not_a_name_collision`.
+    pub fn create_session_exclusive(
+        &self,
+        name: &str,
+        workdir: Option<&str>,
+    ) -> Result<ExclusiveCreate> {
+        let outcome = crate::core::tmux::create_managed_session_exclusive(
+            Some(&self.tmux_path),
+            name,
+            workdir,
+        )
+        .inspect(|o| crate::core::tmux::warn_if_options_unverified(o, name))?;
+        if outcome.output.status.success() {
+            return Ok(ExclusiveCreate::Created);
+        }
+        let stderr = String::from_utf8_lossy(&outcome.output.stderr).into_owned();
+        if stderr_means_duplicate_session(&stderr) {
+            return Ok(ExclusiveCreate::NameTaken);
+        }
+        Err(Error::Protocol(redact_oauth_token(&format!(
+            "tmux new-session for {name} failed: {stderr}"
+        ))))
     }
 
     /// Apply the configured scrollback + mouse ergonomics to the tmux
