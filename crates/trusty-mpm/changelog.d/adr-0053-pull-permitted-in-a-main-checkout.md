@@ -1,3 +1,0 @@
-Changed
-
-- **`git pull` is no longer denied in a main checkout** — `tm hook --pm-guard` classified `pull`, `merge` and `rebase` alike as HEAD moves and refused all three beside another live writer, so the only update path it left was `git fetch`, which never advances local `main`. A pull now runs whether or not another session shares the tree, and it never reaches the daemon's live-writer query. `git merge` and `git rebase` are unchanged and still denied there — either can leave the shared tree conflicted or rewritten. Source edits and source commits in a main checkout are unchanged and still denied (ADR-0053, amending ADR-0048 decision 10)

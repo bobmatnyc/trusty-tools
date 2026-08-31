@@ -1,3 +1,0 @@
-Fixed
-- `tm doctor`'s `worktrees` check counted every git-registered worktree no live session claimed as an orphan, reporting 198 where `tm session prune-worktrees` and `tm session reconcile-worktrees` both found zero. It now reports the ORPHANED count from the reconciled inventory those two verbs already share, so an agent-owned, locked, dirty, or sentinel-less worktree is no longer called an orphan (#5947).
-- That check's remediation hint named `tm session prune --worktrees`, a flag that does not exist — `tm session prune` takes `--state` only. It now names `tm session prune-worktrees`, and a test parses the hint against the real CLI so a renamed flag cannot leave it pointing at nothing (#5947).

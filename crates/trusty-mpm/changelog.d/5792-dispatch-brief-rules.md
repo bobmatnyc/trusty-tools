@@ -1,4 +1,0 @@
-Documentation
-
-- **The resident PM prompt now states that a dispatch brief carries findings, evidence and constraints rather than the implementation mechanism**, and that a reviewer's suggested fix is relayed as a suggestion to verify rather than as an instruction — five lines in `core.md`'s "Delegating Well", added after a session where a PM prescribed mechanisms in five briefs from descriptions of code and was overruled every time by an agent that read the source ([#5792](https://github.com/bobmatnyc/trusty-tools/pull/5792))
-- **An acceptance criterion must now be written so a wrong implementation fails it**, with `tm-delegation-patterns` carrying the five worked failures and a weak-vs-stronger criterion table; its "Delegation Best Practices" items on context and acceptance criteria are reworded to carry both rules, and the Structural Delegation Brief template gains a `Findings` field ([#5792](https://github.com/bobmatnyc/trusty-tools/pull/5792))

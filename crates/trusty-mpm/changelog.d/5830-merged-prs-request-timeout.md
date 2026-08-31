@@ -1,3 +1,0 @@
-Fixed
-
-- `tm session prune-worktrees --merged-prs` no longer fails with "operation timed out" on every invocation. The merged-PR survey runs synchronously inside the daemon handler and takes minutes — over 600 seconds byte-walking 46 worktrees on a large workspace — while the request inherited the client's 10-second default bound, so the CLI hung up before the daemon could ever answer. The request now carries a 1800-second per-request override (`RECLAIM_SURVEY_REQUEST_TIMEOUT`), and prints a one-line notice up front so a long silent wait is distinguishable from a wedged daemon. Only the `--merged-prs` opt-in raises the bound; the orphan-only sweep keeps failing fast at 10 seconds (Refs #5830).

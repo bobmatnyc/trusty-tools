@@ -1,2 +1,0 @@
-Fixed
-- **The health screen's PALACES panel silently dropped a palace it could not read.** `memory_collections` fanned out one `memory.palace_get` per id and skipped any that failed, so the panel could list fewer palaces than the daemon has with nothing saying which or why. It makes one `memory.palaces_list` call now; a row carrying an error renders with `✗` and the daemon's reason, exempt from the empty-palace filter — a palace whose counts could not be read is not a palace holding nothing ([#6286](https://github.com/bobmatnyc/trusty-tools/issues/6286))
