@@ -45,7 +45,9 @@ name = "trusty-common"
 # `PalaceResolveError::NoIdentity` moved from discriminant 3 to 4
 # (`palace_resolve.rs:225`). Cargo's 0.x rule puts a break in the MINOR
 # position, so 0.46.0 is where they ship.
-version = "0.46.2"
+# 0.46.3 (#5439): patch — new public `daemon_token` module and
+# `server::bearer_auth` are additive; cargo-semver-checks reports no break.
+version = "0.46.3"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
