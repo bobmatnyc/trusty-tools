@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { Element } from 'hast';
@@ -20,6 +20,15 @@ import { categoryKey, parseChangelog, parseReleaseHeading, stripLinkDefinitions 
 const REPO_ROOT = findRepoRoot();
 const readCrate = (name: string) =>
 	readFileSync(path.join(REPO_ROOT, 'crates', name, 'CHANGELOG.md'), 'utf8');
+
+/**
+ * The probe `site.ts` builds for production: a real existence check against
+ * this checkout. A case that parses a REAL changelog and asserts no failures
+ * has to pass it — the default probe rejects everything, so the first live
+ * relative link the corpus grows is reported as missing from the repository
+ * (#6464: five `../../docs/adr/0032-…md` links in trusty-search 0.50.0).
+ */
+const repoProbe = (relative: string) => existsSync(path.join(REPO_ROOT, relative));
 
 const parse = (markdown: string) => parseChangelog(markdown, 'crates/x/CHANGELOG.md');
 
@@ -71,7 +80,11 @@ describe('the link-reference trap', () => {
 	 * version stops being separable from the date and reads `0.3.36 — 2026-05-14`.
 	 */
 	it('parses every real trusty-search version as a bare semver, brackets and all', () => {
-		const { releases, failures } = parseChangelog(source, 'crates/trusty-search/CHANGELOG.md');
+		const { releases, failures } = parseChangelog(
+			source,
+			'crates/trusty-search/CHANGELOG.md',
+			repoProbe
+		);
 		expect(failures).toEqual([]);
 		expect(releases.length).toBeGreaterThan(100);
 		for (const entry of releases) {
