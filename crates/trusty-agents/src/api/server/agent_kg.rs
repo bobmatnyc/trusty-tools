@@ -436,7 +436,10 @@ async fn fetch_upstream(
 /// for an agent whose palace was never created; anything else is the daemon
 /// being unreachable or in trouble, and carries its own message so an operator
 /// reads the reason they were given.
-fn describe_failure(e: &anyhow::Error, palace: &str) -> String {
+// #4278: `chat_history` maps agent → bound palace and renders the same
+// reason vocabulary, so it shares this rather than describing a down daemon a
+// second way.
+pub(super) fn describe_failure(e: &anyhow::Error, palace: &str) -> String {
     match e.downcast_ref::<trusty_common::memory_rpc::MemoryRpcError>() {
         Some(rpc) if rpc.is_not_found() => format!("memory palace `{palace}` does not exist"),
         Some(rpc) => format!("trusty-memory refused the read for palace `{palace}`: {rpc}"),
@@ -449,7 +452,8 @@ fn describe_failure(e: &anyhow::Error, palace: &str) -> String {
 /// Identical partial-read rationale to `agent_stores::parse_stores`: a
 /// directory-package `agent.toml` omits `[system_prompt]`, so reading through
 /// the full `AgentConfig` would reject it.
-fn parse_stores(raw: &str) -> (StoresConfig, Option<String>) {
+// #4278: shared with `chat_history`, which needs the same partial read.
+pub(super) fn parse_stores(raw: &str) -> (StoresConfig, Option<String>) {
     #[derive(Deserialize)]
     struct Partial {
         #[serde(default)]

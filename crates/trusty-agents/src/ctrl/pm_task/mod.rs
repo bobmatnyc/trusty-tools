@@ -11,7 +11,11 @@
 //! `ctrl::tests::pm_task_tests`; the dispatch functions are exercised
 //! end-to-end via the ctrl integration tests.
 
-mod dispatch;
+// #4278: crate-visible so `api::server::chat_history` can share
+// `dispatch::persona_memory::session_id_for` with the write path instead of
+// re-deriving the `persona-{agent}` key. Inner items keep their own
+// visibility; nothing new leaves the crate.
+pub(crate) mod dispatch;
 mod helpers;
 // #4520 / #4054: tool-authorization classification (L0 wildcard gate,
 // exfiltration confirmation gate) shared by both persona dispatch paths.

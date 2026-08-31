@@ -1,0 +1,3 @@
+Fixed
+
+- Reloading the Assistant GUI no longer discards the visible conversation. Every persona chat turn was already persisted to a trusty-memory `chat_session` keyed `persona-{agent}`, but nothing read it back, so the chat view started empty on every load. `GET /api/agents/:name/chat-history` now serves that log — bounded to the newest page, with a cursor for loading older turns on demand — and the UI rehydrates from it once the API is healthy. An agent that binds no memory palace, a session that does not exist yet, and an unreachable trusty-memory all report `available: false` with a reason rather than an error, so a down daemon still leaves a usable chat. (#4278)

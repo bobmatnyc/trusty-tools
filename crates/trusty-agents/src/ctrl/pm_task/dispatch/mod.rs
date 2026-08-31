@@ -20,7 +20,10 @@ mod persona;
 // #4171 (epic #4167): pure gating helpers split out of `persona.rs`, which
 // sits exactly at the 500-SLOC production cap.
 mod persona_gate;
-mod persona_memory;
+// #4278: `api::server::chat_history` reads back what `spawn_persist_turn`
+// writes, so `session_id_for` must have exactly one implementation both sides
+// share — a second `format!("persona-{agent}")` would silently diverge.
+pub(crate) mod persona_memory;
 // #446 (epic #3052): `[[plugins.python]]` registration, split out of
 // `persona.rs` for the same SLOC-cap reason as `persona_gate`.
 mod persona_plugins;

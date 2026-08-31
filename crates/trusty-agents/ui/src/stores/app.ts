@@ -399,6 +399,50 @@ export function addMessage(projectId: string, message: Message): void {
 }
 
 /**
+ * Why (#4278): rehydration seeds this store from the durable persona log on
+ * load. It must never clobber live messages — bootstrap is async, so the user
+ * can type before the history arrives, and overwriting would delete the very
+ * turn they just sent. Seeding ONLY an empty bucket makes a late-arriving
+ * history a no-op rather than a second data-loss bug, and makes the call
+ * idempotent if bootstrap ever re-fires.
+ * What: sets `projectId`'s list to `history` when that bucket is empty or
+ * absent; returns whether it seeded. A seed of zero messages is skipped, so
+ * an agent with nothing persisted leaves the store untouched.
+ * Test: `hydrateMessages_seeds_an_empty_bucket`,
+ * `hydrateMessages_never_clobbers_existing_messages`,
+ * `hydrateMessages_ignores_an_empty_history` in `app.hydrate.test.ts`.
+ */
+export function hydrateMessages(projectId: string, history: Message[]): boolean {
+  if (history.length === 0) return false;
+  let seeded = false;
+  messages.update((map) => {
+    if ((map.get(projectId) ?? []).length > 0) return map;
+    const next = new Map(map);
+    next.set(projectId, [...history]);
+    seeded = true;
+    return next;
+  });
+  return seeded;
+}
+
+/**
+ * Why (#4278): lazy-loading older turns prepends a page BEFORE what is already
+ * rendered — the volume requirement's other half. A plain `addMessage` loop
+ * would append them to the end, showing the oldest conversation after the
+ * newest.
+ * What: prepends `older` to `projectId`'s list. No-op for an empty page.
+ * Test: `prependMessages_puts_older_turns_first` in `app.hydrate.test.ts`.
+ */
+export function prependMessages(projectId: string, older: Message[]): void {
+  if (older.length === 0) return;
+  messages.update((map) => {
+    const next = new Map(map);
+    next.set(projectId, [...older, ...(next.get(projectId) ?? [])]);
+    return next;
+  });
+}
+
+/**
  * Why: Progress events arrive while a task is running; we find the assistant
  * placeholder for that task id and append/replace its content to grow the
  * bubble in place rather than spamming new messages.
