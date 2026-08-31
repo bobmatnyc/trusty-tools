@@ -350,9 +350,13 @@ fn spawn_command_without_token_pins_the_exact_command() {
         &[],
     );
     let scrub = crate::core::claude_env_scrub::env_unset_flags();
+    // #6495 added the alternate-screen operand; interpolated for the same reason
+    // the scrub segment is — this pins its POSITION, while its literal text is
+    // pinned in `core::alt_screen`'s `shell_assignment_pins_the_defaulting_form`.
+    let alt = crate::core::alt_screen::ALT_SCREEN_SHELL_ASSIGNMENT;
     let expected = format!(
         "cd '/tmp/ws' && {{ export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'; \
-             env -u ANTHROPIC_API_KEY{scrub} claude \
+             env -u ANTHROPIC_API_KEY{scrub} {alt} claude \
              --setting-sources project,local --dangerously-skip-permissions; \
              echo 'tm: run `tm` to relaunch this session'; }}"
     );
@@ -453,12 +457,22 @@ fn env_bin_prefix_orders_scrub_flags_before_assignments() {
     let last_unset = prefix
         .rfind("-u ")
         .expect("prefix must contain at least one -u flag");
+    // #6495: read the FIRST assignment out of the line rather than naming
+    // `CLAUDE_CONFIG_DIR=`. The alternate-screen operand now leads the
+    // assignments, and a check pinned to a later one would stop covering the
+    // ordering that actually matters.
     let first_assignment = prefix
-        .find("CLAUDE_CONFIG_DIR=")
-        .expect("prefix must contain the config-dir assignment");
+        .find('=')
+        .expect("prefix must contain at least one assignment");
     assert!(
         last_unset < first_assignment,
         "every -u flag must precede the first NAME=VALUE assignment: {prefix}"
+    );
+    assert!(
+        prefix
+            .find("CLAUDE_CONFIG_DIR=")
+            .is_some_and(|i| i > last_unset),
+        "the config-dir assignment must still follow the scrub flags: {prefix}"
     );
     // And the parser the doctor probe relies on must see the marker here.
     let unset = crate::core::claude_env_scrub::parse_env_unset_vars(&prefix);
@@ -605,15 +619,83 @@ fn resume_command_without_token_pins_the_exact_command() {
         &[],
     );
     let scrub = crate::core::claude_env_scrub::env_unset_flags();
+    let alt = crate::core::alt_screen::ALT_SCREEN_SHELL_ASSIGNMENT;
     let expected = format!(
         "cd '/tmp/ws' && {{ export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'; \
-             env -u ANTHROPIC_API_KEY{scrub} claude \
+             env -u ANTHROPIC_API_KEY{scrub} {alt} claude \
              --setting-sources project,local --dangerously-skip-permissions --resume abc-123; \
              echo 'tm: run `tm` to relaunch this session'; }}"
     );
     assert_eq!(
         cmd, expected,
         "no-token resume command shape must stay pinned"
+    );
+}
+
+/// #6495: the daemon spawn path must start the pane on Claude Code's classic
+/// renderer, and must do it in the form that yields to a value the pane already
+/// exports. Asserting the exact `${NAME-1}` operand covers both: a bare
+/// `NAME=1` would satisfy "the variable is present" while overriding the
+/// operator.
+#[test]
+fn spawn_command_defaults_the_alternate_screen_off() {
+    let operand = crate::core::alt_screen::ALT_SCREEN_SHELL_ASSIGNMENT;
+    let dir = Path::new("/tm/claude-config");
+    for cmd in [
+        spawn_command(
+            Path::new(TEST_CWD),
+            "claude",
+            None,
+            TEST_SESSION_ID,
+            None,
+            None,
+            None,
+            &[],
+        ),
+        spawn_command(
+            Path::new(TEST_CWD),
+            "claude",
+            Some(dir),
+            TEST_SESSION_ID,
+            None,
+            Some("tok"),
+            None,
+            &[],
+        ),
+    ] {
+        let at = cmd.find(operand).unwrap_or_else(|| {
+            panic!("the spawn line must default the alternate screen off: {cmd}")
+        });
+        // POSIX `env`: an assignment before a `-u` makes `env` exec `-u`. The
+        // whole line is checked, not just the prefix, because the `cd … export
+        // …` wrapper carries an `=` of its own ahead of the flags.
+        let last_unset = cmd.rfind("-u ").expect("the line carries scrub flags");
+        assert!(
+            last_unset < at,
+            "the operand must follow every -u flag: {cmd}"
+        );
+    }
+}
+
+/// #6495, resume-path counterpart: a resumed session gets the same default as a
+/// fresh one, or the fix would evaporate on the first reconnect.
+#[test]
+fn resume_command_defaults_the_alternate_screen_off() {
+    let cmd = resume_command(
+        Path::new(TEST_CWD),
+        "claude",
+        None,
+        Some("abc-123"),
+        false,
+        TEST_SESSION_ID,
+        None,
+        None,
+        None,
+        &[],
+    );
+    assert!(
+        cmd.contains(crate::core::alt_screen::ALT_SCREEN_SHELL_ASSIGNMENT),
+        "the resume line must default the alternate screen off: {cmd}"
     );
 }
 

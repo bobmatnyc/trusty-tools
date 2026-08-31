@@ -894,6 +894,35 @@ fn inplace_exec_command_scrubs_inherited_session_markers() {
     );
 }
 
+/// #6495: the in-place relaunch execs `claude` directly, so the `env NAME=VALUE`
+/// operand the tmux-pane lines carry cannot reach it — the classic-renderer
+/// default has to be set on the `Command` instead, and it must not clobber a
+/// value this pane already exports.
+///
+/// The expectation is derived from the ambient environment rather than fixed,
+/// which is what makes this deterministic in both directions: the rule under
+/// test IS "override exactly when the launch carries no value". The precedence
+/// logic itself is proven with injected lookups in
+/// `core::alt_screen`'s `command_default_applies_when_the_variable_is_unset` /
+/// `command_default_yields_to_an_operator_value`; this asserts the wiring.
+#[test]
+fn inplace_exec_command_defaults_the_alternate_screen_off() {
+    use trusty_mpm::core::alt_screen::{ALT_SCREEN_DEFAULT, ALT_SCREEN_ENV_VAR};
+
+    let resume = synthetic_resume(&["--dangerously-skip-permissions"]);
+    let cmd = build_inplace_exec_command(&resume, std::path::Path::new("/fake/cwd"));
+
+    let carried_by_the_launch = std::env::var_os(ALT_SCREEN_ENV_VAR).is_some();
+    let provisioned = cmd.get_envs().any(|(k, v)| {
+        k == ALT_SCREEN_ENV_VAR && v.is_some_and(|v| v == std::ffi::OsStr::new(ALT_SCREEN_DEFAULT))
+    });
+    assert_eq!(
+        provisioned, !carried_by_the_launch,
+        "tm must provision {ALT_SCREEN_ENV_VAR}={ALT_SCREEN_DEFAULT} when the launch \
+         carries no value, and leave an operator value untouched when it does"
+    );
+}
+
 #[serial_test::serial]
 #[test]
 fn inplace_exec_command_carries_isolation_flags_and_persona_end_to_end() {

@@ -81,10 +81,13 @@ fn launch_lines_covers_every_builder() {
 const ALLOWLISTED_CLAUDE_SITES: &[(&str, usize, &str)] = &[
     (
         "core/model_inject.rs",
-        3,
-        "the three shared launch-line builders (build_claude_command, \
-         build_inplace_session_command, build_client_session_command — all three in \
-         launch_lines()) plus the `head()` test helper that reconstructs their prefix. \
+        2,
+        "build_client_session_command (in launch_lines()) plus the `head()` test helper \
+         that reconstructs the shared prefix. #6495 dropped this from 3 to 2 WITHOUT \
+         removing a launch line: `client_session_command_appends_the_prompt_file` had \
+         its own copy of that prefix, which had to be rebuilt when the \
+         alternate-screen operand landed, so it now calls `head()` instead of \
+         restating it — one literal fewer, one duplicate fewer. \
          #4181 dropped this from 4 to 3 WITHOUT removing a launch line: \
          build_claude_command gained optional CLAUDE_CONFIG_DIR / \
          CLAUDE_CODE_OAUTH_TOKEN assignments between the scrub flags and the \
@@ -115,6 +118,13 @@ const ALLOWLISTED_CLAUDE_SITES: &[(&str, usize, &str)] = &[
         "core/claude_env_scrub_tests.rs",
         2,
         "test fixtures for scrub_command — not launch lines",
+    ),
+    (
+        "core/alt_screen.rs",
+        2,
+        "test fixtures for apply_default_when_unset (#6495) — not launch lines. The \
+         module emits no command of its own: it supplies the alternate-screen default \
+         that the real builders carry, as a shell operand or a Command mutation",
     ),
     (
         "core/spawn_disclaim/pane.rs",
