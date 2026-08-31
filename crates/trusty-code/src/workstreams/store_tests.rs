@@ -1,10 +1,17 @@
 //! Tests for `workstreams::store` (DOC-48 §3, AC-1.2, AC-1.4, AC-6.1, AC-6.2).
 
 use super::*;
+use std::collections::HashSet;
 use tempfile::TempDir;
 
 fn store_file(dir: &TempDir) -> PathBuf {
     dir.path().join("workstreams-test.json")
+}
+
+/// #4579: the live-session set a fresh daemon boot presents — empty, because
+/// the `SessionRegistry` is in-memory and holds nothing across a restart.
+fn no_live_sessions() -> HashSet<String> {
+    HashSet::new()
 }
 
 #[tokio::test]
@@ -110,7 +117,10 @@ async fn reconcile_restores_active_pointer() {
 
     // A fresh store handle stands in for the daemon reloading after restart.
     let mut restarted = WorkstreamStore::load(&path).await.expect("load restarted");
-    let outcome = restarted.reconcile_on_boot().await.expect("reconcile");
+    let outcome = restarted
+        .reconcile_on_boot(&no_live_sessions())
+        .await
+        .expect("reconcile");
     assert_eq!(outcome.workstream_count, 1);
     assert_eq!(outcome.active_restored, Some(id));
     assert!(!outcome.active_cleared);
@@ -147,7 +157,10 @@ async fn reconcile_clears_active_when_target_missing() {
         "precondition: dangling pointer is present before reconciliation"
     );
 
-    let outcome = store.reconcile_on_boot().await.expect("reconcile");
+    let outcome = store
+        .reconcile_on_boot(&no_live_sessions())
+        .await
+        .expect("reconcile");
     assert!(outcome.active_cleared);
     assert_eq!(outcome.active_restored, None);
     assert_eq!(store.active_workstream_id().await.expect("active"), None);
@@ -167,7 +180,10 @@ async fn reconcile_is_noop_with_no_active_pointer() {
     let mut store = WorkstreamStore::load(store_file(&dir)).await.expect("load");
     store.create("A").await.expect("create");
 
-    let outcome = store.reconcile_on_boot().await.expect("reconcile");
+    let outcome = store
+        .reconcile_on_boot(&no_live_sessions())
+        .await
+        .expect("reconcile");
     assert_eq!(outcome.workstream_count, 1);
     assert_eq!(outcome.active_restored, None);
     assert!(!outcome.active_cleared);
@@ -186,7 +202,10 @@ async fn reconcile_preserves_every_workstream_record() {
     drop(store);
 
     let mut restarted = WorkstreamStore::load(&path).await.expect("reload");
-    restarted.reconcile_on_boot().await.expect("reconcile");
+    restarted
+        .reconcile_on_boot(&no_live_sessions())
+        .await
+        .expect("reconcile");
     let all = restarted.list().await.expect("list");
     assert_eq!(
         all.len(),
@@ -195,6 +214,84 @@ async fn reconcile_preserves_every_workstream_record() {
     );
     assert!(all.iter().any(|w| w.id == a));
     assert!(all.iter().any(|w| w.id == b));
+}
+
+/// #4579: a `session_id` bound before a restart, whose session is absent from
+/// the (in-memory) registry after the restart, must be pruned on boot — the
+/// persisted reference cannot be left dangling. The workstream RECORD survives.
+#[tokio::test]
+async fn reconcile_prunes_dangling_session_ids() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = store_file(&dir);
+
+    // Before restart: a workstream with a bound session.
+    let mut writer = WorkstreamStore::load(&path).await.expect("load writer");
+    let ws = writer.create("A").await.expect("create");
+    writer
+        .bind_session(ws, "sess-gone")
+        .await
+        .expect("bind session");
+    assert_eq!(
+        writer.get(ws).await.expect("get").session_ids,
+        vec!["sess-gone".to_string()],
+        "precondition: the session_id is persisted before the restart"
+    );
+    drop(writer);
+
+    // After restart: the registry is empty, so `sess-gone` is not live.
+    let mut restarted = WorkstreamStore::load(&path).await.expect("load restarted");
+    let outcome = restarted
+        .reconcile_on_boot(&no_live_sessions())
+        .await
+        .expect("reconcile");
+    assert_eq!(outcome.sessions_pruned, 1, "the dangling id must be pruned");
+    assert_eq!(
+        restarted.list().await.expect("list").len(),
+        1,
+        "the workstream record itself must survive (AC-6.1)"
+    );
+    assert!(
+        restarted.get(ws).await.expect("get").session_ids.is_empty(),
+        "no workstream may retain a session_id absent from the live registry"
+    );
+
+    // Persisted, not just in-memory.
+    let mut reloaded = WorkstreamStore::load(&path).await.expect("reload");
+    assert!(
+        reloaded.get(ws).await.expect("get").session_ids.is_empty(),
+        "the prune must be written to disk"
+    );
+}
+
+/// #4579: reconciliation must NOT over-prune — a `session_id` present in the
+/// live registry is kept, while a dangling sibling in the same record is
+/// dropped.
+#[tokio::test]
+async fn reconcile_keeps_live_session_ids() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = store_file(&dir);
+
+    let mut store = WorkstreamStore::load(&path).await.expect("load");
+    let ws = store.create("A").await.expect("create");
+    store
+        .bind_session(ws, "sess-live")
+        .await
+        .expect("bind live");
+    store
+        .bind_session(ws, "sess-gone")
+        .await
+        .expect("bind gone");
+
+    let mut live = HashSet::new();
+    live.insert("sess-live".to_string());
+
+    let outcome = store.reconcile_on_boot(&live).await.expect("reconcile");
+    assert_eq!(outcome.sessions_pruned, 1, "only the dangling id is pruned");
+    assert_eq!(
+        store.get(ws).await.expect("get").session_ids,
+        vec!["sess-live".to_string()],
+        "a live session_id must be kept"
+    );
 }
 
 #[tokio::test]
