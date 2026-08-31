@@ -6,6 +6,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.5.13] — 2026-08-31
+
+### Changed
+
+- `tm-ticketing` now carries the full issue lifecycle — `status:in-progress`
+  claimed at dispatch with a dated session comment, event-driven advances to
+  `status:coded` / `status:merged` / `status:tested`, and a close bar that
+  requires live verification evidence. `tm-workflow` and
+  `tm-delegation-patterns` record the matching `version-control` ownership: the
+  merge, the post-merge verification against the exact head SHA, the merged-
+  worktree reclaim, and the label advance it must flag rather than make.
+- `tm hook --pm-guard` no longer diverts a `version-control` dispatch into an
+  isolation worktree, and no longer denies one beside another writer. Its
+  writes are the merge into main, the branch delete, and the merged-worktree
+  reclaim, none of which can be done from inside a worktree. It still counts as
+  an occupant, so an engineer dispatched into the same directory beside it is
+  denied exactly as before, and engineer source-write confinement is unchanged.
+  (ADR-0056; narrows #4480 and #5650 for one agent name)
+- `tm tui` and `tm attach <target>` now open the multipane project control
+  dashboard (projects / sessions / activity / action bar) instead of the
+  single-pane coordinator chat. `tm attach` selects the resolved session's
+  owning project and row on the first frame.
+  - The coordinator chat stays reachable with the new `--single-pane` flag on
+    both commands, and `tm sessions tui` is unchanged.
+
 ## [1.5.12] — 2026-08-31
 
 ### Added
