@@ -484,6 +484,8 @@ async fn run_doctor_produces_thirty_two_checks() {
         // #5007: `sessions.json` integrity — a corrupt store blocks every write.
         "session_store",
         "stray_mcp_json",
+        // #6469: the tmux server globals a resurrect restore leaves unset.
+        "tmux_options",
     ];
     assert_eq!(names, expected);
     // Count derived from the list above, never a standalone literal:

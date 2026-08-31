@@ -165,6 +165,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "stray_mcp_json",
         "Warns when a `.mcp.json` sits ABOVE the workspace or in a temp root. Claude Code discovers `.mcp.json` by walking UP from a session's cwd, so such a file silently supplies the MCP servers of every session started beneath it — agent scratchpads under `/tmp` included — with nothing in the project to point at. The scan is bounded: the workspace's strict ancestors up to the home directory (never the filesystem root, never a recursive descent) plus `$TMPDIR` and `/tmp`. Each finding names the servers it declares and what tm can PROVE about who wrote it, read from the `mcp-json-provenance.json` ledger rather than guessed from content — a file full of `trusty-*` servers may equally be one the operator wrote. Read-only. `tm doctor --fix` quarantines only ledger-proven tm writes (renaming them aside, never deleting); everything else is refused and needs `tm doctor --quarantine-mcp <path>`.",
     ),
+    (
+        "tmux_options",
+        "Whether the live tmux SERVER's globals still match tm's spec — `history-limit`, `mouse`, and the window-scoped `alternate-screen`. `create_managed_session` applies and verifies them before every pane tm creates, but a server tm did not start carries none of them: a tmux-continuum restore recreates `tm-*` sessions through tmux-resurrect's own bare `new-session`, so restored panes bake tmux's factory 2000-line scrollback and can enter the alternate screen (issue #6469). Warns naming each drifted option; UNKNOWN — never `Ok` — when no option could be read (no tmux binary, or no server running). A green row means NEW panes will be correct: `history-limit` is captured into a pane's ring buffer at creation and cannot be grown in place, so an affected session has to be restarted. Read-only — it reads options, never sets one.",
+    ),
 ];
 
 /// Render the full doctor-check reference.
