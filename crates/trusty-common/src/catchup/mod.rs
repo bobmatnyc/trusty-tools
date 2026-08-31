@@ -36,7 +36,7 @@ use self::{
     git::git_commits_since,
     palace::fetch_recent_palace_drawers,
     session_finder::{filter_sessions_since, find_paused_sessions, render_resume_context},
-    state::{CatchupState, load_catchup_state, save_catchup_state},
+    state::{CatchupState, load_catchup_state_in, save_catchup_state_in},
 };
 
 /// Options controlling one catch-up run.
@@ -221,7 +221,7 @@ pub async fn generate_catchup_context_in(
     let watermark: Option<DateTime<Utc>> = if opts.full {
         None
     } else {
-        load_catchup_state(&palace_id, state_root).map(|s| s.last_catchup_at)
+        load_catchup_state_in(&palace_id, state_root).map(|s| s.last_catchup_at)
     };
 
     let mut out = String::new();
@@ -309,7 +309,7 @@ pub async fn generate_catchup_context_in(
 /// without advancing the watermark (manual peek), while the auto-inject on
 /// session start should advance it.
 /// What: calls [`generate_catchup_context`] to produce the context string,
-/// then — when `advance_watermark` is true — calls [`save_catchup_state`] with
+/// then — when `advance_watermark` is true — calls [`save_catchup_state_in`] with
 /// the current timestamp and the HEAD git SHA. Returns the digest string.
 /// Test: `run_catchup_no_advance_does_not_panic`, `run_catchup_advance_writes_under_the_state_root`.
 pub async fn run_catchup(opts: &CatchupOptions, advance_watermark: bool) -> String {
@@ -354,7 +354,7 @@ pub async fn run_catchup_in(
             palace_id: palace_id.clone(),
             last_git_sha: sha,
         };
-        if let Err(e) = save_catchup_state(&palace_id, &state, state_root) {
+        if let Err(e) = save_catchup_state_in(&palace_id, &state, state_root) {
             eprintln!("catchup: warning: could not save watermark state: {e}");
         }
     }
