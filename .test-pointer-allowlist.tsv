@@ -144,7 +144,6 @@ crates/trusty-agents/src/ticketing/mod.rs	build_client_force_gh_cli_falls_back_t
 crates/trusty-agents/src/ticketing/mod.rs	from_env_reads_github_token
 crates/trusty-agents/src/tm/commands/mod.rs	dispatch_help
 crates/trusty-agents/src/tm/commands/mod.rs	dispatch_unknown
-crates/trusty-agents/src/tools/analysis/trace_flow.rs	trace_flow_outgoing_smoke
 crates/trusty-agents/src/tools/mcp_service_tools.rs	formats_text_content
 crates/trusty-agents/src/tools/mcp_service_tools.rs	mcp_service_tool_executors_returns_tools_for_enabled_services
 crates/trusty-agents/src/tools/mcp_service_tools.rs	surfaces_call_errors
