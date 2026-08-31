@@ -23,6 +23,11 @@ def _run(tool_name: str, args: dict, env_overrides: dict | None = None) -> subpr
 
     env = os.environ.copy()
     env["PYTHONPATH"] = str(PYTHON_DIR / "src") + os.pathsep + env.get("PYTHONPATH", "")
+    # #4860: the fixture is opt-in, so these fixture-backed cases must ask for
+    # it by name. A developer's real `CTO_DB_PATH` is dropped so the suite
+    # queries the committed fixture rather than whatever is on their machine.
+    env.pop("CTO_DB_PATH", None)
+    env["CTO_DB_USE_FIXTURE"] = "1"
     if env_overrides:
         env.update(env_overrides)
     return subprocess.run(
@@ -43,6 +48,38 @@ def test_cli_query_headcount_against_fixture() -> None:
     assert payload["filter_by"] == "team"
     assert isinstance(payload["groups"], list)
     assert len(payload["groups"]) > 0
+
+
+# #4860: fixture output must be identifiable downstream, not indistinguishable
+# from a real answer.
+def test_cli_stamps_the_resolved_source_on_every_response() -> None:
+    proc = _run("query_headcount", {"filter_by": "team"})
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert payload["db_path"] == str(FIXTURE_DB)
+    assert payload["is_fixture"] is True
+
+
+def test_cli_refuses_when_no_database_is_configured() -> None:
+    import os
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(PYTHON_DIR / "src") + os.pathsep + env.get("PYTHONPATH", "")
+    env.pop("CTO_DB_PATH", None)
+    env.pop("CTO_DB_USE_FIXTURE", None)
+    proc = subprocess.run(
+        [sys.executable, "-m", "cto_db_skill.cli", "query_headcount"],
+        input=json.dumps({"filter_by": "team"}),
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=10,
+        check=False,
+    )
+    assert proc.returncode == 1
+    payload = json.loads(proc.stdout)
+    assert "CTO_DB_PATH" in payload["error"]
+    assert "groups" not in payload
 
 
 def test_cli_query_budget_no_args() -> None:

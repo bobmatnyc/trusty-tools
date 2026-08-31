@@ -9,12 +9,14 @@ query logic (that's `db.py`), only argv/stdin/stdout plumbing and exit codes.
 
 What: `main()` reads `sys.argv[1]` as the tool name, parses stdin as JSON
 (treating empty stdin as `{}`), calls `db.dispatch`, and prints the result as
-a single JSON line to stdout. On any exception it prints
-`{"error": "<message>"}` to stdout and exits 1 — never a raw Python
-traceback, which would not parse as the JSON the Rust side expects.
+a single JSON line to stdout, stamped with the `db_path` it queried and an
+`is_fixture` flag (#4860). On any exception — including an unconfigured
+database — it prints `{"error": "<message>"}` to stdout and exits 1, never a
+raw Python traceback, which would not parse as the JSON the Rust side expects.
 
 Test: `tests/test_cli.py` drives this via `subprocess.run` end-to-end,
-including the fixture DB, an unknown tool, and an unknown filter value.
+including the fixture DB, an unknown tool, an unknown filter value, and the
+unconfigured-database refusal.
 """
 
 from __future__ import annotations
@@ -43,7 +45,14 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"error": f"invalid JSON on stdin: {exc}"}))
         return 1
 
-    db_path = db.resolve_db_path()
+    # #4860: an unconfigured skill refuses here instead of quietly answering
+    # from the bundled fixture.
+    try:
+        db_path = db.resolve_db_path()
+    except db.UnconfiguredDatabaseError as exc:
+        print(json.dumps({"error": str(exc)}))
+        return 1
+
     try:
         conn = db.open_readonly(db_path)
     except Exception as exc:  # noqa: BLE001 - surfaced to the LLM, never a crash
@@ -64,6 +73,10 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         conn.close()
 
+    # #4860: stamp the resolved source so fixture output stays identifiable
+    # downstream rather than reading as a real Duetto figure.
+    result["db_path"] = str(db_path)
+    result["is_fixture"] = db.is_fixture_path(db_path)
     print(json.dumps(result))
     return 0
 

@@ -18,7 +18,8 @@ What: Four functions — `query_headcount`, `query_budget`, `query_risks`,
 optional filters and returning a JSON-serialisable `dict`. `resolve_db_path`
 / `open_readonly` centralise path resolution and read-only connection
 opening so `cli.py` (the subprocess entrypoint) and the test suite share one
-code path.
+code path. #4860: `resolve_db_path` refuses when nothing is configured — the
+bundled fixture is served only when `$CTO_DB_USE_FIXTURE` asks for it.
 
 Test: `tests/test_db.py` seeds an in-memory SQLite database with the same
 shape as `fixtures/build_fixture.py` and exercises every function's filters,
@@ -40,32 +41,77 @@ from typing import Any
 # module's README/comments.
 ENV_CTO_DB_PATH = "CTO_DB_PATH"
 
-# The bundled fixture, shipped alongside this package. This is what gets
-# used with NO configuration — see this directory's README.md for the loud
-# "this is fixture data, not the real Duetto CTO ops DB" disclosure.
+# Opt-in to the bundled fixture. #4860: the fixture used to be the silent
+# default, so an unconfigured skill answered "how many people do we have?"
+# with invented sample data and no way for the caller to tell. Serving it now
+# requires asking for it by name.
+ENV_CTO_DB_USE_FIXTURE = "CTO_DB_USE_FIXTURE"
+
+# The bundled fixture, shipped alongside this package. Reachable only via
+# `$CTO_DB_USE_FIXTURE` — see this directory's README.md for the loud "this is
+# fixture data, not the real Duetto CTO ops DB" disclosure.
 _SKILL_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_FIXTURE_DB_PATH = _SKILL_ROOT / "fixtures" / "cto_fixture.db"
+
+# Spellings that turn the fixture opt-in OFF. Anything else non-empty turns it
+# on, so `CTO_DB_USE_FIXTURE=1` and `=true` both work.
+_FIXTURE_OPT_OUT_VALUES = frozenset({"", "0", "false", "no", "off"})
 
 
 class UnknownFilterError(ValueError):
     """Raised when a caller passes a filter value outside the documented enum."""
 
 
-def resolve_db_path() -> Path:
-    """Resolve which SQLite file to open.
+class UnconfiguredDatabaseError(RuntimeError):
+    """Raised when no database is configured and the fixture was not opted into.
 
-    Why: Local dev/CI/production all need to work without code changes —
-    honour an explicit override first, then fall back to the bundled
-    fixture so the skill is usable out of the box.
-    What: Returns `$CTO_DB_PATH` if set and non-empty, else
-    `DEFAULT_FIXTURE_DB_PATH`.
+    Why: #4860 — a confident wrong answer is worse than an error. The caller
+    must see a refusal it can surface, not sample data dressed as a real
+    headcount.
+    """
+
+
+def _fixture_opt_in() -> bool:
+    value = os.environ.get(ENV_CTO_DB_USE_FIXTURE, "").strip().lower()
+    return value not in _FIXTURE_OPT_OUT_VALUES
+
+
+def resolve_db_path() -> Path:
+    """Resolve which SQLite file to open, or refuse.
+
+    Why: #4860 — falling back to the bundled fixture with nothing configured
+    let the four query tools return well-formed answers built from invented
+    data, indistinguishable from a real one. The fixture stays reachable for
+    tests and local development, but only when asked for explicitly.
+    What: Returns `$CTO_DB_PATH` if set and non-empty; else
+    `DEFAULT_FIXTURE_DB_PATH` when `$CTO_DB_USE_FIXTURE` opts in; else raises
+    `UnconfiguredDatabaseError`.
     Test: `test_resolve_db_path_honours_env_override`,
-    `test_resolve_db_path_defaults_to_fixture`.
+    `test_resolve_db_path_refuses_when_unconfigured`,
+    `test_resolve_db_path_serves_fixture_only_on_explicit_opt_in`,
+    `test_fixture_opt_in_rejects_falsey_values`,
+    `test_real_path_wins_over_the_fixture_opt_in`.
     """
     override = os.environ.get(ENV_CTO_DB_PATH, "").strip()
     if override:
         return Path(override)
-    return DEFAULT_FIXTURE_DB_PATH
+    if _fixture_opt_in():
+        return DEFAULT_FIXTURE_DB_PATH
+    raise UnconfiguredDatabaseError(
+        f"no CTO database configured: set {ENV_CTO_DB_PATH} to the real "
+        f"database, or {ENV_CTO_DB_USE_FIXTURE}=1 to query the bundled "
+        "fixture (invented sample data, not real Duetto figures)"
+    )
+
+
+def is_fixture_path(path: Path) -> bool:
+    """Whether `path` is the bundled fixture rather than a real database.
+
+    Why: #4860 — every response carries this so fixture output stays
+    identifiable downstream, even once someone opts in.
+    Test: `test_is_fixture_path_labels_the_bundled_fixture`.
+    """
+    return Path(path) == DEFAULT_FIXTURE_DB_PATH
 
 
 def open_readonly(path: Path) -> sqlite3.Connection:

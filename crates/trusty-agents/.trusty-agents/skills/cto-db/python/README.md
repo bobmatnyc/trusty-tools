@@ -5,11 +5,10 @@ Python skill package backing cto-assistant's four `[tools].allow` entries:
 
 ## IMPORTANT: fixture data, not the real Duetto database
 
-**The database this skill queries by default (`fixtures/cto_fixture.db`) is
-invented sample data, checked in for structural completeness and
-testability only.** It is not a copy, sample, or export of any real Duetto
-system. Names, teams, and numbers are all placeholders (e.g. "Ada Fixture",
-"GTM Sample Team").
+**The bundled database (`fixtures/cto_fixture.db`) is invented sample data,
+checked in for structural completeness and testability only.** It is not a
+copy, sample, or export of any real Duetto system. Names, teams, and numbers
+are all placeholders (e.g. "Ada Fixture", "GTM Sample Team").
 
 The real source this skill is meant to eventually query is
 `~/Duetto/cto/data/cto.db` — a SQLite file that lives on Bob's machine. This
@@ -24,8 +23,18 @@ To use the real database once it's reachable:
 export CTO_DB_PATH=~/Duetto/cto/data/cto.db
 ```
 
-With `CTO_DB_PATH` unset, `db.resolve_db_path()` falls back to the bundled
-fixture. See `db.py`'s module docstring for the exact resolution order.
+### Resolution order (#4860)
+
+1. `CTO_DB_PATH` set and non-empty → that file.
+2. Else `CTO_DB_USE_FIXTURE` set to anything but `0`/`false`/`no`/`off` →
+   the bundled fixture.
+3. Else `db.resolve_db_path()` raises `UnconfiguredDatabaseError`, and
+   `cli.py` turns that into `{"error": ...}` with exit 1.
+
+The fixture used to be the silent default, so an unconfigured skill answered
+"how many people do we have?" with five invented names while the real
+database held 421. Every successful response now also carries `db_path` and
+`is_fixture`, so fixture output stays identifiable downstream.
 
 ## Why this schema
 
@@ -70,8 +79,16 @@ uv pip install -e ".[dev]"
 uv run pytest
 ```
 
+The suite sets `CTO_DB_USE_FIXTURE=1` itself and drops any inherited
+`CTO_DB_PATH`, so it queries the committed fixture rather than a developer's
+real database.
+
 ## Manual smoke test
 
 ```bash
-echo '{"filter_by": "team"}' | uv run python -m cto_db_skill.cli query_headcount
+echo '{"filter_by": "team"}' | CTO_DB_USE_FIXTURE=1 \
+  uv run python -m cto_db_skill.cli query_headcount
 ```
+
+Without `CTO_DB_PATH` or `CTO_DB_USE_FIXTURE`, that command prints a JSON
+error and exits 1 — the intended behaviour, not a misconfiguration.

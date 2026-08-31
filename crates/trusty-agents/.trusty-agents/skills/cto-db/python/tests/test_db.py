@@ -9,6 +9,7 @@ sample rows drifting over time.
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -195,9 +196,45 @@ def test_resolve_db_path_honours_env_override(monkeypatch: pytest.MonkeyPatch) -
     assert str(db.resolve_db_path()) == "/tmp/custom-cto.db"
 
 
-def test_resolve_db_path_defaults_to_fixture(monkeypatch: pytest.MonkeyPatch) -> None:
+# #4860: the fixture must never be the silent default — an unconfigured skill
+# refuses rather than answering a headcount question from invented sample data.
+def test_resolve_db_path_refuses_when_unconfigured(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(db.ENV_CTO_DB_PATH, raising=False)
+    monkeypatch.delenv(db.ENV_CTO_DB_USE_FIXTURE, raising=False)
+    with pytest.raises(db.UnconfiguredDatabaseError) as excinfo:
+        db.resolve_db_path()
+    message = str(excinfo.value)
+    assert db.ENV_CTO_DB_PATH in message
+    assert db.ENV_CTO_DB_USE_FIXTURE in message
+
+
+def test_resolve_db_path_serves_fixture_only_on_explicit_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(db.ENV_CTO_DB_PATH, raising=False)
+    monkeypatch.setenv(db.ENV_CTO_DB_USE_FIXTURE, "1")
     assert db.resolve_db_path() == db.DEFAULT_FIXTURE_DB_PATH
+
+
+@pytest.mark.parametrize("value", ["", "0", "false", "no", "off", "  FALSE  "])
+def test_fixture_opt_in_rejects_falsey_values(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.delenv(db.ENV_CTO_DB_PATH, raising=False)
+    monkeypatch.setenv(db.ENV_CTO_DB_USE_FIXTURE, value)
+    with pytest.raises(db.UnconfiguredDatabaseError):
+        db.resolve_db_path()
+
+
+def test_real_path_wins_over_the_fixture_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(db.ENV_CTO_DB_PATH, "/tmp/custom-cto.db")
+    monkeypatch.setenv(db.ENV_CTO_DB_USE_FIXTURE, "1")
+    assert str(db.resolve_db_path()) == "/tmp/custom-cto.db"
+
+
+def test_is_fixture_path_labels_the_bundled_fixture() -> None:
+    assert db.is_fixture_path(db.DEFAULT_FIXTURE_DB_PATH) is True
+    assert db.is_fixture_path(Path("/tmp/custom-cto.db")) is False
 
 
 def test_open_readonly_rejects_missing_file(tmp_path) -> None:

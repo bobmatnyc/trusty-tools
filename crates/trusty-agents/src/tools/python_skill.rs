@@ -36,10 +36,12 @@
 //!       is the pre-existing behaviour, not a crash).
 //! Test: `manifest_parses_cto_db_shape`, `build_plugin_reads_four_tools`,
 //!       `execute_dispatches_to_python_and_parses_json` (spawns the real
-//!       `cto-db` skill's `uv run` command against its bundled fixture DB;
-//!       skipped with a loud stderr note if `uv` is not on `PATH`, matching
-//!       this workspace's fail-open convention for optional external
-//!       tooling), `execute_maps_python_error_key_to_recoverable_result`,
+//!       `cto-db` skill's `uv run` command against its bundled fixture DB,
+//!       opted into via `CtoDbEnvGuard` since #4860; skipped with a loud
+//!       stderr note if `uv` is not on `PATH`, matching this workspace's
+//!       fail-open convention for optional external tooling),
+//!       `execute_without_a_configured_db_surfaces_the_refusal`,
+//!       `execute_maps_python_error_key_to_recoverable_result`,
 //!       `install_discovered_skill_plugins_is_noop_on_missing_dir`.
 
 use std::path::{Path, PathBuf};
@@ -370,11 +372,77 @@ mod tests {
     /// use. Plain `HOME_LOCK` rather than `test_env::lock_home()` because these
     /// tests exercise no production path guarded by
     /// `home_lock_held_by_this_thread` (only `listeners::store::events_dir` is).
-    /// Test: [`execute_dispatches_to_python_and_parses_json`] and
-    /// [`execute_maps_python_error_key_to_recoverable_result`] — the two tests
+    /// Test: [`execute_dispatches_to_python_and_parses_json`],
+    /// [`execute_maps_python_error_key_to_recoverable_result`], and
+    /// [`execute_without_a_configured_db_surfaces_the_refusal`] — the tests
     /// that spawn `uv`. [`execute_reports_spawn_failure_as_recoverable`]
     /// deliberately does not: it spawns a nonexistent binary and never reads
     /// `HOME`.
+    const CTO_DB_PATH_ENV: &str = "CTO_DB_PATH";
+    const CTO_DB_USE_FIXTURE_ENV: &str = "CTO_DB_USE_FIXTURE";
+
+    /// Pin the cto-db skill's data source for one test body (#4860).
+    ///
+    /// Why: the skill refuses to answer unless a database is configured, so a
+    /// test wanting the bundled fixture must opt in by name, and a test proving
+    /// the refusal must ensure neither variable is set. A developer's real
+    /// `CTO_DB_PATH` is dropped either way so the suite never queries it.
+    /// What: RAII over both variables, restoring their prior values on drop.
+    /// Every caller also holds [`hold_home_for_uv`]'s `HOME_LOCK`, the mutex
+    /// this crate's env-mutating tests serialize on.
+    /// Test: used by [`execute_dispatches_to_python_and_parses_json`],
+    /// [`execute_maps_python_error_key_to_recoverable_result`], and
+    /// [`execute_without_a_configured_db_surfaces_the_refusal`].
+    struct CtoDbEnvGuard {
+        prev_path: Option<String>,
+        prev_fixture: Option<String>,
+    }
+
+    impl CtoDbEnvGuard {
+        fn new(use_fixture: bool) -> Self {
+            let guard = Self {
+                prev_path: std::env::var(CTO_DB_PATH_ENV).ok(),
+                prev_fixture: std::env::var(CTO_DB_USE_FIXTURE_ENV).ok(),
+            };
+            // SAFETY: serialized by the caller's `HOME_LOCK` guard, the same
+            // convention this module's `$HOME` mutation already relies on.
+            unsafe {
+                std::env::remove_var(CTO_DB_PATH_ENV);
+                if use_fixture {
+                    std::env::set_var(CTO_DB_USE_FIXTURE_ENV, "1");
+                } else {
+                    std::env::remove_var(CTO_DB_USE_FIXTURE_ENV);
+                }
+            }
+            guard
+        }
+
+        fn fixture() -> Self {
+            Self::new(true)
+        }
+
+        fn unconfigured() -> Self {
+            Self::new(false)
+        }
+    }
+
+    impl Drop for CtoDbEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: as above.
+            unsafe {
+                for (key, prev) in [
+                    (CTO_DB_PATH_ENV, self.prev_path.take()),
+                    (CTO_DB_USE_FIXTURE_ENV, self.prev_fixture.take()),
+                ] {
+                    match prev {
+                        Some(v) => std::env::set_var(key, v),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+    }
+
     fn hold_home_for_uv() -> std::sync::MutexGuard<'static, ()> {
         crate::test_env::HOME_LOCK
             .lock()
@@ -444,6 +512,8 @@ mod tests {
         }
         // #4414: pin $HOME for the whole body — see `hold_home_for_uv`.
         let _home = hold_home_for_uv();
+        // #4860: the fixture is opt-in now, so ask for it by name.
+        let _db = CtoDbEnvGuard::fixture();
         let plugin = build_plugin(&cto_db_skill_dir()).expect("plugin should build");
         let tool = plugin
             .tools
@@ -460,6 +530,53 @@ mod tests {
         let parsed: Value = serde_json::from_str(result.content()).expect("content must be JSON");
         assert_eq!(parsed["filter_by"], "team");
         assert!(parsed["groups"].as_array().is_some_and(|g| !g.is_empty()));
+        // #4860: fixture output must be labelled, not indistinguishable from a
+        // real answer.
+        assert_eq!(parsed["is_fixture"], true);
+        assert!(
+            parsed["db_path"]
+                .as_str()
+                .is_some_and(|p| p.ends_with("cto_fixture.db"))
+        );
+    }
+
+    /// #4860: with no database configured the bridge must surface a refusal,
+    /// not five invented names presented as a real headcount.
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "#4414: holding HOME_LOCK across the uv subprocess IS the fix"
+    )]
+    #[tokio::test]
+    async fn execute_without_a_configured_db_surfaces_the_refusal() {
+        if !uv_available() {
+            eprintln!("SKIP: `uv` not on PATH — cannot exercise the real cto-db skill subprocess");
+            return;
+        }
+        let _home = hold_home_for_uv();
+        let _db = CtoDbEnvGuard::unconfigured();
+        let plugin = build_plugin(&cto_db_skill_dir()).expect("plugin should build");
+        let tool = plugin
+            .tools
+            .iter()
+            .find(|t| t.name() == "query_headcount")
+            .expect("query_headcount present");
+
+        let result = tool.execute(json!({ "filter_by": "team" })).await;
+        assert!(result.is_error(), "an unconfigured skill must not answer");
+        assert!(
+            !result.is_fatal(),
+            "python skill errors must be recoverable"
+        );
+        assert!(
+            result.content().contains("CTO_DB_PATH"),
+            "the refusal must name the variable that fixes it, got: {}",
+            result.content()
+        );
+        assert!(
+            !result.content().contains("groups"),
+            "no fixture rows may leak into the refusal, got: {}",
+            result.content()
+        );
     }
 
     // #4414: holds the guard across `.await` deliberately — the whole point is
@@ -478,6 +595,9 @@ mod tests {
         }
         // #4414: pin $HOME for the whole body — see `hold_home_for_uv`.
         let _home = hold_home_for_uv();
+        // #4860: opt into the fixture so this reaches the unknown-filter path
+        // rather than stopping at the unconfigured-database refusal.
+        let _db = CtoDbEnvGuard::fixture();
         let plugin = build_plugin(&cto_db_skill_dir()).expect("plugin should build");
         let tool = plugin
             .tools
