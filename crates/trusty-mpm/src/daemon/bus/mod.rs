@@ -61,7 +61,7 @@ pub use envelope::{
 pub use error::BusError;
 pub use inbox::{
     CLIENT_INBOX_CAPACITY, ClientInbox, DeliveryOutcome, INBOX_MISS_RECORD, InboxItem, InboxMiss,
-    InboxSet, InboxSubscription, MissReason, MissedEnvelope,
+    InboxSet, InboxSubscription, MissedEnvelope,
 };
 pub use registry::{InstanceMeta, InstanceRegistry, LiveInstance, PeerTarget};
 
@@ -202,7 +202,6 @@ impl PeerBus {
                 subscription_id = loss.subscription_id,
                 capacity = CLIENT_INBOX_CAPACITY,
                 message_id = %loss.envelope.message_id,
-                reason = ?loss.reason,
                 missed_total = loss.missed_total,
                 "peer bus inbox lost an envelope for one client: it must re-read \
                  the durable log (#6462)"
@@ -383,8 +382,14 @@ impl PeerBus {
         // looked like in practice.
         match live.deliver(envelope.clone()) {
             DeliveryOutcome::Delivered { missed } => {
+                // These two statements are ordered, not incidental: the loss
+                // records go out FIRST so an interruption under-claims. Keep
+                // them as separate statements — folding the call into the
+                // argument list buries the invariant in operand evaluation
+                // order, where a later refactor can invert it silently.
+                let losses_unrecorded = self.record_losses(&missed);
                 self.audit
-                    .log_record(&EnvelopeRecord::new(&envelope, self.record_losses(&missed)));
+                    .log_record(&EnvelopeRecord::new(&envelope, losses_unrecorded));
                 Ok(envelope)
             }
             DeliveryOutcome::NoSubscriber => {

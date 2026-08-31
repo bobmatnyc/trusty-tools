@@ -34,7 +34,7 @@
 //!    budget.
 //! 2. **The OLDEST unread envelope loses, and the loss is recorded.** #4271's
 //!    defect was never the eviction; it was the lie — the log said `delivered`
-//!    and nobody was told. Every eviction here writes an [`InboxEviction`] to
+//!    and nobody was told. Every eviction here writes an [`InboxMiss`] to
 //!    the §9 stream naming the displaced `message_id` and the subscription that
 //!    lost it, and the reader gets an [`InboxItem::Lagged`] at the point of
 //!    loss. Refusing the NEWEST envelope instead would leave a recovering
@@ -119,32 +119,8 @@ pub enum InboxItem {
     /// One addressed envelope, in publish order.
     Envelope(Box<BusEnvelope>),
     /// This inbox displaced `missed` unread envelopes to make room. Each one
-    /// has an [`InboxEviction`] record in the §9 stream.
+    /// has an [`InboxMiss`] record in the §9 stream.
     Lagged(u64),
-}
-
-/// Why one subscription did not end up holding an envelope.
-///
-/// Why two reasons and not one: they have different operator meanings and
-/// different recoveries. A displacement says the client is behind and should
-/// re-read the log; a closed subscription says its instance was deregistered
-/// out from under an in-flight publish, and there is nothing for that client to
-/// come back to. Collapsing them would put "you are behind" and "you are gone"
-/// under one word.
-/// What: the two ways an inbox can fail to end up holding an envelope.
-/// Test: `eviction_is_recorded_per_client_in_the_durable_log`,
-/// `a_publish_racing_deregistration_records_the_closed_subscriptions_miss`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MissReason {
-    /// The inbox was full, so its OLDEST unread envelope was displaced to make
-    /// room for this one. The record's `message_id` names the DISPLACED
-    /// envelope, not the one that arrived.
-    Displaced,
-    /// The subscription was closed by a deregistration before this envelope
-    /// reached it, so it took nothing. The record's `message_id` names the
-    /// envelope that arrived.
-    SubscriptionClosed,
 }
 
 /// One envelope one subscription will never read, with its §9 record's facts.
@@ -164,8 +140,6 @@ pub struct MissedEnvelope {
     /// How many envelopes that subscription has lost in total, this one
     /// included.
     pub missed_total: u64,
-    /// Why it was lost.
-    pub reason: MissReason,
     /// The envelope itself — the §9 log records this publish as `delivered`,
     /// and this is what says that record is not the whole truth for this one
     /// client.
@@ -184,7 +158,6 @@ impl MissedEnvelope {
             subscription_id: self.subscription_id,
             message_id: self.envelope.message_id.clone(),
             message_ts: self.envelope.ts.clone(),
-            reason: self.reason,
             missed_total: self.missed_total,
         }
     }
@@ -198,9 +171,17 @@ impl MissedEnvelope {
 /// delivery failure (co-subscribers may well have read it), so it is not a
 /// second `delivery_state` on the envelope; it is a separate fact about one
 /// subscription, and it is recorded as one.
-/// What: the lost `message_id`, the subscription that lost it, why, and that
+/// What: the lost `message_id`, the subscription that lost it, and that
 /// subscription's running loss count — enough to reconstruct exactly what any
 /// one client did and did not see by replaying the stream.
+///
+/// Displacement is the only thing that produces one. A subscription closed by a
+/// deregistration also loses envelopes, but never alongside a client that took
+/// them: [`InboxSet`]'s terminal flag makes a set all-open or all-closed, so a
+/// fan-out into a closed set accepts nothing, and `publish` records THAT
+/// envelope `dropped` — which already says it reached no one. The record is
+/// named for the fact (one client will not read this) rather than the mechanism,
+/// so a second cause would not need a second shape.
 /// Test: `eviction_is_recorded_per_client_in_the_durable_log`,
 /// `miss_records_are_distinguishable_from_envelopes`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -217,8 +198,6 @@ pub struct InboxMiss {
     pub message_id: String,
     /// That envelope's own timestamp, so a replay can seek to it.
     pub message_ts: String,
-    /// Displaced by a full inbox, or lost to a closed subscription.
-    pub reason: MissReason,
     /// How many envelopes this subscription has lost in total.
     pub missed_total: u64,
 }
@@ -304,26 +283,27 @@ impl ClientInbox {
     /// What: [`InboxAccept::Refused`] when the subscription is closed, taking
     /// nothing; [`InboxAccept::Displaced`] when the queue already holds
     /// [`CLIENT_INBOX_CAPACITY`], having popped the front to make room; else
-    /// [`InboxAccept::Took`]. A refusal and a displacement both count toward
-    /// this subscription's loss total and both wake the reader, so a client
-    /// learns of either through [`InboxItem::Lagged`].
+    /// [`InboxAccept::Took`].
+    ///
+    /// Why a refusal touches no counters (#6462 review): a closed subscription
+    /// is one whose instance was deregistered, so the whole set is closed
+    /// ([`SetState`]) and this envelope reaches nobody — `publish` records it
+    /// `dropped`, which already says so. Raising `pending_lag` would be worse
+    /// than useless: [`try_recv`](Self::try_recv) yields lag BEFORE the queue,
+    /// which is right for a displacement (the lost envelope came off the front,
+    /// where the reader is) and wrong for a refusal (the lost envelope is the
+    /// newest) — a client acting on a notice hoisted ahead of envelopes it has
+    /// not read yet would re-read the durable log from the wrong point in its
+    /// own stream.
     /// Test: `eviction_is_recorded_per_client_in_the_durable_log`,
-    /// `a_publish_racing_deregistration_is_not_recorded_delivered`.
+    /// `a_publish_racing_deregistration_is_not_recorded_delivered`,
+    /// `a_closed_subscription_reads_its_queue_without_a_hoisted_lag_notice`.
     fn deliver(&self, envelope: BusEnvelope) -> InboxAccept {
         let mut state = self.state();
         if state.closed {
-            state.evicted_total += 1;
-            state.pending_lag += 1;
-            let miss = MissedEnvelope {
-                instance_id: self.instance_id.clone(),
-                subscription_id: self.subscription_id,
-                missed_total: state.evicted_total,
-                reason: MissReason::SubscriptionClosed,
-                envelope,
-            };
-            drop(state);
-            self.signal.notify_one();
-            return InboxAccept::Refused(Box::new(miss));
+            // No notify: nothing became readable, and `close` already woke the
+            // reader.
+            return InboxAccept::Refused;
         }
         let displaced = if state.queue.len() >= CLIENT_INBOX_CAPACITY {
             let popped = state.queue.pop_front();
@@ -333,7 +313,6 @@ impl ClientInbox {
                 instance_id: self.instance_id.clone(),
                 subscription_id: self.subscription_id,
                 missed_total: state.evicted_total,
-                reason: MissReason::Displaced,
                 envelope: lost,
             })
         } else {
@@ -362,10 +341,13 @@ impl ClientInbox {
 
     /// Take the next item if one is ready, without waiting.
     ///
-    /// Why lag first: the eviction removed envelopes from the FRONT, which is
+    /// Why lag first: a DISPLACEMENT removed envelopes from the FRONT, which is
     /// where the reader is, so the gap belongs before everything still queued.
     /// That is the same ordering `broadcast` gave and what the SSE contract
-    /// (#4271) already documents.
+    /// (#4271) already documents. Only displacements reach `pending_lag` — a
+    /// closed subscription's refusal deliberately does not, because its lost
+    /// envelope is the newest and a notice here would sit in the wrong place.
+    /// See [`deliver`](Self::deliver).
     /// Test: `a_stalled_subscriber_reads_its_lag_before_the_surviving_envelopes`.
     fn try_recv(&self) -> Option<InboxItem> {
         let mut state = self.state();
@@ -393,16 +375,40 @@ impl ClientInbox {
 /// interleave and hand two clients the same two envelopes in opposite orders.
 /// That is the ordering guarantee the retired broadcast ring gave for free and
 /// that `two_subscribers_one_lagging_account_exactly` pins.
-/// What: the attached inboxes plus the subscription-id source. Attach, detach,
-/// and fan-out all take the same lock; a reader takes only its own inbox's.
+/// What: the attached inboxes, the set's own terminal flag, and the
+/// subscription-id source. Attach, detach, close, and fan-out all take the same
+/// lock; a reader takes only its own inbox's.
 /// Test: `two_subscribers_one_lagging_account_exactly`,
-/// `concurrent_publishers_lose_nothing_without_a_record`.
+/// `concurrent_publishers_lose_nothing_without_a_record`,
+/// `a_subscription_attached_after_deregistration_ends_rather_than_parking`.
 #[derive(Debug, Default)]
 pub struct InboxSet {
-    /// Attached inboxes, in attachment order.
-    inboxes: Mutex<Vec<Arc<ClientInbox>>>,
+    /// Everything the fan-out lock guards.
+    state: Mutex<SetState>,
     /// Source of subscription ids, unique within this instance.
     next_subscription: AtomicU64,
+}
+
+/// The fan-out lock's contents.
+///
+/// Why `closed` lives HERE rather than beside the inboxes as a separate atomic
+/// (#6462 review): [`InboxSet::attach`] and [`InboxSet::close_all`] must not
+/// interleave. `close_all` closes the inboxes present when it takes the lock;
+/// an `attach` landing a moment later used to push a fresh OPEN inbox into a
+/// set nothing would ever close again — its instance is already out of the
+/// registry, so no publisher can reach it and no second deregister can fire.
+/// The reader then parked forever and its SSE stream never ended, which the
+/// retired `broadcast` did not do (the last `Sender` dropped and the stream
+/// yielded `None`). Putting the flag under the same guard as the vector makes
+/// the race unrepresentable rather than unlikely.
+/// What: the attached inboxes plus whether this set has been terminated.
+/// Test: `a_subscription_attached_after_deregistration_ends_rather_than_parking`.
+#[derive(Debug, Default)]
+struct SetState {
+    /// Attached inboxes, in attachment order.
+    inboxes: Vec<Arc<ClientInbox>>,
+    /// Set by [`InboxSet::close_all`]; every later attach is born closed.
+    closed: bool,
 }
 
 /// What one fan-out actually did.
@@ -436,9 +442,9 @@ pub enum DeliveryOutcome {
 /// distinction between "took it" and "took nothing" is the one #6462's review
 /// found missing, and an `Option` cannot carry it.
 /// What: took it cleanly, took it by displacing its oldest, or refused it
-/// because the subscription is closed. The payload is boxed because
-/// [`MissedEnvelope`] carries a whole envelope and the common variant carries
-/// nothing.
+/// because the subscription is closed. The displacement payload is boxed
+/// because [`MissedEnvelope`] carries a whole envelope and the other two
+/// variants carry nothing.
 /// Test: `a_publish_racing_deregistration_is_not_recorded_delivered`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum InboxAccept {
@@ -446,30 +452,46 @@ enum InboxAccept {
     Took,
     /// Queued, displacing the oldest unread envelope.
     Displaced(Box<MissedEnvelope>),
-    /// Not queued — the subscription is closed.
-    Refused(Box<MissedEnvelope>),
+    /// Not queued — the subscription is closed. Carries nothing: the whole set
+    /// is closed whenever this happens, so `publish` records the envelope
+    /// `dropped` and no per-client record is owed. See [`ClientInbox::deliver`].
+    Refused,
 }
 
 impl InboxSet {
     /// Recover a poisoned lock rather than fail a publish — see
     /// [`ClientInbox::state`] for why that is safe here.
-    fn inboxes(&self) -> std::sync::MutexGuard<'_, Vec<Arc<ClientInbox>>> {
-        self.inboxes
+    fn locked(&self) -> std::sync::MutexGuard<'_, SetState> {
+        self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Attach a new subscription and hand back its reader.
     ///
-    /// Test: `a_detached_subscription_stops_costing_the_instance`.
+    /// Why the terminal flag is read under the SAME guard the push takes: see
+    /// [`SetState`]. An attach that raced [`close_all`](Self::close_all) used
+    /// to produce an inbox nothing would ever close, whose reader parked
+    /// forever.
+    /// What: mints a subscription id, builds its inbox already CLOSED when the
+    /// set has been terminated, and pushes it. A subscription born closed
+    /// drains nothing and ends on its first `recv`, which is what a client
+    /// connecting to an instance that just went away should see.
+    /// Test: `a_detached_subscription_stops_costing_the_instance`,
+    /// `a_subscription_attached_after_deregistration_ends_rather_than_parking`.
     pub(super) fn attach(self: &Arc<Self>, instance_id: &str) -> InboxSubscription {
+        let mut set = self.locked();
         let inbox = Arc::new(ClientInbox {
             subscription_id: self.next_subscription.fetch_add(1, Ordering::SeqCst),
             instance_id: instance_id.to_string(),
-            state: Mutex::new(InboxState::default()),
+            state: Mutex::new(InboxState {
+                closed: set.closed,
+                ..InboxState::default()
+            }),
             signal: Notify::new(),
         });
-        self.inboxes().push(Arc::clone(&inbox));
+        set.inboxes.push(Arc::clone(&inbox));
+        drop(set);
         InboxSubscription {
             set: Arc::clone(self),
             inbox,
@@ -480,7 +502,8 @@ impl InboxSet {
     ///
     /// Test: `a_detached_subscription_stops_costing_the_instance`.
     fn detach(&self, subscription_id: u64) {
-        self.inboxes()
+        self.locked()
+            .inboxes
             .retain(|inbox| inbox.subscription_id != subscription_id);
     }
 
@@ -502,43 +525,52 @@ impl InboxSet {
     /// What: [`DeliveryOutcome::NoSubscriber`] when nothing is attached OR
     /// nothing accepted, so the §9 record for that publish reads `dropped` and
     /// the sender gets `409`. Otherwise [`DeliveryOutcome::Delivered`] carrying
-    /// every miss the fan-out caused — displacements, and any closed
-    /// subscription that missed it — so each is recorded against the client
-    /// that lost it. The envelope is cloned per inbox because each client owns
-    /// its copy from here on.
+    /// every displacement the fan-out caused, so each is recorded against the
+    /// client that lost it. The envelope is cloned per inbox because each client
+    /// owns its copy from here on.
     /// Test: `two_subscribers_one_lagging_account_exactly`,
     /// `concurrent_publishers_lose_nothing_without_a_record`,
-    /// `a_publish_racing_deregistration_is_not_recorded_delivered`,
-    /// `a_publish_racing_deregistration_records_the_closed_subscriptions_miss`.
+    /// `a_publish_racing_deregistration_is_not_recorded_delivered`.
     pub(super) fn fan_out(&self, envelope: BusEnvelope) -> DeliveryOutcome {
-        let inboxes = self.inboxes();
+        let set = self.locked();
         let mut accepted = 0usize;
         let mut missed = Vec::new();
-        for inbox in inboxes.iter() {
+        for inbox in set.inboxes.iter() {
             match inbox.deliver(envelope.clone()) {
                 InboxAccept::Took => accepted += 1,
                 InboxAccept::Displaced(miss) => {
                     accepted += 1;
                     missed.push(*miss);
                 }
-                InboxAccept::Refused(miss) => missed.push(*miss),
+                InboxAccept::Refused => {}
             }
         }
         if accepted == 0 {
             // Nothing holds it, so nothing may say it was delivered. The
             // envelope's own `dropped` record already states that it reached
             // no one; a per-client miss record on top would double-count the
-            // same loss.
+            // same loss. Every refusal lands here, because a set is all-open or
+            // all-closed — see `SetState`.
             return DeliveryOutcome::NoSubscriber;
         }
         DeliveryOutcome::Delivered { missed }
     }
 
-    /// End every attached subscription once it has drained.
+    /// End every attached subscription once it has drained, and every later
+    /// one on arrival.
     ///
-    /// Test: `deregister_ends_a_subscription_after_it_drains`.
+    /// Why the flag as well as the loop: an [`attach`](Self::attach) racing
+    /// this loop would otherwise land an inbox nobody closes. Both take this
+    /// one lock, so whichever runs second sees the other's effect.
+    /// What: marks the set terminal, then closes each attached inbox. Neither
+    /// step discards a queued envelope — a reader drains what it holds and only
+    /// then ends.
+    /// Test: `deregister_ends_a_subscription_after_it_drains`,
+    /// `a_subscription_attached_after_deregistration_ends_rather_than_parking`.
     pub(super) fn close_all(&self) {
-        for inbox in self.inboxes().iter() {
+        let mut set = self.locked();
+        set.closed = true;
+        for inbox in set.inboxes.iter() {
             inbox.close();
         }
     }
@@ -547,14 +579,14 @@ impl InboxSet {
     ///
     /// Test: `a_detached_subscription_stops_costing_the_instance`.
     pub fn len(&self) -> usize {
-        self.inboxes().len()
+        self.locked().inboxes.len()
     }
 
     /// Whether nothing is subscribed.
     ///
     /// Test: `a_detached_subscription_stops_costing_the_instance`.
     pub fn is_empty(&self) -> bool {
-        self.inboxes().is_empty()
+        self.locked().inboxes.is_empty()
     }
 }
 
@@ -579,7 +611,7 @@ pub struct InboxSubscription {
 }
 
 impl InboxSubscription {
-    /// This subscription's id — the key its [`InboxEviction`] records carry.
+    /// This subscription's id — the key its [`InboxMiss`] records carry.
     ///
     /// Test: `a_stalled_subscriber_reads_its_lag_before_the_surviving_envelopes`.
     pub fn subscription_id(&self) -> u64 {

@@ -887,12 +887,6 @@ fn eviction_is_recorded_per_client_in_the_durable_log() {
         assert_eq!(miss.instance_id, target.instance_id);
         assert_eq!(miss.subscription_id, stalled.subscription_id());
         assert_eq!(
-            miss.reason,
-            MissReason::Displaced,
-            "a full inbox displaces; that is not the same loss as a closed \
-             subscription"
-        );
-        assert_eq!(
             miss.missed_total,
             n as u64 + 1,
             "the running loss count must let a reader tell how far behind this \
@@ -934,11 +928,6 @@ fn miss_records_are_distinguishable_from_envelopes() {
         lines.iter().filter(|v| v.get("record").is_some()).collect();
     assert_eq!(tagged.len(), 1);
     assert_eq!(tagged[0]["record"], INBOX_MISS_RECORD);
-    assert_eq!(
-        tagged[0]["reason"], "displaced",
-        "a miss line must say WHY, so a reader can tell a slow client from a \
-         deregistered one"
-    );
     assert!(
         lines
             .iter()
@@ -1373,43 +1362,135 @@ fn a_publish_racing_deregistration_is_not_recorded_delivered() {
     );
 }
 
-#[test]
-fn a_publish_racing_deregistration_records_the_closed_subscriptions_miss() {
-    // The partial case the same defect produces more quietly: one subscription
-    // closed, one open. The open one takes the envelope, so the publish IS a
-    // delivery — but the closed one loses it, and that loss needs a record with
-    // its own reason, or the `delivered` line over-claims for that client.
+#[tokio::test]
+async fn a_subscription_attached_after_deregistration_ends_rather_than_parking() {
+    // #6462 review round 2, HIGH. `PeerBus::subscribe` resolves the instance
+    // and THEN attaches, so an attach can land after `close_all` has already
+    // walked the set. Before the fix that produced an inbox with `closed:
+    // false` that nothing would ever close — the instance is out of the
+    // registry, so no publisher can reach it and no second deregister can fire.
+    // `recv` parked forever (`try_recv` None, `is_finished` false, no waker
+    // left alive) and the SSE handler held the stream open with keep-alives
+    // indefinitely. The retired `broadcast` ended that stream immediately, so
+    // this was a regression, and it contradicted `subscribe_instance`'s own
+    // doc.
+    //
+    // The `timeout` is the assertion: a parked `recv` never resolves, so a
+    // pending future IS the failure. Against the pre-fix source this test hung
+    // here and reported the elapsed-timeout panic below.
     let (_dir, bus) = bus();
     let target = bus.registry().register("cto-assistant", None).unwrap();
-    let sender = registered_sender(&bus, "izzie");
-    let closing = bus.subscribe(&target.instance_id).unwrap();
     let stale = bus
         .registry()
         .resolve_instance(&target.instance_id)
         .unwrap();
     assert!(bus.registry().deregister(&target.instance_id));
-    // A second subscription attached through the same stale clone: open, in the
-    // same set as the closed one. Only an in-crate holder of a stale clone can
-    // reach this state, which is exactly what makes it worth pinning.
-    let open = stale.subscribe();
 
-    let envelope = envelope_for(sender, &target, "one takes it, one cannot");
-    let message_id = envelope.message_id.clone();
-    let DeliveryOutcome::Delivered { missed } = stale.deliver(envelope) else {
-        panic!("the open subscription took it, so this is a delivery");
-    };
-
-    assert_eq!(missed.len(), 1, "exactly the closed subscription lost it");
-    assert_eq!(missed[0].subscription_id, closing.subscription_id());
-    assert_eq!(missed[0].reason, MissReason::SubscriptionClosed);
+    let late = stale.subscribe();
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(5), late.recv())
+        .await
+        .expect("a subscription attached after deregistration must not park forever");
     assert_eq!(
-        missed[0].envelope.message_id, message_id,
-        "a closed subscription loses THIS envelope, not a displaced older one"
+        ended, None,
+        "it has nothing to drain and its instance is gone, so it ends at once"
     );
+}
+
+#[test]
+fn a_closed_subscription_reads_its_queue_without_a_hoisted_lag_notice() {
+    // #6462 review round 2, LOW. `try_recv` yields lag before the queue, which
+    // is right for a displacement — the lost envelope came off the front, where
+    // the reader is — and wrong for a refusal, where the lost envelope is the
+    // newest. A refusal therefore does not touch `pending_lag`: a client acting
+    // on a notice hoisted ahead of envelopes it has not read yet would re-read
+    // the durable log from the wrong point in its own stream. The loss is still
+    // counted and still recorded.
+    let (_dir, bus) = bus();
+    let target = bus.registry().register("cto-assistant", None).unwrap();
+    let sender = registered_sender(&bus, "izzie");
+    let subscription = bus.subscribe(&target.instance_id).unwrap();
+    let held = bus
+        .publish(
+            sender.clone(),
+            &PeerTarget::Instance(target.instance_id.clone()),
+            chat("queued before the shutdown"),
+            None,
+        )
+        .unwrap();
+
+    let stale = bus
+        .registry()
+        .resolve_instance(&target.instance_id)
+        .unwrap();
+    assert!(bus.registry().deregister(&target.instance_id));
+    // A publish through the stale clone: refused by the now-closed inbox.
+    let outcome = stale.deliver(envelope_for(sender, &target, "too late"));
+    assert_eq!(outcome, DeliveryOutcome::NoSubscriber);
+
+    assert_eq!(
+        subscription.evicted_total(),
+        0,
+        "a refusal raises no gap for this client to act on — the envelope \
+         reached nobody and is recorded dropped"
+    );
+    match subscription.try_recv() {
+        Some(InboxItem::Envelope(envelope)) => assert_eq!(envelope.message_id, held.message_id),
+        other => panic!("the queued envelope must come first, not a lag notice: {other:?}"),
+    }
+    assert_eq!(
+        subscription.try_recv(),
+        None,
+        "and nothing else — a refusal raises no in-band gap notice"
+    );
+}
+
+#[test]
+fn record_losses_reports_a_durable_write_it_could_not_make() {
+    // #6462 review round 2, MEDIUM. `an_unwritable_log_never_reports_a_clean_delivery`
+    // passes against the pre-fix head too — it proves the hot path survives an
+    // unwritable sink, not that the failure is OBSERVED. `record_losses` is the
+    // link that changed, so its contract is pinned directly: `true` when a loss
+    // record could not be written, `false` when every one landed. The first
+    // assertion cannot compile against `47615f13`, where the method did not
+    // exist and evictions went through the swallowing `log_record`.
+    let writable_dir = tempfile::tempdir().unwrap();
+    let writable = PeerBus::new(writable_dir.path());
     assert!(
-        matches!(next_envelope(&open), Some(e) if e.message_id == message_id),
-        "and the open subscription holds it"
+        !writable.record_losses(&[a_miss()]),
+        "a loss record that lands is not an unrecorded loss"
     );
+    assert_eq!(read_misses(&writable).len(), 1);
+
+    // A FILE where the stream's directory belongs: every write fails.
+    let broken_dir = tempfile::tempdir().unwrap();
+    std::fs::write(broken_dir.path().join("bus"), b"not a directory").unwrap();
+    let broken = PeerBus::new(broken_dir.path());
+    assert!(
+        broken.record_losses(&[a_miss()]),
+        "a loss record that could not be written must be reported, or the \
+         delivery record silently over-claims"
+    );
+    assert!(read_lines(&broken).is_empty());
+}
+
+/// One loss, for the tests that drive `record_losses` directly.
+fn a_miss() -> MissedEnvelope {
+    MissedEnvelope {
+        instance_id: "cto-assistant~b1".into(),
+        subscription_id: 0,
+        missed_total: 1,
+        envelope: BusEnvelope::new(
+            BusEdge::AssistantAssistant,
+            peer_caller("izzie~a1", "izzie"),
+            Recipient {
+                instance_id: Some("cto-assistant~b1".into()),
+                definition_id: Some("cto-assistant".into()),
+            },
+            chat("displaced"),
+            None,
+            DeliveryState::Delivered,
+        ),
+    }
 }
 
 // ── fan-out ordering (#6462 review, MEDIUM) ──────────────────────────────────
@@ -2265,8 +2346,7 @@ async fn route_publish_past_a_stalled_subscriber_is_accepted() {
     assert_eq!(misses.len(), overflow);
     assert!(
         misses.iter().all(|m| m.instance_id == target.instance_id
-            && m.subscription_id == stalled.subscription_id()
-            && m.reason == MissReason::Displaced),
+            && m.subscription_id == stalled.subscription_id()),
         "every miss record must name the client that lost the envelope"
     );
 }

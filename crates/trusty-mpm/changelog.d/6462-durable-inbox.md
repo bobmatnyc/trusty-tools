@@ -19,14 +19,19 @@ Changed
 - Every loss is recorded. The DOC-60 §9 durable stream now carries a second
   record shape alongside the envelope records — `{"record":"inbox_miss",…}`,
   naming the lost `message_id`, the `instance_id`, the `subscription_id` that
-  lost it, a `reason` (`displaced` when a full inbox dropped its oldest,
-  `subscription_closed` when a deregistration raced an in-flight publish), and
-  that subscription's running loss count. Readers of `logs/bus/*.jsonl` must
-  tolerate it: an envelope line has no `record` key, a miss line always does.
-  Nothing recorded `delivered` is lost without a matching miss record.
+  lost it, and that subscription's running loss count. Readers of
+  `logs/bus/*.jsonl` must tolerate it: an envelope line has no `record` key, a
+  miss line always does. Nothing recorded `delivered` is lost without a matching
+  miss record.
 - A publish that no inbox accepted is recorded `dropped` and answered `409`,
   never `delivered`. This is reachable when a deregistration closes every
   subscription while a publisher is mid-flight.
+- A subscription that attaches after its instance was deregistered ends
+  immediately instead of hanging. `subscribe` resolves the instance and then
+  attaches, so an attach could land after the deregistration had already closed
+  every inbox present — leaving one that nothing would ever close, whose SSE
+  stream stayed open on keep-alives forever. An instance's inbox set is now
+  terminal once closed, under the same lock the attach takes.
 - When a miss record cannot be written — the durable sink is failing, and §9's
   logger swallows that by design — the delivery's own record carries
   `losses_unrecorded: true` and an `error!` is emitted, so no line claims a
