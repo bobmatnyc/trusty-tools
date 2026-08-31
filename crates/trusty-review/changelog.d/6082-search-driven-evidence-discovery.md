@@ -1,3 +1,0 @@
-Added
-- A manifest `inspect_priority` entry may now declare `dimension` and `reason` alongside its path: which due-diligence dimension the file is evidence for, and the query or measurement that found it. A declared dimension counts toward the report's dimension coverage, so a dimension no path-name heuristic could recognise is covered when the ranker says the file is evidence for it.
-- The Investigation Coverage section states, per repository, how many examined files came from manifest-declared evidence queries and how many files each covered dimension got, with one example naming why that file was read.

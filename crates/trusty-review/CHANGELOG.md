@@ -6,6 +6,334 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.30.0] — 2026-08-31
+
+### Breaking
+
+- `HttpAnalyzeClient` is removed. Its one remaining caller, the non-default
+  `review` feature's `build_review_state`, now builds a `SubprocessAnalyzeClient`,
+  which needs no daemon at all. The `AnalyzeClient` trait and its response types
+  are unchanged.
+- `ReviewConfig::analyzer_url` becomes `analyzer_socket: PathBuf`, and
+  `DEFAULT_ANALYZER_URL` becomes `default_analyzer_socket()`. The environment
+  variable is `PR_INTELLIGENCE_ANALYZER_SOCKET`, not
+  `PR_INTELLIGENCE_ANALYZER_URL`.
+- `report::HttpAnalyzeMetricsSource::new` takes a socket path instead of a base
+  URL, and `AnalyzeAdapterError::Api { status, body }` becomes
+  `Rpc { code, message }`.
+
+### Added
+
+- `calibrate` measures #1897's three verdict-level acceptance bars: strict verdict agreement, RC-recall, and the clean-PR over-flag rate. The harness previously discarded `ReviewResult::verdict` and reported only finding-level recall/precision, so those bars had no expressible answer. A corpus entry opts in with `reference_verdict`; a corpus with none reports "not measured", and no bar can pass on an empty denominator (#2974).
+- Report manifests may declare a per-repository `inspect_priority` list — ranked repo-relative paths, optionally with an explicit `weight` — that the DD-report investigation inspects ahead of its own path-name heuristics, still bounded by the same file/byte budget. This is the interface an external ranker (trusty-audit) writes its selection intelligence to, so tuning what gets inspected no longer changes trusty-review. Absent the key, selection is byte-identical to before.
+- File selection now folds in the trusty-analyze findings already loaded for a repository: a file a diagnostic or refactor suggestion names outranks an otherwise-equal file the heuristics cannot tell apart.
+- The Investigation Coverage line and the synthesis-prompt coverage summary state the examined share as a percentage alongside the raw counts.
+- `[report].attributed_only` in the manifest restricts the investigation pass to the files `inspect_priority` declares. `inspect_priority` was a dominant sort key rather than a filter, so a declared list shorter than the file budget was topped up with path-name-scored files — files carrying no dimension and no reason, counted toward the examined set exactly as search-found evidence was. Under the flag the remaining budget goes unspent and the coverage section states the shortfall: `attributed-only selection: N of M budgeted file(s) carried search or complexity evidence; the remaining K were left unread rather than filled by path-name heuristics`.
+- The flag is opt-in and manifest-only, with no CLI flag: a manifest written without a search index still wants the heuristic top-up, and only the producer that reached a healthy index knows whether the declared list is the whole intended sample. A repository whose `inspect_priority` is empty ignores the flag rather than examining nothing.
+- A manifest `inspect_priority` entry may now declare `dimension` and `reason` alongside its path: which due-diligence dimension the file is evidence for, and the query or measurement that found it. A declared dimension counts toward the report's dimension coverage, so a dimension no path-name heuristic could recognise is covered when the ranker says the file is evidence for it.
+- The Investigation Coverage section states, per repository, how many examined files came from manifest-declared evidence queries and how many files each covered dimension got, with one example naming why that file was read.
+- The verified investigation is written to `investigation.json` in the report's output directory before synthesis begins, so a synthesis failure no longer discards the run's expensive half.
+- `report --manifest` resolves the provider and per-role models from the
+  manifest's new `[inference]` section, ahead of this host's environment and
+  `~/.config/trusty-review/config.toml`. Precedence per field is CLI flag >
+  manifest > env var > config file > built-in default, so a delivered audit
+  package re-renders on the provider that produced it — the failure this
+  replaced was a June-dated local `provider = "bedrock"` hijacking an OpenRouter
+  engagement's render. A manifest with no `[inference]` section (every manifest
+  written before this) resolves exactly as it did before. The section carries
+  identity only: a credential still comes from the environment, and a render
+  whose declared provider has no key stops before any repository is walked, with
+  the provider named in the message.
+- The report states which models ran. Its Report Metadata table gains an
+  `Inference models` row and the JSON twin an `inference` object, both listing
+  provider and per-role model — and both showing `requested → ran` wherever the
+  resolver adjusted an id.
+- The investigation prompt names the function to look at. An `inspect_priority`
+  entry may now declare `hotspot = { function, start_line, end_line, cyclomatic
+  }` — trusty-audit writes it from the complexity measurement (#6145) — and the
+  batch digest states it directly above that file's fenced content:
+  `Hotspot: lines 40-190, fn settle_invoice, cyclomatic 31 — prioritize DD
+  analysis of this function.` The line comes before the content, so the model
+  reads the instruction rather than reaching it after skimming 900 lines. The
+  Investigation Coverage section names the function too, beside the reason the
+  file was read.
+- A file with no declared measurement produces a byte-identical prompt, and a
+  measurement without a usable line range produces no line at all rather than
+  one pointing at lines 0-0. A half-written `hotspot` table is inert, the same
+  way a priority naming no tracked file is inert — it never fails the manifest
+  load. Nothing here changes which files are selected.
+- Code Quality & Architecture gains a deterministic crate-topology table for any
+  repository whose manifest declares one (trusty-audit measures it from cargo
+  metadata). A summary line states the member count, the internal dependency
+  edge count, the cycle verdict, and the most-depended-on crates; the table lists
+  up to 15 crates — most depended on and shallowest first, so the shared core
+  leads — with each one's direct internal dependencies and inbound count. The
+  synthesised paragraph renders above it and is told to comment on that
+  structure rather than re-derive one.
+- The same facts reach the synthesis prompt as a measured block, and the numbers
+  are admitted by the numeric guardrail because they are rendered into the fill
+  scope the guardrail reads — so the paragraph may quote a member or inbound
+  count without the guardrail rejecting the whole field.
+- A repository that declares no topology renders a report byte-identical to one
+  produced before this existed: the block is omitted whole, never filled with
+  honesty markers, and the prompt gains no heading.
+- Every RED finding and the first ten AMBERs now carry a symbol-graph anchor in `investigation.json`: the symbol its `file:line` citation resolves to, the declaration trusty-search holds for that symbol, and its usage sites inside the same file. A reader who wants to act on a finding gets the declaration without opening the repository. A candidate that cannot complete every step records a `no trace:` reason instead — an unreachable daemon, an unregistered index, a citation with no item declaration, a symbol the graph does not hold, or an entry the graph placed in a different file — and never a partial or guessed anchor.
+- The Investigation Coverage section states `traces assembled: X of Y candidate findings (Z no-trace)`. A report run before this pass renders byte-identically.
+- Call edges are deliberately absent: `GET /indexes/{id}/call_chain` resolves callees and callers by bare symbol name, so on this workspace 254 of one symbol's 321 callee edges cross a crate boundary, 16 land in non-Rust files, and a bare `get` collects 2391 caller edges. Each trace carries `call_edges: []` and a `call_edges_status` naming #6167 as the blocker.
+- Every traced finding now gets a verdict from the verifier-role model, judged against its own trace: CONFIRMED annotates the finding with the anchor declaration and usage count it was checked against, CLEARED drops it one severity band and appends the verifier's one-line reason, UNVERIFIABLE changes nothing. A cleared finding is never removed — a cleared AMBER lands in the clean-signals list naming the clearing, so it cannot read as a strength the investigation found.
+- The Investigation Coverage section states `trace verdicts: A confirmed, B cleared, C unverifiable of D traced`, names the model that judged them, and lists every cleared and unverifiable finding with its reason.
+- Gaps & Caveats carries one line per repository whose traced findings could not all be checked, so a reader who skips the coverage section still cannot read an unverified finding as a disproved one.
+- The pass fails closed at every point: a transport error, a timeout, a truncated response, a refusal, an unparseable body, an unknown verdict token, a candidate leg 1 refused a trace for, and a run with no verifier provider all record UNVERIFIABLE with the reason. No branch raises a severity or removes a finding, so a failing verdict pass can only leave the report as it was.
+- A Python class-body hotspot renders as one — "Split oversized class body", remediated by moving cohesive members out — instead of borrowing the function vocabulary and telling a reader to extract the body of a class. This is the Python half of the #6082 whole-impl relabel, and it reads trusty-analyze's new `region_kind` rather than inferring from a missing function name.
+- An `instructions.md` sitting beside the manifest is read and folded into the auditor/synthesis prompt, with nothing in the manifest declaring it. Everything an audit needs now travels with the engagement, the same principle `[inference]` applied to the provider — unzip an engagement directory, drop the file next to `manifest.toml`, and both `trusty-review report --manifest` and `trusty-audit render` pick it up, because render passes the manifest at its original path. Precedence is unchanged: `--instructions` wins, then `[report].instructions`, then the discovered file.
+- The rendered Analyst Instructions note now names the file that extended the auditor prompt and states that the deterministic post-synthesis checks — reachability, topology grounding, the numeric guardrail — still ran. Custom instructions steer emphasis; they never switch a guard off, and one that asks for a claim the reachability check forbids is still rewritten or rejected.
+- The Analyst Instructions section states how many synthesized claims this run's deterministic guards withheld, and points at the Synthesis Status list that names each one — previously the only signal was that list itself, at the end of the document.
+- The report footnotes the two count classes an independent verifier re-derives and gets a different answer for: §8 states that its commit total counts commits as the forge reports them while a local `git log` on a squash-merged branch counts each squash once, and the Key Facts block names the counter behind its LoC and file-count rows and what that counter excludes relative to raw `git ls-files`.
+- The investigation record carries two deterministic evidence sources it previously lacked: a test census enumerated over the whole tracked file list, so the `test coverage` dimension's counts no longer move with the byte budget (#6193); and bind/exposure facts read from the examined files' own source, so reachability classification has something to read besides markers in finding text — a network-facing component now classifies as evidenced instead of having its true reach claims withheld (#6191).
+- `is_test_path` recognises a repository-root `tests/`, `test/`, `spec/` or `__tests__/` directory. The tracked list is repo-relative, so the directory checks — which all wanted a leading separator — matched none of them, and a Cargo crate whose tests live in the root `tests/` reported no test coverage.
+
+### Fixed
+
+- A finding claiming a file is "not present in diff" no longer blocks a PR that
+  contains that file. A map call sees one chunk, so it cannot see the chunk that
+  adds the file it calls missing; the claim is now checked against the whole
+  changeset and the finding dropped when the changeset refutes it (#1873).
+- Caller-supplied `referenced_code` is pinned to the map-reduce per-file prompts
+  by an end-to-end test, and the branch restores and logs at error level any
+  caller context that failed to reach it instead of reviewing without it
+  (#2654).
+- The verdict embedded in `review_body` is reconciled to the authoritative
+  top-level verdict, so a merge gate reading `BLOCK` can no longer disagree with
+  an `APPROVE` printed inside the review. On the map-reduce path both the grade
+  and verdict reconciles now run after the shallow-review cap (#1902).
+- `review_health` and `/health` report the `dry_run` a review invoked through
+  that surface actually executes with, plus a `dry_run_reason` naming the gate —
+  previously they reported the raw config flag while every review ran dry and
+  posted nothing (#4254).
+- `report_analyze_e2e::analyze_populates_complexity_and_findings` no longer
+  fails when the temp path happens to spell a dropped diagnostic's code; the
+  drop check reads the structured finding rather than the whole rendered page
+  (#4387).
+- The review body no longer carries the raw structured reviewer payload. Under forced structured output the model's response text IS the JSON object, and it reached `review_body` verbatim — an audit of 22 dry-run reviews found 19 posting `{"findings":[],"grade":"A",…}` as the entire PR comment. The unified path now renders the model's own summary and grade rationale instead; the map-reduce path was never affected (#4999).
+- A finding citing a line beyond the cited file's last diffed line is now dropped. Citation integrity previously verified quoted content only, so a misattributed finding that quoted nothing substantial survived with its severity intact — the shape behind 5 of the 19 fabricated-or-partial findings in #4999's audit. The check reads the `@@` hunk headers, covers both sides of each hunk plus Stage-B-dropped hunks, and fails open when no header parses (#4999).
+- **`trusty-review run` no longer posts live on the strength of an ambient env var alone.** `cmd_run` passed `TriggerDecision::None`, so whether a run published a GitHub comment depended entirely on whatever `PR_INTELLIGENCE_DRY_RUN` happened to be set to in the calling shell — with nothing at the call site indicating it would happen. That published an unintended `REQUEST_CHANGES` review to PR #4436 from a run meant only as a local pre-merge check. `run` now takes an explicit `--live` flag: passing it forces a live post (even over a stale `PR_INTELLIGENCE_DRY_RUN=true`), and omitting it forces a dry-run (even over a stale `PR_INTELLIGENCE_DRY_RUN=false`) — the env var no longer gates this command at all. `run` also prints the resolved posting mode to stderr before doing any work. See [#4460](https://github.com/bobmatnyc/trusty-tools/issues/4460).
+- **A findings-parse failure now fails closed instead of rendering `Findings: none`.** A model that returned its `findings` array double-encoded — a JSON *string* holding the array — made the whole response fail to deserialize; the verdict-keyword scan then salvaged the verdict, discarded the evidence, and printed `APPROVE` with `Findings: none`, indistinguishable from a genuinely clean review. Two changes: the parser now decodes a double-encoded `findings` string a second time, so the findings usually survive; and when the structured payload still cannot be parsed, the keyword-scanned token feeds the fail-safe *reason* rather than becoming the verdict, so the run reports `UNKNOWN` plus a `Pipeline error:` line naming the lost findings. See [#4491](https://github.com/bobmatnyc/trusty-tools/issues/4491).
+- `[confluence: "Page Title" — "excerpt"]` is now a recognised inline citation form. `BRACKET_CITATION_RE` matched four bracket forms and the two system prompts mandated the same four, but `duettoresearch/code-intelligence` emits a fifth — so a Confluence excerpt survived the pre-scan strip and was read as an ungrounded free-text code quote, tripping the fabrication check on prose the model had cited correctly. The regex and both prompt grammars now list all five. See #5022.
+- The report's `Data gaps:` line no longer names a section the same report renders populated. Gaps are recorded as the polish pass walks the document, so dropping the Authorship & Key-Person Risk section's unsynthesised narrative paragraph recorded the enclosing heading as a gap — and nothing revisited that once the section's authorship table filled in with six authors, a bus factor and a trajectory. The gap list is now filtered against the finished body: a label matching a heading whose span carries content is dropped, while a genuinely collapsed section is still named. Same stale-emptiness class as #6029. See #6039.
+- A review whose PR-metadata fetch produced no head SHA no longer posts. The dedup claim in `run_review` and the `complete()` call in `finalize_review` are both keyed on the head SHA, and `decide_action` never read it — so a failed `fetch_github_pr_meta` fell back to an empty SHA, continued, and could post live with the claim never taken and never completed; a retry after the same failure posted a duplicate, and the stranded-claim block could never engage. `run_review` now aborts before the diff is loaded when posting is reachable and the SHA is empty, and `finalize_review` downgrades such a run to log-only as a second guard for the webhook path. Same fail-open family as #5126/#5113/#5020. See #6062.
+- A GREEN finding now carries its `file:line`, and only a GREEN carrying one is credited as a clean signal in Security Posture. Greens were admitted as bare titles with no file, no line and no quote — 0 of 23 in one report — and five of them were then cited as security strengths a reader had no way to check. One, "Raw SQL string interpolation via multi-line concatenation for PR upsert", describes a defect and was listed as a strength. The verification guardrail now holds for every band, and the bullet renders `title — \`file:line\`` without any elaboration.
+- The Dependency Inventory's Locked column resolves the declared requirement against every locked version, not the first. A workspace lockfile carries several versions of one crate, and cargo writes them sorted, so first-wins reported the lowest: `base64` declared `0.22` rendered as `0.13.1`, `dashmap` declared `6` as `5.5.3`. The highest satisfying version wins; when none satisfies, the cell names every candidate and says so.
+- The Code Quality table's Maintainability findings cell states the analyze-lane gap instead of a measured `0`. Maintainability findings come from trusty-analyze alone, but the count read `metrics.findings`, which the investigation pass also writes into — so a run whose index was rejected as stale asserted a measurement nobody made, on the page whose Gaps & Caveats said the lane was rejected.
+- Values substituted into a markdown table cell have their `|` escaped. One Top Risks row said "the installer uses an unsigned curl|sh pattern", and that pipe split the cell so every column after it shifted.
+- An evidence quote that stops mid-construct pulls in one more full line. Completing to end-of-line was not enough when the model's stop point already sat on a line boundary: `install.sh`'s security note wraps, and the quote ended "…download and review the script manually" while "All downloaded binaries are SHA-256 verified." sat on the next line — so the finding read as unmitigated remote code execution again.
+- Key Facts' complexity row states the analyze lane's own remedy. It said "re-run with `--analyze`" for every case, including a stale-index rejection where §9 correctly said to re-index under a distinct id; a reader following Key Facts would re-run the same command and get the same rejection.
+- The executive summary and the coverage section state one finding count with one label. They counted differently, so one report said "102 verified findings" and "79 verified evidence-backed findings" about the same set. Both now read `N verified finding(s) (R RED/AMBER evidence-backed, C clean signals)`.
+- Dimension labels fold onto the canonical six at ingestion. The model wrote "error management" for two findings and "error handling" for twenty-three in one run, splitting one dimension's counts across two names. An analyst-focus dimension the crate does not enumerate survives verbatim.
+- A dimension that produced verified findings is listed as covered. Coverage came from file selection alone, so a dimension no selected file matched by name read as not investigated while its findings sat in §5.
+- The coverage section's per-dimension example is the dimension's own top-ranked evidence hit. It was the first file in overall rank order, so a file declared for one dimension that a path heuristic also matched became another dimension's example, carrying the wrong query as its stated reason.
+- `report` reads `TRUSTY_AUDIT_INVESTIGATE_MAX_FILES` and
+  `TRUSTY_AUDIT_INVESTIGATE_MAX_BYTES` as the tier below the manifest's
+  `[report].investigate_max_*` keys. `trusty-audit` records the budget it wants in
+  the manifest, but `tga audit` has already run this binary against that manifest
+  by the time the key is written — so an audit declaring 240 files rendered its
+  report under this crate's 40-file default and said nothing. An explicit
+  `--investigate-max-files` and a declared manifest key both still win; a
+  non-numeric, zero or negative variable reads as absent.
+- A reachability rewrite can no longer ship ungrammatical debris ([#6082](https://github.com/bobmatnyc/trusty-tools/issues/6082))
+  - a replacement that opens with a determiner now takes the article in front of it, so `by a remote attacker` becomes `by any local process` rather than `by a any local process` — the last report's Security Posture lead shipped exactly that
+  - every rewritten sentence is read for grammar debris before it may ship: two adjacent determiners, or a contrast whose two sides describe the same reachability, send the field down the reject-and-disclose path instead of out to a reader
+- A corrected-wording disclosure now cites the §5.1/§5.2 number of the finding it is about ([#6082](https://github.com/bobmatnyc/trusty-tools/issues/6082))
+  - the withheld lines already carried "section 5.1, RED finding 2" while the corrected-wording line beside them named its finding by title only; the grounding check now hands that finding to the reporter, which resolves it to the rendered number
+- A withholding disclosure now names the finding whose field it is ([#6082](https://github.com/bobmatnyc/trusty-tools/issues/6082))
+  - the reachability tier is read from the FILE, so the grounding check resolved it through that file's first loopback-scoped record and quoted that record's title; the last report's RED findings 2 and 3 both sit in `control_routes.rs`, so their two Synthesis Status lines shipped byte-identical, both naming finding 2
+  - the check now takes the field's own finding title and prefers it over the shared record, for both the withheld and the corrected-wording line; report-level prose, which names no finding, still cites the one the subject-token match found for it
+- The crate-topology table renders as a real markdown table again. `ct_row`'s BEGIN/END markers each sat on their own line, so every repetition emitted a leading and a trailing newline and the rows came out blank-line separated; that left the header and its `|---|---|---|` delimiter as a two-line table with no body, which the polish pass collapses and drops. The rendered report showed 15 orphan pipe-lines under no header at all.
+- The topology table lists every crate. It used the `TABLE_ROW_CAP`-truncated list, and the sort puts `inbound == 0` crates last, so the cap dropped exactly the leaves — 15 of 30 in the dogfood run — under a summary line still stating 30 crates. The synthesis prompt still takes the capped list, which is a token budget.
+- Analyze-derived `Component` values are repository-relative. trusty-analyze indexes a checkout by absolute path and reports findings by absolute path, so 21 places in one report carried the auditor's own filesystem layout (`/Users/…/repos/local/trusty-tools/crates/…`) into a document written for someone outside that machine — while the investigation pass cited repo-relative paths for the same files. A trailing `:line` suffix survives the strip; a component under a different root is left alone.
+- A refactor suggestion with no function name is labelled an impl block, not a function. trusty-analyze reports `impl X { … }` as a region with `function_name: None`, and every downstream string then called it a function: the top four maintainability findings of the dogfood report were `impl HnswStore`, `impl Backend for JiraBackend`, `impl AzureDevOpsClient` and `impl ChatSessionStore`, each titled "Extract method", described with a `long_function` smell, and remediated by "Extract the body of 'this function' (lines N–M) into 2–3 smaller functions" — an action no reader can take on an impl block. The remediation now names splitting the impl across submodules, keeping the analyzer's line range; the `long_function` smell is relabelled `long_impl_block`; and the literal `'this function'` placeholder, which appeared 17 times, never renders — replaced by the real name when one was supplied, and the finding suppressed outright when neither a line range nor a rationale identifies the region.
+- Findings that restate themselves no longer reach the report. Three of one report's 157 findings were the model re-reporting findings it had already made, sharing a shape no genuine finding has: the Evidence block quoted the finding's own label (`crates/…/hnsw_store.rs (extract method)`) instead of a line of source, and the Component named a topic (`trusty-common memory_core`) instead of a file. A quoted row is now dropped when its component names no file, when the quote spells its own file's path rather than quoting out of it, or when quote and title restate each other. A row with no evidence quote is untouched — that is an ordinary un-synthesized metrics row, which never claimed to carry evidence. `Cargo.toml` and `deny.toml` still read as real citations.
+- A loopback-only endpoint is no longer written up as remotely exploitable. The executive summary, Top Risks row 1 and the Security Posture lead of the lap-4 dogfood report all called the trusty-mpm control plane "an unauthenticated remote-code-execution path", while the daemon binds loopback only, `guard_write_origin` sits router-wide, and the finding's own remediation says "before exposing them beyond localhost". The synthesis prompt now states each finding the report's own remediation or evidence text scopes to a loopback surface, and a post-check runs over every narrative field and top-risk description afterwards: a remote-reachability phrase in a sentence about one of those findings is rewritten to its local-process-reachable form, and a phrase the rewrite table does not cover fails the field closed with a note naming the finding it contradicts. A finding whose text scopes it to a network-reachable surface (`0.0.0.0`, internet-facing) vetoes the check for its own subject, so a genuinely remote endpoint still reads as remote.
+- A crate nothing depends on is no longer called load-bearing. The same summary named trusty-mpm a load-bearing crate while the topology table two sections down showed it with 0 dependents. The prompt now carries the measured top quartile by dependent count as the authoritative list, and a claim naming any other declared crate as load-bearing or most depended on rejects the field.
+- An LLM finding no longer credits a whole-impl complexity score to one method inside it. One finding read "The copy_all_from function has cyclomatic complexity 89" where the analyze data attributed that 89 to the enclosing impl block at `meta_ops.rs` lines 19–437. The claim is rescoped onto the region that carries it, keeping the number and the file; a claim in a shape this crate cannot rescope drops the finding with a logged reason rather than shipping the attribution.
+- LLM findings that restate a measured hotspot are suppressed. Seven pairs sat side by side in the same AMBER list of one report — same file, a line inside the region, the region's own cyclomatic number quoted back — reading as two findings about one measurement. The deterministic entry is kept, since it carries the structured span, score and smell fields; each suppression is counted and logged with the region it duplicates.
+- A synthesis narrative attaches to the finding it is about, not to whichever finding happens to share its title first. The merge keyed on title text alone, and the analyze daemon emits one canned title per remediation shape — the graded report carried 15 findings titled "Split oversized impl block". Both narratives that shared that title landed on the first of them, so the `hnsw_store.rs` row (cyclomatic 140, the worst impl hotspot in the estate) rendered the Jira backend's narrative and evidence, the hnsw narrative was never rendered at all, and the Jira row never received its own. Colliding titles are now separated by component identity, taken from the narrative's own component or, when the model wrote a topic phrase there, from the file its evidence names.
+- A narrative that merely restates its own finding no longer deletes the measurement underneath it. The restatement filter dropped the whole merged row, so `crates/trusty-common/src/tickets/server.rs` (cyclomatic 118, grade F) vanished from a render that exited 0 listing 167 of the 168 AMBER findings the metrics measured. The junk narrative is still refused; the row now falls back to its raw metrics fields, which is how every un-synthesized hotspot already rendered. A narrative with no measurement behind it is still dropped outright.
+- The reachability guard covers a finding's own narrative fields — description, business impact, remediation and cost/effort — not just the summaries and the top-risk rows. RED finding 3's business impact shipped "enabling remote/local code execution" two lines from a Security Posture paragraph the same guard had corrected to "not remotely". Evidence quotes stay excluded: they are verified verbatim against the file, so rewriting one would make the displayed quote diverge from the quote that was checked.
+- `remote/local` is recognised as a remote-reachability claim. The hedged spelling matched no rewrite pattern, because the `/local` sits between the two words every pattern expected to be adjacent, so the sentence never triggered the check at all.
+- A component carrying whitespace or parentheses is read as a topic phrase, not
+  a file. `trusty-common (memory_core/store)` slipped through as a path because
+  its parenthesised half carries a slash, and the narrative citing it rendered as
+  a numbered AMBER finding whose entire evidence was the file's own path. (Refs
+  #6082)
+- A synthesis narrative the finding bands refuse is now recorded under Synthesis
+  Status with the component that matched nothing, instead of disappearing without
+  a line. (Refs #6082)
+- The reachability guard now runs over the verified investigation's own prose,
+  before that prose is copied onto the model and merged over the synthesis
+  narrative. A RED finding's business impact reached the page stating "a remote
+  code execution risk" about a loopback-bound daemon because only the synthesis
+  copy was guarded and the merge discarded it. (Refs #6082)
+- A finding whose own text says "local-socket" or "unix socket" is read as
+  loopback-scoped, the same as one that says "localhost". (Refs #6082)
+- The reachability guardrail now catches a claim of network reach, not only the word "remote". What makes a sentence its business is a vocabulary of reachability words rather than a table of known phrases, so a spelling it cannot rewrite is rejected and disclosed instead of shipped — the failure that let "an unauthenticated actor on the network or host" through for a daemon bound to 127.0.0.1.
+- A Security Posture paragraph claiming no clean signal was credited is dropped when the section credits some, and the synthesis prompt now states the measured count so the model has no reason to write the claim.
+- The template's closing signature moves to the true end of the report. It used to sign off three sections early, above Synthesis Status, Dependency Inventory and Investigation Coverage.
+- Synthesis Status names the section 5.2 finding a withheld narrative belonged to and says the narrative could not be verified against the collected data, replacing wording that described the matcher rather than the report.
+- Investigation Coverage states how the verified-finding count adds up to what section 5.2 renders: verified findings plus the complexity findings trusty-analyze measures mechanically.
+- A truncated or failed investigation batch is now disclosed in Gaps & Caveats, naming the batches and the files they carried. It was disclosed only in the executive summary and the coverage appendix.
+- A finding's reachability now follows the file it sits in, not the words its own text happens to use ([#6082](https://github.com/bobmatnyc/trusty-tools/issues/6082))
+  - every finding on a file some finding scopes to localhost inherits that scope
+  - a beyond-the-host reach claim about a file the collected data says nothing about is withheld and disclosed, never rewritten
+  - a finding is judged by its own component, so an unrelated finding's title words can no longer empty its business impact
+- Every Synthesis Status line is now written for the reader ([#6082](https://github.com/bobmatnyc/trusty-tools/issues/6082))
+  - the bare `synthesis: available` banner is gone, and the block is omitted when there is nothing to disclose
+  - a line about a finding cites the §5.1/§5.2 number the reader can look up instead of naming it by title alone
+  - citations for RED findings say section 5.1; they used to say 5.2
+- An unevidenced component's reach claim is now caught by vocabulary, not by a table of known phrases ([#6082](https://github.com/bobmatnyc/trusty-tools/issues/6082))
+  - `remote`, `network` and `internet` are read as tokens, so a hyphenated compound (`remote-execution`) and a morphological variant (`remotely`, `network-reachable`) are examined; the last report shipped "a critical remote-execution and privilege risk" because no rewrite pattern matched it
+  - only CLAIM-shaped uses are withheld — the word must sit within three tokens of an access, attack, execution or exposure word — so "a transient network error" and "network and streaming logic" keep their field
+- A Synthesis Status disclosure about a report-level paragraph now cites the §5.1/§5.2 number of the finding it is about ([#6082](https://github.com/bobmatnyc/trusty-tools/issues/6082))
+  - the executive, code-quality, security and authorship summaries belong to no single finding, so their rejections quoted a finding title with no number; the grounding check now hands that finding to the reporter, which resolves it to the rendered number
+- Report synthesis no longer fails outright on a large finding set. The request's output-token ceiling was a hardcoded 3072 that ignored `[models.reviewer].max_tokens`, and the single truncation retry shrank the top-risks table from five rows to three while leaving ten per-finding elaborations — the dominant output cost — untouched at the same ceiling, so it could not converge. A 44- and a 45-finding investigation both truncated twice and exited with no report; 26 findings rendered clean. The retry is now a three-rung ladder that raises the budget and shrinks the ask together: full ask at the configured ceiling, then a concise ask at double it, then a narrative-only ask at quadruple it with no elaboration array in the schema at all. No finding is dropped — every RED/AMBER finding still renders from the deterministic composition and from the investigation's own verified prose.
+- `[models.reviewer].max_tokens` now reaches the synthesis request instead of being overridden by a constant.
+- A model id whose shape names one provider no longer runs on another. An
+  unprefixed OpenRouter slug (`anthropic/claude-opus-4.8`) used to take whatever
+  `provider` the path defaulted to; on the #6093 mitigation run that was
+  Bedrock, which rejected the id, and the render that completed used Bedrock's
+  `us.anthropic.claude-sonnet-4-6` default instead. `resolve_provider_and_model`
+  now routes an unambiguous shape to its own provider — slash-form slugs to
+  OpenRouter, `us.anthropic.*` / `anthropic.*` ids to Bedrock,
+  `accounts/fireworks/models/*` to Fireworks — and returns
+  `LlmError::Validation` naming both the id and the provider when the two cannot
+  be reconciled. A genuinely ambiguous bare id still uses the configured
+  default, and an explicit routing prefix is overruled only by a shape that
+  belongs to exactly one provider's catalogue — never by the dotted
+  `vendor.model` guess, so `openrouter/anthropic.claude-x` keeps working.
+  `resolve_provider_and_model` is now fallible; `build_provider`
+  propagates the error, and `trusty-review report` raises it in its preflight,
+  before a sweep spends minutes on a render that would use the wrong model.
+- A per-request model override now reaches the provider. `OpenRouterProvider`
+  and `FireworksProvider` serialised the id they were constructed with and
+  dropped `LlmRequest.model`, so a request naming a different model ran on the
+  constructor's model and the response echoed the wrong id with nothing
+  reporting the substitution; `BedrockProvider` already read `req.model`. All
+  three now resolve the same way through `LlmRequest::effective_model`, which
+  returns the request's id and falls back to the constructor's only when the
+  request names none. `OpenRouterProvider::with_base_url` is new — the
+  endpoint was a hardcoded constant, so nothing could assert on the bytes the
+  provider actually sends; the regression tests now read the model out of a
+  mock server's received body.
+- The numeric guardrail now admits scaled-unit restatements of a large integer, so "1.55 million lines" for a measured 1,553,771 verifies instead of vetoing the whole field. It also admits the figures the report computes at render time and prints in its own sections (the investigation coverage percentage, the authorship trajectory average), which the synthesis prompt already quotes verbatim.
+- Code Quality & Architecture reads LoC and primary tech through the same source precedence Key Facts uses, so a `--analyze` run — whose fetch leaves `loc`/`counts` to the scanner by design — no longer prints "not stated in source data" beside a §4.1 that renders the scan's figures.
+- AMBER findings render their component path, so a complexity finding no longer reads "Extract the body of 'this function' (lines 23-512)" with no file named.
+- Analyze data whose component paths fall outside the audited checkout is rejected as stale-index evidence with a named gap, instead of being stamped measured. An index is addressed by directory basename, so a second checkout of the same repository answers for the audited one.
+- Every GREEN finding renders as its own topic line. The templates carried three fixed slots, so a run with 21 GREEN findings dropped 18 of them.
+- Security Posture counts only the security dimension's findings, credits that dimension's clean signals, states its actual provenance (verified LLM investigation findings, code-hygiene scope), and prints one table rather than one per row.
+- Executive-summary jump-list anchors match GitHub's rule (punctuation deleted, spaces mapped to dashes), so a heading containing `&` no longer links to an anchor that does not exist.
+- An empty Dependency Inventory renders as a named gap naming what was or was not examined, never as "no manifest-declared dependencies were found". `[workspace.dependencies]` is now inventoried, which is where a cargo workspace root declares its dependencies.
+- Performance & Scalability points at section 5 when the investigation raised scalability findings, rather than reading as though neither was assessed.
+- A verified evidence quote is completed to the end of the line it ends on, so a mitigating clause on that same line cannot be cut away from the finding it qualifies.
+- `report::derive_index_id` now returns the per-checkout id
+  `trusty_common::derive_checkout_index_id` derives (slugified basename plus 8
+  hex digits over the canonical path) rather than the bare basename. The
+  renderer and the audit that indexed the tree run as separate processes sharing
+  only the manifest's checkout path, so both deriving the basename meant a
+  machine holding two checkouts of one repository served whichever registered
+  first — which is how a report presented another tree's complexity as a
+  measurement of the audited one. The out-of-tree component check in
+  `report::analyze_scope` stays as the backstop for an index registered under
+  the old scheme.
+- A doc comment on `parse_entry_node` in `trace_client.rs` tried to escape backticks inside a markdown code span with `\``, but backslash does not escape inside a CommonMark code span — the span closed early and `[ENTRY]` fell outside it, where rustdoc read it as an unresolved intra-doc link. The span now uses a longer backtick-run delimiter (` `` ` instead of `` ` ``) so the inner backticks need no escaping. Caught by the pre-publish rustdoc broken-link gate ahead of the 0.24.0 release.
+
+### Changed
+
+- `store::redb_error_is_incompatible_format` now delegates to
+  `trusty_common::redb_open::is_incompatible_format` instead of carrying its own
+  copy of the four-arm `match` (#5063). Same verdict for every input; the dedup
+  store's recovery policy is unchanged and stays in `store::dedup_open`, because
+  it must serialise the rename-aside behind the sidecar recovery lock (#5064).
+- **MCP protocol primitives now come from the `trusty-mcp` crate instead of `trusty_common::mcp`** — imports move from `trusty_common::mcp::…` to `trusty_mcp::…`, and this crate's own `mcp` feature forwards to `dep:trusty-mcp` rather than `trusty-common/mcp`. The feature is still on by default, so a default build is unaffected. No behaviour change (ADR-0040, [#5803](https://github.com/bobmatnyc/trusty-tools/issues/5803))
+- The Security Posture prompt no longer calls the findings "lint-graded". They are an LLM's readings of source files with every quote mechanically verified — which the disclaimer directly above the paragraph already said, so the paragraph contradicted it.
+- The investigation prompt asks every finding, GREEN included, for a `file` and a verbatim `evidence_quote`, tells the model a GREEN title must name a strength rather than a weakness, and to copy each dimension exactly as the checklist spells it.
+- A verified GREEN finding keeps the evidence quote its citation was verified from; only its prose is dropped. Blanking the quote is what made a green citation uncheckable: "Manifest crate reads OS-level environment for API token resolution parity" cited `trusty-agents-common/Cargo.toml:58`, which is `fd-lock = { workspace = true }` under a file-locking comment, and neither the page nor the JSON twin retained anything that could show the mismatch. The rendered bullet still shows only the topic and its `file:line` — the no-green-analysis rule bans elaboration, not evidence — and a finding with no surviving quote now renders with no `file:line` at all rather than a pointer a reader cannot check.
+- The Security Posture preamble scopes its verification claim to the RED and AMBER findings the table counts, and states that a GREEN clean signal carries a `file:line` only when a verified quote backs it. It previously asserted that every finding's evidence quote was mechanically verified while all 76 GREEN findings carried an empty quote.
+- AMBER findings render their business impact. `business_impact` was present for all 138 red/amber findings the investigation produced and rendered only for the 3 REDs, because the amber block in both bundled templates had no slot for it.
+- A repository whose manifest declares no attributed evidence now says so in its coverage section — "evidence discovery: path-name heuristics only" — instead of rendering identically to a searched run. The cause stays in Gaps & Caveats, where the manifest's writer records it.
+- The MCP `review_pr` / `review_diff` tools fail a `reviewer_model` override
+  they cannot honour. #1357 made this case detectable — it ran the review on the
+  startup provider and reported a `reviewer_model_fallback` string — but that is
+  still a verdict from a model the caller did not ask for. The tool call now
+  returns an error naming the requested model, and the `reviewer_model_fallback`
+  envelope and payload field is removed, since nothing can set it any more.
+- A model id whose shape contradicts the provider pinned for the call now
+  resolves instead of failing (owner ruling 2026-08-21: "Models selection should
+  be robust. We shouldn't fail on naming/id issue. The report should include
+  which models are used."). Where the pinned provider publishes the same model,
+  the id is translated into that provider's own **verified** spelling —
+  `bedrock/anthropic/claude-sonnet-4.6` runs `us.anthropic.claude-sonnet-4-6`;
+  where it does not, the call routes to the provider whose catalogue the id
+  belongs to. The translation reads the verified `ModelTier` catalogue and never
+  derives an id by string surgery, so an unmappable direction (Bedrock publishes
+  no Opus 4.8 profile) resolves by routing rather than by inventing an id. The
+  #6114 guarantee is unchanged in substance and moves from refusal to
+  attribution: every adjustment is logged and printed in the report as
+  `requested → ran`. `LlmError::Validation` remains for the one case with no
+  reasonable resolution — an id belonging to a provider this build cannot call,
+  with no verified equivalent in one it can. The MCP `review_pr` / `review_diff`
+  `reviewer_model` override follows the same rule.
+- BREAKING: `RepositoryEntry` (report::manifest) and `RepositoryReport`
+  (report::model) each gain a public `crate_topology` field. Both are
+  exhaustively constructible through the public API, so any external struct
+  literal over either one stops compiling and must add the field (`None` keeps
+  the previous behavior). This is why the crate goes to 0.23.0 rather than a
+  patch release — for a `0.y.z` crate the breaking bump is the MINOR position.
+- `RepoInvestigation` gains a `traces` field. For a `0.y.z` crate that is a MINOR bump, so this release is 0.24.0.
+- A present-but-unreadable `instructions.md` beside the manifest now fails the report run with `InstructionsUnreadable` instead of being ignored. Fail-open covers an input that is absent, never one the engagement author put there and this process could not honour — bad permissions, a dangling symlink, or non-UTF-8 bytes would otherwise render a report the author believes carries their instructions. An absent file is still the normal case and changes nothing; an empty one is still a warning.
+- **`trusty-review serve` binds a Unix socket instead of a TCP port.** The daemon serves `<data dir>/trusty-review.sock` and answers three JSON-RPC methods — `review.health`, `review.status`, `review.run` — replacing `GET /health`, `GET /status` and `POST /review`. `--socket` overrides the path; `--port` and `--bind` no longer do anything (see below). `--stdio` (MCP) is unchanged. The `http_addr` discovery file is no longer written: the path is derived, so the daemon and its consumers cannot disagree about it. `DEFAULT_PORT` (7891) is removed, and 7891 is released. `SelfOrigins` / `with_guarded_middleware` are deliberately not ported — browser-CSRF machinery has no meaning on a socket; the boundary is the `0700` directory, the `0600` socket, and a peer-uid check on every connection (ADR-0032, [#6277](https://github.com/bobmatnyc/trusty-tools/issues/6277))
+- **`trusty-review port` is now `trusty-review socket`.** It prints the socket path and whether anything is answering on it, and exits non-zero when nothing is — so `$(trusty-review socket)` still fails cleanly. `--addr` is gone with the address it printed; `--json` now emits `{"socket":"…","serving":…}` ([#6277](https://github.com/bobmatnyc/trusty-tools/issues/6277))
+- **The launchd plist passes `--socket <path>` instead of `--port 7891`, and an un-reinstalled one still works.** Upgrading the binary does not rewrite the plist — only `trusty-review service install` does — so `serve` accepts `--port` and `--bind` as no-ops, hidden from `--help`, and warns at every start naming that command. Without the shim clap exits 2 on an unexpected argument and `KeepAlive::Always` turns that into a crash loop every 10 seconds, with only a usage message in the launchd log to explain it. Rerun `trusty-review service install` to clear the warning; the flags will be dropped once no unit passes them ([#6277](https://github.com/bobmatnyc/trusty-tools/issues/6277))
+- The `http-server` feature no longer pulls `axum`, `tower` or `tower-http`. The name is kept so consumers' manifests are unaffected ([#6277](https://github.com/bobmatnyc/trusty-tools/issues/6277))
+- `report --analyze` dials trusty-analyze's Unix socket (#6287, ADR-0032). Its
+  per-endpoint budgets, fail-open contract, and Gaps & Caveats vocabulary are
+  unchanged: `classify_failure` reads JSON-RPC code `-32005` where it read HTTP
+  504, so a daemon-side deadline still prints "did not answer within the time
+  allowed" rather than "could not be reached".
+- The #6038 keep-alive retry is removed. It recovered a pooled HTTP/1.1
+  connection the daemon closed mid-request; the socket client dials per call, so
+  there is no pooled connection to lose.
+- The context gate's skip message no longer names an analyze daemon address —
+  no path on that gate contacts one.
+- `report --analyze` starts trusty-analyze itself rather than requiring a
+  resident daemon, and restarts it if it idles out mid-report: a request that
+  finds the socket gone respawns the server and retries exactly once. A timeout
+  does not retry — the server answered and is working. A start that fails is
+  reported through the "falling back to scan" line on stderr plus an
+  unassessed-dimension entry under Gaps & Caveats, never silently degraded to a
+  clean-looking report (#6350).
+
+### Removed
+
+- The `serve` daemon, the `socket` subcommand and the `service` launchd wrapper
+  are gone — trusty-review runs per invocation, with no resident process and no
+  LaunchAgent (#6290, ADR-0032).
+- `trusty-review run --json` prints the same `ReviewResult` object the retired
+  `review.run` method returned, field for field.
+- A failed run now prints that JSON with the reason in `error` AND exits
+  non-zero; it previously exited 0 on a provider outage.
+- The MCP stdio service moved to `trusty-review mcp`. `serve --stdio` is kept as
+  an alias, so no existing `.mcp.json` needs editing.
+- The `service::rpc` module is gone from the library: `serve`,
+  `serve_with_shutdown`, `build_router`, `socket_path`, the `METHOD_*` and
+  `MAX_FRAME_BYTES` constants, and `NoParams` are all removed. This is the
+  break behind the 0.29.0 bump.
+
+### Documentation
+
+- `build_review_state`'s doc describes the `SubprocessAnalyzeClient` it
+  actually builds — spawning the `trusty-analyze` binary per call, no daemon —
+  rather than the loopback `DEFAULT_ANALYZER_URL` default that #6287 deleted.
+  The broken link failed Gate 1 of the pre-publish workflow.
+
 ## [0.20.0] — 2026-08-19
 
 ### Added

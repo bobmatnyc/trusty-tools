@@ -1,2 +1,0 @@
-Changed
-- A present-but-unreadable `instructions.md` beside the manifest now fails the report run with `InstructionsUnreadable` instead of being ignored. Fail-open covers an input that is absent, never one the engagement author put there and this process could not honour — bad permissions, a dangling symlink, or non-UTF-8 bytes would otherwise render a report the author believes carries their instructions. An absent file is still the normal case and changes nothing; an empty one is still a warning.

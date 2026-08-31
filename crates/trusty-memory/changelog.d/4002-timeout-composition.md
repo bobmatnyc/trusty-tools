@@ -1,3 +1,0 @@
-Fixed
-
-- `memory_remember`, `memory_note` and `task_add` now bound the whole operation instead of each wait inside it. Each took the per-palace write mutex under `write_lock_timeout` (60 s) and then opened the palace under `open_queue_timeout` (60 s), so a caller that exhausted both waited ~123 s before seeing an error. They now stamp one `OpBudget` from the new `AppState::write_op_budget` (`TRUSTY_WRITE_OP_BUDGET_SECS`, 60 s) and pass its remainder to every later leg. An uncontended write is unaffected — the budget caps waiting, not work ([#4002](https://github.com/bobmatnyc/trusty-tools/issues/4002))

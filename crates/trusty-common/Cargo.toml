@@ -38,7 +38,14 @@ name = "trusty-common"
 # 0.45.6 (#6382): patch — `SearchClient::index_communities` and its
 # `CommunitiesWire` struct are removed, but both were private (no `pub`), so
 # no public item changed; nothing here breaks a consumer at compile time.
-version = "0.45.6"
+# 0.46.0 (#6464): minor — two accepted breaks that already landed on main.
+# `PalaceHandle` gained the public field `commit_mutex`
+# (`src/memory_core/retrieval/handle.rs:180`),
+# which breaks any struct-literal construction, and
+# `PalaceResolveError::NoIdentity` moved from discriminant 3 to 4
+# (`palace_resolve.rs:225`). Cargo's 0.x rule puts a break in the MINOR
+# position, so 0.46.0 is where they ship.
+version = "0.46.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

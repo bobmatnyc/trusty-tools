@@ -1,2 +1,0 @@
-Fixed
-- Raw JSON-RPC callers can reach `palace_verify_embedded` and `palace_embed_sweep` again. Both were registered in `tools/list` but missing from the `TOOL_METHODS` allowlist, so a bare-method call — the path `tm memory import --refresh` takes — answered `Method not found (-32601)` while `tools/call` served the same tool. A new test partitions every registered tool across the allowlist and an explicit unforwarded list, so the next added tool cannot drift the same way (#5044).

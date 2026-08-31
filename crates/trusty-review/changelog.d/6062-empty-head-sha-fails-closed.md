@@ -1,3 +1,0 @@
-Fixed
-
-- A review whose PR-metadata fetch produced no head SHA no longer posts. The dedup claim in `run_review` and the `complete()` call in `finalize_review` are both keyed on the head SHA, and `decide_action` never read it — so a failed `fetch_github_pr_meta` fell back to an empty SHA, continued, and could post live with the claim never taken and never completed; a retry after the same failure posted a duplicate, and the stranded-claim block could never engage. `run_review` now aborts before the diff is loaded when posting is reachable and the SHA is empty, and `finalize_review` downgrades such a run to log-only as a second guard for the webhook path. Same fail-open family as #5126/#5113/#5020. See #6062.

@@ -1,3 +1,0 @@
-Fixed
-
-- `build.rs` keeps the committed `ui-dist/` bundle instead of running `make release-prep` on every cold build. That target rebuilds the UI and re-mirrors `ui/dist/` into `ui-dist/`, rewriting files git tracks on a build that had no UI change to ship. Freshness is decided by `scripts/check-ui-bundle-freshness.sh`, the same check `preflight-publish.sh` runs as CHECK 7, and an unreadable answer keeps the committed bundle rather than rebuilding it. `FORCE_UI_BUILD=1` rebuilds unconditionally, and the pnpm fallback path re-stamps the bundle only when a build actually ran. Backported from trusty-memory ([#6060](https://github.com/bobmatnyc/trusty-tools/pull/6060), [#5078](https://github.com/bobmatnyc/trusty-tools/issues/5078))

@@ -1,5 +1,0 @@
-Breaking
-- **`memory_rpc` dials trusty-memory's Unix socket instead of an HTTP base URL** (#6286, ADR-0032). `resolve_memory_base_url`, `resolve_memory_base_url_or_unreachable` and `TRUSTY_MEMORY_URL_ENV` are replaced by `resolve_memory_socket`, `resolve_memory_socket_or_unreachable` and `TRUSTY_MEMORY_SOCKET_ENV`; `call_memory_tool_at` takes a `&Path` rather than a `&str` base URL, and `call_memory_tool_at_with_timeout` is new. The `memory-rpc` feature now implies `uds`
-- **`CatchupOptions::memory_url: String` is `memory_socket: PathBuf`**, and `catchup::palace::fetch_recent_palace_drawers` takes a `&Path`
-- **`monitor::memory_client` speaks JSON-RPC over the socket.** `MemoryClient::new` takes a socket path; `base_url`/`set_base_url` are `socket`/`set_socket`; `resolve_memory_url`, `normalize_url`, `DEFAULT_MEMORY_URL` and `parse_palaces` are removed, and `monitor-tui` now implies `memory-rpc`
-- **`monitor::memory_tui::run_with_url(String)` is `run_with_socket(PathBuf)`**, and `MemoryTuiState::base_url` is `daemon_addr`

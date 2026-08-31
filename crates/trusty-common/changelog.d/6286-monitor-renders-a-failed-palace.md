@@ -1,2 +1,0 @@
-Fixed
-- **The monitor's memory panel could show more palaces than it had rows for.** `MemoryClient::palaces` fanned out one `memory.palace_get` per id and dropped a palace whose call failed at `debug!`, so "12 palaces" over nine rows was a reachable state with nothing saying which three were missing or why. It makes one `memory.palaces_list` call now, and a row the daemon could not read is rendered with `counts_unknown` and the daemon's reason rather than skipped ([#6286](https://github.com/bobmatnyc/trusty-tools/issues/6286))

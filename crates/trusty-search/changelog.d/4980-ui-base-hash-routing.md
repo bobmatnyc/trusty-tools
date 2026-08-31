@@ -1,8 +1,0 @@
-Fixed
-
-- **The dashboard reported itself offline on every reload of a hash-routed URL (`/ui/#/`).** `computeBase()` in `ui/src/lib/base.js` ran its `$`-anchored `index.html` / `ui/` strips against the raw `document.baseURI`, which includes the URL fragment, so the `ui/` mount segment was never stripped and every API call resolved under `/ui/` — onto the SPA catch-all, which answers `200 text/html` with `index.html` (closes [#4980](https://github.com/bobmatnyc/trusty-tools/issues/4980))
-  - nothing failed at the HTTP layer, which is why this went unnoticed for ~18 minor versions: `request()` in `api.js` falls back to `res.text()` for non-JSON and handed callers an HTML string, while `EventSource` hard-failed on the wrong Content-Type
-  - `router.svelte.js` writes the hash on the first sidebar click, so a first visit to bare `/ui/` worked and every reload, restored tab, or bookmark afterwards did not — the steady state after a minute of use. A query string (`/ui/?tab=1`) misrouted identically
-  - the strips now run against `new URL(document.baseURI).pathname`, which carries neither fragment nor query, re-joined to `origin`. The `window.__SEARCH_BASE__` override branch and the non-browser guard are unchanged, and the proxy case still resolves `https://console/proxy/search/ui/#/` to `https://console/proxy/search/`
-  - latent since v0.24.10 (introduced in d087b888); the same fix is applied to the KEEP IN SYNC copies in trusty-memory and trusty-analyze
-  - three `hash-routed load` cases added to `ui/src/lib/base.test.js`, verified to fail against the unfixed code and pass after; the committed `ui-dist/` bundle is regenerated, since CI and release set `SKIP_UI_BUILD=1` and ship whatever is committed

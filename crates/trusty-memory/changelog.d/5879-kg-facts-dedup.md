@@ -1,3 +1,0 @@
-Fixed
-
-- The injected "Relevant KG facts" section no longer reprints a fact the Tier S block above it already showed. Tier S gathers hot predicates across every palace and the KG section gathers them from the current one, so the second was a subset of the first and every overlapping fact was rendered twice on every prompt of every session. It cost nothing only while no palace held a hot triple — the first `kg_assert` with a hot predicate started the bill. Both sides now render a bullet through one `prompt_facts::hot_fact_bullet`, so the comparison cannot drift, and the section is kept rather than dropped because the two sources genuinely disagree when a palace's KG fails to read or the global fetch fails ([#5879](https://github.com/bobmatnyc/trusty-tools/issues/5879))

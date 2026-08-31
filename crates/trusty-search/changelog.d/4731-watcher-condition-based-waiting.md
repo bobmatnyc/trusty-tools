@@ -1,2 +1,0 @@
-Fixed
-- Test stabilization: the six filesystem-watcher tests no longer depend on a fixed startup sleep plus a single save landing inside a 2–3 s deadline. Each now re-applies its save once per debounce window and polls the condition until it holds, so a save lost to a macOS FSEvents queue overflow — which arrives as a `MustScanSubDirs` event naming a directory to rescan rather than the file that changed, and is never redelivered — is retried instead of stranding the test (#4731).

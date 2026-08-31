@@ -1,3 +1,0 @@
-Fixed
-
-- The report's `Data gaps:` line no longer names a section the same report renders populated. Gaps are recorded as the polish pass walks the document, so dropping the Authorship & Key-Person Risk section's unsynthesised narrative paragraph recorded the enclosing heading as a gap — and nothing revisited that once the section's authorship table filled in with six authors, a bus factor and a trajectory. The gap list is now filtered against the finished body: a label matching a heading whose span carries content is dropped, while a genuinely collapsed section is still named. Same stale-emptiness class as #6029. See #6039.

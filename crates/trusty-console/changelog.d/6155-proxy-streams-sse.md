@@ -1,3 +1,0 @@
-Fixed
-- The reverse proxy streams an upstream response instead of collecting it first. Collecting never returned for Server-Sent Events, so `/status/stream` and `/reindex/stream` delivered nothing until the 30-second request timeout fired. A request asking for `text/event-stream` also now uses a client with a read timeout in place of that whole-request deadline.
-- The proxy grants the no-total-deadline client only to a response the upstream labelled `text/event-stream`. `Accept` is a caller claim, so without that check any proxied GET could hold a connection open by asking for a stream and trickling bytes. A mid-stream body failure is logged again, as it was before the switch to streaming.

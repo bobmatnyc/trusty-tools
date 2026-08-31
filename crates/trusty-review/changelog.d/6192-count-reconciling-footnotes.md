@@ -1,2 +1,0 @@
-Added
-- The report footnotes the two count classes an independent verifier re-derives and gets a different answer for: §8 states that its commit total counts commits as the forge reports them while a local `git log` on a squash-merged branch counts each squash once, and the Key Facts block names the counter behind its LoC and file-count rows and what that counter excludes relative to raw `git ls-files`.
