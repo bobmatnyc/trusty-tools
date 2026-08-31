@@ -16,6 +16,10 @@
 //!     (#5052).
 //!   - [`daemon_http_client`] builds a reqwest client with short timeouts so
 //!     CLI commands never hang on a missing daemon.
+//!   - `bearer_auth` (behind `daemon-token`) adds the caller check the origin
+//!     guard deliberately does not perform: `guard_write_origin` passes every
+//!     request that sends no `Origin`, so a loopback daemon still served any
+//!     local process until #5439.
 //!
 //! Test: `cargo test -p trusty-common --features axum-server` covers router
 //! composition (smoke) and client construction (timeouts surfaced through
@@ -33,7 +37,14 @@ use tower_http::{
     trace::TraceLayer,
 };
 
+/// #5439: gated on `daemon-token` as well as this module's own `axum-server`,
+/// because the credential it verifies lives in `crate::daemon_token`.
+#[cfg(feature = "daemon-token")]
+pub mod bearer_auth;
 pub mod origin_guard;
+
+#[cfg(feature = "daemon-token")]
+pub use bearer_auth::{Authenticated, DaemonAuth, require_bearer};
 
 pub use origin_guard::{
     SelfOrigins, guard_write_origin, origin_is_local_webview, origin_is_loopback,

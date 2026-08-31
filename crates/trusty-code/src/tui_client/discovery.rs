@@ -47,6 +47,45 @@ use crate::binding::ProjectBinding;
 /// point 1).
 pub const DAEMON_URL_ENV: &str = "TCODE_DAEMON_URL";
 
+/// Environment variable naming the daemon credential directly, ahead of the
+/// token file (#5439).
+///
+/// Why: a client may run where it cannot read the daemon's data directory — a
+/// container, a different account, an operator driving a remote daemon over a
+/// tunnel. This is a CLIENT-side override only: `tcode serve --http` never
+/// reads it, because a server that took its credential from the environment
+/// would accept whatever a caller could arrange to export.
+pub const DAEMON_TOKEN_ENV: &str = "TCODE_DAEMON_TOKEN";
+
+/// The credential to send to `base_url`, or `None` when there is none to send
+/// or none that may be sent.
+///
+/// Why: the token authenticates a caller to the LOCAL daemon, and nothing
+/// else. `TCODE_DAEMON_URL` can legitimately name a non-loopback address (an
+/// operator forwarding a port, a remote daemon over a tunnel), and attaching
+/// the local machine's credential to a request leaving loopback would hand it
+/// to whatever answers. This crate resolves it in one place so the three
+/// request sites — `RpcHttpClient`, the SSE readers, and `probe_health` —
+/// cannot each grow their own answer.
+/// What: a thin naming of `trusty_common::daemon_token::credential_for`, which
+/// owns the loopback gate, the override precedence, and the file read.
+///
+/// The gate lives THERE and not here for a reason worth stating: the first
+/// version of this function called `server::origin_is_loopback`, an
+/// `Origin`-HEADER parser, which reads
+/// `http://127.0.0.1:7882@attacker.example` as loopback and shipped the token
+/// off-machine. `trusty-code-gui` had the identical bug in its own copy. One
+/// implementation, parsing the way the client that dials the URL parses.
+/// Test: `discovery_tests::credential_is_withheld_from_a_non_loopback_url`,
+/// `discovery_tests::credential_env_override_wins_for_a_loopback_url`.
+pub fn daemon_credential_for(base_url: &str) -> Option<String> {
+    trusty_common::daemon_token::credential_for(
+        crate::serve::http::TOKEN_APP_NAME,
+        base_url,
+        DAEMON_TOKEN_ENV,
+    )
+}
+
 /// How long the liveness ping (`GET {url}/health`) waits before treating the
 /// candidate as dead. Short and fixed — this call happens once, at REPL
 /// startup, and a slow/hung `/health` response is itself a strong "don't use
@@ -265,9 +304,19 @@ fn candidate_url() -> Option<(String, Source)> {
 /// will not parse as JSON still counts as alive (the daemon is answering),
 /// and degrades to `Value::Null`, from which
 /// [`ReportedBinding::from_health`] correctly reports `Unreported`.
+///
+/// #5439/#6472: `/health` stays reachable without a credential, but it answers
+/// an anonymous caller with liveness ALONE. This probe therefore sends the
+/// credential when it has one — without it the body carries no `binding`, and
+/// [`ReportedBinding::from_health`] correctly reports `Unreported`, which the
+/// caller must then treat as an unverifiable daemon.
 async fn probe_health(client: &reqwest::Client, base_url: &str) -> Option<serde_json::Value> {
     let url = format!("{base_url}/health");
-    let resp = client.get(&url).timeout(PING_TIMEOUT).send().await.ok()?;
+    let mut req = client.get(&url).timeout(PING_TIMEOUT);
+    if let Some(token) = daemon_credential_for(base_url) {
+        req = req.bearer_auth(token);
+    }
+    let resp = req.send().await.ok()?;
     if !resp.status().is_success() {
         return None;
     }
@@ -283,6 +332,98 @@ mod discovery_tests {
     /// pattern for env-mutating tests in this crate (a plain `tokio::sync::Mutex`
     /// guard rather than pulling in `serial_test` for one file).
     static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// #5439's credential-exfiltration guard: the local token authenticates a
+    /// caller to the LOCAL daemon and must never leave loopback, however the
+    /// operator points `TCODE_DAEMON_URL`.
+    ///
+    /// This is the arm that fails open if the gate is dropped — with a token
+    /// available in the environment, a non-loopback base URL must still
+    /// resolve to `None`.
+    #[tokio::test]
+    async fn credential_is_withheld_from_a_non_loopback_url() {
+        let _guard = ENV_LOCK.lock().await;
+        // SAFETY: test-only env mutation; serialized by `ENV_LOCK`.
+        unsafe {
+            std::env::set_var(DAEMON_TOKEN_ENV, "a".repeat(64));
+        }
+        let remote = [
+            "http://example.test:7882",
+            "https://10.0.0.5:7882",
+            "http://192.168.1.4:7882",
+            // The userinfo family. An `Origin`-header parser splits the
+            // authority at the FIRST `:`, so it reads the host of these as
+            // `127.0.0.1` and calls them loopback; WHATWG URL parsing splits
+            // userinfo at the LAST `@`, so the real host is `attacker.example`
+            // and every request goes there. Gating on the header parser shipped
+            // a credential-exfiltration path that the plain-hostname rows above
+            // could never catch.
+            "http://127.0.0.1:7882@attacker.example",
+            "http://127.0.0.1:7882@attacker.example/rpc",
+            "http://localhost@attacker.example",
+            "http://user:pass@attacker.example",
+        ]
+        .map(daemon_credential_for);
+        let local = daemon_credential_for("http://127.0.0.1:7882");
+        unsafe {
+            std::env::remove_var(DAEMON_TOKEN_ENV);
+        }
+        for (url, resolved) in [
+            "example.test",
+            "10.0.0.5",
+            "192.168.1.4",
+            "127.0.0.1:7882@attacker.example",
+            "127.0.0.1:7882@attacker.example/rpc",
+            "localhost@attacker.example",
+            "user:pass@attacker.example",
+        ]
+        .iter()
+        .zip(remote.iter())
+        {
+            assert_eq!(resolved.as_deref(), None, "{url} must get no credential");
+        }
+        assert_eq!(
+            local.as_deref(),
+            Some("a".repeat(64).as_str()),
+            "loopback must get the credential"
+        );
+    }
+
+    /// The env override must beat the token file, so a client that cannot read
+    /// the daemon's data directory can still be pointed at a credential.
+    #[tokio::test]
+    async fn credential_env_override_wins_for_a_loopback_url() {
+        let _guard = ENV_LOCK.lock().await;
+        // SAFETY: test-only env mutation; serialized by `ENV_LOCK`.
+        unsafe {
+            std::env::set_var(DAEMON_TOKEN_ENV, "b".repeat(64));
+        }
+        let resolved = daemon_credential_for("http://localhost:7882");
+        unsafe {
+            std::env::remove_var(DAEMON_TOKEN_ENV);
+        }
+        assert_eq!(resolved.as_deref(), Some("b".repeat(64).as_str()));
+    }
+
+    /// A blank override must be ignored rather than becoming an empty
+    /// credential — an empty bearer is a malformed header, not "no header".
+    #[tokio::test]
+    async fn blank_credential_override_falls_through() {
+        let _guard = ENV_LOCK.lock().await;
+        // SAFETY: test-only env mutation; serialized by `ENV_LOCK`.
+        unsafe {
+            std::env::set_var(DAEMON_TOKEN_ENV, "   ");
+        }
+        let resolved = daemon_credential_for("http://127.0.0.1:7882");
+        unsafe {
+            std::env::remove_var(DAEMON_TOKEN_ENV);
+        }
+        assert_ne!(
+            resolved.as_deref(),
+            Some(""),
+            "a blank override must not become an empty credential"
+        );
+    }
 
     /// Both a `TCODE_DAEMON_URL` and a discovery file present: the env var
     /// must win (DOC-50 §3.4 point 1's explicit priority).

@@ -3,7 +3,10 @@ name = "trusty-code"
 # #5073/#6231: test-only stabilization of `daemon_autospawn_tests` — no
 # production behavior changed, so this is a PATCH bump. (0.4.0 was the MINOR
 # bump for #6286's socket-path API break, per Cargo's 0.x rule.)
-version = "0.4.1"
+# 0.5.0 (#5439): minor — `serve::http::build_axum_router` now takes 5
+# parameters instead of 4 (bearer-auth wiring); cargo-semver-checks reports a
+# function_parameter_count_changed break, so Cargo's 0.x rule puts it in MINOR.
+version = "0.5.0"
 edition = "2024"
 rust-version.workspace = true
 # license.workspace resolves to "MIT"; LICENSE is kept in-crate for correctness.
@@ -110,7 +113,11 @@ globset = { workspace = true }
 # resolver the project picker shares with trusty-mpm. serde_yaml + thiserror are
 # already in this crate's dependency graph, so it adds no new transitive deps.
 trusty-mcp = { workspace = true }  # JSON-RPC / MCP primitives (ADR-0040, #5803)
-trusty-common = { workspace = true, features = ["catchup", "stdio-mcp-client", "axum-server", "inference-client", "config-cli", "bedrock-client", "search-index", "crate-config"] }
+# `daemon-token` (#5439) supplies BOTH halves of the loopback credential: the
+# `0600` token file (`serve::http::run_http` writes it, `tui_client` reads it)
+# and — because `axum-server` is on here too — `server::bearer_auth`, the
+# router-wide guard.
+trusty-common = { workspace = true, features = ["catchup", "stdio-mcp-client", "axum-server", "daemon-token", "inference-client", "config-cli", "bedrock-client", "search-index", "crate-config"] }
 
 # `tui_client::CodeEngine` (#3415, DOC-50 §3.3/§3.4, epic #3411 Slice 3): the
 # shared engine-adapter trait + event vocabulary (`TuiEngine`/`ReplEvent`)

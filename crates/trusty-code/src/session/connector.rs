@@ -72,13 +72,84 @@ impl TcodeConnector {
     ///
     /// Why: tests need to target a `--port 0` ephemeral instance rather than
     /// the fixed default.
-    /// What: stores `daemon_url` and a plain `reqwest::Client`.
+    /// What: stores `daemon_url` and a `reqwest::Client` carrying the daemon
+    /// credential (#5439) as a DEFAULT header.
+    ///
+    /// A default header rather than a per-request one because this client
+    /// talks to exactly one target — `daemon_url`, resolved once above — so
+    /// there is no second destination it could reach, and the six request
+    /// sites below cannot individually forget it. The header is marked
+    /// sensitive so `reqwest`'s own `Debug` output redacts it. The
+    /// never-off-loopback rule lives in
+    /// `crate::tui_client::discovery::daemon_credential_for`, not here.
     pub fn with_daemon_url(daemon_url: impl Into<String>) -> Self {
+        let daemon_url = daemon_url.into();
         Self {
-            http: reqwest::Client::new(),
-            daemon_url: daemon_url.into(),
+            http: credentialed_client(&daemon_url),
+            daemon_url,
         }
     }
+
+    /// Build a connector presenting an explicitly supplied credential.
+    ///
+    /// Why: an integration test drives a daemon it spawned with its OWN
+    /// isolated data directory (#5439's hermeticity fix), so the credential is
+    /// not the one this process would resolve from disk. Passing it as an
+    /// argument beats exporting `TCODE_DAEMON_TOKEN`, which is process-global
+    /// and races the other tests in the same binary.
+    /// What: identical to [`Self::with_daemon_url`] except the credential comes
+    /// from the caller. The loopback gate still applies — a non-loopback
+    /// `daemon_url` gets no header, whatever is passed here.
+    /// Test: `tests/connector_e2e.rs`'s live-daemon arms.
+    pub fn with_daemon_url_and_credential(daemon_url: impl Into<String>, credential: &str) -> Self {
+        let daemon_url = daemon_url.into();
+        let http = if trusty_common::daemon_token::url_targets_loopback(&daemon_url) {
+            client_presenting(credential)
+        } else {
+            reqwest::Client::new()
+        };
+        Self { http, daemon_url }
+    }
+}
+
+/// A `reqwest::Client` presenting the daemon credential for `daemon_url`.
+///
+/// Why: #5439 put every route behind a credential, so a connector built on a
+/// bare client sees `401` on every call. Resolution is delegated to
+/// `crate::tui_client::discovery::daemon_credential_for` so the "never send
+/// the local token off loopback" rule has exactly one implementation.
+/// What: falls back to a plain client when there is no credential to present
+/// or the target is not loopback — the caller then reads the daemon's `401`
+/// as an ordinary `ConnectorError`, which is a clearer failure than a client
+/// that refused to be constructed.
+/// Test: `create_session_full_lifecycle`,
+/// `list_sessions_empty_fleet_returns_empty_vec` (both in
+/// `tests/connector_e2e.rs`) exercise the credentialed path against a live
+/// daemon; the loopback gate is covered by
+/// `credential_is_withheld_from_a_non_loopback_url` in `tui_client::discovery`.
+fn credentialed_client(daemon_url: &str) -> reqwest::Client {
+    match crate::tui_client::discovery::daemon_credential_for(daemon_url) {
+        Some(token) => client_presenting(&token),
+        None => reqwest::Client::new(),
+    }
+}
+
+/// A client sending `Authorization: Bearer <token>` on every request.
+///
+/// What: the header is marked sensitive so `reqwest`'s own `Debug` output
+/// redacts it. A token that will not fit in a header value yields a plain
+/// client rather than a panic — the caller then reads the daemon's `401`.
+fn client_presenting(token: &str) -> reqwest::Client {
+    let Ok(mut value) = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}")) else {
+        return reqwest::Client::new();
+    };
+    value.set_sensitive(true);
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(reqwest::header::AUTHORIZATION, value);
+    reqwest::Client::builder()
+        .default_headers(headers)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
 }
 
 impl Default for TcodeConnector {

@@ -19,6 +19,34 @@ use serde_json::{Value, json};
 use tower::util::ServiceExt;
 use trusty_mcp::error_codes;
 
+/// The credential every router test in this file presents.
+///
+/// Why: a fixed literal rather than `mint_token()` so a failing assertion
+/// shows the same value every run, and so a test that must send a WRONG
+/// credential has something concrete to differ from. 64 hex characters, the
+/// shape `trusty_common::daemon_token::mint_token` produces.
+pub(super) const TEST_TOKEN: &str =
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+/// The `DaemonAuth` `build_axum_router` is given throughout this file —
+/// `run_http`'s configuration, with `/health` as the one public path.
+pub(super) fn test_auth() -> DaemonAuth {
+    DaemonAuth::new(TEST_TOKEN, [PUBLIC_HEALTH_PATH]).expect("TEST_TOKEN clears the floor")
+}
+
+/// A request builder already carrying [`TEST_TOKEN`].
+///
+/// Why (#5439): every route on this router now requires a credential, so a
+/// routing test that built a bare `Request` would assert `401` rather than the
+/// routing it means to cover. Going through one helper also means the
+/// unauthenticated cases below are visibly the ones that DON'T call it.
+pub(super) fn authed_request() -> axum::http::request::Builder {
+    Request::builder().header(
+        axum::http::header::AUTHORIZATION,
+        format!("Bearer {TEST_TOKEN}"),
+    )
+}
+
 pub(super) async fn router_and_sessions()
 -> (Arc<Router>, Arc<SessionRegistry>, SharedWorkstreamStore) {
     let sessions = Arc::new(SessionRegistry::new());
@@ -62,12 +90,12 @@ async fn body_json(response: axum::response::Response) -> Value {
 #[tokio::test]
 async fn http_rpc_ping_returns_pong() {
     let (router, sessions, workstreams) = router_and_sessions().await;
-    let app = build_axum_router(router, sessions, workstreams, test_binding());
+    let app = build_axum_router(router, sessions, workstreams, test_binding(), test_auth());
     let req_body = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}).to_string();
 
     let resp = app
         .oneshot(
-            Request::builder()
+            authed_request()
                 .method("POST")
                 .uri("/rpc")
                 .header("content-type", "application/json")
@@ -88,11 +116,11 @@ async fn http_rpc_ping_returns_pong() {
 #[tokio::test]
 async fn http_rpc_malformed_json_returns_parse_error() {
     let (router, sessions, workstreams) = router_and_sessions().await;
-    let app = build_axum_router(router, sessions, workstreams, test_binding());
+    let app = build_axum_router(router, sessions, workstreams, test_binding(), test_auth());
 
     let resp = app
         .oneshot(
-            Request::builder()
+            authed_request()
                 .method("POST")
                 .uri("/rpc")
                 .header("content-type", "application/json")
@@ -112,11 +140,11 @@ async fn http_rpc_malformed_json_returns_parse_error() {
 #[tokio::test]
 async fn http_health_matches_jsonrpc_health_payload() {
     let (router, sessions, workstreams) = router_and_sessions().await;
-    let app = build_axum_router(router, sessions, workstreams, test_binding());
+    let app = build_axum_router(router, sessions, workstreams, test_binding(), test_auth());
 
     let resp = app
         .oneshot(
-            Request::builder()
+            authed_request()
                 .method("GET")
                 .uri("/health")
                 .body(Body::empty())
@@ -140,11 +168,17 @@ async fn http_health_reports_the_daemons_project_binding() {
     let binding = crate::binding::ProjectBinding::resolve(Some(project.path().to_path_buf()))
         .expect("tempdir must bind");
     let (router, sessions, workstreams) = router_and_sessions().await;
-    let app = build_axum_router(router, sessions, workstreams, Arc::new(binding.clone()));
+    let app = build_axum_router(
+        router,
+        sessions,
+        workstreams,
+        Arc::new(binding.clone()),
+        test_auth(),
+    );
 
     let resp = app
         .oneshot(
-            Request::builder()
+            authed_request()
                 .method("GET")
                 .uri("/health")
                 .body(Body::empty())
@@ -168,11 +202,11 @@ async fn http_health_reports_the_daemons_project_binding() {
 #[tokio::test]
 async fn http_rest_sessions_route_is_merged_in() {
     let (router, sessions, workstreams) = router_and_sessions().await;
-    let app = build_axum_router(router, sessions, workstreams, test_binding());
+    let app = build_axum_router(router, sessions, workstreams, test_binding(), test_auth());
 
     let resp = app
         .oneshot(
-            Request::builder()
+            authed_request()
                 .method("GET")
                 .uri("/sessions")
                 .body(Body::empty())
@@ -205,12 +239,12 @@ async fn http_rest_sessions_route_is_merged_in() {
 async fn http_rest_post_sessions_route_is_merged_in() {
     let (router, sessions, workstreams) = router_and_sessions().await;
     let sessions_for_seeding = sessions.clone();
-    let app = build_axum_router(router, sessions, workstreams, test_binding());
+    let app = build_axum_router(router, sessions, workstreams, test_binding(), test_auth());
 
     let create_resp = app
         .clone()
         .oneshot(
-            Request::builder()
+            authed_request()
                 .method("POST")
                 .uri("/sessions")
                 .header("content-type", "application/json")
@@ -233,7 +267,7 @@ async fn http_rest_post_sessions_route_is_merged_in() {
     let put_resp = app
         .clone()
         .oneshot(
-            Request::builder()
+            authed_request()
                 .method("PUT")
                 .uri(format!("/sessions/{session_id}/goal"))
                 .header("content-type", "application/json")
@@ -249,7 +283,7 @@ async fn http_rest_post_sessions_route_is_merged_in() {
 
     let delete_resp = app
         .oneshot(
-            Request::builder()
+            authed_request()
                 .method("DELETE")
                 .uri(format!("/sessions/{session_id}/goal"))
                 .header("content-type", "application/json")
@@ -301,11 +335,17 @@ async fn http_rest_post_tasks_route_is_merged_in() {
         agents.path().to_path_buf(),
         workstreams.clone(),
     );
-    let app = build_axum_router(Arc::new(router), sessions, workstreams, test_binding());
+    let app = build_axum_router(
+        Arc::new(router),
+        sessions,
+        workstreams,
+        test_binding(),
+        test_auth(),
+    );
 
     let resp = app
         .oneshot(
-            Request::builder()
+            authed_request()
                 .method("POST")
                 .uri("/tasks")
                 .header("content-type", "application/json")
@@ -350,12 +390,13 @@ async fn http_rest_get_fs_route_is_merged_in() {
         sessions,
         test_workstreams_store().await,
         test_binding(),
+        test_auth(),
     );
     let tmp = tempfile::tempdir().expect("tempdir");
 
     let resp = app
         .oneshot(
-            Request::builder()
+            authed_request()
                 .method("GET")
                 .uri(format!("/fs?path={}", tmp.path().display()))
                 .body(Body::empty())
@@ -394,11 +435,12 @@ async fn http_rest_get_projects_route_is_merged_in() {
         sessions,
         test_workstreams_store().await,
         test_binding(),
+        test_auth(),
     );
 
     let resp = app
         .oneshot(
-            Request::builder()
+            authed_request()
                 .method("GET")
                 .uri("/projects")
                 .body(Body::empty())
@@ -443,12 +485,13 @@ async fn http_rest_get_agent_and_skill_catalog_routes_are_merged_in() {
         sessions,
         test_workstreams_store().await,
         test_binding(),
+        test_auth(),
     );
 
     let agents_resp = app
         .clone()
         .oneshot(
-            Request::builder()
+            authed_request()
                 .method("GET")
                 .uri("/agents")
                 .body(Body::empty())
@@ -461,7 +504,7 @@ async fn http_rest_get_agent_and_skill_catalog_routes_are_merged_in() {
 
     let skills_resp = app
         .oneshot(
-            Request::builder()
+            authed_request()
                 .method("GET")
                 .uri("/skills")
                 .body(Body::empty())
@@ -484,11 +527,11 @@ async fn http_rest_get_agent_and_skill_catalog_routes_are_merged_in() {
 async fn http_rest_get_session_agents_route_is_merged_in() {
     let (router, sessions, workstreams) = router_and_sessions().await;
     let session = sessions.create("t".to_string(), None, crate::binding::ProjectBinding::None);
-    let app = build_axum_router(router, sessions, workstreams, test_binding());
+    let app = build_axum_router(router, sessions, workstreams, test_binding(), test_auth());
 
     let resp = app
         .oneshot(
-            Request::builder()
+            authed_request()
                 .method("GET")
                 .uri(format!("/sessions/{}/agents", session.id))
                 .body(Body::empty())
@@ -513,11 +556,11 @@ async fn http_rest_get_session_agents_route_is_merged_in() {
 async fn http_rest_get_session_budget_route_is_merged_in() {
     let (router, sessions, workstreams) = router_and_sessions().await;
     let session = sessions.create("t".to_string(), None, crate::binding::ProjectBinding::None);
-    let app = build_axum_router(router, sessions, workstreams, test_binding());
+    let app = build_axum_router(router, sessions, workstreams, test_binding(), test_auth());
 
     let resp = app
         .oneshot(
-            Request::builder()
+            authed_request()
                 .method("GET")
                 .uri(format!("/sessions/{}/budget", session.id))
                 .body(Body::empty())
@@ -541,11 +584,11 @@ async fn http_rest_get_session_budget_route_is_merged_in() {
 async fn http_rest_get_session_search_audit_route_is_merged_in() {
     let (router, sessions, workstreams) = router_and_sessions().await;
     let session = sessions.create("t".to_string(), None, crate::binding::ProjectBinding::None);
-    let app = build_axum_router(router, sessions, workstreams, test_binding());
+    let app = build_axum_router(router, sessions, workstreams, test_binding(), test_auth());
 
     let resp = app
         .oneshot(
-            Request::builder()
+            authed_request()
                 .method("GET")
                 .uri(format!("/sessions/{}/search-audit", session.id))
                 .body(Body::empty())
@@ -582,12 +625,18 @@ async fn http_rest_get_workstreams_route_is_merged_in() {
     crate::session::protocol::register(&mut router, sessions.clone(), workstreams.clone());
     crate::workstreams::protocol::register(&mut router, workstreams.clone());
     let id = workstreams.lock().await.create("t").await.expect("create");
-    let app = build_axum_router(Arc::new(router), sessions, workstreams, test_binding());
+    let app = build_axum_router(
+        Arc::new(router),
+        sessions,
+        workstreams,
+        test_binding(),
+        test_auth(),
+    );
 
     let resp = app
         .clone()
         .oneshot(
-            Request::builder()
+            authed_request()
                 .method("GET")
                 .uri("/workstreams")
                 .body(Body::empty())
@@ -601,7 +650,7 @@ async fn http_rest_get_workstreams_route_is_merged_in() {
 
     let events_resp = app
         .oneshot(
-            Request::builder()
+            authed_request()
                 .method("GET")
                 .uri(format!("/workstreams/{id}/events"))
                 .body(Body::empty())
@@ -617,11 +666,11 @@ async fn http_rest_get_workstreams_route_is_merged_in() {
 #[tokio::test]
 async fn http_session_events_sse_unknown_session_returns_404() {
     let (router, sessions, workstreams) = router_and_sessions().await;
-    let app = build_axum_router(router, sessions, workstreams, test_binding());
+    let app = build_axum_router(router, sessions, workstreams, test_binding(), test_auth());
 
     let resp = app
         .oneshot(
-            Request::builder()
+            authed_request()
                 .method("GET")
                 .uri("/sessions/does-not-exist/events")
                 .body(Body::empty())
@@ -647,11 +696,11 @@ async fn http_session_events_sse_unknown_session_returns_404() {
 async fn http_session_events_sse_streams_replay() {
     let (router, sessions, workstreams) = router_and_sessions().await;
     let session = sessions.create("t".to_string(), None, crate::binding::ProjectBinding::None);
-    let app = build_axum_router(router, sessions, workstreams, test_binding());
+    let app = build_axum_router(router, sessions, workstreams, test_binding(), test_auth());
 
     let resp = app
         .oneshot(
-            Request::builder()
+            authed_request()
                 .method("GET")
                 .uri(format!("/sessions/{}/events", session.id))
                 .body(Body::empty())

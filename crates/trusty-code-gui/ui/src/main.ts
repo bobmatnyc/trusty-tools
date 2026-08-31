@@ -12,8 +12,12 @@
 import './app.css';
 import { mount } from 'svelte';
 import App from './App.svelte';
+import { installDaemonAuth } from './lib/daemon-auth';
 import { initThemeBootstrap } from './lib/theme-bootstrap';
 
+// #5439: install the credential-attaching `fetch` BEFORE mounting, so no
+// component's first request can race ahead of it and get a 401.
+installDaemonAuth();
 initThemeBootstrap();
 
 const app = mount(App, {

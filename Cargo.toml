@@ -114,7 +114,7 @@ authors = ["Bob Matsuoka <bob@matsuoka.com>"]
 # ── Internal crates (path deps so the monorepo builds without publish cycles) ──
 # trusty-code: per-project Claude-Code-compatible MPM orchestration harness (#587).
 # First published to crates.io at version 0.1.0.
-trusty-code = { path = "crates/trusty-code", version = "0.4.0" }
+trusty-code = { path = "crates/trusty-code", version = "0.5.0" }
 # trusty-code-tui: engine-agnostic terminal-UI seam (`TuiEngine` trait + `ReplEvent`)
 # shared by trusty-code's `tcode tui` and trusty-agents' tagent REPL (DOC-50,
 # epic #3411). Published as of #4713 so `trusty-code` can publish again; 0.1.0
@@ -246,6 +246,12 @@ jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 # key so they are reproducible across processes without coordination and carry
 # a full SHA-1 digest rather than the colliding 16-byte fold they replace.
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
+# url: WHATWG URL parsing. #5439 needs it to answer "does this URL target
+# loopback" the way the HTTP client that will dial it answers — an Origin-header
+# parser splits the authority at the first `:` and reads
+# `http://127.0.0.1:7882@attacker.example` as loopback. Already in the lock via
+# reqwest, so this adds no new tree.
+url = "2"
 sha2 = "0.10"
 # NFC canonical composition for the memory content-hash contract (#5902): two
 # machines that typed the same sentence must produce one digest even when their

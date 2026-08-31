@@ -657,9 +657,31 @@ async fn tui_auto_spawns_a_daemon_that_outlives_it() {
         return;
     };
 
-    let health: serde_json::Value = reqwest::get(format!("http://{addr}/health"))
+    // #5439/#6472: an anonymous `/health` answers liveness alone, so this
+    // probe reads the credential the daemon wrote into the same isolated data
+    // directory. That the file is THERE, under the app data dir a client looks
+    // in, is itself part of what this asserts — a daemon that guarded its
+    // routes but stored the token somewhere else would lock every client out.
+    let token = std::fs::read_to_string(data_dir.path().join("trusty-code/auth_token"))
+        .expect("the daemon must write its credential where clients look")
+        .trim()
+        .to_string();
+    assert!(token.len() >= 32, "credential looks too weak: {token:?}");
+
+    let anonymous: serde_json::Value = reqwest::get(format!("http://{addr}/health"))
         .await
         .expect("the spawned daemon must still be serving /health after the TUI exited")
+        .json()
+        .await
+        .expect("/health must return JSON");
+    assert_eq!(anonymous, serde_json::json!({"status": "ok"}));
+
+    let health: serde_json::Value = reqwest::Client::new()
+        .get(format!("http://{addr}/health"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .expect("credentialed /health must answer")
         .json()
         .await
         .expect("/health must return JSON");
@@ -716,12 +738,24 @@ async fn tui_refuses_a_daemon_bound_to_a_different_project() {
         }
     };
 
+    // #5439: this test deliberately gives the two processes SEPARATE data
+    // directories so the TUI cannot find a discovery file. That also puts the
+    // daemon's credential out of the TUI's reach, so the binding check would
+    // read `<unreported>` instead of the mismatch it exists to catch. The
+    // client-only `TCODE_DAEMON_TOKEN` override is exactly the case of a
+    // client that cannot read the daemon's data directory.
+    let token = std::fs::read_to_string(daemon_data.path().join("trusty-code/auth_token"))
+        .expect("the daemon must write its credential before it binds")
+        .trim()
+        .to_string();
+
     let output = support::tcode_command()
         .arg("tui")
         .arg("--project")
         .arg(our_project.path())
         .env("TRUSTY_DATA_DIR_OVERRIDE", tui_data.path())
         .env("TCODE_DAEMON_URL", &url)
+        .env("TCODE_DAEMON_TOKEN", &token)
         .stdin(std::process::Stdio::null())
         .output()
         .expect("spawn tcode tui");

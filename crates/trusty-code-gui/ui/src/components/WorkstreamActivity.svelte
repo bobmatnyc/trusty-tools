@@ -125,6 +125,7 @@
   // pins that this component mounts inside `.body`.
   import { resolveActiveWorkstreamId, setActiveWorkstreamId } from '../lib/active-workstream.svelte';
   import { apiBase } from '../lib/api-config';
+  import { openDaemonEventStream, type DaemonEventStream } from '../lib/daemon-auth';
   import {
     pickActiveSessionInWorkstream,
     TERMINAL_SESSION_STATUSES,
@@ -422,21 +423,26 @@
     const id = activeWorkstreamId;
     if (!id || typeof EventSource === 'undefined') return;
 
-    let source: EventSource | null = null;
+    let source: DaemonEventStream | null = null;
     let cancelled = false;
 
     void (async () => {
-      let base: string;
+      // #5439: EventSource cannot send a header, so this exchanges the
+      // daemon credential for a single-use ticket first; a null result means
+      // no credential is available and the poll cadence alone carries this.
+      // The subscription re-mints on its own when the stream drops — a bare
+      // EventSource would retry the spent ticket and die on a 401.
       try {
-        base = await apiBase();
+        source = await openDaemonEventStream(`/workstreams/${id}/events`, () => {
+          if (pollController) void refresh(pollController.signal);
+        });
       } catch {
         return;
       }
-      if (cancelled) return;
-      source = new EventSource(`${base}/workstreams/${id}/events`);
-      source.onmessage = () => {
-        if (pollController) void refresh(pollController.signal);
-      };
+      if (cancelled || !source) {
+        source?.close();
+        source = null;
+      }
     })();
 
     return () => {
@@ -475,19 +481,17 @@
     streamBubbles = [];
     if (!SSE_ENABLED || !id || typeof EventSource === 'undefined') return;
 
-    let source: EventSource | null = null;
+    let source: DaemonEventStream | null = null;
     let cancelled = false;
 
     void (async () => {
-      let base: string;
+      // #5439: EventSource cannot send a header, so this exchanges the
+      // daemon credential for a single-use ticket first; a null result means
+      // no credential is available and the poll cadence alone carries this.
+      // The subscription re-mints on its own when the stream drops — a bare
+      // EventSource would retry the spent ticket and die on a 401.
       try {
-        base = await apiBase();
-      } catch {
-        return;
-      }
-      if (cancelled) return;
-      source = new EventSource(`${base}/sessions/${id}/events`);
-      source.onmessage = (e: MessageEvent) => {
+        source = await openDaemonEventStream(`/sessions/${id}/events`, (e: MessageEvent) => {
         if (cancelled) return;
         let envelope: { seq?: unknown; event?: { type?: unknown; [key: string]: unknown } };
         try {
@@ -518,7 +522,14 @@
           seq: envelope.seq,
         };
         streamBubbles = applyDelta(streamBubbles, delta);
-      };
+      });
+      } catch {
+        return;
+      }
+      if (cancelled || !source) {
+        source?.close();
+        source = null;
+      }
     })();
 
     return () => {

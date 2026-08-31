@@ -28,6 +28,16 @@
 /// pins both values in the same assertion.
 pub const DEFAULT_DAEMON_URL: &str = "http://127.0.0.1:7882";
 
+/// The app whose data directory holds the daemon's credential file (#5439).
+///
+/// Why: `trusty-code serve --http` writes its `0600` token under
+/// `resolve_data_dir("trusty-code")`, and this shell reads it from the same
+/// place. Like `DEFAULT_DAEMON_URL` above, this literal mirrors a value that
+/// lives in `trusty-code` (`serve::http::TOKEN_APP_NAME`) with no shared crate
+/// between the two to enforce it — pinned by
+/// `token_app_name_matches_tcode_token_app_name`.
+pub const TOKEN_APP_NAME: &str = "trusty-code";
+
 /// Managed Tauri state — just the daemon base URL.
 ///
 /// Why: every actual data fetch happens from the frontend via `fetch()`
@@ -135,6 +145,23 @@ mod tests {
             DEFAULT_DAEMON_URL, expected,
             "trusty-code-gui::DEFAULT_DAEMON_URL must mirror \
              trusty_code::serve::DEFAULT_HTTP_PORT exactly"
+        );
+    }
+
+    /// Cross-crate credential-location pinning contract (#5439).
+    ///
+    /// Why: the shell reads the token from `resolve_data_dir(TOKEN_APP_NAME)`
+    /// and the daemon writes it to `resolve_data_dir(TOKEN_APP_NAME)` — two
+    /// literals in two crates with nothing tying them together at compile
+    /// time. A drift would lock the GUI out of every route with a `401` and no
+    /// hint why, so it is pinned here the same way the port is above.
+    #[test]
+    fn token_app_name_matches_tcode_token_app_name() {
+        assert_eq!(
+            TOKEN_APP_NAME,
+            trusty_code::serve::http::TOKEN_APP_NAME,
+            "trusty-code-gui::TOKEN_APP_NAME must mirror \
+             trusty_code::serve::http::TOKEN_APP_NAME exactly"
         );
     }
 }

@@ -31,9 +31,23 @@
 //! the bound address to stderr, never stdout, and serves until graceful
 //! shutdown).
 //!
+//! #5439 puts every route behind a credential. `trusty_common::daemon_token`
+//! mints and stores it at `0600`; `trusty_common::server::bearer_auth` is the
+//! router-wide guard, applied here to the FULLY-MERGED router so a route added
+//! later cannot slip past it. [`PUBLIC_HEALTH_PATH`] is the single exemption
+//! and discloses only liveness to an anonymous caller (#6472);
+//! [`SSE_TICKET_PATH`] is how a browser `EventSource`, which cannot send a
+//! header, carries an existing right onto a URL.
+//!
 //! Deferred: batch JSON-RPC requests (a JSON array body) are not supported —
 //! `POST /rpc` accepts a single request object per call, matching what the
 //! ticket asked for ("single-request is fine for now").
+//!
+//! Also deferred, and larger: this whole listener is scheduled for replacement
+//! by a Unix socket fronted by trusty-console (ADR-0032, the #5439 owner
+//! ruling of 2026-08-19), which authenticates by peer credential rather than
+//! by a shared secret. This layer is the hardening that stands until then, not
+//! the end state.
 //!
 //! Test: `http::tests::*` drive [`build_axum_router`] via
 //! `tower::util::ServiceExt::oneshot` (no real socket): `POST /rpc` ping
@@ -46,7 +60,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::{
-    Json, Router as AxumRouter,
+    Extension, Json, Router as AxumRouter,
     body::Bytes,
     extract::{Path, State},
     response::sse::{Event as SseEvent, KeepAlive, Sse},
@@ -58,14 +72,37 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::info;
 use trusty_common::server::SelfOrigins;
+use trusty_common::server::bearer_auth::{Authenticated, DaemonAuth, require_bearer};
 use trusty_mcp::Response;
 
 use crate::binding::ProjectBinding;
 use crate::jsonrpc::{ConnectionContext, Router};
-use crate::serve::methods::health_payload;
+use crate::serve::methods::{health_payload, liveness_payload};
 use crate::serve::rest;
 use crate::session::SessionRegistry;
 use crate::workstreams::SharedWorkstreamStore;
+
+/// The app name whose data directory holds this daemon's credential file.
+///
+/// Why: server (`run_http`) and client (`crate::tui_client`) resolve the token
+/// through the same constant, so they cannot end up reading two files.
+pub const TOKEN_APP_NAME: &str = "trusty-code";
+
+/// The one route that answers an unauthenticated caller (#6472).
+///
+/// Why: trusty-console's gateway polls a daemon for liveness and holds no
+/// credential, and the ecosystem convention (trusty-search, trusty-memory) is
+/// an open `GET /health`. Keeping the ROUTE public while moving its
+/// disclosures behind the credential preserves that poll and still stops an
+/// anonymous caller from reading the daemon's pid, bound project, and version.
+pub const PUBLIC_HEALTH_PATH: &str = "/health";
+
+/// `POST` here (authenticated) to mint a single-use SSE ticket.
+///
+/// Why: `EventSource` cannot send an `Authorization` header, so a browser
+/// client exchanges its credential for a ticket here and puts THAT in the SSE
+/// URL — see `trusty_common::server::bearer_auth`'s module docs.
+pub const SSE_TICKET_PATH: &str = "/auth/sse-ticket";
 
 /// Shared axum state: the JSON-RPC router (for `POST /rpc`), the session
 /// registry (for the SSE route, which reads it directly rather than going
@@ -81,6 +118,9 @@ struct HttpState {
     router: Arc<Router>,
     sessions: Arc<SessionRegistry>,
     binding: Arc<ProjectBinding>,
+    // #5439: the same handle the router-wide guard holds, so `POST
+    // /auth/sse-ticket` mints into the table the guard redeems from.
+    auth: DaemonAuth,
 }
 
 /// Build the pure axum router (no listener bound) exposing `POST /rpc`,
@@ -148,15 +188,21 @@ pub fn build_axum_router(
     sessions: Arc<SessionRegistry>,
     workstreams: SharedWorkstreamStore,
     binding: Arc<ProjectBinding>,
+    // #5439: the daemon's local-client credential. Taken as a parameter (not
+    // read from disk here) so the router stays pure and unit-testable, and so
+    // there is no construction path that yields an unguarded router.
+    auth: DaemonAuth,
 ) -> AxumRouter {
     let state = HttpState {
         router: router.clone(),
         sessions,
         binding,
+        auth: auth.clone(),
     };
     let core = AxumRouter::new()
         .route("/rpc", post(rpc_handler))
-        .route("/health", get(health_handler))
+        .route(PUBLIC_HEALTH_PATH, get(health_handler))
+        .route(SSE_TICKET_PATH, post(sse_ticket_handler))
         .route("/sessions/{id}/events", get(session_events_sse))
         .with_state(state);
     let app = core
@@ -171,10 +217,18 @@ pub fn build_axum_router(
         .merge(rest::search_audit::routes(router.clone()))
         .merge(rest::workstreams::routes(router))
         .merge(crate::workstreams::sse::routes(workstreams));
+    // #5439: applied to the FULLY-MERGED router with `.layer()`, never
+    // `route_layer` — the latter covers only routes registered before it in the
+    // same chain, which is how #3268 left routes unguarded on the sibling
+    // origin guard. Every route above, and every route a later edit merges in
+    // here, is guarded without anyone remembering to add it.
+    let authed = app.layer(axum::middleware::from_fn_with_state(auth, require_bearer));
     // #6003: the daemon binds loopback only (`run_http`), so the guard needs no
     // bind-derived allowlist — `SelfOrigins::default()` trusts loopback and
-    // nothing else.
-    trusty_common::server::with_guarded_middleware_same_origin_cors(app, SelfOrigins::default())
+    // nothing else. This stack sits OUTSIDE the credential check, so a CORS
+    // preflight is answered without a credential and a foreign-origin write is
+    // still 403ed rather than 401ed.
+    trusty_common::server::with_guarded_middleware_same_origin_cors(authed, SelfOrigins::default())
 }
 
 /// `POST /rpc` — JSON-RPC 2.0 dispatch endpoint.
@@ -199,23 +253,102 @@ async fn rpc_handler(State(state): State<HttpState>, body: Bytes) -> Json<Respon
     Json(state.router.dispatch_json(&body, &ctx).await)
 }
 
-/// `GET /health` — liveness probe matching the `health` JSON-RPC method.
+/// `GET /health` — liveness for anyone, identity for a credentialed caller.
 ///
-/// Why: the ecosystem convention (trusty-search, trusty-memory) is an
-/// unauthenticated `GET /health`; trusty-console's gateway polls it to
-/// confirm a daemon is alive. Reusing [`health_payload`] — the exact
-/// function the `health` JSON-RPC method calls — keeps the two transports
-/// from drifting into two different health shapes.
+/// Why: two callers with different rights meet on this one route. The
+/// ecosystem convention (trusty-search, trusty-memory) is an unauthenticated
+/// `GET /health`, and trusty-console's gateway polls it holding no credential,
+/// so the route must keep answering an anonymous caller. But #6472: the
+/// payload it used to answer with carried the daemon's pid, its bound project
+/// ROOT PATH, and its version — process and filesystem facts an anonymous
+/// local caller has no claim on, and a fingerprint for anything probing
+/// loopback ports. Splitting by credential rather than by route keeps both the
+/// gateway poll and `tcode tui`'s auto-attach working: the TUI reads the same
+/// credential file the daemon writes, so it still gets the `binding` it needs
+/// (#4512) to refuse a daemon bound to a different project.
 ///
-/// #4512: this is also the route `tcode tui`'s auto-attach reads the
-/// daemon's `binding` from before deciding whether attaching would put it on
-/// the wrong project, which is why the handler now needs `State`.
-/// What: always returns HTTP 200 with
-/// `{"server","version","status","pid","binding"}`.
-/// Test: `http_health_matches_jsonrpc_health_payload`,
+/// What: an anonymous caller gets [`liveness_payload`] — `{"status":"ok"}`,
+/// nothing else. A caller the guard marked [`Authenticated`] gets
+/// [`health_payload`], the exact payload the `health` JSON-RPC method returns,
+/// unchanged. Always HTTP 200 either way; a health route must not turn a
+/// missing credential into a failure, or every liveness poller would read a
+/// live daemon as down.
+/// Test: `health_is_public_but_discloses_only_liveness`,
+/// `health_with_a_credential_still_reports_pid_and_binding`,
+/// `http_health_matches_jsonrpc_health_payload`,
 /// `http_health_reports_the_daemons_project_binding`.
-async fn health_handler(State(state): State<HttpState>) -> Json<serde_json::Value> {
-    Json(health_payload(&state.binding))
+async fn health_handler(
+    State(state): State<HttpState>,
+    authenticated: Option<Extension<Authenticated>>,
+) -> Json<serde_json::Value> {
+    if authenticated.is_some() {
+        return Json(health_payload(&state.binding));
+    }
+    Json(liveness_payload())
+}
+
+/// `POST /auth/sse-ticket` — exchange a bearer credential for a single-use SSE
+/// ticket.
+///
+/// Why: the two SSE routes (`GET /sessions/{id}/events`,
+/// `GET /workstreams/{id}/events`) are opened by browser `EventSource`, which
+/// cannot attach an `Authorization` header. Putting the durable token in the
+/// query string instead would write it into every access log and tracing span;
+/// a ticket that expires in seconds and dies on first use does not carry that
+/// cost. Reaching this route already requires the header, so a ticket is never
+/// a way IN — only a way to carry an existing right onto a URL.
+/// What: takes the path the caller means to open (`?path=`), refuses anything
+/// that is not one of this daemon's two SSE routes, and mints a ticket bound to
+/// that exact path. The route is NOT public, so an anonymous `POST` is `401`ed
+/// by the guard before this function runs.
+///
+/// The binding is what keeps a ticket cheap to leak. Unbound, a ticket read
+/// from a trace log within its TTL bought one arbitrary authenticated request —
+/// `POST /rpc`, the whole method surface, included. Bound, it buys the one
+/// stream its holder already had the credential to open. The route allowlist
+/// lives here rather than in `trusty_common` because it is this daemon's route
+/// table, not a property of the guard.
+/// Test: `http_auth_tests::sse_ticket_requires_a_credential`,
+/// `http_auth_tests::an_sse_ticket_opens_one_stream_then_is_spent`,
+/// `http_auth_tests::a_ticket_cannot_be_minted_for_a_non_sse_path`.
+async fn sse_ticket_handler(
+    State(state): State<HttpState>,
+    axum::extract::Query(params): axum::extract::Query<SseTicketRequest>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    if !path_is_ticketable(&params.path) {
+        // No echo of the requested path — this response reaches a browser.
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "not a ticketable stream"})),
+        ));
+    }
+    Ok(Json(
+        serde_json::json!({ "ticket": state.auth.issue_ticket(&params.path) }),
+    ))
+}
+
+/// The `?path=` a ticket request names.
+#[derive(serde::Deserialize)]
+struct SseTicketRequest {
+    path: String,
+}
+
+/// Is `path` one of the two SSE streams a ticket may open?
+///
+/// Why: a ticket is only as narrow as the set of paths it can be minted for. A
+/// handler that minted for whatever it was handed would give back the arbitrary
+/// authenticated request the binding exists to remove.
+/// What: exact shape match on `/sessions/{id}/events` and
+/// `/workstreams/{id}/events` — three segments, the first and last fixed, the
+/// id non-empty and free of `/`. Anything else, `/rpc` included, is refused.
+/// Test: `http_auth_tests::a_ticket_cannot_be_minted_for_a_non_sse_path`.
+fn path_is_ticketable(path: &str) -> bool {
+    let segments: Vec<&str> = path.split('/').collect();
+    // A leading `/` yields an empty first segment: ["", group, id, "events"].
+    matches!(segments.as_slice(),
+        ["", group, id, "events"]
+            if (*group == "sessions" || *group == "workstreams") && !id.is_empty()
+    )
 }
 
 /// `GET /sessions/{id}/events` — Server-Sent Events stream of a session's
@@ -312,6 +445,17 @@ pub async fn run_http(
     // WHICH project this daemon serves before it starts driving it.
     binding: Arc<ProjectBinding>,
 ) -> Result<()> {
+    // #5439: establish the credential BEFORE binding. A daemon that cannot
+    // write its token file must refuse to serve rather than serve unguarded,
+    // so this `?` is deliberately fatal — the one place in this function that
+    // is not best-effort.
+    let auth = DaemonAuth::new(
+        trusty_common::daemon_token::ensure_token(TOKEN_APP_NAME)
+            .context("tcode serve --http: establish the daemon credential")?,
+        [PUBLIC_HEALTH_PATH],
+    )
+    .context("tcode serve --http: the stored daemon credential is too weak to guard the API")?;
+
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = TcpListener::bind(addr)
         .await
@@ -337,7 +481,7 @@ pub async fn run_http(
         );
     }
 
-    let app = build_axum_router(Arc::new(router), sessions, workstreams, binding);
+    let app = build_axum_router(Arc::new(router), sessions, workstreams, binding, auth);
     axum::serve(listener, app)
         .with_graceful_shutdown(trusty_common::shutdown_signal())
         .await
@@ -357,3 +501,7 @@ mod tests;
 #[cfg(test)]
 #[path = "http_origin_guard_tests.rs"]
 mod origin_guard_tests;
+
+#[cfg(test)]
+#[path = "http_auth_tests.rs"]
+mod auth_tests;

@@ -31,7 +31,13 @@ use state::GuiState;
 pub fn run() {
     tauri::Builder::default()
         .manage(GuiState::new())
-        .invoke_handler(tauri::generate_handler![commands::get_daemon_url])
+        // #5439: `get_daemon_token` is the second half of the same job — only
+        // the native process can read the daemon's `0600` credential, and
+        // every route but `/health` now requires it.
+        .invoke_handler(tauri::generate_handler![
+            commands::get_daemon_url,
+            commands::get_daemon_token
+        ])
         .run(tauri::generate_context!())
         .expect("error while running trusty-code-gui");
 }

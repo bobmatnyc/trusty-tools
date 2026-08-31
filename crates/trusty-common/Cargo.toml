@@ -45,7 +45,9 @@ name = "trusty-common"
 # `PalaceResolveError::NoIdentity` moved from discriminant 3 to 4
 # (`palace_resolve.rs:225`). Cargo's 0.x rule puts a break in the MINOR
 # position, so 0.46.0 is where they ship.
-version = "0.46.2"
+# 0.46.3 (#5439): patch — new public `daemon_token` module and
+# `server::bearer_auth` are additive; cargo-semver-checks reports no break.
+version = "0.46.3"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -108,6 +110,10 @@ lanes = [
         "keyring-store",
         "bedrock",
         "axum-server",
+        # #5439: shares this lane with `axum-server` because `server::bearer_auth`
+        # compiles only when both are on — a lane that ran `daemon-token` alone
+        # would cover the token store and silently skip the guard that uses it.
+        "daemon-token",
     ] },
     { name = "symgraph", features = [
         "symgraph-server",
@@ -213,6 +219,10 @@ axum = { workspace = true, optional = true }
 tower-http = { workspace = true, optional = true }
 # Optional: enabled by the `rpc` feature for UUID-v4 JSON-RPC request ids.
 uuid = { workspace = true, optional = true }
+# Optional: enabled by `daemon-token` for `url_targets_loopback` (#5439). The
+# gate must parse a URL the way the client dialling it does; a hand-rolled
+# authority split is the bug it exists to prevent.
+url = { workspace = true, optional = true }
 # Optional: enabled by the `embedder` feature (formerly the `trusty-embedder`
 # crate). fastembed-rs provides the ONNX-runtime text-embedding pipeline;
 # `hf-hub-native-tls` is required so it can fetch the model on first run.
@@ -389,6 +399,10 @@ postcard = { workspace = true }
 # regression test (#6382 — proves the dead `/communities` route is no longer
 # dialled).
 wiremock = { workspace = true }
+# tower: `ServiceExt::oneshot` drives `server::bearer_auth`'s router through the
+# middleware with no socket bound (#5439), the same way the consuming daemons'
+# router tests do.
+tower = { workspace = true }
 
 [features]
 default = []
@@ -421,6 +435,17 @@ catchup = ["dep:rusqlite", "memory-rpc", "palace-resolve"]
 # Enables the `server` module: standard axum middleware stack (CORS, trace,
 # gzip) and a fast-fail reqwest client for daemon-to-daemon calls.
 axum-server = ["dep:axum", "dep:tower-http"]
+# Enables the `daemon_token` module (#5439): the `0600` local-client credential
+# a loopback daemon and its clients share, the WHATWG loopback gate every client
+# resolves through, and the constant-time comparison every verifier uses.
+# Turning it on WITH `axum-server` additionally compiles `server::bearer_auth`,
+# the router-wide enforcement layer. Kept separate from `axum-server` because
+# the two halves are genuinely separable — a client that only reads the token
+# needs no router — even though both of today's consumers happen to enable both.
+# `uuid` supplies the CSPRNG behind `mint_token`, `url` the WHATWG parsing the
+# loopback gate must not hand-roll, and `thiserror` the weak-credential error;
+# all three are already optional dependencies here.
+daemon-token = ["dep:uuid", "dep:url", "dep:thiserror"]
 # Enables the `memory_rpc` module: the one JSON-RPC client for the
 # trusty-memory daemon's Unix socket. Implies `uds` (#6286) — the daemon retired
 # its HTTP listener, so the framing and the envelope now come from that module
