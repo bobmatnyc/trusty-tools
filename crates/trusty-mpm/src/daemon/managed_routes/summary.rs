@@ -390,7 +390,8 @@ fn probe_staleness_in_list(state: &ManagedSessionState) -> bool {
 /// [`crate::core::session_assets::session_plan_under`] gives. This is the batch
 /// half of that seam, so a test of the fan-out below is hermetic without
 /// redirecting the process-global `$HOME`. Production passes
-/// `FrameworkPaths::home_base()` from [`stale_assets_for_many`].
+/// `FrameworkPaths::home_base()` from [`checked_summaries`] /
+/// [`record_to_summary_checked`].
 pub(super) fn staleness_inputs_under(
     records: Vec<SessionRecord>,
     base: &std::path::Path,
@@ -469,6 +470,9 @@ type StalenessInput = (
 /// summary at its `false` default rather than failing the whole listing.
 /// Test: `checked_summaries_stale_assets_independent_per_session_sharing_one_catalog`,
 /// `checked_summaries_flags_stale_assets_only_for_relevant_states`,
+/// `stale_assets_for_many_reads_shared_agent_dir_once_for_the_whole_fleet`,
+/// `stale_assets_for_many_sees_an_agent_change_on_the_very_next_call`,
+/// `stale_assets_for_many_keeps_per_session_verdicts_correct_under_concurrency`,
 /// `stale_assets_for_many_computes_catalog_exactly_once_per_source_pair`
 /// (issue #4326 review HIGH: the prior pin only exercised [`staleness_inputs_under`]
 /// directly, never this actual hot path, and stayed green when
@@ -477,29 +481,17 @@ type StalenessInput = (
 /// can call this function directly instead of the higher-level
 /// `checked_summaries`, which would also exercise the unrelated `unresumable`
 /// fan-out.
-pub(super) async fn stale_assets_for_many(
-    records: Vec<SessionRecord>,
-) -> HashMap<ManagedSessionId, bool> {
-    stale_assets_for_many_under(records, crate::core::paths::FrameworkPaths::home_base()).await
-}
-
-/// [`stale_assets_for_many`] with the framework install's base directory
-/// supplied by the caller instead of read from `$HOME` (#5040).
 ///
-/// Why: the three `stale_assets_for_many_*` tests each deployed a fixture into
-/// `FrameworkPaths::default()` under a `fake_home()` guard, so their correctness
-/// depended on no other test in the binary rewriting `$HOME` mid-run.
-/// `#[serial_test::serial]` does not provide that — it orders `#[serial]` tests
-/// against each other only, and under `cargo nextest`'s per-test processes it
-/// orders nothing. Passing the base in removes the dependency instead of
-/// guarding it: the tests hand over their own temp dir and mutate no
-/// environment, so no concurrent test can reach them.
-/// What: identical to [`stale_assets_for_many`], with `base` threaded to
-/// [`staleness_inputs_under`]. Owned rather than borrowed because the resolve
-/// step runs inside `spawn_blocking`.
-/// Test: `stale_assets_for_many_reads_shared_agent_dir_once_for_the_whole_fleet`,
-/// `stale_assets_for_many_sees_an_agent_change_on_the_very_next_call`,
-/// `stale_assets_for_many_keeps_per_session_verdicts_correct_under_concurrency`.
+/// #5040: `base` is the framework install's base directory, supplied by the
+/// caller instead of read from `$HOME`. Every test of this path used to deploy
+/// its fixture into `FrameworkPaths::default()` under a `fake_home()` guard, so
+/// its correctness depended on no other test in the binary rewriting `$HOME`
+/// mid-run. `#[serial_test::serial]` does not provide that — it orders
+/// `#[serial]` tests against each other only, and under `cargo nextest`'s
+/// per-test processes it orders nothing. Passing the base in removes the
+/// dependency instead of guarding it: a test hands over its own temp dir and
+/// mutates no environment, so no concurrent test can reach it. Owned rather
+/// than borrowed because the resolve step runs inside `spawn_blocking`.
 pub(super) async fn stale_assets_for_many_under(
     records: Vec<SessionRecord>,
     base: PathBuf,
@@ -540,12 +532,12 @@ pub(super) async fn stale_assets_for_many_under(
     result
 }
 
-/// Run [`stale_assets_for_many`] for a single record — the
-/// `record_to_summary_checked` (single-session GET) call site, which has no
+/// Run [`stale_assets_for_many_under`] for a single record — the
+/// [`record_to_summary_checked`] (single-session GET) call site, which has no
 /// batching benefit (N=1) but reuses the same blocking-pool handoff.
-async fn probe_stale_assets(record: SessionRecord) -> bool {
+async fn probe_stale_assets(record: SessionRecord, base: PathBuf) -> bool {
     let id = record.id;
-    stale_assets_for_many(vec![record])
+    stale_assets_for_many_under(vec![record], base)
         .await
         .get(&id)
         .copied()
@@ -573,10 +565,31 @@ async fn probe_stale_assets(record: SessionRecord) -> bool {
 /// `record_to_summary_checked_still_flags_stale_stopped_session` in
 /// `super::tests`.
 pub(super) async fn record_to_summary_checked(r: &SessionRecord) -> SessionSummary {
+    // #5040: production resolves the framework base exactly as before.
+    record_to_summary_checked_under(r, crate::core::paths::FrameworkPaths::home_base()).await
+}
+
+/// [`record_to_summary_checked`] with the framework install's base directory
+/// supplied by the caller instead of read from `$HOME` (#5040).
+///
+/// Why: `record_to_summary_checked_still_flags_stale_stopped_session` deployed
+/// its drifted fixture into `FrameworkPaths::default()` under a `fake_home()`
+/// guard, which made the test a WRITER of the process-global `$HOME`. Three
+/// unrelated tests in this binary read live `$HOME` concurrently and caught the
+/// tempdir value, failing on roughly one local `cargo test -p trusty-mpm` run in
+/// three. The same seam [`stale_assets_for_many_under`] opened for the batch path
+/// removes the write instead of ordering it.
+/// What: identical to [`record_to_summary_checked`], with `base` threaded to
+/// [`probe_stale_assets`].
+/// Test: `record_to_summary_checked_still_flags_stale_stopped_session`.
+pub(super) async fn record_to_summary_checked_under(
+    r: &SessionRecord,
+    base: PathBuf,
+) -> SessionSummary {
     let mut summary = record_to_summary(r);
     summary.unresumable = crate::session_manager::resume_workdir::is_unresumable(r).await;
     if staleness_meaningful_for(&r.state) {
-        summary.stale_assets = probe_stale_assets(r.clone()).await;
+        summary.stale_assets = probe_stale_assets(r.clone(), base).await;
     }
     summary
 }
@@ -633,6 +646,40 @@ pub(super) async fn checked_summaries_with(
     records: &[SessionRecord],
     probe_assets: bool,
 ) -> Vec<SessionSummary> {
+    // #5040: production resolves the framework base exactly as before.
+    checked_summaries_with_under(
+        records,
+        probe_assets,
+        crate::core::paths::FrameworkPaths::home_base(),
+    )
+    .await
+}
+
+/// [`checked_summaries_with`] with the framework install's base directory
+/// supplied by the caller instead of read from `$HOME` (#5040).
+///
+/// Why: the five `checked_summaries_*` tests each deployed a drifted fixture
+/// into `FrameworkPaths::default()` under a `fake_home()` guard, making every
+/// one of them a WRITER of the process-global `$HOME`. A guard that restores the
+/// variable on drop is the race, not a fix for it: `session_plan_under_matches_
+/// session_plan_at_home`, `managed_prune_worktrees_parity_defaults_to_a_preview`
+/// and `managed_reconcile_worktrees_parity` all read live `$HOME` concurrently,
+/// and an in-process `cargo test -p trusty-mpm` run caught the tempdir value in
+/// roughly one run of three. Threading the base through is what lets those
+/// writes be deleted outright.
+/// What: identical to [`checked_summaries_with`], with `base` threaded to
+/// [`stale_assets_for_many_under`]. The `unresumable` pass reads no framework
+/// path at all, so it is unaffected.
+/// Test: `checked_summaries_preserves_input_order_and_flags_only_dead_sessions`,
+/// `checked_summaries_flags_stale_assets_only_for_relevant_states`,
+/// `checked_summaries_does_not_probe_stopped_sessions`,
+/// `checked_summaries_slim_skips_stale_assets_probe`,
+/// `checked_summaries_stale_assets_independent_per_session_sharing_one_catalog`.
+pub(super) async fn checked_summaries_with_under(
+    records: &[SessionRecord],
+    probe_assets: bool,
+    base: PathBuf,
+) -> Vec<SessionSummary> {
     let mut summaries: Vec<SessionSummary> = records.iter().map(record_to_summary).collect();
 
     let mut probes = tokio::task::JoinSet::new();
@@ -675,7 +722,7 @@ pub(super) async fn checked_summaries_with(
         .cloned()
         .collect();
     if !probed.is_empty() {
-        let stale_map = stale_assets_for_many(probed).await;
+        let stale_map = stale_assets_for_many_under(probed, base).await;
         for (idx, r) in records.iter().enumerate() {
             if let Some(&stale) = stale_map.get(&r.id) {
                 summaries[idx].stale_assets = stale;

@@ -6,8 +6,8 @@
 //! re-run against a candidate fix to prove it helped. This module builds a
 //! synthetic fleet whose SHAPE matches the real one (42 catalog agents at
 //! ~23.5 KiB deployed, 52 catalog skills at ~7.4 KiB, N workspaces) and times
-//! [`stale_assets_for_many`] directly, so before/after runs on the same machine
-//! measure exactly the same work.
+//! [`stale_assets_for_many_under`] directly, so before/after runs on the same
+//! machine measure exactly the same work.
 //! What: [`bench_stale_assets_for_many`], `#[ignore]`d so it never runs in the
 //! ordinary `cargo test` gate (it takes seconds and its output is a
 //! measurement, not an assertion). Run it with
@@ -27,8 +27,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::summary::stale_assets_for_many;
-use crate::core::session_assets::{session_asset_staleness_with_catalog, session_plan};
+use super::summary::stale_assets_for_many_under;
+use crate::core::session_assets::{session_asset_staleness_with_catalog, session_plan_under};
 use crate::core::update_check::CatalogHashes;
 use crate::session_manager::{ManagedSessionId, ManagedSessionState, SessionRecord};
 
@@ -70,8 +70,11 @@ fn write_sized(path: &Path, head: &str, bytes: usize) {
 /// bodies, deploys agents ONCE into the shared deploy dir, then creates
 /// `sessions` workspaces each with its own deployed skill tree, and returns one
 /// `Active` record per workspace.
-fn build_fleet(home: &Path, sessions: usize) -> Vec<SessionRecord> {
-    let fw = crate::core::paths::FrameworkPaths::default();
+///
+/// #5040: `base` is the caller's temp dir, used as both the framework base and
+/// the parent of each workspace — the two roles a redirected `$HOME` played.
+fn build_fleet(base: &Path, sessions: usize) -> Vec<SessionRecord> {
+    let fw = crate::core::paths::FrameworkPaths::under(base);
     let agent_source = fw.agent_source_dir();
     let skill_source = fw.skill_source_dir();
     std::fs::create_dir_all(&agent_source).unwrap();
@@ -102,9 +105,9 @@ fn build_fleet(home: &Path, sessions: usize) -> Vec<SessionRecord> {
 
     (0..sessions)
         .map(|i| {
-            let ws = home.join(format!("bench-ws-{i:03}"));
+            let ws = base.join(format!("bench-ws-{i:03}"));
             std::fs::create_dir_all(&ws).unwrap();
-            let ws_fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&ws);
+            let ws_fw = crate::core::paths::FrameworkPaths::for_managed_workspace_under(base, &ws);
             // Skills: per-workspace destination.
             crate::core::skill_tiers::deploy_all_skill_tiers(
                 &skill_source,
@@ -139,12 +142,14 @@ fn build_fleet(home: &Path, sessions: usize) -> Vec<SessionRecord> {
 /// exactly what #4322 removes.
 async fn stale_assets_per_session_agent_read(
     records: Vec<SessionRecord>,
+    base: PathBuf,
 ) -> HashMap<ManagedSessionId, bool> {
     let inputs = tokio::task::spawn_blocking(move || {
         let mut cache: HashMap<(PathBuf, PathBuf), Arc<CatalogHashes>> = HashMap::new();
         let mut out = Vec::with_capacity(records.len());
         for record in records {
-            let (fw, plan) = session_plan(&record);
+            // #5040: same explicit-base resolution the measured path uses.
+            let (fw, plan) = session_plan_under(&record, &base);
             let key = (plan.agent_source.clone(), plan.skill_source.clone());
             let catalog = cache
                 .entry(key)
@@ -207,16 +212,17 @@ fn median(mut xs: Vec<Duration>) -> Duration {
 #[serial_test::serial]
 #[ignore = "benchmark: run explicitly with --ignored --nocapture"]
 async fn bench_stale_assets_for_many() {
-    let (home, _guard) = super::tests::fake_home();
-    let records = build_fleet(home.path(), SESSIONS);
-    // Every deployed read this fixture performs lands under the fake `$HOME`:
-    // agents under `<home>/.trusty-tools/...`, skills under `<home>/bench-ws-*`.
-    let scope = home.path().to_path_buf();
+    // #5040: an explicit temp base, not a redirected `$HOME`.
+    let base = super::tests::fake_base();
+    let records = build_fleet(base.path(), SESSIONS);
+    // Every deployed read this fixture performs lands under that base: agents
+    // under `<base>/.trusty-tools/...`, skills under `<base>/bench-ws-*`.
+    let scope = base.path().to_path_buf();
 
     // Untimed warm-up so the measurement reflects steady state rather than
     // first-touch page-cache population of the fixture we just wrote.
-    let _ = stale_assets_for_many(records.clone()).await;
-    let _ = stale_assets_per_session_agent_read(records.clone()).await;
+    let _ = stale_assets_for_many_under(records.clone(), scope.clone()).await;
+    let _ = stale_assets_per_session_agent_read(records.clone(), scope.clone()).await;
 
     let mut old_timings = Vec::with_capacity(REPS);
     let mut new_timings = Vec::with_capacity(REPS);
@@ -226,7 +232,7 @@ async fn bench_stale_assets_for_many() {
         let run_old = || async {
             crate::core::update_check::reset_deployed_read_log();
             let t = Instant::now();
-            let out = stale_assets_per_session_agent_read(records.clone()).await;
+            let out = stale_assets_per_session_agent_read(records.clone(), scope.clone()).await;
             let elapsed = t.elapsed();
             let reads = crate::core::update_check::deployed_reads_under(&scope);
             (out, elapsed, reads)
@@ -234,7 +240,7 @@ async fn bench_stale_assets_for_many() {
         let run_new = || async {
             crate::core::update_check::reset_deployed_read_log();
             let t = Instant::now();
-            let out = stale_assets_for_many(records.clone()).await;
+            let out = stale_assets_for_many_under(records.clone(), scope.clone()).await;
             let elapsed = t.elapsed();
             let reads = crate::core::update_check::deployed_reads_under(&scope);
             (out, elapsed, reads)

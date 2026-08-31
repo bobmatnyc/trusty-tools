@@ -10,9 +10,13 @@ use std::path::PathBuf;
 
 use chrono::Utc;
 
-use super::summary::checked_summaries_with;
-use super::summary::{reconcile_against_tmux, reconcile_live_state, stale_assets_for_many_under};
-use super::{checked_summaries, record_to_json, record_to_summary};
+// #5040: every staleness-path entry point is imported in its explicit-base
+// `_under` form, so no test here writes the process-global `$HOME`.
+use super::summary::{
+    checked_summaries_with_under, reconcile_against_tmux, reconcile_live_state,
+    record_to_summary_checked_under, stale_assets_for_many_under,
+};
+use super::{record_to_json, record_to_summary};
 use crate::session_manager::{
     InjectionStatus, ManagedError, ManagedSessionId, ManagedSessionState, ManagedTmuxDriver,
     SessionRecord,
@@ -626,60 +630,30 @@ fn injection_status_wire_stringifies_other_variants() {
 // definition in `resume_error.rs` (#2577 review) — see
 // `resume_error::tests::unresumable_response_tags_reason_header_per_failure_class`.
 
-/// RAII guard restoring `$HOME` on drop (including panic) — mirrors the
-/// identical pattern in `core::session_assets::tests::HomeGuard` /
-/// `core::standalone::load::tests::HomeGuard`.
+/// A throwaway framework base for every test that reaches the staleness path
+/// (#5040).
 ///
-/// Why: `checked_summaries` now also runs the #2444 asset-staleness probe
-/// (`crate::core::session_assets::session_assets_stale`), which resolves its
-/// bundled-source half via `FrameworkPaths::for_managed_workspace` — always
-/// anchored at `FrameworkPaths::default().root` (the real `$HOME/.trusty-mpm`
-/// in production). Any test exercising `checked_summaries` must therefore
-/// point `$HOME` at a throwaway tempdir so the probe reads a fake framework
-/// tree, never the developer's real one.
-pub(super) struct HomeGuard(Option<String>);
-impl Drop for HomeGuard {
-    fn drop(&mut self) {
-        // SAFETY: paired with `#[serial_test::serial]` — no other thread
-        // reads/writes the environment concurrently.
-        match self.0 {
-            Some(ref p) => unsafe { std::env::set_var("HOME", p) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
-    }
-}
-
-/// Point `$HOME` at a fresh tempdir for the duration of the guard.
-///
-/// `pub(super)` so the sibling `staleness_bench_tests` module isolates its
-/// fixture exactly as the unit tests do — a benchmark that read the
-/// developer's real `~/.trusty-mpm` would measure an uncontrolled tree.
-/// A throwaway framework base for the tests that reach the staleness path
-/// through an `_under` entry point (#5040).
-///
-/// Why: [`fake_home`] below points the PROCESS-GLOBAL `$HOME` at a temp dir,
-/// which is what made the `stale_assets_for_many_*` family order-dependent —
-/// `#[serial_test::serial]` orders `#[serial]` tests against each other, not
-/// against the rest of the binary, and under `cargo nextest`'s per-test
-/// processes it orders nothing at all. `staleness_inputs_under` /
-/// `stale_assets_for_many_under` take the base as an argument, so a test using
-/// this fixture reads no environment variable, mutates none, and needs no
-/// serial guard.
+/// Why: this module used to point the PROCESS-GLOBAL `$HOME` at a temp dir and
+/// restore it from a `Drop` guard. The guard IS the race — between the write and
+/// the restore, any concurrently-running test in the same binary that reads live
+/// `$HOME` sees the temp dir. `#[serial_test::serial]` does not close that:
+/// it orders `#[serial]` tests against each other, not against the rest of the
+/// binary, and under `cargo nextest`'s per-test processes it orders nothing at
+/// all. Three readers caught the tempdir value on roughly one local
+/// `cargo test -p trusty-mpm` run in three —
+/// `core::session_assets::tests::session_plan_under_matches_session_plan_at_home`,
+/// `managed_prune_worktrees_parity_defaults_to_a_preview`, and
+/// `managed_reconcile_worktrees_parity`. Every staleness entry point now takes
+/// the base as an argument, so a test using this fixture reads no environment
+/// variable, writes none, and needs no serial guard.
 /// What: a bare `TempDir` used as BOTH the framework base (`<dir>/.trusty-mpm`)
 /// and the parent of each fixture workspace — the same two roles the redirected
-/// `$HOME` played.
-/// Test: used by `staleness_inputs_computes_one_catalog_per_source_pair_shared_by_arc`
-/// and the three `stale_assets_for_many_*` cases.
-fn fake_base() -> tempfile::TempDir {
+/// `$HOME` played. `pub(super)` so the sibling `staleness_bench_tests` module
+/// isolates its fixture the same way.
+/// Test: used by every `checked_summaries_*`, `stale_assets_for_many_*`,
+/// `staleness_inputs_*`, and `record_to_summary_checked_*` case below.
+pub(super) fn fake_base() -> tempfile::TempDir {
     tempfile::TempDir::new().unwrap()
-}
-
-pub(super) fn fake_home() -> (tempfile::TempDir, HomeGuard) {
-    let home = tempfile::TempDir::new().unwrap();
-    let prior = std::env::var("HOME").ok();
-    // SAFETY: serialized via `#[serial_test::serial]` on every caller.
-    unsafe { std::env::set_var("HOME", home.path()) };
-    (home, HomeGuard(prior))
 }
 
 /// #2595 review (PR #2652, MEDIUM finding 4): [`checked_summaries`] fans its
@@ -688,10 +662,12 @@ pub(super) fn fake_home() -> (tempfile::TempDir, HomeGuard) {
 /// pins that the returned `Vec<SessionSummary>` is nonetheless rebuilt in the
 /// SAME order as the input `records` slice, and that only the genuinely-dead
 /// record among a live/dead/healthy-stopped trio gets flagged.
+///
+/// #5040: base injected via [`fake_base`], so no `$HOME` write and no
+/// `#[serial]`.
 #[tokio::test]
-#[serial_test::serial]
 async fn checked_summaries_preserves_input_order_and_flags_only_dead_sessions() {
-    let _home = fake_home();
+    let base = fake_base();
     // r0: Active — the state gate alone skips the filesystem probe.
     let mut r0 = make_record(None);
     r0.state = ManagedSessionState::Active;
@@ -712,7 +688,7 @@ async fn checked_summaries_preserves_input_order_and_flags_only_dead_sessions() 
     r2.last_cwd = None;
 
     let records = vec![r0.clone(), r1.clone(), r2.clone()];
-    let summaries = checked_summaries(&records).await;
+    let summaries = checked_summaries_with_under(&records, true, base.path().to_path_buf()).await;
 
     assert_eq!(summaries.len(), 3, "one summary per input record");
     // Order must match the input slice exactly, regardless of which probe
@@ -750,22 +726,25 @@ async fn checked_summaries_preserves_input_order_and_flags_only_dead_sessions() 
 /// Issue #2444: [`checked_summaries`]'s asset-staleness probe must fire only
 /// for the states where it is meaningful (`Active`/`Stopped`/`Errored`) and
 /// must correctly flag a session whose deployed agent has drifted from the
-/// (fake-home) bundled source, while leaving a `Provisioning` session (no
+/// (temp-base) bundled source, while leaving a `Provisioning` session (no
 /// deploy has happened yet — every artifact would spuriously read "new") at
 /// its `false` default regardless of workspace content.
+///
+/// #5040: base injected via [`fake_base`], so no `$HOME` write and no
+/// `#[serial]`.
 #[tokio::test]
-#[serial_test::serial]
 async fn checked_summaries_flags_stale_assets_only_for_relevant_states() {
-    let (home, _guard) = fake_home();
-    let fw = crate::core::paths::FrameworkPaths::default();
+    let base = fake_base();
+    let fw = crate::core::paths::FrameworkPaths::under(base.path());
     let bundled = fw.agent_source_dir();
     std::fs::create_dir_all(&bundled).unwrap();
     std::fs::write(bundled.join("rust-engineer.md"), "v1").unwrap();
 
     // Deploy into an Active session's workspace, then drift the catalog.
-    let workspace = home.path().join("workspace");
+    let workspace = base.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
-    let session_fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&workspace);
+    let session_fw =
+        crate::core::paths::FrameworkPaths::for_managed_workspace_under(base.path(), &workspace);
     crate::core::agent_deployer::deploy_agents_filtered(
         &bundled,
         &session_fw.agent_deploy_dir(),
@@ -779,14 +758,14 @@ async fn checked_summaries_flags_stale_assets_only_for_relevant_states() {
     active.workspace_path = Some(workspace);
 
     // Provisioning: no deploy has happened in this workspace at all.
-    let provisioning_ws = home.path().join("never-deployed");
+    let provisioning_ws = base.path().join("never-deployed");
     std::fs::create_dir_all(&provisioning_ws).unwrap();
     let mut provisioning = make_record(None);
     provisioning.state = ManagedSessionState::Provisioning;
     provisioning.workspace_path = Some(provisioning_ws);
 
     let records = vec![active, provisioning];
-    let summaries = checked_summaries(&records).await;
+    let summaries = checked_summaries_with_under(&records, true, base.path().to_path_buf()).await;
 
     assert!(
         summaries[0].stale_assets,
@@ -804,21 +783,25 @@ async fn checked_summaries_flags_stale_assets_only_for_relevant_states() {
     );
 }
 
-/// Deploy `stem`.md into `workspace`'s `.claude/agents` from the (fake-home)
-/// bundled source, then drift the catalog underneath it — leaving that
-/// workspace GENUINELY stale relative to the catalog.
+/// Deploy `rust-engineer.md` into `workspace`'s `.claude/agents` from the
+/// bundled source under `base`, then drift the catalog underneath it — leaving
+/// that workspace GENUINELY stale relative to the catalog.
 ///
 /// Why: three staleness tests below need the identical "deployed at v1,
 /// catalog moved to v2" setup; sharing it keeps them asserting about the
 /// PROBE rather than re-deriving the fixture, and guarantees the stopped-vs-
 /// on-demand pair below compare the exact same on-disk condition.
-fn deploy_then_drift_catalog(workspace: &std::path::Path) {
-    let fw = crate::core::paths::FrameworkPaths::default();
+///
+/// #5040: `base` is the caller's [`fake_base`] temp dir, so the fixture writes
+/// into the same tree the probe is told to read — no `$HOME` redirect.
+fn deploy_then_drift_catalog(base: &std::path::Path, workspace: &std::path::Path) {
+    let fw = crate::core::paths::FrameworkPaths::under(base);
     let bundled = fw.agent_source_dir();
     std::fs::create_dir_all(&bundled).unwrap();
     std::fs::write(bundled.join("rust-engineer.md"), "v1").unwrap();
     std::fs::create_dir_all(workspace).unwrap();
-    let session_fw = crate::core::paths::FrameworkPaths::for_managed_workspace(workspace);
+    let session_fw =
+        crate::core::paths::FrameworkPaths::for_managed_workspace_under(base, workspace);
     crate::core::agent_deployer::deploy_agents_filtered(
         &bundled,
         &session_fw.agent_deploy_dir(),
@@ -843,18 +826,25 @@ fn deploy_then_drift_catalog(workspace: &std::path::Path) {
 /// The companion `record_to_summary_checked_still_flags_stale_stopped_session`
 /// proves the SIGNAL itself was not deleted — the same record, fetched
 /// individually (the resume path), still reports stale.
+///
+/// #5040: base injected via [`fake_base`], so no `$HOME` write and no
+/// `#[serial]`.
 #[tokio::test]
-#[serial_test::serial]
 async fn checked_summaries_does_not_probe_stopped_sessions() {
-    let (home, _guard) = fake_home();
-    let workspace = home.path().join("stopped-drifted");
-    deploy_then_drift_catalog(&workspace);
+    let base = fake_base();
+    let workspace = base.path().join("stopped-drifted");
+    deploy_then_drift_catalog(base.path(), &workspace);
 
     let mut stopped = make_record(None);
     stopped.state = ManagedSessionState::Stopped;
     stopped.workspace_path = Some(workspace);
 
-    let summaries = checked_summaries(std::slice::from_ref(&stopped)).await;
+    let summaries = checked_summaries_with_under(
+        std::slice::from_ref(&stopped),
+        true,
+        base.path().to_path_buf(),
+    )
+    .await;
 
     assert!(
         !summaries[0].stale_assets,
@@ -910,9 +900,9 @@ async fn staleness_inputs_computes_one_catalog_per_source_pair_shared_by_arc() {
 
 /// Issue #4326 review, HIGH (empirically proven): the pin above only ever
 /// called [`super::summary::staleness_inputs_under`] directly — it never exercised
-/// [`stale_assets_for_many`], the function `checked_summaries` (and therefore
-/// `tm ls`) actually calls. The critic proved this gap by moving
-/// `CatalogHashes::compute` INSIDE `stale_assets_for_many`'s per-session
+/// [`stale_assets_for_many_under`], the function `checked_summaries` (and
+/// therefore `tm ls`) actually calls. The critic proved this gap by moving
+/// `CatalogHashes::compute` INSIDE `stale_assets_for_many_under`'s per-session
 /// `JoinSet::spawn_blocking` fan-out — reinstating the exact #2444 per-session
 /// recompose — and every existing test, including the pin above, stayed
 /// green.
@@ -978,18 +968,20 @@ async fn stale_assets_for_many_computes_catalog_exactly_once_per_source_pair() {
 /// `tm session resume` reads — the exact moment a stopped session's drift
 /// becomes actionable) must still flag the very same genuinely-stale STOPPED
 /// record its list row leaves undetermined.
+///
+/// #5040: base injected via [`fake_base`], so no `$HOME` write and no
+/// `#[serial]`.
 #[tokio::test]
-#[serial_test::serial]
 async fn record_to_summary_checked_still_flags_stale_stopped_session() {
-    let (home, _guard) = fake_home();
-    let workspace = home.path().join("stopped-drifted-on-demand");
-    deploy_then_drift_catalog(&workspace);
+    let base = fake_base();
+    let workspace = base.path().join("stopped-drifted-on-demand");
+    deploy_then_drift_catalog(base.path(), &workspace);
 
     let mut stopped = make_record(None);
     stopped.state = ManagedSessionState::Stopped;
     stopped.workspace_path = Some(workspace);
 
-    let summary = super::summary::record_to_summary_checked(&stopped).await;
+    let summary = record_to_summary_checked_under(&stopped, base.path().to_path_buf()).await;
 
     assert!(
         summary.stale_assets,
@@ -1012,18 +1004,21 @@ async fn record_to_summary_checked_still_flags_stale_stopped_session() {
 /// produce a genuine `true`, then shows the slim path reports `false` for it.
 /// The difference can only come from the probe not running, which is the whole
 /// point of the flag: the guard's cold-daemon timeout was that probe's cost.
+///
+/// #5040: base injected via [`fake_base`], so no `$HOME` write and no
+/// `#[serial]`.
 #[tokio::test]
-#[serial_test::serial]
 async fn checked_summaries_slim_skips_stale_assets_probe() {
-    let (home, _guard) = fake_home();
-    let fw = crate::core::paths::FrameworkPaths::default();
+    let base = fake_base();
+    let fw = crate::core::paths::FrameworkPaths::under(base.path());
     let bundled = fw.agent_source_dir();
     std::fs::create_dir_all(&bundled).unwrap();
     std::fs::write(bundled.join("rust-engineer.md"), "v1").unwrap();
 
-    let workspace = home.path().join("workspace");
+    let workspace = base.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
-    let session_fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&workspace);
+    let session_fw =
+        crate::core::paths::FrameworkPaths::for_managed_workspace_under(base.path(), &workspace);
     crate::core::agent_deployer::deploy_agents_filtered(
         &bundled,
         &session_fw.agent_deploy_dir(),
@@ -1038,14 +1033,14 @@ async fn checked_summaries_slim_skips_stale_assets_probe() {
     let records = vec![active];
 
     // Control: the full probe SEES the drift.
-    let full = checked_summaries_with(&records, true).await;
+    let full = checked_summaries_with_under(&records, true, base.path().to_path_buf()).await;
     assert!(
         full[0].stale_assets,
         "fixture must genuinely be stale, else the slim assertion below is vacuous"
     );
 
     // Slim: same records, probe skipped, flag left at its default.
-    let slim = checked_summaries_with(&records, false).await;
+    let slim = checked_summaries_with_under(&records, false, base.path().to_path_buf()).await;
     assert!(
         !slim[0].stale_assets,
         "slim mode must skip the staleness probe entirely (#4335)"
@@ -1069,11 +1064,13 @@ async fn checked_summaries_slim_skips_stale_assets_probe() {
 /// agent can no longer be stale for session A and fresh for session B. Skills
 /// are still deployed per-workspace, so they carry the per-session property
 /// this test exists to pin.
+///
+/// #5040: base injected via [`fake_base`], so no `$HOME` write and no
+/// `#[serial]`.
 #[tokio::test]
-#[serial_test::serial]
 async fn checked_summaries_stale_assets_independent_per_session_sharing_one_catalog() {
-    let (home, _guard) = fake_home();
-    let fw = crate::core::paths::FrameworkPaths::default();
+    let base = fake_base();
+    let fw = crate::core::paths::FrameworkPaths::under(base.path());
     let bundled = fw.skill_source_dir();
     std::fs::create_dir_all(&bundled).unwrap();
     std::fs::write(bundled.join("tm-doctor.md"), "v1").unwrap();
@@ -1090,17 +1087,17 @@ async fn checked_summaries_stale_assets_independent_per_session_sharing_one_cata
 
     // Session A: deploys while the catalog is at v1, then the catalog moves
     // to v2 — A must end up stale.
-    let ws_a = home.path().join("workspace-a");
+    let ws_a = base.path().join("workspace-a");
     std::fs::create_dir_all(&ws_a).unwrap();
-    let fw_a = crate::core::paths::FrameworkPaths::for_managed_workspace(&ws_a);
+    let fw_a = crate::core::paths::FrameworkPaths::for_managed_workspace_under(base.path(), &ws_a);
     deploy_skills(&fw_a.claude_skills_dir());
     std::fs::write(bundled.join("tm-doctor.md"), "v2 — catalog moved").unwrap();
 
     // Session B: deploys AFTER the catalog already moved to v2 — B must stay
     // fresh, sharing the SAME (now-v2) catalog hash cache entry as A.
-    let ws_b = home.path().join("workspace-b");
+    let ws_b = base.path().join("workspace-b");
     std::fs::create_dir_all(&ws_b).unwrap();
-    let fw_b = crate::core::paths::FrameworkPaths::for_managed_workspace(&ws_b);
+    let fw_b = crate::core::paths::FrameworkPaths::for_managed_workspace_under(base.path(), &ws_b);
     deploy_skills(&fw_b.claude_skills_dir());
 
     let mut a = make_record(None);
@@ -1111,7 +1108,7 @@ async fn checked_summaries_stale_assets_independent_per_session_sharing_one_cata
     b.workspace_path = Some(ws_b);
 
     let records = vec![a, b];
-    let summaries = checked_summaries(&records).await;
+    let summaries = checked_summaries_with_under(&records, true, base.path().to_path_buf()).await;
 
     assert!(
         summaries[0].stale_assets,
