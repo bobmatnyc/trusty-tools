@@ -634,8 +634,6 @@ crates/trusty-mpm/src/tui/project_ctl/events/mod.rs	kill_on_active_session_opens
 crates/trusty-mpm/src/tui/project_ctl/state/mod.rs	activity_failure_streak_*
 crates/trusty-review/src/commands/calibrate.rs	finding_not_recalled_diff_file
 crates/trusty-review/src/commands/calibrate.rs	finding_not_recalled_diff_kind
-crates/trusty-review/src/config/constants.rs	apex_context_truncates_long_query
-crates/trusty-review/src/config/constants.rs	apex_context_truncates_snippet
 crates/trusty-review/src/config/constants.rs	refuted_finding_is_demoted_below_advisory_tier
 crates/trusty-review/src/config/index_resolver.rs	repo_root_from_cwd_falls_back_to_cwd_on_canonicalize_error
 crates/trusty-review/src/config/index_resolver.rs	resolve_search_index_explicit_env_wins
@@ -657,7 +655,6 @@ crates/trusty-review/src/coverage/policy.rs	coverage_policy_from_env
 crates/trusty-review/src/coverage/policy.rs	coverage_policy_from_file
 crates/trusty-review/src/integrations/analyze_client.rs	complexity_hotspots_empty_on_transport_error
 crates/trusty-review/src/integrations/analyze_client.rs	smells_empty_on_transport_error
-crates/trusty-review/src/integrations/apex_context.rs	apex_context_result_round_trip
 crates/trusty-review/src/integrations/context/config.rs	effective_enabled_auto
 crates/trusty-review/src/integrations/context/config.rs	effective_enabled_honours_explicit
 crates/trusty-review/src/integrations/context/config.rs	from_env_and_file_layers_correctly
@@ -734,7 +731,6 @@ crates/trusty-review/src/pipeline/prompt.rs	build_review_prompt_includes_context
 crates/trusty-review/src/pipeline/prompt.rs	build_system_prompt_coverage_gating_on
 crates/trusty-review/src/pipeline/prompt.rs	build_system_prompt_full_pipeline
 crates/trusty-review/src/pipeline/prompt.rs	build_system_prompt_with_principles
-crates/trusty-review/src/pipeline/prompt.rs	prompt_includes_apex_context
 crates/trusty-review/src/pipeline/prompt.rs	system_prompt_coverage_gating_off
 crates/trusty-review/src/pipeline/prompt.rs	system_prompt_coverage_gating_on
 crates/trusty-review/src/pipeline/prompt_templates.rs	system_prompt_coverage_gating_off

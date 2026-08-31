@@ -295,17 +295,25 @@ mod tests {
     /// issues is the code-context query against `config.search_index`.
     ///
     /// Why: the owner ruling dropped APEX retrieval (0/69 citations at ~0.001
-    /// relevance).  This test is the regression guard: before the removal a PR
-    /// with a title+body drove a SECOND search (the APEX cross-query); after it
-    /// there must be exactly one search, and it must target the code index — no
-    /// APEX client is constructed and no APEX call is made.
-    /// What: runs `gather_context` with identifiers + title + body (the exact
-    /// inputs that previously triggered the APEX cross-query) against a
-    /// call-recording search client; asserts a single search call whose index is
-    /// `config.search_index`.
-    /// Test: this test; no network.
+    /// relevance).  This test is the regression guard: on the pre-fix code a
+    /// configured `TRUSTY_SEARCH_APEX_INDEX` drove a SECOND search (the APEX
+    /// cross-query built from title+body); after the removal that env var is
+    /// ignored, so there must be exactly one search, targeting the code index —
+    /// no APEX client is constructed and no APEX call is made.  Setting the env
+    /// var is what makes this fail on the parent commit; without it the old code
+    /// short-circuited on an empty index and this proved nothing.
+    /// What: with `TRUSTY_SEARCH_APEX_INDEX` set to a sentinel, runs
+    /// `gather_context` with identifiers + title + body (the inputs that drove
+    /// the APEX cross-query) against a call-recording search client; asserts a
+    /// single search call whose index is `config.search_index`.
+    /// Test: this test; `#[serial_test::serial]` for env isolation, no network.
     #[tokio::test]
+    #[serial_test::serial]
     async fn gather_context_makes_no_apex_retrieval() {
+        // Would drive a second (APEX) search on the pre-#4999 code path.
+        unsafe {
+            std::env::set_var("TRUSTY_SEARCH_APEX_INDEX", "apex-sentinel-#4999");
+        }
         let search = Arc::new(RecordingSearch {
             calls: std::sync::Mutex::new(Vec::new()),
         });
@@ -326,6 +334,9 @@ mod tests {
             "PR body",
         )
         .await;
+        unsafe {
+            std::env::remove_var("TRUSTY_SEARCH_APEX_INDEX");
+        }
         let calls = search.calls.lock().expect("recording mutex not poisoned");
         assert_eq!(
             calls.len(),
