@@ -1,0 +1,2 @@
+Fixed
+- `parity_doctor_agrees_across_transports` no longer flakes when a concurrent managed session writes `sessions.json` between its two transport reads: the `session_store` doctor check's live-sampled message (record count and byte length) now joins `worktree_disk`/`worktrees` in the parity comparison's host-sampled allowlist, while its status is still compared so a real cross-transport verdict divergence still fails (#6490).
