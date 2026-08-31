@@ -16,7 +16,7 @@ name = "trusty-mpm"
 # 1.5.11 (#6391): patch — 1.5.10 is published and this PR edits `src/**` to
 # harden worktree removal and unwedge the reap wait; no public item changed
 # signature.
-version = "1.5.12"
+version = "1.5.13"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

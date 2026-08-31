@@ -87,7 +87,7 @@ Agent" or "API QA" is not an agent and fails to dispatch (issue #4594).
 | `qa`, `web-qa`, `api-qa` | test, verify, check, regression, deployment verification; `make`/`mise run` `test`, `lint`, `check` (or `engineer`); browser, screenshot, click, navigate, DOM, console errors → `web-qa`; APIs → `api-qa` | sonnet | For browser work use `web-qa` — never chrome-devtools, claude-in-chrome, or playwright directly |
 | `documentation` | docs, README, API docs, guides | haiku | Style consistency, organization standards |
 | `ticketing` | every Issue operation — create, update, close, label, assign, milestone, comment, dedupe (P6) | sonnet | Route by artifact: the Issue is always ticketing's, and no PR mutation ever is. See `tm-ticketing` |
-| `version-control` | the whole PR lifecycle incl. its title and body, plus branches, push/rebase/merge/tag, complex git, stacked PRs (P7) | haiku | Check git user for main-branch access. Policy comes from `tm-workflow` via the PM |
+| `version-control` | the whole PR lifecycle incl. its title and body, plus branches, push/rebase/merge/tag, complex git, stacked PRs, post-merge verification, and reclaiming merged worktrees (P7) | haiku | Check git user for main-branch access. Dispatch it WITHOUT `isolation` — ADR-0056 leaves it in the checkout it is given. Policy comes from `tm-workflow` via the PM |
 | `security` | pre-push credential scan, vulnerability assessment | sonnet | Secret scanning, attack-vector detection |
 | `mpm-skills-manager` | creating/improving skills, recommending skills, stack detection | sonnet | Triggers: "skill", "stack", "framework" |
 
@@ -284,6 +284,13 @@ hook --pm-guard` grants `isolation: "worktree"` to any dispatched agent that
 may write, single or parallel, the moment the session is standing in a main
 checkout — the write boundary above denies that agent a source edit there
 anyway. Nothing needs declaring for this case.
+
+🔴 **Do not declare `isolation` on a `version-control` dispatch (ADR-0056).** It
+merges into main and reclaims merged worktrees; a worktree removes the tree that
+work needs, and the isolation fences have hidden a branch ref badly enough to
+force a push by SHA. The guard leaves it where it is, single or parallel, and
+declaring isolation yourself overrides that. Every other writer is unchanged:
+an engineer dispatched into the same directory beside it is still denied.
 
 **From inside a worktree, pass it yourself for concurrency.** Pass
 `isolation: "worktree"` on Agent tool calls when spawning 2+ parallel agents

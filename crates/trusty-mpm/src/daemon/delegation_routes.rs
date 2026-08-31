@@ -60,7 +60,7 @@ use serde_json::Value;
 
 use crate::core::agent::is_subagent_dispatch_tool;
 use crate::core::dispatch_isolation::{
-    dispatch_agent, dispatch_isolation, isolation_separates_working_tree, shares_the_callers_tree,
+    blocked_by_shared_tree, dispatch_agent, dispatch_isolation, isolation_separates_working_tree,
 };
 use crate::core::hook::HookEvent;
 use crate::core::session::SessionId;
@@ -151,7 +151,7 @@ pub fn router() -> Router<Arc<DaemonState>> {
 ///
 /// Why: [`shared_tree_dispatch_route`] cannot record a granted dispatch, and
 /// that is deliberate rather than an oversight — it re-derives eligibility with
-/// [`shares_the_callers_tree`], which an `isolation: "worktree"` input makes
+/// [`blocked_by_shared_tree`], which an `isolation: "worktree"` input makes
 /// false, so its record closure never runs (pinned by
 /// `shared_tree_dispatch_route_does_not_reserve_a_read_only_agent`). But a
 /// dispatch the guard just rewrote from unisolated to isolated is exactly the
@@ -226,7 +226,7 @@ pub fn granted_worktree_op(
 /// What: parses the session id, then hands the whole scan-and-claim to
 /// [`DaemonState::claim_shared_tree_dispatch`], which holds one mutex across
 /// both halves. The claim is taken only when the answer is empty AND this
-/// dispatch would itself [`shares_the_callers_tree`] — the daemon re-derives
+/// dispatch would itself [`blocked_by_shared_tree`] — the daemon re-derives
 /// that from the payload rather than trusting the caller to have checked, so a
 /// read-only or isolated dispatch can never occupy a directory. A malformed
 /// session id is a 400; an unknown session is an EMPTY answer, not a 404 — a
@@ -278,9 +278,11 @@ pub fn shared_tree_dispatch_op(
     // Re-derived here, never taken on trust: the caller says which agent it is
     // dispatching, but whether that dispatch may occupy a directory is this
     // daemon's policy call, shared with the guard through one classifier.
+    // ADR-0056: `blocked_by_shared_tree`, not `shares_the_callers_tree` — the
+    // guard's admission question, so the two halves stay one policy.
     let eligible = str_field(payload, "tool").is_some_and(is_subagent_dispatch_tool)
         && dispatch_agent(input)
-            .is_some_and(|agent| shares_the_callers_tree(agent, dispatch_isolation(input)));
+            .is_some_and(|agent| blocked_by_shared_tree(agent, dispatch_isolation(input)));
 
     let (names, claimed) = state.claim_shared_tree_dispatch(&cwd, exclude, eligible, |s| {
         crate::daemon::services::delegation_tracker::observe(

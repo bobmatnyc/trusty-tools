@@ -90,7 +90,7 @@
 //! (#5769).** [`evaluate_granted_worktree`] serves the ADR-0048 worktree grant,
 //! and it needs the opposite of what the route above provides: the grant's whole
 //! point is that the dispatch now declares isolation, which is exactly the
-//! payload `shares_the_callers_tree` rejects, so this route's record closure
+//! payload `blocked_by_shared_tree` rejects, so this route's record closure
 //! could never run for it. `…/delegations/granted-worktree` inverts the
 //! eligibility test and upserts instead of observing. Posting the ORIGINAL input
 //! here instead would be worse than doing nothing: eligibility would pass, an
@@ -123,7 +123,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use trusty_mpm::core::agent::is_subagent_dispatch_tool;
 use trusty_mpm::core::dispatch_isolation::{
-    dispatch_agent, dispatch_isolation, shares_the_callers_tree,
+    blocked_by_shared_tree, dispatch_agent, dispatch_isolation,
 };
 
 use crate::commands::hook_payload::build_hook_payload;
@@ -177,7 +177,7 @@ fn deny_reason(agent: &str, cwd: &Path, live: &[String]) -> String {
 /// it — so the whole policy is exhaustively unit-testable with no network, and
 /// the I/O lives in [`claim_shared_tree`] next door.
 /// What: `Some(reason)` (DENY) when `tool_name` is a dispatch tool, the dispatch
-/// [`shares_the_callers_tree`], and `live` is non-empty. `None` (ALLOW) in every
+/// [`blocked_by_shared_tree`], and `live` is non-empty. `None` (ALLOW) in every
 /// other case, including every non-dispatch tool.
 /// Test: `denies_a_second_concurrent_unisolated_engineer`,
 /// `allows_the_first_dispatch`, `allows_an_isolated_dispatch`,
@@ -199,14 +199,17 @@ pub(crate) fn evaluate_shared_tree_dispatch(
 ///
 /// Why: the cheap predicate that gates the daemon call, so a read-only or
 /// isolated dispatch — and every ordinary tool call — costs nothing.
-/// What: `true` when `tool_name` is a dispatch tool AND the named agent
-/// [`shares_the_callers_tree`] under the declared isolation.
+/// What: `true` when `tool_name` is a dispatch tool AND the named agent is
+/// [`blocked_by_shared_tree`] under the declared isolation — which is
+/// `shares_the_callers_tree` minus the ADR-0056 role grant, so a
+/// `version-control` dispatch neither asks the daemon nor claims the tree.
 /// Test: `allows_a_read_only_agent`, `allows_an_isolated_dispatch`,
-/// `allows_when_the_agent_is_unknown`.
+/// `allows_when_the_agent_is_unknown`,
+/// `allows_version_control_alongside_a_live_writer`.
 pub(crate) fn dispatch_shares_the_tree(tool_name: &str, tool_input: Option<&Value>) -> bool {
     is_subagent_dispatch_tool(tool_name)
         && dispatch_agent(tool_input)
-            .is_some_and(|agent| shares_the_callers_tree(agent, dispatch_isolation(tool_input)))
+            .is_some_and(|agent| blocked_by_shared_tree(agent, dispatch_isolation(tool_input)))
 }
 
 /// The directory a dispatch from this hook would land in.
@@ -534,7 +537,7 @@ pub(crate) async fn live_shared_tree_writers_in(
 /// need it BEFORE the grant is emitted, so they are one call.
 ///
 /// It posts to [`GRANTED_WORKTREE_ROUTE`] rather than the sibling one because
-/// that route re-derives eligibility with `shares_the_callers_tree`, which the
+/// that route re-derives eligibility with `blocked_by_shared_tree`, which the
 /// rewritten input makes false — the record closure would never run. Posting the
 /// ORIGINAL input there instead would be worse than useless: eligibility would
 /// be true, an empty answer would CLAIM the directory, and the phantom this
@@ -1150,9 +1153,31 @@ mod tests {
     }
 
     #[test]
+    fn allows_version_control_alongside_a_live_writer() {
+        // ADR-0056, owner ruling 2026-08-31: `version-control` pushes, opens
+        // PRs, merges into main, and reclaims merged worktrees. Every one of
+        // those acts on the checkout it is handed, so denying it for want of a
+        // worktree denied the work itself — twice on 2026-08-31, for pure
+        // push/PR dispatches.
+        for tool in SUBAGENT_DISPATCH_TOOLS {
+            assert_eq!(
+                evaluate_shared_tree_dispatch(
+                    tool,
+                    Some(&input("version-control", None)),
+                    Path::new("/repo"),
+                    &["rust-engineer".to_string()],
+                ),
+                None,
+                "{tool}: version-control must run in the tree it was given"
+            );
+        }
+    }
+
+    #[test]
     fn denies_a_file_writing_non_engineer_alongside_an_engineer() {
         // #5650: these wrote into the engineer's tree with no deny at all.
-        for agent in ["documentation", "version-control", "qa", "web-qa", "api-qa"] {
+        // ADR-0056 exempted `version-control`; the rest are unchanged.
+        for agent in ["documentation", "qa", "web-qa", "api-qa"] {
             let reason = evaluate_shared_tree_dispatch(
                 "Agent",
                 Some(&input(agent, None)),

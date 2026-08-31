@@ -11191,7 +11191,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-agents-common"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11715,7 +11715,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm"
-version = "1.5.12"
+version = "1.5.13"
 dependencies = [
  "anyhow",
  "async-trait",

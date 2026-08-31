@@ -348,6 +348,21 @@ mod tests {
     }
 
     #[test]
+    fn does_not_grant_a_worktree_to_version_control() {
+        // ADR-0056, owner ruling 2026-08-31: the grant is what forced the
+        // isolation workaround. A `version-control` agent rewritten into a
+        // worktree cannot merge into main and cannot remove the tree it is
+        // standing in, and the fences hid a branch ref badly enough that the
+        // push had to be issued by SHA.
+        let dir = main_checkout();
+        assert_eq!(
+            evaluate_worktree_grant("Agent", Some(&input("version-control", None)), dir.path()),
+            None,
+            "version-control merges into main and must not be moved out of it"
+        );
+    }
+
+    #[test]
     fn does_not_grant_an_already_isolated_dispatch() {
         // Both modes separate the tree; neither may be overwritten, least of
         // all `remote`, which the guard has no business downgrading.

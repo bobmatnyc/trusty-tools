@@ -1,6 +1,6 @@
 # 0044. Main-checkout sessions restrict writes; the harness owns agent worktrees
 
-- **Status:** Amended by [0048](0048-dispatched-writers-get-a-worktree-and-the-write-boundary-is-enforced.md)
+- **Status:** Amended by [0048](0048-dispatched-writers-get-a-worktree-and-the-write-boundary-is-enforced.md), [0056](0056-main-checkout-write-access-is-granted-by-role.md)
 - **Date:** 2026-08-10
 - **Scope:** crate `trusty-mpm` session launch and delegated-agent enforcement;
   Claude Code worktree isolation under `.claude/worktrees/`
