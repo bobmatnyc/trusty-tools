@@ -61,6 +61,49 @@ pub trait ManagedTmuxDriver: Send + Sync {
     /// Create a detached tmux session named `name`, rooted at `workdir`.
     fn create_session(&self, name: &str, workdir: &str) -> Result<(), ManagedError>;
 
+    /// Create a detached tmux session named `name` that FAILS when the name is
+    /// already live, instead of attaching to whatever holds it (#3707).
+    ///
+    /// Why: [`Self::create_session`] renders `tmux new-session -A`, and `-A`
+    /// attaches to an existing session of the same name rather than failing.
+    /// Two concurrent creators that computed the same name therefore both
+    /// "succeed": one creates the pane, the other silently joins it, and two
+    /// records are persisted driving one pane. A lost race must be an error the
+    /// caller can retry under a fresh name, which is what this method makes it.
+    /// What: the default probes [`Self::session_exists_checked`] first and
+    /// returns [`ManagedError::NameCollision`] when the name is taken —
+    /// propagating an unobservable tmux rather than reading it as free.
+    /// [`super::real_tmux::RealTmuxDriver`] overrides it with a `new-session`
+    /// that carries no `-A`, so tmux itself decides the race atomically.
+    /// Test: `two_creators_of_one_name_never_share_a_pane` in
+    /// `super::naming_tests`; `RealTmuxDriver`'s override is exercised by the
+    /// `#[ignore]` live tmux tests.
+    fn create_session_exclusive(&self, name: &str, workdir: &str) -> Result<(), ManagedError> {
+        if self.session_exists_checked(name)? {
+            return Err(ManagedError::NameCollision(format!(
+                "tmux session `{name}` already exists"
+            )));
+        }
+        self.create_session(name, workdir)
+    }
+
+    /// Apply the configured scrollback/mouse ergonomics to the tmux SERVER.
+    ///
+    /// Why: a tmux server that came up without tm creating the session — a
+    /// tmux-resurrect/continuum restore after a server restart runs its own
+    /// bare `new-session` (#6469) — never passes through
+    /// [`crate::core::tmux::create_managed_session`], so the server globals tm
+    /// specifies are simply absent and restored panes bake tmux's factory
+    /// 2000-line `history-limit`. The daemon's boot reconcile is the one place
+    /// that observes such a server, so it is the place to re-assert them.
+    /// What: the default is a no-op — every test double and the tmux-absent
+    /// fallback have no server to configure.
+    /// [`super::real_tmux::RealTmuxDriver`] overrides it with
+    /// [`crate::daemon::tmux::TmuxDriver::apply_scrollback_options`].
+    /// Test: `reconcile_on_boot_reapplies_the_scrollback_server_options` in
+    /// `super::tests`.
+    fn apply_scrollback_options(&self) {}
+
     /// Kill the tmux session named `name`.
     fn kill_session(&self, name: &str) -> Result<(), ManagedError>;
 

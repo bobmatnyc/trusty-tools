@@ -17,7 +17,7 @@
 //! [`ManagedError`]: crate::session_manager::manager::ManagedError
 
 use crate::core::tmux::TmuxTarget;
-use crate::daemon::tmux::TmuxDriver;
+use crate::daemon::tmux::{ExclusiveCreate, TmuxDriver};
 
 use super::manager::{ManagedError, ManagedTmuxDriver};
 
@@ -61,6 +61,35 @@ impl ManagedTmuxDriver for RealTmuxDriver {
         self.driver
             .create_session(name, Some(workdir))
             .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
+    }
+
+    /// Create without `-A`, so tmux itself refuses a name already in use
+    /// (#3707) instead of attaching the loser to the winner's pane.
+    ///
+    /// Why: the trait default probes `list-sessions` first, which is a second
+    /// TOCTOU window in front of the one it is trying to close. tmux's own
+    /// `new-session` is atomic against the server, so the production driver
+    /// asks tmux rather than asking about tmux.
+    /// What: [`crate::daemon::tmux::TmuxDriver::create_session_exclusive`],
+    /// mapping its [`ExclusiveCreate::NameTaken`] answer to
+    /// [`ManagedError::NameCollision`] — the variant
+    /// `create_with_resolved_name` retries on — and every other failure to
+    /// [`ManagedError::TmuxUnavailable`].
+    /// Test: `#[ignore]` live tmux coverage; the retry it feeds is covered by
+    /// `two_creators_of_one_name_never_share_a_pane`.
+    fn create_session_exclusive(&self, name: &str, workdir: &str) -> Result<(), ManagedError> {
+        match self.driver.create_session_exclusive(name, Some(workdir)) {
+            Ok(ExclusiveCreate::Created) => Ok(()),
+            Ok(ExclusiveCreate::NameTaken) => Err(ManagedError::NameCollision(format!(
+                "tmux refused `new-session -s {name}`: that name is already live"
+            ))),
+            Err(e) => Err(ManagedError::TmuxUnavailable(e.to_string())),
+        }
+    }
+
+    /// Re-assert the tmux server's scrollback/mouse globals (#6469).
+    fn apply_scrollback_options(&self) {
+        self.driver.apply_scrollback_options();
     }
 
     fn kill_session(&self, name: &str) -> Result<(), ManagedError> {

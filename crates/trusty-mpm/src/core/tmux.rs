@@ -300,15 +300,19 @@ pub fn run_tmux_argv(args: &[String]) -> std::io::Result<std::process::Output> {
 /// re-testing the ordering guarantee itself (already covered once in
 /// `trusty_common::tmux`'s own tests).
 /// What: delegates straight to
-/// [`trusty_common::tmux::managed_session_commands`] with `idempotent: true`
-/// (trusty-mpm's `-A`-attach creation semantics) and no initial command.
-/// Test: `managed_session_command_sequence_matches_shared_layer`.
+/// [`trusty_common::tmux::managed_session_commands`] with no initial command.
+/// `idempotent` renders `-A` (trusty-mpm's attach-if-present creation
+/// semantics); `false` is the #3707 exclusive create, where a name already in
+/// use is a refusal the caller retries under a fresh name.
+/// Test: `managed_session_command_sequence_matches_shared_layer`,
+/// `exclusive_command_sequence_omits_the_attach_flag`.
 fn managed_session_command_sequence(
     name: &str,
     workdir: Option<&str>,
     history_limit: u32,
     mouse: bool,
     alternate_screen: bool,
+    idempotent: bool,
 ) -> Vec<TmuxCommand> {
     managed_session_commands(
         name,
@@ -316,7 +320,7 @@ fn managed_session_command_sequence(
         history_limit,
         mouse,
         alternate_screen,
-        true,
+        idempotent,
         None,
     )
 }
@@ -418,6 +422,31 @@ pub fn create_managed_session(
     create_managed_session_with_options(tmux_bin, name, workdir, opts)
 }
 
+/// [`create_managed_session`] whose `new-session` carries NO `-A`, so a name
+/// already in use makes tmux refuse instead of attaching (#3707).
+///
+/// Why: `-A` turns a lost create race into silence — the loser attaches to the
+/// winner's pane and both persist a record for it, which is two sessions
+/// driving one terminal with no error anywhere. The managed create path wants
+/// the refusal so it can re-dedupe the name and try again; every other caller
+/// (resume, reattach) still wants `-A` and keeps it.
+/// What: the same #2398 option-ordering and #3386 apply-and-verify cycle as
+/// [`create_managed_session`], with `idempotent: false`. The refusal arrives as
+/// a non-zero exit whose stderr says `duplicate session`; classifying it is
+/// [`crate::daemon::tmux::TmuxDriver::create_session_exclusive`]'s job, since
+/// this layer returns the raw `Output` either way.
+/// Test: `exclusive_command_sequence_omits_the_attach_flag`; the live-process
+/// call is exercised by the `#[ignore]` tmux integration tests.
+pub fn create_managed_session_exclusive(
+    tmux_bin: Option<&str>,
+    name: &str,
+    workdir: Option<&str>,
+) -> std::io::Result<ManagedSessionOutcome> {
+    let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
+    let opts = crate::core::trusty_tools_config::resolve_tmux_options(&config);
+    create_managed_session_inner(tmux_bin, name, workdir, opts, false)
+}
+
 /// [`create_managed_session`] with the resolved tmux options supplied by the
 /// caller instead of loaded from `~/.trusty-mpm/config.toml` (#5040).
 ///
@@ -439,6 +468,25 @@ pub fn create_managed_session_with_options(
     name: &str,
     workdir: Option<&str>,
     opts: crate::core::trusty_tools_config::ResolvedTmuxOptions,
+) -> std::io::Result<ManagedSessionOutcome> {
+    create_managed_session_inner(tmux_bin, name, workdir, opts, true)
+}
+
+/// The body shared by [`create_managed_session_with_options`] (`-A`) and
+/// [`create_managed_session_exclusive`] (no `-A`, #3707).
+///
+/// Why: the two differ by one boolean threaded into the `new-session` entry;
+/// duplicating the host-state gate, binary resolution and apply-and-verify
+/// cycle to vary it would put two copies of the #3386 retry loop in one file.
+/// What: see [`create_managed_session_with_options`]. `idempotent` is passed
+/// straight to [`managed_session_command_sequence`].
+/// Test: `create_managed_session_confirms_server_before_applying_options`.
+fn create_managed_session_inner(
+    tmux_bin: Option<&str>,
+    name: &str,
+    workdir: Option<&str>,
+    opts: crate::core::trusty_tools_config::ResolvedTmuxOptions,
+    idempotent: bool,
 ) -> std::io::Result<ManagedSessionOutcome> {
     // #5784: refuse once, loudly, at the entry point. `host_state_guard` also
     // guards every spawn below, but this is the operation an operator asked
@@ -468,6 +516,7 @@ pub fn create_managed_session_with_options(
         opts.history_limit,
         opts.mouse,
         opts.alternate_screen,
+        idempotent,
     );
     let split = commands.len().saturating_sub(1);
     let (options, new_session) = commands.split_at(split);
@@ -678,7 +727,7 @@ fn apply_and_verify_scrollback_options(
 /// the value — callers decide how loudly to react.
 /// Test: `probe_history_limit_reads_back_configured_value`,
 /// `probe_history_limit_errors_on_unparsable_output`.
-fn probe_history_limit(bin: &str) -> Result<u32, String> {
+pub(crate) fn probe_history_limit(bin: &str) -> Result<u32, String> {
     match run_tmux_with_bin(
         bin,
         &TmuxCommand::ShowGlobalOption {
@@ -715,7 +764,7 @@ fn probe_history_limit(bin: &str) -> Result<u32, String> {
 /// `probe_alternate_screen_reads_back_off`,
 /// `probe_alternate_screen_errors_on_unrecognised_value`,
 /// `probe_alternate_screen_errors_on_nonzero_exit`.
-fn probe_alternate_screen(bin: &str) -> Result<bool, String> {
+pub(crate) fn probe_alternate_screen(bin: &str) -> Result<bool, String> {
     match run_tmux_with_bin(
         bin,
         &TmuxCommand::ShowWindowGlobalOption {

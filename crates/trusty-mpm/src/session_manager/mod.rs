@@ -100,6 +100,9 @@ mod reap_orphaned_worktrees_tests;
 mod naming_tests;
 
 #[cfg(test)]
+mod create_race_tests;
+
+#[cfg(test)]
 mod resume_reattach_tests;
 
 #[cfg(test)]
