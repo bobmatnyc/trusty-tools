@@ -946,3 +946,135 @@ fn stray_files_do_not_move_the_bundle_stamp() {
         "the stamp must hash the bundled file set, not the raw embed tree"
     );
 }
+
+/// Every entry under `dir` — files AND directories — as a `/`-joined path
+/// relative to `dir`, paired with its own `symlink_metadata` (#5226).
+///
+/// Why: [`source_tree_paths`] answers "which files are here" and follows
+/// symlinks to do it, so a link is indistinguishable from the file it names.
+/// The two tests below need the opposite: the link ITSELF, unresolved.
+/// What: reads each directory entry, stats it with `symlink_metadata` (which
+/// never traverses the final component), and descends only into a real
+/// directory — so a symlinked directory is reported once and never walked.
+/// Test: `no_symlink_reaches_the_embedded_asset_trees`,
+/// `every_source_file_is_a_bundled_asset_or_known_junk`.
+fn source_tree_entries(
+    dir: &Path,
+    prefix: &str,
+    out: &mut Vec<(String, std::fs::Metadata)>,
+) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let rel = if prefix.is_empty() {
+            name
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let meta = std::fs::symlink_metadata(entry.path())?;
+        let descend = !meta.is_symlink() && meta.is_dir();
+        out.push((rel.clone(), meta));
+        if descend {
+            source_tree_entries(&entry.path(), &rel, out)?;
+        }
+    }
+    Ok(())
+}
+
+/// The two embedded source trees, as `(name, absolute path)` (#5226).
+fn embedded_source_trees() -> [(&'static str, PathBuf); 2] {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(".trusty-agents");
+    [
+        ("agents", root.join("agents")),
+        ("workflows", root.join("workflows")),
+    ]
+}
+
+/// Why (#5226): [`is_bundled_asset`] and the `#[include]` globs both match on
+/// the NAME, and `rust-embed-utils` walks the folder with `.follow_links(true)`
+/// (8.11.0, `lib.rs:18`). A symlink named `persona.md` planted in
+/// `.trusty-agents/agents/` before a release build therefore passes both
+/// filters and embeds its TARGET's bytes into the shipped binary — which is
+/// then written into every user's `~/.trusty-agents/`. A link to `~/.ssh/id_rsa`
+/// is the worst case, and the allowlist cannot see it: only the file type can.
+/// What: walks both source trees without resolving links and fails naming every
+/// entry that is itself a symlink, file and directory alike. A symlinked
+/// directory would embed its whole target subtree, so it is caught the same way.
+/// Test: itself.
+#[test]
+fn no_symlink_reaches_the_embedded_asset_trees() {
+    let mut offenders: Vec<String> = Vec::new();
+    for (tree, dir) in embedded_source_trees() {
+        let mut entries = Vec::new();
+        source_tree_entries(&dir, "", &mut entries)
+            .unwrap_or_else(|e| panic!("{tree}: cannot walk {}: {e}", dir.display()));
+        assert!(!entries.is_empty(), "{tree}: no source entries found");
+        for (rel, meta) in entries {
+            if meta.is_symlink() {
+                offenders.push(format!("{tree}/{rel}"));
+            }
+        }
+    }
+    offenders.sort();
+
+    assert!(
+        offenders.is_empty(),
+        "these entries in the embedded asset trees are symlinks, so a release \
+         build would embed their targets' bytes and write them into every \
+         user's home — replace each with a real file (#5226): {offenders:?}"
+    );
+}
+
+/// Names a stray file is allowed to carry without failing the tripwire below.
+///
+/// Why (#5226): the strays that actually reach these trees are editor and tool
+/// droppings, and they must not be mistaken for a new asset kind nobody wired
+/// up. Everything else — including `.DS_Store` and any dotfile — is either a
+/// bundled asset or a mistake.
+/// What: dotfiles (which covers `.env`, `.gitignore`, `.DS_Store`), `*.bak`
+/// editor backups, and the `*.lock` sidecars `state_writer::atomic_write` drops.
+/// Test: `every_source_file_is_a_bundled_asset_or_known_junk`.
+fn is_known_junk(rel: &str) -> bool {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    name.starts_with('.') || name.ends_with(".bak") || name.ends_with(".lock")
+}
+
+/// Why (#5226): `embedded_trees_carry_only_bundled_assets` filters BOTH of its
+/// comparands through [`is_bundled_asset`], so a real new asset kind — a
+/// `roster.yaml`, say — is subtracted from the embedded set and from the
+/// expected set alike, and that test stays green while the asset silently never
+/// ships. Filtering both sides can only prove the two filters agree; it can
+/// never notice a file neither side was asked about.
+/// What: walks both source trees UNFILTERED and requires every file to be
+/// either accepted by [`is_bundled_asset`] or matched by [`is_known_junk`]. An
+/// unrecognised real extension fails here, at the point where a human can
+/// decide whether to add it to the allowlist and the `#[include]` globs or to
+/// delete it.
+/// Test: itself.
+#[test]
+fn every_source_file_is_a_bundled_asset_or_known_junk() {
+    let mut unrecognised: Vec<String> = Vec::new();
+    for (tree, dir) in embedded_source_trees() {
+        let mut entries = Vec::new();
+        source_tree_entries(&dir, "", &mut entries)
+            .unwrap_or_else(|e| panic!("{tree}: cannot walk {}: {e}", dir.display()));
+        assert!(!entries.is_empty(), "{tree}: no source entries found");
+        for (rel, meta) in entries {
+            if meta.is_dir() {
+                continue;
+            }
+            if !is_bundled_asset(&rel) && !is_known_junk(&rel) {
+                unrecognised.push(format!("{tree}/{rel}"));
+            }
+        }
+    }
+    unrecognised.sort();
+
+    assert!(
+        unrecognised.is_empty(),
+        "these source files are neither bundled assets nor recognised strays, \
+         so they are silently absent from the shipped binary — extend \
+         `is_bundled_asset` and the `#[include]` globs if they belong in the \
+         bundle, or delete them (#5226): {unrecognised:?}"
+    );
+}

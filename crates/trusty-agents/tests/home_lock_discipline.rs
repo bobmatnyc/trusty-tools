@@ -23,6 +23,10 @@
 use std::path::{Path, PathBuf};
 
 /// Text that mutates the process-global `$HOME`.
+///
+/// Blind spot: these are literal substrings, so a mutation routed through a
+/// generic helper that takes the variable NAME as a parameter is not seen
+/// (#6089).
 const HOME_MUTATIONS: &[&str] = &[
     "set_var(\"HOME\"",
     "remove_var(\"HOME\"",
