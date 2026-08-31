@@ -1,2 +1,0 @@
-Added
-- `github.work_items_unavailable` declares the GitHub work-item leg absent for a run and says why. With it set, no GitHub adapter is built, the reason is logged, and `tga audit` adds a Gaps & Caveats line stating the leg was not attempted and that the sections it feeds are unassessed. Without it, nothing changes: a configured `github.repo` whose fetch fails still fails the `collect` stage closed. It is a reason string, never a boolean — an empty value declares nothing.
