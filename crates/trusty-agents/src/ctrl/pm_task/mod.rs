@@ -12,6 +12,11 @@
 //! end-to-end via the ctrl integration tests.
 
 mod dispatch;
+// #4278: the read path (`api::server::chat_history`) must derive the
+// `persona-{agent}` session key exactly as the write path does. Re-exporting
+// the one function keeps `dispatch` and `persona_memory` private rather than
+// widening two modules to crate scope for it.
+pub(crate) use dispatch::persona_memory::session_id_for;
 mod helpers;
 // #4520 / #4054: tool-authorization classification (L0 wildcard gate,
 // exfiltration confirmation gate) shared by both persona dispatch paths.

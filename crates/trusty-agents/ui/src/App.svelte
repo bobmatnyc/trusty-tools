@@ -47,7 +47,11 @@
     fetchAgentCatalog,
     fetchModelCatalog,
     refreshOverlayAgents,
+    activeAgentId,
+    activeProjectId,
+    agentRoster,
   } from './stores/app';
+  import { rehydrateChat, resolveRehydrationTarget } from './lib/chatHistory';
   import { requestExitConfigPane } from './stores/configPane';
   // Why (#3217): parallel structured-data sink — see stores/workflow.ts doc
   // comment for the full rationale. Additive to the flattened webBus path
@@ -319,17 +323,56 @@
   let prevApiReady = false;
   function refetchPickerCatalogsOnReady(ready: boolean) {
     if (shouldRefetchCatalogs(prevApiReady, ready)) {
-      fetchAgentCatalog().catch((e) =>
+      const catalog = fetchAgentCatalog().catch((e) =>
         console.error('[App] fetchAgentCatalog failed:', e),
       );
       fetchModelCatalog().catch((e) =>
         console.error('[App] fetchModelCatalog failed:', e),
       );
       refreshOverlayAgents();
+      // #4278: rehydration reads the roster for the speaker label, and the
+      // roster is derived from this catalog — starting both at once left it
+      // empty at read time, so every restored assistant bubble fell back to
+      // "Assistant". Chaining off the catalog (settled, not resolved — a failed
+      // fetch must still rehydrate, just with the fallback label) is what makes
+      // the label correct.
+      catalog.then(rehydrateChatOnReady);
     }
     prevApiReady = ready;
   }
   $: refetchPickerCatalogsOnReady(apiReady);
+
+  // #4278: restore the persisted conversation once the API is healthy.
+  //
+  // It hangs off the same apiReady edge as the catalog refetch rather than off
+  // `onMount`, because the route reads through the sidecar — on a cold start
+  // that is not listening when `onMount` fires, so a mount-time fetch would
+  // fail and leave the chat blank, which is the bug. `hydrateMessages` refuses
+  // to overwrite a non-empty bucket, so a message typed while this is in
+  // flight survives.
+  //
+  // The persona log is keyed by AGENT (`persona-{agent}`) while the chat store
+  // is keyed by project, so this maps the selected agent's history into the
+  // active project's bucket. `activeAgentId` is null for the base ctrl/PM
+  // session — see its doc comment in `stores/app.ts`.
+  let rehydrated = false;
+  function rehydrateChatOnReady() {
+    if (rehydrated) return;
+    rehydrated = true;
+    const { agentId, speaker } = resolveRehydrationTarget(
+      get(activeAgentId),
+      get(agentRoster),
+    );
+    rehydrateChat(agentId, speaker, get(activeProjectId))
+      .then((result) => {
+        // Every failure mode renders as an empty chat, so an unreported reason
+        // makes a broken history indistinguishable from a first run.
+        if (result.reason) {
+          console.warn('[App] chat not rehydrated:', result.reason);
+        }
+      })
+      .catch((e) => console.error('[App] chat rehydration failed:', e));
+  }
 
   onMount(() => {
     bootstrap();

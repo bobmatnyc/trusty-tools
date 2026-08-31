@@ -399,6 +399,102 @@ export function addMessage(projectId: string, message: Message): void {
 }
 
 /**
+ * Why (#4278): rehydration seeds this store from the durable persona log on
+ * load. It must never clobber live messages — bootstrap is async, so the user
+ * can type before the history arrives, and overwriting would delete the very
+ * turn they just sent. Seeding ONLY an empty bucket makes a late-arriving
+ * history a no-op rather than a second data-loss bug, and makes the call
+ * idempotent if bootstrap ever re-fires.
+ * What: sets `projectId`'s list to `history` when that bucket is empty or
+ * absent; returns whether it seeded. A seed of zero messages is skipped, so
+ * an agent with nothing persisted leaves the store untouched.
+ * Test: `hydrateMessages_seeds_an_empty_bucket`,
+ * `hydrateMessages_never_clobbers_existing_messages`,
+ * `hydrateMessages_ignores_an_empty_history` in `app.hydrate.test.ts`.
+ */
+export function hydrateMessages(projectId: string, history: Message[]): boolean {
+  if (history.length === 0) return false;
+  let seeded = false;
+  messages.update((map) => {
+    if ((map.get(projectId) ?? []).length > 0) return map;
+    const next = new Map(map);
+    next.set(projectId, [...history]);
+    seeded = true;
+    return next;
+  });
+  return seeded;
+}
+
+/**
+ * Why (#4278): lazy-loading older turns prepends a page BEFORE what is already
+ * rendered — the volume requirement's other half. A plain `addMessage` loop
+ * would append them to the end, showing the oldest conversation after the
+ * newest.
+ * What: prepends `older` to `projectId`'s list. No-op for an empty page.
+ * Test: `prependMessages_puts_older_turns_first` in `app.hydrate.test.ts`.
+ */
+export function prependMessages(projectId: string, older: Message[]): void {
+  if (older.length === 0) return;
+  messages.update((map) => {
+    const next = new Map(map);
+    next.set(projectId, [...older, ...(next.get(projectId) ?? [])]);
+    return next;
+  });
+}
+
+/**
+ * Why (#4278): the "load earlier" control needs facts the chat view cannot
+ * derive from `messages` — WHOSE history is being paged, into WHICH bucket, how
+ * far back the client has read, and whether anything older exists. The identity
+ * half is not bookkeeping: the cursor is one global store, and the user can
+ * switch agent (`AgentSwitcher`, `ChatHeader`, `Sidebar`) or project
+ * (`ProjectsView`) at any time. Recording who a cursor belongs to is what lets
+ * `canLoadOlderChat` refuse a cursor that no longer matches the view.
+ * What: `null` until rehydration seeds a conversation. `start` is the ABSOLUTE
+ * index the server reported for the oldest message held, which is exactly what
+ * the next request passes as `until`.
+ */
+export interface ChatHistoryCursor {
+  agentId: string;
+  speaker: string;
+  projectId: string;
+  start: number;
+  hasMore: boolean;
+}
+
+export const chatHistoryCursor = writable<ChatHistoryCursor | null>(null);
+
+/** True while a "load earlier" fetch is in flight, to disable the control. */
+export const loadingOlderChat = writable<boolean>(false);
+
+/**
+ * Why: the cursor outlives the view it was armed for. Gating the control on
+ * `hasMore` alone let a stale cursor page agent A's conversation into agent B's
+ * chat, attributed to A — a continuous `persona-{agent}` session always reports
+ * `has_more`, so the affordance never disappeared on its own. Deriving the
+ * answer from live identity is why no reset is needed anywhere: a cursor that
+ * does not match the current view simply stops qualifying, and re-qualifies
+ * untouched if the user switches back.
+ *
+ * Chosen over a subscription that nulls the cursor on every switch because a
+ * subscription is a side effect racing the click handler, while this cannot be
+ * stale — it is recomputed from the same stores the view renders from.
+ *
+ * What: true only when a cursor exists, reports more history, and names both
+ * the active agent and the active project. `activeAgentId` is null for the base
+ * ctrl session, matching `resolveRehydrationTarget`'s mapping.
+ * Test: `canLoadOlderChat_*` in `app.hydrate.test.ts`.
+ */
+export const canLoadOlderChat = derived(
+  [chatHistoryCursor, activeAgentId, activeProjectId],
+  ([$cursor, $activeAgentId, $activeProjectId]) =>
+    !!$cursor &&
+    $cursor.hasMore &&
+    $cursor.agentId === ($activeAgentId ?? 'ctrl') &&
+    $cursor.projectId === $activeProjectId,
+);
+
+/**
  * Why: Progress events arrive while a task is running; we find the assistant
  * placeholder for that task id and append/replace its content to grow the
  * bubble in place rather than spamming new messages.

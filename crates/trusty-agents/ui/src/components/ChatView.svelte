@@ -11,7 +11,10 @@
     streamDeltaIntoTask,
     isRunning,
     activeTaskId,
+    canLoadOlderChat,
+    loadingOlderChat,
   } from '../stores/app';
+  import { loadOlderChat } from '../lib/chatHistory';
   import { responderDisplayName } from '../lib/roster';
   import { listenEvent, type UnlistenFn } from '../lib/transport';
   import { streamAccumulator, type DeltaPayload } from '../lib/chatStream';
@@ -149,6 +152,17 @@
    */
   let pinnedToBottom = true;
 
+  // #4278: page one more window of persisted history in above what is rendered.
+  // `loadOlderChat` reads the armed cursor for the agent, the speaker, AND the
+  // bucket, so this passes nothing — a stale cursor cannot be pointed at the
+  // wrong conversation from here.
+  async function loadEarlier() {
+    const result = await loadOlderChat();
+    if (result.reason) {
+      console.warn('[ChatView] could not load earlier messages:', result.reason);
+    }
+  }
+
   function onScroll() {
     if (scrollEl) pinnedToBottom = isPinnedToBottom(scrollEl);
   }
@@ -184,6 +198,25 @@
   {/if}
 
   <div class="mx-auto flex max-w-3xl flex-col gap-3 font-sans">
+    <!-- #4278: the other half of the bounded initial load. Rehydration seeds
+         only the newest page of a `persona-{agent}` session that never rolls
+         over, so without this control the bound would just be truncation.
+         `canLoadOlderChat` — not the cursor's `hasMore` — is the gate: the
+         cursor is global and survives an agent or project switch, and a
+         continuous persona session always reports more history, so gating on
+         `hasMore` alone left the button offering another agent's turns. -->
+    {#if $canLoadOlderChat}
+      <div class="flex justify-center">
+        <button
+          type="button"
+          on:click={loadEarlier}
+          disabled={$loadingOlderChat}
+          class="rounded-full border border-foundry-light-border dark:border-foundry-primary/30 px-3 py-1 text-xs text-foundry-light-muted dark:text-foundry-text/70 hover:text-foundry-light-text dark:hover:text-foundry-text disabled:opacity-50"
+        >
+          {$loadingOlderChat ? 'Loading…' : 'Load earlier messages'}
+        </button>
+      </div>
+    {/if}
     {#each $activeMessages as msg (msg.id)}
       {#if msg.role === 'user'}
         <div class="flex justify-end">

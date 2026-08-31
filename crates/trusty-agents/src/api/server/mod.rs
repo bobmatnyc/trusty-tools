@@ -49,6 +49,9 @@ mod agent_stores;
 mod agent_subagents;
 mod auth;
 mod cancel;
+// #4278: read back the durable `persona-{agent}` chat log so the GUI can
+// rehydrate its chat view on reload.
+mod chat_history;
 mod costs;
 mod ctrl_sessions;
 // #5052: short-lived tickets that authenticate the `/api/events` SSE stream.

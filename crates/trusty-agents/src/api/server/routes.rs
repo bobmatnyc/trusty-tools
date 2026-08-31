@@ -34,6 +34,7 @@ use super::agent_stores::agent_stores_route;
 use super::agent_subagents::agent_subagents_route;
 use super::auth::{ApiClientConfig, ApiConfig, AuthState, auth_middleware};
 use super::cancel::cancel_task;
+use super::chat_history::agent_chat_history_route;
 use super::costs::get_costs;
 use super::ctrl_sessions::{
     attach_ctrl_session_handler, create_ctrl_session_handler, get_ctrl_session_handler,
@@ -222,6 +223,15 @@ pub fn build_router_with_origins(
         .route(
             "/api/agents/{name}/subagents",
             axum::routing::get(agent_subagents_route),
+        )
+        // #4278: the durable persona chat log, so a page reload rehydrates the
+        // chat view instead of discarding it. Reads the trusty-memory
+        // `chat_session` projection keyed `persona-{agent}` — the only store
+        // holding BOTH halves of a turn (`GET /api/tasks` carries no request
+        // text). Bounded + cursored, because that session never rolls over.
+        .route(
+            "/api/agents/{name}/chat-history",
+            axum::routing::get(agent_chat_history_route),
         )
         // #4098: aggregated usage cost for the Costs tab — totals plus
         // by-agent/by-model/by-date breakdowns, folded read-time from

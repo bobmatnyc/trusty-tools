@@ -20,7 +20,10 @@ mod persona;
 // #4171 (epic #4167): pure gating helpers split out of `persona.rs`, which
 // sits exactly at the 500-SLOC production cap.
 mod persona_gate;
-mod persona_memory;
+// #4278: `pub(super)`, not `pub(crate)` — only `pm_task` names this, to
+// re-export `session_id_for` for the read path. `dispatch` itself stays
+// private, so exactly one function reaches crate scope.
+pub(super) mod persona_memory;
 // #446 (epic #3052): `[[plugins.python]]` registration, split out of
 // `persona.rs` for the same SLOC-cap reason as `persona_gate`.
 mod persona_plugins;

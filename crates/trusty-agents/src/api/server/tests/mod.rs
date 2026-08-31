@@ -17,6 +17,8 @@ mod agent_subagents;
 mod assistant_streams;
 mod attendance;
 mod cancel;
+// #4278: the durable persona chat log read back for GUI rehydration.
+mod chat_history;
 mod costs;
 mod ctrl_sessions;
 // #5052: `/api/events` stream authentication (ticket mint + redeem + CORS).
