@@ -17,7 +17,8 @@
    * Test: `cardActions.test.js` covers the one-action / many-action / no-action
    *       rule, the Enter/Space key set, and the described-by composition.
    *       `statusPresentation.test.js` covers the badge label, badge color and
-   *       hint sentence, including the on-demand members (#6416).
+   *       hint sentence, including the on-demand members, which render no
+   *       hint at all (#6416).
    *       Ordering of the cards themselves is
    *       server-side — see `detect::order_for_display` and
    *       `test_services_route_orders_running_before_absent`.

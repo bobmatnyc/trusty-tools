@@ -17,15 +17,13 @@ const onDemand = (over = {}) => ({
   ...over,
 });
 
-test('an installed on-demand tool is not told to start a daemon', () => {
+test('an installed on-demand tool shows no hint at all', () => {
   // The defect: the Trusty Review and Trusty Analyze cards read "Binary found
-  // but daemon is not running" over a service that has no daemon to run.
+  // but daemon is not running" over a service that has no daemon to run. The
+  // owner then ruled the follow-up explanatory sentence unnecessary too
+  // (#6416) — the card carries no hint, same as a running daemon.
   const out = cardPresentation(onDemand());
-  assert.equal(out.hint.kind, 'on-demand');
-  assert.ok(
-    !/daemon is not running/.test(out.hint.text),
-    `no daemon expectation may survive: ${out.hint.text}`,
-  );
+  assert.equal(out.hint, null);
 });
 
 test('an installed on-demand tool is not painted as a warning', () => {
