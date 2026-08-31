@@ -495,7 +495,7 @@ pub struct InlineCommentOut {
 /// serialised to the review log, compared between models, and diffed across
 /// pipeline versions.
 /// What: a subset of spec §07 REV-600 fields covering the MVP verdict loop.
-/// The full field set (JIRA/APEX/Confluence context, multi-pass tokens, etc.)
+/// The full field set (JIRA/Confluence context, multi-pass tokens, etc.)
 /// will be added in later stages.
 /// Test: `review_result_serde_roundtrip`.
 #[derive(Debug, Clone, Serialize, Deserialize)]

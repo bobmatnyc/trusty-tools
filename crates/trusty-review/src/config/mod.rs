@@ -322,27 +322,11 @@ pub struct ReviewConfig {
 
     // ── External context sources (Phase 6, #550) ───────────────────────────
     /// Resolved per-source settings for the external enrichment sources
-    /// (JIRA / Confluence / GitHub Issues; APEX in PR-B).  Each source defaults
+    /// (JIRA / Confluence / GitHub Issues).  Each source defaults
     /// to disabled unless its credentials are present (auto-enable) — so the
     /// crate works out of the box with no Atlassian/GitHub-context config.  These
     /// sources are best-effort / fail-open, distinct from the REQUIRED gate above.
     pub context_sources: crate::integrations::context::ContextSourcesConfig,
-
-    // ── APEX / KB indexed context (Phase 6 PR-B, REV-420, #550) ───────────
-    /// trusty-search index id that contains the APEX/KB corpus.
-    ///
-    /// `TRUSTY_SEARCH_APEX_INDEX` (default: `""`).  Empty string ⇒ APEX disabled
-    /// (fail-open no-op).  For Option A this is typically the SAME index id as
-    /// `search_index`; the APEX hits are distinguished by `apex_path_prefixes`.
-    pub apex_index: String,
-
-    /// Corpus-relative path prefixes that mark a search hit as an APEX/KB doc.
-    ///
-    /// `TRUSTY_REVIEW_APEX_PATH_PREFIXES` — comma-separated list (e.g.
-    /// `apex/,specs/,docs/adr/`).  Empty ⇒ treat ALL hits from `apex_index` as
-    /// APEX (no prefix filtering).  Non-empty ⇒ retain only hits whose `file`
-    /// starts with one of the prefixes.
-    pub apex_path_prefixes: Vec<String>,
 
     // ── Voice package (Phase 3, #754 / #756) ──────────────────────────────
     /// Name of the voice package to load for the 3-layer prompt composition
@@ -530,8 +514,6 @@ impl ReviewConfig {
             verification,
             context,
             context_sources,
-            apex_index: std::env::var("TRUSTY_SEARCH_APEX_INDEX").unwrap_or_default(),
-            apex_path_prefixes: load_apex_path_prefixes(),
             voice_package: voice::load_voice_package(repo_voice, file_voice),
             voice_principles: voice::load_voice_principles(repo_voice, file_voice),
             review_template: review_template::load_review_template(
@@ -730,26 +712,6 @@ fn load_live_review_requesters() -> Vec<String> {
         .map(|raw| {
             raw.split(',')
                 .map(|s| s.trim().to_lowercase())
-                .filter(|s| !s.is_empty())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Load the APEX/KB path-prefix filter list from the environment.
-///
-/// Why: REV-420 lets operators scope APEX hits to specific corpus sub-paths
-/// (e.g. `apex/,specs/`) so that, in a mixed code+docs index, only the doc
-/// segment is treated as APEX context.  This helper parses that list once.
-/// What: reads `TRUSTY_REVIEW_APEX_PATH_PREFIXES`, splits on commas, trims, and
-/// drops empty entries.  Absent var → empty list (no prefix filtering).
-/// Test: covered by `apex_path_prefixes_parses_csv` in `config_tests.rs`.
-fn load_apex_path_prefixes() -> Vec<String> {
-    std::env::var("TRUSTY_REVIEW_APEX_PATH_PREFIXES")
-        .ok()
-        .map(|raw| {
-            raw.split(',')
-                .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect()
         })

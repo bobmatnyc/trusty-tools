@@ -17,7 +17,7 @@ use super::prompt::{ReviewContext, ReviewPrMeta};
 /// What: formats PR metadata as a header, then the diff block, then optional
 /// context sections for code search and static analysis, then any external
 /// context (`## Related <source>` markdown already rendered by the context
-/// orchestrator — JIRA / Confluence / GitHub Issues; APEX in PR-B).
+/// orchestrator — JIRA / Confluence / GitHub Issues).
 /// Test: `prompt_includes_context_blocks`, `prompt_includes_external_context`.
 pub(super) fn build_user_message(
     owner: &str,
@@ -116,41 +116,6 @@ pub(super) fn build_user_message(
             ));
         }
         msg.push('\n');
-    }
-
-    // APEX product-spec context block (Phase 6 PR-B, REV-420).
-    // Each result is a snippet from the spec/docs corpus that semantically
-    // matches the PR content.  Cite format: [apex: `path:line` — "excerpt"].
-    if !context.apex_results.is_empty() {
-        msg.push_str("## Related APEX product specs\n\n");
-        // defensive: apex_results already capped in fetch_apex_context; guard against future refactors
-        for (i, apex) in context
-            .apex_results
-            .iter()
-            .enumerate()
-            .take(crate::config::constants::MAX_APEX_RESULTS)
-        {
-            let line_suffix = apex.start_line.map(|l| format!(":{l}")).unwrap_or_default();
-            msg.push_str(&format!(
-                "### APEX {} — `{}{}`\n",
-                i + 1,
-                apex.file,
-                line_suffix
-            ));
-            if !apex.snippet.is_empty() {
-                msg.push_str("```\n");
-                msg.push_str(&apex.snippet);
-                if !apex.snippet.ends_with('\n') {
-                    msg.push('\n');
-                }
-                msg.push_str("```\n");
-            }
-            msg.push('\n');
-        }
-        msg.push_str(
-            "When citing an APEX spec, use the format: \
-             [apex: `path/to/spec.md:15` — \"brief excerpt\"]\n\n",
-        );
     }
 
     // External context block (rendered `## Related <source>` markdown from the

@@ -9,7 +9,7 @@
 use super::*;
 
 // Shared fixture helpers (sample_meta, empty_context, stock_voice).
-// Extracted to avoid duplication across prompt_tests.rs / prompt_tests_apex.rs /
+// Extracted to avoid duplication across prompt_tests.rs /
 // prompt_voice_tests.rs (#760 cleanup finding #4).
 #[path = "prompt_test_helpers.rs"]
 mod helpers;
@@ -281,7 +281,6 @@ fn prompt_includes_context_blocks() {
             severity: "medium".to_string(),
             line: Some(20),
         }],
-        apex_results: vec![],
         coverage_contrib: None,
         ..Default::default()
     };
@@ -657,11 +656,6 @@ fn system_prompt_contains_source_citation_instruction() {
         );
     }
 }
-
-// ── APEX prompt tests ─────────────────────────────────────────────────────────
-// Extracted to prompt_tests_apex.rs to keep this file under the 500-line cap (#610).
-#[path = "prompt_tests_apex.rs"]
-mod apex_tests;
 
 // ── Rust false-positive guardrail tests (#1422) ───────────────────────────────
 

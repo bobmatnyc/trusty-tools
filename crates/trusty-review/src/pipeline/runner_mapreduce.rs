@@ -56,7 +56,7 @@ pub(super) struct MapReduceRun {
     pub raw_diff: String,
     /// PR metadata for the per-file prompts.
     pub pr_meta: ReviewPrMeta,
-    /// Gathered code-search/analyze/APEX context (PR-level, sliced per file).
+    /// Gathered code-search/analyze context (PR-level, sliced per file).
     pub context: ReviewContext,
     /// External (JIRA/Confluence) context markdown.
     pub external_context: String,

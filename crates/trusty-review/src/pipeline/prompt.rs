@@ -26,7 +26,6 @@ use crate::{
     coverage::CoverageVerdictContrib,
     integrations::{
         analyze_client::{ComplexityHotspot, Smell},
-        apex_context::ApexContextResult,
         search_client::SearchResult,
     },
     llm::{ChatMessage, LlmRequest, ResponseSchema, strip_provider_prefix},
@@ -189,14 +188,13 @@ pub fn review_response_schema() -> ResponseSchema {
 
 // ─── Context inputs ───────────────────────────────────────────────────────────
 
-/// Context assembled from trusty-search, trusty-analyze, and APEX before the LLM call.
+/// Context assembled from trusty-search and trusty-analyze before the LLM call.
 ///
 /// Why: the pipeline gathers context in parallel from multiple sources then
 /// bundles it into a single struct for prompt construction.
 /// What: all fields are optional / empty-defaulted so the pipeline degrades
 /// gracefully when a source is unavailable.
-/// Test: `build_review_prompt_includes_context_blocks`,
-/// `prompt_includes_apex_context` (prompt_tests.rs).
+/// Test: `build_review_prompt_includes_context_blocks` (prompt_tests.rs).
 #[derive(Debug, Default)]
 pub struct ReviewContext {
     /// Code search results from trusty-search (may be empty if unavailable).
@@ -205,13 +203,6 @@ pub struct ReviewContext {
     pub complexity_hotspots: Vec<ComplexityHotspot>,
     /// Code smells from trusty-analyze (may be empty).
     pub smells: Vec<Smell>,
-    /// APEX/KB product spec snippets (Phase 6 PR-B, REV-420, #550).
-    ///
-    /// Retrieved from the configured `apex_index` using the PR title+description
-    /// as the cross-query, then filtered by `apex_path_prefixes`.  Empty when
-    /// APEX is disabled (`apex_index` not configured) or no matching docs are
-    /// found.  Fail-open: a search error produces an empty vec, never an error.
-    pub apex_results: Vec<ApexContextResult>,
     /// Coverage verdict contribution from the coverage policy (#1014).
     ///
     /// `None` when coverage gating is disabled (the default) or when no LCOV
