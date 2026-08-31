@@ -66,22 +66,6 @@ cargo test -p trusty-common --features unconditional-only                 # only
 - `cargo build` / `cargo check -p trusty-common` are unaffected.
   `--all-features` is unavailable — the `embedder-*` ORT variants are mutually
   exclusive.
-- 🔴 **Naming a feature covers that feature and nothing else (#4474).** A run
-  that names one is a deliberate, visible choice, and the guard above lets it
-  through — but `--features inference-client` never compiled
-  `inference::bedrock`, which sits behind `bedrock-client`. What full coverage
-  means is stated in `[package.metadata.trusty-test-coverage]` in
-  `crates/trusty-common/Cargo.toml`: four lanes (`unconditional`, `core`,
-  `inference`, `symgraph`) plus exemptions that each say why no lane runs them.
-  `tests/feature_coverage.rs` fails when a declared feature is in neither, so
-  the statement cannot rot. Run every lane at a hardening boundary — it builds a
-  bundled ONNX Runtime, so it is not an inner-loop command:
-
-  ```bash
-  bash scripts/test_trusty_common_lanes.sh          # every lane
-  bash scripts/test_trusty_common_lanes.sh core     # one lane by name
-  ```
-
 - 🟡 Other crates hide the same trap: before trusting a crate-scoped green, check
   whether the module you edited sits behind a non-default feature.
 
@@ -187,20 +171,32 @@ and the disposition on a hit (`COMMENT` / `REOPEN` / `NEW REGRESSION` /
 closed issues by **test name**, **panic / error text**, **affected symbol**, and
 **crate** ([issue-search-keys.md](docs/reference/issue-search-keys.md)).
 
-🔴 **Issue lifecycle — open → coded → merged → tested → closed.** Three mutually
-exclusive labels between GitHub's native open/closed:
+🔴 **Issue lifecycle — open → in-progress → coded → merged → tested → closed.**
+Four mutually exclusive labels between GitHub's native open/closed:
 
 | Label | Meaning |
 |---|---|
+| `status:in-progress` | A session/agent has claimed it and is actively working it |
 | `status:coded` | Implementation pushed on a branch; PR not yet merged |
 | `status:merged` | PR merged to main; live verification pending |
 | `status:tested` | Verified live (installed binary / real run); eligible to close |
 
+- `status:in-progress` goes on at dispatch, with a comment naming the claiming
+  session and the date. Another session takes a claimed issue ONLY when the
+  claim is provably stale: the named session is gone AND nothing referencing
+  the issue (branch push, PR, comment) has moved since the claim. When in
+  doubt, leave it.
 - Advancing a state removes the prior label in the same edit:
   `gh issue edit N --add-label status:merged --remove-label status:coded`.
 - Fix PRs use `Refs #N`, **never** `Closes #N` — merge must not auto-close.
 - An issue closes only from `status:tested`, with live verification evidence in
   the closing comment. A merged fix that fails live verification stays open.
+
+🔴 **`.trusty-mpm/sessions/` is TRACKED** (owner ruling 2026-08-31) — session
+snapshots and the pause log are committed so other sessions and harnesses can
+read prior work and intent. Commit new snapshot files after each pause. The
+re-include at the end of `.gitignore` overrides the auto-managed ignore block;
+do not "fix" either rule.
 
 🔴 **Why/What/Test doc pattern with proportional depth:**
 
@@ -438,8 +434,7 @@ everywhere: ticket descriptions, build commands, conversation.
 
 - **Rust**: `rustup`, toolchain at MSRV `1.94` or later
   (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`).
-- **Node / pnpm**: only for the Svelte UIs — `trusty-console` carries two of
-  them (`ui/`, and `ui-search/` since #6155), plus `trusty-memory` and others
+- **Node / pnpm**: only for the Svelte UIs in `trusty-search` / `trusty-memory`
   (`npm i -g pnpm`).
 - **Env vars**: `RUST_LOG` and `SKIP_UI_BUILD=1` (skip the Svelte UI build in
   `build.rs`) are the day-to-day two. Full table:
