@@ -1034,3 +1034,70 @@ fn alias_collision_resolves_deterministically() {
         );
     }
 }
+
+/// A `TeamConfig` carrying both collision shapes #4293 covers on the `team:`
+/// path: two members declaring the alias `jr`, and two free-form `team.aliases`
+/// keys that both lower-case to `jr2`. Rebuilt per call so each iteration gets
+/// a fresh `HashMap` with its own iteration order.
+fn colliding_team_resolver() -> IdentityResolver {
+    let mut aliases = HashMap::new();
+    // Two keys that collide once lowercased. "JR2" sorts before "jr2".
+    aliases.insert("JR2".to_string(), "John Roe".to_string());
+    aliases.insert("jr2".to_string(), "Jane Roe".to_string());
+    let team = TeamConfig {
+        members: vec![
+            TeamMember {
+                name: "Jane Roe".into(),
+                email: "jane.roe@acme.com".into(),
+                aliases: vec!["jr".into()],
+            },
+            TeamMember {
+                name: "John Roe".into(),
+                email: "john.roe@acme.com".into(),
+                aliases: vec!["jr".into()],
+            },
+        ],
+        aliases,
+        canonical_domain: None,
+    };
+    IdentityResolver::new(Some(&team))
+}
+
+/// Why: #4293 — `new()` wrote member aliases with a raw `HashMap::insert`, so a
+/// contested alias went to the LAST member declared: the opposite policy from
+/// `from_alias_map`'s first-claimant-wins.
+/// What: two members declare `jr`; the lowest `(email, name)` member must claim
+/// it, not the one declared last.
+#[test]
+fn team_member_alias_collision_goes_to_the_first_claimant() {
+    for i in 0..200 {
+        let (n, e) = colliding_team_resolver().resolve("jr", "jr@unaffiliated.test");
+        assert_eq!(
+            n, "Jane Roe",
+            "member alias collision flipped on rebuild {i}"
+        );
+        assert_eq!(
+            e, "jane.roe@acme.com",
+            "member alias collision flipped on rebuild {i}"
+        );
+    }
+}
+
+/// Why: #4293 — `team.aliases` is a `HashMap`, so two keys differing only by
+/// case raced for the same lowercased slot and the last writer took it.
+/// What: `JR2` and `jr2` both lower-case to `jr2`; the first in sorted key order
+/// must claim it on every rebuild.
+#[test]
+fn team_free_form_alias_case_collision_goes_to_the_first_claimant() {
+    for i in 0..200 {
+        let (n, e) = colliding_team_resolver().resolve("jr2", "jr2@unaffiliated.test");
+        assert_eq!(
+            n, "John Roe",
+            "team.aliases case collision flipped on rebuild {i}"
+        );
+        assert_eq!(
+            e, "john.roe@acme.com",
+            "team.aliases case collision flipped on rebuild {i}"
+        );
+    }
+}

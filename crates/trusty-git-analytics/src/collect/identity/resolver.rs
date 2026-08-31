@@ -189,26 +189,42 @@ pub struct IdentityResolver {
 
 impl IdentityResolver {
     /// Construct a resolver from a [`TeamConfig`].
+    ///
+    /// Carries the same alias contract as [`Self::from_alias_map`] (issue
+    /// #4293): members are consumed in `(email, name)` order, an alias claimed
+    /// by two identities goes to the first claimant, and the three alias sources
+    /// are registered in a fixed precedence — member canonical emails, then
+    /// member declared aliases, then the free-form `team.aliases` map. So a
+    /// member always owns its own address, and a member alias still outranks a
+    /// free-form one, as it did before.
     pub fn new(team: Option<&TeamConfig>) -> Self {
         let mut aliases: HashMap<String, String> = HashMap::new();
         let mut members: Vec<(String, String)> = Vec::new();
         let mut canonical_domain: Option<String> = None;
         if let Some(team) = team {
+            // #4293: walk members in member_key order, not declaration order, so
+            // a contested alias and a case-colliding canonical name both resolve
+            // by a stated rule.
+            let mut roster: Vec<&crate::core::config::TeamMember> = team.members.iter().collect();
+            roster.sort_by(|a, b| {
+                (a.email.as_str(), a.name.as_str()).cmp(&(b.email.as_str(), b.name.as_str()))
+            });
+            for m in &roster {
+                members.push((m.name.clone(), m.email.clone()));
+                register_alias(&mut aliases, &m.email, &m.name);
+            }
+            for m in &roster {
+                for a in &m.aliases {
+                    register_alias(&mut aliases, a, &m.name);
+                }
+            }
             // #4293: `team.aliases` is a HashMap, so walk it in sorted key order
             // — two keys differing only by case otherwise raced for the same
             // lowercased slot.
             let mut free_aliases: Vec<(&String, &String)> = team.aliases.iter().collect();
             free_aliases.sort_unstable();
             for (k, v) in free_aliases {
-                aliases.insert(k.to_lowercase(), v.clone());
-            }
-            for m in &team.members {
-                members.push((m.name.clone(), m.email.clone()));
-                for a in &m.aliases {
-                    aliases.insert(a.to_lowercase(), m.name.clone());
-                }
-                // Also auto-register the canonical email as an alias to itself.
-                aliases.insert(m.email.to_lowercase(), m.name.clone());
+                register_alias(&mut aliases, k, v);
             }
             canonical_domain = team
                 .canonical_domain
@@ -216,9 +232,6 @@ impl IdentityResolver {
                 .map(|d| d.trim().trim_start_matches('@').to_lowercase())
                 .filter(|d| !d.is_empty());
         }
-        // #4293: two members whose canonical names differ only by case resolved
-        // by declaration order; sorting makes the winner a stated rule.
-        members.sort_by(|a, b| member_key(a).cmp(&member_key(b)));
         Self {
             aliases,
             members,
