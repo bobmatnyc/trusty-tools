@@ -9,6 +9,8 @@
 
 pub(crate) mod loading;
 mod params;
+// #3766: the configured bundled-template provider policy, end to end.
+mod provider_policy;
 
 use crate::agents::{AgentConfig, AgentInfo, ToolsConfig};
 

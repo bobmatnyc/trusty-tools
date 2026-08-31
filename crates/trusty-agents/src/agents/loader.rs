@@ -324,13 +324,84 @@ impl AgentConfig {
     /// other provider can no longer be hijacked by an ambient
     /// `ANTHROPIC_API_KEY`, and a pin TO Anthropic no longer depends on one
     /// being noticed.
+    ///
+    /// #3766 added one step in front: an agent that declares NEITHER a pin nor
+    /// a provider in its model slug adopts the operator's configured default
+    /// ([`crate::llm::provider_policy`]) as its `provider_id` before any of the
+    /// above runs. With no policy configured that step is a no-op and this
+    /// function behaves exactly as it did.
     /// Test: `agent_config_honours_a_provider_pin`,
     /// `agent_config_pin_beats_the_model_slug_prefix`,
     /// `agent_config_without_a_pin_is_unchanged`,
-    /// `agent_config_rejects_a_pin_with_no_credential`.
+    /// `agent_config_rejects_a_pin_with_no_credential`; and, for the policy
+    /// step, `agents::tests::provider_policy`.
     pub(crate) fn apply_provider_pin(&mut self) -> Result<()> {
-        let Some(pin) =
-            crate::llm::provider_pin::resolve(&self.agent.name, self.agent.provider_id.as_deref())?
+        // #3766: read the operator config only for an agent the policy could
+        // govern, so a pinned or provider-named agent costs no file I/O.
+        let policy = if crate::llm::provider_policy::applies_to(
+            self.agent.provider_id.as_deref(),
+            &self.agent.model,
+        ) {
+            crate::llm::provider_policy::configured_default()
+        } else {
+            None
+        };
+        self.apply_provider_pin_with_policy(policy.as_deref())
+    }
+
+    /// [`Self::apply_provider_pin`] against an explicitly supplied policy
+    /// (#3766) — the injectable half, so the policy's effect is testable
+    /// without mutating the process-global `$HOME`.
+    ///
+    /// Why: adopting the policy as this config's `provider_id` — rather than
+    /// carrying it as a second, parallel notion of "which provider" — is what
+    /// makes every #3765 consumer honour it for free: the slug rewrite here,
+    /// the ambient-routing skip in `ctrl::config::apply_credential_routing`,
+    /// and the re-pin on a post-load model override. A parallel field would
+    /// have to be threaded through each of those, and the first one missed
+    /// would be a silent ambient fallback — the exact defect being fixed.
+    /// What: when `policy` names a provider and
+    /// [`crate::llm::provider_policy::applies_to`] says this agent is
+    /// unpinned and provider-agnostic, writes it into `agent.provider_id`;
+    /// then runs the ordinary pin path. A policy naming an unusable provider
+    /// fails the load closed like any pin, with context naming the config key
+    /// so the operator knows which of the two sources to fix. Nothing is
+    /// written back to the agent's TOML — the policy is applied in memory on
+    /// every load, which is why a bundled-template reprovision cannot regress
+    /// it.
+    /// Test: `agents::tests::provider_policy`.
+    pub(crate) fn apply_provider_pin_with_policy(&mut self, policy: Option<&str>) -> Result<()> {
+        let mut from_policy = false;
+        if let Some(configured) = policy.map(str::trim).filter(|v| !v.is_empty())
+            && crate::llm::provider_policy::applies_to(
+                self.agent.provider_id.as_deref(),
+                &self.agent.model,
+            )
+        {
+            tracing::debug!(
+                agent = %self.agent.name,
+                provider = %configured,
+                "adopting the configured default provider for an unpinned agent"
+            );
+            self.agent.provider_id = Some(configured.to_string());
+            from_policy = true;
+        }
+
+        let resolved =
+            crate::llm::provider_pin::resolve(&self.agent.name, self.agent.provider_id.as_deref());
+        let Some(pin) = resolved.map_err(|e| {
+            if from_policy {
+                anyhow::Error::new(e).context(format!(
+                    "[{}] {} in ~/.trusty-agents/config.toml selected this provider for \
+                     unpinned agent '{}'; change that key or pin the agent explicitly",
+                    crate::llm::provider_policy::CONFIG_TABLE,
+                    crate::llm::provider_policy::CONFIG_KEY,
+                    self.agent.name
+                ))
+            } else {
+                anyhow::Error::new(e)
+            }
+        })?
         else {
             return Ok(());
         };

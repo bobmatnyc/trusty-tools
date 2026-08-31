@@ -1,6 +1,25 @@
 # trusty-agents global configuration
 # ~/.trusty-agents/config.toml
 
+# Issue #3766: which inference provider serves the bundled agent templates.
+#
+# Every bundled template ships a bare model slug (e.g. `claude-sonnet-4-6`)
+# and no `[agent].provider_id`. Left unset, such a template runs on whichever
+# ambient credential is found first, so the same template can land on a
+# different provider on two machines. Set this key to decide it once, here.
+#
+# Applies ONLY to agents that declare neither `[agent].provider_id` nor a
+# provider in their model slug — an explicit pin and a provider-named template
+# (`bedrock/…`, `openai/…`) both win over this default.
+#
+# Accepted values: openrouter, anthropic, bedrock, fireworks, atlascloud,
+# local. The provider must have a working credential or agent loads fail with
+# a message naming the missing environment variable — this never falls back
+# silently. Unset (the default, below) keeps the ambient behaviour unchanged.
+#
+# [providers]
+# default_provider_id = "anthropic"
+
 [mcp]
 # Agent roles that receive MCP tool descriptions in their system prompt
 inject_for_roles = ["ctrl", "pm", "research", "observe"]
