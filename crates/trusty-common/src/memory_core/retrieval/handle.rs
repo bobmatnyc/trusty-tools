@@ -614,8 +614,9 @@ impl PalaceHandle {
     /// `RememberOptions::allow_secret_like` opt-in bypasses the secret gate.
     /// What: Applies the supplied `FilterConfig` (skipping it entirely when
     /// `force == true`), THEN — unless `allow_secret_like == true` — always
-    /// runs [`check_secret`] regardless of `force`, classifies the content,
-    /// sets the appropriate TTL when the result is a `SessionEvent`, then
+    /// runs [`crate::memory_core::filter::check_secret`] regardless of
+    /// `force`, classifies the content, sets the appropriate TTL when the
+    /// result is a `SessionEvent`, then
     /// runs the original embed/upsert/persist pipeline under the default
     /// write-pipeline ceiling.
     ///
