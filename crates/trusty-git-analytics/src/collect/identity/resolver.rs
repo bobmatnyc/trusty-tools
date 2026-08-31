@@ -12,11 +12,13 @@
 //! alias table they are switched off (issue #4251). See
 //! [`IdentityResolver::fuzzy_fallback`].
 
+use std::cmp::Ordering;
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
 use rusqlite::params;
 use strsim::jaro_winkler;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::core::config::TeamConfig;
 use crate::core::db::Database;
@@ -88,11 +90,83 @@ pub fn email_domain_matches(email: &str, domain: &str) -> bool {
     }
 }
 
+/// Why: every member scan — both fuzzy tiers and
+/// [`IdentityResolver::find_member_by_name`] — walks `members` in slice order,
+/// so that order decides the winner. Building it by pushing in `HashMap`
+/// iteration order made the resolved identity differ between two resolvers
+/// constructed from identical input (issue #4293).
+/// What: total order over a canonical member — canonical email first, canonical
+/// name second, both compared as raw bytes.
+/// Test: see `resolver_tests::member_order_is_deterministic_across_rebuilds`.
+fn member_key(m: &(String, String)) -> (&str, &str) {
+    (m.1.as_str(), m.0.as_str())
+}
+
+/// Why: both fuzzy tiers kept the incumbent on an exact score tie, so the
+/// winner was whichever member the scan reached first (issue #4293).
+/// What: returns `true` when `(score, candidate)` should displace `best`,
+/// deciding an exact tie on [`member_key`] — lowest key wins — instead of on
+/// encounter order. Callers gate on the similarity threshold first, which
+/// already rejects a `NaN` score.
+/// Test: see `resolver_tests::fuzzy_tie_breaks_on_stable_key`.
+fn is_better(
+    score: f64,
+    candidate: &(String, String),
+    best: Option<(f64, &(String, String))>,
+) -> bool {
+    match best {
+        None => true,
+        Some((incumbent, m)) => match score.partial_cmp(&incumbent) {
+            Some(Ordering::Greater) => true,
+            Some(Ordering::Equal) => member_key(candidate) < member_key(m),
+            _ => false,
+        },
+    }
+}
+
+/// Why: two canonical identities may declare the same alias. Last-writer-wins
+/// over a `HashMap` iteration made that mapping differ between runs (#4293).
+/// What: claims `alias → canonical` only while the alias is unclaimed, so the
+/// FIRST writer wins under the caller's deterministic iteration order, and
+/// warns when a second identity is turned away.
+/// Test: see `resolver_tests::alias_collision_resolves_deterministically`.
+fn register_alias(aliases: &mut HashMap<String, String>, alias: &str, canonical: &str) {
+    match aliases.entry(alias.to_lowercase()) {
+        Entry::Vacant(slot) => {
+            slot.insert(canonical.to_string());
+        }
+        Entry::Occupied(slot) => {
+            if slot.get() != canonical {
+                warn!(
+                    alias = %alias,
+                    kept = %slot.get(),
+                    rejected = %canonical,
+                    "alias claimed by two canonical identities; keeping the first"
+                );
+            }
+        }
+    }
+}
+
+/// The first email-looking entry of an alias list, or the empty string.
+fn first_email(alias_list: &[String]) -> String {
+    alias_list
+        .iter()
+        .find(|a| a.contains('@'))
+        .cloned()
+        .unwrap_or_default()
+}
+
 /// Resolves observed author identities to canonical `(name, email)` pairs.
 pub struct IdentityResolver {
     /// Mapping of alias (lowercased name or email) → canonical name.
     aliases: HashMap<String, String>,
     /// Canonical members: `(canonical_name, canonical_email)`.
+    ///
+    /// Kept sorted by [`member_key`] at all times (issue #4293) — the fuzzy
+    /// tiers and [`Self::find_member_by_name`] scan this slice in order, so the
+    /// order is part of the resolver's contract, not an artefact of how the
+    /// caller's config happened to be laid out.
     members: Vec<(String, String)>,
     /// Threshold for accepting a fuzzy match.
     threshold: f64,
@@ -120,7 +194,12 @@ impl IdentityResolver {
         let mut members: Vec<(String, String)> = Vec::new();
         let mut canonical_domain: Option<String> = None;
         if let Some(team) = team {
-            for (k, v) in &team.aliases {
+            // #4293: `team.aliases` is a HashMap, so walk it in sorted key order
+            // — two keys differing only by case otherwise raced for the same
+            // lowercased slot.
+            let mut free_aliases: Vec<(&String, &String)> = team.aliases.iter().collect();
+            free_aliases.sort_unstable();
+            for (k, v) in free_aliases {
                 aliases.insert(k.to_lowercase(), v.clone());
             }
             for m in &team.members {
@@ -137,6 +216,9 @@ impl IdentityResolver {
                 .map(|d| d.trim().trim_start_matches('@').to_lowercase())
                 .filter(|d| !d.is_empty());
         }
+        // #4293: two members whose canonical names differ only by case resolved
+        // by declaration order; sorting makes the winner a stated rule.
+        members.sort_by(|a, b| member_key(a).cmp(&member_key(b)));
         Self {
             aliases,
             members,
@@ -154,26 +236,35 @@ impl IdentityResolver {
     /// The first entry in each alias list (if any looks like an email — i.e.
     /// contains `@`) is treated as the canonical email; otherwise the
     /// canonical email is left blank.
+    ///
+    /// The caller's `HashMap` is consumed in sorted canonical-name order and an
+    /// alias claimed by two identities goes to the first claimant, so the same
+    /// map always produces a byte-identical resolver (issue #4293). Self-aliases
+    /// — a canonical name and its canonical email — are registered ahead of the
+    /// declared alias lists, so an identity always owns its own name and address.
     pub fn from_alias_map(map: &HashMap<String, Vec<String>>) -> Self {
         let mut aliases: HashMap<String, String> = HashMap::new();
         let mut members: Vec<(String, String)> = Vec::new();
-        for (canon_name, alias_list) in map {
-            // Pick the first email-looking alias as canonical email.
-            let canon_email = alias_list
-                .iter()
-                .find(|a| a.contains('@'))
-                .cloned()
+        // #4293: HashMap iteration order is per-instance randomised — sort first.
+        let mut canon_names: Vec<&String> = map.keys().collect();
+        canon_names.sort_unstable();
+        for canon_name in &canon_names {
+            let canon_email = map
+                .get(*canon_name)
+                .map(|l| first_email(l))
                 .unwrap_or_default();
-            members.push((canon_name.clone(), canon_email.clone()));
-            // Register canonical name + canonical email as self-aliases.
-            aliases.insert(canon_name.to_lowercase(), canon_name.clone());
+            members.push(((*canon_name).clone(), canon_email.clone()));
+            register_alias(&mut aliases, canon_name, canon_name);
             if !canon_email.is_empty() {
-                aliases.insert(canon_email.to_lowercase(), canon_name.clone());
-            }
-            for a in alias_list {
-                aliases.insert(a.to_lowercase(), canon_name.clone());
+                register_alias(&mut aliases, &canon_email, canon_name);
             }
         }
+        for canon_name in &canon_names {
+            for a in map.get(*canon_name).into_iter().flatten() {
+                register_alias(&mut aliases, a, canon_name);
+            }
+        }
+        members.sort_by(|a, b| member_key(a).cmp(&member_key(b)));
         Self {
             aliases,
             members,
@@ -318,7 +409,13 @@ impl IdentityResolver {
             } else {
                 String::new()
             };
-            self.members.push((canonical.to_string(), canonical_email));
+            // #4293: insert in sorted position so a runtime-registered identity
+            // does not reintroduce arrival-order dependence into the scans.
+            let entry = (canonical.to_string(), canonical_email);
+            let at = self
+                .members
+                .partition_point(|m| member_key(m) < member_key(&entry));
+            self.members.insert(at, entry);
         }
     }
 
@@ -374,7 +471,8 @@ impl IdentityResolver {
                 0.0
             };
             let score = s_name.max(s_email);
-            if score >= self.threshold && best.map(|(b, _)| score > b).unwrap_or(true) {
+            // #4293: total comparison — an exact tie goes to the lowest member_key.
+            if score >= self.threshold && is_better(score, m, best) {
                 best = Some((score, m));
             }
         }
@@ -404,9 +502,8 @@ impl IdentityResolver {
                 jaro_winkler(&name_norm, &canon_local_norm),
             ];
             let score = candidates.iter().cloned().fold(0.0_f64, f64::max);
-            if score >= NORMALIZED_SIMILARITY_THRESHOLD
-                && best_norm.map(|(b, _)| score > b).unwrap_or(true)
-            {
+            // #4293: same total comparison as Tier 3.
+            if score >= NORMALIZED_SIMILARITY_THRESHOLD && is_better(score, m, best_norm) {
                 best_norm = Some((score, m));
             }
         }
@@ -499,6 +596,11 @@ impl IdentityResolver {
         self.canonical_domain.as_deref()
     }
 
+    /// First member whose canonical name matches `name`, ignoring ASCII case.
+    ///
+    /// #4293: "first" is well-defined because `members` is kept sorted by
+    /// [`member_key`], so two canonical names differing only by case always
+    /// resolve to the same one.
     fn find_member_by_name(&self, name: &str) -> Option<(String, String)> {
         self.members
             .iter()
