@@ -395,8 +395,12 @@ pub struct HttpDaemon {
     child: Child,
     pub base_url: String,
     /// #5439: the daemon's local-client credential, read from the `0600` file
-    /// `run_http` wrote before binding. Every route but `/health` requires it.
+    /// `run_http` wrote into [`Self::data_dir`] before binding. Every route but
+    /// `/health` requires it.
     pub token: String,
+    /// The daemon's own isolated data directory. Held so it outlives the
+    /// daemon; dropping it removes the tree.
+    pub data_dir: tempfile::TempDir,
 }
 
 /// Spawn `tcode serve --http --port 0` and discover its ephemeral bound
@@ -437,6 +441,20 @@ pub async fn spawn_http_daemon_with_env(
     // the test harness from its own path, and would warm `project` (a
     // `tempfile` fixture) into the operator's live trusty-search registry.
     cmd.env(trusty_common::test_harness::FORCE_ENV, "1");
+    // #5439: give every spawned daemon its OWN data directory. Without this
+    // they all mint into the operator's real `~/…/trusty-code/auth_token`, so
+    // a test run rewrites a live daemon's credential and two concurrent test
+    // daemons race each other for it. The isolated tree is also where this
+    // helper reads the token from below, which is what makes the read
+    // deterministic rather than a lookup in whatever the parent process
+    // happens to see.
+    let data_dir = tempfile::tempdir().expect("daemon data dir");
+    cmd.env(
+        trusty_common::data_dir::DATA_DIR_OVERRIDE_ENV,
+        data_dir.path(),
+    );
+    // A caller's own env wins — `cli_e2e` sets its own override for tests that
+    // assert on the discovery file's location.
     for (key, value) in envs {
         cmd.env(key, value);
     }
@@ -472,16 +490,25 @@ pub async fn spawn_http_daemon_with_env(
     tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
 
     // #5439: the daemon established this before it printed the line above, so
-    // by now the file exists. Read through the same entry point a real client
-    // uses, so a test can never authenticate by a path production does not
-    // have.
-    let token = trusty_common::daemon_token::read_token(trusty_code::serve::http::TOKEN_APP_NAME)
-        .expect("`tcode serve --http` must write its credential before it binds");
+    // by now the file exists — in the isolated tree, not the operator's. Read
+    // through the same entry point a real client uses, so a test can never
+    // authenticate by a path production does not have.
+    let token_path = data_dir
+        .path()
+        .join(trusty_code::serve::http::TOKEN_APP_NAME)
+        .join(trusty_common::daemon_token::TOKEN_FILENAME);
+    let token = trusty_common::daemon_token::read_token_at(&token_path).unwrap_or_else(|| {
+        panic!(
+            "`tcode serve --http` must write its credential to {} before it binds",
+            token_path.display()
+        )
+    });
 
     HttpDaemon {
         child,
         base_url,
         token,
+        data_dir,
     }
 }
 

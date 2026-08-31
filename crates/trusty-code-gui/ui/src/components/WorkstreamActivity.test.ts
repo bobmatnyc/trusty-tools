@@ -139,7 +139,7 @@ function fakeDaemon(opts: {
     }
     // #5439: the SSE routes are opened through a single-use ticket minted
     // here, because EventSource cannot carry an Authorization header.
-    if (url.endsWith('/auth/sse-ticket') && method === 'POST') {
+    if (url.includes('/auth/sse-ticket') && method === 'POST') {
       return { ok: true, status: 200, json: async () => ({ ticket: 'test-ticket' }) } as Response;
     }
     throw new Error(`unexpected fetch: ${method} ${url}`);

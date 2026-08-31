@@ -11504,6 +11504,7 @@ dependencies = [
  "tree-sitter-typescript",
  "trusty-mcp",
  "unicode-normalization",
+ "url",
  "uuid",
  "walkdir",
  "wiremock",

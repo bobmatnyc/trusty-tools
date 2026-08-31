@@ -64,28 +64,26 @@ pub const DAEMON_TOKEN_ENV: &str = "TCODE_DAEMON_TOKEN";
 /// else. `TCODE_DAEMON_URL` can legitimately name a non-loopback address (an
 /// operator forwarding a port, a remote daemon over a tunnel), and attaching
 /// the local machine's credential to a request leaving loopback would hand it
-/// to whatever answers — a credential-exfiltration path that the discovery
-/// override alone would be enough to open. Gating on the destination means the
-/// caller cannot be tricked into disclosing it by pointing at a different
-/// host, and it keeps the check in ONE place rather than at each of the three
-/// request sites.
-/// What: `None` unless `base_url`'s host is loopback; otherwise
-/// [`DAEMON_TOKEN_ENV`] when set and non-empty, else the `0600` token file
-/// `crate::serve::http::run_http` wrote. A missing credential is `None`, never
-/// an error — the caller sends no header and reads the daemon's `401`.
+/// to whatever answers. This crate resolves it in one place so the three
+/// request sites — `RpcHttpClient`, the SSE readers, and `probe_health` —
+/// cannot each grow their own answer.
+/// What: a thin naming of `trusty_common::daemon_token::credential_for`, which
+/// owns the loopback gate, the override precedence, and the file read.
+///
+/// The gate lives THERE and not here for a reason worth stating: the first
+/// version of this function called `server::origin_is_loopback`, an
+/// `Origin`-HEADER parser, which reads
+/// `http://127.0.0.1:7882@attacker.example` as loopback and shipped the token
+/// off-machine. `trusty-code-gui` had the identical bug in its own copy. One
+/// implementation, parsing the way the client that dials the URL parses.
 /// Test: `discovery_tests::credential_is_withheld_from_a_non_loopback_url`,
 /// `discovery_tests::credential_env_override_wins_for_a_loopback_url`.
 pub fn daemon_credential_for(base_url: &str) -> Option<String> {
-    if !trusty_common::server::origin_is_loopback(base_url) {
-        return None;
-    }
-    if let Ok(raw) = std::env::var(DAEMON_TOKEN_ENV) {
-        let trimmed = raw.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
-        }
-    }
-    trusty_common::daemon_token::read_token(crate::serve::http::TOKEN_APP_NAME)
+    trusty_common::daemon_token::credential_for(
+        crate::serve::http::TOKEN_APP_NAME,
+        base_url,
+        DAEMON_TOKEN_ENV,
+    )
 }
 
 /// How long the liveness ping (`GET {url}/health`) waits before treating the
@@ -353,15 +351,34 @@ mod discovery_tests {
             "http://example.test:7882",
             "https://10.0.0.5:7882",
             "http://192.168.1.4:7882",
+            // The userinfo family. An `Origin`-header parser splits the
+            // authority at the FIRST `:`, so it reads the host of these as
+            // `127.0.0.1` and calls them loopback; WHATWG URL parsing splits
+            // userinfo at the LAST `@`, so the real host is `attacker.example`
+            // and every request goes there. Gating on the header parser shipped
+            // a credential-exfiltration path that the plain-hostname rows above
+            // could never catch.
+            "http://127.0.0.1:7882@attacker.example",
+            "http://127.0.0.1:7882@attacker.example/rpc",
+            "http://localhost@attacker.example",
+            "http://user:pass@attacker.example",
         ]
         .map(daemon_credential_for);
         let local = daemon_credential_for("http://127.0.0.1:7882");
         unsafe {
             std::env::remove_var(DAEMON_TOKEN_ENV);
         }
-        for (url, resolved) in ["example.test", "10.0.0.5", "192.168.1.4"]
-            .iter()
-            .zip(remote.iter())
+        for (url, resolved) in [
+            "example.test",
+            "10.0.0.5",
+            "192.168.1.4",
+            "127.0.0.1:7882@attacker.example",
+            "127.0.0.1:7882@attacker.example/rpc",
+            "localhost@attacker.example",
+            "user:pass@attacker.example",
+        ]
+        .iter()
+        .zip(remote.iter())
         {
             assert_eq!(resolved.as_deref(), None, "{url} must get no credential");
         }

@@ -82,7 +82,38 @@ pub struct DaemonAuth(Arc<Inner>);
 struct Inner {
     token: String,
     public_paths: HashSet<String>,
-    tickets: Mutex<HashMap<String, Instant>>,
+    tickets: Mutex<HashMap<String, Ticket>>,
+}
+
+/// One outstanding ticket: what it may open, and when it stops being valid.
+///
+/// Why `path` is stored rather than the ticket standing alone: a ticket rides
+/// in a URL and therefore lands in access logs and tracing spans. Unbound, a
+/// ticket read from a log within [`TICKET_TTL`] buys one arbitrary
+/// authenticated request — `POST /rpc` included, which is the whole method
+/// surface. Bound, it buys exactly the one stream its holder already had the
+/// credential to open.
+struct Ticket {
+    path: String,
+    issued: Instant,
+}
+
+/// A credential too weak to guard anything.
+///
+/// Why an error rather than a silent acceptance: a daemon constructed around an
+/// empty or truncated token would answer `401` to every real client while
+/// authenticating a bare `Authorization: Bearer `. Refusing at construction
+/// makes that a startup failure the operator sees, not a runtime hole nobody
+/// does.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "daemon credential is {got} characters; at least {} are required",
+    crate::daemon_token::MIN_TOKEN_LEN
+)]
+pub struct WeakCredential {
+    /// Length of the rejected value. The VALUE is never included — an error
+    /// string reaches logs.
+    pub got: usize,
 }
 
 impl DaemonAuth {
@@ -94,48 +125,77 @@ impl DaemonAuth {
     /// state would silently discard tickets minted against the earlier value.
     /// Fail-closed by construction: a route merged in later is guarded without
     /// anyone remembering to add it, and a daemon opts a path OUT here, once.
-    /// What: `public_paths` is matched by exact string equality against
+    /// What: rejects a `token` shorter than
+    /// [`crate::daemon_token::MIN_TOKEN_LEN`] with [`WeakCredential`], so a
+    /// daemon cannot start around a credential that guards nothing.
+    /// `public_paths` is matched by exact string equality against
     /// `req.uri().path()` — never a prefix match, so `/health` cannot be
     /// widened into `/healthz-secrets` by a future route name.
     /// Test: `bearer_auth_tests::public_path_passes_without_a_credential`,
-    /// `bearer_auth_tests::public_path_match_is_exact_not_prefix`.
-    pub fn new<I, S>(token: impl Into<String>, public_paths: I) -> Self
+    /// `bearer_auth_tests::public_path_match_is_exact_not_prefix`,
+    /// `bearer_auth_tests::a_weak_token_is_refused_at_construction`.
+    pub fn new<I, S>(token: impl Into<String>, public_paths: I) -> Result<Self, WeakCredential>
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        Self(Arc::new(Inner {
-            token: token.into(),
+        let token = token.into();
+        if token.len() < crate::daemon_token::MIN_TOKEN_LEN {
+            return Err(WeakCredential { got: token.len() });
+        }
+        Ok(Self(Arc::new(Inner {
+            token,
             public_paths: public_paths.into_iter().map(Into::into).collect(),
             tickets: Mutex::new(HashMap::new()),
-        }))
+        })))
     }
 
-    /// Mint a single-use ticket redeemable for [`TICKET_TTL`].
+    /// Mint a single-use ticket that opens `path`, and only `path`, by `GET`,
+    /// for [`TICKET_TTL`].
     ///
-    /// Why/What: see the module docs' `EventSource` note. Expired entries are
-    /// swept here rather than on a timer, so the table cannot grow without an
-    /// authenticated caller driving it.
-    /// Test: `bearer_auth_tests::ticket_authenticates_once_then_is_spent`.
-    pub fn issue_ticket(&self) -> String {
+    /// Why the binding: see [`Ticket`]. The caller decides which paths are
+    /// ticketable — this type deliberately does not know the daemon's routes,
+    /// so a daemon validates the requested path against its own SSE shapes
+    /// before calling here.
+    /// What: mints, sweeps expired entries (here rather than on a timer, so the
+    /// table cannot grow without an authenticated caller driving it), and
+    /// records the bound path.
+    /// Test: `bearer_auth_tests::ticket_authenticates_once_then_is_spent`,
+    /// `bearer_auth_tests::a_ticket_opens_only_the_path_it_was_issued_for`.
+    pub fn issue_ticket(&self, path: impl Into<String>) -> String {
         let ticket = mint_token();
         if let Ok(mut tickets) = self.0.tickets.lock() {
             let now = Instant::now();
-            tickets.retain(|_, issued| now.duration_since(*issued) < TICKET_TTL);
-            tickets.insert(ticket.clone(), now);
+            tickets.retain(|_, t| now.duration_since(t.issued) < TICKET_TTL);
+            tickets.insert(
+                ticket.clone(),
+                Ticket {
+                    path: path.into(),
+                    issued: now,
+                },
+            );
         }
         ticket
     }
 
-    /// Redeem `ticket`, consuming it. `false` for unknown, spent, or expired.
-    fn consume_ticket(&self, ticket: &str) -> bool {
+    /// Redeem `ticket` for a `GET` of `path`, consuming it.
+    ///
+    /// What: `false` for unknown, spent, expired, a non-`GET` method, or a path
+    /// other than the one the ticket was issued for. The entry is removed
+    /// whichever way the checks land — a ticket presented on the wrong route is
+    /// spent, not left available for a retry on the right one.
+    fn consume_ticket(&self, ticket: &str, method: &axum::http::Method, path: &str) -> bool {
         let Ok(mut tickets) = self.0.tickets.lock() else {
             // A poisoned table means a panic already happened while holding it;
             // refusing the ticket is the fail-closed answer.
             return false;
         };
         match tickets.remove(ticket) {
-            Some(issued) => Instant::now().duration_since(issued) < TICKET_TTL,
+            Some(t) => {
+                method == axum::http::Method::GET
+                    && t.path == path
+                    && Instant::now().duration_since(t.issued) < TICKET_TTL
+            }
             None => false,
         }
     }
@@ -185,9 +245,14 @@ pub async fn require_bearer(
     mut req: Request,
     next: Next,
 ) -> Response {
-    let authenticated = auth.header_is_valid(req.headers().get(AUTHORIZATION))
-        || DaemonAuth::ticket_in_query(req.uri().query())
-            .is_some_and(|ticket| auth.consume_ticket(ticket));
+    let authenticated = auth.header_is_valid(req.headers().get(AUTHORIZATION)) || {
+        // #5439: a ticket is redeemable only for the GET of the exact path it
+        // was issued for, so one read from a log buys that stream and nothing
+        // else. Bound before the borrow so `req` stays available below.
+        let (method, path) = (req.method().clone(), req.uri().path().to_string());
+        DaemonAuth::ticket_in_query(req.uri().query())
+            .is_some_and(|ticket| auth.consume_ticket(ticket, &method, &path))
+    };
 
     if authenticated {
         req.extensions_mut().insert(Authenticated);
@@ -224,7 +289,7 @@ mod bearer_auth_tests {
     }
 
     fn guarded(token: &str) -> Router {
-        router(DaemonAuth::new(token, ["/health"]))
+        router(DaemonAuth::new(token, ["/health"]).expect("test token clears the floor"))
     }
 
     async fn get_with(app: Router, uri: &str, header: Option<&str>) -> (StatusCode, String) {
@@ -325,7 +390,7 @@ mod bearer_auth_tests {
     /// path must stay guarded.
     #[tokio::test]
     async fn public_path_match_is_exact_not_prefix() {
-        let auth = DaemonAuth::new(mint_token(), ["/priv"]);
+        let auth = DaemonAuth::new(mint_token(), ["/priv"]).expect("mint_token clears the floor");
         let (status, _) = get_with(router(auth), "/private", None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
@@ -343,8 +408,8 @@ mod bearer_auth_tests {
     /// fail, which is what makes a ticket safe to place in a URL.
     #[tokio::test]
     async fn ticket_authenticates_once_then_is_spent() {
-        let auth = DaemonAuth::new(mint_token(), ["/health"]);
-        let ticket = auth.issue_ticket();
+        let auth = DaemonAuth::new(mint_token(), ["/health"]).expect("mint_token clears the floor");
+        let ticket = auth.issue_ticket("/private");
         let uri = format!("/private?{TICKET_QUERY_PARAM}={ticket}");
 
         let (status, body) = get_with(router(auth.clone()), &uri, None).await;
@@ -355,14 +420,55 @@ mod bearer_auth_tests {
         assert_eq!(status, StatusCode::UNAUTHORIZED, "replay must fail");
     }
 
+    /// A ticket rides in a URL and therefore reaches access logs. Bound to one
+    /// path, a ticket read from a log within the TTL buys that stream and
+    /// nothing else; unbound, it bought one arbitrary authenticated request —
+    /// `POST /rpc` included.
+    #[tokio::test]
+    async fn a_ticket_opens_only_the_path_it_was_issued_for() {
+        let auth = DaemonAuth::new(mint_token(), ["/health"]).expect("mint_token clears the floor");
+        let ticket = auth.issue_ticket("/health");
+
+        let (status, _) = get_with(
+            router(auth.clone()),
+            &format!("/private?{TICKET_QUERY_PARAM}={ticket}"),
+            None,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "a ticket for /health must not authenticate /private"
+        );
+
+        // And it is SPENT by that attempt, not left available for the route it
+        // was actually issued for.
+        assert!(
+            !auth.consume_ticket(&ticket, &axum::http::Method::GET, "/health"),
+            "a ticket presented on the wrong route must not survive it"
+        );
+    }
+
+    /// A ticket authenticates a `GET` only. The SSE routes it exists for are
+    /// `GET`; letting it carry a `POST` would hand a log reader the mutation
+    /// surface.
+    #[test]
+    fn a_ticket_does_not_authenticate_a_non_get_method() {
+        let auth = DaemonAuth::new(mint_token(), Vec::<String>::new())
+            .expect("mint_token clears the floor");
+        let ticket = auth.issue_ticket("/rpc");
+        assert!(!auth.consume_ticket(&ticket, &axum::http::Method::POST, "/rpc"));
+    }
+
     /// A ticket issued against one clone must be redeemable against another —
     /// axum clones the state per request, and a per-clone table would reject
     /// every ticket.
     #[tokio::test]
     async fn ticket_table_is_shared_across_clones() {
-        let auth = DaemonAuth::new(mint_token(), Vec::<String>::new());
-        let ticket = auth.clone().issue_ticket();
-        assert!(auth.consume_ticket(&ticket));
+        let auth = DaemonAuth::new(mint_token(), Vec::<String>::new())
+            .expect("mint_token clears the floor");
+        let ticket = auth.clone().issue_ticket("/events");
+        assert!(auth.consume_ticket(&ticket, &axum::http::Method::GET, "/events"));
     }
 
     /// A ticket past [`TICKET_TTL`] must be refused even though the table
@@ -370,7 +476,8 @@ mod bearer_auth_tests {
     /// sweep in `issue_ticket`.
     #[test]
     fn expired_ticket_is_rejected() {
-        let auth = DaemonAuth::new(mint_token(), Vec::<String>::new());
+        let auth = DaemonAuth::new(mint_token(), Vec::<String>::new())
+            .expect("mint_token clears the floor");
         let stale = mint_token();
         // A machine up for less than TICKET_TTL cannot represent the earlier
         // instant; skip rather than panic on `Instant - Duration`.
@@ -378,9 +485,43 @@ mod bearer_auth_tests {
             return;
         };
         if let Ok(mut tickets) = auth.0.tickets.lock() {
-            tickets.insert(stale.clone(), issued);
+            tickets.insert(
+                stale.clone(),
+                Ticket {
+                    path: "/events".to_string(),
+                    issued,
+                },
+            );
         }
-        assert!(!auth.consume_ticket(&stale), "an expired ticket must fail");
+        assert!(
+            !auth.consume_ticket(&stale, &axum::http::Method::GET, "/events"),
+            "an expired ticket must fail"
+        );
+    }
+
+    /// A daemon must not start around a credential that guards nothing.
+    ///
+    /// Paired with `daemon_token`'s `MIN_TOKEN_LEN` floor in
+    /// `credentials_match`: that stops an empty token from VERIFYING, this
+    /// stops one from being installed at all, so the failure is a visible
+    /// startup error rather than a daemon that `401`s every real client.
+    #[test]
+    fn a_weak_token_is_refused_at_construction() {
+        for weak in ["", " ", "short", &"a".repeat(31)] {
+            let err = DaemonAuth::new(weak, ["/health"])
+                .err()
+                .unwrap_or_else(|| panic!("{weak:?} must be refused"));
+            assert_eq!(err.got, weak.len());
+        }
+        // The error reaches logs, so it reports the LENGTH and never the value.
+        let err = DaemonAuth::new("sekrit-and-distinctive", ["/health"])
+            .err()
+            .expect("refused");
+        assert!(
+            !err.to_string().contains("sekrit"),
+            "the error must not echo the credential: {err}"
+        );
+        assert!(DaemonAuth::new("a".repeat(32), ["/health"]).is_ok());
     }
 
     /// Only the `ticket` parameter is read, and only when it is spelled

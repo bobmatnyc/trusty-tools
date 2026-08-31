@@ -65,6 +65,26 @@ export function resetDaemonTokenCache(): void {
 }
 
 /**
+ * Do `url` and `base` share an origin?
+ *
+ * Why: the first version compared with `url.startsWith(base)`, the prefix-match
+ * class this repo already fixed once in #3280. `http://127.0.0.1:7882` is a
+ * prefix of `http://127.0.0.1:7882.attacker.example`, so a request to the
+ * attacker's host would have carried the credential. Comparing parsed origins
+ * makes the host, port, and scheme all exact.
+ *
+ * What: `new URL(...).origin` on both sides. An unparseable URL is not
+ * same-origin — fail closed, send no credential.
+ */
+export function sameOrigin(url: string, base: string): boolean {
+  try {
+    return new URL(url).origin === new URL(base).origin;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Wrap `globalThis.fetch` so daemon requests carry the credential.
  *
  * What: leaves the URL, method, body, and every other option untouched; adds
@@ -80,7 +100,7 @@ export function installDaemonAuth(): void {
     const url =
       typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     const base = await apiBase();
-    if (!url.startsWith(base)) return original(input, init);
+    if (!sameOrigin(url, base)) return original(input, init);
 
     const token = await daemonToken();
     if (!token) return original(input, init);
@@ -94,31 +114,112 @@ export function installDaemonAuth(): void {
   globalThis.fetch = wrapped as typeof fetch;
 }
 
-/**
- * Open an authenticated `EventSource` against a daemon SSE route.
- *
- * Why: `EventSource` has no header API, and putting the durable token in the
- * query string would write it into the daemon's access log and every tracing
- * span. The daemon mints a single-use ticket that expires in seconds, so a
- * ticket captured from a log is already spent.
- *
- * What: `path` is daemon-relative (`/sessions/x/events`). Returns `null` when
- * no ticket can be obtained — the caller then falls back to polling, exactly as
- * it already does when `EventSource` is unavailable.
- */
-export async function openDaemonEventStream(path: string): Promise<EventSource | null> {
-  if (typeof EventSource === 'undefined') return null;
-  const base = await apiBase();
+/** Backoff between re-mint attempts after a stream drops, in milliseconds. */
+const RECONNECT_BACKOFF_MS = [1000, 2000, 5000, 10000];
+
+/** A live SSE subscription. `close()` stops it and cancels any pending retry. */
+export interface DaemonEventStream {
+  close(): void;
+}
+
+/** Mint a ticket for `path`, or `null` when none can be obtained. */
+async function mintTicket(base: string, path: string): Promise<string | null> {
   const token = await daemonToken();
   if (!token) return null;
-
-  const res = await fetch(`${base}${SSE_TICKET_PATH}`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await fetch(
+    `${base}${SSE_TICKET_PATH}?path=${encodeURIComponent(path)}`,
+    { method: 'POST', headers: { Authorization: `Bearer ${token}` } },
+  );
   if (!res.ok) return null;
   const { ticket } = (await res.json()) as { ticket?: string };
-  if (!ticket) return null;
+  return ticket ?? null;
+}
 
-  return new EventSource(`${base}${path}?${TICKET_QUERY_PARAM}=${encodeURIComponent(ticket)}`);
+/**
+ * Open an authenticated SSE subscription to a daemon stream, and keep it open.
+ *
+ * Why the ticket: `EventSource` has no header API, and putting the durable
+ * token in the query string would write it into the daemon's access log and
+ * every tracing span. The daemon mints a single-use ticket that expires in
+ * seconds, so a ticket captured from a log is already spent.
+ *
+ * Why this is a subscription rather than a bare `EventSource`: single-use is
+ * exactly what breaks `EventSource`'s own reconnect. On any drop the browser
+ * retries the SAME URL, which carries the SAME spent ticket, so the daemon
+ * answers `401` and the stream dies permanently — silently, with the component
+ * still holding a handle it believes is live. Reconnecting has to mint a fresh
+ * ticket, which only this layer can do.
+ *
+ * What: mints, opens, and on `error` closes and re-mints on a bounded backoff
+ * ([`RECONNECT_BACKOFF_MS`], then steady at its last value). `onMessage` is
+ * rebound to each new `EventSource`, so a caller sees one continuous stream.
+ * Returns `null` when the FIRST attempt cannot get a ticket — the caller then
+ * falls back to polling, exactly as it already does when `EventSource` is
+ * unavailable.
+ */
+export async function openDaemonEventStream(
+  path: string,
+  onMessage: (event: MessageEvent) => void,
+): Promise<DaemonEventStream | null> {
+  if (typeof EventSource === 'undefined') return null;
+  const base = await apiBase();
+
+  const first = await mintTicket(base, path);
+  if (!first) return null;
+
+  let source: EventSource | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let attempt = 0;
+  let closed = false;
+
+  const open = (ticket: string) => {
+    if (closed) return;
+    source = new EventSource(
+      `${base}${path}?${TICKET_QUERY_PARAM}=${encodeURIComponent(ticket)}`,
+    );
+    source.onmessage = (event) => {
+      // A message means the stream is healthy: reset the backoff so a later,
+      // unrelated drop retries promptly rather than at the previous ceiling.
+      attempt = 0;
+      onMessage(event);
+    };
+    source.onerror = () => {
+      // The browser would retry this URL itself, with the spent ticket. Close
+      // first so it cannot, then come back with a fresh one.
+      source?.close();
+      source = null;
+      scheduleReconnect();
+    };
+  };
+
+  const scheduleReconnect = () => {
+    if (closed || timer !== null) return;
+    const delay =
+      RECONNECT_BACKOFF_MS[Math.min(attempt, RECONNECT_BACKOFF_MS.length - 1)];
+    attempt += 1;
+    timer = setTimeout(() => {
+      timer = null;
+      if (closed) return;
+      void (async () => {
+        const ticket = await mintTicket(base, path);
+        if (closed) return;
+        if (ticket) open(ticket);
+        else scheduleReconnect();
+      })();
+    }, delay);
+  };
+
+  open(first);
+
+  return {
+    close() {
+      closed = true;
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      source?.close();
+      source = null;
+    },
+  };
 }

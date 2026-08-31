@@ -101,7 +101,7 @@ function fakeDaemon(initial: Workstream[], activeId: string | null = null) {
 
     // here, because EventSource cannot carry an Authorization header.
 
-    if (url.endsWith('/auth/sse-ticket') && method === 'POST') {
+    if (url.includes('/auth/sse-ticket') && method === 'POST') {
 
       return { ok: true, status: 200, json: async () => ({ ticket: 'test-ticket' }) } as Response;
 

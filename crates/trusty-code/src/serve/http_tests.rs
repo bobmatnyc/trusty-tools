@@ -31,7 +31,7 @@ pub(super) const TEST_TOKEN: &str =
 /// The `DaemonAuth` `build_axum_router` is given throughout this file —
 /// `run_http`'s configuration, with `/health` as the one public path.
 pub(super) fn test_auth() -> DaemonAuth {
-    DaemonAuth::new(TEST_TOKEN, [PUBLIC_HEALTH_PATH])
+    DaemonAuth::new(TEST_TOKEN, [PUBLIC_HEALTH_PATH]).expect("TEST_TOKEN clears the floor")
 }
 
 /// A request builder already carrying [`TEST_TOKEN`].

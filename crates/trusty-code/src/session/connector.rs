@@ -89,6 +89,27 @@ impl TcodeConnector {
             daemon_url,
         }
     }
+
+    /// Build a connector presenting an explicitly supplied credential.
+    ///
+    /// Why: an integration test drives a daemon it spawned with its OWN
+    /// isolated data directory (#5439's hermeticity fix), so the credential is
+    /// not the one this process would resolve from disk. Passing it as an
+    /// argument beats exporting `TCODE_DAEMON_TOKEN`, which is process-global
+    /// and races the other tests in the same binary.
+    /// What: identical to [`Self::with_daemon_url`] except the credential comes
+    /// from the caller. The loopback gate still applies — a non-loopback
+    /// `daemon_url` gets no header, whatever is passed here.
+    /// Test: `tests/connector_e2e.rs`'s live-daemon arms.
+    pub fn with_daemon_url_and_credential(daemon_url: impl Into<String>, credential: &str) -> Self {
+        let daemon_url = daemon_url.into();
+        let http = if trusty_common::daemon_token::url_targets_loopback(&daemon_url) {
+            client_presenting(credential)
+        } else {
+            reqwest::Client::new()
+        };
+        Self { http, daemon_url }
+    }
 }
 
 /// A `reqwest::Client` presenting the daemon credential for `daemon_url`.
@@ -104,9 +125,18 @@ impl TcodeConnector {
 /// Test: `connector_e2e`'s live-daemon arms exercise the credentialed path;
 /// the loopback gate is covered in `tui_client::discovery`'s tests.
 fn credentialed_client(daemon_url: &str) -> reqwest::Client {
-    let Some(token) = crate::tui_client::discovery::daemon_credential_for(daemon_url) else {
-        return reqwest::Client::new();
-    };
+    match crate::tui_client::discovery::daemon_credential_for(daemon_url) {
+        Some(token) => client_presenting(&token),
+        None => reqwest::Client::new(),
+    }
+}
+
+/// A client sending `Authorization: Bearer <token>` on every request.
+///
+/// What: the header is marked sensitive so `reqwest`'s own `Debug` output
+/// redacts it. A token that will not fit in a header value yields a plain
+/// client rather than a panic — the caller then reads the daemon's `401`.
+fn client_presenting(token: &str) -> reqwest::Client {
     let Ok(mut value) = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}")) else {
         return reqwest::Client::new();
     };

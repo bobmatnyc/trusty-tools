@@ -78,19 +78,19 @@ pub fn get_daemon_token(state: State<'_, GuiState>) -> String {
 /// need no `tauri::State` (which has no public constructor outside a running
 /// `App`).
 fn daemon_token_for(daemon_url: &str) -> String {
-    // The classifier is trusty-common's, shared with the daemon's own origin
-    // guard — a second "is this loopback" spelling here is exactly what would
-    // drift and start disclosing the token off-host.
-    if !trusty_common::server::origin_is_loopback(daemon_url) {
-        return String::new();
-    }
-    if let Ok(raw) = std::env::var(DAEMON_TOKEN_ENV) {
-        let trimmed = raw.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
-    }
-    trusty_common::daemon_token::read_token(crate::state::TOKEN_APP_NAME).unwrap_or_default()
+    // #5439: one shared resolver, not a second copy of the loopback gate. This
+    // function used to spell the gate itself with `server::origin_is_loopback`,
+    // an `Origin`-HEADER parser that reads
+    // `http://127.0.0.1:7882@attacker.example` as loopback — so a
+    // `TRUSTY_CODE_URL` of that shape handed the local token to the frontend,
+    // which then sent it to `attacker.example`. `trusty-code`'s client had the
+    // identical bug in its identical copy.
+    trusty_common::daemon_token::credential_for(
+        crate::state::TOKEN_APP_NAME,
+        daemon_url,
+        DAEMON_TOKEN_ENV,
+    )
+    .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -124,12 +124,27 @@ mod tests {
         unsafe {
             std::env::set_var(DAEMON_TOKEN_ENV, "a".repeat(64));
         }
-        let remote = daemon_token_for("http://example.test:7882");
+        let remote: Vec<(&str, String)> = [
+            "http://example.test:7882",
+            // The userinfo family — an `Origin`-header parser splits the
+            // authority at the FIRST `:` and reads the host as `127.0.0.1`,
+            // while the browser this URL is handed to resolves
+            // `attacker.example`. See the twin case in
+            // `trusty_code::tui_client::discovery`.
+            "http://127.0.0.1:7882@attacker.example",
+            "http://localhost@attacker.example",
+            "http://user:pass@attacker.example",
+        ]
+        .iter()
+        .map(|url| (*url, daemon_token_for(url)))
+        .collect();
         let local = daemon_token_for("http://127.0.0.1:7882");
         unsafe {
             std::env::remove_var(DAEMON_TOKEN_ENV);
         }
-        assert_eq!(remote, "", "a remote daemon must get no credential");
+        for (url, resolved) in &remote {
+            assert_eq!(resolved, "", "{url} must get no credential");
+        }
         assert_eq!(local, "a".repeat(64), "loopback must get the credential");
     }
 

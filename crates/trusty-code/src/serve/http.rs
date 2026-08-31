@@ -296,13 +296,58 @@ async fn health_handler(
 /// a ticket that expires in seconds and dies on first use does not carry that
 /// cost. Reaching this route already requires the header, so a ticket is never
 /// a way IN — only a way to carry an existing right onto a URL.
-/// What: mints via `DaemonAuth::issue_ticket` and returns `{"ticket": "…"}`.
-/// The route is NOT public, so an anonymous `POST` is `401`ed by the guard
-/// before this function runs.
-/// Test: `http_sse_ticket_requires_a_credential`,
-/// `http_sse_ticket_opens_the_session_events_stream_once`.
-async fn sse_ticket_handler(State(state): State<HttpState>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "ticket": state.auth.issue_ticket() }))
+/// What: takes the path the caller means to open (`?path=`), refuses anything
+/// that is not one of this daemon's two SSE routes, and mints a ticket bound to
+/// that exact path. The route is NOT public, so an anonymous `POST` is `401`ed
+/// by the guard before this function runs.
+///
+/// The binding is what keeps a ticket cheap to leak. Unbound, a ticket read
+/// from a trace log within its TTL bought one arbitrary authenticated request —
+/// `POST /rpc`, the whole method surface, included. Bound, it buys the one
+/// stream its holder already had the credential to open. The route allowlist
+/// lives here rather than in `trusty_common` because it is this daemon's route
+/// table, not a property of the guard.
+/// Test: `http_auth_tests::sse_ticket_requires_a_credential`,
+/// `http_auth_tests::an_sse_ticket_opens_one_stream_then_is_spent`,
+/// `http_auth_tests::a_ticket_cannot_be_minted_for_a_non_sse_path`.
+async fn sse_ticket_handler(
+    State(state): State<HttpState>,
+    axum::extract::Query(params): axum::extract::Query<SseTicketRequest>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    if !path_is_ticketable(&params.path) {
+        // No echo of the requested path — this response reaches a browser.
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "not a ticketable stream"})),
+        ));
+    }
+    Ok(Json(
+        serde_json::json!({ "ticket": state.auth.issue_ticket(&params.path) }),
+    ))
+}
+
+/// The `?path=` a ticket request names.
+#[derive(serde::Deserialize)]
+struct SseTicketRequest {
+    path: String,
+}
+
+/// Is `path` one of the two SSE streams a ticket may open?
+///
+/// Why: a ticket is only as narrow as the set of paths it can be minted for. A
+/// handler that minted for whatever it was handed would give back the arbitrary
+/// authenticated request the binding exists to remove.
+/// What: exact shape match on `/sessions/{id}/events` and
+/// `/workstreams/{id}/events` — three segments, the first and last fixed, the
+/// id non-empty and free of `/`. Anything else, `/rpc` included, is refused.
+/// Test: `http_auth_tests::a_ticket_cannot_be_minted_for_a_non_sse_path`.
+fn path_is_ticketable(path: &str) -> bool {
+    let segments: Vec<&str> = path.split('/').collect();
+    // A leading `/` yields an empty first segment: ["", group, id, "events"].
+    matches!(segments.as_slice(),
+        ["", group, id, "events"]
+            if (*group == "sessions" || *group == "workstreams") && !id.is_empty()
+    )
 }
 
 /// `GET /sessions/{id}/events` — Server-Sent Events stream of a session's
@@ -407,7 +452,8 @@ pub async fn run_http(
         trusty_common::daemon_token::ensure_token(TOKEN_APP_NAME)
             .context("tcode serve --http: establish the daemon credential")?,
         [PUBLIC_HEALTH_PATH],
-    );
+    )
+    .context("tcode serve --http: the stored daemon credential is too weak to guard the API")?;
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = TcpListener::bind(addr)

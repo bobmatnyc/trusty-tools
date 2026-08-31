@@ -17,6 +17,7 @@ import {
   installDaemonAuth,
   openDaemonEventStream,
   resetDaemonTokenCache,
+  sameOrigin,
 } from './daemon-auth';
 
 const TOKEN = 'a'.repeat(64);
@@ -108,21 +109,46 @@ describe('daemon-auth', () => {
     expect(authHeaderOf(stub)).toBe(`Bearer ${TOKEN}`);
   });
 
-  it('mints a ticket and puts it in the SSE URL rather than the token', async () => {
-    localStorage.setItem(TOKEN_STORAGE_KEY, TOKEN);
-    const opened: string[] = [];
-    class FakeEventSource {
-      constructor(url: string) {
-        opened.push(url);
-      }
-      close() {}
+  it('rejects a lookalike host rather than prefix-matching the base URL', () => {
+    // The prefix-match class already fixed once in #3280:
+    // `http://127.0.0.1:7882` is a PREFIX of
+    // `http://127.0.0.1:7882.attacker.example`, so a startsWith test would have
+    // sent the credential there.
+    expect(sameOrigin(`${DEFAULT_DAEMON_URL}/sessions`, DEFAULT_DAEMON_URL)).toBe(true);
+    for (const hostile of [
+      'http://127.0.0.1:7882.attacker.example/sessions',
+      'http://127.0.0.1:78820/sessions',
+      'https://127.0.0.1:7882/sessions',
+      'http://127.0.0.1:7883/sessions',
+      'not a url',
+    ]) {
+      expect(sameOrigin(hostile, DEFAULT_DAEMON_URL)).toBe(false);
     }
+  });
+
+  it('does not attach the credential to a lookalike prefix host', async () => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, TOKEN);
+    const stub = stubFetch();
+    installDaemonAuth();
+
+    await fetch(`${DEFAULT_DAEMON_URL}.attacker.example/sessions`);
+
+    expect(authHeaderOf(stub)).toBeNull();
+  });
+
+  it('mints a ticket for the requested path and puts it in the SSE URL', async () => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, TOKEN);
+    const { opened, FakeEventSource } = fakeEventSource();
     vi.stubGlobal('EventSource', FakeEventSource);
-    stubFetch(new Response(JSON.stringify({ ticket: 'tkt-1' }), { status: 200 }));
+    const stub = stubFetch(new Response(JSON.stringify({ ticket: 'tkt-1' }), { status: 200 }));
 
-    const source = await openDaemonEventStream('/sessions/s1/events');
+    const stream = await openDaemonEventStream('/sessions/s1/events', () => {});
 
-    expect(source).not.toBeNull();
+    expect(stream).not.toBeNull();
+    // The ticket request names the stream it is for, so the daemon can bind it.
+    expect(String(stub.mock.calls[0]?.[0])).toBe(
+      `${DEFAULT_DAEMON_URL}/auth/sse-ticket?path=%2Fsessions%2Fs1%2Fevents`,
+    );
     expect(opened).toHaveLength(1);
     expect(opened[0]).toBe(
       `${DEFAULT_DAEMON_URL}/sessions/s1/events?${TICKET_QUERY_PARAM}=tkt-1`,
@@ -132,29 +158,91 @@ describe('daemon-auth', () => {
     expect(opened[0]).not.toContain(TOKEN);
   });
 
+  it('re-mints a fresh ticket when the stream drops', async () => {
+    // A ticket is single-use, so EventSource's OWN reconnect re-sends a spent
+    // one, gets 401, and the stream dies permanently. Only this layer can mint
+    // a replacement.
+    vi.useFakeTimers();
+    try {
+      localStorage.setItem(TOKEN_STORAGE_KEY, TOKEN);
+      const { opened, instances, FakeEventSource } = fakeEventSource();
+      vi.stubGlobal('EventSource', FakeEventSource);
+      let minted = 0;
+      globalThis.fetch = vi.fn(async () => {
+        minted += 1;
+        return new Response(JSON.stringify({ ticket: `tkt-${minted}` }), { status: 200 });
+      }) as unknown as typeof fetch;
+
+      const stream = await openDaemonEventStream('/sessions/s1/events', () => {});
+      expect(opened).toHaveLength(1);
+
+      instances[0].onerror?.(new Event('error'));
+      expect(instances[0].closed).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(opened).toHaveLength(2);
+      expect(opened[1]).toContain(`${TICKET_QUERY_PARAM}=tkt-2`);
+      expect(opened[1]).not.toContain('tkt-1');
+
+      stream?.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops reconnecting once closed', async () => {
+    vi.useFakeTimers();
+    try {
+      localStorage.setItem(TOKEN_STORAGE_KEY, TOKEN);
+      const { opened, instances, FakeEventSource } = fakeEventSource();
+      vi.stubGlobal('EventSource', FakeEventSource);
+      stubFetch(new Response(JSON.stringify({ ticket: 'tkt' }), { status: 200 }));
+
+      const stream = await openDaemonEventStream('/sessions/s1/events', () => {});
+      instances[0].onerror?.(new Event('error'));
+      stream?.close();
+
+      await vi.advanceTimersByTimeAsync(60000);
+      expect(opened).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('returns null when the daemon refuses to mint a ticket', async () => {
     localStorage.setItem(TOKEN_STORAGE_KEY, TOKEN);
-    vi.stubGlobal(
-      'EventSource',
-      class {
-        close() {}
-      },
-    );
+    vi.stubGlobal('EventSource', fakeEventSource().FakeEventSource);
     stubFetch(new Response('', { status: 401 }));
 
-    expect(await openDaemonEventStream('/sessions/s1/events')).toBeNull();
+    expect(await openDaemonEventStream('/sessions/s1/events', () => {})).toBeNull();
   });
 
   it('returns null with no credential rather than opening an unauthenticated stream', async () => {
-    vi.stubGlobal(
-      'EventSource',
-      class {
-        close() {}
-      },
-    );
+    vi.stubGlobal('EventSource', fakeEventSource().FakeEventSource);
     const stub = stubFetch();
 
-    expect(await openDaemonEventStream('/sessions/s1/events')).toBeNull();
+    expect(await openDaemonEventStream('/sessions/s1/events', () => {})).toBeNull();
     expect(stub).not.toHaveBeenCalled();
   });
 });
+
+/** A recording `EventSource` double: the URLs opened and each live instance. */
+function fakeEventSource() {
+  const opened: string[] = [];
+  const instances: FakeSource[] = [];
+  class FakeSource {
+    onmessage: ((e: MessageEvent) => void) | null = null;
+    onerror: ((e: Event) => void) | null = null;
+    closed = false;
+    constructor(url: string) {
+      opened.push(url);
+      instances.push(this);
+    }
+    close() {
+      this.closed = true;
+    }
+  }
+  return { opened, instances, FakeEventSource: FakeSource };
+}

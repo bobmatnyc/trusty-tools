@@ -70,7 +70,8 @@ async fn delegate_is_not_supported() {
 #[tokio::test]
 async fn list_sessions_empty_fleet_returns_empty_vec() {
     let daemon = support::spawn_http_daemon().await;
-    let connector = TcodeConnector::with_daemon_url(daemon.base_url.clone());
+    let connector =
+        TcodeConnector::with_daemon_url_and_credential(daemon.base_url.clone(), &daemon.token);
     let sessions = connector.list_sessions().await.expect("list_sessions");
     assert!(sessions.is_empty(), "fresh daemon must have no sessions");
 }
@@ -79,7 +80,8 @@ async fn list_sessions_empty_fleet_returns_empty_vec() {
 #[tokio::test]
 async fn session_status_unknown_id_is_not_found() {
     let daemon = support::spawn_http_daemon().await;
-    let connector = TcodeConnector::with_daemon_url(daemon.base_url.clone());
+    let connector =
+        TcodeConnector::with_daemon_url_and_credential(daemon.base_url.clone(), &daemon.token);
     ConnectorTestKit::assert_status_not_found_for_unknown_id(&connector, "does-not-exist").await;
 }
 
@@ -87,14 +89,16 @@ async fn session_status_unknown_id_is_not_found() {
 #[tokio::test]
 async fn send_input_unknown_id_is_not_found() {
     let daemon = support::spawn_http_daemon().await;
-    let connector = TcodeConnector::with_daemon_url(daemon.base_url.clone());
+    let connector =
+        TcodeConnector::with_daemon_url_and_credential(daemon.base_url.clone(), &daemon.token);
     ConnectorTestKit::assert_send_not_found_for_unknown_id(&connector, "does-not-exist").await;
 }
 
 #[tokio::test]
 async fn attach_unknown_id_is_not_found() {
     let daemon = support::spawn_http_daemon().await;
-    let connector = TcodeConnector::with_daemon_url(daemon.base_url.clone());
+    let connector =
+        TcodeConnector::with_daemon_url_and_credential(daemon.base_url.clone(), &daemon.token);
     let err = connector.attach("does-not-exist").await.unwrap_err();
     assert!(err.is_not_found(), "expected NotFound, got {err:?}");
 }
@@ -105,7 +109,8 @@ async fn attach_unknown_id_is_not_found() {
 #[tokio::test]
 async fn create_session_full_lifecycle() {
     let daemon = support::spawn_http_daemon().await;
-    let connector = TcodeConnector::with_daemon_url(daemon.base_url.clone());
+    let connector =
+        TcodeConnector::with_daemon_url_and_credential(daemon.base_url.clone(), &daemon.token);
     // A dedicated tempdir (not the shared OS temp root) held alive for the
     // whole test, mirroring `tm_tests.rs::local_bare_repo`'s TempDir-guard
     // pattern — `session.create`'s `ProjectBinding::resolve` just needs SOME

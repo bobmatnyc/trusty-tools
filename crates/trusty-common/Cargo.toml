@@ -217,6 +217,10 @@ axum = { workspace = true, optional = true }
 tower-http = { workspace = true, optional = true }
 # Optional: enabled by the `rpc` feature for UUID-v4 JSON-RPC request ids.
 uuid = { workspace = true, optional = true }
+# Optional: enabled by `daemon-token` for `url_targets_loopback` (#5439). The
+# gate must parse a URL the way the client dialling it does; a hand-rolled
+# authority split is the bug it exists to prevent.
+url = { workspace = true, optional = true }
 # Optional: enabled by the `embedder` feature (formerly the `trusty-embedder`
 # crate). fastembed-rs provides the ONNX-runtime text-embedding pipeline;
 # `hf-hub-native-tls` is required so it can fetch the model on first run.
@@ -430,14 +434,16 @@ catchup = ["dep:rusqlite", "memory-rpc", "palace-resolve"]
 # gzip) and a fast-fail reqwest client for daemon-to-daemon calls.
 axum-server = ["dep:axum", "dep:tower-http"]
 # Enables the `daemon_token` module (#5439): the `0600` local-client credential
-# a loopback daemon and its clients share, plus the constant-time comparison
-# every verifier uses. Turning it on WITH `axum-server` additionally compiles
-# `server::bearer_auth`, the router-wide enforcement layer. Kept separate from
-# `axum-server` so a client-only consumer (trusty-code-gui's Tauri shell reads
-# the token to hand to its webview) pays for neither axum nor tower-http.
-# `uuid` supplies the CSPRNG behind `mint_token` and is already an optional
-# dependency here.
-daemon-token = ["dep:uuid"]
+# a loopback daemon and its clients share, the WHATWG loopback gate every client
+# resolves through, and the constant-time comparison every verifier uses.
+# Turning it on WITH `axum-server` additionally compiles `server::bearer_auth`,
+# the router-wide enforcement layer. Kept separate from `axum-server` because
+# the two halves are genuinely separable — a client that only reads the token
+# needs no router — even though both of today's consumers happen to enable both.
+# `uuid` supplies the CSPRNG behind `mint_token`, `url` the WHATWG parsing the
+# loopback gate must not hand-roll, and `thiserror` the weak-credential error;
+# all three are already optional dependencies here.
+daemon-token = ["dep:uuid", "dep:url", "dep:thiserror"]
 # Enables the `memory_rpc` module: the one JSON-RPC client for the
 # trusty-memory daemon's Unix socket. Implies `uds` (#6286) — the daemon retired
 # its HTTP listener, so the framing and the envelope now come from that module

@@ -79,7 +79,7 @@ async fn unauthenticated_requests_are_rejected_on_every_route() {
         ("GET", "/workstreams"),
         ("POST", "/workstreams"),
         ("GET", "/workstreams/any-id/events"),
-        ("POST", super::SSE_TICKET_PATH),
+        ("POST", "/auth/sse-ticket?path=%2Fsessions%2Fs1%2Fevents"),
     ] {
         let resp = guarded_router()
             .await
@@ -260,13 +260,70 @@ async fn sse_ticket_requires_a_credential() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(super::SSE_TICKET_PATH)
+                .uri(format!(
+                    "{}?path=/sessions/s1/events",
+                    super::SSE_TICKET_PATH
+                ))
                 .body(Body::empty())
                 .expect("build request"),
         )
         .await
         .expect("router response");
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// A ticket may be minted only for one of the two SSE streams.
+///
+/// Why: the ticket's narrowness is exactly the set of paths it can be minted
+/// for. A handler that minted for whatever it was handed would give a log
+/// reader back the arbitrary authenticated request — `POST /rpc` included —
+/// that binding the ticket to a path exists to remove.
+#[tokio::test]
+async fn a_ticket_cannot_be_minted_for_a_non_sse_path() {
+    for path in [
+        "/rpc",
+        "/sessions",
+        "/sessions/s1",
+        "/sessions/s1/transcript",
+        "/sessions//events",
+        "/agents",
+        "/health",
+        "/sessions/s1/events/extra",
+        "",
+    ] {
+        let resp = guarded_router()
+            .await
+            .oneshot(
+                authed_request()
+                    .method("POST")
+                    .uri(format!(
+                        "{}?path={}",
+                        super::SSE_TICKET_PATH,
+                        urlencode(path)
+                    ))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("router response");
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "a ticket must not be mintable for {path:?}"
+        );
+    }
+}
+
+/// Percent-encode the few characters these test paths carry — enough for a
+/// query value, not a general encoder.
+fn urlencode(raw: &str) -> String {
+    raw.chars()
+        .map(|c| match c {
+            '/' => "%2F".to_string(),
+            '&' | '=' | '?' | '#' | ' ' => format!("%{:02X}", c as u8),
+            other => other.to_string(),
+        })
+        .collect()
 }
 
 /// The browser path end to end: mint a ticket over the header-authenticated
@@ -281,12 +338,17 @@ async fn an_sse_ticket_opens_one_stream_then_is_spent() {
     let session = sessions.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     let app = build_axum_router(router, sessions, workstreams, test_binding(), test_auth());
 
+    let stream_path = format!("/sessions/{}/events", session.id);
     let minted = app
         .clone()
         .oneshot(
             authed_request()
                 .method("POST")
-                .uri(super::SSE_TICKET_PATH)
+                .uri(format!(
+                    "{}?path={}",
+                    super::SSE_TICKET_PATH,
+                    urlencode(&stream_path)
+                ))
                 .body(Body::empty())
                 .expect("build request"),
         )
@@ -299,8 +361,7 @@ async fn an_sse_ticket_opens_one_stream_then_is_spent() {
         .to_string();
 
     let uri = format!(
-        "/sessions/{}/events?{}={ticket}",
-        session.id,
+        "{stream_path}?{}={ticket}",
         trusty_common::server::bearer_auth::TICKET_QUERY_PARAM
     );
     let opened = app
@@ -335,6 +396,67 @@ async fn an_sse_ticket_opens_one_stream_then_is_spent() {
         StatusCode::UNAUTHORIZED,
         "a spent ticket must not open a second stream"
     );
+}
+
+/// A ticket minted for one stream must not open a DIFFERENT route.
+///
+/// This is the arm that fails if the path binding is dropped: before it, a
+/// ticket read from a trace log within its 30s life bought one arbitrary
+/// authenticated request, `POST /rpc` — the whole JSON-RPC method surface —
+/// included.
+#[tokio::test]
+async fn a_ticket_is_bound_to_the_stream_it_was_minted_for() {
+    let (router, sessions, workstreams) = router_and_sessions().await;
+    let session = sessions.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let app = build_axum_router(router, sessions, workstreams, test_binding(), test_auth());
+
+    let minted = app
+        .clone()
+        .oneshot(
+            authed_request()
+                .method("POST")
+                .uri(format!(
+                    "{}?path={}",
+                    super::SSE_TICKET_PATH,
+                    urlencode(&format!("/sessions/{}/events", session.id))
+                ))
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("router response");
+    let ticket = body_json(minted).await["ticket"]
+        .as_str()
+        .expect("ticket is a string")
+        .to_string();
+
+    let param = trusty_common::server::bearer_auth::TICKET_QUERY_PARAM;
+    for (method, uri) in [
+        ("POST", format!("/rpc?{param}={ticket}")),
+        ("GET", format!("/sessions?{param}={ticket}")),
+        (
+            "GET",
+            format!("/sessions/{}/transcript?{param}={ticket}", session.id),
+        ),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(&uri)
+                    .header("content-type", "application/json")
+                    .body(rpc_create_body())
+                    .expect("build request"),
+            )
+            .await
+            .expect("router response");
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "an SSE ticket must not authenticate {method} {uri}"
+        );
+    }
 }
 
 /// A fabricated ticket must not open a stream — the guard redeems from its own
