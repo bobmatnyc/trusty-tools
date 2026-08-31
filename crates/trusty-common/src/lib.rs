@@ -963,6 +963,27 @@ pub mod daemon_addr;
 /// Test: covered via daemon_addr integration tests.
 pub mod health_probe;
 
+/// The local-client credential a loopback daemon and its clients share
+/// through a `0600` file (#5439).
+///
+/// Why: a loopback bind limits remote reach but establishes no identity among
+/// local callers, so `trusty-code serve --http` served sessions, transcripts,
+/// and every mutation route to any process on the machine. Server and clients
+/// need one answer to "where is the token and what counts as valid"; a second
+/// spelling of either is the defect the common-entry-point rule forbids.
+/// What: Exposes [`daemon_token::token_path`], [`daemon_token::ensure_token`]
+/// (server side — read or mint at `0600`), [`daemon_token::read_token`] /
+/// [`daemon_token::read_token_at`] (client side, best-effort),
+/// [`daemon_token::mint_token`], and [`daemon_token::credentials_match`] (the
+/// constant-time comparison every verifier uses instead of `==`). The axum
+/// enforcement half is `server::bearer_auth`, behind `axum-server`.
+/// Read the module's honesty clause before describing the boundary this
+/// establishes: a `0600` file is an OS-user and browser-origin boundary, not
+/// isolation from an untrusted process running as the same uid.
+/// Test: `cargo test -p trusty-common --features daemon-token -- daemon_token::`.
+#[cfg(feature = "daemon-token")]
+pub mod daemon_token;
+
 /// The single HTTP-client constructor for loopback/daemon targets (#4392).
 ///
 /// Why: reqwest 0.12 routes `127.0.0.1` through an exported `HTTP_PROXY` /

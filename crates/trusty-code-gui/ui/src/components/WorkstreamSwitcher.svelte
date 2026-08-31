@@ -58,6 +58,7 @@
   // extension this component) mounts inside `.hdr`.
   import { resolveActiveWorkstreamId, setActiveWorkstreamId } from '../lib/active-workstream.svelte';
   import { apiBase } from '../lib/api-config';
+  import { openDaemonEventStream } from '../lib/daemon-auth';
   import {
     ActiveConflictError,
     activateWorkstream,
@@ -184,14 +185,19 @@
     let cancelled = false;
 
     void (async () => {
-      let base: string;
+      // #5439: EventSource cannot send a header, so this exchanges the
+      // daemon credential for a single-use ticket first; a null result means
+      // no credential is available and the poll cadence alone carries this.
       try {
-        base = await apiBase();
+        source = await openDaemonEventStream(`/workstreams/${activeId}/events`);
       } catch {
         return;
       }
-      if (cancelled) return;
-      source = new EventSource(`${base}/workstreams/${activeId}/events`);
+      if (cancelled || !source) {
+        source?.close();
+        source = null;
+        return;
+      }
       source.onmessage = (e: MessageEvent<string>) => {
         try {
           const envelope = JSON.parse(e.data) as WorkstreamEventEnvelope;

@@ -108,6 +108,10 @@ lanes = [
         "keyring-store",
         "bedrock",
         "axum-server",
+        # #5439: shares this lane with `axum-server` because `server::bearer_auth`
+        # compiles only when both are on — a lane that ran `daemon-token` alone
+        # would cover the token store and silently skip the guard that uses it.
+        "daemon-token",
     ] },
     { name = "symgraph", features = [
         "symgraph-server",
@@ -389,6 +393,10 @@ postcard = { workspace = true }
 # regression test (#6382 — proves the dead `/communities` route is no longer
 # dialled).
 wiremock = { workspace = true }
+# tower: `ServiceExt::oneshot` drives `server::bearer_auth`'s router through the
+# middleware with no socket bound (#5439), the same way the consuming daemons'
+# router tests do.
+tower = { workspace = true }
 
 [features]
 default = []
@@ -421,6 +429,15 @@ catchup = ["dep:rusqlite", "memory-rpc", "palace-resolve"]
 # Enables the `server` module: standard axum middleware stack (CORS, trace,
 # gzip) and a fast-fail reqwest client for daemon-to-daemon calls.
 axum-server = ["dep:axum", "dep:tower-http"]
+# Enables the `daemon_token` module (#5439): the `0600` local-client credential
+# a loopback daemon and its clients share, plus the constant-time comparison
+# every verifier uses. Turning it on WITH `axum-server` additionally compiles
+# `server::bearer_auth`, the router-wide enforcement layer. Kept separate from
+# `axum-server` so a client-only consumer (trusty-code-gui's Tauri shell reads
+# the token to hand to its webview) pays for neither axum nor tower-http.
+# `uuid` supplies the CSPRNG behind `mint_token` and is already an optional
+# dependency here.
+daemon-token = ["dep:uuid"]
 # Enables the `memory_rpc` module: the one JSON-RPC client for the
 # trusty-memory daemon's Unix socket. Implies `uds` (#6286) — the daemon retired
 # its HTTP listener, so the framing and the envelope now come from that module

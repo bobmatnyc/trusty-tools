@@ -63,7 +63,8 @@ pub(super) async fn run_workstream_subscription(
             return;
         }
         let url = format!("{}/workstreams/{current_id}/events", state.rpc.base_url());
-        let resp = match state.rpc.http().get(&url).send().await {
+        // #5439: guarded like every other route — send the same credential.
+        let resp = match state.rpc.authorize(state.rpc.http().get(&url)).send().await {
             Ok(r) if r.status().is_success() => r,
             _ => {
                 let _ = tx.send(ReplEvent::ConnectionLost {

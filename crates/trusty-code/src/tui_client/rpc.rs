@@ -37,17 +37,50 @@ pub const DEFAULT_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_
 pub struct RpcHttpClient {
     http: reqwest::Client,
     base_url: String,
+    credential: Option<String>,
     next_id: AtomicI64,
 }
 
 impl RpcHttpClient {
     /// Build a client targeting `base_url` (no trailing slash), reusing the
     /// caller-supplied pooled `reqwest::Client`.
+    ///
+    /// #5439: resolves the daemon credential for `base_url` once, here, rather
+    /// than at each request — `daemon_credential_for` is where the "never send
+    /// the local token off loopback" rule lives, and resolving it once means a
+    /// later request site cannot bypass it by reading the token itself.
     pub fn new(http: reqwest::Client, base_url: String) -> Self {
+        let credential = super::discovery::daemon_credential_for(&base_url);
         Self {
             http,
             base_url,
+            credential,
             next_id: AtomicI64::new(1),
+        }
+    }
+
+    /// The credential to present to this daemon, if any.
+    ///
+    /// Why: the SSE readers (`engine_state::pump_session_events`,
+    /// `workstream_subscription`) build their own `GET`s against
+    /// [`RpcHttpClient::http`] and must attach the SAME credential this client
+    /// resolved — reading it independently would duplicate the loopback gate.
+    /// Test: `rpc_tests::call_sends_the_bearer_credential`.
+    pub fn credential(&self) -> Option<&str> {
+        self.credential.as_deref()
+    }
+
+    /// Attach this client's credential to `req`, if it has one.
+    ///
+    /// What: sets `Authorization: Bearer <token>`; a client with no credential
+    /// sends no header and receives the daemon's `401`, which surfaces as an
+    /// ordinary transport-level failure rather than a special case.
+    /// Test: `rpc_tests::call_sends_the_bearer_credential`,
+    /// `rpc_tests::call_sends_no_header_without_a_credential`.
+    pub fn authorize(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.credential {
+            Some(token) => req.bearer_auth(token),
+            None => req,
         }
     }
 
@@ -88,8 +121,7 @@ impl RpcHttpClient {
         };
         let url = format!("{}/rpc", self.base_url);
         let resp = self
-            .http
-            .post(&url)
+            .authorize(self.http.post(&url))
             .json(&req)
             .timeout(DEFAULT_CALL_TIMEOUT)
             .send()
@@ -117,8 +149,68 @@ impl RpcHttpClient {
 mod rpc_tests {
     use super::*;
     use serde_json::json;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// #5439: the daemon's every route requires a credential, so the client's
+    /// `POST /rpc` must carry one — a client that forgot it would see `401`
+    /// on every call.
+    ///
+    /// `RpcHttpClient::new` resolves the credential from the environment or
+    /// the token file, neither of which a test may rely on, so this drives
+    /// [`RpcHttpClient::authorize`] against a client built with an explicit
+    /// credential and asserts the header on the wire.
+    #[tokio::test]
+    async fn call_sends_the_bearer_credential() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/rpc"))
+            .and(header("authorization", "Bearer test-credential"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {"pong": true},
+            })))
+            .mount(&server)
+            .await;
+
+        let mut client = RpcHttpClient::new(reqwest::Client::new(), server.uri());
+        client.credential = Some("test-credential".to_string());
+        assert_eq!(client.credential(), Some("test-credential"));
+        let result = client.call("ping", json!({})).await.expect("call");
+        assert_eq!(result, json!({"pong": true}));
+    }
+
+    /// A client with no credential must send NO `Authorization` header rather
+    /// than an empty or placeholder one — an empty bearer would be a
+    /// malformed credential the daemon rejects with a confusing shape.
+    #[tokio::test]
+    async fn call_sends_no_header_without_a_credential() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/rpc"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {"pong": true},
+            })))
+            .mount(&server)
+            .await;
+
+        let mut client = RpcHttpClient::new(reqwest::Client::new(), server.uri());
+        client.credential = None;
+        client.call("ping", json!({})).await.expect("call");
+
+        let requests = server
+            .received_requests()
+            .await
+            .expect("wiremock records requests");
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0].headers.get("authorization").is_none(),
+            "a credential-less client must send no Authorization header"
+        );
+    }
 
     /// A successful `POST /rpc` call must return the envelope's `result`.
     #[tokio::test]

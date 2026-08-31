@@ -482,7 +482,7 @@ async fn m1_cutline_full_scenario_over_http() {
     let project = project_with_agents();
     let daemon =
         support::spawn_http_daemon_with_env(project.path(), &[("TCODE_MOCK_LLM", "echo")]).await;
-    let client = reqwest::Client::new();
+    let client = daemon.client();
     let rpc_url = format!("{}/rpc", daemon.base_url);
 
     let post = |id: i64, method: &'static str, params: serde_json::Value| {

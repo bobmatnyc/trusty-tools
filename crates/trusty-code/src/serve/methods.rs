@@ -113,6 +113,24 @@ async fn health(
 /// `health_payload_reports_a_bound_project_root`,
 /// `health_payload_reports_incremental_index_drops`,
 /// `health_payload_reports_incremental_index_truncations`.
+/// The whole of what an UNAUTHENTICATED `GET /health` caller may learn
+/// (#6472).
+///
+/// Why: [`health_payload`] answers `pid`, the bound project's absolute root
+/// path, the daemon's version, and its index counters. Those are process and
+/// filesystem facts about the operator's machine, and until #6472 any local
+/// process — including a page in the operator's browser — could read them
+/// without presenting anything. A liveness poller needs none of it: it needs
+/// to know the daemon answered. This payload is deliberately not derived from
+/// [`health_payload`] by filtering, because a filter grows a hole every time a
+/// field is added upstream; a field added to `health_payload` cannot leak here.
+/// What: `{"status": "ok"}`. Nothing conditional, nothing derived.
+/// Test: `liveness_payload_discloses_only_status`, and end-to-end in
+/// `http_tests::http_health_anonymous_discloses_only_liveness`.
+pub(crate) fn liveness_payload() -> Value {
+    json!({ "status": "ok" })
+}
+
 pub(crate) fn health_payload(binding: &ProjectBinding) -> Value {
     // #2798: publish the background-index loss counters where a health check
     // already looks, so a saturated pool is not invisible.
@@ -160,6 +178,22 @@ mod tests {
         assert_eq!(result["server"], "tcode");
         assert_eq!(result["status"], "ok");
         assert_eq!(result["version"], crate::VERSION);
+    }
+
+    /// The anonymous payload must carry `status` and NOTHING else — the
+    /// #6472 regression. Asserting the key SET (not just the absence of
+    /// `pid`/`binding`) is what makes a future field addition fail here
+    /// rather than leak.
+    #[test]
+    fn liveness_payload_discloses_only_status() {
+        let payload = liveness_payload();
+        let obj = payload.as_object().expect("liveness payload is an object");
+        assert_eq!(obj["status"], "ok");
+        assert_eq!(
+            obj.keys().collect::<Vec<_>>(),
+            vec!["status"],
+            "an anonymous /health caller must learn only that the daemon is up"
+        );
     }
 
     /// `health_payload` (shared with the HTTP `GET /health` route) must carry

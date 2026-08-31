@@ -25,8 +25,18 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
+# #5439: `daemon-token` reads the daemon's `0600` credential (only the native
+# process can), and `axum-server` is taken for ONE item — `origin_is_loopback`,
+# the classifier that stops the shell handing that credential to a non-loopback
+# `TRUSTY_CODE_URL`. Re-spelling that predicate here instead would be the
+# duplicate implementation the common-entry-point rule forbids, and axum is a
+# rounding error beside Tauri in this crate's build.
+trusty-common = { workspace = true, features = ["daemon-token", "axum-server"] }
 
 [dev-dependencies]
+# serial_test: `commands::tests` mutate `TCODE_DAEMON_TOKEN`, which is shared
+# across the threads `cargo test` runs a target's tests on.
+serial_test = { workspace = true }
 # Test-only: pins `DEFAULT_DAEMON_URL` (state.rs) against trusty-code's own
 # `serve::DEFAULT_HTTP_PORT` so the two compiled-in defaults cannot drift
 # apart silently the way they did in #3364 — see

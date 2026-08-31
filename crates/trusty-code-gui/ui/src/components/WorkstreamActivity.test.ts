@@ -19,6 +19,7 @@
 // `GET /sessions/{id}/transcript`, and `POST /sessions/{id}/cancel`.
 // Test: this file.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { TOKEN_STORAGE_KEY, resetDaemonTokenCache } from '../lib/daemon-auth';
 import { mount, unmount } from 'svelte';
 import WorkstreamActivity from './WorkstreamActivity.svelte';
 import { activeWorkstreamState, setActiveWorkstreamId } from '../lib/active-workstream.svelte';
@@ -136,12 +137,23 @@ function fakeDaemon(opts: {
         json: async () => ({ ...found, status: cancelled.has(found.id) ? 'cancelled' : found.status }),
       } as Response;
     }
+    // #5439: the SSE routes are opened through a single-use ticket minted
+    // here, because EventSource cannot carry an Authorization header.
+    if (url.endsWith('/auth/sse-ticket') && method === 'POST') {
+      return { ok: true, status: 200, json: async () => ({ ticket: 'test-ticket' }) } as Response;
+    }
     throw new Error(`unexpected fetch: ${method} ${url}`);
   });
   return fetchMock;
 }
 
+// #5439: every daemon request now carries a credential, and the SSE routes
+// take a ticket minted with it. Seeding the plain-browser override (jsdom has
+// no Tauri runtime) is what keeps these component tests exercising the real
+// transport rather than the no-credential fallback.
 beforeEach(() => {
+  localStorage.setItem(TOKEN_STORAGE_KEY, 'a'.repeat(64));
+  resetDaemonTokenCache();
   target = document.createElement('div');
   document.body.appendChild(target);
   // The pending-workstream fallback marker and the shared active-workstream
@@ -697,7 +709,7 @@ describe('WorkstreamActivity live delta streaming (tcode streaming epic #3696, S
 
     await waitFor(() => target.textContent?.includes('ship the feature') ?? false);
     expect(
-      FakeEventSource.instances.some((s) => s.url.endsWith('/sessions/bound-session/events')),
+      FakeEventSource.instances.some((s) => s.url.includes('/sessions/bound-session/events')),
     ).toBe(false);
   });
 
@@ -716,10 +728,10 @@ describe('WorkstreamActivity live delta streaming (tcode streaming epic #3696, S
 
     await waitFor(() => target.textContent?.includes('ship the feature') ?? false);
     await waitFor(() =>
-      FakeEventSource.instances.some((s) => s.url.endsWith('/sessions/bound-session/events')),
+      FakeEventSource.instances.some((s) => s.url.includes('/sessions/bound-session/events')),
     );
     const sessionSource = FakeEventSource.instances.find((s) =>
-      s.url.endsWith('/sessions/bound-session/events'),
+      s.url.includes('/sessions/bound-session/events'),
     )!;
 
     sessionSource.emit(agentMessageDeltaEnvelope(1, { delta: 'Hel', done: false }));
@@ -749,10 +761,10 @@ describe('WorkstreamActivity live delta streaming (tcode streaming epic #3696, S
 
     await waitFor(() => target.textContent?.includes('ship the feature') ?? false);
     await waitFor(() =>
-      FakeEventSource.instances.some((s) => s.url.endsWith('/sessions/bound-session/events')),
+      FakeEventSource.instances.some((s) => s.url.includes('/sessions/bound-session/events')),
     );
     const sessionSource = FakeEventSource.instances.find((s) =>
-      s.url.endsWith('/sessions/bound-session/events'),
+      s.url.includes('/sessions/bound-session/events'),
     )!;
 
     expect(() => sessionSource.onmessage?.({ data: 'not json' } as MessageEvent)).not.toThrow();

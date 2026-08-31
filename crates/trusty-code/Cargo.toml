@@ -110,7 +110,11 @@ globset = { workspace = true }
 # resolver the project picker shares with trusty-mpm. serde_yaml + thiserror are
 # already in this crate's dependency graph, so it adds no new transitive deps.
 trusty-mcp = { workspace = true }  # JSON-RPC / MCP primitives (ADR-0040, #5803)
-trusty-common = { workspace = true, features = ["catchup", "stdio-mcp-client", "axum-server", "inference-client", "config-cli", "bedrock-client", "search-index", "crate-config"] }
+# `daemon-token` (#5439) supplies BOTH halves of the loopback credential: the
+# `0600` token file (`serve::http::run_http` writes it, `tui_client` reads it)
+# and — because `axum-server` is on here too — `server::bearer_auth`, the
+# router-wide guard.
+trusty-common = { workspace = true, features = ["catchup", "stdio-mcp-client", "axum-server", "daemon-token", "inference-client", "config-cli", "bedrock-client", "search-index", "crate-config"] }
 
 # `tui_client::CodeEngine` (#3415, DOC-50 §3.3/§3.4, epic #3411 Slice 3): the
 # shared engine-adapter trait + event vocabulary (`TuiEngine`/`ReplEvent`)

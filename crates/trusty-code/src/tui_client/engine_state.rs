@@ -326,10 +326,13 @@ impl EngineState {
             // (issue #3494) — see that const's doc comment for why this
             // can't silently extend to the `resp.bytes_stream()` body read
             // governed by `SSE_IDLE_TIMEOUT` below.
+            // #5439: the SSE routes are guarded like every other route, so this
+            // stream carries the same credential `POST /rpc` does. A native
+            // client sends the header directly — the `/auth/sse-ticket`
+            // exchange exists only for browser `EventSource`, which cannot.
             let resp = match self
                 .rpc
-                .http()
-                .get(&url)
+                .authorize(self.rpc.http().get(&url))
                 .timeout(CONNECT_TIMEOUT)
                 .send()
                 .await

@@ -389,10 +389,14 @@ impl StdioSession {
     }
 }
 
-/// A running `tcode serve --http` subprocess plus its discovered base URL.
+/// A running `tcode serve --http` subprocess plus its discovered base URL and
+/// the credential every request to it must carry.
 pub struct HttpDaemon {
     child: Child,
     pub base_url: String,
+    /// #5439: the daemon's local-client credential, read from the `0600` file
+    /// `run_http` wrote before binding. Every route but `/health` requires it.
+    pub token: String,
 }
 
 /// Spawn `tcode serve --http --port 0` and discover its ephemeral bound
@@ -467,10 +471,40 @@ pub async fn spawn_http_daemon_with_env(
     // startup line already consumed above.
     tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
 
-    HttpDaemon { child, base_url }
+    // #5439: the daemon established this before it printed the line above, so
+    // by now the file exists. Read through the same entry point a real client
+    // uses, so a test can never authenticate by a path production does not
+    // have.
+    let token = trusty_common::daemon_token::read_token(trusty_code::serve::http::TOKEN_APP_NAME)
+        .expect("`tcode serve --http` must write its credential before it binds");
+
+    HttpDaemon {
+        child,
+        base_url,
+        token,
+    }
 }
 
 impl HttpDaemon {
+    /// A `reqwest::Client` that carries this daemon's credential on every
+    /// request.
+    ///
+    /// Why (#5439): every route but `/health` requires the credential, so a
+    /// bare `reqwest::Client::new()` now gets `401` and the test reports a
+    /// decode failure rather than the behaviour it meant to assert. Attaching
+    /// it as a DEFAULT header means an added request site cannot forget it.
+    pub fn client(&self) -> reqwest::Client {
+        let mut auth = reqwest::header::HeaderValue::from_str(&format!("Bearer {}", self.token))
+            .expect("credential is header-safe");
+        auth.set_sensitive(true);
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::AUTHORIZATION, auth);
+        reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .expect("build credentialed test client")
+    }
+
     /// Send SIGTERM and assert the daemon exits cleanly (issue #534
     /// connection-safe daemon-restart convention, exercised here against
     /// the real process rather than only `trusty_common::shutdown_signal`'s

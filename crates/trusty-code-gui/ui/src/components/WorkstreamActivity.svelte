@@ -125,6 +125,7 @@
   // pins that this component mounts inside `.body`.
   import { resolveActiveWorkstreamId, setActiveWorkstreamId } from '../lib/active-workstream.svelte';
   import { apiBase } from '../lib/api-config';
+  import { openDaemonEventStream } from '../lib/daemon-auth';
   import {
     pickActiveSessionInWorkstream,
     TERMINAL_SESSION_STATUSES,
@@ -426,14 +427,19 @@
     let cancelled = false;
 
     void (async () => {
-      let base: string;
+      // #5439: EventSource cannot send a header, so this exchanges the
+      // daemon credential for a single-use ticket first; a null result means
+      // no credential is available and the poll cadence alone carries this.
       try {
-        base = await apiBase();
+        source = await openDaemonEventStream(`/workstreams/${id}/events`);
       } catch {
         return;
       }
-      if (cancelled) return;
-      source = new EventSource(`${base}/workstreams/${id}/events`);
+      if (cancelled || !source) {
+        source?.close();
+        source = null;
+        return;
+      }
       source.onmessage = () => {
         if (pollController) void refresh(pollController.signal);
       };
@@ -479,14 +485,19 @@
     let cancelled = false;
 
     void (async () => {
-      let base: string;
+      // #5439: EventSource cannot send a header, so this exchanges the
+      // daemon credential for a single-use ticket first; a null result means
+      // no credential is available and the poll cadence alone carries this.
       try {
-        base = await apiBase();
+        source = await openDaemonEventStream(`/sessions/${id}/events`);
       } catch {
         return;
       }
-      if (cancelled) return;
-      source = new EventSource(`${base}/sessions/${id}/events`);
+      if (cancelled || !source) {
+        source?.close();
+        source = null;
+        return;
+      }
       source.onmessage = (e: MessageEvent) => {
         if (cancelled) return;
         let envelope: { seq?: unknown; event?: { type?: unknown; [key: string]: unknown } };

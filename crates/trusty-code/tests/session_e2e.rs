@@ -208,7 +208,7 @@ async fn session_lifecycle_over_stdio() {
 #[tokio::test]
 async fn session_lifecycle_over_http_with_sse() {
     let daemon = spawn_http_daemon().await;
-    let client = reqwest::Client::new();
+    let client = daemon.client();
     let rpc_url = format!("{}/rpc", daemon.base_url);
 
     // 1. session.create

@@ -23,10 +23,10 @@
 //! This is CSRF/read-disclosure defence, not caller authentication — #5439
 //! (auth, and the HTTP-vs-UDS transport question under ADR-0032) stays open.
 
-use super::tests::{router_and_sessions, test_binding};
+use super::tests::{authed_request, router_and_sessions, test_auth, test_binding};
 use super::*;
 use axum::body::Body;
-use axum::http::{HeaderValue, Request, StatusCode, header};
+use axum::http::{HeaderValue, StatusCode, header};
 use tower::util::ServiceExt;
 
 /// The exact router `tcode serve --http` serves, over a fresh empty session
@@ -37,7 +37,7 @@ use tower::util::ServiceExt;
 /// middleware line that stops covering routes merged in later.
 async fn guarded_router() -> AxumRouter {
     let (router, sessions, workstreams) = router_and_sessions().await;
-    build_axum_router(router, sessions, workstreams, test_binding())
+    build_axum_router(router, sessions, workstreams, test_binding(), test_auth())
 }
 
 /// A well-formed `session.create` JSON-RPC body, so the write-arm requests
@@ -74,7 +74,7 @@ async fn rpc_rejects_cross_origin_write() {
     let resp = guarded_router()
         .await
         .oneshot(
-            Request::builder()
+            authed_request()
                 .method("POST")
                 .uri("/rpc")
                 .header(header::ORIGIN, "http://evil.example.com")
@@ -101,7 +101,7 @@ async fn merged_rest_write_route_rejects_cross_origin() {
     let resp = guarded_router()
         .await
         .oneshot(
-            Request::builder()
+            authed_request()
                 .method("POST")
                 .uri("/tasks")
                 .header(header::ORIGIN, "https://evil.example.com")
@@ -128,7 +128,7 @@ async fn write_with_non_utf8_origin_is_rejected() {
     let resp = guarded_router()
         .await
         .oneshot(
-            Request::builder()
+            authed_request()
                 .method("POST")
                 .uri("/rpc")
                 .header(
@@ -158,7 +158,7 @@ async fn rpc_allows_same_origin_write() {
         let resp = guarded_router()
             .await
             .oneshot(
-                Request::builder()
+                authed_request()
                     .method("POST")
                     .uri("/rpc")
                     .header(header::ORIGIN, origin)
@@ -186,7 +186,7 @@ async fn rpc_allows_cli_shaped_write_with_no_origin() {
     let resp = guarded_router()
         .await
         .oneshot(
-            Request::builder()
+            authed_request()
                 .method("POST")
                 .uri("/rpc")
                 .header(header::CONTENT_TYPE, "application/json")
@@ -219,7 +219,7 @@ async fn content_reads_are_not_cors_reflected_to_a_foreign_origin() {
         let resp = guarded_router()
             .await
             .oneshot(
-                Request::builder()
+                authed_request()
                     .uri(uri)
                     .header(header::ORIGIN, "https://evil.example.com")
                     .body(Body::empty())
@@ -247,7 +247,7 @@ async fn content_reads_are_cors_reflected_to_a_same_machine_origin() {
         let resp = guarded_router()
             .await
             .oneshot(
-                Request::builder()
+                authed_request()
                     .uri("/sessions/does-not-exist/transcript")
                     .header(header::ORIGIN, origin)
                     .body(Body::empty())
@@ -277,7 +277,7 @@ async fn ip_prefixed_dns_lookalike_is_neither_reflected_nor_allowed_to_write() {
     let read = guarded_router()
         .await
         .oneshot(
-            Request::builder()
+            authed_request()
                 .uri("/sessions/does-not-exist/transcript")
                 .header(header::ORIGIN, lookalike)
                 .body(Body::empty())
@@ -295,7 +295,7 @@ async fn ip_prefixed_dns_lookalike_is_neither_reflected_nor_allowed_to_write() {
     let write = guarded_router()
         .await
         .oneshot(
-            Request::builder()
+            authed_request()
                 .method("POST")
                 .uri("/rpc")
                 .header(header::ORIGIN, lookalike)
@@ -322,7 +322,7 @@ async fn health_read_is_unaffected_by_the_guard() {
     let resp = guarded_router()
         .await
         .oneshot(
-            Request::builder()
+            authed_request()
                 .uri("/health")
                 .header(header::ORIGIN, "https://evil.example.com")
                 .body(Body::empty())

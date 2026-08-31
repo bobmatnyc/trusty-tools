@@ -107,7 +107,7 @@ async fn late_attaching_client_can_query_cached_readiness() {
     // once, and whose readiness this connection never re-reads via
     // `session.attach` (proving the cache — not a live subscription — is
     // what the late client below actually reads).
-    let original_client = reqwest::Client::new();
+    let original_client = daemon.client();
     let run_resp = call_rpc(
         &original_client,
         &rpc_url,
@@ -135,7 +135,7 @@ async fn late_attaching_client_can_query_cached_readiness() {
     // 3. A FRESH client — a brand-new connection that made none of the
     // above calls and never `session.attach`ed — must retrieve the SAME
     // cached snapshot from a single `session.get_readiness` call.
-    let late_client = reqwest::Client::new();
+    let late_client = daemon.client();
     let late_resp = call_rpc(
         &late_client,
         &rpc_url,
@@ -163,7 +163,7 @@ async fn late_attaching_client_can_query_cached_readiness() {
 #[tokio::test]
 async fn never_probed_session_returns_never_probed_over_the_wire() {
     let daemon = spawn_http_daemon().await;
-    let client = reqwest::Client::new();
+    let client = daemon.client();
     let rpc_url = format!("{}/rpc", daemon.base_url);
 
     let create_resp = call_rpc(

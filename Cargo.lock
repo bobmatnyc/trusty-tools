@@ -11403,10 +11403,12 @@ dependencies = [
  "anyhow",
  "serde",
  "serde_json",
+ "serial_test",
  "tauri",
  "tauri-build",
  "tokio",
  "trusty-code",
+ "trusty-common",
 ]
 
 [[package]]
@@ -11487,6 +11489,7 @@ dependencies = [
  "tokio",
  "toml 0.8.23",
  "toml_edit 0.22.27",
+ "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
