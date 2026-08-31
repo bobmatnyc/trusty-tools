@@ -658,11 +658,17 @@ pub(crate) async fn run_inplace_relaunch(
 /// `CLAUDE_CODE_CHILD_SESSION` marker and would silently lose its transcript.
 /// The scrub runs BEFORE the deliberate assignments below so it can never
 /// clobber `CLAUDE_CONFIG_DIR` (#4455) even if the marker list grew wrongly.
+///
+/// Issue #6495: the same reasoning applies to the classic-renderer default —
+/// the `env NAME=VALUE` operand the tmux-pane paths carry cannot reach an exec,
+/// so [`trusty_mpm::core::alt_screen::apply_default_to_command`] sets it here.
+/// It runs last and sets nothing when this pane already exports a value.
 /// Test: `inplace_exec_command_forwards_every_arg_in_order`,
 /// `inplace_exec_command_scrubs_api_key_and_sets_auth_env`,
 /// `inplace_exec_command_scrubs_inherited_session_markers`,
 /// `inplace_exec_command_carries_a_non_empty_mcp_env`,
-/// `inplace_exec_command_carries_isolation_flags_and_persona_end_to_end`.
+/// `inplace_exec_command_carries_isolation_flags_and_persona_end_to_end`,
+/// `inplace_exec_command_defaults_the_alternate_screen_off`.
 pub(crate) fn build_inplace_exec_command(
     resume: &trusty_mpm::runtime::InPlaceResumeCommand,
     cwd: &std::path::Path,
@@ -686,6 +692,9 @@ pub(crate) fn build_inplace_exec_command(
     for (name, value) in &resume.mcp_env {
         cmd.env(name, value);
     }
+    // #6495: relaunch on the classic renderer so the pane keeps its scrollback,
+    // unless this pane already carries an operator value.
+    trusty_mpm::core::alt_screen::apply_default_to_command(&mut cmd);
     cmd
 }
 

@@ -169,8 +169,14 @@ fn cd_and_group(cwd: &Path, body: &str) -> String {
 /// `--resume` / `--continue` / `/rewind` recovery. The scrub list deliberately
 /// EXCLUDES `CLAUDE_CONFIG_DIR` — see that module's `DELIBERATE_SPAWN_ENV`, and
 /// #4455/#4451 for why removing it would re-break the bundled agent roster.
-/// What: `env -u ANTHROPIC_API_KEY <-u marker…> [CLAUDE_CONFIG_DIR='<dir>'] [CLAUDE_CODE_OAUTH_TOKEN='<token>'] <claude_bin>`
-/// — each bracketed assignment appears only when its value is `Some`. The
+/// (5) Issue #6495: the line always assigns
+/// [`crate::core::alt_screen::ALT_SCREEN_SHELL_ASSIGNMENT`], which starts the
+/// pane on Claude Code's classic renderer. The fullscreen renderer captures the
+/// mouse wheel, so a managed pane loses both native and tmux scrollback. The
+/// operand's `${NAME-1}` expansion means a value the pane already exports wins.
+/// What: `env -u ANTHROPIC_API_KEY <-u marker…> CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN="${…-1}" [CLAUDE_CONFIG_DIR='<dir>'] [CLAUDE_CODE_OAUTH_TOKEN='<token>'] <claude_bin>`
+/// — each bracketed assignment appears only when its value is `Some`; the
+/// alternate-screen operand is unconditional. The
 /// `-u NAME` option MUST precede any
 /// `NAME=VALUE` assignment per POSIX `env` grammar (`env [OPTION]...
 /// [NAME=VALUE]... [COMMAND]...`); putting an assignment before `-u` makes
@@ -187,7 +193,9 @@ fn cd_and_group(cwd: &Path, body: &str) -> String {
 /// `spawn_command_without_token_pins_the_exact_command`,
 /// `spawn_command_scrubs_inherited_session_markers`,
 /// `spawn_command_keeps_config_dir_out_of_the_scrub`,
-/// `env_bin_prefix_orders_scrub_flags_before_assignments`.
+/// `env_bin_prefix_orders_scrub_flags_before_assignments`,
+/// `spawn_command_defaults_the_alternate_screen_off`,
+/// `resume_command_defaults_the_alternate_screen_off`.
 ///
 /// `GH_TOKEN`/`GH_USER` (issue #3025) are deliberately NOT assignments on
 /// this prefix — see [`claude_code_gh_env::gh_env_source_prefix`], applied
@@ -202,6 +210,11 @@ pub(crate) fn env_bin_prefix(
     mcp_env: &[(String, String)],
 ) -> String {
     let mut assignments = String::new();
+    // #6495: default the pane to Claude Code's classic renderer so native and
+    // tmux scrollback keep working; the `${NAME-1}` form yields to a value the
+    // pane already exports.
+    assignments.push(' ');
+    assignments.push_str(crate::core::alt_screen::ALT_SCREEN_SHELL_ASSIGNMENT);
     if let Some(dir) = config_dir {
         let quoted = shell_single_quote(&dir.display().to_string());
         assignments.push_str(&format!(" CLAUDE_CONFIG_DIR={quoted}"));

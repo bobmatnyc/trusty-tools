@@ -51,11 +51,17 @@ use super::registry::ManagedRegistry;
 /// — there is no tmux here, so upstream's `tmux show-environment -g` escape hatch
 /// returns false immediately and an inherited `CLAUDE_CODE_CHILD_SESSION` always
 /// wins.
+///
+/// Issue #6495: also provisions the classic-renderer default via
+/// [`crate::core::alt_screen::apply_default_to_command`] — `tm run` is an
+/// interactive session and the fullscreen renderer costs it terminal
+/// scrollback. Nothing is set when the launching shell already exports a value.
 /// Test: `test_build_launch_command_sets_env_and_cwd`,
 /// `test_build_launch_command_adds_bare_with_api_key`,
 /// `test_build_launch_command_no_bare_without_api_key`,
 /// `test_build_launch_command_includes_bypass_permissions`,
-/// `test_build_launch_command_scrubs_inherited_session_markers`.
+/// `test_build_launch_command_scrubs_inherited_session_markers`,
+/// `test_build_launch_command_defaults_the_alternate_screen_off`.
 pub fn build_launch_command(
     repo_path: &Path,
     claude_config_dir: &Path,
@@ -71,6 +77,9 @@ pub fn build_launch_command(
     // on the tmux server's global env. Runs before the `CLAUDE_CONFIG_DIR`
     // assignment below so the deliberate value always wins (#4455).
     crate::core::claude_env_scrub::scrub_command(&mut cmd);
+    // #6495: start on Claude Code's classic renderer so the terminal keeps its
+    // scrollback; a value this shell already exports wins.
+    crate::core::alt_screen::apply_default_to_command(&mut cmd);
     cmd.env("CLAUDE_CONFIG_DIR", claude_config_dir);
     cmd.stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -408,6 +417,33 @@ mod tests {
                 Some(cfg.display().to_string())
             )),
             "CLAUDE_CONFIG_DIR must survive the scrub as a set value: {envs:?}"
+        );
+    }
+
+    /// #6495: `tm run` is an interactive session with no tmux and no shell, so
+    /// it needs the classic-renderer default set on the `Command` — and it must
+    /// leave a value the launching shell already exports alone.
+    ///
+    /// The expectation is derived from the ambient environment, which is what
+    /// makes it deterministic in both directions: the rule under test IS
+    /// "override exactly when the launch carries no value". The precedence logic
+    /// itself is proven with injected lookups in `core::alt_screen`.
+    #[test]
+    fn test_build_launch_command_defaults_the_alternate_screen_off() {
+        use crate::core::alt_screen::{ALT_SCREEN_DEFAULT, ALT_SCREEN_ENV_VAR};
+
+        let tmp = TempDir::new().unwrap();
+        let cmd = build_launch_command(&tmp.path().join("repo"), &tmp.path().join("cfg"), None);
+
+        let carried_by_the_launch = std::env::var_os(ALT_SCREEN_ENV_VAR).is_some();
+        let provisioned = cmd.get_envs().any(|(k, v)| {
+            k == ALT_SCREEN_ENV_VAR
+                && v.is_some_and(|v| v == std::ffi::OsStr::new(ALT_SCREEN_DEFAULT))
+        });
+        assert_eq!(
+            provisioned, !carried_by_the_launch,
+            "tm run must provision {ALT_SCREEN_ENV_VAR}={ALT_SCREEN_DEFAULT} when the \
+             launch carries no value, and leave an operator value untouched when it does"
         );
     }
 

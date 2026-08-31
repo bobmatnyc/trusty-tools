@@ -223,11 +223,17 @@ pub fn scrub_command(cmd: &mut std::process::Command) {
 /// scan would otherwise run to the end of the line. A future `claude` flag pair
 /// spelled `-u <value>` would then be miscounted as an unset variable. Not
 /// reachable today — this closes the hole before a flag makes it reachable.
+/// #4181 gave [`crate::core::model_inject::build_claude_command`] the same
+/// optional `CLAUDE_CONFIG_DIR` / `CLAUDE_CODE_OAUTH_TOKEN` assignments the
+/// daemon prefix carries, so on that line the assignment stop fires. #6495 then
+/// gave every remaining shell builder — including
 /// [`crate::core::model_inject::build_inplace_session_command`] and
-/// `build_client_session_command` are still assignment-free; #4181 gave
-/// [`crate::core::model_inject::build_claude_command`] the same optional
-/// `CLAUDE_CONFIG_DIR` / `CLAUDE_CODE_OAUTH_TOKEN` assignments the daemon prefix
-/// carries, so on that line the assignment stop now fires.
+/// `build_client_session_command`, which were assignment-free until then — the
+/// unconditional
+/// [`crate::core::alt_screen::ALT_SCREEN_SHELL_ASSIGNMENT`] operand, so the
+/// assignment stop now fires on all of them. `daemon::spawn_command`'s
+/// `relaunch_command` is the one that stays assignment-free, which is what keeps
+/// the COMMAND stop reachable.
 /// Test: `parse_env_unset_vars_reads_the_real_spawn_prefix`,
 /// `parse_env_unset_vars_stops_at_the_first_assignment`,
 /// `parse_env_unset_vars_stops_at_the_command_word`,

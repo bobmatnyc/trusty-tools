@@ -21,6 +21,10 @@ pub mod agent_skill_codeploy;
 // #4840: bundled agent assets reached `$CLAUDE_CONFIG_DIR/agents/` only via a
 // manual `tm install`; this module makes the refresh+deploy automatic.
 pub mod agent_source;
+// #6495: the classic-renderer default every managed launch carries. Claude
+// Code's fullscreen renderer captures the mouse wheel, costing the pane both
+// native and tmux scrollback.
+pub mod alt_screen;
 pub mod artifact;
 pub mod auto_resume;
 // #5069: the base checkout behind a worktree owns the embedding lane that
