@@ -1,0 +1,217 @@
+/*
+ * Foundry component subset for the machine-status dashboard (#6518).
+ *
+ * Why: the Overview tab is now built to Foundry, the Trusty-suite design system
+ * at docs/design/UI/. Its component sheet
+ * (design-system-svelte/src/styles/foundry.css) carries the card / table /
+ * badge / stat-card primitives the dashboard needs, and its tokens.css carries
+ * the typography, spacing and soft-status tokens those primitives reference.
+ * This crate's theme.css defines COLOURS ONLY, so neither set is present here
+ * yet. Rather than reinvent the layout, this file ports the needed subset.
+ *
+ * What: two parts.
+ *   1. The tokens the subset references, copied 1:1 from the canonical
+ *      docs/design/UI/design-system/tokens.css (both palettes), added to the
+ *      same :root[data-theme=…] selectors theme.css already uses. Only tokens
+ *      theme.css does not already define appear here — no colour is redefined.
+ *   2. The component classes .card / .card-header / .card-body, .table,
+ *      .badge + tones, and .stat-grid / .stat / .stat-label / .stat-value /
+ *      .stat-meta, copied from the Foundry component sheet.
+ *
+ * Two deliberate deviations from a byte-for-byte port, both documented at the
+ * rule that carries them: the component classes are scoped under `.foundry`,
+ * and the warning/danger badge foregrounds resolve through a token so the dark
+ * palette stays legible. The sheet's button, input, sidebar, modal and global
+ * html/body rules are NOT ported — this crate already styles all of those, and
+ * importing them would restyle every existing tab.
+ *
+ * Test: `machineStatus.test.js` covers the logic this sheet renders; the sheet
+ * itself is verified by the binary smoke run on the Overview tab in both
+ * palettes.
+ */
+
+/* ── 1. Tokens ──────────────────────────────────────────────────────────── */
+
+/* Light palette — Foundry v2 "rust-on-paper". Values from
+   docs/design/UI/design-system/tokens.css; theme.css owns the colours it
+   already declares, so only its gaps are filled here. */
+:root[data-theme="light"] {
+  --trusty-surface-hover:   rgba(183, 65, 14, 0.06);
+  --trusty-text-inverse:    #ffffff;
+  --trusty-info:            #3d6b8a;
+  --trusty-accent-soft:     #f3d9cb;
+  --trusty-success-soft:    #dcedd2;
+  --trusty-warning-soft:    #f5e7c4;
+  --trusty-danger-soft:     #f6d7d0;
+  --trusty-info-soft:       #dde9f0;
+  --trusty-shadow-sm:       none;
+  --trusty-shadow:          0 1px 2px rgba(43, 28, 18, 0.06);
+  --trusty-shadow-lg:       0 14px 32px rgba(43, 28, 18, 0.28);
+  /* Badge foregrounds. The canonical sheet hardcodes these two hexes because
+     it was written light-first; keeping them as tokens is what lets the dark
+     block below swap them for the bright status colours. */
+  --trusty-badge-warning-fg: #7a5a10;
+  --trusty-badge-danger-fg:  #8a2013;
+}
+
+/* Dark palette — Foundry v2 "night shift". */
+:root[data-theme="dark"] {
+  --trusty-surface-hover:   rgba(217, 119, 66, 0.09);
+  --trusty-text-inverse:    #201612;
+  --trusty-info:            #7ba7c4;
+  --trusty-accent-soft:     rgba(217, 119, 66, 0.16);
+  --trusty-success-soft:    rgba(143, 191, 106, 0.14);
+  --trusty-warning-soft:    rgba(217, 168, 58, 0.14);
+  --trusty-danger-soft:     rgba(224, 106, 82, 0.14);
+  --trusty-info-soft:       rgba(123, 167, 196, 0.14);
+  --trusty-shadow-sm:       none;
+  --trusty-shadow:          0 1px 2px rgba(0, 0, 0, 0.3);
+  --trusty-shadow-lg:       0 14px 32px rgba(0, 0, 0, 0.55);
+  /* The light hexes are near-black browns on a translucent dark ground — the
+     text disappears. The bright palette colours are what the rest of this
+     crate already uses for status on dark. */
+  --trusty-badge-warning-fg: var(--trusty-warning);
+  --trusty-badge-danger-fg:  var(--trusty-danger);
+}
+
+/* Theme-agnostic typography, spacing and radii. The font stacks name the
+   Foundry faces first and fall back to the system stack this SPA already
+   renders with — the console ships no webfont. */
+:root {
+  --trusty-font:    'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+  --trusty-display: 'Chakra Petch', 'IBM Plex Sans', system-ui, sans-serif;
+  --trusty-mono:    'IBM Plex Mono', ui-monospace, Menlo, monospace;
+
+  --trusty-fs-xs:  0.75rem;
+  --trusty-fs-sm:  0.875rem;
+  --trusty-fs-md:  1rem;
+  --trusty-fs-lg:  1.125rem;
+  --trusty-fs-xl:  1.5rem;
+  --trusty-fs-2xl: 2rem;
+
+  --trusty-radius-sm: 3px;
+  --trusty-radius:    5px;
+  --trusty-radius-lg: 8px;
+
+  --trusty-space-1: 4px;
+  --trusty-space-2: 8px;
+  --trusty-space-3: 12px;
+  --trusty-space-4: 16px;
+  --trusty-space-5: 24px;
+  --trusty-space-6: 32px;
+}
+
+/* ── 2. Component subset ────────────────────────────────────────────────── */
+
+/*
+ * Every rule below is scoped under `.foundry`.
+ *
+ * The class names .badge, .stat-grid, .stat-value and .stat-label are ALREADY
+ * in use by SearchTab, MemoryTab, AnalyzeTab, ReviewTab and ServiceCard, each
+ * with its own scoped styling. A global port would leak the Foundry mono
+ * stamping into those five components — Svelte's scoped rules override the
+ * properties they set, but not font-family or letter-spacing, so the existing
+ * pill badges would silently become half-stamped. Scoping the port confines it
+ * to the machine-status dashboard, which is the only thing built to Foundry
+ * today; a later phase that converts a tab adds `.foundry` to that tab's root.
+ */
+
+/* Cards — flat, clean 1.5px line borders */
+.foundry .card {
+  background: var(--trusty-card-bg);
+  border: 1.5px solid var(--trusty-border);
+  border-radius: var(--trusty-radius);
+}
+.foundry .card-header {
+  padding: 14px var(--trusty-space-5);
+  border-bottom: 1.5px solid var(--trusty-border);
+  background: var(--trusty-surface-raised);
+  font-family: var(--trusty-display);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.foundry .card-body { padding: var(--trusty-space-5); }
+
+/* Tables — mono stamped headers, no zebra */
+.foundry .table { width: 100%; border-collapse: collapse; font-size: var(--trusty-fs-sm); }
+.foundry .table th,
+.foundry .table td {
+  text-align: left;
+  padding: 11px 16px;
+  border-bottom: 1px solid var(--trusty-surface-raised);
+}
+.foundry .table th {
+  font: 600 10px var(--trusty-mono);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--trusty-text-muted);
+  border-bottom: 1px solid var(--trusty-border);
+  background: transparent;
+}
+.foundry .table tbody tr:hover { background: var(--trusty-surface-hover); }
+
+/* Badges — rectangular stamps, never pills */
+.foundry .badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: var(--trusty-radius-sm);
+  font: 600 10px var(--trusty-mono);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: var(--trusty-accent-soft);
+  color: var(--trusty-accent-hover);
+}
+.foundry .badge-success { background: var(--trusty-success-soft); color: var(--trusty-success); }
+.foundry .badge-warning { background: var(--trusty-warning-soft); color: var(--trusty-badge-warning-fg); }
+.foundry .badge-danger  { background: var(--trusty-danger-soft);  color: var(--trusty-badge-danger-fg); }
+.foundry .badge-info    { background: var(--trusty-info-soft);    color: var(--trusty-info); }
+.foundry .badge-muted   { background: var(--trusty-surface-raised); color: var(--trusty-text-secondary); }
+
+/* Stat cards */
+.foundry .stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--trusty-space-4);
+  margin-bottom: var(--trusty-space-5);
+}
+/* The dashboard reference lays its top row out as four equal columns
+   (design-system-svelte/src/screens/search/Dashboard.svelte). Below the width
+   where four 220px cards fit, it reverts to the auto-fill track above so the
+   cards wrap rather than crush. */
+.foundry .stat-grid.four { grid-template-columns: repeat(4, 1fr); }
+@media (max-width: 900px) {
+  .foundry .stat-grid.four { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+}
+.foundry .stat {
+  background: var(--trusty-card-bg);
+  border: 1.5px solid var(--trusty-border);
+  border-radius: var(--trusty-radius);
+  padding: 20px;
+}
+.foundry .stat-label {
+  font: 600 10px var(--trusty-mono);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--trusty-text-muted);
+  margin-bottom: var(--trusty-space-2);
+}
+.foundry .stat-value {
+  font-family: var(--trusty-display);
+  font-size: var(--trusty-fs-2xl);
+  font-weight: 700;
+  color: var(--trusty-text-primary);
+}
+.foundry .stat-meta {
+  font-size: var(--trusty-fs-xs);
+  color: var(--trusty-text-muted);
+  margin-top: var(--trusty-space-1);
+}
+/* The reference grid's values are short counts ("4", "128,441"); the
+   machine-status values are phrases ("12.3 / 32.0 GiB", "↓ 2.4 MB/s ↑ 0.3
+   MB/s"). At --trusty-fs-2xl those overflow a quarter-width card, so the
+   four-column row steps down one size and is allowed to wrap. */
+.foundry .stat-grid.four .stat-value {
+  font-size: var(--trusty-fs-xl);
+  overflow-wrap: anywhere;
+}
