@@ -962,12 +962,85 @@ async fn managed_prune_rejects_an_unparseable_invoking_session() {
     assert_parity("mpm.managed.prune (bad invoker)", &http, &rpc);
 }
 
+/// Pin `TRUSTY_MPM_WORKSPACE_ROOT` at an empty fixture dir for one test (#6551).
+///
+/// Why: `prune_worktrees_core` and `reconcile_worktrees_core` resolve the
+/// worktree root through `TrustyToolsConfig::load()` on EVERY call, and with the
+/// variable unset that resolves to `$HOME/trusty-mpm-projects` — the operator's
+/// real fleet. Two consequences, both observed: the two transports enumerate
+/// ~200 real worktrees instead of the `TempDir` fixture, and a sibling test that
+/// sets or clears this same process-global variable between the HTTP call and
+/// the RPC call splits the parity comparison. Pinning it removes both, because
+/// the two calls then read one value that names an empty directory.
+///
+/// What: takes the crate-wide `env_test_lock` and sets the variable, restoring
+/// the previous value (or removing it) on drop, unwinding panics included.
+/// BOTH guards are needed and they cover different populations, exactly as
+/// `prune::tests::prune_spares_a_stopped_records_workspace` records:
+/// `env_test_lock` serialises the env-precedence tests, `#[serial_test::serial]`
+/// serialises `connectors::tm_tests`, which mutates this variable under
+/// `serial` alone. The lock is held across the awaited route calls on purpose —
+/// releasing it earlier is the race.
+///
+/// `#[serial_test::file_serial]` is deliberately NOT used: the pinned resource
+/// is a process environment variable, so under `cargo nextest`'s
+/// process-per-test model (#4162) each test already has its own copy and there
+/// is nothing shared across processes to serialise.
+///
+/// Test: `managed_prune_worktrees_enumerates_only_the_pinned_workspace_root`.
+struct WorkspaceRootEnv {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    prev: Option<std::ffi::OsString>,
+}
+
+impl WorkspaceRootEnv {
+    fn pin(root: &std::path::Path) -> Self {
+        let lock = crate::core::trusty_tools_config::env_test_lock();
+        let key = crate::core::trusty_tools_config::WORKSPACE_ROOT_ENV;
+        let prev = std::env::var_os(key);
+        // SAFETY: the crate-wide `env_test_lock` is held for this value's whole
+        // lifetime, and every other mutator of this variable takes it too.
+        unsafe { std::env::set_var(key, root) };
+        Self { _lock: lock, prev }
+    }
+}
+
+impl Drop for WorkspaceRootEnv {
+    fn drop(&mut self) {
+        let key = crate::core::trusty_tools_config::WORKSPACE_ROOT_ENV;
+        // SAFETY: `_lock` is still held — it is dropped after this field.
+        unsafe {
+            match self.prev.take() {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
+/// Every path a route reports, across the three path-carrying keys.
+fn reported_paths(body: &Value) -> Vec<String> {
+    ["paths", "owner_unknown_paths", "agent_owned_paths"]
+        .iter()
+        .filter_map(|key| body.get(*key).and_then(|v| v.as_array()))
+        .flatten()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect()
+}
+
 /// The safe defaults survive the transport: an RPC `prune-worktrees` with no
 /// flags previews rather than deleting, exactly as an empty HTTP body does
 /// (#4091, #2919).
+///
+/// #6551: pinned to a fixture workspace root. Unpinned, the two transports read
+/// the ambient `$HOME` at different instants and `assert_parity` compares one
+/// side's real worktree inventory against the other's.
+#[serial_test::serial]
 #[tokio::test]
 async fn managed_prune_worktrees_parity_defaults_to_a_preview() {
     let (state, _dir) = test_state().await;
+    let workspace = tempfile::tempdir().expect("workspace root");
+    let _env = WorkspaceRootEnv::pin(workspace.path());
     let http = http_call(
         http_router(Arc::clone(&state)),
         Method::POST,
@@ -990,9 +1063,69 @@ async fn managed_prune_worktrees_parity_defaults_to_a_preview() {
     assert_parity("mpm.managed.prune_worktrees", &http, &rpc);
 }
 
+/// The prune preview reports the pinned workspace root and nothing outside it
+/// (#6551).
+///
+/// Why: `managed_prune_worktrees_parity_defaults_to_a_preview` compares the two
+/// transports to each other, so it stays green whenever they agree — including
+/// when they agree on the operator's real `~/trusty-mpm-projects`. This asserts
+/// on WHICH root was scanned, which is the thing that was wrong.
+/// What: pins the root at a `GitWorktreeFixture` holding one reclaimable
+/// orphaned worktree, then asserts every reported path is inside it. Seeding a
+/// real, reclaimable worktree is what stops an empty result from passing for
+/// isolation — the same fixture `prune::tests` uses.
+/// Test: this is the test. RED without `WorkspaceRootEnv::pin`: the preview
+/// enumerates the real home's worktrees, none of which is under the fixture.
+#[serial_test::serial]
+#[tokio::test]
+async fn managed_prune_worktrees_enumerates_only_the_pinned_workspace_root() {
+    use crate::session_manager::worktree_git_fixture::GitWorktreeFixture;
+
+    let (state, _dir) = test_state().await;
+    let fx = GitWorktreeFixture::new();
+    let orphan = fx.add_worktree("orphaned-6551");
+    GitWorktreeFixture::stamp_reclaimable_sentinel(&orphan);
+    let root = fx
+        .repos_root
+        .canonicalize()
+        .unwrap_or_else(|_| fx.repos_root.clone());
+
+    let _env = WorkspaceRootEnv::pin(&root);
+    let http = http_call(
+        http_router(Arc::clone(&state)),
+        Method::POST,
+        "/api/v1/sessions/managed/prune-worktrees",
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(http.status, 200);
+    let body = http.json.as_ref().expect("prune-worktrees returns json");
+    let paths = reported_paths(body);
+    assert!(
+        !paths.is_empty(),
+        "the seeded orphan at {} must be reported, or this proves nothing: {body}",
+        orphan.display()
+    );
+    let stray: Vec<&String> = paths
+        .iter()
+        .filter(|p| !std::path::Path::new(p).starts_with(&root))
+        .collect();
+    assert!(
+        stray.is_empty(),
+        "#6551: the preview scanned outside the pinned workspace root {} — \
+         these paths come from the ambient $HOME: {stray:?}",
+        root.display()
+    );
+}
+
+/// #6551: pinned for the same reason as the prune parity test above —
+/// `reconcile_worktrees_core` resolves the same ambient workspace root.
+#[serial_test::serial]
 #[tokio::test]
 async fn managed_reconcile_worktrees_parity() {
     let (state, _dir) = test_state().await;
+    let workspace = tempfile::tempdir().expect("workspace root");
+    let _env = WorkspaceRootEnv::pin(workspace.path());
     let http = http_call(
         http_router(Arc::clone(&state)),
         Method::GET,
