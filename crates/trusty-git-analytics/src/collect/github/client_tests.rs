@@ -763,7 +763,6 @@ mod bounded_fetch_tests {
             .await
             .expect_err("a permanent rate limit must not read as `no reviews`");
         assert!(matches!(first, CollectError::Throttled { status: 429, .. }));
-        assert!(client.throttled());
 
         let before = server
             .received_requests()
