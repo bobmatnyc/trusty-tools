@@ -63,7 +63,7 @@ pub use collector::{
 pub use destination::{LIST_LIMIT, LogDestination, ObjectMeta, ObjectStoreDestination, PutMeta};
 pub use error::DrainError;
 pub use manifest::{
-    DrainManifest, MANIFEST_FILENAME, MANIFEST_VERSION, ManifestEntry, StatDecision,
+    DrainManifest, MANIFEST_FILENAME, MANIFEST_VERSION, ManifestEntry, ManifestOrigin, StatDecision,
 };
 pub use uri::{DestinationScheme, DestinationUri};
 
@@ -123,6 +123,10 @@ impl DrainTarget {
     }
 
     /// Path segment identifying this target inside the local state directory.
+    ///
+    /// The TARGET half only. [`DrainManifest::cache_path`] puts the
+    /// destination's namespace above it, so a record made for one destination
+    /// is never read back for another (#6548).
     fn cache_key(&self) -> String {
         format!("{}/{}", self.github_id, self.session_id)
     }
@@ -194,6 +198,13 @@ pub struct DrainReport {
     pub bytes_wire: u64,
     /// Per-file failures, as `(key or path, message)`. Never aborts the batch.
     pub errors: Vec<(String, String)>,
+    /// Sampled remote-manifest entries whose object was missing (#6548).
+    ///
+    /// 0 or 1 per run — one entry is sampled, not all of them. Non-zero means
+    /// the destination's own manifest lists something the destination does not
+    /// have, so every file it lists is being skipped rather than uploaded.
+    /// Repair is documented in `docs/reference/log-drain.md`.
+    pub manifest_spot_check_missing: usize,
 }
 
 /// Run the drain once: collect, compare against the manifest, upload what changed.
@@ -204,7 +215,10 @@ pub struct DrainReport {
 ///
 /// What: validates `target` FIRST, so a bad identity costs no filesystem walk
 /// and can never reach a `put`. Loads the manifest (remote authoritative, local
-/// cache as fallback). Collects every matching file. For each: the stat-only
+/// cache as fallback, and the cache is scoped to the DESTINATION as well as the
+/// target — see [`DrainManifest::cache_path`]). Collects every matching file.
+/// A manifest that came from the destination gets one sampled
+/// [`DrainManifest::spot_check`]. For each file: the stat-only
 /// fast path skips unchanged files without comparing digests; a file whose stat
 /// moved but whose SHA-256 matches is still skipped, with its manifest entry
 /// refreshed so the next run takes the fast path. Everything else is uploaded.
@@ -234,7 +248,8 @@ pub async fn run_once(
 
     let manifest_key = target.manifest_key();
     let cache_key = target.cache_key();
-    let mut manifest = DrainManifest::load(dest, &cfg.state_dir, &manifest_key, &cache_key).await?;
+    let (mut manifest, origin) =
+        DrainManifest::load_with_origin(dest, &cfg.state_dir, &manifest_key, &cache_key).await?;
 
     let collected = collect(sources, &cfg.secrets, cfg.max_file_bytes)?;
 
@@ -244,6 +259,21 @@ pub async fn run_once(
     };
     for (path, message) in collected.errors {
         report.errors.push((path.display().to_string(), message));
+    }
+
+    // #6548: a manifest written before the cache-keying fix can list objects
+    // this destination never received, and every one of them then skips
+    // forever. One sampled `head` turns that into a warning an operator sees.
+    if origin == ManifestOrigin::Remote
+        && let Some(missing) = manifest.spot_check(dest, &target.logs_prefix()).await
+    {
+        report.manifest_spot_check_missing += 1;
+        tracing::warn!(
+            key = %missing,
+            manifest = %manifest_key,
+            "log-drain manifest lists an object this destination does not have; \
+             delete the manifest object to force a full re-upload (see #6548)"
+        );
     }
 
     let now = chrono::Utc::now().to_rfc3339();

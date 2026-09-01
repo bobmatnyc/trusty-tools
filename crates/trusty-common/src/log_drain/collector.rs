@@ -338,8 +338,8 @@ fn gzip(body: &[u8]) -> std::io::Result<Vec<u8>> {
     encoder.finish()
 }
 
-/// Hex SHA-256 of a byte slice.
-fn hex_digest(body: &[u8]) -> String {
+/// Hex SHA-256 of a byte slice. Always 64 characters.
+pub(super) fn hex_digest(body: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(body);
     format!("{:x}", hasher.finalize())

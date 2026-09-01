@@ -15,6 +15,7 @@
 
 use std::path::PathBuf;
 
+use super::collector::hex_digest;
 use super::error::DrainError;
 
 /// The scheme half of a destination URI.
@@ -205,6 +206,37 @@ impl DestinationUri {
             Self::S3 { prefix, .. } => prefix,
             Self::File { .. } => "",
         }
+    }
+
+    /// Stable, filesystem-safe identity of this destination for local state.
+    ///
+    /// Why: the local manifest cache used to live at a path built from the
+    /// identity alone, so pointing one session at a second bucket reused the
+    /// record written for the first and skipped every file that record listed —
+    /// 86 files that never reached the new bucket (#6548). A skip decision is
+    /// only valid for the destination it was made against, so the destination
+    /// has to be part of where that decision is stored.
+    ///
+    /// What: `<scheme>-<first 16 hex chars of SHA-256(canonical form)>`. The
+    /// canonical form carries scheme, bucket-or-path, and key prefix —
+    /// everything that changes WHICH objects a destination holds. `?region=` is
+    /// excluded on purpose: a region override changes which endpoint serves a
+    /// bucket, never its contents, so adding one must not orphan a valid cache.
+    /// The value is hashed rather than spelled out because a key prefix and a
+    /// filesystem path are both arbitrary strings, and a cache directory needs
+    /// one segment with no `/`, no `..`, and no length surprise.
+    ///
+    /// Test: `super::tests::cache_namespace_separates_destinations`,
+    /// `super::tests::cache_namespace_ignores_the_region_override`.
+    pub fn cache_namespace(&self) -> String {
+        let (scheme, canonical) = match self {
+            // #6548: `region` is deliberately absent from the canonical form.
+            Self::S3 { bucket, prefix, .. } => ("s3", format!("s3://{bucket}/{prefix}")),
+            Self::File { path } => ("file", format!("file://{}", path.display())),
+        };
+        // `hex_digest` is a SHA-256 in hex, so it is always 64 characters.
+        let digest = hex_digest(canonical.as_bytes());
+        format!("{scheme}-{}", &digest[..16])
     }
 
     /// The scheme this destination was parsed from.
