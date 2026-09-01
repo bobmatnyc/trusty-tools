@@ -12,7 +12,7 @@
 //!       `tests::sorts_by_most_recent_timestamp`.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use trusty_common::error_capture::ErrorStore;
 
@@ -46,6 +46,27 @@ fn store_path_for(app_name: &str) -> Option<PathBuf> {
     trusty_common::resolve_data_dir(app_name)
         .ok()
         .map(|dir| dir.join("errors.jsonl"))
+}
+
+/// The same four store paths, resolved under a base directory the caller owns.
+///
+/// Why (#6505): [`store_path_for`] goes through `resolve_data_dir`, which reads
+/// the process-global `TRUSTY_DATA_DIR_OVERRIDE` on every call. Several tests in
+/// this crate's test binary set and clear that variable, so two aggregations a
+/// few milliseconds apart can read different directories — which is how
+/// `parity_errors_agrees_across_transports` saw five errors over HTTP and none
+/// over the socket. A caller holding its own base passes it here and never
+/// consults process state.
+/// What: `<base>/<app_name>/errors.jsonl` for every [`DAEMON_APP_NAMES`] entry,
+/// mirroring the layout `resolve_data_dir` produces. Creates nothing — a missing
+/// file reads as no records.
+/// Test: `store_paths_under_names_every_daemon`.
+#[must_use]
+pub fn store_paths_under(base: &Path) -> Vec<PathBuf> {
+    DAEMON_APP_NAMES
+        .iter()
+        .map(|app_name| base.join(app_name).join("errors.jsonl"))
+        .collect()
 }
 
 /// Aggregate captured errors from all known daemon stores.
@@ -224,6 +245,24 @@ mod tests {
         let path = write_jsonl(&tmp, "store.jsonl", &records);
         let agg = aggregate_errors_from_paths(&[path], 3);
         assert_eq!(agg.len(), 3);
+    }
+
+    /// Why: the caller-owned base exists so an aggregation can skip
+    /// `resolve_data_dir` entirely (#6505). A base that named three daemons, or
+    /// that dropped the `errors.jsonl` leaf, would silently read fewer stores
+    /// than the ambient path does.
+    /// Test: this function IS the test.
+    #[test]
+    fn store_paths_under_names_every_daemon() {
+        let base = Path::new("/tmp/does-not-exist-6505");
+        let paths = store_paths_under(base);
+
+        assert_eq!(paths.len(), DAEMON_APP_NAMES.len());
+        for (path, app_name) in paths.iter().zip(DAEMON_APP_NAMES) {
+            assert_eq!(path, &base.join(app_name).join("errors.jsonl"));
+        }
+        // An absent base is a read of no records, never an error.
+        assert!(aggregate_errors_from_paths(&paths, 100).is_empty());
     }
 
     #[test]

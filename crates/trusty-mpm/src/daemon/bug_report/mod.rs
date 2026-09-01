@@ -51,7 +51,7 @@ pub mod types;
 
 pub use github::{GithubFilingError, extract_fingerprint, file_issue, file_issue_with};
 // Re-export token providers from the token module (Phase 4).
-pub use multi_store::{aggregate_errors, aggregate_errors_from_paths};
+pub use multi_store::{aggregate_errors, aggregate_errors_from_paths, store_paths_under};
 pub use preview::{IssuePreview, build_preview};
 pub use ratelimit::{FilingDecision, RateLimitGuard};
 pub use scrubber::{ScrubChange, ScrubResult, scrub, scrub_compat};
