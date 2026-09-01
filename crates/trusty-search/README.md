@@ -728,6 +728,10 @@ Run `trusty-search doctor` for a 6-check diagnostic. Common causes:
 - Stale PID lockfile: `trusty-search doctor --fix` removes it automatically
 - Less than 16 GB RAM: the daemon performs a hard RAM check and exits with an actionable error. Set `TRUSTY_SKIP_RAM_CHECK=1` in the daemon environment to bypass for small workloads; not recommended on large corpora (risk of OOM during indexing)
 
+**High GPU load during indexing**
+
+During an initial index or reindex, embedding is the GPU-heavy stage — `btop` (or Activity Monitor → GPU) shows the load, and the search dashboard's per-collection panel can pause embedding.
+
 **Embedder stuck on "initializing"**
 
 The ONNX Runtime initializes the model on first start and may take 30–60 seconds on slower machines. If it hangs indefinitely, increase the timeout:
