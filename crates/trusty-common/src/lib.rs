@@ -517,6 +517,24 @@ pub mod stdio_mcp_client;
 #[cfg(feature = "host-metrics")]
 pub mod host_metrics;
 
+/// Upload trusty-* log files to object storage (#6533).
+///
+/// Why: every trusty daemon writes logs to a local path that nothing prunes and
+/// nothing collects, so diagnosing a failure on another machine means asking a
+/// human to find and send a file. The drain lives here rather than in any one
+/// daemon because five crates produce logs and the common-entry rule gives that
+/// capability exactly one implementation.
+/// What: gated behind the `log-drain` feature, which implies `credentials` so
+/// the collector's [`credentials::scrub_secrets`] pass cannot be
+/// compiled out from under it. Exposes the [`log_drain::LogDestination`] trait
+/// with `s3://` and `file://` adapters, [`log_drain::DestinationUri`],
+/// [`log_drain::DrainManifest`], [`log_drain::collect`], and
+/// [`log_drain::run_once`]. This is the drain CORE — no scheduler, and no
+/// GitHub-identity resolution; the caller supplies a [`log_drain::DrainTarget`].
+/// Test: `cargo test -p trusty-common --features log-drain --no-fail-fast`.
+#[cfg(feature = "log-drain")]
+pub mod log_drain;
+
 /// Throttled crates.io update-notification helper.
 ///
 /// Why: User-facing CLIs should nudge operators when a newer release is
