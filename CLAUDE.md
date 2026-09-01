@@ -493,6 +493,18 @@ testing) are not repeated here. Extended explanations:
 - **Edition mismatch:** the workspace *default* is edition 2024 (`edition.workspace = true`); 11 crates pin `edition = "2021"` explicitly. Let-chains (`if let … && let …`) only compile in 2024 — read the crate's `Cargo.toml` before copying one in
 - **Ignored tests:** ONNX-backed embedder tests are `#[ignore]`d so CI stays fast; they need `cargo test -- --include-ignored` to run at all
 
+## UI Design System (Foundry)
+
+🟡 **All trusty-* UI builds to Foundry**, the Trusty-suite design system at
+[docs/design/UI/](docs/design/UI/README.md) — NOT inside any crate. Canonical
+tokens/CSS/icons live in `design-system/`; a runnable Svelte component +
+14-screen reference lives in `design-system-svelte/` (dashboard-layout example
+`src/screens/search/Dashboard.svelte`, console screen `src/screens/console/`);
+design-canvas artboards are the `Foundry *.dc.html` files. Its `tokens.css` is
+already deployed in `trusty-console/ui-search`, `trusty-analyze/ui`,
+`trusty-memory/ui`. Reconcile new UI to it before inventing layout. Spec:
+[DOC-39](docs/specs/trusty-code-harness-ui.md) §8 (#3153).
+
 ## Reference Documentation
 
 Most references are linked from the rule they serve, above. Not linked elsewhere:
