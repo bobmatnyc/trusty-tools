@@ -12,19 +12,33 @@
    *       "UNIT-05 · SERVICE CONSOLE" descriptor, spaced to the identity
    *       README's clear-space rule (one robot-eye width around the lockup).
    *       Colors come from the palette tokens, so both fields are covered by
-   *       one component.
+   *       one component. The descriptor also names the running crate version,
+   *       probed from the server on mount (`consoleVersion.js`) and rendered in
+   *       the same span, so it inherits the descriptor's type style; until that
+   *       probe answers, the descriptor reads exactly as it did before.
    * Test: Mount `<BrandLockup />`, flip `<html data-theme>` between light and
    *       dark, and confirm the wordmark stays primary-text and the descriptor
-   *       stays muted in both, with the mark recoloring alongside.
+   *       stays muted in both, with the mark recoloring alongside. The
+   *       descriptor text itself is covered by `consoleVersion.test.js`.
    */
+  import { onMount } from 'svelte';
+
   import BrandMark from './BrandMark.svelte';
+  import { describeConsole, fetchConsoleVersion } from './consoleVersion.js';
+
+  /** The running server's version, or `null` while unknown. */
+  let version = $state(null);
+
+  onMount(async () => {
+    version = await fetchConsoleVersion();
+  });
 </script>
 
 <span class="lockup">
   <BrandMark size={44} />
   <span class="text">
     <span class="wordmark">Trusty Console</span>
-    <span class="descriptor">UNIT-05 · SERVICE CONSOLE</span>
+    <span class="descriptor">{describeConsole(version)}</span>
   </span>
 </span>
 
