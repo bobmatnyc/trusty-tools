@@ -136,5 +136,58 @@ export const api = {
     }),
 
   /** Request a graceful daemon shutdown. */
-  stopDaemon: () => request('/admin/stop', { method: 'POST' })
+  stopDaemon: () => request('/admin/stop', { method: 'POST' }),
+
+  /**
+   * Why: a large corpus can saturate the embedder for hours, and an operator who
+   * needs that machine back has had no way to stop it short of killing the
+   * daemon (#6524). Pausing parks the embedding stage only — BM25 and the
+   * knowledge graph keep indexing, and the file watcher keeps watching, so the
+   * index stays searchable and current on its lexical lane while the semantic
+   * one waits.
+   * What: POSTs the pause; resolves to `{ index_id, embedding_paused: true }`.
+   * The daemon holds this in memory, so it clears on a daemon restart.
+   * Idempotent — pausing a paused index is a no-op that reports `true` again.
+   * Test: `indexingPipeline.test.js` covers the state mapping this feeds; the
+   * live check is `POST /indexes/<id>/embedding/pause` returning
+   * `embedding_paused: true` and the next `GET .../status` reporting
+   * `stages.semantic.paused: true`.
+   */
+  pauseEmbedding: (id) =>
+    request(`/indexes/${encodeURIComponent(id)}/embedding/pause`, {
+      method: 'POST'
+    }),
+
+  /**
+   * Why: the other half of the toggle — an index left paused embeds nothing,
+   * and its semantic lane silently falls behind the lexical one.
+   * What: POSTs the resume; resolves to `{ index_id, embedding_paused: false }`.
+   * The stage picks up where it stopped: the daemon re-derives which chunks are
+   * still missing vectors rather than replaying from the start.
+   * Test: as `pauseEmbedding`, with the flag reading `false`.
+   */
+  resumeEmbedding: (id) =>
+    request(`/indexes/${encodeURIComponent(id)}/embedding/resume`, {
+      method: 'POST'
+    })
 };
+
+/**
+ * Why: the file-change feed is Server-Sent Events, not a fetch — `EventSource`
+ * takes a URL and does its own request, so it cannot go through `request()`.
+ * Building the URL here anyway keeps every API path in one file, and keeps the
+ * proxy rebasing (`apiUrl`) that a hand-built path would miss: under
+ * `/tools/search/` a bare `/indexes/…` string resolves at the console root and
+ * 404s.
+ * What: the absolute URL of one index's `file-events` stream. The feed replays
+ * up to the last 200 changes and then stays open with live ones; each message is
+ * one `{ path, kind, at_unix_ms }` event.
+ * Test: `indexingPipeline.test.js` covers the event mapping; the live check is
+ * `curl -N .../file-events/stream` showing a `modified` row after touching a
+ * file in the indexed corpus.
+ * @param {string} id  Index id
+ * @returns {string}   Fully-qualified EventSource URL
+ */
+export function fileEventsStreamUrl(id) {
+  return apiUrl(`/indexes/${encodeURIComponent(id)}/file-events/stream`);
+}
