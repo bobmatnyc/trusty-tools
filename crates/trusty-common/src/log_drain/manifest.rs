@@ -13,6 +13,17 @@
 //! `super::tests::run_once_reuploads_a_mutated_file`,
 //! `super::tests::run_once_sha_beats_a_moved_mtime`,
 //! `super::tests::manifest_remote_wins_over_local_cache`.
+//!
+//! # The cache is per DESTINATION as well as per target (#6548)
+//!
+//! [`DrainManifest::cache_path`] puts
+//! [`LogDestination::cache_namespace`] above the target's own segment. Before
+//! that, the cache lived at `<state_dir>/log-drain/<github_id>/<session_id>/`
+//! and described no particular destination, so switching one session from
+//! bucket A to bucket B found A's record — and, since the fresh bucket had no
+//! remote manifest of its own to override it, skipped every file A already
+//! held. A skip decision is only ever valid for the destination it was made
+//! against.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -85,6 +96,23 @@ pub enum StatDecision {
     SkipUnchanged,
     /// No entry, or the stat differs. The file must be read and hashed.
     NeedsHash,
+}
+
+/// Which copy [`DrainManifest::load_with_origin`] actually returned.
+///
+/// Why: only a manifest that came from the destination makes a claim about what
+/// that destination holds, so only that one is worth spot-checking against it
+/// (#6548). A cached or empty manifest has nothing to be caught lying about.
+/// Test: `super::tests::run_once_spot_checks_a_lying_remote_manifest`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ManifestOrigin {
+    /// The destination's own copy — the authoritative one.
+    Remote,
+    /// The local cache; the destination had no decodable manifest.
+    LocalCache,
+    /// Neither copy existed, so the manifest is empty.
+    Absent,
 }
 
 impl DrainManifest {
@@ -170,14 +198,36 @@ impl DrainManifest {
         remote_key: &str,
         cache_key: &str,
     ) -> Result<Self, DrainError> {
-        let cache_path = cache_file(state_dir, cache_key);
+        Self::load_with_origin(dest, state_dir, remote_key, cache_key)
+            .await
+            .map(|(manifest, _)| manifest)
+    }
+
+    /// [`DrainManifest::load`], also saying which copy answered.
+    ///
+    /// Why: [`DrainManifest::spot_check`] is only meaningful against a manifest
+    /// the destination itself supplied, and `load` alone cannot say whether it
+    /// returned one (#6548).
+    /// What: identical to `load` in every other respect; the second element is
+    /// [`ManifestOrigin`].
+    /// Test: `super::tests::run_once_spot_checks_a_lying_remote_manifest`.
+    ///
+    /// # Errors
+    /// As [`DrainManifest::load`].
+    pub async fn load_with_origin(
+        dest: &dyn LogDestination,
+        state_dir: &Path,
+        remote_key: &str,
+        cache_key: &str,
+    ) -> Result<(Self, ManifestOrigin), DrainError> {
+        let cache_path = Self::cache_path(state_dir, dest, cache_key);
 
         if let Some(raw) = dest.get(remote_key).await? {
             match Self::decode(&raw) {
                 Ok(remote) => {
                     // Remote is authoritative: overwrite whatever the cache held.
                     write_cache(&cache_path, &remote);
-                    return Ok(remote);
+                    return Ok((remote, ManifestOrigin::Remote));
                 }
                 Err(reason) => {
                     tracing::warn!(
@@ -189,7 +239,64 @@ impl DrainManifest {
             }
         }
 
-        Ok(read_cache(&cache_path).unwrap_or_default())
+        Ok(match read_cache(&cache_path) {
+            Some(cached) => (cached, ManifestOrigin::LocalCache),
+            None => (Self::default(), ManifestOrigin::Absent),
+        })
+    }
+
+    /// Confirm that one sampled entry's object really is at the destination.
+    ///
+    /// Why: the runs made before #6548 was fixed wrote manifests that LIE — a
+    /// pass against a new bucket saved a record copied from a different
+    /// bucket's cache, so the document lists objects that bucket never
+    /// received, and every listed file skips forever. Keying the cache by
+    /// destination stops new ones being written; it cannot repair the ones
+    /// already in a bucket. One `head` per run buys an operator that signal
+    /// without putting a `head` per FILE on every steady-state pass — roughly
+    /// 150 extra round trips a run, forever, to guard against a defect that can
+    /// no longer occur.
+    ///
+    /// What: samples ONE entry, `head`s its key, and returns that key when the
+    /// object is absent. Detection only: nothing is re-uploaded and the
+    /// manifest is not rewritten, because an object a bucket lifecycle rule
+    /// legitimately expired would otherwise re-upload the whole session on
+    /// every run. The repair is deliberate and manual — delete the remote
+    /// manifest object; see `docs/reference/log-drain.md`. A transport error is
+    /// not an answer either way, so it yields `None` rather than failing a run
+    /// whose uploads are fine.
+    ///
+    /// Test: `super::tests::run_once_spot_checks_a_lying_remote_manifest`.
+    pub async fn spot_check(&self, dest: &dyn LogDestination, logs_prefix: &str) -> Option<String> {
+        let entry = self.entries.get(sample_index(self.entries.len())?)?;
+        let key = format!("{logs_prefix}/{}", entry.relative_file);
+        match dest.head(&key).await {
+            Ok(Some(_)) => None,
+            Ok(None) => Some(key),
+            Err(e) => {
+                tracing::debug!(
+                    %key,
+                    error = %e,
+                    "log-drain manifest spot check could not reach the destination"
+                );
+                None
+            }
+        }
+    }
+
+    /// Where this destination's local cache copy of a target's manifest lives.
+    ///
+    /// Why: public because clearing the cache is the operator-facing half of
+    /// the #6548 story, and a path an operator has to reconstruct by hand is a
+    /// path that will be reconstructed wrongly.
+    /// What: `<state_dir>/log-drain/<destination namespace>/<cache_key>/manifest.json`.
+    /// Test: `super::tests::manifest_remote_wins_over_local_cache`.
+    pub fn cache_path(state_dir: &Path, dest: &dyn LogDestination, cache_key: &str) -> PathBuf {
+        state_dir
+            .join("log-drain")
+            .join(dest.cache_namespace())
+            .join(cache_key)
+            .join("manifest.json")
     }
 
     /// Write the manifest to the destination and refresh the local cache.
@@ -218,7 +325,7 @@ impl DrainManifest {
         )
         .await?;
 
-        write_cache(&cache_file(state_dir, cache_key), self);
+        write_cache(&Self::cache_path(state_dir, dest, cache_key), self);
         Ok(())
     }
 
@@ -235,12 +342,19 @@ impl DrainManifest {
     }
 }
 
-/// Where the local cache copy of a target's manifest lives.
-fn cache_file(state_dir: &Path, cache_key: &str) -> PathBuf {
-    state_dir
-        .join("log-drain")
-        .join(cache_key)
-        .join("manifest.json")
+/// Pick one entry index out of `len`, or `None` when there is nothing to pick.
+///
+/// Sub-second wall clock is the source of variation, so consecutive scheduled
+/// runs land on different entries and a lying manifest is found within a few
+/// passes rather than only when the same entry keeps being drawn.
+fn sample_index(len: usize) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos() as usize);
+    Some(nanos % len)
 }
 
 /// Read the cache, returning `None` for anything unreadable or undecodable.

@@ -160,6 +160,42 @@ fn uri_region_override() {
 }
 
 #[test]
+fn cache_namespace_separates_destinations() {
+    let a = DestinationUri::parse("s3://bucket-a/logs").expect("bucket-a");
+    let b = DestinationUri::parse("s3://bucket-b/logs").expect("bucket-b");
+    let other_prefix = DestinationUri::parse("s3://bucket-a/other").expect("other prefix");
+    let local = DestinationUri::parse("file:///tmp/drain-a").expect("file");
+
+    assert_ne!(a.cache_namespace(), b.cache_namespace(), "bucket");
+    assert_ne!(
+        a.cache_namespace(),
+        other_prefix.cache_namespace(),
+        "prefix"
+    );
+    assert_ne!(a.cache_namespace(), local.cache_namespace(), "scheme");
+
+    // A cache directory is named with this, so it is one segment and it is
+    // recognisable to an operator reading `ls`.
+    assert!(a.cache_namespace().starts_with("s3-"));
+    assert!(local.cache_namespace().starts_with("file-"));
+    assert!(!a.cache_namespace().contains('/'));
+    assert!(!local.cache_namespace().contains('/'));
+
+    // Unstable between calls would mean the cache is written and never read.
+    let a_again = DestinationUri::parse("s3://bucket-a/logs").expect("bucket-a again");
+    assert_eq!(a.cache_namespace(), a_again.cache_namespace());
+}
+
+#[test]
+fn cache_namespace_ignores_the_region_override() {
+    // `?region=` changes which endpoint serves a bucket, never which objects it
+    // holds, so adding one must not orphan a cache that is still valid (#6548).
+    let plain = DestinationUri::parse("s3://bucket-a/logs").expect("plain");
+    let regioned = DestinationUri::parse("s3://bucket-a/logs?region=eu-west-1").expect("regioned");
+    assert_eq!(plain.cache_namespace(), regioned.cache_namespace());
+}
+
+#[test]
 fn uri_table_rejects() {
     // Each case must fail with DrainError::Uri, not a scheme error.
     let cases = [
@@ -535,11 +571,7 @@ async fn manifest_remote_wins_over_local_cache() {
         sha256: "stale".into(),
         uploaded_at: "2026-01-01T00:00:00Z".into(),
     });
-    let cache_path = state
-        .path()
-        .join("log-drain")
-        .join("bob/sess")
-        .join("manifest.json");
+    let cache_path = DrainManifest::cache_path(state.path(), &dest, "bob/sess");
     std::fs::create_dir_all(cache_path.parent().expect("parent")).expect("cache dir");
     std::fs::write(&cache_path, serde_json::to_vec(&stale).expect("encode")).expect("cache write");
 
@@ -683,6 +715,135 @@ async fn run_once_is_idempotent() {
     assert_eq!(second.uploaded, 0, "nothing changed, so nothing re-uploads");
     assert_eq!(second.skipped_unchanged, 1);
     assert_eq!(second.bytes_wire, 0);
+    assert_eq!(
+        second.manifest_spot_check_missing, 0,
+        "the manifest describes a file that really is there"
+    );
+}
+
+/// Every key under `prefix`, with its size, sorted — a stable snapshot of what
+/// a destination holds.
+async fn contents(dest: &dyn LogDestination, prefix: &str) -> Vec<(String, u64)> {
+    let mut out: Vec<(String, u64)> = dest
+        .list(prefix)
+        .await
+        .expect("list")
+        .into_iter()
+        .map(|m| (m.key, m.size))
+        .collect();
+    out.sort();
+    out
+}
+
+#[tokio::test]
+async fn run_once_reuploads_when_the_destination_changes() {
+    let logs = tempfile::tempdir().expect("tempdir");
+    let dest_a_root = tempfile::tempdir().expect("tempdir");
+    let dest_b_root = tempfile::tempdir().expect("tempdir");
+    // ONE state dir across both runs: the operator changed
+    // `log_drain.destination`, not their machine.
+    let state = tempfile::tempdir().expect("tempdir");
+
+    write(&logs.path().join("daemon.log"), TRACING_FIXTURE);
+    write(&logs.path().join("nested/worker.log"), TRACING_FIXTURE);
+
+    let cfg = DrainConfig::new(state.path());
+    let t = target();
+    let sources = [source(logs.path(), Some(Level::Info))];
+
+    let dest_a = file_dest(dest_a_root.path()).await;
+    let first = run_once(&cfg, &dest_a, &t, &sources)
+        .await
+        .expect("run against A");
+    assert_eq!(first.uploaded, 2);
+    let a_before = contents(&dest_a, &t.logs_prefix()).await;
+
+    // Same identity, same state dir, a destination that holds nothing. B has no
+    // manifest of its own, so before #6548 the load fell back to the cache
+    // written for A and classified every file SkipUnchanged — the files never
+    // arrived, and B's manifest then claimed they had.
+    let dest_b = file_dest(dest_b_root.path()).await;
+    let second = run_once(&cfg, &dest_b, &t, &sources)
+        .await
+        .expect("run against B");
+
+    assert_eq!(
+        second.uploaded, 2,
+        "a fresh destination holds none of these files yet"
+    );
+    assert_eq!(
+        second.skipped_unchanged, 0,
+        "a skip decision made for A must decide nothing for B"
+    );
+
+    for relative in ["trusty-mpm/daemon.log", "trusty-mpm/nested/worker.log"] {
+        let key = t.object_key(relative);
+        assert!(
+            dest_b.head(&key).await.expect("head B").is_some(),
+            "expected an object at `{key}` under B"
+        );
+    }
+    assert!(
+        dest_b
+            .head(&t.manifest_key())
+            .await
+            .expect("head B")
+            .is_some(),
+        "B gets its own manifest"
+    );
+
+    assert_eq!(
+        a_before,
+        contents(&dest_a, &t.logs_prefix()).await,
+        "a run aimed at B must not write to A"
+    );
+}
+
+#[tokio::test]
+async fn run_once_spot_checks_a_lying_remote_manifest() {
+    let logs = tempfile::tempdir().expect("tempdir");
+    let dest_root = tempfile::tempdir().expect("tempdir");
+    let state = tempfile::tempdir().expect("tempdir");
+    write(&logs.path().join("daemon.log"), TRACING_FIXTURE);
+
+    let dest = file_dest(dest_root.path()).await;
+    let cfg = DrainConfig::new(state.path());
+    let t = target();
+    let sources = [source(logs.path(), Some(Level::Info))];
+
+    run_once(&cfg, &dest, &t, &sources)
+        .await
+        .expect("first run");
+
+    // Exactly what #6548 left in the wild: a remote manifest naming an object
+    // this destination never received. One entry, so the sample is determined.
+    let mut lying = DrainManifest::default();
+    lying.record(ManifestEntry {
+        relative_file: "trusty-mpm/never-uploaded.log".into(),
+        size: 1,
+        mtime_unix: 1,
+        sha256: "ghost".into(),
+        uploaded_at: "2026-01-01T00:00:00Z".into(),
+    });
+    dest.put(
+        &t.manifest_key(),
+        bytes::Bytes::from(serde_json::to_vec(&lying).expect("encode")),
+        PutMeta::default(),
+    )
+    .await
+    .expect("put the lying manifest");
+
+    let report = run_once(&cfg, &dest, &t, &sources)
+        .await
+        .expect("second run");
+    assert_eq!(
+        report.manifest_spot_check_missing, 1,
+        "the sampled entry names an object the destination does not have"
+    );
+    assert_eq!(
+        report.uploaded, 1,
+        "detection only — the run still uploads what the lying manifest omits"
+    );
 }
 
 #[tokio::test]
@@ -934,6 +1095,10 @@ impl LogDestination for FailingDestination {
 
     async fn list(&self, prefix: &str) -> Result<Vec<ObjectMeta>, DrainError> {
         self.inner.list(prefix).await
+    }
+
+    fn cache_namespace(&self) -> &str {
+        self.inner.cache_namespace()
     }
 }
 

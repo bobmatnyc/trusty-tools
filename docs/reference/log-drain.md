@@ -106,7 +106,8 @@ invalidates every recorded digest.
 
 - **Remote** (`<…>/logs/.drain-manifest.json`) is **authoritative**. It is the
   only copy that describes what is actually in the bucket.
-- **Local cache** (`<state_dir>/log-drain/<github_id>/<session_id>/manifest.json`)
+- **Local cache**
+  (`<state_dir>/log-drain/<destination namespace>/<github_id>/<session_id>/manifest.json`)
   exists so an unchanged run costs no network read at all.
 
 When both exist and disagree, the remote copy wins and the cache is rewritten
@@ -117,6 +118,55 @@ one extra remote read and nothing else.
 An **undecodable** manifest — corrupt JSON, or an unrecognised `version` — is
 treated as **absent**, never as an error. Re-uploading a file is strictly safer
 than skipping one that was never written.
+
+### The cache is scoped to the destination
+
+`<destination namespace>` is `DestinationUri::cache_namespace()`:
+`<scheme>-<16 hex chars of SHA-256(canonical form)>`, e.g. `s3-4f1c9ae0d2b7…`.
+The canonical form carries the **scheme**, the **bucket or path**, and the **key
+prefix** — everything that changes which objects a destination holds. `?region=`
+is deliberately **excluded**: a region override changes which endpoint serves a
+bucket, never its contents, so adding one must not orphan a cache that is still
+valid. The value is hashed because a key prefix and a filesystem path are both
+arbitrary strings, and a cache directory needs a single path segment.
+
+Before [#6548](https://github.com/bobmatnyc/trusty-tools/issues/6548) the cache
+was keyed by identity alone. Repointing one session from bucket A to a brand-new
+bucket B found A's record; B had no remote manifest of its own to override it,
+so **every file A already held was classified `SkipUnchanged` and never reached
+B** — 86 of them in the live incident — while sources with no prior entry
+uploaded normally. B's manifest was then written from that record, so it now
+lists objects B never received.
+
+### Repairing a tainted remote manifest
+
+The keying fix stops new ones being written. It cannot repair a manifest already
+sitting in a bucket, and a manifest that lies makes every file it lists skip
+forever.
+
+**Repair:** delete the manifest object.
+
+```bash
+aws s3 rm s3://<bucket>/<prefix>/<github_id>/<session_id>/logs/.drain-manifest.json
+```
+
+The next run finds no remote copy, falls back to a cache that is now
+destination-scoped (and therefore empty for that destination), and re-uploads
+everything. Nothing else needs clearing; the local cache directory can also be
+deleted, but on its own that is not enough, because the tainted remote copy
+wins.
+
+**Detection.** Each run whose manifest came from the destination `head`s **one
+sampled entry**. When that object is absent, `DrainReport`'s
+`manifest_spot_check_missing` counter goes to 1 and a `warn!` names the key and
+the repair. One `head` per run, not one per file: a per-file check would put
+roughly 150 extra round trips on every steady-state pass, forever, to guard
+against a defect that can no longer occur. Sub-second wall clock picks the
+sample, so consecutive scheduled runs cover different entries.
+
+Detection **only** — nothing is re-uploaded automatically and the manifest is
+not rewritten. An object a bucket lifecycle rule legitimately expired would
+otherwise re-upload the whole session on every run.
 
 ### Skip decision, and why SHA-256 wins
 
