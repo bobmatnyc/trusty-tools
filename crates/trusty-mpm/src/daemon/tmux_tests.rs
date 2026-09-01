@@ -227,20 +227,42 @@ fn attachment_flips_to_detached_when_client_count_drops_to_zero() {
 
 #[test]
 fn parses_managed_pane_row() {
-    let row = TmuxDriver::parse_managed_pane_row("tmpm-brave-otter\tclaude\t12345\t%7").unwrap();
+    let row = TmuxDriver::parse_managed_pane_row("tmpm-brave-otter\tclaude\t12345\t%7\t/work/repo")
+        .unwrap();
     assert_eq!(row.session_name, "tmpm-brave-otter");
     assert_eq!(row.pane_current_command, "claude");
     assert_eq!(row.pane_pid, Some(12345));
     assert_eq!(row.pane_id.as_deref(), Some("%7"));
+    assert_eq!(row.pane_current_path.as_deref(), Some("/work/repo"));
 
-    // #6529: the four columns the format string asks for are all required. A
-    // short, over-long, or non-numeric row is a reply we did not request, and
-    // guessing which column is which is exactly what produced the live failure.
-    assert!(TmuxDriver::parse_managed_pane_row("tmpm-x\tzsh\t\t%9").is_none());
+    // #6529: the columns the format string asks for are all required. A short,
+    // over-long, or non-numeric row is a reply we did not request, and guessing
+    // which column is which is exactly what produced the live failure.
+    assert!(TmuxDriver::parse_managed_pane_row("tmpm-x\tzsh\t\t%9\t/w").is_none());
     assert!(TmuxDriver::parse_managed_pane_row("tmpm-y\tclaude\t222").is_none());
-    assert!(TmuxDriver::parse_managed_pane_row("tmpm-z\tzsh\t1\t%1\textra").is_none());
-    assert!(TmuxDriver::parse_managed_pane_row("\tzsh\t1\t%1").is_none());
-    assert!(TmuxDriver::parse_managed_pane_row("tmpm-q\t\t1\t%1").is_none());
+    assert!(TmuxDriver::parse_managed_pane_row("tmpm-z\tzsh\t1\t%1\t/w\textra").is_none());
+    assert!(TmuxDriver::parse_managed_pane_row("\tzsh\t1\t%1\t/w").is_none());
+    assert!(TmuxDriver::parse_managed_pane_row("tmpm-q\t\t1\t%1\t/w").is_none());
+}
+
+/// #6118: the fifth column is the only OPTIONAL one — an empty value is "tmux
+/// told us nothing about this pane's cwd", which the orphan-GC can never reap
+/// on. It must parse to `None`, not to an empty path that would resolve to the
+/// daemon's own working directory.
+#[test]
+fn parses_pane_row_with_empty_current_path() {
+    let row = TmuxDriver::parse_managed_pane_row("tm-a\tclaude\t12\t%1\t").expect("row parses");
+    assert_eq!(row.pane_current_path, None);
+    let row = TmuxDriver::parse_managed_pane_row("tm-a\tclaude\t12\t%1\t   ").expect("row parses");
+    assert_eq!(row.pane_current_path, None);
+}
+
+/// #6118: a row carrying only the pre-#6118 four columns is DROPPED, not
+/// accepted with a guessed-absent trailing field. Dropping a row can only ever
+/// spare a session — accepting a shape we did not ask for is how #6529 happened.
+#[test]
+fn four_column_pane_row_is_dropped() {
+    assert!(TmuxDriver::parse_managed_pane_row("tm-a\tclaude\t12\t%1").is_none());
 }
 
 /// A captured REAL `list-panes -a -F` listing parses column-for-column (#6529).
@@ -253,16 +275,21 @@ fn parses_managed_pane_row() {
 /// Test: this is the test.
 #[test]
 fn parses_a_real_tab_delimited_listing() {
-    let captured = "tm-00b14f3b-dd31-4474-9\tzsh\t74149\t%1860\n\
-                    tm-trusty-tools-01\tzsh\t10302\t%2306\n\
-                    tm-trusty-tools-02\ttrusty-mpm\t10738\t%2307\n\
-                    tm-writing-03\tzsh\t53398\t%2105\n";
+    let captured = "tm-00b14f3b-dd31-4474-9\tzsh\t74149\t%1860\t/tmp/gone-worktree\n\
+                    tm-trusty-tools-01\tzsh\t10302\t%2306\t/Users/masa/trusty-tools\n\
+                    tm-trusty-tools-02\ttrusty-mpm\t10738\t%2307\t/Users/masa/trusty-tools\n\
+                    tm-writing-03\tzsh\t53398\t%2105\t/Users/masa/writing\n";
     let rows = TmuxDriver::parse_managed_pane_rows(captured);
     assert_eq!(rows.len(), 4, "every captured row must parse: {rows:?}");
     assert_eq!(rows[0].session_name, "tm-00b14f3b-dd31-4474-9");
     assert_eq!(rows[0].pane_current_command, "zsh");
     assert_eq!(rows[0].pane_pid, Some(74149));
     assert_eq!(rows[0].pane_id.as_deref(), Some("%1860"));
+    // #6118: the cwd column is what makes a declined-adopt pane reapable.
+    assert_eq!(
+        rows[0].pane_current_path.as_deref(),
+        Some("/tmp/gone-worktree")
+    );
     assert_eq!(rows[2].session_name, "tm-trusty-tools-02");
     assert_eq!(rows[2].pane_current_command, "trusty-mpm");
     assert_eq!(rows[2].pane_id.as_deref(), Some("%2307"));

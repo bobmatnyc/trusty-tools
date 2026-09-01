@@ -319,6 +319,9 @@ pub(crate) fn parse_pane_probes(
             // Unused by `pane_runtime_exited`; the session-scoped query below is
             // what establishes which session these panes belong to.
             pane_id: None,
+            // #6118: likewise unused here — the cwd gate belongs to the daemon's
+            // orphan-GC, and this CLI path never classifies a pane through it.
+            pane_current_path: None,
         });
     }
     (!panes.is_empty()).then_some(panes)

@@ -56,7 +56,7 @@ mod resume_error;
 pub(crate) mod route_outcome_http;
 mod session_prep;
 mod session_summary;
-mod summary;
+pub(crate) mod summary;
 pub mod sync_assets;
 pub use activity::{ActivityResponse, get_session_activity};
 pub use delete::{delete_managed_session, stop_managed_session};

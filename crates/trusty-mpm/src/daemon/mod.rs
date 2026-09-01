@@ -736,7 +736,9 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
         interval_secs,
         "orphan-GC enabled; running startup sweep then periodic reconciliation"
     );
-    let mut gc = orphan_gc::OrphanGc::new();
+    // #6118: the untracked-active skip log repeats once every N sweeps per
+    // session rather than every sweep; N is overridable for live debugging.
+    let mut gc = orphan_gc::OrphanGc::from_env();
     // Cross-restart debounce for the PID-file sweep (#1918): owned here (not
     // reconstructed per-tick) so its two-pass candidate history persists across
     // sweeps, exactly like `gc` above.
@@ -831,7 +833,11 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
                 let tracked = state.gather_tracked_names().await;
                 let mgr = state.session_manager().await;
                 let mtmux = mgr.tmux_driver();
-                let reaped = orphan_gc::run_sweep(&mut gc, &panes, &tracked, &probe, mtmux.as_ref());
+                // #6118: `run_sweep_fs` supplies the filesystem cwd probe, which
+                // is what lets the sweep reap a pane whose worktree was deleted
+                // underneath it — see `orphan_gc::CwdProbe`.
+                let reaped =
+                    orphan_gc::run_sweep_fs(&mut gc, &panes, &tracked, &probe, mtmux.as_ref());
                 if reaped > 0 {
                     info!("orphan-GC reaped {reaped} orphaned managed session(s)");
                 }

@@ -27,6 +27,8 @@ mod reconcile;
 pub mod record;
 pub mod rename;
 pub mod restart_ops;
+/// #6568: the auto-resume circuit breaker's policy and its persisted counters.
+pub mod resume_breaker;
 pub(crate) mod resume_workdir;
 /// Age-based eviction of terminal records and the slot numbers they hold.
 pub mod retention;
@@ -119,6 +121,9 @@ mod set_deliverable_id_tests;
 
 #[cfg(test)]
 mod dedup_tests;
+
+#[cfg(test)]
+mod resume_breaker_tests;
 
 #[cfg(test)]
 mod runtime_exit_reconcile_tests;

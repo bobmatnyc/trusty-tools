@@ -29,7 +29,7 @@ use tracing::{error, info, warn};
 use crate::core::names::SessionNameError;
 use crate::core::sm::control::Submit;
 
-use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord, StopCause};
+use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 use super::resume_workdir;
 use super::slots::SlotRegistry;
 use super::store::{SessionStore, StoreError};
@@ -223,6 +223,12 @@ pub struct SessionManager {
     /// per daemon process is exactly the "reset numbering on restart"
     /// requirement. `pub(crate)` for the sibling `numbering.rs`.
     pub(crate) slots: RwLock<SlotRegistry>,
+    /// #6568: per-session auto-resume flap counters, persisted beside the store
+    /// because the reaper and the poller run in separate processes.
+    /// `pub(crate)` for the sibling `resume_breaker.rs`, which owns every read.
+    pub(crate) resume_breaker: RwLock<super::resume_breaker::ResumeBreakerStore>,
+    /// #6568: the breaker's window/threshold, read once at construction.
+    pub(crate) resume_breaker_cfg: super::resume_breaker::ResumeBreakerConfig,
 }
 
 impl std::fmt::Debug for SessionManager {
@@ -254,6 +260,10 @@ impl SessionManager {
             tmux,
             data_dir: data_dir.to_owned(),
             slots: RwLock::new(SlotRegistry::new()),
+            // #6568: a missing or unreadable sidecar starts empty — see
+            // `ResumeBreakerStore::load` for why that can only ever delay a park.
+            resume_breaker: RwLock::new(super::resume_breaker::ResumeBreakerStore::load(data_dir)),
+            resume_breaker_cfg: super::resume_breaker::ResumeBreakerConfig::from_env(),
         })
     }
 
@@ -730,7 +740,10 @@ impl SessionManager {
         record.state = ManagedSessionState::Stopped;
         // #6194: nothing asked for this stop — the runtime exited on its own —
         // so relaunching it is the self-healing action auto-resume exists for.
-        record.stop_cause = Some(StopCause::Unexpected);
+        // #6568: unless relaunching it has already been tried and has already
+        // failed to change anything K times in a row — see
+        // `SessionManager::runtime_exit_stop_cause` in `resume_breaker.rs`.
+        record.stop_cause = Some(self.runtime_exit_stop_cause(id, &record.tmux_name).await);
         guard.upsert(record.clone()).await?;
         drop(guard);
         info!(
@@ -817,7 +830,24 @@ impl SessionManager {
     /// `liveness_tests.rs`'s `resume_refuses_when_the_tmux_probe_fails` —
     /// asserts an unobservable probe refuses instead of killing the pane
     /// (#5859).
+    ///
+    /// #6568: this is the OPERATOR entry point. It forgives the auto-resume flap
+    /// streak, because a person resuming a session by hand is saying the cause
+    /// is addressed and the session deserves a fresh budget. The automatic
+    /// callers — the supervisor poller and the boot-reconcile tail — go through
+    /// [`Self::resume_auto`] instead (in the sibling `resume_breaker` module),
+    /// which stamps the attempt without forgiving anything.
     pub async fn resume(&self, id: &ManagedSessionId) -> Result<SessionRecord, ManagedError> {
+        let record = self.resume_inner(id).await?;
+        self.note_operator_resume(id).await;
+        Ok(record)
+    }
+
+    /// The shared resume body — see [`Self::resume`] for the full contract.
+    pub(crate) async fn resume_inner(
+        &self,
+        id: &ManagedSessionId,
+    ) -> Result<SessionRecord, ManagedError> {
         let mut record = self.get(id).await?;
         match record.state {
             ManagedSessionState::Stopped | ManagedSessionState::Errored => {}
