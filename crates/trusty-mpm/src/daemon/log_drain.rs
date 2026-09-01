@@ -166,12 +166,16 @@ impl LogDrainStatus {
                 report.errors.len()
             )
         } else {
+            // #6547: the second number is what says whether the backlog is
+            // settled. A pass that recorded no new decision logged no warning.
             format!(
-                "{} file(s) uploaded ({} B), {} unchanged, {} over the size ceiling",
+                "{} file(s) uploaded ({} B), {} unchanged, {} over the size ceiling \
+                 ({} newly recorded)",
                 report.uploaded,
                 report.bytes_plain,
                 report.skipped_unchanged,
-                report.skipped_too_large
+                report.skipped_too_large,
+                report.skips_recorded
             )
         };
         Self {
@@ -325,7 +329,9 @@ pub async fn run_tick(
     };
     let cfg = DrainConfig::new(state_dir)
         .with_secrets(plan.secrets.clone())
-        .with_max_file_bytes(plan.max_file_bytes);
+        .with_max_file_bytes(plan.max_file_bytes)
+        // #6547: the collector streams, so this is the bound that matters.
+        .with_max_wire_bytes(plan.max_wire_bytes);
     match run_once(&cfg, &dest, target, &plan.sources).await {
         Ok(report) => LogDrainStatus::from_report(plan, &report),
         Err(e) => LogDrainStatus::failed(plan, format!("drain run failed: {e}")),

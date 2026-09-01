@@ -93,6 +93,7 @@ log_drain:
     };
     assert_eq!(plan.interval.as_secs(), DEFAULT_INTERVAL_SECS);
     assert_eq!(plan.max_file_bytes, DEFAULT_MAX_FILE_BYTES);
+    assert_eq!(plan.max_wire_bytes, DEFAULT_MAX_WIRE_BYTES);
     assert_eq!(plan.scheme(), "file");
     assert_eq!(plan.github_id, None);
     assert_eq!(plan.session_id, None);
@@ -245,6 +246,43 @@ log_drain:
             field: "max_file_bytes"
         }
     );
+}
+
+#[test]
+fn resolve_rejects_a_zero_max_wire_bytes() {
+    // #6547: a zero wire cap skips every file with a recorded decision, which
+    // reads exactly like a working drain with nothing to send.
+    let config = config_from_yaml(
+        r#"
+log_drain:
+  enabled: true
+  destination: "file:///tmp/drain"
+  max_wire_bytes: 0
+"#,
+    );
+    assert_eq!(
+        resolve_log_drain(&config, home()).expect_err("zero wire cap is an error"),
+        LogDrainConfigError::NonPositive {
+            field: "max_wire_bytes"
+        }
+    );
+}
+
+#[test]
+fn resolve_carries_a_configured_max_wire_bytes() {
+    let config = config_from_yaml(
+        r#"
+log_drain:
+  enabled: true
+  destination: "file:///tmp/drain"
+  max_wire_bytes: 4096
+"#,
+    );
+    let LogDrainSetting::Enabled(plan) = resolve_log_drain(&config, home()).expect("resolves")
+    else {
+        panic!("expected an enabled plan");
+    };
+    assert_eq!(plan.max_wire_bytes, 4096);
 }
 
 #[test]

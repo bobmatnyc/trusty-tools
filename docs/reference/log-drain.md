@@ -176,8 +176,9 @@ Per source file, in order:
    `mtime_unix` match, the file is skipped **without being opened**. This is
    where an unchanged run's cheapness comes from: an unchanged machine reads no
    log bytes at all.
-2. **Size ceiling.** A file over `max_file_bytes` is skipped — see
-   [Limits](#limits).
+2. **Size ceiling.** A file over `max_file_bytes`, or whose compressed body
+   passes `max_wire_bytes` mid-stream, is skipped and the decision is written to
+   the manifest as a `SkipRecord` — see [Limits](#limits).
 3. **SHA-256 tiebreak.** Otherwise the file is read and hashed. **If the digest
    matches the recorded entry, the file is still skipped**, and the entry's
    `size`/`mtime_unix` are refreshed so the next run takes the fast path.
@@ -195,8 +196,8 @@ did upload.
 
 Every body passes through `credentials::scrub_secrets` before compression, with
 the caller-supplied secret list. The pipeline order is fixed inside the
-collector — decode, level-filter, **scrub**, gzip — so no body can reach a
-destination having skipped it. The `log-drain` feature *implies* `credentials`
+collector — decode, level-filter, **scrub**, gzip — and holds per chunk on the
+streamed path, so no body can reach a destination having skipped it. The `log-drain` feature *implies* `credentials`
 for exactly this reason: a build with the drain but without the scrubber would
 upload log text nothing had cleaned.
 
@@ -224,14 +225,48 @@ Two rules keep it from destroying a file it does not understand:
 
 | Limit | Value | Behaviour |
 |---|---|---|
-| `max_file_bytes` | 64 MiB default | Oversize files are **skipped**, never truncated or chunked |
+| `max_file_bytes` | 4 GiB default | Plaintext source ceiling. Over it, the file is never opened |
+| `max_wire_bytes` | 64 MiB default | Compressed body ceiling. Over it, the stream is abandoned |
 | `LIST_LIMIT` | 10 000 entries | `list` truncates with a `warn!` |
 
-**Why oversize files are skipped rather than streamed.** The scrub has to see a
-whole body to catch a secret that straddles a chunk boundary, so a chunked
-upload path could only ever write partially-scrubbed text. Refusing to upload is
-the safe half of that trade, and `DrainReport::skipped_too_large` plus a `warn!`
-say so out loud rather than silently truncating.
+Neither bound truncates. A file that trips one is skipped whole, counted in
+`DrainReport::skipped_too_large`, and recorded in the manifest.
+
+**The collector streams (#6547).** It reads 1 MiB at a time, splitting on the
+last line terminator, so peak memory is a function of the chunk and the
+compressed body rather than of the source file. That is why the source ceiling
+moved from 64 MiB to 4 GiB: at 64 MiB, 29 of 86 daily-rotated daemon logs — up
+to 176 MB each — were permanently undrainable, and a file that cannot shrink
+could never become drainable.
+
+**Chunking is safe for the scrub.** The hazard #6534 named is real: a secret
+split across two chunks is found by neither. `ScrubCarry` holds back the last
+`longest needle - 1` bytes of every scrubbed chunk and prepends them to the
+next, so every occurrence is scrubbed in a window that contains it whole, and
+nothing is emitted until it can no longer participate in a boundary-crossing
+match.
+
+**What still bounds memory** is `max_wire_bytes`. `LogDestination::put` takes an
+in-memory `Bytes`, so the gzip output is the one buffer that still scales with
+the file; at the ~20x ratio daemon log text compresses at, 64 MiB of wire admits
+well over a gigabyte of source.
+
+### Skip decisions are made once (#6547)
+
+An oversize file's answer cannot change while the file does not, so re-deciding
+it every 15-minute cycle produced 1,276 identical `WARN`s in 48 hours over ~40
+files. `run_once` now writes a `SkipRecord` — `relative_file`, `size`,
+`mtime_unix`, `reason`, `decided_at` — into the manifest's `skips` list:
+
+- A later pass that sees the same `(file, size, mtime)` counts the file and logs
+  nothing. `DrainReport::skips_recorded` is the count that did warn, so a steady
+  state reads `skipped_too_large: 29, skips_recorded: 0`.
+- A file whose size or mtime moved no longer matches its record and is evaluated
+  again from scratch.
+- Any file a pass CAN read has its record dropped, so raising a bound takes
+  effect on the next pass rather than needing the manifest cleared by hand.
+- `skips` is `#[serde(default)]`, so a manifest written before #6547 still
+  decodes; it simply carries no decisions, and the next pass makes them.
 
 ## What the caller owns
 

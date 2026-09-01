@@ -50,6 +50,7 @@ mod collector;
 mod destination;
 mod error;
 mod manifest;
+mod pipeline;
 mod uri;
 
 #[cfg(test)]
@@ -58,12 +59,14 @@ mod tests;
 use std::path::PathBuf;
 
 pub use collector::{
-    Collected, CollectedFile, DEFAULT_MAX_FILE_BYTES, Level, LogSource, OversizeFile, collect,
+    CollectLimits, Collected, CollectedFile, DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_WIRE_BYTES, Level,
+    LogSource, OversizeFile, collect,
 };
 pub use destination::{LIST_LIMIT, LogDestination, ObjectMeta, ObjectStoreDestination, PutMeta};
 pub use error::DrainError;
 pub use manifest::{
-    DrainManifest, MANIFEST_FILENAME, MANIFEST_VERSION, ManifestEntry, ManifestOrigin, StatDecision,
+    DrainManifest, MANIFEST_FILENAME, MANIFEST_VERSION, ManifestEntry, ManifestOrigin, SkipReason,
+    SkipRecord, StatDecision,
 };
 pub use uri::{DestinationScheme, DestinationUri};
 
@@ -143,20 +146,24 @@ pub struct DrainConfig {
     pub state_dir: PathBuf,
     /// Values [`collect`] removes from every body before upload.
     pub secrets: Vec<String>,
-    /// Files larger than this are skipped, never truncated.
+    /// Plaintext source ceiling. Files over it are skipped, never truncated.
     pub max_file_bytes: u64,
+    /// Compressed body ceiling (#6547). See [`DEFAULT_MAX_WIRE_BYTES`].
+    pub max_wire_bytes: u64,
 }
 
 impl DrainConfig {
-    /// A config with [`DEFAULT_MAX_FILE_BYTES`] and no secrets.
+    /// A config with the default [`CollectLimits`] and no secrets.
     ///
     /// A caller that leaves `secrets` empty gets no scrubbing — see the module
     /// docs.
     pub fn new(state_dir: impl Into<PathBuf>) -> Self {
+        let limits = CollectLimits::default();
         Self {
             state_dir: state_dir.into(),
             secrets: Vec::new(),
-            max_file_bytes: DEFAULT_MAX_FILE_BYTES,
+            max_file_bytes: limits.max_file_bytes,
+            max_wire_bytes: limits.max_wire_bytes,
         }
     }
 
@@ -167,11 +174,23 @@ impl DrainConfig {
         self
     }
 
-    /// Set the per-file size ceiling.
+    /// Set the plaintext source ceiling.
     #[must_use]
     pub fn with_max_file_bytes(mut self, max: u64) -> Self {
         self.max_file_bytes = max;
         self
+    }
+
+    /// Set the compressed-body ceiling (#6547).
+    #[must_use]
+    pub fn with_max_wire_bytes(mut self, max: u64) -> Self {
+        self.max_wire_bytes = max;
+        self
+    }
+
+    /// The two bounds, as [`collect`] takes them.
+    pub fn limits(&self) -> CollectLimits {
+        CollectLimits::new(self.max_file_bytes, self.max_wire_bytes)
     }
 }
 
@@ -190,8 +209,15 @@ pub struct DrainReport {
     pub uploaded: usize,
     /// Files skipped because the manifest already had them.
     pub skipped_unchanged: usize,
-    /// Files skipped for exceeding `max_file_bytes`.
+    /// Files skipped for exceeding one of the size bounds.
     pub skipped_too_large: usize,
+    /// Of those, the ones whose decision was recorded for the FIRST time (#6547).
+    ///
+    /// A steady state where every oversize file has already been decided reads
+    /// `skipped_too_large: 29, skips_recorded: 0` — which is the signal that no
+    /// warning was logged this pass, and the difference between a backlog that
+    /// is settled and one that keeps churning.
+    pub skips_recorded: usize,
     /// Total plaintext bytes of everything uploaded.
     pub bytes_plain: u64,
     /// Total gzipped bytes actually written to the destination.
@@ -227,10 +253,18 @@ pub struct DrainReport {
 /// machine. The manifest is rewritten once at the end, reflecting only what
 /// actually landed.
 ///
+/// A file over one of the size bounds is decided ONCE and the decision is
+/// written to the manifest as a [`SkipRecord`] (#6547); a later pass that sees
+/// the same `(file, size, mtime)` counts it and says nothing. Any file the pass
+/// CAN read has its skip record dropped, so raising a bound takes effect on the
+/// next pass rather than needing the manifest cleared by hand.
+///
 /// Single-flight is the CALLER's responsibility; see the module docs.
 ///
 /// Test: `tests::run_once_end_to_end`, `tests::run_once_is_idempotent`,
-/// `tests::run_once_reuploads_a_mutated_file`, `tests::run_once_refuses_empty_github_id`.
+/// `tests::run_once_reuploads_a_mutated_file`, `tests::run_once_refuses_empty_github_id`,
+/// `tests::run_once_records_an_oversize_skip_once`,
+/// `tests::run_once_re_evaluates_a_skip_when_the_file_changes`.
 ///
 /// # Errors
 /// - [`DrainError::MissingIdentity`] when `target` has an empty component.
@@ -251,7 +285,7 @@ pub async fn run_once(
     let (mut manifest, origin) =
         DrainManifest::load_with_origin(dest, &cfg.state_dir, &manifest_key, &cache_key).await?;
 
-    let collected = collect(sources, &cfg.secrets, cfg.max_file_bytes)?;
+    let collected = collect(sources, &cfg.secrets, cfg.limits())?;
 
     let mut report = DrainReport {
         skipped_too_large: collected.oversize.len(),
@@ -279,7 +313,44 @@ pub async fn run_once(
     let now = chrono::Utc::now().to_rfc3339();
     let mut manifest_dirty = false;
 
+    // #6547: decide each oversize file ONCE. A file that has already been
+    // recorded at this exact size and mtime cannot have changed its answer, so
+    // it is counted and passed over in silence rather than warned about again
+    // every cycle.
+    for over in &collected.oversize {
+        if manifest.skip_recorded(&over.relative_key, over.size, over.mtime_unix) {
+            tracing::debug!(
+                path = %over.path.display(),
+                size = over.size,
+                "log-drain skip already recorded for this size and mtime"
+            );
+            continue;
+        }
+        tracing::warn!(
+            path = %over.path.display(),
+            size = over.size,
+            limit = over.reason.limit_name(),
+            "log-drain is not uploading this file; the decision is recorded in the \
+             manifest and is not logged again until the file's size or mtime changes"
+        );
+        manifest.record_skip(SkipRecord {
+            relative_file: over.relative_key.clone(),
+            size: over.size,
+            mtime_unix: over.mtime_unix,
+            reason: over.reason,
+            decided_at: now.clone(),
+        });
+        report.skips_recorded += 1;
+        manifest_dirty = true;
+    }
+
     for file in collected.files {
+        // A file the pass CAN read has no business carrying a skip record —
+        // raising a bound, or a rotation that shrank it, makes it drainable.
+        if manifest.forget_skip(&file.relative_key) {
+            manifest_dirty = true;
+        }
+
         // Fast path: stat alone says nothing changed, so never compare digests.
         if manifest.decide(&file.relative_key, file.plaintext_len, file.mtime_unix)
             == StatDecision::SkipUnchanged
