@@ -23,6 +23,7 @@ fn plan() -> LogDrainSetting {
             destination_display: "file:///tmp/drain".to_string(),
             interval: Duration::from_secs(LOG_DRAIN_DEFAULT_INTERVAL_SECS),
             max_file_bytes: 1024,
+            max_wire_bytes: 1024,
             secrets: Vec::new(),
             github_id: Some("octocat".to_string()),
             session_id: Some("sess-1".to_string()),

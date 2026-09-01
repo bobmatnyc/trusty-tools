@@ -125,6 +125,76 @@ async fn a_second_tick_dedupes() {
 }
 
 #[tokio::test]
+async fn a_ceiling_skip_is_decided_once_across_ticks() {
+    // #6547: the drain re-stat'd ~40 permanently-oversize files every 15-minute
+    // cycle and re-logged the same WARN — 1,276 of them in 48 hours. The
+    // scheduler is the loop that produced them, so the "decided once" property
+    // is proved here at tick granularity, not only inside `run_once`.
+    let tmp = TempDir::new().expect("tempdir");
+    let dest = tmp.path().join("dest");
+    let logs = log_dir_with(&tmp, &"x".repeat(4096));
+    let state = tmp.path().join("state");
+
+    let mut config = enabled_config(&dest, &logs);
+    config
+        .log_drain
+        .as_mut()
+        .expect("fixture section")
+        .max_file_bytes = Some(1024);
+    let plan = plan_of(&config, tmp.path());
+    let target = fixture_target();
+
+    let first = run_tick(&plan, &state, &target).await;
+    assert_eq!(first.outcome, DrainOutcome::Success, "{}", first.detail);
+    assert_eq!(first.uploaded, 0, "{}", first.detail);
+    assert!(
+        first
+            .detail
+            .contains("1 over the size ceiling (1 newly recorded)"),
+        "the first tick decides: {}",
+        first.detail
+    );
+
+    let second = run_tick(&plan, &state, &target).await;
+    assert!(
+        second
+            .detail
+            .contains("1 over the size ceiling (0 newly recorded)"),
+        "a later tick must not re-decide an unchanged file: {}",
+        second.detail
+    );
+}
+
+#[tokio::test]
+async fn the_wire_ceiling_reaches_the_drain_config() {
+    // The knob #6547 added has to survive config → plan → `DrainConfig`, or the
+    // bound that actually governs memory is unreachable from YAML.
+    let tmp = TempDir::new().expect("tempdir");
+    let dest = tmp.path().join("dest");
+    let logs = log_dir_with(&tmp, "INFO a line that will not gzip under 8 bytes\n");
+    let state = tmp.path().join("state");
+
+    let mut config = enabled_config(&dest, &logs);
+    config
+        .log_drain
+        .as_mut()
+        .expect("fixture section")
+        .max_wire_bytes = Some(8);
+    let plan = plan_of(&config, tmp.path());
+    assert_eq!(plan.max_wire_bytes, 8);
+
+    let status = run_tick(&plan, &state, &fixture_target()).await;
+    assert_eq!(status.uploaded, 0, "{}", status.detail);
+    assert!(
+        status
+            .detail
+            .contains("1 over the size ceiling (1 newly recorded)"),
+        "the wire ceiling must be reported like any other skip: {}",
+        status.detail
+    );
+}
+
+#[tokio::test]
 async fn a_failing_destination_records_failed() {
     let tmp = TempDir::new().expect("tempdir");
     // A `file://` root nested under a regular FILE: `create_dir_all` cannot

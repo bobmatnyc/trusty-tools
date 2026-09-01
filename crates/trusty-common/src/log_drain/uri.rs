@@ -15,8 +15,8 @@
 
 use std::path::PathBuf;
 
-use super::collector::hex_digest;
 use super::error::DrainError;
+use super::pipeline::hex_digest;
 
 /// The scheme half of a destination URI.
 ///
