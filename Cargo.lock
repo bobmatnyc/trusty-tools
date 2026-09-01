@@ -6596,7 +6596,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 2.0.0",
+ "proc-macro-crate 1.3.1",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -10439,7 +10439,7 @@ dependencies = [
 
 [[package]]
 name = "tga"
-version = "5.0.2"
+version = "5.0.3"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -11604,7 +11604,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.46.6"
+version = "0.47.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11901,7 +11901,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm"
-version = "1.5.15"
+version = "1.5.16"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12033,7 +12033,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-search"
-version = "0.51.0"
+version = "0.52.0"
 dependencies = [
  "anyhow",
  "arc-swap",
