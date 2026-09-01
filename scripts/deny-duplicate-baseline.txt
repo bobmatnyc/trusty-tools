@@ -2,7 +2,9 @@
 #
 # The number below is how many crates appear at more than one version in this
 # workspace's dependency graph, as counted by `cargo deny check bans` with the
-# policy in deny.toml. Measured 2026-08-15 at e39183c3, with the default feature set (NOT --all-features).
+# policy in deny.toml. Always measured with the default feature set (NOT
+# --all-features); the date and commit of the current measurement are in the
+# most recent raise note below.
 #
 # The gate FAILS when the live count exceeds this number, so a dependency bump
 # that introduces a new duplicate has to be noticed and justified. It PASSES and
@@ -11,38 +13,44 @@
 # LOWERING IT IS ALWAYS WELCOME. Raising it is a review decision that belongs in
 # the PR body, not a quiet edit.
 #
-# The three worst offenders today are base64, derive_more and lru, each at three
-# versions. `cargo deny check bans` prints the full list and the dependency path
-# to every copy.
+# The worst offenders today are itertools and toml at four versions each, then
+# base64, derive_more, getrandom, lru, nix, rand, rand_core, toml_datetime,
+# toml_edit and winnow at three. `cargo deny check bans` prints the full list
+# and the dependency path to every copy.
 #
-# RAISED 83 -> 84 on 2026-09-01 (#6549, log-drain dependency chain).
+# RAISED 83 -> 84 on 2026-09-01 (#6549, log-drain dependency chain), then
+# 84 -> 86 the same day (#6549) when the 84 pin turned out to be vulnerable.
+# Measured 86 on 2026-09-01 at f3d825341 plus this commit's dependency change.
+# The 84 and 86 lists differ by exactly four crates: quick-xml leaves, md-5,
+# reqwest and spin arrive.
 #
-# The pair: quick-xml 0.39 (pulled by object_store) against quick-xml 0.41
-# (pulled by calamine 0.36, plist 1.10, and trusty-search's own direct
-# dependency).
+# What the 84 row bought and why it was given back. object_store 0.13.2 was
+# pinned in `[workspace.dependencies]` to hold the count at 84: it wants
+# quick-xml ^0.39, ONE new duplicate against the quick-xml 0.41 that calamine
+# 0.36, plist 1.10 and trusty-search already pull. object_store 0.14.1 wants
+# quick-xml ^0.41 (unified) but also reqwest ^0.13, md-5 ^0.11 and a new
+# crc-fast (-> spin 0.10) — THREE new duplicates, since the workspace,
+# async-openai, teloxide-core, hf-hub and reqwest-eventsource are all on
+# reqwest 0.12, lopdf holds md-5 0.10, and ring holds spin 0.9.
 #
-# Why it cannot unify: 0.39 and 0.41 are semver-incompatible — for a 0.x crate
-# Cargo treats the MINOR as the major — so no `cargo update --precise` can
-# collapse them. Only object_store's major chooses which one it wants, and every
-# choice costs something:
+# The 0.39 side is not merely older. quick-xml 0.39.4 carries RUSTSEC-2026-0194
+# (quadratic run time checking a start tag for duplicate attribute names) and
+# RUSTSEC-2026-0195 (unbounded namespace-declaration allocation in `NsReader`),
+# both 7.5 high, both fixed only in 0.41.0. `cargo audit` (Gate 2) and
+# `cargo deny check advisories` (Gate 3) hard-fail on either, so the 84 pin
+# could not clear the pre-publish gate at all.
 #
-#   object_store 0.14.1  quick-xml ^0.41 (unified) but reqwest ^0.13, md-5
-#                        ^0.11 and a new crc-fast (-> spin 0.10) — THREE new
-#                        duplicates, since the workspace, async-openai,
-#                        teloxide-core, hf-hub and reqwest-eventsource are all
-#                        on reqwest 0.12, lopdf holds md-5 0.10, and ring holds
-#                        spin 0.9. Count: 86.
-#   object_store 0.13.2  needs none of those three, but wants quick-xml ^0.39 —
-#                        ONE new duplicate. Count: 84.
+# Nothing cheaper exists. 0.13.2 is the newest 0.13.x on crates.io, so no patch
+# release moves that line off 0.39; 0.39 and 0.41 are semver-incompatible — for
+# a 0.x crate Cargo treats the MINOR as the major — so no `cargo update
+# --precise` collapses them; and moving the other side is not available either,
+# since calamine and plist pin 0.41 at their latest releases. Only the
+# object_store major chooses. A real advisory outranks two duplicate versions,
+# so object_store moves to 0.14 and this number moves to 86.
 #
-# 0.13.2 is pinned in `[workspace.dependencies]` for exactly this reason: it
-# trades three duplicates for one and keeps a second reqwest/hyper/rustls stack
-# out of every binary. Moving the other side is not available either — calamine
-# and plist pin 0.41 at their latest releases, so pinning trusty-search down to
-# 0.39 would leave the duplicate in place and drag two more crates backwards.
-#
-# This row drops back to 83 when the workspace moves to reqwest 0.13, at which
-# point object_store 0.14 costs nothing and quick-xml unifies on 0.41.
+# This row drops to 85 when the workspace itself moves to reqwest 0.13. The
+# remaining two need their other side to move: lopdf off md-5 0.10, and ring
+# off spin 0.9.
 #
 # One bare integer, first non-comment line:
-84
+86
