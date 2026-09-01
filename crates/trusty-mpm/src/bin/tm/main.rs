@@ -62,6 +62,13 @@ mod tests_behavior_a;
 #[path = "install_policy_tests.rs"]
 mod install_policy_tests;
 
+// #6441: parse-layer coverage for the bare `tm <github-url>` form. Its own
+// file rather than `tests.rs` because the `infer_subcommands` /
+// `external_subcommand` precedence it pins is one cohesive claim.
+#[cfg(test)]
+#[path = "tests_behavior_bare_run_tests.rs"]
+mod tests_behavior_bare_run;
+
 #[cfg(test)]
 #[path = "tests_behavior_b_tests.rs"]
 mod tests_behavior_b;
@@ -620,6 +627,12 @@ async fn main() -> anyhow::Result<()> {
         // routing decision lives in `run_target` so it is unit-testable.
         Some(Command::Run { target, task, root }) => {
             commands::run_target::run(&client, &url, &target, task, root).await
+        }
+        // #6441: a leading token that matched no subcommand. A repo shape runs
+        // the same cold start as `tm run`; anything else is a typo and gets
+        // clap's usage error back.
+        Some(Command::External(ref tokens)) => {
+            commands::run_target::run_external(&client, &url, tokens, &argv, &HELP).await
         }
         Some(Command::Path { alias, root }) => {
             let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
