@@ -123,6 +123,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `stop` — Stop a session (graceful by default, --force for immediate)
 - `session` — \[DEPRECATED\] Alias of `sessions` (#2116) — use `tm sessions <verb>`
   - `activity` — Show recent activity for a managed session
+  - `adopt-worktree` — Take over a worktree whose owning session or agent is dead (#6497)
   - `answer` — Answer a managed session's pending decision
   - `attach` — Print the tmux attach command for a managed session
   - `breakers` — Show every agent's circuit-breaker state
@@ -156,6 +157,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `tui` — Launch the coordinator TUI: an input box over a live session list (#1272)
 - `sessions` — Define and manage Claude Code sessions within a project
   - `activity` — Show recent activity for a managed session
+  - `adopt-worktree` — Take over a worktree whose owning session or agent is dead (#6497)
   - `answer` — Answer a managed session's pending decision
   - `attach` — Print the tmux attach command for a managed session
   - `breakers` — Show every agent's circuit-breaker state
