@@ -18,10 +18,67 @@
 //! Test: this file IS the test module; run with `cargo test -p trusty-mpm`.
 
 use super::decommission::{
-    WORKTREE_SENTINEL_FILE, is_session_worktree, remove_session_worktree, worktrees_dirname,
+    WORKTREE_SENTINEL_FILE, is_session_worktree, removal_permitted, remove_session_worktree,
+    worktrees_dirname,
 };
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
+
+/// The three tiers of `removal_permitted` (#6561), asserted on the predicate
+/// itself so the reclaim classifier's forward and the remover's own gate are
+/// pinned to one rule rather than to two copies of it.
+#[test]
+fn removal_permitted_admits_all_three_tiers() {
+    let tmp = crate::test_support::hermetic_temp_dir();
+
+    // Tier 1 — the ownership sentinel, wherever the worktree is parked.
+    let parked = tmp.path().join("parked");
+    std::fs::create_dir_all(&parked).expect("mkdir");
+    assert!(!removal_permitted(&parked));
+    std::fs::write(parked.join(WORKTREE_SENTINEL_FILE), b"").expect("write sentinel");
+    assert!(removal_permitted(&parked));
+
+    // Tier 2 — the `.worktrees/<name>` convention.
+    let convention = tmp.path().join(".worktrees").join("some-session");
+    std::fs::create_dir_all(&convention).expect("mkdir");
+    assert!(removal_permitted(&convention));
+
+    // Tier 3 (#6561) — the harness's own `isolation: "worktree"` store, which
+    // `agent_worktree_reap` already removes from on every agent exit. Before
+    // this the reclaim survey reported `0 of 0 measured` against stores holding
+    // 30+ merged, clean worktrees.
+    let agent_store = tmp
+        .path()
+        .join(".claude")
+        .join("worktrees")
+        .join("agent-aa049179cd3e4e1bb");
+    std::fs::create_dir_all(&agent_store).expect("mkdir");
+    assert!(
+        removal_permitted(&agent_store),
+        "a `.claude/worktrees/<name>` leaf is the harness store and is trusty-mpm's to reclaim"
+    );
+}
+
+/// The boundary: widening to the harness store must not admit an ordinary
+/// directory, a `worktrees/` without the dot-claude parent, or a nested path
+/// inside an agent worktree.
+#[test]
+fn removal_permitted_refuses_a_user_directory() {
+    let tmp = crate::test_support::hermetic_temp_dir();
+    for rel in [
+        "src",
+        "worktrees/not-under-dot-claude",
+        ".claude/worktrees/agent-x/crates",
+        ".claude/settings",
+    ] {
+        let path = tmp.path().join(rel);
+        std::fs::create_dir_all(&path).expect("mkdir");
+        assert!(
+            !removal_permitted(&path),
+            "{rel} carries none of the three ownership marks and must be refused"
+        );
+    }
+}
 
 #[test]
 fn is_session_worktree_detects_dot_worktrees_component() {
@@ -75,19 +132,28 @@ fn worktrees_dirname_delegates_to_the_shared_resolver() {
 }
 
 /// #5204 REGRESSION: no configured worktree base may make a Claude Code agent
-/// worktree look tm-owned.
+/// worktree look like a SESSION worktree.
 ///
 /// Why: making the base configurable put `.claude/worktrees/<agent>` one config
-/// value away from deletion. `is_session_worktree` asks only whether the
-/// immediate parent is a worktree base, and `worktree_reclaim::tm_provisioned`
-/// applies "exactly the predicate the remover applies" (#2919 removed the
-/// classifier/remover asymmetry on purpose, so there is no second opinion left).
-/// A dotless `worktrees` would therefore have both the survey and the remover
-/// classify an agent worktree — out of scope per ADR-0020 — as reclaimable.
+/// value away from being treated as a per-session tree — a dotless `worktrees`
+/// would have `is_session_worktree` match it, after which the session paths
+/// (decommission, search-index GC, `--reset-agents-workspaces`) would all act on
+/// an agent's tree as if a session owned it. The reserved-name guard in
+/// `trusty_common::workspace_layout` is what holds.
+///
+/// **What #6561 changed, and what it did not.** `removal_permitted` now admits
+/// the harness store as its own third tier, so `tm_provisioned` answers `true`
+/// for such a path — deliberately, and by a rule keyed on the `.claude/worktrees`
+/// shape rather than on the configured base. This test's subject is the
+/// CONFIGURED-BASE route, which must still refuse: the config value must not be
+/// what decides, or a rename of the base would silently re-scope the session
+/// paths above. So the assertion moved from "nothing may remove it" to "the
+/// config value is not what admits it".
 /// What: sets `TRUSTY_MPM_WORKTREES_DIRNAME=worktrees`, the adversarial value,
-/// and asserts both predicates still refuse `.claude/worktrees/<agent>`. The
-/// reserved-name guard in `trusty_common::workspace_layout` is what holds here.
-/// Test: this test.
+/// and asserts `is_session_worktree` still refuses `.claude/worktrees/<agent>`
+/// and that removing the agent-store tier would leave it refused.
+/// Test: this test; `removal_permitted_admits_all_three_tiers` covers the tier
+/// that does admit it.
 #[test]
 fn configured_base_can_never_claim_a_claude_agent_worktree() {
     let _guard = crate::core::trusty_tools_config::env_test_lock();
@@ -98,7 +164,9 @@ fn configured_base_can_never_claim_a_claude_agent_worktree() {
         "/Users/dev/trusty-mpm-projects/owner/repo/.claude/worktrees/agent-abc123",
     );
     let observed_session = is_session_worktree(agent_wt);
-    let observed_provisioned = crate::session_manager::worktree_reclaim::tm_provisioned(agent_wt);
+    // #6561: the harness-store tier is what admits this path now. Asserting on
+    // the other two tiers keeps the configured base out of the answer.
+    let observed_sentinel = agent_wt.join(WORKTREE_SENTINEL_FILE).exists();
 
     // SAFETY: as above.
     unsafe { std::env::remove_var("TRUSTY_MPM_WORKTREES_DIRNAME") };
@@ -109,9 +177,9 @@ fn configured_base_can_never_claim_a_claude_agent_worktree() {
          TRUSTY_MPM_WORKTREES_DIRNAME says"
     );
     assert!(
-        !observed_provisioned,
-        "the remover's own predicate must refuse a Claude Code agent worktree \
-         (ADR-0020 puts that store out of scope)"
+        !observed_sentinel,
+        "and it must not be admitted by a sentinel that is not there — the only \
+         thing admitting it is the explicit harness-store tier (#6561)"
     );
 }
 

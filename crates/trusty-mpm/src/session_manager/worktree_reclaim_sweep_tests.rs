@@ -141,11 +141,15 @@ fn recheck_refuses_when_git_cannot_be_queried() {
 
 #[test]
 fn recheck_refuses_a_worktree_that_lost_its_ownership_marker() {
-    // Parked outside `.worktrees/` and carrying no sentinel: this is the
-    // harness `.claude/worktrees/` shape, which `remove_session_worktree`
-    // refuses. Approving it would report a removal that never happened.
+    // Parked outside `.worktrees/`, carrying no sentinel, and not in the
+    // harness agent store: `remove_session_worktree` refuses it, so approving
+    // it would report a removal that never happened.
+    //
+    // #6561 moved the `.claude/worktrees/` shape out of this case — it is now
+    // tier 3 of `removal_permitted` and the remover does act on it. The shape
+    // asserted on here is the one that still carries no ownership mark at all.
     let fx = GitWorktreeFixture::new();
-    let parent = fx.repo.join(".claude").join("worktrees");
+    let parent = fx.repo.join("elsewhere");
     let path = fx.add_worktree_at(&parent, "unowned-2919");
     let reason = recheck_before_delete(&path, Some(&[]), &merged(1), &no_agents)
         .expect("an unowned worktree must refuse");
@@ -356,12 +360,16 @@ fn survey_reports_a_merged_worktree_as_reclaimable() {
 
 #[test]
 fn survey_excludes_a_worktree_trusty_mpm_cannot_remove() {
-    // #2919 HIGH: `.claude/worktrees/` entries used to be classified
+    // #2919 HIGH: a worktree the remover would refuse used to be classified
     // `Reclaimable` and counted into `reclaimable_bytes`, so `tm doctor`
     // advertised a command that then failed and left them on disk. On the
     // machine this was measured on that is most of the 1.1 TiB.
+    //
+    // #6561 retargeted the fixture: the `.claude/worktrees/` store is now a
+    // shape the remover DOES act on, so the shape that must still be excluded
+    // is one carrying no ownership mark at all.
     let fx = GitWorktreeFixture::new();
-    let parent = fx.repo.join(".claude").join("worktrees");
+    let parent = fx.repo.join("elsewhere");
     let path = fx.add_worktree_at(&parent, "harness-2919");
     let s = survey_with_index(
         &fx.repos_root,
@@ -385,6 +393,44 @@ fn survey_excludes_a_worktree_trusty_mpm_cannot_remove() {
         s.reclaimable_bytes, 0,
         "its bytes must not be counted as reclaimable"
     );
+}
+
+/// The #6561 regression, at the survey level. `tm session prune-worktrees
+/// --merged-prs` reported `reclaimed 0 worktree(s); 0 byte(s) across 0 of 0
+/// measured` against stores holding 30+ merged, clean `agent-*` worktrees,
+/// because gate 3 called the harness store out of scope while
+/// `agent_worktree_reap` was removing trees from that same store on every agent
+/// exit. The agent-store shape is the dominant creation path in a
+/// tm-orchestrated session, so this was most of what the flag exists to reclaim.
+///
+/// Fails before the fix: the candidate is listed but `Blocked` with "the harness
+/// `.claude/worktrees/` store is out of scope (ADR-0020)", and
+/// `s.reclaimable` is 0.
+#[test]
+fn survey_offers_a_merged_agent_store_worktree() {
+    let fx = GitWorktreeFixture::new();
+    let parent = fx.repo.join(".claude").join("worktrees");
+    let path = fx.add_worktree_at(&parent, "agent-6561");
+    land(&path);
+    let s = survey_with_index(
+        &fx.repos_root,
+        &[],
+        &|_: &Path| merged_index("wt/agent-6561", 759),
+        &no_agents,
+        SurveyBudget::default(),
+        false,
+    );
+    let found = s
+        .candidates
+        .iter()
+        .find(|c| c.path == path)
+        .unwrap_or_else(|| panic!("survey missed {}", path.display()));
+    assert_eq!(
+        found.verdict,
+        ReclaimVerdict::Reclaimable { pr: 759 },
+        "a merged, clean, unclaimed agent worktree must be offered"
+    );
+    assert_eq!(s.reclaimable, 1);
 }
 
 #[test]

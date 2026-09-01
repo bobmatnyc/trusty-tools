@@ -408,6 +408,72 @@ fn reap_leaves_a_live_sessions_delegations_alone() {
     );
 }
 
+/// The #6556 regression, second defect. A `rust-engineer` dispatched with
+/// `isolation: "worktree"` and demonstrably running in
+/// `.claude/worktrees/agent-…` was named by the ADR-0049 deny as "running there
+/// with no worktree of its own", because the query read the DECLARED isolation
+/// and that field was empty on the record. `worktree_path` is the agent's own
+/// report of where it is, and it says otherwise.
+///
+/// Fails before the fix: the pre-#6556 filter consults `isolation` alone, so a
+/// record with `isolation: None` and a recorded agent worktree is still
+/// reported.
+#[test]
+fn a_recorded_worktree_outranks_a_missing_isolation_declaration() {
+    let state = DaemonState::new();
+    let session = sample_session();
+    let id = session.id;
+    let cwd = std::path::PathBuf::from("/repo/main");
+    state.register_session(session);
+
+    let mut d = unisolated_running_delegation(id, &cwd);
+    // What the agent reported from its own hook cwd (#4311) — a tree that is
+    // not the dispatcher's.
+    d.worktree_path = Some(std::path::PathBuf::from(
+        "/repo/main/.claude/worktrees/agent-aa049179cd3e4e1bb",
+    ));
+    state.upsert_delegation(d);
+
+    assert!(
+        state.live_shared_tree_writers(&cwd, None).is_empty(),
+        "an agent that reported a tree of its own is not writing in the shared checkout"
+    );
+}
+
+/// The control for the rule above: `worktree_path` is `None` both when the agent
+/// shares the dispatcher's tree AND before it has made its first tool call, so
+/// absence must never be read as evidence of a separate tree. The isolation test
+/// still decides, and an unisolated engineer still blocks.
+#[test]
+fn an_unrecorded_worktree_leaves_the_isolation_test_deciding() {
+    let state = DaemonState::new();
+    let session = sample_session();
+    let id = session.id;
+    let cwd = std::path::PathBuf::from("/repo/main");
+    state.register_session(session);
+    state.upsert_delegation(unisolated_running_delegation(id, &cwd));
+    assert_eq!(
+        state.live_shared_tree_writers(&cwd, None).len(),
+        1,
+        "no recorded worktree means undetermined, and the guard still blocks"
+    );
+
+    // A recorded path EQUAL to the dispatcher's cwd is the same agent in the
+    // same tree — that is not evidence of separation either.
+    let state = DaemonState::new();
+    let session = sample_session();
+    let id = session.id;
+    state.register_session(session);
+    let mut d = unisolated_running_delegation(id, &cwd);
+    d.worktree_path = Some(cwd.clone());
+    state.upsert_delegation(d);
+    assert_eq!(
+        state.live_shared_tree_writers(&cwd, None).len(),
+        1,
+        "a recorded path equal to the dispatch cwd names the shared tree, not a separate one"
+    );
+}
+
 #[test]
 fn new_reads_default_when_optimizer_file_missing() {
     // With no framework installed (the optimizer.toml file absent), the

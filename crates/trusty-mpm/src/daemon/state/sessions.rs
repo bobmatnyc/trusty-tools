@@ -91,6 +91,30 @@ pub(crate) const DELEGATION_RETENTION_SECS: i64 = 60 * 60;
 /// `a_stale_delegation_is_eventually_evicted`.
 pub(crate) const STALE_RETENTION_SECS: i64 = 24 * 60 * 60;
 
+/// Has this agent positively reported a working tree other than `cwd` (#6556)?
+///
+/// Why: [`DaemonState::live_shared_tree_writers`] answers "who is writing in
+/// this directory", and it used to answer it from the DECLARED `isolation`
+/// alone. That field records an intention read off one hook payload, and it is
+/// absent whenever the declaration did not reach the tracker — after which a
+/// worktree-isolated agent is named as a shared-checkout writer for the six
+/// hours of [`RUNNING_STALE_AFTER_SECS`]. `worktree_path` is the opposite kind
+/// of fact: the subagent's own hook cwd, written only after the delegation
+/// tracker's four ownership claims and a successful sentinel write, and only
+/// when it differs from the dispatcher's `cwd`. So a recorded path that is not
+/// `cwd` is positive evidence of a separate tree, which is what ADR-0045 asks
+/// reconciliation to run on.
+/// What: `true` only when `worktree_path` is recorded AND differs from `cwd`.
+/// `None` is NOT evidence of sharing — the agent may simply not have made a tool
+/// call yet — so it answers `false` and the isolation test still decides.
+/// Test: `a_recorded_worktree_outranks_a_missing_isolation_declaration`,
+/// `an_unrecorded_worktree_leaves_the_isolation_test_deciding`.
+fn holds_its_own_tree(d: &Delegation, cwd: &std::path::Path) -> bool {
+    d.worktree_path
+        .as_deref()
+        .is_some_and(|recorded| recorded != cwd)
+}
+
 /// What one [`DaemonState::sweep_delegations`] pass did.
 ///
 /// Why: the sweep runs on a timer with no caller to inspect its effects, so it
@@ -644,9 +668,24 @@ impl DaemonState {
     /// share one: it is indeterminate, and this whole guard fails toward ALLOW.
     /// `Stale` is deliberately not live — a record tracking has given up on
     /// must not block a dispatch for the remaining hours of its retention.
+    ///
+    /// **A recorded `worktree_path` outranks the declared `isolation` (#6556).**
+    /// `isolation` is what the dispatch ASKED for and can be wrong in the deny
+    /// direction: the field is read off the payload one hook happened to see, so
+    /// a grant whose isolation POST was lost, or a dispatch whose declaration did
+    /// not reach the tracker, leaves `None` on a record whose agent is demonstrably
+    /// somewhere else. `worktree_path` is what the agent REPORTED — the cwd of a
+    /// hook event the subagent itself emitted, admitted only after
+    /// [`crate::daemon::services::delegation_tracker`]'s four ownership claims and
+    /// a successful sentinel write — so a value that differs from `cwd` is
+    /// positive evidence that this agent is not writing in `cwd` at all
+    /// (ADR-0045). On 2026-09-01 a `rust-engineer` dispatched with
+    /// `isolation: "worktree"` and running in `.claude/worktrees/agent-…` was
+    /// named here anyway, and blocked four ADR-0049 documents-only commits.
     /// Test: `shared_tree_dispatch_route_reports_live_unisolated_writers` and
     /// siblings in [`crate::daemon::delegation_routes`], which drive every
-    /// filter here through the route that is this method's only caller.
+    /// filter here through the route that is this method's only caller;
+    /// `a_recorded_worktree_outranks_a_missing_isolation_declaration`.
     pub fn live_shared_tree_writers(
         &self,
         cwd: &std::path::Path,
@@ -660,6 +699,9 @@ impl DaemonState {
                     && d.cwd.as_deref() == Some(cwd)
                     && !(exclude_tool_use_id.is_some()
                         && d.tool_use_id.as_deref() == exclude_tool_use_id)
+                    // #6556: the agent reported a tree of its own, so it is not
+                    // writing here whatever the dispatch declared.
+                    && !holds_its_own_tree(d, cwd)
                     && crate::core::dispatch_isolation::shares_the_callers_tree(
                         &d.agent,
                         d.isolation.as_deref(),

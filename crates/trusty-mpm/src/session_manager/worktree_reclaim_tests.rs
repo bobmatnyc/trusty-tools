@@ -683,17 +683,23 @@ fn measure_bytes_stops_at_an_expired_deadline() {
 
 #[test]
 fn classify_blocks_a_worktree_trusty_mpm_does_not_own() {
-    // #2919 HIGH: `remove_session_worktree` refuses any path with no ownership
-    // sentinel that is not under `.worktrees/`, so classifying one as
-    // `Reclaimable` made `tm doctor` advertise a command that then failed and
-    // left the directory on disk. The classifier now applies exactly the
-    // predicate the remover applies.
+    // #2919 HIGH: `remove_session_worktree` refuses any path carrying none of
+    // the ownership marks, so classifying one as `Reclaimable` made `tm doctor`
+    // advertise a command that then failed and left the directory on disk. The
+    // classifier applies exactly the predicate the remover applies.
+    //
+    // #6561 moved the harness `.claude/worktrees/` store OUT of this case — it
+    // is now tier 3 of `removal_permitted` — so the unowned shape this asserts
+    // on is a worktree parked somewhere with no sentinel at all.
     let fx = GitWorktreeFixture::new();
-    let parent = fx.repo.join(".claude").join("worktrees");
-    let path = fx.add_worktree_at(&parent, "harness-owned-2919");
+    let path = fx.add_worktree_at(&fx.repo.join("elsewhere"), "unowned-2919");
     let v = classify_no_agent(&path, Admission::Admitted, false, &merged(9), &clean);
     assert!(!v.is_reclaimable(), "{v:?}");
-    assert!(reason(&v).contains("out of scope"), "{}", reason(&v));
+    assert!(
+        reason(&v).contains("not a trusty-mpm-removable worktree"),
+        "{}",
+        reason(&v)
+    );
 }
 
 #[test]
@@ -702,8 +708,7 @@ fn the_remover_really_refuses_what_tm_provisioned_rejects() {
     // than to a copy of its rules. Without this the two can drift silently and
     // the classifier goes back to advertising worktrees that cannot be removed.
     let fx = GitWorktreeFixture::new();
-    let parent = fx.repo.join(".claude").join("worktrees");
-    let path = fx.add_worktree_at(&parent, "remover-refuses-2919");
+    let path = fx.add_worktree_at(&fx.repo.join("elsewhere"), "remover-refuses-2919");
     assert!(
         !tm_provisioned(&path),
         "precondition: the classifier rejects this shape"
@@ -719,7 +724,7 @@ fn the_remover_really_refuses_what_tm_provisioned_rejects() {
 
 #[test]
 fn tm_provisioned_matches_the_removers_own_predicate() {
-    // Both tiers `remove_session_worktree` accepts must be accepted here, or
+    // Every tier `remove_session_worktree` accepts must be accepted here, or
     // the classifier and the remover disagree in the OTHER direction and real
     // reclaimable worktrees are silently skipped forever.
     let fx = GitWorktreeFixture::new();
@@ -732,12 +737,87 @@ fn tm_provisioned_matches_the_removers_own_predicate() {
     let parked = fx.add_worktree_at(&fx.repo.join("elsewhere"), "sentinel-2919");
     assert!(
         !tm_provisioned(&parked),
-        "no sentinel, not under .worktrees/"
+        "no sentinel, not under .worktrees/, not in the harness store"
     );
     GitWorktreeFixture::stamp_reclaimable_sentinel(&parked);
     assert!(
         tm_provisioned(&parked),
         "an ownership sentinel must be accepted wherever the worktree is parked"
+    );
+
+    // #6561 tier 3: the harness's own `isolation: "worktree"` store, which
+    // `agent_worktree_reap` already removes from on every agent exit.
+    let agent_store = fx.add_worktree_at(
+        &fx.repo.join(".claude").join("worktrees"),
+        "agent-aa049179cd3e4e1bb",
+    );
+    assert!(
+        tm_provisioned(&agent_store),
+        "a `.claude/worktrees/agent-*` leaf must be accepted — it is the dominant \
+         creation path in a tm-orchestrated session"
+    );
+}
+
+/// The #6561 regression. `tm session prune-worktrees --merged-prs` reported
+/// `0 of 0 measured` against stores holding 30+ merged, clean `agent-*`
+/// worktrees, because gate 3 called the harness store out of scope while
+/// `agent_worktree_reap` was removing trees from it on every agent exit.
+///
+/// Fails before the fix: gate 3 blocks with "the harness `.claude/worktrees/`
+/// store is out of scope (ADR-0020)".
+#[test]
+fn classify_offers_a_merged_agent_store_worktree() {
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree_at(
+        &fx.repo.join(".claude").join("worktrees"),
+        "agent-6561merged",
+    );
+    let v = classify_no_agent(&path, Admission::Admitted, false, &merged(759), &clean);
+    assert!(
+        v.is_reclaimable(),
+        "a merged, clean, unclaimed agent worktree must become reclaimable: {v:?}"
+    );
+}
+
+/// The #4091 dirty-work guard is untouched by that widening: an agent-store
+/// worktree holding uncommitted or unpushed work is still refused, merged PR or
+/// not. This is the assertion that must never be relaxed.
+#[test]
+fn a_dirty_agent_store_worktree_is_still_refused() {
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree_at(
+        &fx.repo.join(".claude").join("worktrees"),
+        "agent-6561dirty",
+    );
+    let v = classify_no_agent(&path, Admission::Admitted, false, &merged(759), &dirty);
+    assert!(
+        !v.is_reclaimable(),
+        "unsaved work outranks a merged PR, in the harness store as anywhere: {v:?}"
+    );
+}
+
+/// The #5661 refusal keeps its exact meaning across the widening: an agent-store
+/// worktree whose sentinel FILE exists but names no owner could be hiding a
+/// claim this cannot read, and is still refused. What #6561 admits is the path
+/// with no sentinel at all, which carries no claim to hide.
+#[test]
+fn an_unreadable_agent_sentinel_still_blocks_an_agent_store_worktree() {
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree_at(
+        &fx.repo.join(".claude").join("worktrees"),
+        "agent-6561garbage",
+    );
+    std::fs::write(
+        path.join(crate::session_manager::decommission::WORKTREE_SENTINEL_FILE),
+        b"{not json",
+    )
+    .expect("write garbage sentinel");
+    let v = classify_no_agent(&path, Admission::Admitted, false, &merged(759), &clean);
+    assert!(!v.is_reclaimable(), "{v:?}");
+    assert!(
+        reason(&v).contains("names no owner"),
+        "the #5661 reason must still be the one given: {}",
+        reason(&v)
     );
 }
 

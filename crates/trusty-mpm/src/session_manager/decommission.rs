@@ -151,6 +151,52 @@ pub(crate) fn is_session_worktree_with(
         .unwrap_or(false)
 }
 
+/// May trusty-mpm remove this worktree directory at all (#6561)?
+///
+/// Why: this is the OWNERSHIP question — "is this ours to delete", asked before
+/// any of the safety questions about whether deleting it right now would lose
+/// work. It existed twice, inline: once as [`remove_session_worktree`]'s
+/// two-tier sentinel/convention gate and once as
+/// [`super::worktree_reclaim::tm_provisioned`], whose whole doc is about
+/// applying "exactly the predicate the remover applies". Two copies of one rule
+/// is the drift this repository's common-entry-point convention forbids, and the
+/// drift had already happened in the other direction: the classifier's copy said
+/// the harness `.claude/worktrees/` store could never be removed, while
+/// [`super::super::daemon::services::agent_worktree_reap`] removes trees from
+/// exactly that store on every agent exit.
+///
+/// What: three tiers, any of which admits the path.
+///
+/// 1. **Sentinel** — the path carries [`WORKTREE_SENTINEL_FILE`]. This is the
+///    explicit marker every SM-created worktree gets, and since #4311 it is also
+///    what the delegation tracker writes into a registered agent worktree.
+/// 2. **Convention** — [`is_session_worktree`], the `.worktrees/<name>` shape,
+///    kept for worktrees created before the sentinel existed.
+/// 3. **Harness agent store (#6561)** — [`is_harness_agent_worktree`], the
+///    `<checkout>/.claude/worktrees/<name>` shape Claude Code's
+///    `isolation: "worktree"` dispatch creates. Admitting it is what makes
+///    `tm session prune-worktrees --merged-prs` able to reclaim the dominant
+///    creation path in a tm-orchestrated session; before this it reported
+///    `0 of 0 measured` against a store holding 30+ merged, clean worktrees.
+///
+/// **This grants no permission to delete anything.** It answers ownership only.
+/// Every gate that decides whether a removal is SAFE stands after it and is
+/// untouched: the merged-PR requirement, the #4091 dirty-work guard
+/// ([`super::worktree_safety::inspect_dirt`], which fails toward dirty and
+/// refuses on an unpushed commit), the live-session check, the agent-ownership
+/// sentinel check (#5661), and the per-candidate re-read immediately before each
+/// delete. Tier 3 widens who may be CONSIDERED, never what may be lost.
+/// Test: `removal_permitted_admits_all_three_tiers`,
+/// `removal_permitted_refuses_a_user_directory`,
+/// `tm_provisioned_matches_the_removers_own_predicate`.
+pub(crate) fn removal_permitted(path: &Path) -> bool {
+    path.join(WORKTREE_SENTINEL_FILE).exists()
+        || is_session_worktree(path)
+        // #6561: the harness's own isolation store, which the agent-worktree
+        // reaper already removes from.
+        || super::worktree_ownership::is_harness_agent_worktree(path)
+}
+
 /// What happened to a worktree the removal path was asked to delete (#4732).
 ///
 /// Why: the caller has to be able to tell "gone" from "still on disk, and here
@@ -264,7 +310,9 @@ pub(super) fn remove_session_worktree(path: &Path) -> WorktreeRemoval {
     // that happen to sit under a `.worktrees/` parent.
     let sentinel = path.join(WORKTREE_SENTINEL_FILE);
     if !sentinel.exists() {
-        if !is_session_worktree(path) {
+        // #6561: one predicate, shared with the reclaim classifier that proposes
+        // these candidates — see `removal_permitted`.
+        if !removal_permitted(path) {
             warn!(
                 path = %path.display(),
                 sentinel = WORKTREE_SENTINEL_FILE,
@@ -274,7 +322,7 @@ pub(super) fn remove_session_worktree(path: &Path) -> WorktreeRemoval {
             // #5204: name the configured base in the message the operator reads.
             return WorktreeRemoval::Kept(format!(
                 "no trusty-mpm ownership sentinel ({WORKTREE_SENTINEL_FILE}) and the path \
-                 is not under {}/",
+                 is not under {}/ or the harness agent-worktree store",
                 worktrees_dirname()
             ));
         }

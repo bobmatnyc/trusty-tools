@@ -38,7 +38,7 @@ use serde::{Deserialize, Serialize};
 
 use super::worktree_ownership::{
     AgentDelegationState, AgentWorktreeOwner, SentinelOwner, is_harness_agent_worktree,
-    read_sentinel_owner,
+    read_sentinel_owner, sentinel_file_present,
 };
 use super::worktree_registry::Admission;
 use super::worktree_safety::DirtyWorktree;
@@ -496,14 +496,20 @@ pub(crate) fn pr_state_for_branch(registry_root: &Path, branch: &str) -> BranchP
 /// this machine that is MOST of the 1.1 TiB. Advertising a remedy that cannot
 /// fire is worse than reporting nothing, so the classifier now applies exactly
 /// the predicate the remover applies.
-/// What: mirrors `remove_session_worktree`'s two-tier ownership test — the
-/// `.trusty-mpm-worktree` sentinel, or the `.worktrees/<name>` convention.
+/// What: CALLS the remover's own predicate
+/// ([`super::decommission::removal_permitted`]) rather than restating it. It
+/// used to restate it, and the restatement drifted (#6561): both copies excluded
+/// the harness `.claude/worktrees/` store, so `--merged-prs` reported
+/// `0 of 0 measured` against a store full of merged, clean agent worktrees while
+/// `agent_worktree_reap` was removing trees from that same store on every agent
+/// exit. The tier that admits them lives in `removal_permitted`; this function
+/// is now a one-line forward so the classifier and the remover cannot disagree
+/// again.
 /// Test: `classify_blocks_a_worktree_trusty_mpm_does_not_own`,
-/// `tm_provisioned_matches_the_removers_own_predicate`.
+/// `tm_provisioned_matches_the_removers_own_predicate`,
+/// `classify_offers_a_merged_agent_store_worktree`.
 pub(crate) fn tm_provisioned(path: &Path) -> bool {
-    path.join(super::decommission::WORKTREE_SENTINEL_FILE)
-        .exists()
-        || super::decommission::is_session_worktree(path)
+    super::decommission::removal_permitted(path)
 }
 
 /// Why a DISPATCHED AGENT's ownership forbids reclaiming `path`, or `None` when
@@ -528,12 +534,23 @@ pub(crate) fn tm_provisioned(path: &Path) -> bool {
 ///    reports nothing for an agent that is still working, and an unanswerable
 ///    liveness question must never resolve to "free" (ADR-0045).
 /// 2. [`SentinelOwner::Unknown`] for a path inside the harness agent store
-///    ([`is_harness_agent_worktree`]). Reaching this gate means gate 3 already
-///    found a sentinel FILE there — `tm_provisioned`'s other tier,
-///    `.worktrees/<name>`, cannot match an agent-store path — so the file exists
-///    and its content does not name an owner. Empty, truncated, garbage or
-///    unreadable are indistinguishable to the tolerant parse, and any of them
-///    could be hiding an agent claim. Undeterminable, not absent.
+///    ([`is_harness_agent_worktree`]) that DOES carry a sentinel file. Its
+///    content does not name an owner; empty, truncated, garbage and unreadable
+///    are indistinguishable to the tolerant parse, and any of them could be
+///    hiding an agent claim. Undeterminable, not absent.
+///
+///    The file-presence test is explicit since #6561 and used to be implied.
+///    Reaching this gate used to prove a sentinel existed, because
+///    `tm_provisioned` admitted a path only through the sentinel or the
+///    `.worktrees/<name>` convention, and the second cannot match an agent-store
+///    path. `removal_permitted`'s third tier admits an agent-store path with no
+///    sentinel at all, so the implication no longer holds — and a path carrying
+///    no sentinel carries no claim to hide, which is a different fact from an
+///    unreadable one. Refusing it would have made the entire population #6561
+///    exists to reclaim permanently unreclaimable, under a reason
+///    ("carries an ownership sentinel that names no owner") that is not true of
+///    it. What such a path faces instead is every remaining gate: the merged PR,
+///    the #4091 dirty-work guard, and the per-candidate re-read before deletion.
 ///
 /// # What this deliberately does NOT change
 ///
@@ -547,7 +564,8 @@ pub(crate) fn tm_provisioned(path: &Path) -> bool {
 /// `classify_blocks_an_agent_the_registry_never_heard_of`,
 /// `classify_allows_a_finished_agents_merged_worktree`,
 /// `classify_blocks_an_agent_store_worktree_with_an_unreadable_sentinel`,
-/// `classify_leaves_a_session_owned_worktree_alone`.
+/// `classify_leaves_a_session_owned_worktree_alone`,
+/// `classify_offers_a_merged_agent_store_worktree`.
 pub(crate) fn agent_ownership_blocks(
     path: &Path,
     agent_state: AgentStateProbe<'_>,
@@ -568,13 +586,19 @@ pub(crate) fn agent_ownership_blocks(
             )),
             AgentDelegationState::Ended => None,
         },
-        SentinelOwner::Unknown if is_harness_agent_worktree(path) => Some(
-            "carries an ownership sentinel that names no owner (empty, malformed or unreadable) \
-             inside the harness agent-worktree store — it could be an agent claim this cannot \
-             read, and an unreadable claim on a destructive path is undeterminable, not absent \
-             (#5661, ADR-0045)"
-                .to_string(),
-        ),
+        // #6561: `sentinel_file_present` is what separates an unreadable claim
+        // from no claim at all — see this function's doc, refusal 2.
+        SentinelOwner::Unknown
+            if is_harness_agent_worktree(path) && sentinel_file_present(path) =>
+        {
+            Some(
+                "carries an ownership sentinel that names no owner (empty, malformed or \
+                 unreadable) inside the harness agent-worktree store — it could be an agent \
+                 claim this cannot read, and an unreadable claim on a destructive path is \
+                 undeterminable, not absent (#5661, ADR-0045)"
+                    .to_string(),
+            )
+        }
         SentinelOwner::Known(..) | SentinelOwner::Unknown => None,
     }
 }
@@ -708,10 +732,14 @@ pub(crate) fn classify(
     // `tm doctor` advertise a command that then failed and left the directory
     // on disk — see `tm_provisioned`.
     if !tm_provisioned(path) {
+        // #6561: the harness `.claude/worktrees/` store is no longer named here
+        // as out of scope — `removal_permitted` admits it and the remover can
+        // now act on it. What remains excluded is a path with none of the three
+        // ownership marks.
         return ReclaimVerdict::blocked(
-            "not a trusty-mpm-provisioned worktree — no ownership sentinel and not under \
-             `.worktrees/`; the harness `.claude/worktrees/` store is out of scope (ADR-0020) \
-             and `prune-worktrees` cannot remove it",
+            "not a trusty-mpm-removable worktree — no ownership sentinel, not under \
+             `.worktrees/`, and not in the harness `.claude/worktrees/` store, so \
+             `prune-worktrees` cannot remove it",
         );
     }
     // Gate 4 (#5661): a dispatched agent has no session record, so gate 2 is

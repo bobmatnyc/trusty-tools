@@ -259,6 +259,156 @@ fn subagent_stop_completes_matching_delegation() {
     assert!(!has_live_children(&state.delegations_for(sid)));
 }
 
+/// A `SubagentStop` naming an agent TYPE as well as an id.
+fn stop_of_type(agent_id: &str, agent_type: &str) -> Value {
+    serde_json::json!({ "agent_id": agent_id, "agent_type": agent_type })
+}
+
+/// The #6556 regression, first defect. The dispatch's `PostToolUse` is installed
+/// `async: true` and its POST fails open, so it can be lost outright — after
+/// which no `agent_id` is ever taught, `on_subagent_stop` can resolve nothing,
+/// and the record reads live for the six hours of `RUNNING_STALE_AFTER_SECS`.
+/// Observed 2026-09-01: records for two completed agents blocked four ADR-0049
+/// documents-only commits across ~80 minutes.
+///
+/// Fails before the fix: without `reconcile_by_agent_type` the stop only lands
+/// in the deferred-stop ledger and the record stays `Running`.
+#[test]
+fn a_completed_agents_record_stops_blocking_when_its_id_was_never_taught() {
+    let (state, sid) = state_with_session();
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre("Agent", "rust-engineer", "fix the bug", "toolu_lost"),
+    );
+    // No PostToolUse at all — the id is never learned.
+    let cwd = std::path::PathBuf::from("/tmp/p");
+    assert_eq!(
+        state.live_shared_tree_writers(&cwd, None).len(),
+        1,
+        "the live record blocks an ADR-0049 commit while the agent is running"
+    );
+
+    observe(
+        &state,
+        sid,
+        HookEvent::SubagentStop,
+        &stop_of_type("a403cdbc", "rust-engineer"),
+    );
+
+    let d = only(&state, sid);
+    assert_eq!(
+        d.status,
+        DelegationStatus::Stale,
+        "identified by type, so `Stale` — tracking gave up, the agent is not asserted finished"
+    );
+    assert!(
+        d.ended_at.is_none(),
+        "staling must not stamp ended_at, which means `reached a terminal status`"
+    );
+    assert!(
+        state.live_shared_tree_writers(&cwd, None).is_empty(),
+        "a completed agent's record must stop blocking a documents-only commit"
+    );
+    // The stop is still deferred, so a late `PostToolUse` resolves the record to
+    // the truth — `Stale` is not terminal.
+    observe(
+        &state,
+        sid,
+        HookEvent::PostToolUse,
+        &post_async("Agent", "toolu_lost", "a403cdbc"),
+    );
+    assert_eq!(
+        only(&state, sid).status,
+        DelegationStatus::Completed,
+        "the deferred stop must still be able to correct a staled record"
+    );
+}
+
+/// Ambiguity declines. Two unresolved records of one type are indistinguishable
+/// from a stop that names only the type, and closing the wrong one would stop
+/// the ADR-0048 guard counting a writer that is still in the tree.
+#[test]
+fn two_unresolved_records_of_one_type_are_left_alone() {
+    let (state, sid) = state_with_session();
+    for id in ["toolu_a", "toolu_b"] {
+        observe(
+            &state,
+            sid,
+            HookEvent::PreToolUse,
+            &pre("Agent", "rust-engineer", id, id),
+        );
+    }
+    observe(
+        &state,
+        sid,
+        HookEvent::SubagentStop,
+        &stop_of_type("a403cdbc", "rust-engineer"),
+    );
+    let live = state.delegations_for(sid);
+    assert_eq!(live.len(), 2);
+    assert!(
+        live.iter().all(|d| d.status == DelegationStatus::Running),
+        "ambiguity must decline rather than guess: {live:?}"
+    );
+}
+
+/// A stop carrying no `agent_type` offers nothing to match on, and matching on
+/// liveness alone would be the "most recent" guess the module note forbids.
+#[test]
+fn a_stop_without_an_agent_type_reconciles_nothing() {
+    let (state, sid) = state_with_session();
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre("Agent", "rust-engineer", "t", "toolu_1"),
+    );
+    observe(
+        &state,
+        sid,
+        HookEvent::SubagentStop,
+        &serde_json::json!({ "agent_id": "a403cdbc" }),
+    );
+    assert_eq!(
+        only(&state, sid).status,
+        DelegationStatus::Running,
+        "no agent_type is no evidence about which record ended"
+    );
+}
+
+/// A record that DID learn its id is resolved by id, never by type — so a
+/// mismatched stop cannot reach through the type path and stale it.
+#[test]
+fn reconciliation_never_touches_a_record_that_learned_its_id() {
+    let (state, sid) = state_with_session();
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre("Agent", "rust-engineer", "t", "toolu_1"),
+    );
+    observe(
+        &state,
+        sid,
+        HookEvent::PostToolUse,
+        &post_async("Agent", "toolu_1", "known-id"),
+    );
+    // A stop for a DIFFERENT agent of the same type.
+    observe(
+        &state,
+        sid,
+        HookEvent::SubagentStop,
+        &stop_of_type("other-id", "rust-engineer"),
+    );
+    assert_eq!(
+        only(&state, sid).status,
+        DelegationStatus::Running,
+        "a record with an id is only ever closed by that id"
+    );
+}
+
 #[test]
 fn subagent_stop_failure_marks_failed() {
     let (state, sid) = state_with_session();
