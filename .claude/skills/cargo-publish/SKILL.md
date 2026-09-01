@@ -22,9 +22,14 @@ Every publish follows this exact sequence:
 0. scripts/check-publish-ready.sh <crate>   — MANDATORY, MUST PASS
 1. Pre-flight checks (fmt, clippy, tests)
 2. cargo publish --dry-run
+2b. scripts/preflight-publish.sh --check-only <crate>  — MANDATORY, MUST PASS
+    BEFORE TAGGING (#6508): decides whether tagging is allowed. Tags here are
+    immutable (#6178), so a failure found only AFTER tagging strands the
+    version — this is what trusty-common 0.46.1 and 0.46.3 both burned this
+    week.
 3. git tag <crate-name>-v<version>
 4. git push origin <crate-name>-v<version>
-5. scripts/preflight-publish.sh <crate>     — MANDATORY, MUST PASS (run again, immediately before step 6)
+5. scripts/preflight-publish.sh <crate>     — MANDATORY, MUST PASS (run again, immediately before step 6; this run also binds the tag to the commit via CHECK 6, which step 2b cannot do — no tag exists yet at that point)
 6. cargo publish
 6b. scripts/check-tag-publish-parity.sh --vcs-info auto <crate>  — confirm the
     tag names the commit cargo actually recorded
@@ -34,7 +39,8 @@ Every publish follows this exact sequence:
 10. Verify <binary> --version
 ```
 
-**Critical**: Never skip dry-run. Never publish from the main checkout.
+**Critical**: Never skip dry-run. Never publish from the main checkout. Never
+tag before step 2b passes.
 
 ## Step 0: Publish-Only-From-Merged-Main Guard (MANDATORY, issue #2227)
 
@@ -82,6 +88,34 @@ the entire pipeline (build/release/homebrew-bump AND the publish-dry-run job
 below) is skipped — this is a second, independent enforcement point, not a
 replacement for running `check-publish-ready.sh` yourself before `cargo
 publish`.
+
+## Step 2b: Pre-Tag Gate (MANDATORY, issue #6508)
+
+🔴 **Run `scripts/preflight-publish.sh --check-only <crate>` BEFORE `git tag`
+— it is the gate that decides whether tagging is allowed.** Tags on this repo
+are immutable (#6178); a preflight failure discovered only after the tag is
+already pushed cannot be fixed by moving or deleting the tag, so it burns the
+version number. trusty-common 0.46.1 and 0.46.3 both burned a version this
+week this way — the canonical workflow tagged and pushed BEFORE running
+preflight, so CHECK 5 (semver) failing there stranded an already-pushed tag.
+
+```bash
+scripts/preflight-publish.sh --check-only trusty-mpm
+```
+
+This runs every check unconditionally, including the checks that don't need a
+tag yet (semver, identity, clean-tree, version-not-live, UI bundle freshness,
+the pre-publish gate, the changelog assembler). CHECK 6 (tag/publish-commit
+parity, Step 5 below) is the one exception: a `TAG-MISSING` finding here is
+the expected pre-tag state, not a failure — `--check-only` reports it as
+`[SKIP]` and does not block on it. Only tag once this run passes clean.
+
+The full (non-`--check-only`) run in Step 5 below is the POST-TAG gate and
+mechanically enforces this ordering: it refuses to certify a run — failing
+the same way any other check does, printing the exact `--check-only` command
+above — when no candidate tag for the target version exists locally yet.
+This does not replace the procedural rule; it catches the case where someone
+reaches for the full run as a substitute for the pre-tag one.
 
 ## Step 5: Identity + Clean-Tree + Version-Not-Live Guard (MANDATORY, closes the 2026-07-08 collision)
 
@@ -160,12 +194,13 @@ version instead). Runs six checks and fails loud on any of them:
    Full rationale, the four finding codes, and the residual gap:
    [docs/reference/release-workflow.md](../../../docs/reference/release-workflow.md#tagpublish-commit-parity-guard).
 
-`scripts/preflight-publish.sh --check-only <crate>` runs all six checks
-unconditionally and prints a `[PASS]`/`[FAIL]` line per check without
-assuming you're mid-publish — use it to preview status. `--help` documents
-the rare, logged `PREFLIGHT_ALLOW_DETACHED=1` override for check 1 (validated
-release worktrees only — misuse of it is exactly how the incident happened).
-No override exists for the identity check.
+`scripts/preflight-publish.sh --check-only <crate>` runs all checks
+unconditionally and prints a `[PASS]`/`[FAIL]`/`[SKIP]` line per check without
+assuming you're mid-publish — this is the Step 2b pre-tag gate above, MANDATORY
+before `git tag`, not just a status preview. `--help` documents the rare,
+logged `PREFLIGHT_ALLOW_DETACHED=1` override for check 1 (validated release
+worktrees only — misuse of it is exactly how the incident happened). No
+override exists for the identity check.
 
 ## Step 6: Version-Parity Guard (MANDATORY, issue #3366)
 
@@ -619,11 +654,20 @@ SKIP_UI_BUILD=1 cargo publish --dry-run -p <crate>
 #    - Wait 100s
 #    - Retry this crate's dry-run
 
+# 8b. Pre-tag gate (MANDATORY, #6508) — MUST PASS before tagging. Tags here
+#     are immutable (#6178); a failure found only after tagging strands the
+#     version, which is what burned trusty-common 0.46.1 and 0.46.3 this week.
+scripts/preflight-publish.sh --check-only <crate>
+
 # 9. Tag
 git tag <crate>-v<version>
 
 # 10. Push tag to origin
 git push -u origin <crate>-v<version>
+
+# 10b. Full preflight gate (MANDATORY, Step 5 above) — run again now that the
+#      tag exists; this run is what binds the tag to the commit (CHECK 6).
+scripts/preflight-publish.sh <crate>
 
 # 11. Publish to crates.io (same SKIP_UI_BUILD=1 requirement as step 7, for
 #     the same reason)
@@ -649,10 +693,15 @@ depends on it. Both need to publish.
 # === STEP 1: PUBLISH trusty-common 0.8.0 ===
 cd .claude/worktrees/publish-trusty-common
 
-# Edit, test, commit, tag
+# Edit, test, commit
 vim crates/trusty-common/Cargo.toml  # 0.7.0 → 0.8.0
 cargo test -p trusty-common
 git commit -m "chore: bump trusty-common to v0.8.0"
+
+# Pre-tag gate (MANDATORY, #6508) — must pass BEFORE tagging
+scripts/preflight-publish.sh --check-only trusty-common
+
+# Tag
 git tag trusty-common-v0.8.0
 git push origin trusty-common-v0.8.0
 
@@ -672,10 +721,15 @@ curl -s https://crates.io/api/v1/crates/trusty-common/0.8.0 | head -c 200
 # === STEP 2: PUBLISH trusty-search 0.13.1 ===
 cd .claude/worktrees/publish-trusty-search
 
-# Edit, test, commit, tag
+# Edit, test, commit
 vim crates/trusty-search/Cargo.toml  # 0.13.0 → 0.13.1
 cargo test -p trusty-search
 git commit -m "chore: bump trusty-search to v0.13.1"
+
+# Pre-tag gate (MANDATORY, #6508) — must pass BEFORE tagging
+scripts/preflight-publish.sh --check-only trusty-search
+
+# Tag
 git tag trusty-search-v0.13.1
 git push origin trusty-search-v0.13.1
 
@@ -754,8 +808,13 @@ Before declaring a publish complete:
 - [ ] `scripts/check-publish-ready.sh <crate>` (or `make publish-check CRATE=<crate>`) passed
 - [ ] Pre-flight checks passed (fmt, clippy, tests, check)
 - [ ] Dry-run succeeded
+- [ ] `scripts/preflight-publish.sh --check-only <crate>` passed — MANDATORY
+      before tagging (#6508); tags are immutable, so this is what catches a
+      semver/changelog/gate failure before it can strand one
 - [ ] Tag created with correct name pattern
 - [ ] Tag pushed to origin
+- [ ] `scripts/preflight-publish.sh <crate>` (full run) passed again, now that
+      the tag exists — this is what binds the tag to the commit (CHECK 6)
 - [ ] `cargo publish` succeeded (status 200 OK)
 - [ ] Waited 100s and verified on crates.io API
 - [ ] Binary installed with `cargo install --path … --locked` (if applicable)

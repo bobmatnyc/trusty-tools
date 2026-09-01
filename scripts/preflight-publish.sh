@@ -970,26 +970,89 @@ semver_decide() {
 }
 
 # ===========================================================================
+# Pre-tag guard (#6508) — FULL mode refuses to certify a run without a tag
+# ===========================================================================
+# Why: the canonical workflow tags and pushes BEFORE this script's full run
+#   (`scripts/preflight-publish.sh <crate>`, no --check-only), so a CHECK 5
+#   (semver) failure discovered here strands an already-pushed tag — tags on
+#   this repo are IMMUTABLE (#6178). trusty-common 0.46.1 and 0.46.3 both
+#   burned a version this week exactly this way. `--check-only` runs every
+#   check, tag-parity included (see tagparity_decide below), and is the
+#   MANDATORY gate before `git tag` — see .claude/skills/cargo-publish and
+#   docs/reference/release-workflow.md.
+#
+#   This guard makes full mode refuse to double as that pre-tag check. It
+#   does NOT short-circuit the run — every other check still executes, per
+#   this file's existing "always run every check" design (below: "a partial
+#   preflight is how gaps get missed") — it only ensures a missing tag costs
+#   full mode a [FAIL] and the exact remedy, the same as any other check. A
+#   no-op in --check-only mode, and a no-op once the tag has actually been
+#   created — the corrected sequence never trips it.
+full_mode_requires_tag() {
+  [ "$CHECK_ONLY" -eq 1 ] && return 0
+  local candidates="${CRATE_DIR}-v${VERSION}" tag
+  if [ "$PKG_NAME" != "$CRATE_DIR" ]; then
+    candidates="${candidates} ${PKG_NAME}-v${VERSION}"
+  fi
+  for tag in $candidates; do
+    if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  echo "[FAIL] tag-exists: no local tag (${candidates}) for ${PKG_NAME} ${VERSION} yet." >&2
+  echo "       Full-mode preflight-publish.sh is the POST-TAG gate — CHECK 6 binds" >&2
+  echo "       the tag to the commit about to publish, which is undefined before" >&2
+  echo "       one exists. Run the pre-tag gate first, and only tag once it passes" >&2
+  echo "       clean (#6508 — this is what keeps a preflight failure from ever" >&2
+  echo "       stranding an already-pushed, immutable tag):" >&2
+  echo "         scripts/preflight-publish.sh --check-only ${CRATE_INPUT}" >&2
+  return 1
+}
+
+# ===========================================================================
 # CHECK 6 — the release tag names the commit this publish ships
 # ===========================================================================
 # Delegated rather than inlined so the comparison has somewhere to be tested:
 # scripts/check-tag-publish-parity-selftest.sh drives every failure branch
 # against synthetic repos, which is not something this script's network- and
 # identity-bound checks can be wrapped in.
-check6_tag_parity() {
-  local log="${TMP_PARITY}" rc=0
-
-  bash "${REPO_ROOT}/scripts/check-tag-publish-parity.sh" \
-    "$PKG_NAME" "$VERSION" > "$log" 2>&1 || rc=$?
+#
+# tagparity_decide is split out (rather than inlined in check6_tag_parity) so
+# it can be extracted and driven over canned log content the same way
+# semver_decide (CHECK 5) and gate_decide (CHECK 8) are — see
+# preflight-check6-tag-gate-selftest.sh. In --check-only mode (#6508), a
+# TAG-MISSING finding is the expected pre-tag state, not a failure: the whole
+# point of --check-only is previewing the OTHER checks before the tag exists.
+# TAG-SPLIT, TAG-DRIFT and VCS-INFO-MISMATCH all still fail in either mode —
+# those mean a tag DOES exist and is wrong, never "as expected, not yet."
+tagparity_decide() {
+  local rc="$1" log="$2"
 
   if [ "$rc" -eq 0 ]; then
     echo "[PASS] tag-parity: $(grep '^PASS:' "$log" | head -1)" >&2
     return 0
   fi
 
+  if [ "$CHECK_ONLY" -eq 1 ] && grep -q '^FAIL: TAG-MISSING' "$log"; then
+    echo "[SKIP] tag-parity: no release tag exists yet for ${PKG_NAME} ${VERSION} —" >&2
+    echo "       expected before tagging. --check-only previews the checks that" >&2
+    echo "       do not depend on a tag; tag/publish-commit parity is verified for" >&2
+    echo "       real by the full, post-tag preflight run once the tag exists." >&2
+    return 0
+  fi
+
   echo "[FAIL] tag-parity: the release tag does not name the commit about to be published:" >&2
   sed 's/^/       /' "$log" >&2
   return 1
+}
+
+check6_tag_parity() {
+  local log="${TMP_PARITY}" rc=0
+
+  bash "${REPO_ROOT}/scripts/check-tag-publish-parity.sh" \
+    "$PKG_NAME" "$VERSION" > "$log" 2>&1 || rc=$?
+
+  tagparity_decide "$rc" "$log"
 }
 
 # ===========================================================================
@@ -1472,6 +1535,7 @@ check2_identity;            [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check3_clean_tree;          [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check4_version_not_live;    [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check5_semver;              [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
+full_mode_requires_tag;     [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check6_tag_parity;          [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check7_ui_bundle;           [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check8_prepublish_gate;     [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
