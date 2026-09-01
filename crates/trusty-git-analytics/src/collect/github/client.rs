@@ -505,15 +505,6 @@ impl GitHubClient {
         self.budget.notices()
     }
 
-    /// Whether this client's budget latched, meaning it stopped fetching early.
-    ///
-    /// A caller that continued past per-item failures uses this to tell "the
-    /// items I skipped were individually bad" from "GitHub stopped answering
-    /// and everything after the trip was never attempted" (#6084).
-    pub(crate) fn throttled(&self) -> bool {
-        self.budget.tripped_error().is_some()
-    }
-
     /// Fetch all reviews for a given pull request, paginating until exhausted.
     ///
     /// Why: review counts, approval status, and review latency are core PR
