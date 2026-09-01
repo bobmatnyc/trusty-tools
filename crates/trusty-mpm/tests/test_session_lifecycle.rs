@@ -13,8 +13,42 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+use trusty_mpm::core::host_state_gate::ALLOW_HOST_STATE_ENV;
 use trusty_mpm::daemon::state::DaemonState;
 use trusty_mpm::daemon::tmux::TmuxDriver;
+
+/// RAII override of one environment variable, restored on drop.
+///
+/// Why: `$HOME` is process-global, and an assertion failure between the set and
+/// a manual restore would leak the scratch value into the harness's own
+/// teardown. Same shape as `scratch_home_tmux_gate.rs`'s guard — this binary
+/// holds exactly ONE test (`full_user_cycle`), which is what makes a plain
+/// process-global override safe here without `#[serial_test::file_serial]`:
+/// under both `cargo test` and `cargo nextest` no other test shares the process.
+struct EnvOverride {
+    key: &'static str,
+    prev: Option<std::ffi::OsString>,
+}
+
+impl EnvOverride {
+    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let prev = std::env::var_os(key);
+        // SAFETY: single-test binary — no other thread reads or writes the
+        // environment while this runs.
+        unsafe { std::env::set_var(key, value) };
+        Self { key, prev }
+    }
+}
+
+impl Drop for EnvOverride {
+    fn drop(&mut self) {
+        // SAFETY: as in `set` — single-test binary.
+        match self.prev.take() {
+            Some(v) => unsafe { std::env::set_var(self.key, v) },
+            None => unsafe { std::env::remove_var(self.key) },
+        }
+    }
+}
 
 /// True when a tmux session named `name` is live on this host.
 ///
@@ -107,8 +141,25 @@ async fn wait_for_health(base: &str) {
 /// Note: tmux send/capture are not exercised (tmux may not be installed in CI);
 /// the command and output endpoints are called but the underlying driver ops
 /// are best-effort and errors are logged rather than propagated to the test.
+/// `$HOME` is redirected to a scratch directory for the whole run (#6523), so
+/// the pause step writes its `pause.json` there rather than into the operator's
+/// real `~/.trusty-mpm/sessions/`.
 #[tokio::test]
 async fn full_user_cycle() {
+    // #6523: `$HOME` is both the daemon's data root (`~/.trusty-mpm`) and the
+    // base `core::session_store::pause_path` resolves, so step 5's pause wrote a
+    // real `~/.trusty-mpm/sessions/<uuid>/pause.json` into the operator's home
+    // on every run and nothing removed it. Set before `TestServer::spawn`, which
+    // resolves `FrameworkPaths::default()` at construction.
+    let scratch_home = tempfile::tempdir().expect("scratch home");
+    let _home = EnvOverride::set("HOME", scratch_home.path());
+    // #6523: a scratch `$HOME` is precisely what `host_state_gate` refuses tmux
+    // under (#5784), and step 11's #1454 assertion needs a REAL tmux host to
+    // mean anything — without the opt-in `tmux_available` reads false and the
+    // whole tmux arm silently vanishes. This is the hatch that gate documents
+    // for a test that deliberately wants an isolated `$HOME` AND real tmux.
+    let _allow_host_state = EnvOverride::set(ALLOW_HOST_STATE_ENV, "1");
+
     let server = TestServer::spawn().await;
     let client = reqwest::Client::new();
 
