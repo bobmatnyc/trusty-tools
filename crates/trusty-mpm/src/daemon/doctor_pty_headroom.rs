@@ -6,10 +6,12 @@
 //! session spawn failed with a bare `ENXIO` that names neither the limit nor
 //! the leak. Nothing reported the pressure before it became a hard failure.
 //!
-//! What: [`check_pty_headroom`] reads the cap and counts the allocated
-//! `/dev/ttys*` slaves, then folds the two into a [`DoctorCheck`] via the pure
-//! [`build_pty_headroom_check`]. macOS only — every other platform reports `Ok`
-//! with a skip reason, since the `/dev/ttys*` inventory is a Darwin layout.
+//! What: [`check_pty_headroom`] folds a pty census into a [`DoctorCheck`] via
+//! the pure [`build_pty_headroom_check`]. Only the two platform reads are
+//! target-gated, behind [`read_pty_census`], which yields `None` off Darwin
+//! because `/dev/ttys*` is a Darwin device layout; the check then reports `Ok`
+//! with a skip reason. The threshold classification and its constants sit on
+//! the non-gated path, so they compile and are tested on every target.
 //! Read-only: it counts device nodes and reaps nothing itself.
 //! Test: the `tests` module below.
 
@@ -117,29 +119,45 @@ fn count_allocated_ptys() -> Option<usize> {
     )
 }
 
+/// Gather the pty census on hosts that have one.
+///
+/// Why: #6529 — this is the file's ONLY target-gated decision. Confining the
+/// platform split to the reads keeps [`build_pty_headroom_check`] and its
+/// thresholds on the non-gated path, so they are neither dead code nor
+/// untested off Darwin.
+/// What: `Some((allocated, cap))` on macOS, each element still `None` when that
+/// individual read failed; `None` where the `/dev/ttys*` inventory does not
+/// exist as a concept.
+/// Test: `pty_headroom_skips_cleanly_off_darwin`.
+#[cfg(target_os = "macos")]
+fn read_pty_census() -> Option<(Option<usize>, Option<usize>)> {
+    Some((count_allocated_ptys(), read_ptmx_max()))
+}
+
+/// No pty census off Darwin — see the macOS variant above.
+#[cfg(not(target_os = "macos"))]
+fn read_pty_census() -> Option<(Option<usize>, Option<usize>)> {
+    None
+}
+
 /// Report how much pseudo-terminal capacity the host has left (#6529).
 ///
 /// Why: see the module doc — pty exhaustion presents as an unexplained `ENXIO`
 /// on the next session spawn, long after the leak that caused it.
-/// What: on macOS, reads the cap and the allocated count and renders them with
-/// [`build_pty_headroom_check`]. Every other platform reports `Ok` naming the
-/// skip, because `/dev/ttys*` is a Darwin device layout and a check that
-/// guessed on Linux would report a fiction.
+/// What: renders whatever [`read_pty_census`] gathered with
+/// [`build_pty_headroom_check`]. A host with no census reports `Ok` naming the
+/// skip, because a check that guessed on Linux would report a fiction.
 /// Test: `pty_headroom_skips_cleanly_off_darwin` and the pure-verdict tests.
 pub(super) fn check_pty_headroom() -> DoctorCheck {
-    #[cfg(target_os = "macos")]
-    {
-        build_pty_headroom_check(count_allocated_ptys(), read_ptmx_max())
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        DoctorCheck::new(
+    let Some((allocated, max)) = read_pty_census() else {
+        return DoctorCheck::new(
             CHECK_NAME,
             CheckStatus::Ok,
             "pseudo-terminal headroom is a macOS-specific probe (`kern.tty.ptmx_max` \
              against the /dev/ttys* inventory) — skipped on this platform",
-        )
-    }
+        );
+    };
+    build_pty_headroom_check(allocated, max)
 }
 
 #[cfg(test)]
