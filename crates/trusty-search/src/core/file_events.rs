@@ -17,7 +17,8 @@
 //! it empty.
 //!
 //! Test: `file_events_tests` at the foot of this file;
-//! `service::rpc::streams_tests` drives the stream over the socket.
+//! `service::rpc::streams::tests::file_events_replays_the_ring_then_streams_live`
+//! drives the stream over the socket.
 
 use std::collections::VecDeque;
 use std::sync::Arc;

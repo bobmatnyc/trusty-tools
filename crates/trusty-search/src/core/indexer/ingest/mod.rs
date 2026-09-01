@@ -33,8 +33,7 @@ use super::{populate_virtual_terms, CodeIndexer, ParsedBatch};
 /// prevent. `paused` is the third fact that keeps that from happening.
 /// What: `embedded` is what THIS pass computed, `total` the corpus size, and
 /// `paused` whether an operator pause stopped it before the remainder was done.
-/// Test: `a_paused_pass_stops_early_and_commits_what_it_embedded` in
-/// `service::reindex::embed_pause_tests`.
+/// Test: `service::reindex::embed_pause_tests::a_paused_pass_owes_work_and_a_resumed_one_embeds_only_the_gap`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmbedCatchUp {
     /// Chunks this pass embedded and committed.
@@ -672,19 +671,7 @@ impl CodeIndexer {
     /// membership check) before embedding/committing. On a fresh corpus (the
     /// ordinary post-reindex C1/C2 fast pass) no id is present yet, so the
     /// filter is a no-op there — behaviour is unchanged for that path.
-    /// Returns `(newly_embedded, total_corpus_chunks)`.
-    /// Test: `deferred_embed_pass_marks_semantic_ready_and_is_idempotent`,
-    /// `embed_deferred_chunks_skips_already_embedded_chunks`.
-    pub async fn embed_deferred_chunks(
-        &self,
-        progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<(usize, u64)>>,
-    ) -> anyhow::Result<(usize, usize)> {
-        let outcome = self.embed_deferred_chunks_gated(progress_tx, None).await?;
-        Ok((outcome.embedded, outcome.total))
-    }
-
-    /// [`Self::embed_deferred_chunks`], stoppable at a wave boundary by an
-    /// operator pause (#6524).
+    /// Stoppable at a wave boundary by an operator pause (#6524).
     ///
     /// Why: pausing is only useful if it takes effect DURING a pass — a gate
     /// checked once at the start would leave a multi-minute embed running after
@@ -698,10 +685,16 @@ impl CodeIndexer {
     /// next wave and leaves the tail `None`. Only the embedded PREFIX is
     /// committed, so those vectors are durable and the next pass skips them.
     /// `paused` in the returned [`EmbedCatchUp`] tells the caller the pass owes
-    /// more work — it must not be reported as a completed stage.
-    /// Test: `a_paused_pass_stops_early_and_commits_what_it_embedded` and
-    /// `a_resumed_pass_finishes_the_remainder` in
-    /// `service::reindex::embed_pause_tests`.
+    /// more work — it must not be reported as a completed stage. `pause: None`
+    /// is the un-pausable form every caller used before #6524.
+    ///
+    /// This is a DURABLE WRITE: `scripts/teardown-guard-methods.tsv` lists it,
+    /// so a caller that reaches it without the per-index teardown read-guard is
+    /// a red gate rather than a silent race with a `DELETE` (#3049).
+    /// Test: `service::reindex::embed_pause_tests::a_paused_pass_owes_work_and_a_resumed_one_embeds_only_the_gap`
+    /// drives the paused, resumed and already-complete passes in one run;
+    /// `a_paused_index_finishes_lexically_and_embeds_only_after_a_resume`
+    /// covers the same through the real reindex pipeline.
     pub async fn embed_deferred_chunks_gated(
         &self,
         progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<(usize, u64)>>,

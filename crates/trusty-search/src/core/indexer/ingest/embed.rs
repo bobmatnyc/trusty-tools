@@ -108,9 +108,8 @@ impl CodeIndexer {
     /// index's teardown guard, so parking would stall every other index's
     /// catch-up and any `DELETE` on this one. The caller commits the embedded
     /// prefix and re-queues the rest.
-    /// Test: `test_index_files_batch_*`. Order: `tests/multiflight.rs`.
-    /// Pause: `a_paused_pass_stops_early_and_commits_what_it_embedded` in
-    /// `service::reindex::embed_pause_tests`.
+    /// Test: `test_index_files_batch_*`. Order: `tests/multiflight.rs`. The
+    /// pause arm: `service::reindex::embed_pause_tests::a_paused_pass_owes_work_and_a_resumed_one_embeds_only_the_gap`.
     pub(crate) async fn embed_chunks_in_batches(
         &self,
         chunks: &[RawChunk],

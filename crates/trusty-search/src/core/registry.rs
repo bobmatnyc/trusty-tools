@@ -523,8 +523,9 @@ pub struct IndexHandle {
     /// What: `Arc<FileEventFeed>`, populated by `service::watch_loop` and served
     /// by the `search.index.file_events` stream. Bounded at
     /// `file_events::FILE_EVENT_CAPACITY`, in-memory only.
-    /// Test: `core::file_events::file_events_tests`,
-    /// `service::rpc::streams_tests`.
+    /// Test: `core::file_events::file_events_tests::the_ring_keeps_the_newest_events_in_order`;
+    /// `service::rpc::streams::tests::file_events_replays_the_ring_then_streams_live`
+    /// drives the stream over the socket.
     pub file_events: crate::core::file_events::SharedFileEventFeed,
 }
 

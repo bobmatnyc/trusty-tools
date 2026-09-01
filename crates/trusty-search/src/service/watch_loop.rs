@@ -270,7 +270,8 @@ pub const RESCAN_FEED_PATH: &str = ".";
 /// one `strip_prefix` and is not shared with `handle_modified` on purpose:
 /// threading it through would change two `pub` handler signatures that
 /// integration tests call directly.
-/// Test: `service::rpc::streams_tests` end to end; the key itself is pinned by
+/// Test: `service::rpc::streams::tests::file_events_replays_the_ring_then_streams_live`
+/// end to end; the key itself is pinned by
 /// `removed_event_produces_same_relative_key_as_modified` below.
 async fn record_file_event(
     feed: &crate::core::file_events::FileEventFeed,

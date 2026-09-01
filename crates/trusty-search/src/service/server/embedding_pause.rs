@@ -39,7 +39,9 @@ use super::state::SearchAppState;
 /// index-scoped read answers with.
 ///
 /// Test: `pause_then_resume_round_trips_over_the_socket`,
-/// `pausing_an_unknown_index_is_refused`, `pause_is_idempotent`.
+/// `pausing_or_resuming_an_unknown_index_is_refused`,
+/// `pause_and_resume_are_idempotent_over_the_socket`,
+/// `status_reports_the_semantic_stage_as_paused`.
 pub(crate) fn pause_embedding_report(
     state: &Arc<SearchAppState>,
     id: &str,
@@ -68,7 +70,10 @@ pub(crate) fn pause_embedding_report(
 /// `404` when the index is not in the registry.
 ///
 /// Test: `pause_then_resume_round_trips_over_the_socket`,
-/// `resuming_an_unknown_index_is_refused`, `resume_is_idempotent`.
+/// `pausing_or_resuming_an_unknown_index_is_refused`,
+/// `pause_and_resume_are_idempotent_over_the_socket`;
+/// `service::reindex::embed_pause_tests::a_paused_index_finishes_lexically_and_embeds_only_after_a_resume`
+/// proves the resume actually completes the parked work.
 pub(crate) fn resume_embedding_report(
     state: &Arc<SearchAppState>,
     id: &str,
