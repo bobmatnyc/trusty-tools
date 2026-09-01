@@ -1,6 +1,10 @@
 <script>
   import { onMount } from 'svelte';
   import ServiceCard from './ServiceCard.svelte';
+  // #6518: the Overview tab leads with the whole-machine dashboard; the card
+  // grid below it stays because it is the only place a service that never
+  // reported — absent binary, never installed — is visible at all.
+  import MachineStatusPanel from './MachineStatusPanel.svelte';
   import MemoryTab from './MemoryTab.svelte';
   import SearchTab from './SearchTab.svelte';
   import AnalyzeTab from './AnalyzeTab.svelte';
@@ -93,6 +97,13 @@
   <!-- Tab panels -->
   <div class="panel">
     {#if activeTab === 'overview'}
+      <!-- The dashboard reads its own endpoint, so it renders whether or not
+           the service probe below has answered. -->
+      <MachineStatusPanel />
+      <!-- Not "Services": the dashboard above already has a SERVICES card, and
+           two identical headings on one screen read as a duplicate. This grid
+           lists what is INSTALLED, reporting or not. -->
+      <h2 class="section-title">Installed Services</h2>
       {#if loading}
         <div class="loading">
           <BrandMark size={28} />
@@ -192,6 +203,18 @@
   /* Panel */
   .panel {
     min-height: 200px;
+  }
+  /* #6518: names the surviving ServiceCard grid now that the machine-status
+     dashboard sits above it. Same Foundry display treatment as the dashboard's
+     own heading. */
+  .section-title {
+    margin: 0 0 1rem;
+    font-family: var(--trusty-display);
+    font-size: 1.25rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--trusty-text-primary);
   }
   .cards {
     display: grid;
