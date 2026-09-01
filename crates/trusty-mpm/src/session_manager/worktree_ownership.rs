@@ -575,6 +575,20 @@ mod tests {
         assert_eq!(read_sentinel_owner(dir.path()), SentinelOwner::Unknown);
     }
 
+    /// #6561 critic round: an absent sentinel and an unreadable one BOTH read
+    /// `Unknown`, and both are undeterminable for an agent-store path. The first
+    /// cut split them and admitted the absent case; this pins that they stay
+    /// collapsed, so `agent_ownership_blocks` cannot be given a distinction it
+    /// must not act on.
+    #[test]
+    fn an_absent_and_an_unreadable_sentinel_are_both_unknown() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(read_sentinel_owner(dir.path()), SentinelOwner::Unknown);
+
+        std::fs::write(dir.path().join(WORKTREE_SENTINEL_FILE), b"not json {").expect("write");
+        assert_eq!(read_sentinel_owner(dir.path()), SentinelOwner::Unknown);
+    }
+
     #[test]
     fn sentinel_owner_round_trips_valid_payload() {
         let dir = tempfile::tempdir().expect("tempdir");

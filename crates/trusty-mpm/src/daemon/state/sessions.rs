@@ -91,6 +91,101 @@ pub(crate) const DELEGATION_RETENTION_SECS: i64 = 60 * 60;
 /// `a_stale_delegation_is_eventually_evicted`.
 pub(crate) const STALE_RETENTION_SECS: i64 = 24 * 60 * 60;
 
+/// Has this agent positively reported a working tree other than `cwd` (#6556)?
+///
+/// Why: [`DaemonState::live_shared_tree_writers`] answers "who is writing in
+/// this directory", and it used to answer it from the DECLARED `isolation`
+/// alone. That field records an intention read off one hook payload, and it is
+/// absent whenever the declaration did not reach the tracker — after which a
+/// worktree-isolated agent is named as a shared-checkout writer for the six
+/// hours of [`RUNNING_STALE_AFTER_SECS`]. `worktree_path` is the opposite kind
+/// of fact: the subagent's own hook cwd, written only after the delegation
+/// tracker's four ownership claims and a successful sentinel write, and only
+/// when it differs from the dispatcher's `cwd`. So a recorded path that is not
+/// `cwd` is positive evidence of a separate tree, which is what ADR-0045 asks
+/// reconciliation to run on.
+/// What: `true` only when the agent's granted tree ([`Delegation::worktree_path`])
+/// is recorded, is not `cwd`, and is where the agent's LAST hook event ran
+/// ([`Delegation::last_agent_cwd`]). `None` in either field is not evidence of
+/// anything — the agent may not have made a tool call yet — so it answers
+/// `false` and the isolation test still decides.
+///
+/// **Both fields, because `worktree_path` is a latch (#6556 critic round).**
+/// That field never reverts: the tree stays this delegation's to own even after
+/// the agent walks out of it, which is what the reap needs. An agent CAN walk
+/// out — `EnterWorktree` then `ExitWorktree` with `action: "keep"` puts it back
+/// in the dispatcher's checkout — and the latch alone excluded it from this
+/// count for the rest of its life. Requiring the last observed cwd to BE the
+/// granted tree turns a historical grant into a statement about the present,
+/// which is the only thing this guard may act on.
+/// Test: `a_recorded_worktree_outranks_a_missing_isolation_declaration`,
+/// `an_unrecorded_worktree_leaves_the_isolation_test_deciding`,
+/// `an_agent_that_leaves_its_worktree_blocks_the_shared_tree_again`.
+fn holds_its_own_tree(d: &Delegation, cwd: &std::path::Path) -> bool {
+    let (Some(granted), Some(current)) = (d.worktree_path.as_deref(), d.last_agent_cwd.as_deref())
+    else {
+        return false;
+    };
+    // #6556: granted a tree of its own, and standing in it right now.
+    granted != cwd && current == granted
+}
+
+/// What a shared-tree caller is going to DO with the answer (#6556 critic
+/// round 2).
+///
+/// Why: [`DaemonState::claim_shared_tree_dispatch`] served one set of names to
+/// two kinds of caller, and the occupancy split made that unsafe in the other
+/// direction. The ADR-0049 documents-only commit query travels the SAME route as
+/// a dispatch — `tm hook` POSTs `shared-tree-dispatch` for a `Bash` payload —
+/// so returning occupancy to every caller left the commit #6556 exists to
+/// unblock denied for the full [`RUNNING_STALE_AFTER_SECS`] window, which is the
+/// original bug wearing the fix's clothes.
+///
+/// It is a parameter rather than a re-read of `eligible` deliberately.
+/// `eligible` answers "may this dispatch CLAIM the tree", and
+/// `granted_worktree_op` passes `false` for a dispatch it still must deny beside
+/// an occupant — so inferring one meaning from the other reopens the hazard
+/// through that route. Two questions, named separately, decided by whoever knows
+/// which one they are asking.
+/// Test: `the_commit_query_and_the_dispatch_query_disagree_on_one_record`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SharedTreeQuestion {
+    /// "May a new file-mutating agent enter this tree?" — answered with
+    /// everything OCCUPYING it, a type-reconciled record included.
+    Dispatch,
+    /// "Is anyone writing here right now?" — a commit, a merge, or a rebase
+    /// about to move a shared HEAD. Answered with the records still positively
+    /// live, so a record #6556 reconciled stops blocking.
+    HeadWrite,
+}
+
+/// Does a record staled by AGENT TYPE still occupy the tree it was dispatched
+/// into (#6556 critic round)?
+///
+/// Why: type reconciliation writes `Stale` on evidence that names a KIND of
+/// agent, not one record. When it picks wrong, the record it staled belongs to
+/// an agent still writing in the shared checkout — and releasing that tree for a
+/// new file-mutating DISPATCH is the ADR-0048 harm the guard exists to prevent,
+/// which is worse than the ADR-0049 commit the reconciliation is meant to
+/// unblock. So the two questions diverge: the commit guard honours the stale,
+/// the dispatch guard does not.
+///
+/// What: `true` while a type-reconciled record is still within
+/// [`RUNNING_STALE_AFTER_SECS`] of its own start. Bounded rather than open-ended
+/// because the alternative is worse than the bug: without a bound the record
+/// would occupy the tree for the whole [`STALE_RETENTION_SECS`] window (24 h),
+/// which is four times the budget it would have had if nothing had reconciled it
+/// at all. Past that budget the sweep would have staled it anyway, so occupancy
+/// ends exactly where it would have ended without this feature.
+/// Test: `a_type_reconciled_record_still_occupies_the_tree_for_a_dispatch`,
+/// `a_type_reconciled_record_stops_occupying_at_its_original_budget`.
+fn type_reconciled_occupant(d: &Delegation, now: chrono::DateTime<chrono::Utc>) -> bool {
+    d.stale_by_agent_type
+        && d.status == DelegationStatus::Stale
+        && now - d.started_at.unwrap_or(d.created_at)
+            <= chrono::Duration::seconds(RUNNING_STALE_AFTER_SECS)
+}
+
 /// What one [`DaemonState::sweep_delegations`] pass did.
 ///
 /// Why: the sweep runs on a timer with no caller to inspect its effects, so it
@@ -644,22 +739,93 @@ impl DaemonState {
     /// share one: it is indeterminate, and this whole guard fails toward ALLOW.
     /// `Stale` is deliberately not live — a record tracking has given up on
     /// must not block a dispatch for the remaining hours of its retention.
+    ///
+    /// **A recorded `worktree_path` outranks the declared `isolation` (#6556).**
+    /// `isolation` is what the dispatch ASKED for and can be wrong in the deny
+    /// direction: the field is read off the payload one hook happened to see, so
+    /// a grant whose isolation POST was lost, or a dispatch whose declaration did
+    /// not reach the tracker, leaves `None` on a record whose agent is demonstrably
+    /// somewhere else. `worktree_path` is what the agent REPORTED — the cwd of a
+    /// hook event the subagent itself emitted, admitted only after
+    /// [`crate::daemon::services::delegation_tracker`]'s four ownership claims and
+    /// a successful sentinel write — so a value that differs from `cwd` is
+    /// positive evidence that this agent is not writing in `cwd` at all
+    /// (ADR-0045). On 2026-09-01 a `rust-engineer` dispatched with
+    /// `isolation: "worktree"` and running in `.claude/worktrees/agent-…` was
+    /// named here anyway, and blocked four ADR-0049 documents-only commits.
+    ///
+    /// **This is the ADMISSION answer; occupancy is
+    /// [`Self::shared_tree_occupants`] (#6556 critic round).** A record staled by
+    /// type reconciliation is omitted here and reported there, because the two
+    /// callers are asking different questions of the same map — see that method.
     /// Test: `shared_tree_dispatch_route_reports_live_unisolated_writers` and
     /// siblings in [`crate::daemon::delegation_routes`], which drive every
-    /// filter here through the route that is this method's only caller.
+    /// filter here through the route that is this method's only caller;
+    /// `a_recorded_worktree_outranks_a_missing_isolation_declaration`,
+    /// `a_type_reconciled_record_still_occupies_the_tree_for_a_dispatch`.
     pub fn live_shared_tree_writers(
         &self,
         cwd: &std::path::Path,
         exclude_tool_use_id: Option<&str>,
     ) -> Vec<String> {
+        self.shared_tree_agents(cwd, exclude_tool_use_id, false)
+    }
+
+    /// Agents whose work would COLLIDE with a new file-mutating dispatch into
+    /// `cwd` (#6556 critic round).
+    ///
+    /// Why: [`Self::live_shared_tree_writers`] served two callers with one
+    /// answer, and #6556's type reconciliation made that unsafe. A record staled
+    /// on a `SubagentStop`'s `agent_type` was identified by KIND, not by id; when
+    /// that identification is wrong the agent is still writing. Releasing the
+    /// tree for a documents-only commit is the bargain #6556 makes deliberately.
+    /// Releasing it for a second file-mutating AGENT is not: that admits two
+    /// writers onto one git HEAD, which is the harm #4480 and ADR-0048 exist to
+    /// prevent and which no later signal undoes.
+    ///
+    /// What: [`Self::live_shared_tree_writers`] plus every
+    /// [`type_reconciled_occupant`] — a type-reconciled `Stale` record still
+    /// inside its original liveness budget — under the same `cwd`, isolation and
+    /// exclusion filters. `claim_shared_tree_dispatch` is its caller, so this is
+    /// what decides whether a dispatch is admitted and what the deny names.
+    /// Test: `a_type_reconciled_record_still_occupies_the_tree_for_a_dispatch`,
+    /// `a_type_reconciled_record_stops_occupying_at_its_original_budget`.
+    pub fn shared_tree_occupants(
+        &self,
+        cwd: &std::path::Path,
+        exclude_tool_use_id: Option<&str>,
+    ) -> Vec<String> {
+        self.shared_tree_agents(cwd, exclude_tool_use_id, true)
+    }
+
+    /// The one filter both shared-tree queries run, differing only in whether a
+    /// type-reconciled record counts (#6556 critic round).
+    ///
+    /// Why: two copies of this predicate would drift, and a drift here is a
+    /// guard that admits a writer or denies ordinary work. `include_reconciled`
+    /// is the single axis on which the two callers disagree.
+    /// Test: as the two public wrappers.
+    fn shared_tree_agents(
+        &self,
+        cwd: &std::path::Path,
+        exclude_tool_use_id: Option<&str>,
+        include_reconciled: bool,
+    ) -> Vec<String> {
+        let now = chrono::Utc::now();
         self.delegations
             .iter()
             .filter(|e| {
                 let d = e.value();
-                d.status.is_live()
+                let counts =
+                    d.status.is_live() || (include_reconciled && type_reconciled_occupant(d, now));
+                counts
                     && d.cwd.as_deref() == Some(cwd)
                     && !(exclude_tool_use_id.is_some()
                         && d.tool_use_id.as_deref() == exclude_tool_use_id)
+                    // #6556: the agent reported a tree of its own AND is still
+                    // standing in it, so it is not writing here whatever the
+                    // dispatch declared.
+                    && !holds_its_own_tree(d, cwd)
                     && crate::core::dispatch_isolation::shares_the_callers_tree(
                         &d.agent,
                         d.isolation.as_deref(),
@@ -700,30 +866,58 @@ impl DaemonState {
     /// the two in the other order is what would deadlock. It must not block on
     /// anything else.
     ///
-    /// It takes no session (ADR-0048). [`Self::live_shared_tree_writers`] spans
+    /// It takes no session (ADR-0048). [`Self::shared_tree_occupants`] spans
     /// every session, so a guard in one session now sees a writer another
     /// session put in the same directory, and the caller's own `record` closure
     /// carries whichever session the claim is written under. One mutex still
     /// serialises every caller, because the directory it protects is a property
     /// of this state rather than of a session.
+    /// **The claim decision and the reported names are separate (#6556 critic
+    /// round 2).** `claimed` is ALWAYS decided from
+    /// [`Self::shared_tree_occupants`], because whether a tree is safe to enter
+    /// cannot vary with who is asking. `question` chooses only what the caller
+    /// is TOLD: a dispatch hears the occupants it would be joining, a commit or
+    /// HEAD move hears the writers still positively live. Returning occupancy to
+    /// both left the ADR-0049 documents-only commit denied for the full
+    /// [`RUNNING_STALE_AFTER_SECS`] window — #6556's own incident, reintroduced
+    /// by its own fix.
+    ///
+    /// Reporting the narrower set to a `HeadWrite` caller can never weaken a
+    /// dispatch deny, because `evaluate_shared_tree_dispatch` (in the `tm`
+    /// binary's `commands::pm_guard_dispatch`) denies only when the payload is a
+    /// tree-sharing dispatch — which is a [`SharedTreeQuestion::Dispatch`]
+    /// caller by construction.
     /// Test: `shared_tree_dispatch_route_denies_the_second_claim`,
     /// `shared_tree_writers_span_sessions_in_one_checkout`,
     /// `shared_tree_dispatch_route_reserves_the_tree_on_an_empty_answer`,
-    /// `shared_tree_dispatch_route_does_not_reserve_when_it_denies`.
+    /// `shared_tree_dispatch_route_does_not_reserve_when_it_denies`,
+    /// `the_commit_query_and_the_dispatch_query_disagree_on_one_record`.
     pub fn claim_shared_tree_dispatch<F: FnOnce(&Self)>(
         &self,
         cwd: &std::path::Path,
         exclude_tool_use_id: Option<&str>,
         eligible: bool,
+        question: SharedTreeQuestion,
         record: F,
     ) -> (Vec<String>, bool) {
         let _claim = self.shared_tree_claim.lock();
-        let live = self.live_shared_tree_writers(cwd, exclude_tool_use_id);
-        let claimed = eligible && live.is_empty();
+        // The claim is decided on OCCUPANCY whoever is asking: a record staled
+        // by matching a stop's `agent_type` may name an agent still writing
+        // here, and a second file-mutating dispatch must not join it.
+        let occupants = self.shared_tree_occupants(cwd, exclude_tool_use_id);
+        let claimed = eligible && occupants.is_empty();
         if claimed {
             record(self);
         }
-        (live, claimed)
+        // #6556: only a dispatch hears the occupants. A commit hears the live
+        // writers, or the reconciliation that unblocks it would be undone here.
+        let names = match question {
+            SharedTreeQuestion::Dispatch => occupants,
+            SharedTreeQuestion::HeadWrite => {
+                self.live_shared_tree_writers(cwd, exclude_tool_use_id)
+            }
+        };
+        (names, claimed)
     }
 
     /// Find one session's delegation matching `pred`, returning its id (#2864).

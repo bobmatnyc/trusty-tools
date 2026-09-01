@@ -286,8 +286,19 @@ fn usable_agent_id(response: &Value) -> Option<&str> {
 /// absent/unparsable ([`SentinelOwner::Unknown`], nothing to overwrite) or
 /// already this same agent's. Anything else refuses and logs, exactly like the
 /// write-failure arm below.
+/// # It also tracks where the agent IS, not only what it owns (#6556)
+///
+/// `worktree_path` is a latch by design — the tree stays this delegation's to
+/// own after the agent walks out of it, which is what
+/// [`super::agent_worktree_reap`] needs. The shared-tree guard asks a different
+/// question ("where is this agent writing now") and a latch cannot answer it, so
+/// every subagent hook also refreshes
+/// [`Delegation::last_agent_cwd`](crate::core::agent::Delegation::last_agent_cwd).
+/// The write happens only when the value changed, so the steady state costs one
+/// scan and no allocation.
 /// Test: `subagent_tool_call_registers_its_worktree`,
 /// `subagent_sharing_the_dispatchers_tree_registers_nothing`,
+/// `subagent_tool_calls_track_the_current_working_directory`,
 /// `an_unknown_agent_id_registers_nothing`,
 /// `a_failed_sentinel_write_registers_no_worktree`,
 /// `a_cwd_outside_the_harness_store_gets_no_sentinel`,
@@ -410,13 +421,25 @@ fn register_agent_worktree(state: &DaemonState, session: SessionId, payload: &Va
     let Some(cwd) = field(payload, "cwd").map(std::path::PathBuf::from) else {
         return;
     };
-    let Some(id) = state.find_delegation(session, |d| {
-        d.agent_id.as_deref() == Some(agent_id)
-            && d.worktree_path.as_deref() != Some(cwd.as_path())
-            && d.cwd.as_deref() != Some(cwd.as_path())
-    }) else {
+    let Some(id) = state.find_delegation(session, |d| d.agent_id.as_deref() == Some(agent_id))
+    else {
         return;
     };
+    // #6556 critic round: track where this agent is NOW, in the same pass that
+    // decides whether to claim. `worktree_path` is a latch and must stay one —
+    // the reap needs it — so the current directory is its own field. Written
+    // only when it changed, which keeps the steady state off the hot path.
+    let mut claim_needed = false;
+    state.mutate_delegation(id, |d| {
+        if d.last_agent_cwd.as_deref() != Some(cwd.as_path()) {
+            d.last_agent_cwd = Some(cwd.clone());
+        }
+        claim_needed = d.worktree_path.as_deref() != Some(cwd.as_path())
+            && d.cwd.as_deref() != Some(cwd.as_path());
+    });
+    if !claim_needed {
+        return;
+    }
     if let Some(refusal) = claim_refused(state, session, agent_id, &cwd) {
         tracing::warn!(
             agent_id,
@@ -897,11 +920,32 @@ fn recognized_response(response: &Value) -> bool {
 /// A missing `agent_id` still terminalizes nothing and records nothing — with no
 /// correlation key there is nothing to defer, and the module note explains why a
 /// "most recent" guess is forbidden.
+///
+/// # Disposition 3 also reconciles by `agent_type` (#6556)
+///
+/// Deferring is the whole answer only when the `agent_id` will eventually be
+/// taught. When the dispatch's `PostToolUse` is lost outright — it is installed
+/// `async: true`, and its POST fails open on a 2 s budget — no id is ever
+/// learned, nothing can consume the deferred stop, and the record reads live for
+/// the six hours of `RUNNING_STALE_AFTER_SECS`. Observed 2026-09-01: records for
+/// a `version-control` agent and a `rust-engineer` outlived both agents by ~80
+/// minutes and four ADR-0049 documents-only commits were denied naming them.
+/// #6497 fixed the sibling case where the owning SESSION died; this is the case
+/// where the agent finished normally.
+///
+/// So before deferring, [`reconcile_by_agent_type`] looks for the one live
+/// record this stop can only be about. It is driven by a real stop signal —
+/// positive evidence that a subagent of this session, of this type, has ended
+/// (ADR-0045) — declines whenever more than one record could match, and writes
+/// [`DelegationStatus::Stale`] rather than a terminal status, because the
+/// identification is by type rather than by id. The stop is STILL deferred, so a
+/// `PostToolUse` that lands late replaces "we lost track" with the truth.
 /// Test: `subagent_stop_completes_matching_delegation`,
 /// `subagent_stop_without_agent_id_terminalizes_nothing`,
 /// `concurrent_delegations_terminalize_independently`,
 /// `out_of_order_subagent_stop_resolves_when_its_post_tool_use_lands`,
-/// `a_redelivered_stop_for_a_finished_delegation_records_no_pending_stop`.
+/// `a_redelivered_stop_for_a_finished_delegation_records_no_pending_stop`,
+/// `a_completed_agents_record_stops_blocking_when_its_id_was_never_taught`.
 fn on_subagent_stop(state: &DaemonState, session: SessionId, payload: &Value, event: HookEvent) {
     let Some(agent_id) = field(payload, "agent_id") else {
         tracing::trace!(
@@ -927,10 +971,87 @@ fn on_subagent_stop(state: &DaemonState, session: SessionId, payload: &Value, ev
     {
         return;
     }
+    // #6556: no record carries this id, and one may never learn it. Stale the
+    // single record this stop can only be about, before deferring it.
+    reconcile_by_agent_type(state, session, payload);
     // #4142: the id is unknown to this session — hold the stop rather than drop it.
     state
         .pending_stops()
         .record(session, agent_id, status, Utc::now());
+}
+
+/// Stale the one live record a stop with an unresolvable `agent_id` can only be
+/// about (#6556).
+///
+/// Why: see [`on_subagent_stop`]'s disposition 3. A `SubagentStop` whose id no
+/// record carries still proves that a subagent of this session ENDED, and
+/// `agent_type` names which kind. When exactly one live record of that kind has
+/// never learned an `agent_id`, that record is the only thing the stop can
+/// describe, so leaving it live is a claim this daemon has evidence against.
+///
+/// What: with the dispatch-record lock held — the same lock every other writer
+/// of a delegation's identity fields takes, so a `PostToolUse` cannot teach an
+/// id between the count and the write — collects the session's live delegations
+/// whose `agent` equals `payload.agent_type` and whose `agent_id` is `None`, and
+/// writes [`DelegationStatus::Stale`] when there is EXACTLY ONE. Returns whether
+/// it wrote.
+///
+/// Three refusals, each deliberate:
+///
+/// * **No `agent_type`** — nothing to match on, so nothing is reconciled. A
+///   match on liveness alone would be the "most recent guess" the module note
+///   forbids.
+/// * **More than one candidate** — two unresolved agents of one type are
+///   indistinguishable here, and closing the wrong one would stop the ADR-0048
+///   guard counting a writer that is still in the tree. Ambiguity declines.
+/// * **`Stale`, not `Completed`** — the identification is by TYPE. A stop whose
+///   own `PreToolUse` was lost could name a record belonging to a sibling of the
+///   same type, and `Stale` is the status that says "tracking gave up" without
+///   asserting the agent finished. It is non-terminal, so the deferred stop
+///   still resolves it to the truth if the id is taught later, and it is not
+///   live, so it stops blocking a dispatch or an ADR-0049 commit immediately —
+///   which is the whole closure condition.
+///
+/// Test: `a_completed_agents_record_stops_blocking_when_its_id_was_never_taught`,
+/// `two_unresolved_records_of_one_type_are_left_alone`,
+/// `a_stop_without_an_agent_type_reconciles_nothing`,
+/// `reconciliation_never_touches_a_record_that_learned_its_id`.
+fn reconcile_by_agent_type(state: &DaemonState, session: SessionId, payload: &Value) -> bool {
+    let Some(agent_type) = field(payload, "agent_type") else {
+        return false;
+    };
+    let _guard = state.dispatch_record_guard();
+    let mut candidates = state
+        .delegations_for(session)
+        .into_iter()
+        .filter(|d| d.status.is_live() && d.agent_id.is_none() && d.agent == agent_type);
+    let Some(only) = candidates.next() else {
+        return false;
+    };
+    if candidates.next().is_some() {
+        tracing::debug!(
+            agent_type,
+            "delegation: a stop names an agent type with more than one unresolved record — \
+             declining to guess which finished (#6556)"
+        );
+        return false;
+    }
+    // #6556 critic round: `stale_by_agent_type` is what keeps this record
+    // OCCUPYING the tree for a new file-mutating dispatch while releasing it for
+    // an ADR-0049 commit. See `DaemonState::shared_tree_occupants`.
+    let wrote = state.mutate_delegation(only.id, |d| {
+        d.status = DelegationStatus::Stale;
+        d.stale_by_agent_type = true;
+    });
+    if wrote {
+        tracing::info!(
+            agent_type,
+            delegation = ?only.id,
+            "delegation: a subagent of this type stopped and only this record could be it — \
+             marking it stale so it stops counting as a live writer (#6556)"
+        );
+    }
+    wrote
 }
 
 #[cfg(test)]

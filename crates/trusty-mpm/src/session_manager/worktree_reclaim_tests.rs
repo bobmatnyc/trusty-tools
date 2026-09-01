@@ -683,17 +683,23 @@ fn measure_bytes_stops_at_an_expired_deadline() {
 
 #[test]
 fn classify_blocks_a_worktree_trusty_mpm_does_not_own() {
-    // #2919 HIGH: `remove_session_worktree` refuses any path with no ownership
-    // sentinel that is not under `.worktrees/`, so classifying one as
-    // `Reclaimable` made `tm doctor` advertise a command that then failed and
-    // left the directory on disk. The classifier now applies exactly the
-    // predicate the remover applies.
+    // #2919 HIGH: `remove_session_worktree` refuses any path carrying none of
+    // the ownership marks, so classifying one as `Reclaimable` made `tm doctor`
+    // advertise a command that then failed and left the directory on disk. The
+    // classifier applies exactly the predicate the remover applies.
+    //
+    // #6561 moved the harness `.claude/worktrees/` store OUT of this case — it
+    // is now tier 3 of `removal_permitted` — so the unowned shape this asserts
+    // on is a worktree parked somewhere with no sentinel at all.
     let fx = GitWorktreeFixture::new();
-    let parent = fx.repo.join(".claude").join("worktrees");
-    let path = fx.add_worktree_at(&parent, "harness-owned-2919");
+    let path = fx.add_worktree_at(&fx.repo.join("elsewhere"), "unowned-2919");
     let v = classify_no_agent(&path, Admission::Admitted, false, &merged(9), &clean);
     assert!(!v.is_reclaimable(), "{v:?}");
-    assert!(reason(&v).contains("out of scope"), "{}", reason(&v));
+    assert!(
+        reason(&v).contains("not a trusty-mpm-removable worktree"),
+        "{}",
+        reason(&v)
+    );
 }
 
 #[test]
@@ -702,8 +708,7 @@ fn the_remover_really_refuses_what_tm_provisioned_rejects() {
     // than to a copy of its rules. Without this the two can drift silently and
     // the classifier goes back to advertising worktrees that cannot be removed.
     let fx = GitWorktreeFixture::new();
-    let parent = fx.repo.join(".claude").join("worktrees");
-    let path = fx.add_worktree_at(&parent, "remover-refuses-2919");
+    let path = fx.add_worktree_at(&fx.repo.join("elsewhere"), "remover-refuses-2919");
     assert!(
         !tm_provisioned(&path),
         "precondition: the classifier rejects this shape"
@@ -719,7 +724,7 @@ fn the_remover_really_refuses_what_tm_provisioned_rejects() {
 
 #[test]
 fn tm_provisioned_matches_the_removers_own_predicate() {
-    // Both tiers `remove_session_worktree` accepts must be accepted here, or
+    // Every tier `remove_session_worktree` accepts must be accepted here, or
     // the classifier and the remover disagree in the OTHER direction and real
     // reclaimable worktrees are silently skipped forever.
     let fx = GitWorktreeFixture::new();
@@ -732,12 +737,99 @@ fn tm_provisioned_matches_the_removers_own_predicate() {
     let parked = fx.add_worktree_at(&fx.repo.join("elsewhere"), "sentinel-2919");
     assert!(
         !tm_provisioned(&parked),
-        "no sentinel, not under .worktrees/"
+        "no sentinel, not under .worktrees/, not in the harness store"
     );
     GitWorktreeFixture::stamp_reclaimable_sentinel(&parked);
     assert!(
         tm_provisioned(&parked),
         "an ownership sentinel must be accepted wherever the worktree is parked"
+    );
+
+    // #6561 tier 3: the harness's own `isolation: "worktree"` store, which
+    // `agent_worktree_reap` already removes from on every agent exit.
+    let agent_store = fx.add_worktree_at(
+        &fx.repo.join(".claude").join("worktrees"),
+        "agent-aa049179cd3e4e1bb",
+    );
+    assert!(
+        tm_provisioned(&agent_store),
+        "a `.claude/worktrees/agent-*` leaf must be accepted — it is the dominant \
+         creation path in a tm-orchestrated session"
+    );
+}
+
+/// The #6556 critic round, HIGH 3. `removal_permitted`'s third tier lets an
+/// agent-store path reach gate 4, and the first cut of #6561 then let a
+/// SENTINEL-LESS one straight through it — leaving merged-PR and clean-tree as
+/// the only gates in front of a delete. That is the routine window the critic
+/// named: a `version-control` agent squash-merges while the dispatched agent is
+/// still finishing, so the tree is merged and clean and the agent is still in
+/// it. The sentinel is written only after `PostToolUse` teaches an `agent_id`,
+/// so #6556's own lost-`PostToolUse` population lands here with no attribution
+/// at all.
+///
+/// Fails before this round: `classify` returns `Reclaimable { pr: 759 }`.
+#[test]
+fn an_unattributed_agent_store_worktree_is_never_reclaimable() {
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree_at(
+        &fx.repo.join(".claude").join("worktrees"),
+        "agent-6561unattributed",
+    );
+    // No sentinel of any kind: nothing attributes this tree to an agent and
+    // nothing says whether one is still working in it. Merged and clean, so
+    // gates 5 and 6 both pass and only the ownership gate stands.
+    let v = classify_no_agent(&path, Admission::Admitted, false, &merged(759), &clean);
+    assert!(
+        !v.is_reclaimable(),
+        "an unattributed agent-store tree must never be deleted on merged+clean alone: {v:?}"
+    );
+    assert!(
+        reason(&v).contains("names no owner"),
+        "and the refusal must be the ownership one, naming why: {}",
+        reason(&v)
+    );
+}
+
+/// The #4091 dirty-work guard, asserted on the agent store specifically: unsaved
+/// work outranks a merged PR there as anywhere. This assertion must never be
+/// relaxed.
+#[test]
+fn a_dirty_agent_store_worktree_is_still_refused() {
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree_at(
+        &fx.repo.join(".claude").join("worktrees"),
+        "agent-6561dirty",
+    );
+    let v = classify_no_agent(&path, Admission::Admitted, false, &merged(759), &dirty);
+    assert!(
+        !v.is_reclaimable(),
+        "unsaved work outranks a merged PR, in the harness store as anywhere: {v:?}"
+    );
+}
+
+/// The #5661 refusal for the spelling it was written against — a sentinel FILE
+/// that exists but names no owner. Kept beside the sentinel-LESS case above so
+/// the two spellings are pinned to the same verdict; the first cut of #6561
+/// split them and admitted one.
+#[test]
+fn an_unreadable_agent_sentinel_still_blocks_an_agent_store_worktree() {
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree_at(
+        &fx.repo.join(".claude").join("worktrees"),
+        "agent-6561garbage",
+    );
+    std::fs::write(
+        path.join(crate::session_manager::decommission::WORKTREE_SENTINEL_FILE),
+        b"{not json",
+    )
+    .expect("write garbage sentinel");
+    let v = classify_no_agent(&path, Admission::Admitted, false, &merged(759), &clean);
+    assert!(!v.is_reclaimable(), "{v:?}");
+    assert!(
+        reason(&v).contains("names no owner"),
+        "the #5661 reason must still be the one given: {}",
+        reason(&v)
     );
 }
 
