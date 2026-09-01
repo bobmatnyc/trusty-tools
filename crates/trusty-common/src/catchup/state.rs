@@ -6,11 +6,13 @@
 //! repetitive, catch-ups.
 //! What: [`CatchupState`] is the persisted state; [`load_catchup_state`] reads it
 //! fail-open (None on missing or parse error); [`save_catchup_state`] writes it,
-//! creating parent directories as needed. Both take a `state_root` override so a
-//! test can point the framework root at a temp dir (#4323).
+//! creating parent directories as needed. [`load_catchup_state_in`] and
+//! [`save_catchup_state_in`] take a `state_root` override so a test can point the
+//! framework root at a temp dir (#4323); the two original functions delegate to
+//! them with `None`.
 //! Test: `state_save_load_roundtrip`, `state_missing_file_returns_none`,
 //! `state_parse_failure_returns_none`, `catchup_dir_honours_state_root`,
-//! `catchup_dir_falls_back_to_home`.
+//! `catchup_dir_falls_back_to_home`, `load_wrapper_delegates_with_the_home_default`.
 //!
 // CUTOVER BRIDGE — remove post-migration (#1762)
 
@@ -68,13 +70,28 @@ fn state_path(palace_id: &str, state_root: Option<&Path>) -> Option<PathBuf> {
 ///
 /// Why: if the state file is absent (first run) or corrupt, we want full
 /// catch-up history — returning None signals "no watermark, use full history".
-/// What: reads `<state_root|~/.trusty-mpm>/projects/<palace-id>/catchup-state.json`;
-/// returns None if the file is missing, unreadable, or JSON-invalid. Never
-/// panics. `state_root` overrides the framework root (#4323); `None` is the
-/// production home-relative default.
+/// What: reads `~/.trusty-mpm/projects/<palace-id>/catchup-state.json`; returns
+/// None if the file is missing, unreadable, or JSON-invalid. Never panics.
+/// Delegates to [`load_catchup_state_in`] with the home-relative default.
+/// Test: `load_wrapper_delegates_with_the_home_default`.
+pub fn load_catchup_state(palace_id: &str) -> Option<CatchupState> {
+    // #4323: the state_root seam lives on `load_catchup_state_in`; this
+    // signature stays as published so the override is additive, not a break.
+    load_catchup_state_in(palace_id, None)
+}
+
+/// [`load_catchup_state`] with the framework state root supplied by the caller.
+///
+/// Why (#4323): the watermark read resolves `~/.trusty-mpm/projects/` from the
+/// home directory, so a test against a temp project still consulted the
+/// operator's real state dir — and a stale watermark there silently changed what
+/// the digest reported. Same `_in` seam as [`super::run_catchup_in`].
+/// What: identical to [`load_catchup_state`] except that `state_root` replaces
+/// the `.trusty-mpm` framework root; `None` is the production home-relative
+/// default.
 /// Test: `state_missing_file_returns_none`, `state_parse_failure_returns_none`,
 /// `state_save_load_roundtrip`.
-pub fn load_catchup_state(palace_id: &str, state_root: Option<&Path>) -> Option<CatchupState> {
+pub fn load_catchup_state_in(palace_id: &str, state_root: Option<&Path>) -> Option<CatchupState> {
     let path = state_path(palace_id, state_root)?;
     let bytes = std::fs::read(&path).ok()?;
     serde_json::from_slice(&bytes).ok()
@@ -84,11 +101,29 @@ pub fn load_catchup_state(palace_id: &str, state_root: Option<&Path>) -> Option<
 ///
 /// Why: advancing the watermark after a successful catch-up ensures the next
 /// run only surfaces incremental activity.
-/// What: creates parent directories if needed, then writes the state as JSON.
-/// `state_root` overrides the framework root (#4323); `None` is the production
-/// home-relative default.
+/// What: creates parent directories if needed, then writes the state as JSON
+/// under `~/.trusty-mpm/projects/<palace-id>/`. Delegates to
+/// [`save_catchup_state_in`] with the home-relative default.
+/// Test: covered by `save_writes_under_the_state_root` on the `_in` variant this
+/// forwards to; the `None` arm writes into the operator's real home, which is
+/// the pollution #4323 removed, so no test exercises it.
+pub fn save_catchup_state(palace_id: &str, state: &CatchupState) -> anyhow::Result<()> {
+    // #4323: see `load_catchup_state` — the override is the `_in` variant.
+    save_catchup_state_in(palace_id, state, None)
+}
+
+/// [`save_catchup_state`] with the framework state root supplied by the caller.
+///
+/// Why (#4323): `run_catchup(&opts, true)` is the ONE catch-up call that writes,
+/// and it resolved `~/.trusty-mpm/projects/<palace-id>/` unconditionally, so
+/// every test exercising the advancing path left a directory in the operator's
+/// real state dir. A temp `$HOME` did not help, because this path resolves the
+/// home directory itself rather than taking a base.
+/// What: identical to [`save_catchup_state`] except that `state_root` replaces
+/// the `.trusty-mpm` framework root; `None` is the production home-relative
+/// default. Errors when neither a root nor a home directory resolves.
 /// Test: `state_save_load_roundtrip`, `save_writes_under_the_state_root`.
-pub fn save_catchup_state(
+pub fn save_catchup_state_in(
     palace_id: &str,
     state: &CatchupState,
     state_root: Option<&Path>,
@@ -124,18 +159,30 @@ mod tests {
     fn state_save_load_roundtrip() {
         let tmp = TempDir::new().unwrap();
         let state = sample("test-palace");
-        save_catchup_state("test-palace", &state, Some(tmp.path())).unwrap();
+        save_catchup_state_in("test-palace", &state, Some(tmp.path())).unwrap();
         let loaded =
-            load_catchup_state("test-palace", Some(tmp.path())).expect("state should load back");
+            load_catchup_state_in("test-palace", Some(tmp.path())).expect("state should load back");
         assert_eq!(loaded.palace_id, "test-palace");
         assert_eq!(loaded.last_git_sha.as_deref(), Some("abc1234"));
+    }
+
+    /// See #6501: the two-parameter wrapper is the published signature, and it
+    /// must reach the same place `_in(.., None)` does. Read-only on purpose —
+    /// asserting the write arm would create the home directory #4323 removed.
+    #[test]
+    fn load_wrapper_delegates_with_the_home_default() {
+        assert_eq!(
+            load_catchup_state("no-such-palace-6501").is_none(),
+            load_catchup_state_in("no-such-palace-6501", None).is_none(),
+        );
+        assert!(load_catchup_state("no-such-palace-6501").is_none());
     }
 
     /// #4323: the write must land under the supplied root, never under `$HOME`.
     #[test]
     fn save_writes_under_the_state_root() {
         let tmp = TempDir::new().unwrap();
-        save_catchup_state("pinned-palace", &sample("pinned-palace"), Some(tmp.path())).unwrap();
+        save_catchup_state_in("pinned-palace", &sample("pinned-palace"), Some(tmp.path())).unwrap();
         assert!(
             tmp.path()
                 .join("projects")
@@ -172,7 +219,7 @@ mod tests {
     #[test]
     fn state_missing_file_returns_none() {
         let tmp = TempDir::new().unwrap();
-        assert!(load_catchup_state("never-written", Some(tmp.path())).is_none());
+        assert!(load_catchup_state_in("never-written", Some(tmp.path())).is_none());
     }
 
     #[test]
@@ -182,7 +229,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("catchup-state.json"), b"not valid json {{").unwrap();
         assert!(
-            load_catchup_state("test-palace", Some(tmp.path())).is_none(),
+            load_catchup_state_in("test-palace", Some(tmp.path())).is_none(),
             "invalid JSON should yield None"
         );
     }

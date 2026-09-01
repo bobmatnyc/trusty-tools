@@ -26,7 +26,7 @@ use super::palace::fetch_recent_palace_drawers;
 use super::session_finder::{
     FilteredSessions, PausedSession, filter_sessions_since, find_paused_sessions,
 };
-use super::state::load_catchup_state;
+use super::state::load_catchup_state_in;
 
 /// A single paused session, restructured as JSON fields instead of markdown
 /// prose (MCP `session_context_catchup` tool).
@@ -297,7 +297,7 @@ pub async fn generate_catchup_json_in(
     };
 
     let watermark: Option<DateTime<Utc>> = match (opts.full, palace_id.as_deref()) {
-        (false, Some(id)) => load_catchup_state(id, state_root).map(|s| s.last_catchup_at),
+        (false, Some(id)) => load_catchup_state_in(id, state_root).map(|s| s.last_catchup_at),
         _ => None,
     };
 
@@ -354,7 +354,7 @@ pub async fn generate_catchup_json_in(
 mod tests {
     use super::*;
     use crate::catchup::CatchupOptions;
-    use crate::catchup::state::{CatchupState, save_catchup_state};
+    use crate::catchup::state::{CatchupState, save_catchup_state_in};
     use std::fs;
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -456,7 +456,7 @@ mod tests {
         // test used to write a `2099-01-01` watermark into the operator's real
         // `~/.trusty-mpm/projects/t-tmpXXXX/`, where it outlived the tempdir.
         let state_root = tmp.path().join("state");
-        save_catchup_state(&palace_id, &state, Some(&state_root)).unwrap();
+        save_catchup_state_in(&palace_id, &state, Some(&state_root)).unwrap();
 
         let opts = CatchupOptions {
             project_dir: tmp.path().to_path_buf(),
@@ -515,7 +515,7 @@ mod tests {
         let palace_id = derive_palace_id_for(tmp.path()).expect("a temp dir resolves to a palace");
         // #4323: watermark under the tempdir, not the operator's real state dir.
         let state_root = tmp.path().join("state");
-        save_catchup_state(
+        save_catchup_state_in(
             &palace_id,
             &CatchupState {
                 last_catchup_at: "2099-01-01T00:00:00Z".parse().unwrap(),
@@ -577,7 +577,7 @@ mod tests {
         let palace_id = derive_palace_id_for(tmp.path()).expect("a temp dir resolves to a palace");
         // #4323: watermark under the tempdir, not the operator's real state dir.
         let state_root = tmp.path().join("state");
-        save_catchup_state(
+        save_catchup_state_in(
             &palace_id,
             &CatchupState {
                 last_catchup_at: "2099-01-01T00:00:00Z".parse().unwrap(),
