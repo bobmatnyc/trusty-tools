@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.46.5] — 2026-09-01
+
+### Fixed
+
+- Resolved 7 broken intra-doc links on the `daemon_token` / `server::bearer_auth` surface (#5439) so the pre-publish rustdoc-link gate is green again.
+
 ## [0.46.4] — 2026-09-01
 
 ### Fixed
