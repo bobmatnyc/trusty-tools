@@ -71,3 +71,5 @@
 {"session_id":"tm-dogfood-0-at0-20260831","event":"pause","snapshot":"tm-dogfood-0-at0-20260831/session-20260831-170955.md","timestamp":"2026-08-31T17:09:55.446633+00:00"}
 {"session_id":"tm-trusty-tools-01-0-at2221","event":"pause","snapshot":"tm-trusty-tools-01-0-at2221/session-20260831-201746.md","timestamp":"2026-08-31T20:17:46.051171+00:00"}
 {"session_id":"0b318c84-bae9-4a50-8832-65ed61f8ab22","event":"pause","snapshot":"0b318c84-bae9-4a50-8832-65ed61f8ab22/session-20260901-144157.md","timestamp":"2026-09-01T14:41:57.381916+00:00"}
+{"session_id":"0b318c84-bae9-4a50-8832-65ed61f8ab22","event":"pause","snapshot":"0b318c84-bae9-4a50-8832-65ed61f8ab22/session-20260901-172730.md","timestamp":"2026-09-01T17:27:30.579162+00:00"}
+{"session_id":"1852fea9-d45b-4288-96ff-9cda26abd845","event":"pause","snapshot":"1852fea9-d45b-4288-96ff-9cda26abd845/session-20260901-204005.md","timestamp":"2026-09-01T20:40:05.799937+00:00"}
