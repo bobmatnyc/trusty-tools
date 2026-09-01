@@ -46,7 +46,11 @@ name = "tga"
 # identity resolution, plus routing the team-config constructor through the
 # same alias contract. No public signature changes — `cargo-semver-checks`
 # reports no semver update required. PATCH.
-version = "5.0.2"
+# 5.0.2 → 5.0.3 (issue #4421, post-publish wave 2026-09-01): patch — 5.0.2 is
+# already live on crates.io and #6564 edits `src/**` under it. Bumped on
+# `main` first so the `PR version bump vs crates.io` gate clears once #6564
+# updates its branch onto this commit.
+version = "5.0.3"
 publish = true
 edition = "2021"
 # Aligned with the workspace MSRV (1.94) per #254. Required for
