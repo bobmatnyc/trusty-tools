@@ -65,6 +65,27 @@ fn git_ok(dir: &Path, args: &[&str]) {
     );
 }
 
+/// Run `git -C <dir> <args>` and return stdout, panicking on failure (#6507).
+///
+/// Why: [`git_ok`] discards stdout, and the squash fixture has to read the
+/// worktree's own branch name back before it can merge it.
+fn git_stdout_ok(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("fixture: `git {}` could not be run: {e}", args.join(" ")));
+    assert!(
+        out.status.success(),
+        "fixture: `git {}` failed in {}: {}",
+        args.join(" "),
+        dir.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
 /// Restores a path's permission bits when it drops, pass or panic (#4732).
 ///
 /// Why: the "git cannot read this" tests work by `chmod 000`-ing a real `.git`
@@ -193,6 +214,70 @@ impl GitWorktreeFixture {
     /// covers, or outside the repos root entirely.
     /// What: `git worktree add -b wt/<name> <parent>/<name>` off the current
     /// `HEAD`, creating `<parent>` if needed. Returns the worktree path.
+    /// Commit `file` in `wt`, then SQUASH-merge that branch to `origin/main`
+    /// and drop every remote ref that made the commit reachable (#6507).
+    ///
+    /// Why: this is the exact end state `gh pr merge --squash --delete-branch`
+    /// plus `git fetch --prune` leaves behind, and it is the state the reclaim
+    /// path misread as "holds unsaved work". Reproducing it needs a real squash
+    /// — the landed commit must be a DIFFERENT SHA carrying the SAME patch —
+    /// so nothing here can be faked with a fast-forward.
+    /// What: commits `file` on the worktree's own branch, squash-merges that
+    /// branch onto `main` in the owning checkout, pushes `main`, and fetches.
+    /// The branch is never pushed, so it has no upstream and no remote-tracking
+    /// ref — the pruned-upstream shape.
+    /// Test: `inspect_dirt_clears_a_squash_merged_branch_whose_upstream_was_pruned`.
+    pub(crate) fn squash_merge_to_origin(&self, wt: &Path, file: &str) {
+        let branch = git_stdout_ok(wt, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        std::fs::write(wt.join(file), "landed content\n").expect("fixture: write file");
+        git_ok(wt, &["add", file]);
+        git_ok(wt, &["commit", "-m", "feat: work that later squash-merges"]);
+        git_ok(&self.repo, &["merge", "--squash", branch.trim()]);
+        git_ok(&self.repo, &["commit", "-m", "feat: work (#1)"]);
+        git_ok(&self.repo, &["push", "origin", "main"]);
+        git_ok(&self.repo, &["fetch", "--prune", "origin"]);
+    }
+
+    /// Commit `file` in `wt`, PUSH that commit under `remote_branch`, and ALSO
+    /// squash-merge its patch onto `origin/main` (#6507).
+    ///
+    /// Why: this builds the one shape that separates a per-commit patch filter
+    /// from a naive count subtraction. The commit ends up reachable from a
+    /// remote ref, so `rev-list HEAD --not --remotes` never counts it — while
+    /// `git cherry origin/main HEAD` still marks it `-`, because its patch is on
+    /// `main` too. Subtracting the number of `-` lines from the candidate count
+    /// therefore discounts one commit too many, and the commit it eats is
+    /// whichever genuinely unpushed one the caller adds next.
+    /// What: commits `file`, pushes the branch to `origin/<remote_branch>`,
+    /// squash-merges it onto `main` in the owning checkout, pushes `main`, and
+    /// fetches so both remote refs exist locally. No upstream is configured, so
+    /// the dirty check still takes its no-upstream arm.
+    /// Test: `inspect_dirt_discounts_only_the_commits_the_query_counted`.
+    pub(crate) fn land_patch_and_keep_the_remote_branch(
+        &self,
+        wt: &Path,
+        file: &str,
+        remote_branch: &str,
+    ) {
+        let branch = git_stdout_ok(wt, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        let branch = branch.trim().to_string();
+        std::fs::write(wt.join(file), "landed and pushed\n").expect("fixture: write file");
+        git_ok(wt, &["add", file]);
+        git_ok(wt, &["commit", "-m", "feat: landed under two refs"]);
+        git_ok(
+            wt,
+            &[
+                "push",
+                "origin",
+                &format!("HEAD:refs/heads/{remote_branch}"),
+            ],
+        );
+        git_ok(&self.repo, &["merge", "--squash", &branch]);
+        git_ok(&self.repo, &["commit", "-m", "feat: landed (#2)"]);
+        git_ok(&self.repo, &["push", "origin", "main"]);
+        git_ok(&self.repo, &["fetch", "origin"]);
+    }
+
     /// Test: `enumerate_finds_worktree_at_an_unwalked_location`,
     /// `registry_root_for_ignores_where_the_worktree_is_parked`.
     pub(crate) fn add_worktree_at(&self, parent: &Path, name: &str) -> PathBuf {

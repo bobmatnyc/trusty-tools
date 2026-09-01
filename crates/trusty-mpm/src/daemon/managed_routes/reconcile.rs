@@ -51,6 +51,11 @@ pub fn worktree_routes() -> Router<Arc<DaemonState>> {
             "/api/v1/sessions/managed/reconcile-worktrees",
             get(reconcile_worktrees_route),
         )
+        // #6497: the ownership transfer the reconcile report can only propose.
+        .route(
+            "/api/v1/sessions/managed/adopt-worktree",
+            post(super::adopt_worktree::adopt_worktree_route),
+        )
 }
 
 /// GET /api/v1/sessions/managed/reconcile-worktrees (#4288).

@@ -381,14 +381,65 @@ impl DaemonState {
         }
         for id in &dead {
             self.remove_session(*id);
+            // #6497: the session's agents cannot outlive it, and their records
+            // block a successor's dispatch until they are reconciled.
+            self.stale_delegations_of_dead_session(*id);
         }
         for id in &stopped_ids {
             self.update_session(id, |s| s.status = SessionStatus::Stopped);
+            self.stale_delegations_of_dead_session(*id);
         }
         ReapResult {
             reaped: dead.len(),
             stopped: stopped_ids.len(),
         }
+    }
+
+    /// Mark every live delegation of a session the reaper just buried
+    /// [`DelegationStatus::Stale`] (#6497).
+    ///
+    /// Why: `SubagentStop` is the only signal that closes a `Running`
+    /// delegation, and a session that dies takes its agents down without any of
+    /// them sending one. The records then read as live for the six hours of
+    /// [`RUNNING_STALE_AFTER_SECS`], and
+    /// [`Self::live_shared_tree_writers`] reports the dead session's agents as
+    /// writing in the shared checkout — so a successor session dispatched to
+    /// finish that work is refused, with the guard's own error text telling it
+    /// to "say so rather than retrying" and naming no verb to say it with. That
+    /// is the second half of #6497.
+    ///
+    /// What: status only, exactly as [`Self::sweep_delegations_at`] writes it —
+    /// `Stale`, never `Completed`, and no `ended_at`. This records that the
+    /// OWNER is gone, not that the agent finished, so a late `SubagentStop` can
+    /// still resolve the record to the truth for the rest of its
+    /// [`STALE_RETENTION_SECS`] window.
+    ///
+    /// It is driven only by the reaper, which acts on POSITIVE evidence — the
+    /// tmux session is gone from `list-sessions`, or the tracked `claude`
+    /// process has exited. Absence from the registry is deliberately NOT a
+    /// trigger: a session the daemon never registered is undeterminable rather
+    /// than dead (ADR-0045), and treating it as dead would quietly disarm the
+    /// ADR-0048 shared-checkout guard for every unregistered session.
+    /// Test: `reap_stales_a_dead_sessions_delegations`,
+    /// `reap_leaves_a_live_sessions_delegations_alone`.
+    pub(crate) fn stale_delegations_of_dead_session(&self, session: SessionId) -> usize {
+        let mut staled = 0;
+        for mut entry in self.delegations.iter_mut() {
+            let d = entry.value_mut();
+            if d.session != session || !d.status.is_live() {
+                continue;
+            }
+            d.status = DelegationStatus::Stale;
+            staled += 1;
+        }
+        if staled > 0 {
+            tracing::info!(
+                session = ?session,
+                staled,
+                "delegation: owning session is gone — its live records are stale (#6497)"
+            );
+        }
+        staled
     }
 
     /// Gather the tmux names tracked by BOTH session registries.

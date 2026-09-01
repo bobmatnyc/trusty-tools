@@ -49,6 +49,8 @@ pub mod proxy;
 pub mod prune;
 pub mod reactivate;
 pub mod reconcile;
+// #6497: the explicit ownership transfer for a dead owner's worktree.
+pub mod adopt_worktree;
 pub mod rename;
 mod resume_error;
 pub(crate) mod route_outcome_http;

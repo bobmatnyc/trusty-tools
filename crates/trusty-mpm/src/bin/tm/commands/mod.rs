@@ -14,6 +14,9 @@
 //! Test: each module has its own unit tests; integration coverage lives in
 //! `tests.rs`.
 
+// #6497: `tm session adopt-worktree` — the explicit ownership transfer for a
+// tree whose owning session or agent is provably dead.
+pub(crate) mod adopt_worktree;
 pub(crate) mod agent;
 pub(crate) mod auth;
 // #6274: `tm` in a plain directory initializes a repository there instead of

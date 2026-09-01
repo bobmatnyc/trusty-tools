@@ -45,6 +45,9 @@ pub mod store_health;
 pub mod store_integrity;
 pub mod task_inject;
 pub mod workspace_guard;
+// #6497: the explicit ownership transfer for a tree whose owner is provably
+// dead — the compliant alternative to rebuilding the branch by hand.
+pub(crate) mod worktree_adopt;
 // #4311: the OS-level "is a process standing in here?" gate — the one removal
 // check that does not read a registry trusty-mpm or git wrote.
 pub(crate) mod worktree_liveness;
