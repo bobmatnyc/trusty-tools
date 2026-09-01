@@ -936,3 +936,70 @@ async fn proxy_route_rejects_other_tailnet_host() {
          not blanket-trust the whole CGNAT range"
     );
 }
+
+/// Why (#6517): before the background host sampler has produced a snapshot, the
+/// machine-status route must answer 503 so the UI can show "not yet available"
+/// rather than empty JSON — the same contract as the per-service metrics routes.
+/// What: GET /api/console/machine-status on a fresh state (host cache cold),
+/// asserts 503.
+/// Test: this test itself.
+#[tokio::test]
+async fn machine_status_route_cold_cache_returns_503() {
+    let router = build_router(make_test_state());
+    let req = Request::builder()
+        .uri("/api/console/machine-status")
+        .body(Body::empty())
+        .expect("request");
+    let resp = router.oneshot(req).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+/// Why (#6517): once the host cache is warm, the route must assemble and return
+/// the aggregated MachineStatus JSON, folding in whichever per-service reports
+/// are cached.
+/// What: warms the host cache with a real sample and one service report, issues
+/// GET /api/console/machine-status, asserts 200 and that the body parses as a
+/// MachineStatus whose rollup counts the one warm service.
+/// Test: this test itself.
+#[tokio::test]
+async fn machine_status_route_warm_cache_returns_json() {
+    use trusty_common::console_metrics::machine_status::MachineStatus;
+    use trusty_common::console_metrics::{ServiceHealth, make_report};
+    use trusty_common::host_metrics::HostSampler;
+
+    let state = make_test_state();
+    state
+        .host_metrics_cache()
+        .set(HostSampler::new().sample())
+        .await;
+    state
+        .metrics_cache()
+        .set(make_report(
+            "trusty-analyze",
+            "Analyze",
+            "0.7.0",
+            ServiceHealth::Ok,
+            serde_json::json!({ "files": 1 }),
+            1,
+        ))
+        .await;
+
+    let router = build_router(state);
+    let req = Request::builder()
+        .uri("/api/console/machine-status")
+        .body(Body::empty())
+        .expect("request");
+    let resp = router.oneshot(req).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("collect body")
+        .to_bytes();
+    let status: MachineStatus = serde_json::from_slice(&bytes).expect("parse MachineStatus");
+    assert_eq!(status.services.total, 1);
+    assert_eq!(status.services.ok, 1);
+    assert!(status.host.cpu.logical_cores >= 1);
+}

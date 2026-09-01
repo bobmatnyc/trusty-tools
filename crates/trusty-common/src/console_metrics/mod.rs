@@ -27,6 +27,13 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+// #6517: the aggregated whole-machine + per-service status the Foundry dashboard
+// renders. Gated on `host-metrics` (in addition to this module's own
+// `console-metrics`) because it embeds `crate::host_metrics::HostMetrics`; the
+// console enables both features.
+#[cfg(feature = "host-metrics")]
+pub mod machine_status;
+
 /// The MCP tool name a local service exposes (no arguments) so a console can
 /// poll it uniformly.
 ///

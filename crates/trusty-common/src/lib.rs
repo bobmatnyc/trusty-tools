@@ -501,6 +501,22 @@ pub mod console_metrics;
 #[cfg(feature = "stdio-mcp-client")]
 pub mod stdio_mcp_client;
 
+/// Whole-machine host metrics for the Foundry machine-status dashboard (#6517).
+///
+/// Why: [`sys_metrics`] samples only the current PROCESS; the Foundry dashboard
+/// needs the whole HOST — overall CPU, system memory with a pressure signal,
+/// per-mount + aggregate disk, and network throughput. This shared host-sampling
+/// capability lives here (not in the console) per the workspace common-entry
+/// rule, so any future consumer reuses the same typed shapes.
+/// What: gated behind the `host-metrics` feature, which additionally enables
+/// `sysinfo`'s `disk` and `network` features (the crate already depends on
+/// `sysinfo` with `system` for `sys_metrics`). Exposes
+/// [`host_metrics::HostSampler`] and the [`host_metrics::HostMetrics`] snapshot
+/// with its subsystem structs and PROVISIONAL [`host_metrics::HostThresholds`].
+/// Test: `cargo test -p trusty-common --features host-metrics -- host_metrics`.
+#[cfg(feature = "host-metrics")]
+pub mod host_metrics;
+
 /// Throttled crates.io update-notification helper.
 ///
 /// Why: User-facing CLIs should nudge operators when a newer release is

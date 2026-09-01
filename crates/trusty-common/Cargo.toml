@@ -97,6 +97,10 @@ lanes = [
         "crate-config",
         "codex-config",
         "console-metrics",
+        # #6517: host-metrics shares this lane with console-metrics so the
+        # `console_metrics::machine_status` module (which needs BOTH) is compiled
+        # and tested by the core lane, not silently skipped.
+        "host-metrics",
         "update-check",
         "bug-capture",
         "session-naming",
@@ -783,6 +787,17 @@ stdio-mcp-client = []
 # to decode. Implies `stdio-mcp-client` so the console can poll via the shared
 # client without a separate feature declaration.
 console-metrics = ["stdio-mcp-client"]
+
+# Enables the `host_metrics` module (#6517): whole-machine CPU / memory / disk /
+# network sampling for the Foundry machine-status dashboard, plus the
+# `console_metrics::machine_status` aggregation (which additionally requires
+# `console-metrics`). `sysinfo` is ALREADY an unconditional dependency of this
+# crate (the per-process `sys_metrics` module uses it with only the `system`
+# feature); this feature turns on `sysinfo`'s `disk` and `network` features that
+# whole-machine `Disks`/`Networks` sampling needs, WITHOUT adding them to every
+# consumer's build. Adds no new crate to the lockfile — only two extra sysinfo
+# features, and only for a consumer that opts in.
+host-metrics = ["sysinfo/disk", "sysinfo/network"]
 
 # Enables the top-level `credentials` module (issue #2401, epic #2400 Wave 1;
 # promoted out of `inference::` by #4564): the `KeyStore` trait,

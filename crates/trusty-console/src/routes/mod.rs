@@ -21,6 +21,8 @@ pub mod census_guard;
 pub mod cleanup;
 pub mod config;
 pub mod deletes;
+// #6517: the aggregated whole-machine + per-service status endpoint.
+pub mod machine_status;
 pub mod memory_rpc;
 pub mod origin_guard;
 pub mod sessions;
