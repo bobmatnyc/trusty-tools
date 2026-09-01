@@ -391,6 +391,31 @@ aws-config             = { version = "1.8", features = ["behavior-version-latest
 aws-sdk-bedrockruntime = { version = "1.131", default-features = false, features = ["default-https-client", "rt-tokio"] }
 aws-types              = { version = "1" }
 aws-smithy-types       = { version = "1.4" }
+# #6533: the log drain's S3 adapter bridges the AWS default credential chain
+# into `object_store`'s own `CredentialProvider`, which means calling
+# `ProvideCredentials::provide_credentials`. `aws-types` re-exports the
+# `SharedCredentialsProvider` HANDLE but not the TRAIT, so the trait has to come
+# from its own crate. Already resolved in `Cargo.lock` as a transitive dep of
+# `aws-config`, so declaring it direct adds no new crate to the graph.
+aws-credential-types   = { version = "1.2" }
+
+# ── Object storage (optional; used by trusty-common's `log-drain` feature) ──
+# #6533: the log drain's destination adapters. `aws` is the ONLY backend feature
+# enabled — it brings `AmazonS3Builder` for `s3://` URIs. `LocalFileSystem`
+# (`file://`, the hermetic-test destination) is in the crate core and needs no
+# feature. `gs://` and `az://` are deliberately NOT enabled: the URI parser
+# reserves those schemes and rejects them with `DrainError::UnsupportedScheme`,
+# so turning on `gcp`/`azure` here would compile two backends nothing reaches.
+# `default-features = false` keeps the generic `http` (WebDAV) backend and its
+# extra TLS stack out of the graph — the drain only ever talks S3 or local disk.
+# `fs` is re-enabled explicitly because dropping the defaults also drops
+# `LocalFileSystem`, which the `file://` destination and every hermetic test need.
+object_store = { version = "0.14", default-features = false, features = ["aws", "fs"] }
+# Cheaply-cloneable reference-counted byte buffer. `object_store` already
+# resolves it (its `PutPayload` is built from `Bytes`), so declaring it direct
+# adds no new crate to the lockfile — it only lets `LogDestination::put` name
+# the type in its own signature rather than leaking `object_store`'s re-export.
+bytes = "1"
 
 # ── trusty-analyze additional deps ────────────────────────────────────────
 clap_complete = "4"
