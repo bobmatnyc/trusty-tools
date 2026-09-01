@@ -262,6 +262,43 @@ pub(super) fn validate_embedding(v: &[f32]) -> std::result::Result<(), &'static 
     Ok(())
 }
 
+/// Collapse a batch to one entry per chunk id, keeping the last occurrence.
+///
+/// Why (#6571): this store holds one vector per chunk id, and `upsert_batch`
+/// assumed its input already did. A batch carrying an id twice resolved one
+/// usearch key for both, added the first, and failed the second with usearch's
+/// "Duplicate keys not allowed in high-level wrappers" — whereupon the
+/// failure-rollback path removed the id→key mapping the successful add had just
+/// installed, leaving a vector in the graph that nothing could reach. A minified
+/// JS bundle reached this every reindex: `walk::make_chunk_id` omits the end
+/// line, so a one-line bundle's many `function e(…)` declarations all share the
+/// id `…/index.js::Function::e::1`.
+///
+/// What: last occurrence wins, matching upsert semantics — a caller sending the
+/// same id twice means the later vector. Output order follows the position of
+/// each id's surviving occurrence, so a batch with no duplicates comes back in
+/// its original order and pays only one hash pass.
+///
+/// Test: `tests::test_upsert_batch_collapses_duplicate_ids`.
+pub(super) fn dedupe_last_by_id(items: &[(String, Vec<f32>)]) -> Vec<(&str, &[f32])> {
+    let mut last_at: HashMap<&str, usize> = HashMap::with_capacity(items.len());
+    for (i, (id, _)) in items.iter().enumerate() {
+        last_at.insert(id.as_str(), i);
+    }
+    if last_at.len() == items.len() {
+        return items
+            .iter()
+            .map(|(id, v)| (id.as_str(), v.as_slice()))
+            .collect();
+    }
+    items
+        .iter()
+        .enumerate()
+        .filter(|(i, (id, _))| last_at.get(id.as_str()) == Some(i))
+        .map(|(_, (id, v))| (id.as_str(), v.as_slice()))
+        .collect()
+}
+
 /// `UsearchStore`: usearch HNSW index wrapped in `Arc<RwLock<>>` for concurrent reads.
 ///
 /// Why: The HNSW graph is shared across many concurrent search requests; reader-priority

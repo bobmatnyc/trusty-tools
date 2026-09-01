@@ -53,10 +53,19 @@ fn pre_fix_watch_event(ev: &Event) -> Option<WatchEvent> {
     })
 }
 
+/// Build an index fixture under an id no other test in this binary uses.
+///
+/// #6570: the content-hash cache `reconcile_after_rescan` consults is a
+/// process-global map keyed by `IndexId`. A shared id would let one test's
+/// fingerprints decide whether another test's file is re-parsed, which is a
+/// cross-test dependency that shows up as a flake under parallel execution.
 fn fixture(dir: &std::path::Path) -> (IndexId, Arc<RwLock<CodeIndexer>>, IndexedFiles) {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let id = format!("watch-rescan-test-{n}");
     (
-        IndexId::new("watch-rescan-test"),
-        Arc::new(RwLock::new(CodeIndexer::new("watch-rescan-test", dir))),
+        IndexId::new(&id),
+        Arc::new(RwLock::new(CodeIndexer::new(&id, dir))),
         IndexedFiles::new(),
     )
 }
@@ -405,6 +414,116 @@ async fn rescan_partial_pass_schedules_a_retry_that_fires() {
         rx.recv().await,
         Some(WatchEvent::Rescan),
         "the scheduled retry must put another Rescan back on the loop's channel"
+    );
+}
+
+/// Why (#6570): 22 overflows in 48h each reported
+/// `files_reindexed=17284 chunks_indexed=183348` on a tree where nothing had
+/// changed. The pass re-read, re-parsed and re-committed the whole corpus every
+/// time. Before this fix a second reconcile over an untouched tree did the same
+/// work as the first; the assertion below is what failed.
+///
+/// The full-tree contract is asserted alongside it: the skip is decided on the
+/// file's CONTENT, so editing a file makes the next pass reindex it again even
+/// though the walk and the tree are otherwise identical.
+#[tokio::test]
+async fn rescan_reconcile_skips_files_whose_content_did_not_change() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = std::fs::canonicalize(dir.path()).expect("canonicalize");
+    let (index_id, indexer, tracker) = fixture(&root);
+
+    std::fs::write(root.join("alpha.rs"), "fn alpha() {}\n").expect("write alpha");
+    std::fs::write(root.join("beta.rs"), "fn beta() {}\n").expect("write beta");
+
+    let first = reconcile_after_rescan(&index_id, &root, &root, &indexer, &tracker)
+        .await
+        .expect("first reconcile succeeds");
+    assert_eq!(
+        first.files_reindexed, 2,
+        "the first pass has nothing cached and must index both files"
+    );
+    assert_eq!(first.files_unchanged, 0, "and nothing was skippable yet");
+
+    // Nothing on disk changed between the two passes.
+    let second = reconcile_after_rescan(&index_id, &root, &root, &indexer, &tracker)
+        .await
+        .expect("second reconcile succeeds");
+    assert_eq!(
+        second.files_reindexed, 0,
+        "pre-fix this was 2 — an unchanged tree was re-parsed and re-committed in full"
+    );
+    assert_eq!(
+        second.chunks_indexed, 0,
+        "and no chunk was rewritten into the corpus"
+    );
+    assert_eq!(
+        second.files_unchanged, 2,
+        "both files must be reported as walked-and-unchanged, not as skipped-unreadable"
+    );
+    assert!(
+        second.is_complete(),
+        "a pass that skipped only unchanged files has fully reconciled the tree"
+    );
+    assert_eq!(
+        second.files_removed, 0,
+        "a hash-skipped file is still live on disk and must never look like a deletion"
+    );
+
+    // Content, not metadata: an edit must come back through the full path.
+    std::fs::write(root.join("beta.rs"), "fn beta() {}\nfn gamma() {}\n").expect("edit beta");
+    let third = reconcile_after_rescan(&index_id, &root, &root, &indexer, &tracker)
+        .await
+        .expect("third reconcile succeeds");
+    assert_eq!(
+        third.files_reindexed, 1,
+        "the edited file must be reindexed — the skip is a content decision"
+    );
+    assert_eq!(
+        third.files_unchanged, 1,
+        "and the untouched file stays skipped"
+    );
+}
+
+/// Why (#6570): the in-process hash cache is per-daemon-lifetime, so without
+/// warming it from the durable corpus the first overflow after every restart
+/// would still re-parse the whole tree. Simulates that restart by clearing the
+/// cache the previous pass populated and asserting the next pass still skips.
+#[tokio::test]
+async fn rescan_reconcile_warms_the_hash_cache_from_the_corpus() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = std::fs::canonicalize(dir.path()).expect("canonicalize");
+    let (index_id, indexer, tracker) = fixture(&root);
+
+    // A durable corpus is what the warm reads from; a BM25-only index has none.
+    {
+        let corpus = crate::core::corpus::CorpusStore::open(&root.join("index.redb"))
+            .expect("open test corpus");
+        corpus
+            .upsert_file_hashes(&[(
+                "alpha.rs",
+                &crate::service::reindex::hash::hash_content("fn alpha() {}\n"),
+            )])
+            .expect("seed the persisted hash");
+    }
+    std::fs::write(root.join("alpha.rs"), "fn alpha() {}\n").expect("write alpha");
+    {
+        let mut idx = indexer.write().await;
+        idx.set_corpus_store(Arc::new(
+            crate::core::corpus::CorpusStore::open(&root.join("index.redb"))
+                .expect("reopen test corpus"),
+        ));
+    }
+
+    let stats = reconcile_after_rescan(&index_id, &root, &root, &indexer, &tracker)
+        .await
+        .expect("reconcile succeeds");
+    assert_eq!(
+        stats.files_unchanged, 1,
+        "the persisted hash must be warmed into the cache and honoured on the first pass"
+    );
+    assert_eq!(
+        stats.files_reindexed, 0,
+        "so a restart does not buy the whole corpus a re-parse"
     );
 }
 
