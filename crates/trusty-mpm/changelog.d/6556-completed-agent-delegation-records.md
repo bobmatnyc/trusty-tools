@@ -11,7 +11,10 @@ Fixed
   file-mutating DISPATCH. Identification by `agent_type` can name a sibling that
   is still writing, and admitting a second writer onto one git HEAD is the
   ADR-0048 harm no later signal undoes, so `shared_tree_occupants` keeps the
-  record counted until its original liveness budget expires (#6556).
+  record counted until its original liveness budget expires. The two questions
+  travel one route — `tm hook` posts it for a `Bash` payload too — so the caller
+  now says which it is asking, rather than the route inferring it from whether
+  the dispatch may claim (#6556).
 - pm-guard: a dispatch that reported a working tree of its own is no longer
   named as a shared-checkout writer — but only while it is still IN that tree.
   `worktree_path` is a one-way latch the reap depends on, so an agent that ran

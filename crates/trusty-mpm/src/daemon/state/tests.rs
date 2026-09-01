@@ -561,8 +561,13 @@ fn a_type_reconciled_record_still_occupies_the_tree_for_a_dispatch() {
 
     // And the claim the dispatch guard actually takes must be refused.
     let mut recorded = false;
-    let (occupants, claimed) =
-        state.claim_shared_tree_dispatch(&cwd, None, true, |_| recorded = true);
+    let (occupants, claimed) = state.claim_shared_tree_dispatch(
+        &cwd,
+        None,
+        true,
+        crate::daemon::state::sessions::SharedTreeQuestion::Dispatch,
+        |_| recorded = true,
+    );
     assert_eq!(occupants.len(), 1, "the deny must name the occupant");
     assert!(
         !claimed,

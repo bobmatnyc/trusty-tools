@@ -91,6 +91,119 @@ fn unisolated_hook_payload(tool_use_id: &str) -> Value {
     })
 }
 
+/// The Bash payload `tm hook` POSTs to this route for an ADR-0049
+/// documents-only commit and for the ADR-0048 `git merge`/`git rebase` query.
+/// It carries no `input`, so nothing about it is a dispatch.
+fn commit_query(cwd: &str) -> SharedTreeDispatchRequest {
+    SharedTreeDispatchRequest {
+        payload: serde_json::json!({
+            "cwd": cwd,
+            "tool": "Bash",
+            "input": {"command": "git commit -m 'docs: snapshot'"},
+        }),
+    }
+}
+
+/// The #6556 critic round 2. The occupancy split kept a type-reconciled record
+/// counted for a dispatch — correctly — but the ADR-0049 documents-only commit
+/// travels the SAME route, so every caller heard the occupant and the commit
+/// #6556 exists to unblock stayed denied for the full
+/// `RUNNING_STALE_AFTER_SECS` window. The unit-level assertion in
+/// `daemon::state::tests` could not catch it: no consumer reads
+/// `live_shared_tree_writers` through the route.
+///
+/// The input is #6556's own incident. A `rust-engineer` is dispatched into a
+/// main checkout, its `agent_id` is never taught, and 80 minutes later its
+/// `SubagentStop` reconciles the record by `agent_type`.
+///
+/// Fails against f69363eeb: the commit query answers one agent and
+/// `docs_commit_deny_reason` fires.
+#[tokio::test]
+async fn the_commit_query_and_the_dispatch_query_disagree_on_one_record() {
+    let (state, _dir, session) = hermetic();
+    insert(
+        &state,
+        session,
+        "rust-engineer",
+        "/repo",
+        None,
+        Some("toolu_lost"),
+        DelegationStatus::Running,
+    );
+    // What `reconcile_by_agent_type` writes when the stop names this agent type
+    // and only this record could be it.
+    let id = state.delegations_for(session)[0].id;
+    state.mutate_delegation(id, |d| {
+        d.started_at = Some(chrono::Utc::now());
+        d.status = DelegationStatus::Stale;
+        d.stale_by_agent_type = true;
+    });
+
+    // The commit query: the reconciliation must be honoured, or #6556 is not
+    // fixed at the surface it was filed against.
+    let commit = call(&state, session, commit_query("/repo")).await;
+    assert!(
+        commit.agents.is_empty(),
+        "a documents-only commit must not be denied by a type-reconciled record: {:?}",
+        commit.agents
+    );
+    assert_eq!(commit.total, 0);
+    assert!(!commit.claimed, "a Bash query never claims the tree");
+
+    // The dispatch query: the tree is still occupied, because the
+    // identification was by type and may name an agent still writing.
+    let disp = call(
+        &state,
+        session,
+        dispatch("/repo", "rust-engineer", None, Some("toolu_new")),
+    )
+    .await;
+    assert_eq!(
+        disp.agents.len(),
+        1,
+        "a second file-mutating dispatch must still see the occupant: {:?}",
+        disp.agents
+    );
+    assert_eq!(disp.agents[0].agent, "rust-engineer");
+    assert!(
+        !disp.claimed,
+        "and must not be admitted onto that agent's HEAD"
+    );
+}
+
+/// The control: with no type reconciliation in play the two questions agree, so
+/// the split cannot be hiding a live writer from the commit guard. A genuinely
+/// `Running` record denies both.
+#[tokio::test]
+async fn a_live_writer_is_reported_to_both_questions() {
+    let (state, _dir, session) = hermetic();
+    insert(
+        &state,
+        session,
+        "rust-engineer",
+        "/repo",
+        None,
+        Some("toolu_live"),
+        DelegationStatus::Running,
+    );
+
+    let commit = call(&state, session, commit_query("/repo")).await;
+    assert_eq!(
+        commit.agents.len(),
+        1,
+        "a live writer must still deny a documents-only commit (ADR-0049)"
+    );
+
+    let disp = call(
+        &state,
+        session,
+        dispatch("/repo", "rust-engineer", None, Some("toolu_new")),
+    )
+    .await;
+    assert_eq!(disp.agents.len(), 1);
+    assert!(!disp.claimed);
+}
+
 #[tokio::test]
 async fn a_grant_and_the_tracker_converge_in_either_order() {
     // #5769, and the reason the fix is an upsert rather than a second call to

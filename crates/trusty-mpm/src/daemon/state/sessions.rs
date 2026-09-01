@@ -130,6 +130,35 @@ fn holds_its_own_tree(d: &Delegation, cwd: &std::path::Path) -> bool {
     granted != cwd && current == granted
 }
 
+/// What a shared-tree caller is going to DO with the answer (#6556 critic
+/// round 2).
+///
+/// Why: [`DaemonState::claim_shared_tree_dispatch`] served one set of names to
+/// two kinds of caller, and the occupancy split made that unsafe in the other
+/// direction. The ADR-0049 documents-only commit query travels the SAME route as
+/// a dispatch — `tm hook` POSTs `shared-tree-dispatch` for a `Bash` payload —
+/// so returning occupancy to every caller left the commit #6556 exists to
+/// unblock denied for the full [`RUNNING_STALE_AFTER_SECS`] window, which is the
+/// original bug wearing the fix's clothes.
+///
+/// It is a parameter rather than a re-read of `eligible` deliberately.
+/// `eligible` answers "may this dispatch CLAIM the tree", and
+/// `granted_worktree_op` passes `false` for a dispatch it still must deny beside
+/// an occupant — so inferring one meaning from the other reopens the hazard
+/// through that route. Two questions, named separately, decided by whoever knows
+/// which one they are asking.
+/// Test: `the_commit_query_and_the_dispatch_query_disagree_on_one_record`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SharedTreeQuestion {
+    /// "May a new file-mutating agent enter this tree?" — answered with
+    /// everything OCCUPYING it, a type-reconciled record included.
+    Dispatch,
+    /// "Is anyone writing here right now?" — a commit, a merge, or a rebase
+    /// about to move a shared HEAD. Answered with the records still positively
+    /// live, so a record #6556 reconciled stops blocking.
+    HeadWrite,
+}
+
 /// Does a record staled by AGENT TYPE still occupy the tree it was dispatched
 /// into (#6556 critic round)?
 ///
@@ -843,28 +872,52 @@ impl DaemonState {
     /// carries whichever session the claim is written under. One mutex still
     /// serialises every caller, because the directory it protects is a property
     /// of this state rather than of a session.
+    /// **The claim decision and the reported names are separate (#6556 critic
+    /// round 2).** `claimed` is ALWAYS decided from
+    /// [`Self::shared_tree_occupants`], because whether a tree is safe to enter
+    /// cannot vary with who is asking. `question` chooses only what the caller
+    /// is TOLD: a dispatch hears the occupants it would be joining, a commit or
+    /// HEAD move hears the writers still positively live. Returning occupancy to
+    /// both left the ADR-0049 documents-only commit denied for the full
+    /// [`RUNNING_STALE_AFTER_SECS`] window — #6556's own incident, reintroduced
+    /// by its own fix.
+    ///
+    /// Reporting the narrower set to a `HeadWrite` caller can never weaken a
+    /// dispatch deny, because
+    /// [`evaluate_shared_tree_dispatch`](crate::commands::pm_guard_dispatch)
+    /// denies only when the payload is a tree-sharing dispatch — which is a
+    /// [`SharedTreeQuestion::Dispatch`] caller by construction.
     /// Test: `shared_tree_dispatch_route_denies_the_second_claim`,
     /// `shared_tree_writers_span_sessions_in_one_checkout`,
     /// `shared_tree_dispatch_route_reserves_the_tree_on_an_empty_answer`,
-    /// `shared_tree_dispatch_route_does_not_reserve_when_it_denies`.
+    /// `shared_tree_dispatch_route_does_not_reserve_when_it_denies`,
+    /// `the_commit_query_and_the_dispatch_query_disagree_on_one_record`.
     pub fn claim_shared_tree_dispatch<F: FnOnce(&Self)>(
         &self,
         cwd: &std::path::Path,
         exclude_tool_use_id: Option<&str>,
         eligible: bool,
+        question: SharedTreeQuestion,
         record: F,
     ) -> (Vec<String>, bool) {
         let _claim = self.shared_tree_claim.lock();
-        // #6556 critic round: OCCUPANCY, not admission. A record staled by
-        // matching a stop's `agent_type` may name an agent that is still
-        // writing here; a documents-only commit accepts that risk, a second
-        // file-mutating dispatch must not. See `shared_tree_occupants`.
-        let live = self.shared_tree_occupants(cwd, exclude_tool_use_id);
-        let claimed = eligible && live.is_empty();
+        // The claim is decided on OCCUPANCY whoever is asking: a record staled
+        // by matching a stop's `agent_type` may name an agent still writing
+        // here, and a second file-mutating dispatch must not join it.
+        let occupants = self.shared_tree_occupants(cwd, exclude_tool_use_id);
+        let claimed = eligible && occupants.is_empty();
         if claimed {
             record(self);
         }
-        (live, claimed)
+        // #6556: only a dispatch hears the occupants. A commit hears the live
+        // writers, or the reconciliation that unblocks it would be undone here.
+        let names = match question {
+            SharedTreeQuestion::Dispatch => occupants,
+            SharedTreeQuestion::HeadWrite => {
+                self.live_shared_tree_writers(cwd, exclude_tool_use_id)
+            }
+        };
+        (names, claimed)
     }
 
     /// Find one session's delegation matching `pred`, returning its id (#2864).
