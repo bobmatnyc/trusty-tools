@@ -211,6 +211,22 @@ fn lanes() -> Vec<(&'static str, Lane, serde_json::Value)> {
             Lane::Free,
             index.clone(),
         ),
+        // #6524: all three are `free` and none has an HTTP route to copy. The
+        // pause pair flips one atomic and returns, so putting it behind the
+        // admission limiter would let a saturated index refuse the very call
+        // that relieves it; the feed stream is `free` for the same reason the
+        // other two streams are — it outlives any admission permit.
+        (
+            writes::METHOD_INDEX_PAUSE_EMBEDDING,
+            Lane::Free,
+            index.clone(),
+        ),
+        (
+            writes::METHOD_INDEX_RESUME_EMBEDDING,
+            Lane::Free,
+            index.clone(),
+        ),
+        (streams::METHOD_INDEX_FILE_EVENTS, Lane::Free, index.clone()),
         // Slice 5.5's operational remainder: every HTTP route is in `free`.
         // `search.config.set` names no field and `search.index.config.set`
         // carries an empty body, so neither moves anything the sweep would then

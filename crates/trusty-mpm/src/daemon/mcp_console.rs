@@ -291,6 +291,9 @@ fn config_to_json(config: &TrustyToolsConfig) -> Value {
         "default_model": config.default_model,
         "github": config.github,
         "untracked_sync": config.untracked_sync,
+        // #6535: the cloud log-drain section, so the Config tab can render
+        // where logs go and whether the drain is on without a second read.
+        "log_drain": config.log_drain,
         "projects": config.projects,
         "workspace_root": trusty_tools_config::workspace_root(config).to_string_lossy(),
     })

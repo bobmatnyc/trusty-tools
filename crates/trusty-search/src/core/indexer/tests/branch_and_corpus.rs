@@ -874,10 +874,11 @@ async fn embed_deferred_chunks_skips_already_embedded_chunks() {
         .await
         .expect("pre-seed vector");
 
-    let (embedded, total) = idx
-        .embed_deferred_chunks(None)
+    let outcome = idx
+        .embed_deferred_chunks_gated(None, None)
         .await
-        .expect("embed_deferred_chunks");
+        .expect("embed_deferred_chunks_gated");
+    let (embedded, total) = (outcome.embedded, outcome.total);
     assert_eq!(total, 2, "total must reflect the full corpus");
     assert_eq!(
         embedded, 1,
@@ -1119,10 +1120,11 @@ async fn stale_vector_eviction_then_catch_up_reembeds_current_content() {
         .await
         .expect("commit edited chunk without embedding");
 
-    let (embedded, total) = idx
-        .embed_deferred_chunks(None)
+    let outcome = idx
+        .embed_deferred_chunks_gated(None, None)
         .await
-        .expect("embed_deferred_chunks");
+        .expect("embed_deferred_chunks_gated");
+    let (embedded, total) = (outcome.embedded, outcome.total);
     assert_eq!(total, 1);
     assert_eq!(
         embedded, 1,

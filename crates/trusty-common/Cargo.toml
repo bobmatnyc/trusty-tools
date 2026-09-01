@@ -101,6 +101,11 @@ lanes = [
         # `console_metrics::machine_status` module (which needs BOTH) is compiled
         # and tested by the core lane, not silently skipped.
         "host-metrics",
+        # #6533: log-drain implies `credentials`, which this lane does not
+        # otherwise carry. It sits here rather than in `inference` so the
+        # collector's `scrub_secrets` path is exercised by the lane that already
+        # owns the crate's filesystem-facing modules.
+        "log-drain",
         "update-check",
         "bug-capture",
         "session-naming",
@@ -338,6 +343,20 @@ aws-config = { workspace = true, optional = true }
 aws-sdk-bedrockruntime = { workspace = true, optional = true }
 aws-types = { workspace = true, optional = true }
 aws-smithy-types = { workspace = true, optional = true }
+
+# Optional: enabled by the `log-drain` feature (#6533). `object_store` supplies
+# both destination adapters — `AmazonS3Builder` for `s3://` and
+# `LocalFileSystem` for `file://`. `bytes` names the payload type in
+# `LogDestination::put`'s own signature. `flate2` gzips each body on the wire,
+# `sha2` produces the manifest's plaintext digest, `globset` compiles a
+# `LogSource`'s include patterns, and `walkdir` enumerates its root. Every one
+# of these is already an optional workspace dep pulled in by some other feature;
+# only `object_store` and `bytes` are new to the lockfile.
+object_store = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+aws-credential-types = { workspace = true, optional = true }
+flate2 = { workspace = true, optional = true }
+globset = { workspace = true, optional = true }
 
 # Optional: enabled by the `catchup` feature (DOC-28 cutover bridge, #1762).
 # rusqlite is used only by the `mpm_registry` submodule to read the
@@ -798,6 +817,35 @@ console-metrics = ["stdio-mcp-client"]
 # consumer's build. Adds no new crate to the lockfile — only two extra sysinfo
 # features, and only for a consumer that opts in.
 host-metrics = ["sysinfo/disk", "sysinfo/network"]
+
+# Enables the `log_drain` module (#6533, epic phase 1+2): the `LogDestination`
+# trait, its `s3://` and `file://` adapters, the `DestinationUri` parser, the
+# key layout, the idempotency manifest, the collector, and `run_once`. Phase 1+2
+# is the drain CORE only — no scheduler, and no consumer wired up yet.
+#
+# Why gated: `object_store` with the `aws` backend pulls the AWS SDK transport
+# stack, which the 20-plus consumers that never drain a log must not compile.
+# `credentials` is a hard implication rather than an optional extra — the
+# collector runs every body through `credentials::redact::scrub_secrets` before
+# it reaches a destination, so a build with the drain but without the scrubber
+# would upload log text nothing had cleaned. Making it a feature implication is
+# what stops that combination existing.
+# `dep:aws-config`/`dep:aws-types` supply the S3 adapter's credential chain —
+# the same providers the `bedrock` features use, reused rather than duplicated
+# per the common-entry-point rule.
+log-drain = [
+    "credentials",
+    "dep:object_store",
+    "dep:bytes",
+    "dep:flate2",
+    "dep:globset",
+    "dep:walkdir",
+    "dep:sha2",
+    "dep:futures",
+    "dep:aws-config",
+    "dep:aws-types",
+    "dep:aws-credential-types",
+]
 
 # Enables the top-level `credentials` module (issue #2401, epic #2400 Wave 1;
 # promoted out of `inference::` by #4564): the `KeyStore` trait,

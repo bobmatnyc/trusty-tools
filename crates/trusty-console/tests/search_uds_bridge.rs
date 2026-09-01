@@ -268,6 +268,168 @@ async fn deprecated_alias_reaches_the_same_handler() {
     assert_eq!(status, StatusCode::OK, "{body}");
 }
 
+// ─── the indexing pipeline (#6524) ───────────────────────────────────────────
+
+/// Why: the pause toggle is optimistic in the SPA — it flips the badge, fires
+/// the POST and rolls back if it fails — so what comes BACK decides whether the
+/// rollback happens. A `POST` carrying no body must reach `pause_embedding` with
+/// only the index id, and the daemon's `embedding_paused` must reach the browser
+/// unchanged rather than being inferred from the status code.
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pause_write_reaches_the_daemon_and_returns_its_flag() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let socket = stub_daemon(tmp.path(), |request| {
+        vec![result_frame(json!({
+            "index_id": request["params"]["index_id"].clone(),
+            "embedding_paused": true,
+            "method_seen": request["method"].clone(),
+            "params_seen": request["params"].clone(),
+        }))]
+    });
+
+    let (status, _, body) = through_router(
+        socket,
+        "POST",
+        "/api/search/indexes/scratch/embedding/pause",
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let parsed: Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(parsed["method_seen"], json!("search.index.pause_embedding"));
+    assert_eq!(parsed["index_id"], json!("scratch"));
+    assert_eq!(parsed["embedding_paused"], json!(true));
+    assert_eq!(
+        parsed["params_seen"],
+        json!({ "index_id": "scratch" }),
+        "the write takes the id and nothing else"
+    );
+}
+
+/// Why: resume is a different method, and mapping both toggle directions onto
+/// one would leave a paused index unable to come back — the failure an operator
+/// notices last, because the button reports success either way.
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resume_write_reaches_its_own_method() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let socket = stub_daemon(tmp.path(), |request| {
+        vec![result_frame(json!({
+            "embedding_paused": false,
+            "method_seen": request["method"].clone(),
+        }))]
+    });
+
+    let (status, _, body) = through_router(
+        socket,
+        "POST",
+        "/api/search/indexes/scratch/embedding/resume",
+        "{}",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let parsed: Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(
+        parsed["method_seen"],
+        json!("search.index.resume_embedding")
+    );
+    assert_eq!(parsed["embedding_paused"], json!(false));
+}
+
+/// Why: the daemon refuses an unknown index with a not-found error frame, and
+/// the SPA branches on the status to decide whether to roll the toggle back. A
+/// refusal arriving as a `200` would leave the badge showing PAUSED against an
+/// index that is not.
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pause_on_an_unknown_index_is_a_not_found() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let socket = stub_daemon(tmp.path(), |_| {
+        vec![error_frame(-32004, "unknown index 'ghost'")]
+    });
+
+    let (status, _, body) = through_router(
+        socket,
+        "POST",
+        "/api/search/indexes/ghost/embedding/pause",
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("unknown index 'ghost'"), "{body}");
+}
+
+/// Why: the file-events feed replays a ring and then stays open, and the SPA
+/// renders each frame as one row. The stream has to negotiate as a stream and
+/// arrive one `data:` line per event, or the feed renders as a single blob.
+/// What: three replayed events through the real router, asserted verbatim
+/// against the SSE framing.
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_file_events_feed_reaches_the_browser_frame_for_frame() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let socket = stub_daemon(tmp.path(), |request| {
+        assert_eq!(request["method"], json!("search.index.file_events"));
+        assert_eq!(
+            request["stream"],
+            json!(true),
+            "the feed is a streaming method"
+        );
+        assert_eq!(request["params"]["index_id"], json!("scratch"));
+        vec![
+            item_frame(json!({ "path": "src/a.rs", "kind": "modified", "at_unix_ms": 1 })),
+            item_frame(json!({ "path": "src/b.rs", "kind": "removed", "at_unix_ms": 2 })),
+            item_frame(json!({ "path": ".", "kind": "rescan", "at_unix_ms": 3 })),
+            end_frame(),
+        ]
+    });
+
+    let (status, content_type, body) = through_router(
+        socket,
+        "GET",
+        "/api/search/indexes/scratch/file-events/stream",
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(content_type, "text/event-stream");
+    assert_eq!(
+        body,
+        "data: {\"at_unix_ms\":1,\"kind\":\"modified\",\"path\":\"src/a.rs\"}\n\n\
+         data: {\"at_unix_ms\":2,\"kind\":\"removed\",\"path\":\"src/b.rs\"}\n\n\
+         data: {\"at_unix_ms\":3,\"kind\":\"rescan\",\"path\":\".\"}\n\n",
+        "each event must be exactly one SSE data line"
+    );
+}
+
+/// Why: an unknown index refuses the feed in its FIRST frame, before any event.
+/// Committing to `200 text/event-stream` there would hand the SPA an empty feed
+/// against a mistyped id, which reads as "nothing has changed" rather than as an
+/// error.
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unknown_index_refuses_the_feed_before_it_opens() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let socket = stub_daemon(tmp.path(), |_| {
+        vec![stream_error_frame(-32004, "unknown index 'ghost'")]
+    });
+
+    let (status, content_type, body) = through_router(
+        socket,
+        "GET",
+        "/api/search/indexes/ghost/file-events/stream",
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(
+        !content_type.contains("event-stream"),
+        "a refusal must not open a feed: {content_type}"
+    );
+    assert!(body.contains("unknown index 'ghost'"), "{body}");
+}
+
 // ─── streams ─────────────────────────────────────────────────────────────────
 
 /// Why: the reindex view reads `/reindex/stream` as Server-Sent Events, and the

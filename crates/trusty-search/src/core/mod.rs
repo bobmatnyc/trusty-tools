@@ -6,8 +6,11 @@ pub mod concept_cluster;
 pub mod corpus;
 pub mod corpus_recovery;
 pub mod embed;
+// #6524: the embedding pause gate and the per-index file-change feed.
+pub mod embed_pause;
 pub mod entity;
 pub mod extract;
+pub mod file_events;
 pub mod git;
 pub mod indexer;
 pub mod memguard;

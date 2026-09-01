@@ -300,9 +300,22 @@ pub(super) async fn prepare_and_parse_batch(
     //
     // For full-pipeline indexes, use `parse_and_embed_files_tracked` so
     // that per-wave `chunk_progress` SSE events fire at ~32-chunk granularity.
+    // #6524: this batch embeds inline only when the index opted OUT of
+    // `defer_embed`. On that path there is no separate stage to park, so a
+    // pause parks the whole batch here, at the boundary before any parse or
+    // embed work starts. Every index defers by default; on the default path
+    // this gate is never reached and only the catch-up pass parks, which is
+    // what keeps BM25 and KG running through a pause (owner ruling, #6524).
+    let embeds_inline = !(ctx.lexical_only || ctx.defer_embed || ctx.skip_vector);
+    let embedding_drained = embeds_inline
+        && ctx.handle.embedding_pause.wait_while_paused().await
+            == crate::core::embed_pause::PauseWait::Drained;
     let parsed = {
         let indexer = ctx.handle.indexer.read().await;
-        let result = if ctx.lexical_only || ctx.defer_embed || ctx.skip_vector {
+        // A drained gate means the daemon is shutting down: fall back to the
+        // lexical-only parse so this batch still commits its chunks instead of
+        // waiting on an embedder the process is about to drop.
+        let result = if !embeds_inline || embedding_drained {
             indexer.parse_files_only(to_index).await
         } else {
             use crate::core::indexer::PROGRESS_CHUNK_INTERVAL;

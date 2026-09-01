@@ -127,7 +127,13 @@ pub(crate) async fn run_embed_catch_up(handle: Arc<IndexHandle>, progress: Arc<R
 
     let result = {
         let indexer = handle.indexer.read().await;
-        indexer.embed_deferred_chunks(Some(&progress_tx)).await
+        // #6524: the pass stops at the next wave boundary while embedding is
+        // paused. It does not park here — this task holds the one background
+        // permit, this index's permit and its teardown read-guard, so a park
+        // would stall every other index's catch-up and any DELETE on this one.
+        indexer
+            .embed_deferred_chunks_gated(Some(&progress_tx), Some(&handle.embedding_pause))
+            .await
     };
     // Drop the sender so the updater task's recv loop terminates.
     drop(progress_tx);
@@ -135,7 +141,42 @@ pub(crate) async fn run_embed_catch_up(handle: Arc<IndexHandle>, progress: Arc<R
     let _ = progress_updater.await;
 
     match result {
-        Ok((embedded, total)) => {
+        // #6524: an operator pause stopped the pass. The embedded prefix is
+        // already committed, so nothing is lost; what must NOT happen is
+        // settling the stage. Leaving `semantic` `InProgress` and KEEPING the
+        // durable pending marker is the same rule the `Failed` arm below
+        // follows for the same reason — the chunks really are still
+        // un-embedded, and the marker is the only thing that survives a restart
+        // to re-arm the pass. Re-queueing puts the job back in front of the
+        // queue's own pause gate, which is where it parks (holding no permits)
+        // until the operator resumes.
+        Ok(outcome) if outcome.paused => {
+            let embedded = outcome.embedded;
+            {
+                let indexer = handle.indexer.read().await;
+                indexer.force_incremental_persist();
+            }
+            {
+                let mut stages = handle.stages.write().await;
+                stages.semantic.embedded = Some(embedded);
+            }
+            tracing::info!(
+                "deferred_embed[{}]: paused after {embedded} chunks — re-queued; \
+                 semantic stays in_progress and the pending marker is kept",
+                index_id.0,
+            );
+            progress
+                .push(serde_json::json!({
+                    "event": "embed_paused",
+                    "index_id": index_id.0,
+                    "embedded": embedded,
+                }))
+                .await;
+            let pending = handle.indexer.read().await.pending_embed_count().await;
+            spawn_deferred_embed_pass(handle, progress, pending);
+        }
+        Ok(outcome) => {
+            let (embedded, total) = (outcome.embedded, outcome.total);
             // Force an HNSW snapshot so the vectors survive a daemon
             // restart even if no subsequent reindex runs.
             {

@@ -40,8 +40,9 @@ use serde_json::{Map, Value, json};
 
 use super::{
     METHOD_CONFIG_GET, METHOD_CONFIG_SET, METHOD_HEALTH, METHOD_INDEX_CONFIG_GET,
-    METHOD_INDEX_CONFIG_SET, METHOD_INDEX_CREATE, METHOD_INDEX_DELETE, METHOD_INDEX_REINDEX,
-    METHOD_INDEX_REINDEX_STREAM, METHOD_INDEX_STATUS, METHOD_INDEXES_LIST, METHOD_LOGS_TAIL,
+    METHOD_INDEX_CONFIG_SET, METHOD_INDEX_CREATE, METHOD_INDEX_DELETE, METHOD_INDEX_FILE_EVENTS,
+    METHOD_INDEX_PAUSE_EMBEDDING, METHOD_INDEX_REINDEX, METHOD_INDEX_REINDEX_STREAM,
+    METHOD_INDEX_RESUME_EMBEDDING, METHOD_INDEX_STATUS, METHOD_INDEXES_LIST, METHOD_LOGS_TAIL,
     METHOD_QUERY, METHOD_QUERY_ALL, METHOD_REGISTRY_ORPHANS, METHOD_STATUS_STREAM,
 };
 
@@ -139,6 +140,25 @@ pub(crate) fn map_request(
         ),
         (&Method::GET, ["indexes", id, "reindex", "stream"]) => {
             stream(METHOD_INDEX_REINDEX_STREAM, json!({ "index_id": id }))
+        }
+
+        // ---- the indexing pipeline (#6524) -----------------------------------
+        //
+        // Both writes take the index id and nothing else, so the request body is
+        // not read at all: a `POST` with no body maps as cleanly as the SPA's
+        // `{}`. Each is idempotent on the daemon, so a double-click costs a
+        // round trip and changes nothing.
+        (&Method::POST, ["indexes", id, "embedding", "pause"]) => {
+            unary(METHOD_INDEX_PAUSE_EMBEDDING, json!({ "index_id": id }))
+        }
+        (&Method::POST, ["indexes", id, "embedding", "resume"]) => {
+            unary(METHOD_INDEX_RESUME_EMBEDDING, json!({ "index_id": id }))
+        }
+        // `file-events` hyphenated in the path and underscored in the method:
+        // the path segment follows the SPA's own URL style and the method name
+        // is the daemon's. This row is where the two spellings meet.
+        (&Method::GET, ["indexes", id, "file-events", "stream"]) => {
+            stream(METHOD_INDEX_FILE_EVENTS, json!({ "index_id": id }))
         }
 
         // ---- registry-wide ---------------------------------------------------
@@ -369,6 +389,81 @@ mod tests {
             Call::Stream {
                 method: METHOD_INDEX_REINDEX_STREAM,
                 params: json!({ "index_id": "a" })
+            }
+        );
+
+        // #6524: the indexing-pipeline trio.
+        assert_eq!(
+            unary(&Method::POST, "indexes/a/embedding/pause", None, ""),
+            Call::Unary {
+                method: METHOD_INDEX_PAUSE_EMBEDDING,
+                params: json!({ "index_id": "a" })
+            }
+        );
+        assert_eq!(
+            unary(&Method::POST, "indexes/a/embedding/resume", None, "{}"),
+            Call::Unary {
+                method: METHOD_INDEX_RESUME_EMBEDDING,
+                params: json!({ "index_id": "a" })
+            }
+        );
+        assert_eq!(
+            unary(&Method::GET, "indexes/a/file-events/stream", None, ""),
+            Call::Stream {
+                method: METHOD_INDEX_FILE_EVENTS,
+                params: json!({ "index_id": "a" })
+            }
+        );
+    }
+
+    /// Why: the two pause writes take the index id and nothing else, so the
+    /// body is ignored — but ignoring it must be a decision the table proves,
+    /// not an accident. A row that folded the body into `params` would send the
+    /// daemon a field its `IndexRef` refuses.
+    /// What: the same call with no body, an empty object and a populated object
+    /// all map to the same one-field params.
+    /// Test: this is the test.
+    #[test]
+    fn a_pause_write_ignores_whatever_body_it_is_given() {
+        for body in ["", "{}", r#"{"unexpected":true}"#] {
+            assert_eq!(
+                unary(&Method::POST, "indexes/a/embedding/pause", None, body),
+                Call::Unary {
+                    method: METHOD_INDEX_PAUSE_EMBEDDING,
+                    params: json!({ "index_id": "a" })
+                },
+                "body {body:?} must not reach the daemon"
+            );
+        }
+    }
+
+    /// Why: the file-events feed is a stream, and the difference between the two
+    /// `Call` arms decides whether the bridge answers one JSON body or holds an
+    /// SSE connection open. A row landing in `Unary` would read the first event
+    /// and close, which the SPA renders as a feed with exactly one entry.
+    /// What: asserts the arm, not just the method.
+    /// Test: this is the test.
+    #[test]
+    fn the_file_events_feed_maps_to_a_stream_not_a_unary_call() {
+        let call = unary(&Method::GET, "indexes/a/file-events/stream", None, "");
+        assert!(
+            matches!(call, Call::Stream { .. }),
+            "the feed must stream: {call:?}"
+        );
+    }
+
+    /// Why: an index id is free text and the SPA percent-encodes it, so the
+    /// segment this row binds arrives already decoded. A space in an id must
+    /// reach the daemon as a space rather than as `%20`, which would name a
+    /// different index.
+    /// Test: this is the test.
+    #[test]
+    fn a_decoded_index_id_reaches_the_pause_row_intact() {
+        assert_eq!(
+            unary(&Method::POST, "indexes/my index/embedding/pause", None, ""),
+            Call::Unary {
+                method: METHOD_INDEX_PAUSE_EMBEDDING,
+                params: json!({ "index_id": "my index" })
             }
         );
     }

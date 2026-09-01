@@ -93,6 +93,8 @@ fn make_handle(root: &Path, id: &str) -> Arc<IndexHandle> {
         walk_diagnostics: Arc::new(tokio::sync::RwLock::new(
             crate::core::registry::WalkDiagnostics::default(),
         )),
+        embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
+        file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
     })
 }
 

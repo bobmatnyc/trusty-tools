@@ -371,6 +371,9 @@ pub(crate) async fn relocate_index_report(
         stages: Arc::clone(&existing.stages),
         search_pressure: Arc::clone(&existing.search_pressure),
         walk_diagnostics: Arc::clone(&existing.walk_diagnostics),
+        // #6524: a rebuild must not drop an operator's pause or the event feed.
+        embedding_pause: Arc::clone(&existing.embedding_pause),
+        file_events: Arc::clone(&existing.file_events),
     };
 
     // Issue #3995 round 5 (CRITICAL): snapshot the cold-store entry (if any)

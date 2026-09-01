@@ -536,6 +536,8 @@ pub(crate) async fn restore_one_index(
         walk_diagnostics: Arc::new(tokio::sync::RwLock::new(
             crate::core::registry::WalkDiagnostics::default(),
         )),
+        embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
+        file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
     };
     let registered = state.registry.register(handle);
     // #4390: an embed pass interrupted before it committed leaves the corpus

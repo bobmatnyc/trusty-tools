@@ -1244,6 +1244,8 @@ async fn doctor_endpoint_returns_report() {
         // #6529: pseudo-terminal headroom — a session leak exhausts it and the
         // next spawn fails with a bare ENXIO.
         "pty_headroom",
+        // #6535: the cloud log drain's state and last-run verdict.
+        "log_drain",
     ];
     assert_eq!(names, expected);
     // Count derived from the list above, never a standalone literal:

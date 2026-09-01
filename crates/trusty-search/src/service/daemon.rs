@@ -814,6 +814,12 @@ pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<()
     // flush below for the same reason the watchers are stopped first — an RPC
     // connection still in a handler must not race the flush.
     drain.cancel();
+    // #6524: release every parked embedding stage. A pause is an unbounded wait
+    // on an operator action, so a paused index would otherwise hold a background
+    // task — and the flush behind it — open for a resume that is never coming.
+    // Each parked stage wakes, abandons its work with its durable pending marker
+    // still set, and the next boot re-arms it.
+    drain_paused_embedders(&flush_state);
     if let Err(e) = rpc_task.await {
         tracing::warn!("the rpc serve task did not exit cleanly: {e}");
     }
@@ -854,6 +860,29 @@ pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<()
     serve_result.map_err(|e| DaemonError::Server(e.to_string()))?;
     drop(lock_file);
     Ok(())
+}
+
+/// Wake every parked embedding stage so shutdown is never held open by a pause
+/// (#6524).
+///
+/// Why: [`crate::core::embed_pause::EmbeddingPause::wait_while_paused`] waits on
+/// an operator, and shutdown cannot. Draining converts every park into a
+/// bounded return.
+/// What: sets the drain flag on every registered handle's gate. One-way — the
+/// process is ending, so nothing clears it.
+/// Test: `shutdown_drain_releases_a_parked_embed_pass` in
+/// `service::reindex::embed_pause_tests`.
+fn drain_paused_embedders(state: &SearchAppState) {
+    let mut drained = 0usize;
+    for handle in state.registry.list_handles() {
+        if handle.embedding_pause.is_paused() {
+            drained += 1;
+        }
+        handle.embedding_pause.drain();
+    }
+    if drained > 0 {
+        tracing::info!("shutdown: released {drained} paused embedding stage(s)");
+    }
 }
 
 // Shutdown-flush helpers extracted to `service::shutdown_flush` (issue #874 split).

@@ -338,6 +338,25 @@ async fn wait_for_turn(my_seq: u64) {
         }
     };
 
+    // #6524: park here while this index's embedding is paused — BEFORE any
+    // permit is taken. The job has already left the heap, so every other index
+    // keeps draining, and a paused index holds neither the single background
+    // permit nor its own teardown read-guard, so a DELETE on it is not blocked
+    // either. Daemon shutdown releases the park through `EmbeddingPause::drain`;
+    // the job is then abandoned with its durable pending marker still set, so
+    // the next boot re-arms it.
+    if job.handle.embedding_pause.wait_while_paused().await
+        == crate::core::embed_pause::PauseWait::Drained
+    {
+        tracing::info!(
+            "deferred_embed[{}]: abandoning a paused embed job — daemon is draining",
+            job.handle.id.0,
+        );
+        let remaining = QUEUE_DEPTH.fetch_sub(1, Ordering::AcqRel) - 1;
+        note_if_drained(remaining);
+        return;
+    }
+
     // Same concurrency guards `spawn_deferred_embed_pass` always used: the
     // process-wide background-reindex permit, then this index's own
     // mutual-exclusion permit. Only the SUBMISSION ORDER changed.

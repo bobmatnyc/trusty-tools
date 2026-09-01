@@ -19,6 +19,7 @@
   import { apiUrl } from '../base.js';
   import { navigate } from '../router.svelte.js';
   import { getIndexes, getLoading, getError, refreshIndexes } from '../state.svelte.js';
+  import IndexPipeline from '../components/IndexPipeline.svelte';
 
   let indexes = $derived(getIndexes());
   let loading = $derived(getLoading());
@@ -80,6 +81,28 @@
       next.add(id);
     }
     selected = next;
+  }
+
+  // -------------------------------------------------------------------------
+  // Per-collection pipeline detail (#6524)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Why: the Status column collapses three indexing lanes into one word, so an
+   * index whose embedding stage is hours behind reads as "ready". Expanding a
+   * row shows the three lanes, the embedding pause toggle and the file-change
+   * feed. One row at a time: each open row polls its status and holds an SSE
+   * connection, and a table with twenty of those open is twenty live streams.
+   * What: the id of the expanded row, or null. The detail component mounts on
+   * expand and unmounts on collapse, which is what starts and stops its poll and
+   * its feed — no teardown wiring lives here.
+   * Test: expand a row, confirm the pipeline panel appears; expand another,
+   * confirm the first closes.
+   */
+  let expandedId = $state(null);
+
+  function toggleExpanded(id) {
+    expandedId = expandedId === id ? null : id;
   }
 
   // -------------------------------------------------------------------------
@@ -480,7 +503,18 @@
                     aria-label={`Select ${ix.id}`}
                   />
                 </td>
-                <td><strong>{ix.id}</strong></td>
+                <td>
+                  <!-- #6524: the disclosure for the per-collection pipeline -->
+                  <button
+                    class="disclosure"
+                    aria-expanded={expandedId === ix.id}
+                    aria-label={`${expandedId === ix.id ? 'Hide' : 'Show'} the indexing pipeline for ${ix.id}`}
+                    onclick={() => toggleExpanded(ix.id)}
+                  >
+                    <span class="chevron" class:open={expandedId === ix.id}>▸</span>
+                    <strong>{ix.id}</strong>
+                  </button>
+                </td>
                 <td>{(ix.chunk_count ?? 0).toLocaleString()}</td>
                 <td class="text-mono text-xs">{humanBytes(ix.disk_bytes)}</td>
                 <td class="text-xs text-muted">{humanTime(ix.last_indexed)}</td>
@@ -527,6 +561,18 @@
                   </button>
                 </td>
               </tr>
+              <!--
+                #6524: the pipeline detail. Mounting it here is what starts its
+                status poll and its file-events stream; collapsing unmounts it,
+                which is what stops both.
+              -->
+              {#if expandedId === ix.id}
+                <tr class="detail-row">
+                  <td colspan="8" class="detail-cell">
+                    <IndexPipeline id={ix.id} />
+                  </td>
+                </tr>
+              {/if}
             {/each}
           </tbody>
         </table>
@@ -630,5 +676,41 @@
   /* Highlight selected rows */
   .selected-row {
     background: var(--trusty-primary-soft, rgba(59, 130, 246, 0.07));
+  }
+
+  /* Per-collection pipeline disclosure (#6524) */
+  .disclosure {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: none;
+    border: none;
+    padding: 0;
+    margin: 0;
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+    text-align: left;
+  }
+  .disclosure:hover .chevron,
+  .disclosure:focus-visible .chevron {
+    color: var(--trusty-text-primary);
+  }
+  .chevron {
+    display: inline-block;
+    color: var(--trusty-text-muted);
+    transition: transform 0.12s ease-out;
+    font-size: 0.8em;
+  }
+  .chevron.open {
+    transform: rotate(90deg);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .chevron {
+      transition: none;
+    }
+  }
+  .detail-cell {
+    padding: 0;
   }
 </style>

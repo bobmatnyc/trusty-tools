@@ -48,6 +48,14 @@ cargo build --release -p trusty-search
 ./target/release/trusty-search start
 ```
 
+## Default local URLs
+
+| Service | Default URL |
+|---|---|
+| trusty-console | `http://127.0.0.1:7788` |
+| trusty-search | `http://127.0.0.1:7878` |
+| trusty-memory | `http://127.0.0.1:7070` |
+
 To wire a locally-built binary into Claude Code, update your project's
 `.mcp.json` or `~/.claude/mcp.json` to point `command` at the absolute path
 of the built binary (e.g. `target/release/trusty-search`).

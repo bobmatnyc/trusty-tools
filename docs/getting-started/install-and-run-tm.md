@@ -363,7 +363,8 @@ See [claude-mpm vs trusty-mpm — Differences & Install](./claude-mpm-vs-trusty-
 | `tctl upgrade [members]` | Upgrade to BOM-pinned versions. |
 | `tctl updates` | List available updates + changelog. |
 | `tctl status` | One-line stack summary. |
-| `tctl doctor` | Full system health check. |
+| `tctl stack doctor [member]` | Deep diagnostic sweep — tools×scope matrix, drill-down, remediation. |
+| `tctl doctor --self-check <member>` | Per-member DOC-1 conformance self-check (contract envelope, `verbs[]`, secret redaction). |
 | `tctl config` | Print effective configuration. |
 | `tctl version` | Print versions: installer + stack members. |
 | `tctl start [members]` | Start daemon(s). |

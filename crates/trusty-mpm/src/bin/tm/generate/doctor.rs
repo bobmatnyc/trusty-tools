@@ -173,6 +173,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "pty_headroom",
         "How much pseudo-terminal capacity the host has left. Every tmux pane holds one pty and macOS caps the total at `kern.tty.ptmx_max` (511 by default), so a session leak presents as a bare `ENXIO` on the next spawn, naming neither the limit nor the leak — 456 sessions the stalled orphan-GC never reaped put this host over the cap (issue #6529). Warns at 80% of the cap, FAILS at 95%, and names both numbers plus what actually reaps the sessions holding them. UNKNOWN — never `Ok` — when either number could not be read. macOS only; other platforms report the skip. Read-only — it counts device nodes and reaps nothing.",
     ),
+    (
+        "log_drain",
+        "Whether the cloud log drain is configured, where it points, and how its last pass ended (issue #6535). The drain uploads the daemon's own log files to an object store on an interval; it is OFF unless `log_drain.enabled` is set in `~/.trusty-tools/trusty-mpm/config.yaml`, and a host that never configured one reports `Ok`. A `log_drain:` section that does not resolve — a malformed destination URI, a zero interval, a source with no root — reports `Fail`, because the daemon refuses to start the scheduler and no bytes move. Enabled but never observed running reports `Warn`. The last pass's verdict is read from `~/.trusty-mpm/log-drain/status.json`, and a pass that errored — including one that finished with per-file failures — reports `Fail`, never a drained-looking `Ok`. Read-only: this probe never drains and never connects to the destination.",
+    ),
 ];
 
 /// Render the full doctor-check reference.

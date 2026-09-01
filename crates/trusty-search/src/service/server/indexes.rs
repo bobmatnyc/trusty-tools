@@ -795,6 +795,8 @@ pub(crate) async fn create_index_report(
         walk_diagnostics: Arc::new(tokio::sync::RwLock::new(
             crate::core::registry::WalkDiagnostics::default(),
         )),
+        embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
+        file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
     };
     // Issue #3995 round 5 (CRITICAL): snapshot whatever cold-store entry is
     // parked under `id` right now, BEFORE registering the fresh handle below.
