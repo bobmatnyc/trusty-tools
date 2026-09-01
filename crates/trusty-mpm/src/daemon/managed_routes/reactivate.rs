@@ -385,6 +385,7 @@ mod tests {
             pane_current_command: cmd.to_string(),
             pane_pid: Some(4242),
             pane_id: None,
+            pane_current_path: None,
         }
     }
 
@@ -396,6 +397,7 @@ mod tests {
             pane_current_command: cmd.to_string(),
             pane_pid: Some(4242),
             pane_id: Some(pane_id.to_string()),
+            pane_current_path: None,
         }
     }
 

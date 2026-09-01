@@ -482,7 +482,10 @@ impl SessionManager {
                 to_resume.len()
             );
             for sid in to_resume {
-                if let Err(e) = self.resume(&sid).await {
+                // #6568: boot reconciliation is an automatic path like the
+                // supervisor's, so it stamps the attempt rather than forgiving
+                // the flap streak an operator's own resume forgives.
+                if let Err(e) = self.resume_auto(&sid).await {
                     warn!(id = %sid, "reconcile: auto_resume failed: {e}");
                 }
             }

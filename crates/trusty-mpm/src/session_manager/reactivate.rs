@@ -119,6 +119,11 @@ impl SessionManager {
         // #6194: the operator is relaunching into this pane, so the reason it
         // last stopped no longer describes it — same clear `resume` does.
         record.stop_cause = None;
+        // #6568: and the same forgiveness. This path feeds `record_death`
+        // through `mark_runtime_exited_stopped`, so without this an operator
+        // reactivating repeatedly would build the flap streak with their own
+        // hands and get parked on the next ordinary exit.
+        self.note_operator_resume(id).await;
         // #4337: a reactivation always precedes the client `exec`-ing a fresh
         // `claude` back into this SAME pane, guaranteeing a genuinely NEW
         // top-level `SessionStart` is imminent. Clearing the old id here

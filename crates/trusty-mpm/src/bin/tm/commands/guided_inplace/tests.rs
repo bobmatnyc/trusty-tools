@@ -566,6 +566,7 @@ fn stopped_record_at(workspace: &std::path::Path) -> trusty_mpm::client::Managed
         attached: false,
         slot: 0,
         deleted: false,
+        auto_resume_parked: None,
     }
 }
 

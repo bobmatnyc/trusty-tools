@@ -44,6 +44,7 @@ fn summary(id: &str, state: &str) -> ManagedSessionSummary {
         attached: false,
         slot: 0,
         deleted: false,
+        auto_resume_parked: None,
     }
 }
 

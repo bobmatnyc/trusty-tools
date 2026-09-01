@@ -38,6 +38,7 @@ fn session(name: &str, state: &str, workspace_path: Option<&str>) -> ManagedSess
         attached: false,
         slot: 1,
         deleted: false,
+        auto_resume_parked: None,
     }
 }
 

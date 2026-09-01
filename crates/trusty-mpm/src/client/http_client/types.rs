@@ -584,6 +584,22 @@ pub struct ManagedSessionSummary {
     /// Test: `managed_session_summary_deserializes_slot_and_deleted`.
     #[serde(default)]
     pub deleted: bool,
+    /// Why the supervisor has stopped auto-resuming this session, if it has
+    /// (#6568).
+    ///
+    /// Why: a parked session renders exactly like an idle stopped one, and the
+    /// difference is that nothing will ever revive it. Carrying the reason to
+    /// the CLI lets `tm session ls` mark the row and `tm session status` print
+    /// the whole sentence, including how to clear it.
+    /// What: `Some(<reason>)` when the daemon reports one — mirroring
+    /// `daemon::managed_routes::SessionSummary::auto_resume_parked`, whose value
+    /// comes from `SessionRecord::auto_resume_park_reason`. `#[serde(default)]`
+    /// keeps an older daemon that omits the field deserializable; it reads as
+    /// "not parked", which is what such a daemon means.
+    /// Test: `format_state_column_appends_resume_parked_marker` in
+    /// `commands::managed_tests`.
+    #[serde(default)]
+    pub auto_resume_parked: Option<String>,
 }
 
 /// Wrapper for `GET /api/v1/sessions/managed` (the list endpoint).

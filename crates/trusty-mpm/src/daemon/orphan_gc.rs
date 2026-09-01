@@ -26,12 +26,33 @@
 //! exercise the full decision matrix with a fake driver; `run_sweep` is covered
 //! by `tests/orphan_gc_sweep.rs` against a fake [`ManagedTmuxDriver`](crate::session_manager::ManagedTmuxDriver).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::process::Command;
 
 use tracing::{debug, info, warn};
 
 use crate::core::names::is_managed_session_name;
+
+/// How many sweeps pass between two "untracked active managed session" lines
+/// for the SAME session, when nothing else changes.
+///
+/// Why (#6118): the previous code logged one line per warned session per sweep.
+/// 478 permanently-warned sessions on a 60-second sweep produced 992,078 lines
+/// in 48 hours — 76% of every daemon log line written. The set of warned
+/// sessions is stable for hours at a time, so re-stating it every minute adds
+/// no information after the first line.
+/// What: a session is logged on its FIRST sweep as a warn candidate and then
+/// once every `DEFAULT_SKIP_LOG_EVERY_SWEEPS` sweeps thereafter; the per-sweep
+/// TOTAL stays in the sweep-complete summary either way. At the daemon's
+/// 60-second cadence this is one line per session per hour.
+/// Test: `skip_log_is_throttled_per_session`, `skip_log_repeats_after_n_sweeps`.
+pub const DEFAULT_SKIP_LOG_EVERY_SWEEPS: u32 = 60;
+
+/// Environment override for [`DEFAULT_SKIP_LOG_EVERY_SWEEPS`].
+///
+/// `0` or an unparsable value falls back to the default; `1` restores the
+/// pre-#6118 log-every-sweep behavior.
+pub const ENV_SKIP_LOG_EVERY_SWEEPS: &str = "TRUSTY_MPM_ORPHAN_GC_SKIP_LOG_EVERY";
 
 /// Shell commands that mark a pane as *idle* (no agent running inside it).
 ///
@@ -92,6 +113,141 @@ pub struct PaneInfo {
     /// Distinct from `pane_pid` (which the OS can reuse across a pane's
     /// lifetime); never inherited across panes, unlike an env var.
     pub pane_id: Option<String>,
+    /// The pane's working directory as tmux reports it, when the enumeration
+    /// captured one (#6118).
+    ///
+    /// Why: the GC's only reap path used to be "bare shell, no live child",
+    /// which never covers a pane whose worktree was deleted underneath it — the
+    /// pane keeps running an agent, `reconcile` declines to adopt it because its
+    /// cwd does not resolve, and nothing else can act. tmux still reports the
+    /// path it recorded for the pane, so comparing that path against the
+    /// filesystem is POSITIVE evidence the pane has nothing left to work in.
+    /// What: `Some(path)` when tmux reported a non-empty `#{pane_current_path}`;
+    /// `None` when it reported an empty field or the enumeration predates this
+    /// column. `None` is NO evidence and can never select a pane for reaping.
+    pub pane_current_path: Option<String>,
+}
+
+/// What the filesystem says about a pane's reported working directory (#6118).
+///
+/// Why (ADR-0045): "the directory is gone" and "I could not tell" are different
+/// answers, and only the first is evidence for a kill. Collapsing them into a
+/// bool is exactly the fail-open shape that ADR forbids on a destructive path.
+///
+/// ADR-0045's trigger table names the case that makes this more than a
+/// formality: an unmounted or ejected volume returns plain ENOENT, NOT an error
+/// kind that could be recognised as "undeterminable". An external disk carrying
+/// a live agent's worktree therefore looks byte-for-byte like a deleted
+/// worktree to `symlink_metadata` alone. [`FsCwdProbe`] separates them by asking
+/// about the PARENT — see its doc.
+/// What: three states. `Exists` and `Gone` are decided answers; `Undeterminable`
+/// covers every case where the answer was not obtained, including tmux reporting
+/// no path at all.
+/// Test: `fs_cwd_probe_reports_exists_for_a_real_dir`,
+/// `fs_cwd_probe_reports_gone_for_a_deleted_dir`,
+/// `fs_cwd_probe_is_undeterminable_when_the_parent_is_gone_too`,
+/// `classify_keeps_active_pane_when_cwd_is_undeterminable`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CwdEvidence {
+    /// The path tmux reported resolves to something on disk.
+    Exists,
+    /// The path tmux reported is confirmed ABSENT — the one reapable answer.
+    Gone,
+    /// No answer: tmux reported no path, or the filesystem could not say.
+    Undeterminable,
+}
+
+/// A probe answering whether a pane's reported working directory still exists.
+///
+/// Why: keeps [`classify_session`] pure and lets tests decide the answer without
+/// creating and deleting real directories, mirroring [`ChildLivenessProbe`].
+/// What: one method mapping a non-empty path string to a [`CwdEvidence`].
+/// Fail-closed contract: return [`CwdEvidence::Gone`] ONLY when the path's
+/// absence is attributable to that path itself. An error that is not "not
+/// found" — a permission denial, an I/O failure, a stale NFS handle — and an
+/// absence that extends to the path's whole enclosing subtree both MUST return
+/// [`CwdEvidence::Undeterminable`], which keeps the pane.
+/// Test: [`FsCwdProbe`]'s tests below; the fakes in the `tests` submodule drive
+/// the classifier.
+pub trait CwdProbe {
+    /// Classify `path` (guaranteed non-empty by the caller).
+    fn evidence(&self, path: &str) -> CwdEvidence;
+}
+
+/// The production [`CwdProbe`], backed by `std::fs`.
+///
+/// Why: the reap decision must consult the real filesystem, and the
+/// absent-vs-undeterminable split cannot be made from the `io::Error` kind
+/// alone. ADR-0045's trigger table is explicit that an unmounted or ejected
+/// volume answers plain ENOENT — the SAME answer a deleted worktree gives. A
+/// probe that stopped at `NotFound` would kill an agent working on an external
+/// disk about two minutes after someone ejected it, which is the opposite of
+/// what #6118 asks for.
+///
+/// What separates the two is the PARENT. #6118's target is a worktree removed
+/// from an intact `.claude/worktrees/`, so the parent survives. An ejected
+/// volume, an unmounted share, and a deleted parent tree all take the parent
+/// with them, and none of those is evidence about this pane's own directory.
+/// What: `symlink_metadata` on the path — never `metadata`, which follows the
+/// link and would call a dangling symlink "gone" when the pane's own entry is
+/// very much there. `Ok` → [`CwdEvidence::Exists`]. `ErrorKind::NotFound` →
+/// [`CwdEvidence::Gone`] only when the parent directory is itself present;
+/// otherwise [`CwdEvidence::Undeterminable`]. A path with no parent, and every
+/// other error kind, are [`CwdEvidence::Undeterminable`].
+/// Test: `fs_cwd_probe_reports_exists_for_a_real_dir`,
+/// `fs_cwd_probe_reports_gone_for_a_deleted_dir`,
+/// `fs_cwd_probe_is_undeterminable_when_the_parent_is_gone_too`,
+/// `fs_cwd_probe_is_undeterminable_on_a_non_notfound_error`.
+pub struct FsCwdProbe;
+
+impl CwdProbe for FsCwdProbe {
+    fn evidence(&self, path: &str) -> CwdEvidence {
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => CwdEvidence::Exists,
+            // #6118: absent — but absent WHY? Only a surviving parent makes this
+            // about this directory rather than about its whole volume.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let Some(parent) = std::path::Path::new(path).parent() else {
+                    return CwdEvidence::Undeterminable;
+                };
+                if std::fs::symlink_metadata(parent).is_ok() {
+                    CwdEvidence::Gone
+                } else {
+                    debug!(
+                        path = %path,
+                        "orphan-GC: a pane's cwd is absent and so is its parent — an unmounted \
+                         volume answers exactly like a deleted directory (ADR-0045), so this is \
+                         not evidence; keeping the pane (#6118)"
+                    );
+                    CwdEvidence::Undeterminable
+                }
+            }
+            Err(e) => {
+                warn!(
+                    path = %path,
+                    error = %e,
+                    "orphan-GC: cannot determine whether a pane's cwd still exists; keeping the pane (#6118)"
+                );
+                CwdEvidence::Undeterminable
+            }
+        }
+    }
+}
+
+/// Classify a pane's reported cwd, treating an unreported path as no evidence.
+///
+/// Why: `None` and `Some("")` both mean tmux told us nothing, and neither may
+/// ever reach the filesystem probe as a path to test — an empty string would
+/// resolve to the process cwd and answer `Exists` for a pane we know nothing
+/// about.
+/// What: returns [`CwdEvidence::Undeterminable`] for a missing or blank path;
+/// otherwise delegates to `probe`.
+/// Test: `pane_cwd_evidence_is_undeterminable_without_a_path`.
+pub fn pane_cwd_evidence(pane: &PaneInfo, probe: &dyn CwdProbe) -> CwdEvidence {
+    match pane.pane_current_path.as_deref().map(str::trim) {
+        Some(p) if !p.is_empty() => probe.evidence(p),
+        _ => CwdEvidence::Undeterminable,
+    }
 }
 
 /// The GC's verdict for a single tmux session.
@@ -114,6 +270,11 @@ pub enum GcDecision {
     /// The session is a reap candidate this pass (managed + untracked + idle).
     /// Debounce still gates whether it is actually killed.
     ReapCandidate,
+    /// The session is a reap candidate for a DIFFERENT reason (#6118): it is
+    /// managed, untracked, and its pane's working directory is confirmed gone,
+    /// even though the pane's foreground command is not a bare shell. Debounce
+    /// gates this exactly as it gates [`Self::ReapCandidate`].
+    ReapCandidateCwdGone,
 }
 
 /// Why a session was kept by [`classify_session`].
@@ -232,16 +393,30 @@ impl ChildLivenessProbe for AlwaysIdleProbe {
 /// 3. it is genuinely idle: `pane_current_command` is a bare shell
 ///    ([`is_idle_shell`]) AND the `probe` finds no live agent child.
 ///
-/// A managed, untracked, but *active* (non-shell) session yields
-/// [`GcDecision::WarnUntrackedActive`] (keep + warn). Everything else is a
-/// [`GcDecision::Keep`] with the precise [`KeepReason`].
+/// A managed, untracked, *active* (non-shell) session whose pane's working
+/// directory is CONFIRMED gone yields [`GcDecision::ReapCandidateCwdGone`]
+/// (#6118) — the pane has no directory left to work in, `reconcile` has already
+/// declined to adopt it for that reason, and nothing else could ever act on it.
+/// Any other active untracked session yields [`GcDecision::WarnUntrackedActive`]
+/// (keep + warn). Everything else is a [`GcDecision::Keep`] with the precise
+/// [`KeepReason`].
+///
+/// The cwd gate is POSITIVE evidence only (ADR-0045): a pane whose path tmux
+/// never reported, or whose existence the filesystem could not decide, is KEPT
+/// exactly as before. Both reap candidates still pass through the same two-sweep
+/// debounce in [`OrphanGc::plan_sweep`] before anything is killed.
 /// Test: `classify_keeps_non_managed`, `classify_keeps_tracked_legacy`,
 /// `classify_keeps_tracked_managed`, `classify_warns_untracked_active`,
-/// `classify_reaps_untracked_idle`, `classify_keeps_live_child`.
+/// `classify_reaps_untracked_idle`, `classify_keeps_live_child`,
+/// `classify_reaps_active_pane_whose_cwd_is_gone`,
+/// `classify_keeps_active_pane_when_cwd_is_undeterminable`,
+/// `classify_keeps_active_pane_whose_cwd_exists`,
+/// `classify_keeps_tracked_pane_whose_cwd_is_gone`.
 pub fn classify_session(
     pane: &PaneInfo,
     tracked: &TrackedNames,
     probe: &dyn ChildLivenessProbe,
+    cwd_probe: &dyn CwdProbe,
 ) -> GcDecision {
     // Gate 1: managed prefix. Anything not ours is untouchable.
     if !is_managed_session_name(&pane.session_name) {
@@ -259,9 +434,17 @@ pub fn classify_session(
     debug_assert!(!tracked.contains(&pane.session_name));
 
     // Gate 3: idleness. A managed+untracked session running an agent is the
-    // dangerous case — surface it loudly and KEEP it.
+    // dangerous case — surface it loudly and KEEP it, UNLESS its working
+    // directory is provably gone.
     if !is_idle_shell(&pane.pane_current_command) {
-        return GcDecision::WarnUntrackedActive;
+        // #6118: a declined-adopt pane (reconcile refused it because its cwd
+        // does not resolve) stayed here forever — 478 of them, re-logged every
+        // sweep. A confirmed-absent cwd is the positive evidence that makes it
+        // reapable; anything less keeps the pre-#6118 warn-and-keep outcome.
+        return match pane_cwd_evidence(pane, cwd_probe) {
+            CwdEvidence::Gone => GcDecision::ReapCandidateCwdGone,
+            CwdEvidence::Exists | CwdEvidence::Undeterminable => GcDecision::WarnUntrackedActive,
+        };
     }
 
     // Belt-and-braces: even a bare-shell pane is spared if a live agent child
@@ -291,6 +474,12 @@ pub struct SweepPlan {
     pub kept: usize,
     /// Untracked active managed sessions that were warned-and-kept.
     pub warned: usize,
+    /// How many of `warned` actually produced a log line this sweep (#6118).
+    /// The rest were suppressed by the per-session throttle.
+    pub warn_logged: usize,
+    /// Names in `to_reap` selected because their pane's cwd is gone, not
+    /// because the pane is an idle shell (#6118). Drives the kill-log reason.
+    pub cwd_gone: HashSet<String>,
 }
 
 /// Cross-pass orphan garbage-collector with a debounce.
@@ -313,6 +502,14 @@ pub struct SweepPlan {
 pub struct OrphanGc {
     /// Names that were reap candidates on the previous sweep.
     prev_candidates: HashSet<String>,
+    /// #6118: how many sweeps each currently-warned session has been warned
+    /// for. Drives the per-session log throttle; entries for sessions that
+    /// stopped being warned are dropped each sweep so the map cannot grow past
+    /// the live warned set.
+    warn_sweeps: HashMap<String, u32>,
+    /// #6118: log a warned session on its first sweep and then once every this
+    /// many sweeps. `0` is normalised to `1` (log every sweep) on construction.
+    skip_log_every: u32,
 }
 
 impl OrphanGc {
@@ -320,10 +517,56 @@ impl OrphanGc {
     ///
     /// Why: the daemon owns one long-lived `OrphanGc` across the process
     /// lifetime so debounce state persists between sweeps.
-    /// What: returns a default-initialised instance.
+    /// What: an empty debounce set and the default #6118 log throttle
+    /// ([`DEFAULT_SKIP_LOG_EVERY_SWEEPS`]).
     /// Test: used by every `debounce_*` test and the async runner.
     pub fn new() -> Self {
-        Self::default()
+        Self::with_skip_log_every(DEFAULT_SKIP_LOG_EVERY_SWEEPS)
+    }
+
+    /// Construct a GC whose #6118 log throttle comes from the process env.
+    ///
+    /// Why: the daemon's reap loop is the one production construction site, and
+    /// it should read the override without spelling out the env plumbing there —
+    /// `daemon/mod.rs` sits at its 500-SLOC cap.
+    /// What: [`Self::with_skip_log_every`] over [`Self::skip_log_every_from_env`].
+    /// Test: the parsing is covered by `skip_log_every_from_env_parsing`.
+    pub fn from_env() -> Self {
+        Self::with_skip_log_every(Self::skip_log_every_from_env(|k| std::env::var(k).ok()))
+    }
+
+    /// Construct a GC whose untracked-active log repeats every `sweeps` sweeps.
+    ///
+    /// Why (#6118): the throttle interval has to be settable so a test can
+    /// assert both the suppression and the eventual repeat without running 60
+    /// sweeps, and so an operator debugging a live host can restore the old
+    /// every-sweep behavior through [`ENV_SKIP_LOG_EVERY_SWEEPS`].
+    /// What: stores `sweeps`, normalising `0` to `1` — a modulus of zero has no
+    /// meaning and silently disabling the log would hide the very sessions this
+    /// line exists to surface.
+    /// Test: `skip_log_is_throttled_per_session`, `skip_log_repeats_after_n_sweeps`,
+    /// `skip_log_every_zero_logs_every_sweep`.
+    pub fn with_skip_log_every(sweeps: u32) -> Self {
+        Self {
+            prev_candidates: HashSet::new(),
+            warn_sweeps: HashMap::new(),
+            skip_log_every: sweeps.max(1),
+        }
+    }
+
+    /// Read the #6118 log-throttle interval from an injectable environment.
+    ///
+    /// Why: the daemon constructs its `OrphanGc` from the process environment,
+    /// and threading a resolver keeps that reachable from a test without any
+    /// process-wide `set_var`.
+    /// What: parses [`ENV_SKIP_LOG_EVERY_SWEEPS`]; an absent, unparsable, or
+    /// zero value yields [`DEFAULT_SKIP_LOG_EVERY_SWEEPS`].
+    /// Test: `skip_log_every_from_env_parsing`.
+    pub fn skip_log_every_from_env(get: impl Fn(&str) -> Option<String>) -> u32 {
+        get(ENV_SKIP_LOG_EVERY_SWEEPS)
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(DEFAULT_SKIP_LOG_EVERY_SWEEPS)
     }
 
     /// Forget the previous pass's reap candidates, restarting the debounce.
@@ -355,36 +598,62 @@ impl OrphanGc {
     /// `info!` (downgraded from `warn!` in #1813 — these are informational, not
     /// emergencies; frequent `warn!` here was filling logs at 56 MB/day).
     /// True anomalies (kill failures, degraded snapshots) remain at `warn!`.
+    /// #6118 adds a second candidate class — a pane whose cwd is confirmed gone
+    /// ([`GcDecision::ReapCandidateCwdGone`]) — through the SAME debounce, and
+    /// throttles the untracked-active log to once per session per
+    /// `skip_log_every` sweeps.
     /// Test: `debounce_skips_first_observation`, `debounce_reaps_second_observation`,
-    /// `gc_key_is_session_name_only_not_composite` (regression for #1813).
+    /// `gc_key_is_session_name_only_not_composite` (regression for #1813);
+    /// `cwd_gone_pane_is_debounced_then_reaped`, `skip_log_is_throttled_per_session`
+    /// (#6118).
     pub fn plan_sweep(
         &mut self,
         panes: &[PaneInfo],
         tracked: &TrackedNames,
         probe: &dyn ChildLivenessProbe,
+        cwd_probe: &dyn CwdProbe,
     ) -> SweepPlan {
         let mut plan = SweepPlan {
             scanned: panes.len(),
             ..SweepPlan::default()
         };
         let mut this_pass: HashSet<String> = HashSet::new();
+        let mut warned_this_pass: HashMap<String, u32> = HashMap::new();
 
         for pane in panes {
-            match classify_session(pane, tracked, probe) {
+            match classify_session(pane, tracked, probe, cwd_probe) {
                 GcDecision::ReapCandidate => {
                     this_pass.insert(pane.session_name.clone());
                 }
+                GcDecision::ReapCandidateCwdGone => {
+                    this_pass.insert(pane.session_name.clone());
+                    plan.cwd_gone.insert(pane.session_name.clone());
+                }
                 GcDecision::WarnUntrackedActive => {
                     plan.warned += 1;
-                    // Downgraded from warn! (#1813): an untracked active pane is
-                    // informational — we intentionally skip it every sweep. Logging
-                    // at warn! caused 56 MB/day of log growth for users with live
-                    // managed sessions. Reserve warn! for genuine anomalies.
-                    info!(
-                        session = %pane.session_name,
-                        command = %pane.pane_current_command,
-                        "orphan-GC: untracked active managed session — skipping"
-                    );
+                    // #6118: the same ids were re-logged every 60s forever —
+                    // 992,078 lines in 48h. Count the sweeps this session has
+                    // been warned for and log only the 1st and every Nth.
+                    let seen = self
+                        .warn_sweeps
+                        .get(pane.session_name.as_str())
+                        .copied()
+                        .unwrap_or(0);
+                    warned_this_pass.insert(pane.session_name.clone(), seen + 1);
+                    if seen % self.skip_log_every == 0 {
+                        plan.warn_logged += 1;
+                        // Downgraded from warn! (#1813): an untracked active pane is
+                        // informational — we intentionally skip it every sweep. Logging
+                        // at warn! caused 56 MB/day of log growth for users with live
+                        // managed sessions. Reserve warn! for genuine anomalies.
+                        info!(
+                            session = %pane.session_name,
+                            command = %pane.pane_current_command,
+                            sweeps_skipped = seen,
+                            repeats_every = self.skip_log_every,
+                            "orphan-GC: untracked active managed session — skipping"
+                        );
+                    }
                 }
                 GcDecision::Keep(reason) => {
                     plan.kept += 1;
@@ -404,9 +673,15 @@ impl OrphanGc {
             }
         }
         plan.to_reap.sort();
+        // A cwd-gone name still held back by the debounce must not be reported
+        // as a reason for a kill that is not happening.
+        plan.cwd_gone.retain(|n| plan.to_reap.contains(n));
 
-        // Remember this pass's candidates for next time's intersection.
+        // Remember this pass's candidates for next time's intersection, and
+        // replace (never merge) the warn counters so a session that stopped
+        // being warned is forgotten rather than accumulating forever.
         self.prev_candidates = this_pass;
+        self.warn_sweeps = warned_this_pass;
         plan
     }
 }
@@ -510,6 +785,7 @@ pub fn run_sweep(
     panes: &[PaneInfo],
     tracked: &TrackedNames,
     probe: &dyn ChildLivenessProbe,
+    cwd_probe: &dyn CwdProbe,
     driver: &dyn crate::session_manager::ManagedTmuxDriver,
 ) -> usize {
     // Fail-closed: an incomplete protected set means a tracked session might be
@@ -523,17 +799,20 @@ pub fn run_sweep(
         );
         return 0;
     }
-    let plan = gc.plan_sweep(panes, tracked, probe);
+    let plan = gc.plan_sweep(panes, tracked, probe, cwd_probe);
     let mut reaped = 0usize;
     for name in &plan.to_reap {
+        // #6118: name the evidence that selected this pane — an idle shell and
+        // a vanished working directory are different kills to audit.
+        let reason = if plan.cwd_gone.contains(name) {
+            "untracked managed session whose working directory is gone (orphan-GC, debounced, #6118)"
+        } else {
+            "untracked idle managed session (orphan-GC, debounced)"
+        };
         match driver.kill_session(name) {
             Ok(()) => {
                 reaped += 1;
-                info!(
-                    session = %name,
-                    reason = "untracked idle managed session (orphan-GC, debounced)",
-                    "reaped orphaned tmux session"
-                );
+                info!(session = %name, reason, "reaped orphaned tmux session");
             }
             Err(e) => {
                 warn!(session = %name, error = %e, "orphan-GC kill failed");
@@ -543,12 +822,34 @@ pub fn run_sweep(
     debug!(
         scanned = plan.scanned,
         kept = plan.kept,
+        // #6118: the per-session lines are throttled, so the aggregate is the
+        // only place the full warned count is still stated every sweep.
         warned = plan.warned,
+        warn_logged = plan.warn_logged,
         candidates = plan.to_reap.len(),
+        cwd_gone = plan.cwd_gone.len(),
         reaped,
         "orphan-GC sweep complete"
     );
     reaped
+}
+
+/// [`run_sweep`] with the production filesystem cwd probe (#6118).
+///
+/// Why: the daemon's reap loop is the only production caller and always wants
+/// [`FsCwdProbe`]; naming it at the call site cost `daemon/mod.rs` five lines it
+/// does not have against its 500-SLOC cap. Tests keep using `run_sweep` so they
+/// can inject a deterministic probe.
+/// What: forwards every argument, supplying [`FsCwdProbe`].
+/// Test: `tests/orphan_gc_sweep.rs` covers the wrapped function directly.
+pub fn run_sweep_fs(
+    gc: &mut OrphanGc,
+    panes: &[PaneInfo],
+    tracked: &TrackedNames,
+    probe: &dyn ChildLivenessProbe,
+    driver: &dyn crate::session_manager::ManagedTmuxDriver,
+) -> usize {
+    run_sweep(gc, panes, tracked, probe, &FsCwdProbe, driver)
 }
 
 #[cfg(test)]
@@ -563,12 +864,46 @@ mod tests {
         }
     }
 
+    /// A cwd probe that never answers — the pre-#6118 world, where nothing is
+    /// known about any pane's working directory.
+    struct NoCwdEvidence;
+    impl CwdProbe for NoCwdEvidence {
+        fn evidence(&self, _path: &str) -> CwdEvidence {
+            CwdEvidence::Undeterminable
+        }
+    }
+
+    /// A cwd probe that reports every path as CONFIRMED absent.
+    struct AllCwdGone;
+    impl CwdProbe for AllCwdGone {
+        fn evidence(&self, _path: &str) -> CwdEvidence {
+            CwdEvidence::Gone
+        }
+    }
+
+    /// A cwd probe that reports every path as present.
+    struct AllCwdExists;
+    impl CwdProbe for AllCwdExists {
+        fn evidence(&self, _path: &str) -> CwdEvidence {
+            CwdEvidence::Exists
+        }
+    }
+
     fn pane(name: &str, cmd: &str) -> PaneInfo {
         PaneInfo {
             session_name: name.to_string(),
             pane_current_command: cmd.to_string(),
             pane_pid: Some(4242),
             pane_id: None,
+            pane_current_path: None,
+        }
+    }
+
+    /// A pane that reports a working directory (#6118).
+    fn pane_at(name: &str, cmd: &str, path: &str) -> PaneInfo {
+        PaneInfo {
+            pane_current_path: Some(path.to_string()),
+            ..pane(name, cmd)
         }
     }
 
@@ -691,6 +1026,7 @@ mod tests {
             &pane("work", "zsh"),
             &TrackedNames::default(),
             &AlwaysIdleProbe,
+            &NoCwdEvidence,
         );
         assert_eq!(d, GcDecision::Keep(KeepReason::NotManaged));
     }
@@ -699,7 +1035,12 @@ mod tests {
     fn classify_keeps_tracked_legacy() {
         // (b-ish) tracked in old DaemonState registry, even if idle → KEEP.
         let tracked = tracked_with(&["tmpm-tracked"], &[]);
-        let d = classify_session(&pane("tmpm-tracked", "zsh"), &tracked, &AlwaysIdleProbe);
+        let d = classify_session(
+            &pane("tmpm-tracked", "zsh"),
+            &tracked,
+            &AlwaysIdleProbe,
+            &NoCwdEvidence,
+        );
         assert_eq!(d, GcDecision::Keep(KeepReason::TrackedLegacy));
     }
 
@@ -707,7 +1048,12 @@ mod tests {
     fn classify_keeps_tracked_managed() {
         // (b) tracked in new SessionManager store, even if idle → KEEP.
         let tracked = tracked_with(&[], &["tmpm-managed"]);
-        let d = classify_session(&pane("tmpm-managed", "zsh"), &tracked, &AlwaysIdleProbe);
+        let d = classify_session(
+            &pane("tmpm-managed", "zsh"),
+            &tracked,
+            &AlwaysIdleProbe,
+            &NoCwdEvidence,
+        );
         assert_eq!(d, GcDecision::Keep(KeepReason::TrackedManaged));
     }
 
@@ -715,7 +1061,12 @@ mod tests {
     fn classify_keeps_tracked_active() {
         // (a) tracked active session → KEEP (tracking wins before idleness).
         let tracked = tracked_with(&[], &["tmpm-busy"]);
-        let d = classify_session(&pane("tmpm-busy", "claude"), &tracked, &AlwaysIdleProbe);
+        let d = classify_session(
+            &pane("tmpm-busy", "claude"),
+            &tracked,
+            &AlwaysIdleProbe,
+            &NoCwdEvidence,
+        );
         assert_eq!(d, GcDecision::Keep(KeepReason::TrackedManaged));
     }
 
@@ -726,6 +1077,7 @@ mod tests {
             &pane("tmpm-rogue", "claude"),
             &TrackedNames::default(),
             &AlwaysIdleProbe,
+            &NoCwdEvidence,
         );
         assert_eq!(d, GcDecision::WarnUntrackedActive);
     }
@@ -737,6 +1089,7 @@ mod tests {
             &pane("tmpm-orphan", "zsh"),
             &TrackedNames::default(),
             &AlwaysIdleProbe,
+            &NoCwdEvidence,
         );
         assert_eq!(d, GcDecision::ReapCandidate);
     }
@@ -749,6 +1102,7 @@ mod tests {
             &pane("tmpm-spawning", "zsh"),
             &TrackedNames::default(),
             &AlwaysLiveProbe,
+            &NoCwdEvidence,
         );
         assert_eq!(d, GcDecision::Keep(KeepReason::LiveChildProcess));
     }
@@ -760,6 +1114,7 @@ mod tests {
             &pane("trusty-mpm-deadbeef", "bash"),
             &TrackedNames::default(),
             &AlwaysIdleProbe,
+            &NoCwdEvidence,
         );
         assert_eq!(d, GcDecision::ReapCandidate);
     }
@@ -779,7 +1134,7 @@ mod tests {
 
         // First pass: (d) is a candidate but debounce holds it back.
         let mut gc = OrphanGc::new();
-        let p1 = gc.plan_sweep(&panes, &tracked, &AlwaysIdleProbe);
+        let p1 = gc.plan_sweep(&panes, &tracked, &AlwaysIdleProbe, &NoCwdEvidence);
         assert!(
             p1.to_reap.is_empty(),
             "debounce must spare a first-seen candidate, got {:?}",
@@ -789,9 +1144,383 @@ mod tests {
         assert_eq!(p1.scanned, 5);
 
         // Second pass: (d) is still the only orphan → reaped; nothing else.
-        let p2 = gc.plan_sweep(&panes, &tracked, &AlwaysIdleProbe);
+        let p2 = gc.plan_sweep(&panes, &tracked, &AlwaysIdleProbe, &NoCwdEvidence);
         assert_eq!(p2.to_reap, vec!["tmpm-d-untracked-idle".to_string()]);
         assert_eq!(p2.warned, 1);
+    }
+
+    // ---------------------------------------------------------------------
+    // #6118 — reaping a pane whose working directory is gone.
+    // ---------------------------------------------------------------------
+
+    /// The gap this issue reopened for: an untracked pane running an agent whose
+    /// worktree was deleted underneath it. `reconcile` declines to adopt it
+    /// (its cwd does not resolve), and before this fix `classify_session`
+    /// answered `WarnUntrackedActive` forever — 478 permanent zombies. RED
+    /// before the fix: the pre-fix classifier had no cwd input at all.
+    #[test]
+    fn classify_reaps_active_pane_whose_cwd_is_gone() {
+        let d = classify_session(
+            &pane_at("tm-zombie", "claude", "/gone/worktree"),
+            &TrackedNames::default(),
+            &AlwaysIdleProbe,
+            &AllCwdGone,
+        );
+        assert_eq!(
+            d,
+            GcDecision::ReapCandidateCwdGone,
+            "a confirmed-gone cwd is positive evidence an untracked pane has \
+             nothing left to work in (#6118)"
+        );
+    }
+
+    /// ADR-0045: an undeterminable answer is not an absent one. A pane whose cwd
+    /// the probe could not decide keeps the pre-#6118 warn-and-keep outcome.
+    #[test]
+    fn classify_keeps_active_pane_when_cwd_is_undeterminable() {
+        let d = classify_session(
+            &pane_at("tm-unknown", "claude", "/maybe/here"),
+            &TrackedNames::default(),
+            &AlwaysIdleProbe,
+            &NoCwdEvidence,
+        );
+        assert_eq!(d, GcDecision::WarnUntrackedActive);
+    }
+
+    /// A pane whose cwd is present is ordinary live work — never a candidate.
+    #[test]
+    fn classify_keeps_active_pane_whose_cwd_exists() {
+        let d = classify_session(
+            &pane_at("tm-busy", "claude", "/real/dir"),
+            &TrackedNames::default(),
+            &AlwaysIdleProbe,
+            &AllCwdExists,
+        );
+        assert_eq!(d, GcDecision::WarnUntrackedActive);
+    }
+
+    /// The #4091-family protection the cwd gate must never weaken: tracking wins
+    /// before any idleness or cwd reasoning. A TRACKED session whose cwd is gone
+    /// stays kept — the store, not the GC, owns that record's fate.
+    #[test]
+    fn classify_keeps_tracked_pane_whose_cwd_is_gone() {
+        let tracked = tracked_with(&[], &["tm-tracked-gone"]);
+        let d = classify_session(
+            &pane_at("tm-tracked-gone", "claude", "/gone"),
+            &tracked,
+            &AlwaysIdleProbe,
+            &AllCwdGone,
+        );
+        assert_eq!(d, GcDecision::Keep(KeepReason::TrackedManaged));
+    }
+
+    /// A non-managed pane is untouchable whatever its cwd says.
+    #[test]
+    fn classify_keeps_non_managed_pane_whose_cwd_is_gone() {
+        let d = classify_session(
+            &pane_at("my-own-work", "vim", "/gone"),
+            &TrackedNames::default(),
+            &AlwaysIdleProbe,
+            &AllCwdGone,
+        );
+        assert_eq!(d, GcDecision::Keep(KeepReason::NotManaged));
+    }
+
+    /// Fail-open check: tmux reporting no path must never reach the filesystem
+    /// probe, because an empty path would resolve to the process cwd and answer
+    /// `Exists` for a pane we know nothing about.
+    #[test]
+    fn pane_cwd_evidence_is_undeterminable_without_a_path() {
+        assert_eq!(
+            pane_cwd_evidence(&pane("tm-a", "claude"), &AllCwdGone),
+            CwdEvidence::Undeterminable
+        );
+        assert_eq!(
+            pane_cwd_evidence(&pane_at("tm-a", "claude", "   "), &AllCwdGone),
+            CwdEvidence::Undeterminable
+        );
+    }
+
+    /// The real probe against the real filesystem — the absent/present split.
+    #[test]
+    fn fs_cwd_probe_reports_exists_for_a_real_dir() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        assert_eq!(
+            FsCwdProbe.evidence(&tmp.path().to_string_lossy()),
+            CwdEvidence::Exists
+        );
+    }
+
+    #[test]
+    fn fs_cwd_probe_reports_gone_for_a_deleted_dir() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let path = tmp.path().join("worktree");
+        std::fs::create_dir(&path).expect("create");
+        assert_eq!(
+            FsCwdProbe.evidence(&path.to_string_lossy()),
+            CwdEvidence::Exists
+        );
+        std::fs::remove_dir(&path).expect("remove");
+        assert_eq!(
+            FsCwdProbe.evidence(&path.to_string_lossy()),
+            CwdEvidence::Gone,
+            "a deleted worktree inside an intact parent is the exact live \
+             condition #6118 reports"
+        );
+    }
+
+    /// ADR-0045's first trigger row: an unmounted or ejected volume answers
+    /// plain ENOENT, indistinguishable from a deleted directory by error kind
+    /// alone. The surviving-parent gate is what separates them — an ejected disk
+    /// takes the parent with it, a removed worktree does not.
+    ///
+    /// Input this reproduces: an untracked pane running `claude` with its cwd on
+    /// an external volume, ejected. Without the gate the agent is killed about
+    /// two sweeps (~2 minutes) later.
+    /// Test: this is the test. RED before the parent gate: `Gone`.
+    #[test]
+    fn fs_cwd_probe_is_undeterminable_when_the_parent_is_gone_too() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let mount = tmp.path().join("Volumes-Ext");
+        let workdir = mount.join("work").join("repo");
+        std::fs::create_dir_all(&workdir).expect("create");
+        assert_eq!(
+            FsCwdProbe.evidence(&workdir.to_string_lossy()),
+            CwdEvidence::Exists
+        );
+
+        // The whole subtree disappears at once, as an eject does.
+        std::fs::remove_dir_all(&mount).expect("eject");
+        assert_eq!(
+            FsCwdProbe.evidence(&workdir.to_string_lossy()),
+            CwdEvidence::Undeterminable,
+            "an absent path whose parent is also absent is not evidence about \
+             that path — it is an unmounted volume (ADR-0045)"
+        );
+    }
+
+    /// The `Err(other)` arm: an error that is not `NotFound` must keep the pane.
+    ///
+    /// What: probing `<regular file>/child` yields ENOTDIR on every supported
+    /// target — a non-`NotFound` error reachable without root or a real mount.
+    #[test]
+    fn fs_cwd_probe_is_undeterminable_on_a_non_notfound_error() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let file = tmp.path().join("not-a-dir");
+        std::fs::write(&file, b"x").expect("write");
+        let under_a_file = file.join("child");
+        assert_eq!(
+            FsCwdProbe.evidence(&under_a_file.to_string_lossy()),
+            CwdEvidence::Undeterminable,
+            "an unexpected errno must never read as absence"
+        );
+    }
+
+    /// A path with no parent cannot be gated, so it is never evidence.
+    #[test]
+    fn fs_cwd_probe_is_undeterminable_for_a_parentless_path() {
+        assert_eq!(FsCwdProbe.evidence("/"), CwdEvidence::Exists);
+        // A bare relative name has an empty parent, which does not stat.
+        assert_eq!(
+            FsCwdProbe.evidence("definitely-not-here-6118"),
+            CwdEvidence::Undeterminable
+        );
+    }
+
+    /// A cwd-gone pane earns the SAME two-sweep confirmation an idle-shell
+    /// orphan does before anything is killed — a pane running a live foreground
+    /// process is never reaped on one observation.
+    #[test]
+    fn cwd_gone_pane_is_debounced_then_reaped() {
+        let panes = vec![pane_at("tm-zombie", "claude", "/gone")];
+        let mut gc = OrphanGc::new();
+
+        let p1 = gc.plan_sweep(
+            &panes,
+            &TrackedNames::default(),
+            &AlwaysIdleProbe,
+            &AllCwdGone,
+        );
+        assert!(
+            p1.to_reap.is_empty(),
+            "first sighting must never kill a pane with a live foreground process"
+        );
+
+        let p2 = gc.plan_sweep(
+            &panes,
+            &TrackedNames::default(),
+            &AlwaysIdleProbe,
+            &AllCwdGone,
+        );
+        assert_eq!(p2.to_reap, vec!["tm-zombie".to_string()]);
+        assert!(
+            p2.cwd_gone.contains("tm-zombie"),
+            "the kill must be attributed to the cwd-gone reason, not to idleness"
+        );
+    }
+
+    /// A cwd-gone candidate whose directory reappears between sweeps restarts
+    /// the debounce, exactly as a lapsed idle-shell candidate does.
+    #[test]
+    fn cwd_gone_debounce_resets_when_the_directory_returns() {
+        let panes = vec![pane_at("tm-flaky", "claude", "/maybe")];
+        let mut gc = OrphanGc::new();
+        let _ = gc.plan_sweep(
+            &panes,
+            &TrackedNames::default(),
+            &AlwaysIdleProbe,
+            &AllCwdGone,
+        );
+        let p2 = gc.plan_sweep(
+            &panes,
+            &TrackedNames::default(),
+            &AlwaysIdleProbe,
+            &AllCwdExists,
+        );
+        assert!(p2.to_reap.is_empty(), "got {:?}", p2.to_reap);
+        let p3 = gc.plan_sweep(
+            &panes,
+            &TrackedNames::default(),
+            &AlwaysIdleProbe,
+            &AllCwdGone,
+        );
+        assert!(
+            p3.to_reap.is_empty(),
+            "a lapsed candidate must restart the debounce, got {:?}",
+            p3.to_reap
+        );
+    }
+
+    /// `cwd_gone` names only what is ACTUALLY being killed this sweep, so the
+    /// kill log can never attribute a reason to a pane it is not touching.
+    #[test]
+    fn cwd_gone_reason_is_dropped_while_the_debounce_holds() {
+        let panes = vec![pane_at("tm-zombie", "claude", "/gone")];
+        let mut gc = OrphanGc::new();
+        let p1 = gc.plan_sweep(
+            &panes,
+            &TrackedNames::default(),
+            &AlwaysIdleProbe,
+            &AllCwdGone,
+        );
+        assert!(p1.cwd_gone.is_empty(), "got {:?}", p1.cwd_gone);
+    }
+
+    // ---------------------------------------------------------------------
+    // #6118 — throttling the untracked-active skip log.
+    // ---------------------------------------------------------------------
+
+    /// The log flood: the same warned session used to emit one line per sweep.
+    /// RED before the fix — `warn_logged` did not exist and every sweep logged.
+    #[test]
+    fn skip_log_is_throttled_per_session() {
+        let panes = vec![pane("tm-warned", "claude")];
+        let mut gc = OrphanGc::with_skip_log_every(3);
+        let p1 = gc.plan_sweep(
+            &panes,
+            &TrackedNames::default(),
+            &AlwaysIdleProbe,
+            &NoCwdEvidence,
+        );
+        assert_eq!(p1.warned, 1);
+        assert_eq!(p1.warn_logged, 1, "the first sighting is always logged");
+        for sweep in 2..=3 {
+            let p = gc.plan_sweep(
+                &panes,
+                &TrackedNames::default(),
+                &AlwaysIdleProbe,
+                &NoCwdEvidence,
+            );
+            assert_eq!(p.warned, 1, "sweep {sweep} still counts the session");
+            assert_eq!(p.warn_logged, 0, "sweep {sweep} must be suppressed");
+        }
+    }
+
+    #[test]
+    fn skip_log_repeats_after_n_sweeps() {
+        let panes = vec![pane("tm-warned", "claude")];
+        let mut gc = OrphanGc::with_skip_log_every(3);
+        for _ in 0..3 {
+            let _ = gc.plan_sweep(
+                &panes,
+                &TrackedNames::default(),
+                &AlwaysIdleProbe,
+                &NoCwdEvidence,
+            );
+        }
+        let p4 = gc.plan_sweep(
+            &panes,
+            &TrackedNames::default(),
+            &AlwaysIdleProbe,
+            &NoCwdEvidence,
+        );
+        assert_eq!(
+            p4.warn_logged, 1,
+            "the line must reappear every N sweeps so a zombie is never invisible"
+        );
+    }
+
+    /// A zero interval would make the modulus meaningless and could silence the
+    /// line entirely; it is normalised to log-every-sweep instead.
+    #[test]
+    fn skip_log_every_zero_logs_every_sweep() {
+        let panes = vec![pane("tm-warned", "claude")];
+        let mut gc = OrphanGc::with_skip_log_every(0);
+        for _ in 0..3 {
+            let p = gc.plan_sweep(
+                &panes,
+                &TrackedNames::default(),
+                &AlwaysIdleProbe,
+                &NoCwdEvidence,
+            );
+            assert_eq!(p.warn_logged, 1);
+        }
+    }
+
+    /// The throttle map must not grow without bound: a session that stops being
+    /// warned is forgotten, and its next appearance logs as a first sighting.
+    #[test]
+    fn skip_log_counter_resets_when_a_session_stops_being_warned() {
+        let warned = vec![pane("tm-warned", "claude")];
+        let mut gc = OrphanGc::with_skip_log_every(10);
+        let _ = gc.plan_sweep(
+            &warned,
+            &TrackedNames::default(),
+            &AlwaysIdleProbe,
+            &NoCwdEvidence,
+        );
+        // The session becomes tracked, so it is no longer warned at all.
+        let tracked = tracked_with(&[], &["tm-warned"]);
+        let _ = gc.plan_sweep(&warned, &tracked, &AlwaysIdleProbe, &NoCwdEvidence);
+        // It goes untracked again — a fresh first sighting, logged.
+        let p3 = gc.plan_sweep(
+            &warned,
+            &TrackedNames::default(),
+            &AlwaysIdleProbe,
+            &NoCwdEvidence,
+        );
+        assert_eq!(p3.warn_logged, 1);
+    }
+
+    #[test]
+    fn skip_log_every_from_env_parsing() {
+        assert_eq!(
+            OrphanGc::skip_log_every_from_env(|_| None),
+            DEFAULT_SKIP_LOG_EVERY_SWEEPS
+        );
+        assert_eq!(
+            OrphanGc::skip_log_every_from_env(|_| Some("  7 ".to_string())),
+            7
+        );
+        // Zero and garbage both fall back rather than silencing the line.
+        assert_eq!(
+            OrphanGc::skip_log_every_from_env(|_| Some("0".to_string())),
+            DEFAULT_SKIP_LOG_EVERY_SWEEPS
+        );
+        assert_eq!(
+            OrphanGc::skip_log_every_from_env(|_| Some("nope".to_string())),
+            DEFAULT_SKIP_LOG_EVERY_SWEEPS
+        );
     }
 
     #[test]
@@ -799,7 +1528,12 @@ mod tests {
         // A freshly-appeared untracked-idle candidate is NOT reaped on first sight.
         let panes = vec![pane("tmpm-fresh", "zsh")];
         let mut gc = OrphanGc::new();
-        let plan = gc.plan_sweep(&panes, &TrackedNames::default(), &AlwaysIdleProbe);
+        let plan = gc.plan_sweep(
+            &panes,
+            &TrackedNames::default(),
+            &AlwaysIdleProbe,
+            &NoCwdEvidence,
+        );
         assert!(plan.to_reap.is_empty());
     }
 
@@ -808,8 +1542,18 @@ mod tests {
         // Observed orphaned on two consecutive passes → reaped on the second.
         let panes = vec![pane("tmpm-persist", "zsh")];
         let mut gc = OrphanGc::new();
-        let _ = gc.plan_sweep(&panes, &TrackedNames::default(), &AlwaysIdleProbe);
-        let plan = gc.plan_sweep(&panes, &TrackedNames::default(), &AlwaysIdleProbe);
+        let _ = gc.plan_sweep(
+            &panes,
+            &TrackedNames::default(),
+            &AlwaysIdleProbe,
+            &NoCwdEvidence,
+        );
+        let plan = gc.plan_sweep(
+            &panes,
+            &TrackedNames::default(),
+            &AlwaysIdleProbe,
+            &NoCwdEvidence,
+        );
         assert_eq!(plan.to_reap, vec!["tmpm-persist".to_string()]);
     }
 
@@ -821,12 +1565,17 @@ mod tests {
         let orphan = vec![pane("tmpm-flaky", "zsh")];
         let mut gc = OrphanGc::new();
         // Pass 1: orphan present (1st sighting).
-        let _ = gc.plan_sweep(&orphan, &TrackedNames::default(), &AlwaysIdleProbe);
+        let _ = gc.plan_sweep(
+            &orphan,
+            &TrackedNames::default(),
+            &AlwaysIdleProbe,
+            &NoCwdEvidence,
+        );
         // Pass 2: the pane is STILL present, but it is now tracked (the tracked
         // set changed, not the pane) — so it is no longer a reap candidate and
         // the debounce history is cleared of it. Nothing may be reaped this pass.
         let tracked = tracked_with(&[], &["tmpm-flaky"]);
-        let p2 = gc.plan_sweep(&orphan, &tracked, &AlwaysIdleProbe);
+        let p2 = gc.plan_sweep(&orphan, &tracked, &AlwaysIdleProbe, &NoCwdEvidence);
         assert!(
             p2.to_reap.is_empty(),
             "a now-tracked pane must not be reaped, got {:?}",
@@ -834,7 +1583,12 @@ mod tests {
         );
         // Pass 3: it becomes an orphan candidate again — but this is a *fresh*
         // 1st sighting after the reset, so it still must not be reaped.
-        let p3 = gc.plan_sweep(&orphan, &TrackedNames::default(), &AlwaysIdleProbe);
+        let p3 = gc.plan_sweep(
+            &orphan,
+            &TrackedNames::default(),
+            &AlwaysIdleProbe,
+            &NoCwdEvidence,
+        );
         assert!(
             p3.to_reap.is_empty(),
             "a candidate that lapsed must restart the debounce, got {:?}",
@@ -851,11 +1605,21 @@ mod tests {
         let orphan = vec![pane("tmpm-flaky", "zsh")];
         let mut gc = OrphanGc::new();
         // 1st sighting → candidate remembered, nothing reaped.
-        let _ = gc.plan_sweep(&orphan, &TrackedNames::default(), &AlwaysIdleProbe);
+        let _ = gc.plan_sweep(
+            &orphan,
+            &TrackedNames::default(),
+            &AlwaysIdleProbe,
+            &NoCwdEvidence,
+        );
         // Reset wipes the remembered candidate.
         gc.reset_debounce();
         // Next sighting is therefore a fresh 1st sighting → still not reaped.
-        let after = gc.plan_sweep(&orphan, &TrackedNames::default(), &AlwaysIdleProbe);
+        let after = gc.plan_sweep(
+            &orphan,
+            &TrackedNames::default(),
+            &AlwaysIdleProbe,
+            &NoCwdEvidence,
+        );
         assert!(
             after.to_reap.is_empty(),
             "reset must restart the debounce, got {:?}",
@@ -892,9 +1656,11 @@ mod tests {
                 pane_current_command: "claude".to_string(),
                 pane_pid: Some(45162),
                 pane_id: None,
+                pane_current_path: None,
             },
             &tracked,
             &AlwaysIdleProbe,
+            &NoCwdEvidence,
         );
         assert_eq!(
             decision,
@@ -910,9 +1676,11 @@ mod tests {
                 pane_current_command: "zsh".to_string(),
                 pane_pid: Some(99999),
                 pane_id: None,
+                pane_current_path: None,
             },
             &tracked,
             &AlwaysIdleProbe,
+            &NoCwdEvidence,
         );
         assert_eq!(
             decision,
@@ -927,9 +1695,11 @@ mod tests {
                 pane_current_command: "zsh".to_string(),
                 pane_pid: Some(55555),
                 pane_id: None,
+                pane_current_path: None,
             },
             &tracked,
             &AlwaysIdleProbe,
+            &NoCwdEvidence,
         );
         assert_eq!(
             decision,
@@ -955,21 +1725,30 @@ mod tests {
         use crate::daemon::tmux::TmuxDriver;
 
         let tracked = tracked_with(&[], &["tm-trusty-tools-01"]);
-        let listing = "tm-trusty-tools-01\tclaude\t10302\t%2306\n\
-                       tm-00b14f3b-dd31-4474-9\tzsh\t74149\t%1860\n";
+        let listing = "tm-trusty-tools-01\tclaude\t10302\t%2306\t/Users/masa/trusty-tools\n\
+                       tm-00b14f3b-dd31-4474-9\tzsh\t74149\t%1860\t/tmp/gone\n\
+                       tm-declined-adopt-01\tclaude\t81234\t%1900\t/tmp/gone\n";
         let panes = TmuxDriver::parse_managed_pane_rows(listing);
-        assert_eq!(panes.len(), 2, "both rows must parse: {panes:?}");
+        assert_eq!(panes.len(), 3, "every row must parse: {panes:?}");
 
         assert_eq!(
-            classify_session(&panes[0], &tracked, &AlwaysIdleProbe),
+            classify_session(&panes[0], &tracked, &AlwaysIdleProbe, &NoCwdEvidence),
             GcDecision::Keep(KeepReason::TrackedManaged),
             "a tracked session must be kept even when its pane runs an agent"
         );
         assert_eq!(
-            classify_session(&panes[1], &tracked, &AlwaysIdleProbe),
+            classify_session(&panes[1], &tracked, &AlwaysIdleProbe, &NoCwdEvidence),
             GcDecision::ReapCandidate,
             "an untracked idle managed session parsed from a real row must be \
              reapable — the live failure was that it never could be (#6529)"
+        );
+        // #6118: the third row is the declined-adopt zombie — an agent pane
+        // whose worktree is gone. Its cwd must survive the parse and reach the
+        // classifier as the evidence that selects it.
+        assert_eq!(
+            classify_session(&panes[2], &tracked, &AlwaysIdleProbe, &AllCwdGone),
+            GcDecision::ReapCandidateCwdGone,
+            "a real row's cwd column must carry through to the cwd-gone gate (#6118)"
         );
 
         // The tmux-sanitized shape of the SAME listing: no panes, so nothing is
