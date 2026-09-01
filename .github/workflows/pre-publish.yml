@@ -427,6 +427,16 @@ jobs:
   # the ones it does not run; read its header for why a subset plus a ratchet is
   # the honest shape here and a blanket `--run-ignored all` is not (442 ignored
   # tests, many needing API keys, live daemons, tmux, or macOS hardware).
+  #
+  # #812: the pre-seed below only helped the trusty-common and trusty-memory
+  # tests. trusty-agents' embedder hard-coded `~/.cache/trusty-agents/models`
+  # and no `FASTEMBED_CACHE_DIR` could reach it, so its three tests re-fetched
+  # the model from HuggingFace on every run — from three concurrent nextest
+  # PROCESSES, which is how one 2026-09-01 run died on `http status: 429` and
+  # the next on `Lock acquisition failed: …/blobs/<sha>.lock`. That crate now
+  # resolves the same shared cache dir, and hf-hub's `get()` reads the local
+  # snapshot without touching the network when the file is present, so the
+  # pre-seed below now covers all eleven selected tests.
   # ==========================================================================
   ignored-tests:
     name: "Gate 4 — #[ignore]d ONNX/embedder tests"
@@ -436,6 +446,16 @@ jobs:
     env:
       FASTEMBED_CACHE_DIR: /home/runner/.cache/fastembed
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      # #812: every selected test here loads an ONNX model, and nextest gives
+      # each of them its own PROCESS. Running them concurrently is what put
+      # eleven processes on one HuggingFace blob lock and one rate limiter.
+      # Serialising costs well under a minute on a 60-minute job — the model
+      # load is seconds and the cache is already on disk — and it removes the
+      # race rather than narrowing its window. `--test-threads` is not reachable
+      # through `check_ignored_tests.sh`'s interface, so it is set here, where
+      # the reason for it also lives. Every other job's parallelism is
+      # untouched.
+      NEXTEST_TEST_THREADS: "1"
     steps:
       - uses: actions/checkout@v5
         with:
