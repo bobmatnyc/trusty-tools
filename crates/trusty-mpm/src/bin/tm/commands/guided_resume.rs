@@ -269,10 +269,11 @@ pub(crate) fn plan_resume(state: &str, tmux_live: bool, runtime_live: bool) -> R
 /// silently mis-answer "is the runtime alive?" — and a wrong answer here now
 /// drives a `kill_session`. Splitting it out keeps that risk on a pure,
 /// unit-tested seam. Deliberately does NOT go through the `list-panes -a`
-/// whole-server sweep in [`trusty_mpm::daemon::tmux`]: that path's composite-key
-/// parsing is a known live failure mode (the #1813 shape, where `session_name`
-/// ends up holding an entire joined row and `pane_current_command` comes back
-/// empty), and a session-scoped listing needs none of it. The TAB delimiter is
+/// whole-server sweep in [`trusty_mpm::daemon::tmux`]: a session-scoped listing
+/// needs none of that path's whole-server reconciliation. Both paths now reject
+/// a row that arrives without its columns rather than folding it into
+/// `session_name` — the live failure #6529 diagnosed, whose cause was tmux
+/// rewriting the delimiters for a client with no UTF-8 locale. The TAB delimiter is
 /// chosen for the same reason — it cannot appear in a tmux session name or a
 /// command word, so the columns cannot smear into each other the way the
 /// space-joined `-a` format did.
@@ -377,17 +378,19 @@ pub(crate) fn session_runtime_live(session_name: &str) -> bool {
         return true;
     }
     let tmux_bin = trusty_mpm::core::tmux::resolve_tmux_binary_or_bare();
-    let Ok(output) = std::process::Command::new(&tmux_bin)
-        .args([
-            "list-panes",
-            "-s",
-            "-t",
-            name,
-            "-F",
-            "#{session_name}\t#{pane_current_command}\t#{pane_pid}",
-        ])
-        .output()
-    else {
+    let mut cmd = std::process::Command::new(&tmux_bin);
+    cmd.args([
+        "list-panes",
+        "-s",
+        "-t",
+        name,
+        "-F",
+        "#{session_name}\t#{pane_current_command}\t#{pane_pid}",
+    ]);
+    // #6529: a tmux client with no UTF-8 locale rewrites these tabs to `_`,
+    // which `parse_pane_probes` then refuses — reporting every session live.
+    trusty_mpm::core::tmux::force_utf8_client_env(&mut cmd);
+    let Ok(output) = cmd.output() else {
         return true;
     };
     if !output.status.success() {

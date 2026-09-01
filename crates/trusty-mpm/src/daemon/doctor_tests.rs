@@ -443,7 +443,10 @@ async fn run_doctor_produces_thirty_two_checks() {
     // twenty-seven); issue #4033 adds `binary_provenance` (twenty-seven →
     // twenty-eight); issue #5045 adds `search_index_pin` (twenty-nine →
     // thirty); the stray-`.mcp.json` probe adds `stray_mcp_json` (thirty →
-    // thirty-one); issue #3605 adds `base_clone` (thirty-one → thirty-two).
+    // thirty-one); issue #3605 adds `base_clone` (thirty-one → thirty-two);
+    // issue #5007 adds `session_store` and issue #6469 adds `tmux_options`
+    // (thirty-two → thirty-four); issue #6529 adds `pty_headroom` and issue
+    // #6535 adds `log_drain` (thirty-four → thirty-six).
     // #1905's stale-skill cleanup is deliberately NOT a `run_doctor` probe
     // — see the `run_doctor` doc.
     let report = run_doctor(None, None, &[], None).await;
@@ -486,6 +489,9 @@ async fn run_doctor_produces_thirty_two_checks() {
         "stray_mcp_json",
         // #6469: the tmux server globals a resurrect restore leaves unset.
         "tmux_options",
+        // #6529: pseudo-terminal headroom — a session leak exhausts it and the
+        // next spawn fails with a bare ENXIO.
+        "pty_headroom",
         // #6535: whether the cloud log drain is on, where it points, and
         // whether its last pass landed.
         "log_drain",

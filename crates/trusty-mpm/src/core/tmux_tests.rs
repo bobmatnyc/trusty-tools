@@ -593,3 +593,56 @@ fn apply_and_verify_probes_the_same_scope_it_sets() {
         "the readback must query the scope the set wrote: {calls}"
     );
 }
+
+// ── #6529: the tmux client's UTF-8 declaration decides whether tmux keeps
+// the delimiters in a `-F` listing ────────────────────────────────────────
+
+/// tmux reads ONE locale variable, by precedence — mirror that, not any-of.
+///
+/// Why: `LC_ALL=C` beside `LANG=en_US.UTF-8` is the case an any-of test gets
+/// backwards. tmux takes the first non-empty of `LC_ALL`, `LC_CTYPE`, `LANG`
+/// and tests only that one, so that environment is NOT UTF-8 to tmux and its
+/// server sanitizes the tabs out of the reply.
+/// What: pins each precedence step and the empty-value skip.
+/// Test: this is the test.
+#[test]
+fn env_declares_utf8_follows_tmux_precedence() {
+    assert!(declares_utf8(Some("en_US.UTF-8"), None, None));
+    assert!(declares_utf8(Some("C.utf8"), None, None));
+    assert!(!declares_utf8(Some("C"), None, None));
+    assert!(!declares_utf8(Some("POSIX"), None, Some("en_US.UTF-8")));
+    // An empty value is skipped, exactly as tmux's `*s == '\0'` test does.
+    assert!(declares_utf8(Some(""), None, Some("en_US.UTF-8")));
+    assert!(declares_utf8(None, Some("en_US.UTF-8"), Some("C")));
+    // Nothing set at all — the environment launchd hands the daemon (#6529).
+    assert!(!declares_utf8(None, None, None));
+}
+
+/// The helper injects `LC_ALL` only when the inherited environment needs it.
+///
+/// Why: overriding an operator's own UTF-8 locale is a behaviour change this
+/// fix does not need. The injection exists for an environment that declares
+/// nothing, which is what launchd hands the daemon.
+/// What: builds a `Command` under this process's real environment and asserts
+/// the helper's decision agrees with [`declares_utf8`] for that environment,
+/// mutating no process-global state.
+/// Test: this is the test.
+#[test]
+fn force_utf8_client_env_is_a_no_op_under_a_utf8_locale() {
+    let read = |key: &str| std::env::var(key).ok();
+    let already = declares_utf8(
+        read("LC_ALL").as_deref(),
+        read("LC_CTYPE").as_deref(),
+        read("LANG").as_deref(),
+    );
+    let mut cmd = std::process::Command::new("true");
+    force_utf8_client_env(&mut cmd);
+    let injected = cmd
+        .get_envs()
+        .any(|(k, v)| k == "LC_ALL" && v == Some(std::ffi::OsStr::new(UTF8_LOCALE)));
+    assert_eq!(
+        injected, !already,
+        "LC_ALL must be injected exactly when the environment does not already \
+         declare UTF-8 (#6529)"
+    );
+}

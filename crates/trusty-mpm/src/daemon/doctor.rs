@@ -155,6 +155,9 @@ use doctor_push_guard::check_push_guard;
 #[path = "doctor_worktree_disk.rs"]
 mod doctor_worktree_disk;
 use doctor_worktree_disk::check_worktree_disk;
+#[path = "doctor_pty_headroom.rs"]
+mod doctor_pty_headroom;
+use doctor_pty_headroom::check_pty_headroom;
 
 // #6535: the cloud log drain runs inside the daemon and writes to somebody
 // else's bucket, so nothing else on screen says whether it is on, where it
@@ -461,6 +464,10 @@ pub async fn run_doctor(
     // nothing about panes already created — `history-limit` is captured at pane
     // creation and cannot be grown in place.
     checks.push(check_tmux_options());
+    // #6529: every tmux pane holds a pseudo-terminal and macOS caps the total,
+    // so a session leak becomes a bare ENXIO on the next spawn with nothing
+    // naming the cause. Read-only — it counts device nodes and reaps nothing.
+    checks.push(check_pty_headroom());
     // #6535: whether the cloud log drain is on, where it points, and whether
     // its last pass actually landed. Read-only — it never drains.
     checks.push(check_log_drain(&FrameworkPaths::default().root, &home));
