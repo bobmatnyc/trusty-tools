@@ -6,6 +6,44 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.46.6] — 2026-09-01
+
+### Added
+
+- `host_metrics` module (behind the new `host-metrics` feature): whole-machine
+  CPU, memory (with a provisional pressure signal), disk (per-mount + aggregate),
+  and network-throughput sampling via `HostSampler`, plus the
+  `console_metrics::machine_status::MachineStatus` aggregation that rolls up the
+  per-service `ConsoleMetricsReport`s. Data foundation for the Foundry
+  machine-status dashboard (#6517). The `host-metrics` feature enables `sysinfo`'s
+  `disk`/`network` features only for opt-in consumers.
+- `log_drain` module (behind the new `log-drain` feature): uploads trusty-* log
+  files to object storage. Ships the `LogDestination` trait with `s3://` and
+  `file://` adapters over `object_store`, a closed-scheme `DestinationUri` parser
+  (`gs://`/`az://` are reserved and refused), the
+  `<prefix>/<github_id>/<session_id>/logs/<crate>/<file>` key layout, a
+  size+mtime+SHA-256 manifest that makes a re-run skip unchanged files, and a
+  collector that level-filters `tracing` output, scrubs secrets via
+  `credentials::scrub_secrets`, and gzips each body before `run_once` uploads it
+  (#6533). S3 credentials come from the AWS default provider chain already used
+  by the Bedrock adapters; no bucket or region is hardcoded. This is the drain
+  core only — no scheduler, no consumers, and no GitHub-identity resolution: the
+  caller supplies a `DrainTarget`, and an empty `github_id` or `session_id` is
+  refused rather than defaulted. The `log-drain` feature implies `credentials`
+  so the scrub cannot be compiled out from under the collector.
+
+### Fixed
+
+- The launchd-label drift scan no longer reads a plist's `CFBundleIdentifier` as
+  a stray launchd label. launchd takes a job label from `<key>Label</key>` and
+  from no other key, so `TrustyConsole.saver`'s bundle identifier turned
+  `cargo test -p trusty-common` red on `main` and blocked every release, while
+  the failure's own advice — derive it from the registry — would have
+  invalidated the bundle's designated requirement (#6540, #5438, #2558). The
+  codesign-identifier naming check also widened from `scripts/install-*-signed.sh`
+  to every `scripts/*.sh` that runs `codesign`, which is what let the console-saver
+  build script mint an unnamed identifier in the first place.
+
 ## [0.46.5] — 2026-09-01
 
 ### Fixed

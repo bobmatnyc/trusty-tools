@@ -6,6 +6,66 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.9.2] — 2026-09-01
+
+### Added
+
+- `GET /api/console/machine-status`: aggregated whole-machine status combining
+  host resources (CPU, memory, disk, network) with a per-service health rollup.
+  A background sampler (`host_status`) keeps the host snapshot warm; the route
+  assembles `MachineStatus` from it plus the cached per-service reports. Data
+  endpoint for the phase-2 Foundry dashboard (#6517).
+- The Overview tab leads with a whole-machine status dashboard built to the
+  Foundry design system: a four-card row for host CPU, memory, disk and network,
+  each stamped with the pressure band the server classified, and a rollup card
+  counting every reporting service with a per-service table of version, health
+  and collection time. It polls `GET /api/console/machine-status` every 15s and
+  says "first sample pending" while the host cache is still cold, rather than
+  reporting HTTP 503. The existing per-service card grid stays below it — that
+  grid is the only place a never-installed or absent service is visible (#6518).
+- A fullscreen screensaver route at `/ui/screensaver` (also reachable at
+  `/screensaver`), rendering the machine-status data across the whole viewport
+  with no tabs, no theme selector and no scrollbars. It forces the dark palette,
+  shows a live clock beside the brand lockup, and rotates every 20 seconds
+  between the four host stat cards with service counts and the full per-service
+  table. It renders with no user interaction, which is what the coming macOS
+  `.saver` bundle needs (#6519, #6520).
+- The screensaver survives an unreachable daemon: a failed poll keeps the last
+  good snapshot on screen behind an "updated Xm ago" line instead of an error
+  box, and the 15s poll doubles after three consecutive failures up to a 60s
+  ceiling, resetting on the first success (#6519).
+- Optional idle entry, **off by default**: set the `localStorage` key
+  `trusty-console-screensaver-idle-minutes` to a positive number of minutes and
+  the console navigates to the screensaver after that long without a mouse or
+  key event; any input there returns to `/ui`. There is no settings UI for this
+  key yet — set it from the browser console. On the screensaver's own URL the
+  first click or keypress requests fullscreen (a no-op where the browser refuses
+  it) and the next one leaves (#6519).
+- A native macOS screen saver, `TrustyConsole.saver`, that displays the console
+  dashboard: one `ScreenSaverView` hosting a `WKWebView` on
+  `http://127.0.0.1:7788/ui/screensaver`. When the console is unreachable it
+  paints a native Foundry-dark fallback and retries every 15s; the System
+  Settings thumbnail renders the wordmark rather than spinning up a web view; and
+  it reloads hourly for long-run memory hygiene. Port and route are overridable
+  via `defaults -currentHost write com.trusty.console.saver ConsolePort <port>`.
+  Source in `crates/trusty-console/macos/saver/`, built and installed by
+  `scripts/build-console-saver.sh` and `scripts/install-console-saver.sh` —
+  ad-hoc signed by default, Developer ID with `CODESIGN_IDENTITY` set. macOS-only
+  (#6520).
+- The header lockup names the running console version — `UNIT-05 · SERVICE CONSOLE · v0.9.2`. The version is read from the server's existing `GET /health` on mount rather than compiled into the SPA bundle, which is committed and would otherwise go stale; until that probe answers, the descriptor renders unchanged.
+- The search dashboard's index rows expand to a per-collection indexing
+  pipeline: a badge per lane (lexical, semantic, graph) with its counters, an
+  embedding pause/resume toggle, and a live feed of the last 200 file changes the
+  watcher saw. Pausing stops embedding only — lexical search, the knowledge graph
+  and the watcher keep running — and the pause is in-memory, so it clears when
+  the daemon restarts; the panel says so. An expanded row polls its status every
+  15s and holds one SSE feed; collapsing it stops both (#6524).
+- Three `/api/search/…` rows onto the daemon's socket methods:
+  `POST /indexes/{id}/embedding/pause` and `.../resume` onto
+  `search.index.pause_embedding` / `search.index.resume_embedding`, and
+  `GET /indexes/{id}/file-events/stream` onto the `search.index.file_events`
+  stream (#6524).
+
 ## [0.9.1] — 2026-08-31
 
 ### Changed

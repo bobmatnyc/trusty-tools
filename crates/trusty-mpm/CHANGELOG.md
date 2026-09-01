@@ -6,6 +6,69 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.5.15] — 2026-09-01
+
+### Added
+
+- `tm session adopt-worktree <path> --as <session>` transfers a worktree whose
+  owning session or agent is provably dead to a live session, by rewriting the
+  ownership sentinel. The daemon refuses unless the current owner is positively
+  known to have ended and no live delegation is still working in the tree; an
+  owner the delegation registry has merely never heard of is undeterminable and
+  refuses too (ADR-0045). The verb is EXPLICIT rather than automatic — a design
+  choice this change makes, since a tree that changes hands on its own is
+  indistinguishable from one taken from a working agent (#6497).
+- The daemon can now periodically upload its own log files to an object store.
+  A new `log_drain:` section in `~/.trusty-tools/trusty-mpm/config.yaml` names
+  the destination URI (`s3://bucket/prefix` or `file:///path`), the interval,
+  the per-source include globs, the per-file size ceiling, and any extra
+  literal secrets to scrub before upload. The drain is OFF by default and the
+  daemon spawns no scheduler without it; a malformed section is a hard error
+  that refuses to start the drain rather than a silent skip. `config_read` now
+  returns the section (#6535, Phase 3 of #6533).
+- `tm doctor` gained a `log_drain` row reporting whether the drain is on, which
+  destination scheme it points at, and how the last pass ended. A pass that
+  errored — including one that completed with per-file failures — reports
+  `Fail`, never a drained-looking `Ok` (#6535).
+
+### Fixed
+
+- The session reaper now marks a dead session's live delegations `Stale` in the
+  same pass that buries the session. Their `SubagentStop` never arrives, so the
+  records read as live for six hours and reported the dead session's agents as
+  writing in the shared checkout — which refused a successor's serialized
+  dispatch with no verb to clear it. Staling records that the owner is gone, not
+  that the agent finished, so a late stop still resolves the record; a session
+  the reaper leaves alone keeps every delegation live (#6497).
+- `GET /api/v1/errors` and `mpm.errors.list` now read their four daemon error
+  stores from a base the daemon pins at construction, instead of re-resolving
+  the OS data directory on every call. Production resolution is unchanged; a
+  daemon built against an explicit framework root reads its stores under that
+  root, so two calls can no longer disagree because a process-global
+  `TRUSTY_DATA_DIR_OVERRIDE` moved between them (#6505).
+- `tm session prune-worktrees --merged-prs` now reclaims worktrees whose pull
+  request was SQUASH-merged. A squash replays a branch as one new commit on
+  `main`, and `gh pr merge --squash --delete-branch` then removes the remote
+  branch, so every landed commit read as unpushed and the dirty-work gate
+  refused the tree — the flag reclaimed nothing on a repository that
+  squash-merges. The gate now discounts a commit only when `git cherry` proves
+  its patch is already on a remote landing branch; a commit that landed nowhere
+  is still refused, and an unanswerable comparison leaves the count untouched
+  (#6507).
+- The `full_user_cycle` lifecycle test no longer writes a real
+  `~/.trusty-mpm/sessions/<uuid>/pause.json` into the operator's home on every
+  run. It redirects `$HOME` to a scratch directory, and takes
+  `host_state_gate`'s `TRUSTY_MPM_ALLOW_HOST_STATE` opt-in so the scratch
+  `$HOME` does not silently void its real-tmux assertion (#6523).
+- A failed `ScratchTmuxSession::spawn` now quotes tmux's own stderr in the
+  panic. The exit status alone did not distinguish a duplicate session name
+  from a host that has run out of pseudo-terminals, so both read
+  `exit status: 1` (#6523).
+- `drop_kills_the_session_even_when_the_body_panics` no longer passes
+  vacuously when the fixture cannot create a tmux session: the spawn moved out
+  of the `catch_unwind` that was swallowing its failure (#6523).
+- **orphan-GC reads pane rows correctly again; `tm doctor` reports pty headroom** ([#6529](https://github.com/bobmatnyc/trusty-tools/issues/6529)): tmux sets its `CLIENT_UTF8` flag purely from `LC_ALL`/`LC_CTYPE`/`LANG`, and without it the server pushes every printed line through `utf8_sanitize()`, which replaces each byte below `0x20` with `_`. A launchd-started daemon inherits no locale variables, so the TABs separating the columns of `tmux list-panes -a -F` were rewritten and every pane row arrived as one field: `PaneInfo.session_name` held the whole joined row, `pane_current_command` came back empty, and `classify_session`'s idleness gate could never fire — 456 orphaned `tm-*` sessions survived every 60-second sweep for five days and exhausted the host's pseudo-terminal pool. Pane listings now spawn tmux through `core::tmux::force_utf8_client_env`, which injects `LC_ALL=en_US.UTF-8` only when the inherited environment does not already declare UTF-8 by tmux's own precedence. `parse_managed_pane_row` now requires exactly the four columns it asked for and DROPS anything else with one warning per listing, rather than folding a whole row into a session name. A new `pty_headroom` doctor check reports allocated pseudo-terminals against `kern.tty.ptmx_max`, warning at 80% and failing at 95%.
+
 ## [1.5.14] — 2026-08-31
 
 ### Fixed
