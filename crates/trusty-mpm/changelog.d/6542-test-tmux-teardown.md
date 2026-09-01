@@ -7,5 +7,3 @@ Fixed
   days and exhausted its pseudo-terminal pool. The test-support fixture now
   claims such a session by its pane's working directory and kills it on drop,
   panicking assertions included (#6542, refs #6523).
-</content>
-</invoke>
