@@ -222,55 +222,104 @@ pub fn evaluate(
 /// Persisted per-session flap counters, stored beside the session store.
 ///
 /// Why: the reaper (in the daemon) and the poller (in `tm supervisor`) run in
-/// SEPARATE processes, so an in-memory counter would never see the other half of
-/// the cycle. A small JSON file beside `sessions.json` is the cheapest thing
-/// both can read.
-/// What: a `HashMap<session id, FlapState>` loaded on construction and rewritten
-/// after each mutation. Every I/O failure is logged and swallowed: losing this
-/// file costs a session one extra resume cycle, while failing a runtime-exit
-/// reconcile because a counter could not be written would be strictly worse.
+/// SEPARATE PROCESSES, so an in-memory counter never sees the other half of the
+/// cycle — the daemon's `last_auto_resume_at` stays `None`, every death
+/// evaluates as `Reset`, and the breaker cannot trip. The file is therefore
+/// authoritative, exactly as `sessions.json` is: every read reloads it and every
+/// write goes out atomically, through the shared [`super::json_file`]
+/// primitives `SessionStore` uses for the sibling file in the same directory.
+/// What: a `HashMap<session id, FlapState>` plus the fingerprint of the bytes
+/// last observed. [`Self::reload_if_changed`] re-reads when that fingerprint
+/// moved; [`Self::persist`] stages through a per-instance temp file and renames.
+///
+/// Not a lock: two processes read-modify-writing concurrently can still lose an
+/// update. That is tolerable here and only here — a lost counter delays a park
+/// by one cycle, and the PARK itself lives on the session record, so no lost
+/// write can un-park anything or cause a park that was not earned.
+///
+/// Every I/O failure is logged and swallowed for the same reason: failing a
+/// runtime-exit reconcile because a counter could not be written would be
+/// strictly worse than losing the counter.
 /// Test: `store_round_trips_state`, `store_survives_a_missing_file`,
-/// `store_survives_a_corrupt_file`.
+/// `store_survives_a_corrupt_file`,
+/// `two_managers_over_one_data_dir_still_park_a_flapping_session`.
 #[derive(Debug)]
 pub struct ResumeBreakerStore {
     path: PathBuf,
+    tmp_path: PathBuf,
     states: HashMap<String, FlapState>,
+    last_sig: Option<super::json_file::FileSig>,
 }
 
 impl ResumeBreakerStore {
     /// File name of the sidecar inside the session-manager data directory.
     pub const FILE_NAME: &'static str = "resume-breaker.json";
 
-    /// Load (or start empty) the sidecar under `data_dir`.
+    /// Open the sidecar under `data_dir`, loading whatever is there.
     ///
     /// What: reads `<data_dir>/resume-breaker.json`. A missing file, an
     /// unreadable one, and an unparsable one all yield an EMPTY map — never an
     /// error — because a lost counter can only delay a park, never cause one.
     /// Test: `store_survives_a_missing_file`, `store_survives_a_corrupt_file`.
-    pub fn load(data_dir: &Path) -> Self {
+    pub async fn load(data_dir: &Path) -> Self {
         let path = data_dir.join(Self::FILE_NAME);
-        let states = match std::fs::read_to_string(&path) {
-            Ok(body) => serde_json::from_str(&body).unwrap_or_else(|e| {
-                warn!(
-                    path = %path.display(),
-                    "resume-breaker: sidecar unparsable ({e}); starting from an empty counter set"
-                );
-                HashMap::new()
-            }),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
-            Err(e) => {
-                warn!(
-                    path = %path.display(),
-                    "resume-breaker: sidecar unreadable ({e}); starting from an empty counter set"
-                );
-                HashMap::new()
-            }
+        let tmp_path = super::json_file::staging_path(&path);
+        let mut store = Self {
+            path,
+            tmp_path,
+            states: HashMap::new(),
+            last_sig: None,
         };
-        Self { path, states }
+        store.reload_if_changed().await;
+        store
     }
 
-    /// This session's current bookkeeping (default when never seen).
-    pub fn state_of(&self, id: &ManagedSessionId) -> FlapState {
+    /// Re-read the sidecar when the file on disk moved since we last saw it.
+    ///
+    /// Why (#6568): this is the whole cross-process fix. `note_auto_resume` runs
+    /// in `tm supervisor` and `record_death` runs in the daemon; without this
+    /// the daemon never observes the supervisor's stamp, so every death
+    /// evaluates as `Reset` and the breaker is inert in production while passing
+    /// every single-process test.
+    /// What: compares the file's current fingerprint against the last observed
+    /// one via [`super::json_file::is_unchanged`] — one stat and no parse when
+    /// nothing moved. On a changed or first-seen file, re-reads and replaces the
+    /// map. A read or parse failure keeps the current map and logs; it never
+    /// errors.
+    /// Test: `an_external_write_is_picked_up_by_the_next_read`,
+    /// `two_managers_over_one_data_dir_still_park_a_flapping_session`.
+    async fn reload_if_changed(&mut self) {
+        let current = super::json_file::sig_of(&self.path).await;
+        if super::json_file::is_unchanged(current, self.last_sig) {
+            return;
+        }
+        match tokio::fs::read_to_string(&self.path).await {
+            Ok(body) => match serde_json::from_str(&body) {
+                Ok(states) => {
+                    self.states = states;
+                    self.last_sig = current;
+                }
+                Err(e) => warn!(
+                    path = %self.path.display(),
+                    "resume-breaker: sidecar unparsable ({e}); keeping the counters already in memory"
+                ),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Absent is a legitimate state, not a failure: nothing has
+                // flapped yet, or the file was cleaned up between passes.
+                self.states.clear();
+                self.last_sig = None;
+            }
+            Err(e) => warn!(
+                path = %self.path.display(),
+                "resume-breaker: sidecar unreadable ({e}); keeping the counters already in memory"
+            ),
+        }
+    }
+
+    /// This session's current bookkeeping, reconciled with disk first.
+    pub async fn state_of(&mut self, id: &ManagedSessionId) -> FlapState {
+        self.reload_if_changed().await;
         self.states
             .get(&id.to_string())
             .cloned()
@@ -279,45 +328,54 @@ impl ResumeBreakerStore {
 
     /// Record that an AUTOMATIC path just resumed this session.
     ///
-    /// Why: the stamp is what makes the next death attributable. It is written
-    /// by the auto-resume path only — an operator's manual resume goes through
-    /// [`Self::note_operator_resume`], which also forgives the streak.
-    /// What: stamps `last_auto_resume_at = now`, keeping `consecutive`.
-    /// Test: `a_fast_death_after_an_auto_resume_counts`.
-    pub fn note_auto_resume(&mut self, id: &ManagedSessionId, now: DateTime<Utc>) {
+    /// Why: the stamp is what makes the next death attributable, and it is
+    /// written in a DIFFERENT process from the one that reads it — so it
+    /// reloads before mutating, or it would write back a map missing every row
+    /// the daemon added since this process last looked.
+    /// What: reloads, stamps `last_auto_resume_at = now` (keeping
+    /// `consecutive`), persists.
+    /// Test: `a_fast_death_after_an_auto_resume_counts`,
+    /// `two_managers_over_one_data_dir_still_park_a_flapping_session`.
+    pub async fn note_auto_resume(&mut self, id: &ManagedSessionId, now: DateTime<Utc>) {
+        self.reload_if_changed().await;
         let entry = self.states.entry(id.to_string()).or_default();
         entry.last_auto_resume_at = Some(now);
-        self.persist();
+        self.persist().await;
     }
 
     /// Record that an OPERATOR resumed this session, clearing its streak.
     ///
     /// Why: a manual resume is the operator saying the cause is addressed. If it
-    /// did not clear the streak, a parked session unparked by hand would re-park
-    /// on its very next fast death instead of getting a fresh budget.
-    /// What: drops the entry entirely — an absent entry IS the zero state, so
-    /// this also keeps the sidecar from accumulating rows for healthy sessions.
-    /// Test: `an_operator_resume_forgives_the_streak`.
-    pub fn note_operator_resume(&mut self, id: &ManagedSessionId) {
+    /// did not clear the streak, a session unparked by hand would re-park on its
+    /// very next fast death instead of getting a fresh budget.
+    /// What: reloads, drops the entry — an absent entry IS the zero state, so
+    /// this also keeps the sidecar from accumulating rows for healthy sessions —
+    /// and persists.
+    /// Test: `an_operator_resume_forgives_the_streak`,
+    /// `an_in_place_reactivate_forgives_the_streak`.
+    pub async fn note_operator_resume(&mut self, id: &ManagedSessionId) {
+        self.reload_if_changed().await;
         if self.states.remove(&id.to_string()).is_some() {
-            self.persist();
+            self.persist().await;
         }
     }
 
     /// Apply one runtime-exit stop and return what it means.
     ///
-    /// What: evaluates through [`evaluate`], then stores the resulting streak —
-    /// `Reset` clears the entry (including the stamp, so the NEXT death is not
-    /// attributed to a resume that is now old news), `Counting`/`Park` keep the
-    /// stamp and store the new count.
-    /// Test: `record_death_*` in `resume_breaker_tests.rs`.
-    pub fn record_death(
+    /// What: reloads (so the other process's stamp is visible), evaluates
+    /// through [`evaluate`], then stores the resulting streak — `Reset` clears
+    /// the entry, including the stamp, so the NEXT death is not attributed to a
+    /// resume that is now old news; `Counting`/`Park` keep the stamp and store
+    /// the new count.
+    /// Test: `record_death_*`,
+    /// `two_managers_over_one_data_dir_still_park_a_flapping_session`.
+    pub async fn record_death(
         &mut self,
         id: &ManagedSessionId,
         cfg: &ResumeBreakerConfig,
         now: DateTime<Utc>,
     ) -> BreakerVerdict {
-        let state = self.state_of(id);
+        let state = self.state_of(id).await;
         let verdict = evaluate(cfg, &state, now);
         match verdict {
             BreakerVerdict::Reset => {
@@ -333,15 +391,21 @@ impl ResumeBreakerStore {
                 );
             }
         }
-        self.persist();
+        self.persist().await;
         verdict
     }
 
-    /// Write the map back, best-effort.
+    /// Write the map back atomically, best-effort.
     ///
-    /// Fail-open by design: a sidecar that cannot be written must never abort a
-    /// reconcile. The warning names the path so an operator can see it.
-    fn persist(&self) {
+    /// Why: a plain truncate-and-rewrite lets the other process read a torn
+    /// file — the hazard `SessionStore::save` documents for the sibling file in
+    /// this same directory. Routing through [`super::json_file::write_atomic`]
+    /// means there is one implementation of that rule, not two.
+    /// What: serialises, stages through this instance's private temp path,
+    /// renames, then records the resulting fingerprint so the next
+    /// [`Self::reload_if_changed`] treats our own write as unchanged. Failures
+    /// log and return — see the type's doc for why this never errors.
+    async fn persist(&mut self) {
         let body = match serde_json::to_string_pretty(&self.states) {
             Ok(b) => b,
             Err(e) => {
@@ -349,12 +413,14 @@ impl ResumeBreakerStore {
                 return;
             }
         };
-        if let Err(e) = std::fs::write(&self.path, body) {
+        if let Err(e) = super::json_file::write_atomic(&self.path, &self.tmp_path, &body).await {
             warn!(
                 path = %self.path.display(),
                 "resume-breaker: could not persist counters ({e}); they will restart empty"
             );
+            return;
         }
+        self.last_sig = super::json_file::sig_of(&self.path).await;
     }
 }
 
@@ -386,7 +452,8 @@ impl super::SessionManager {
         self.resume_breaker
             .write()
             .await
-            .note_auto_resume(id, Utc::now());
+            .note_auto_resume(id, Utc::now())
+            .await;
         Ok(record)
     }
 
@@ -396,7 +463,11 @@ impl super::SessionManager {
     /// see that method's doc for the resume contract itself.
     /// Test: `an_operator_resume_forgives_the_streak`.
     pub(crate) async fn note_operator_resume(&self, id: &ManagedSessionId) {
-        self.resume_breaker.write().await.note_operator_resume(id);
+        self.resume_breaker
+            .write()
+            .await
+            .note_operator_resume(id)
+            .await;
     }
 
     /// Decide the `stop_cause` one runtime-exit stop earns.
@@ -418,11 +489,12 @@ impl super::SessionManager {
         tmux_name: &str,
     ) -> super::record::StopCause {
         use super::record::StopCause;
-        let verdict = self.resume_breaker.write().await.record_death(
-            id,
-            &self.resume_breaker_cfg,
-            Utc::now(),
-        );
+        let verdict = self
+            .resume_breaker
+            .write()
+            .await
+            .record_death(id, &self.resume_breaker_cfg, Utc::now())
+            .await;
         match verdict {
             BreakerVerdict::Park { consecutive } => {
                 warn!(

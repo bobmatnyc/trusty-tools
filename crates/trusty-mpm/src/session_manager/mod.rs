@@ -18,6 +18,10 @@ pub mod hook_sync;
 // #4743: the single capability every destructive index DELETE must hold.
 mod index_delete_guard;
 pub mod injection_status;
+/// The cross-process JSON-file mechanism `sessions.json` and its siblings share.
+pub(crate) mod json_file;
+#[cfg(test)]
+mod json_file_tests;
 pub mod manager;
 pub mod naming;
 mod numbering;

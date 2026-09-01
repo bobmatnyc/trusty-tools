@@ -143,81 +143,129 @@ fn verdict_reports_its_streak_length() {
 // Sidecar store — including the failure paths (Fail-Open Check)
 // -------------------------------------------------------------------------
 
-#[test]
-fn store_round_trips_state() {
+#[tokio::test]
+async fn store_round_trips_state() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let id = ManagedSessionId::new();
     let now = Utc::now();
     {
-        let mut store = ResumeBreakerStore::load(tmp.path());
-        store.note_auto_resume(&id, now);
+        let mut store = ResumeBreakerStore::load(tmp.path()).await;
+        store.note_auto_resume(&id, now).await;
         assert_eq!(
-            store.record_death(&id, &cfg(120, 3), now),
+            store.record_death(&id, &cfg(120, 3), now).await,
             BreakerVerdict::Counting { consecutive: 1 }
         );
     }
-    // A fresh load in a DIFFERENT process would see the same counter — this is
-    // why the sidecar exists at all (the reaper and the poller are separate
+    // A fresh load in a DIFFERENT process sees the same counter — this is why
+    // the sidecar exists at all (the reaper and the poller are separate
     // processes).
-    let reloaded = ResumeBreakerStore::load(tmp.path());
-    assert_eq!(reloaded.state_of(&id).consecutive, 1);
+    let mut reloaded = ResumeBreakerStore::load(tmp.path()).await;
+    assert_eq!(reloaded.state_of(&id).await.consecutive, 1);
 }
 
-#[test]
-fn store_survives_a_missing_file() {
+/// The cross-process contract at the store level: a write by ANOTHER instance
+/// over the same file is visible to the next read, without reconstruction.
+///
+/// Why: a store that loaded once and never re-read is exactly the defect the
+/// critic round found — the daemon's copy would never see the supervisor's
+/// stamp, so every death evaluated as `Reset` and the breaker could not trip.
+/// Test: this is the test. RED before the fix: `store_b` kept its load-time map.
+#[tokio::test]
+async fn an_external_write_is_picked_up_by_the_next_read() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
-    let store = ResumeBreakerStore::load(tmp.path());
+    let id = ManagedSessionId::new();
+    let now = Utc::now();
+
+    let mut store_a = ResumeBreakerStore::load(tmp.path()).await;
+    let mut store_b = ResumeBreakerStore::load(tmp.path()).await;
+    assert_eq!(store_b.state_of(&id).await, FlapState::default());
+
+    store_a.note_auto_resume(&id, now).await;
+
     assert_eq!(
-        store.state_of(&ManagedSessionId::new()),
+        store_b.state_of(&id).await.last_auto_resume_at,
+        Some(now),
+        "a read must reconcile with disk before answering (#6568)"
+    );
+}
+
+/// The other half: one instance's write must not erase rows another added.
+#[tokio::test]
+async fn a_write_does_not_erase_another_instances_rows() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let (a, b) = (ManagedSessionId::new(), ManagedSessionId::new());
+    let now = Utc::now();
+
+    let mut store_a = ResumeBreakerStore::load(tmp.path()).await;
+    let mut store_b = ResumeBreakerStore::load(tmp.path()).await;
+
+    store_a.note_auto_resume(&a, now).await;
+    store_b.note_auto_resume(&b, now).await;
+
+    let mut reader = ResumeBreakerStore::load(tmp.path()).await;
+    assert_eq!(reader.state_of(&a).await.last_auto_resume_at, Some(now));
+    assert_eq!(reader.state_of(&b).await.last_auto_resume_at, Some(now));
+}
+
+#[tokio::test]
+async fn store_survives_a_missing_file() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let mut store = ResumeBreakerStore::load(tmp.path()).await;
+    assert_eq!(
+        store.state_of(&ManagedSessionId::new()).await,
         FlapState::default()
     );
 }
 
-#[test]
-fn store_survives_a_corrupt_file() {
+#[tokio::test]
+async fn store_survives_a_corrupt_file() {
     // Fail-open: a corrupt sidecar starts empty rather than erroring. Losing
     // the counter can only DELAY a park; it can never cause one, because the
     // park itself lives on the record.
     let tmp = tempfile::TempDir::new().expect("tempdir");
     std::fs::write(tmp.path().join(ResumeBreakerStore::FILE_NAME), "{ not json")
         .expect("write corrupt sidecar");
-    let store = ResumeBreakerStore::load(tmp.path());
+    let mut store = ResumeBreakerStore::load(tmp.path()).await;
     assert_eq!(
-        store.state_of(&ManagedSessionId::new()),
+        store.state_of(&ManagedSessionId::new()).await,
         FlapState::default()
     );
 }
 
-#[test]
-fn a_reset_forgets_the_stamp_as_well_as_the_count() {
+#[tokio::test]
+async fn a_reset_forgets_the_stamp_as_well_as_the_count() {
     // After a slow death the previous auto-resume is no longer the thing this
     // session died after, so the NEXT death must not be attributed to it.
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let id = ManagedSessionId::new();
     let now = Utc::now();
-    let mut store = ResumeBreakerStore::load(tmp.path());
-    store.note_auto_resume(&id, now - TimeDelta::seconds(500));
+    let mut store = ResumeBreakerStore::load(tmp.path()).await;
+    store
+        .note_auto_resume(&id, now - TimeDelta::seconds(500))
+        .await;
     assert_eq!(
-        store.record_death(&id, &cfg(120, 2), now),
+        store.record_death(&id, &cfg(120, 2), now).await,
         BreakerVerdict::Reset
     );
-    assert_eq!(store.state_of(&id), FlapState::default());
+    assert_eq!(store.state_of(&id).await, FlapState::default());
     // A second death immediately afterwards is still not a flap.
     assert_eq!(
-        store.record_death(&id, &cfg(120, 2), now),
+        store.record_death(&id, &cfg(120, 2), now).await,
         BreakerVerdict::Reset
     );
 }
 
-#[test]
-fn a_fast_death_after_an_auto_resume_counts() {
+#[tokio::test]
+async fn a_fast_death_after_an_auto_resume_counts() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let id = ManagedSessionId::new();
     let now = Utc::now();
-    let mut store = ResumeBreakerStore::load(tmp.path());
-    store.note_auto_resume(&id, now);
+    let mut store = ResumeBreakerStore::load(tmp.path()).await;
+    store.note_auto_resume(&id, now).await;
     assert_eq!(
-        store.record_death(&id, &cfg(120, 9), now + TimeDelta::seconds(30)),
+        store
+            .record_death(&id, &cfg(120, 9), now + TimeDelta::seconds(30))
+            .await,
         BreakerVerdict::Counting { consecutive: 1 }
     );
 }
@@ -273,6 +321,87 @@ async fn one_cycle(mgr: &Arc<SessionManager>, id: &ManagedSessionId) -> super::S
         mgr.resume_auto(id).await.expect("auto-resume");
     }
     stopped
+}
+
+/// Build a manager over an EXISTING data dir, without re-seeding a record.
+///
+/// Why: the production topology has two `SessionManager`s over one directory —
+/// the daemon's and `tm supervisor`'s. Reproducing it needs a second manager
+/// that adopts the first's store rather than creating its own session.
+async fn attach(dir: &tempfile::TempDir, k: u32) -> Arc<SessionManager> {
+    let mut mgr = SessionManager::new(dir.path(), Arc::new(FakeNoopTmuxDriver))
+        .await
+        .expect("session manager");
+    mgr.set_resume_breaker_config(ResumeBreakerConfig {
+        flap_window: Duration::from_secs(3600),
+        max_consecutive: k,
+    });
+    Arc::new(mgr)
+}
+
+/// The production topology: the reaper and the poller are DIFFERENT processes.
+///
+/// Why: this is the defect the critic round caught. The single-manager test
+/// below passes over it, because one manager's in-memory sidecar carries the
+/// stamp from its own `resume_auto` straight into its own `record_death`. In
+/// production those two calls are made by two processes over one file, and a
+/// sidecar loaded once at construction leaves the daemon's
+/// `last_auto_resume_at` permanently `None` — every death evaluates as `Reset`
+/// and the breaker never trips.
+/// What: `daemon` marks the runtime exited; `supervisor`, a SEPARATE manager
+/// over the same `data_dir`, does the auto-resume. Only a sidecar that reloads
+/// from disk on every read can carry the stamp between them.
+/// Test: this is the test. RED at 0e357cfd8 — `daemon` never observes
+/// `supervisor`'s stamp, so the loop runs forever and the final assertion that
+/// the record is parked fails with `Some(Unexpected)`.
+#[tokio::test]
+async fn two_managers_over_one_data_dir_still_park_a_flapping_session() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let (daemon, id) = seeded(&tmp, 3).await;
+    let supervisor = attach(&tmp, 3).await;
+
+    // Cycle 1: the first death follows no auto-resume at all, so it resets.
+    let first = daemon
+        .mark_runtime_exited_stopped(&id)
+        .await
+        .expect("mark stopped");
+    assert_eq!(first.stop_cause, Some(StopCause::Unexpected));
+    supervisor.resume_auto(&id).await.expect("auto-resume");
+
+    // Cycles 2 and 3 build the streak across the process boundary.
+    for cycle in 2..=3 {
+        let r = daemon
+            .mark_runtime_exited_stopped(&id)
+            .await
+            .expect("mark stopped");
+        assert_eq!(
+            r.stop_cause,
+            Some(StopCause::Unexpected),
+            "cycle {cycle} must still be resumable"
+        );
+        supervisor.resume_auto(&id).await.expect("auto-resume");
+    }
+
+    // Cycle 4 reaches the threshold — in the daemon, off a stamp the supervisor
+    // wrote in the other process.
+    let parked = daemon
+        .mark_runtime_exited_stopped(&id)
+        .await
+        .expect("mark stopped");
+    assert_eq!(
+        parked.stop_cause,
+        Some(StopCause::ResumeFlapping),
+        "the breaker must trip when the two halves of the cycle run in different \
+         processes — the only topology that exists in production (#6568)"
+    );
+    assert!(!parked.is_auto_resumable());
+
+    // And the supervisor's own view of the record agrees, so it stops resuming.
+    let seen_by_supervisor = supervisor.get(&id).await.expect("get");
+    assert!(
+        !seen_by_supervisor.is_auto_resumable(),
+        "the process that does the resuming must be the one that sees the park"
+    );
 }
 
 /// The headline regression. RED before the fix: every cycle wrote
@@ -348,6 +477,44 @@ async fn an_operator_resume_forgives_the_streak() {
         next.stop_cause,
         Some(StopCause::Unexpected),
         "an operator resume must restore the full budget, not one death of it"
+    );
+    assert!(next.is_auto_resumable());
+}
+
+/// The in-place reactivate is an operator action too, so it forgives the streak.
+///
+/// Why: `mark_reactivated` (#2023 C) is the bare-`tm` in-pane relaunch. It feeds
+/// `record_death` through the same `mark_runtime_exited_stopped` the reaper
+/// uses, so before this fix an operator relaunching repeatedly built the flap
+/// streak with their own hands and got parked on the next ordinary exit.
+/// Test: this is the test. RED before the fix: the streak survived the
+/// reactivate and the fourth death parked the session.
+#[tokio::test]
+async fn an_in_place_reactivate_forgives_the_streak() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let (mgr, id) = seeded(&tmp, 2).await;
+
+    // Build the streak to one short of the threshold.
+    one_cycle(&mgr, &id).await; // reset + resume
+    let counted = mgr
+        .mark_runtime_exited_stopped(&id)
+        .await
+        .expect("mark stopped");
+    assert_eq!(counted.stop_cause, Some(StopCause::Unexpected));
+
+    // The operator relaunches in place rather than through `resume`.
+    let revived = mgr.mark_reactivated(&id).await.expect("reactivate");
+    assert_eq!(revived.state, ManagedSessionState::Active);
+    assert_eq!(revived.stop_cause, None);
+
+    let next = mgr
+        .mark_runtime_exited_stopped(&id)
+        .await
+        .expect("mark stopped");
+    assert_eq!(
+        next.stop_cause,
+        Some(StopCause::Unexpected),
+        "an in-place reactivate must restore the full budget, like `resume` does"
     );
     assert!(next.is_auto_resumable());
 }

@@ -194,6 +194,7 @@ mod tests {
             attached: false,
             slot: 0,
             deleted: false,
+            auto_resume_parked: None,
         };
         let items = vec![summary("m-1", "tmpm-red-owl"), summary("m-2", "api")];
         assert_eq!(

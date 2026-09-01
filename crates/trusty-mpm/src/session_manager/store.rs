@@ -9,13 +9,13 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::fs;
 use tracing::{debug, warn};
 
+use super::json_file;
 use super::record::{ManagedSessionId, SessionRecord};
 use super::store_integrity::{StoreIntegrity, validate};
 
@@ -117,53 +117,6 @@ pub(crate) struct StoredData {
     pub(crate) sessions: HashMap<String, SessionRecord>,
 }
 
-/// A cheap freshness fingerprint for the backing file.
-///
-/// Why: the cross-process reload check (#1219) keys off "did the file change
-/// since we last touched it". An mtime alone is insufficient on filesystems
-/// whose mtime resolution is coarse (1s on some): two writes in the same second
-/// would compare equal and the reader would miss the second write. Pairing the
-/// mtime with the byte length catches a same-second write that changed the file
-/// size, which a state transition (different JSON length) almost always does.
-/// What: the file's last-modified `SystemTime` (an `Option` — `None` when the
-/// platform/filesystem cannot report an mtime) and its length in bytes. The whole
-/// `FileSig` is wrapped in an `Option` by callers, where `None` means "file
-/// absent / could not be stat'd".
-/// Test: `store_reload_picks_up_external_write`, `store_reload_noop_when_unchanged`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-struct FileSig {
-    /// File modification time, if the platform/filesystem reports one.
-    mtime: Option<SystemTime>,
-    /// File length in bytes.
-    len: u64,
-}
-
-/// The private staging path a store instance renames over `path` on save.
-///
-/// Why (#5007): `save` used to stage through `path.with_extension("json.tmp")`
-/// — one fixed name shared by every writer of that store, in every process.
-/// The rename is atomic, but the staging write is not exclusive: two writers
-/// each open that one name with truncate, each stream their own serialization
-/// into it, and the file that gets renamed into place has the length of the
-/// longer document and the head of the shorter one. That is the exact shape
-/// #5007 reports — a complete document followed by a stale tail whose length
-/// equals the difference between the two serializations. Making the staging
-/// name private to one store instance removes the shared resource entirely.
-/// What: `<path>.tmp.<pid>.<uuid>` — the pid separates processes, the uuid
-/// separates instances within one process (tests routinely hold two stores over
-/// one directory, and `agent_reset_workspace` builds its own alongside the
-/// daemon's).
-/// Test: `two_stores_over_one_path_do_not_share_a_staging_file`.
-fn staging_path(path: &Path) -> PathBuf {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(
-        ".tmp.{}.{}",
-        std::process::id(),
-        uuid::Uuid::new_v4().simple()
-    ));
-    path.with_file_name(name)
-}
-
 /// Async, file-backed store for [`SessionRecord`]s.
 ///
 /// Why: the session manager must be able to reload all known sessions after a
@@ -194,7 +147,7 @@ pub struct SessionStore {
     /// not exist at last observation (a fresh, never-saved store).
     /// What: the (mtime, len) pair captured from the file's metadata.
     /// Test: `store_reload_picks_up_external_write`.
-    last_sig: Option<FileSig>,
+    last_sig: Option<json_file::FileSig>,
     /// Private staging path this instance renames over `path` on every save.
     ///
     /// Why (#5007): every `SessionStore` used to stage through the SAME
@@ -228,7 +181,7 @@ impl SessionStore {
     pub async fn load(data_dir: &Path) -> Result<Self, StoreError> {
         let path = data_dir.join("sessions.json");
         let (data, last_sig) = Self::read_file(&path).await?;
-        let tmp_path = staging_path(&path);
+        let tmp_path = json_file::staging_path(&path);
         Ok(Self {
             data,
             path,
@@ -273,25 +226,6 @@ impl SessionStore {
         &self.tmp_path
     }
 
-    /// Stat `path` and return its freshness fingerprint, or `None` if absent.
-    ///
-    /// Why: both the reload check and `save` need to capture the same (mtime,
-    /// len) signature; centralising it keeps "what counts as the file's
-    /// identity" in one place.
-    /// What: on `metadata` success returns `Some(FileSig { mtime, len })`; on any
-    /// stat error (most commonly: file does not exist) returns `None`.
-    /// Test: exercised via `store_reload_*` tests.
-    async fn sig_of(path: &Path) -> Option<FileSig> {
-        let meta = fs::metadata(path).await.ok()?;
-        Some(FileSig {
-            // `modified()` can be unsupported on exotic filesystems; `None` there
-            // makes the (mtime, len) pair compare unequal so reads reload — correct,
-            // just less efficient — rather than risk serving stale data.
-            mtime: meta.modified().ok(),
-            len: meta.len(),
-        })
-    }
-
     /// Read and parse the backing file, returning the data and its fingerprint.
     ///
     /// Why: both [`Self::load`] and [`Self::reload_if_changed`] need the exact
@@ -310,7 +244,9 @@ impl SessionStore {
     /// which compares unequal and harmlessly forces a future reload.
     /// Test: `store_reload_picks_up_external_write`, `store_load_save_round_trip`,
     /// `store_read_file_sig_matches_post_read_bytes`.
-    async fn read_file(path: &Path) -> Result<(StoredData, Option<FileSig>), StoreError> {
+    async fn read_file(
+        path: &Path,
+    ) -> Result<(StoredData, Option<json_file::FileSig>), StoreError> {
         let raw = match fs::read_to_string(path).await {
             Ok(raw) => raw,
             // ONLY a genuinely absent file means "fresh store" (#5007). Before
@@ -349,7 +285,7 @@ impl SessionStore {
         let data =
             validate(path, &raw).map_err(|integrity| StoreError::Corrupt(Box::new(integrity)))?;
         // Stat AFTER the read so the signature matches the bytes we parsed.
-        let sig = Self::sig_of(path).await.unwrap_or_default();
+        let sig = json_file::sig_of(path).await.unwrap_or_default();
         Ok((data, Some(sig)))
     }
 
@@ -369,11 +305,11 @@ impl SessionStore {
     /// Test: `store_reload_picks_up_external_write`,
     /// `store_reload_noop_when_unchanged`.
     pub async fn reload_if_changed(&mut self) -> Result<(), StoreError> {
-        let current = Self::sig_of(&self.path).await;
+        let current = json_file::sig_of(&self.path).await;
         // Reload unless the file is present AND its fingerprint exactly matches
         // what we last observed. A `None` on either side (file absent, or never
         // saved) is treated as "changed" so we never miss an external write.
-        let unchanged = matches!((current, self.last_sig), (Some(a), Some(b)) if a == b);
+        let unchanged = json_file::is_unchanged(current, self.last_sig);
         if unchanged {
             return Ok(());
         }
@@ -436,7 +372,7 @@ impl SessionStore {
         // Record the fingerprint of the bytes we just wrote so a subsequent
         // `reload_if_changed` treats our own write as "unchanged" and does not
         // pointlessly re-read the file we just authored (#1219).
-        self.last_sig = Self::sig_of(&self.path).await;
+        self.last_sig = json_file::sig_of(&self.path).await;
         debug!(path = %self.path.display(), "session store saved");
         Ok(())
     }

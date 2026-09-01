@@ -132,14 +132,20 @@ pub struct PaneInfo {
 ///
 /// Why (ADR-0045): "the directory is gone" and "I could not tell" are different
 /// answers, and only the first is evidence for a kill. Collapsing them into a
-/// bool is exactly the fail-open shape that ADR forbids on a destructive path —
-/// a permission error, a stalled network mount, or a tmux that reported nothing
-/// would all read as "gone" and kill a pane doing real work.
+/// bool is exactly the fail-open shape that ADR forbids on a destructive path.
+///
+/// ADR-0045's trigger table names the case that makes this more than a
+/// formality: an unmounted or ejected volume returns plain ENOENT, NOT an error
+/// kind that could be recognised as "undeterminable". An external disk carrying
+/// a live agent's worktree therefore looks byte-for-byte like a deleted
+/// worktree to `symlink_metadata` alone. [`FsCwdProbe`] separates them by asking
+/// about the PARENT — see its doc.
 /// What: three states. `Exists` and `Gone` are decided answers; `Undeterminable`
 /// covers every case where the answer was not obtained, including tmux reporting
 /// no path at all.
 /// Test: `fs_cwd_probe_reports_exists_for_a_real_dir`,
 /// `fs_cwd_probe_reports_gone_for_a_deleted_dir`,
+/// `fs_cwd_probe_is_undeterminable_when_the_parent_is_gone_too`,
 /// `classify_keeps_active_pane_when_cwd_is_undeterminable`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CwdEvidence {
@@ -156,9 +162,10 @@ pub enum CwdEvidence {
 /// Why: keeps [`classify_session`] pure and lets tests decide the answer without
 /// creating and deleting real directories, mirroring [`ChildLivenessProbe`].
 /// What: one method mapping a non-empty path string to a [`CwdEvidence`].
-/// Fail-closed contract: return [`CwdEvidence::Gone`] ONLY when the path is
-/// confirmed absent. Any error that is not "not found" — a permission denial, an
-/// unresponsive mount, an interrupted call — MUST return
+/// Fail-closed contract: return [`CwdEvidence::Gone`] ONLY when the path's
+/// absence is attributable to that path itself. An error that is not "not
+/// found" — a permission denial, an I/O failure, a stale NFS handle — and an
+/// absence that extends to the path's whole enclosing subtree both MUST return
 /// [`CwdEvidence::Undeterminable`], which keeps the pane.
 /// Test: [`FsCwdProbe`]'s tests below; the fakes in the `tests` submodule drive
 /// the classifier.
@@ -170,21 +177,51 @@ pub trait CwdProbe {
 /// The production [`CwdProbe`], backed by `std::fs`.
 ///
 /// Why: the reap decision must consult the real filesystem, and the
-/// absent-vs-undeterminable split has to be made from the actual `io::Error`
-/// kind rather than from an `is_ok()` bool.
-/// What: `symlink_metadata` — never `metadata`, which follows the link and would
-/// call a dangling symlink "gone" when the pane's own path entry is very much
-/// there. `Ok` → [`CwdEvidence::Exists`]; `ErrorKind::NotFound` →
-/// [`CwdEvidence::Gone`]; every other error → [`CwdEvidence::Undeterminable`].
+/// absent-vs-undeterminable split cannot be made from the `io::Error` kind
+/// alone. ADR-0045's trigger table is explicit that an unmounted or ejected
+/// volume answers plain ENOENT — the SAME answer a deleted worktree gives. A
+/// probe that stopped at `NotFound` would kill an agent working on an external
+/// disk about two minutes after someone ejected it, which is the opposite of
+/// what #6118 asks for.
+///
+/// What separates the two is the PARENT. #6118's target is a worktree removed
+/// from an intact `.claude/worktrees/`, so the parent survives. An ejected
+/// volume, an unmounted share, and a deleted parent tree all take the parent
+/// with them, and none of those is evidence about this pane's own directory.
+/// What: `symlink_metadata` on the path — never `metadata`, which follows the
+/// link and would call a dangling symlink "gone" when the pane's own entry is
+/// very much there. `Ok` → [`CwdEvidence::Exists`]. `ErrorKind::NotFound` →
+/// [`CwdEvidence::Gone`] only when the parent directory is itself present;
+/// otherwise [`CwdEvidence::Undeterminable`]. A path with no parent, and every
+/// other error kind, are [`CwdEvidence::Undeterminable`].
 /// Test: `fs_cwd_probe_reports_exists_for_a_real_dir`,
-/// `fs_cwd_probe_reports_gone_for_a_deleted_dir`.
+/// `fs_cwd_probe_reports_gone_for_a_deleted_dir`,
+/// `fs_cwd_probe_is_undeterminable_when_the_parent_is_gone_too`,
+/// `fs_cwd_probe_is_undeterminable_on_a_non_notfound_error`.
 pub struct FsCwdProbe;
 
 impl CwdProbe for FsCwdProbe {
     fn evidence(&self, path: &str) -> CwdEvidence {
         match std::fs::symlink_metadata(path) {
             Ok(_) => CwdEvidence::Exists,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => CwdEvidence::Gone,
+            // #6118: absent — but absent WHY? Only a surviving parent makes this
+            // about this directory rather than about its whole volume.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let Some(parent) = std::path::Path::new(path).parent() else {
+                    return CwdEvidence::Undeterminable;
+                };
+                if std::fs::symlink_metadata(parent).is_ok() {
+                    CwdEvidence::Gone
+                } else {
+                    debug!(
+                        path = %path,
+                        "orphan-GC: a pane's cwd is absent and so is its parent — an unmounted \
+                         volume answers exactly like a deleted directory (ADR-0045), so this is \
+                         not evidence; keeping the pane (#6118)"
+                    );
+                    CwdEvidence::Undeterminable
+                }
+            }
             Err(e) => {
                 warn!(
                     path = %path,
@@ -1227,7 +1264,66 @@ mod tests {
         assert_eq!(
             FsCwdProbe.evidence(&path.to_string_lossy()),
             CwdEvidence::Gone,
-            "a deleted worktree is the exact live condition #6118 reports"
+            "a deleted worktree inside an intact parent is the exact live \
+             condition #6118 reports"
+        );
+    }
+
+    /// ADR-0045's first trigger row: an unmounted or ejected volume answers
+    /// plain ENOENT, indistinguishable from a deleted directory by error kind
+    /// alone. The surviving-parent gate is what separates them — an ejected disk
+    /// takes the parent with it, a removed worktree does not.
+    ///
+    /// Input this reproduces: an untracked pane running `claude` with its cwd on
+    /// an external volume, ejected. Without the gate the agent is killed about
+    /// two sweeps (~2 minutes) later.
+    /// Test: this is the test. RED before the parent gate: `Gone`.
+    #[test]
+    fn fs_cwd_probe_is_undeterminable_when_the_parent_is_gone_too() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let mount = tmp.path().join("Volumes-Ext");
+        let workdir = mount.join("work").join("repo");
+        std::fs::create_dir_all(&workdir).expect("create");
+        assert_eq!(
+            FsCwdProbe.evidence(&workdir.to_string_lossy()),
+            CwdEvidence::Exists
+        );
+
+        // The whole subtree disappears at once, as an eject does.
+        std::fs::remove_dir_all(&mount).expect("eject");
+        assert_eq!(
+            FsCwdProbe.evidence(&workdir.to_string_lossy()),
+            CwdEvidence::Undeterminable,
+            "an absent path whose parent is also absent is not evidence about \
+             that path — it is an unmounted volume (ADR-0045)"
+        );
+    }
+
+    /// The `Err(other)` arm: an error that is not `NotFound` must keep the pane.
+    ///
+    /// What: probing `<regular file>/child` yields ENOTDIR on every supported
+    /// target — a non-`NotFound` error reachable without root or a real mount.
+    #[test]
+    fn fs_cwd_probe_is_undeterminable_on_a_non_notfound_error() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let file = tmp.path().join("not-a-dir");
+        std::fs::write(&file, b"x").expect("write");
+        let under_a_file = file.join("child");
+        assert_eq!(
+            FsCwdProbe.evidence(&under_a_file.to_string_lossy()),
+            CwdEvidence::Undeterminable,
+            "an unexpected errno must never read as absence"
+        );
+    }
+
+    /// A path with no parent cannot be gated, so it is never evidence.
+    #[test]
+    fn fs_cwd_probe_is_undeterminable_for_a_parentless_path() {
+        assert_eq!(FsCwdProbe.evidence("/"), CwdEvidence::Exists);
+        // A bare relative name has an empty parent, which does not stat.
+        assert_eq!(
+            FsCwdProbe.evidence("definitely-not-here-6118"),
+            CwdEvidence::Undeterminable
         );
     }
 

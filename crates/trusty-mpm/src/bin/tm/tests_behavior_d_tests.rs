@@ -1193,6 +1193,7 @@ fn ls_test_session(
         attached: false,
         slot: 0,
         deleted: false,
+        auto_resume_parked: None,
     }
 }
 

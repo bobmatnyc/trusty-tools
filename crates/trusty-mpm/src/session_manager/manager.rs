@@ -261,8 +261,12 @@ impl SessionManager {
             data_dir: data_dir.to_owned(),
             slots: RwLock::new(SlotRegistry::new()),
             // #6568: a missing or unreadable sidecar starts empty — see
-            // `ResumeBreakerStore::load` for why that can only ever delay a park.
-            resume_breaker: RwLock::new(super::resume_breaker::ResumeBreakerStore::load(data_dir)),
+            // `ResumeBreakerStore::load` for why that can only ever delay a
+            // park. Every later read reloads from disk, because the process
+            // that writes the stamp is not the one that reads it.
+            resume_breaker: RwLock::new(
+                super::resume_breaker::ResumeBreakerStore::load(data_dir).await,
+            ),
             resume_breaker_cfg: super::resume_breaker::ResumeBreakerConfig::from_env(),
         })
     }

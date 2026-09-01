@@ -49,11 +49,11 @@ fn truncate_clips_and_appends_ellipsis() {
 #[test]
 fn format_state_column_appends_dead_marker() {
     assert_eq!(
-        format_state_column("stopped", true, false, false),
+        format_state_column("stopped", true, false, false, false),
         "stopped [dead]"
     );
     assert_eq!(
-        format_state_column("errored", true, false, false),
+        format_state_column("errored", true, false, false, false),
         "errored [dead]"
     );
 }
@@ -63,11 +63,11 @@ fn format_state_column_appends_dead_marker() {
 #[test]
 fn format_state_column_appends_stale_assets_marker() {
     assert_eq!(
-        format_state_column("active", false, true, false),
+        format_state_column("active", false, true, false, false),
         "active [stale-assets]"
     );
     assert_eq!(
-        format_state_column("stopped", true, true, false),
+        format_state_column("stopped", true, true, false, false),
         "stopped [dead] [stale-assets]",
         "both markers must be able to appear together"
     );
@@ -80,18 +80,41 @@ fn format_state_column_appends_stale_assets_marker() {
 #[test]
 fn format_state_column_appends_unchecked_assets_marker() {
     assert_eq!(
-        format_state_column("stopped", false, false, true),
+        format_state_column("stopped", false, false, true, false),
         "stopped [assets ?]"
     );
     assert_eq!(
-        format_state_column("stopped", true, false, true),
+        format_state_column("stopped", true, false, true, false),
         "stopped [dead] [assets ?]",
         "the dead marker and the undetermined-assets marker must compose"
     );
     assert_eq!(
-        format_state_column("stopped", false, true, true),
+        format_state_column("stopped", false, true, true, false),
         "stopped [stale-assets]",
         "a real stale verdict must win over 'undetermined' — never both"
+    );
+}
+
+/// #6568: a parked session must be distinguishable from an ordinary stopped
+/// one, because nothing will ever auto-resume it again.
+///
+/// Test: this is the test. RED before the fix: the column had no such marker,
+/// so a parked row rendered as a plain `stopped`.
+#[test]
+fn format_state_column_appends_resume_parked_marker() {
+    assert_eq!(
+        format_state_column("stopped", false, false, false, true),
+        "stopped [resume-parked]"
+    );
+    // Markers coexist rather than shadowing each other.
+    assert_eq!(
+        format_state_column("stopped", true, true, false, true),
+        "stopped [dead] [resume-parked] [stale-assets]"
+    );
+    // A session nothing parked is untouched.
+    assert_eq!(
+        format_state_column("stopped", false, false, false, false),
+        "stopped"
     );
 }
 
@@ -99,13 +122,16 @@ fn format_state_column_appends_unchecked_assets_marker() {
 /// unchanged — no regression for the common case.
 #[test]
 fn format_state_column_leaves_healthy_state_unchanged() {
-    assert_eq!(format_state_column("active", false, false, false), "active");
     assert_eq!(
-        format_state_column("stopped", false, false, false),
+        format_state_column("active", false, false, false, false),
+        "active"
+    );
+    assert_eq!(
+        format_state_column("stopped", false, false, false, false),
         "stopped"
     );
     assert_eq!(
-        format_state_column("provisioning", false, false, false),
+        format_state_column("provisioning", false, false, false, false),
         "provisioning"
     );
 }
@@ -123,12 +149,12 @@ fn format_state_column_renders_deleted_marker() {
     // A soft-deleted record renders the `--deleted--` marker (#2012) instead of
     // the raw `deleted` state, so the master list REFLECTS the deletion.
     assert_eq!(
-        format_state_column("deleted", false, false, false),
+        format_state_column("deleted", false, false, false, false),
         "--deleted--"
     );
     // Markers still compose on top of the deleted base.
     assert_eq!(
-        format_state_column("deleted", true, false, false),
+        format_state_column("deleted", true, false, false, false),
         "--deleted-- [dead]"
     );
 }
@@ -1034,6 +1060,7 @@ fn ls_session(name: &str, slot: u32) -> trusty_mpm::client::ManagedSessionSummar
         attached: false,
         slot,
         deleted: false,
+        auto_resume_parked: None,
     }
 }
 

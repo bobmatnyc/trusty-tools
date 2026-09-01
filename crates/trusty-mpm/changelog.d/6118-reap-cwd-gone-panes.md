@@ -7,6 +7,10 @@ Fixed
   - The evidence is positive only (ADR-0045): a path tmux never reported, or one
     the filesystem could not decide on, keeps the pane, and the kill still needs
     the same two consecutive sweeps an idle-shell orphan needs.
+  - An absent directory only counts when its PARENT still exists. An unmounted or
+    ejected volume answers with the same ENOENT a deleted worktree does, so
+    without that gate an agent working on an external disk would be killed about
+    two minutes after someone ejected it.
 - The orphan-GC's "untracked active managed session — skipping" line is now
   logged once per session per 60 sweeps rather than every sweep — it was
   992,078 lines in 48 hours, 76% of the daemon log — with the per-sweep total
