@@ -32,7 +32,12 @@ name = "trusty-search"
 # `DeleteIndex` gains `expected_root_path` (`rpc/writes.rs:172`); all three
 # structs were exhaustively constructible through the public API. Cargo's 0.x
 # rule puts a break in the MINOR position.
-version = "0.51.0"
+# 0.52.0 (issue #4421, post-publish wave 2026-09-01): minor — 0.51.0 is
+# already live on crates.io and #6573 changes the public `detect_project` /
+# `resolve_index` signatures to return `Result`. Bumped on `main` first so
+# the `PR version bump vs crates.io` gate clears once #6573 (and #6582)
+# update their branches onto this commit.
+version = "0.52.0"
 edition = "2021"
 description = "Machine-wide hybrid code search service: BM25 + vector + KG, zero cold-start, MCP server"
 readme = "README.md"
