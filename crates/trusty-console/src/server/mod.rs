@@ -86,6 +86,10 @@ pub struct AppState {
     /// trusty-mpm `console_metrics` cache (#1222). Populated by the background
     /// poller; served by `GET /api/console/metrics/mpm`.
     mpm_metrics_cache: MetricsCache,
+    /// Whole-machine host-metrics cache (#6517). Populated by the background
+    /// host sampler (`crate::host_status`); served by
+    /// `GET /api/console/machine-status`.
+    host_metrics_cache: crate::host_status::HostMetricsCache,
     http_client: Arc<reqwest::Client>,
     /// The client the proxy uses for Server-Sent Events (#6155).
     ///
@@ -224,6 +228,7 @@ impl AppState {
             search_metrics_cache: MetricsCache::new(),
             review_metrics_cache: MetricsCache::new(),
             mpm_metrics_cache: MetricsCache::new(),
+            host_metrics_cache: crate::host_status::HostMetricsCache::new(),
             http_client: Arc::new(client),
             stream_client: Arc::new(stream_client),
             analyze_handle,
@@ -323,6 +328,44 @@ impl AppState {
         &self.mpm_metrics_cache
     }
 
+    /// Access the whole-machine host-metrics cache (#6517).
+    ///
+    /// Why: the background host sampler writes here; the machine-status route
+    /// reads it. `run_serve` clones it to start the sampler.
+    /// What: returns a reference to the `HostMetricsCache` handle.
+    /// Test: `machine_status_route_cold_cache_returns_503`.
+    pub fn host_metrics_cache(&self) -> &crate::host_status::HostMetricsCache {
+        &self.host_metrics_cache
+    }
+
+    /// Gather whichever per-service `ConsoleMetricsReport`s are currently cached
+    /// (#6517).
+    ///
+    /// Why: the machine-status rollup counts and lists every service that has a
+    /// warm report. A service whose cache is still `None` (binary absent or not
+    /// yet polled) is simply omitted — the rollup describes what is reachable.
+    /// What: reads all five per-service metrics caches and collects the `Some`
+    /// reports into a `Vec` in a stable service order.
+    /// Test: `machine_status_route_warm_cache_returns_json`.
+    pub async fn collect_service_reports(
+        &self,
+    ) -> Vec<trusty_common::console_metrics::ConsoleMetricsReport> {
+        let caches = [
+            &self.metrics_cache,
+            &self.memory_metrics_cache,
+            &self.search_metrics_cache,
+            &self.review_metrics_cache,
+            &self.mpm_metrics_cache,
+        ];
+        let mut reports = Vec::with_capacity(caches.len());
+        for cache in caches {
+            if let Some(report) = cache.get().await {
+                reports.push(report);
+            }
+        }
+        reports
+    }
+
     /// Access the shared `reqwest::Client`.
     ///
     /// Why: Re-using one client enables connection pooling across proxy requests.
@@ -413,6 +456,11 @@ fn build_router_inner(
         .route("/api/console/metrics/search", get(metrics_search_handler))
         .route("/api/console/metrics/review", get(metrics_review_handler))
         .route("/api/console/metrics/mpm", get(metrics_mpm_handler))
+        // #6517: aggregated whole-machine host resources + per-service rollup.
+        .route(
+            "/api/console/machine-status",
+            get(crate::routes::machine_status::machine_status_handler),
+        )
         // ── trusty-mpm session-manager surface (#1222: P2 tab + P3 front door) ──
         // The console is the SINGLE HTTP front door for the session REST API;
         // every handler calls a trusty-mpm MCP tool via the stdio bridge — never

@@ -13,7 +13,7 @@ name        = "trusty-console"
 # (`src/connector.rs:100`). The struct was exhaustively constructible through
 # the public API, so a struct literal downstream stops compiling. Cargo's 0.x
 # rule puts a break in the MINOR position.
-version     = "0.9.1"
+version     = "0.9.2"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true
@@ -67,7 +67,9 @@ mime_guess         = { workspace = true }
 # `axum-server` (#3304): the shared same-origin write guard the console consumes
 # via `routes::origin_guard`. `uds` + `webhook-hmac` (#5089 step 3): the hardened
 # UDS dial/framing the webhook relay uses and the single GitHub HMAC verifier.
-trusty-common      = { workspace = true, features = ["stdio-mcp-client", "console-metrics", "config-cli", "axum-server", "uds", "uds-supervisor", "webhook-hmac", "webhook-relay"] }
+# #6517: `host-metrics` adds the whole-machine sampler + the
+# `console_metrics::machine_status` aggregation the machine-status route serves.
+trusty-common      = { workspace = true, features = ["stdio-mcp-client", "console-metrics", "host-metrics", "config-cli", "axum-server", "uds", "uds-supervisor", "webhook-hmac", "webhook-relay"] }
 reqwest            = { workspace = true }
 # #6155: `TryStreamExt::inspect_err` on the proxied upstream body, so a
 # mid-stream failure is logged instead of reaching the browser as a silent

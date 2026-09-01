@@ -50,6 +50,9 @@ pub mod bind;
 pub mod connector;
 pub mod console_ui;
 pub mod detect;
+// #6517: background whole-machine host-metrics sampler + cache feeding the
+// machine-status route.
+pub mod host_status;
 pub mod mcp_handle;
 pub mod metrics_poller;
 pub mod poller;
@@ -427,6 +430,16 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
             );
         }
     }
+
+    // ── whole-machine host-metrics sampler (#6517) ──────────────────────────
+    // Runs in the background and keeps `host_metrics_cache` warm so
+    // GET /api/console/machine-status serves the host snapshot without a
+    // per-request sysinfo refresh. Sampled on the same interval as the service
+    // pollers.
+    host_status::start(
+        state.host_metrics_cache().clone(),
+        Duration::from_secs(args.poll_interval),
+    );
 
     // #3269: trust the console's own non-loopback bind address(es) (e.g. the
     // Tailscale CGNAT address in `--tailscale` mode) as write-origin
