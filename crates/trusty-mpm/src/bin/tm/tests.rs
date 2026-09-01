@@ -1107,14 +1107,25 @@ fn cli_parses_session_singular() {
 
 #[test]
 fn cli_rejects_removed_coordinator_tui() {
-    // #1392: the old top-level `tm coordinator-tui` was deleted (not aliased).
-    // Parsing it must now fail with an unrecognized-subcommand error.
-    let err = Cli::try_parse_from(["trusty-mpm", "coordinator-tui"]).unwrap_err();
-    assert_eq!(
-        err.kind(),
-        clap::error::ErrorKind::InvalidSubcommand,
-        "expected InvalidSubcommand, got {:?}",
-        err.kind()
+    // #1392: the old top-level `tm coordinator-tui` was deleted (not aliased),
+    // and the invocation must stay refused.
+    //
+    // #6441 moved WHERE that refusal happens. `Command::External` is a clap
+    // `external_subcommand`, so the parse itself now SUCCEEDS for any token no
+    // subcommand matches — this one included. The rejection is enforced one
+    // step later instead: `commands::run_target::classify_bare` answers `None`
+    // for a token that does not name a repository, and
+    // `run_target::reject_unknown_subcommand` then reproduces the same clap
+    // usage error and exit code this test used to read off the parse. The
+    // behaviour a user sees is unchanged; only the layer asserting it moved.
+    let cli = Cli::try_parse_from(["trusty-mpm", "coordinator-tui"]).unwrap();
+    match cli.command.unwrap() {
+        Command::External(tokens) => assert_eq!(tokens, ["coordinator-tui"]),
+        other => panic!("expected the External catch-all, got {other:?}"),
+    }
+    assert!(
+        crate::commands::run_target::classify_bare("coordinator-tui").is_none(),
+        "a retired subcommand must route to the usage error, never to a managed run"
     );
 }
 

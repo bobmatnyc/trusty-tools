@@ -1322,6 +1322,31 @@ pub(crate) enum Command {
     /// from tm's MCP-native `config_read`/`config_write` daemon config tools —
     /// different domain, deliberately not merged.
     Config(trusty_common::inference::config::ConfigCommand),
+
+    /// Catch-all for a leading token that names no subcommand (#6441).
+    ///
+    /// Why: `tm https://github.com/<owner>/<repo>` and `tm <owner>/<repo>`
+    /// should provision and run the repo in ONE command, and clap has no way
+    /// to express "a positional, but only when it matches no subcommand"
+    /// except this variant. Adding a plain top-level positional instead would
+    /// make every subcommand name ambiguous with it.
+    /// What: clap collects the unrecognized token and everything after it.
+    /// [`crate::commands::run_target::classify_bare`] then decides which of two
+    /// outcomes it gets, and the gate is deliberately narrow: only a token
+    /// [`crate::commands::register_args::looks_like_repo`] accepts becomes a
+    /// managed run. Everything else — a typo like `tm statuss` — falls back to
+    /// clap's usage error plus the workspace "did you mean?" hint, exactly as
+    /// it did before this variant existed. Without that gate a typo would
+    /// become a registry-alias lookup and report the wrong problem.
+    ///
+    /// This is POST-parse, so `--url` / `TRUSTY_MPM_URL` still bind normally.
+    /// An exact or unambiguously-inferred subcommand name always wins over this
+    /// arm; `infer_subcommands` is matched first.
+    /// Test: `cli_parses_bare_github_url`, `cli_parses_bare_owner_repo`,
+    /// `cli_bare_infers_abbreviated_subcommand_over_external`,
+    /// `cli_bare_unknown_subcommand_is_not_a_repo`.
+    #[command(external_subcommand)]
+    External(Vec<String>),
 }
 
 /// Post-report local actions for `tm doctor`.

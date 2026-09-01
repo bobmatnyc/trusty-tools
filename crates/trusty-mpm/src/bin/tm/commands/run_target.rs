@@ -159,6 +159,160 @@ pub(crate) async fn run(
     }
 }
 
+/// Decide whether a token clap could not match names a repo to run (#6441).
+///
+/// Why: `tm <github-url>` has to reach the same register→load→run chain
+/// `tm run <url>` already drives, and clap surfaces such a token through
+/// [`crate::cli::Command::External`] — the same arm EVERY token clap cannot
+/// resolve lands in: a typo (`statuss`), an ambiguous prefix (`sta`, which
+/// matches `start`/`status`/`statusline`), and a retired subcommand
+/// (`coordinator-tui`). So the gate is the whole design: each of those must
+/// keep getting clap's usage error and the "did you mean?" hint, never a
+/// managed run and never an alias lookup reporting "alias 'statuss' not found".
+/// Only a token [`super::register_args::looks_like_repo`] accepts — the SAME
+/// predicate `tm register` and [`classify_run_target`] use — is a repo.
+/// What: `None` means "not a repo, hand it back to the usage-error path".
+/// `Some(Ok(..))` is always [`RunTarget::Repo`]; `Some(Err(..))` is a
+/// repo-shaped token that [`super::register_args::resolved_url`] refuses (a
+/// host with no path, a browser paste into a repo's web UI), and that
+/// descriptive error is what the user should see rather than a usage dump.
+///
+/// A relative path is `None` on purpose: it is neither a repo nor a
+/// subcommand, and clap's usage error names the real problem more usefully
+/// than a clone attempt would.
+/// Test: `classify_bare_accepts_repo_shapes`,
+/// `classify_bare_declines_subcommand_typos`,
+/// `classify_bare_surfaces_resolved_url_errors`.
+pub(crate) fn classify_bare(token: &str) -> Option<anyhow::Result<RunTarget>> {
+    let token = token.trim();
+    if !super::register_args::looks_like_repo(token) {
+        return None;
+    }
+    Some(classify_run_target(token))
+}
+
+/// `tm <token>` where `<token>` matched no subcommand (#6441).
+///
+/// Why: keeping the fallback here rather than in `main.rs` keeps that file's
+/// dispatch arm one line wide — it sits against the 500-SLOC production cap —
+/// and gives the two-outcome decision a testable home next to the predicate it
+/// depends on.
+/// What: a repo-shaped token runs through [`run_managed`], the same cold start
+/// `tm run <owner>/<repo>` uses, so an already-registered repo refreshes and
+/// runs rather than erroring. Anything else goes to
+/// [`reject_unknown_subcommand`], which reproduces the exact usage error the
+/// invocation produced before [`crate::cli::Command::External`] existed.
+/// Trailing tokens are refused rather than silently dropped: `tm <url> extra`
+/// means something the CLI cannot honour.
+/// Test: the repo half is [`classify_bare`]'s coverage plus `tm run`'s existing
+/// managed-checkout tests; the usage-error half exits the process and is
+/// covered at the parse layer by `cli_bare_unknown_subcommand_is_not_a_repo`,
+/// `cli_bare_ambiguous_prefix_is_not_a_repo`, and
+/// `cli_bare_retired_subcommand_is_not_a_repo`.
+pub(crate) async fn run_external(
+    client: &reqwest::Client,
+    url: &str,
+    tokens: &[String],
+    argv: &[String],
+    help: &trusty_common::help::HelpConfig,
+) -> anyhow::Result<()> {
+    let token = tokens.first().map(String::as_str).unwrap_or_default();
+    let Some(classified) = classify_bare(token) else {
+        reject_unknown_subcommand(argv, help);
+    };
+
+    if tokens.len() > 1 {
+        anyhow::bail!(
+            "tm {token} takes no further arguments (got {extra:?}). \
+             Use `tm run {token}` for the flag-bearing form.",
+            extra = &tokens[1..]
+        );
+    }
+
+    match classified? {
+        RunTarget::Repo {
+            owner,
+            repo,
+            clone_url,
+        } => run_managed(client, url, &owner, &repo, &clone_url).await,
+        // `classify_bare` returns `None` rather than an alias, so this is
+        // unreachable; routing it to the same cold start keeps the arm total.
+        RunTarget::Alias(alias) => Err(super::register_args::rejection(&alias)),
+    }
+}
+
+/// Print the usage error a token would have produced before #6441, and exit.
+///
+/// Why: `external_subcommand` makes clap ACCEPT any leading token it does not
+/// recognize, so three previously-failing invocations now parse — a typo
+/// (`tm statuss`), an AMBIGUOUS prefix (`tm sta`, which matches `start`,
+/// `status`, and `statusline`), and a retired subcommand (`tm coordinator-tui`,
+/// #1392). All three must still be refused, and with clap's own wording: its
+/// "tip: some similar subcommands exist" line names the real candidates, which
+/// a hand-written message cannot reproduce.
+/// What: re-parses the ORIGINAL argv against a command carrying the same
+/// arguments and subcommands but WITHOUT the external catch-all — which is
+/// exactly the pre-#6441 definition — then prints that error, appends the
+/// workspace "did you mean?" hint the way `main` does, and exits with clap's
+/// own code.
+///
+/// 🔴 The rebuild is required. Calling `allow_external_subcommands(false)` on
+/// the command `clap::CommandFactory` hands back does NOT disable the
+/// catch-all: the flag reads back as `false` and `sta` still matches as the
+/// external subcommand `sta`, because the derive already wired the match path
+/// during augmentation. Only a command built fresh from
+/// [`clap::Command::new`] honours the absence of the flag. Do not "simplify"
+/// this back to a flag flip.
+///
+/// The re-parse cannot succeed — the token reached this function precisely
+/// because nothing matched it — but an `Ok` is handled rather than unwrapped.
+/// Test: `reject_unknown_subcommand_rebuild_reproduces_claps_error`,
+/// `cli_bare_ambiguous_prefix_is_not_a_repo`,
+/// `cli_bare_unknown_subcommand_is_not_a_repo`,
+/// `cli_bare_retired_subcommand_is_not_a_repo`.
+fn reject_unknown_subcommand(argv: &[String], help: &trusty_common::help::HelpConfig) -> ! {
+    let code = match without_external_catch_all().try_get_matches_from(argv) {
+        Err(e) => {
+            e.print().ok();
+            trusty_common::help::print_suggestion_hint(argv, help);
+            e.exit_code()
+        }
+        // Unreachable: this token matched no subcommand a moment ago.
+        Ok(_) => {
+            eprintln!("error: unrecognized subcommand");
+            2
+        }
+    };
+    std::process::exit(code);
+}
+
+/// The `tm` command definition as it stood before #6441.
+///
+/// Why: see [`reject_unknown_subcommand`] — the pre-#6441 error can only be
+/// reproduced by a command that never had the external catch-all wired in.
+/// What: copies [`crate::cli::Cli`]'s own arguments and subcommands onto a
+/// fresh [`clap::Command`], keeping `infer_subcommands` so an unambiguous
+/// prefix still resolves and an ambiguous one still reports every candidate.
+/// The name is spelled out because `clap::builder::Str` only accepts a
+/// `&'static str`; `command_name_matches_the_rebuild` pins it against the
+/// derive so the two cannot drift.
+/// Test: `command_name_matches_the_rebuild`,
+/// `reject_unknown_subcommand_rebuild_reproduces_claps_error`.
+pub(crate) fn without_external_catch_all() -> clap::Command {
+    use clap::CommandFactory as _;
+
+    let src = crate::cli::Cli::command();
+    clap::Command::new(CLI_NAME)
+        .infer_subcommands(true)
+        .args(src.get_arguments().cloned())
+        .subcommands(src.get_subcommands().cloned())
+}
+
+/// The `#[command(name = ...)]` on [`crate::cli::Cli`].
+///
+/// Test: `command_name_matches_the_rebuild`.
+pub(crate) const CLI_NAME: &str = "trusty-mpm";
+
 /// Cold-start a daemon-managed session for a GitHub `owner/repo`.
 ///
 /// Why: this is the whole point of #4990 — a bare string ends in a real

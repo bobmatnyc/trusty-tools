@@ -170,6 +170,85 @@ fn classify_rejects_browser_pastes_and_paths() {
     }
 }
 
+/// #6441: every repo shape `tm run` accepts is also a bare-`tm` target.
+///
+/// Why: `tm <url>` and `tm run <url>` must not disagree about what a string
+/// means, so `classify_bare` delegates to `classify_run_target` rather than
+/// re-deriving. This pins the delegation on the shapes both see.
+/// Test: itself.
+#[test]
+fn classify_bare_accepts_repo_shapes() {
+    for spec in [
+        "bobmatnyc/mcp-a-protocol",
+        "https://github.com/bobmatnyc/mcp-a-protocol",
+        "https://github.com/bobmatnyc/mcp-a-protocol.git",
+        "git@github.com:bobmatnyc/mcp-a-protocol.git",
+    ] {
+        let bare = classify_bare(spec)
+            .unwrap_or_else(|| panic!("'{spec}' is a repo shape, not a typo"))
+            .unwrap_or_else(|e| panic!("'{spec}' must resolve: {e}"));
+        assert_eq!(
+            bare,
+            classify_run_target(spec).expect("tm run accepts it too"),
+            "'{spec}' must mean the same thing bare as it does after `tm run`"
+        );
+        assert!(matches!(bare, RunTarget::Repo { .. }));
+    }
+}
+
+/// THE GATE: anything that is not repo-shaped declines, and declines QUIETLY.
+///
+/// Why: `Command::External` catches subcommand typos as well as URLs. `None`
+/// is what hands a typo back to clap's usage error; a `Some(Err(..))` here
+/// would replace "did you mean status?" with a repository complaint, and a
+/// `Some(Ok(Alias(..)))` would turn it into a registry lookup for an alias
+/// nobody registered. A relative path declines for the same reason — clap's
+/// usage error names the real problem better than a clone attempt would.
+/// Test: itself.
+#[test]
+fn classify_bare_declines_subcommand_typos() {
+    for not_a_repo in [
+        "statuss",
+        "sessionz",
+        "instal",
+        "notacommand",
+        "",
+        "   ",
+        "./some/dir",
+        "../sibling",
+    ] {
+        assert!(
+            classify_bare(not_a_repo).is_none(),
+            "'{not_a_repo}' must fall through to the usage-error path, not become a target"
+        );
+    }
+}
+
+/// A repo-shaped token that names no repo keeps `resolved_url`'s message.
+///
+/// Why: `https://example.com/` is a URL, so it is not a typo and the usage
+/// error would be the wrong answer. The remedy is the one `tm register`
+/// already writes, inherited rather than restated.
+/// Test: itself.
+#[test]
+fn classify_bare_surfaces_resolved_url_errors() {
+    for (bad, expected) in [
+        ("https://example.com/", "names a host"),
+        (
+            "https://github.com/bobmatnyc/trusty-tools/issues",
+            "points inside a repository",
+        ),
+    ] {
+        let err = classify_bare(bad)
+            .unwrap_or_else(|| panic!("'{bad}' is repo-SHAPED, so it is never the typo path"))
+            .expect_err("but it does not name a repository");
+        assert!(
+            err.to_string().contains(expected),
+            "rejection of '{bad}' must say '{expected}', got: {err}"
+        );
+    }
+}
+
 /// An empty or whitespace-only target names nothing and must say so.
 ///
 /// Test: itself.
