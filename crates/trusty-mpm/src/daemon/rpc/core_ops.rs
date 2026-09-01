@@ -89,10 +89,20 @@ pub async fn doctor(
 /// Recently captured errors from every daemon store (`GET /api/v1/errors`,
 /// `mpm.errors.list`).
 ///
+/// Why the base comes from `state` (#6505): the ambient
+/// [`bug_report::aggregate_errors`] re-resolves the data directory on every
+/// call, and that resolution reads a process-global variable other tests move.
+/// Two calls of this body could therefore read two different directories, which
+/// is exactly what the parity test compares.
 /// Test: `parity_errors_agrees_across_transports`.
-pub fn list_errors(_state: &Arc<DaemonState>, query: ErrorsQuery) -> ErrorsResponse {
+pub fn list_errors(state: &Arc<DaemonState>, query: ErrorsQuery) -> ErrorsResponse {
     let limit = query.limit.unwrap_or(20).min(100) as usize;
-    let errors = bug_report::aggregate_errors(limit);
+    let errors = match state.error_store_base() {
+        Some(base) => {
+            bug_report::aggregate_errors_from_paths(&bug_report::store_paths_under(base), limit)
+        }
+        None => bug_report::aggregate_errors(limit),
+    };
     let summaries: Vec<ErrorSummary> = errors
         .iter()
         .map(|e| ErrorSummary {

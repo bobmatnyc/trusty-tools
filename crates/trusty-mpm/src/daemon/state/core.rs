@@ -186,6 +186,22 @@ pub struct DaemonState {
     /// What: the framework root, the directory `pairing.json` lives in.
     /// Test: `pairing_persists_to_disk`.
     pub(super) framework_root: PathBuf,
+    /// The base the captured-error stores are read from, when this daemon must
+    /// not resolve them from process-global state (#6505).
+    ///
+    /// Why: `GET /api/v1/errors` and `mpm.errors.list` aggregate
+    /// `<data_dir>/<app>/errors.jsonl` for four daemons, and that `data_dir`
+    /// resolution reads `TRUSTY_DATA_DIR_OVERRIDE` on every call. Tests in this
+    /// crate's binary set and clear that variable, so two calls a few
+    /// milliseconds apart need not read the same directory — which is how
+    /// `parity_errors_agrees_across_transports` saw five errors over HTTP and
+    /// none over the socket. Pinning the base at construction makes both
+    /// transports read one directory.
+    /// What: `None` on [`Self::new`] / [`Self::with_root`], which keep the OS
+    /// data-directory resolution unchanged; `Some(root)` under
+    /// [`Self::with_paths`], whose whole purpose is a temp-rooted daemon.
+    /// Test: `parity_errors_agrees_across_transports`.
+    pub(super) error_store_base: Option<PathBuf>,
     /// Broadcast channel for live hook events.
     ///
     /// Why: the GUI and other real-time consumers subscribe to a Server-Sent
@@ -499,6 +515,8 @@ impl DaemonState {
             paired_chat_id: Mutex::new(paired),
             pair_code: Mutex::new(None),
             framework_root: root,
+            // Production keeps the OS data-directory resolution; see the field doc.
+            error_store_base: None,
             event_tx,
             managed_sessions: tokio::sync::OnceCell::new(),
             activity_monitor: std::sync::OnceLock::new(),
@@ -573,6 +591,9 @@ impl DaemonState {
             )),
             paired_chat_id: Mutex::new(paired),
             pair_code: Mutex::new(None),
+            // #6505: a temp-rooted daemon reads its error stores under that same
+            // root, so neither transport re-resolves the process data directory.
+            error_store_base: Some(framework_root.clone()),
             framework_root,
             event_tx,
             managed_sessions: tokio::sync::OnceCell::new(),
@@ -605,6 +626,20 @@ impl DaemonState {
     /// `with_root` a tempdir and asserts the handler reads it.
     pub fn framework_root(&self) -> &std::path::Path {
         &self.framework_root
+    }
+
+    /// The base this daemon reads captured-error stores from, when one is
+    /// pinned (#6505).
+    ///
+    /// Why: see [`Self::error_store_base`] — `core_ops::list_errors` must resolve
+    /// the four store paths the same way on both transports, and re-reading the
+    /// process data directory per call does not guarantee that.
+    /// What: `Some` only for a daemon built with [`Self::with_paths`]; `None`
+    /// means "resolve the OS data directory", the production behaviour.
+    /// Test: `parity_errors_agrees_across_transports`.
+    #[must_use]
+    pub fn error_store_base(&self) -> Option<&std::path::Path> {
+        self.error_store_base.as_deref()
     }
 
     /// The idle-park auto-nudge ledger (#2621).

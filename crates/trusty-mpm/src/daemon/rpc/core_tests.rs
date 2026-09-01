@@ -47,6 +47,7 @@ use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tower::ServiceExt;
+use trusty_common::error_capture::CapturedError;
 use trusty_common::uds::server::{
     CODE_INTERNAL_ERROR, CODE_INVALID_PARAMS, CODE_METHOD_NOT_FOUND, RpcResponse, RpcRouter,
 };
@@ -54,6 +55,7 @@ use trusty_common::uds::server::{
 use super::{METHODS, register};
 use crate::core::paths::FrameworkPaths;
 use crate::daemon::api;
+use crate::daemon::bug_report;
 use crate::daemon::error::{CODE_NOT_FOUND, CODE_UNAVAILABLE};
 use crate::daemon::state::DaemonState;
 
@@ -285,17 +287,88 @@ async fn parity_overseer_agrees_across_transports() {
     assert_same("mpm.overseer", body, result, &[]);
 }
 
+/// One captured error written into the hermetic daemon's own store, returning
+/// its fingerprint.
+///
+/// Why (#6505): without a store it controls, the errors parity case compares
+/// whatever the developer's real `errors.jsonl` happened to hold at each of its
+/// two reads — a value another test could change between them. Seeding one
+/// record makes the expected answer a constant, and makes a regression of the
+/// [`DaemonState::error_store_base`] seam visible: a body that went back to the
+/// ambient data directory would not find this fingerprint.
+/// What: writes a single JSONL line to the `trusty-mpm` store under the state's
+/// pinned base, which for [`hermetic`] is the temp framework root.
+fn seed_one_error(state: &Arc<DaemonState>) -> String {
+    let base = state
+        .error_store_base()
+        .expect("a hermetic daemon must pin its error-store base");
+    let path = bug_report::store_paths_under(base)
+        .into_iter()
+        .find(|p| p.ends_with("trusty-mpm/errors.jsonl"))
+        .expect("the aggregated store set must include this crate's own daemon");
+    std::fs::create_dir_all(path.parent().expect("the store path has a parent"))
+        .expect("create the hermetic store directory");
+
+    let record = CapturedError {
+        timestamp_secs: 1_700_000_000,
+        crate_target: "trusty_mpm::daemon::rpc".to_string(),
+        crate_version: "0.0.0-test".to_string(),
+        message: "seeded parity record".to_string(),
+        fields: String::new(),
+        file: Some("src/daemon/rpc/core_tests.rs".to_string()),
+        line: Some(1),
+        os: "test-os".to_string(),
+        arch: "test-arch".to_string(),
+        fingerprint: "6505000000000000000000000000000000000000000000000000000000000000".to_string(),
+    };
+    std::fs::write(
+        &path,
+        format!(
+            "{}\n",
+            serde_json::to_string(&record).expect("encode record")
+        ),
+    )
+    .expect("write the hermetic error store");
+    record.fingerprint
+}
+
 /// Why the explicit `?limit=`: the HTTP route defaults an absent `limit` to 20
 /// inside the shared body, and passing it on both sides proves the ARGUMENT
 /// survives the transport change rather than only the default.
+///
+/// Why no `#[serial]` despite the sibling doctor case carrying one (#6505): this
+/// body used to read `<data_dir>/<app>/errors.jsonl`, resolved through the
+/// process-global `TRUSTY_DATA_DIR_OVERRIDE` on EVERY call, so a test that set
+/// or cleared that variable between the two transport calls made them read
+/// different directories — observed as `total: 5` over HTTP and `total: 0` over
+/// the socket. The daemon now pins its store base at construction
+/// ([`DaemonState::error_store_base`]), so both calls read the one temp
+/// directory this test seeded and no process state can move it. A seam, not a
+/// lock: `#[serial]` would only have serialised this binary's own tests, and
+/// nextest gives every test its own process where that attribute serialises
+/// nothing (#4162).
 /// Test: this function IS the test.
 #[tokio::test]
 async fn parity_errors_agrees_across_transports() {
     let (state, _dir) = hermetic();
+    let fingerprint = seed_one_error(&state);
+
     let (status, body) = http(&state, "GET", "/api/v1/errors?limit=5", None).await;
     assert_eq!(status, StatusCode::OK);
     let result = rpc_ok(&rpc_router(&state), "mpm.errors.list", json!({"limit": 5})).await;
     assert_eq!(body["limit"], json!(5), "the argument must reach the body");
+    // The seeded record, and only it: reading the ambient data directory instead
+    // would report the operator's real errors (or none of them).
+    assert_eq!(
+        body["total"],
+        json!(1),
+        "the hermetic store holds one: {body}"
+    );
+    assert_eq!(
+        body["errors"][0]["fingerprint"],
+        json!(fingerprint),
+        "{body}"
+    );
     assert_same("mpm.errors.list", body, result, &[]);
 }
 
