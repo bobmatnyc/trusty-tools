@@ -224,6 +224,13 @@ trusty-common = { workspace = true, features = [
     # `catchup` → `memory-rpc` → `uds`; listed explicitly so a future change to
     # the catch-up engine's deps cannot silently remove the daemon's transport.
     "uds",
+    # #6535: the cloud log drain core (`trusty_common::log_drain`) — the
+    # destination adapters, URI parser, manifest, and `run_once`. The daemon's
+    # `log_drain_loop` scheduler and the `log_drain` doctor row are the only
+    # consumers. Unconditional rather than feature-gated here so the scheduler
+    # compiles into every daemon build; the drain itself stays OFF unless
+    # `log_drain.enabled` is set in config.
+    "log-drain",
 ] }
 # `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
 # `console-metrics` enables `trusty_common::console_metrics` (used unconditionally by

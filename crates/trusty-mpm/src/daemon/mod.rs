@@ -27,6 +27,8 @@ pub mod idle_nudge;
 pub mod idle_reaper;
 pub mod llm_overseer;
 pub mod lock;
+/// The cloud log-drain scheduler (#6535, Phase 3 of #6533).
+pub mod log_drain;
 pub mod managed_routes;
 pub mod manager;
 pub mod mcp_backend;
@@ -224,6 +226,35 @@ pub async fn serve_with_shutdown(
         tokio::spawn(orphan_gc_loop(Arc::clone(&state), cancel.child_token()));
     } else {
         info!("orphan-GC disabled via TRUSTY_MPM_ORPHAN_GC");
+    }
+
+    // Cloud log drain (#6535): OFF unless `log_drain.enabled` is true, so the
+    // default host spawns nothing. A malformed section is reported here and
+    // recorded for the `log_drain` doctor row rather than silently skipped —
+    // an operator who configured a drain must not have to guess why no bytes
+    // moved. The loop never crashes the daemon: a failed pass warns and retries
+    // on the next tick.
+    {
+        let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+        let framework_root = crate::core::paths::FrameworkPaths::default().root;
+        let tt_config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
+        match log_drain::should_spawn(&tt_config, &home) {
+            Ok(true) => {
+                tokio::spawn(log_drain::log_drain_loop(
+                    framework_root,
+                    home,
+                    cancel.child_token(),
+                ));
+            }
+            Ok(false) => info!("log drain disabled (no `log_drain:` section, or enabled: false)"),
+            Err(reason) => {
+                tracing::error!("log drain NOT started — invalid `log_drain:` config: {reason}");
+                // Persist the verdict so `tm doctor` reports it even though no
+                // pass ever ran.
+                let dir = log_drain::state_dir(&framework_root);
+                log_drain::save_status(&dir, &log_drain::config_error_status(&reason));
+            }
+        }
     }
 
     // Run inproject-hygiene for all managed base clones (#1709):
