@@ -410,7 +410,22 @@ aws-credential-types   = { version = "1.2" }
 # extra TLS stack out of the graph — the drain only ever talks S3 or local disk.
 # `fs` is re-enabled explicitly because dropping the defaults also drops
 # `LocalFileSystem`, which the `file://` destination and every hermetic test need.
-object_store = { version = "0.14", default-features = false, features = ["aws", "fs"] }
+#
+# PINNED TO 0.13, NOT 0.14, TO KEEP THE DUPLICATE RATCHET AT ITS BASELINE.
+# 0.14.0 swapped three transitive pins at once, and each one lands as a second
+# copy of a crate the workspace already resolves:
+#   reqwest ^0.12 -> ^0.13   (the whole workspace, async-openai, teloxide-core,
+#                             hf-hub and reqwest-eventsource are all on 0.12)
+#   md-5    ^0.10 -> ^0.11   (lopdf holds 0.10)
+#   crc-fast (new)           (pulls spin 0.10; ring holds spin 0.9)
+# All three are semver-incompatible majors, so no `cargo update --precise` can
+# unify them — only the object_store major chooses. 0.13.2 needs none of them,
+# and the drain uses no 0.14-only API: AmazonS3Builder, AwsCredential,
+# LocalFileSystem, path::Path, ObjectMeta, CredentialProvider and the
+# NotFound/Unauthenticated variants all predate it. Staying on 0.13 also keeps a
+# second reqwest/hyper/rustls stack out of every binary. Revisit when the
+# workspace itself moves to reqwest 0.13. See #6549.
+object_store = { version = "0.13", default-features = false, features = ["aws", "fs"] }
 # Cheaply-cloneable reference-counted byte buffer. `object_store` already
 # resolves it (its `PutPayload` is built from `Bytes`), so declaring it direct
 # adds no new crate to the lockfile — it only lets `LogDestination::put` name

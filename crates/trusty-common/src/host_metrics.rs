@@ -8,11 +8,13 @@
 //!      host-sampling capability lives here once rather than being reinvented in
 //!      trusty-console, so any future consumer (a second dashboard, a headless
 //!      health probe) reuses the same typed shapes.
-//! What: [`HostSampler`] wraps a `sysinfo::System` plus its `Networks`/`Disks`
-//!      handles and, on each [`HostSampler::sample`], returns a [`HostMetrics`]
-//!      snapshot. Health thresholds ([`HostThresholds`]) are PROVISIONAL — see
-//!      the type's docs; they need an owner ruling before any alarm is wired to
-//!      them.
+//! What: [`HostSampler`](crate::host_metrics::HostSampler) wraps a
+//!      `sysinfo::System` plus its `Networks`/`Disks` handles and, on each
+//!      [`HostSampler::sample`](crate::host_metrics::HostSampler::sample),
+//!      returns a [`HostMetrics`](crate::host_metrics::HostMetrics) snapshot.
+//!      Health thresholds ([`HostThresholds`](crate::host_metrics::HostThresholds))
+//!      are PROVISIONAL — see the type's docs; they need an owner ruling before
+//!      any alarm is wired to them.
 //! Test: the inline `tests` module — `sampler_produces_plausible_snapshot`,
 //!      `pressure_classification_boundaries`, `thresholds_are_configurable`,
 //!      and the serde round-trip.
