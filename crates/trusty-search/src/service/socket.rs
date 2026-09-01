@@ -120,6 +120,12 @@ pub const METHODS: &[&str] = &[
     writes::METHOD_INDEX_FILE_REMOVE,
     writes::METHOD_INDEX_REINDEX,
     writes::METHOD_GRAPH_INGEST,
+    // #6524 — the embedding pause pair and its file-change stream. Socket-only:
+    // none of the three has an HTTP route, because #6285 is retiring the
+    // listener a new one would be added to.
+    writes::METHOD_INDEX_PAUSE_EMBEDDING,
+    writes::METHOD_INDEX_RESUME_EMBEDDING,
+    streams::METHOD_INDEX_FILE_EVENTS,
     // #6285 slice 5 — the streams. Registered in a SEPARATE router table from
     // the twenty-three above: a name is streaming or unary, never both, so
     // `rpc_router_registers_every_documented_method` compares this array

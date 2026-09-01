@@ -224,6 +224,8 @@ impl WatcherManager {
             handle.id.clone(),
             Arc::clone(&handle.indexer),
             indexed_files,
+            // #6524: the watcher populates this index's file-change feed.
+            Arc::clone(&handle.file_events),
         ) {
             Ok(task) => task,
             Err(e) => {

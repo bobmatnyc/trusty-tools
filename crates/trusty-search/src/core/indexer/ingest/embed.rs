@@ -102,11 +102,20 @@ impl CodeIndexer {
     /// mode). `progress_tx`: when `Some`, a `(chunks_in_wave, wave_embed_ms)` pair
     /// is sent after each wave of ≥ `PROGRESS_CHUNK_INTERVAL` chunks so callers
     /// can emit fine-grained progress events without polling.
+    /// `pause`: when `Some` and paused, the loop stops at the next WAVE
+    /// boundary and leaves the remaining slots `None` (#6524). It does NOT park
+    /// here — the caller holds the process-wide background permit and this
+    /// index's teardown guard, so parking would stall every other index's
+    /// catch-up and any `DELETE` on this one. The caller commits the embedded
+    /// prefix and re-queues the rest.
     /// Test: `test_index_files_batch_*`. Order: `tests/multiflight.rs`.
+    /// Pause: `a_paused_pass_stops_early_and_commits_what_it_embedded` in
+    /// `service::reindex::embed_pause_tests`.
     pub(crate) async fn embed_chunks_in_batches(
         &self,
         chunks: &[RawChunk],
         progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<(usize, u64)>>,
+        pause: Option<&crate::core::embed_pause::EmbeddingPause>,
     ) -> Result<Vec<Option<Vec<f32>>>> {
         use futures::StreamExt as _;
 
@@ -155,6 +164,17 @@ impl CodeIndexer {
         tracing::debug!(chunk_total, batch_size, inflight, "embed_chunks_in_batches");
         let mut batch_start = 0usize;
         while batch_start < chunk_total {
+            // #6524: stop at this wave boundary while embedding is paused.
+            if pause.is_some_and(|p| p.is_paused()) {
+                tracing::info!(
+                    index_id = %self.index_id,
+                    embedded = batch_start,
+                    chunk_total,
+                    "embed pass parked by an operator pause — committing what is done \
+                     and re-queueing the remainder (#6524)",
+                );
+                break;
+            }
             let wave_start = batch_start;
             let mut wave_sub_batches: Vec<(usize, Vec<String>)> = Vec::with_capacity(inflight);
             let mut wave_pos = batch_start;

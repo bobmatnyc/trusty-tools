@@ -108,6 +108,11 @@ pub const METHOD_INDEX_FILE_REMOVE: &str = "search.index.file.remove";
 pub const METHOD_INDEX_REINDEX: &str = "search.index.reindex";
 /// `POST /indexes/{id}/graph` — ingest one producer's contributed graph.
 pub const METHOD_GRAPH_INGEST: &str = "search.graph.ingest";
+/// Park this index's embedding stage at its next batch boundary (#6524).
+/// Socket-only — this pair has no HTTP twin.
+pub const METHOD_INDEX_PAUSE_EMBEDDING: &str = "search.index.pause_embedding";
+/// Let this index's embedding stage continue (#6524). Socket-only.
+pub const METHOD_INDEX_RESUME_EMBEDDING: &str = "search.index.resume_embedding";
 
 /// Every method this slice registers, in registration order.
 ///
@@ -126,6 +131,9 @@ pub const METHODS: &[&str] = &[
     METHOD_INDEX_FILE_REMOVE,
     METHOD_INDEX_REINDEX,
     METHOD_GRAPH_INGEST,
+    // #6524 — the embedding pause pair.
+    METHOD_INDEX_PAUSE_EMBEDDING,
+    METHOD_INDEX_RESUME_EMBEDDING,
 ];
 
 /// An index-scoped write whose HTTP form takes a request BODY.
@@ -265,9 +273,11 @@ pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
         }};
     }
 
+    use super::reads::IndexRef;
     use crate::service::server::{
         create_index_report, delete_index_report, index_file_report, ingest_graph_report,
-        reindex_report, relocate_index_report, remove_file_report,
+        pause_embedding_report, reindex_report, relocate_index_report, remove_file_report,
+        resume_embedding_report,
     };
 
     let r = router;
@@ -311,6 +321,18 @@ pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
     // ---- reindex trigger (the SSE stream is slice 5) ------------------------
     let r = bulk_write!(r, METHOD_INDEX_REINDEX, ReindexParams, |s, p| {
         reindex_report(&s, &p.index_id, p.body).await
+    });
+
+    // ---- embedding pause/resume (#6524) -------------------------------------
+    // Deliberately in the `free` lane, not `bulk_limited`: these flip one atomic
+    // and return. Putting them behind the admission limiter would let a
+    // saturated index refuse the very call that relieves it, which is the
+    // opposite of what the control is for.
+    let r = free_write!(r, METHOD_INDEX_PAUSE_EMBEDDING, IndexRef, |s, p| {
+        pause_embedding_report(&s, &p.index_id)
+    });
+    let r = free_write!(r, METHOD_INDEX_RESUME_EMBEDDING, IndexRef, |s, p| {
+        resume_embedding_report(&s, &p.index_id)
     });
 
     // ---- contributed-graph ingest, the one TYPED report on this surface -----

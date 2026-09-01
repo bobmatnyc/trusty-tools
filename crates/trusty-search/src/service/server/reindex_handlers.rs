@@ -324,6 +324,9 @@ pub(crate) async fn reindex_report(
                     // Preserve walk diagnostics across root-path override — a
                     // subsequent reindex will refresh the snapshot.
                     walk_diagnostics: Arc::clone(&handle.walk_diagnostics),
+                    // #6524: a rebuild must not drop an operator's pause or the event feed.
+                    embedding_pause: Arc::clone(&handle.embedding_pause),
+                    file_events: Arc::clone(&handle.file_events),
                 };
                 // Issue #3995 round 5 (CRITICAL): snapshot the cold-store
                 // entry (if any) parked under `index_id` BEFORE registering

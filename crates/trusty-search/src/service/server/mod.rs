@@ -19,6 +19,10 @@ mod contrib_graph;
 mod degraded;
 // #6380: the delete-time root-path re-check `search.index.delete` applies.
 mod delete_guard;
+mod embedding_pause;
+#[cfg(test)]
+#[path = "embedding_pause_tests.rs"]
+mod embedding_pause_tests;
 mod facet_route;
 mod fanout;
 mod files;
@@ -226,6 +230,7 @@ pub(crate) use typeahead::{typeahead_report, TypeaheadParams};
 // both transports render, so a socket write cannot land where the HTTP route
 // would have refused it — nor report a landing that did not happen.
 pub(crate) use contrib_graph::{ingest_graph_report, IngestGraphRequest};
+pub(crate) use embedding_pause::{pause_embedding_report, resume_embedding_report};
 pub(crate) use files::{index_file_report, remove_file_report};
 pub(crate) use indexes::create_index_report;
 pub(crate) use indexes_relocate::{relocate_index_report, RelocateIndexRequest};

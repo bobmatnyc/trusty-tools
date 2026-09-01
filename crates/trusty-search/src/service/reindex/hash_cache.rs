@@ -239,6 +239,8 @@ mod tests {
             walk_diagnostics: Arc::new(RwLock::new(
                 crate::core::registry::WalkDiagnostics::default(),
             )),
+            embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
+            file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
         }
     }
 
@@ -436,6 +438,8 @@ mod tests {
             walk_diagnostics: Arc::new(RwLock::new(
                 crate::core::registry::WalkDiagnostics::default(),
             )),
+            embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
+            file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
         };
 
         // Load hashes into a fresh map — this is what `spawn_reindex` does.

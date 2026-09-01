@@ -104,7 +104,7 @@ async fn catchup_embeds_route_through_background_lane_when_pool_installed() {
         raw("c3", "src/c.rs", "fn c() {}"),
     ];
     let embeddings = indexer
-        .embed_chunks_in_batches(&chunks, None)
+        .embed_chunks_in_batches(&chunks, None, None)
         .await
         .expect("embed_chunks_in_batches must not error");
     assert_eq!(embeddings.len(), chunks.len());
@@ -130,7 +130,7 @@ async fn catchup_embeds_fall_back_to_direct_embedder_without_pool() {
         raw("c2", "src/b.rs", "fn b() {}"),
     ];
     let embeddings = indexer
-        .embed_chunks_in_batches(&chunks, None)
+        .embed_chunks_in_batches(&chunks, None, None)
         .await
         .expect("embed_chunks_in_batches must not error");
     assert_eq!(embeddings.len(), chunks.len());
@@ -196,7 +196,7 @@ async fn both_call_sites_dispatch_to_the_same_pool_instance() {
         .expect("embed_query must not error");
     let chunks = vec![raw("c1", "src/a.rs", "fn a() {}")];
     indexer
-        .embed_chunks_in_batches(&chunks, None)
+        .embed_chunks_in_batches(&chunks, None, None)
         .await
         .expect("embed_chunks_in_batches must not error");
 
@@ -393,7 +393,7 @@ async fn probe_catchup_wave_peak_concurrency(workers: usize) -> usize {
         .map(|i| raw(&format!("c{i}"), &format!("src/f{i}.rs"), "fn f() {}"))
         .collect();
     indexer
-        .embed_chunks_in_batches(&chunks, None)
+        .embed_chunks_in_batches(&chunks, None, None)
         .await
         .expect("embed_chunks_in_batches must not error");
 

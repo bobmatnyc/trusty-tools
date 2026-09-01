@@ -310,7 +310,11 @@ pub(crate) async fn index_status_report(
     // array. The legacy `status` field stays at the top level, but
     // integrators wanting "is the vector lane ready" should consult
     // `search_capabilities`.
-    let stages_snapshot = handle.stages.read().await.clone();
+    let mut stages_snapshot = handle.stages.read().await.clone();
+    // #6524: the pause flag lives on the handle, not inside `stages` — one
+    // owner, projected here at read time, so no writer has to keep two copies
+    // in step. Only `semantic` is pausable, so the other two stay `false`.
+    stages_snapshot.semantic.paused = handle.embedding_pause.is_paused();
     let search_capabilities = stages_snapshot.search_capabilities();
     // Issue #100: surface budget-truncation so callers can flag indexes that
     // hit the `TRUSTY_MAX_CHUNKS` cap during the last reindex. Defaults to

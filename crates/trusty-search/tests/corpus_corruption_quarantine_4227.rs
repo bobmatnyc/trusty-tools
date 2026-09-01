@@ -264,6 +264,7 @@ async fn corrupt_corpus_refuses_watcher_writes_and_chunk_count_stays_zero() {
         IndexId::new("corrupt-4227-watch"),
         Arc::clone(&corrupt),
         IndexedFiles::new(),
+        Arc::new(trusty_search::core::file_events::FileEventFeed::new()),
     )
     .expect("spawn corrupt watch loop");
     let _healthy_watch = spawn_watch_loop(
@@ -271,6 +272,7 @@ async fn corrupt_corpus_refuses_watcher_writes_and_chunk_count_stays_zero() {
         IndexId::new("healthy-4227"),
         Arc::clone(&healthy),
         IndexedFiles::new(),
+        Arc::new(trusty_search::core::file_events::FileEventFeed::new()),
     )
     .expect("spawn healthy watch loop");
 
