@@ -24,12 +24,13 @@
 //! not a stronger token. Do not describe this module as providing more than
 //! it does.
 //!
-//! What: [`token_path`] resolves `{resolve_data_dir(app)}/auth_token`;
-//! [`ensure_token`] is the SERVER side (read the existing token, or mint and
-//! persist one at `0600`); [`read_token`] is the CLIENT side (best-effort —
-//! `None` means "no credential available", never a hard error);
-//! [`credentials_match`] is the constant-time comparison every verifier must
-//! use instead of `==`.
+//! What: [`crate::daemon_token::token_path`] resolves
+//! `{resolve_data_dir(app)}/auth_token`; [`crate::daemon_token::ensure_token`]
+//! is the SERVER side (read the existing token, or mint and persist one at
+//! `0600`); [`crate::daemon_token::read_token`] is the CLIENT side (best-effort
+//! — `None` means "no credential available", never a hard error);
+//! [`crate::daemon_token::credentials_match`] is the constant-time comparison
+//! every verifier must use instead of `==`.
 //!
 //! Test: `daemon_token_tests::*` — mint strength, round trip, `0600` mode,
 //! rotation on a too-weak stored value, constant-time equality.
