@@ -691,12 +691,16 @@ pub use slug::slugify_string;
 /// What: Exposes [`index_id::derive_index_id`], [`index_id::resolve_project_root`],
 /// [`index_id::find_git_root`], and [`index_id::identifies_same_path`] — the one
 /// implementation of "do these two paths name the same directory tree?" that
-/// both registration guards route through.
+/// both registration guards route through — plus
+/// [`index_id::refuse_unindexable_root`], the one implementation of "may this
+/// root become an index at all?" that both DERIVATION sites route through
+/// (#6550).
 /// Test: `cargo test -p trusty-common --features unconditional-only --
 /// index_id::tests`.
 pub mod index_id;
 pub use index_id::{
-    derive_checkout_index_id, derive_index_id, find_git_root, identifies_same_path,
+    IndexRootRefusal, derive_checkout_index_id, derive_index_id, find_git_root,
+    identifies_same_path, refuse_unindexable_root, refuse_unindexable_root_against,
     resolve_project_root,
 };
 

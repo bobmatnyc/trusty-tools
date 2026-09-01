@@ -59,7 +59,10 @@
 //!
 //! Test: `create_rejected_by_the_daemon_withholds_the_pinnable_id`,
 //! `ensure_project_indexed_withholds_id_when_nothing_was_registered`,
-//! `ensure_project_indexed_none_for_root`, the `index_is_fresh_*` predicate
+//! `ensure_project_indexed_none_for_root`,
+//! `ensure_project_indexed_refuses_the_real_home_directory`,
+//! `index_files_inner_refuses_the_real_home_directory`,
+//! the `index_is_fresh_*` predicate
 //! tests, the `index_files_inner_*` / `relative_index_path_*` /
 //! `index_file_request_body_*` tests, and the incremental-hardening tests
 //! `retry_backoff_is_bounded_and_increasing` /
@@ -221,6 +224,10 @@ pub enum IndexRegistration {
     /// This is a test process and the write was deliberately suppressed
     /// (#4255). Never a real registration.
     SkippedUnderTest,
+    /// The resolved root is a directory that names no project — the operator's
+    /// home directory or the filesystem root (#6550). Nothing was sent, and
+    /// `index_id` is `None` because the derived basename would have been wrong.
+    RefusedUnindexableRoot(crate::IndexRootRefusal),
 }
 
 /// The derived index id plus what actually happened daemon-side (#5065 review).
@@ -302,19 +309,41 @@ fn pinnable_index_id(report: EnsureIndexReport) -> Option<String> {
 /// silent no-op against a down daemon — see [`IndexRegistration`]. This is the
 /// ONE implementation; the two id-only entry points delegate here, so no third
 /// copy of the register-then-populate sequence exists.
-/// What: resolves the git-root, derives the id, and — when the id is non-empty,
-/// this is not a test process, and a daemon address resolves — issues the
-/// find-or-create `POST /indexes` followed by the freshness-gated reindex
-/// trigger. Returns the id in every case except empty derivation, alongside the
-/// registration outcome. Still fail-open: no step propagates an error.
+/// What: resolves the git-root, refuses an unindexable root (#6550), derives
+/// the id, and — when the id is non-empty, this is not a test process, and a
+/// daemon address resolves — issues the find-or-create `POST /indexes` followed
+/// by the freshness-gated reindex trigger. Returns the id in every case except
+/// a refusal or empty derivation, alongside the registration outcome. Still
+/// fail-open: no step propagates an error.
+///
+/// The refusal is the one place this function is deliberately NOT best-effort.
+/// `resolve_project_root` falls back to the start path when nothing above it is
+/// a git repository, so a caller that passed `$HOME` got index `masa` — a
+/// plausible id naming the operator, which a later reindex then repointed at a
+/// real repository (#6550). Registering the wrong index is worse than
+/// registering none, so the root is refused and no id comes back.
 /// Test: `reporting_says_skipped_under_test_harness`,
 /// `reporting_says_daemon_unreachable_when_no_daemon_is_discoverable`,
-/// `ensure_project_indexed_none_for_root`.
+/// `ensure_project_indexed_none_for_root`,
+/// `ensure_project_indexed_refuses_the_real_home_directory`.
 pub fn ensure_project_indexed_reporting(
     project_root: &Path,
     opts: IndexOptions,
 ) -> EnsureIndexReport {
     let root = crate::resolve_project_root(project_root);
+    // #6550: a basename is a plausible id for a directory that names no
+    // project, so refuse before deriving one rather than registering it.
+    if let Some(refusal) = crate::refuse_unindexable_root(&root) {
+        tracing::error!(
+            "refusing to register a trusty-search index for {}: it is {refusal}. \
+             Pass the project directory itself (see #6550).",
+            root.display()
+        );
+        return EnsureIndexReport {
+            index_id: None,
+            registration: IndexRegistration::RefusedUnindexableRoot(refusal),
+        };
+    }
     let index_id = crate::derive_index_id(&root);
     if index_id.trim().is_empty() {
         tracing::warn!(
@@ -633,12 +662,23 @@ fn stop_batch_for_budget(
 /// had not reached are abandoned, never retried from here.
 /// Test: `index_files_inner_is_noop_for_empty_paths`,
 /// `index_files_inner_skips_when_index_id_empty`,
-/// `index_files_inner_skips_gracefully_when_daemon_down`.
+/// `index_files_inner_skips_gracefully_when_daemon_down`,
+/// `index_files_inner_refuses_the_real_home_directory`.
 fn index_files_inner(project_root: &Path, paths: &[std::path::PathBuf]) {
     if paths.is_empty() {
         return;
     }
     let root = crate::resolve_project_root(project_root);
+    // #6550: same derivation as the registration path, so the same refusal —
+    // otherwise this posts file content into an index named after the operator.
+    if let Some(refusal) = crate::refuse_unindexable_root(&root) {
+        tracing::error!(
+            "refusing an incremental trusty-search index update for {}: it is {refusal} \
+             (see #6550)",
+            root.display()
+        );
+        return;
+    }
     let index_id = crate::derive_index_id(&root);
     if index_id.trim().is_empty() {
         tracing::debug!(

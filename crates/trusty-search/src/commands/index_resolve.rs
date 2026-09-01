@@ -10,6 +10,7 @@
 //! and `cargo run -- search foo` from inside this repo (auto-detect path).
 
 use crate::detect::{detect_project, DetectionMethod};
+use anyhow::Result;
 use colored::Colorize;
 
 /// Resolve the effective index ID: explicit `--index` flag wins, otherwise
@@ -17,17 +18,22 @@ use colored::Colorize;
 ///
 /// Why: every project-scoped command needs the same precedence rules.
 /// What: returns `(index_id, warned)` where `warned` is true when we fell back
-/// to the CWD basename and should print a warning.
+/// to the CWD basename and should print a warning. Errors when detection
+/// refuses the resolved root (#6550) — running from `$HOME` derived an index id
+/// naming the operator, and no command should proceed against that. An explicit
+/// `--index` is checked first and never reaches detection, so it stays the way
+/// out.
 /// Test: With explicit Some("foo") → returns ("foo", false). With None inside
 /// this repo → returns ("trusty-search", false) (detected via .git).
-pub fn resolve_index(explicit: &Option<String>) -> (String, bool) {
+/// `resolve_index_explicit_wins`, `resolve_index_none_falls_through_to_detection`.
+pub fn resolve_index(explicit: &Option<String>) -> Result<(String, bool)> {
     if let Some(id) = explicit {
-        return (id.clone(), false);
+        return Ok((id.clone(), false));
     }
     let cwd = std::env::current_dir().unwrap_or_default();
-    let ctx = detect_project(&cwd);
+    let ctx = detect_project(&cwd)?;
     let warned = matches!(ctx.detection_method, DetectionMethod::Fallback);
-    (ctx.index_id, warned)
+    Ok((ctx.index_id, warned))
 }
 
 /// Why: Make fallback detection visible so users know to run `init`.
@@ -51,7 +57,7 @@ mod tests {
     #[test]
     fn resolve_index_explicit_wins() {
         let explicit = Some("my-explicit-index".to_string());
-        let (id, warned) = resolve_index(&explicit);
+        let (id, warned) = resolve_index(&explicit).expect("explicit never detects");
         assert_eq!(id, "my-explicit-index");
         assert!(!warned, "explicit --index should never warn");
     }
@@ -61,7 +67,7 @@ mod tests {
         // Even an empty string is preferred over auto-detect: callers are
         // responsible for trimming/validating.
         let explicit = Some(String::new());
-        let (id, warned) = resolve_index(&explicit);
+        let (id, warned) = resolve_index(&explicit).expect("explicit never detects");
         assert_eq!(id, "");
         assert!(!warned);
     }
@@ -70,7 +76,7 @@ mod tests {
     fn resolve_index_none_falls_through_to_detection() {
         // We can't assert the exact id (depends on CWD when test runs) but we
         // can assert the contract: returns a non-empty index_id, doesn't panic.
-        let (id, _warned) = resolve_index(&None);
+        let (id, _warned) = resolve_index(&None).expect("the test CWD is a real project");
         assert!(
             !id.is_empty(),
             "auto-detected index_id should never be empty"

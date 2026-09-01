@@ -14,7 +14,7 @@ pub async fn handle_remove(
     explicit_index: &Option<String>,
     file: std::path::PathBuf,
 ) -> Result<()> {
-    let (index_id, warned) = resolve_index(explicit_index);
+    let (index_id, warned) = resolve_index(explicit_index)?;
     print_index_header(&index_id, warned);
     let base = daemon_base_url();
     crate::commands::daemon_guard::ensure_daemon_running_or_exit(&base).await?;

@@ -180,10 +180,66 @@ fn reporting_says_daemon_unreachable_when_no_daemon_is_discoverable() {
 
 #[test]
 fn ensure_project_indexed_none_for_root() {
-    // Derivation yields an empty id for the filesystem root, so the helper
+    // The filesystem root is refused before derivation (#6550), so the helper
     // returns None without touching the daemon.
     assert_eq!(ensure_project_indexed(Path::new("/"), true), None);
     assert_eq!(ensure_project_indexed(Path::new("/"), false), None);
+    assert_eq!(
+        ensure_project_indexed_reporting(Path::new("/"), IndexOptions::default()).registration,
+        IndexRegistration::RefusedUnindexableRoot(crate::IndexRootRefusal::FilesystemRoot)
+    );
+}
+
+/// #6550, the defect itself: a registration handed `$HOME` derived index
+/// `masa` from the home directory's basename, and a later reindex repointed
+/// that id at a real repository it does not name.
+///
+/// Why: this asserts the guard at the REGISTRATION site, not just the
+/// predicate — the pre-fix code reached `derive_index_id` here and returned a
+/// pinnable id, so this assertion fails against it.
+/// What: calls the real entry point with the real home directory and asserts
+/// no id comes back and the refusal is reported. No daemon is touched: the
+/// refusal precedes both the `#[4255]` harness guard and address discovery.
+/// Test: this test.
+#[test]
+fn ensure_project_indexed_refuses_the_real_home_directory() {
+    let Some(home) = dirs::home_dir() else {
+        panic!("this test needs a resolvable home directory");
+    };
+    // `resolve_project_root` walks UP for a `.git`, so a repository ABOVE the
+    // home directory would resolve elsewhere and the case under test would not
+    // arise. Assert it, rather than skipping, so the test can never pass vacuously.
+    assert_eq!(
+        crate::resolve_project_root(&home),
+        home,
+        "no ancestor of $HOME may be a git repository for this case to exist"
+    );
+
+    let report = ensure_project_indexed_reporting(&home, IndexOptions::default());
+
+    assert_eq!(
+        report.registration,
+        IndexRegistration::RefusedUnindexableRoot(crate::IndexRootRefusal::HomeDirectory)
+    );
+    assert_eq!(
+        report.index_id, None,
+        "the home directory's basename is the wrong id and must not be handed back"
+    );
+    assert_eq!(ensure_project_indexed(&home, false), None);
+    assert_eq!(ensure_project_indexed(&home, true), None);
+}
+
+/// The incremental per-file path derives the same `(root, index_id)` pair, so
+/// it inherits the same refusal (#6550) rather than posting file content into
+/// an index named after the operator.
+#[test]
+fn index_files_inner_refuses_the_real_home_directory() {
+    let Some(home) = dirs::home_dir() else {
+        panic!("this test needs a resolvable home directory");
+    };
+    // Returns without panicking and without any daemon I/O; the guard runs
+    // before the id is derived, so nothing can be posted.
+    index_files_inner(&home, &[PathBuf::from("some/file.rs")]);
 }
 
 /// `index_files_inner` is a true no-op — no filesystem or network I/O —
