@@ -748,13 +748,13 @@ impl CodeIndexer {
     }
 
     /// Count corpus chunks NOT yet embedded (issue #3748 slice A, review
-    /// finding 2) — the real cost [`Self::embed_deferred_chunks`] will pay, as
+    /// finding 2) — the real cost [`Self::embed_deferred_chunks_gated`] will pay, as
     /// opposed to `chunk_count()`'s TOTAL corpus size.
     ///
     /// Why: the deferred-embed catch-up queue (`service::reindex::defer_embed_queue`)
     /// originally keyed its size-ordered priority on `chunk_count()`,
     /// captured once by `finish_reindex` after every reindex — including
-    /// INCREMENTAL ones. But `embed_deferred_chunks` only ever embeds the
+    /// INCREMENTAL ones. But `embed_deferred_chunks_gated` only ever embeds the
     /// chunks the vector store does not already have (its own
     /// `contains_many` filter, see that method's docs) — so an incremental
     /// reindex of a 94k-chunk repo with a single changed chunk sorted as
@@ -771,15 +771,15 @@ impl CodeIndexer {
     /// are already resident — always true immediately after a reindex, the
     /// only caller of this today) and reads only the chunk IDs (`HashMap`
     /// keys — no `RawChunk` content/Vec fields cloned, unlike
-    /// `embed_deferred_chunks`, which legitimately needs the full chunks to
+    /// `embed_deferred_chunks_gated`, which legitimately needs the full chunks to
     /// embed them), runs the SAME single bulk `VectorStore::contains_many`
-    /// check `embed_deferred_chunks` runs, and counts the `false`
+    /// check `embed_deferred_chunks_gated` runs, and counts the `false`
     /// (not-yet-embedded) entries.
     /// Test: `pending_embed_count_matches_delta_not_total_chunk_count`,
     /// `pending_embed_count_equals_total_on_a_cold_index`.
     pub async fn pending_embed_count(&self) -> usize {
         if self.store.is_none() || self.embedder.is_none() {
-            // `embed_deferred_chunks` would short-circuit to `Ok((0, total))`
+            // `embed_deferred_chunks_gated` would short-circuit to `Ok((0, total))`
             // immediately in this case too, so the queue key is moot here —
             // fall back to the plain (non-blocking) chunk count rather than
             // loading/locking the chunk map for a membership check that

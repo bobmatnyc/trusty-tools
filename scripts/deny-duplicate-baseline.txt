@@ -15,5 +15,34 @@
 # versions. `cargo deny check bans` prints the full list and the dependency path
 # to every copy.
 #
+# RAISED 83 -> 84 on 2026-09-01 (#6549, log-drain dependency chain).
+#
+# The pair: quick-xml 0.39 (pulled by object_store) against quick-xml 0.41
+# (pulled by calamine 0.36, plist 1.10, and trusty-search's own direct
+# dependency).
+#
+# Why it cannot unify: 0.39 and 0.41 are semver-incompatible — for a 0.x crate
+# Cargo treats the MINOR as the major — so no `cargo update --precise` can
+# collapse them. Only object_store's major chooses which one it wants, and every
+# choice costs something:
+#
+#   object_store 0.14.1  quick-xml ^0.41 (unified) but reqwest ^0.13, md-5
+#                        ^0.11 and a new crc-fast (-> spin 0.10) — THREE new
+#                        duplicates, since the workspace, async-openai,
+#                        teloxide-core, hf-hub and reqwest-eventsource are all
+#                        on reqwest 0.12, lopdf holds md-5 0.10, and ring holds
+#                        spin 0.9. Count: 86.
+#   object_store 0.13.2  needs none of those three, but wants quick-xml ^0.39 —
+#                        ONE new duplicate. Count: 84.
+#
+# 0.13.2 is pinned in `[workspace.dependencies]` for exactly this reason: it
+# trades three duplicates for one and keeps a second reqwest/hyper/rustls stack
+# out of every binary. Moving the other side is not available either — calamine
+# and plist pin 0.41 at their latest releases, so pinning trusty-search down to
+# 0.39 would leave the duplicate in place and drag two more crates backwards.
+#
+# This row drops back to 83 when the workspace moves to reqwest 0.13, at which
+# point object_store 0.14 costs nothing and quick-xml unifies on 0.41.
+#
 # One bare integer, first non-comment line:
-83
+84

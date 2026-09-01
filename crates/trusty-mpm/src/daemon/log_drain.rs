@@ -4,22 +4,26 @@
 //! identity resolution, and no memory of what it last did. A daemon that only
 //! ever called it would upload once and never again, under whatever identity
 //! the caller guessed. This module is the half that makes it a running service:
-//! an interval loop beside [`super::orphan_gc_loop`], `gh`-resolved identity,
-//! and a persisted last-run verdict the `log_drain` doctor row reads.
+//! an interval loop beside `orphan_gc_loop` (private, in `daemon/mod.rs`),
+//! `gh`-resolved identity, and a persisted last-run verdict the `log_drain`
+//! doctor row reads.
 //!
-//! What: [`log_drain_loop`] ticks on the configured interval until its
+//! What: [`log_drain_loop`](crate::daemon::log_drain::log_drain_loop) ticks on
+//! the configured interval until its
 //! [`CancellationToken`](tokio_util::sync::CancellationToken) fires;
-//! [`drain_once`] is one full pass (resolve config, resolve identity, connect,
-//! `run_once`, record); [`LogDrainStatus`] is what it writes to
-//! `<state_dir>/status.json`.
+//! [`drain_once`](crate::daemon::log_drain::drain_once) is one full pass
+//! (resolve config, resolve identity, connect, `run_once`, record);
+//! [`LogDrainStatus`](crate::daemon::log_drain::LogDrainStatus) is what it
+//! writes to `<state_dir>/status.json`.
 //!
 //! Test: `tests` submodule — every case drives a real `file://` destination in
 //! a `tempfile::TempDir`, so nothing here needs S3 or the network.
 //!
 //! # It never reports "drained" for a run that failed
 //!
-//! [`DrainOutcome`] has exactly three values, and the mapping is total:
-//! `run_once` returning `Err` is [`DrainOutcome::Failed`], and so is an `Ok`
+//! [`DrainOutcome`](crate::daemon::log_drain::DrainOutcome) has exactly three
+//! values, and the mapping is total: `run_once` returning `Err` is
+//! [`DrainOutcome::Failed`](crate::daemon::log_drain::DrainOutcome::Failed), and so is an `Ok`
 //! report carrying per-file errors — the core deliberately continues past an
 //! unreadable file, which means an `Ok` return is NOT proof every file landed.
 //! Collapsing either into "success" would let the doctor row read green while

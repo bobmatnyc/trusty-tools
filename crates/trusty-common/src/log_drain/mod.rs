@@ -6,9 +6,12 @@
 //! those bytes somewhere durable, scrubbed of credentials, without re-uploading
 //! what has not changed.
 //!
-//! What: the drain CORE — a [`LogDestination`] trait with `s3://` and `file://`
-//! adapters, a [`DestinationUri`] parser, the key layout, an idempotency
-//! [`DrainManifest`], the [`collect`] pipeline, and [`run_once`]. Phase 1+2 is
+//! What: the drain CORE — a [`LogDestination`](crate::log_drain::LogDestination)
+//! trait with `s3://` and `file://` adapters, a
+//! [`DestinationUri`](crate::log_drain::DestinationUri) parser, the key layout,
+//! an idempotency [`DrainManifest`](crate::log_drain::DrainManifest), the
+//! [`collect`](crate::log_drain::collect) pipeline, and
+//! [`run_once`](crate::log_drain::run_once). Phase 1+2 is
 //! the core ONLY: there is no scheduler, no config plumbing, and no consumer
 //! wired up. Phase 3 adds those, plus GitHub-identity resolution — this module
 //! deliberately does not resolve an identity, it demands one.
@@ -23,15 +26,19 @@
 //! ```
 //!
 //! The destination prefix comes from the URI (`s3://bucket/PREFIX`); everything
-//! after it is built by [`DrainTarget::logs_prefix`]. Per-target reference
+//! after it is built by
+//! [`DrainTarget::logs_prefix`](crate::log_drain::DrainTarget::logs_prefix).
+//! Per-target reference
 //! documentation: `docs/reference/log-drain.md`.
 //!
 //! # What the caller owns
 //!
-//! - **Identity.** [`DrainTarget`] is supplied, never resolved here. An empty
-//!   `github_id` or `session_id` is refused with
-//!   [`DrainError::MissingIdentity`] rather than defaulted.
-//! - **Single-flight.** [`run_once`] is exactly what its name says: one pass,
+//! - **Identity.** [`DrainTarget`](crate::log_drain::DrainTarget) is supplied,
+//!   never resolved here. An empty `github_id` or `session_id` is refused with
+//!   [`DrainError::MissingIdentity`](crate::log_drain::DrainError::MissingIdentity)
+//!   rather than defaulted.
+//! - **Single-flight.** [`run_once`](crate::log_drain::run_once) is exactly what
+//!   its name says: one pass,
 //!   no locking. Two concurrent runs against one target will both upload and
 //!   both rewrite the manifest, and the loser's entries are lost. The scheduler
 //!   Phase 3 adds owns that mutual exclusion.
