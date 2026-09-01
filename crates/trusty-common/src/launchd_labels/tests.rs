@@ -223,32 +223,10 @@ fn no_stray_launchd_label_literals_in_workspace_sources() {
         if rel.contains("trusty-common/src/launchd_labels") {
             continue;
         }
-        let kind = kind_of(path);
         let Ok(body) = std::fs::read_to_string(path) else {
             continue;
         };
-        for line in production_lines(&body, kind) {
-            // Naming a legacy label in order to EVICT it is the one correct use
-            // of one. A `launchctl bootout`/`unload` line in a build file is
-            // doing exactly the migration this issue is about; the bug is
-            // naming a legacy label to install, load, or point a user at.
-            let evicting =
-                kind != Kind::Rust && (line.contains("bootout") || line.contains("unload"));
-            for label in extract_labels(&codesign_stripped(&line)) {
-                if evicting && legacy_labels_for_any().contains(&label.as_str()) {
-                    continue;
-                }
-                // A Makefile, shell script or plist cannot import a Rust
-                // constant, so naming the CANONICAL label is the best it can
-                // do. What it must never carry is a legacy or unknown label —
-                // that is what `com.bobmatnyc.trusty-search` was. Rust has no
-                // such excuse: it gets the registry, so any literal is a stray.
-                if kind != Kind::Rust && is_canonical_label(&label) {
-                    continue;
-                }
-                strays.push(format!("{rel}: {label}"));
-            }
-        }
+        strays.extend(strays_in(&rel, kind_of(path), &body));
     }
 
     assert!(
@@ -262,9 +240,210 @@ fn no_stray_launchd_label_literals_in_workspace_sources() {
          designated requirement and re-triggers macOS TCC prompts (#2558). Bind one \
          to a `readonly <NAME>_IDENTIFIER=` constant instead, which is the naming \
          `codesign_stripped` exempts and \
-         `signed_install_scripts_name_codesign_identifiers_by_convention` enforces.\n  \
+         `codesign_scripts_name_identifiers_by_convention` enforces. In a plist the \
+         same split runs off the KEY (#6540): launchd reads a job label from \
+         `<key>Label</key>` and nowhere else, so a `CFBundleIdentifier` value is \
+         already exempt — a hit under any other key is a real launchd label.\n  \
          {}",
         strays.join("\n  ")
+    );
+}
+
+/// Every launchd-label literal in one file's body that the registry does not
+/// own, formatted as the scan reports it.
+///
+/// Why: the scan's per-file decision is also what the namespace regressions need
+/// to assert against, so both read the same code rather than an approximation of
+/// it.
+/// What: comment-stripped lines, minus the codesign identifier token and — for a
+/// plist — the bundle-identifier values, then every remaining `com.trusty.*` /
+/// `com.bobmatnyc.*` token that is neither an evicted legacy alias nor a
+/// canonical label a non-Rust file is allowed to name.
+/// Test: `no_stray_launchd_label_literals_in_workspace_sources`,
+/// `plist_bundle_identifier_is_not_a_launchd_label`,
+/// `plist_label_key_value_is_still_a_stray`.
+fn strays_in(rel: &str, kind: Kind, body: &str) -> Vec<String> {
+    let mut lines = production_lines(body, kind);
+    if kind == Kind::Xml {
+        // #6540: a plist's bundle identifier is the codesign namespace.
+        lines = bundle_identifier_stripped(lines);
+    }
+    let mut out = Vec::new();
+    for line in lines {
+        // Naming a legacy label in order to EVICT it is the one correct use of
+        // one. A `launchctl bootout`/`unload` line in a build file is doing
+        // exactly the migration this issue is about; the bug is naming a legacy
+        // label to install, load, or point a user at.
+        let evicting = kind != Kind::Rust && (line.contains("bootout") || line.contains("unload"));
+        for label in extract_labels(&codesign_stripped(&line)) {
+            if evicting && legacy_labels_for_any().contains(&label.as_str()) {
+                continue;
+            }
+            // A Makefile, shell script or plist cannot import a Rust constant,
+            // so naming the CANONICAL label is the best it can do. What it must
+            // never carry is a legacy or unknown label — that is what
+            // `com.bobmatnyc.trusty-search` was. Rust has no such excuse: it
+            // gets the registry, so any literal is a stray.
+            if kind != Kind::Rust && is_canonical_label(&label) {
+                continue;
+            }
+            out.push(format!("{rel}: {label}"));
+        }
+    }
+    out
+}
+
+/// Plist keys whose `<string>` value is a BUNDLE identifier, never a launchd
+/// job label.
+///
+/// launchd reads a job's label from `Label` and from no other key. A
+/// `CFBundleIdentifier` names a bundle to codesign, `defaults`, and `os_log`;
+/// `TrustyConsole.saver` carries one and is loaded by legacyScreenSaver, so it
+/// is not a launchd job at all (#6540).
+const PLIST_BUNDLE_IDENTIFIER_KEYS: &[&str] = &["CFBundleIdentifier"];
+
+/// Blank out the `<string>` value belonging to a bundle-identifier `<key>`.
+///
+/// Why (#6540, and #5438 before it): the scan read `TrustyConsole.saver`'s
+/// `CFBundleIdentifier` as a stray launchd label and told the reader to derive
+/// it from the registry — the one edit that invalidates the bundle's designated
+/// requirement and re-triggers macOS TCC prompts (#2558). `codesign_stripped`
+/// classifies a shell line by an adjacent marker; a plist needs the same
+/// distinction drawn from its key.
+///
+/// What: takes plist lines in order and empties the body of the `<string>`
+/// element that follows a `PLIST_BUNDLE_IDENTIFIER_KEYS` key, whether the two
+/// share a line or not. Any other `<key>` clears the pending state, so only the
+/// bundle identifier's own value is exempt — a `<key>Label</key>` value is left
+/// for the scan.
+/// Test: `plist_bundle_identifier_is_not_a_launchd_label`,
+/// `plist_label_key_value_is_still_a_stray`,
+/// `bundle_identifier_stripped_spares_a_label_on_the_same_line`.
+fn bundle_identifier_stripped(lines: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    let mut awaiting_value = false;
+    for line in lines {
+        let key_end = PLIST_BUNDLE_IDENTIFIER_KEYS.iter().find_map(|k| {
+            let marker = format!("<key>{k}</key>");
+            line.find(&marker).map(|i| i + marker.len())
+        });
+        match key_end {
+            Some(end) if line[end..].contains("<string>") => {
+                awaiting_value = false;
+                out.push(blank_plist_string(&line, end));
+            }
+            Some(_) => {
+                awaiting_value = true;
+                out.push(line);
+            }
+            None if awaiting_value && line.contains("<string>") => {
+                awaiting_value = false;
+                out.push(blank_plist_string(&line, 0));
+            }
+            None => {
+                // Another key ends the pending value; a malformed plist must not
+                // carry the exemption forward onto an unrelated string.
+                if line.contains("<key>") {
+                    awaiting_value = false;
+                }
+                out.push(line);
+            }
+        }
+    }
+    out
+}
+
+/// Empty the body of the first `<string>…</string>` element at or after `from`.
+///
+/// Returns the line unchanged when the element is absent or unterminated —
+/// failing CLOSED, so an unrecognised shape stays scanned.
+fn blank_plist_string(line: &str, from: usize) -> String {
+    const OPEN: &str = "<string>";
+    const CLOSE: &str = "</string>";
+    let Some(open) = line[from..].find(OPEN).map(|i| from + i + OPEN.len()) else {
+        return line.to_string();
+    };
+    let Some(close) = line[open..].find(CLOSE).map(|i| open + i) else {
+        return line.to_string();
+    };
+    let mut out = line.to_string();
+    out.replace_range(open..close, "");
+    out
+}
+
+/// REGRESSION (#6540): a `.saver` bundle's `CFBundleIdentifier` is not a launchd
+/// label.
+///
+/// Why: `TrustyConsole.saver`'s `Info.plist` turned `cargo test -p trusty-common`
+/// red on `main` and blocked every release, and the advice the failure printed —
+/// derive it from the registry — would have broken the bundle's signature
+/// (#2558). This is the shape that failed.
+/// Test: this is the test.
+#[test]
+fn plist_bundle_identifier_is_not_a_launchd_label() {
+    let body = "<plist version=\"1.0\">\n<dict>\n\t<key>CFBundleIdentifier</key>\n\
+                \t<string>com.trusty.console.saver</string>\n\
+                \t<key>CFBundleName</key>\n\t<string>TrustyConsole</string>\n\
+                </dict>\n</plist>\n";
+    let found = strays_in("crates/x/macos/saver/Info.plist", Kind::Xml, body);
+    assert!(
+        found.is_empty(),
+        "a CFBundleIdentifier is the codesign namespace, not a launchd label: {found:?}"
+    );
+
+    // The same value under no key at all is still read as a stray, so the
+    // exemption is the KEY and not the string.
+    let bare = strays_in(
+        "crates/x/macos/saver/Info.plist",
+        Kind::Xml,
+        "<string>com.trusty.console.saver</string>\n",
+    );
+    assert_eq!(
+        bare,
+        vec!["crates/x/macos/saver/Info.plist: com.trusty.console.saver".to_string()],
+        "only a bundle-identifier key earns the exemption"
+    );
+}
+
+/// Why: the exemption must not cost the scan its reason to exist — `Label` is
+/// the key launchd actually reads, and an unregistered label under it is exactly
+/// the drift #4919 was filed for.
+/// Test: this is the test.
+#[test]
+fn plist_label_key_value_is_still_a_stray() {
+    let body = "\t<key>Label</key>\n\t<string>com.trusty.fixture-unregistered</string>\n";
+    assert_eq!(
+        strays_in("deploy/x.plist", Kind::Xml, body),
+        vec!["deploy/x.plist: com.trusty.fixture-unregistered".to_string()],
+        "a Label value must stay scanned"
+    );
+
+    // A bundle-identifier key does not carry its exemption onto the next key's
+    // value.
+    let after = "\t<key>CFBundleIdentifier</key>\n\t<key>Label</key>\n\
+                 \t<string>com.trusty.fixture-unregistered</string>\n";
+    assert_eq!(
+        strays_in("deploy/x.plist", Kind::Xml, after).len(),
+        1,
+        "the pending exemption must end at the next key"
+    );
+}
+
+/// Why (mirrors `codesign_stripped_spares_only_the_identifier_token`): a
+/// whole-line skip would hide a real label that shares the line.
+/// Test: this is the test.
+#[test]
+fn bundle_identifier_stripped_spares_a_label_on_the_same_line() {
+    let line = "<key>CFBundleIdentifier</key><string>com.trusty.console.saver</string>\
+                <key>Label</key><string>com.trusty.fixture-unregistered</string>";
+    let out = bundle_identifier_stripped(vec![line.to_string()]).remove(0);
+    assert!(
+        !out.contains("com.trusty.console.saver"),
+        "the bundle identifier must be exempt, got: {out}"
+    );
+    assert!(
+        out.contains("com.trusty.fixture-unregistered"),
+        "a launchd label on the same line must still be scanned, got: {out}"
     );
 }
 
@@ -913,7 +1092,7 @@ fn retired_analyze_carries_both_its_labels() {
     );
 }
 
-/// The signed-install scripts whose codesign identifiers the label scan exempts.
+/// The scripts whose codesign identifiers the label scan exempts.
 ///
 /// Why: `codesign_stripped` exempts an identifier by NAMING — the token has to
 /// sit beside `--identifier` or an `*_IDENTIFIER=` assignment. Nothing made a
@@ -921,18 +1100,26 @@ fn retired_analyze_carries_both_its_labels() {
 /// `install-trusty-memory-signed.sh` after the scan reported them as stray
 /// launchd labels and its panic text advised deriving them from the registry —
 /// the one edit that invalidates a designated requirement (#2558).
-/// What: every `scripts/install-*-signed.sh` in the repository.
-/// Test: `signed_install_scripts_name_codesign_identifiers_by_convention`.
-fn signed_install_scripts(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+///
+/// #6540: the selector was `scripts/install-*-signed.sh`, so
+/// `build-console-saver.sh` minted `BUNDLE_ID="com.trusty.console.saver"` with
+/// nothing to catch it and reproduced that false red on `main`. A script that
+/// runs `codesign` is a script that mints identifiers, whatever it is named.
+///
+/// What: every `scripts/*.sh` whose body invokes `codesign`.
+/// Test: `codesign_scripts_name_identifiers_by_convention`.
+fn codesign_scripts(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(root.join("scripts")) else {
         return out;
     };
     for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with("install-") && name.ends_with("-signed.sh") {
-            out.push(entry.path());
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "sh") {
+            continue;
+        }
+        if std::fs::read_to_string(&path).is_ok_and(|b| b.contains("codesign")) {
+            out.push(path);
         }
     }
     out.sort();
@@ -1039,20 +1226,28 @@ fn identifier_convention_violations(rel: &str, body: &str) -> Vec<String> {
 }
 
 /// Why (#5438): closure condition 2 — the exemption is checked mechanically
-/// across every signed-install script instead of being observed by habit.
+/// across every script that signs something, instead of being observed by habit.
+/// #6540 widened it past the signed installers after the console-saver build
+/// script minted an identifier outside that glob.
 /// What: no script binds a codesign identifier under a name the scan cannot
-/// see. The counts guard against a vacuous pass — a glob that matched nothing,
+/// see. The counts guard against a vacuous pass — a walk that matched nothing,
 /// or scripts that carry no identifier at all, would otherwise report success.
 /// Test: this is the test.
 #[test]
-fn signed_install_scripts_name_codesign_identifiers_by_convention() {
+fn codesign_scripts_name_identifiers_by_convention() {
     let root = workspace_root();
-    let scripts = signed_install_scripts(&root);
+    let scripts = codesign_scripts(&root);
     assert!(
         scripts.len() >= 3,
-        "expected the signed-install scripts under {}/scripts, found {}",
+        "expected the codesigning scripts under {}/scripts, found {}",
         root.display(),
         scripts.len()
+    );
+    assert!(
+        scripts.iter().any(|p| p
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().ends_with("-signed.sh"))),
+        "the signed installers #5438 was filed over must stay in scope, found: {scripts:?}"
     );
 
     let mut bindings = 0usize;

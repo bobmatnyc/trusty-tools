@@ -29,6 +29,11 @@ DEST_DIR="$HOME/Library/Screen Savers"
 DEST="$DEST_DIR/TrustyConsole.saver"
 DEFAULT_SOURCE="$REPO_ROOT/target/console-saver/TrustyConsole.saver"
 
+# #6540: the saver's CFBundleIdentifier, which is also its `defaults` domain and
+# its os_log subsystem — the bundle namespace, not a launchd label. Bound once
+# here and interpolated into the closing notice so the string is stated once.
+readonly SAVER_IDENTIFIER="com.trusty.console.saver"
+
 SOURCE=""
 DRY_RUN=0
 UNINSTALL=0
@@ -109,13 +114,13 @@ else
   codesign -dv "$DEST"
 fi
 
-cat <<'EOF'
+cat <<EOF
 
 MANUAL STEP — this cannot be scripted:
   System Settings → Screen Saver → select "TrustyConsole", then Preview.
 
   The console must be running and reachable at http://127.0.0.1:7788 (or the
-  port set with: defaults -currentHost write com.trusty.console.saver ConsolePort <port>).
+  port set with: defaults -currentHost write $SAVER_IDENTIFIER ConsolePort <port>).
   Watch it live with:
-    log stream --predicate 'subsystem == "com.trusty.console.saver"'
+    log stream --predicate 'subsystem == "$SAVER_IDENTIFIER"'
 EOF

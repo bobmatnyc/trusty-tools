@@ -40,8 +40,13 @@ ZIP="$OUT_DIR/TrustyConsole.saver.zip"
 CARGO_TOML="$REPO_ROOT/crates/trusty-console/Cargo.toml"
 
 MODULE_NAME="TrustyConsoleSaver"
-BUNDLE_ID="com.trusty.console.saver"
 DEPLOYMENT_TARGET="13.0"
+
+# #6540: the saver's CFBundleIdentifier / codesign identifier — the bundle
+# namespace, NOT a launchd label. A `.saver` is loaded by legacyScreenSaver and
+# is never a launchd job. The `_IDENTIFIER` name is what exempts it from
+# trusty-common's launchd-label scan, whose advice would break signing (#2558).
+readonly SAVER_IDENTIFIER="com.trusty.console.saver"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "ERROR: a .saver bundle is macOS-only; this host is $(uname -s)." >&2
@@ -109,11 +114,11 @@ if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
     --sign "$CODESIGN_IDENTITY" \
     --options runtime \
     --timestamp \
-    --identifier "$BUNDLE_ID" \
+    --identifier "$SAVER_IDENTIFIER" \
     "$BUNDLE"
 else
   echo "==> codesign (ad-hoc; set CODESIGN_IDENTITY for a distributable bundle)"
-  codesign --force --sign - --identifier "$BUNDLE_ID" "$BUNDLE"
+  codesign --force --sign - --identifier "$SAVER_IDENTIFIER" "$BUNDLE"
 fi
 
 codesign --verify --deep --strict --verbose=2 "$BUNDLE"
