@@ -883,10 +883,10 @@ impl DaemonState {
     /// by its own fix.
     ///
     /// Reporting the narrower set to a `HeadWrite` caller can never weaken a
-    /// dispatch deny, because
-    /// [`evaluate_shared_tree_dispatch`](crate::commands::pm_guard_dispatch)
-    /// denies only when the payload is a tree-sharing dispatch — which is a
-    /// [`SharedTreeQuestion::Dispatch`] caller by construction.
+    /// dispatch deny, because `evaluate_shared_tree_dispatch` (in the `tm`
+    /// binary's `commands::pm_guard_dispatch`) denies only when the payload is a
+    /// tree-sharing dispatch — which is a [`SharedTreeQuestion::Dispatch`]
+    /// caller by construction.
     /// Test: `shared_tree_dispatch_route_denies_the_second_claim`,
     /// `shared_tree_writers_span_sessions_in_one_checkout`,
     /// `shared_tree_dispatch_route_reserves_the_tree_on_an_empty_answer`,
