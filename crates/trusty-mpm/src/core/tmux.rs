@@ -117,6 +117,65 @@ pub fn resolve_tmux_binary_or_bare() -> String {
         .unwrap_or_else(|| "tmux".to_string())
 }
 
+/// The `LC_ALL` value [`force_utf8_client_env`] injects when nothing else
+/// declares UTF-8.
+///
+/// Why: tmux only string-matches the variable, so the locale need not be
+/// installed for the client flag to be set; `en_US.UTF-8` is the locale tmux
+/// itself tries first at startup.
+const UTF8_LOCALE: &str = "en_US.UTF-8";
+
+/// Does the environment already declare UTF-8 the way tmux's client decides it?
+///
+/// Why: tmux does not test the three variables independently — it takes the
+/// FIRST non-empty of `LC_ALL`, `LC_CTYPE`, `LANG` and tests only that one. An
+/// any-of test would read `LC_ALL=C` beside `LANG=en_US.UTF-8` as UTF-8 while
+/// tmux reads it as not, which is the exact case this helper exists to repair.
+/// What: mirrors that precedence, then substring-matches `utf-8`/`utf8`
+/// case-insensitively, as tmux's `strcasestr` does.
+/// Test: `env_declares_utf8_follows_tmux_precedence`.
+fn declares_utf8(lc_all: Option<&str>, lc_ctype: Option<&str>, lang: Option<&str>) -> bool {
+    let effective = [lc_all, lc_ctype, lang]
+        .into_iter()
+        .flatten()
+        .find(|v| !v.is_empty());
+    effective.is_some_and(|v| {
+        let lower = v.to_ascii_lowercase();
+        lower.contains("utf-8") || lower.contains("utf8")
+    })
+}
+
+/// Guarantee a spawned `tmux` client declares UTF-8, so tmux does not rewrite
+/// the delimiters out of a `-F` listing (#6529).
+///
+/// Why: tmux sets its `CLIENT_UTF8` flag purely from `LC_ALL` / `LC_CTYPE` /
+/// `LANG`. Without that flag the SERVER pushes every printed line through
+/// `utf8_sanitize()`, which replaces each byte below `0x20` with `_` — the TAB
+/// separating the columns of `list-panes -F` included. A launchd-started daemon
+/// inherits no locale variables at all, so its pane rows arrived as one
+/// underscore-joined field: `session_name` held the whole row,
+/// `pane_current_command` came back empty, and the orphan-GC's idleness gate
+/// could never fire. Measured on tmux 3.6b: identical argv, same server, tabs
+/// with `LC_ALL=en_US.UTF-8` and underscores with `LC_ALL=C`.
+/// What: sets `LC_ALL` to [`UTF8_LOCALE`] only when the inherited environment
+/// does not already declare UTF-8 by tmux's own precedence ([`declares_utf8`]),
+/// so an operator's own UTF-8 locale is left alone. Mutates the child's
+/// environment only — never this process's. Every tmux call whose output is
+/// parsed by column MUST route through here.
+/// Test: `env_declares_utf8_follows_tmux_precedence`,
+/// `force_utf8_client_env_is_a_no_op_under_a_utf8_locale`.
+pub fn force_utf8_client_env(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    let read = |key: &str| std::env::var(key).ok();
+    if !declares_utf8(
+        read("LC_ALL").as_deref(),
+        read("LC_CTYPE").as_deref(),
+        read("LANG").as_deref(),
+    ) {
+        cmd.env("LC_ALL", UTF8_LOCALE);
+    }
+    cmd
+}
+
 /// Run a typed tmux command against an EXPLICITLY resolved binary path,
 /// returning the raw process `Output` (#2398 architecture consolidation).
 ///

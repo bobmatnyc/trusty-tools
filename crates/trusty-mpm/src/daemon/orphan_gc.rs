@@ -937,4 +937,48 @@ mod tests {
             "(c) tracked idle session must be Keep, not ReapCandidate"
         );
     }
+
+    /// The same three properties, driven through the REAL listing parser (#6529).
+    ///
+    /// Why: `gc_key_is_session_name_only_not_composite` above builds every
+    /// `PaneInfo` from a literal, so it proved the classifier while the actual
+    /// pane rows arrived joined into one field for days. A guard that never
+    /// touches the parse cannot see a parse regression, which is precisely how
+    /// #6529 stayed invisible after #1813 closed.
+    /// What: feeds a verbatim `list-panes -a -F` listing through
+    /// [`crate::daemon::tmux::TmuxDriver::parse_managed_pane_rows`], then
+    /// classifies the rows it produces. Also asserts the tmux-sanitized form of
+    /// the same listing yields no panes — never a pane named for the whole row.
+    /// Test: this is the test. RED before the fix on the sanitized half.
+    #[test]
+    fn gc_classifies_rows_that_came_through_the_real_parse() {
+        use crate::daemon::tmux::TmuxDriver;
+
+        let tracked = tracked_with(&[], &["tm-trusty-tools-01"]);
+        let listing = "tm-trusty-tools-01\tclaude\t10302\t%2306\n\
+                       tm-00b14f3b-dd31-4474-9\tzsh\t74149\t%1860\n";
+        let panes = TmuxDriver::parse_managed_pane_rows(listing);
+        assert_eq!(panes.len(), 2, "both rows must parse: {panes:?}");
+
+        assert_eq!(
+            classify_session(&panes[0], &tracked, &AlwaysIdleProbe),
+            GcDecision::Keep(KeepReason::TrackedManaged),
+            "a tracked session must be kept even when its pane runs an agent"
+        );
+        assert_eq!(
+            classify_session(&panes[1], &tracked, &AlwaysIdleProbe),
+            GcDecision::ReapCandidate,
+            "an untracked idle managed session parsed from a real row must be \
+             reapable — the live failure was that it never could be (#6529)"
+        );
+
+        // The tmux-sanitized shape of the SAME listing: no panes, so nothing is
+        // classified at all rather than one bogus always-busy session per row.
+        let sanitized = "tm-trusty-tools-01_claude_10302_%2306\n\
+                         tm-00b14f3b-dd31-4474-9_zsh_74149_%1860\n";
+        assert!(
+            TmuxDriver::parse_managed_pane_rows(sanitized).is_empty(),
+            "a delimiter-stripped listing must yield no panes (#6529)"
+        );
+    }
 }

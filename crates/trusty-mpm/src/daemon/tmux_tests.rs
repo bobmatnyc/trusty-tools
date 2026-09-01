@@ -233,20 +233,104 @@ fn parses_managed_pane_row() {
     assert_eq!(row.pane_pid, Some(12345));
     assert_eq!(row.pane_id.as_deref(), Some("%7"));
 
-    // Missing/garbage PID degrades to None but keeps the row (command is key).
-    let no_pid = TmuxDriver::parse_managed_pane_row("tmpm-x\tzsh\t\t%9").unwrap();
-    assert_eq!(no_pid.pane_pid, None);
-    assert_eq!(no_pid.pane_current_command, "zsh");
-    assert_eq!(no_pid.pane_id.as_deref(), Some("%9"));
-
-    // A row from an older tmux with no pane_id column degrades to None
-    // pane_id rather than dropping the row.
-    let no_pane_id = TmuxDriver::parse_managed_pane_row("tmpm-y\tclaude\t222").unwrap();
-    assert_eq!(no_pane_id.pane_id, None);
-    assert_eq!(no_pane_id.pane_pid, Some(222));
-
-    // Empty session name is dropped entirely.
+    // #6529: the four columns the format string asks for are all required. A
+    // short, over-long, or non-numeric row is a reply we did not request, and
+    // guessing which column is which is exactly what produced the live failure.
+    assert!(TmuxDriver::parse_managed_pane_row("tmpm-x\tzsh\t\t%9").is_none());
+    assert!(TmuxDriver::parse_managed_pane_row("tmpm-y\tclaude\t222").is_none());
+    assert!(TmuxDriver::parse_managed_pane_row("tmpm-z\tzsh\t1\t%1\textra").is_none());
     assert!(TmuxDriver::parse_managed_pane_row("\tzsh\t1\t%1").is_none());
+    assert!(TmuxDriver::parse_managed_pane_row("tmpm-q\t\t1\t%1").is_none());
+}
+
+/// A captured REAL `list-panes -a -F` listing parses column-for-column (#6529).
+///
+/// Why: every pre-#6529 test built `PaneInfo` from a literal, so nothing
+/// asserted that a row tmux actually emits survives the parse. These four rows
+/// are verbatim output from `tmux 3.6b` on the host where the orphan-GC stalled,
+/// tabs and `%NNN` pane ids included.
+/// What: drives the production listing parser and pins every field of every row.
+/// Test: this is the test.
+#[test]
+fn parses_a_real_tab_delimited_listing() {
+    let captured = "tm-00b14f3b-dd31-4474-9\tzsh\t74149\t%1860\n\
+                    tm-trusty-tools-01\tzsh\t10302\t%2306\n\
+                    tm-trusty-tools-02\ttrusty-mpm\t10738\t%2307\n\
+                    tm-writing-03\tzsh\t53398\t%2105\n";
+    let rows = TmuxDriver::parse_managed_pane_rows(captured);
+    assert_eq!(rows.len(), 4, "every captured row must parse: {rows:?}");
+    assert_eq!(rows[0].session_name, "tm-00b14f3b-dd31-4474-9");
+    assert_eq!(rows[0].pane_current_command, "zsh");
+    assert_eq!(rows[0].pane_pid, Some(74149));
+    assert_eq!(rows[0].pane_id.as_deref(), Some("%1860"));
+    assert_eq!(rows[2].session_name, "tm-trusty-tools-02");
+    assert_eq!(rows[2].pane_current_command, "trusty-mpm");
+    assert_eq!(rows[2].pane_id.as_deref(), Some("%2307"));
+}
+
+/// The #6529 live failure: tmux's own sanitized reply must be DROPPED (#6529).
+///
+/// Why: a tmux client that declares no UTF-8 locale gets every byte below
+/// `0x20` replaced with `_` by the server, so the tab columns arrive joined.
+/// The pre-fix parser folded the whole row into `session_name` with an empty
+/// command; `classify_session` then matched no registry entry and read
+/// `is_idle_shell("")` as busy, so 456 orphaned sessions survived every sweep
+/// for days. These rows are verbatim from that daemon's log.
+/// What: asserts the sanitized rows produce NO panes at all — never a pane
+/// whose name is the joined row.
+/// Test: this is the test. RED before the fix: three coerced `PaneInfo` rows.
+#[test]
+fn sanitized_pane_row_is_dropped_not_coerced() {
+    let sanitized = "tm-trusty-tools-01_zsh_10302_%2306\n\
+                     tm-trusty-tools-02_trusty-mpm_10738_%2307\n\
+                     tm-writing-03_zsh_53398_%2105\n";
+    let rows = TmuxDriver::parse_managed_pane_rows(sanitized);
+    assert!(
+        rows.is_empty(),
+        "a row with no tab columns must be dropped, never coerced into a \
+         session name: {rows:?}"
+    );
+}
+
+/// The live listing against this host's real tmux server (#6529).
+///
+/// Why: the parse tests above prove the pure function; only a real listing
+/// proves the SPAWN asks tmux for — and receives — the columns, which is where
+/// #6529 actually broke. Read-only: `list-panes` creates and kills nothing.
+/// What: lists every pane on the operator's server and asserts each row carries
+/// a non-empty command and a `%`-prefixed pane id, i.e. that the delimiters
+/// survived. Skips cleanly when no tmux binary or no server is present.
+/// Test: this is the test. `#[ignore]` because it needs the operator's server.
+#[test]
+#[ignore = "needs the host's live tmux server"]
+fn live_listing_keeps_its_columns() {
+    let Ok(driver) = TmuxDriver::discover() else {
+        eprintln!("no tmux binary — skipping");
+        return;
+    };
+    let panes = driver
+        .list_managed_panes()
+        .expect("list_managed_panes must not error against a live server");
+    if panes.is_empty() {
+        eprintln!("no tmux server running — skipping");
+        return;
+    }
+    for pane in &panes {
+        assert!(
+            !pane.pane_current_command.is_empty(),
+            "a parsed pane always carries its command: {pane:?}"
+        );
+        assert!(
+            !pane.session_name.contains('_') || !pane.session_name.contains('%'),
+            "session_name must never hold a joined row (#6529): {pane:?}"
+        );
+        assert!(
+            pane.pane_id
+                .as_deref()
+                .is_some_and(|id| id.starts_with('%')),
+            "a parsed pane always carries its tmux pane id: {pane:?}"
+        );
+    }
 }
 
 #[test]

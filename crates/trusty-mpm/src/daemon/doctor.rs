@@ -155,6 +155,9 @@ use doctor_push_guard::check_push_guard;
 #[path = "doctor_worktree_disk.rs"]
 mod doctor_worktree_disk;
 use doctor_worktree_disk::check_worktree_disk;
+#[path = "doctor_pty_headroom.rs"]
+mod doctor_pty_headroom;
+use doctor_pty_headroom::check_pty_headroom;
 
 // Split out to keep this file under the 500-SLOC production cap (issue #4286 —
 // the retired `.trusty-mpm/` override-file probe, the on-demand half of the
@@ -454,6 +457,10 @@ pub async fn run_doctor(
     // nothing about panes already created — `history-limit` is captured at pane
     // creation and cannot be grown in place.
     checks.push(check_tmux_options());
+    // #6529: every tmux pane holds a pseudo-terminal and macOS caps the total,
+    // so a session leak becomes a bare ENXIO on the next spawn with nothing
+    // naming the cause. Read-only — it counts device nodes and reaps nothing.
+    checks.push(check_pty_headroom());
 
     DoctorReport::from_checks(checks)
 }

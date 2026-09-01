@@ -169,6 +169,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "tmux_options",
         "Whether the live tmux SERVER's globals still match tm's spec — `history-limit`, `mouse`, and the window-scoped `alternate-screen`. `create_managed_session` applies and verifies them before every pane tm creates, but a server tm did not start carries none of them: a tmux-continuum restore recreates `tm-*` sessions through tmux-resurrect's own bare `new-session`, so restored panes bake tmux's factory 2000-line scrollback and can enter the alternate screen (issue #6469). Warns naming each drifted option; UNKNOWN — never `Ok` — when no option could be read (no tmux binary, or no server running). A green row means NEW panes will be correct: `history-limit` is captured into a pane's ring buffer at creation and cannot be grown in place, so an affected session has to be restarted. Read-only — it reads options, never sets one.",
     ),
+    (
+        "pty_headroom",
+        "How much pseudo-terminal capacity the host has left. Every tmux pane holds one pty and macOS caps the total at `kern.tty.ptmx_max` (511 by default), so a session leak presents as a bare `ENXIO` on the next spawn, naming neither the limit nor the leak — 456 sessions the stalled orphan-GC never reaped put this host over the cap (issue #6529). Warns at 80% of the cap, FAILS at 95%, and names both numbers plus what actually reaps the sessions holding them. UNKNOWN — never `Ok` — when either number could not be read. macOS only; other platforms report the skip. Read-only — it counts device nodes and reaps nothing.",
+    ),
 ];
 
 /// Render the full doctor-check reference.

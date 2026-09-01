@@ -645,17 +645,26 @@ impl TmuxDriver {
     /// colliding with the colons in session names. An empty tmux server (`no
     /// server running`) yields an empty `Vec` rather than an error, so a quiet
     /// host reaps nothing rather than failing the sweep.
-    /// Test: row parsing covered by `parses_managed_pane_row`; the live listing
-    /// path is exercised by the `#[ignore]` integration test.
+    ///
+    /// The spawn goes through [`crate::core::tmux::force_utf8_client_env`]
+    /// because tmux deletes this format's delimiters from its own output when
+    /// the client does not declare a UTF-8 locale — see that function and
+    /// #6529. A row that still arrives malformed is DROPPED, never coerced, and
+    /// the drop is reported once per listing rather than once per row.
+    /// Test: row parsing covered by `parses_managed_pane_row`,
+    /// `sanitized_pane_row_is_dropped_not_coerced`; the live listing path is
+    /// exercised by the `#[ignore]` integration test.
     pub fn list_managed_panes(&self) -> Result<Vec<crate::daemon::orphan_gc::PaneInfo>> {
-        let output = Command::new(&self.tmux_path)
-            .args([
-                "list-panes",
-                "-a",
-                "-F",
-                "#{session_name}\t#{pane_current_command}\t#{pane_pid}\t#{pane_id}",
-            ])
-            .output()?;
+        let mut cmd = Command::new(&self.tmux_path);
+        cmd.args([
+            "list-panes",
+            "-a",
+            "-F",
+            "#{session_name}\t#{pane_current_command}\t#{pane_pid}\t#{pane_id}",
+        ]);
+        // #6529: without a UTF-8 client locale tmux rewrites every tab to `_`.
+        crate::core::tmux::force_utf8_client_env(&mut cmd);
+        let output = cmd.output()?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             if stderr_means_empty_server(&stderr) {
@@ -664,37 +673,80 @@ impl TmuxDriver {
             return Err(Error::Protocol(format!("tmux list-panes -a: {stderr}")));
         }
         let stdout = String::from_utf8_lossy(&output.stdout);
-        Ok(stdout
-            .lines()
-            .filter(|l| !l.is_empty())
-            .filter_map(Self::parse_managed_pane_row)
-            .collect())
+        Ok(Self::parse_managed_pane_rows(&stdout))
+    }
+
+    /// Parse a whole `list-panes -a -F` listing, reporting dropped rows once.
+    ///
+    /// Why: a malformed listing is a whole-listing condition, not a per-row one
+    /// — every row of a sanitized reply is malformed the same way, so a warning
+    /// per row is the 478-lines-per-sweep log flood #1813 already paid for. One
+    /// line naming the count and a single sample says the same thing.
+    /// What: keeps the rows [`Self::parse_managed_pane_row`] accepts and counts
+    /// the rest, emitting one `warn!` that names the likely cause when any were
+    /// dropped. Never coerces a malformed row into a pane.
+    /// Test: `sanitized_pane_row_is_dropped_not_coerced`,
+    /// `parses_a_real_tab_delimited_listing`.
+    pub(super) fn parse_managed_pane_rows(stdout: &str) -> Vec<crate::daemon::orphan_gc::PaneInfo> {
+        let mut panes = Vec::new();
+        let mut dropped = 0usize;
+        let mut sample = String::new();
+        for line in stdout.lines().filter(|l| !l.is_empty()) {
+            match Self::parse_managed_pane_row(line) {
+                Some(pane) => panes.push(pane),
+                None => {
+                    dropped += 1;
+                    if sample.is_empty() {
+                        sample = line.chars().take(80).collect();
+                    }
+                }
+            }
+        }
+        if dropped > 0 {
+            tracing::warn!(
+                dropped,
+                sample = %sample,
+                "tmux list-panes returned rows without the requested tab columns — \
+                 dropping them rather than guessing which field is which; the usual \
+                 cause is a tmux client without a UTF-8 locale, which rewrites the \
+                 delimiters to `_` (#6529)"
+            );
+        }
+        panes
     }
 
     /// Parse one `session_name\tpane_current_command\tpane_pid\tpane_id` row.
     ///
     /// Why: keeping the parse separate from the subprocess call makes it
     /// unit-testable without spawning tmux.
-    /// What: splits on the tab delimiter; a row missing the session name is
-    /// dropped (`None`); a missing or unparsable PID degrades to `None` PID
-    /// rather than dropping the whole row (the command is the primary signal);
-    /// a missing/blank `pane_id` degrades to `None` (an older tmux or a
-    /// truncated row still yields a usable pane for the idleness sweep).
-    /// Test: `parses_managed_pane_row`.
+    /// What: requires EXACTLY the four tab-separated columns the format string
+    /// asked for, with a non-empty session name and command and a numeric pid;
+    /// anything else is `None`. Fails CLOSED on purpose: the failure this
+    /// replaces silently handed `classify_session` a `session_name` holding an
+    /// entire joined row, which matched no registry entry and read as a busy
+    /// session forever (#6529, and the #1813 shape before it). A dropped row
+    /// makes a pane invisible to the sweep, which can only ever spare a session
+    /// — never kill one.
+    /// Test: `parses_managed_pane_row`, `sanitized_pane_row_is_dropped_not_coerced`.
     fn parse_managed_pane_row(line: &str) -> Option<crate::daemon::orphan_gc::PaneInfo> {
-        let mut parts = line.splitn(4, '\t');
-        let session_name = parts.next().filter(|s| !s.is_empty())?.to_string();
-        let pane_current_command = parts.next().unwrap_or("").trim().to_string();
-        let pane_pid = parts.next().and_then(|s| s.trim().parse::<u32>().ok());
-        let pane_id = parts
-            .next()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+        let mut parts = line.split('\t');
+        let session_name = parts.next()?.trim();
+        let pane_current_command = parts.next()?.trim();
+        let pane_pid = parts.next()?.trim();
+        let pane_id = parts.next()?.trim();
+        // More columns than the format asked for means this is not the reply we
+        // requested — refuse to guess which column is which.
+        if parts.next().is_some() {
+            return None;
+        }
+        if session_name.is_empty() || pane_current_command.is_empty() || pane_id.is_empty() {
+            return None;
+        }
         Some(crate::daemon::orphan_gc::PaneInfo {
-            session_name,
-            pane_current_command,
-            pane_pid,
-            pane_id,
+            session_name: session_name.to_string(),
+            pane_current_command: pane_current_command.to_string(),
+            pane_pid: Some(pane_pid.parse::<u32>().ok()?),
+            pane_id: Some(pane_id.to_string()),
         })
     }
 

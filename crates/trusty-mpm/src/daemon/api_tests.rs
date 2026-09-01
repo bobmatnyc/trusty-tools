@@ -1241,6 +1241,9 @@ async fn doctor_endpoint_returns_report() {
         "stray_mcp_json",
         // #6469: the tmux server globals a resurrect restore leaves unset.
         "tmux_options",
+        // #6529: pseudo-terminal headroom — a session leak exhausts it and the
+        // next spawn fails with a bare ENXIO.
+        "pty_headroom",
     ];
     assert_eq!(names, expected);
     // Count derived from the list above, never a standalone literal:
