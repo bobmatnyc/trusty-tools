@@ -10,7 +10,9 @@
 //! What: Re-exports the `tool_output` dispatch/filter module — the
 //! `compress_tool_output` dispatch, the async RTK-then-native
 //! `compress_tool_output_async`, and the path-reporting
-//! `compress_tool_output_async_with_path` used for stats logging. `trusty-agents`
+//! `compress_tool_output_async_with_path` used for stats logging, plus the
+//! `has_filter_for` / `classify_tool` coverage predicate the `tm hook` rewrite
+//! gates on (#6566). `trusty-agents`
 //! re-exports the same symbols via `trusty_agents::compress` for source-level
 //! compatibility with existing call sites.
 //! Test: `cargo test -p trusty-agents-common` runs `tool_output::tests` in
@@ -20,6 +22,6 @@
 pub mod tool_output;
 
 pub use tool_output::{
-    CompressionPath, compress_tool_output, compress_tool_output_async,
-    compress_tool_output_async_with_path,
+    CompressionPath, ToolFilter, classify_tool, compress_tool_output, compress_tool_output_async,
+    compress_tool_output_async_with_path, has_filter_for,
 };

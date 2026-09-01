@@ -549,3 +549,100 @@ async fn compress_tool_output_async_with_path_matches_plain_wrapper() {
     // must round-trip through a valid, stable string.
     assert!(matches!(path.as_str(), "rtk_binary" | "native_fallback"));
 }
+
+// ── Filter coverage classification (#6566) ──────────────────────────────
+
+#[test]
+fn classify_tool_routes_known_tool_families() {
+    assert_eq!(
+        classify_tool("cargo test -p x"),
+        Some(ToolFilter::TestRunner)
+    );
+    assert_eq!(classify_tool("cargo check"), Some(ToolFilter::CargoCheck));
+    assert_eq!(classify_tool("cargo clippy"), Some(ToolFilter::CargoCheck));
+    assert_eq!(classify_tool("git diff"), Some(ToolFilter::GitDiff));
+    assert_eq!(classify_tool("git log"), Some(ToolFilter::GitLog));
+    assert_eq!(classify_tool("cat file.rs"), Some(ToolFilter::FileRead));
+    assert_eq!(classify_tool("grep -n foo"), Some(ToolFilter::Grep));
+    assert_eq!(classify_tool("rg foo"), Some(ToolFilter::Grep));
+    assert_eq!(classify_tool("find ."), Some(ToolFilter::Grep));
+    assert_eq!(classify_tool("ls -la"), Some(ToolFilter::Ls));
+    // Case-insensitive, like the dispatch has always been.
+    assert_eq!(classify_tool("CARGO TEST"), Some(ToolFilter::TestRunner));
+}
+
+#[test]
+fn classify_tool_returns_none_for_uncovered_tools() {
+    // The names #6566 measured as the bulk of the no-op wraps.
+    for name in [
+        "git status",
+        "git add",
+        "git push",
+        "sed -n",
+        "gh pr",
+        "gh issue",
+        "wc -l",
+        "ssh",
+        "tm wait",
+        "bash",
+        "echo",
+    ] {
+        assert_eq!(classify_tool(name), None, "expected no filter for {name}");
+    }
+}
+
+#[test]
+fn has_filter_for_true_for_covered_tools() {
+    for name in ["cargo test", "git diff", "git log", "grep -n", "ls", "cat"] {
+        assert!(has_filter_for(name), "expected a filter for {name}");
+    }
+}
+
+#[test]
+fn has_filter_for_false_for_uncovered_tools() {
+    for name in ["git status", "sed -n", "gh pr", "wc -l", "ssh"] {
+        assert!(!has_filter_for(name), "expected no filter for {name}");
+    }
+}
+
+#[test]
+fn has_filter_for_agrees_with_classify_tool() {
+    // The predicate is defined as `classify_tool(..).is_some()`; this pins
+    // that equivalence so the two cannot answer differently (#6566). Drift
+    // between the PREDICATE and the DISPATCH is prevented structurally
+    // instead: `compress_tool_output` matches exhaustively over `ToolFilter`
+    // with no catch-all arm, so a new filter variant fails to compile until
+    // the dispatch handles it, and `classify_tool` is the only thing that
+    // produces one.
+    for name in [
+        "cargo test",
+        "cargo clippy",
+        "git diff",
+        "git log",
+        "read",
+        "grep",
+        "ls",
+        "git status",
+        "sed -n",
+        "gh pr",
+        "",
+    ] {
+        assert_eq!(
+            has_filter_for(name),
+            classify_tool(name).is_some(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn uncovered_tool_output_passes_through_unchanged() {
+    // The behavioural half of the predicate's contract: a name `has_filter_for`
+    // rejects gets its bytes back verbatim from the dispatch, which is exactly
+    // what made the unconditional hook wrap a no-op process spawn (#6566).
+    let input = "M  crates/trusty-mpm/src/main.rs\n".repeat(20);
+    for name in ["git status", "sed -n", "gh pr"] {
+        assert!(!has_filter_for(name));
+        assert_eq!(compress_tool_output(name, &input), input, "{name}");
+    }
+}
