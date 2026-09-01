@@ -263,7 +263,8 @@ pub(crate) fn interpret_delete_body(delete_data: bool, body: &Value) -> Result<b
 /// What: returns the CLI path verbatim when present, otherwise walks upward
 ///       from CWD looking for `.git` / `.trusty-search` markers via
 ///       `detect::detect_project`. Falls back to the CWD itself if no marker
-///       is found (mirrors the `Fallback` branch elsewhere).
+///       is found (mirrors the `Fallback` branch elsewhere), and errors when
+///       detection refuses that root (#6550).
 /// Test: `index_remove_resolves_path_uses_cli` and
 ///       `index_remove_resolves_path_falls_back_to_cwd`.
 fn resolve_target_path(cli_path: Option<PathBuf>) -> Result<PathBuf> {
@@ -271,7 +272,8 @@ fn resolve_target_path(cli_path: Option<PathBuf>) -> Result<PathBuf> {
         return Ok(p);
     }
     let cwd = std::env::current_dir().context("could not resolve current directory")?;
-    let ctx = detect_project(&cwd);
+    // #6550: a refused root is an error here, not a path to remove by guess.
+    let ctx = detect_project(&cwd)?;
     Ok(ctx.root_path)
 }
 
@@ -425,7 +427,7 @@ mod tests {
 
         // Exercise the same helper detect uses by passing through detect_project
         // directly — we cannot safely change CWD inside a parallel test runner.
-        let ctx = detect_project(&nested);
+        let ctx = detect_project(&nested).expect("a git-rooted fixture is indexable");
         assert_eq!(ctx.root_path, tmp);
 
         let _ = fs::remove_dir_all(&tmp);
