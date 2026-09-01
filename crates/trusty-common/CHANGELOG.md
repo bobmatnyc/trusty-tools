@@ -44,6 +44,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   to every `scripts/*.sh` that runs `codesign`, which is what let the console-saver
   build script mint an unnamed identifier in the first place.
 
+### Changed
+
+- Pinned `object_store` to 0.13 (from 0.14) for the `log-drain` feature. 0.14
+  moved to `reqwest` 0.13, `md-5` 0.11 and a new `crc-fast`, each of which lands
+  as a second copy of a crate the workspace already resolves — the workspace,
+  `async-openai`, `teloxide-core`, `hf-hub` and `reqwest-eventsource` are all on
+  `reqwest` 0.12, `lopdf` holds `md-5` 0.10, and `ring` holds `spin` 0.9. 0.13.2
+  needs none of them and the drain uses no 0.14-only API, so this drops three
+  duplicate crate versions and keeps a second reqwest/hyper/rustls stack out of
+  every binary. Revisit when the workspace itself moves to `reqwest` 0.13
+  (#6549).
+
+### Documentation
+
+- Fixed 13 broken intra-doc links in the `host_metrics` and `log_drain` module
+  headers. Both headers are concatenated with the outer `///` block on their
+  `pub mod` declaration in `lib.rs`, so rustdoc resolves them in the crate-root
+  scope and bare item names never resolved. Link targets are now crate-qualified,
+  matching the `sys_metrics` link that already worked. A broken link is baked
+  into a docs.rs page permanently, so these had to land before publishing
+  (#6549).
+
 ## [0.46.5] — 2026-09-01
 
 ### Fixed
