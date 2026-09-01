@@ -35,6 +35,10 @@
 //! Test: `rewrite_*`, `is_orchestrator_command_*`, `first_command_token_*`,
 //! `is_safe_tool_name_*`, `build_pretooluse_rewrite_response_*` below.
 
+// #6566: the tool-name coverage predicate lives beside the filter dispatch it
+// predicts, in `trusty-agents-common`, so the two cannot drift apart.
+use trusty_agents_common::compress::has_filter_for;
+
 /// Day-one orchestrator-command exclusion list.
 ///
 /// Why: These tools spawn long, multi-stage subprocess chains where an
@@ -83,11 +87,21 @@ const ORCHESTRATOR_EXCLUSIONS: &[&str] = &[
 /// command would silently pass through with 0% compression — defeating the
 /// entire point of this spike. Quoted because the derived name may contain
 /// a space (e.g. `"cargo test"`).
+/// Finally, it returns `None` when no compression filter covers the derived
+/// tool name (#6566): the wrap used to be unconditional, so a `git status`,
+/// `sed -n`, or `gh pr list` paid a `tm compress` process spawn to get its
+/// own bytes back. Over 48h of `~/.trusty-mpm/compression.jsonl`, 3,415 of
+/// 3,643 wrapped invocations (93.7%) reduced nothing. The tool-name list
+/// stays in `trusty-agents-common` — this module asks
+/// `compress::has_filter_for` rather than keeping a second copy that could
+/// drift from the dispatch it is meant to predict.
 /// Test: `rewrite_appends_compress_pipe_for_plain_command`,
 /// `rewrite_appends_compress_pipe_with_subcommand_tool_name`,
 /// `rewrite_skips_orchestrator_commands`, `rewrite_skips_piped_commands`,
 /// `rewrite_skips_chained_commands`, `rewrite_skips_empty_command`,
-/// `rewrite_skips_command_substitution_in_tool_name`.
+/// `rewrite_skips_command_substitution_in_tool_name`,
+/// `rewrite_skips_tools_with_no_compression_filter`,
+/// `rewrite_still_wraps_tools_with_a_compression_filter`.
 pub(crate) fn rewrite_bash_command_for_compression(command: &str) -> Option<String> {
     let trimmed = command.trim();
     if trimmed.is_empty() {
@@ -103,6 +117,11 @@ pub(crate) fn rewrite_bash_command_for_compression(command: &str) -> Option<Stri
     if !is_safe_tool_name(&tool) {
         return None;
     }
+    // #6566: no filter covers this tool name, so the wrap would spawn a
+    // process that returns its input unchanged.
+    if !has_filter_for(&tool) {
+        return None;
+    }
     Some(format!("{trimmed} | tm compress --tool \"{tool}\""))
 }
 
@@ -114,10 +133,9 @@ pub(crate) fn rewrite_bash_command_for_compression(command: &str) -> Option<Stri
 /// branches) — it has no branch for the literal string `"bash"`. Passing
 /// the command's actual program + subcommand lets the existing `cargo
 /// test`/`cargo check`/`git diff`/`git log` filters fire for the domains
-/// they already cover; commands outside that coverage (e.g. `grep`, `ls`)
-/// still pass through unchanged, which matches this repo's own documented
-/// filter-coverage gap (`docs/specs/tool-output-interception-seam.md`
-/// §Spike) rather than a new regression.
+/// they already cover. Commands outside that coverage (`git status`, `sed`,
+/// `gh pr list`, …) are no longer wrapped at all since #6566 — the caller
+/// checks the derived name against `compress::has_filter_for` first.
 /// What: Strips the same env-assignment/`sudo`/`env`/path noise
 /// [`first_command_token`] strips (looping so `env FOO=bar cargo test` and
 /// similar multi-prefix combinations resolve correctly — a trusty-review
@@ -459,6 +477,55 @@ mod tests {
             rewrite_bash_command_for_compression("sudo -u root make build"),
             None
         );
+    }
+
+    #[test]
+    fn rewrite_skips_tools_with_no_compression_filter() {
+        // #6566: these were wrapped unconditionally, each paying a `tm
+        // compress` process spawn to get its own bytes back — 93.7% of
+        // wrapped invocations over the measured 48h window. `git status`,
+        // `sed -n 1p f`, and `gh pr list` are the three highest-volume
+        // offenders; none reaches a filter branch in
+        // `trusty-agents-common::compress`.
+        for cmd in [
+            "git status",
+            "git add -A",
+            "git push",
+            "sed -n 1p f",
+            "gh pr list",
+            "gh issue view 6566",
+            "wc -l Cargo.toml",
+            "ssh host uptime",
+            "tm wait --for run",
+            "echo hello",
+        ] {
+            assert_eq!(
+                rewrite_bash_command_for_compression(cmd),
+                None,
+                "expected no compress wrap for uncovered tool: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn rewrite_still_wraps_tools_with_a_compression_filter() {
+        // The other half of #6566's gate: every tool the dispatch does cover
+        // must be wrapped exactly as before.
+        for (cmd, tool) in [
+            ("cargo test -p x", "cargo test"),
+            ("cargo clippy --all-targets", "cargo clippy"),
+            ("git diff", "git diff"),
+            ("git log --oneline", "git log"),
+            ("grep -n foo src/", "grep -n"),
+            ("ls -la", "ls -la"),
+        ] {
+            let expected = format!("{cmd} | tm compress --tool \"{tool}\"");
+            assert_eq!(
+                rewrite_bash_command_for_compression(cmd).as_deref(),
+                Some(expected.as_str()),
+                "expected a compress wrap for covered tool: {cmd}"
+            );
+        }
     }
 
     #[test]

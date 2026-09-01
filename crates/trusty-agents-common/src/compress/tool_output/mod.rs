@@ -5,10 +5,12 @@
 //! preserves signal while shrinking context.
 //! What: `compress_tool_output(name, output)` dispatches to a filter based on
 //! the tool name, returning a possibly-shorter string. Each filter is a pure
-//! `fn` for unit testability.
+//! `fn` for unit testability. `classify_tool` names that routing decision and
+//! `has_filter_for` exposes it as a predicate, so a caller upstream of the
+//! dispatch can tell whether a tool name reaches a filter at all (#6566).
 //!
 //! Module layout (see #366 split):
-//! - `mod.rs` — dispatch + the native per-tool filters
+//! - `mod.rs` — classification, dispatch, and the native per-tool filters
 //! - `structured.rs` — JSON/YAML/TOML/CSV passthrough detection
 //! - `strategy.rs` — generic `FilterLevel`/`Language`/`FilterStrategy`
 //! - `rtk.rs` — RTK subprocess delegation + async wrapper, plus
@@ -47,12 +49,126 @@ pub use structured::is_structured_format;
 /// the cognitive cost of compression artifacts. RTK uses 80 bytes.
 const SIZE_GATE_BYTES: usize = 80;
 
+/// Line count above which `git log` output is worth filtering.
+const GIT_LOG_LINE_GATE: usize = 30;
+/// Line count above which a file read is worth filtering.
+const FILE_READ_LINE_GATE: usize = 200;
+
+/// Which native filter [`compress_tool_output`] applies to a given tool name.
+///
+/// Why: #6566 — callers upstream of the dispatch (the `tm hook` `PreToolUse`
+/// Bash rewrite in `trusty-mpm`) need to know whether a tool name reaches a
+/// filter at all, so they can skip wrapping a command whose output nothing
+/// here would shrink. Naming the routing decision as a value lets
+/// [`classify_tool`] answer that question and lets the dispatch match on it
+/// exhaustively, so a new filter cannot appear in one without the other.
+/// What: One variant per filter branch. `Grep` covers `grep`/`rg`/`find`;
+/// `Ls` covers `ls`. Both delegate to the same line-list cap but stay
+/// separate so each keeps its own named filter entry point.
+/// Test: `classify_tool_*` and `has_filter_for_*` in `tests`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ToolFilter {
+    /// `cargo test` and other test runners — [`filter_test_runner`].
+    TestRunner,
+    /// `cargo check` / `cargo clippy` — [`filter_cargo_check`].
+    CargoCheck,
+    /// Unified diffs — [`filter_git_diff`].
+    GitDiff,
+    /// `git log` — [`filter_git_log`], above [`GIT_LOG_LINE_GATE`] lines.
+    GitLog,
+    /// File reads — [`filter_file_read`], above [`FILE_READ_LINE_GATE`] lines.
+    FileRead,
+    /// `grep`/`rg`/`find` match lists — [`filter_grep_output`].
+    Grep,
+    /// `ls` directory listings — [`filter_ls_output`].
+    Ls,
+}
+
+/// Route a tool name to the filter [`compress_tool_output`] would apply.
+///
+/// Why: The single source of truth for "which filter, if any, covers this
+/// tool name". [`compress_tool_output`] dispatches on its result and
+/// [`has_filter_for`] tests it, so the coverage question has exactly one
+/// answer (#6566, and the common-entry-point rule).
+/// What: Substring match against the lowercased name, in the order the
+/// dispatch has always used — the `test`/`cargo` family first (with
+/// `check`/`clippy` inside it taking the cargo-check filter), then `diff`,
+/// `log`, `read`/`cat`. `grep`/`rg`/`find`/`ls` match on the FIRST
+/// whitespace token rather than a substring, because `rg` is a substring of
+/// unrelated names this sees (`cargo`, `git merge`) that must not misfire
+/// (#1957). `None` means no filter covers the name.
+/// Test: `classify_tool_routes_known_tool_families`,
+/// `classify_tool_returns_none_for_uncovered_tools`.
+pub fn classify_tool(tool_name: &str) -> Option<ToolFilter> {
+    let n = tool_name.to_ascii_lowercase();
+    if n.contains("test") || n.contains("cargo") {
+        // Note: "cargo check"/"cargo clippy" go to the cargo_check filter
+        // which strips Compiling/Finished lines; "cargo test" goes here.
+        if n.contains("check") || n.contains("clippy") {
+            return Some(ToolFilter::CargoCheck);
+        }
+        return Some(ToolFilter::TestRunner);
+    }
+    if n.contains("diff") {
+        return Some(ToolFilter::GitDiff);
+    }
+    if n.contains("log") {
+        return Some(ToolFilter::GitLog);
+    }
+    if n.contains("read") || n.contains("cat") {
+        return Some(ToolFilter::FileRead);
+    }
+    // #1957: grep/rg/find emit a flat match-or-path list; ls emits a flat
+    // directory listing. Matched on the first whitespace token (not
+    // `.contains()`, unlike the branches above) — see this function's doc.
+    let first_word = n.split_whitespace().next().unwrap_or("");
+    if first_word == "grep" || first_word == "rg" || first_word == "find" {
+        return Some(ToolFilter::Grep);
+    }
+    if first_word == "ls" {
+        return Some(ToolFilter::Ls);
+    }
+    if n.contains("check") || n.contains("clippy") {
+        return Some(ToolFilter::CargoCheck);
+    }
+    None
+}
+
+/// Whether any native filter covers `tool_name`.
+///
+/// Why: #6566 — `tm hook`'s `PreToolUse` rewrite appended
+/// `| tm compress --tool "<name>"` to every eligible Bash command, but only
+/// the handful of names [`classify_tool`] recognises reach a filter. Measured
+/// over 48h of `~/.trusty-mpm/compression.jsonl`, 3,415 of 3,643 wrapped
+/// invocations (93.7%) returned their input byte-for-byte: each one paid a
+/// process spawn to change nothing. This predicate lets the rewrite decide
+/// before it wraps.
+/// What: `true` exactly when [`classify_tool`] returns a variant. It answers
+/// the NAME question only — the size gate ([`SIZE_GATE_BYTES`]), the
+/// structured-format passthrough, and the per-filter line gates all depend on
+/// the output, which a pre-execution caller cannot see, so a `true` here
+/// promises a filter branch is reached, not that bytes will drop.
+/// Note the RTK path is out of scope: `compress_tool_output_async` prefers
+/// the external `rtk` binary when installed, which can shrink names this
+/// returns `false` for. A hook gating on this under-wraps in that setup,
+/// which is the safe direction — see #6566.
+/// Test: `has_filter_for_true_for_covered_tools`,
+/// `has_filter_for_false_for_uncovered_tools`,
+/// `has_filter_for_agrees_with_classify_tool`.
+pub fn has_filter_for(tool_name: &str) -> bool {
+    classify_tool(tool_name).is_some()
+}
+
 /// Compress a tool's textual output based on its name.
 ///
 /// Why: Centralizes the per-tool filter dispatch so callers don't have to
 /// know which filter applies to which tool.
-/// What: Routes by substring match in `tool_name`. Applies a size gate and a
-/// structured-format passthrough before any filter runs. Unknown tools pass
+/// What: Applies a size gate and a structured-format passthrough, then routes
+/// on [`classify_tool`]. The match is exhaustive over [`ToolFilter`] with no
+/// catch-all arm, so adding a filter variant fails to compile until this
+/// dispatch handles it — that is what keeps [`has_filter_for`] from drifting
+/// away from what the dispatch actually filters (#6566). Unknown tools pass
 /// through unchanged. Always infallible.
 /// Test: `compress_tool_output_dispatch_test` plus per-filter tests.
 pub fn compress_tool_output(tool_name: &str, output: &str) -> String {
@@ -65,49 +181,28 @@ pub fn compress_tool_output(tool_name: &str, output: &str) -> String {
     if is_structured_format(output) {
         return output.to_string();
     }
-    let n = tool_name.to_ascii_lowercase();
-    if n.contains("test") || n.contains("cargo") {
-        // Note: "cargo check"/"cargo clippy" go to the cargo_check filter
-        // which strips Compiling/Finished lines; "cargo test" goes here.
-        if n.contains("check") || n.contains("clippy") {
-            return filter_cargo_check(output);
+    match classify_tool(tool_name) {
+        None => output.to_string(),
+        Some(ToolFilter::TestRunner) => filter_test_runner(output),
+        Some(ToolFilter::CargoCheck) => filter_cargo_check(output),
+        Some(ToolFilter::GitDiff) => filter_git_diff(output),
+        Some(ToolFilter::GitLog) => {
+            if output.lines().count() > GIT_LOG_LINE_GATE {
+                filter_git_log(output)
+            } else {
+                output.to_string()
+            }
         }
-        return filter_test_runner(output);
-    }
-    if n.contains("diff") {
-        return filter_git_diff(output);
-    }
-    if n.contains("log") {
-        let line_count = output.lines().count();
-        if line_count > 30 {
-            return filter_git_log(output);
+        Some(ToolFilter::FileRead) => {
+            if output.lines().count() > FILE_READ_LINE_GATE {
+                filter_file_read(output)
+            } else {
+                output.to_string()
+            }
         }
-        return output.to_string();
+        Some(ToolFilter::Grep) => filter_grep_output(output),
+        Some(ToolFilter::Ls) => filter_ls_output(output),
     }
-    if n.contains("read") || n.contains("cat") {
-        let line_count = output.lines().count();
-        if line_count > 200 {
-            return filter_file_read(output);
-        }
-        return output.to_string();
-    }
-    // #1957: grep/rg/find emit a flat match-or-path list; ls emits a flat
-    // directory listing. Neither had a filter branch — the #1953 spike
-    // measured 0% reduction for grep and ls output. Matched on the first
-    // whitespace token (not `.contains()`, unlike the branches above)
-    // because "rg" is a substring of unrelated tool names this dispatch
-    // sees (e.g. "cargo", "git merge") that must not misfire.
-    let first_word = n.split_whitespace().next().unwrap_or("");
-    if first_word == "grep" || first_word == "rg" || first_word == "find" {
-        return filter_grep_output(output);
-    }
-    if first_word == "ls" {
-        return filter_ls_output(output);
-    }
-    if n.contains("check") || n.contains("clippy") {
-        return filter_cargo_check(output);
-    }
-    output.to_string()
 }
 
 /// Strip passing test lines from `cargo test` output.
