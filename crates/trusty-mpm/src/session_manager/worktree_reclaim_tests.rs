@@ -758,30 +758,42 @@ fn tm_provisioned_matches_the_removers_own_predicate() {
     );
 }
 
-/// The #6561 regression. `tm session prune-worktrees --merged-prs` reported
-/// `0 of 0 measured` against stores holding 30+ merged, clean `agent-*`
-/// worktrees, because gate 3 called the harness store out of scope while
-/// `agent_worktree_reap` was removing trees from it on every agent exit.
+/// The #6556 critic round, HIGH 3. `removal_permitted`'s third tier lets an
+/// agent-store path reach gate 4, and the first cut of #6561 then let a
+/// SENTINEL-LESS one straight through it — leaving merged-PR and clean-tree as
+/// the only gates in front of a delete. That is the routine window the critic
+/// named: a `version-control` agent squash-merges while the dispatched agent is
+/// still finishing, so the tree is merged and clean and the agent is still in
+/// it. The sentinel is written only after `PostToolUse` teaches an `agent_id`,
+/// so #6556's own lost-`PostToolUse` population lands here with no attribution
+/// at all.
 ///
-/// Fails before the fix: gate 3 blocks with "the harness `.claude/worktrees/`
-/// store is out of scope (ADR-0020)".
+/// Fails before this round: `classify` returns `Reclaimable { pr: 759 }`.
 #[test]
-fn classify_offers_a_merged_agent_store_worktree() {
+fn an_unattributed_agent_store_worktree_is_never_reclaimable() {
     let fx = GitWorktreeFixture::new();
     let path = fx.add_worktree_at(
         &fx.repo.join(".claude").join("worktrees"),
-        "agent-6561merged",
+        "agent-6561unattributed",
     );
+    // No sentinel of any kind: nothing attributes this tree to an agent and
+    // nothing says whether one is still working in it. Merged and clean, so
+    // gates 5 and 6 both pass and only the ownership gate stands.
     let v = classify_no_agent(&path, Admission::Admitted, false, &merged(759), &clean);
     assert!(
-        v.is_reclaimable(),
-        "a merged, clean, unclaimed agent worktree must become reclaimable: {v:?}"
+        !v.is_reclaimable(),
+        "an unattributed agent-store tree must never be deleted on merged+clean alone: {v:?}"
+    );
+    assert!(
+        reason(&v).contains("names no owner"),
+        "and the refusal must be the ownership one, naming why: {}",
+        reason(&v)
     );
 }
 
-/// The #4091 dirty-work guard is untouched by that widening: an agent-store
-/// worktree holding uncommitted or unpushed work is still refused, merged PR or
-/// not. This is the assertion that must never be relaxed.
+/// The #4091 dirty-work guard, asserted on the agent store specifically: unsaved
+/// work outranks a merged PR there as anywhere. This assertion must never be
+/// relaxed.
 #[test]
 fn a_dirty_agent_store_worktree_is_still_refused() {
     let fx = GitWorktreeFixture::new();
@@ -796,10 +808,10 @@ fn a_dirty_agent_store_worktree_is_still_refused() {
     );
 }
 
-/// The #5661 refusal keeps its exact meaning across the widening: an agent-store
-/// worktree whose sentinel FILE exists but names no owner could be hiding a
-/// claim this cannot read, and is still refused. What #6561 admits is the path
-/// with no sentinel at all, which carries no claim to hide.
+/// The #5661 refusal for the spelling it was written against — a sentinel FILE
+/// that exists but names no owner. Kept beside the sentinel-LESS case above so
+/// the two spellings are pinned to the same verdict; the first cut of #6561
+/// split them and admitted one.
 #[test]
 fn an_unreadable_agent_sentinel_still_blocks_an_agent_store_worktree() {
     let fx = GitWorktreeFixture::new();

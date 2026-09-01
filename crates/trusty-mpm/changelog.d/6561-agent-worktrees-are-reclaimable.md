@@ -1,12 +1,13 @@
 Fixed
 
-- `tm session prune-worktrees --merged-prs` now considers `.claude/worktrees/`
-  agent worktrees. The ownership question is a single predicate,
-  `decommission::removal_permitted`, shared by the reclaim classifier and the
-  remover; its third tier admits the harness's `isolation: "worktree"` store,
-  which `agent_worktree_reap` already removes from on every agent exit. Before
-  this the pass reported `0 of 0 measured` against stores holding 30+ merged,
-  clean agent worktrees. Every safety gate is unchanged — the merged-PR
-  requirement, the #4091 dirty-work guard, the live-session check, the #5661
-  agent-sentinel refusal, and the per-candidate re-read immediately before each
-  delete (#6561).
+- The ownership question behind `tm session prune-worktrees` is now a single
+  predicate, `decommission::removal_permitted`, shared by the reclaim classifier
+  and the remover. The two had already drifted: the classifier called the
+  harness `.claude/worktrees/` store out of scope while `agent_worktree_reap`
+  removes trees from it on every agent exit (#6561).
+- An agent-store worktree whose sentinel names no owner is refused whether that
+  sentinel is unreadable OR absent. A missing sentinel is the absence of any
+  attribution, not the absence of a claim, so resolving it toward "free" on a
+  destructive path is exactly what ADR-0045 forbids. This leaves the historical
+  backlog of unattributed agent worktrees unreclaimable — stated in #6561 rather
+  than silently deleted (#6561, #5661).

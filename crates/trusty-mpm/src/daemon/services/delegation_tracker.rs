@@ -286,8 +286,19 @@ fn usable_agent_id(response: &Value) -> Option<&str> {
 /// absent/unparsable ([`SentinelOwner::Unknown`], nothing to overwrite) or
 /// already this same agent's. Anything else refuses and logs, exactly like the
 /// write-failure arm below.
+/// # It also tracks where the agent IS, not only what it owns (#6556)
+///
+/// `worktree_path` is a latch by design — the tree stays this delegation's to
+/// own after the agent walks out of it, which is what
+/// [`super::agent_worktree_reap`] needs. The shared-tree guard asks a different
+/// question ("where is this agent writing now") and a latch cannot answer it, so
+/// every subagent hook also refreshes
+/// [`Delegation::last_agent_cwd`](crate::core::agent::Delegation::last_agent_cwd).
+/// The write happens only when the value changed, so the steady state costs one
+/// scan and no allocation.
 /// Test: `subagent_tool_call_registers_its_worktree`,
 /// `subagent_sharing_the_dispatchers_tree_registers_nothing`,
+/// `subagent_tool_calls_track_the_current_working_directory`,
 /// `an_unknown_agent_id_registers_nothing`,
 /// `a_failed_sentinel_write_registers_no_worktree`,
 /// `a_cwd_outside_the_harness_store_gets_no_sentinel`,
@@ -410,13 +421,25 @@ fn register_agent_worktree(state: &DaemonState, session: SessionId, payload: &Va
     let Some(cwd) = field(payload, "cwd").map(std::path::PathBuf::from) else {
         return;
     };
-    let Some(id) = state.find_delegation(session, |d| {
-        d.agent_id.as_deref() == Some(agent_id)
-            && d.worktree_path.as_deref() != Some(cwd.as_path())
-            && d.cwd.as_deref() != Some(cwd.as_path())
-    }) else {
+    let Some(id) = state.find_delegation(session, |d| d.agent_id.as_deref() == Some(agent_id))
+    else {
         return;
     };
+    // #6556 critic round: track where this agent is NOW, in the same pass that
+    // decides whether to claim. `worktree_path` is a latch and must stay one —
+    // the reap needs it — so the current directory is its own field. Written
+    // only when it changed, which keeps the steady state off the hot path.
+    let mut claim_needed = false;
+    state.mutate_delegation(id, |d| {
+        if d.last_agent_cwd.as_deref() != Some(cwd.as_path()) {
+            d.last_agent_cwd = Some(cwd.clone());
+        }
+        claim_needed = d.worktree_path.as_deref() != Some(cwd.as_path())
+            && d.cwd.as_deref() != Some(cwd.as_path());
+    });
+    if !claim_needed {
+        return;
+    }
     if let Some(refusal) = claim_refused(state, session, agent_id, &cwd) {
         tracing::warn!(
             agent_id,
@@ -1013,7 +1036,13 @@ fn reconcile_by_agent_type(state: &DaemonState, session: SessionId, payload: &Va
         );
         return false;
     }
-    let wrote = state.mutate_delegation(only.id, |d| d.status = DelegationStatus::Stale);
+    // #6556 critic round: `stale_by_agent_type` is what keeps this record
+    // OCCUPYING the tree for a new file-mutating dispatch while releasing it for
+    // an ADR-0049 commit. See `DaemonState::shared_tree_occupants`.
+    let wrote = state.mutate_delegation(only.id, |d| {
+        d.status = DelegationStatus::Stale;
+        d.stale_by_agent_type = true;
+    });
     if wrote {
         tracing::info!(
             agent_type,

@@ -395,19 +395,16 @@ fn survey_excludes_a_worktree_trusty_mpm_cannot_remove() {
     );
 }
 
-/// The #6561 regression, at the survey level. `tm session prune-worktrees
-/// --merged-prs` reported `reclaimed 0 worktree(s); 0 byte(s) across 0 of 0
-/// measured` against stores holding 30+ merged, clean `agent-*` worktrees,
-/// because gate 3 called the harness store out of scope while
-/// `agent_worktree_reap` was removing trees from that same store on every agent
-/// exit. The agent-store shape is the dominant creation path in a
-/// tm-orchestrated session, so this was most of what the flag exists to reclaim.
+/// The #6556 critic round, HIGH 3, at the survey level. The first cut of #6561
+/// let a sentinel-less agent-store worktree through gate 4, so a whole-store
+/// sweep would have offered every unattributed `agent-*` tree whose PR had
+/// merged — including one a dispatched agent was still working in, since
+/// `version-control` squash-merges before that agent finishes.
 ///
-/// Fails before the fix: the candidate is listed but `Blocked` with "the harness
-/// `.claude/worktrees/` store is out of scope (ADR-0020)", and
-/// `s.reclaimable` is 0.
+/// Fails before this round: the candidate is `Reclaimable { pr: 759 }` and
+/// `s.reclaimable` is 1.
 #[test]
-fn survey_offers_a_merged_agent_store_worktree() {
+fn survey_refuses_an_unattributed_agent_store_worktree() {
     let fx = GitWorktreeFixture::new();
     let parent = fx.repo.join(".claude").join("worktrees");
     let path = fx.add_worktree_at(&parent, "agent-6561");
@@ -425,12 +422,15 @@ fn survey_offers_a_merged_agent_store_worktree() {
         .iter()
         .find(|c| c.path == path)
         .unwrap_or_else(|| panic!("survey missed {}", path.display()));
-    assert_eq!(
-        found.verdict,
-        ReclaimVerdict::Reclaimable { pr: 759 },
-        "a merged, clean, unclaimed agent worktree must be offered"
+    assert!(
+        !found.verdict.is_reclaimable(),
+        "a merged, clean, but UNATTRIBUTED agent worktree must not be offered: {:?}",
+        found.verdict
     );
-    assert_eq!(s.reclaimable, 1);
+    assert_eq!(
+        s.reclaimable, 0,
+        "and it must not be counted toward what the operator is told to reclaim"
+    );
 }
 
 #[test]

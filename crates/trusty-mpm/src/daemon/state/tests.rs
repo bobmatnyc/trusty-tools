@@ -428,15 +428,63 @@ fn a_recorded_worktree_outranks_a_missing_isolation_declaration() {
 
     let mut d = unisolated_running_delegation(id, &cwd);
     // What the agent reported from its own hook cwd (#4311) — a tree that is
-    // not the dispatcher's.
-    d.worktree_path = Some(std::path::PathBuf::from(
-        "/repo/main/.claude/worktrees/agent-aa049179cd3e4e1bb",
-    ));
+    // not the dispatcher's, and where its latest hook still runs.
+    let tree = std::path::PathBuf::from("/repo/main/.claude/worktrees/agent-aa049179cd3e4e1bb");
+    d.worktree_path = Some(tree.clone());
+    d.last_agent_cwd = Some(tree);
     state.upsert_delegation(d);
 
     assert!(
         state.live_shared_tree_writers(&cwd, None).is_empty(),
         "an agent that reported a tree of its own is not writing in the shared checkout"
+    );
+}
+
+/// The #6556 critic round, HIGH 2. `worktree_path` is a one-way latch, so an
+/// agent that entered a worktree and came back out — `EnterWorktree`, then
+/// `ExitWorktree` with `action: "keep"`, which restores the dispatcher's cwd —
+/// was excluded from the shared-tree count for the rest of its life while
+/// writing in the shared checkout the whole time.
+///
+/// Fails before this round: `holds_its_own_tree` reads `worktree_path` alone, so
+/// the writer stays invisible after it leaves.
+#[test]
+fn an_agent_that_leaves_its_worktree_blocks_the_shared_tree_again() {
+    let state = DaemonState::new();
+    let session = sample_session();
+    let id = session.id;
+    let cwd = std::path::PathBuf::from("/repo/main");
+    let tree = std::path::PathBuf::from("/repo/main/.claude/worktrees/agent-enterexit");
+    state.register_session(session);
+
+    // In its own tree: granted, and standing in it.
+    let mut d = unisolated_running_delegation(id, &cwd);
+    d.worktree_path = Some(tree.clone());
+    d.last_agent_cwd = Some(tree.clone());
+    let delegation_id = d.id;
+    state.upsert_delegation(d);
+    assert!(
+        state.live_shared_tree_writers(&cwd, None).is_empty(),
+        "while it is in its own tree it is not writing in the shared checkout"
+    );
+
+    // ExitWorktree with `action: "keep"`: the tree stays its own — the reap
+    // needs that — but the agent is back in the dispatcher's checkout.
+    state.mutate_delegation(delegation_id, |d| d.last_agent_cwd = Some(cwd.clone()));
+    assert_eq!(
+        state.live_shared_tree_writers(&cwd, None).len(),
+        1,
+        "once it walks back into the shared checkout it must block again"
+    );
+    assert_eq!(
+        state
+            .all_delegations()
+            .into_iter()
+            .next()
+            .expect("one")
+            .worktree_path,
+        Some(tree),
+        "and the ownership latch must survive, or the reap loses the tree's owner"
     );
 }
 
@@ -466,11 +514,116 @@ fn an_unrecorded_worktree_leaves_the_isolation_test_deciding() {
     state.register_session(session);
     let mut d = unisolated_running_delegation(id, &cwd);
     d.worktree_path = Some(cwd.clone());
+    d.last_agent_cwd = Some(cwd.clone());
     state.upsert_delegation(d);
     assert_eq!(
         state.live_shared_tree_writers(&cwd, None).len(),
         1,
         "a recorded path equal to the dispatch cwd names the shared tree, not a separate one"
+    );
+}
+
+/// The #6556 critic round, HIGH 1. `reconcile_by_agent_type` identifies a record
+/// by KIND, so a stop belonging to an agent whose own dispatch was never
+/// observed — dispatched while the daemon was unreachable — can stale a sibling
+/// that is still writing. Releasing that tree for a documents-only commit is the
+/// bargain #6556 makes; releasing it for a second FILE-MUTATING dispatch is the
+/// ADR-0048 harm, and no later signal undoes two writers on one HEAD.
+///
+/// Fails before this round: `claim_shared_tree_dispatch` read
+/// `live_shared_tree_writers`, which omits every `Stale` record, so the claim
+/// was granted and a second engineer was admitted onto the live agent's HEAD.
+#[test]
+fn a_type_reconciled_record_still_occupies_the_tree_for_a_dispatch() {
+    let state = DaemonState::new();
+    let session = sample_session();
+    let id = session.id;
+    let cwd = std::path::PathBuf::from("/repo/main");
+    state.register_session(session);
+
+    let mut d = unisolated_running_delegation(id, &cwd);
+    d.started_at = Some(chrono::Utc::now());
+    // What `reconcile_by_agent_type` writes when a sibling's stop names this
+    // record's agent type and nothing else could be it.
+    d.status = crate::core::agent::DelegationStatus::Stale;
+    d.stale_by_agent_type = true;
+    state.upsert_delegation(d);
+
+    assert!(
+        state.live_shared_tree_writers(&cwd, None).is_empty(),
+        "the ADR-0049 commit guard honours the reconciliation — that is the point of #6556"
+    );
+    assert_eq!(
+        state.shared_tree_occupants(&cwd, None).len(),
+        1,
+        "but the tree is still occupied, because the identification was by type"
+    );
+
+    // And the claim the dispatch guard actually takes must be refused.
+    let mut recorded = false;
+    let (occupants, claimed) =
+        state.claim_shared_tree_dispatch(&cwd, None, true, |_| recorded = true);
+    assert_eq!(occupants.len(), 1, "the deny must name the occupant");
+    assert!(
+        !claimed,
+        "a second file-mutating dispatch must not be admitted"
+    );
+    assert!(
+        !recorded,
+        "and nothing may be recorded when the claim is refused"
+    );
+}
+
+/// Occupancy is BOUNDED. Without a bound a type-reconciled record would hold the
+/// tree for the whole 24 h `STALE_RETENTION_SECS` window — four times the budget
+/// it would have had if nothing had reconciled it — so it ends exactly where the
+/// staleness sweep would have ended it anyway.
+#[test]
+fn a_type_reconciled_record_stops_occupying_at_its_original_budget() {
+    let state = DaemonState::new();
+    let session = sample_session();
+    let id = session.id;
+    let cwd = std::path::PathBuf::from("/repo/main");
+    state.register_session(session);
+
+    let mut d = unisolated_running_delegation(id, &cwd);
+    d.started_at = Some(
+        chrono::Utc::now()
+            - chrono::Duration::seconds(
+                crate::daemon::state::sessions::RUNNING_STALE_AFTER_SECS + 60,
+            ),
+    );
+    d.status = crate::core::agent::DelegationStatus::Stale;
+    d.stale_by_agent_type = true;
+    state.upsert_delegation(d);
+
+    assert!(
+        state.shared_tree_occupants(&cwd, None).is_empty(),
+        "past its own liveness budget the record occupies nothing — the sweep would \
+         have staled it by now regardless"
+    );
+}
+
+/// A record staled by the sweep or by #6497's dead-session reaper must NOT
+/// re-acquire occupancy. Those act on evidence about the record's OWN owner, and
+/// #6497 released the tree deliberately so a successor session could take it.
+#[test]
+fn an_ordinarily_staled_record_occupies_nothing() {
+    let state = DaemonState::new();
+    let session = sample_session();
+    let id = session.id;
+    let cwd = std::path::PathBuf::from("/repo/main");
+    state.register_session(session);
+
+    let mut d = unisolated_running_delegation(id, &cwd);
+    d.started_at = Some(chrono::Utc::now());
+    d.status = crate::core::agent::DelegationStatus::Stale;
+    // `stale_by_agent_type` deliberately left false.
+    state.upsert_delegation(d);
+
+    assert!(
+        state.shared_tree_occupants(&cwd, None).is_empty(),
+        "only a TYPE-reconciled stale keeps occupancy; #6497's reaper must still release"
     );
 }
 

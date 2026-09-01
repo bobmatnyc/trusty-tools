@@ -174,21 +174,30 @@ pub(crate) fn is_session_worktree_with(
 ///    kept for worktrees created before the sentinel existed.
 /// 3. **Harness agent store (#6561)** — [`is_harness_agent_worktree`], the
 ///    `<checkout>/.claude/worktrees/<name>` shape Claude Code's
-///    `isolation: "worktree"` dispatch creates. Admitting it is what makes
-///    `tm session prune-worktrees --merged-prs` able to reclaim the dominant
-///    creation path in a tm-orchestrated session; before this it reported
-///    `0 of 0 measured` against a store holding 30+ merged, clean worktrees.
+///    `isolation: "worktree"` dispatch creates.
 ///
-/// **This grants no permission to delete anything.** It answers ownership only.
-/// Every gate that decides whether a removal is SAFE stands after it and is
-/// untouched: the merged-PR requirement, the #4091 dirty-work guard
+/// **This grants no permission to delete anything.** It answers ownership only —
+/// "is this directory a kind trusty-mpm may act on at all" — and every gate that
+/// decides whether a removal is SAFE stands after it, untouched: the merged-PR
+/// requirement, the #4091 dirty-work guard
 /// ([`super::worktree_safety::inspect_dirt`], which fails toward dirty and
 /// refuses on an unpushed commit), the live-session check, the agent-ownership
-/// sentinel check (#5661), and the per-candidate re-read immediately before each
-/// delete. Tier 3 widens who may be CONSIDERED, never what may be lost.
+/// refusal (#5661), and the per-candidate re-read immediately before each delete.
+///
+/// **Tier 3 in particular decides nothing on its own (#6561 critic round).**
+/// [`super::worktree_reclaim::agent_ownership_blocks`] refuses EVERY agent-store
+/// path whose sentinel does not name an agent the delegation registry can
+/// resolve, absent sentinels included — so tier 3 can never be the reason such a
+/// tree is deleted. Its effect is to keep this predicate and
+/// `super::worktree_reclaim::tm_provisioned` a single rule rather than two
+/// copies that had already drifted: the classifier's copy called the harness
+/// store out of scope while
+/// [`super::super::daemon::services::agent_worktree_reap`] removes trees from
+/// it on every agent exit.
 /// Test: `removal_permitted_admits_all_three_tiers`,
 /// `removal_permitted_refuses_a_user_directory`,
-/// `tm_provisioned_matches_the_removers_own_predicate`.
+/// `tm_provisioned_matches_the_removers_own_predicate`,
+/// `an_unattributed_agent_store_worktree_is_never_reclaimable`.
 pub(crate) fn removal_permitted(path: &Path) -> bool {
     path.join(WORKTREE_SENTINEL_FILE).exists()
         || is_session_worktree(path)

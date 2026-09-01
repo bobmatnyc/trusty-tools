@@ -38,7 +38,7 @@ use serde::{Deserialize, Serialize};
 
 use super::worktree_ownership::{
     AgentDelegationState, AgentWorktreeOwner, SentinelOwner, is_harness_agent_worktree,
-    read_sentinel_owner, sentinel_file_present,
+    read_sentinel_owner,
 };
 use super::worktree_registry::Admission;
 use super::worktree_safety::DirtyWorktree;
@@ -533,24 +533,29 @@ pub(crate) fn tm_provisioned(path: &Path) -> bool {
 ///    delegation map is rebuilt empty at every daemon boot: after a restart it
 ///    reports nothing for an agent that is still working, and an unanswerable
 ///    liveness question must never resolve to "free" (ADR-0045).
-/// 2. [`SentinelOwner::Unknown`] for a path inside the harness agent store
-///    ([`is_harness_agent_worktree`]) that DOES carry a sentinel file. Its
-///    content does not name an owner; empty, truncated, garbage and unreadable
-///    are indistinguishable to the tolerant parse, and any of them could be
-///    hiding an agent claim. Undeterminable, not absent.
+/// 2. [`SentinelOwner::Unknown`] for ANY path inside the harness agent store
+///    ([`is_harness_agent_worktree`]) — whether the sentinel is unreadable or
+///    absent entirely. Undeterminable, not absent.
 ///
-///    The file-presence test is explicit since #6561 and used to be implied.
-///    Reaching this gate used to prove a sentinel existed, because
-///    `tm_provisioned` admitted a path only through the sentinel or the
-///    `.worktrees/<name>` convention, and the second cannot match an agent-store
-///    path. `removal_permitted`'s third tier admits an agent-store path with no
-///    sentinel at all, so the implication no longer holds — and a path carrying
-///    no sentinel carries no claim to hide, which is a different fact from an
-///    unreadable one. Refusing it would have made the entire population #6561
-///    exists to reclaim permanently unreclaimable, under a reason
-///    ("carries an ownership sentinel that names no owner") that is not true of
-///    it. What such a path faces instead is every remaining gate: the merged PR,
-///    the #4091 dirty-work guard, and the per-candidate re-read before deletion.
+///    The first cut of #6561 split those two spellings and refused only the
+///    unreadable one, reasoning that a path with no sentinel carries no claim to
+///    hide. That is backwards, and the critic round caught it: a missing
+///    sentinel is not weaker evidence of a claim, it is the ABSENCE OF ANY
+///    ATTRIBUTION — trusty-mpm knows neither who owns the tree nor whether
+///    anyone is working in it, which is the exact question ADR-0045 forbids
+///    resolving toward "free" on a destructive path. The sentinel is written
+///    only after `PostToolUse` teaches an `agent_id`, so #6556's own
+///    lost-`PostToolUse` population has neither a sentinel nor a
+///    `worktree_path`; a `version-control` agent squash-merging while that agent
+///    is still finishing leaves the tree merged and clean, and gates 5 and 6
+///    would then be the only things standing in front of a delete of a live
+///    agent's tree. That is the #5661 shape, reintroduced.
+///
+///    What this costs: the historical backlog of unattributed agent worktrees
+///    stays unreclaimable, which is the pre-existing state and is stated in
+///    #6561 rather than silently fixed. What it does not cost: a tree whose
+///    agent DID register (sentinel written, delegation terminal) is answered
+///    `Ended` by the probe above and reclaims normally.
 ///
 /// # What this deliberately does NOT change
 ///
@@ -586,19 +591,16 @@ pub(crate) fn agent_ownership_blocks(
             )),
             AgentDelegationState::Ended => None,
         },
-        // #6561: `sentinel_file_present` is what separates an unreadable claim
-        // from no claim at all — see this function's doc, refusal 2.
-        SentinelOwner::Unknown
-            if is_harness_agent_worktree(path) && sentinel_file_present(path) =>
-        {
-            Some(
-                "carries an ownership sentinel that names no owner (empty, malformed or \
-                 unreadable) inside the harness agent-worktree store — it could be an agent \
-                 claim this cannot read, and an unreadable claim on a destructive path is \
-                 undeterminable, not absent (#5661, ADR-0045)"
-                    .to_string(),
-            )
-        }
+        // #6561 critic round: absent and unreadable are BOTH undeterminable
+        // here — see this function's doc, refusal 2.
+        SentinelOwner::Unknown if is_harness_agent_worktree(path) => Some(
+            "names no owner inside the harness agent-worktree store — the sentinel is absent, \
+             empty, malformed or unreadable, so nothing attributes this tree to an agent and \
+             nothing says whether one is still working in it. An unanswerable ownership \
+             question on a destructive path is undeterminable, not absent (#5661, #6561, \
+             ADR-0045)"
+                .to_string(),
+        ),
         SentinelOwner::Known(..) | SentinelOwner::Unknown => None,
     }
 }

@@ -281,26 +281,6 @@ pub(crate) fn is_harness_agent_worktree(path: &Path) -> bool {
 /// `sentinel_owner_empty_file_is_unknown`,
 /// `sentinel_owner_garbage_file_is_unknown`,
 /// `sentinel_owner_round_trips_valid_payload`.
-/// Does an ownership sentinel FILE exist under `worktree_path` (#6561)?
-///
-/// Why: [`read_sentinel_owner`] is deliberately tolerant — absent, empty and
-/// unparsable all read as [`SentinelOwner::Unknown`] — and that collapse is
-/// correct for asking "whose is this". It is wrong for one caller.
-/// [`super::worktree_reclaim::agent_ownership_blocks`] refuses an agent-store
-/// worktree whose sentinel names no owner, on the ground that an unreadable
-/// claim could be hiding an agent's (#5661); that reasoning is about a file
-/// whose CONTENT could not be read, and it does not reach a path that carries no
-/// sentinel at all and therefore no claim to hide. Until #6561 the two were
-/// indistinguishable, and the distinction did not matter because such a path
-/// never reached that gate. It does now.
-/// What: a plain existence check on `<worktree_path>/.trusty-mpm-worktree`. An
-/// unreadable-but-present file answers `true`, which is the fail-closed
-/// direction: it routes to the refusal, not past it.
-/// Test: `sentinel_presence_separates_absent_from_unreadable`.
-pub(crate) fn sentinel_file_present(worktree_path: &Path) -> bool {
-    worktree_path.join(WORKTREE_SENTINEL_FILE).exists()
-}
-
 pub(crate) fn read_sentinel_owner(worktree_path: &Path) -> SentinelOwner {
     let sentinel_path = worktree_path.join(WORKTREE_SENTINEL_FILE);
     let Ok(bytes) = std::fs::read(&sentinel_path) else {
@@ -595,29 +575,18 @@ mod tests {
         assert_eq!(read_sentinel_owner(dir.path()), SentinelOwner::Unknown);
     }
 
-    /// #6561: `read_sentinel_owner` collapses "no file" and "unreadable file"
-    /// into `Unknown`, which is right for asking whose a worktree is and wrong
-    /// for the #5661 refusal — that one is about a claim that could not be READ,
-    /// not about a path with no claim on it.
+    /// #6561 critic round: an absent sentinel and an unreadable one BOTH read
+    /// `Unknown`, and both are undeterminable for an agent-store path. The first
+    /// cut split them and admitted the absent case; this pins that they stay
+    /// collapsed, so `agent_ownership_blocks` cannot be given a distinction it
+    /// must not act on.
     #[test]
-    fn sentinel_presence_separates_absent_from_unreadable() {
+    fn an_absent_and_an_unreadable_sentinel_are_both_unknown() {
         let dir = tempfile::tempdir().expect("tempdir");
-        assert!(
-            !sentinel_file_present(dir.path()),
-            "no sentinel file means no claim to hide"
-        );
         assert_eq!(read_sentinel_owner(dir.path()), SentinelOwner::Unknown);
 
         std::fs::write(dir.path().join(WORKTREE_SENTINEL_FILE), b"not json {").expect("write");
-        assert!(
-            sentinel_file_present(dir.path()),
-            "an unreadable file is present, and must route to the refusal"
-        );
-        assert_eq!(
-            read_sentinel_owner(dir.path()),
-            SentinelOwner::Unknown,
-            "both spellings still read Unknown — presence is the discriminator"
-        );
+        assert_eq!(read_sentinel_owner(dir.path()), SentinelOwner::Unknown);
     }
 
     #[test]

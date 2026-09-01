@@ -304,6 +304,11 @@ fn a_completed_agents_record_stops_blocking_when_its_id_was_never_taught() {
         "identified by type, so `Stale` — tracking gave up, the agent is not asserted finished"
     );
     assert!(
+        d.stale_by_agent_type,
+        "and flagged as type-reconciled, so it still OCCUPIES the tree for a dispatch \
+         (#6556 critic round, HIGH 1)"
+    );
+    assert!(
         d.ended_at.is_none(),
         "staling must not stamp ended_at, which means `reached a terminal status`"
     );
@@ -1277,6 +1282,55 @@ fn subagent_tool_call_registers_its_worktree() {
             SentinelOwner::Agent(owner, _) if owner.agent_id == "a403"
         ),
         "the tree must carry an ownership sentinel naming this agent"
+    );
+}
+
+/// The #6556 critic round, HIGH 2, at the tracker. `worktree_path` is a latch —
+/// the tree stays this delegation's to own, which the reap needs — so where the
+/// agent IS has to be its own field, refreshed on every subagent hook.
+///
+/// Fails before this round: `last_agent_cwd` does not exist, and
+/// `register_agent_worktree`'s finder skips an event whose cwd equals the
+/// dispatcher's, so nothing at all records the agent walking back out.
+#[test]
+fn subagent_tool_calls_track_the_current_working_directory() {
+    let (state, sid) = state_with_session();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let wt = harness_store_dir(&tmp, "agent-enterexit");
+    dispatched_from(&state, sid, tmp.path(), "enterexit", "toolu_1");
+
+    // EnterWorktree: the subagent's hooks now run in its own tree.
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &subagent_call("enterexit", &wt.to_string_lossy()),
+    );
+    let d = only(&state, sid);
+    assert_eq!(d.worktree_path.as_deref(), Some(wt.as_path()));
+    assert_eq!(
+        d.last_agent_cwd.as_deref(),
+        Some(wt.as_path()),
+        "the current directory is recorded alongside the grant"
+    );
+
+    // ExitWorktree with `action: "keep"`: back in the dispatcher's checkout.
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &subagent_call("enterexit", &tmp.path().to_string_lossy()),
+    );
+    let d = only(&state, sid);
+    assert_eq!(
+        d.last_agent_cwd.as_deref(),
+        Some(tmp.path()),
+        "the agent moved, and the record must say so"
+    );
+    assert_eq!(
+        d.worktree_path.as_deref(),
+        Some(wt.as_path()),
+        "while the ownership latch survives — the reap still needs the tree's owner"
     );
 }
 

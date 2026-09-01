@@ -150,10 +150,13 @@ fn worktrees_dirname_delegates_to_the_shared_resolver() {
 /// paths above. So the assertion moved from "nothing may remove it" to "the
 /// config value is not what admits it".
 /// What: sets `TRUSTY_MPM_WORKTREES_DIRNAME=worktrees`, the adversarial value,
-/// and asserts `is_session_worktree` still refuses `.claude/worktrees/<agent>`
-/// and that removing the agent-store tier would leave it refused.
+/// and asserts the path is classified by SHAPE — it is the harness agent store
+/// and is not a session worktree — under that value. The earlier spelling of
+/// this assertion tested `<path>/.trusty-mpm-worktree` on a hardcoded
+/// nonexistent path, which could never fail (#6556 critic round, MEDIUM 5).
 /// Test: this test; `removal_permitted_admits_all_three_tiers` covers the tier
-/// that does admit it.
+/// that does admit it, and `an_unattributed_agent_store_worktree_is_never_reclaimable`
+/// covers what still refuses to delete it.
 #[test]
 fn configured_base_can_never_claim_a_claude_agent_worktree() {
     let _guard = crate::core::trusty_tools_config::env_test_lock();
@@ -164,9 +167,9 @@ fn configured_base_can_never_claim_a_claude_agent_worktree() {
         "/Users/dev/trusty-mpm-projects/owner/repo/.claude/worktrees/agent-abc123",
     );
     let observed_session = is_session_worktree(agent_wt);
-    // #6561: the harness-store tier is what admits this path now. Asserting on
-    // the other two tiers keeps the configured base out of the answer.
-    let observed_sentinel = agent_wt.join(WORKTREE_SENTINEL_FILE).exists();
+    // #6561: the harness-store tier is what classifies this path, and it is
+    // keyed on the `.claude/worktrees` shape rather than on the configured base.
+    let observed_harness = super::worktree_ownership::is_harness_agent_worktree(agent_wt);
 
     // SAFETY: as above.
     unsafe { std::env::remove_var("TRUSTY_MPM_WORKTREES_DIRNAME") };
@@ -174,12 +177,13 @@ fn configured_base_can_never_claim_a_claude_agent_worktree() {
     assert!(
         !observed_session,
         "`.claude/worktrees/<agent>` must never be a tm session worktree, whatever \
-         TRUSTY_MPM_WORKTREES_DIRNAME says"
+         TRUSTY_MPM_WORKTREES_DIRNAME says — the session paths (decommission, \
+         search-index GC, --reset-agents-workspaces) all key on that predicate"
     );
     assert!(
-        !observed_sentinel,
-        "and it must not be admitted by a sentinel that is not there — the only \
-         thing admitting it is the explicit harness-store tier (#6561)"
+        observed_harness,
+        "it is the harness agent store, and that classification must come from the \
+         path shape rather than from a config value a rename could flip (#6561)"
     );
 }
 
