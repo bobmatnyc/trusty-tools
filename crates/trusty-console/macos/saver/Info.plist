@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template for TrustyConsole.saver/Contents/Info.plist (#6520).
+
+  scripts/build-console-saver.sh copies this file into the bundle and replaces
+  __CONSOLE_VERSION__ with the trusty-console crate version read from
+  crates/trusty-console/Cargo.toml. Edit this template, never the copy under
+  target/.
+
+  NSPrincipalClass must stay module-qualified (`<Module>.<Class>`): the Swift
+  class carries no @objc rename, so its runtime name is the mangled Swift name
+  that NSClassFromString only resolves from this form.
+
+  No NSAppTransportSecurity key by design — ATS reads the HOST application's
+  plist, not a plug-in's, and 127.0.0.1 is exempt from ATS regardless.
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>TrustyConsoleSaver</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.trusty.console.saver</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>TrustyConsole</string>
+	<key>CFBundlePackageType</key>
+	<string>BNDL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>__CONSOLE_VERSION__</string>
+	<key>CFBundleVersion</key>
+	<string>__CONSOLE_VERSION__</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>MIT — https://github.com/bobmatnyc/trusty-tools</string>
+	<key>NSPrincipalClass</key>
+	<string>TrustyConsoleSaver.TrustyConsoleSaverView</string>
+</dict>
+</plist>
