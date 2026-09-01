@@ -370,7 +370,8 @@ impl ResumeBreakerStore {
     /// the entry, including the stamp, so the NEXT death is not attributed to a
     /// resume that is now old news; `Counting`/`Park` keep the stamp and store
     /// the new count.
-    /// Test: `record_death_*`,
+    /// Test: `a_reset_forgets_the_stamp_as_well_as_the_count`,
+    /// `a_fast_death_after_an_auto_resume_counts`,
     /// `two_managers_over_one_data_dir_still_park_a_flapping_session`.
     pub async fn record_death(
         &mut self,
