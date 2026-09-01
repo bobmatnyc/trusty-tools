@@ -228,9 +228,19 @@ pub fn evaluate(
 /// authoritative, exactly as `sessions.json` is: every read reloads it and every
 /// write goes out atomically, through the shared [`super::json_file`]
 /// primitives `SessionStore` uses for the sibling file in the same directory.
-/// What: a `HashMap<session id, FlapState>` plus the fingerprint of the bytes
-/// last observed. [`Self::reload_if_changed`] re-reads when that fingerprint
-/// moved; [`Self::persist`] stages through a per-instance temp file and renames.
+/// What: a `HashMap<session id, FlapState>`. [`Self::reload`] re-reads on every
+/// access; [`Self::persist`] stages through a per-instance temp file and renames.
+///
+/// Deliberately WITHOUT the (mtime, len) fingerprint short-circuit
+/// `SessionStore` uses, because this payload defeats it. One cycle restamps a
+/// fixed-width timestamp and steps a counter `1`→`2`→`3`, so the serialized
+/// length does not move and freshness would rest on mtime alone; on a
+/// filesystem with 1-second mtime resolution the supervisor's stamp and the
+/// daemon's read can land in the same tick, compare equal, and skip the reload
+/// that is the entire point of this file. The sidecar is a few hundred bytes
+/// read about once a minute per process, so the stat saves nothing worth that
+/// risk. `SessionStore`'s own use of the fingerprint is unaffected — its
+/// records change length on almost every transition.
 ///
 /// Not a lock: two processes read-modify-writing concurrently can still lose an
 /// update. That is tolerable here and only here — a lost counter delays a park
@@ -248,7 +258,6 @@ pub struct ResumeBreakerStore {
     path: PathBuf,
     tmp_path: PathBuf,
     states: HashMap<String, FlapState>,
-    last_sig: Option<super::json_file::FileSig>,
 }
 
 impl ResumeBreakerStore {
@@ -268,37 +277,32 @@ impl ResumeBreakerStore {
             path,
             tmp_path,
             states: HashMap::new(),
-            last_sig: None,
         };
-        store.reload_if_changed().await;
+        store.reload().await;
         store
     }
 
-    /// Re-read the sidecar when the file on disk moved since we last saw it.
+    /// Re-read the sidecar from disk, unconditionally.
     ///
     /// Why (#6568): this is the whole cross-process fix. `note_auto_resume` runs
-    /// in `tm supervisor` and `record_death` runs in the daemon; without this
-    /// the daemon never observes the supervisor's stamp, so every death
+    /// in `tm supervisor` and `record_death` runs in the daemon; without a
+    /// reload the daemon never observes the supervisor's stamp, so every death
     /// evaluates as `Reset` and the breaker is inert in production while passing
     /// every single-process test.
-    /// What: compares the file's current fingerprint against the last observed
-    /// one via [`super::json_file::is_unchanged`] — one stat and no parse when
-    /// nothing moved. On a changed or first-seen file, re-reads and replaces the
-    /// map. A read or parse failure keeps the current map and logs; it never
-    /// errors.
+    ///
+    /// Unconditional, with no (mtime, len) short-circuit: this payload keeps a
+    /// constant serialized length across a cycle, so the fingerprint would rest
+    /// on mtime alone and a coarse-mtime filesystem could skip the very reload
+    /// this exists for. See the type's doc for the full reasoning.
+    /// What: reads and replaces the map. A read or parse failure keeps the map
+    /// already in memory and logs; it never errors. A file that is simply absent
+    /// is a legitimate empty state, not a failure.
     /// Test: `an_external_write_is_picked_up_by_the_next_read`,
     /// `two_managers_over_one_data_dir_still_park_a_flapping_session`.
-    async fn reload_if_changed(&mut self) {
-        let current = super::json_file::sig_of(&self.path).await;
-        if super::json_file::is_unchanged(current, self.last_sig) {
-            return;
-        }
+    async fn reload(&mut self) {
         match tokio::fs::read_to_string(&self.path).await {
             Ok(body) => match serde_json::from_str(&body) {
-                Ok(states) => {
-                    self.states = states;
-                    self.last_sig = current;
-                }
+                Ok(states) => self.states = states,
                 Err(e) => warn!(
                     path = %self.path.display(),
                     "resume-breaker: sidecar unparsable ({e}); keeping the counters already in memory"
@@ -308,7 +312,6 @@ impl ResumeBreakerStore {
                 // Absent is a legitimate state, not a failure: nothing has
                 // flapped yet, or the file was cleaned up between passes.
                 self.states.clear();
-                self.last_sig = None;
             }
             Err(e) => warn!(
                 path = %self.path.display(),
@@ -319,7 +322,7 @@ impl ResumeBreakerStore {
 
     /// This session's current bookkeeping, reconciled with disk first.
     pub async fn state_of(&mut self, id: &ManagedSessionId) -> FlapState {
-        self.reload_if_changed().await;
+        self.reload().await;
         self.states
             .get(&id.to_string())
             .cloned()
@@ -337,7 +340,7 @@ impl ResumeBreakerStore {
     /// Test: `a_fast_death_after_an_auto_resume_counts`,
     /// `two_managers_over_one_data_dir_still_park_a_flapping_session`.
     pub async fn note_auto_resume(&mut self, id: &ManagedSessionId, now: DateTime<Utc>) {
-        self.reload_if_changed().await;
+        self.reload().await;
         let entry = self.states.entry(id.to_string()).or_default();
         entry.last_auto_resume_at = Some(now);
         self.persist().await;
@@ -354,7 +357,7 @@ impl ResumeBreakerStore {
     /// Test: `an_operator_resume_forgives_the_streak`,
     /// `an_in_place_reactivate_forgives_the_streak`.
     pub async fn note_operator_resume(&mut self, id: &ManagedSessionId) {
-        self.reload_if_changed().await;
+        self.reload().await;
         if self.states.remove(&id.to_string()).is_some() {
             self.persist().await;
         }
@@ -401,10 +404,10 @@ impl ResumeBreakerStore {
     /// file — the hazard `SessionStore::save` documents for the sibling file in
     /// this same directory. Routing through [`super::json_file::write_atomic`]
     /// means there is one implementation of that rule, not two.
-    /// What: serialises, stages through this instance's private temp path,
-    /// renames, then records the resulting fingerprint so the next
-    /// [`Self::reload_if_changed`] treats our own write as unchanged. Failures
-    /// log and return — see the type's doc for why this never errors.
+    /// What: serialises, stages through this instance's private temp path, and
+    /// renames. Records no fingerprint — [`Self::reload`] re-reads
+    /// unconditionally, so there is nothing for one to short-circuit. Failures
+    /// log and return; see the type's doc for why this never errors.
     async fn persist(&mut self) {
         let body = match serde_json::to_string_pretty(&self.states) {
             Ok(b) => b,
@@ -418,9 +421,7 @@ impl ResumeBreakerStore {
                 path = %self.path.display(),
                 "resume-breaker: could not persist counters ({e}); they will restart empty"
             );
-            return;
         }
-        self.last_sig = super::json_file::sig_of(&self.path).await;
     }
 }
 

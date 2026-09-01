@@ -344,31 +344,25 @@ impl SessionStore {
     /// a concurrent reader can observe a half-written (unparseable) file. Writing
     /// a temp file and renaming it into place makes the swap atomic on POSIX, so
     /// a cross-process reader always sees either the old or the new file whole.
-    /// What: serializes `self.data` to JSON, creates parent directories if
-    /// needed, writes a sibling `sessions.json.tmp`, then renames it over the
-    /// real path; finally records the resulting mtime so a subsequent
-    /// [`Self::reload_if_changed`] treats our own write as "unchanged".
+    /// What: serializes `self.data` to JSON and hands the bytes to
+    /// [`json_file::write_atomic`], which creates the parent, stages through
+    /// this instance's private temp path and renames; then records the
+    /// resulting mtime so a subsequent [`Self::reload_if_changed`] treats our
+    /// own write as "unchanged". The stage-and-rename itself lives in
+    /// `json_file` because the #6568 breaker sidecar in this same directory
+    /// needs the identical rule — two copies of it is how one of them drifts.
     /// Test: verified indirectly by every mutating store test;
-    /// `store_reload_picks_up_external_write` exercises the cross-process path.
+    /// `store_reload_picks_up_external_write` exercises the cross-process path;
+    /// the write mechanics by `write_atomic_*` in `json_file_tests.rs`.
     pub async fn save(&mut self) -> Result<(), StoreError> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent).await?;
-        }
         let json = serde_json::to_string_pretty(&self.data)
             .map_err(|e| StoreError::Serialize(e.to_string()))?;
-        // Atomic swap: write to a temp sibling then rename over the target so a
-        // concurrent reader in another process never sees a torn file.
         // #5007: the staging name is PER STORE INSTANCE, not the shared
-        // `sessions.json.tmp` it used to be — see `tmp_path`'s doc for why a
-        // shared one produces exactly the corruption this issue was filed for.
-        let tmp = &self.tmp_path;
-        fs::write(tmp, json).await?;
-        if let Err(e) = fs::rename(tmp, &self.path).await {
-            // Do not leave the staging file behind on a failed swap; it is
-            // named after this process and nothing else will ever clean it up.
-            let _ = fs::remove_file(tmp).await;
-            return Err(StoreError::Io(e));
-        }
+        // `sessions.json.tmp` it used to be — see `json_file::staging_path` for
+        // why a shared one produces exactly the corruption that issue reports.
+        json_file::write_atomic(&self.path, &self.tmp_path, &json)
+            .await
+            .map_err(StoreError::Io)?;
         // Record the fingerprint of the bytes we just wrote so a subsequent
         // `reload_if_changed` treats our own write as "unchanged" and does not
         // pointlessly re-read the file we just authored (#1219).

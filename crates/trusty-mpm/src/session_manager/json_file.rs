@@ -10,11 +10,15 @@
 //! same directory. A second, weaker copy is the defect this module prevents —
 //! see CLAUDE.md's common-entry-point rule.
 //!
-//! What: [`FileSig`] and [`sig_of`] are the freshness fingerprint; [`staging_path`]
-//! mints the per-instance temp name; [`write_atomic`] does the stage-and-rename.
-//! Nothing here parses or knows about any payload type — the caller owns
-//! serialisation, so the same three primitives serve a `Vec<SessionRecord>` and
-//! a `HashMap<String, FlapState>` alike.
+//! What: [`staging_path`] mints the per-instance temp name and [`write_atomic`]
+//! does the stage-and-rename — both callers use both. [`FileSig`], [`sig_of`]
+//! and [`is_unchanged`] are the freshness fingerprint, which `SessionStore`
+//! uses and the breaker sidecar deliberately does not: that payload keeps a
+//! constant serialized length across a cycle, so the fingerprint would rest on
+//! mtime alone and could skip a needed reload on a coarse-mtime filesystem (see
+//! `resume_breaker::ResumeBreakerStore`). Nothing here parses or knows about any
+//! payload type — the caller owns serialisation, so the same primitives serve a
+//! `Vec<SessionRecord>` and a `HashMap<String, FlapState>` alike.
 //!
 //! What this is NOT: a lock. Two processes that read-modify-write concurrently
 //! can still lose one update — the rename makes each write ATOMIC, not

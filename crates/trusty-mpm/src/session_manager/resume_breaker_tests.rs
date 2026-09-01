@@ -189,6 +189,54 @@ async fn an_external_write_is_picked_up_by_the_next_read() {
     );
 }
 
+/// A same-length rewrite is still picked up — the class an (mtime, len)
+/// fingerprint short-circuit would have missed.
+///
+/// Why: this payload keeps a constant serialized length across a cycle (a
+/// fixed-width timestamp restamped, a counter stepping 1 -> 2 -> 3), so `len`
+/// contributes nothing and freshness would rest on mtime alone. On a
+/// filesystem with 1-second mtime resolution the two writes land in one tick,
+/// compare equal, and the reload that this whole file exists for is skipped.
+/// `ResumeBreakerStore` therefore reloads unconditionally; this asserts the
+/// resulting behavior rather than the absence of the optimisation.
+/// What: writes the sidecar twice with byte-identical LENGTHS and different
+/// counter values, and requires the second to be visible.
+/// Test: this is the test.
+#[tokio::test]
+async fn a_same_length_external_rewrite_is_still_picked_up() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let id = ManagedSessionId::new();
+    let now = Utc::now();
+
+    let mut writer = ResumeBreakerStore::load(tmp.path()).await;
+    let mut reader = ResumeBreakerStore::load(tmp.path()).await;
+
+    writer.note_auto_resume(&id, now).await;
+    let first = writer.record_death(&id, &cfg(3600, 9), now).await;
+    assert_eq!(first, BreakerVerdict::Counting { consecutive: 1 });
+    let len_after_first = std::fs::metadata(tmp.path().join(ResumeBreakerStore::FILE_NAME))
+        .expect("sidecar exists")
+        .len();
+    assert_eq!(reader.state_of(&id).await.consecutive, 1);
+
+    // 1 -> 2 is a single-digit step, so the file is the same size as before.
+    let second = writer.record_death(&id, &cfg(3600, 9), now).await;
+    assert_eq!(second, BreakerVerdict::Counting { consecutive: 2 });
+    let len_after_second = std::fs::metadata(tmp.path().join(ResumeBreakerStore::FILE_NAME))
+        .expect("sidecar exists")
+        .len();
+    assert_eq!(
+        len_after_first, len_after_second,
+        "the premise of this test is that the length does not move"
+    );
+
+    assert_eq!(
+        reader.state_of(&id).await.consecutive,
+        2,
+        "a same-length rewrite must still reach the other instance (#6568)"
+    );
+}
+
 /// The other half: one instance's write must not erase rows another added.
 #[tokio::test]
 async fn a_write_does_not_erase_another_instances_rows() {
