@@ -11772,6 +11772,7 @@ dependencies = [
  "tower",
  "tracing",
  "trusty-common",
+ "trusty-installer",
  "trusty-mcp",
  "uuid",
 ]

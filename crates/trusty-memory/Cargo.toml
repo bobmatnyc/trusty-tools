@@ -192,6 +192,17 @@ serial_test = { workspace = true }
 # of this migration are proven to agree.
 trusty-common = { path = "../trusty-common", version = "0.46", default-features = false, features = ["memory-core", "embedder-test-support", "docgen", "memory-rpc"] }
 chrono = { workspace = true }
+# #6555: `tests/uds_consumer_contract.rs` calls `tctl`'s real
+# `probe_daemon_http` against this daemon's real router. Every other arm hands
+# the daemon `json!({})` by hand, which is precisely what hid a probe that sent
+# no `params` at all and read a healthy daemon as `down`.
+#
+# PATH-ONLY, deliberately no `version`: `cargo package` strips a dev-dependency
+# that carries no version requirement, so this does NOT make trusty-memory's
+# publish wait for trusty-installer's. A `workspace = true` entry would carry
+# the version and create exactly that ordering constraint. No cycle either —
+# trusty-installer's own dependencies are trusty-common and trusty-progress.
+trusty-installer = { path = "../trusty-installer" }
 
 [features]
 # Why (issue #226, renamed #6286): a library consumer that only needs
