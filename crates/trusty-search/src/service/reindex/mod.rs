@@ -263,6 +263,10 @@ pub(crate) use tokio::sync::Semaphore;
 // ── test module ──────────────────────────────────────────────────────────────
 #[cfg(test)]
 mod tests;
+
+// #6524: the embedding pause, end to end.
+#[cfg(test)]
+mod embed_pause_tests;
 // Issue #2178: isolated from `tests.rs` to keep it under the 1500-SLOC
 // test-file cap; see the module doc comment there for the incident writeup.
 #[cfg(test)]

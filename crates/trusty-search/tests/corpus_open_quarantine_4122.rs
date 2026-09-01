@@ -199,6 +199,7 @@ async fn quarantined_index_refuses_watcher_write_and_chunk_count_stays_zero() {
         IndexId::new("broken"),
         Arc::clone(&broken),
         IndexedFiles::new(),
+        Arc::new(trusty_search::core::file_events::FileEventFeed::new()),
     )
     .expect("spawn broken watch loop");
     let _healthy_watch = spawn_watch_loop(
@@ -206,6 +207,7 @@ async fn quarantined_index_refuses_watcher_write_and_chunk_count_stays_zero() {
         IndexId::new("healthy"),
         Arc::clone(&healthy),
         IndexedFiles::new(),
+        Arc::new(trusty_search::core::file_events::FileEventFeed::new()),
     )
     .expect("spawn healthy watch loop");
 

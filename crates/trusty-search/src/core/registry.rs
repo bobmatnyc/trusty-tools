@@ -94,6 +94,21 @@ pub struct StageState {
     /// operator sees WHY a stage failed without reading daemon logs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure: Option<String>,
+    /// #6524: the stage is parked on an operator pause rather than working.
+    ///
+    /// Why: a paused embedding stage is legitimately `InProgress` — it owes
+    /// work and will finish it — so `status` alone cannot tell an operator
+    /// "stopped on purpose" from "running". This is the field that does. No new
+    /// `StageStatus` variant was added for it: the five existing variants are
+    /// what every consumer already branches on, and a sixth would change the
+    /// `status` string under consumers that never asked about pausing.
+    /// What: only `stages.semantic` is ever `true` — embedding is the only
+    /// pausable stage (owner ruling, #6524) — and only for as long as the
+    /// pause is held. It is projected from `IndexHandle::embedding_pause` at
+    /// status-read time rather than written here, so the flag has one owner.
+    /// Test: `status_reports_the_semantic_stage_as_paused` in
+    /// `service::server::embedding_pause_tests`.
+    pub paused: bool,
 }
 
 impl StageState {
@@ -485,6 +500,33 @@ pub struct IndexHandle {
     /// read by the HTTP handler without holding the reindex lock.
     /// Test: `walk_diagnostics_populated_after_reindex` (reindex tests).
     pub walk_diagnostics: Arc<tokio::sync::RwLock<WalkDiagnostics>>,
+
+    /// #6524: this index's embedding pause gate.
+    ///
+    /// Why: embedding is the heavy stage and the owner ruling scoped the pause
+    /// to it alone. The gate lives on the handle because the handle is the only
+    /// thing every embedding call site holds — the deferred-embed queue task,
+    /// the catch-up pass, and the full-pipeline batch loop all reach an index
+    /// through it and none of them can see `SearchAppState`.
+    /// What: `Arc<EmbeddingPause>`, so a handle rebuilt by
+    /// `PATCH /indexes/:id/config` keeps the live flag (`Arc::clone`, never
+    /// replaced) exactly as `stages` does. IN-MEMORY ONLY — a pause does not
+    /// survive a daemon restart, and nothing persists it.
+    /// Test: `service::reindex::embed_pause_tests`.
+    pub embedding_pause: Arc<crate::core::embed_pause::EmbeddingPause>,
+
+    /// #6524: bounded ring of this index's recent watcher-observed changes.
+    ///
+    /// Why: the watcher applied every change and discarded it, so nothing could
+    /// answer "what changed lately in this repo" — the question an operator
+    /// asks first when a paused index's backlog is growing.
+    /// What: `Arc<FileEventFeed>`, populated by `service::watch_loop` and served
+    /// by the `search.index.file_events` stream. Bounded at
+    /// `file_events::FILE_EVENT_CAPACITY`, in-memory only.
+    /// Test: `core::file_events::file_events_tests::the_ring_keeps_the_newest_events_in_order`;
+    /// `service::rpc::streams::tests::file_events_replays_the_ring_then_streams_live`
+    /// drives the stream over the socket.
+    pub file_events: crate::core::file_events::SharedFileEventFeed,
 }
 
 /// Diagnostic snapshot of the most recent walk (issue #280).
@@ -558,6 +600,9 @@ impl IndexHandle {
             stages: Arc::new(RwLock::new(IndexStages::default())),
             search_pressure: Arc::new(tokio::sync::Notify::new()),
             walk_diagnostics: Arc::new(tokio::sync::RwLock::new(WalkDiagnostics::default())),
+            // #6524: a fresh handle starts un-paused with an empty feed.
+            embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
+            file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
         }
     }
 }

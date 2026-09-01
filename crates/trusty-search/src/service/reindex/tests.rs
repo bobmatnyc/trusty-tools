@@ -54,6 +54,8 @@ async fn reindex_honours_include_paths_filter() {
         walk_diagnostics: Arc::new(tokio::sync::RwLock::new(
             crate::core::registry::WalkDiagnostics::default(),
         )),
+        embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
+        file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
     });
     let progress = Arc::new(ReindexProgress::new());
     // Issue #2730: deterministic rendezvous — await the task instead of polling.
@@ -136,6 +138,8 @@ async fn reindex_honours_path_filter() {
         walk_diagnostics: Arc::new(tokio::sync::RwLock::new(
             crate::core::registry::WalkDiagnostics::default(),
         )),
+        embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
+        file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
     });
     let progress = Arc::new(ReindexProgress::new());
     spawn_reindex_awaitable(handle.clone(), progress.clone(), false)
@@ -887,6 +891,8 @@ fn make_handle_with_flags(
         walk_diagnostics: Arc::new(tokio::sync::RwLock::new(
             crate::core::registry::WalkDiagnostics::default(),
         )),
+        embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
+        file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
     })
 }
 
@@ -945,6 +951,8 @@ fn make_handle_with_skip_vector(
         walk_diagnostics: Arc::new(tokio::sync::RwLock::new(
             crate::core::registry::WalkDiagnostics::default(),
         )),
+        embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
+        file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
     })
 }
 

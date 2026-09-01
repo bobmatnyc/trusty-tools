@@ -119,6 +119,8 @@ async fn stamp_handle_produces_valid_rfc3339_date() {
         }))),
         search_pressure: Arc::new(tokio::sync::Notify::new()),
         walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
+        embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
+        file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
     });
 
     stamp_handle(&handle, "abc123").await;
@@ -314,6 +316,8 @@ async fn reconcile_stamps_head_sha_after_delta() {
         }))),
         search_pressure: Arc::new(tokio::sync::Notify::new()),
         walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
+        embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
+        file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
     });
 
     let new_sha = "new_sha_abcde";
@@ -429,6 +433,8 @@ async fn reconcile_up_to_date_index_is_noop() {
         }))),
         search_pressure: Arc::new(tokio::sync::Notify::new()),
         walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
+        embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
+        file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
     });
 
     let summary = Arc::new(std::sync::Mutex::new(
@@ -505,6 +511,8 @@ async fn reconcile_stale_index_stamps_new_sha() {
         }))),
         search_pressure: Arc::new(tokio::sync::Notify::new()),
         walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
+        embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
+        file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
     });
 
     let summary = Arc::new(std::sync::Mutex::new(
@@ -583,6 +591,8 @@ async fn apply_delta_total_failure_does_not_stamp() {
         }))),
         search_pressure: Arc::new(tokio::sync::Notify::new()),
         walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
+        embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
+        file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
     });
 
     // Pass a non-empty files list containing a path that does NOT exist on disk.
@@ -811,6 +821,8 @@ async fn mtime_reconcile_skips_never_indexed_non_git_index() {
         }))),
         search_pressure: Arc::new(tokio::sync::Notify::new()),
         walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
+        embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
+        file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
     });
 
     let summary = Arc::new(std::sync::Mutex::new(ReconcileSummary::default()));
@@ -887,6 +899,8 @@ async fn reconcile_in_progress_clears_after_tasks_complete() {
         }))),
         search_pressure: Arc::new(tokio::sync::Notify::new()),
         walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
+        embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
+        file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
     });
 
     let summary = Arc::new(std::sync::Mutex::new(ReconcileSummary::default()));
@@ -975,6 +989,8 @@ async fn reconcile_summary_counts_up_to_date() {
         }))),
         search_pressure: Arc::new(tokio::sync::Notify::new()),
         walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
+        embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
+        file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
     });
 
     let summary = Arc::new(std::sync::Mutex::new(ReconcileSummary::default()));
@@ -1042,6 +1058,8 @@ fn stuck_unwalked_handle(
         }))),
         search_pressure: Arc::new(tokio::sync::Notify::new()),
         walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
+        embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
+        file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
     })
 }
 

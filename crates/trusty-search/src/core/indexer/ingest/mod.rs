@@ -24,6 +24,37 @@ use crate::core::symbol_graph::{ChunkTuple, ContribMergeOutcome, SymbolGraph};
 
 use super::{populate_virtual_terms, CodeIndexer, ParsedBatch};
 
+/// What one deferred-embed catch-up pass achieved (#6524).
+///
+/// Why: the pass used to answer `(embedded, total)`, which cannot express "I
+/// stopped early and still owe work". A caller that read a short count as a
+/// finished pass would mark the semantic stage `Ready` over an index whose
+/// vectors are incomplete — the exact false-green #601 and #4707 exist to
+/// prevent. `paused` is the third fact that keeps that from happening.
+/// What: `embedded` is what THIS pass computed, `total` the corpus size, and
+/// `paused` whether an operator pause stopped it before the remainder was done.
+/// Test: `service::reindex::embed_pause_tests::a_paused_pass_owes_work_and_a_resumed_one_embeds_only_the_gap`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmbedCatchUp {
+    /// Chunks this pass embedded and committed.
+    pub embedded: usize,
+    /// Total chunks in the corpus.
+    pub total: usize,
+    /// The pass stopped on an operator pause and still owes work.
+    pub paused: bool,
+}
+
+impl EmbedCatchUp {
+    /// A pass that ran to completion.
+    fn finished(embedded: usize, total: usize) -> Self {
+        Self {
+            embedded,
+            total,
+            paused: false,
+        }
+    }
+}
+
 /// Minimum chunks embedded before a progress notification is fired.
 ///
 /// Why: the caller (reindex orchestrator) needs fine-grained progress so the
@@ -319,7 +350,7 @@ impl CodeIndexer {
             let embeddings = if self.skip_vector {
                 vec![None; chunks.len()]
             } else {
-                self.embed_chunks_in_batches(&chunks, None).await?
+                self.embed_chunks_in_batches(&chunks, None, None).await?
             };
             let parsed = ParsedBatch {
                 chunks,
@@ -545,7 +576,7 @@ impl CodeIndexer {
         let (embeddings, embed_ms, vector_count) = if embed {
             let embed_start = std::time::Instant::now();
             let embeddings = self
-                .embed_chunks_in_batches(&all_chunks, progress_tx.as_ref())
+                .embed_chunks_in_batches(&all_chunks, progress_tx.as_ref(), None)
                 .await?;
             let embed_ms = embed_start.elapsed().as_millis() as u64;
             let vector_count = embeddings.iter().filter(|e| e.is_some()).count();
@@ -640,13 +671,35 @@ impl CodeIndexer {
     /// membership check) before embedding/committing. On a fresh corpus (the
     /// ordinary post-reindex C1/C2 fast pass) no id is present yet, so the
     /// filter is a no-op there — behaviour is unchanged for that path.
-    /// Returns `(newly_embedded, total_corpus_chunks)`.
-    /// Test: `deferred_embed_pass_marks_semantic_ready_and_is_idempotent`,
-    /// `embed_deferred_chunks_skips_already_embedded_chunks`.
-    pub async fn embed_deferred_chunks(
+    /// Stoppable at a wave boundary by an operator pause (#6524).
+    ///
+    /// Why: pausing is only useful if it takes effect DURING a pass — a gate
+    /// checked once at the start would leave a multi-minute embed running after
+    /// the operator asked for the machine back. It is also only safe if a
+    /// stopped pass loses nothing, which is what makes the incremental filter
+    /// above load-bearing here: "not yet embedded" is derived by asking the
+    /// vector store (`contains_many`), not from a list this call holds, so the
+    /// next pass re-derives the remainder from durable state and resumes at the
+    /// first gap with no checkpoint to keep.
+    /// What: threads `pause` into `embed_chunks_in_batches`, which stops at the
+    /// next wave and leaves the tail `None`. Only the embedded PREFIX is
+    /// committed, so those vectors are durable and the next pass skips them.
+    /// `paused` in the returned [`EmbedCatchUp`] tells the caller the pass owes
+    /// more work — it must not be reported as a completed stage. `pause: None`
+    /// is the un-pausable form every caller used before #6524.
+    ///
+    /// This is a DURABLE WRITE: `scripts/teardown-guard-methods.tsv` lists it,
+    /// so a caller that reaches it without the per-index teardown read-guard is
+    /// a red gate rather than a silent race with a `DELETE` (#3049).
+    /// Test: `service::reindex::embed_pause_tests::a_paused_pass_owes_work_and_a_resumed_one_embeds_only_the_gap`
+    /// drives the paused, resumed and already-complete passes in one run;
+    /// `a_paused_index_finishes_lexically_and_embeds_only_after_a_resume`
+    /// covers the same through the real reindex pipeline.
+    pub async fn embed_deferred_chunks_gated(
         &self,
         progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<(usize, u64)>>,
-    ) -> anyhow::Result<(usize, usize)> {
+        pause: Option<&crate::core::embed_pause::EmbeddingPause>,
+    ) -> anyhow::Result<EmbedCatchUp> {
         let chunks: Vec<RawChunk> = {
             self.ensure_chunks_loaded().await;
             let map = self.chunks.read().await;
@@ -654,7 +707,7 @@ impl CodeIndexer {
         };
         let total = chunks.len();
         if total == 0 || self.embedder.is_none() || self.store.is_none() {
-            return Ok((0, total));
+            return Ok(EmbedCatchUp::finished(0, total));
         }
         // Issue #2984 Phase 1 HIGH finding 3: incremental catch-up — skip
         // chunks that already have a stored vector rather than blindly
@@ -668,12 +721,30 @@ impl CodeIndexer {
             .filter_map(|(chunk, embedded)| (!embedded).then_some(chunk))
             .collect();
         if to_embed.is_empty() {
-            return Ok((0, total));
+            return Ok(EmbedCatchUp::finished(0, total));
         }
-        let embeddings = self.embed_chunks_in_batches(&to_embed, progress_tx).await?;
-        self.commit_vectors_batch(&to_embed, &embeddings).await?;
-        self.commit_embeddings_cache(&to_embed, embeddings).await;
-        Ok((to_embed.len(), total))
+        let mut embeddings = self
+            .embed_chunks_in_batches(&to_embed, progress_tx, pause)
+            .await?;
+        // #6524: a pause stops the wave loop early, leaving the tail `None`.
+        // Commit only the embedded prefix — a `None` slot means "no vector was
+        // computed for this chunk in this pass", which `commit_vectors_batch`
+        // reads as a stale-embedding eviction, and evicting the un-embedded
+        // remainder would be work undone rather than work deferred. Without a
+        // pause the loop fills every slot, so `done == to_embed.len()` and both
+        // commits see exactly the slices they always did.
+        let done = embeddings.iter().take_while(|e| e.is_some()).count();
+        let paused = done < to_embed.len();
+        embeddings.truncate(done);
+        self.commit_vectors_batch(&to_embed[..done], &embeddings)
+            .await?;
+        self.commit_embeddings_cache(&to_embed[..done], embeddings)
+            .await;
+        Ok(EmbedCatchUp {
+            embedded: done,
+            total,
+            paused,
+        })
     }
 
     /// Count corpus chunks NOT yet embedded (issue #3748 slice A, review

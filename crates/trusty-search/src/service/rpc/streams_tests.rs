@@ -27,6 +27,7 @@ use futures_util::StreamExt as _;
 use tower::ServiceExt as _;
 use trusty_common::uds::server::{RpcOutcome, RpcRouter, RpcStreamItems};
 
+use crate::core::file_events::FileEventKind;
 use crate::core::indexer::CodeIndexer;
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use crate::service::concurrency::ConcurrencyLimiter;
@@ -665,4 +666,78 @@ async fn a_client_that_drops_mid_stream_leaves_no_producer_subscribed() {
 
     let _ = stop_tx.send(());
     let _ = tokio::time::timeout(GENEROUS, served).await;
+}
+
+// ------------------------------------------------- #6524 file-change feed ---
+
+/// `search.index.file_events` replays the ring, then streams live events.
+///
+/// Why: this is the contract the console proxy and the UI's file-change list
+/// are written against — a consumer opening cold must see recent history, and
+/// one already open must see the next change. A stream that only did one of the
+/// two would look correct in whichever half a reviewer happened to try.
+/// What: records one event before opening and one after, then asserts the first
+/// arrives as replay and the second arrives live, in that order, with the
+/// documented `{path, kind, at_unix_ms}` shape.
+/// Test: this test. It does not compile on `origin/main`: neither the method
+/// nor `IndexHandle::file_events` exists there.
+#[tokio::test]
+async fn file_events_replays_the_ring_then_streams_live() {
+    let (state, _http, rpc) = routers(&["feed-6524"]).await;
+    let handle = state
+        .registry
+        .get(&IndexId::new("feed-6524"))
+        .expect("the fixture index is registered");
+
+    handle
+        .file_events
+        .record(FileEventKind::Modified, "src/before.rs")
+        .await;
+
+    let mut items = open_stream(
+        &rpc,
+        streams::METHOD_INDEX_FILE_EVENTS,
+        serde_json::json!({ "index_id": "feed-6524" }),
+    )
+    .await;
+
+    handle
+        .file_events
+        .record(FileEventKind::Removed, "src/after.rs")
+        .await;
+
+    let delivered = take_items(&mut items, 2).await;
+    assert_eq!(delivered[0]["path"], "src/before.rs");
+    assert_eq!(delivered[0]["kind"], "modified");
+    assert!(
+        delivered[0]["at_unix_ms"].as_u64().unwrap_or(0) > 0,
+        "each row carries a real timestamp"
+    );
+    assert_eq!(delivered[1]["path"], "src/after.rs");
+    assert_eq!(delivered[1]["kind"], "removed");
+}
+
+/// An unknown index is refused before the file-events stream opens.
+///
+/// Why: a stream that opened empty for a typo'd id would look like "this repo
+/// has had no changes" — the wrong answer, indistinguishable from the right one.
+/// What: opens the stream against an unregistered id and asserts the one item
+/// is the not-found refusal.
+/// Test: this test.
+#[tokio::test]
+async fn an_unknown_index_is_refused_before_the_file_events_stream_opens() {
+    let (_state, _http, rpc) = routers(&["feed-known-6524"]).await;
+
+    let mut items = open_stream(
+        &rpc,
+        streams::METHOD_INDEX_FILE_EVENTS,
+        serde_json::json!({ "index_id": "no-such-index-6524" }),
+    )
+    .await;
+    let refusal = tokio::time::timeout(GENEROUS, items.recv())
+        .await
+        .expect("the refusal must arrive rather than hang")
+        .expect("a refused stream carries one item")
+        .expect_err("that item must be the refusal, not an event");
+    assert_eq!(refusal.code, CODE_NOT_FOUND);
 }

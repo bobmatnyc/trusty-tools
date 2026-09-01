@@ -127,6 +127,9 @@ mod tests;
 pub const METHOD_STATUS_STREAM: &str = "search.status.stream";
 /// `GET /indexes/{id}/reindex/stream` — one index's reindex progress events.
 pub const METHOD_INDEX_REINDEX_STREAM: &str = "search.index.reindex.stream";
+/// Recent and live file changes for one index (#6524). Socket-only — this
+/// stream has no SSE twin.
+pub const METHOD_INDEX_FILE_EVENTS: &str = "search.index.file_events";
 
 /// Every method this slice registers, in registration order.
 ///
@@ -137,7 +140,11 @@ pub const METHOD_INDEX_REINDEX_STREAM: &str = "search.index.reindex.stream";
 /// Test: `rpc_router_registers_every_documented_method` and
 /// `every_family_method_is_spliced_into_the_socket_method_list` in
 /// `socket_tests.rs`.
-pub const METHODS: &[&str] = &[METHOD_STATUS_STREAM, METHOD_INDEX_REINDEX_STREAM];
+pub const METHODS: &[&str] = &[
+    METHOD_STATUS_STREAM,
+    METHOD_INDEX_REINDEX_STREAM,
+    METHOD_INDEX_FILE_EVENTS,
+];
 
 /// How many items a producer may run ahead of the connection writer.
 ///
@@ -300,7 +307,80 @@ async fn reindex_stream(
     Ok(items)
 }
 
-/// Map this slice's two methods onto their producers.
+/// `search.index.file_events` — this index's recent changes, then its live ones
+/// (#6524).
+///
+/// What: looks the index up and refuses when it is absent, then opens through
+/// [`FileEventFeed::subscribe_with_replay`], which hands back the ring snapshot
+/// and the live subscription together. That ONE call is what makes the open
+/// exactly-once, for the reason #6386 recorded for the reindex stream: a
+/// snapshot and a subscribe written as two statements let an event whose ring
+/// write and broadcast fall between them arrive twice, or not at all.
+///
+/// Unlike the reindex stream there is no terminal state to end on — a watched
+/// index keeps changing — so the stream runs until the client hangs up or the
+/// daemon drops the feed.
+///
+/// # Errors
+///
+/// [`CODE_NOT_FOUND`] when the index is not registered.
+///
+/// [`CODE_NOT_FOUND`]: super::error::CODE_NOT_FOUND
+/// [`FileEventFeed::subscribe_with_replay`]:
+///     crate::core::file_events::FileEventFeed::subscribe_with_replay
+///
+/// Test: `file_events_replays_the_ring_then_streams_live`,
+/// `an_unknown_index_is_refused_before_the_file_events_stream_opens`.
+async fn file_events_stream(
+    state: &Arc<SearchAppState>,
+    index_id: &str,
+) -> Result<RpcStreamItems, RpcError> {
+    let id = IndexId::new(index_id.to_string());
+    let handle = state.registry.get(&id).ok_or_else(|| {
+        rpc_error_from_http(
+            StatusCode::NOT_FOUND,
+            &serde_json::json!({ "error": format!("unknown index '{}'", id.0) }),
+        )
+    })?;
+
+    // #6386's rule, applied to this feed: one atomic open.
+    let (replay, mut events) = handle.file_events.subscribe_with_replay().await;
+
+    let (tx, items) = mpsc::channel(STREAM_BUFFER);
+    tokio::spawn(async move {
+        for event in replay {
+            let value = serde_json::to_value(&event).unwrap_or_else(
+                |e| serde_json::json!({ "type": "error", "message": e.to_string() }),
+            );
+            if tx.send(Ok(value)).await.is_err() {
+                return;
+            }
+        }
+        loop {
+            let received = tokio::select! {
+                biased;
+                () = tx.closed() => return,
+                received = events.recv() => received,
+            };
+            let value = match received {
+                Ok(event) => serde_json::to_value(&event).unwrap_or_else(
+                    |e| serde_json::json!({ "type": "error", "message": e.to_string() }),
+                ),
+                Err(RecvError::Lagged(skipped)) => lag(skipped),
+                // The handle was dropped (the index was deleted or evicted):
+                // nothing more can be emitted, so this is an END, not an error.
+                Err(RecvError::Closed) => return,
+            };
+            if tx.send(Ok(value)).await.is_err() {
+                return;
+            }
+        }
+    });
+
+    Ok(items)
+}
+
+/// Map this slice's methods onto their producers.
 ///
 /// Neither is wrapped in an admission or deadline guard, because neither HTTP
 /// route is — see the lane table in this module's header, and
@@ -316,8 +396,15 @@ pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
     });
 
     let held = Arc::clone(state);
-    router.typed_stream::<IndexRef, _, _>(METHOD_INDEX_REINDEX_STREAM, move |params| {
+    let router =
+        router.typed_stream::<IndexRef, _, _>(METHOD_INDEX_REINDEX_STREAM, move |params| {
+            let state = Arc::clone(&held);
+            async move { reindex_stream(&state, &params.index_id).await }
+        });
+
+    let held = Arc::clone(state);
+    router.typed_stream::<IndexRef, _, _>(METHOD_INDEX_FILE_EVENTS, move |params| {
         let state = Arc::clone(&held);
-        async move { reindex_stream(&state, &params.index_id).await }
+        async move { file_events_stream(&state, &params.index_id).await }
     })
 }

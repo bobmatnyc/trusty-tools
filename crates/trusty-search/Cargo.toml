@@ -32,7 +32,7 @@ name = "trusty-search"
 # `DeleteIndex` gains `expected_root_path` (`rpc/writes.rs:172`); all three
 # structs were exhaustively constructible through the public API. Cargo's 0.x
 # rule puts a break in the MINOR position.
-version = "0.50.0"
+version = "0.51.0"
 edition = "2021"
 description = "Machine-wide hybrid code search service: BM25 + vector + KG, zero cold-start, MCP server"
 readme = "README.md"

@@ -23,6 +23,7 @@ use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
+use crate::core::file_events::FileEventKind;
 use crate::service::indexed_files::IndexedFiles;
 use crate::service::walker::{path_in_skipped_dir, should_skip_path};
 use crate::service::watch_rescan::RescanFollowUp;
@@ -100,6 +101,9 @@ pub fn spawn_watch_loop(
     index_id: crate::core::registry::IndexId,
     indexer: Arc<RwLock<CodeIndexer>>,
     indexed_files: IndexedFiles,
+    // #6524: the index's bounded ring of recent changes. The watcher is the
+    // only producer — it is the one place that sees a change at all.
+    file_events: crate::core::file_events::SharedFileEventFeed,
 ) -> Result<WatcherTask> {
     let (tx, mut rx) = mpsc::unbounded_channel::<WatchEvent>();
     // Retained so a failed dropped-event reconcile can re-arm itself. See
@@ -132,6 +136,11 @@ pub fn spawn_watch_loop(
                 // nothing will redeliver them, so the changed paths can only be
                 // re-derived from disk. Discarding this is a silent data loss.
                 WatchEvent::Rescan => {
+                    // #6524: no single path is implicated, so the feed row says
+                    // "the whole tree" rather than naming a file it cannot know.
+                    file_events
+                        .record(FileEventKind::Rescan, RESCAN_FEED_PATH)
+                        .await;
                     let outcome = crate::service::watch_rescan::reconcile_after_rescan(
                         &index_id,
                         &canonical_root,
@@ -196,6 +205,17 @@ pub fn spawn_watch_loop(
                     }
                 }
                 WatchEvent::Modified(path) => {
+                    // #6524: record before applying — the feed reports what the
+                    // watcher SAW, so a change whose apply then fails still
+                    // shows up rather than vanishing with the error.
+                    record_file_event(
+                        &file_events,
+                        FileEventKind::Modified,
+                        &canonical_root,
+                        &raw_root,
+                        &path,
+                    )
+                    .await;
                     handle_modified(
                         &path,
                         &index_id,
@@ -207,6 +227,15 @@ pub fn spawn_watch_loop(
                     .await;
                 }
                 WatchEvent::Removed(path) => {
+                    // #6524: same key `handle_removed` looks the file up by.
+                    record_file_event(
+                        &file_events,
+                        FileEventKind::Removed,
+                        &canonical_root,
+                        &raw_root,
+                        &path,
+                    )
+                    .await;
                     handle_removed(
                         &path,
                         &index_id,
@@ -225,6 +254,37 @@ pub fn spawn_watch_loop(
         _watcher: watcher,
         join,
     })
+}
+
+/// The `path` a `Rescan` feed row carries — the whole watched tree (#6524).
+pub const RESCAN_FEED_PATH: &str = ".";
+
+/// Push one watcher observation onto the index's feed (#6524).
+///
+/// Why: the feed's `path` must be the same repo-root-relative key the reindex
+/// walker stores and a search result reports, or a consumer cannot line a feed
+/// row up against the file it names. Reusing
+/// [`watcher_relative_path`] — rather than stripping the root again here — is
+/// what guarantees that, including its dual-root fallback for a deleted file.
+/// What: computes the relative key and records it. Recomputing the key costs
+/// one `strip_prefix` and is not shared with `handle_modified` on purpose:
+/// threading it through would change two `pub` handler signatures that
+/// integration tests call directly.
+/// Test: `service::rpc::streams::tests::file_events_replays_the_ring_then_streams_live`
+/// end to end; the key itself is pinned by
+/// `removed_event_produces_same_relative_key_as_modified` below.
+async fn record_file_event(
+    feed: &crate::core::file_events::FileEventFeed,
+    kind: FileEventKind,
+    canonical_root: &Path,
+    raw_root: &Path,
+    event_path: &Path,
+) {
+    feed.record(
+        kind,
+        watcher_relative_path(canonical_root, raw_root, event_path),
+    )
+    .await;
 }
 
 /// Normalize an absolute watcher event path to a repo-root-relative string,
@@ -647,6 +707,7 @@ mod tests {
             crate::core::registry::IndexId::new("watch-loop-test"),
             Arc::clone(&indexer),
             tracker.clone(),
+            Arc::new(crate::core::file_events::FileEventFeed::new()),
         )
         .expect("watch loop starts");
 
@@ -694,6 +755,7 @@ mod tests {
             crate::core::registry::IndexId::new("watch-loop-test"),
             Arc::clone(&indexer),
             tracker.clone(),
+            Arc::new(crate::core::file_events::FileEventFeed::new()),
         )
         .expect("watch loop starts");
 
@@ -758,6 +820,7 @@ mod tests {
             crate::core::registry::IndexId::new("watch-loop-test"),
             Arc::clone(&indexer),
             tracker.clone(),
+            Arc::new(crate::core::file_events::FileEventFeed::new()),
         )
         .expect("watch loop starts");
 
@@ -803,6 +866,7 @@ mod tests {
             crate::core::registry::IndexId::new("watch-loop-test"),
             Arc::clone(&indexer),
             tracker.clone(),
+            Arc::new(crate::core::file_events::FileEventFeed::new()),
         )
         .expect("watch loop starts");
 
