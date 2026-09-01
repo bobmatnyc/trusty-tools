@@ -1,5 +1,5 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import ServiceCard from './ServiceCard.svelte';
   // #6518: the Overview tab leads with the whole-machine dashboard; the card
   // grid below it stays because it is the only place a service that never
@@ -14,6 +14,13 @@
   import ThemeSelector from './ThemeSelector.svelte';
   import BrandLockup from './BrandLockup.svelte';
   import BrandMark from './BrandMark.svelte';
+  // #6519: opt-in idle entry to the screensaver route.
+  import {
+    IDLE_ENTRY_URL,
+    IDLE_EVENTS,
+    idleExpiredAt,
+    readIdleMinutes,
+  } from './screensaver.js';
 
   // ── state ────────────────────────────────────────────────────────────────
 
@@ -51,6 +58,7 @@
   // ── data fetch ───────────────────────────────────────────────────────────
 
   onMount(async () => {
+    armIdleWatch();
     try {
       const resp = await fetch('/api/console/services');
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -59,6 +67,44 @@
       error = e.message;
     } finally {
       loading = false;
+    }
+  });
+
+  // ── idle entry to the screensaver (#6519) ────────────────────────────────
+
+  /** How often the idle check runs. Minutes-scale threshold, so this is cheap. */
+  const IDLE_TICK_MS = 10_000;
+
+  let lastInputMs = Date.now();
+  let idleTimer;
+  const noteInput = () => (lastInputMs = Date.now());
+
+  /**
+   * Watch for idleness, but only when the operator asked for it.
+   *
+   * Default OFF: `readIdleMinutes()` returns 0 unless
+   * `trusty-console-screensaver-idle-minutes` is set in localStorage, and this
+   * function then attaches nothing. A console that navigates itself away
+   * mid-read is worse than no screensaver, so the feature stays opt-in until it
+   * earns a settings UI.
+   */
+  function armIdleWatch() {
+    const minutes = readIdleMinutes();
+    if (minutes <= 0) return;
+    for (const event of IDLE_EVENTS) {
+      window.addEventListener(event, noteInput, { passive: true });
+    }
+    idleTimer = setInterval(() => {
+      if (idleExpiredAt(lastInputMs, Date.now(), minutes)) {
+        window.location.assign(IDLE_ENTRY_URL);
+      }
+    }, IDLE_TICK_MS);
+  }
+
+  onDestroy(() => {
+    clearInterval(idleTimer);
+    for (const event of IDLE_EVENTS) {
+      window.removeEventListener(event, noteInput);
     }
   });
 
