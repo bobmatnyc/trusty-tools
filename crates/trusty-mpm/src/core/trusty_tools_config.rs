@@ -37,6 +37,16 @@ pub use untracked_sync::{
     resolve_untracked_sync,
 };
 
+/// Cloud log-drain config shape + resolution (#6535), split out for the same
+/// SLOC reason as `untracked_sync`. See that module's doc for why a malformed
+/// section is an error rather than a silent fall-back to defaults.
+pub mod log_drain;
+pub use log_drain::{
+    DEFAULT_INTERVAL_SECS as LOG_DRAIN_DEFAULT_INTERVAL_SECS, LogDrainConfig, LogDrainConfigError,
+    LogDrainSetting, LogDrainSourceConfig, ResolvedLogDrain,
+    STATE_SUBDIR as LOG_DRAIN_STATE_SUBDIR, resolve_log_drain,
+};
+
 /// Crate name used as the `~/.trusty-tools/<crate>/` directory segment.
 ///
 /// Why: the cross-crate convention keys each crate's config dir by its crate name;
@@ -174,6 +184,15 @@ pub struct TrustyToolsConfig {
     /// the field-level docs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tmux: Option<TmuxConfig>,
+
+    /// Cloud log drain (the `log_drain:` YAML section, #6535).
+    ///
+    /// `None` → the drain is disabled and the daemon spawns no scheduler; that
+    /// is the default and requires no config file. When present, the section is
+    /// VALIDATED even while `enabled: false` — see
+    /// [`resolve_log_drain`] for why a malformed section is a hard error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_drain: Option<LogDrainConfig>,
 }
 
 /// The `daemon:` section of `~/.trusty-tools/trusty-mpm/config.yaml` (#1836).

@@ -169,6 +169,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "tmux_options",
         "Whether the live tmux SERVER's globals still match tm's spec — `history-limit`, `mouse`, and the window-scoped `alternate-screen`. `create_managed_session` applies and verifies them before every pane tm creates, but a server tm did not start carries none of them: a tmux-continuum restore recreates `tm-*` sessions through tmux-resurrect's own bare `new-session`, so restored panes bake tmux's factory 2000-line scrollback and can enter the alternate screen (issue #6469). Warns naming each drifted option; UNKNOWN — never `Ok` — when no option could be read (no tmux binary, or no server running). A green row means NEW panes will be correct: `history-limit` is captured into a pane's ring buffer at creation and cannot be grown in place, so an affected session has to be restarted. Read-only — it reads options, never sets one.",
     ),
+    (
+        "log_drain",
+        "Whether the cloud log drain is configured, where it points, and how its last pass ended (issue #6535). The drain uploads the daemon's own log files to an object store on an interval; it is OFF unless `log_drain.enabled` is set in `~/.trusty-tools/trusty-mpm/config.yaml`, and a host that never configured one reports `Ok`. A `log_drain:` section that does not resolve — a malformed destination URI, a zero interval, a source with no root — reports `Fail`, because the daemon refuses to start the scheduler and no bytes move. Enabled but never observed running reports `Warn`. The last pass's verdict is read from `~/.trusty-mpm/log-drain/status.json`, and a pass that errored — including one that finished with per-file failures — reports `Fail`, never a drained-looking `Ok`. Read-only: this probe never drains and never connects to the destination.",
+    ),
 ];
 
 /// Render the full doctor-check reference.

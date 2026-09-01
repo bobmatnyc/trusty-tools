@@ -156,6 +156,13 @@ use doctor_push_guard::check_push_guard;
 mod doctor_worktree_disk;
 use doctor_worktree_disk::check_worktree_disk;
 
+// #6535: the cloud log drain runs inside the daemon and writes to somebody
+// else's bucket, so nothing else on screen says whether it is on, where it
+// points, or whether the last pass worked.
+#[path = "doctor_log_drain.rs"]
+mod doctor_log_drain;
+use doctor_log_drain::check_log_drain;
+
 // Split out to keep this file under the 500-SLOC production cap (issue #4286 —
 // the retired `.trusty-mpm/` override-file probe, the on-demand half of the
 // signal that stops the hard cut from silently dropping a project's rules).
@@ -454,6 +461,9 @@ pub async fn run_doctor(
     // nothing about panes already created — `history-limit` is captured at pane
     // creation and cannot be grown in place.
     checks.push(check_tmux_options());
+    // #6535: whether the cloud log drain is on, where it points, and whether
+    // its last pass actually landed. Read-only — it never drains.
+    checks.push(check_log_drain(&FrameworkPaths::default().root, &home));
 
     DoctorReport::from_checks(checks)
 }

@@ -486,6 +486,9 @@ async fn run_doctor_produces_thirty_two_checks() {
         "stray_mcp_json",
         // #6469: the tmux server globals a resurrect restore leaves unset.
         "tmux_options",
+        // #6535: whether the cloud log drain is on, where it points, and
+        // whether its last pass landed.
+        "log_drain",
     ];
     assert_eq!(names, expected);
     // Count derived from the list above, never a standalone literal:
