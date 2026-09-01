@@ -258,6 +258,54 @@ async fn test_upsert_batch_isolates_bad_vector() {
     assert_eq!(store.len().await.unwrap(), 4);
 }
 
+/// Why (#6571): a batch that named the same chunk id twice used to add the
+/// first occurrence, fail every later one with usearch's "Duplicate keys not
+/// allowed in high-level wrappers", and then let the failure-rollback delete the
+/// id→key mapping the successful add had installed. The vector stayed in the
+/// graph with nothing pointing at it, so the chunk was permanently unsearchable
+/// and every subsequent reindex re-computed and re-discarded it. Observed live
+/// on a minified bundle: 225 distinct ids, 209 surplus chunks skipped per pass,
+/// 2,299 warnings across 11 passes in 48h.
+///
+/// Pre-fix this test failed on the `search` assertion — `dup` resolved to
+/// nothing.
+#[tokio::test]
+async fn test_upsert_batch_collapses_duplicate_ids() {
+    let store = UsearchStore::new(4).expect("store init");
+    // `dup` appears three times, the way `chunk_ast` emitted it for a one-line
+    // bundle whose declarations all shared a name and a start line.
+    let items: Vec<(String, Vec<f32>)> = vec![
+        ("keep-a".to_string(), vec![1.0, 0.0, 0.0, 0.0]),
+        ("dup".to_string(), vec![0.0, 1.0, 0.0, 0.0]),
+        ("dup".to_string(), vec![0.0, 0.0, 1.0, 0.0]),
+        ("dup".to_string(), vec![0.0, 0.0, 0.0, 1.0]),
+        ("keep-b".to_string(), vec![1.0, 1.0, 0.0, 0.0]),
+    ];
+    store
+        .upsert_batch(&items)
+        .await
+        .expect("a batch carrying a duplicate id must not fail");
+
+    assert_eq!(
+        store.len().await.unwrap(),
+        3,
+        "three distinct ids means three vectors, not five adds and two orphans"
+    );
+    // The surviving `dup` vector must be the LAST one sent — upsert semantics.
+    let hits = store.search(&[0.0, 0.0, 0.0, 1.0], 1).await.unwrap();
+    assert_eq!(
+        hits[0].chunk_id, "dup",
+        "the duplicated id must resolve, not be rolled back into an orphan"
+    );
+    for (id, dir) in [
+        ("keep-a", [1.0f32, 0.0, 0.0, 0.0]),
+        ("keep-b", [1.0, 1.0, 0.0, 0.0]),
+    ] {
+        let hits = store.search(&dir, 1).await.unwrap();
+        assert_eq!(hits[0].chunk_id, id, "{id} must be unaffected");
+    }
+}
+
 #[tokio::test]
 async fn test_upsert_batch_all_bad_vectors_errors() {
     // When *every* vector is bad it's a systemic failure, not isolated

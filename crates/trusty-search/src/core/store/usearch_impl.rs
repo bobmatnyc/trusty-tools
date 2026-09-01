@@ -16,7 +16,9 @@ use async_trait::async_trait;
 use super::types::StagedSwapOutcome;
 use super::types::VectorHit;
 use super::types::VectorStore;
-use super::usearch_store::{hnsw_max_elements, validate_embedding, UsearchStore};
+use super::usearch_store::{
+    dedupe_last_by_id, hnsw_max_elements, validate_embedding, UsearchStore,
+};
 
 #[async_trait]
 impl VectorStore for UsearchStore {
@@ -365,11 +367,20 @@ impl VectorStore for UsearchStore {
         if items.is_empty() {
             return Ok(());
         }
+        // #6571: one vector per chunk id is this store's contract, and a batch
+        // carrying an id twice used to break it. Both occurrences resolved to
+        // the same usearch key; the first `add` landed and every later one
+        // failed with "Duplicate keys not allowed in high-level wrappers", after
+        // which the failure rollback deleted the id→key mapping the successful
+        // add had installed — orphaning a live vector and making the file
+        // unsearchable. Collapsing here keeps the contract at the boundary that
+        // enforces it, whatever the caller sends.
+        let items: Vec<(&str, &[f32])> = dedupe_last_by_id(items);
         // Promote view → mutable on first write. No-op when already mutable.
         // Done before any other work so we never half-commit against a view.
         self.ensure_mutable().await?;
         // Phase 1: validate dims up front so we don't half-commit on a bad batch.
-        for (_, v) in items {
+        for (_, v) in &items {
             if v.len() != self.dim {
                 return Err(anyhow!(
                     "embedding dim mismatch: got {}, expected {}",
@@ -386,13 +397,13 @@ impl VectorStore for UsearchStore {
             let mut id_map = self.id_to_key.write().await;
             let mut key_map = self.key_to_id.write().await;
             let mut out = Vec::with_capacity(items.len());
-            for (id, _) in items {
-                let key = if let Some(&k) = id_map.get(id.as_str()) {
+            for (id, _) in &items {
+                let key = if let Some(&k) = id_map.get(*id) {
                     k
                 } else {
                     let k = self.next_key.fetch_add(1, Ordering::Relaxed);
-                    id_map.insert(id.clone(), k);
-                    key_map.insert(k, id.clone());
+                    id_map.insert((*id).to_string(), k);
+                    key_map.insert(k, (*id).to_string());
                     k
                 };
                 out.push(key);
@@ -455,15 +466,16 @@ impl VectorStore for UsearchStore {
         // try (and fail) to resolve.
         let mut failed: Vec<(String, String)> = Vec::new();
         for (key, (id, embedding)) in resolved_keys.iter().zip(items.iter()) {
+            let id = *id;
             // Screen the vector first: a NaN/zero vector is not reliably
             // rejected by usearch's `add`, but it poisons cosine search if it
             // lands in the graph. Catching it here keeps the index clean.
             if let Err(reason) = validate_embedding(embedding) {
-                failed.push((id.clone(), format!("embedding {reason}")));
+                failed.push((id.to_string(), format!("embedding {reason}")));
                 continue;
             }
             if let Err(e) = index.add(*key, embedding) {
-                failed.push((id.clone(), e.to_string()));
+                failed.push((id.to_string(), e.to_string()));
             }
         }
         // The graph was mutated above (removes and/or adds attempted) — mark
@@ -494,11 +506,11 @@ impl VectorStore for UsearchStore {
             for (id, key) in resolved_keys
                 .iter()
                 .zip(items.iter())
-                .filter(|(_, (id, _))| failed_ids.contains(id.as_str()))
-                .map(|(key, (id, _))| (id, key))
+                .filter(|(_, (id, _))| failed_ids.contains(id))
+                .map(|(key, (id, _))| (*id, key))
             {
-                if !existing.contains(key) && id_map.get(id.as_str()) == Some(key) {
-                    id_map.remove(id.as_str());
+                if !existing.contains(key) && id_map.get(id) == Some(key) {
+                    id_map.remove(id);
                     key_map.remove(key);
                 }
             }
@@ -506,9 +518,15 @@ impl VectorStore for UsearchStore {
 
         let succeeded = items.len() - failed.len();
         for (id, err) in &failed {
+            // #6571: report the error the add actually returned. This line used
+            // to append "likely a NaN or zero embedding vector" to every
+            // failure, which sent #6571 after an embedder defect for a batch
+            // whose real error text was "Duplicate keys not allowed in
+            // high-level wrappers". A degenerate vector already arrives here
+            // with its own reason from `validate_embedding`.
             tracing::warn!(
-                "usearch upsert_batch: skipped chunk '{id}' — add failed ({err}); \
-                 likely a NaN or zero embedding vector. The rest of the batch was indexed."
+                "usearch upsert_batch: skipped chunk '{id}' — add failed ({err}). \
+                 The rest of the batch was indexed."
             );
         }
 

@@ -47,7 +47,7 @@ pub(super) fn file_hashes() -> &'static DashMap<IndexId, Arc<DashMap<PathBuf, St
 /// reindex of index A does not clear the cache for index B.
 /// What: `entry(id).or_insert_with(...)` on the global `DashMap`.
 /// Test: covered indirectly by all reindex tests.
-pub(super) fn hashes_for(id: &IndexId) -> Arc<DashMap<PathBuf, String>> {
+pub(crate) fn hashes_for(id: &IndexId) -> Arc<DashMap<PathBuf, String>> {
     file_hashes()
         .entry(id.clone())
         .or_insert_with(|| Arc::new(DashMap::new()))
@@ -97,7 +97,7 @@ pub(super) fn shrink_hashes_if_needed(map: &DashMap<PathBuf, String>) {
 /// Test: see `reindex_walks_directory_and_emits_events` — a re-run of the
 /// reindex with unchanged files must mark them as skipped (proves the hash
 /// is stable across two invocations within the same process).
-pub(super) fn hash_content(content: &str) -> String {
+pub(crate) fn hash_content(content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content.as_bytes());
     format!("{:x}", hasher.finalize())
