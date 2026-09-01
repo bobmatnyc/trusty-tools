@@ -1,7 +1,7 @@
 //! Router-wide bearer authentication for a loopback daemon's HTTP/SSE
 //! surface (#5439).
 //!
-//! Why: [`super::origin_guard`] stops a browser page on a foreign origin from
+//! Why: [`crate::server::origin_guard`] stops a browser page on a foreign origin from
 //! issuing a WRITE and (with `same_origin_cors`) from READING a response, but
 //! it is deliberately not authentication: it passes every request that sends
 //! no `Origin` at all — `curl`, a reverse proxy, any local process. That is
@@ -28,7 +28,7 @@
 //! opening `GET /sessions/{id}/events` has no way to attach `Authorization`,
 //! and putting the durable token in the query string would write it into every
 //! access log and tracing span. [`DaemonAuth::issue_ticket`] mints a
-//! single-use value that expires in [`TICKET_TTL`], obtained over the
+//! single-use value that expires in [`crate::server::bearer_auth::TICKET_TTL`], obtained over the
 //! header-authenticated surface; a ticket in a log is spent and stale.
 //!
 //! **A public path passes unmarked, not authenticated.** A handler that serves
@@ -236,7 +236,7 @@ impl DaemonAuth {
 /// surface and one hole.
 /// What: valid `Authorization: Bearer` → mark [`Authenticated`], continue;
 /// else valid `?ticket=` → mark [`Authenticated`], continue; else a path in
-/// [`DaemonAuth::with_public_paths`] → continue UNMARKED; else `401` with an
+/// [`DaemonAuth::new`]'s `public_paths` → continue UNMARKED; else `401` with an
 /// empty body and a bare `WWW-Authenticate: Bearer`, disclosing nothing about
 /// whether the path exists, why the credential failed, or what the daemon is.
 /// Test: `bearer_auth_tests::*`.
