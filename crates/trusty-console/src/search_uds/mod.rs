@@ -87,6 +87,15 @@ pub(crate) const METHOD_REGISTRY_ORPHANS: &str = "search.registry.orphans";
 pub(crate) const METHOD_STATUS_STREAM: &str = "search.status.stream";
 /// One index's reindex progress — `GET /indexes/{id}/reindex/stream`, as a stream.
 pub(crate) const METHOD_INDEX_REINDEX_STREAM: &str = "search.index.reindex.stream";
+// #6524: the indexing-pipeline trio. Socket-only on the daemon — these three
+// never had an HTTP twin, so this table is their only route to the SPA.
+/// Park one index's embedding stage — `POST /indexes/{id}/embedding/pause`.
+pub(crate) const METHOD_INDEX_PAUSE_EMBEDDING: &str = "search.index.pause_embedding";
+/// Let one index's embedding stage continue — `POST /indexes/{id}/embedding/resume`.
+pub(crate) const METHOD_INDEX_RESUME_EMBEDDING: &str = "search.index.resume_embedding";
+/// One index's recent and live file changes — `GET /indexes/{id}/file-events/stream`,
+/// as a stream.
+pub(crate) const METHOD_INDEX_FILE_EVENTS: &str = "search.index.file_events";
 
 /// How long one unary exchange may take, end to end.
 ///
