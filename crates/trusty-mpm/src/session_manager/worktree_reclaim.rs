@@ -507,7 +507,7 @@ pub(crate) fn pr_state_for_branch(registry_root: &Path, branch: &str) -> BranchP
 /// again.
 /// Test: `classify_blocks_a_worktree_trusty_mpm_does_not_own`,
 /// `tm_provisioned_matches_the_removers_own_predicate`,
-/// `classify_offers_a_merged_agent_store_worktree`.
+/// `an_unattributed_agent_store_worktree_is_never_reclaimable`.
 pub(crate) fn tm_provisioned(path: &Path) -> bool {
     super::decommission::removal_permitted(path)
 }
@@ -570,7 +570,8 @@ pub(crate) fn tm_provisioned(path: &Path) -> bool {
 /// `classify_allows_a_finished_agents_merged_worktree`,
 /// `classify_blocks_an_agent_store_worktree_with_an_unreadable_sentinel`,
 /// `classify_leaves_a_session_owned_worktree_alone`,
-/// `classify_offers_a_merged_agent_store_worktree`.
+/// `an_unattributed_agent_store_worktree_is_never_reclaimable`,
+/// `an_unreadable_agent_sentinel_still_blocks_an_agent_store_worktree`.
 pub(crate) fn agent_ownership_blocks(
     path: &Path,
     agent_state: AgentStateProbe<'_>,
