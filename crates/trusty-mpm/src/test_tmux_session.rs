@@ -190,19 +190,33 @@ impl ScratchTmuxSession {
     /// name is one such non-zero exit, which is the behaviour that keeps the
     /// ownership claim honest: the caller gets no guard, so nothing later kills
     /// a session someone else created.
+    ///
+    /// The panic quotes tmux's own stderr, because the exit status alone does
+    /// not distinguish the cases (#6523). `create window failed: fork failed:
+    /// Device not configured` means the HOST is out of pseudo-terminals — on
+    /// macOS the pool is capped by `kern.tty.ptmx_max` (511) and a machine with
+    /// hundreds of leaked panes exhausts it — so every tmux spawn on that
+    /// machine fails until the panes are reaped. That is a machine fault, not a
+    /// fixture one; no test-side change creates a pty.
     pub(crate) fn spawn(tmux_bin: &str, name: &str, pane_command: &str) -> Self {
         // #6116: reap what an earlier hard-killed run leaked, before adding to
         // the namespace. Once per process, mirroring `test_support`'s
         // `sweep_stale_test_dirs`.
         SWEEP_ONCE.call_once(|| sweep_stale_reserved_sessions(tmux_bin));
-        let status = Command::new(tmux_bin)
+        // #6523: capture tmux's stderr instead of letting it through. `.status()`
+        // sent the real cause to the test binary's stderr, unattached to the
+        // panic, so five simultaneous failures each read only `exit status: 1`
+        // and got misattributed to nested tmux.
+        let out = Command::new(tmux_bin)
             .args(["new-session", "-d", "-s", name, pane_command])
-            .status()
+            .output()
             .unwrap_or_else(|e| panic!("spawn `{tmux_bin} new-session -s {name}`: {e}"));
         assert!(
-            status.success(),
-            "`{tmux_bin} new-session -d -s {name}` failed with {status}; the session was NOT \
-             created, so no guard may claim it"
+            out.status.success(),
+            "`{tmux_bin} new-session -d -s {name}` failed with {}; the session was NOT \
+             created, so no guard may claim it. tmux said: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
         );
         Self {
             tmux_bin: tmux_bin.to_string(),
@@ -323,6 +337,14 @@ not-an-epoch tm-xtest-garbage-01
     ///
     /// The panic message reaching stderr during this run is expected output,
     /// not a failure.
+    ///
+    /// #6523: the spawn and the precondition sit OUTSIDE the `catch_unwind`. In
+    /// the earlier shape both were inside it, so a spawn that FAILED was caught
+    /// by the same handler that the deliberate panic was meant to trip:
+    /// `outcome.is_err()` held for the wrong reason, and `!exists` then held
+    /// trivially because nothing had been created. The test reported `ok` on a
+    /// machine that could not spawn a tmux session at all, while its two
+    /// siblings failed — a false green that hid a third of the evidence.
     #[test]
     fn drop_kills_the_session_even_when_the_body_panics() {
         if !ScratchTmuxSession::tmux_available(TMUX) {
@@ -330,12 +352,15 @@ not-an-epoch tm-xtest-garbage-01
             return;
         }
         let name = scratch_name("panic");
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let session = ScratchTmuxSession::spawn(TMUX, &name, "sh");
-            assert!(
-                ScratchTmuxSession::exists(TMUX, session.name()),
-                "fixture precondition: the session must be live before the panic"
-            );
+        let session = ScratchTmuxSession::spawn(TMUX, &name, "sh");
+        assert!(
+            ScratchTmuxSession::exists(TMUX, session.name()),
+            "fixture precondition: the session must be live before the panic"
+        );
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            // Moved in, so the guard drops during THIS unwind — the property
+            // under test.
+            let _owned = session;
             panic!("simulated mid-test failure while the guard is alive");
         }));
         assert!(
