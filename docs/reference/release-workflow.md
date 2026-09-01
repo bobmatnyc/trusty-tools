@@ -63,6 +63,15 @@ e.g. `trusty-mcp-core-v0.2.0`. The version comes from the crate's `Cargo.toml`.
 > is intentionally deferred and not yet implemented.
 3. Run `cargo test -p <name>` and `cargo clippy --workspace -- -D warnings`.
 4. Commit the version bump.
+4b. Run `scripts/preflight-publish.sh --check-only <crate-name>` — MANDATORY,
+   must pass BEFORE tagging (issue #6508). This is the gate that decides
+   whether tagging is allowed: tags here are immutable (see
+   [Release Tags Are Immutable](#release-tags-are-immutable) below), so a
+   preflight failure discovered only after the tag is already pushed burns the
+   version rather than being fixable in place — this is what happened to
+   trusty-common 0.46.1 and 0.46.3 in one week. Full rationale and the
+   `--check-only`/full-mode split:
+   [`.claude/skills/cargo-publish/SKILL.md`, "Step 2b"](../../.claude/skills/cargo-publish/SKILL.md#step-2b-pre-tag-gate-mandatory-issue-6508).
 5. Create the tag: `git tag <crate-name>-v<version>`.
 6. Push the tag: `git push origin <crate-name>-v<version>`.
 7. Run `scripts/check-publish-ready.sh <crate-name>` (or
@@ -71,9 +80,10 @@ e.g. `trusty-mcp-core-v0.2.0`. The version comes from the crate's `Cargo.toml`.
    Also runs automatically post-merge: `make version-parity-check` (or wait
    for `.github/workflows/version-parity.yml` on the merge commit) — see
    [Version-Parity Guard](#version-parity-guard-issue-3366) below.
-7b. Run `scripts/preflight-publish.sh <crate-name>` immediately before step 8.
-   Its CHECK 6 is the one that catches a tag left behind by a fast-forward —
-   see [Tag/Publish-Commit Parity Guard](#tagpublish-commit-parity-guard) below.
+7b. Run `scripts/preflight-publish.sh <crate-name>` immediately before step 8 —
+   the post-tag counterpart of step 4b, now that the tag exists. Its CHECK 6
+   is the one that catches a tag left behind by a fast-forward — see
+   [Tag/Publish-Commit Parity Guard](#tagpublish-commit-parity-guard) below.
    🔴 If main moved between steps 5 and 7 and you fast-forwarded this checkout
    to satisfy the merged-main check, the tag from step 5 is now stale. Reset the
    checkout back to the tag (`git reset --hard <crate-name>-v<version>`) and
@@ -154,7 +164,10 @@ publish-dry-run job below — is skipped rather than silently proceeding.
 
 🔴 **The release tag must name the commit `cargo publish` actually ships.**
 `scripts/check-tag-publish-parity.sh <crate> [version]` enforces it, and
-`scripts/preflight-publish.sh` runs it as CHECK 6 with no override.
+`scripts/preflight-publish.sh` runs it as CHECK 6 with no override — except
+that a `TAG-MISSING` finding under `--check-only` is a pass-through `[SKIP]`,
+not a failure: no tag is expected to exist yet at the pre-tag gate (issue
+#6508). See [`.claude/skills/cargo-publish/SKILL.md`, "Step 2b"](../../.claude/skills/cargo-publish/SKILL.md#step-2b-pre-tag-gate-mandatory-issue-6508).
 
 **The defect it closes.** Nothing bound the tag to the upload. Step 5 tags,
 step 8 publishes, and the two gates in between check different things:
