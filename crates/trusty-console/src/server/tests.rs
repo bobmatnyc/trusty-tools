@@ -248,6 +248,37 @@ async fn test_spa_root_returns_html() {
     assert!(ct.contains("text/html"), "expected text/html, got: {ct}");
 }
 
+/// Why: the phase-4 `.saver` bundle (#6520) loads the screensaver by URL and
+/// has no way to report a 404 — a blank WKWebView is all the operator sees. The
+/// two spellings reach the shell by different mechanisms (`/ui/screensaver`
+/// through the wildcard's SPA fallback, `/screensaver` through its own route),
+/// so both are asserted rather than assumed.
+/// What: issues GET on each and asserts 200 + text/html.
+/// Test: this test itself.
+#[tokio::test]
+async fn test_screensaver_paths_return_spa_shell() {
+    for uri in ["/ui/screensaver", "/screensaver"] {
+        let router = build_router(make_test_state());
+        let req = Request::builder()
+            .uri(uri)
+            .body(Body::empty())
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::OK, "{uri} must serve the shell");
+
+        let ct = resp
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        assert!(
+            ct.contains("text/html"),
+            "{uri}: expected text/html, got: {ct}"
+        );
+    }
+}
+
 /// A connector whose `detect()` always panics — simulates a buggy plugin.
 struct PanicConnector;
 

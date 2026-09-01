@@ -595,6 +595,10 @@ fn build_router_inner(
             get(crate::tools_ui::search_ui_asset),
         )
         .route("/", get(crate::console_ui::spa_index_handler))
+        // #6519: /ui/screensaver already reaches the shell through the SPA
+        // fallback in the wildcard below; this is the top-level alias, which has
+        // no wildcard to fall through and so needs its own route.
+        .route("/screensaver", get(crate::console_ui::spa_index_handler))
         .route("/ui", get(crate::console_ui::spa_index_handler))
         .route("/ui/", get(crate::console_ui::spa_index_handler))
         .route("/ui/{*path}", get(crate::console_ui::spa_asset_handler))
