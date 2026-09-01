@@ -238,6 +238,46 @@ impl GitWorktreeFixture {
         git_ok(&self.repo, &["fetch", "--prune", "origin"]);
     }
 
+    /// Commit `file` in `wt`, PUSH that commit under `remote_branch`, and ALSO
+    /// squash-merge its patch onto `origin/main` (#6507).
+    ///
+    /// Why: this builds the one shape that separates a per-commit patch filter
+    /// from a naive count subtraction. The commit ends up reachable from a
+    /// remote ref, so `rev-list HEAD --not --remotes` never counts it — while
+    /// `git cherry origin/main HEAD` still marks it `-`, because its patch is on
+    /// `main` too. Subtracting the number of `-` lines from the candidate count
+    /// therefore discounts one commit too many, and the commit it eats is
+    /// whichever genuinely unpushed one the caller adds next.
+    /// What: commits `file`, pushes the branch to `origin/<remote_branch>`,
+    /// squash-merges it onto `main` in the owning checkout, pushes `main`, and
+    /// fetches so both remote refs exist locally. No upstream is configured, so
+    /// the dirty check still takes its no-upstream arm.
+    /// Test: `inspect_dirt_discounts_only_the_commits_the_query_counted`.
+    pub(crate) fn land_patch_and_keep_the_remote_branch(
+        &self,
+        wt: &Path,
+        file: &str,
+        remote_branch: &str,
+    ) {
+        let branch = git_stdout_ok(wt, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        let branch = branch.trim().to_string();
+        std::fs::write(wt.join(file), "landed and pushed\n").expect("fixture: write file");
+        git_ok(wt, &["add", file]);
+        git_ok(wt, &["commit", "-m", "feat: landed under two refs"]);
+        git_ok(
+            wt,
+            &[
+                "push",
+                "origin",
+                &format!("HEAD:refs/heads/{remote_branch}"),
+            ],
+        );
+        git_ok(&self.repo, &["merge", "--squash", &branch]);
+        git_ok(&self.repo, &["commit", "-m", "feat: landed (#2)"]);
+        git_ok(&self.repo, &["push", "origin", "main"]);
+        git_ok(&self.repo, &["fetch", "origin"]);
+    }
+
     /// Test: `enumerate_finds_worktree_at_an_unwalked_location`,
     /// `registry_root_for_ignores_where_the_worktree_is_parked`.
     pub(crate) fn add_worktree_at(&self, parent: &Path, name: &str) -> PathBuf {

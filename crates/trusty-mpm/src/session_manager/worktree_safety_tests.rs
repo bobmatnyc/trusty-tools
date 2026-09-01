@@ -870,6 +870,51 @@ fn inspect_dirt_still_reports_a_genuinely_unpushed_commit_beside_a_squashed_one(
     );
 }
 
+/// The discount is applied PER COMMIT, never as a difference of counts.
+///
+/// Why this needs its own fixture: `git cherry`'s output range is
+/// `<base>..<tip>`, which can hold commits the rev-list never counted. Here the
+/// first commit is reachable from `origin/landed-elsewhere`, so it is not a
+/// candidate — and its patch is also on `origin/main`, so cherry marks it `-`.
+/// A naive `candidates - landed.len()` therefore reports 1 - 1 = 0 and calls the
+/// worktree clean, discarding the SECOND commit, which exists nowhere but this
+/// directory. The other two #6507 tests pass under that naive form; this one
+/// does not.
+#[test]
+fn inspect_dirt_discounts_only_the_commits_the_query_counted() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("two-refs");
+    fx.land_patch_and_keep_the_remote_branch(&wt, "landed.rs", "landed-elsewhere");
+
+    std::fs::write(wt.join("only-here.rs"), "exists nowhere else\n").unwrap();
+    git_must(&wt, &["add", "only-here.rs"]);
+    git_must(&wt, &["commit", "-m", "feat: exists nowhere else"]);
+
+    // The fixture's own precondition: exactly ONE candidate (the second
+    // commit), and a cherry range that also marks the first one landed.
+    let counted = git_stdout(&wt, &["rev-list", "--count", "HEAD", "--not", "--remotes"])
+        .expect("rev-list must run");
+    assert_eq!(
+        counted.trim(),
+        "1",
+        "the fixture must count only the commit that landed nowhere"
+    );
+    let cherry = git_stdout(&wt, &["cherry", "refs/remotes/origin/main", "HEAD"])
+        .expect("git cherry must run");
+    assert_eq!(
+        cherry.lines().filter(|l| l.starts_with("- ")).count(),
+        1,
+        "the cherry range must also hold a landed commit the rev-list never counted: {cherry}"
+    );
+
+    let dirt = inspect_dirt(&wt).expect("the second commit is unsaved work");
+    assert_eq!(
+        dirt.unpushed_commits, 1,
+        "a landed commit outside the counted set must not discount one inside it; reason was: {}",
+        dirt.reason
+    );
+}
+
 /// A repository with no remote landing branch discounts NOTHING — the patch
 /// comparison has no base, and an unanswerable comparison must leave the raw
 /// count exactly where it was.
