@@ -431,6 +431,13 @@ pub(crate) async fn session(
             crate::commands::reconcile_worktrees::session_reconcile_worktrees(client, url, json)
                 .await?
         }
+        // #6497: the transfer the reconcile report can only propose. Explicit
+        // by design — a tree that changes hands on its own is indistinguishable
+        // from one taken out from under a working agent.
+        SessionAction::AdoptWorktree { path, as_session } => {
+            crate::commands::adopt_worktree::session_adopt_worktree(client, url, &path, &as_session)
+                .await?
+        }
         // #2444: re-sync a live session's (or every syncable session's)
         // deployed assets against the current catalog. Fleet-wide store
         // operation like `Prune`/`DecommissionEphemeral` above — direct HTTP,

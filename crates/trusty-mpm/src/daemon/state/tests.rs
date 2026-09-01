@@ -323,6 +323,91 @@ fn reap_marks_stopped_when_pid_dead() {
     assert_eq!(after.status, SessionStatus::Stopped);
 }
 
+/// A `Running` delegation belonging to `session`, standing in `cwd` with no
+/// worktree of its own — the shape `live_shared_tree_writers` reports (#6497).
+fn unisolated_running_delegation(
+    session: crate::core::session::SessionId,
+    cwd: &std::path::Path,
+) -> crate::core::agent::Delegation {
+    let mut d = crate::core::agent::Delegation::new(
+        session,
+        None,
+        "rust-engineer",
+        crate::core::agent::ModelTier::Sonnet,
+        "finish the work",
+    );
+    d.status = crate::core::agent::DelegationStatus::Running;
+    d.cwd = Some(cwd.to_path_buf());
+    d.isolation = None;
+    d
+}
+
+/// The #6497 regression. When the reaper buries a session, that session's agents
+/// went down with it — their `SubagentStop` never arrives, so their records
+/// stayed live for six hours and `live_shared_tree_writers` kept reporting them
+/// as writing in the shared checkout, refusing a successor's serialized
+/// dispatch.
+#[test]
+fn reap_stales_a_dead_sessions_delegations() {
+    let state = DaemonState::new();
+    let session = sample_session();
+    let id = session.id;
+    let cwd = std::path::PathBuf::from("/repo/main");
+    state.register_session(session);
+    state.upsert_delegation(unisolated_running_delegation(id, &cwd));
+
+    assert_eq!(
+        state.live_shared_tree_writers(&cwd, None).len(),
+        1,
+        "the record blocks a dispatch while its session is alive"
+    );
+
+    // The tmux session is gone from `list-sessions` — the reaper's positive
+    // evidence of death.
+    let result = state.reap_against(&std::collections::HashSet::new());
+    assert_eq!(result.reaped, 1);
+
+    assert!(
+        state.live_shared_tree_writers(&cwd, None).is_empty(),
+        "a dead session's records must stop blocking dispatch"
+    );
+    let after = state.all_delegations();
+    assert_eq!(after.len(), 1, "the record is staled, never dropped");
+    assert_eq!(
+        after[0].status,
+        crate::core::agent::DelegationStatus::Stale,
+        "Stale records that tracking gave up, and stays resolvable by a late stop"
+    );
+    assert!(
+        after[0].ended_at.is_none(),
+        "staling must not stamp ended_at — that field means `reached a terminal status`"
+    );
+}
+
+/// The control: a session the reaper leaves alone keeps every one of its
+/// delegations live, so the ADR-0048 shared-checkout guard is untouched for
+/// every session that is still running.
+#[test]
+fn reap_leaves_a_live_sessions_delegations_alone() {
+    let state = DaemonState::new();
+    let session = sample_session();
+    let id = session.id;
+    let tmux_name = session.tmux_name.clone();
+    let cwd = std::path::PathBuf::from("/repo/main");
+    state.register_session(session);
+    state.upsert_delegation(unisolated_running_delegation(id, &cwd));
+
+    let live: std::collections::HashSet<String> = [tmux_name].into_iter().collect();
+    let result = state.reap_against(&live);
+
+    assert_eq!(result.reaped, 0);
+    assert_eq!(
+        state.live_shared_tree_writers(&cwd, None).len(),
+        1,
+        "a live session's agent must still block a second writer in its checkout"
+    );
+}
+
 #[test]
 fn new_reads_default_when_optimizer_file_missing() {
     // With no framework installed (the optimizer.toml file absent), the

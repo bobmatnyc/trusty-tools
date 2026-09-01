@@ -699,6 +699,45 @@ fn cli_reconcile_worktrees_takes_no_destructive_flag() {
     }
 }
 
+/// #6497: the adoption verb parses a path and the session taking it over.
+#[test]
+fn cli_parses_session_adopt_worktree() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "session",
+        "adopt-worktree",
+        "/repo/.claude/worktrees/agent-abc",
+        "--as",
+        "11111111-2222-3333-4444-555555555555",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Session {
+            action: SessionAction::AdoptWorktree { path, as_session },
+        } => {
+            assert_eq!(
+                path,
+                std::path::PathBuf::from("/repo/.claude/worktrees/agent-abc")
+            );
+            assert_eq!(as_session, "11111111-2222-3333-4444-555555555555");
+        }
+        other => panic!("expected session adopt-worktree, got {other:?}"),
+    }
+}
+
+/// #6497: adoption names its new owner or does not run.
+///
+/// Why: a transfer with no stated recipient would have to invent one, and the
+/// invented answer — "whoever is running this command" — is exactly the
+/// implicit ownership change this verb exists to replace.
+#[test]
+fn cli_adopt_worktree_requires_the_adopting_session() {
+    assert!(
+        Cli::try_parse_from(["trusty-mpm", "session", "adopt-worktree", "/repo/tree"]).is_err(),
+        "`adopt-worktree` without `--as` must not parse"
+    );
+}
+
 #[test]
 fn cli_parses_sessions_sync_assets() {
     // #2444: `sync-assets <id>` re-syncs ONE session.

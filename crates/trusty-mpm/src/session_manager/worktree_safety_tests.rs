@@ -794,3 +794,102 @@ fn inspect_dirt_allows_empty_non_git_leftover() {
         inspect_dirt(&shell)
     );
 }
+
+// ── #6507: a squash-merged branch is not unsaved work ────────────────────────
+
+/// Run one git command in `dir`, asserting it succeeded (#6507 tests).
+fn git_must(dir: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("`git {}` could not be run: {e}", args.join(" ")));
+    assert!(
+        out.status.success(),
+        "`git {}` failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The #6507 regression. A branch whose PR squash-merged, and whose remote
+/// branch was then deleted, holds no work a removal could destroy — its patch
+/// is on `origin/main` under a different SHA. Before this fix
+/// `rev-list --count HEAD --not --remotes` returned 1 for exactly that state,
+/// gate 6 of the merged-PR reclaim reported "holds unsaved work", and
+/// `tm session prune-worktrees --merged-prs --force` reclaimed 0 on a
+/// squash-merging repository.
+///
+/// FAIL-OPEN CHECK: reporting clean when work is unsaved is the one direction
+/// this module may not get wrong, so the discount is per-commit and
+/// evidence-based — `git cherry` marking that commit `-` against a remote
+/// landing branch. It is never "the upstream ref is gone, therefore fine": the
+/// sibling test below keeps a genuinely unpushed commit on the same fixture
+/// refused.
+#[test]
+fn inspect_dirt_clears_a_squash_merged_branch_whose_upstream_was_pruned() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("squashed");
+    fx.squash_merge_to_origin(&wt, "landed.rs");
+
+    // The pre-fix state, pinned so a regression stays legible: the commit
+    // really is unreachable from every remote ref.
+    let reachability = git_stdout(&wt, &["rev-list", "--count", "HEAD", "--not", "--remotes"])
+        .expect("rev-list must run");
+    assert_eq!(
+        reachability.trim(),
+        "1",
+        "the fixture must reproduce the pruned-upstream shape this bug needs"
+    );
+
+    assert!(
+        inspect_dirt(&wt).is_none(),
+        "a squash-merged branch holds no unsaved work; got {:?}",
+        inspect_dirt(&wt)
+    );
+}
+
+/// The control the #6507 fix may never break: a commit that landed NOWHERE is
+/// still unsaved work, in the same worktree, beside one that did land.
+#[test]
+fn inspect_dirt_still_reports_a_genuinely_unpushed_commit_beside_a_squashed_one() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("mixed");
+    fx.squash_merge_to_origin(&wt, "landed.rs");
+
+    std::fs::write(wt.join("never-landed.rs"), "work that exists only here\n").unwrap();
+    git_must(&wt, &["add", "never-landed.rs"]);
+    git_must(&wt, &["commit", "-m", "feat: never pushed anywhere"]);
+
+    let dirt = inspect_dirt(&wt).expect("an unlanded commit must still read as dirty");
+    assert_eq!(
+        dirt.unpushed_commits, 1,
+        "only the squash-merged commit may be discounted; reason was: {}",
+        dirt.reason
+    );
+}
+
+/// A repository with no remote landing branch discounts NOTHING — the patch
+/// comparison has no base, and an unanswerable comparison must leave the raw
+/// count exactly where it was.
+#[test]
+fn inspect_dirt_discounts_nothing_without_a_remote_landing_branch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = std::fs::canonicalize(tmp.path()).unwrap().join("solo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git_must(&repo, &["init", "--initial-branch=main"]);
+    git_must(&repo, &["config", "user.email", "ci@test.invalid"]);
+    git_must(&repo, &["config", "user.name", "CI"]);
+    git_must(&repo, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(repo.join("only.rs"), "local\n").unwrap();
+    git_must(&repo, &["add", "only.rs"]);
+    git_must(&repo, &["commit", "-m", "local only"]);
+
+    assert!(
+        landing_bases(&repo).is_empty(),
+        "a repository with no remotes offers no landing base"
+    );
+    let dirt = inspect_dirt(&repo).expect("a commit on no remote is unsaved work");
+    assert_eq!(dirt.unpushed_commits, 1, "reason was: {}", dirt.reason);
+}

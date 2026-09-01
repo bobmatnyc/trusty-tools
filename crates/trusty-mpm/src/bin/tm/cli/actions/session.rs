@@ -563,4 +563,24 @@ pub(crate) enum SessionAction {
         #[arg(long)]
         json: bool,
     },
+    /// Take over a worktree whose owning session or agent is dead (#6497).
+    ///
+    /// Why: a session can die holding an agent's worktree that still contains
+    /// uncommitted work, and until this verb a successor had no compliant way
+    /// to finish it — every write route in was refused because the sentinel
+    /// still named the dead owner, and the recorded workaround rebuilt the
+    /// branch by hand in a new tree.
+    /// What: POSTs `/api/v1/sessions/managed/adopt-worktree`. The daemon
+    /// refuses unless the current owner is POSITIVELY known to have ended and
+    /// nothing live is still working in the tree; on success the ownership
+    /// sentinel names `--as` instead. It moves no files and commits nothing.
+    /// Test: `cli_parses_session_adopt_worktree`,
+    /// `cli_adopt_worktree_requires_the_adopting_session`.
+    AdoptWorktree {
+        /// The worktree directory whose ownership is being transferred.
+        path: std::path::PathBuf,
+        /// The managed session that becomes the new owner.
+        #[arg(long = "as")]
+        as_session: String,
+    },
 }

@@ -99,6 +99,7 @@
 //!
 //! Test: `worktree_safety_tests`.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -570,8 +571,18 @@ fn is_worktree_root(path: &Path) -> Result<bool, String> {
 /// pushed under its own name but never had upstream tracking configured. In a
 /// repository with no remotes at all, `--remotes` expands to nothing and every
 /// commit counts as unpushed — the correct, conservative answer.
+/// Reachability alone is not the question a SQUASH-merge repository can answer
+/// (#6507). A squash merge replays the branch's changes as ONE NEW commit on
+/// `main`, so the branch tip is never an ancestor of it, and
+/// `gh pr merge --squash --delete-branch` then removes the remote branch that
+/// made those commits reachable. `rev-list --count HEAD --not --remotes` counts
+/// them all as unpushed, gate 6 of the merged-PR reclaim reports "holds unsaved
+/// work", and `prune-worktrees --merged-prs` reclaims nothing on a repository
+/// that squash-merges every PR. [`count_unlanded`] subtracts the commits whose
+/// PATCH is provably already on a remote landing branch.
 /// Test: `inspect_dirt_reports_unpushed_commit`,
-/// `inspect_dirt_clean_pushed_worktree_is_none`.
+/// `inspect_dirt_clean_pushed_worktree_is_none`,
+/// `inspect_dirt_clears_a_squash_merged_branch_whose_upstream_was_pruned`.
 fn count_unpushed(path: &Path) -> Result<usize, String> {
     let upstream = git_stdout(
         path,
@@ -586,15 +597,160 @@ fn count_unpushed(path: &Path) -> Result<usize, String> {
     .map(|s| s.trim().to_string())
     .filter(|s| !s.is_empty());
 
-    let raw = match upstream {
-        Some(up) => git_stdout(path, &["rev-list", "--count", &format!("{up}..HEAD")])?,
-        None => git_stdout(path, &["rev-list", "--count", "HEAD", "--not", "--remotes"])?,
+    // #6507: the count and the listing must be the SAME query — the listing is
+    // what the patch-equivalence filter runs over.
+    let range;
+    let (count_args, list_args): (Vec<&str>, Vec<&str>) = match &upstream {
+        Some(up) => {
+            range = format!("{up}..HEAD");
+            (
+                vec!["rev-list", "--count", &range],
+                vec!["rev-list", &range],
+            )
+        }
+        None => (
+            vec!["rev-list", "--count", "HEAD", "--not", "--remotes"],
+            vec!["rev-list", "HEAD", "--not", "--remotes"],
+        ),
     };
-    let head = raw
+    let head = count_unlanded(path, &count_args, &list_args, &["HEAD"])?;
+    Ok(head + count_session_branch_unpushed(path)?)
+}
+
+/// The most unpushed-looking commits this guard will patch-compare (#6507).
+///
+/// Why: the no-upstream arm of [`count_unpushed`] is
+/// `rev-list HEAD --not --remotes`, which in a repository with no remote refs
+/// at all expands to the WHOLE history — tens of thousands of commits here. The
+/// patch comparison is worth running over a branch's divergence and never over
+/// a history, so past this many candidates the raw count is returned unchanged.
+/// That is the fail-closed direction: more unpushed commits, never fewer.
+/// What: 200, comfortably above any real branch's divergence.
+/// Test: `inspect_dirt_clears_a_squash_merged_branch_whose_upstream_was_pruned`
+/// exercises the comparing path; the cap only ever restores today's behaviour.
+const LANDED_PROBE_MAX_CANDIDATES: usize = 200;
+
+/// Ref patterns naming a branch a merge can LAND on (#6507).
+///
+/// Why: `git cherry` takes exactly one upstream, so the comparison needs a
+/// concrete ref rather than `--remotes`. A squash merge lands on a remote's
+/// default branch, and these three patterns name it: `HEAD` when the remote's
+/// symbolic default is known locally (every `git clone` sets it), and the two
+/// conventional spellings for a repository built by `git init` + `git remote
+/// add`, which sets no `HEAD`. A pattern that matches nothing contributes
+/// nothing, so an unusual default branch simply leaves the raw count in place.
+/// Test: `inspect_dirt_clears_a_squash_merged_branch_whose_upstream_was_pruned`.
+const LANDING_BASE_PATTERNS: &[&str] = &[
+    "refs/remotes/*/HEAD",
+    "refs/remotes/*/main",
+    "refs/remotes/*/master",
+];
+
+/// How many distinct landing bases one call will compare against (#6507).
+///
+/// Why: each base costs one `git cherry` per tip, and a machine with several
+/// remotes would otherwise pay for all of them on every dirty check.
+const LANDING_BASE_LIMIT: usize = 4;
+
+/// Count the commits in one rev-list query that are NOT already on a remote,
+/// by patch rather than by reachability (#6507).
+///
+/// Why: see [`count_unpushed`]. The subtraction is per-COMMIT and never a
+/// difference of counts: `git cherry`'s output range is `<base>..<tip>`, which
+/// can hold commits this query never counted, so subtracting its `-` total
+/// would discount a genuinely unsaved commit against an unrelated match.
+/// What: runs `count_args` for the number and `list_args` for the same
+/// commits' SHAs, then drops those [`landed_on_a_remote`] proved equivalent to
+/// a commit already on a landing branch. Every failure arm keeps the raw count:
+/// an unanswerable patch comparison must never lower it.
+/// Test: `inspect_dirt_clears_a_squash_merged_branch_whose_upstream_was_pruned`,
+/// `inspect_dirt_still_reports_a_genuinely_unpushed_commit_beside_a_squashed_one`.
+fn count_unlanded(
+    path: &Path,
+    count_args: &[&str],
+    list_args: &[&str],
+    tips: &[&str],
+) -> Result<usize, String> {
+    let raw = git_stdout(path, count_args)?;
+    let counted = raw
         .trim()
         .parse::<usize>()
         .map_err(|e| format!("unparsable rev-list count `{}`: {e}", raw.trim()))?;
-    Ok(head + count_session_branch_unpushed(path)?)
+    if counted == 0 || counted > LANDED_PROBE_MAX_CANDIDATES {
+        return Ok(counted);
+    }
+    let listed = git_stdout(path, list_args)?;
+    let landed = landed_on_a_remote(path, tips);
+    Ok(listed
+        .split_whitespace()
+        .filter(|sha| !landed.contains(*sha))
+        .count())
+}
+
+/// The SHAs reachable from `tips` whose patch is already on a landing branch
+/// (#6507).
+///
+/// Why: this is the only evidence that turns "unreachable from every remote"
+/// into "already landed". `git cherry <base> <tip>` marks a commit `-` when its
+/// patch id matches one on `base` — which is exactly what a squash merge
+/// produces — and `+` otherwise.
+/// What: the `-` SHAs, unioned over every [`landing_bases`] base and every tip.
+/// An empty set on every failure path, which leaves the caller's count intact.
+///
+/// Residual, stated rather than hidden: an EMPTY commit has an empty patch id,
+/// so two unrelated empty commits read as equivalent and one could be
+/// discounted. An empty commit carries no file content, so nothing recoverable
+/// is at risk. `git cherry` also skips merge commits, which therefore never
+/// appear here and stay counted — the conservative direction.
+/// Test: `inspect_dirt_clears_a_squash_merged_branch_whose_upstream_was_pruned`.
+fn landed_on_a_remote(path: &Path, tips: &[&str]) -> HashSet<String> {
+    let mut landed = HashSet::new();
+    for base in landing_bases(path) {
+        for tip in tips {
+            let Ok(out) = git_stdout(path, &["cherry", &base, tip]) else {
+                continue;
+            };
+            for line in out.lines() {
+                if let Some(sha) = line.strip_prefix("- ") {
+                    landed.insert(sha.trim().to_string());
+                }
+            }
+        }
+    }
+    landed
+}
+
+/// Remote refs a squash merge could have landed on, deduplicated by commit
+/// (#6507).
+///
+/// Why: `refs/remotes/origin/HEAD` and `refs/remotes/origin/main` usually name
+/// the SAME commit, and comparing against both would double the subprocess cost
+/// for one answer.
+/// What: one `for-each-ref` over [`LANDING_BASE_PATTERNS`], keeping the first
+/// ref for each distinct object and at most [`LANDING_BASE_LIMIT`] of them. An
+/// empty vector when git cannot be asked, which discounts nothing.
+/// Test: `inspect_dirt_clears_a_squash_merged_branch_whose_upstream_was_pruned`.
+fn landing_bases(path: &Path) -> Vec<String> {
+    let mut args = vec!["for-each-ref", "--format=%(objectname) %(refname)"];
+    args.extend_from_slice(LANDING_BASE_PATTERNS);
+    let Ok(out) = git_stdout(path, &args) else {
+        return Vec::new();
+    };
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut bases = Vec::new();
+    for line in out.lines() {
+        let Some((object, refname)) = line.trim().split_once(' ') else {
+            continue;
+        };
+        if !seen.insert(object) {
+            continue;
+        }
+        bases.push(refname.to_string());
+        if bases.len() >= LANDING_BASE_LIMIT {
+            break;
+        }
+    }
+    bases
 }
 
 /// Count unpushed commits on the `session/<leaf>` branch `decommission` deletes.
@@ -652,13 +808,18 @@ fn count_session_branch_unpushed(path: &Path) -> Result<usize, String> {
     if present.is_empty() {
         return Ok(0);
     }
-    let mut args: Vec<&str> = vec!["rev-list", "--count"];
-    args.extend(present.iter().map(String::as_str));
-    args.extend(["--not", "--remotes", "HEAD"]);
-    let raw = git_stdout(path, &args)?;
-    raw.trim()
-        .parse::<usize>()
-        .map_err(|e| format!("unparsable rev-list count `{}`: {e}", raw.trim()))
+    let mut count_args: Vec<&str> = vec!["rev-list", "--count"];
+    count_args.extend(present.iter().map(String::as_str));
+    count_args.extend(["--not", "--remotes", "HEAD"]);
+    let mut list_args: Vec<&str> = vec!["rev-list"];
+    list_args.extend(present.iter().map(String::as_str));
+    list_args.extend(["--not", "--remotes", "HEAD"]);
+    // #6507: a session branch is squash-merged like any other, so the same
+    // patch-equivalence subtraction applies here. The tips are the branch refs
+    // themselves — `HEAD` is excluded from this query, so comparing against it
+    // would name commits this arm never counted.
+    let tips: Vec<&str> = present.iter().map(String::as_str).collect();
+    count_unlanded(path, &count_args, &list_args, &tips)
 }
 
 /// Run `git -C <dir> <args>` and return stdout, or an error string.
