@@ -209,8 +209,9 @@ fn delete_targets(program: &str, tail: &[String]) -> Vec<String> {
 /// Whether `path` is one of the destructive-root categories issue #4031
 /// denylists.
 ///
-/// What: `true` when `path`, after [`resolve_target_path`]'s expansion and
-/// lexical normalization, is exactly `/`, `/root`, `$HOME`'s resolved value, a
+/// What: `true` when `path` — after [`resolve_target_path`]'s expansion and
+/// lexical normalization, and after [`glob_parent`]'s glob-aware
+/// substitution — is exactly `/`, `/root`, `$HOME`'s resolved value, a
 /// single-level `/Users/<name>` home root, the checkout's own repository root
 /// (`repo_root`, resolved once per segment by the caller via
 /// [`main_checkout_root`] — `None` for a worktree, whose own root is instead
@@ -221,6 +222,7 @@ fn delete_targets(program: &str, tail: &[String]) -> Vec<String> {
 /// this is a target-PATH classifier, not a target-root-prefix one, so ordinary
 /// cleanup under any of these stays allowed.
 fn is_denylisted_delete_target(path: &Path, repo_root: Option<&Path>, env: &PathEnv) -> bool {
+    let path = glob_parent(path);
     if path == Path::new("/") || path == Path::new("/root") {
         return true;
     }
@@ -239,6 +241,37 @@ fn is_denylisted_delete_target(path: &Path, repo_root: Option<&Path>, env: &Path
         return true;
     }
     is_worktree_root_or_container(path)
+}
+
+/// The directory a glob-suffixed delete target would actually clear, or
+/// `path` itself when it names no glob.
+///
+/// Why (#4031 review, CRITICAL 2): this module classifies TEXT — it never
+/// expands a glob the way the shell would at execution time — so
+/// `rm -rf /Users/bob/*` reached [`is_denylisted_delete_target`] as the
+/// literal path `/Users/bob/*`, which matched no denylist entry exactly,
+/// while the shell's own expansion would delete everything inside
+/// `/Users/bob`: exactly as destructive as `rm -rf /Users/bob` itself, and
+/// the same shape as `rm -rf ./*`/`rm -rf ~/*` run from `$HOME`, or
+/// `rm -rf .[!.]*` (a hidden-file glob). Rather than implement glob
+/// expansion (unbounded, and it would have to touch the filesystem), the
+/// glob's PARENT directory — where the shell would actually perform the
+/// deletion — is evaluated against the denylist instead.
+/// What: gated on the LAST path component containing `*`, `?`, or `[`
+/// (POSIX glob metacharacters); when it does, returns `path`'s parent (or
+/// `path` itself if it has none — e.g. a bare `*` with no resolvable
+/// parent, which conservatively keeps the check running against something
+/// rather than nothing). A non-glob path is returned unchanged.
+fn glob_parent(path: &Path) -> &Path {
+    let has_glob = path
+        .file_name()
+        .and_then(|f| f.to_str())
+        .is_some_and(|f| f.contains(['*', '?', '[']));
+    if has_glob {
+        path.parent().unwrap_or(path)
+    } else {
+        path
+    }
 }
 
 /// Whether `path` is exactly a single-level `/Users/<name>` entry — someone's
@@ -458,6 +491,87 @@ mod tests {
             "true; rm -rf .git",
             "cd /repo && rm -rf .claude/worktrees/agent-x",
         ] {
+            assert_eq!(
+                evaluate_destructive_delete_command_in(command, Path::new("/repo"), &env),
+                Some(DESTRUCTIVE_DELETE_REASON),
+                "expected deny for: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn denies_pwd_expansion_of_the_current_worktree_root() {
+        // #4031 review, CRITICAL 1: `$PWD` reached `resolve_target_path`
+        // unexpanded, so `rm -rf $PWD` from inside a session's own worktree
+        // root matched no denylist entry. `$PWD` must expand to the tracked
+        // effective cwd, not merely allow (the same property the sibling
+        // `$HOME` expansion test pins).
+        let env = env_with_home("/Users/agent");
+        let worktree = Path::new("/repo/.claude/worktrees/agent-x");
+        for command in ["rm -rf $PWD", "rm -rf ${PWD}"] {
+            assert_eq!(
+                evaluate_destructive_delete_command_in(command, worktree, &env),
+                Some(DESTRUCTIVE_DELETE_REASON),
+                "expected deny for: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn allows_pwd_expansion_of_a_subdirectory() {
+        // The other half: `$PWD/target` is an ordinary subdirectory of the
+        // worktree, not its root — must stay allowed.
+        let env = env_with_home("/Users/agent");
+        let worktree = Path::new("/repo/.claude/worktrees/agent-x");
+        assert_eq!(
+            evaluate_destructive_delete_command_in("rm -rf $PWD/target", worktree, &env),
+            None
+        );
+    }
+
+    #[test]
+    fn denies_glob_suffixed_deletes_of_a_denylisted_parent() {
+        // #4031 review, CRITICAL 2: this module classifies text, never
+        // expands a glob — `rm -rf /Users/bob/*` reached the denylist check
+        // as the literal path `/Users/bob/*`, which matched no entry exactly,
+        // while the shell's own expansion clears everything inside
+        // `/Users/bob`. The glob's PARENT must be evaluated instead.
+        let env = env_with_home("/Users/agent");
+        let home = Path::new("/Users/agent");
+        for (command, cwd) in [
+            ("rm -rf /Users/someone/*", home),
+            ("rm -rf ./*", home),
+            ("rm -rf ~/*", home),
+            ("rm -rf .[!.]*", home),
+        ] {
+            assert_eq!(
+                evaluate_destructive_delete_command_in(command, cwd, &env),
+                Some(DESTRUCTIVE_DELETE_REASON),
+                "expected deny for: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn allows_a_glob_inside_a_worktree_subdirectory() {
+        // The companion allow case: a glob whose parent is an ORDINARY
+        // subdirectory (not a denylisted root) is not this rule's business.
+        let env = env_with_home("/Users/agent");
+        let worktree = Path::new("/repo/.claude/worktrees/agent-x");
+        assert_eq!(
+            evaluate_destructive_delete_command_in("rm -rf ./target/*", worktree, &env),
+            None
+        );
+    }
+
+    #[test]
+    fn denies_backslash_and_command_wrapper_bypasses() {
+        // #4031 review, HIGH 3/4: `\rm` and `command rm` are the standard
+        // POSIX alias-bypass idioms — both run the real `rm` exactly as
+        // `rm` does, and both previously slipped past `first_command_token`
+        // unresolved.
+        let env = env_with_home("/Users/agent");
+        for command in ["\\rm -rf /root", "command rm -rf /root"] {
             assert_eq!(
                 evaluate_destructive_delete_command_in(command, Path::new("/repo"), &env),
                 Some(DESTRUCTIVE_DELETE_REASON),

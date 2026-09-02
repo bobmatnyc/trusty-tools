@@ -259,26 +259,44 @@ fn is_orchestrator_command(command: &str) -> bool {
 /// this mirrors), then returns the basename (post-`/`) of whatever token
 /// remains.
 /// Returns `None` — "can't confidently resolve" — when the token
-/// immediately after `sudo`/`env` is itself flag-shaped (starts with `-`,
-/// e.g. `sudo -u root make`, `env -i cmd`): the real program name in that
-/// case needs argument-aware parsing this function doesn't do, and
-/// [`is_orchestrator_command`] treats `None` as "conservatively assume
-/// orchestrator" rather than risk missing a real exclusion (trusty-review
-/// finding, PR #1968).
+/// immediately after `sudo`/`env`/`command`/`builtin` is itself flag-shaped
+/// (starts with `-`, e.g. `sudo -u root make`, `env -i cmd`): the real
+/// program name in that case needs argument-aware parsing this function
+/// doesn't do, and [`is_orchestrator_command`] treats `None` as
+/// "conservatively assume orchestrator" rather than risk missing a real
+/// exclusion (trusty-review finding, PR #1968).
+///
+/// A leading `\` and a `command`/`builtin` wrapper are the two standard
+/// POSIX idioms for bypassing a shell alias/function of the same name —
+/// `\rm -rf /` and `command rm -rf /` both run the real `rm` exactly as
+/// `rm -rf /` does. Neither was stripped here, so a resolved verb like `\rm`
+/// or `command rm` never matched a guard's `"rm"` literal and slipped past
+/// every classifier this function feeds (issue #4031 review, HIGH 3/4).
 /// Test: `first_command_token_strips_env_assignment`,
 /// `first_command_token_strips_sudo`, `first_command_token_strips_path`,
 /// `first_command_token_plain_command`,
 /// `first_command_token_strips_env_command_prefix`,
-/// `first_command_token_none_for_sudo_followed_by_flag`.
+/// `first_command_token_none_for_sudo_followed_by_flag`,
+/// `first_command_token_strips_leading_backslash`,
+/// `first_command_token_strips_command_wrapper`,
+/// `first_command_token_strips_builtin_wrapper`,
+/// `first_command_token_strips_backslash_after_sudo`.
 pub(crate) fn first_command_token(command: &str) -> Option<&str> {
     let mut tokens = command.split_whitespace();
     let mut tok = tokens.next()?;
     loop {
+        // #4031: strip the alias-bypass backslash BEFORE every other check —
+        // it can precede an env assignment, `sudo`/`env`/`command`/`builtin`,
+        // or the real program name itself, and each `continue` below re-runs
+        // this strip on the next token.
+        if let Some(stripped) = tok.strip_prefix('\\') {
+            tok = stripped;
+        }
         if is_env_assignment(tok) {
             tok = tokens.next()?;
             continue;
         }
-        if tok == "sudo" || tok == "env" {
+        if tok == "sudo" || tok == "env" || tok == "command" || tok == "builtin" {
             let next = tokens.next()?;
             if next.starts_with('-') {
                 return None;
@@ -590,6 +608,35 @@ mod tests {
         // bogus token `"-u"`.
         assert_eq!(first_command_token("sudo -u root make build"), None);
         assert_eq!(first_command_token("env -i make build"), None);
+    }
+
+    #[test]
+    fn first_command_token_strips_leading_backslash() {
+        // #4031 review, HIGH 3: `\rm` is the standard alias-bypass idiom —
+        // Bash itself strips the backslash before exec, so this classifier
+        // must too, or a resolved verb like `\rm` never matches `"rm"`.
+        assert_eq!(first_command_token("\\rm -rf /root"), Some("rm"));
+    }
+
+    #[test]
+    fn first_command_token_strips_command_wrapper() {
+        // #4031 review, HIGH 4: `command rm` runs the real `rm`, bypassing
+        // any shell function/alias named `rm` — the same bypass class as a
+        // leading backslash, via the POSIX `command` builtin instead.
+        assert_eq!(first_command_token("command rm -rf /root"), Some("rm"));
+    }
+
+    #[test]
+    fn first_command_token_strips_builtin_wrapper() {
+        assert_eq!(first_command_token("builtin rm -rf /root"), Some("rm"));
+    }
+
+    #[test]
+    fn first_command_token_strips_backslash_after_sudo() {
+        // The two bypass idioms compose: `sudo \rm` must resolve the same
+        // as `sudo rm` — the backslash strip re-runs on every token the
+        // `sudo`/`env`/`command`/`builtin` arm advances to.
+        assert_eq!(first_command_token("sudo \\rm -rf /root"), Some("rm"));
     }
 
     #[test]

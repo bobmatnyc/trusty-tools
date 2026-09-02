@@ -881,6 +881,74 @@ fn pm_guard_destructive_delete_denial_is_not_budget_eligible() {
 }
 
 #[test]
+fn pm_guard_denies_pwd_expansion_of_the_current_worktree_root() {
+    // #4031 review, CRITICAL 1: `$PWD` reached the guard unexpanded, so a
+    // dispatched subagent's `rm -rf $PWD` from inside its OWN worktree root
+    // matched no denylist entry. `agent_id` is present so this also proves
+    // the rule still pierces Guard 4.
+    let worktree = std::path::Path::new("/projects/example-repo/.claude/worktrees/agent-x");
+    for command in ["rm -rf $PWD", "rm -rf ${PWD}"] {
+        let payload = bash_payload_at(
+            command,
+            worktree,
+            r#""agent_id":"agent-xyz789","agent_type":"rust-engineer","#,
+        );
+        assert_denied(&run_pm_guard(&payload, &[]));
+    }
+}
+
+#[test]
+fn pm_guard_allows_pwd_expansion_of_a_subdirectory() {
+    // The companion allow case: `$PWD/target` is an ordinary subdirectory of
+    // the worktree, not its root.
+    let worktree = std::path::Path::new("/projects/example-repo/.claude/worktrees/agent-x");
+    let payload = bash_payload_at("rm -rf $PWD/target", worktree, "");
+    assert_eq!(run_pm_guard(&payload, &[]).trim(), "");
+}
+
+#[test]
+fn pm_guard_denies_glob_suffixed_deletes_of_home() {
+    // #4031 review, CRITICAL 2: this classifier never expands a glob — a
+    // literal `$HOME/*` or a `./*` run from `$HOME` must still deny by
+    // evaluating the glob's PARENT (here, `$HOME` itself) against the
+    // denylist. `HOME` is pinned via `isolated_home` so the assertion does
+    // not depend on the runner's real home directory.
+    let home = isolated_home();
+    let home_s = home.path().to_string_lossy().to_string();
+    for command in ["rm -rf $HOME/*", "rm -rf ./*"] {
+        let payload = bash_payload_at(command, home.path(), "");
+        assert_denied(&run_pm_guard(&payload, &[("HOME", &home_s)]));
+    }
+}
+
+#[test]
+fn pm_guard_allows_a_glob_inside_a_worktree_subdirectory() {
+    // The companion allow case: a glob whose parent is an ORDINARY
+    // subdirectory (not a denylisted root) is not this rule's business.
+    let worktree = std::path::Path::new("/projects/example-repo/.claude/worktrees/agent-x");
+    let payload = bash_payload_at("rm -rf ./target/*", worktree, "");
+    assert_eq!(run_pm_guard(&payload, &[]).trim(), "");
+}
+
+#[test]
+fn pm_guard_denies_backslash_and_command_wrapper_bypasses() {
+    // #4031 review, HIGH 3/4: `\rm` and `command rm` are the standard POSIX
+    // alias-bypass idioms — both run the real `rm` exactly as `rm` does.
+    // Built via `serde_json::json!` rather than string interpolation so the
+    // literal backslash is JSON-escaped correctly (a hand-interpolated
+    // `"\rm …"` decodes as a carriage return, not a backslash).
+    for command in [r"rm -rf /root", r"\rm -rf /root", "command rm -rf /root"] {
+        let payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": command}
+        })
+        .to_string();
+        assert_denied(&run_pm_guard(&payload, &[]));
+    }
+}
+
+#[test]
 fn pm_guard_allows_benign_pipes_and_dev_null() {
     // Composition with no forbidden segment must still allow.
     let piped = run_pm_guard(

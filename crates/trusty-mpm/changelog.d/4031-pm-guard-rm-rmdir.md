@@ -9,3 +9,9 @@ Fixed
   source. Ordinary cleanup (`rm stale.txt`, `cargo clean`, `git clean -fd`) is
   unaffected, and `git worktree remove` / `git branch -D` are untouched by
   this rule (#4031).
+- The guard now also expands a literal `$PWD`/`${PWD}` target to the tracked
+  effective working directory, evaluates the PARENT directory of a
+  glob-suffixed target (`rm -rf ~/*`, `rm -rf /Users/<name>/*`, `rm -rf
+  .[!.]*`) against the same denylist, and resolves a leading `\` or a
+  `command`/`builtin` wrapper (`\rm`, `command rm`) to the real verb — closing
+  four bypasses of the rule above found in review (#4031).
