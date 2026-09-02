@@ -223,18 +223,72 @@ pub struct RpcServeOptions {
     /// `serve_rejects_an_oversized_frame`,
     /// `stream_refuses_an_item_larger_than_the_frame_budget`.
     pub max_frame_bytes: u64,
+
+    /// Longest [`serve_until_idle`] waits for in-flight connections to finish
+    /// after the shutdown signal, before it returns and the caller unlinks the
+    /// socket (#6601).
+    ///
+    /// Why a budget rather than an unbounded wait: the signal is the start of a
+    /// window that ends in SIGKILL, and a handler that never returns must not
+    /// spend it. When the budget expires the loop warns and returns anyway —
+    /// holding the socket path open longer trades one hazard for a socket file
+    /// nobody unlinks.
+    ///
+    /// Why this is NOT a per-connection read budget: [`Self::read_timeout`]
+    /// bounds how long a peer may take to DELIVER a request. This bounds how
+    /// long the loop waits for requests it already accepted to be answered, and
+    /// a service whose method runs for minutes needs the second to be large
+    /// while the first stays small.
+    ///
+    /// Defaults to [`crate::shutdown::plannable_grace`] — the process-wide
+    /// SIGTERM-to-SIGKILL window MINUS [`crate::shutdown::CLEANUP_RESERVE`],
+    /// including an operator's `TRUSTY_TERMINATION_GRACE_SECS` override.
+    ///
+    /// 🔴 **Why the reserve rather than the whole window (#6601).** The signal
+    /// that starts this drain is the same signal that starts the SIGKILL
+    /// countdown, so a drain sized to the whole window leaves the caller's
+    /// post-serve work with no budget at all whenever the drain runs long.
+    /// `trusty-memory` is the concrete case: `transport::uds::
+    /// serve_with_shutdown` runs the BM25 exit flush AFTER `serve_until`
+    /// returns, and `bm25_lane::shutdown` states there is "no window in which a
+    /// SIGKILL can land mid-flush" — a full-window drain makes that false.
+    ///
+    /// A service whose real SIGKILL deadline is shorter than the process grace
+    /// window sets this explicitly rather than inheriting the default — but
+    /// establish that the deadline REACHES this process first (#6601 review).
+    /// `trusty-analyze` briefly set it to its supervisor's `sigterm_patience`
+    /// and that was wrong: it runs detached, so it is absent from the
+    /// supervisor's population and no reap path signals it while it is serving.
+    /// Overriding on a deadline that never fires does not avert a SIGKILL; it
+    /// only gives up the drain early.
+    ///
+    /// Test: `shutdown_drains_an_in_flight_connection_before_it_returns`,
+    /// `shutdown_returns_when_the_drain_budget_expires`,
+    /// `default_serve_options_reserve_cleanup_time_inside_the_grace_window`.
+    pub shutdown_drain: Duration,
 }
 
 impl Default for RpcServeOptions {
-    /// Thirty seconds, and [`MAX_FRAME_BYTES`].
+    /// Thirty seconds, [`MAX_FRAME_BYTES`], and the plannable termination grace.
     ///
     /// The read covers a local socket writing one already-serialised frame, so
     /// thirty seconds is headroom for a stalled writer rather than a latency
     /// budget.
+    ///
+    /// 🔴 **This `Default` reads the environment on every call (#6601).**
+    /// `shutdown_drain` comes from [`crate::shutdown::plannable_grace`], which
+    /// reads `TRUSTY_TERMINATION_GRACE_SECS` each time — so two values built
+    /// either side of a `set_var` differ, and this cannot be a `const`.
+    /// Deliberate: the override exists so a host whose supervisor window cannot
+    /// be raised can tell the daemon the truth, and a value frozen at first call
+    /// would ignore it. A caller wanting one stable budget for the process
+    /// builds the options once and copies them, which is what [`RpcServer`] and
+    /// `trusty-analyze`'s `serve_options` both do.
     fn default() -> Self {
         Self {
             read_timeout: Duration::from_secs(30),
             max_frame_bytes: MAX_FRAME_BYTES,
+            shutdown_drain: crate::shutdown::plannable_grace(),
         }
     }
 }
@@ -382,7 +436,9 @@ pub async fn serve_until(
 /// `serve_stops_on_shutdown`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServeExit {
-    /// The caller's shutdown future resolved (SIGTERM/SIGINT, or a test).
+    /// The caller's shutdown future resolved (SIGTERM/SIGINT, or a test), and
+    /// the in-flight connections have finished or spent
+    /// [`RpcServeOptions::shutdown_drain`] (#6601).
     Shutdown,
     /// No connection answered anything for the whole idle window.
     Idle,
@@ -469,7 +525,7 @@ async fn drain_backlog(
     listener: &UnixListener,
     router: &Arc<RpcRouter>,
     options: RpcServeOptions,
-    idle: Option<&Arc<IdleTracker>>,
+    idle: &Arc<IdleTracker>,
 ) -> Drained {
     let Ok(accepted) = tokio::time::timeout(IDLE_EXIT_DRAIN, listener.accept()).await else {
         return Drained::Nothing;
@@ -481,22 +537,113 @@ async fn drain_backlog(
             return Drained::Nothing;
         }
     };
-    let mut guard = idle.map(IdleTracker::connection_opened);
+    let mut guard = IdleTracker::connection_opened(idle);
     let served = handle_connection(stream, Arc::clone(router), options).await;
     let answered = matches!(served, Ok(Served::Answered { .. }));
     if let Err(e) = &served {
         tracing::warn!(error = %e, "uds rpc connection failed during idle drain");
     }
-    if answered && let Some(g) = guard.as_mut() {
-        g.answered();
+    if answered {
+        guard.answered();
     }
-    if let Some(g) = guard {
-        g.release().await;
-    }
+    guard.release().await;
     if answered {
         Drained::Answered
     } else {
         Drained::Nothing
+    }
+}
+
+/// How often [`drain_shutdown`] re-reads the in-flight count.
+///
+/// Five milliseconds: the drain ends the moment the last handler releases its
+/// guard, so this bounds how long a clean shutdown lingers past that release.
+const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(5);
+
+/// Let in-flight connections finish before the caller unlinks the socket
+/// (#6601).
+///
+/// Why: the shutdown arm used to return the instant the signal resolved. Every
+/// accepted connection holds an `Arc<RpcRouter>` clone — and through it whatever
+/// the service's handlers own, a redb `Database` in `trusty-analyze`'s case — so
+/// returning under an open connection unlinked the socket while those handles
+/// were still live. The unlink is what tells a client to spawn a successor, and
+/// the successor then died opening a store this process had not let go of
+/// (#6595). Draining HERE gives that guarantee to every service behind this
+/// loop rather than to the one caller that noticed.
+///
+/// What, while the count is above zero and the budget has not expired:
+///   - the accept loop is over, so nothing new is served; and
+///   - a client that dials anyway is accepted and IMMEDIATELY closed, which
+///     reaches it as `UdsRpcError::NoResponse` on the next poll. Leaving it in
+///     the backlog instead would hold it open until the listener dropped and
+///     then reset it — a failure the client cannot tell from a broken service.
+///
+/// A budget that expires warns and returns: the process is exiting on a signal
+/// either way, and holding the path open longer trades one hazard for a socket
+/// file nobody unlinks.
+///
+/// Connections queued in the kernel backlog but never accepted are NOT counted —
+/// `connect(2)` succeeds before this server sees anything. Those are refused by
+/// the loop above when a drain is running, and reset by the listener drop when
+/// there was nothing to drain.
+///
+/// Test: `shutdown_drains_an_in_flight_connection_before_it_returns`,
+/// `shutdown_refuses_a_connection_dialled_after_the_signal`,
+/// `shutdown_returns_when_the_drain_budget_expires`.
+async fn drain_shutdown(listener: &UnixListener, open: &Arc<IdleTracker>, budget: Duration) {
+    if open.open_connections() == 0 {
+        return;
+    }
+    // #6601 review: a process serving more than one socket needs the warn below
+    // to say WHICH one is still busy. `local_addr` is the listener's own answer,
+    // so it cannot disagree with the path actually bound; an unnamed socket
+    // (which this loop never binds) degrades to "<unknown>" rather than a panic.
+    let socket = listener
+        .local_addr()
+        .ok()
+        .and_then(|addr| addr.as_pathname().map(|p| p.display().to_string()))
+        .unwrap_or_else(|| "<unknown>".to_string());
+    tracing::info!(
+        %socket,
+        open = open.open_connections(),
+        ?budget,
+        "uds rpc shutdown signalled; draining in-flight connections"
+    );
+
+    let refuse = async {
+        loop {
+            match listener.accept().await {
+                Ok((stream, _)) => {
+                    tracing::debug!("refusing a connection dialled during the shutdown drain");
+                    drop(stream);
+                }
+                // Never a reason to stop refusing: the whole arm is bounded by
+                // the `select!`'s budget, and a bare `continue` on a persistent
+                // error (EMFILE, say) would spin.
+                Err(e) => {
+                    tracing::debug!(error = %e, "accept failed during the shutdown drain");
+                    tokio::time::sleep(DRAIN_POLL_INTERVAL).await;
+                }
+            }
+        }
+    };
+    let settled = async {
+        while open.open_connections() > 0 {
+            tokio::time::sleep(DRAIN_POLL_INTERVAL).await;
+        }
+    };
+
+    tokio::select! {
+        () = settled => {}
+        () = refuse => {}
+        () = tokio::time::sleep(budget) => tracing::warn!(
+            %socket,
+            open = open.open_connections(),
+            ?budget,
+            "connections still in flight after the shutdown drain budget; \
+             unlinking anyway"
+        ),
     }
 }
 
@@ -521,10 +668,18 @@ async fn drain_backlog(
 /// queued before the window elapsed; one that appears is served like any other
 /// and the loop continues, so the exit only stands when nobody was waiting.
 ///
+/// #6601: the shutdown arm drains too. Every accepted connection is counted —
+/// with an idle policy or without one — and the signal runs [`drain_shutdown`]
+/// before [`ServeExit::Shutdown`] is returned, so the caller's unlink never
+/// lands on top of a handler that is still holding the router.
+///
 /// Test: `serve_until_idle_exits_when_the_window_elapses`,
 /// `serve_until_idle_is_reset_by_an_answered_request`,
 /// `serve_until_idle_ignores_liveness_probes`,
-/// `a_client_queued_when_the_idle_window_elapses_is_served_not_reset`.
+/// `a_client_queued_when_the_idle_window_elapses_is_served_not_reset`,
+/// `shutdown_drains_an_in_flight_connection_before_it_returns`,
+/// `shutdown_refuses_a_connection_dialled_after_the_signal`,
+/// `shutdown_returns_when_the_drain_budget_expires`.
 pub async fn serve_until_idle(
     listener: &UnixListener,
     router: Arc<RpcRouter>,
@@ -536,10 +691,21 @@ pub async fn serve_until_idle(
     let idle_expired = idle_expiry(idle.clone());
     tokio::pin!(idle_expired);
 
+    // #6601: connections are counted whether or not an idle policy exists — the
+    // shutdown drain asks the same question the idle window does.
+    let open = match &idle {
+        Some(tracker) => Arc::clone(tracker),
+        None => IdleTracker::counting_only(),
+    };
+
     loop {
         let step = tokio::select! {
             biased;
-            () = &mut shutdown => return ServeExit::Shutdown,
+            () = &mut shutdown => {
+                // #6601: in-flight handlers finish before the caller unlinks.
+                drain_shutdown(listener, &open, options.shutdown_drain).await;
+                return ServeExit::Shutdown;
+            }
             () = &mut idle_expired => Step::IdleElapsed,
             accepted = listener.accept() => Step::Accepted(accepted),
         };
@@ -553,15 +719,13 @@ pub async fn serve_until_idle(
         // forever.
         let accepted = match step {
             Step::Accepted(accepted) => accepted,
-            Step::IdleElapsed => {
-                match drain_backlog(listener, &router, options, idle.as_ref()).await {
-                    Drained::Answered => {
-                        idle_expired.set(idle_expiry(idle.clone()));
-                        continue;
-                    }
-                    Drained::Nothing => return ServeExit::Idle,
+            Step::IdleElapsed => match drain_backlog(listener, &router, options, &open).await {
+                Drained::Answered => {
+                    idle_expired.set(idle_expiry(idle.clone()));
+                    continue;
                 }
-            }
+                Drained::Nothing => return ServeExit::Idle,
+            },
         };
         let stream = match accepted {
             Ok((stream, _)) => stream,
@@ -573,7 +737,7 @@ pub async fn serve_until_idle(
         // Taken BEFORE the connection task is spawned: taking it inside would
         // leave a window in which the count is zero while a connection is
         // already accepted, and the idle future could win the race in it.
-        let guard = idle.as_ref().map(IdleTracker::connection_opened);
+        let guard = IdleTracker::connection_opened(&open);
         let router = Arc::clone(&router);
         tokio::spawn(async move {
             // #6277 review: the connection runs in an INNER task whose
@@ -586,11 +750,7 @@ pub async fn serve_until_idle(
             let inner = tokio::spawn(handle_connection(stream, router, options));
             let mut guard = guard;
             match inner.await {
-                Ok(Ok(Served::Answered { .. })) => {
-                    if let Some(g) = guard.as_mut() {
-                        g.answered();
-                    }
-                }
+                Ok(Ok(Served::Answered { .. })) => guard.answered(),
                 Ok(Ok(Served::LivenessProbe)) => {
                     tracing::debug!("liveness probe connected and closed without a frame");
                 }
@@ -610,9 +770,7 @@ pub async fn serve_until_idle(
                     tracing::warn!(error = %join, "uds rpc connection task was cancelled");
                 }
             }
-            if let Some(g) = guard {
-                g.release().await;
-            }
+            guard.release().await;
         });
     }
 }

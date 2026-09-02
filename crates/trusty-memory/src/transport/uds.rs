@@ -490,7 +490,9 @@ pub async fn serve_with_shutdown(
     serve_until(&listener, Arc::clone(&router), serve_options(), shutdown).await;
 
     if let Some(lane) = bm25 {
-        lane.shutdown().await;
+        // #6601: bounded, so the unlink below is still reached — see
+        // `flush_within_reserve`.
+        flush_within_reserve(lane.shutdown(), trusty_common::shutdown::CLEANUP_RESERVE).await;
     }
 
     if let Err(e) = std::fs::remove_file(socket) {
@@ -498,6 +500,44 @@ pub async fn serve_with_shutdown(
     }
     drop(listener);
     Ok(())
+}
+
+/// Run the BM25 exit flush inside the window the cleanup reserve promises.
+///
+/// Why (#6601 review): [`trusty_common::shutdown::CLEANUP_RESERVE`] is the time
+/// `serve_until`'s drain holds back from the grace window SO THAT the work after
+/// the drain can run, and `bm25_lane::shutdown` states there is "no window in
+/// which a SIGKILL can land mid-flush". Nothing enforced either claim.
+/// `BM25Lane::flush_all` takes the residency mutex and flushes every resident
+/// palace with no deadline, so a slow flush spends the whole reserve, the socket
+/// unlink never runs, and the SIGKILL lands anyway — leaving behind the stale
+/// socket file `bind_singleton_hardened` exists to work around.
+///
+/// Cutting the flush short is the safe side of that trade, and letting it run is
+/// not. `BM25Index::flush` writes a `.json.tmp` and renames it, so an abandoned
+/// flush leaves the previous snapshot intact and loses only what the coalescing
+/// ticker had not yet published — precisely what a SIGKILL would have cost,
+/// except this way it is logged and the unlink still happens.
+///
+/// What: awaits `flush` under `budget`. Returns whether it completed; a timeout
+/// warns and names the budget.
+/// Test: `an_exit_flush_that_overruns_the_reserve_is_abandoned`,
+/// `a_prompt_exit_flush_is_not_cut_short`.
+#[cfg(feature = "daemon")]
+async fn flush_within_reserve<F>(flush: F, budget: std::time::Duration) -> bool
+where
+    F: std::future::Future<Output = ()>,
+{
+    if tokio::time::timeout(budget, flush).await.is_err() {
+        tracing::warn!(
+            budget_secs = budget.as_secs(),
+            "BM25 exit flush exceeded the shutdown cleanup reserve and was \
+             abandoned so the socket is still unlinked; palaces not yet flushed \
+             keep the snapshot their last ticker published"
+        );
+        return false;
+    }
+    true
 }
 
 /// Delete the `http_addr` files the TCP daemon used to write (#6286).

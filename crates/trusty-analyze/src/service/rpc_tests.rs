@@ -1269,19 +1269,61 @@ fn rpc_diagnostics_reports_deadline_exceeded_distinctly() {
     );
 }
 
-/// Why (#6595): the idle exit reaches the unlink with zero open connections —
-/// `IdleGuard` guarantees it — but the SIGTERM/SIGINT exit does not.
-/// `serve_until_idle` returns `ServeExit::Shutdown` the moment the signal
-/// future resolves, with no check on connections in flight, so a connection
-/// task still holds an `Arc<RpcRouter>` clone and with it the `FactStore`'s
-/// `Arc<Database>`. Without a wait, the unlink would run while that lock is
-/// held and hand the next `ensure_running` a successor that cannot open
-/// facts.redb — the same failure on the shutdown path that the idle path had.
+/// Why (#6601 review): the first version of this test pinned the drain to
+/// `SHUTDOWN_FLUSH_TIMEOUT` and asserted it fitted inside `sigterm_patience` —
+/// a deadline that never applies to a serving analyze process. A bound analyze
+/// child is detached, so `ensure_running` never enters it in the supervisor's
+/// population and no `terminate_child` call site can reach it; `sigterm_patience`
+/// governs only a child that failed to bind. `trusty-analyze stop` sends SIGTERM
+/// and polls 5 s to REPORT, never to kill. The only bounded terminator left is
+/// the OS grace window, so that is what the drain must be sized to.
 ///
-/// What forces the arm deterministically: a peer that has been accepted but
-/// never completes its request frame parks the connection task in a read, so
-/// `Arc::into_inner` is on its `None` arm when the shutdown lands. The peer is
-/// then released, which is what the bounded wait is there to pick up.
+/// What: `serve_options().shutdown_drain` must be the plannable grace — and the
+/// assertion pins the RELATION to the grace window, so an operator's
+/// `TRUSTY_TERMINATION_GRACE_SECS` moves both together instead of falsifying a
+/// hardcoded number. A 3 s drain fails the first assertion; a whole-window drain
+/// fails the second.
+/// Test: this is the test.
+#[test]
+fn serve_options_drain_for_as_long_as_this_server_may_actually_live() {
+    let drain = serve_options().shutdown_drain;
+    assert_eq!(
+        drain,
+        trusty_common::shutdown::plannable_grace(),
+        "the drain must be the part of the OS grace window this process may \
+         plan inside — no supervisor deadline binds a SERVING analyze child"
+    );
+    assert_eq!(
+        drain + trusty_common::shutdown::CLEANUP_RESERVE,
+        trusty_common::shutdown::termination_grace(),
+        "the drain must still leave the cleanup reserve for the socket unlink \
+         and the store drop that follow it"
+    );
+    assert!(
+        drain > SHUTDOWN_FLUSH_TIMEOUT,
+        "the #6595 guarantee — redb released before the unlink — must not be \
+         abandoned at the supervisor's spawn-failure budget"
+    );
+}
+
+/// Why (#6595): the idle exit reaches the unlink with zero open connections —
+/// `IdleGuard` guarantees it — but the SIGTERM/SIGINT exit used not to.
+/// `serve_until_idle` returned `ServeExit::Shutdown` the moment the signal
+/// future resolved, with no check on connections in flight, so a connection
+/// task still held an `Arc<RpcRouter>` clone and with it the `FactStore`'s
+/// `Arc<Database>`. The unlink then ran while that lock was held and handed the
+/// next `ensure_running` a successor that could not open facts.redb.
+///
+/// What closes it since #6601: `drain_shutdown` inside `serve_until_idle`. Every
+/// accepted connection holds an `IdleGuard`, and the shutdown arm waits for that
+/// count to reach zero — bounded by `RpcServeOptions::shutdown_drain`, which
+/// [`serve_options`] inherits from the plannable grace window — before it
+/// returns and [`release_stores`] drops the router.
+///
+/// What forces that path deterministically: a peer that has been accepted but
+/// never completes its request frame parks the connection task in a read, so the
+/// guard count is above zero when the shutdown lands. The peer is then released,
+/// which is what the drain is there to pick up.
 /// Test: this is the test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shutdown_with_a_connection_in_flight_frees_its_redb_lock_before_the_unlink() {

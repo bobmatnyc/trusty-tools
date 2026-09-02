@@ -1251,3 +1251,268 @@ async fn a_client_queued_when_the_idle_window_elapses_is_served_not_reset() {
         .expect("join");
     assert_eq!(exit, ServeExit::Idle);
 }
+
+// ── shutdown drain (#6601) ──────────────────────────────────────────────────
+
+/// A recorder of the order two events happened in.
+///
+/// Why: the property #6601 fixes is an ORDER — the in-flight response must be
+/// written before `serve_until_idle` returns, because the caller unlinks the
+/// socket the moment it does. Asserting only that the client got its answer
+/// passes on the pre-fix code too: the connection task is detached, so it keeps
+/// running after the loop has returned.
+#[derive(Clone, Default)]
+struct EventLog(Arc<std::sync::Mutex<Vec<&'static str>>>);
+
+impl EventLog {
+    fn record(&self, event: &'static str) {
+        if let Ok(mut events) = self.0.lock() {
+            events.push(event);
+        }
+    }
+
+    fn events(&self) -> Vec<&'static str> {
+        self.0.lock().map(|e| e.clone()).unwrap_or_default()
+    }
+}
+
+/// Serve `dir/drain.sock` with one deliberately slow method.
+///
+/// The handler sleeps `handler_for`, then records `"answered"`; the loop records
+/// `"returned"` when `serve_until_idle` resolves. The returned receiver fires as
+/// the handler begins, so a test signals shutdown with a request genuinely in
+/// flight rather than after a sleep that only makes that likely.
+fn spawn_draining_server(
+    dir: &std::path::Path,
+    handler_for: Duration,
+    drain_budget: Duration,
+) -> (
+    std::path::PathBuf,
+    EventLog,
+    tokio::sync::mpsc::UnboundedReceiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<ServeExit>,
+) {
+    let socket = dir.join("drain.sock");
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    let (started_tx, started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let log = EventLog::default();
+
+    let bound = socket.clone();
+    let handler_log = log.clone();
+    let loop_log = log.clone();
+    let handle = tokio::spawn(async move {
+        let router = RpcRouter::new().typed("slow", move |_req: ()| {
+            let log = handler_log.clone();
+            let started = started_tx.clone();
+            async move {
+                let _ = started.send(());
+                tokio::time::sleep(handler_for).await;
+                log.record("answered");
+                Ok::<_, RpcError>(json!({ "ok": true }))
+            }
+        });
+        let listener = crate::uds::bind_hardened(&bound).expect("bind");
+        let options = RpcServeOptions {
+            shutdown_drain: drain_budget,
+            ..RpcServeOptions::default()
+        };
+        let exit = serve_until_idle(
+            &listener,
+            Arc::new(router),
+            options,
+            async move {
+                let _ = stop_rx.await;
+            },
+            None,
+        )
+        .await;
+        loop_log.record("returned");
+        let _ = std::fs::remove_file(&bound);
+        exit
+    });
+    (socket, log, started_rx, stop_tx, handle)
+}
+
+/// Why (#6601 review): the drain and the caller's post-serve work are spent
+/// from ONE window — the SIGTERM-to-SIGKILL grace — so a default drain sized to
+/// the whole of it leaves the caller nothing. `trusty-memory` runs its BM25 exit
+/// flush after `serve_until` returns; `bm25_lane::shutdown` claims no SIGKILL
+/// can land mid-flush, and a full-window default is what would make that false.
+///
+/// What: the default drain plus the cleanup reserve must FIT in the grace
+/// window. Written as an inequality rather than an equality so a service that
+/// later shortens the default still passes, while restoring
+/// `termination_grace()` fails.
+/// Test: this is the test.
+#[test]
+fn default_serve_options_reserve_cleanup_time_inside_the_grace_window() {
+    let grace = crate::shutdown::termination_grace();
+    let drain = RpcServeOptions::default().shutdown_drain;
+    assert!(
+        drain + crate::shutdown::CLEANUP_RESERVE <= grace,
+        "the default drain ({drain:?}) plus the cleanup reserve ({:?}) must fit \
+         inside the termination grace window ({grace:?}), or the caller's \
+         post-serve work runs on borrowed time",
+        crate::shutdown::CLEANUP_RESERVE
+    );
+    assert!(
+        drain > Duration::ZERO,
+        "reserving cleanup time must not collapse the drain to nothing"
+    );
+}
+
+/// Why (#6601): the shutdown arm used to return the instant the signal
+/// resolved. Every accepted connection holds an `Arc<RpcRouter>` clone — in
+/// `trusty-analyze` that reaches a redb `Database` — so the caller's unlink ran
+/// on top of handles still in use, and the successor a client spawned on seeing
+/// that unlink died opening the same store (#6595).
+///
+/// What: one 400 ms handler, the signal delivered while it runs. Both halves are
+/// asserted — the client gets a normal response, AND `"answered"` is recorded
+/// before `"returned"`. The second is the discriminator: the connection task is
+/// detached, so the response arrives either way and only the ORDER changes.
+/// Test: this is the test.
+#[tokio::test]
+async fn shutdown_drains_an_in_flight_connection_before_it_returns() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (socket, log, mut started, stop, handle) = spawn_draining_server(
+        tmp.path(),
+        Duration::from_millis(400),
+        Duration::from_secs(5),
+    );
+    await_socket(&socket).await;
+
+    let dialled = socket.clone();
+    let client = tokio::spawn(async move { call(&dialled, 1, "slow", json!(null)).await });
+    started.recv().await.expect("the handler must start");
+
+    stop.send(()).expect("signal shutdown");
+
+    let response = tokio::time::timeout(Duration::from_secs(10), client)
+        .await
+        .expect("the in-flight request must complete during the drain")
+        .expect("join");
+    assert_eq!(
+        response.result,
+        Some(json!({ "ok": true })),
+        "a request already accepted must be answered, not dropped"
+    );
+
+    let exit = tokio::time::timeout(Duration::from_secs(10), handle)
+        .await
+        .expect("the loop must return once the drain finishes")
+        .expect("join");
+    assert_eq!(exit, ServeExit::Shutdown);
+    assert_eq!(
+        log.events(),
+        vec!["answered", "returned"],
+        "the loop must not return — and so let its caller unlink — until the \
+         in-flight handler is done"
+    );
+}
+
+/// Why (#6601): while the drain runs nothing is serving new work, and a client
+/// that dials anyway must be told so. Left in the kernel backlog it would sit
+/// there until the listener dropped and then see a reset, which it cannot tell
+/// from a broken service; accepted and closed at once it gets
+/// `UdsRpcError::NoResponse` immediately and can retry against a successor.
+///
+/// What makes this a test OF the drain (#6601 review): `refused.is_err()` alone
+/// is true of a dropped listener's reset too, so it passed with the drain arm
+/// replaced by a bare `return`. The two assertions below close that. The error
+/// must be `NoResponse` — the accept-and-close signature, which a dial against
+/// an already-unlinked path (`Dial`) is not — AND the loop must not yet have
+/// recorded `"returned"` when the refusal lands. Only one order produces both:
+/// the listener is still owned by a running drain. Replace the arm with a bare
+/// return and the loop records `"returned"` and drops the listener before any
+/// reset can reach the client, so whichever error the client gets, one of the
+/// two assertions fails.
+/// Test: this is the test.
+#[tokio::test]
+async fn shutdown_refuses_a_connection_dialled_after_the_signal() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (socket, log, mut started, stop, handle) = spawn_draining_server(
+        tmp.path(),
+        Duration::from_millis(600),
+        Duration::from_secs(5),
+    );
+    await_socket(&socket).await;
+
+    let dialled = socket.clone();
+    let client = tokio::spawn(async move { call(&dialled, 1, "slow", json!(null)).await });
+    started.recv().await.expect("the handler must start");
+    stop.send(()).expect("signal shutdown");
+
+    let request = json!({ "jsonrpc": "2.0", "id": 2, "method": "slow", "params": null });
+    let refused = tokio::time::timeout(
+        Duration::from_secs(3),
+        crate::uds::send_framed_request::<_, RpcResponse>(
+            &socket,
+            &request,
+            Duration::from_secs(3),
+        ),
+    )
+    .await
+    .expect("a post-signal dial must be refused, not left hanging in the backlog");
+    // Snapshot BEFORE any further await, so the 600 ms handler cannot finish and
+    // let the loop return between the refusal and the assertion.
+    let during_refusal = log.events();
+
+    assert!(
+        matches!(refused, Err(crate::uds::UdsRpcError::NoResponse { .. })),
+        "a dial during the drain must be accepted and closed — not reset by a \
+         dropped listener, and not refused at connect by an unlinked path: \
+         {refused:?}"
+    );
+    assert!(
+        !during_refusal.contains(&"returned"),
+        "the refusal must land while the drain still owns the listener; the \
+         loop had already returned: {during_refusal:?}"
+    );
+
+    let _ = client.await;
+    let exit = tokio::time::timeout(Duration::from_secs(10), handle)
+        .await
+        .expect("the loop must still return")
+        .expect("join");
+    assert_eq!(exit, ServeExit::Shutdown);
+}
+
+/// Why: the drain is bounded on purpose. The signal starts a window that ends in
+/// SIGKILL, so a handler that outlives the budget must not spend it — the loop
+/// warns and returns, and the caller unlinks. Without the bound a wedged handler
+/// would hold the socket path past the process's own grace window.
+/// Test: this is the test.
+#[tokio::test]
+async fn shutdown_returns_when_the_drain_budget_expires() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let budget = Duration::from_millis(150);
+    let (socket, log, mut started, stop, handle) =
+        spawn_draining_server(tmp.path(), Duration::from_secs(30), budget);
+    await_socket(&socket).await;
+
+    let dialled = socket.clone();
+    let client = tokio::spawn(async move { call(&dialled, 1, "slow", json!(null)).await });
+    started.recv().await.expect("the handler must start");
+
+    let signalled = std::time::Instant::now();
+    stop.send(()).expect("signal shutdown");
+    let exit = tokio::time::timeout(Duration::from_secs(10), handle)
+        .await
+        .expect("the drain must be bounded")
+        .expect("join");
+    let elapsed = signalled.elapsed();
+
+    assert_eq!(exit, ServeExit::Shutdown);
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the loop must return on the budget, not on the handler: {elapsed:?}"
+    );
+    assert_eq!(
+        log.events(),
+        vec!["returned"],
+        "the handler had not finished, so only the loop's own event is recorded"
+    );
+    client.abort();
+}

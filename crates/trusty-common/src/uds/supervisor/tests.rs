@@ -336,17 +336,24 @@ async fn probe_verdict_reports_serving_for_a_bound_socket() {
 /// Why: the backoff loop must terminate on the service's own budget, not on a
 /// constant. A loop that ignored `spawn_probe` would hang a caller for whatever
 /// the old BM25 3 s value happened to be.
+///
+/// The child is alive throughout — a LIVE child that has not bound is the case
+/// the budget is for, and #6600's `try_wait` arm must not shorten it.
 /// Test: this test itself.
 #[serial_test::serial]
 #[tokio::test]
-async fn wait_for_socket_gives_up_within_the_spawn_budget() {
+async fn wait_for_spawn_gives_up_within_the_spawn_budget() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let missing = tmp.path().join("never.sock");
     let budget = Duration::from_millis(120);
     let timeouts = ServiceTimeouts::new(budget, Duration::from_millis(10), Duration::from_secs(1));
+    let mut child = stub_child();
 
     let started = std::time::Instant::now();
-    assert!(!super::probe::wait_for_socket(&missing, &timeouts).await);
+    assert!(matches!(
+        super::probe::wait_for_spawn(&missing, &timeouts, &mut child).await,
+        super::probe::SpawnWait::TimedOut
+    ));
     let elapsed = started.elapsed();
     assert!(
         elapsed >= budget,
@@ -363,11 +370,54 @@ async fn wait_for_socket_gives_up_within_the_spawn_budget() {
 /// Test: this test itself.
 #[serial_test::serial]
 #[tokio::test]
-async fn wait_for_socket_returns_once_the_socket_binds() {
+async fn wait_for_spawn_returns_once_the_socket_binds() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let sock = tmp.path().join("bound.sock");
     let _listener = tokio::net::UnixListener::bind(&sock).expect("bind listener");
-    assert!(super::probe::wait_for_socket(&sock, &TEST_TIMEOUTS).await);
+    let mut child = stub_child();
+    assert!(matches!(
+        super::probe::wait_for_spawn(&sock, &TEST_TIMEOUTS, &mut child).await,
+        super::probe::SpawnWait::Bound
+    ));
+}
+
+/// Why (#6600): a child that dies before binding is the case the loop was blind
+/// to. It has to be reported as its own outcome, and inside one poll interval —
+/// polling the socket for the whole budget and then reporting a timeout blames
+/// the budget for a failure the budget had nothing to do with.
+/// Test: this test itself.
+#[serial_test::serial]
+#[tokio::test]
+async fn wait_for_spawn_reports_a_child_that_exited() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let missing = tmp.path().join("never.sock");
+    // A generous budget, so "returned early" is a claim the elapsed time can
+    // falsify rather than something the budget makes true on its own.
+    let budget = Duration::from_secs(3);
+    let timeouts = ServiceTimeouts::new(budget, Duration::from_millis(10), Duration::from_secs(1));
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "exit 3"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn a child that exits at once");
+
+    let started = std::time::Instant::now();
+    let outcome = super::probe::wait_for_spawn(&missing, &timeouts, &mut child).await;
+    let elapsed = started.elapsed();
+
+    match outcome {
+        super::probe::SpawnWait::Exited(status) => {
+            assert_eq!(status.code(), Some(3), "the real exit status must survive")
+        }
+        _ => panic!("a child that exited must not be reported as a timeout"),
+    }
+    assert!(
+        elapsed < budget / 3,
+        "the answer must not wait out the spawn budget: {elapsed:?}"
+    );
 }
 
 // ── Child lifecycle ───────────────────────────────────────────────────────
@@ -425,10 +475,10 @@ async fn spawn_child_creates_requested_directories() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let data = tmp.path().join("nested/data");
     let spec = SpawnSpec::new("/bin/echo").create_dir(&data);
-    let mut child = super::child::spawn_child("test-service", "k", &spec, false)
+    let mut spawned = super::child::spawn_child("test-service", "k", &spec, false)
         .await
         .expect("spawn");
-    let _ = child.wait().await;
+    let _ = spawned.child.wait().await;
     assert!(data.is_dir(), "the spec's directory must exist after spawn");
 }
 
@@ -814,6 +864,298 @@ async fn a_child_that_never_binds_fails_with_the_service_budget() {
         sup.supervised_count().await,
         0,
         "a child that never bound must not be registered"
+    );
+}
+
+/// Why (#6600 review): `SpawnTimeout`'s message guesses at the cause — "its
+/// spawn_probe is too small" — and the child's own last lines are what say
+/// whether the guess is right. A model still loading and a child spinning on a
+/// lock it will never get produce the same timeout and different logs, and only
+/// one of them is fixed by raising the budget.
+///
+/// What: a child that logs and then hangs without ever binding. The timeout must
+/// carry the tail, and the operator-facing message must quote it.
+/// Test: this test itself.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_child_that_never_binds_reports_the_stderr_it_did_write() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let socket = tmp.path().join("stuck.sock");
+    let cfg = SupervisorConfig::new(
+        "test-service",
+        3,
+        ServiceTimeouts::new(
+            Duration::from_millis(300),
+            Duration::from_millis(10),
+            Duration::from_secs(1),
+        ),
+    );
+    let sup = UdsServiceSupervisor::new(cfg);
+
+    let err = sup
+        .ensure_running("inst", &socket, || {
+            Ok(SpawnSpec::new("/bin/sh")
+                .arg("-c")
+                .arg("echo 'still loading the model' >&2; sleep 30"))
+        })
+        .await
+        .expect_err("a child that never binds must not be reported as running");
+
+    let SupervisorError::SpawnTimeout { stderr, .. } = &err else {
+        panic!("expected SpawnTimeout, got {err:?}");
+    };
+    assert!(
+        stderr.iter().any(|l| l.contains("still loading the model")),
+        "the child's own words must reach the caller, got {stderr:?}"
+    );
+    assert!(
+        err.to_string().contains("still loading the model"),
+        "the operator-facing message must quote the stderr tail: {err}"
+    );
+}
+
+/// Why (#6600): the #6595 CI signature was a child that died on a held redb
+/// lock in ~100 ms and was reported 20 s later as `SpawnTimeout`, whose message
+/// blames the spawn budget. `ensure_running` has to observe the child, not only
+/// the socket, so the operator gets the exit status and the child's own words.
+///
+/// What: a child that writes one line to stderr and exits 3, against a 3 s
+/// budget. Both halves of the fix are asserted — the VARIANT (not
+/// `SpawnTimeout`) and the LATENCY (well inside the budget, not at its
+/// boundary) — because either alone still passes on the pre-fix code path for
+/// one of the two reasons.
+/// Test: this test itself.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_child_that_exits_before_binding_reports_its_status_and_stderr() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let socket = tmp.path().join("dead.sock");
+    let budget = Duration::from_secs(3);
+    let cfg = SupervisorConfig::new(
+        "test-service",
+        3,
+        ServiceTimeouts::new(budget, Duration::from_millis(10), Duration::from_secs(1)),
+    );
+    let sup = UdsServiceSupervisor::new(cfg);
+
+    let started = std::time::Instant::now();
+    let err = sup
+        .ensure_running("inst", &socket, || {
+            Ok(SpawnSpec::new("/bin/sh")
+                .arg("-c")
+                .arg("echo 'Database already open. Cannot acquire lock.' >&2; exit 3"))
+        })
+        .await
+        .expect_err("a child that exited must not be reported as running");
+    let elapsed = started.elapsed();
+
+    match &err {
+        SupervisorError::ChildExited { status, stderr, .. } => {
+            assert_eq!(status.code(), Some(3), "the real exit status must survive");
+            assert!(
+                stderr.iter().any(|l| l.contains("Cannot acquire lock")),
+                "the child's own diagnosis must reach the caller, got {stderr:?}"
+            );
+        }
+        other => panic!("expected ChildExited, got {other:?}"),
+    }
+    assert!(
+        elapsed < budget / 3,
+        "a dead child must be reported within a poll interval, not at the \
+         spawn budget: {elapsed:?}"
+    );
+    assert!(
+        err.to_string().contains("Cannot acquire lock"),
+        "the operator-facing message must quote the stderr tail: {err}"
+    );
+    assert_eq!(sup.spawned_count(), 1, "the launch itself did happen");
+    assert_eq!(
+        sup.supervised_count().await,
+        0,
+        "a child that never bound must not be registered"
+    );
+}
+
+/// Why (#6601 review): capping the READ bounded memory but not the RING. A
+/// 1 MiB line arrived as 128 capped reads and was pushed as 128 entries, so it
+/// evicted all twenty slots and every real line before it. Measured on the
+/// pre-fix relay with this exact child: `entries=20 kept_real_line=false` — the
+/// lock diagnosis `a_child_that_exits_before_binding_reports_its_status_and_stderr`
+/// asserts on was gone, on the one code path #6600 exists to serve.
+///
+/// What: a real line, then an over-cap line, then a second real line. The two
+/// real lines must survive and the giant one must occupy exactly ONE slot.
+/// Test: this test itself.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_real_line_survives_the_over_cap_line_that_follows_it() {
+    use super::child::{STDERR_LINE_CAP, STDERR_TAIL_LINES, relay_stderr_into};
+
+    const PADDING: usize = 1024 * 1024;
+    const DIAGNOSIS: &str = "Database already open. Cannot acquire lock.";
+
+    let mut child = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!(
+            "echo '{DIAGNOSIS}' >&2; printf '%0{PADDING}d\\n' 0 >&2; echo 'after' >&2"
+        ))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the shouty child");
+    let pipe = child.stderr.take().expect("stderr was piped");
+
+    let (buffer, relay) = relay_stderr_into(pipe, tokio::io::sink());
+    relay.await.expect("the relay must finish at EOF");
+    child.wait().await.expect("reap the child");
+
+    let tail = buffer.tail(STDERR_TAIL_LINES);
+    assert_eq!(
+        tail.len(),
+        3,
+        "three logical lines were written; the ring must hold three, not one \
+         per capped read: {:?}",
+        tail.iter().map(|l| l.len()).collect::<Vec<_>>()
+    );
+    assert!(
+        tail[0].contains(DIAGNOSIS),
+        "the line written BEFORE the giant one must survive it, got {:?}",
+        tail[0]
+    );
+    assert!(
+        tail[1].ends_with("bytes truncated]"),
+        "the over-cap line must be retained once, marked, got {:?}",
+        &tail[1][tail[1].len().saturating_sub(40)..]
+    );
+    assert_eq!(tail[2], "after", "the line after it must survive too");
+    let longest = tail.iter().map(String::len).max().unwrap_or(0);
+    assert!(
+        longest as u64 <= STDERR_LINE_CAP,
+        "the marker must fit inside the cap, not extend past it; longest was \
+         {longest}"
+    );
+}
+
+/// Why (#6601 review): `ensure_running`'s doc promised a stderr tail with no
+/// caveat, and every test of the #6600 arms drove a SUPERVISED child. The one
+/// production consumer that matters is detached — `OnDemandAnalyze` — and a
+/// detached child keeps `Stdio::inherit()`, so its tail is structurally empty.
+/// Nothing asserted that, so a future change that started piping a detached
+/// child's stderr (reintroducing the EPIPE the inherit avoids) would have gone
+/// unnoticed here.
+///
+/// What: the same dying child as
+/// `a_child_that_exits_before_binding_reports_its_status_and_stderr`, spawned
+/// through a `with_detached(true)` config. The variant and the exit status must
+/// be identical; the tail must be EMPTY rather than absent-or-populated.
+/// Test: this test itself.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_detached_child_that_exits_before_binding_reports_an_empty_tail() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let socket = tmp.path().join("dead-detached.sock");
+    let budget = Duration::from_secs(3);
+    let cfg = SupervisorConfig::new(
+        "test-service",
+        3,
+        ServiceTimeouts::new(budget, Duration::from_millis(10), Duration::from_secs(1)),
+    )
+    .with_detached(true);
+    let sup = UdsServiceSupervisor::new(cfg);
+
+    let started = std::time::Instant::now();
+    let err = sup
+        .ensure_running("inst", &socket, || {
+            Ok(SpawnSpec::new("/bin/sh")
+                .arg("-c")
+                .arg("echo 'Database already open. Cannot acquire lock.' >&2; exit 3"))
+        })
+        .await
+        .expect_err("a detached child that exited must not be reported as running");
+    let elapsed = started.elapsed();
+
+    match &err {
+        SupervisorError::ChildExited { status, stderr, .. } => {
+            assert_eq!(
+                status.code(),
+                Some(3),
+                "detaching must not cost the exit status"
+            );
+            assert!(
+                stderr.is_empty(),
+                "a detached child's stderr is inherited, so there is nothing to \
+                 quote; got {stderr:?}"
+            );
+        }
+        other => panic!("expected ChildExited, got {other:?}"),
+    }
+    assert!(
+        elapsed < budget / 3,
+        "the #6600 latency fix must hold for a detached child too: {elapsed:?}"
+    );
+    assert_eq!(
+        sup.supervised_count().await,
+        0,
+        "a detached child that never bound must not be registered"
+    );
+}
+
+/// Why (#6600 review): `STDERR_TAIL_LINES` bounds how MANY lines the relay
+/// retains and says nothing about how long one may be. A child that writes a
+/// megabyte before its first newline — a panic carrying a big `Debug` payload —
+/// was buffered whole by `lines()` and then retained whole by the ring, so a
+/// supervisor holding several such children carried tens of megabytes for as
+/// long as they lived.
+///
+/// What: a child that writes 1 MiB with no newline at all. Every retained line
+/// must fit `STDERR_LINE_CAP`, and the whole tail must fit
+/// `STDERR_TAIL_LINES * STDERR_LINE_CAP` — the bound the fix establishes. On the
+/// `lines()` implementation the tail is one 1 MiB entry and both assertions
+/// fail: `no retained line may exceed the per-line cap (8192 bytes); longest was
+/// 1048576`.
+///
+/// Why the relay's pass-through goes to `sink()` here: the relay copies every
+/// byte through unchanged, which is correct and not what this bounds — running
+/// it against the real stderr would put a megabyte of `0`s in every CI log.
+/// Test: this test itself.
+#[tokio::test]
+async fn a_child_writing_an_enormous_line_does_not_grow_the_relay_buffer() {
+    use super::child::{STDERR_LINE_CAP, STDERR_TAIL_LINES, relay_stderr_into};
+
+    const WRITTEN: usize = 1024 * 1024;
+
+    let mut child = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!("printf '%0{WRITTEN}d' 0 >&2"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the shouty child");
+    let pipe = child.stderr.take().expect("stderr was piped");
+
+    let (buffer, relay) = relay_stderr_into(pipe, tokio::io::sink());
+    relay.await.expect("the relay must finish at EOF");
+    child.wait().await.expect("reap the child");
+
+    let tail = buffer.tail(STDERR_TAIL_LINES);
+    let longest = tail.iter().map(String::len).max().unwrap_or(0);
+    assert!(
+        longest as u64 <= STDERR_LINE_CAP,
+        "no retained line may exceed the per-line cap ({STDERR_LINE_CAP} bytes); \
+         longest was {longest}"
+    );
+    let retained: usize = tail.iter().map(String::len).sum();
+    let ceiling = STDERR_TAIL_LINES as u64 * STDERR_LINE_CAP;
+    assert!(
+        retained as u64 <= ceiling,
+        "the whole retained tail must fit {ceiling} bytes; it held {retained} \
+         out of the {WRITTEN} the child wrote"
+    );
+    assert!(
+        !tail.is_empty(),
+        "bounding the line must not throw the child's output away entirely"
     );
 }
 

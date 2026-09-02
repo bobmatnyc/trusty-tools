@@ -396,6 +396,19 @@ async fn two_concurrent_callers_share_one_server() {
 /// import this crate to read it. This equality is what turns that rule from a
 /// comment into a check — the same shape trusty-memory's
 /// `sigterm_patience_exceeds_the_daemon_flush_budget` uses.
+///
+/// #6601 review: since `SHUTDOWN_FLUSH_TIMEOUT` became an alias of
+/// `ANALYZE_SHUTDOWN_FLUSH`, the first assertion cannot fail — which is the
+/// point, the drift is now unrepresentable rather than merely detected. The
+/// second is the one that still has work to do: it pins the value the SUPERVISOR
+/// was configured with, which a `ServiceTimeouts::new` call site could otherwise
+/// pass a literal to.
+///
+/// #6601 review: this budget bounds the supervisor's spawn-failure kill and
+/// nothing else — a bound analyze child is detached and no reap path reaches it.
+/// What the SERVE LOOP drains on is a different window, pinned by
+/// `serve_options_drain_for_as_long_as_this_server_may_actually_live` in
+/// `rpc_tests.rs`.
 /// Test: this is the test.
 #[test]
 fn analyze_flush_budget_matches_the_supervisor_contract() {
@@ -404,6 +417,11 @@ fn analyze_flush_budget_matches_the_supervisor_contract() {
         trusty_analyze::service::SHUTDOWN_FLUSH_TIMEOUT,
         "the supervisor's flush budget must be this server's own, not a literal \
          that happens to match it today"
+    );
+    assert_eq!(
+        trusty_common::uds::on_demand::ANALYZE_TIMEOUTS.shutdown_flush,
+        trusty_analyze::service::SHUTDOWN_FLUSH_TIMEOUT,
+        "the timeouts handed to the supervisor must carry that same budget"
     );
 }
 
