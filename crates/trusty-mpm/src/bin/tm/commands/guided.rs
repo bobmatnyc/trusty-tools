@@ -47,7 +47,11 @@ use crate::formatters::info_box::DaemonInfo;
 /// written to; all managed sessions run in the protected base-clone workspace.
 /// What: (0) an operator-supplied `--url` / `TRUSTY_MPM_URL` that is
 /// unreachable errors out immediately (issue #1737 — see below) before any
-/// of the following runs; (1) tries the rich picker UX when the daemon is
+/// of the following runs; (0b) a cwd outside every git work tree hands off to
+/// [`super::guided_outside_git::run_outside_git_menu`] — the managed-session
+/// listing plus the two explicit ways to create a session (#6666) — so nothing
+/// below, `ensure_git_repo` included, runs for a plain directory; (1) tries the
+/// rich picker UX when the daemon is
 /// reachable and the CWD is a GitHub-backed git project; (2) falls through to
 /// [`fallback_protected`] for every other case (daemon unreachable, non-GitHub
 /// remote, non-git directory). Non-TTY piped invocations print project + session
@@ -281,6 +285,14 @@ pub(crate) async fn run_guided_default(
     }
 
     let cwd = std::env::current_dir().context("cannot resolve current directory")?;
+
+    // #6666: outside a git work tree, bare `tm` lists the managed sessions and
+    // offers the two ways to create one instead of running `git init` here.
+    // That auto-init (#6274) stays for every directory git already knows.
+    if let Some(result) = super::guided_outside_git::try_outside_git(client, url, &cwd).await {
+        return result;
+    }
+
     let workdir = cwd.to_string_lossy().to_string();
     eprintln!("tm: no subcommand — using guided default for {workdir}");
 

@@ -79,6 +79,11 @@ pub(crate) const DEFAULT_ADDR: &str = trusty_mpm::core::DEFAULT_DAEMON_ADDR;
     name = "trusty-mpm",
     version,
     about = "trusty-mpm — unified binary",
+    // #6666: `--help` is where an operator looks after bare `tm` did something
+    // they did not expect, so the outside-a-work-tree behaviour is stated here.
+    long_about = "trusty-mpm — unified binary\n\n\
+                  Bare `tm` outside a git work tree lists managed sessions and offers a new \
+                  untracked session (`tm sessions start`) or a managed one (`tm sessions new`).",
     subcommand_required = false,
     arg_required_else_help = false,
     infer_subcommands = true
