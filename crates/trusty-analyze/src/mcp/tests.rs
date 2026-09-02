@@ -342,7 +342,13 @@ async fn tools_list_includes_tr_review_tools() {
         .iter()
         .filter_map(|t| t.get("name").and_then(Value::as_str))
         .collect();
-    for required in ["tr_review_pr", "tr_review_diff", "tr_review_health"] {
+    // #6669 adds `tr_report` to the same feature-gated append.
+    for required in [
+        "tr_review_pr",
+        "tr_review_diff",
+        "tr_review_health",
+        "tr_report",
+    ] {
         assert!(names.contains(&required), "missing {required} in {names:?}");
     }
     // The base surface must still be present (no descriptors lost in the
@@ -374,6 +380,29 @@ async fn tr_review_health_routes_not_unknown_tool() {
             err.code,
             error_codes::METHOD_NOT_FOUND,
             "tr_review_health must route, not be unknown: {err:?}"
+        );
+    }
+}
+
+/// #6669: `tr_report` routes to its own handler, not to trusty-review's MCP
+/// surface, so it needs its own routing proof. A call with no `manifest_path`
+/// must come back as invalid params — which is the dispatcher recognising the
+/// name and reaching the handler, without starting a multi-minute run.
+#[cfg(feature = "review")]
+#[tokio::test]
+async fn tr_report_routes_to_the_report_pipeline() {
+    let server = AnalyzerMcpServer::new("http://127.0.0.1:1");
+    let resp = server
+        .dispatch(req(
+            "tools/call",
+            serde_json::json!({ "name": "tr_report", "arguments": {} }),
+        ))
+        .await;
+    if let Some(err) = resp.error {
+        assert_ne!(
+            err.code,
+            error_codes::METHOD_NOT_FOUND,
+            "tr_report must route, not be unknown: {err:?}"
         );
     }
 }

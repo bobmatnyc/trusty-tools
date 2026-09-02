@@ -51,6 +51,30 @@ pub const ENV_AUDIT_INVESTIGATE_MAX_FILES: &str = "TRUSTY_AUDIT_INVESTIGATE_MAX_
 /// under the same precedence.
 pub const ENV_AUDIT_INVESTIGATE_MAX_BYTES: &str = "TRUSTY_AUDIT_INVESTIGATE_MAX_BYTES";
 
+/// Report template an audit asks its renderer for
+/// (`TRUSTY_AUDIT_REPORT_TEMPLATE`).
+///
+/// Why (#6669): `trusty-audit`'s `[report] template` key has to reach
+/// `trusty-review report`, and on the sweep path it reaches it through `tga
+/// audit` — a grandchild this crate never spawns and whose argument vector it
+/// does not own. The environment crosses both process boundaries. An argument
+/// would also break an older pinned renderer, which exits 2 on a flag it does
+/// not know rather than ignoring it.
+/// What: the exact env-var name; the value is a template name or the `cast`
+/// alias. Read by `trusty-review`'s report entry point BELOW the `--template`
+/// flag and below the manifest `[report].template` key.
+/// Test: `env_var_names_are_stable`.
+pub const ENV_AUDIT_REPORT_TEMPLATE: &str = "TRUSTY_AUDIT_REPORT_TEMPLATE";
+
+/// Code-only rendering an audit asks its renderer for
+/// (`TRUSTY_AUDIT_REPORT_CODE_ONLY`).
+///
+/// Why/What/Test: the boolean half of [`ENV_AUDIT_REPORT_TEMPLATE`], resolved
+/// under the same precedence. `1`/`true`/`yes`/`on` (case-insensitive) enable
+/// it; anything else reads as absent, so a typo never silently narrows what a
+/// report says its scope was.
+pub const ENV_AUDIT_REPORT_CODE_ONLY: &str = "TRUSTY_AUDIT_REPORT_CODE_ONLY";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69,5 +93,9 @@ mod tests {
             ENV_AUDIT_INVESTIGATE_MAX_BYTES,
             "TRUSTY_AUDIT_INVESTIGATE_MAX_BYTES"
         );
+        // #6669: the CAST code-only selection travels the same way, for the
+        // same reason — see the two constants' own docs.
+        assert_eq!(ENV_AUDIT_REPORT_TEMPLATE, "TRUSTY_AUDIT_REPORT_TEMPLATE");
+        assert_eq!(ENV_AUDIT_REPORT_CODE_ONLY, "TRUSTY_AUDIT_REPORT_CODE_ONLY");
     }
 }

@@ -335,14 +335,23 @@ pub struct BoardCredentials {
 /// [`crate::grounding::priority::Budget::for_engagement`] for the precedence
 /// and for why an absent byte budget is derived rather than pinned.
 ///
+/// #6669 adds the two keys that select WHICH report is produced. They belong
+/// here for the same reason the budget does: an engagement that wants the CAST
+/// methodology, or that collected only a repository, had nowhere to say so, and
+/// an operator had to remember to pass `--template` to a child this crate
+/// spawns on their behalf.
+///
 /// ```toml
 /// [report]
 /// investigate_max_files = 240
 /// investigate_max_bytes = 2457600
+/// template = "cast"
+/// code_only = true
 /// ```
 ///
 /// Test: `super::config_tests::a_declared_investigation_budget_loads`,
-/// `super::config_tests::a_config_with_no_report_table_still_loads`.
+/// `super::config_tests::a_config_with_no_report_table_still_loads`,
+/// `super::config_tests::a_declared_report_template_loads`.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[non_exhaustive]
 pub struct ReportSettings {
@@ -352,6 +361,57 @@ pub struct ReportSettings {
     /// Total content bytes it may send per repository.
     #[serde(default)]
     pub investigate_max_bytes: Option<usize>,
+    /// Report template name or alias — `cast`, `default`, or a full bundled
+    /// name (#6669). Absent leaves `trusty-review`'s own precedence in charge.
+    #[serde(default)]
+    pub template: Option<String>,
+    /// Render the template's non-code sections as stated out-of-scope
+    /// boundaries (#6669). Only `true` has an effect: the renderer's flag can
+    /// turn the mode on, never off.
+    #[serde(default)]
+    pub code_only: Option<bool>,
+}
+
+impl ReportSettings {
+    /// The report selection as the environment pairs a child inherits (#6669).
+    ///
+    /// Why: the same reason [`crate::grounding::priority::Budget::child_env`]
+    /// exists. On the sweep path `tga audit` writes the manifest and runs
+    /// `trusty-review report` against it in the same process, so a key this
+    /// crate wrote into that file reaches a re-render and never the report the
+    /// sweep itself produced. The environment reaches the grandchild before the
+    /// file does. An ARGUMENT would not work either: the pinned renderer may be
+    /// an older build, and clap exits 2 on a flag it does not know rather than
+    /// ignoring it.
+    /// What: one pair per key that is set, and nothing for a key that is not —
+    /// it is the LOWEST tier trusty-review consults, so it adds a floor and
+    /// overrides neither an explicit flag nor a manifest key. `code_only` is
+    /// emitted only when `true`, because the flag cannot turn the mode off and
+    /// a `false` pair would read as if it could.
+    /// Test: `super::config_tests::{report_settings_child_env_carries_both_keys,
+    /// report_settings_child_env_is_empty_when_nothing_is_declared}`.
+    #[must_use]
+    pub fn child_env(&self) -> Vec<(&'static str, String)> {
+        let mut pairs = Vec::with_capacity(2);
+        if let Some(template) = self
+            .template
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
+            pairs.push((
+                trusty_common::env_vars::ENV_AUDIT_REPORT_TEMPLATE,
+                template.to_owned(),
+            ));
+        }
+        if self.code_only == Some(true) {
+            pairs.push((
+                trusty_common::env_vars::ENV_AUDIT_REPORT_CODE_ONLY,
+                "true".to_owned(),
+            ));
+        }
+        pairs
+    }
 }
 
 /// The engagement config that travels inside the handoff package.
@@ -1343,6 +1403,74 @@ trusty-review = "0.15.1"
         .expect("parses");
         assert_eq!(cfg.report.investigate_max_files, Some(240));
         assert_eq!(cfg.report.investigate_max_bytes, Some(2_457_600));
+    }
+
+    /// 🔴 #6669: the engagement gets a place to say WHICH report it wants.
+    /// Before this, asking for the CAST template meant remembering to pass
+    /// `--template` to a child this crate spawns on the operator's behalf —
+    /// which on the sweep path there is no way to do at all.
+    #[test]
+    fn a_declared_report_template_loads() {
+        let cfg = EngagementConfig::from_toml(
+            &format!("{SAMPLE}\n[report]\ntemplate = \"cast\"\ncode_only = true\n"),
+            Path::new("engagement.toml"),
+        )
+        .expect("parses");
+        assert_eq!(cfg.report.template.as_deref(), Some("cast"));
+        assert_eq!(cfg.report.code_only, Some(true));
+        assert!(
+            cfg.unsupported_keys().is_empty(),
+            "the two keys must be recognised, not tolerated: {:?}",
+            cfg.unsupported_keys()
+        );
+    }
+
+    /// Why (#6669): the environment is the only channel that reaches the
+    /// grandchild renderer before the manifest does, so what the engagement
+    /// declared has to arrive as pairs.
+    /// What: both keys become pairs, named by the shared constants.
+    #[test]
+    fn report_settings_child_env_carries_both_keys() {
+        let cfg = EngagementConfig::from_toml(
+            &format!("{SAMPLE}\n[report]\ntemplate = \" cast \"\ncode_only = true\n"),
+            Path::new("engagement.toml"),
+        )
+        .expect("parses");
+        let env = cfg.report.child_env();
+        assert_eq!(
+            env,
+            vec![
+                (
+                    trusty_common::env_vars::ENV_AUDIT_REPORT_TEMPLATE,
+                    "cast".to_owned()
+                ),
+                (
+                    trusty_common::env_vars::ENV_AUDIT_REPORT_CODE_ONLY,
+                    "true".to_owned()
+                ),
+            ],
+            "the template is trimmed and both pairs are emitted"
+        );
+    }
+
+    /// Why: this is the lowest precedence tier, so an engagement that declared
+    /// nothing must inject nothing — an empty pair would still be a value the
+    /// renderer reads, and `code_only = false` would read as an instruction to
+    /// widen a scope the flag cannot widen.
+    /// What: an absent table, a blank template, and `code_only = false` all
+    /// yield no pairs.
+    #[test]
+    fn report_settings_child_env_is_empty_when_nothing_is_declared() {
+        let bare =
+            EngagementConfig::from_toml(SAMPLE, Path::new("engagement.toml")).expect("parses");
+        assert!(bare.report.child_env().is_empty());
+
+        let blank = EngagementConfig::from_toml(
+            &format!("{SAMPLE}\n[report]\ntemplate = \"   \"\ncode_only = false\n"),
+            Path::new("engagement.toml"),
+        )
+        .expect("parses");
+        assert!(blank.report.child_env().is_empty());
     }
 
     /// Every config written before the section existed still loads, and reads

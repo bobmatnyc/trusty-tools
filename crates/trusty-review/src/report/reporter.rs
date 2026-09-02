@@ -51,6 +51,12 @@ pub struct Reporter {
     /// `[report] mermaid = false`; when off the output is byte-identical to the
     /// pre-wave-4 report (the injection pass is simply skipped).
     mermaid: bool,
+    /// Whether this render states a code-only audit scope (#6669).
+    ///
+    /// Why: off by default, so every existing render is byte-identical. On, the
+    /// template's marked non-code sections state their boundary instead of
+    /// collapsing, and the metadata table says what the scope was.
+    code_only: bool,
 }
 
 impl Reporter {
@@ -63,7 +69,23 @@ impl Reporter {
         Self {
             output_dir: output_dir.into(),
             mermaid: true,
+            code_only: false,
         }
+    }
+
+    /// Render in code-only mode (#6669).
+    ///
+    /// Why: the caller resolves the decision (a `--code-only` flag, a manifest
+    /// key, or the engagement's `[report] code_only`) and threads it in without
+    /// changing `render`'s signature — the same shape
+    /// [`with_mermaid`](Self::with_mermaid) uses.
+    /// What: consumes and returns `self` with the flag set. `false` leaves
+    /// output byte-identical to a pre-#6669 render.
+    /// Test: `cast_template_golden::the_non_code_sections_state_their_boundary`.
+    #[must_use]
+    pub fn with_code_only(mut self, code_only: bool) -> Self {
+        self.code_only = code_only;
+        self
     }
 
     /// Set whether Mermaid charts are rendered (#2366).
@@ -110,13 +132,31 @@ impl Reporter {
     /// Test: `reporter_tests.rs::{render_splits_authorship_into_its_own_document,
     /// render_without_authorship_data_still_produces_the_document}`.
     pub fn render_documents(&self, model: &ReportModel, template: &str) -> RenderedReports {
-        let scope = build_scope(model);
+        let mut scope = build_scope(model);
+        // #6669: what this run's scope WAS, in the metadata table. Declared —
+        // it is a run parameter the operator set, not something measured.
+        scope.set(
+            "audit_scope",
+            tag(
+                if self.code_only {
+                    super::code_only::SCOPE_CODE_ONLY
+                } else {
+                    super::code_only::SCOPE_FULL
+                },
+                Provenance::Declared,
+            ),
+        );
         // Fill deterministically, then polish the OUTPUT (#2342): strip every
         // non-dataset template comment, drop honesty-marker rows, collapse empty
         // sections, and gather the gaps.  The leading-comment strip stays a
         // pre-fill step so the header's literal `{{…}}`/BEGIN-END examples are
         // never mistaken for real placeholders by the fill engine.
-        let filled = render(strip_leading_comment(template), &scope);
+        // #6669: the code-only transform runs BETWEEN those two, on template
+        // source — a non-code section's placeholders must never reach the fill
+        // engine, or the honesty marker would put "not stated in source data"
+        // where the boundary statement belongs.
+        let source = super::code_only::apply(strip_leading_comment(template), self.code_only);
+        let filled = render(&source, &scope);
         // #5239: the model's named gaps (an upstream orchestrator's unassessed
         // areas, plus any repo the live analyze fetch could not populate) lead
         // the Gaps & Caveats section.

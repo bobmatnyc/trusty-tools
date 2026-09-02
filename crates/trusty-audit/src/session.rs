@@ -1089,6 +1089,14 @@ impl Session {
         let pinned_review = config
             .as_ref()
             .map(|c| c.tools.trusty_review.version().to_owned());
+        // #6669: the engagement's report selection, read before `config` is
+        // consumed below. A delivered package re-rendered on a machine that
+        // never ran the engagement declares none, and the renderer's own
+        // precedence stays in charge.
+        let report_settings = config
+            .as_ref()
+            .map(|c| c.report.clone())
+            .unwrap_or_default();
         let models = config.map(|c| c.models).unwrap_or_default();
         // #6135: both halves — the pairs the child inherits, and the identity
         // the index states when no manifest declares its own.
@@ -1099,6 +1107,7 @@ impl Session {
             &self.config_path,
             &key,
             &inference,
+            &report_settings,
             options,
             pinned_review.as_deref(),
             &self.progress,

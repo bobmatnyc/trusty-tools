@@ -170,7 +170,12 @@ ner     = ["dep:ort", "dep:tokenizers"]
 #      trusty-review to be published. Pulls in trusty-review with its `mcp`
 #      feature so the reusable tool surface (`tools::call_tool`, `AppState`,
 #      `build_review_state`) is reachable.
-review  = ["dep:trusty-review", "trusty-review/mcp"]
+# #6669 adds `trusty-review/report`: the `report` verb and the `tr_report` MCP
+#      tool drive trusty-review's report pipeline through its library entry
+#      point (`trusty_review::report::run_report`), which that feature gates.
+#      It pulls in no new external dependency — the report module reuses
+#      toml/serde/regex/chrono/dirs, all already in trusty-review's tree.
+review  = ["dep:trusty-review", "trusty-review/mcp", "trusty-review/report"]
 
 [package.metadata.docs.rs]
 # Why: docs.rs builds with no features by default; the binary requires

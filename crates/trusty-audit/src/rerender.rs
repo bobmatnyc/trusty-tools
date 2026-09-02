@@ -230,6 +230,7 @@ pub async fn rerender(
     config: &Path,
     key: &SecretKey,
     inference: &crate::inference::Inference,
+    report_settings: &crate::config::ReportSettings,
     options: &RerenderOptions,
     pinned_review: Option<&str>,
     progress: &Progress,
@@ -266,6 +267,14 @@ pub async fn rerender(
     let tools = grounding::Tools::resolved(work);
     mkdir(&output)?;
 
+    // #6669: one env set per run, resolved once for the same reason the
+    // inference selection is — the engagement's report selection is a property
+    // of the engagement, not of a manifest, so every child gets the same pairs.
+    // The report keys sit AFTER the inference pairs and name different
+    // variables, so neither can shadow the other.
+    let mut child_env = inference.env.clone();
+    child_env.extend(report_settings.child_env());
+
     // #6080: this run's own wall clock, for the index written at the end.
     let started = std::time::Instant::now();
     let total = manifests.len();
@@ -289,16 +298,8 @@ pub async fn rerender(
         let name = unique_name(&manifest, index, &mut taken);
         progress.unit_started(Operation::Rerender, name.as_str(), index + 1, total);
         let unit_started = std::time::Instant::now();
-        let mut rendered = render_one(
-            &review,
-            &tools,
-            &manifest,
-            &output,
-            name,
-            key,
-            &inference.env,
-        )
-        .await?;
+        let mut rendered =
+            render_one(&review, &tools, &manifest, &output, name, key, &child_env).await?;
         // Timed here rather than inside `render_one`, which returns from two
         // places — a manifest that will not parse is still a unit that took time.
         rendered.duration_ms = Some(millis(unit_started.elapsed()));
@@ -949,6 +950,7 @@ mod rerender_tests {
             config,
             &key(),
             &crate::inference::Inference::default(),
+            &crate::config::ReportSettings::default(),
             &RerenderOptions {
                 from: from.map(Path::to_path_buf),
                 out: None,
@@ -1575,6 +1577,7 @@ mod rerender_tests {
             &config,
             &key(),
             &crate::inference::Inference::default(),
+            &crate::config::ReportSettings::default(),
             &RerenderOptions::default(),
             // The pin this stub answers with, so reconciliation is satisfied
             // rather than skipped — see #6173.
@@ -1628,6 +1631,7 @@ mod rerender_tests {
             &config,
             &key(),
             &crate::inference::Inference::default(),
+            &crate::config::ReportSettings::default(),
             &RerenderOptions::default(),
             Some("0.23.1"),
             &Progress::none(),

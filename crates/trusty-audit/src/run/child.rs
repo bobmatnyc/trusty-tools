@@ -165,6 +165,13 @@ pub(super) async fn spawn_tga(
     for (name, value) in investigation.child_env() {
         command.env(name, value);
     }
+    // #6669: which report the engagement asked for, down the same channel and
+    // for the same reason — the manifest arrives too late on this path, and an
+    // argument would break an older pinned renderer. See
+    // `EngagementConfig::report`'s `child_env`.
+    for (name, value) in config.report.child_env() {
+        command.env(name, value);
+    }
 
     let spawned = command.spawn();
 

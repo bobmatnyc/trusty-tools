@@ -170,6 +170,37 @@ pub fn resolve(overrides: &BTreeMap<String, String>) -> BTreeMap<String, String>
         .collect()
 }
 
+/// Resolve as [`resolve`] does, then add the code-only directive to every
+/// section (#6669).
+///
+/// Why: the rendered page states its code-only boundary, but the model writing
+/// the executive summary and the top-risks rows never sees the rendered page.
+/// Without this an exec summary recommends a process change, or cites a peer
+/// quartile, in a document whose Peer Benchmark and Next Steps sections both
+/// say those were never measured — the report contradicts itself in its first
+/// paragraph. The addendum is APPENDED, never substituted, so a template's own
+/// `instruct:` voice survives intact.
+/// What: the fully-resolved map with
+/// [`super::code_only::SYNTHESIS_ADDENDUM`] appended to each entry. Written
+/// back onto the model's `section_instructions` map, which makes every entry a
+/// template-tier override — [`resolve`] then returns them unchanged, so the
+/// analyst brief still layers on top exactly as before.
+/// Test: `section_instructions_tests::{code_only_appends_to_every_section,
+/// code_only_keeps_a_template_override}`.
+pub fn resolve_code_only(overrides: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    resolve(overrides)
+        .into_iter()
+        .map(|(id, text)| {
+            let joined = if text.is_empty() {
+                super::code_only::SYNTHESIS_ADDENDUM.to_string()
+            } else {
+                format!("{text} {}", super::code_only::SYNTHESIS_ADDENDUM)
+            };
+            (id, joined)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 #[path = "section_instructions_tests.rs"]
 mod tests;

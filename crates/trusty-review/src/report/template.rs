@@ -34,6 +34,38 @@ const BUNDLED_TECHNICAL_DD_CAST: &str = include_str!("../../templates/report-tec
 /// The default template name used when none is specified.
 pub const DEFAULT_TEMPLATE: &str = "report-technical-dd";
 
+/// The CAST-methodology template's full bundled name.
+pub const CAST_TEMPLATE: &str = "report-technical-dd-cast";
+
+/// Short names an operator may type instead of a bundled template's full name.
+///
+/// Why (#6669): `--template report-technical-dd-cast` is the only way to ask
+/// for the CAST report today, and it is long enough to mistype in a runbook a
+/// third party follows. The alias is resolved BEFORE the loader searches, so an
+/// operator's own XDG override of the full name still wins exactly as it did.
+/// What: alias to full bundled name, matched exactly and case-sensitively. A
+/// name that is not an alias passes through unchanged, so every existing
+/// invocation and every XDG template name keeps working.
+const ALIASES: &[(&str, &str)] = &[
+    ("cast", CAST_TEMPLATE),
+    ("default", DEFAULT_TEMPLATE),
+    ("generic", DEFAULT_TEMPLATE),
+];
+
+/// Resolve a short template alias to the bundled name it stands for (#6669).
+///
+/// Why: the CLI, the MCP tool and the engagement config all accept `cast`, and
+/// one resolver is what keeps them from disagreeing about what it means.
+/// What: returns the aliased name, or `name` unchanged when it is not an alias.
+/// Test: `template.rs::{cast_alias_resolves, an_unknown_name_passes_through}`.
+#[must_use]
+pub fn resolve_template_alias(name: &str) -> &str {
+    ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == name)
+        .map_or(name, |(_, full)| *full)
+}
+
 /// Resolves report template names to markdown source.
 ///
 /// Why: a single entry point for template loading so the reporter and CLI need
@@ -218,6 +250,34 @@ mod tests {
         let loader = TemplateLoader::with_extra_dirs(vec![tmp.path().to_path_buf()]);
         let out = loader.load("report-technical-dd").expect("override");
         assert!(out.contains("OVERRIDE MARKER"));
+    }
+
+    /// Why (#6669): the runbook a third party follows types `--template cast`;
+    /// were that not resolved, the CAST report would silently be the generic
+    /// one.
+    /// What: the alias maps to the bundled CAST name, and that name loads.
+    /// Test: this test itself.
+    #[test]
+    fn cast_alias_resolves() {
+        assert_eq!(resolve_template_alias("cast"), CAST_TEMPLATE);
+        assert_eq!(resolve_template_alias("default"), DEFAULT_TEMPLATE);
+        assert!(
+            TemplateLoader::bundled_only()
+                .load(resolve_template_alias("cast"))
+                .is_ok()
+        );
+    }
+
+    /// Why: aliasing must never shadow a name an operator already uses — the
+    /// full bundled names and every XDG override keep working unchanged.
+    /// What: a non-alias name is returned as given.
+    /// Test: this test itself.
+    #[test]
+    fn an_unknown_name_passes_through() {
+        assert_eq!(resolve_template_alias(CAST_TEMPLATE), CAST_TEMPLATE);
+        assert_eq!(resolve_template_alias("my-own-template"), "my-own-template");
+        // Case-sensitive on purpose: a template file name is.
+        assert_eq!(resolve_template_alias("CAST"), "CAST");
     }
 
     /// Why: an unknown template name must fail loudly, not silently.
