@@ -106,8 +106,9 @@ pub struct Synthesis {
 /// separately from the prose lets the reporter resolve the number at render.
 /// What: `text` is a complete reader sentence on its own; `subject` is the
 /// finding title the reporter looks up, absent for report-level prose.
-/// Test: `reporter_tests.rs::{a_status_note_cites_its_finding_number,
-/// a_status_note_without_a_numbered_finding_renders_bare}`.
+/// Test: `reporter_tests.rs::a_status_note_cites_its_finding_number`, and
+/// `synthesize_tests.rs::a_status_note_renders_with_and_without_a_citation` for
+/// the bare arm.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct StatusNote {
     /// The disclosure, as the reader sees it.
@@ -585,12 +586,12 @@ pub(super) struct RawSynthesis {
 /// response that is not even this fallback shape is still rejected as
 /// [`SynthesisError::Unparseable`].
 /// Test: `synthesize_tests.rs::{synthesize_happy_path_injects,
-/// synthesize_malformed_json_fails_closed,
+/// synthesize_malformed_json_is_a_hard_error,
 /// synthesize_recovers_executive_summary_from_markdown_fallback,
 /// synthesize_markdown_fallback_rejects_response_with_no_heading,
 /// parse_raw_recovers_shape2_field_name_drift,
 /// parse_raw_recovers_shape3_field_name_drift,
-/// parse_raw_rejects_a_wholly_unrecognized_shape}`.
+/// synthesize_rejects_a_wholly_unrecognized_shape}`.
 fn parse_raw(text: &str) -> Option<(RawSynthesis, Vec<String>)> {
     let body = text.trim();
     if body.starts_with('{')

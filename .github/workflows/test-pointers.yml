@@ -130,6 +130,16 @@ jobs:
         if: steps.detect.outputs.pointer_inputs_changed == 'true'
         run: bash scripts/check_scan_floor_selftest.sh test_pointers
 
+      # The gate's own fixture suite, which the scan-floor selftest above does
+      # not reach: it proves the scan is non-empty, never that the PARSER reads
+      # a citation correctly. #6678 landed on exactly that gap — brace-set
+      # citations were dropped as "not a candidate" while the floor stayed far
+      # above its minimum and the gate reported 0 dangling pointers. Runs before
+      # the real gate, matching line-cap.yml's selftest-then-gate ordering.
+      - name: Parser selftest (fixtures, no toolchain)
+        if: steps.detect.outputs.pointer_inputs_changed == 'true'
+        run: bash scripts/check_test_pointers.sh --self-test
+
       - name: "Lint Test: doc-comment pointers against real test names"
         if: steps.detect.outputs.pointer_inputs_changed == 'true'
         run: bash scripts/check_test_pointers.sh

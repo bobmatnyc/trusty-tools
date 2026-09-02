@@ -1,0 +1,4 @@
+Documentation
+- Repointed seven `Test:` citations whose named test had been renamed, and rewrapped the `analyze_endpoints` module citation that split an identifier across two doc lines. All were invisible while the pointer lint dropped brace-set citations (#6678).
+- Repointed eighteen more brace-set `Test:` citations across `context_gate`, `analyze_findings`, `investigate::select`, `investigate::verify`, `mermaid`, `reporter`, `reporter_findings`, `synthesize`, `synthesize_normalize`, `synthesize_prompt` and `topology` at the tests that exist — renamed successors where the test was renamed, and the surviving test where the cited name never shipped (#6678).
+- Corrected `verify_findings`'s What paragraph, which still described GREEN as a title-only topic admitted without evidence; since #6080 every band must cite a file in the inspected set (#6678).

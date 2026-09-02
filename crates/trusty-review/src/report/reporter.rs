@@ -618,7 +618,7 @@ fn inject_synthesis_summary(root: &mut Scope, syn: &super::synthesize::Synthesis
 /// look, which is what makes a claimed strength falsifiable.
 /// Test: `reporter_tests.rs::{reporter_fills_green_topics,
 /// reporter_renders_every_green_topic, green_topic_carries_its_citation,
-/// reporter_leaves_findings_honesty_marked_without_metrics}`.
+/// reporter_omits_empty_findings_sections_without_metrics}`.
 fn push_green_topics(root: &mut Scope, model: &ReportModel) {
     let greens = model
         .repositories
@@ -666,7 +666,7 @@ fn green_topic_line(finding: &super::metrics::MetricFinding) -> String {
 /// [`Reporter::write`] rejects a synthesis-free model outright (#5454).
 /// Test: `reporter_tests.rs::{reporter_appends_guardrail_rejection_note,
 /// a_status_note_cites_its_finding_number, an_empty_synthesis_status_is_omitted,
-/// an_unmeasured_orphan_narrative_is_not_numbered}`.
+/// an_unplaced_narrative_is_disclosed_not_numbered}`.
 fn append_synthesis_note(out: &mut String, model: &ReportModel) {
     let Some(syn) = &model.synthesis else {
         return;

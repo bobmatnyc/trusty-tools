@@ -3243,6 +3243,45 @@ fn colliding_titles_attach_to_their_own_components() {
     );
 }
 
+/// #6678: the claim guard on its own. Two narratives sharing one title AND one
+/// cited file must not both land on that file's row.
+///
+/// Why: `match_row` filters to UNCLAIMED rows before it disambiguates, and that
+/// filter is the only thing standing between a duplicated narrative and a row
+/// whose prose it silently replaces — the lap-5 cross-wire in the other
+/// direction. Component disambiguation cannot cover this case, because both
+/// narratives resolve to the same component.
+/// What: both narratives cite `hnsw_store.rs`. Asserts the hnsw row keeps the
+/// FIRST narrative's business impact and never renders the second's.
+/// Test: this test itself.
+#[test]
+fn a_second_narrative_cannot_overwrite_a_claimed_row() {
+    let mut first = amber_prose(
+        "Split oversized impl block",
+        "crates/trusty-common/src/memory_core/store/hnsw_store.rs:327",
+        "fn insert(&mut self, id: u64) {",
+    );
+    first.business_impact = "the first narrative claims this row".to_string();
+    let mut second = amber_prose(
+        "Split oversized impl block",
+        "crates/trusty-common/src/memory_core/store/hnsw_store.rs:327",
+        "fn insert(&mut self, id: u64) {",
+    );
+    second.business_impact = "the second narrative must not replace it".to_string();
+
+    let md = render_colliding(vec![first, second]);
+    let amber = amber_section(&md);
+
+    assert!(
+        component_for(amber, "the first narrative claims this row").contains("hnsw_store.rs"),
+        "the first narrative keeps the row it claimed:\n{amber}"
+    );
+    assert!(
+        !component_for(amber, "the second narrative must not replace it").contains("hnsw_store.rs"),
+        "a claimed row must never be overwritten by a later narrative:\n{amber}"
+    );
+}
+
 /// #6082 lap 5 (BLOCKER 1, second arm): a self-restating narrative must never
 /// delete the measurement underneath it.
 ///

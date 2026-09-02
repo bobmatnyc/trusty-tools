@@ -375,7 +375,7 @@ where
 /// from the environment as it did before this key existed.
 ///
 /// Test: `super::inference_tests::{the_section_lands_in_the_manifest,
-/// a_second_write_replaces_the_first}`.
+/// a_manifest_that_cannot_be_written_says_so}`.
 pub fn write_into_manifest(path: &std::path::Path, selection: &Selection) -> Result<(), String> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("{} could not be read ({e})", path.display()))?;

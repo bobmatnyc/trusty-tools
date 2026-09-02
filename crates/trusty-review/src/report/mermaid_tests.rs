@@ -246,6 +246,49 @@ fn parses_chart_types() {
     assert_eq!(parse_chart("pie"), ChartType::Unknown);
 }
 
+/// Why (#6678): the marker declares every field a chart needs, and `parse_marker`
+/// is the only thing that reads it — a `group:` lost to the comma-inside-`y:`
+/// grammar silently collapses a multi-series radar to one curve.
+/// What: the full radar marker parses into every declared field.
+/// Test: this test.
+#[test]
+fn parses_full_marker() {
+    let marker = parse_marker(
+        "<!-- dataset: health_factors_by_app | chart: radar | x: factor | \
+         y: score, group: application -->",
+    )
+    .expect("a complete marker parses");
+    assert_eq!(marker.slug, "health_factors_by_app");
+    assert_eq!(marker.chart, ChartType::Radar);
+    assert_eq!(marker.x, "factor");
+    assert_eq!(marker.y, "score");
+    assert_eq!(
+        marker.group.as_deref(),
+        Some("application"),
+        "the group field lives comma-appended inside the y: segment"
+    );
+}
+
+/// Why (#6678): every line of a report passes through this parser, so anything
+/// that is not a dataset marker — an ordinary HTML comment, a marker missing a
+/// required field — must come back `None` rather than half-parsed.
+/// What: a non-dataset comment, a non-comment line, and markers missing
+/// `dataset`, `x`, or `y` are all rejected.
+/// Test: this test.
+#[test]
+fn ignores_non_dataset_comment() {
+    assert!(parse_marker("<!-- generated: 2026-09-02 -->").is_none());
+    assert!(parse_marker("| Application | Factor |").is_none());
+    assert!(
+        parse_marker("<!-- dataset: loc | chart: bar | x: tech -->").is_none(),
+        "a marker with no y: field declares no value column"
+    );
+    assert!(
+        parse_marker("<!-- dataset: loc | chart: bar | y: loc -->").is_none(),
+        "a marker with no x: field declares no category column"
+    );
+}
+
 /// Why: column resolution maps semantic field names to real headers.
 /// What: exact match, last-token match, and a miss.
 /// Test: this test.

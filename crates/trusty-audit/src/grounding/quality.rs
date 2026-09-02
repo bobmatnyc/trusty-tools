@@ -187,8 +187,8 @@ const MAX_MANIFESTS: usize = 12;
 /// # Postconditions
 /// Never panics. An unreadable directory contributes nothing and stops nothing.
 ///
-/// Test: `super::quality_tests::{dependency_manifests_lead_with_the_root_manifest,
-/// dependency_manifests_skip_vendored_trees, dependency_manifests_are_capped}`.
+/// Test: `super::quality_tests::{manifests_lead_the_dependencies_dimension,
+/// a_tree_with_no_manifest_is_left_alone, dependency_manifests_are_capped}`.
 #[must_use]
 pub fn dependency_manifests(checkout: &Path) -> Vec<FileEvidence> {
     let mut found: Vec<(usize, String)> = Vec::new();

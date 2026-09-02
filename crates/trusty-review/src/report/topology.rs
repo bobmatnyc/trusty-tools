@@ -203,7 +203,7 @@ impl CrateTopology {
 /// Nothing is pushed when no repository declares one, and the whole block then
 /// renders as nothing (`fill::render_scope`'s omit-empty rule).
 /// Test: `topology_tests::{a_declared_topology_renders_rows,
-/// every_crate_reaches_the_rendered_table, no_topology_pushes_no_block,
+/// every_crate_reaches_the_rendered_table, no_topology_renders_nothing,
 /// several_repositories_are_named_in_the_rows}`.
 pub fn push_crate_topology(root: &mut Scope, model: &ReportModel) {
     let declared: Vec<(&str, &CrateTopology)> = model

@@ -183,7 +183,9 @@ fn index_args(path: &Path, index_id: &str) -> Vec<OsString> {
 /// the renderer's membership check while still filling, so its sections render
 /// from whatever had been embedded by then.
 ///
-/// Test: `index_tests::{a_served_index_is_not_rebuilt, an_index_failure_is_a_reason}`.
+/// Test: `index_tests::{a_served_index_is_not_rebuilt,
+/// an_unserved_index_is_built_under_the_requested_id,
+/// a_refused_index_is_a_reason_not_a_status}`.
 pub fn ensure_indexed(
     search: &Path,
     checkout: &Path,
@@ -388,6 +390,37 @@ mod index_tests {
         assert_eq!(status, IndexStatus::Indexed);
         let seen = std::fs::read_to_string(&calls).expect("stub ran");
         assert!(seen.contains("index /w/repos/xsv --name xsv"), "{seen}");
+    }
+
+    /// #6678: the failure arm of the same path. `index --name` refusing must
+    /// come back as the one-line reason the caller turns into a gap, never as
+    /// an `IndexStatus` — a refused index reported as `Indexed` would let every
+    /// downstream leg read an index that was never built.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_index_is_a_reason_not_a_status() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let stub = tmp.path().join("trusty-search");
+        // `index add` is approved; `index-status` reports the daemon's 404; the
+        // build itself refuses on stderr the way a non-allowlisted root does.
+        std::fs::write(
+            &stub,
+            "#!/bin/sh\n\
+             [ \"$1 $2\" = \"index add\" ] && exit 0\n\
+             [ \"$1\" = index-status ] && exit 1\n\
+             echo 'indexing refused: root is not allowlisted' >&2\n\
+             exit 1\n",
+        )
+        .expect("write stub");
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        let reason = ensure_indexed(&stub, Path::new("/w/repos/xsv"), "xsv")
+            .expect_err("a refused index must not report a status");
+        assert!(reason.contains("/w/repos/xsv"), "{reason}");
+        assert!(reason.contains("root is not allowlisted"), "{reason}");
+        assert_eq!(reason.lines().count(), 1, "must stay one line: {reason}");
     }
 
     /// The backstop still has to be precise: the comparison resolves symlinks

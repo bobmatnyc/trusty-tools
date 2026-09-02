@@ -679,7 +679,7 @@ pub fn select_files(
 /// with different budgets used to report different test-coverage figures for an
 /// unchanged checkout.
 /// Test: `select_tests::{per_dimension_coverage_names_why_a_file_was_read,
-/// coverage_names_the_measured_function,
+/// a_declared_hotspot_reaches_the_selected_file_and_the_coverage_row,
 /// the_test_coverage_row_is_enumerated_not_sampled}`.
 fn per_dimension(
     selected: &[SelectedFile],

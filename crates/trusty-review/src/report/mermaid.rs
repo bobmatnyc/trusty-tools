@@ -269,7 +269,8 @@ fn cells_of(trimmed: &str) -> Vec<String> {
 /// builder.  `Heatmap` → the fallback note; `Unknown` → `None` + a debug log;
 /// bar/stacked-bar/radar → a ```mermaid block, or `None` when no row yields a
 /// numeric y (chart would be empty).
-/// Test: `mermaid_tests.rs::{renders_bar, heatmap_fallback, unknown_no_block}`.
+/// Test: `mermaid_tests.rs::{renders_bar, heatmap_fallback_note_only,
+/// unknown_chart_no_block}`.
 fn render_block(marker: &Marker, table: &Table) -> Option<String> {
     if marker.chart == ChartType::Heatmap {
         return Some(format!("{HEATMAP_NOTE}\n"));
@@ -524,7 +525,7 @@ fn overflow_notes(cat_overflow: usize, series_overflow: usize) -> String {
 /// What: normalizes both sides to lowercase alphanumerics and tries, in priority
 /// order over the full field then its last `_`/space token: exact equality,
 /// header-starts-with, header-contains.  Returns the first matching column.
-/// Test: `mermaid_tests.rs::{resolves_exact_column, resolves_by_last_token}`.
+/// Test: `mermaid_tests.rs::resolves_columns`.
 fn resolve_column(header: &[String], field: &str) -> Option<usize> {
     let full = normalize(field);
     let last_raw = field.rsplit(['_', ' ']).next().unwrap_or(field);

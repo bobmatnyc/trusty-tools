@@ -196,7 +196,7 @@ fn rank(hotspots: &[Hotspot], checkout: &Path) -> Vec<RankedFile> {
 ///
 /// Test: `super::grounding_tests::{an_unreachable_hotspots_endpoint_is_a_named_gap,
 /// an_empty_hotspot_list_is_a_named_gap,
-/// hotspots_become_ranked_inspect_priority_in_the_manifest}`.
+/// hotspots_and_search_hits_become_ranked_inspect_priority_in_the_manifest}`.
 pub async fn fetch(
     socket: &Path,
     index_id: &str,

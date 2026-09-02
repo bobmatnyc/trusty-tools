@@ -389,7 +389,7 @@ fn discovery_gaps(discovery: &evidence::Discovery, display: &str) -> Vec<String>
 /// `[report]` budget and the budget the investigation pass ran under one number
 /// rather than two independent resolutions of it (#6082, #6247). It both sizes
 /// the evidence caps and reaches `[report]`.
-/// Test: `super::grounding_tests::{hotspots_become_ranked_inspect_priority_in_the_manifest,
+/// Test: `super::grounding_tests::{hotspots_and_search_hits_become_ranked_inspect_priority_in_the_manifest,
 /// a_manifest_that_cannot_be_written_is_a_named_gap}`.
 pub async fn ground_manifest(
     manifest: &Path,
