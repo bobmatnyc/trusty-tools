@@ -119,21 +119,11 @@ description: What this skill provides
 
 ## Tech Stack Detection
 
-Detect the project's technology stack to recommend relevant skills:
-
-```bash
-# Detect Rust project
-ls Cargo.toml Cargo.lock 2>/dev/null
-
-# Detect Node/JS project
-ls package.json 2>/dev/null && cat package.json | jq '.dependencies | keys'
-
-# Detect Python project
-ls pyproject.toml requirements.txt 2>/dev/null
-
-# Detect Elixir/Phoenix project
-ls mix.exs 2>/dev/null
-```
+Read the marker set from `tm-capabilities`'s `references/agents.md` "Deploys
+When" column — the same generated table `mpm-agent-manager` defers to — rather
+than re-deriving stack markers by hand. Its source of truth is
+`framework-manifest.toml`; do not hand-list `ls`/`cat` probes here that would
+drift from it.
 
 Match detected tech to relevant skills and surface recommendations to the PM.
 
@@ -195,7 +185,9 @@ A good skill:
 
 1. Edit the `.md` file in `src/assets/skills/`
 2. Run `cargo test -p trusty-mpm bundle` to confirm the bundle builds
-3. Commit and open a PR with the improvement rationale
+3. Run `tm doctor` after the edit to confirm no tier-shadow was introduced;
+   `tm doctor --fix-skills --yes` repairs one on demand
+4. Commit and open a PR with the improvement rationale
 
 ## Delegation Patterns
 - **Skill content authoring** → `documentation` or `engineer`

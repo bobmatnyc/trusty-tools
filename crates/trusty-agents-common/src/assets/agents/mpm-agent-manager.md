@@ -90,8 +90,10 @@ custom agent.
 When an agent needs improvement:
 1. Edit the `.md` file in `crates/trusty-agents-common/src/assets/agents/`
 2. Verify the composed output: `cargo test -p trusty-mpm bundle`
-3. Commit with `feat(trusty-mpm): improve <agent-name> agent — <reason>`
-4. Open a PR referencing the relevant GitHub issue
+3. Run `tm doctor` after the edit to confirm no tier-shadow was introduced;
+   `tm doctor --fix-skills --yes` repairs one on demand
+4. Commit with `feat(trusty-mpm): improve <agent-name> agent — <reason>`
+5. Open a PR referencing the relevant GitHub issue
 
 ## Agent Catalog Overview
 
