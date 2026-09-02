@@ -84,6 +84,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "Reports UNKNOWN when a bundled skill is deployed to a tier whose `.trusty-mpm-skills-manifest.json` does not track it — the tier planner classifies it project-custom and drops it from every deploy, so no `tm` command can refresh it and `skill_staleness` (which compares against that same manifest) cannot see it at all. Never `Ok` for such a skill: content alone cannot distinguish an orphaned tm deployment from a deliberate customization. Scans `$CLAUDE_CONFIG_DIR/skills`, `~/.claude/skills`, and the project's `.claude/skills`. Read-only; `tm install --reconcile-skills` is the repair (issue #4605).",
     ),
     (
+        "skill_project_tier",
+        "Warns when a bundled skill is still deployed at the PROJECT tier (`<project>/.claude/skills`). Bundled skills are user-tier only since the 2026-09-01 owner ruling, the same principle #4448 settled for bundled agents, so the deploy sites no longer write them there — but they cannot remove a copy an earlier binary already wrote, and nothing refreshes it afterward. The user-tier copy is the one Claude Code loads (for skills, personal outranks project). Read-only, never deletes: a bundled-named file here could be a project-custom skill the operator wrote. `tm doctor --fix-skills` is the repair (issue #6586).",
+    ),
+    (
         "legacy_sources",
         "No legacy global instruction sources linger from a pre-migration install (issue #2876).",
     ),

@@ -752,6 +752,21 @@ fn prepare_session_self_heals_missing_skill_source() {
         report.skill_deploy
     );
     assert!(fw.skills.join("tm-doctor.md").exists());
+    // #6586: the deployed copy lands in the MANAGED user tier, never the
+    // project's own `.claude/skills/`. Asserting both halves keeps this a
+    // deploy test — the self-heal is only proven by a skill reaching disk.
+    assert!(
+        fw.skill_deploy_dir()
+            .join("tm-doctor")
+            .join("SKILL.md")
+            .is_file(),
+        "the healed skill must be deployed to the managed tier: {}",
+        fw.skill_deploy_dir().display()
+    );
+    assert!(
+        !fw.claude_skills_dir().join("tm-doctor").exists(),
+        "a bundled skill must never be deployed to the project tier"
+    );
 }
 
 #[test]
@@ -780,6 +795,20 @@ fn prepare_session_self_heals_renamed_skill_source() {
     assert!(
         !report.skill_deploy.deployed.is_empty(),
         "renamed/stale skill source must self-heal and deploy current skills"
+    );
+    // #6586: as above — the refreshed roster reaches the managed user tier, and
+    // the project tier stays free of bundled skills.
+    assert!(
+        fw.skill_deploy_dir()
+            .join("tm-doctor")
+            .join("SKILL.md")
+            .is_file(),
+        "the refreshed roster must be deployed to the managed tier: {}",
+        fw.skill_deploy_dir().display()
+    );
+    assert!(
+        !fw.claude_skills_dir().join("tm-doctor").exists(),
+        "a bundled skill must never be deployed to the project tier"
     );
 }
 

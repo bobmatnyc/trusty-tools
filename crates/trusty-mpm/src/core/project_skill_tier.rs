@@ -90,6 +90,39 @@ use crate::core::skill_tiers::{Shadow, deploy_all_skill_tiers, list_source_stems
 /// Test: `stamp_file_is_ignored_by_the_tier_planner`.
 pub const PROJECT_TIER_STAMP_FILE: &str = ".trusty-mpm-project-tier-stamp";
 
+/// The bundled-skill selection for the PROJECT tier — nothing (#6586).
+///
+/// Why: owner ruling 2026-09-01, "these should be user level only", the same
+/// principle #4448 settled for bundled AGENTS. Every bundled `tm-*` skill was
+/// deployed BOTH to the managed user tier and to each project's
+/// `.claude/skills/`, byte-identical, so an upgrade had two copies to keep in
+/// step and a drifted project copy was indistinguishable from a deliberate
+/// customization.
+///
+/// This costs no coverage, which is the fact that makes it safe rather than
+/// merely tidier. `managed_config::ensure_managed_config_dir` deploys the
+/// bundled roster to the user tier with `|_| true` — the WHOLE roster, not the
+/// manifest-selected subset — so every stem this predicate now declines is
+/// already on disk one tier up. And Claude Code resolves skills
+/// `enterprise > personal > project > bundled`, so for skills the user tier
+/// OUTRANKS the project tier anyway (see this module's WHICH PRECEDENCE note):
+/// the project copy was never the one that loaded. DOC-42's co-deploy guarantee
+/// (§SPEC-AGENTSKILLS-02) is met by that same user-tier deploy, which is why the
+/// `co_deploy_skills` override is dropped at the project-tier call sites rather
+/// than routed around this predicate.
+///
+/// What: a named function rather than an inline `|_| false` at three call sites,
+/// so the ruling lives in one place and a reader who finds it at a deploy site
+/// gets the reasoning. Only the BUNDLED tier is declined —
+/// `deploy_all_skill_tiers` applies `select` to the bundled stem set alone, so
+/// user-custom skills still deploy here and project-custom skills are still
+/// never overwritten.
+/// Test: `project_tier_receives_no_bundled_skill`,
+/// `bundled_skill_reaches_the_user_tier_only`.
+pub fn bundled_excluded_from_project_tier(_stem: &str) -> bool {
+    false
+}
+
 /// What one [`ensure_project_skill_tier`] call did.
 ///
 /// Why: the call site logs "the project tier was refreshed" only when a deploy
@@ -243,11 +276,12 @@ pub fn ensure_project_skill_tier_for_version(
         return Ok(ProjectTierDeploy::default());
     }
 
+    // #6586: bundled skills are user-tier only.
     let deploy = deploy_all_skill_tiers(
         &plan.skill_source,
         &fw.user_skill_source_dir(),
         &dest,
-        |name| plan.skill_selected(name),
+        bundled_excluded_from_project_tier,
     )?;
 
     std::fs::create_dir_all(&dest)?;

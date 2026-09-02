@@ -321,6 +321,18 @@ fn seed_skill(fw: &FrameworkPaths, stem: &str, body: &str) {
     std::fs::write(fw.skills.join(format!("{stem}.md")), body).unwrap();
 }
 
+/// Seed one USER-CUSTOM-tier skill with the given body (#6586).
+///
+/// Why: bundled skills are user-tier only now, so a bundled stem never reaches
+/// a project's `.claude/skills/` and cannot carry the project-tier deploy the
+/// three tests below are about. The user-custom tier still deploys there, so it
+/// is the vehicle; each test's subject is unchanged.
+fn seed_user_skill(fw: &FrameworkPaths, stem: &str, body: &str) {
+    let dir = fw.user_skill_source_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{stem}.md")), body).unwrap();
+}
+
 /// Guard on the fixture itself: without the pin, the seeded source is replaced
 /// by the real bundle and every assertion below would be measuring the wrong
 /// thing.
@@ -656,6 +668,8 @@ fn ensure_managed_config_dir_deploys_the_project_skill_tier() {
     let fw = seed_framework(tmp.path());
     pin_skill_source_stamp(&fw);
     seed_skill(&fw, "probe-skill", "---\nname: probe-skill\n---\n\nV1\n");
+    // #6586: bundled skills are user-tier only; the project tier takes this one.
+    seed_user_skill(&fw, "probe-skill", "---\nname: probe-skill\n---\n\nV1\n");
     let config_dir = tmp.path().join(".trusty-tools/trusty-mpm/claude-config");
     let workspace = project_dir(tmp.path());
     let project_copy = workspace
@@ -679,6 +693,8 @@ fn ensure_managed_config_dir_deploys_the_project_skill_tier() {
     // `CARGO_PKG_VERSION` cannot move mid-test.) The exclude names a DIFFERENT
     // stem so `probe-skill` stays selected.
     seed_skill(&fw, "probe-skill", "---\nname: probe-skill\n---\n\nV2\n");
+    // #6586: bundled skills are user-tier only; the project tier takes this one.
+    seed_user_skill(&fw, "probe-skill", "---\nname: probe-skill\n---\n\nV2\n");
     let framework = crate::core::harness_root::framework_dir(&workspace);
     std::fs::create_dir_all(&framework).unwrap();
     std::fs::write(
@@ -708,6 +724,8 @@ fn ensure_managed_config_dir_project_tier_is_a_noop_when_unchanged() {
     let fw = seed_framework(tmp.path());
     pin_skill_source_stamp(&fw);
     seed_skill(&fw, "probe-skill", "---\nname: probe-skill\n---\n\nV1\n");
+    // #6586: bundled skills are user-tier only; the project tier takes this one.
+    seed_user_skill(&fw, "probe-skill", "---\nname: probe-skill\n---\n\nV1\n");
     let config_dir = tmp.path().join(".trusty-tools/trusty-mpm/claude-config");
     let workspace = project_dir(tmp.path());
     let project_copy = workspace

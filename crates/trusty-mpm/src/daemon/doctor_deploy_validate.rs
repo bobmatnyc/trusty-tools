@@ -73,7 +73,9 @@ mod tests {
         crate::core::agent_manifest::AgentManifest::default()
             .save(&agents_dir)
             .unwrap();
-        let skills_dir = paths.claude_skills_dir();
+        // #6586: the skill ownership manifest the probe reads lives beside the
+        // bundled roster, in the managed config-dir tier — not the project's.
+        let skills_dir = paths.skill_deploy_dir();
         std::fs::create_dir_all(&skills_dir).unwrap();
         crate::core::skill_manifest::SkillManifest::default()
             .save(&skills_dir)

@@ -469,6 +469,28 @@ impl FrameworkPaths {
         self.agent_deploy.clone()
     }
 
+    /// The ONE directory bundled (framework-owned) skills deploy into (#6586).
+    ///
+    /// Why: bundled skills became user-tier-only on the 2026-09-01 owner
+    /// ruling, so "where does a bundled skill live?" now has a single answer
+    /// that three call sites had each derived for themselves —
+    /// [`crate::core::skill_deploy_tiers::skill_deploy_tiers`], the session
+    /// launch's own deploy, and [`crate::core::deploy_validate`]'s probe. A
+    /// probe deriving that path differently from the deploy that fills it is
+    /// exactly the split #6586 had to close, so the derivation lives here.
+    /// What: the `skills` sibling of [`agent_deploy_dir`](Self::agent_deploy_dir),
+    /// i.e. `<base>/.trusty-tools/trusty-mpm/claude-config/skills`. Like the
+    /// agent tier it is NEVER rewritten project-local by
+    /// [`for_managed_project`](Self::for_managed_project).
+    /// Test: `skill_deploy_dir_is_managed_config_skills`,
+    /// `skill_deploy_dir_is_not_project_local_for_managed_workspace`.
+    pub fn skill_deploy_dir(&self) -> PathBuf {
+        self.agent_deploy
+            .parent()
+            .map(|dir| dir.join("skills"))
+            .unwrap_or_else(|| self.agent_deploy.join("skills"))
+    }
+
     /// Directory Claude Code reads skill files from (`~/.claude/skills`).
     ///
     /// Why: the skill deploy step writes `.md` skill files here so Claude Code
@@ -613,6 +635,41 @@ mod tests {
             paths.agent_deploy_dir(),
             PathBuf::from("/base/.trusty-tools/trusty-mpm/claude-config/agents"),
             "bundled agents must deploy into the tm-managed CLAUDE_CONFIG_DIR"
+        );
+    }
+
+    // #6586: bundled skills deploy into the same tm-managed
+    // `CLAUDE_CONFIG_DIR` tier, and nowhere else.
+    #[test]
+    fn skill_deploy_dir_is_managed_config_skills() {
+        let paths = FrameworkPaths::under("/base");
+        assert_eq!(
+            paths.skill_deploy_dir(),
+            PathBuf::from("/base/.trusty-tools/trusty-mpm/claude-config/skills"),
+            "bundled skills must deploy into the tm-managed CLAUDE_CONFIG_DIR"
+        );
+        assert_ne!(
+            paths.skill_deploy_dir(),
+            paths.claude_skills_dir(),
+            "the bundled tier must not be `<base>/.claude/skills`"
+        );
+    }
+
+    #[test]
+    fn skill_deploy_dir_is_not_project_local_for_managed_workspace() {
+        // `for_managed_project` moves `claude_skills` project-local; the
+        // BUNDLED skill destination must stay global (#6586), or the probe in
+        // `deploy_validate` and the deploy that fills it disagree per project.
+        let paths = FrameworkPaths::for_managed_project("/managed-root", "/some/project/repo");
+        assert!(
+            !paths.skill_deploy_dir().starts_with("/some/project/repo"),
+            "bundled skills must never deploy into a workspace: {}",
+            paths.skill_deploy_dir().display()
+        );
+        assert_eq!(
+            paths.skill_deploy_dir(),
+            FrameworkPaths::from_root("/managed-root").skill_deploy_dir(),
+            "the workspace override must not touch the skill deploy tier"
         );
     }
 
