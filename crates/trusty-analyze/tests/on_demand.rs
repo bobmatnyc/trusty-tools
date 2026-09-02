@@ -387,10 +387,13 @@ async fn two_concurrent_callers_share_one_server() {
 /// point, the drift is now unrepresentable rather than merely detected. The
 /// second is the one that still has work to do: it pins the value the SUPERVISOR
 /// was configured with, which a `ServiceTimeouts::new` call site could otherwise
-/// pass a literal to. What binds the SERVE LOOP to the same number is
-/// `serve_options_bind_the_shutdown_drain_to_this_services_own_budget`, in
-/// `rpc_tests.rs` — that link was the one missing when this test was written,
-/// and it is what let a 5 s patience sit under a 60 s drain.
+/// pass a literal to.
+///
+/// #6601 review: this budget bounds the supervisor's spawn-failure kill and
+/// nothing else — a bound analyze child is detached and no reap path reaches it.
+/// What the SERVE LOOP drains on is a different window, pinned by
+/// `serve_options_drain_for_as_long_as_this_server_may_actually_live` in
+/// `rpc_tests.rs`.
 /// Test: this is the test.
 #[test]
 fn analyze_flush_budget_matches_the_supervisor_contract() {

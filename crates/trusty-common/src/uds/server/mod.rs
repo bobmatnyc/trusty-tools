@@ -254,10 +254,13 @@ pub struct RpcServeOptions {
     /// SIGKILL can land mid-flush" — a full-window drain makes that false.
     ///
     /// A service whose real SIGKILL deadline is shorter than the process grace
-    /// window sets this explicitly rather than inheriting the default:
-    /// `trusty-analyze` is supervised by `UdsServiceSupervisor`, whose
-    /// `sigterm_patience` is the deadline that actually applies to it, so it
-    /// passes its own `service::rpc::SHUTDOWN_FLUSH_TIMEOUT`.
+    /// window sets this explicitly rather than inheriting the default — but
+    /// establish that the deadline REACHES this process first (#6601 review).
+    /// `trusty-analyze` briefly set it to its supervisor's `sigterm_patience`
+    /// and that was wrong: it runs detached, so it is absent from the
+    /// supervisor's population and no reap path signals it while it is serving.
+    /// Overriding on a deadline that never fires does not avert a SIGKILL; it
+    /// only gives up the drain early.
     ///
     /// Test: `shutdown_drains_an_in_flight_connection_before_it_returns`,
     /// `shutdown_returns_when_the_drain_budget_expires`,

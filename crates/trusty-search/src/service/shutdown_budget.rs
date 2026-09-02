@@ -38,6 +38,17 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+/// Wall-clock time held back from the grace window for the cleanup that runs
+/// after the flush — the port file, discovery deregistration, the lockfile.
+///
+/// An alias of [`trusty_common::shutdown::CLEANUP_RESERVE`], not a second
+/// number (#6601). `trusty_common::shutdown` owns the value AND the saturating
+/// subtraction ([`trusty_common::shutdown::plannable_grace_from`]), so this
+/// flush planner and the UDS serve loop's drain cannot reserve different
+/// amounts of the same window. The re-export is what lets this module's docs
+/// and `shutdown_budget_tests.rs` name it without repeating the path.
+pub use trusty_common::shutdown::CLEANUP_RESERVE;
+
 /// How much of its life this process has left to spend on the shutdown flush.
 ///
 /// Why: see the module doc. The type exists so that "how long may this index

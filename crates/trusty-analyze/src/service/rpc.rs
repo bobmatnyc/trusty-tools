@@ -334,42 +334,79 @@ pub fn build_router(state: AnalyzerAppState) -> RpcRouter {
 
 /// Per-connection budgets for this service.
 ///
-/// The read timeout is the shared default; the frame budget and the shutdown
-/// drain both move. See [`MAX_FRAME_BYTES`] for the first. The read bound does
-/// NOT cover a handler, which is what makes a multi-minute
-/// `analyze.diagnostics` compatible with a 30-second guard against a peer that
-/// connects and never writes.
+/// The read timeout and the shutdown drain are the shared defaults; only the
+/// frame budget moves. See [`MAX_FRAME_BYTES`]. The read bound does NOT cover a
+/// handler, which is what makes a multi-minute `analyze.diagnostics` compatible
+/// with a 30-second guard against a peer that connects and never writes.
 ///
-/// 🔴 **`shutdown_drain` is set explicitly, not inherited (#6601 review).** The
-/// shared default is sized to the process's termination grace, which is the
-/// window a launchd-supervised daemon gets. This server is not one: ADR-0032
-/// makes it on-demand under `UdsServiceSupervisor`, whose
-/// `ANALYZE_SIGTERM_PATIENCE` is 5 s — so a drain inheriting a 55 s default
-/// would be SIGKILLed 5 s in, and the drain's whole purpose (release the redb
-/// handles BEFORE the socket unlink, #6595) would be defeated on exactly the
-/// path it was added for. [`SHUTDOWN_FLUSH_TIMEOUT`] is the budget this server
-/// actually has, and
-/// `serve_options_bind_the_shutdown_drain_to_this_services_own_budget` pins
-/// this field to it.
+/// 🔴 **`shutdown_drain` is INHERITED, and the 3 s override this briefly
+/// carried was wrong (#6601 review).** That override rested on
+/// "`UdsServiceSupervisor` SIGKILLs this server at `ANALYZE_SIGTERM_PATIENCE`,
+/// 5 s". No supervisor path does. `ensure_running` returns early for a detached
+/// child and never enters it in `children` (`supervisor/mod.rs`, #6350), every
+/// `terminate_child` call site reads only `children` or the doomed queue, and
+/// `ANALYZE_TIMEOUTS` is built `with_detached(true)` — so the single place
+/// `sigterm_patience` reaches an analyze child is the spawn-probe timeout, a
+/// child that never bound.
+///
+/// Nothing in this repository escalates a SERVING analyze server to SIGKILL:
+/// `commands::daemon::handle_stop` sends SIGTERM, polls 5 s, and then merely
+/// REPORTS that the socket is still answering. The remaining bounded terminator
+/// is the OS at logout or shutdown, whose window this workspace models as
+/// [`trusty_common::shutdown::termination_grace`]; the part a component may
+/// plan inside is [`trusty_common::shutdown::plannable_grace`], which is what
+/// [`RpcServeOptions::default`] already supplies.
+///
+/// A 3 s drain averted no SIGKILL. It abandoned the #6595 guarantee — every
+/// redb handle released BEFORE the unlink — three seconds into a multi-minute
+/// `analyze.review`, narrowing that window rather than closing it. The drain is
+/// a MAXIMUM wait, so the larger budget costs a prompt shutdown nothing and
+/// buys a slow one the release it needs.
+/// Test: `serve_options_drain_for_as_long_as_this_server_may_actually_live`.
 fn serve_options() -> RpcServeOptions {
     RpcServeOptions {
         max_frame_bytes: MAX_FRAME_BYTES,
-        shutdown_drain: SHUTDOWN_FLUSH_TIMEOUT,
         ..RpcServeOptions::default()
     }
 }
 
+/// What this server declares to [`trusty_common::uds::on_demand::ANALYZE_TIMEOUTS`]
+/// as its own shutdown budget.
+///
+/// Why it is an ALIAS of [`trusty_common::uds::ANALYZE_SHUTDOWN_FLUSH`] rather
+/// than a second literal (#6601 review): `ServiceTimeouts`' sourcing rule says
+/// the supervisor's `shutdown_flush` must be the supervised binary's REAL
+/// budget, and `trusty-common` cannot import this crate to read it. The previous
+/// arrangement — two literals plus
+/// `analyze_flush_budget_matches_the_supervisor_contract` asserting they were
+/// equal — detected drift only after someone edited one of them. One definition
+/// makes the drift unrepresentable.
+///
+/// 🔴 **It is NOT the serve loop's drain, and binding the two was the #6601
+/// review's HIGH finding.** The relation this number participates in
+/// (`sigterm_patience > shutdown_flush`) governs the one path where the
+/// supervisor signals an analyze child: the spawn-probe timeout, a child that
+/// never bound. A child that DID bind is detached, so it is absent from the
+/// supervisor's population and no reap path can reach it — see [`serve_options`]
+/// for the walk through those call sites, and for the window the loop drains on
+/// instead.
+///
+/// Three seconds is right for what it does bound. Every handler commits its
+/// redb write before answering, so a SIGTERM discards nothing that was acked;
+/// what the child spends after SIGTERM is signal delivery, the socket unlink and
+/// exit, and 3 s leaves 2 s of the supervisor's 5 s patience for exactly that.
+pub const SHUTDOWN_FLUSH_TIMEOUT: std::time::Duration = trusty_common::uds::ANALYZE_SHUTDOWN_FLUSH;
+
 /// Bind `socket` and serve until SIGTERM/SIGINT, then unlink it.
 ///
 /// Why the bind is [`trusty_common::uds::bind_singleton_hardened`] and not
-/// [`trusty_common::uds::server::RpcServer::run`]: this daemon is supervised by
-/// launchd with `KeepAlive::Always` (`commands::service::launchd_config`). A
-/// predecessor that is SIGKILLed — which is what `launchctl kickstart -k` does
-/// at the `ExitTimeOut` boundary — never reaches the unlink below and leaves its
-/// socket file behind. `RpcServer::run` binds through `bind_hardened`, which
-/// refuses an occupied path rather than clobbering what might be a live owner,
-/// so the replacement launchd starts would fail its bind, exit, be restarted,
-/// and fail again — a crash loop with no operator-visible cause, the same shape
+/// [`trusty_common::uds::server::RpcServer::run`]: a predecessor that is
+/// SIGKILLed never reaches the unlink below and leaves its socket file behind.
+/// ADR-0032 retired this daemon's launchd unit, so the successor is whatever
+/// `OnDemandAnalyze` spawns on the next request — and `RpcServer::run` binds
+/// through `bind_hardened`, which refuses an occupied path rather than
+/// clobbering what might be a live owner. That successor would fail its bind and
+/// exit, and so would the next, with no operator-visible cause — the same shape
 /// as the #2566 port collision. `bind_singleton_hardened` probes first and takes
 /// over only a socket the kernel proves nobody is serving, so a live daemon is
 /// still never clobbered.
@@ -390,36 +427,6 @@ fn serve_options() -> RpcServeOptions {
 ///
 /// Test: `rpc_health_answers_over_a_real_socket`,
 /// `rpc_unlinks_its_socket_on_shutdown`.
-/// This server's own shutdown budget, as the supervisor contract requires.
-///
-/// Why it is an ALIAS of [`trusty_common::uds::ANALYZE_SHUTDOWN_FLUSH`] rather
-/// than a second literal (#6601 review): `ServiceTimeouts`' sourcing rule says
-/// the supervisor's `shutdown_flush` must be the supervised binary's REAL
-/// budget, and `trusty-common` cannot import this crate to read it. The previous
-/// arrangement — two literals plus
-/// `analyze_flush_budget_matches_the_supervisor_contract` asserting they were
-/// equal — detected drift only after someone edited one of them. One definition
-/// makes the drift unrepresentable; that test now pins the equality this alias
-/// makes structural, and its companion binds this constant to the value the
-/// serve loop actually uses.
-///
-/// It is ALSO the loop's `shutdown_drain` — [`serve_options`] passes it — so
-/// this one number is what the supervisor waits for and what the server spends.
-/// Before #6601 those were two numbers: the supervisor waited 5 s while the loop
-/// inherited the shared 60 s default, and the SIGKILL landed 5 s into a drain
-/// sized for twelve times that.
-///
-/// Three seconds. Every handler commits its redb write before answering, so a
-/// SIGTERM discards nothing that was acked; what the budget buys is the #6601
-/// drain — time for connections already accepted to be answered and release
-/// their router clone, so the redb stores are closed BEFORE the unlink below
-/// tells a client to spawn a successor (#6595). Three leaves 2 s of the
-/// supervisor's 5 s patience for the unlink, the store drop and exit. An
-/// `analyze.review` handler that runs for minutes outlives it and always would:
-/// no budget under `ANALYZE_SIGTERM_PATIENCE` can cover one, and raising the
-/// patience to fit charges every supervisor reap for it.
-pub const SHUTDOWN_FLUSH_TIMEOUT: std::time::Duration = trusty_common::uds::ANALYZE_SHUTDOWN_FLUSH;
-
 pub async fn serve(state: AnalyzerAppState, socket: &Path) -> Result<()> {
     // Migration cleanup, deliberately OUTSIDE `serve_with_shutdown`: it resolves
     // the real `$HOME` and the real data directory, so a test that drove it

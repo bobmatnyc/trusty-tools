@@ -1269,29 +1269,40 @@ fn rpc_diagnostics_reports_deadline_exceeded_distinctly() {
     );
 }
 
-/// Why (#6601 review): `analyze_flush_budget_matches_the_supervisor_contract`
-/// pins two CONSTANTS against each other and neither was the value the serve
-/// loop spent — `serve_options` inherited `RpcServeOptions::default()`, so the
-/// supervisor waited 5 s while the loop drained on the process grace window.
-/// Both constants stayed equal throughout; the assertion could not see it. This
-/// is the missing link: the field the loop reads, pinned to the budget the
-/// supervisor was told about.
+/// Why (#6601 review): the first version of this test pinned the drain to
+/// `SHUTDOWN_FLUSH_TIMEOUT` and asserted it fitted inside `sigterm_patience` —
+/// a deadline that never applies to a serving analyze process. A bound analyze
+/// child is detached, so `ensure_running` never enters it in the supervisor's
+/// population and no `terminate_child` call site can reach it; `sigterm_patience`
+/// governs only a child that failed to bind. `trusty-analyze stop` sends SIGTERM
+/// and polls 5 s to REPORT, never to kill. The only bounded terminator left is
+/// the OS grace window, so that is what the drain must be sized to.
 ///
-/// What: `serve_options().shutdown_drain` must BE `SHUTDOWN_FLUSH_TIMEOUT`, and
-/// that must be strictly less than the patience the supervisor waits, or the
-/// SIGKILL lands inside the drain.
+/// What: `serve_options().shutdown_drain` must be the plannable grace — and the
+/// assertion pins the RELATION to the grace window, so an operator's
+/// `TRUSTY_TERMINATION_GRACE_SECS` moves both together instead of falsifying a
+/// hardcoded number. A 3 s drain fails the first assertion; a whole-window drain
+/// fails the second.
 /// Test: this is the test.
 #[test]
-fn serve_options_bind_the_shutdown_drain_to_this_services_own_budget() {
+fn serve_options_drain_for_as_long_as_this_server_may_actually_live() {
+    let drain = serve_options().shutdown_drain;
     assert_eq!(
-        serve_options().shutdown_drain,
-        SHUTDOWN_FLUSH_TIMEOUT,
-        "the loop must drain on this service's declared budget, not on the \
-         shared default sized to the process termination grace"
+        drain,
+        trusty_common::shutdown::plannable_grace(),
+        "the drain must be the part of the OS grace window this process may \
+         plan inside — no supervisor deadline binds a SERVING analyze child"
+    );
+    assert_eq!(
+        drain + trusty_common::shutdown::CLEANUP_RESERVE,
+        trusty_common::shutdown::termination_grace(),
+        "the drain must still leave the cleanup reserve for the socket unlink \
+         and the store drop that follow it"
     );
     assert!(
-        SHUTDOWN_FLUSH_TIMEOUT < trusty_common::uds::on_demand::ANALYZE_TIMEOUTS.sigterm_patience,
-        "the drain must finish inside the patience the supervisor actually waits"
+        drain > SHUTDOWN_FLUSH_TIMEOUT,
+        "the #6595 guarantee — redb released before the unlink — must not be \
+         abandoned at the supervisor's spawn-failure budget"
     );
 }
 
@@ -1306,7 +1317,7 @@ fn serve_options_bind_the_shutdown_drain_to_this_services_own_budget() {
 /// What closes it since #6601: `drain_shutdown` inside `serve_until_idle`. Every
 /// accepted connection holds an `IdleGuard`, and the shutdown arm waits for that
 /// count to reach zero — bounded by `RpcServeOptions::shutdown_drain`, which
-/// [`serve_options`] sets to this crate's `SHUTDOWN_FLUSH_TIMEOUT` — before it
+/// [`serve_options`] inherits from the plannable grace window — before it
 /// returns and [`release_stores`] drops the router.
 ///
 /// What forces that path deterministically: a peer that has been accepted but

@@ -10,8 +10,10 @@
 
 use super::*;
 use crate::service::shutdown_flush::MIN_FLUSH_TIMEOUT_SECS;
+// `CLEANUP_RESERVE` arrives through `use super::*` above — the module
+// re-exports it (#6601 review), so this file exercises the alias rather than
+// reaching past it to `trusty_common`.
 use serial_test::serial;
-use trusty_common::shutdown::CLEANUP_RESERVE;
 
 /// A snapshot path that does not exist, so `shutdown_flush_deadline_for` returns
 /// exactly its floor (`MIN_FLUSH_TIMEOUT_SECS`) with no size scaling.
