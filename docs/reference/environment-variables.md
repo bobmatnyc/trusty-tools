@@ -15,6 +15,7 @@
 | `TRUSTY_AWS_REGION` | `trusty-analyze` (Bedrock deep pass) | AWS region for Bedrock `Converse` calls. Takes priority over `AWS_REGION`. Default: `us-east-1`. |
 | `AWS_REGION` | `trusty-analyze` (Bedrock deep pass) | Fallback AWS region for Bedrock calls. Overridden by `TRUSTY_AWS_REGION`. |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` | `trusty-analyze` (Bedrock deep pass) | Standard AWS credentials for Bedrock access. The full AWS credential chain (env vars, `~/.aws/credentials` profiles, IAM roles, SSO) is supported. No API key is needed when using a `bedrock/` model. |
+| `AWS_REGION`, `AWS_PROFILE`, `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` | `trusty-mpm` log drain (`s3://` destinations) | Read through the same AWS default provider chain, for any `s3://` log-drain destination that does NOT pin an identity. **A destination that carries `?profile=` ignores all of these** — that profile alone supplies its credentials and region, so an `AWS_ACCESS_KEY_ID` in the daemon's environment cannot re-point one destination at another account (#6657). See [log-drain.md](log-drain.md#s3-credentials). |
 
 ## Logging
 

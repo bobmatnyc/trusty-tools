@@ -6,7 +6,10 @@ name = "trusty-code"
 # 0.5.0 (#5439): minor — `serve::http::build_axum_router` now takes 5
 # parameters instead of 4 (bearer-auth wiring); cargo-semver-checks reports a
 # function_parameter_count_changed break, so Cargo's 0.x rule puts it in MINOR.
-version = "0.5.0"
+# 0.5.1 (#6657): patch — `fs_browse::mpm_registry::parse_owner_repo` (a
+# private fn) now delegates to `trusty_common::github_path::parse_remote_url`
+# instead of its own split logic; no public item changed shape.
+version = "0.5.1"
 edition = "2024"
 rust-version.workspace = true
 # license.workspace resolves to "MIT"; LICENSE is kept in-crate for correctness.

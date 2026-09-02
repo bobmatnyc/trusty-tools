@@ -11,7 +11,8 @@
 //! over `str` — split on `://`, dispatch on the scheme, then parse the
 //! remainder per-scheme. No generic URI crate is involved.
 //! Test: `super::tests::uri_table_accepts`, `super::tests::uri_table_rejects`,
-//! `super::tests::uri_reserved_schemes`, `super::tests::uri_region_override`.
+//! `super::tests::uri_reserved_schemes`, `super::tests::uri_region_override`,
+//! `super::tests::uri_accepts_profile_and_role_arn`.
 
 use std::path::PathBuf;
 
@@ -77,6 +78,19 @@ pub enum DestinationUri {
         prefix: String,
         /// Region override from `?region=…`. `None` defers to the AWS chain.
         region: Option<String>,
+        /// Named `~/.aws` profile from `?profile=…` (#6657).
+        ///
+        /// `Some` means the profile is the WHOLE identity: the adapter reads
+        /// credentials from that profile alone and never consults the default
+        /// chain, so `AWS_ACCESS_KEY_ID` in the daemon's environment cannot
+        /// silently re-point one destination at another account.
+        profile: Option<String>,
+        /// Role to assume from `?role_arn=…` (#6657).
+        ///
+        /// Combines with `profile`: the profile (or the default chain when
+        /// there is none) supplies the base credentials the STS
+        /// `AssumeRole` call is signed with.
+        role_arn: Option<String>,
     },
     /// A local directory. Used by the hermetic tests and by any operator who
     /// wants the drain's output on disk before pointing it at a bucket.
@@ -94,10 +108,13 @@ impl DestinationUri {
     /// config reader, the CLI, and the tests.
     /// What: splits at the first `://`, resolves the scheme through
     /// [`DestinationScheme::parse`], then parses the remainder per scheme.
-    /// `s3://bucket/prefix?region=us-west-2` overrides the region the AWS chain
-    /// would otherwise supply; no other query parameter is accepted.
+    /// An `s3://` URI accepts exactly three query parameters — `region`,
+    /// `profile`, and `role_arn` (#6657) — in any combination and any order.
+    /// Every other key is rejected, and a repeated key is rejected rather than
+    /// letting the last one win.
     /// Test: `super::tests::uri_table_accepts`, `super::tests::uri_table_rejects`,
-    /// `super::tests::uri_reserved_schemes`, `super::tests::uri_region_override`.
+    /// `super::tests::uri_reserved_schemes`, `super::tests::uri_region_override`,
+    /// `super::tests::uri_accepts_profile_and_role_arn`.
     ///
     /// # Errors
     /// - [`DrainError::UnsupportedScheme`] for `gs://` and `az://`, and for any
@@ -134,7 +151,8 @@ impl DestinationUri {
         }
     }
 
-    /// Parse the remainder of an `s3://` URI: `bucket[/prefix][?region=…]`.
+    /// Parse the remainder of an `s3://` URI:
+    /// `bucket[/prefix][?region=…&profile=…&role_arn=…]`.
     fn parse_s3(uri: &str, rest: &str) -> Result<Self, DrainError> {
         let (path_part, query) = match rest.split_once('?') {
             Some((p, q)) => (p, Some(q)),
@@ -153,15 +171,17 @@ impl DestinationUri {
             });
         }
 
-        let region = match query {
-            Some(q) => Some(parse_region_query(uri, q)?),
-            None => None,
+        let params = match query {
+            Some(q) => parse_s3_query(uri, q)?,
+            None => S3Params::default(),
         };
 
         Ok(Self::S3 {
             bucket: bucket.to_string(),
             prefix: normalise_prefix(prefix),
-            region,
+            region: params.region,
+            profile: params.profile,
+            role_arn: params.role_arn,
         })
     }
 
@@ -218,20 +238,44 @@ impl DestinationUri {
     /// has to be part of where that decision is stored.
     ///
     /// What: `<scheme>-<first 16 hex chars of SHA-256(canonical form)>`. The
-    /// canonical form carries scheme, bucket-or-path, and key prefix —
-    /// everything that changes WHICH objects a destination holds. `?region=` is
-    /// excluded on purpose: a region override changes which endpoint serves a
-    /// bucket, never its contents, so adding one must not orphan a valid cache.
+    /// canonical form carries scheme, bucket-or-path, key prefix, and the
+    /// identity (`profile`, `role_arn`) — everything that changes WHICH objects
+    /// a destination holds or can see. `?region=` is excluded on purpose: a
+    /// region override changes which endpoint serves a bucket, never its
+    /// contents, so adding one must not orphan a valid cache. The identity is
+    /// NOT excluded, because two identities against one bucket can see
+    /// different objects, and the cheap way to be wrong is the safe one — an
+    /// unnecessary split re-uploads, a wrong share skips (#6657).
     /// The value is hashed rather than spelled out because a key prefix and a
     /// filesystem path are both arbitrary strings, and a cache directory needs
     /// one segment with no `/`, no `..`, and no length surprise.
     ///
     /// Test: `super::tests::cache_namespace_separates_destinations`,
-    /// `super::tests::cache_namespace_ignores_the_region_override`.
+    /// `super::tests::cache_namespace_ignores_the_region_override`,
+    /// `super::tests::cache_namespace_separates_identities`.
     pub fn cache_namespace(&self) -> String {
         let (scheme, canonical) = match self {
             // #6548: `region` is deliberately absent from the canonical form.
-            Self::S3 { bucket, prefix, .. } => ("s3", format!("s3://{bucket}/{prefix}")),
+            Self::S3 {
+                bucket,
+                prefix,
+                profile,
+                role_arn,
+                ..
+            } => {
+                // The suffix is appended only when an identity is pinned, so a
+                // destination written before #6657 keeps the namespace its
+                // existing cache directory already carries.
+                let identity = match (profile.as_deref(), role_arn.as_deref()) {
+                    (None, None) => String::new(),
+                    (p, r) => format!(
+                        "#profile={}&role_arn={}",
+                        p.unwrap_or_default(),
+                        r.unwrap_or_default()
+                    ),
+                };
+                ("s3", format!("s3://{bucket}/{prefix}{identity}"))
+            }
             Self::File { path } => ("file", format!("file://{}", path.display())),
         };
         // `hex_digest` is a SHA-256 in hex, so it is always 64 characters.
@@ -248,35 +292,64 @@ impl DestinationUri {
     }
 }
 
-/// Extract `region=<value>` from an `s3://` query string.
+/// The three `s3://` query parameters, before they reach the enum variant.
+#[derive(Debug, Default)]
+struct S3Params {
+    region: Option<String>,
+    profile: Option<String>,
+    role_arn: Option<String>,
+}
+
+/// Extract `region=`, `profile=`, and `role_arn=` from an `s3://` query string.
 ///
 /// Rejects any other parameter rather than ignoring it: a silently-dropped
-/// `?reigon=eu-west-1` would send logs to the wrong region with no signal.
-fn parse_region_query(uri: &str, query: &str) -> Result<String, DrainError> {
-    let mut region = None;
+/// `?reigon=eu-west-1` would send logs to the wrong region with no signal, and
+/// a silently-dropped `?porfile=logs-writer` would send them to the wrong
+/// ACCOUNT under whatever identity the default chain happened to hold (#6657).
+/// A repeated key is rejected for the same reason — picking the last occurrence
+/// makes `?profile=a&profile=b` mean `b` with nothing on screen saying so.
+fn parse_s3_query(uri: &str, query: &str) -> Result<S3Params, DrainError> {
+    let mut params = S3Params::default();
     for pair in query.split('&').filter(|p| !p.is_empty()) {
         let (key, value) = pair.split_once('=').ok_or_else(|| DrainError::Uri {
             uri: uri.to_string(),
             reason: format!("query parameter `{pair}` has no `=`"),
         })?;
-        if key != "region" {
-            return Err(DrainError::Uri {
-                uri: uri.to_string(),
-                reason: format!("unknown query parameter `{key}` — only `region` is accepted"),
-            });
-        }
         if value.is_empty() {
             return Err(DrainError::Uri {
                 uri: uri.to_string(),
-                reason: "`region=` is empty".to_string(),
+                reason: format!("`{key}=` is empty"),
             });
         }
-        region = Some(value.to_string());
+        let slot = match key {
+            "region" => &mut params.region,
+            "profile" => &mut params.profile,
+            "role_arn" => &mut params.role_arn,
+            _ => {
+                return Err(DrainError::Uri {
+                    uri: uri.to_string(),
+                    reason: format!(
+                        "unknown query parameter `{key}` — only `region`, `profile`, \
+                         and `role_arn` are accepted"
+                    ),
+                });
+            }
+        };
+        if slot.is_some() {
+            return Err(DrainError::Uri {
+                uri: uri.to_string(),
+                reason: format!("query parameter `{key}` is given more than once"),
+            });
+        }
+        *slot = Some(value.to_string());
     }
-    region.ok_or_else(|| DrainError::Uri {
-        uri: uri.to_string(),
-        reason: "query string is present but empty".to_string(),
-    })
+    if params.region.is_none() && params.profile.is_none() && params.role_arn.is_none() {
+        return Err(DrainError::Uri {
+            uri: uri.to_string(),
+            reason: "query string is present but empty".to_string(),
+        });
+    }
+    Ok(params)
 }
 
 /// Strip leading and trailing `/` and collapse the empty case.

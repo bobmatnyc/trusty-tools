@@ -1,11 +1,10 @@
 # Log Drain — Destinations, Key Layout, and Manifest Semantics
 
-> Reference for `trusty_common::log_drain`, added by
-> [#6533](https://github.com/bobmatnyc/trusty-tools/issues/6533) (epic phase
-> 1+2). This page covers the drain **core**: destination URIs, the key layout,
-> manifest semantics, the scrub, and the limits. It is not a configuration
-> guide — nothing reads a config file or schedules a run yet. See
-> [What Phase 3 adds](#what-phase-3-adds).
+> Reference for `trusty_common::log_drain` and the `log_drain:` config section,
+> added by [#6533](https://github.com/bobmatnyc/trusty-tools/issues/6533). This
+> page covers the drain **core** — destination URIs, the key layout, manifest
+> semantics, the scrub, and the limits — and the
+> [`log_drain:` configuration](#configuration) trusty-mpm's daemon reads.
 
 The module is gated behind the `log-drain` feature and is not compiled by
 default:
@@ -34,54 +33,95 @@ syntax error.
 |---|---|
 | `s3://bucket` | Bucket root, region from the AWS credential chain |
 | `s3://bucket/prefix` | Every object written beneath `prefix` |
-| `s3://bucket/prefix?region=us-west-2` | Region override; the ONLY accepted query parameter |
+| `s3://bucket/prefix?region=us-west-2` | Region override |
+| `s3://bucket/prefix?profile=logs-writer` | Credentials and region from that `~/.aws` profile alone (#6657) |
+| `s3://bucket/prefix?role_arn=arn:aws:iam::…:role/…` | Assume that role over the base identity (#6657) |
 | `file:///abs/path` | A local directory. Used by the hermetic tests, and by an operator staging output before pointing at a bucket |
 | `gs://…`, `az://…` | **Reserved and refused** with `DrainError::UnsupportedScheme` |
 
+`region`, `profile`, and `role_arn` are the only accepted query parameters. They
+combine in any order, and `file://` takes none.
+
 Rejected forms, each with `DrainError::Uri`: a missing `://`, an empty bucket
 (`s3:///prefix`), a relative `file://relative/path`, `file:///` (the filesystem
-root), a query on a `file://` URI, an empty or misspelled query parameter. A
-misspelled `?reigon=` is refused rather than ignored — silently dropping it
-would send logs to the wrong region with no signal.
+root), a query on a `file://` URI, an empty or misspelled query parameter, and a
+parameter given twice. A misspelled `?reigon=` is refused rather than ignored —
+silently dropping it would send logs to the wrong region with no signal, and a
+dropped `?porfile=` would send them to the wrong ACCOUNT.
 
 Schemes are matched case-insensitively; the rest of the URI is not.
 
 ### S3 credentials
 
-The S3 adapter loads the **AWS default provider chain** — environment
-variables, `~/.aws/credentials`, SSO, IMDS — the same chain
-`inference::bedrock` uses, reused rather than reimplemented per the
+With no `?profile=` and no `?role_arn=`, the S3 adapter loads the **AWS default
+provider chain** — environment variables, `~/.aws/credentials`, SSO, IMDS — the
+same chain `inference::bedrock` uses, reused rather than reimplemented per the
 common-entry-point rule in [`CLAUDE.md`](../../CLAUDE.md). It is bridged into
 `object_store`'s own `CredentialProvider`, and re-fetched on each request so a
 rotated session token is picked up without rebuilding the store.
 
 **No bucket or region is ever hardcoded.** The region resolves as
-`?region=` → the credential chain → refusal with `DrainError::Credentials`.
+`?region=` → the identity's own region → refusal with `DrainError::Credentials`.
+
+#### Per-destination identity (#6657)
+
+`?profile=<name>` makes that profile the **whole** identity for the destination:
+credentials come from `ProfileFileCredentialsProvider` for that profile and
+nothing else, so an `AWS_ACCESS_KEY_ID` in the daemon's environment cannot
+re-point it at another account. Region falls back to the same profile's
+`region`, so a two-account layout needs no `?region=` on either URI.
+
+`?role_arn=<arn>` wraps whatever identity resolved — the named profile, or the
+default chain when none is named — in an STS `AssumeRole`. No STS call happens
+at connect time; the provider is lazy, so a bad ARN surfaces on the first upload
+rather than at daemon startup.
+
+The manifest cache namespace **includes** the identity, unlike `?region=`. A
+region override cannot change what a bucket holds; a different identity can
+change what it shows, and the cheap way to be wrong is the safe one — an
+unnecessary split re-uploads, a wrong share skips.
 
 ## Key layout
 
 ```text
-<destination prefix>/<github_id>/<session_id>/logs/<crate>/<relative_file>
+<destination prefix>/<owner>/<project>/<crate>/<relative_file>
 ```
 
 The destination prefix comes from the URI (`s3://bucket/PREFIX`) and is joined
 by the adapter; everything after it is built by `DrainTarget`. For
 `file://` destinations the URI's path is the store root, so the prefix is empty.
+A destination of `s3://acme-logs/live` therefore writes
+`live/duettoresearch/pricing/trusty-code/daemon.log`.
 
-`DrainTarget { github_id, session_id }` is **supplied by the caller**. The core
-does not resolve GitHub identity — that is Phase 3's job. An empty or
-whitespace-only `github_id` or `session_id` is refused with
-`DrainError::MissingIdentity` **before anything touches the filesystem or the
-network**: the drain never writes under an unknown id, because an empty
-component collapses one user's logs into a shared, unattributable prefix.
+`DrainTarget { owner, project }` is **supplied by the caller**. The core does
+not resolve the identity — trusty-mpm's config layer does, from the git
+`origin` of each source's root. An empty or whitespace-only `owner` or
+`project` is refused with `DrainError::MissingIdentity` **before anything
+touches the filesystem or the network**: the drain never writes under a guessed
+identity, because an empty component collapses one project's logs into a
+shared, unattributable prefix.
 
-`session_id` is opaque to the drain — it is whatever the consuming crate calls
-its own session.
+### The layout changed in #6657
+
+The previous layout was `<github_id>/<session_id>/logs/<crate>/<relative_file>`
+— every project on a host under one prefix, keyed by whoever ran the daemon,
+split by a session id that meant nothing to anyone reading the bucket.
+
+**Objects already uploaded under the old layout stay exactly where they are.**
+Nothing moves them and nothing deletes them. The manifest is keyed by
+destination *and* key, so the new layout starts with an empty manifest of its
+own: the first pass after the upgrade re-uploads the current log files under
+`<owner>/<project>/…` and then dedupes as before. The old prefix simply stops
+growing. Delete it by hand if you want it gone:
+
+```bash
+aws s3 rm --recursive s3://<bucket>/<prefix>/<github_id>/<session_id>/
+```
 
 ## Manifest semantics
 
 Each target carries a JSON manifest at
-`<…>/logs/.drain-manifest.json`, listing one entry per uploaded file:
+`<owner>/<project>/.drain-manifest.json`, listing one entry per uploaded file:
 
 ```json
 {
@@ -104,10 +144,10 @@ invalidates every recorded digest.
 
 ### Two copies, and which one wins
 
-- **Remote** (`<…>/logs/.drain-manifest.json`) is **authoritative**. It is the
+- **Remote** (`<owner>/<project>/.drain-manifest.json`) is **authoritative**. It is the
   only copy that describes what is actually in the bucket.
 - **Local cache**
-  (`<state_dir>/log-drain/<destination namespace>/<github_id>/<session_id>/manifest.json`)
+  (`<state_dir>/log-drain/<destination namespace>/<owner>/<project>/manifest.json`)
   exists so an unchanged run costs no network read at all.
 
 When both exist and disagree, the remote copy wins and the cache is rewritten
@@ -123,12 +163,16 @@ than skipping one that was never written.
 
 `<destination namespace>` is `DestinationUri::cache_namespace()`:
 `<scheme>-<16 hex chars of SHA-256(canonical form)>`, e.g. `s3-4f1c9ae0d2b7…`.
-The canonical form carries the **scheme**, the **bucket or path**, and the **key
-prefix** — everything that changes which objects a destination holds. `?region=`
-is deliberately **excluded**: a region override changes which endpoint serves a
-bucket, never its contents, so adding one must not orphan a cache that is still
-valid. The value is hashed because a key prefix and a filesystem path are both
-arbitrary strings, and a cache directory needs a single path segment.
+The canonical form carries the **scheme**, the **bucket or path**, the **key
+prefix**, and the **identity** (`?profile=`, `?role_arn=`) — everything that
+changes which objects a destination holds or can see. `?region=` is deliberately
+**excluded**: a region override changes which endpoint serves a bucket, never
+its contents, so adding one must not orphan a cache that is still valid. The
+value is hashed because a key prefix and a filesystem path are both arbitrary
+strings, and a cache directory needs a single path segment.
+
+A destination that pins no identity produces the same namespace it produced
+before #6657, so adding per-destination identities orphaned no existing cache.
 
 Before [#6548](https://github.com/bobmatnyc/trusty-tools/issues/6548) the cache
 was keyed by identity alone. Repointing one session from bucket A to a brand-new
@@ -147,7 +191,7 @@ forever.
 **Repair:** delete the manifest object.
 
 ```bash
-aws s3 rm s3://<bucket>/<prefix>/<github_id>/<session_id>/logs/.drain-manifest.json
+aws s3 rm s3://<bucket>/<prefix>/<owner>/<project>/.drain-manifest.json
 ```
 
 The next run finds no remote copy, falls back to a cache that is now
@@ -270,7 +314,7 @@ files. `run_once` now writes a `SkipRecord` — `relative_file`, `size`,
 
 ## What the caller owns
 
-- **Identity** — `DrainTarget` is supplied, never resolved here.
+- **Identity** — `DrainTarget { owner, project }` is supplied, never resolved here.
 - **Single-flight** — `run_once` is one pass with no locking. Two concurrent
   runs against one target will both upload and both rewrite the manifest, and
   the loser's entries are lost. Mutual exclusion belongs to the scheduler.
@@ -280,17 +324,132 @@ A **per-file** failure is collected into `DrainReport::errors` and the batch
 continues; one unreadable file must not strand every other log on the machine.
 Only a manifest read/write failure aborts a run.
 
-## What Phase 3 adds
+## Configuration
 
-Not in this module, deliberately:
+The drain is off by default. trusty-mpm's daemon reads the `log_drain:` section
+of `~/.trusty-tools/trusty-mpm/config.yaml`; `resolve_log_drain` turns it into a
+plan, and the `log_drain` doctor row reports what that plan says.
 
-- The **scheduler** — a `tokio::time::interval` + `CancellationToken` loop
-  beside `orphan_gc_loop`, with the single-flight guard `run_once` does not
-  provide.
-- **GitHub identity resolution** — one cached `gh api user` lookup feeding
-  `DrainTarget.github_id`, with the config value taking precedence.
-- **Configuration** — a `[log_drain]` section, and the `LogSource` list for the
-  daemons that actually produce logs.
-- **Consumers** — nothing calls `run_once` yet.
-- **Pruning** — the drain is upload-only; `prune_after_upload` is not
-  implemented.
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Whether the scheduler runs at all |
+| `destination` | — | Section-default destination URI |
+| `interval_secs` | `900` | Seconds between passes. Zero is an error |
+| `max_file_bytes` | 4 GiB | Plaintext source ceiling |
+| `max_wire_bytes` | 64 MiB | Compressed body ceiling |
+| `secrets` | `[]` | Extra literal strings scrubbed from every body |
+| `owner` | — | Fallback owner for a source that resolves none |
+| `project` | — | Fallback project, paired with `owner` |
+| `sources[]` | the daemon's own log dir | Directories to collect |
+
+A `sources[]` entry takes `crate_name` and `root` (both required), `include`
+(globs relative to `root`, default `**/*`), `level` (minimum line level),
+`destination`, `owner`/`project`, and `enabled`.
+
+**A malformed section is a hard error, never a silent skip.** Validation runs
+whenever the section is present, including while `enabled: false`, so a typo is
+found before the operator flips the switch. The scheduler refuses to start and
+the `log_drain` doctor row reports `Fail`.
+
+### Per-project destinations (#6657)
+
+A source's own `destination` wins; a source that names none inherits the
+section's. `destination` at the section level is required only when some source
+still needs it.
+
+Each source also resolves an `<owner>/<project>`, in this order:
+
+1. the source's own `owner:` and `project:` — set both, or neither;
+2. the git `origin` of its `root`. `git -C <root> config --get
+   remote.origin.url` walks **up**, so a log directory inside a checkout
+   resolves to that checkout, and a worktree resolves to its parent;
+3. the section-level `owner:`/`project:`.
+
+A source that resolves none of the three is a **hard config error** naming the
+source, its root, and both ways to fix it. There is no placeholder key: the
+drain refuses the whole plan rather than file one project's logs under an
+invented prefix.
+
+The remote is parsed by `trusty_common::github_path::parse_remote_url`, the
+workspace's one git-remote-URL parser — HTTPS, `ssh://`, and scp-style
+`git@host:owner/repo`, with or without `.git`, on any host. The owner and
+project keep the case the remote spells them in.
+
+Sources are grouped by the destination **and** project they resolve to, and the
+scheduler runs **one pass per group** — its own connection, its own manifest.
+One bucket holding three projects is three passes.
+
+```yaml
+log_drain:
+  enabled: true
+  # Everything that does not say otherwise goes here.
+  destination: "s3://team-shared-logs/live"
+  interval_secs: 900
+  # Used only by sources that resolve no project of their own — the daemon's
+  # own log directory is inside no checkout.
+  owner: "duettoresearch"
+  project: "workstation"
+  sources:
+    - crate_name: trusty-mpm
+      root: "~/.trusty-mpm/logs"
+      include: ["trusty-mpm.log*"]
+      level: info
+    # Inside the checkout, so owner and project come from its git origin.
+    - crate_name: trusty-code
+      root: "~/src/duettoresearch/pricing/logs"
+      include: ["*.log"]
+      destination: "s3://pricing-logs/live?profile=pricing&region=us-east-1"
+    # Logs live outside the checkout, so this one names its project.
+    - crate_name: trusty-agents
+      root: "~/Library/Logs/trusty-agents"
+      include: ["daemon-*.log"]
+      owner: "duettoresearch"
+      project: "insights"
+    # Off for now, without deleting the entry.
+    - crate_name: trusty-search
+      root: "~/Library/Logs/trusty-search"
+      enabled: false
+```
+
+That config produces three passes per tick, writing
+`live/duettoresearch/workstation/trusty-mpm/…` to `team-shared-logs`,
+`live/duettoresearch/pricing/trusty-code/…` to `pricing-logs` signed with the
+`pricing` profile, and `live/duettoresearch/insights/trusty-agents/…` back to
+`team-shared-logs`.
+
+Two sources share a pass only when they resolved to the same destination AND
+the same project. Grouping is by the PARSED URI, so `s3://b/p` and `s3://b/p/`
+are one group, while two identities against one bucket are two.
+
+### Turning one project off
+
+`enabled: false` on a source skips it: no connection, no upload, no manifest.
+The entry stays in the config and `tm doctor` still names it, so an operator can
+tell a deliberate opt-out from a project that fell out of the file:
+
+```
+log drain enabled (s3 → s3://team-shared-logs/live [duettoresearch/workstation],
+  trusty-search → s3://team-shared-logs/live: disabled) ...
+```
+
+### A destination that fails does not fall back
+
+If a destination cannot be reached, its sources are **skipped for that tick**.
+They are never retried against the section default — a per-source destination is
+a statement about which account those bytes belong in, so shipping them to the
+fallback would be worse than not shipping them. Every other destination still
+drains, the tick reports `Failed`, and the `log_drain` doctor row names which
+destination broke:
+
+```
+log drain enabled (s3 → s3://team-shared-logs/live [duettoresearch/workstation], s3 → s3://pricing-logs/live?profile=pricing [duettoresearch/pricing])
+  but the last run FAILED at 2026-09-02T11:40:12Z —
+  s3 → s3://team-shared-logs/live [duettoresearch/workstation]: ok — 2 file(s) uploaded (48122 B), 7 unchanged, 0 over the size ceiling (0 newly recorded);
+  s3 → s3://pricing-logs/live?profile=pricing [duettoresearch/pricing]: FAILED — cannot reach the destination: …
+```
+
+## Not implemented
+
+- **Pruning** — the drain is upload-only; `prune_after_upload` does not exist.
+- **`gs://` and `az://`** — recognised by the parser and refused; no backend is
+  compiled behind either.

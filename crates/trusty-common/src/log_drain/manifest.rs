@@ -18,7 +18,7 @@
 //!
 //! [`DrainManifest::cache_path`] puts
 //! [`LogDestination::cache_namespace`] above the target's own segment. Before
-//! that, the cache lived at `<state_dir>/log-drain/<github_id>/<session_id>/`
+//! that, the cache lived at `<state_dir>/log-drain/<identity>/`
 //! and described no particular destination, so switching one session from
 //! bucket A to bucket B found A's record — and, since the fresh bucket had no
 //! remote manifest of its own to override it, skipped every file A already
@@ -373,9 +373,9 @@ impl DrainManifest {
     /// whose uploads are fine.
     ///
     /// Test: `super::tests::run_once_spot_checks_a_lying_remote_manifest`.
-    pub async fn spot_check(&self, dest: &dyn LogDestination, logs_prefix: &str) -> Option<String> {
+    pub async fn spot_check(&self, dest: &dyn LogDestination, key_prefix: &str) -> Option<String> {
         let entry = self.entries.get(sample_index(self.entries.len())?)?;
-        let key = format!("{logs_prefix}/{}", entry.relative_file);
+        let key = format!("{key_prefix}/{}", entry.relative_file);
         match dest.head(&key).await {
             Ok(Some(_)) => None,
             Ok(None) => Some(key),

@@ -42,9 +42,9 @@ pub use untracked_sync::{
 /// section is an error rather than a silent fall-back to defaults.
 pub mod log_drain;
 pub use log_drain::{
-    DEFAULT_INTERVAL_SECS as LOG_DRAIN_DEFAULT_INTERVAL_SECS, LogDrainConfig, LogDrainConfigError,
-    LogDrainSetting, LogDrainSourceConfig, ResolvedLogDrain,
-    STATE_SUBDIR as LOG_DRAIN_STATE_SUBDIR, resolve_log_drain,
+    DEFAULT_INTERVAL_SECS as LOG_DRAIN_DEFAULT_INTERVAL_SECS, DisabledSource, LogDrainConfig,
+    LogDrainConfigError, LogDrainSetting, LogDrainSourceConfig, ResolvedDrainDestination,
+    ResolvedLogDrain, STATE_SUBDIR as LOG_DRAIN_STATE_SUBDIR, resolve_log_drain,
 };
 
 /// Crate name used as the `~/.trusty-tools/<crate>/` directory segment.

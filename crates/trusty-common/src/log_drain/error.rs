@@ -10,8 +10,8 @@
 //! What: [`DrainError`], a `thiserror` enum. `#[non_exhaustive]` so a later
 //! phase can add a variant without a breaking change on a `0.x` crate.
 //! Test: `super::tests::uri_*` (the URI and scheme variants),
-//! `super::tests::run_once_refuses_empty_github_id` and
-//! `super::tests::run_once_refuses_empty_session_id` (identity refusal).
+//! `super::tests::run_once_refuses_an_empty_owner` and
+//! `super::tests::run_once_refuses_an_empty_project` (identity refusal).
 
 use std::path::PathBuf;
 
@@ -23,7 +23,7 @@ use std::path::PathBuf;
 /// resolution, object-store transport, local IO, manifest decoding, and the
 /// fail-closed identity refusal.
 /// Test: `super::tests::uri_table_rejects`, `super::tests::uri_reserved_schemes`,
-/// `super::tests::run_once_refuses_empty_github_id`.
+/// `super::tests::run_once_refuses_an_empty_owner`.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum DrainError {
@@ -104,15 +104,15 @@ pub enum DrainError {
     /// The caller supplied an empty identity component.
     ///
     /// Why this is an error and not a default: the key layout puts every
-    /// uploaded byte under `<github_id>/<session_id>`. An empty component
-    /// collapses one user's logs into a shared, unattributable prefix, so the
-    /// drain fails closed rather than uploading under an unknown id.
+    /// uploaded byte under `<owner>/<project>` (#6657). An empty component
+    /// collapses one project's logs into a shared, unattributable prefix, so
+    /// the drain fails closed rather than uploading under a guessed identity.
     #[error(
         "refusing to upload: `{field}` is empty — \
          the log drain never writes under an unknown identity"
     )]
     MissingIdentity {
-        /// Which component was empty: `github_id` or `session_id`.
+        /// Which component was empty: `owner` or `project`.
         field: &'static str,
     },
 }

@@ -26,8 +26,8 @@ async fn file_dest(root: &Path) -> ObjectStoreDestination {
 
 fn target() -> DrainTarget {
     DrainTarget {
-        github_id: "bobmatnyc".to_string(),
-        session_id: "sess-01".to_string(),
+        owner: "bobmatnyc".to_string(),
+        project: "trusty-tools".to_string(),
     }
 }
 
@@ -74,57 +74,29 @@ fn touch_forward(path: &Path) {
 
 // ── DestinationUri: the table ───────────────────────────────────────────────
 
+/// An `s3://` destination with no identity pinned — the shape of most cases.
+fn s3(bucket: &str, prefix: &str, region: Option<&str>) -> DestinationUri {
+    DestinationUri::S3 {
+        bucket: bucket.into(),
+        prefix: prefix.into(),
+        region: region.map(str::to_string),
+        profile: None,
+        role_arn: None,
+    }
+}
+
 #[test]
 fn uri_table_accepts() {
     let cases: &[(&str, DestinationUri)] = &[
-        (
-            "s3://my-bucket",
-            DestinationUri::S3 {
-                bucket: "my-bucket".into(),
-                prefix: String::new(),
-                region: None,
-            },
-        ),
-        (
-            "s3://my-bucket/",
-            DestinationUri::S3 {
-                bucket: "my-bucket".into(),
-                prefix: String::new(),
-                region: None,
-            },
-        ),
-        (
-            "s3://my-bucket/logs",
-            DestinationUri::S3 {
-                bucket: "my-bucket".into(),
-                prefix: "logs".into(),
-                region: None,
-            },
-        ),
+        ("s3://my-bucket", s3("my-bucket", "", None)),
+        ("s3://my-bucket/", s3("my-bucket", "", None)),
+        ("s3://my-bucket/logs", s3("my-bucket", "logs", None)),
         (
             "s3://my-bucket/logs/nested/",
-            DestinationUri::S3 {
-                bucket: "my-bucket".into(),
-                prefix: "logs/nested".into(),
-                region: None,
-            },
+            s3("my-bucket", "logs/nested", None),
         ),
-        (
-            "  s3://my-bucket/logs  ",
-            DestinationUri::S3 {
-                bucket: "my-bucket".into(),
-                prefix: "logs".into(),
-                region: None,
-            },
-        ),
-        (
-            "S3://my-bucket/logs",
-            DestinationUri::S3 {
-                bucket: "my-bucket".into(),
-                prefix: "logs".into(),
-                region: None,
-            },
-        ),
+        ("  s3://my-bucket/logs  ", s3("my-bucket", "logs", None)),
+        ("S3://my-bucket/logs", s3("my-bucket", "logs", None)),
         (
             "file:///var/log/trusty",
             DestinationUri::File {
@@ -149,14 +121,62 @@ fn uri_table_accepts() {
 #[test]
 fn uri_region_override() {
     let parsed = DestinationUri::parse("s3://bucket/logs?region=us-west-2").expect("parses");
-    assert_eq!(
-        parsed,
-        DestinationUri::S3 {
-            bucket: "bucket".into(),
-            prefix: "logs".into(),
-            region: Some("us-west-2".into()),
-        }
-    );
+    assert_eq!(parsed, s3("bucket", "logs", Some("us-west-2")));
+}
+
+#[test]
+fn uri_accepts_profile_and_role_arn() {
+    // #6657: a per-source destination has to be able to name its own identity,
+    // or every destination in one daemon signs with whatever the process-wide
+    // default chain happened to resolve.
+    /// One URI and the three query values it must parse to.
+    struct Case {
+        uri: &'static str,
+        region: Option<&'static str>,
+        profile: Option<&'static str>,
+        role_arn: Option<&'static str>,
+    }
+
+    let arn = "arn:aws:iam::141377423791:role/log-drain-writer";
+    let cases = [
+        Case {
+            uri: "s3://b/p?profile=logs-writer",
+            region: None,
+            profile: Some("logs-writer"),
+            role_arn: None,
+        },
+        Case {
+            uri: "s3://b/p?role_arn=arn:aws:iam::141377423791:role/log-drain-writer",
+            region: None,
+            profile: None,
+            role_arn: Some(arn),
+        },
+        // All three, in an order that is not the parser's own.
+        Case {
+            uri: "s3://b/p?role_arn=arn:aws:iam::141377423791:role/log-drain-writer\
+                  &profile=logs-writer&region=us-east-1",
+            region: Some("us-east-1"),
+            profile: Some("logs-writer"),
+            role_arn: Some(arn),
+        },
+    ];
+
+    for case in cases {
+        let parsed = DestinationUri::parse(case.uri)
+            .unwrap_or_else(|e| panic!("`{}` should parse, got {e}", case.uri));
+        assert_eq!(
+            parsed,
+            DestinationUri::S3 {
+                bucket: "b".into(),
+                prefix: "p".into(),
+                region: case.region.map(str::to_string),
+                profile: case.profile.map(str::to_string),
+                role_arn: case.role_arn.map(str::to_string),
+            },
+            "parsing `{}`",
+            case.uri
+        );
+    }
 }
 
 #[test]
@@ -187,6 +207,29 @@ fn cache_namespace_separates_destinations() {
 }
 
 #[test]
+fn cache_namespace_separates_identities() {
+    // #6657: two identities against one bucket can see different objects, so a
+    // skip decision made under one must not be read back under the other. The
+    // asymmetry with `?region=` below is deliberate — a region change cannot
+    // change what a bucket holds, an identity change can change what it shows.
+    let plain = DestinationUri::parse("s3://bucket-a/logs").expect("plain");
+    let profiled = DestinationUri::parse("s3://bucket-a/logs?profile=alpha").expect("profiled");
+    let other_profile = DestinationUri::parse("s3://bucket-a/logs?profile=beta").expect("beta");
+    let roled =
+        DestinationUri::parse("s3://bucket-a/logs?role_arn=arn:aws:iam::1:role/r").expect("roled");
+
+    assert_ne!(plain.cache_namespace(), profiled.cache_namespace());
+    assert_ne!(profiled.cache_namespace(), other_profile.cache_namespace());
+    assert_ne!(plain.cache_namespace(), roled.cache_namespace());
+    assert_ne!(profiled.cache_namespace(), roled.cache_namespace());
+
+    // A destination that pins no identity keeps the namespace it had before
+    // #6657, so upgrading does not orphan an existing cache directory.
+    let regioned = DestinationUri::parse("s3://bucket-a/logs?region=eu-west-1").expect("regioned");
+    assert_eq!(plain.cache_namespace(), regioned.cache_namespace());
+}
+
+#[test]
 fn cache_namespace_ignores_the_region_override() {
     // `?region=` changes which endpoint serves a bucket, never which objects it
     // holds, so adding one must not orphan a cache that is still valid (#6548).
@@ -210,6 +253,13 @@ fn uri_table_rejects() {
         ("s3://bucket/logs?region=", "empty region value"),
         ("s3://bucket/logs?reigon=eu-west-1", "misspelled parameter"),
         ("s3://bucket/logs?region", "parameter with no `=`"),
+        // #6657: the new keys are rejected the same way when misspelled or
+        // empty, and a repeated key never silently resolves to the last one.
+        ("s3://bucket/logs?porfile=writer", "misspelled profile"),
+        ("s3://bucket/logs?profile=", "empty profile value"),
+        ("s3://bucket/logs?role_arn=", "empty role_arn value"),
+        ("s3://bucket/logs?rolearn=arn:x", "misspelled role_arn"),
+        ("s3://bucket/logs?profile=a&profile=b", "repeated parameter"),
     ];
 
     for (input, why) in cases {
@@ -244,33 +294,35 @@ fn uri_reserved_schemes() {
 
 #[test]
 fn key_layout_shape() {
+    // #6657: `<owner>/<project>/<relative log path>`, with no session segment
+    // and no `logs/` interlayer.
     let t = target();
-    assert_eq!(t.logs_prefix(), "bobmatnyc/sess-01/logs");
+    assert_eq!(t.key_prefix(), "bobmatnyc/trusty-tools");
     assert_eq!(
         t.object_key("trusty-mpm/daemon.log"),
-        "bobmatnyc/sess-01/logs/trusty-mpm/daemon.log"
+        "bobmatnyc/trusty-tools/trusty-mpm/daemon.log"
     );
     assert_eq!(
         t.manifest_key(),
-        "bobmatnyc/sess-01/logs/.drain-manifest.json"
+        "bobmatnyc/trusty-tools/.drain-manifest.json"
     );
 }
 
 #[test]
 fn identity_refusal_is_fail_closed() {
-    for (github_id, session_id, field) in [
-        ("", "sess", "github_id"),
-        ("   ", "sess", "github_id"),
-        ("bob", "", "session_id"),
-        ("bob", "  ", "session_id"),
+    for (owner, project, field) in [
+        ("", "proj", "owner"),
+        ("   ", "proj", "owner"),
+        ("bob", "", "project"),
+        ("bob", "  ", "project"),
     ] {
         let t = DrainTarget {
-            github_id: github_id.to_string(),
-            session_id: session_id.to_string(),
+            owner: owner.to_string(),
+            project: project.to_string(),
         };
         match t.validate() {
             Err(DrainError::MissingIdentity { field: got }) => assert_eq!(got, field),
-            other => panic!("`{github_id}`/`{session_id}` should refuse, got {other:?}"),
+            other => panic!("`{owner}`/`{project}` should refuse, got {other:?}"),
         }
     }
 }
@@ -344,6 +396,200 @@ async fn destination_list_is_bounded_and_prefix_scoped() {
         listed.len() <= LIST_LIMIT,
         "list must never exceed its documented cap"
     );
+}
+
+// ── #6657: per-destination S3 identity ──────────────────────────────────────
+
+/// Two profiles with distinct static keys, supplied in memory.
+///
+/// Nothing is written to disk and no env var is touched, so this cannot pick up
+/// the developer's own `~/.aws` files or collide with a concurrent test.
+#[allow(deprecated)]
+fn fixture_profiles() -> super::destination::ProfileFiles {
+    use aws_config::profile::profile_file::ProfileFileKind;
+    super::destination::ProfileFiles::builder()
+        .with_contents(
+            ProfileFileKind::Credentials,
+            "[alpha]\n\
+             aws_access_key_id = AKIAALPHAALPHAALPHA\n\
+             aws_secret_access_key = alpha-secret\n\
+             \n\
+             [beta]\n\
+             aws_access_key_id = AKIABETABETABETABET\n\
+             aws_secret_access_key = beta-secret\n\
+             \n\
+             [regionless]\n\
+             aws_access_key_id = AKIANOREGIONNOREGIO\n\
+             aws_secret_access_key = regionless-secret\n",
+        )
+        .with_contents(
+            ProfileFileKind::Config,
+            "[profile alpha]\nregion = us-east-1\n\n[profile beta]\nregion = eu-west-1\n",
+        )
+        .build()
+}
+
+/// The role every `?role_arn=` fixture assumes. Never contacted: the provider
+/// is lazy, so building one reaches no STS endpoint.
+const FIXTURE_ROLE_ARN: &str = "arn:aws:iam::123456789012:role/log-drain";
+
+/// Resolve one destination's identity against the in-memory profile fixture.
+async fn resolve_fixture_auth(
+    label: &str,
+    region: Option<&str>,
+    profile: Option<&str>,
+) -> Result<super::destination::S3Auth, DrainError> {
+    resolve_fixture_auth_with_role(label, region, profile, None).await
+}
+
+/// The same, with an explicit `?role_arn=`.
+///
+/// Every caller also pins a `profile`. A role with no profile falls through to
+/// the AWS default chain, which reads the developer's own environment and
+/// `~/.aws` files — the one thing this fixture exists to avoid.
+async fn resolve_fixture_auth_with_role(
+    label: &str,
+    region: Option<&str>,
+    profile: Option<&str>,
+    role_arn: Option<&str>,
+) -> Result<super::destination::S3Auth, DrainError> {
+    let files = fixture_profiles();
+    super::destination::resolve_s3_auth(
+        label,
+        super::destination::S3AuthRequest {
+            region,
+            profile,
+            role_arn,
+            profile_files: Some(&files),
+        },
+    )
+    .await
+}
+
+#[tokio::test]
+async fn two_profiles_resolve_to_different_identities() {
+    // #6657: the whole point of a per-source `?profile=` is that two
+    // destinations in ONE daemon sign with two different sets of credentials.
+    // Proving it needs no bucket and no network — the credentials the provider
+    // hands back are the observable.
+    use aws_credential_types::provider::ProvideCredentials;
+
+    let alpha = resolve_fixture_auth("s3://a/logs", None, Some("alpha"))
+        .await
+        .expect("alpha resolves");
+    let beta = resolve_fixture_auth("s3://b/logs", None, Some("beta"))
+        .await
+        .expect("beta resolves");
+
+    let alpha_key = alpha
+        .provider
+        .provide_credentials()
+        .await
+        .expect("alpha credentials")
+        .access_key_id()
+        .to_string();
+    let beta_key = beta
+        .provider
+        .provide_credentials()
+        .await
+        .expect("beta credentials")
+        .access_key_id()
+        .to_string();
+
+    assert_eq!(alpha_key, "AKIAALPHAALPHAALPHA");
+    assert_eq!(beta_key, "AKIABETABETABETABET");
+    assert_ne!(
+        alpha_key, beta_key,
+        "two profiles must not collapse onto one identity"
+    );
+
+    // Each profile's own `region` is used, so a two-account layout needs no
+    // `?region=` on either URI.
+    assert_eq!(alpha.region, "us-east-1");
+    assert_eq!(beta.region, "eu-west-1");
+}
+
+#[tokio::test]
+async fn a_uri_region_overrides_the_profile_region() {
+    let resolved = resolve_fixture_auth("s3://a/logs", Some("ap-south-1"), Some("alpha"))
+        .await
+        .expect("resolves");
+    assert_eq!(resolved.region, "ap-south-1");
+}
+
+#[tokio::test]
+async fn a_profile_without_a_region_is_refused() {
+    // Signing for the wrong region reaches a bucket that is not there, so there
+    // is no literal to fall back to — the refusal names both levers.
+    let err = resolve_fixture_auth("s3://a/logs", None, Some("regionless"))
+        .await
+        .expect_err("a profile with no region and no `?region=` cannot be signed for");
+    match err {
+        DrainError::Credentials { ref uri, .. } => assert_eq!(uri, "s3://a/logs"),
+        other => panic!("expected DrainError::Credentials, got {other:?}"),
+    }
+    let message = err.to_string();
+    assert!(
+        message.contains("?region=") && message.contains("profile"),
+        "the refusal must name what to set, got: {message}"
+    );
+}
+
+#[tokio::test]
+async fn a_role_arn_resolves_to_an_assumed_role_identity() {
+    // #6657: `?role_arn=` is how one daemon writes into an account it holds no
+    // long-lived keys for. The provider the branch builds is the observable —
+    // reading credentials from it would call STS, and the design is that it
+    // does not until the first upload.
+    let resolved =
+        resolve_fixture_auth_with_role("s3://a/logs", None, Some("alpha"), Some(FIXTURE_ROLE_ARN))
+            .await
+            .expect("a role over a profile resolves");
+
+    // The region the STS client is pinned to comes off the same ladder an
+    // ordinary destination uses — here, the profile's own.
+    assert_eq!(resolved.region, "us-east-1");
+    let provider = format!("{:?}", resolved.provider);
+    assert!(
+        provider.contains("AssumeRoleProvider"),
+        "the role branch must wrap the base identity, got: {provider}"
+    );
+}
+
+#[tokio::test]
+async fn a_profile_and_a_role_arn_do_not_collapse_onto_the_profile() {
+    // The two knobs compose: the profile signs the AssumeRole, and the assumed
+    // role is what reaches S3. Returning the base provider unwrapped would
+    // still resolve, still carry the right region, and write with the wrong
+    // identity — so the with/without comparison is the assertion, not the Ok.
+    let plain = resolve_fixture_auth("s3://a/logs", None, Some("alpha"))
+        .await
+        .expect("the profile alone resolves");
+    let assumed = resolve_fixture_auth_with_role(
+        "s3://a/logs",
+        Some("ap-south-1"),
+        Some("alpha"),
+        Some(FIXTURE_ROLE_ARN),
+    )
+    .await
+    .expect("the profile plus a role resolves");
+
+    let plain_provider = format!("{:?}", plain.provider);
+    let assumed_provider = format!("{:?}", assumed.provider);
+    assert!(
+        !plain_provider.contains("AssumeRoleProvider"),
+        "no `?role_arn=` was given, got: {plain_provider}"
+    );
+    assert!(
+        assumed_provider.contains("AssumeRoleProvider"),
+        "the same profile plus a role must not resolve to the bare profile \
+         identity, got: {assumed_provider}"
+    );
+
+    // `?region=` still wins over the profile's own with a role in play, so the
+    // STS client is pinned to the region the operator asked for.
+    assert_eq!(plain.region, "us-east-1");
+    assert_eq!(assumed.region, "ap-south-1");
 }
 
 // ── collector: level filtering ──────────────────────────────────────────────
@@ -761,7 +1007,7 @@ async fn run_once_reuploads_when_the_destination_changes() {
         .await
         .expect("run against A");
     assert_eq!(first.uploaded, 2);
-    let a_before = contents(&dest_a, &t.logs_prefix()).await;
+    let a_before = contents(&dest_a, &t.key_prefix()).await;
 
     // Same identity, same state dir, a destination that holds nothing. B has no
     // manifest of its own, so before #6548 the load fell back to the cache
@@ -799,7 +1045,7 @@ async fn run_once_reuploads_when_the_destination_changes() {
 
     assert_eq!(
         a_before,
-        contents(&dest_a, &t.logs_prefix()).await,
+        contents(&dest_a, &t.key_prefix()).await,
         "a run aimed at B must not write to A"
     );
 }
@@ -1256,21 +1502,21 @@ async fn run_once_re_evaluates_a_skip_when_the_file_changes() {
 }
 
 #[tokio::test]
-async fn run_once_refuses_empty_github_id() {
+async fn run_once_refuses_an_empty_owner() {
     let dest_root = tempfile::tempdir().expect("tempdir");
     let state = tempfile::tempdir().expect("tempdir");
     let dest = file_dest(dest_root.path()).await;
 
     let t = DrainTarget {
-        github_id: String::new(),
-        session_id: "sess-01".to_string(),
+        owner: String::new(),
+        project: "trusty-tools".to_string(),
     };
     let err = run_once(&DrainConfig::new(state.path()), &dest, &t, &[])
         .await
-        .expect_err("an empty github_id must be refused");
+        .expect_err("an empty owner must be refused");
     assert!(matches!(
         err,
-        DrainError::MissingIdentity { field: "github_id" }
+        DrainError::MissingIdentity { field: "owner" }
     ));
 
     // Fail-closed means NOTHING was written, not even a manifest.
@@ -1284,23 +1530,21 @@ async fn run_once_refuses_empty_github_id() {
 }
 
 #[tokio::test]
-async fn run_once_refuses_empty_session_id() {
+async fn run_once_refuses_an_empty_project() {
     let dest_root = tempfile::tempdir().expect("tempdir");
     let state = tempfile::tempdir().expect("tempdir");
     let dest = file_dest(dest_root.path()).await;
 
     let t = DrainTarget {
-        github_id: "bobmatnyc".to_string(),
-        session_id: "   ".to_string(),
+        owner: "bobmatnyc".to_string(),
+        project: "   ".to_string(),
     };
     let err = run_once(&DrainConfig::new(state.path()), &dest, &t, &[])
         .await
-        .expect_err("an empty session_id must be refused");
+        .expect_err("an empty project must be refused");
     assert!(matches!(
         err,
-        DrainError::MissingIdentity {
-            field: "session_id"
-        }
+        DrainError::MissingIdentity { field: "project" }
     ));
 }
 
@@ -1405,8 +1649,8 @@ async fn s3_smoke() {
     write(&logs.path().join("smoke.log"), TRACING_FIXTURE);
 
     let t = DrainTarget {
-        github_id: "log-drain-smoke".to_string(),
-        session_id: format!("run-{}", chrono::Utc::now().timestamp()),
+        owner: "log-drain-smoke".to_string(),
+        project: format!("run-{}", chrono::Utc::now().timestamp()),
     };
     let cfg = DrainConfig::new(state.path());
 

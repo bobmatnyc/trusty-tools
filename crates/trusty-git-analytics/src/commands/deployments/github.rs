@@ -140,51 +140,15 @@ fn owner_repo_from_remote(repo_path: &std::path::Path) -> Option<(String, String
     extract_owner_repo_from_url(url)
 }
 
-/// Pure-string helper: extract an `owner/name` pair from a GitHub
-/// remote URL string. Returns `None` for non-GitHub URLs or malformed
-/// input.
+/// Extract an `owner/name` pair from a GitHub remote URL string.
 ///
-/// Why: kept independent of `git2` so it can be unit-tested without a
-/// real repo on disk.
-/// What: strips the `.git` suffix, recognises HTTPS, SSH, and
-/// `ssh://git@github.com/...` forms.
+/// Why: this module carried its own copy of the parse until #6657, and the two
+/// copies had already drifted apart in what their docs claimed to accept —
+/// which is how two parsers of one grammar start answering differently.
+/// What: re-exports `collect::github::repo_resolver`'s adapter, which
+/// delegates to `trusty_common::github_path::parse_remote_url`.
 /// Test: covered by `extract_owner_repo_from_url_handles_common_forms`.
-pub(super) fn extract_owner_repo_from_url(url: &str) -> Option<(String, String)> {
-    let cleaned = url.strip_suffix(".git").unwrap_or(url);
-    if let Some(rest) = cleaned.strip_prefix("git@github.com:") {
-        return split_owner_repo(rest);
-    }
-    for prefix in [
-        "https://github.com/",
-        "http://github.com/",
-        "ssh://git@github.com/",
-    ] {
-        if let Some(rest) = cleaned.strip_prefix(prefix) {
-            return split_owner_repo(rest);
-        }
-    }
-    if let Some(after_scheme) = cleaned.strip_prefix("https://") {
-        if let Some(at_idx) = after_scheme.find('@') {
-            let after_at = &after_scheme[at_idx + 1..];
-            if let Some(rest) = after_at.strip_prefix("github.com/") {
-                return split_owner_repo(rest);
-            }
-        }
-    }
-    None
-}
-
-/// Split a `owner/name(/...)` tail into a `(String, String)`. Returns
-/// `None` if either segment is empty.
-fn split_owner_repo(rest: &str) -> Option<(String, String)> {
-    let mut parts = rest.splitn(3, '/');
-    let owner = parts.next()?;
-    let name = parts.next()?;
-    if owner.is_empty() || name.is_empty() {
-        return None;
-    }
-    Some((owner.to_string(), name.to_string()))
-}
+pub(super) use crate::collect::github::repo_resolver::extract_owner_repo_from_url;
 
 /// Parse the `Link: <url>; rel="next"` header value, returning the URL of
 /// the `next` page when present.

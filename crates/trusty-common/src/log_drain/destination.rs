@@ -11,13 +11,20 @@
 //! selected by [`ObjectStoreDestination::connect`] from a [`DestinationUri`].
 //! S3 credentials come from the AWS default provider chain — the same chain
 //! `inference::bedrock` uses — bridged into `object_store`'s own
-//! `CredentialProvider` by [`AwsChainCredentials`].
+//! `CredentialProvider` by [`AwsChainCredentials`]. A URI carrying `?profile=`
+//! or `?role_arn=` narrows that to one named profile or an assumed role
+//! (#6657); see [`resolve_s3_auth`].
 //! Test: `super::tests::destination_roundtrip`, `super::tests::destination_roundtrip`,
 //! `super::tests::destination_list_is_bounded_and_prefix_scoped`, `super::tests::s3_smoke` (gated).
 
 use std::fmt;
 use std::sync::Arc;
 
+use aws_config::profile::ProfileFileCredentialsProvider;
+use aws_config::profile::region::ProfileFileRegionProvider;
+use aws_config::sts::AssumeRoleProvider;
+use aws_types::region::Region;
+use aws_types::sdk_config::SharedCredentialsProvider;
 use bytes::Bytes;
 use futures::StreamExt;
 use object_store::aws::{AmazonS3Builder, AwsCredential};
@@ -39,6 +46,17 @@ use super::uri::DestinationUri;
 /// looks at one session's worth. The cap is the "bounded" in the trait's
 /// contract; a caller that hits it is asking the wrong question.
 pub const LIST_LIMIT: usize = 10_000;
+
+/// The profile-file set `ProfileFileCredentialsProvider` and
+/// `ProfileFileRegionProvider` are pointed at.
+///
+/// #6657: `aws-config` deprecated this alias in favour of
+/// `aws_runtime::env_config::file::EnvConfigFiles`, but its own
+/// `profile_files()` builder methods still take the old name, so it cannot be
+/// avoided. Declaring `aws-runtime` directly to dodge one deprecation would pin
+/// an SDK-internal crate's version in the workspace manifest.
+#[allow(deprecated)]
+pub(super) type ProfileFiles = aws_config::profile::profile_file::ProfileFiles;
 
 /// Metadata attached to an object as it is written.
 ///
@@ -191,17 +209,17 @@ impl ObjectStoreDestination {
     /// through the AWS chain, which may reach IMDS or SSO), so it cannot be a
     /// `From` impl.
     /// What: `file://` creates the directory if absent and wraps a
-    /// `LocalFileSystem` rooted there. `s3://` loads the AWS default provider
-    /// chain, bridges it into `object_store`'s `CredentialProvider`, and builds
-    /// an `AmazonS3` for the bucket. The region comes from the URI's
-    /// `?region=` override when present and from the chain otherwise — no
-    /// bucket or region is ever hardcoded.
+    /// `LocalFileSystem` rooted there. `s3://` resolves an identity through
+    /// [`resolve_s3_auth`], bridges it into `object_store`'s
+    /// `CredentialProvider`, and builds an `AmazonS3` for the bucket. The
+    /// region comes from the URI's `?region=` override when present and from
+    /// the resolved identity otherwise — no bucket or region is ever hardcoded.
     /// Test: `super::tests::destination_roundtrip` (file),
     /// `super::tests::s3_smoke` (S3, gated on an env var).
     ///
     /// # Errors
     /// - [`DrainError::Io`] when a `file://` root cannot be created or opened.
-    /// - [`DrainError::Credentials`] when the AWS chain yields no region.
+    /// - [`DrainError::Credentials`] when no region or no credentials resolve.
     /// - [`DrainError::Transport`] when the S3 client cannot be constructed.
     pub async fn connect(uri: &DestinationUri) -> Result<Self, DrainError> {
         // #6548: derived here, from the URI, so no caller can supply an id that
@@ -229,50 +247,42 @@ impl ObjectStoreDestination {
                 bucket,
                 prefix,
                 region,
-            } => Self::connect_s3(bucket, prefix, region.as_deref(), cache_namespace).await,
+                profile,
+                role_arn,
+            } => {
+                Self::connect_s3(
+                    bucket,
+                    prefix,
+                    S3AuthRequest {
+                        region: region.as_deref(),
+                        profile: profile.as_deref(),
+                        role_arn: role_arn.as_deref(),
+                        profile_files: None,
+                    },
+                    cache_namespace,
+                )
+                .await
+            }
         }
     }
 
-    /// Build the S3 store: resolve credentials and region, then hand both to
+    /// Build the S3 store: resolve an identity and region, then hand both to
     /// `AmazonS3Builder`.
     async fn connect_s3(
         bucket: &str,
         prefix: &str,
-        region_override: Option<&str>,
+        auth: S3AuthRequest<'_>,
         cache_namespace: String,
     ) -> Result<Self, DrainError> {
         let label = format!("s3://{bucket}/{prefix}");
-
-        // #6533: the same default provider chain `inference::bedrock` loads —
-        // env vars, `~/.aws/credentials`, SSO, IMDS — reused rather than
-        // reimplemented, per the common-entry-point rule.
-        let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .load()
-            .await;
-
-        let region = region_override
-            .map(str::to_string)
-            .or_else(|| sdk_config.region().map(|r| r.as_ref().to_string()))
-            .ok_or_else(|| DrainError::Credentials {
-                uri: label.clone(),
-                source: "no AWS region: none in the URI's `?region=`, none from the \
-                         credential chain (set AWS_REGION or add `?region=` to the URI)"
-                    .into(),
-            })?;
-
-        let provider =
-            sdk_config
-                .credentials_provider()
-                .ok_or_else(|| DrainError::Credentials {
-                    uri: label.clone(),
-                    source: "the AWS default provider chain supplied no credentials provider"
-                        .into(),
-                })?;
+        let resolved = resolve_s3_auth(&label, auth).await?;
 
         let store = AmazonS3Builder::new()
             .with_bucket_name(bucket)
-            .with_region(&region)
-            .with_credentials(Arc::new(AwsChainCredentials { inner: provider }))
+            .with_region(&resolved.region)
+            .with_credentials(Arc::new(AwsChainCredentials {
+                inner: resolved.provider,
+            }))
             .build()
             .map_err(|source| DrainError::Transport {
                 op: "connect",
@@ -411,6 +421,173 @@ impl LogDestination for ObjectStoreDestination {
     }
 }
 
+/// What a caller knows about an `s3://` destination's identity (#6657).
+///
+/// Why a struct rather than four arguments: `profile_files` exists only so a
+/// test can supply profile text in memory, and a bare `Option<&ProfileFiles>`
+/// in the fourth position of a call is unreadable at every real call site.
+/// What: `profile_files` is `None` everywhere in production, which means the
+/// SDK's own file discovery (`~/.aws/config`, `~/.aws/credentials`, and the
+/// `AWS_CONFIG_FILE` / `AWS_SHARED_CREDENTIALS_FILE` overrides).
+/// Test: `super::tests::two_profiles_resolve_to_different_identities`.
+pub(super) struct S3AuthRequest<'a> {
+    /// `?region=` from the URI, when the operator pinned one.
+    pub region: Option<&'a str>,
+    /// `?profile=` from the URI.
+    pub profile: Option<&'a str>,
+    /// `?role_arn=` from the URI.
+    pub role_arn: Option<&'a str>,
+    /// Profile-file override. `None` in production; a test injects text here.
+    pub profile_files: Option<&'a ProfileFiles>,
+}
+
+/// A resolved S3 identity: which region to sign for, and with what credentials.
+pub(super) struct S3Auth {
+    /// Region the bucket is addressed in.
+    pub region: String,
+    /// Credentials every request is signed with.
+    pub provider: SharedCredentialsProvider,
+}
+
+impl fmt::Debug for S3Auth {
+    /// Prints the region only. A credential provider's own `Debug` can carry
+    /// key material, and this type ends up in test failure messages.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("S3Auth")
+            .field("region", &self.region)
+            .finish()
+    }
+}
+
+/// Resolve the region and credentials one `s3://` destination signs with.
+///
+/// Why: one daemon now drains to several destinations, and the owner ruling
+/// that this project's logs belong in one specific AWS account is only
+/// enforceable if a destination can name its own identity. Leaving every
+/// destination on the process-wide default chain meant whichever credentials
+/// the daemon happened to start with wrote to all of them (#6657).
+///
+/// What: three cases, in order.
+/// - `?profile=<name>` — credentials come from THAT profile alone, through
+///   `ProfileFileCredentialsProvider`, and the region falls back to the same
+///   profile's `region`. The default chain is not consulted, so an
+///   `AWS_ACCESS_KEY_ID` in the daemon's environment cannot override a pinned
+///   profile. That is the whole point of pinning one.
+/// - `?role_arn=<arn>` — the base identity above (or the default chain when no
+///   profile is named) signs an STS `AssumeRole`, and the assumed role's
+///   credentials are what reach S3. No STS call happens here: the provider is
+///   lazy, so a bad ARN surfaces on the first upload rather than at connect.
+/// - neither — the AWS default provider chain, exactly as before.
+///
+/// Region resolution is `?region=` → the identity's own region → refusal. It is
+/// never defaulted to a literal, because a wrong region is a request signed for
+/// a bucket that is not there.
+///
+/// Test: `super::tests::two_profiles_resolve_to_different_identities`,
+/// `super::tests::a_profile_without_a_region_is_refused`,
+/// `super::tests::a_role_arn_resolves_to_an_assumed_role_identity`,
+/// `super::tests::a_profile_and_a_role_arn_do_not_collapse_onto_the_profile`.
+///
+/// # Errors
+/// [`DrainError::Credentials`] when no region resolves, or when the default
+/// chain yields no credentials provider.
+pub(super) async fn resolve_s3_auth(
+    label: &str,
+    auth: S3AuthRequest<'_>,
+) -> Result<S3Auth, DrainError> {
+    let (identity_region, base) = match auth.profile {
+        Some(name) => resolve_profile_identity(name, auth.profile_files).await,
+        None => resolve_default_chain(label).await?,
+    };
+
+    let region = auth
+        .region
+        .map(str::to_string)
+        .or(identity_region)
+        .ok_or_else(|| DrainError::Credentials {
+            uri: label.to_string(),
+            source: "no AWS region: none in the URI's `?region=`, none from the \
+                     credential chain or the named profile (set AWS_REGION, give the \
+                     profile a `region`, or add `?region=` to the URI)"
+                .into(),
+        })?;
+
+    let provider = match auth.role_arn {
+        None => base,
+        Some(arn) => assume_role(arn, &region, base).await,
+    };
+
+    Ok(S3Auth { region, provider })
+}
+
+/// Credentials and region from one named `~/.aws` profile.
+///
+/// Both halves read the same profile files, so a profile that sets `region` in
+/// `~/.aws/config` needs no `?region=` in the URI.
+async fn resolve_profile_identity(
+    name: &str,
+    files: Option<&ProfileFiles>,
+) -> (Option<String>, SharedCredentialsProvider) {
+    let mut credentials = ProfileFileCredentialsProvider::builder().profile_name(name);
+    let mut region = ProfileFileRegionProvider::builder().profile_name(name);
+    if let Some(files) = files {
+        credentials = credentials.profile_files(files.clone());
+        region = region.profile_files(files.clone());
+    }
+    // `ProvideRegion` is the trait `region()` lives on.
+    use aws_config::meta::region::ProvideRegion;
+    let region = region
+        .build()
+        .region()
+        .await
+        .map(|r| r.as_ref().to_string());
+    (region, SharedCredentialsProvider::new(credentials.build()))
+}
+
+/// Credentials and region from the AWS default provider chain.
+///
+/// #6533: the same chain `inference::bedrock` loads — env vars,
+/// `~/.aws/credentials`, SSO, IMDS — reused rather than reimplemented, per the
+/// common-entry-point rule.
+async fn resolve_default_chain(
+    label: &str,
+) -> Result<(Option<String>, SharedCredentialsProvider), DrainError> {
+    let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .load()
+        .await;
+    let region = sdk_config.region().map(|r| r.as_ref().to_string());
+    let provider = sdk_config
+        .credentials_provider()
+        .ok_or_else(|| DrainError::Credentials {
+            uri: label.to_string(),
+            source: "the AWS default provider chain supplied no credentials provider".into(),
+        })?;
+    Ok((region, provider))
+}
+
+/// Wrap `base` in an STS `AssumeRole` for `arn`.
+///
+/// The region and credentials are pinned onto the `SdkConfig` the STS client is
+/// built from, so building it resolves nothing on its own — no IMDS probe, no
+/// network call until the first credential fetch.
+async fn assume_role(
+    arn: &str,
+    region: &str,
+    base: SharedCredentialsProvider,
+) -> SharedCredentialsProvider {
+    let sts_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .region(Region::new(region.to_string()))
+        .credentials_provider(base)
+        .load()
+        .await;
+    SharedCredentialsProvider::new(
+        AssumeRoleProvider::builder(arn)
+            .configure(&sts_config)
+            .build()
+            .await,
+    )
+}
+
 /// Bridges the AWS default credential chain into `object_store`'s provider trait.
 ///
 /// Why: `object_store` signs its own S3 requests and wants an
@@ -426,7 +603,7 @@ impl LogDestination for ObjectStoreDestination {
 /// there is no way to prove a credential bridge against a local filesystem.
 #[derive(Debug)]
 struct AwsChainCredentials {
-    inner: aws_types::sdk_config::SharedCredentialsProvider,
+    inner: SharedCredentialsProvider,
 }
 
 #[async_trait::async_trait]
