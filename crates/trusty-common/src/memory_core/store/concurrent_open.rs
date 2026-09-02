@@ -959,4 +959,78 @@ mod tests {
         assert!(s.contains(&format!("{}", std::process::id())));
         assert!(s.ends_with("kg.redb"));
     }
+
+    /// Why (#6652): the measurement pass must not be able to change the thing
+    /// it measures — a `--dry-run` that migrated the palace would make the
+    /// whole gate a lie. `Database::create`, which every other open path uses,
+    /// takes the exclusive lock and lets the caller open a write transaction.
+    /// What: reads the file's bytes, opens through [`ReadOnlyRedb`], runs a
+    /// read transaction, and compares the bytes again.
+    #[test]
+    fn read_only_open_never_writes_the_live_file() {
+        const T: redb::TableDefinition<'static, &'static str, &'static str> =
+            redb::TableDefinition::new("t");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("ro.redb");
+        {
+            let db = Database::create(&path).unwrap();
+            let wtx = db.begin_write().unwrap();
+            {
+                let mut t = wtx.open_table(T).unwrap();
+                t.insert("k", "v").unwrap();
+            }
+            wtx.commit().unwrap();
+        }
+        let before = std::fs::read(&path).unwrap();
+
+        let ro = ReadOnlyRedb::open(&path).unwrap();
+        assert!(
+            !ro.is_snapshot(),
+            "nothing holds the file, so it opens live"
+        );
+        {
+            let rtx = ro.begin_read().unwrap();
+            let t = rtx.open_table(T).unwrap();
+            assert_eq!(t.get("k").unwrap().unwrap().value(), "v");
+        }
+        drop(ro);
+
+        assert_eq!(
+            before,
+            std::fs::read(&path).unwrap(),
+            "a read-only open wrote to the live file"
+        );
+    }
+
+    /// Why (#6652): `ReadOnlyDatabase::open` takes a shared lock and is refused
+    /// outright while a writer holds the file — which is the normal state on a
+    /// machine running the daemon. Without the fallback, `palace stats` would
+    /// be unusable in exactly the situation it exists for.
+    /// What: holds the live file open for writing, then opens it read-only and
+    /// asserts the read came from a snapshot and still sees the data.
+    #[test]
+    fn read_only_open_falls_back_to_a_snapshot_when_locked() {
+        const T: redb::TableDefinition<'static, &'static str, &'static str> =
+            redb::TableDefinition::new("t");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("locked.redb");
+        let live = Database::create(&path).unwrap();
+        {
+            let wtx = live.begin_write().unwrap();
+            {
+                let mut t = wtx.open_table(T).unwrap();
+                t.insert("k", "v").unwrap();
+            }
+            wtx.commit().unwrap();
+        }
+
+        let ro = ReadOnlyRedb::open(&path).unwrap();
+        assert!(
+            ro.is_snapshot(),
+            "a writer holds the file, so the read must come from a copy"
+        );
+        let rtx = ro.begin_read().unwrap();
+        let t = rtx.open_table(T).unwrap();
+        assert_eq!(t.get("k").unwrap().unwrap().value(), "v");
+    }
 }

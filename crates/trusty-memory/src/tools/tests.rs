@@ -4008,3 +4008,32 @@ async fn forget_succeeds_when_the_lexical_lane_is_disabled() {
     .expect("memory_forget with the lane off");
     assert_eq!(forgotten["status"], "deleted", "{forgotten}");
 }
+
+/// Why (#6652): `palace_compact`'s name invites the reading that it shrinks
+/// the palace on disk. It does not — it reclaims orphaned HNSW vector rows in
+/// `index.usearch.redb` and never opens `kg.redb`. The description is the only
+/// place a caller learns that, so it is worth a guard.
+#[test]
+fn palace_compact_description_says_vector_index_only() {
+    let defs = tool_definitions_with(false);
+    let compact = defs
+        .get("tools")
+        .and_then(|t| t.as_array())
+        .expect("tools array")
+        .iter()
+        .find(|d| d["name"] == "palace_compact")
+        .expect("palace_compact is in the roster");
+    let description = compact["description"].as_str().expect("a description");
+    assert!(
+        description.contains("VECTOR-INDEX ONLY"),
+        "the vector-only scope must be stated outright: {description}"
+    );
+    assert!(
+        description.contains("does not read, rewrite, prune, or shrink"),
+        "the description must say what it does NOT do to kg.redb: {description}"
+    );
+    assert!(
+        description.contains("palace compact"),
+        "it must point at the tool that DOES reclaim kg.redb: {description}"
+    );
+}

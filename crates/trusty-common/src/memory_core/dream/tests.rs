@@ -2580,3 +2580,46 @@ fn kg_compaction_config_defaults() {
     assert_eq!(MIN_PRUNE_HISTORY_DAYS, 7);
     assert_eq!(COMPACT_MIN_RECLAIM_PERCENT, 10);
 }
+
+/// Why (#6652): the three `DreamStats` compaction fields are the only durable
+/// record that the phase ran — `trusty-memory doctor` reads `kg_bytes_after`
+/// out of `dream_stats.json` to spot growth between cycles. Testing
+/// `kg_compact_pass` alone leaves the wiring from `Dreamer::dream_cycle` into
+/// those fields unproven, which is exactly where a phase gets added and its
+/// telemetry forgotten.
+/// What: runs a full cycle over a palace stuffed with dead history and asserts
+/// all three fields carry the phase's real numbers.
+#[tokio::test]
+async fn dream_cycle_records_kg_compaction_stats() {
+    let handle = open_test_handle("kg-compact-stats").await;
+    handle
+        .remember(
+            "a drawer that survives the cycle with enough words".to_string(),
+            RoomType::Planning,
+            vec![],
+            0.9,
+        )
+        .await
+        .expect("remember");
+    seed_stale_history(&handle, 3_000, 400);
+
+    let dreamer = Dreamer::new(compact_only_config());
+    let stats = dreamer.dream_cycle(&handle).await.expect("dream cycle");
+
+    assert_eq!(
+        stats.kg_history_rows_pruned, 3_000,
+        "the cycle did not record what the phase pruned"
+    );
+    assert!(
+        stats.kg_bytes_reclaimed > 0,
+        "the cycle recorded no reclaimed bytes"
+    );
+    assert!(
+        stats.kg_bytes_after > 0,
+        "kg_bytes_after must carry the post-cycle file size for the doctor check"
+    );
+    assert!(
+        stats.kg_bytes_after < stats.kg_bytes_after + stats.kg_bytes_reclaimed,
+        "reclaimed bytes and the post-cycle size must be consistent"
+    );
+}

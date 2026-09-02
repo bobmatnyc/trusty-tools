@@ -268,7 +268,7 @@ pub struct DreamStats {
     /// `trusty-tools` did. This is the byte-level twin.
     /// What: `bytes_before - bytes_after`, or `0` when the phase was gated off
     /// or skipped. `#[serde(default)]` keeps older `dream_stats.json` readable.
-    /// Test: `kg_compaction_shrinks_the_file_in_a_dream_cycle`.
+    /// Test: `dream_cycle_records_kg_compaction_stats`.
     #[serde(default)]
     pub kg_bytes_reclaimed: u64,
 
@@ -278,13 +278,13 @@ pub struct DreamStats {
     /// the last cycle, and the only durable record of "last cycle" is this file.
     /// What: `metadata(kg.redb).len()` at the end of the phase; `0` when the
     /// palace has no on-disk store.
-    /// Test: `doctor_warns_on_a_large_kg_redb`.
+    /// Test: `dream_cycle_records_kg_compaction_stats`.
     #[serde(default)]
     pub kg_bytes_after: u64,
 
     /// Stale `hist:` triple rows the rewrite dropped this cycle (#6652).
     ///
-    /// Test: `kg_compaction_shrinks_the_file_in_a_dream_cycle`.
+    /// Test: `dream_cycle_records_kg_compaction_stats`.
     #[serde(default)]
     pub kg_history_rows_pruned: u64,
 

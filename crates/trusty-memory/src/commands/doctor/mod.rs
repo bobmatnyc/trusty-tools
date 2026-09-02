@@ -715,4 +715,44 @@ mod tests {
         assert_eq!(r.status, CheckStatus::Warn);
         assert!(r.detail.as_deref().unwrap_or("").contains("disk full"));
     }
+
+    /// Why (#6652): the thresholds are the whole check — an operator acts on
+    /// "warn at 100 MB, fail at 500 MB" and on the command the message names.
+    /// Pinning them here keeps a later tweak deliberate, and needs no
+    /// filesystem.
+    #[test]
+    fn kg_redb_size_verdict_matches_the_thresholds() {
+        use super::CheckStatus;
+        use checks::kg_redb_verdict;
+
+        let pass = kg_redb_verdict("kg.redb size".into(), "small", 10 * 1024 * 1024);
+        assert!(matches!(pass.status, CheckStatus::Pass), "{pass:?}");
+
+        let warn = kg_redb_verdict("kg.redb size".into(), "mid", 120 * 1024 * 1024);
+        assert!(matches!(warn.status, CheckStatus::Warn), "{warn:?}");
+        assert!(
+            warn.detail
+                .as_deref()
+                .unwrap_or("")
+                .contains("palace stats mid"),
+            "the warning must name the command to run: {warn:?}"
+        );
+
+        let fail = kg_redb_verdict("kg.redb size".into(), "huge", 600 * 1024 * 1024);
+        assert!(matches!(fail.status, CheckStatus::Fail), "{fail:?}");
+        assert!(
+            fail.detail
+                .as_deref()
+                .unwrap_or("")
+                .contains("palace compact huge"),
+            "the failure must name the command to run: {fail:?}"
+        );
+        assert!(
+            fail.detail
+                .as_deref()
+                .unwrap_or("")
+                .contains("disk, not data"),
+            "a large store still serves every read; say so: {fail:?}"
+        );
+    }
 }

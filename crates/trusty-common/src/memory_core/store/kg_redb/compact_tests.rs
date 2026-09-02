@@ -229,6 +229,93 @@ fn the_compaction_drops_the_dead_predicate_index() {
     );
 }
 
+/// Why (#6652): the prune predicate keys on the `hist:` prefix, and an ACTIVE
+/// row never carries one no matter how old it is. Age alone must never be
+/// enough to drop a row a live query can still see.
+/// What: a palace whose only triples are active and were asserted with a
+/// `valid_from` two years back, compacted at the most aggressive cutoff the
+/// config floor allows.
+#[test]
+fn prune_never_touches_an_active_row_however_old() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("kg.redb");
+    {
+        let kg = KgStoreRedb::open(&path).expect("open");
+        for i in 0..6 {
+            let mut t = triple(&format!("old{i}"), "knows", &format!("o{i}"));
+            t.valid_from = Utc::now() - chrono::Duration::days(730);
+            kg.assert(&t).expect("assert");
+        }
+    }
+    let before = KgRedbStats::measure(&path, 7).expect("measure");
+    assert_eq!(before.triples_active, 6);
+    assert_eq!(
+        before.triples_history_stale, 0,
+        "an active row is never stale history, whatever its age"
+    );
+
+    let out = compact(&path, 7);
+    assert_eq!(out.history_rows_pruned, 0);
+    let after = KgRedbStats::measure(&path, 7).expect("measure");
+    assert_eq!(after.triples_active, 6, "an old ACTIVE row was pruned");
+}
+
+/// Why (#6652): the copy decides what to drop by decoding each `TRIPLES`
+/// value. A value it cannot decode is something unrecognised, not something
+/// dead — dropping it would turn "this build does not understand this row"
+/// into data loss. `is_stale_history` returns `false` for that case, so the
+/// row is copied verbatim.
+/// What: writes a `hist:`-keyed row whose value is not a `TripleValue` at all,
+/// compacts at a cutoff that would drop every real history row, and asserts
+/// the garbage row is still on disk afterwards.
+#[test]
+fn an_undecodable_row_survives_the_compaction() {
+    let (_d, path) = palace_with_history(3, 20, 400);
+    let mut garbage_key = Vec::from(HISTORY_KEY_PREFIX);
+    garbage_key.extend_from_slice(&encode_triple_key("junk", "junk", "junk"));
+    garbage_key.extend_from_slice(&0i64.to_be_bytes());
+    {
+        let kg = KgStoreRedb::open(&path).expect("open");
+        let db = kg.db();
+        let wtx = db.begin_write().expect("begin");
+        {
+            let mut t = wtx.open_table(TRIPLES).expect("open triples");
+            t.insert(
+                garbage_key.as_slice(),
+                b"not a postcard TripleValue".as_slice(),
+            )
+            .expect("insert");
+        }
+        wtx.commit().expect("commit");
+    }
+
+    let out = compact(&path, 90);
+    assert_eq!(
+        out.history_rows_pruned, 20,
+        "the decodable history still goes"
+    );
+
+    let kg = KgStoreRedb::open(&path).expect("reopen");
+    let db = kg.db();
+    let rtx = db.begin_read().expect("read");
+    let t = rtx.open_table(TRIPLES).expect("open triples");
+    assert!(
+        t.get(garbage_key.as_slice()).expect("get").is_some(),
+        "the compaction dropped a row it could not decode"
+    );
+}
+
+/// Why: `path()` is what tells the compaction where to put its `.compacting`
+/// and `.pre-compact.bak` siblings, so a store that misreported it would place
+/// them on the wrong filesystem and break the rename's atomicity.
+#[test]
+fn kg_redb_path_reports_the_open_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("kg.redb");
+    let kg = KgStoreRedb::open(&path).expect("open");
+    assert_eq!(kg.path(), path.as_path());
+}
+
 // ── the copy-then-swap ─────────────────────────────────────────────────────
 
 fn compact(path: &Path, cutoff_days: i64) -> copy_swap::CompactOutcome {

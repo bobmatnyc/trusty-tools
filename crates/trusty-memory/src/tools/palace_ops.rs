@@ -438,7 +438,7 @@ fn alias_audit_state(audit: &trusty_common::memory_core::retrieval::AliasAudit) 
 /// in its name or schema to warn a caller, so the KG rewrite lives behind
 /// `palace_dream { compact: true }` and `trusty-memory palace compact` instead.
 /// What: delegates to `PalaceHandle::compact_vector_orphans`, unchanged.
-/// Test: `dispatch_palace_compact_returns_counts` in `tools::tests`.
+/// Test: `palace_compact_description_says_vector_index_only`.
 pub(crate) async fn handle_palace_compact(state: &AppState, args: Value) -> Result<Value> {
     let palace = resolve_palace(state, &args, "palace_compact")?;
     let handle = open_palace_handle(state, &palace)?;

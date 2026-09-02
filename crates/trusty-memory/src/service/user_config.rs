@@ -479,4 +479,50 @@ enabled = true
         assert!(!cfg.enabled);
         assert!(cfg.model.is_empty());
     }
+
+    /// Why (#6652): each `[dream]` key is `Option` so an absent one inherits
+    /// the `DreamConfig` default rather than this struct's own. That only
+    /// matters when SOME keys are present — the case a "both empty" test would
+    /// miss entirely.
+    #[test]
+    fn dream_table_overrides_the_compaction_defaults() {
+        let dream = DreamMin {
+            compact: Some(false),
+            prune_history_after_days: Some(30),
+            compact_min_bytes: None,
+            compact_keep_backup: None,
+        };
+        let cfg = dream_config_from_parts(
+            &LoadedUserConfig::default(),
+            SemanticConsolidationConfig::default(),
+            dream,
+        );
+        let defaults = DreamConfig::default();
+        assert!(!cfg.compact, "an explicit false must switch compaction off");
+        assert_eq!(cfg.prune_history_after_days, 30);
+        assert_eq!(
+            cfg.compact_min_bytes, defaults.compact_min_bytes,
+            "an absent key inherits the default, not zero"
+        );
+        assert_eq!(cfg.compact_keep_backup, defaults.compact_keep_backup);
+    }
+
+    /// Why: a machine with no `[dream]` table at all must behave exactly as it
+    /// did before #6652 added the section.
+    #[test]
+    fn an_absent_dream_table_leaves_every_default() {
+        let cfg = dream_config_from_parts(
+            &LoadedUserConfig::default(),
+            SemanticConsolidationConfig::default(),
+            DreamMin::default(),
+        );
+        let defaults = DreamConfig::default();
+        assert_eq!(cfg.compact, defaults.compact);
+        assert_eq!(
+            cfg.prune_history_after_days,
+            defaults.prune_history_after_days
+        );
+        assert_eq!(cfg.compact_min_bytes, defaults.compact_min_bytes);
+        assert_eq!(cfg.compact_keep_backup, defaults.compact_keep_backup);
+    }
 }

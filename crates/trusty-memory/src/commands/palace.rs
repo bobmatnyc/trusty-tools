@@ -99,15 +99,32 @@ pub async fn dispatch(action: PalaceAction) -> Result<()> {
 /// Test: `palace_stats_reports_a_hand_built_palace`.
 pub async fn handle_palace_stats(name: String, history_days: i64, json: bool) -> Result<()> {
     let palace = resolve(&name)?;
+    print!("{}", stats_report(&name, &palace, history_days, json)?);
+    Ok(())
+}
+
+/// The report [`handle_palace_stats`] prints, as a string.
+///
+/// Why: `resolve` reads the machine's real data root, so a test driving the
+/// handler would assert against whatever palaces that machine happens to hold.
+/// Taking the `Palace` as an argument is what makes the measurement and the
+/// rendering testable against a fixture.
+/// What: measures `<data_dir>/kg.redb` read-only and renders text or JSON.
+/// Test: `palace_stats_reports_a_hand_built_palace`.
+pub(crate) fn stats_report(
+    name: &str,
+    palace: &Palace,
+    history_days: i64,
+    json: bool,
+) -> Result<String> {
     let path = palace.data_dir.join("kg.redb");
     let stats = KgRedbStats::measure(&path, history_days)
         .with_context(|| format!("measure {}", path.display()))?;
     if json {
-        println!("{}", render_json(&name, &stats)?);
+        Ok(format!("{}\n", render_json(name, &stats)?))
     } else {
-        print!("{}", render_text(&name, &stats));
+        Ok(render_text(name, &stats))
     }
-    Ok(())
 }
 
 /// `trusty-memory palace compact <name> [--dry-run]` — the kg.redb rewrite.
@@ -122,13 +139,33 @@ pub async fn handle_palace_stats(name: String, history_days: i64, json: bool) ->
 /// Test: `palace_compact_dry_run_writes_nothing`.
 pub async fn handle_palace_compact(name: String, dry_run: bool, history_days: i64) -> Result<()> {
     let palace = resolve(&name)?;
+    print!(
+        "{}",
+        compact_report(&name, &palace, dry_run, history_days).await?
+    );
+    Ok(())
+}
+
+/// The report [`handle_palace_compact`] prints, as a string.
+///
+/// Why: same reason [`stats_report`] exists — the handler's only untestable
+/// step is `resolve`, so the work moves below it.
+/// What: opens the palace (Writer intent for a real run, read-only for a dry
+/// run), runs the phase with the idle size gate disabled, and renders.
+/// Test: `palace_compact_dry_run_writes_nothing`.
+pub(crate) async fn compact_report(
+    name: &str,
+    palace: &Palace,
+    dry_run: bool,
+    history_days: i64,
+) -> Result<String> {
     let intent = if dry_run {
         OpenIntent::ReadOnlyClient
     } else {
         OpenIntent::Writer
     };
     let handle = std::sync::Arc::new(
-        PalaceHandle::open_with_intent(&palace, intent)
+        PalaceHandle::open_with_intent(palace, intent)
             .with_context(|| format!("open palace {}", palace.id))?,
     );
     let cfg = DreamConfig {
@@ -139,15 +176,15 @@ pub async fn handle_palace_compact(name: String, dry_run: bool, history_days: i6
         ..DreamConfig::default()
     };
     let report = kg_compact_pass(&handle, &cfg, dry_run).await?;
-    println!("palace={name} {}", report.summary());
+    let mut out = format!("palace={name} {}\n", report.summary());
     if let Some(backup) = &report.backup {
-        println!("  backup: {}", backup.display());
+        out.push_str(&format!("  backup: {}\n", backup.display()));
     }
-    print!("{}", render_text(&name, &report.stats));
+    out.push_str(&render_text(name, &report.stats));
     if dry_run {
-        println!("nothing was written — re-run without --dry-run to compact");
+        out.push_str("nothing was written — re-run without --dry-run to compact\n");
     }
-    Ok(())
+    Ok(out)
 }
 
 /// Look up one palace by id under the configured data root.
@@ -251,10 +288,97 @@ fn render_json(name: &str, s: &KgRedbStats) -> Result<String> {
 }
 
 /// `part` as a whole-number percentage of `whole`; `0` when `whole` is zero.
+///
+/// `checked_div` rather than a zero guard: clippy's `manual_checked_division`
+/// fires on the guarded form under the workspace-wide lint job.
 fn percent(part: u64, whole: u64) -> u64 {
-    if whole == 0 {
-        0
-    } else {
-        part.saturating_mul(100) / whole
+    part.saturating_mul(100).checked_div(whole).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trusty_common::memory_core::palace::PalaceId;
+
+    /// A palace directory on disk with `n` live triples in its `kg.redb`.
+    fn fixture(name: &str, n: usize) -> (tempfile::TempDir, Palace) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().join(name);
+        std::fs::create_dir_all(&data_dir).expect("mkdir");
+        let kg = trusty_common::memory_core::store::kg_redb::KgStoreRedb::open(
+            &data_dir.join("kg.redb"),
+        )
+        .expect("open kg");
+        for i in 0..n {
+            kg.assert(&trusty_common::memory_core::store::Triple {
+                subject: format!("s{i}"),
+                predicate: "knows".into(),
+                object: format!("o{i}"),
+                valid_from: chrono::Utc::now(),
+                valid_to: None,
+                confidence: 1.0,
+                provenance: None,
+            })
+            .expect("assert");
+        }
+        drop(kg);
+        let palace = Palace {
+            id: PalaceId::new(name),
+            name: name.into(),
+            description: None,
+            created_at: chrono::Utc::now(),
+            data_dir,
+        };
+        (dir, palace)
+    }
+
+    /// Why: the report is the evidence #6652's "measure before deleting" gate
+    /// rests on, so the numbers it prints have to be the palace's real ones —
+    /// not a plausible-looking template.
+    #[test]
+    fn palace_stats_reports_a_hand_built_palace() {
+        let (_d, palace) = fixture("stats-fixture", 5);
+        let text = stats_report("stats-fixture", &palace, 90, false).expect("report");
+        assert!(text.contains("palace=stats-fixture"), "{text}");
+        assert!(text.contains("triples active=5"), "{text}");
+        assert!(text.contains("history=0"), "{text}");
+        assert!(text.contains("file_bytes"), "{text}");
+        assert!(text.contains("triples_by_object"), "{text}");
+
+        let json = stats_report("stats-fixture", &palace, 90, true).expect("json");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
+        assert_eq!(parsed["triples_active"], 5);
+        assert_eq!(parsed["palace"], "stats-fixture");
+    }
+
+    /// Why: `--dry-run` is the operator's look-before-you-leap, and it is only
+    /// worth anything if it provably writes nothing — no backup, no temp file,
+    /// no rename.
+    #[tokio::test]
+    async fn palace_compact_dry_run_writes_nothing() {
+        let (_d, palace) = fixture("dry-run-fixture", 4);
+        let kg_path = palace.data_dir.join("kg.redb");
+        // Row counts, not raw bytes: redb rewrites its own allocator state when
+        // a `Database` is dropped, so opening the palace at all changes the
+        // file even when nothing wrote a row.
+        let rows = |p: &std::path::Path| {
+            KgRedbStats::measure(p, 90)
+                .expect("measure")
+                .tables
+                .iter()
+                .map(|t| (t.name.clone(), t.rows))
+                .collect::<Vec<_>>()
+        };
+        let before = rows(&kg_path);
+
+        let out = compact_report("dry-run-fixture", &palace, true, 90)
+            .await
+            .expect("dry run");
+        assert!(out.contains("dry-run:"), "{out}");
+        assert!(out.contains("nothing was written"), "{out}");
+
+        assert_eq!(before, rows(&kg_path), "the dry run changed kg.redb");
+        assert!(!palace.data_dir.join("kg.redb.pre-compact.bak").exists());
+        assert!(!palace.data_dir.join("kg.redb.compacting").exists());
     }
 }
