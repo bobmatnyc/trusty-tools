@@ -21,25 +21,27 @@
 //! falling off the end of every gate. Each gate `return`s a `Blocked` verdict,
 //! so a gate that errors, times out, or cannot answer produces a refusal — the
 //! failure branch can never advance to deletion. In particular a PR state that
-//! could not be determined ([`BranchPrState::Unknown`]) blocks, and so does an
-//! index that may have been TRUNCATED (an absent branch is only `NoPr` when
-//! the index is known complete).
+//! could not be determined ([`BranchPrState::Unknown`]) blocks, a lookup that
+//! FAILED ([`BranchPrState::LookupFailed`], #6561) blocks and says why, and so
+//! does an index that may have been TRUNCATED (an absent branch is only `NoPr`
+//! when the index is known complete).
 //!
 //! Test: `worktree_reclaim_tests` — one refusal test per gate, each of which
 //! fails if its gate is deleted.
 
 use std::collections::BTreeMap;
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
+// #6561: the `gh` runner lives next door so this file stays under the SLOC cap;
+// the re-import keeps every call site (and `super::*` in the tests) unchanged.
 use super::worktree_ownership::{
     AgentDelegationState, AgentWorktreeOwner, SentinelOwner, is_harness_agent_worktree,
     read_sentinel_owner,
 };
+use super::worktree_reclaim_gh::{GH_TIMEOUT, PR_JSON_FIELDS, gh_command, run_with_timeout};
 use super::worktree_registry::{Admission, HarnessLockState, harness_lock_state};
 use super::worktree_safety::DirtyWorktree;
 
@@ -65,38 +67,22 @@ pub(crate) type AgentStateProbe<'a> = &'a dyn Fn(&AgentWorktreeOwner) -> AgentDe
 /// Test: `pr_index_truncated_reply_makes_absent_branches_unknown`.
 pub(crate) const PR_INDEX_LIMIT: usize = 400;
 
-/// Environment variables that would point `gh`/`git` at a DIFFERENT repository.
-///
-/// Why: the same hazard `worktree_safety::GIT_REDIRECTING_ENV` documents —
-/// `gh` resolves the repository through git, and an inherited `GIT_DIR` names
-/// a repository the worktree under inspection has nothing to do with. A
-/// work-destroying gate must not be steerable by ambient environment.
-/// What: removed from the child environment so the repository is resolved from
-/// `-C <registry_root>` alone.
-/// Test: `gh_command_strips_repository_redirecting_env`.
-const GH_STRIPPED_ENV: &[&str] = &[
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_COMMON_DIR",
-    "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY",
-    "GH_REPO",
-];
-
 /// The pull-request state of the branch a worktree has checked out (#2919).
 ///
-/// Why: only ONE of these five states is evidence that the worktree's work has
-/// landed and the directory is disposable. Modelling the other four explicitly
+/// Why: only ONE of these six states is evidence that the worktree's work has
+/// landed and the directory is disposable. Modelling the other five explicitly
 /// — rather than as `Option<bool>` — is what keeps "we could not find out"
 /// from collapsing into "there is nothing here", which is the fail-open shape
 /// this repository keeps re-encountering.
 /// What: `Merged` carries the PR number that proves the branch landed. `Open`
 /// and `ClosedUnmerged` are active/abandoned-but-unlanded branches. `NoPr` is
-/// asserted only against a KNOWN-COMPLETE index. `Unknown` covers every
-/// unanswerable case: `gh` missing, unauthenticated, erroring, a truncated
-/// index, or a detached HEAD with no branch to attribute a PR to.
+/// asserted only against a KNOWN-COMPLETE index. `Unknown` is the answerable-
+/// but-unanswered case: a truncated index, or a detached HEAD with no branch to
+/// attribute a PR to. `LookupFailed` is the BROKEN case — `gh` missing,
+/// unauthenticated, timing out, or erroring — and carries its reason (#6561).
 /// Test: `classify_blocks_open_pr`, `classify_blocks_closed_unmerged_pr`,
-/// `classify_blocks_no_pr`, `classify_blocks_unknown_pr_state`.
+/// `classify_blocks_no_pr`, `classify_blocks_unknown_pr_state`,
+/// `classify_blocks_a_failed_lookup_and_names_the_reason`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum BranchPrState {
@@ -119,6 +105,21 @@ pub(crate) enum BranchPrState {
     NoPr,
     /// The state could not be determined — always blocks reclamation.
     Unknown,
+    /// The lookup itself FAILED, carrying `gh`'s own one-line complaint (#6561).
+    ///
+    /// Why: this used to be `Unknown`, and the collapse hid a whole-workspace
+    /// outage. The daemon carries neither `GH_TOKEN` nor `GH_CONFIG_DIR`, so
+    /// `gh pr list` exited 4 with `To get started with GitHub CLI, please run:
+    /// gh auth login` for all 261 registered worktrees; the survey reported
+    /// `0 reclaimable` and named no cause. An unanswerable branch (a detached
+    /// HEAD, a truncated index) and a broken lookup need opposite operator
+    /// actions, so they are now separate states.
+    /// Test: `pr_state_for_branch_reports_a_failed_call_as_lookup_failed`,
+    /// `survey_counts_a_failed_lookup_apart_from_an_unknown_state`.
+    LookupFailed {
+        /// One line: the exit code plus `gh`'s first stderr line.
+        reason: String,
+    },
 }
 
 impl BranchPrState {
@@ -128,15 +129,15 @@ impl BranchPrState {
     /// #1, push again, open PR #2). Reclaiming on the merged one while a newer
     /// one is open would delete live work, so when one branch maps to several
     /// rows the most blocking state must win, not the newest or the first.
-    /// What: `Open` (3) > `ClosedUnmerged` (2) > `Merged` (1); `NoPr`/`Unknown`
-    /// never come from a row so they rank 0.
+    /// What: `Open` (3) > `ClosedUnmerged` (2) > `Merged` (1); `NoPr`,
+    /// `Unknown` and `LookupFailed` never come from a row so they rank 0.
     /// Test: `pr_index_open_pr_beats_a_merged_one_on_the_same_branch`.
     fn block_rank(&self) -> u8 {
         match self {
             Self::Open { .. } => 3,
             Self::ClosedUnmerged { .. } => 2,
             Self::Merged { .. } => 1,
-            Self::NoPr | Self::Unknown => 0,
+            Self::NoPr | Self::Unknown | Self::LookupFailed { .. } => 0,
         }
     }
 }
@@ -163,7 +164,7 @@ struct PrRow {
     /// pre-existing behaviour and is caught by the same-repo assumption the
     /// field exists to break — so the field is also requested explicitly in
     /// [`PrIndex::from_gh`], and a `gh` that cannot supply it fails the whole
-    /// call, yielding [`PrIndex::unavailable`].
+    /// call, yielding [`PrIndex::unavailable_because`].
     #[serde(default, rename = "isCrossRepository")]
     is_cross_repository: bool,
 }
@@ -174,33 +175,42 @@ struct PrRow {
 /// importantly — one place that knows whether the answer set is trustworthy.
 /// An index that failed to build, or that may have been truncated, must not
 /// let an absent branch read as "no PR", because "no PR" would otherwise be
-/// indistinguishable from a merged PR that fell off the end of the page.
+/// indistinguishable from a merged PR that fell off the end of the page. Since
+/// #6561 the two are also kept apart from each other: a failed build carries
+/// `gh`'s own reason and reports it, a truncated one does not.
 /// What: the branch map plus a `complete` flag. [`state_for`](Self::state_for)
 /// returns `NoPr` for an absent branch ONLY when `complete` holds; otherwise
 /// `Unknown`.
 /// Test: `pr_index_absent_branch_is_no_pr_when_complete`,
 /// `pr_index_truncated_reply_makes_absent_branches_unknown`,
-/// `pr_index_unavailable_makes_every_branch_unknown`.
+/// `pr_index_reports_a_failed_lookup_with_its_reason`.
 #[derive(Debug, Default)]
 pub(crate) struct PrIndex {
     /// Branch name → the most blocking state observed for it.
     by_branch: BTreeMap<String, BranchPrState>,
     /// True only when the reply is known to hold every pull request.
     complete: bool,
+    /// Why the lookup FAILED, when it did — `None` means it answered (#6561).
+    ///
+    /// Distinguishes an index that could not be built from one that was merely
+    /// truncated: both leave a branch unresolved, but only the first is a fault
+    /// the operator can fix.
+    failure: Option<String>,
 }
 
 impl PrIndex {
-    /// An index that answers nothing — every branch reads `Unknown`.
+    /// An index that answers nothing BECAUSE the lookup failed (#6561).
     ///
-    /// Why: the single value every failure path returns, so a `gh` that is
-    /// absent, unauthenticated, rate-limited, or erroring produces refusals
-    /// rather than a silently empty "no PRs anywhere" index.
-    /// What: empty map, `complete: false`.
-    /// Test: `pr_index_unavailable_makes_every_branch_unknown`.
-    pub(crate) fn unavailable() -> Self {
+    /// Why: [`unavailable`](Self::unavailable) says "no answers" and nothing
+    /// about why. Every branch it cannot resolve now reads
+    /// [`BranchPrState::LookupFailed`] carrying `reason`, so the survey can
+    /// count and print the cause instead of reporting a bare zero.
+    /// Test: `pr_index_reports_a_failed_lookup_with_its_reason`.
+    pub(crate) fn unavailable_because(reason: String) -> Self {
         Self {
             by_branch: BTreeMap::new(),
             complete: false,
+            failure: Some(reason),
         }
     }
 
@@ -221,7 +231,11 @@ impl PrIndex {
     /// `pr_index_malformed_json_is_unavailable`.
     pub(crate) fn from_json(stdout: &str, limit: usize) -> Self {
         let Ok(rows) = serde_json::from_str::<Vec<PrRow>>(stdout) else {
-            return Self::unavailable();
+            // #6561: a zero exit that printed something other than the JSON is
+            // a failed lookup, not an empty repository — say which.
+            return Self::unavailable_because(
+                "`gh` printed output that is not the pull-request JSON".to_string(),
+            );
         };
         // #2919: a full page is indistinguishable from a truncated one, so it
         // is treated as truncated. Erring the other way would let a merged PR
@@ -250,6 +264,7 @@ impl PrIndex {
         Self {
             by_branch,
             complete,
+            failure: None,
         }
     }
 
@@ -261,9 +276,11 @@ impl PrIndex {
     /// number,headRefName,state,isCrossRepository`, run with its WORKING
     /// DIRECTORY set to `registry_root` (never `-C`, which `gh` does not
     /// have — see [`gh_command`]) and with the repository-redirecting
-    /// environment stripped. Any failure to spawn, a timeout, a non-zero exit,
-    /// or unparsable output all yield [`unavailable`](Self::unavailable) —
-    /// never an empty-but-complete index.
+    /// environment stripped. A failure to spawn, a timeout, a non-zero exit, or
+    /// unparsable output all yield
+    /// [`unavailable_because`](Self::unavailable_because) carrying `gh`'s own
+    /// one-line complaint (#6561) — never an empty-but-complete index, and
+    /// since #6561 never a cause-free one either.
     /// Test: `gh_command_passes_no_dash_c_flag`,
     /// `gh_command_runs_in_the_requested_directory`,
     /// `gh_command_strips_repository_redirecting_env` (argv/env shape);
@@ -275,7 +292,7 @@ impl PrIndex {
             .arg(PR_INDEX_LIMIT.to_string())
             .args(["--json", PR_JSON_FIELDS]);
         match run_with_timeout(cmd, GH_TIMEOUT) {
-            Some((true, stdout)) => {
+            Ok(stdout) => {
                 let index = Self::from_json(&stdout, PR_INDEX_LIMIT);
                 // #2919: logged because "resolved 0 branches" is the signature
                 // of a call that ran but answered nothing — the shape the bogus
@@ -288,13 +305,17 @@ impl PrIndex {
                 );
                 index
             }
-            _ => {
-                tracing::debug!(
+            Err(reason) => {
+                // #6561: WARN, not debug, and carrying the reason. A silent
+                // debug line is why an auth failure across all 261 worktrees
+                // surfaced only as "0 reclaimable".
+                tracing::warn!(
                     root = %registry_root.display(),
-                    "worktree-reclaim: `gh pr list` failed, timed out, or could not be \
-                     run — every branch will read PR-state-unknown and block (#2919)"
+                    reason = %reason,
+                    "worktree-reclaim: the pull-request lookup failed — every branch \
+                     will block, and the survey reports this reason (#6561)"
                 );
-                Self::unavailable()
+                Self::unavailable_because(reason)
             }
         }
     }
@@ -330,9 +351,12 @@ impl PrIndex {
     /// What: a detached worktree (`None`) is `Unknown` — there is no branch to
     /// attribute a pull request to, so nothing can prove its work landed. A
     /// present branch returns its recorded state; an absent one returns `NoPr`
-    /// when the index is complete and `Unknown` otherwise.
+    /// when the index is complete, [`BranchPrState::LookupFailed`] when the
+    /// lookup itself failed (#6561), and `Unknown` when the index merely ran
+    /// past its page limit.
     /// Test: `pr_index_detached_worktree_is_unknown`,
-    /// `pr_index_absent_branch_is_no_pr_when_complete`.
+    /// `pr_index_absent_branch_is_no_pr_when_complete`,
+    /// `pr_index_reports_a_failed_lookup_with_its_reason`.
     pub(crate) fn state_for(&self, branch: Option<&str>) -> BranchPrState {
         let Some(branch) = branch else {
             return BranchPrState::Unknown;
@@ -340,117 +364,15 @@ impl PrIndex {
         match self.by_branch.get(branch) {
             Some(state) => state.clone(),
             None if self.complete => BranchPrState::NoPr,
-            None => BranchPrState::Unknown,
-        }
-    }
-}
-
-/// A `gh` invocation rooted at `dir` with a sanitised environment (#2919).
-///
-/// Why: `gh` resolves the repository from its WORKING DIRECTORY. It has no
-/// global `-C` flag — that is a `git` habit, and carrying it across made every
-/// call in this module fail at flag parsing with
-/// `unknown shorthand flag: 'C' in -C` (verified against gh 2.96.0;
-/// `gh --help` mentions no `-C`). The failure was silent by design: a failed
-/// call yields [`PrIndex::unavailable`], every branch reads
-/// [`BranchPrState::Unknown`], `classify` gate 4 blocks every candidate, and
-/// the delete loop never executes — so `--merged-prs` reclaimed zero bytes
-/// ALWAYS, and `tm doctor` blamed `gh auth status` for what was an argv bug.
-/// Nothing in the test suite noticed, because no test ever ran a SUCCESSFUL
-/// `gh` call. Hence `current_dir`, and hence
-/// `gh_command_passes_no_dash_c_flag`.
-///
-/// The pager and prompt suppression are not cosmetic either — an interactive
-/// prompt in a daemon-run probe hangs it forever. See [`GH_STRIPPED_ENV`] for
-/// the environment scrub.
-/// What: `gh` with its working directory set to `dir`, the repository-
-/// redirecting variables removed, and pager/prompt/colour disabled.
-/// Test: `gh_command_passes_no_dash_c_flag`,
-/// `gh_command_runs_in_the_requested_directory`,
-/// `gh_command_strips_repository_redirecting_env`.
-fn gh_command(dir: &Path) -> Command {
-    // #5475: argv/binary/env come from trusty-common's single `gh` entry
-    // point; this module keeps its own kill-on-timeout runner, which is why it
-    // takes the unspawned `std::process::Command` rather than a runner method.
-    // #2919: `current_dir`, NEVER `-C` — `gh` has no such flag.
-    let mut cmd = trusty_common::gh::GhCommand::bare().cwd(dir);
-    for key in GH_STRIPPED_ENV {
-        cmd = cmd.env_remove(key);
-    }
-    cmd.env("GH_PAGER", "")
-        .env("GH_PROMPT_DISABLED", "1")
-        .env("GH_NO_UPDATE_NOTIFIER", "1")
-        .env("NO_COLOR", "1")
-        .to_std_command()
-}
-
-/// The `--json` field set every `gh pr list` call in this module requests.
-///
-/// Why: named once so the bulk index and the per-branch fallback cannot drift
-/// into asking for different facts. `isCrossRepository` is not optional — see
-/// [`PrRow::is_cross_repository`]; a `gh` that does not understand the field
-/// makes the whole call fail, which yields [`PrIndex::unavailable`] and blocks,
-/// rather than silently returning rows with fork PRs indistinguishable from
-/// local ones.
-/// Test: `pr_index_skips_fork_pull_requests`.
-const PR_JSON_FIELDS: &str = "number,headRefName,state,isCrossRepository";
-
-/// Wall-clock ceiling for any single `gh` invocation (#2919).
-///
-/// Why: `gh pr list` is a NETWORK call. `std::process::Command::output()` has
-/// no timeout, so a wedged or throttled request hangs the calling thread
-/// forever — and because this runs inside `spawn_blocking`, which cannot be
-/// cancelled, that hang propagates to runtime shutdown. This is the same
-/// failure shape already fixed for the byte walk; a subprocess needs its own
-/// bound for the same reason.
-/// What: 10 seconds, after which the child is killed and the call reports
-/// failure — which resolves to [`PrIndex::unavailable`] and therefore blocks.
-/// Test: `run_with_timeout_kills_a_hung_child`.
-const GH_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Run `cmd`, killing it if it outlives `budget` (#2919).
-///
-/// Why: see [`GH_TIMEOUT`]. `Command::output()` waits indefinitely.
-/// What: spawns the child with piped stdio and DRAINS both pipes on their own
-/// threads — a child that fills a pipe buffer blocks forever if nobody reads
-/// it, which would defeat the timeout it is meant to enforce (a 400-PR JSON
-/// reply comfortably exceeds a 64 KiB pipe buffer). Polls `try_wait` until the
-/// budget expires, then kills and reaps the child. Returns `None` on spawn
-/// failure, timeout, or a wait error — every failure is indistinguishable to
-/// the caller, and every one of them blocks reclamation.
-/// Test: `run_with_timeout_captures_output`, `run_with_timeout_kills_a_hung_child`.
-fn run_with_timeout(mut cmd: Command, budget: Duration) -> Option<(bool, String)> {
-    let mut child = cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .ok()?;
-    let mut stdout = child.stdout.take()?;
-    let mut stderr = child.stderr.take()?;
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut buf = String::new();
-        let _ = stdout.read_to_string(&mut buf);
-        let _ = tx.send(buf);
-    });
-    std::thread::spawn(move || {
-        let mut sink = Vec::new();
-        let _ = stderr.read_to_end(&mut sink);
-    });
-    let deadline = Instant::now() + budget;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let stdout = rx.recv_timeout(Duration::from_secs(2)).unwrap_or_default();
-                return Some((status.success(), stdout));
-            }
-            Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
-            Err(_) => return None,
+            // #6561: a branch the index could not answer BECAUSE the lookup
+            // failed reports the failure; a merely truncated index still
+            // reports `Unknown`.
+            None => match &self.failure {
+                Some(reason) => BranchPrState::LookupFailed {
+                    reason: reason.clone(),
+                },
+                None => BranchPrState::Unknown,
+            },
         }
     }
 }
@@ -466,9 +388,17 @@ fn run_with_timeout(mut cmd: Command, budget: Duration) -> Option<(bool, String)
 /// uses it; the `tm doctor` probe has a 3-second budget and discloses the
 /// truncation instead.
 /// What: `gh pr list --head <branch> --state all`. Fork rows are dropped by
-/// [`PrIndex::from_json`] exactly as in the bulk path. Any failure or timeout
-/// yields [`BranchPrState::Unknown`], which blocks.
-/// Test: `pr_state_for_branch_maps_a_failed_call_to_unknown`.
+/// [`PrIndex::from_json`] exactly as in the bulk path. A failure or timeout
+/// yields [`BranchPrState::LookupFailed`] carrying `gh`'s own first stderr line
+/// (#6561); it used to yield a cause-free `Unknown`. Either blocks.
+///
+/// #6561: this resolves a SQUASH-MERGED pull request whose head branch was
+/// deleted at merge. `--head` matches the pull request's recorded
+/// `headRefName`, which outlives the branch, so all three worktrees the issue
+/// names answer `MERGED` here. The deleted branch was never the reason they
+/// read unknown — the `gh` call was.
+/// Test: `pr_state_for_branch_reports_a_failed_call_as_lookup_failed`,
+/// `pr_index_resolves_a_squash_merged_pr_whose_head_branch_was_deleted`.
 pub(crate) fn pr_state_for_branch(registry_root: &Path, branch: &str) -> BranchPrState {
     const PER_BRANCH_LIMIT: usize = 50;
     let mut cmd = gh_command(registry_root);
@@ -476,10 +406,8 @@ pub(crate) fn pr_state_for_branch(registry_root: &Path, branch: &str) -> BranchP
         .arg(PER_BRANCH_LIMIT.to_string())
         .args(["--json", PR_JSON_FIELDS]);
     match run_with_timeout(cmd, GH_TIMEOUT) {
-        Some((true, stdout)) => {
-            PrIndex::from_json(&stdout, PER_BRANCH_LIMIT).state_for(Some(branch))
-        }
-        _ => BranchPrState::Unknown,
+        Ok(stdout) => PrIndex::from_json(&stdout, PER_BRANCH_LIMIT).state_for(Some(branch)),
+        Err(reason) => BranchPrState::LookupFailed { reason },
     }
 }
 
@@ -802,6 +730,12 @@ pub(crate) fn classify(
                  and authenticated?)",
             );
         }
+        // #6561: the lookup broke. Same refusal, but naming the cause — the
+        // operator can act on `gh exited 4: … gh auth login`; they cannot act
+        // on "could not be determined".
+        BranchPrState::LookupFailed { reason } => {
+            return ReclaimVerdict::blocked(format!("the pull-request lookup failed: {reason}"));
+        }
     };
     // Gate 6 (#2919): a merged PR does NOT prove the directory holds nothing
     // novel — the 2026-07-21 salvage found merged-PR worktrees carrying real
@@ -896,6 +830,21 @@ pub(crate) struct ReclaimSurvey {
     /// `gh auth status` for a problem that is really "raise the budget".
     /// Test: `survey_separates_deadline_skips_from_lookup_failures`.
     pub not_inspected: usize,
+    /// How many candidates the pull-request lookup FAILED for (#6561).
+    ///
+    /// Why: distinct from `pr_state_unknown`, which now means only "inspected,
+    /// and the answer was genuinely indeterminate". A failed lookup is a fault
+    /// with a fix; an indeterminate answer is not. Conflating them produced the
+    /// live report this issue is about — 261 of 261 unknown, `0 reclaimable`,
+    /// and no cause anywhere in the output.
+    /// Test: `survey_counts_a_failed_lookup_apart_from_an_unknown_state`.
+    pub lookup_failed: usize,
+    /// The FIRST failure reason observed, verbatim from `gh` (#6561).
+    ///
+    /// One reason rather than a list: every candidate under a broken `gh`
+    /// fails identically, so 261 copies of one line would bury the count.
+    /// Test: `survey_counts_a_failed_lookup_apart_from_an_unknown_state`.
+    pub lookup_failure: Option<String>,
 }
 
 impl ReclaimSurvey {
@@ -915,6 +864,8 @@ impl ReclaimSurvey {
             blocked: 0,
             unmeasured: 0,
             pr_state_unknown: 0,
+            lookup_failed: 0,
+            lookup_failure: None,
             agent_owned: Vec::new(),
             candidates: Vec::new(),
         };
@@ -936,8 +887,15 @@ impl ReclaimSurvey {
             } else {
                 out.blocked += 1;
             }
-            if c.pr == BranchPrState::Unknown {
-                out.pr_state_unknown += 1;
+            // #6561: an inspected-but-indeterminate state and a BROKEN lookup
+            // are counted apart, and the first failure keeps its reason.
+            match &c.pr {
+                BranchPrState::Unknown => out.pr_state_unknown += 1,
+                BranchPrState::LookupFailed { reason } => {
+                    out.lookup_failed += 1;
+                    out.lookup_failure.get_or_insert_with(|| reason.clone());
+                }
+                _ => {}
             }
             // #5829: collected here, with the totals, so the disclosed list can
             // never disagree with the candidate list it is derived from.

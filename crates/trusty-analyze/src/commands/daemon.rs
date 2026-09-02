@@ -463,7 +463,7 @@ fn retired_labels() -> Vec<&'static str> {
 /// [`handle_doctor`] already fails on that.
 #[cfg(target_os = "macos")]
 fn retired_plist_if_present(label: &str) -> Option<PathBuf> {
-    let path = trusty_common::launchd::user_plist_path(label).ok()?;
+    let path = trusty_common::launchd::plist_path_for_label(label)?;
     path.exists().then_some(path)
 }
 

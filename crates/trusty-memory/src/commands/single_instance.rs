@@ -77,6 +77,82 @@ pub fn startup_action_from_probe_result(probe_ok: bool) -> StartupAction {
     }
 }
 
+/// Whether `socket` is the path a launchd-managed trusty-memory would serve
+/// (#6619).
+///
+/// Why: every #6619 guard turns on this one question, and getting it wrong in
+/// either direction is a bug — too broad refuses a sandboxed daemon that launchd
+/// never managed, too narrow lets the orphan back onto the production path. One
+/// definition, used by both the caller-side spawn guard and the callee-side bind
+/// refusal.
+/// What: `socket` must be what [`crate::socket_path`] resolves AND the process
+/// must not be running under a `TRUSTY_DATA_DIR_OVERRIDE` sandbox — the plist
+/// sets no such override, so a process that has one is by construction not the
+/// unit launchd runs.
+/// Test: `production_socket_is_the_resolved_path`,
+/// `production_socket_is_false_under_a_data_dir_override`.
+#[must_use]
+pub fn is_production_socket(socket: &Path) -> bool {
+    if std::env::var_os(trusty_common::DATA_DIR_OVERRIDE_ENV).is_some() {
+        return false;
+    }
+    crate::socket_path().is_ok_and(|p| p == socket)
+}
+
+/// Refuse the production socket when this process is not the launchd unit that
+/// owns it (#6619).
+///
+/// Why: the spawn guard stops a bridge from racing launchd, but only a bridge
+/// that runs the fixed code. This is the callee-side half, and it is the one
+/// that holds for a daemon started any other way — by hand, by an older bridge,
+/// by a script. Binding the production socket unsupervised is what left an
+/// orphan without the plist's `FASTEMBED_CACHE_DIR` owning the path while
+/// launchd's own instance exited 0 reporting success.
+///
+/// What: three inputs, and the refusal needs all three.
+///
+/// - `is_production_socket` — a test or sandbox socket is never launchd's.
+/// - `unit_registered` — [`trusty_common::launchd_claim`]'s verdict.
+/// - `launchd_runs_us` — a POSITIVE answer from launchd that it does NOT run
+///   this PID (`LaunchdSupervision::NotSupervised`), never
+///   [`trusty_common::supervision::LaunchdSupervision::Unknown`].
+///
+/// 🔴 The `Unknown` exclusion is deliberate and is the difference between a
+/// guard and an outage. Both signals here read launchd, so a host where
+/// `launchctl` cannot be queried would report "unit registered" from the plist
+/// on disk and "not supervised" from a failed query — and refuse to start the
+/// launchd-supervised daemon on every boot. Refusing only on a positive
+/// `NotSupervised` fails closed against the observed defect (an unsupervised
+/// spawn on a healthy host) and open against an unreadable launchd.
+///
+/// Test: `bind_refused_for_an_unsupervised_process_on_a_registered_socket`,
+/// `bind_permitted_for_the_launchd_unit_itself`,
+/// `bind_permitted_when_no_unit_is_registered`,
+/// `bind_permitted_on_a_socket_launchd_does_not_own`,
+/// `bind_permitted_when_launchd_cannot_be_asked`.
+#[must_use]
+pub fn production_bind_refusal(
+    label: &str,
+    is_production_socket: bool,
+    unit_registered: bool,
+    supervision: &trusty_common::supervision::LaunchdSupervision,
+) -> Option<String> {
+    use trusty_common::supervision::LaunchdSupervision;
+
+    let positively_unsupervised = matches!(supervision, LaunchdSupervision::NotSupervised);
+    if !(is_production_socket && unit_registered && positively_unsupervised) {
+        return None;
+    }
+    Some(format!(
+        "refusing to bind the trusty-memory production socket: launchd unit \
+         {label} is registered for it and launchd does not run this process. An \
+         unsupervised daemon here starts without the plist's EnvironmentVariables \
+         and launchd's own instance then exits 0 reporting success (#6619). Start \
+         it with `launchctl kickstart -k gui/$(id -u)/{label}`, or point this \
+         process at a different socket"
+    ))
+}
+
 /// Perform the single-instance check at daemon startup.
 ///
 /// Why: launchd respawns any non-zero exit, so a second instance that fails to
@@ -184,6 +260,138 @@ mod tests {
             single_instance_check(&socket).await,
             StartupAction::ExitAlreadyRunning,
             "a live socket must stop a second instance from binding"
+        );
+    }
+
+    use trusty_common::supervision::LaunchdSupervision;
+
+    /// The unit that owns the production socket.
+    const LABEL: &str = "com.trusty.memory";
+
+    /// Why (#6619): the observed orphan. A bridge-spawned daemon bound the
+    /// production socket while `com.trusty.memory` was mid-restart, without the
+    /// plist's `FASTEMBED_CACHE_DIR`, and launchd's own instance then exited 0
+    /// reporting success. The callee-side refusal is what holds even for a
+    /// daemon started by something this fix did not change.
+    /// What: production socket + registered unit + a positive "launchd does not
+    /// run this PID" refuses, naming the unit.
+    /// Test: itself.
+    #[test]
+    fn bind_refused_for_an_unsupervised_process_on_a_registered_socket() {
+        let refusal =
+            production_bind_refusal(LABEL, true, true, &LaunchdSupervision::NotSupervised)
+                .expect("an unsupervised bind of a registered socket must be refused");
+        assert!(refusal.contains(LABEL), "the unit must be named: {refusal}");
+    }
+
+    /// Why: the unit launchd runs IS the legitimate owner. Refusing it would
+    /// stop trusty-memory starting on every supervised host — an outage caused
+    /// by the guard.
+    /// What: a `Supervised` answer permits the bind.
+    /// Test: itself.
+    #[test]
+    fn bind_permitted_for_the_launchd_unit_itself() {
+        assert_eq!(
+            production_bind_refusal(
+                LABEL,
+                true,
+                true,
+                &LaunchdSupervision::Supervised(LABEL.to_owned())
+            ),
+            None
+        );
+    }
+
+    /// Why: a dev machine that never installed the service must keep starting
+    /// the daemon by hand.
+    /// What: no registered unit permits the bind.
+    /// Test: itself.
+    #[test]
+    fn bind_permitted_when_no_unit_is_registered() {
+        assert_eq!(
+            production_bind_refusal(LABEL, true, false, &LaunchdSupervision::NotSupervised),
+            None
+        );
+    }
+
+    /// Why: a sandboxed daemon under `TRUSTY_DATA_DIR_OVERRIDE` serves a path
+    /// launchd never manages, so the guard must not reach it — this is what
+    /// keeps the crate's own test daemons startable on an installed host.
+    /// What: a non-production socket permits the bind even with a unit
+    /// registered.
+    /// Test: itself.
+    #[test]
+    fn bind_permitted_on_a_socket_launchd_does_not_own() {
+        assert_eq!(
+            production_bind_refusal(LABEL, false, true, &LaunchdSupervision::NotSupervised),
+            None
+        );
+    }
+
+    /// Why: `Unknown` means launchd could not be ASKED, and both of this
+    /// guard's other signals read launchd too. Refusing on it would take the
+    /// daemon down on every host whose `launchctl list` is unreadable — trading
+    /// an orphan for an outage.
+    /// What: `Unknown` permits, unlike `NotSupervised`.
+    /// Test: itself.
+    #[test]
+    fn bind_permitted_when_launchd_cannot_be_asked() {
+        assert_eq!(
+            production_bind_refusal(
+                LABEL,
+                true,
+                true,
+                &LaunchdSupervision::Unknown("launchctl timed out".to_owned())
+            ),
+            None,
+            "an unanswerable launchd is not evidence of an orphan"
+        );
+    }
+
+    /// Why: every #6619 guard turns on this predicate, so the path it accepts
+    /// must be the one the daemon actually resolves — not a re-derived guess.
+    /// What: the resolved socket is production; a sibling path is not.
+    /// Test: itself.
+    #[test]
+    fn production_socket_is_the_resolved_path() {
+        let Ok(resolved) = crate::socket_path() else {
+            return; // no home directory in this environment; nothing to assert
+        };
+        if std::env::var_os(trusty_common::DATA_DIR_OVERRIDE_ENV).is_some() {
+            return; // a sibling test set the override; covered below instead
+        }
+        assert!(is_production_socket(&resolved));
+        assert!(!is_production_socket(Path::new("/tmp/not-the-daemon.sock")));
+    }
+
+    /// Why: a `TRUSTY_DATA_DIR_OVERRIDE` sandbox is by construction not the unit
+    /// launchd runs — the plist sets no override — so the guard must not reach
+    /// it whatever launchd has registered.
+    /// What: with the override set, even the resolved socket is not production.
+    /// Test: itself.
+    #[test]
+    #[serial_test::serial]
+    fn production_socket_is_false_under_a_data_dir_override() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let previous = std::env::var_os(trusty_common::DATA_DIR_OVERRIDE_ENV);
+        // SAFETY: serialised by `#[serial]`; no concurrent env access here.
+        unsafe { std::env::set_var(trusty_common::DATA_DIR_OVERRIDE_ENV, tmp.path()) };
+
+        let resolved = crate::socket_path();
+        let verdict = resolved.as_ref().map(|p| is_production_socket(p));
+
+        // SAFETY: same as above.
+        unsafe {
+            match previous {
+                Some(v) => std::env::set_var(trusty_common::DATA_DIR_OVERRIDE_ENV, v),
+                None => std::env::remove_var(trusty_common::DATA_DIR_OVERRIDE_ENV),
+            }
+        }
+
+        assert_eq!(
+            verdict.ok(),
+            Some(false),
+            "a sandboxed socket is never launchd's production path"
         );
     }
 }

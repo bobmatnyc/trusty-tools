@@ -4,5 +4,3 @@ Added
   the idle window for it, so a monitor polling faster than the window can no
   longer keep an on-demand service resident. A connect-and-close probe was
   already exempt; a health RPC was not (#6621).
-- `launchd::user_plist_path(label)` resolves `~/Library/LaunchAgents/<label>.plist`
-  from a label alone. `LaunchdConfig::plist_path` delegates to it (#6621).
