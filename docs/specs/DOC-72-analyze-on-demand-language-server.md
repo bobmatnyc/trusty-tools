@@ -58,6 +58,16 @@ client).
 >
 > — Bob, 2026-09-01, scope expansion
 
+> "1. Configurable option, on my default (linters too); 2. Node or Bun,
+> recommend installing in scaffolding. 3. Study more, do intentional analysis.
+> 4. Relay. 5. Recommend. 6. Cap per server 7. Experiment."
+>
+> — Bob, 2026-09-01, answering §10's seven questions in order
+
+§10 records each answer against the question it settles. The rulings are folded
+into §2, §4, §7, §8, §9, and §11, so no section still describes an open choice
+the owner has made.
+
 ---
 
 ## Why
@@ -151,9 +161,49 @@ One language-server process per workspace per language.
   `on_demand.rs`'s existing contract. A caller that wants to degrade decides that
   visibly; nothing decides it silently on the caller's behalf.
 
-**Binary provisioning.** The installer provisions the server binaries; the daemon
-probes and reports, exactly as `tool_registry.rs` does for `ruff` and `biome`
-today.
+**Binary provisioning.** `trusty-installer` installs the language servers **and
+the existing linters** — `ruff` and `biome` — as a configurable option that is
+**ON by default** (owner ruling, §10 Q1). With the option off the installer
+installs nothing and the daemon falls back to today's behaviour: probe each
+binary, record the unavailable ones, and report them, exactly as
+`tool_registry.rs` does now. Provisioning changes who installs the tools; it
+never changes the daemon's probe-and-report contract.
+
+**Config key shape.** The option lives in the installer's own config, under the
+`~/.trusty-tools/<crate>/config.yaml` convention `trusty_common::crate_config`
+fixes (#1220 — YAML, not TOML):
+
+```yaml
+# ~/.trusty-tools/trusty-installer/config.yaml
+analysis_tools:
+  install: true                    # default ON (§10 Q1)
+  language_servers: [rust-analyzer, pyright, typescript-language-server]
+  linters: [ruff, biome]
+  js_runtime: auto                 # auto | bun | node | none
+```
+
+**Installer scaffolding step.** The tools join the data-driven `PREREQS` table in
+`crates/trusty-installer/src/commands/prereqs/`, and run through the
+check-confirm-offer-install-reverify orchestration that `prereqs/phase.rs`
+already implements, with `prereqs/hints.rs` supplying the per-platform install
+command and `prereqs/exec_heartbeat.rs` keeping a long install visible (#3821).
+No second installer path — this is one more table entry per tool, gated on
+`analysis_tools.install`.
+
+**JavaScript runtime.** `pyright` and `typescript-language-server` are npm
+packages and need a JavaScript runtime. Either Node or Bun serves (owner ruling,
+§10 Q2), and the scaffolding installs one, so **phases 3 and 4 are not gated on
+the machine already having a runtime**.
+
+Selection rule, in order:
+
+1. If Bun is present, use Bun. It starts faster, and these servers are spawned on
+   demand rather than kept resident, so start-up cost is paid on every use.
+2. Otherwise, if Node is present, use Node.
+3. If neither is present, **install Node**. Both servers are published and tested
+   against Node, so a fresh install should land on the runtime their maintainers
+   support rather than one that emulates it. `js_runtime` overrides the rule when
+   an operator wants a specific runtime.
 
 | Language | Server | Provisioning note |
 |---|---|---|
@@ -175,10 +225,19 @@ Every result carries the exact state it was computed against.
 
 Both stamps ride on every response and on every published event (§4).
 
-**The barrier.** `analysed_at(version)` is a synchronous call. It returns only
-when the server has applied the named document version, or it returns a
-timeout — never a partial state. A gate calls the barrier first and then reads
-results, so the results it reads provably describe the edit under review.
+**The barrier.** `analysed_at(version)` is a **blocking call with a deadline**
+(the PM recommendation, adopted by the owner — §10 Q5). It returns exactly one of:
+
+```
+Ready                          # the server has applied `version`
+TimedOut { version_seen }      # the deadline expired; this is how far it got
+```
+
+It never returns a partial state, and **callers do not poll**. A polling loop
+burns a round trip per iteration and invents its own backoff; one held connection
+with a server-side deadline is simpler for a gate and gives the caller a single
+place to handle failure. A gate calls the barrier first and then reads results,
+so the results it reads provably describe the edit under review.
 
 **Refusing stale answers.** A call naming a version the server has already moved
 past returns a typed `Stale { requested, current }` error. It never returns the
@@ -205,12 +264,41 @@ notifications are therefore separate.
 - **Reads stay synchronous.** §5's methods answer from the versioned store. A
   caller that cannot subscribe polls the barrier and then reads.
 
-**Transport is an open question (§10, Q4).** #6287 removed `AnalyzerEvent`, the
-broadcast channel, and the `/sse` route from this daemon, and ADR-0032 leaves it
-with no HTTP surface to stream from. `trusty-analyze` also has no Cargo edge on
-`trusty-agents-common`, so `HarnessEvent` is not reachable from it today. Adding
-that edge, or relaying through `trusty-console`, is a decision this spec does not
-make.
+**Transport: relay through `trusty-console`** (owner ruling, §10 Q4).
+`trusty-analyze` takes **no Cargo edge on `trusty-agents-common`**, so
+`HarnessEvent` is a shape this daemon mirrors by field name, never a type it
+imports. The relay reuses the console↔service seam that already exists rather
+than reviving the `/sse` route #6287 removed.
+
+**Analyze side — a bounded ring, read by cursor.** Published events land in an
+in-memory ring buffer per `(workspace, language)`, each stamped with a
+process-monotonic `seq`. One new socket method drains it:
+
+```
+analyze.lsp_events  { since_seq, max }
+  -> { events: [ … ], next_seq, dropped }
+```
+
+`dropped` reports ring overflow, so a slow reader sees a gap marker instead of
+silently missing events — the same contract as ADR-0005's `Lag`. The ring is
+memory only. A restart loses undrained events, and that is correct: §5's read
+methods are the durable answer, and the events are a notification that an answer
+changed.
+
+**Console side — poll, cache, republish.** `trusty-console` polls
+`analyze.lsp_events` over UDS, holding the cursor, in the poller that already
+polls this daemon's `console_metrics`
+(`crates/trusty-console/src/metrics_poller.rs`, which backs
+`GET /api/console/metrics/analyze`). It republishes on two routes:
+
+| Route | Shape |
+|---|---|
+| `GET /api/console/events/analyze/lsp?since_seq=<n>` | JSON: `{events, next_seq, dropped}` — the cursor form, for a programmatic consumer |
+| `GET /api/console/events/analyze/lsp/stream` | SSE: one event per element, for the dashboard |
+
+This keeps ADR-0032 intact — analyze binds no socket but its own UDS one, and
+console remains the only HTTP surface — and matches ADR-0035's direction, where
+console aggregates over UDS and clients read console.
 
 ---
 
@@ -233,7 +321,8 @@ names are bare snake_case, matching `complexity_hotspots` and `find_smells`.
 | `analyze.lsp_implementations` | `lsp_implementations` | `{symbol, version}` | concrete implementations of a trait, interface, or abstract method |
 | `analyze.lsp_type_at` | `lsp_type_at` | `{path, line, column, version}` | the inferred type at a position |
 | `analyze.lsp_impact` | `lsp_impact` | `{symbol, new_signature, version}` | every call site the signature change breaks |
-| `analyze.lsp_analysed_at` | `lsp_analysed_at` | `{version, timeout_ms}` | the barrier of §3 |
+| `analyze.lsp_analysed_at` | `lsp_analysed_at` | `{version, timeout_ms}` | `Ready` or `TimedOut{version_seen}` — the blocking barrier of §3 |
+| `analyze.lsp_events` | — | `{since_seq, max}` | the event cursor of §4; console polls it, agents do not |
 
 - Every response carries `document_version` and `snapshot` (§3).
 - Every method takes `version` and refuses a stale one (§3).
@@ -283,16 +372,22 @@ spec is not accepted with them empty.
 | Python | `pyright` | TBD | TBD | TBD | TBD |
 | TypeScript | `typescript-language-server` | TBD | TBD | TBD | TBD |
 
-**The hard cap.** A per-language RSS ceiling is configured, defaulting to the
-measured peak plus 50%. The daemon samples each child's RSS.
+**The hard cap is per server** (owner ruling, §10 Q6). Each language-server
+process carries its own RSS ceiling, defaulting to that language's measured peak
+plus 50%. The daemon samples each child's RSS against its own cap.
+
+There is **no aggregate budget** across servers. A per-server cap fails one
+language and leaves the others working; a shared budget would let a heavy Rust
+workspace starve an unrelated Python one, and would make the failure depend on
+what else happened to be running.
 
 **What happens when a cap is exceeded: refuse, never swap.** The daemon kills the
-offending server, marks that `(workspace, language)` pair unavailable for a
-cool-off window, and returns a typed `CapacityExceeded` error to every caller
-during it. Callers fall back to the batch checker. The daemon does not queue,
-does not retry in a loop, and does not let the machine page — a swapping analysis
-daemon is worse than no analysis daemon, and this repository has already paid for
-that lesson in `trusty-search`.
+offending server, marks that one `(workspace, language)` pair unavailable for a
+cool-off window, and returns a typed `CapacityExceeded` error to callers of that
+pair during it. Every other supervised server keeps serving. Callers fall back to
+the batch checker. The daemon does not queue, does not retry in a loop, and does
+not let the machine page — a swapping analysis daemon is worse than no analysis
+daemon, and this repository has already paid for that lesson in `trusty-search`.
 
 ---
 
@@ -338,6 +433,10 @@ happens inside stage 9, `report`, which is the stage that invokes
 `trusty-review report --analyze`. Adding a tenth sweep stage would put tga in
 direct contact with trusty-analyze, which DOC-67 §5 seam 3 forbids.
 
+**Which of the eight tools the audit consumes is decided by experiment, not by
+this spec** (owner ruling, §10 Q7). Phase 2 of §9 runs it. The seam is fixed
+here; the tool set that flows through it is an outcome.
+
 > **Stale reference in DOC-67.** DOC-67 §5's diagram labels the analyze edge
 > `HTTP :7879`. #6287 retired that listener and ADR-0032 forbids it; the adapter
 > is UDS today. This spec does not edit DOC-67 — the correction belongs in a
@@ -347,27 +446,80 @@ direct contact with trusty-analyze, which DOC-67 §5 seam 3 forbids.
 
 ## {#SPEC-ANALYZELSP-09~draft} 9. Rollout
 
-Three phases, each independently shippable, each behind an explicit flag until
-its acceptance criteria are met.
+Five phases, each independently shippable, each behind an explicit flag until its
+acceptance criteria are met.
 
 **Phase order is repo-first.** The coding agents working in this repository write
 Rust, so Rust is where the capability earns or fails its keep here. This inverts
 the gap-first order (#6606's outline put Python first because it has no compiler
-step at all); the gap is real and Python is phase 2, not dropped.
+step at all); the gap is real and Python is phase 3, not dropped.
+
+### Phase 0 — Intentional analysis
+
+Not a build phase. A measurement phase that decides what phase 1 optimises for
+(owner ruling, §10 Q3: "study more, do intentional analysis").
+
+The existing A/B numbers are the **baseline, not the verdict**. Both trials
+measured a plugin the model never chose to invoke — 0/18 and 0/6 — so they
+measure availability, not usefulness. Phase 0 measures the queries under
+deliberate use, where the caller is told to use them.
+
+**Queries under test.** `lsp_references`, `lsp_call_hierarchy`,
+`lsp_implementations`, `lsp_impact`.
+
+**Coding-agent tasks.** Three shapes, drawn from §8c's instruction set, run on
+this repository:
+
+| Task | What the agent is asked to do |
+|---|---|
+| Architecture mapping | Map the call and implementation structure of a named subsystem |
+| Refactor impact | Size and then execute a signature change across crates |
+| Performance hot-path | Find the hot path into a named function and rank it by complexity |
+
+**Metrics.** Per task and arm: invocation count (did the agent call the tool when
+told to), correctness delta against a grep-and-read ground truth, wall time, and
+peak RSS of the language server.
+
+**Decision rule.** Phase 1 proceeds when deliberate use shows a correctness gain
+on at least one task shape at acceptable wall time and RSS. If deliberate use
+also shows no gain, the finding is that the AST index answers these questions
+adequately, and the capability narrows to type-checked diagnostics only — §1's
+first bullet — dropping the navigation-adjacent tools. Either outcome is a
+result; neither cancels the spec.
 
 ### Phase 1 — `rust-analyzer`
+
+**Not time-boxed** (owner ruling, §10 Q3). Phase 0 supplies the intent; phase 1
+builds against it.
 
 - Ships behind an explicit flag, default off.
 - Carries the mise-shim / pinned-toolchain provisioning caveat of §2 as a
   hard install requirement, with a probe that fails loudly rather than
   installing a shim that recurses.
 - **Acceptance:** a supervised server starts on demand and exits on idle; the
-  barrier of §3 returns only after the named version is applied; `lsp_impact`
-  finds a call site `cargo check` also flags, on a seeded signature change; the
-  §7 table's Rust row is filled from measurement; the crash Claude Code
-  swallowed as `outcome=ok` surfaces here as a typed error.
+  barrier of §3 returns `Ready` only after the named version is applied;
+  `lsp_impact` finds a call site `cargo check` also flags, on a seeded signature
+  change; the §7 table's Rust row is filled from measurement; the crash Claude
+  Code swallowed as `outcome=ok` surfaces here as a typed error.
 
-### Phase 2 — `pyright`
+### Phase 2 — Audit tool-selection experiment
+
+Which of §5's eight tools the audit consumes is decided by running them (owner
+ruling, §10 Q7). The experiment takes three repositories of increasing size,
+runs a DD report twice each — once with the LSP fetches in
+`analyze_adapter.rs`'s set and once without — and records, per tool, the added
+report findings, the added wall time, and the added peak RSS. A tool enters the
+audit's default set when it changes a report's findings on at least one
+repository at a cost that scales; a tool that only slows the sweep is left out
+and stays available on request. Acquisition-sized corpora are the point of the
+size ladder: a tool that pays for itself on one workspace can be untenable
+across fifty.
+
+- **Acceptance:** the per-tool table is filled for all three repositories, and
+  `analyze_adapter.rs`'s default fetch set names only the tools that earned a
+  place.
+
+### Phase 3 — `pyright`
 
 - Closes the largest capability gap: Python has no compiler step in this daemon
   today, only `ruff` (§1).
@@ -375,7 +527,7 @@ step at all); the gap is real and Python is phase 2, not dropped.
   reports a type error `ruff` does not; the §7 Python row is filled; a Python
   repository with no CI type check gets a gate verdict from §6's review trigger.
 
-### Phase 3 — `typescript-language-server`
+### Phase 4 — `typescript-language-server`
 
 - **Acceptance:** phase 1's criteria on a TypeScript workspace;
   `lsp_diagnostics` agrees with `tsc --noEmit` on a seeded type error; the §7
@@ -387,31 +539,78 @@ resident or session-provisioned.
 
 ---
 
-## {#SPEC-ANALYZELSP-10~draft} 10. Open questions for the owner
+## {#SPEC-ANALYZELSP-10~draft} 10. Resolved decisions
 
-1. **Provisioning.** Does `trusty-installer` install these third-party servers,
-   or does the daemon only probe and report as it does for `ruff` and `biome`
-   today? The installer provisions no third-party linter now, so this is a new
-   responsibility either way.
-2. **Node runtime.** `pyright` and `typescript-language-server` are npm packages.
-   Is a Node runtime an acceptable requirement on an operator machine, or should
-   phases 2 and 3 be gated on the machine already having one?
-3. **Rust at all.** The Rust edit A/B measured 0/6 invocations and a 40% slowdown
-   from the plugin. Phase 1 is Rust because this repository is Rust. Should
-   phase 1 instead be a time-boxed evaluation that can be abandoned, rather than
-   a shipped flag?
-4. **Event transport.** #6287 removed this daemon's event channel and ADR-0032
-   leaves it no HTTP surface. Does `trusty-analyze` take a Cargo edge on
-   `trusty-agents-common` for `HarnessEvent`, or does it relay through
-   `trusty-console`?
-5. **Barrier semantics.** Is `analysed_at` a blocking call with a deadline, or a
-   poll the caller loops on? A blocking call is simpler for a gate and holds a
-   connection open for the duration.
-6. **Cap granularity.** Is the §7 hard cap per language server, or one budget
-   across every server the daemon supervises?
-7. **Audit depth.** Which of §5's tools does the audit actually consume? Running
-   all eight over an acquisition-sized corpus is a different cost profile from
-   running them over one workspace.
+All seven questions this section originally asked were answered by the owner on
+**2026-09-01**. The question text is kept so the ruling reads against what was
+asked.
+
+**Q1 — Provisioning.** *Does `trusty-installer` install these third-party
+servers, or does the daemon only probe and report as it does for `ruff` and
+`biome` today? The installer provisions no third-party linter now, so this is a
+new responsibility either way.*
+
+> **Ruled 2026-09-01:** "Configurable option, on my default (linters too)."
+> The installer provisions the language servers **and** `ruff` and `biome`,
+> under a config option defaulting to ON. With the option off the daemon keeps
+> today's probe-and-report behaviour. Applied in §2.
+
+**Q2 — Node runtime.** *`pyright` and `typescript-language-server` are npm
+packages. Is a Node runtime an acceptable requirement on an operator machine, or
+should phases 2 and 3 be gated on the machine already having one?*
+
+> **Ruled 2026-09-01:** "Node or Bun, recommend installing in scaffolding."
+> Either runtime serves and the scaffolding installs one, so no phase is gated
+> on a pre-existing runtime. §2 fixes the selection rule: prefer Bun when
+> present, else Node when present, else install Node.
+
+**Q3 — Rust at all.** *The Rust edit A/B measured 0/6 invocations and a 40%
+slowdown from the plugin. Phase 1 is Rust because this repository is Rust.
+Should phase 1 instead be a time-boxed evaluation that can be abandoned, rather
+than a shipped flag?*
+
+> **Ruled 2026-09-01:** "Study more, do intentional analysis."
+> Phase 1 is **not** time-boxed. A new phase 0 measures the queries under
+> deliberate use first, and the existing A/B numbers are its baseline rather
+> than its verdict. Applied in §9.
+
+**Q4 — Event transport.** *#6287 removed this daemon's event channel and
+ADR-0032 leaves it no HTTP surface. Does `trusty-analyze` take a Cargo edge on
+`trusty-agents-common` for `HarnessEvent`, or does it relay through
+`trusty-console`?*
+
+> **Ruled 2026-09-01:** "Relay."
+> Events relay through `trusty-console`, and `trusty-analyze` takes **no** Cargo
+> edge on `trusty-agents-common`. §4 fixes the ring buffer, the
+> `analyze.lsp_events` cursor method, and the two console routes.
+
+**Q5 — Barrier semantics.** *Is `analysed_at` a blocking call with a deadline, or
+a poll the caller loops on? A blocking call is simpler for a gate and holds a
+connection open for the duration.*
+
+> **Ruled 2026-09-01:** "Recommend."
+> The owner adopted the recommendation stated in the question: a blocking call
+> with a deadline, returning `Ready` or `TimedOut{version_seen}`, with no polling
+> loops. Applied in §3 and §5.
+
+**Q6 — Cap granularity.** *Is the §7 hard cap per language server, or one budget
+across every server the daemon supervises?*
+
+> **Ruled 2026-09-01:** "Cap per server."
+> One RSS ceiling per language-server process, no aggregate budget. Exceeding it
+> kills that one server and refuses callers of that pair; every other server
+> keeps serving. Applied in §7.
+
+**Q7 — Audit depth.** *Which of §5's tools does the audit actually consume?
+Running all eight over an acquisition-sized corpus is a different cost profile
+from running them over one workspace.*
+
+> **Ruled 2026-09-01:** "Experiment."
+> A dedicated phase decides it by measurement across three repositories of
+> increasing size. Applied in §8d and as phase 2 of §9.
+
+No question in this spec is open. What remains unsettled is measurement: the §7
+table's TBD cells, phase 0's decision rule, and phase 2's per-tool table.
 
 ---
 
@@ -420,26 +619,41 @@ resident or session-provisioned.
 To be filed by `ticketing` once the owner accepts this spec. One line each; each
 references #6606.
 
-1. `trusty-analyze`: language-server supervisor keyed by `(workspace, language)`,
+1. **Phase 0 — intentional analysis (§9).** Run the four queries against the
+   three coding-agent task shapes, record invocations, correctness delta, wall
+   time, and RSS, and apply the decision rule. Blocks nothing structurally, but
+   its outcome sets phase 1's target. First issue to cut.
+2. `trusty-analyze`: language-server supervisor keyed by `(workspace, language)`,
    reusing `UdsServiceSupervisor`, with per-language idle exit (§2).
-2. `trusty-analyze`: versioned result store — document version plus
+3. `trusty-analyze`: versioned result store — document version plus
    `<git head>+<dirty hash>` snapshot on every result (§3).
-3. `trusty-analyze`: `analyze.lsp_analysed_at` barrier and the `Stale` refusal
-   (§3).
-4. `trusty-analyze`: the seven read methods of §5 on the socket, plus their MCP
+4. `trusty-analyze`: `analyze.lsp_analysed_at` as a blocking barrier returning
+   `Ready | TimedOut{version_seen}`, plus the `Stale` refusal (§3).
+5. `trusty-analyze`: the seven read methods of §5 on the socket, plus their MCP
    descriptors.
-5. `trusty-analyze`: publish diagnostics and reference results as control-bus
-   events — blocked on open question 4 (§4).
-6. `trusty-analyze`: per-language RSS cap, kill, cool-off, and the
+6. `trusty-analyze`: the §4 event ring buffer and the `analyze.lsp_events` cursor
+   method, with `dropped` on overflow.
+7. `trusty-console`: poll `analyze.lsp_events` in `metrics_poller.rs` and
+   republish on `GET /api/console/events/analyze/lsp` (cursor JSON) and
+   `…/lsp/stream` (SSE) (§4). No Cargo edge from analyze to
+   `trusty-agents-common`.
+8. `trusty-analyze`: per-server RSS cap, kill, cool-off, and the
    `CapacityExceeded` error (§7).
-7. `trusty-installer`: provision `rust-analyzer` per pinned toolchain, with a
-   probe that detects the mise-shim recursion — blocked on open question 1 (§2).
-8. `trusty-mpm`: create the bundled `analyze` skill documenting each tool and its
-   trigger policy (§8b).
-9. `trusty-agents-common`: add the tool-use section to `BASE-ENGINEER.md` (§8c).
-10. `trusty-review`: extend `analyze_adapter.rs`'s fetch set with the audit's LSP
+9. `trusty-installer`: add the analysis tools to the `PREREQS` table behind
+   `analysis_tools.install` (default ON) — the three language servers plus `ruff`
+   and `biome`, with `rust-analyzer` installed per pinned toolchain and a probe
+   that detects the mise-shim recursion (§2).
+10. `trusty-installer`: the JavaScript-runtime scaffolding step — Bun if present,
+    else Node if present, else install Node, with the `js_runtime` override (§2).
+11. `trusty-mpm`: create the bundled `analyze` skill documenting each tool and its
+    trigger policy (§8b).
+12. `trusty-agents-common`: add the tool-use section to `BASE-ENGINEER.md` (§8c).
+13. `trusty-review`: extend `analyze_adapter.rs`'s fetch set with the audit's LSP
     fetches (§8d).
-11. Phase 1 acceptance run: fill the §7 Rust row from measurement and record the
+14. **Phase 2 — audit tool-selection experiment (§9).** Run the three-repository
+    size ladder with and without the LSP fetches, fill the per-tool table, and
+    set `analyze_adapter.rs`'s default fetch set from the result.
+15. Phase 1 acceptance run: fill the §7 Rust row from measurement and record the
     A/B against the batch checker.
-12. Phase 2 (`pyright`) and phase 3 (`typescript-language-server`), one issue
+16. Phase 3 (`pyright`) and phase 4 (`typescript-language-server`), one issue
     each, gated on phase 1's acceptance (§9).
