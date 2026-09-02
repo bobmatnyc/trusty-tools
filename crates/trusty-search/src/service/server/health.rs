@@ -1,14 +1,15 @@
-//! `GET /health` and `POST /upgrade` handlers.
+//! `GET /health` handler.
 //!
 //! Why: Health probes are polled at 2s intervals by external orchestrators;
 //! keeping them in a focused module makes response-shape changes easy to review.
 //! What: `health_handler` returns daemon liveness + embedder status + resource
-//! metrics. `upgrade_handler` drives `cargo install` and triggers a self-restart.
+//! metrics. `POST /upgrade` moved to `super::upgrade` in #6688, when this file
+//! crossed the 500-SLOC production cap.
 //! Test: `health_handler_reports_indexes_and_uptime` and related tests in
 //! `super::tests`.
 use axum::extract::State;
 use axum::Json;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::sync::Arc;
 
 use crate::core::embed::Embedder as _;
@@ -82,6 +83,42 @@ pub(super) struct HealthResponse {
     /// `~102`) immediately visible without tailing logs. The `warm_boot_degraded`
     /// boolean is the machine-readable flag external monitors should poll.
     pub(super) warmboot_summary: WarmBootSummary,
+    /// Issue #6688: the IDS of the indexes `warmboot_summary.indexes_stage_failed`
+    /// counts. Absent — not `null`, not `[]` — when that count is `0`.
+    ///
+    /// Why: every failing-index signal on this response was a COUNT, so a
+    /// consumer reading `indexes_stage_failed: 1` on a 41-index daemon could
+    /// not tell which index failed and had to poll `GET /indexes/:id/status`
+    /// for every registered index to find out. That blocks per-index
+    /// remediation and made trusty-review degrade every review because one
+    /// unrelated index on the host had failed lanes (#6686).
+    /// What: `IndexStages::any_failed()` — the SAME predicate, evaluated in the
+    /// SAME registry scan, on the same `handle.stages` read that produces
+    /// `indexes_stage_failed`. So `indexes_stage_failed_ids.len()` and that
+    /// counter can never disagree, including under the fail-open arm: a handle
+    /// whose `stages` lock is contended is skipped by both (and counted in
+    /// `indexes_health_scan_skipped`). Sorted, because the registry is a
+    /// `DashMap` and its iteration order is not stable across polls.
+    ///
+    /// `any_failed()` and NOT `indexes_corpus_failed`'s
+    /// `CodeIndexer::corpus_open_failed`: a corpus-open failure marks every
+    /// lane `Failed` (`derive_warm_boot_stages`' `corpus_open_failed` guard),
+    /// so a corpus-failed index is already named here by its lanes. Folding the
+    /// flag in would name indexes that no counter on this response counts, for
+    /// only the post-warm-boot backstop case #5927 added — a corpus-failure
+    /// id list is a separate additive field, not a widening of this one.
+    ///
+    /// Additive and optional by construction (`skip_serializing_if`): a
+    /// consumer built against an older daemon never sees the key, and every
+    /// existing counter keeps its exact shape. A consumer mirroring this field
+    /// MUST spell it `Option<Vec<String>>` or `#[serde(default)]` — a bare
+    /// `Vec<String>` hard-fails against a daemon that omits it (#628).
+    /// Test: `health_names_the_indexes_with_a_failed_lane`,
+    /// `health_omits_the_failing_index_ids_when_nothing_is_failing`, and
+    /// `health_counter_wire_shape_is_unchanged_by_the_id_field` in
+    /// `stage_failed_5927_tests`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) indexes_stage_failed_ids: Option<Vec<String>>,
     /// Number of registered indexes with the KG component disabled
     /// (`skip_kg == true`) — issue #2984 Phase 1.
     ///
@@ -657,6 +694,9 @@ pub(super) async fn health_handler(
     // the stage lanes, so it can never disagree with the per-index
     // `corpus_open_failure` block on `GET /indexes/:id/status`.
     let mut indexes_corpus_failed = 0usize;
+    // #6688: name the failing indexes, not just count them — same scan, same
+    // `stages` read, same `any_failed()` predicate as the counter below.
+    let mut indexes_stage_failed_ids: Vec<String> = Vec::new();
     let indexes_stage_failed = state
         .registry
         .list_handles()
@@ -752,7 +792,13 @@ pub(super) async fn health_handler(
                             indexes_stuck_mid_walk += 1;
                         }
                     }
-                    stages.any_failed()
+                    let failed = stages.any_failed();
+                    if failed {
+                        // #6688: recorded from the same `any_failed()` the
+                        // counter is derived from, so the two cannot diverge.
+                        indexes_stage_failed_ids.push(handle.id.to_string());
+                    }
+                    failed
                 }
                 Err(_) => {
                     indexes_health_scan_skipped += 1;
@@ -765,6 +811,19 @@ pub(super) async fn health_handler(
             }
         })
         .count();
+    // #6688: stable order — the registry is a `DashMap` and iterates arbitrarily.
+    indexes_stage_failed_ids.sort_unstable();
+    debug_assert_eq!(
+        indexes_stage_failed_ids.len(),
+        indexes_stage_failed,
+        "#6688: the id list and indexes_stage_failed come from one predicate in one scan"
+    );
+    // #6688: absent rather than `[]` on a healthy daemon — see the field's doc.
+    let indexes_stage_failed_ids = if indexes_stage_failed_ids.is_empty() {
+        None
+    } else {
+        Some(indexes_stage_failed_ids)
+    };
     warmboot_summary.indexes_corpus_failed = indexes_corpus_failed;
     warmboot_summary.indexes_stage_failed = indexes_stage_failed;
     warmboot_summary.indexes_health_scan_skipped = indexes_health_scan_skipped;
@@ -891,6 +950,8 @@ pub(super) async fn health_handler(
         indexes_empty,
         total_chunks,
         warmboot_summary,
+        // #6688: which indexes the counter above is about.
+        indexes_stage_failed_ids,
         boot_reconcile,
         indexes_watcher_network_degraded,
         embedder_bootstrap,
@@ -1042,20 +1103,6 @@ pub(super) fn recompute_warm_boot_degraded(state: &SearchAppState) -> bool {
     conclusive
 }
 
-/// Request body for `POST /upgrade` (issue #537).
-///
-/// Why: typed body avoids raw JSON field extraction in the handler, and serde
-/// provides friendly error messages for malformed requests.
-/// What: mirrors the MCP tool schema: `check` (default true) and `confirm`.
-/// Test: the MCP `upgrade` tool calls this endpoint.
-#[derive(Deserialize)]
-pub(super) struct UpgradeRequest {
-    #[serde(default = "bool_true")]
-    check: bool,
-    #[serde(default)]
-    confirm: bool,
-}
-
 /// The `/health` body, for a caller that is not an axum route (#6285).
 ///
 /// Why: `search.health` over the UDS socket and `GET /health` must never be
@@ -1074,103 +1121,6 @@ pub(crate) async fn health_report(state: Arc<SearchAppState>) -> serde_json::Val
     serde_json::to_value(resp).unwrap_or_else(
         |e| serde_json::json!({ "status": "error", "error": format!("serialize health: {e}") }),
     )
-}
-
-/// `POST /upgrade` — check for or install a new trusty-search version (issue #537).
-///
-/// Why: Exposes the upgrade workflow over HTTP so the MCP dispatcher (which
-/// calls the daemon's REST API) can trigger an upgrade and receive the response
-/// before the daemon self-exits. Never silently auto-installs.
-///
-/// What:
-/// - `check=true` or `confirm=false`: query crates.io and return version info.
-/// - `confirm=true`: install via `cargo install --locked`, health-gate, then
-///   schedule a 500 ms delayed exit (to flush this response) and return the
-///   result. When launchd-supervised the daemon exits non-zero so launchd
-///   respawns with the new binary. When unsupervised a restart hint is returned.
-///
-/// Test: manual via `curl -X POST http://127.0.0.1:$(trusty-search port)/upgrade \
-///  -H 'Content-Type: application/json' -d '{"check":true}'`.
-pub(super) async fn upgrade_handler(
-    State(state): State<Arc<SearchAppState>>,
-    Json(body): Json<UpgradeRequest>,
-) -> Json<serde_json::Value> {
-    let crate_name = env!("CARGO_PKG_NAME");
-    let current = env!("CARGO_PKG_VERSION");
-
-    let info = trusty_common::update::check_crates_io(crate_name, current).await;
-
-    let (latest, is_update) = match &info {
-        Some(u) => (u.latest.as_str(), true),
-        None => (current, false),
-    };
-
-    if body.check || !body.confirm {
-        let msg = if is_update {
-            format!(
-                "Update available: {crate_name} {latest} (you have {current}). \
-                 POST with confirm=true to install."
-            )
-        } else {
-            format!("{crate_name} {current} is already up to date.")
-        };
-        return Json(serde_json::json!({
-            "status": "checked",
-            "current": current,
-            "latest": latest,
-            "update_available": is_update,
-            "message": msg
-        }));
-    }
-
-    if !is_update {
-        return Json(serde_json::json!({
-            "status": "up_to_date",
-            "current": current,
-            "message": format!("{crate_name} {current} is already up to date.")
-        }));
-    }
-
-    let latest_owned = latest.to_string();
-    let crate_name_owned = crate_name.to_string();
-    let update_slot = state.update_available.clone();
-    let response = serde_json::json!({
-        "status": "installing",
-        "current": current,
-        "latest": latest_owned,
-        "message": format!(
-            "Installing {crate_name} {latest_owned} — daemon will restart \
-             under launchd (or print a restart hint if not supervised)."
-        )
-    });
-
-    // Spawn the install on a delayed task so this handler can return the
-    // response to the HTTP client (and thus to the MCP caller) before the
-    // process might exit. 500 ms gives the TCP stack time to flush.
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        match trusty_common::update::upgrade_and_restart(&crate_name_owned, &crate_name_owned).await
-        {
-            Ok(Some(hint)) => {
-                tracing::info!("{hint}");
-                eprintln!("{hint}");
-            }
-            Ok(None) => {}
-            Err(e) => {
-                tracing::error!("upgrade_and_restart failed: {e:#}");
-                eprintln!("[trusty-search] upgrade failed: {e:#}");
-                if let Ok(mut g) = update_slot.lock() {
-                    *g = None;
-                }
-            }
-        }
-    });
-
-    Json(response)
-}
-
-fn bool_true() -> bool {
-    true
 }
 
 #[cfg(test)]

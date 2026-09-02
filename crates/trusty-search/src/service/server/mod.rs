@@ -44,6 +44,8 @@ mod state_impl;
 mod status;
 mod tickers;
 mod typeahead;
+// #6688: `POST /upgrade`, split out of `health.rs` when it crossed the cap.
+mod upgrade;
 
 // cfg(test) sub-modules — each < 500 lines
 #[cfg(test)]
@@ -197,7 +199,7 @@ pub use typeahead::{
     typeahead_handler as typeahead_handler_for_tests, TypeaheadParams as TypeaheadParamsForTests,
 };
 
-use self::health::upgrade_handler;
+use self::upgrade::upgrade_handler;
 
 // #6285: the one seam `service::socket` reads the health report through, so the
 // socket and `GET /health` cannot report different things.
