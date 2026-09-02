@@ -42,9 +42,17 @@ impl DaemonClient {
             Ok(report) => {
                 // Issue #2149: a roster-deploy failure no longer aborts
                 // preparation — surface it loudly rather than let it hide.
-                for err in &report.roster_errors {
-                    tracing::error!(%err, "roster provisioning gap (non-fatal)");
-                }
+                // #6649 folded the asset-hygiene lines in beside them, through
+                // the one shared reporter.
+                crate::core::session_launch::log_prep_findings(
+                    &report.roster_errors,
+                    &report.asset_notices,
+                    crate::core::session_launch::PrepScope {
+                        kind: "connect",
+                        session: None,
+                        dir: std::path::Path::new(workdir),
+                    },
+                );
             }
             // #4752: fatal — refuse the launch rather than start a session
             // whose compiled instructions could not be written.

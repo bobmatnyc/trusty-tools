@@ -14,6 +14,14 @@
 //! Test: `prepare_session_writes_claude_md_and_stash` and
 //! `prepare_session_is_idempotent` in this module's tests.
 
+// #6649: the launch lines an operator sees when an asset tier is not clean.
+mod asset_notices;
+/// The ONE way a non-terminal launch path surfaces a `PrepReport`'s findings.
+///
+/// Why: five spawn paths wrote the same two loops by hand, and a sixth would
+/// have surfaced only half of them. See [`asset_notices::log_prep_findings`].
+/// Test: covered by `asset_notices`' own tests (this is a plain re-export).
+pub use asset_notices::{PrepScope, log_prep_findings};
 mod palace_alias;
 // #4448: the ONE wiring of the shadowing-agent quarantine, shared by
 // `prepare_session_inner` and `sync_session_assets`.
@@ -240,6 +248,24 @@ pub struct PrepReport {
     /// Test: `prepare_session_continues_after_agent_deploy_failure`,
     /// `prepare_session_continues_after_skill_deploy_failure`.
     pub roster_errors: Vec<String>,
+    /// Operator-facing asset-hygiene lines for this launch (#6649).
+    ///
+    /// Why (owner ruling 2026-09-02): the launch already quarantines shadowing
+    /// agents and could already see project-tier skill strays, and every one of
+    /// those findings went to `tracing` — which a terminal session does not
+    /// show. This is the field that makes them visible. It is SEPARATE from
+    /// [`Self::roster_errors`] because these are not provisioning failures: the
+    /// launch succeeded, and what is reported is the state of the operator's
+    /// own working tree.
+    /// What: at most three lines from
+    /// [`asset_notices::launch_asset_notices`] — agents quarantined, skills
+    /// stray, duplicates — EMPTY when all three are clean, because this runs on
+    /// every launch and a clean project must add nothing to the terminal.
+    /// Callers MUST surface each line: the CLI paths print to stdout, the
+    /// daemon and client paths log at `warn`.
+    /// Test: `prepare_session_reports_a_quarantined_agent_as_a_launch_notice`,
+    /// `prepare_session_on_a_clean_project_reports_no_asset_notice`.
+    pub asset_notices: Vec<String>,
 }
 
 /// A failure raised while preparing a session for launch.
@@ -764,6 +790,9 @@ fn prepare_session_inner(
     // Non-fatal, like every other roster step here.
     // Test: `prepare_session_quarantines_a_shadowing_workspace_agent`,
     // `prepare_session_never_quarantines_the_operator_home_agents_tier`.
+    // #6649: the report is KEPT so the launch line can name what moved — the
+    // `warn!` below goes to a log no terminal session is showing the operator.
+    let mut quarantine_report = None;
     match quarantine_shadows::quarantine_workspace_shadows(fw, project_dir) {
         Ok(report) => {
             if let Some(summary) = quarantine_shadows::summarize(&report) {
@@ -775,6 +804,7 @@ fn prepare_session_inner(
                     report.failed.len()
                 ));
             }
+            quarantine_report = Some(report);
         }
         Err(err) => {
             tracing::warn!(
@@ -1089,10 +1119,12 @@ fn prepare_session_inner(
     // text this session will actually receive (`resolved_prompt`, the same
     // string stashed to `.trusty-mpm/last-instructions.md` above).
     //
-    // It is deliberately the LAST step, so a refusal is not also a
+    // It is deliberately the last step that WRITES, so a refusal is not also a
     // half-provisioned workspace: everything the session needs is already on
-    // disk by the time this can fail. Nothing below this line may depend on the
-    // write succeeding — keep it last.
+    // disk by the time this can fail. #6649 puts exactly one step after it —
+    // `launch_asset_notices`, which only READS the tiers this launch just wrote.
+    // Nothing that writes, and nothing that depends on the write succeeding, may
+    // go below this line.
     // #4832 migration, best-effort: retire the pre-#4832 per-project compiled
     // prompt so an upgraded install is not left with a file nothing refreshes.
     // Run against BOTH the directory handed in (which is the worktree on a
@@ -1124,6 +1156,11 @@ fn prepare_session_inner(
             source,
         })?;
 
+    // #6649: computed LAST so the skill tier it reads is the one this launch
+    // leaves behind, not the one it inherited.
+    let asset_notices =
+        asset_notices::launch_asset_notices(fw, project_dir, quarantine_report.as_ref());
+
     Ok(PrepReport {
         deploy,
         skill_deploy,
@@ -1134,6 +1171,7 @@ fn prepare_session_inner(
         hooks_written,
         catchup_context,
         roster_errors,
+        asset_notices,
     })
 }
 

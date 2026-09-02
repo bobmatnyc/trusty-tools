@@ -47,6 +47,7 @@
 - [Test Ladder Baseline](./reference/test-ladder-baseline.md)
 - [Generated Documentation Regions](./reference/generated-doc-regions.md)
 - [CI Script Inventory](./reference/ci-scripts.md)
+- [Agent and Skill Tier Hygiene](./reference/asset-tier-hygiene.md)
 - [Worktree Discipline](./reference/worktree-discipline.md)
 - [Common Pitfalls](./reference/common-pitfalls.md)
 - [Harness Architecture](./architecture/harnesses.md)

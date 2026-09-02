@@ -37,6 +37,9 @@ pub mod bundle;
 // `instruction_package`. Byte-identical to the legacy assembly it replaces; the
 // override configurations stay on that legacy path by design.
 pub mod bundled_pm_package;
+// #6649: one asset name claimed by two entries inside ONE tier — the collision
+// every tier-vs-tier probe is structurally unable to see.
+pub mod asset_duplicates;
 // #4442/#4448: the ONE bundled-agent name roster, shared by `tm doctor`'s
 // asset_tier probe (which reports) and the quarantine (which moves).
 pub mod bundled_roster;
@@ -135,6 +138,9 @@ pub mod project_config;
 pub mod project_discovery;
 // #4880: the project skill tier redeploys on project-manifest change.
 pub mod project_skill_tier;
+// #6649: `tm doctor --fix-agents` sweeps bundled AGENT copies stranded at the
+// project tier — the ledger-proven mirror of `project_tier_strays`.
+pub mod project_tier_agent_strays;
 // #6586: `tm doctor --fix-skills` sweeps bundled copies stranded at the project
 // tier by a pre-#6602 deploy.
 pub mod project_tier_strays;

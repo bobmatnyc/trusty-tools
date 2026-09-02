@@ -255,6 +255,89 @@ fn prepare_session_leaves_a_clean_project_clean() {
     );
 }
 
+/// #6649 deliverable 1: hand-place a bundled-named agent, launch, and the
+/// operator gets a line. Deleting `launch_asset_notices` from
+/// `prepare_session_inner` must fail this.
+#[test]
+#[serial_test::serial]
+fn prepare_session_reports_a_quarantined_agent_as_a_launch_notice() {
+    let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let fw = managed_fixture(tmp_home.path(), project);
+
+    stage_project_agent(project, "rust-engineer.md", &tm_shadow("rust-engineer"));
+
+    let report = prepare_session(&fw, project).expect("prep succeeds");
+
+    let agents_line = report
+        .asset_notices
+        .iter()
+        .find(|n| n.starts_with("agents quarantined"))
+        .unwrap_or_else(|| {
+            panic!(
+                "a quarantined agent must reach the operator: {:?}",
+                report.asset_notices
+            )
+        });
+    assert!(
+        agents_line.contains("rust-engineer"),
+        "the line must NAME what moved: {agents_line}"
+    );
+}
+
+/// #6649 deliverable 1, the other half: a clean project adds nothing to the
+/// terminal. This runs on every launch, so silence is the contract — and
+/// deliverable 4's negative case rides on the same fixture, since `acme.md`
+/// declares a name no roster carries.
+#[test]
+#[serial_test::serial]
+fn prepare_session_on_a_clean_project_reports_no_asset_notice() {
+    let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let fw = managed_fixture(tmp_home.path(), project);
+
+    stage_project_agent(project, "acme.md", &tm_shadow("acme-house-agent"));
+
+    let report = prepare_session(&fw, project).expect("prep succeeds");
+
+    assert!(
+        report.asset_notices.is_empty(),
+        "a clean launch must say nothing: {:?}",
+        report.asset_notices
+    );
+}
+
+/// #6649 deliverable 3, at the launch line: a same-stem duplicate is counted.
+#[test]
+#[serial_test::serial]
+fn prepare_session_reports_a_same_stem_duplicate() {
+    let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let fw = managed_fixture(tmp_home.path(), project);
+
+    // An operator-authored directory beside a file of the same stem. Neither is
+    // a bundled name, so nothing quarantines or sweeps it — only the duplicate
+    // check can see this.
+    let tier = project.join(".claude").join("agents");
+    std::fs::create_dir_all(tier.join("acme-house-agent")).unwrap();
+    stage_project_agent(project, "acme-house-agent.md", "---\nname: a\n---\n");
+
+    let report = prepare_session(&fw, project).expect("prep succeeds");
+
+    let line = report
+        .asset_notices
+        .iter()
+        .find(|n| n.starts_with("duplicates"))
+        .unwrap_or_else(|| panic!("expected a duplicates line: {:?}", report.asset_notices));
+    assert!(line.contains("acme-house-agent"), "{line}");
+}
+
 /// The sync-assets path authorises the same move and must be covered too —
 /// deleting its call site alone must fail something.
 #[test]

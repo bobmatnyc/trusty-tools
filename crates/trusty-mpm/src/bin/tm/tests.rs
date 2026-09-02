@@ -310,6 +310,7 @@ fn cli_parses_doctor() {
             flags: DoctorFlags {
                 prune_stale_skills: false,
                 fix_skills: false,
+                fix_agents: false,
                 fix: false,
                 yes: false,
                 include_frozen: false,
@@ -328,6 +329,7 @@ fn cli_parses_doctor_prune_stale_skills() {
             flags: DoctorFlags {
                 prune_stale_skills: true,
                 fix_skills: false,
+                fix_agents: false,
                 fix: false,
                 yes: false,
                 include_frozen: false,
@@ -353,6 +355,7 @@ fn cli_parses_doctor_fix_skills() {
             flags: DoctorFlags {
                 prune_stale_skills: false,
                 fix_skills: true,
+                fix_agents: false,
                 fix: false,
                 yes: false,
                 include_frozen: false,
@@ -395,6 +398,49 @@ fn cli_parses_doctor_fix_skills() {
     assert!(
         Cli::try_parse_from(["trusty-mpm", "doctor", "--yes"]).is_err(),
         "--yes without a write action must still be rejected"
+    );
+}
+
+/// #6649: `--fix-agents` is opt-in and previews; `--yes` must reach it.
+///
+/// Why: it is the second repair in this command that DELETES, so the gate that
+/// keeps a bare flag inert is the CLI's, exactly as for `--fix-skills`. A
+/// `--yes` that parsed without any write action would let a refactor reach a
+/// removal from a flag the operator thinks is inert.
+/// Test: this test.
+#[test]
+fn cli_parses_doctor_fix_agents() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "doctor", "--fix-agents"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Doctor {
+            flags: DoctorFlags {
+                fix_agents: true,
+                fix_skills: false,
+                fix: false,
+                yes: false,
+                ..
+            }
+        }
+    ));
+
+    let cli = Cli::try_parse_from(["trusty-mpm", "doctor", "--fix-agents", "--yes"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Doctor {
+            flags: DoctorFlags {
+                fix_agents: true,
+                yes: true,
+                ..
+            }
+        }
+    ));
+
+    // `--include-frozen` belongs to the skill redeploy; it has no meaning for
+    // an agent removal and must not be reachable through this flag alone.
+    assert!(
+        Cli::try_parse_from(["trusty-mpm", "doctor", "--fix-agents", "--include-frozen"]).is_err(),
+        "--include-frozen requires a skill repair, not --fix-agents"
     );
 }
 

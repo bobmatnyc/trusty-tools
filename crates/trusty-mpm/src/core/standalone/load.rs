@@ -208,12 +208,17 @@ fn run_prepare_session(
             .map_err(|e| anyhow::anyhow!("prepare_session failed: {e}"))?;
     // Issue #2149: a roster-deploy failure no longer aborts preparation —
     // surface it loudly rather than let it hide behind a silent `Ok(())`.
-    for err in &report.roster_errors {
-        tracing::error!(
-            repo_dir = %repo_dir.display(),
-            "roster provisioning gap (session still launches with its trusty-mpm identity): {err}"
-        );
-    }
+    // #6649 folded the asset-hygiene lines in beside them, through the one
+    // shared reporter.
+    crate::core::session_launch::log_prep_findings(
+        &report.roster_errors,
+        &report.asset_notices,
+        crate::core::session_launch::PrepScope {
+            kind: "load",
+            session: None,
+            dir: repo_dir,
+        },
+    );
     Ok(())
 }
 

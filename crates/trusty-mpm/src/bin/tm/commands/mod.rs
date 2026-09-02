@@ -31,6 +31,8 @@ pub(crate) mod delete;
 // #6336: the standalone `tm doctor` — the battery runs in-process and the
 // daemon is one appended reachability row, never a precondition.
 pub(crate) mod doctor_daemon_row;
+// #6649: `--fix-agents`, the agent mirror of `--fix-skills`.
+pub(crate) mod doctor_fix_agents;
 pub(crate) mod doctor_fix_skills;
 pub(crate) mod doctor_local;
 pub(crate) mod doctor_orphan;
