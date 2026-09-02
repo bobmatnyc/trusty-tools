@@ -41,7 +41,9 @@ use super::worktree_ownership::{
     AgentDelegationState, AgentWorktreeOwner, SentinelOwner, is_harness_agent_worktree,
     read_sentinel_owner,
 };
-use super::worktree_reclaim_gh::{GH_TIMEOUT, PR_JSON_FIELDS, gh_command, run_with_timeout};
+use super::worktree_reclaim_gh::{
+    GH_TIMEOUT, PR_JSON_FIELDS, gh_command, resolve_daemon_gh_env, run_with_timeout,
+};
 use super::worktree_registry::{Admission, HarnessLockState, harness_lock_state};
 use super::worktree_safety::DirtyWorktree;
 
@@ -287,7 +289,12 @@ impl PrIndex {
     /// `pr_index_from_gh_reads_this_repository` (a real successful call);
     /// `pr_index_malformed_json_is_unavailable` (failure-to-unavailable).
     pub(crate) fn from_gh(registry_root: &Path) -> Self {
-        let mut cmd = gh_command(registry_root);
+        // #6623: resolved once per registry root — the daemon's own gh
+        // identity, since launchd hands it neither `GH_TOKEN` nor
+        // `GH_CONFIG_DIR`.
+        let gh_env = resolve_daemon_gh_env(registry_root);
+        let identity = gh_env.describe();
+        let mut cmd = gh_command(registry_root, &gh_env);
         cmd.args(["pr", "list", "--state", "all", "--limit"])
             .arg(PR_INDEX_LIMIT.to_string())
             .args(["--json", PR_JSON_FIELDS]);
@@ -308,14 +315,17 @@ impl PrIndex {
             Err(reason) => {
                 // #6561: WARN, not debug, and carrying the reason. A silent
                 // debug line is why an auth failure across all 261 worktrees
-                // surfaced only as "0 reclaimable".
+                // surfaced only as "0 reclaimable". #6623: the resolved
+                // identity rides along, so "used the wrong config dir" reads
+                // differently from "used none at all".
                 tracing::warn!(
                     root = %registry_root.display(),
                     reason = %reason,
+                    identity = %identity,
                     "worktree-reclaim: the pull-request lookup failed — every branch \
-                     will block, and the survey reports this reason (#6561)"
+                     will block, and the survey reports this reason (#6561, #6623)"
                 );
-                Self::unavailable_because(reason)
+                Self::unavailable_because(format!("{reason} (resolved gh identity: {identity})"))
             }
         }
     }
@@ -401,13 +411,20 @@ impl PrIndex {
 /// `pr_index_resolves_a_squash_merged_pr_whose_head_branch_was_deleted`.
 pub(crate) fn pr_state_for_branch(registry_root: &Path, branch: &str) -> BranchPrState {
     const PER_BRANCH_LIMIT: usize = 50;
-    let mut cmd = gh_command(registry_root);
+    // #6623: same resolution as the bulk index — this call has its own
+    // working directory and must not rely on the daemon's bare launchd
+    // environment either.
+    let gh_env = resolve_daemon_gh_env(registry_root);
+    let identity = gh_env.describe();
+    let mut cmd = gh_command(registry_root, &gh_env);
     cmd.args(["pr", "list", "--head", branch, "--state", "all", "--limit"])
         .arg(PER_BRANCH_LIMIT.to_string())
         .args(["--json", PR_JSON_FIELDS]);
     match run_with_timeout(cmd, GH_TIMEOUT) {
         Ok(stdout) => PrIndex::from_json(&stdout, PER_BRANCH_LIMIT).state_for(Some(branch)),
-        Err(reason) => BranchPrState::LookupFailed { reason },
+        Err(reason) => BranchPrState::LookupFailed {
+            reason: format!("{reason} (resolved gh identity: {identity})"),
+        },
     }
 }
 

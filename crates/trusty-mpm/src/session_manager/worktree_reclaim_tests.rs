@@ -660,7 +660,10 @@ fn pr_index_unrecognised_state_is_not_treated_as_merged() {
 fn gh_command_strips_repository_redirecting_env() {
     // `gh` resolves the repository through git, so an inherited GIT_DIR would
     // aim the PR query at a different repository entirely.
-    let cmd = gh_command(Path::new("/tmp"));
+    let cmd = gh_command(
+        Path::new("/tmp"),
+        &crate::core::gh_identity::GhEnv::default(),
+    );
     let removed: Vec<&str> = cmd
         .get_envs()
         .filter(|(_, v)| v.is_none())
@@ -672,6 +675,28 @@ fn gh_command_strips_repository_redirecting_env() {
             "{key} must be stripped: {removed:?}"
         );
     }
+}
+
+/// Why (#6623): the resolved daemon `gh` identity must reach the actual
+/// `Command` — this is what makes a `GH_CONFIG_DIR` resolved from a project's
+/// config take effect instead of leaving the daemon's bare launchd
+/// environment in place.
+#[test]
+fn gh_command_applies_the_resolved_gh_env() {
+    let env = crate::core::gh_identity::resolve_gh_env(Some(
+        &crate::core::trusty_tools_config::GithubConfig {
+            config_dir: Some(PathBuf::from("/cfg/daemon")),
+            ..Default::default()
+        },
+    ))
+    .expect("ok");
+    let cmd = gh_command(Path::new("/tmp"), &env);
+    let value = cmd
+        .get_envs()
+        .find(|(k, _)| *k == "GH_CONFIG_DIR")
+        .and_then(|(_, v)| v)
+        .expect("GH_CONFIG_DIR must be set");
+    assert_eq!(value, "/cfg/daemon");
 }
 
 // ---------------------------------------------------------------------------
@@ -1103,7 +1128,10 @@ fn classify_blocks_a_failed_lookup_and_names_the_reason() {
 /// distinguishes them.
 #[test]
 fn gh_command_passes_no_dash_c_flag() {
-    let cmd = gh_command(Path::new("/tmp"));
+    let cmd = gh_command(
+        Path::new("/tmp"),
+        &crate::core::gh_identity::GhEnv::default(),
+    );
     let args: Vec<String> = cmd
         .get_args()
         .map(|a| a.to_string_lossy().into_owned())
@@ -1124,7 +1152,10 @@ fn gh_command_runs_in_the_requested_directory() {
     // The repository is resolved from the working directory, so this IS the
     // repository selection — if it stops being set, every call silently
     // resolves whatever repository the daemon happens to be sitting in.
-    let cmd = gh_command(Path::new("/tmp"));
+    let cmd = gh_command(
+        Path::new("/tmp"),
+        &crate::core::gh_identity::GhEnv::default(),
+    );
     assert_eq!(cmd.get_current_dir(), Some(Path::new("/tmp")));
 }
 

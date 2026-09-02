@@ -17,11 +17,20 @@
 //! Test: `run_with_timeout_captures_output`, `run_with_timeout_kills_a_hung_child`,
 //! `run_with_timeout_reports_the_exit_code_and_stderr` in
 //! `worktree_reclaim::worktree_reclaim_tests`.
+//!
+//! #6623: the daemon runs under launchd, which carries neither `GH_TOKEN` nor
+//! `GH_CONFIG_DIR` — every `gh` call made from this module used to inherit
+//! that bare environment and exit 4 ("gh auth login"). [`resolve_daemon_gh_env`]
+//! resolves the same per-project/global `github:` binding an interactive `tm`
+//! invocation would (via `core::gh_identity`), and [`gh_command`] applies it.
 
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+use crate::core::gh_identity::{self, GhEnv};
+use crate::core::trusty_tools_config::TrustyToolsConfig;
 
 /// Environment variables that would point `gh`/`git` at a DIFFERENT repository.
 ///
@@ -74,7 +83,8 @@ pub(crate) const GH_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long to wait for a drained pipe's contents after the child has exited.
 const PIPE_DRAIN_WAIT: Duration = Duration::from_secs(2);
 
-/// A `gh` invocation rooted at `dir` with a sanitised environment (#2919).
+/// A `gh` invocation rooted at `dir` with a sanitised environment and the
+/// resolved `gh` identity applied (#2919, #6623).
 ///
 /// Why: `gh` resolves the repository from its WORKING DIRECTORY. It has no
 /// global `-C` flag — that is a `git` habit, and carrying it across made every
@@ -88,12 +98,22 @@ const PIPE_DRAIN_WAIT: Duration = Duration::from_secs(2);
 /// The pager and prompt suppression are not cosmetic either — an interactive
 /// prompt in a daemon-run probe hangs it forever. See [`GH_STRIPPED_ENV`] for
 /// the environment scrub.
+///
+/// #6623: `gh_env` is applied BEFORE the pager/prompt overrides so a `gh`
+/// spawned under launchd — which inherits neither `GH_TOKEN` nor
+/// `GH_CONFIG_DIR` — authenticates the same way an interactive `tm`
+/// invocation would. It is injected rather than resolved internally so the
+/// existing hermetic tests (a bare `/tmp` directory, no real config on disk)
+/// stay pure; [`resolve_daemon_gh_env`] is the production resolver every real
+/// call site uses.
 /// What: `gh` with its working directory set to `dir`, the repository-
-/// redirecting variables removed, and pager/prompt/colour disabled.
+/// redirecting variables removed, `gh_env`'s overrides applied, and
+/// pager/prompt/colour disabled.
 /// Test: `gh_command_passes_no_dash_c_flag`,
 /// `gh_command_runs_in_the_requested_directory`,
-/// `gh_command_strips_repository_redirecting_env`.
-pub(crate) fn gh_command(dir: &Path) -> Command {
+/// `gh_command_strips_repository_redirecting_env`,
+/// `gh_command_applies_the_resolved_gh_env`.
+pub(crate) fn gh_command(dir: &Path, gh_env: &GhEnv) -> Command {
     // #5475: argv/binary/env come from trusty-common's single `gh` entry
     // point; this module keeps its own kill-on-timeout runner, which is why it
     // takes the unspawned `std::process::Command` rather than a runner method.
@@ -102,11 +122,61 @@ pub(crate) fn gh_command(dir: &Path) -> Command {
     for key in GH_STRIPPED_ENV {
         cmd = cmd.env_remove(key);
     }
+    for (key, value) in gh_env.vars() {
+        cmd = cmd.env(key, value);
+    }
     cmd.env("GH_PAGER", "")
         .env("GH_PROMPT_DISABLED", "1")
         .env("GH_NO_UPDATE_NOTIFIER", "1")
         .env("NO_COLOR", "1")
         .to_std_command()
+}
+
+/// Resolve the [`GhEnv`] to apply to a `gh` spawn rooted at `dir` — the
+/// production wiring every real call site in this module uses (#6623).
+///
+/// Why: the daemon's `gh` spawn sites have a WORKING DIRECTORY only. Under
+/// launchd they inherit neither `GH_TOKEN` nor `GH_CONFIG_DIR` (this issue's
+/// root cause), so each call must resolve its own identity the same way an
+/// interactive `tm` invocation's `resolve_project_aware` does. Kept separate
+/// from [`gh_identity::select_config_for_origin`] (the pure selection) so that
+/// function stays unit-testable without disk or subprocess I/O; this wrapper
+/// is the impure boundary, deliberately thin and exercised only through its
+/// callers — mirroring `bin/tm/gh_identity::load_gh_env`.
+/// What: reads `dir`'s `remote.origin.url` (best-effort — an unreadable or
+/// non-git directory falls through to the global tier, never a hard failure,
+/// and is logged at `warn`), loads [`TrustyToolsConfig`] from disk, and
+/// resolves via [`gh_identity::select_config_for_origin`] +
+/// [`gh_identity::resolve_gh_env`]. An `account`-only binding (refused by
+/// `resolve_gh_env` — see its module docs) is logged and treated as ambient:
+/// a housekeeping spawn must not mutate the operator's global `gh` account,
+/// and a misconfigured project must not block the whole reclaim survey.
+/// Test: exercised through the production `gh_command` call sites
+/// (`PrIndex::from_gh`, `pr_state_for_branch`); the pure selection is unit-
+/// tested via `select_config_for_origin_*` in `core::gh_identity`.
+pub(crate) fn resolve_daemon_gh_env(dir: &Path) -> GhEnv {
+    let origin_url = crate::daemon::managed_routes::inproject::get_origin_url(dir)
+        .inspect_err(|e| {
+            tracing::warn!(
+                dir = %dir.display(),
+                "worktree-reclaim: cannot read git origin remote for gh identity \
+                 resolution — falling back to the global github: binding (#6623): {e}"
+            );
+        })
+        .ok()
+        .flatten();
+    let config = TrustyToolsConfig::load();
+    let selected = gh_identity::select_config_for_origin(&config, origin_url.as_deref());
+    match gh_identity::resolve_gh_env(selected) {
+        Ok(env) => env,
+        Err(e) => {
+            tracing::warn!(
+                dir = %dir.display(),
+                "worktree-reclaim: {e} — spawning gh with the ambient environment (#6623)"
+            );
+            GhEnv::default()
+        }
+    }
 }
 
 /// Read `pipe` to EOF on its own thread, handing the text back over a channel.
