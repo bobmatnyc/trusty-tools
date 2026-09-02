@@ -2374,3 +2374,91 @@ fn cli_rejects_doctor_yes_without_a_write_action() {
     // the pair parsing now; what stays rejected is `--yes` with no action.
     assert!(Cli::try_parse_from(["trusty-mpm", "doctor", "--quarantine-mcp"]).is_err());
 }
+
+/// `tm pr open` parses its title, body file, and the four pre-flight switches.
+///
+/// Why (#6653): the flag surface IS the agent-facing contract — a `--rung`
+/// that silently accepted 9, or a `--closes` that defaulted on, would push the
+/// judgment this command exists to remove back onto the caller.
+/// Test: this test.
+#[test]
+fn cli_parses_pr_open() {
+    use crate::cli::PrCmd;
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "pr",
+        "open",
+        "--title",
+        "feat(x): a thing",
+        "--body-file",
+        "/tmp/body.md",
+        "--issue",
+        "6653",
+        "--rung",
+        "3",
+        "--docs-only",
+        "--dry-run",
+    ])
+    .unwrap();
+    let Some(Command::Pr {
+        cmd: PrCmd::Open(args),
+    }) = cli.command
+    else {
+        panic!("expected pr open");
+    };
+    assert_eq!(args.title, "feat(x): a thing");
+    assert_eq!(args.body_file.to_string_lossy(), "/tmp/body.md");
+    assert_eq!(args.issue, Some(6653));
+    assert_eq!(args.rung, Some(3));
+    assert_eq!(args.base, "main", "base defaults to main");
+    assert!(args.docs_only);
+    assert!(args.dry_run);
+    assert!(!args.closes, "Closes is opt-in, never the default");
+}
+
+/// `--rung` outside 1-6 is rejected at parse time.
+#[test]
+fn cli_rejects_pr_open_rung_out_of_range() {
+    let args = [
+        "trusty-mpm",
+        "pr",
+        "open",
+        "--title",
+        "t",
+        "--body-file",
+        "/tmp/b.md",
+        "--rung",
+        "7",
+    ];
+    assert!(Cli::try_parse_from(args).is_err(), "rung 7 must not parse");
+}
+
+/// `tm pr queue-check` defaults to `main` and takes an optional PR number.
+///
+/// Why: the no-argument form is the whole-queue read, and it must not require
+/// a base to be spelled out every time.
+/// Test: this test.
+#[test]
+fn cli_parses_pr_queue_check() {
+    use crate::cli::PrCmd;
+    let cli = Cli::try_parse_from(["trusty-mpm", "pr", "queue-check"]).unwrap();
+    let Some(Command::Pr {
+        cmd: PrCmd::QueueCheck(args),
+    }) = cli.command
+    else {
+        panic!("expected pr queue-check");
+    };
+    assert_eq!(args.base, "main");
+    assert_eq!(args.pr, None);
+    assert!(!args.json);
+
+    let cli = Cli::try_parse_from(["trusty-mpm", "pr", "queue-check", "42", "--json"]).unwrap();
+    let Some(Command::Pr {
+        cmd: PrCmd::QueueCheck(args),
+    }) = cli.command
+    else {
+        panic!("expected pr queue-check");
+    };
+    assert_eq!(args.pr, Some(42));
+    assert!(args.json);
+}

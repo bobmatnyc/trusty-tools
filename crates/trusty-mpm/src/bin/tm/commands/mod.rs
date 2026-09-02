@@ -88,6 +88,8 @@ pub(crate) mod pm_guard_fanout;
 pub(crate) mod pm_guard_routing;
 pub(crate) mod pm_guard_worktree_grant;
 pub(crate) mod pm_guard_write_boundary;
+// #6653: `tm pr` — the deterministic PR-open and merge-queue gates.
+pub(crate) mod pr;
 pub(crate) mod project;
 pub(crate) mod projects;
 pub(crate) mod prune;

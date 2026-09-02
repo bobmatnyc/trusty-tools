@@ -1,5 +1,7 @@
 # CI-only check scripts
 
+(Plus two operator scripts no workflow runs at all — see the last section.)
+
 Eight scripts in `scripts/` run in a GitHub Actions workflow and nowhere else —
 no pre-commit hook, no `Makefile` target, no other doc page. Each was written
 for a specific failure and none of them announced itself anywhere a reader
@@ -56,3 +58,21 @@ a hand-copied list already cost
 gh api repos/bobmatnyc/trusty-tools/branches/main/protection \
   --jq '.required_status_checks.contexts'
 ```
+
+## Operator scripts no workflow runs
+
+Two scripts in `scripts/` exist for a person or an agent at a terminal, never
+for CI. They are listed here because `scripts/` is where a reader looks, and a
+script nothing invokes is a script nobody finds.
+
+| Script | Who calls it | What it answers |
+|---|---|---|
+| `required-checks.sh` | `version-control`, or anyone before a merge | Prints the LIVE `required_status_checks.contexts` for a base branch, one per line. Exits 1 on an EMPTY list as well as on a `gh` failure — "nothing is required" and "the read did not work" look identical in the output, and treating either as a pass removes the last gate. `tm pr queue-check` performs the same read in-process. |
+| `is-branch-caused.sh` | anyone facing a red gate | Prints `PRE-EXISTING` / `BRANCH-CAUSED` / `INCONCLUSIVE` (exit 0/1/2) for one crate. An empty `git diff --name-only origin/main...HEAD -- <crate-dir>/` settles it immediately; otherwise it re-runs `cargo test -p <crate> --no-fail-fast` in a throwaway worktree at the base ref and compares. The caller's checkout is never touched. |
+
+`is-branch-caused.sh` has a self-test, `scripts/is-branch-caused-selftest.sh`,
+which pins the empty-diff shortcut against a synthetic repository — that path
+is the one a reader acts on without re-checking, and a false `PRE-EXISTING`
+would launder a real regression into someone else's problem.
+`required-checks.sh` has none: it is a single `gh api` call whose only logic is
+the empty-list refusal.
