@@ -152,6 +152,65 @@ async fn await_serving(socket: &Path, budget: Duration) -> bool {
     false
 }
 
+/// Why (#6595): the unlink is what tells a client this server is gone, and the
+/// client's answer is to spawn a successor that opens the same two redb files.
+/// redb locks each file exclusively, so a lock released AFTER the unlink hands
+/// the successor `Database already open. Cannot acquire lock.`; the successor
+/// dies before it binds, `Supervisor::ensure_running` never notices, and the
+/// caller waits out the whole 20s `spawn_probe` for a `SpawnTimeout`. That is
+/// the failure this test exists to keep out — it took
+/// `the_adapter_respawns_a_server_that_idled_out` red on two consecutive main
+/// runs.
+///
+/// What makes it deterministic rather than load-dependent: the unlink is the
+/// event, not a duration. A blocking spin watches the path with no sleep, so it
+/// observes the unlink within microseconds, and the open runs at that instant.
+/// Load lengthens the window this catches; it cannot close it. Against the
+/// pre-fix ordering this failed 15 rounds out of 15, with the lock held for
+/// 54–560 ms and `lsof` naming the exiting server as its only holder.
+/// Test: this is the test.
+// `serial` for the single-process `cargo test` run, not for a fixture: this
+// spawns a child, and a sibling's `set_var` on PATH / TRUSTY_* would race that
+// spawn's read of the environment (#6542). Under nextest it is a no-op.
+#[serial_test::serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_idle_exit_frees_its_redb_locks_before_it_unlinks_the_socket() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let search = StubSearch::start().await;
+    let (socket, mut child) = spawn_server(tmp.path(), &search, 1);
+    let facts = tmp.path().join("store").join("facts.redb");
+
+    assert!(
+        await_serving(&socket, Duration::from_secs(30)).await,
+        "the server never began serving {}",
+        socket.display()
+    );
+
+    // A blocking task, so the spin cannot starve the runtime this test needs.
+    let watched = socket.clone();
+    let probed = facts.clone();
+    let verdict = tokio::task::spawn_blocking(move || {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while watched.exists() && Instant::now() < deadline {
+            std::hint::spin_loop();
+        }
+        assert!(!watched.exists(), "the server never unlinked its socket");
+        trusty_analyze::core::FactStore::open(&probed).map(|_| ())
+    })
+    .await
+    .expect("the spin task");
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    if let Err(e) = verdict {
+        panic!(
+            "a successor spawned at the unlink cannot open {}: {e:#}",
+            facts.display()
+        );
+    }
+}
+
 /// Why: this is the closure condition of #6350 — the server ends itself, and it
 /// ends CLEANLY, leaving no socket file for the next spawn to trip over. A
 /// server that exited but left the path occupied would push every later start

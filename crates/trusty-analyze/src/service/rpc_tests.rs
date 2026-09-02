@@ -1269,6 +1269,80 @@ fn rpc_diagnostics_reports_deadline_exceeded_distinctly() {
     );
 }
 
+/// Why (#6595): the idle exit reaches the unlink with zero open connections —
+/// `IdleGuard` guarantees it — but the SIGTERM/SIGINT exit does not.
+/// `serve_until_idle` returns `ServeExit::Shutdown` the moment the signal
+/// future resolves, with no check on connections in flight, so a connection
+/// task still holds an `Arc<RpcRouter>` clone and with it the `FactStore`'s
+/// `Arc<Database>`. Without a wait, the unlink would run while that lock is
+/// held and hand the next `ensure_running` a successor that cannot open
+/// facts.redb — the same failure on the shutdown path that the idle path had.
+///
+/// What forces the arm deterministically: a peer that has been accepted but
+/// never completes its request frame parks the connection task in a read, so
+/// `Arc::into_inner` is on its `None` arm when the shutdown lands. The peer is
+/// then released, which is what the bounded wait is there to pick up.
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_with_a_connection_in_flight_frees_its_redb_lock_before_the_unlink() {
+    use tokio::io::AsyncWriteExt as _;
+
+    let tmp = TempDir::new().unwrap();
+    let stores = tmp.path().join("stores");
+    std::fs::create_dir_all(&stores).unwrap();
+    let facts_path = stores.join("facts.redb");
+    let socket = tmp.path().join("sockets").join("analyze.sock");
+    let (stop, handle) = spawn_daemon(state_in(&stores), &socket).await;
+
+    // No trailing newline, so the frame is incomplete and the handler never
+    // runs: the task sits in `read_one_frame` holding its router clone.
+    let mut stalled = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    stalled
+        .write_all(br#"{"jsonrpc":"2.0","id":1"#)
+        .await
+        .unwrap();
+    stalled.flush().await.unwrap();
+
+    // An answered request on a SECOND connection proves the accept loop got
+    // past the stalled one — the accept queue is FIFO — so the clone is
+    // outstanding by the time the shutdown below fires. A sleep would only
+    // make that likely.
+    let answered = call_over_socket(&socket, METHOD_HEALTH, serde_json::json!({})).await;
+    assert!(
+        answered.is_ok(),
+        "the daemon must answer before the shutdown"
+    );
+
+    let _ = stop.send(());
+    // Release the stalled peer just after the shutdown, so the wait has
+    // something to wait FOR rather than a task that was already gone.
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        drop(stalled);
+    });
+
+    let watched = socket.clone();
+    let probed = facts_path.clone();
+    let verdict = tokio::task::spawn_blocking(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while watched.exists() && std::time::Instant::now() < deadline {
+            std::hint::spin_loop();
+        }
+        assert!(!watched.exists(), "the shutdown never unlinked its socket");
+        FactStore::open(&probed).map(|_| ())
+    })
+    .await
+    .unwrap();
+
+    handle.await.unwrap().unwrap();
+    if let Err(e) = verdict {
+        panic!(
+            "a successor spawned at the unlink cannot open {}: {e:#}",
+            facts_path.display()
+        );
+    }
+}
+
 /// Why: `remove_retired_discovery_files` is deliberately never called from a
 /// test — it resolves the real data directory. Its removal step is this
 /// function, and this is where it is proven.

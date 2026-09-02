@@ -479,13 +479,25 @@ pub async fn serve_with_shutdown(
 /// `bind_singleton_hardened`'s takeover is a recovery path, not a licence to
 /// leave corpses.
 ///
+/// The router is released BEFORE the unlink, through [`release_stores`]
+/// (#6595). The unlink is what tells a client this server is gone, and the
+/// client's answer to that is to spawn a successor, whose first act is to open
+/// the same two redb files. redb takes an exclusive lock per file, so releasing
+/// those locks after the unlink hands the successor a `Database already open.
+/// Cannot acquire lock.` — measured at 54–560 ms of exposure on an idle
+/// machine, and `Supervisor::ensure_running` does not notice the child died, so
+/// it polls the socket for the full 20 s `spawn_probe` budget and reports a
+/// spawn timeout.
+///
 /// # Errors
 ///
 /// As [`serve`].
 ///
 /// Test: `rpc_unlinks_its_socket_on_shutdown`,
-/// `rpc_accepts_a_request_larger_than_the_shared_default`, and
-/// `tests/on_demand.rs`' `serve_exits_on_its_own_idle_window`.
+/// `rpc_accepts_a_request_larger_than_the_shared_default`,
+/// `shutdown_with_a_connection_in_flight_frees_its_redb_lock_before_the_unlink`,
+/// `tests/on_demand.rs`' `serve_exits_on_its_own_idle_window` and
+/// `an_idle_exit_frees_its_redb_locks_before_it_unlinks_the_socket`.
 pub async fn serve_with_idle(
     state: AnalyzerAppState,
     socket: &Path,
@@ -531,11 +543,60 @@ pub async fn serve_with_idle(
         eprintln!("trusty-analyze: idle; exiting");
     }
 
+    // #6595: close the redb stores before the unlink advertises this server as
+    // gone, so a successor never opens facts.redb against a lock this process
+    // still holds.
+    release_stores(router, socket).await;
+
     if let Err(e) = std::fs::remove_file(socket) {
         tracing::debug!(socket = %socket.display(), error = %e, "socket already gone");
     }
     drop(listener);
     Ok(())
+}
+
+/// Drop `router` — and with it both redb handles — before the caller unlinks
+/// the socket (#6595).
+///
+/// Why a wait rather than a bare drop: the router holds one `AnalyzerAppState`
+/// clone per handler, so it owns the `FactStore` and `ScipOverlayStore`
+/// handles, and every accepted connection holds a clone of it for the life of
+/// its task. An idle exit has none open — `IdleGuard` is what makes the window
+/// elapse — but `serve_until_idle` returns `Shutdown` the instant the signal
+/// resolves, with no such guarantee. Unlinking on top of a lock a connection
+/// task still holds is the #6595 failure, moved to the shutdown path: the
+/// unlink is what tells a client to spawn a successor, and the successor dies
+/// on `Database already open. Cannot acquire lock.`
+///
+/// What: polls `Arc::strong_count` for up to [`SHUTDOWN_FLUSH_TIMEOUT`], whose
+/// doc already scopes it to "the accept loop returning and the socket unlink".
+/// The count only falls — nothing accepts once the loop has returned, and this
+/// function clones nothing — so reading 1 proves sole ownership rather than
+/// merely suggesting it. `Arc::into_inner` cannot be polled in its place: it
+/// consumes the `Arc` on the `None` arm, so a failed attempt cannot be retried.
+///
+/// A handler with no read budget — `analyze.review` runs for minutes by
+/// design — can outlast the budget. That case warns and proceeds: the process
+/// is exiting on a signal either way, and holding the path open longer trades
+/// one hazard for a socket file nobody unlinks.
+///
+/// Test: `shutdown_with_a_connection_in_flight_frees_its_redb_lock_before_the_unlink`.
+async fn release_stores(router: Arc<RpcRouter>, socket: &Path) {
+    let deadline = std::time::Instant::now() + SHUTDOWN_FLUSH_TIMEOUT;
+    while Arc::strong_count(&router) > 1 {
+        if std::time::Instant::now() >= deadline {
+            tracing::warn!(
+                socket = %socket.display(),
+                holders = Arc::strong_count(&router),
+                "a connection task still holds the router after the flush budget; \
+                 the redb locks may outlive the socket and a successor spawned in \
+                 that window will fail to open them"
+            );
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    drop(router);
 }
 
 /// Delete the `http_addr` files the TCP daemon used to write (#6287).
