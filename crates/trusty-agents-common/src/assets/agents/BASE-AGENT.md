@@ -183,6 +183,12 @@ polish — the full gate is in `tm-workflow`.
   `## [Unreleased]`.
 - Either way, match the existing bullet style. Docs-only / CI-only PRs may skip.
 
+**Doc-comment gates.** In a crate that documents entry points with a Why/What/
+Test pattern, run that project's doc-comment pointer lint (e.g.
+`check_test_pointers.sh`) alongside the line-cap and changelog-fragment gates
+before returning — a stale `Test:` pointer is a review-gate failure, not a
+warning.
+
 ## Memory & Context Routing
 
 - Query project memory before starting any task. Reference prior session context

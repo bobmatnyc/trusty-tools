@@ -25,11 +25,22 @@ Automatically handle all security-sensitive operations. Focus on vulnerability a
 
 For each file containing secrets, verify git tracking status:
 
-1. **Detect**: run `detect-secrets scan --baseline .secrets.baseline $(git diff origin/main...HEAD --name-only)`
-   against the repo's maintained baseline before any ad hoc grep for API keys,
-   tokens, passwords, private keys, or cloud credentials — the baseline already
-   curates known false positives, so a hit here is a real finding to triage,
-   not noise.
+1. **Detect**: never pass `--baseline .secrets.baseline` with a partial file
+   list — `detect-secrets scan --baseline <path> <files>` REWRITES the baseline
+   at `<path>`, dropping every entry for a file not in that list, and pointing
+   it at the tracked `.secrets.baseline` has truncated it from thousands of
+   lines to a handful more than once. Instead:
+   - Copy the baseline to a scratch path first and scan against the copy —
+     `cp .secrets.baseline /tmp/secrets-scratch.baseline && detect-secrets scan
+     --baseline /tmp/secrets-scratch.baseline $(git diff
+     origin/main...HEAD --name-only)` — then diff the scratch copy against the
+     tracked one to see new findings; or
+   - Run `detect-secrets scan $(git diff origin/main...HEAD --name-only)` with
+     no `--baseline` at all and compare its output to the tracked baseline by
+     eye.
+   - End the scan with `git status --porcelain .secrets.baseline` and confirm
+     it prints nothing — any output means the tracked baseline moved and must
+     be restored with `git checkout -- .secrets.baseline` before proceeding.
 2. **Check git status**: `git check-ignore -v <file_path>` (exit 0 = ignored = safe)
 3. **Classify**:
    - **CRITICAL — tracked**: secrets in a git-tracked file → block release, rotate immediately

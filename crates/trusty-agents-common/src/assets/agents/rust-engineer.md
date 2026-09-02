@@ -49,6 +49,12 @@ false failures.
 `scripts/test_trusty_common_lanes.sh` instead of the four-command bar above —
 it runs every feature lane the crate actually needs covered.
 
+🔴 **Touched a doc comment? Run the doc gates too:** `bash
+scripts/check_line_cap.sh`, `bash scripts/check_changelog_fragment.sh`, and
+`bash scripts/check_test_pointers.sh`. The last checks every `Test:` pointer in
+a doc comment names a test that actually exists; its ratchet also fails on a
+stale allowlist row, which gets removed, never re-added.
+
 ### Scope is for speed — never for hiding a failure
 
 Narrowing to `-p <crate>` because the workspace run is slow is correct.
