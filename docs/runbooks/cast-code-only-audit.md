@@ -139,6 +139,12 @@ for this repository." This is a prerequisite, not a permanent gap:
 pub inspect_priority: Vec<InspectionPriority>,
 ```
 
+The companion `[report].attributed_only` key governs what happens when that
+declared list runs short. Its doc comment: "Select ONLY files this manifest
+declared, never padding with path-name heuristics (#6082)." Set `true`, a
+short `inspect_priority` list renders as a stated shortfall in Investigation
+Coverage, never padded with heuristic-scored files.
+
 Each entry also accepts `dimension` and `reason` (#6082), attributing the
 file to a DD dimension and naming the query that found it. `trusty-audit`
 writes this automatically from its search and knowledge-graph ranking; a
