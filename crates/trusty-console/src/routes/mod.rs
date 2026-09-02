@@ -21,9 +21,15 @@ pub mod census_guard;
 pub mod cleanup;
 pub mod config;
 pub mod deletes;
+// #6641: the bounded sample window + per-service transition log, as JSON and as
+// a live event stream.
+pub mod machine_history;
 // #6517: the aggregated whole-machine + per-service status endpoint.
 pub mod machine_status;
 pub mod memory_rpc;
+// #6641: the five per-service metrics handlers, split out of `server/mod.rs`
+// when the machine-status history routes pushed it over the 500-SLOC cap.
+pub mod metrics;
 pub mod origin_guard;
 pub mod sessions;
 // #6423: review and settle a registration trusty-search could not check.

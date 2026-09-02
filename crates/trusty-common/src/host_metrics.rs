@@ -15,9 +15,13 @@
 //!      Health thresholds ([`HostThresholds`](crate::host_metrics::HostThresholds))
 //!      are PROVISIONAL — see the type's docs; they need an owner ruling before
 //!      any alarm is wired to them.
+//!      The [`history`](crate::host_metrics::history) submodule adds the
+//!      bounded sliding window of those snapshots the console's real-time
+//!      graphs read (#6641).
 //! Test: the inline `tests` module — `sampler_produces_plausible_snapshot`,
 //!      `pressure_classification_boundaries`, `thresholds_are_configurable`,
-//!      and the serde round-trip.
+//!      and the serde round-trip; the window itself is covered by
+//!      `push_evicts_oldest_at_capacity` and its siblings in `history`.
 //!
 //! ## OS-agnostic sampling
 //!
@@ -36,6 +40,12 @@
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 use sysinfo::{CpuRefreshKind, Disks, MemoryRefreshKind, Networks, RefreshKind, System};
+
+// #6641: the bounded sample history the console's real-time graphs read. It
+// lives beside the sampler rather than in trusty-console because the buffer has
+// two writers by design — today's sampler and the pushed samples #6284 will
+// deliver — and both must enter through `MetricRing::push`.
+pub mod history;
 
 /// Coarse pressure classification for one host subsystem (#6517).
 ///
