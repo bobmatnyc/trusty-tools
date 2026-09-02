@@ -347,8 +347,8 @@ pub(crate) fn schema_contract_statement(schema: &serde_json::Value) -> String {
 /// owner requires every executive summary to describe the product and analyze
 /// its major components, so a template `instruct:` override must not be able
 /// to drop that requirement while restyling the section.
-/// Test: `synthesize_tests.rs::{system_prompt_embeds_resolved_instructions,
-/// system_prompt_concise_retry_directive,
+/// Test: `synthesize_tests.rs::{system_prompt_uses_generic_defaults_when_no_override,
+/// retry_concise_shrinks_top_risks_cap_and_adds_directive,
 /// system_prompt_asks_for_unregistered_target_gaps,
 /// system_prompt_asks_what_the_codebase_does,
 /// schema_contract_statement_reaches_system_prompt}`.
@@ -447,9 +447,10 @@ Populate the structured response:
 /// being overridden by a constant (#6093).  Strips any provider routing prefix
 /// from `llm_model`.
 /// Test: `synthesize_tests.rs::{prompt_excludes_greens, prompt_strips_prefix,
-/// synthesis_schema_shape, digest_uses_compact_findings,
-/// template_override_reaches_system_prompt,
-/// tier_ladder_raises_budget_and_shrinks_ask}`.
+/// synthesis_schema_shape, template_override_reaches_system_prompt,
+/// tier_ladder_raises_budget_and_shrinks_ask}`, and
+/// `synthesize_digest_tests.rs::digest_stays_bounded_at_100_findings` for the
+/// digest's own bound.
 pub(super) fn build_synthesis_prompt(
     model: &ReportModel,
     llm_model: &str,

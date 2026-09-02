@@ -432,7 +432,7 @@ pub fn build_authorship_summary(conn: &Connection, repository: &str) -> Result<A
 /// computing it per repository paid that cost repeatedly for one answer
 /// (#6142 review).
 /// Test: `super::authorship_tests::{builds_from_seeded_commits,
-/// bots_and_merges_are_excluded, single_author_subsystem_detected,
+/// bots_and_merges_are_excluded, shared_subsystem_is_not_single_author,
 /// aliases_collapse_through_the_identity_resolver,
 /// unresolved_authors_are_counted_and_caveated}`.
 ///

@@ -91,7 +91,7 @@ pub enum GateOutcome {
 /// interactive_surface_defaults_to_degraded_when_search_down,
 /// hosted_surface_defaults_to_skip_when_search_down,
 /// degraded_reason_prefers_health_error_detail,
-/// degraded_but_serving_proceeds, degraded_not_serving_skips}` (issue #3693:
+/// degraded_but_serving_proceeds, not_serving_search_still_skips}` (issue #3693:
 /// a `status: "degraded"` health response now proceeds when trusty-search's
 /// own `warmboot_summary.warm_boot_degraded` flag says it is still serving,
 /// and still skips when that flag says it is genuinely broken).

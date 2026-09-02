@@ -295,8 +295,7 @@ fn humanise_refactor_type(t: &str) -> String {
 /// relative, or under a different root, is left exactly as it is — this
 /// normalises paths, it never rewrites ones it does not recognise.
 /// Test: `analyze_adapter_tests::{components_are_made_repo_relative,
-/// a_component_outside_the_checkout_is_left_alone,
-/// a_relative_component_is_left_alone}`.
+/// a_component_outside_the_checkout_is_left_alone}`.
 pub(super) fn relativize_components(metrics: &mut AnalyzeMetrics, root: &Path) {
     for finding in &mut metrics.findings {
         if let Some(rel) = repo_relative(&finding.component, root) {

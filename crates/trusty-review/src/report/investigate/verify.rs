@@ -157,13 +157,15 @@ fn normalize_dimension(raw: &str) -> String {
 /// Why: the fail-closed core — a finding is admitted only when its evidence is
 /// real, so the report can never cite code that was not inspected or does not
 /// exist.
-/// What: for each finding, GREEN passes as a title-only topic (no evidence
-/// required); RED/AMBER require (a) `file` present in `selection` and (b) a
-/// whitespace-insensitive verbatim match of `evidence_quote` in that file, from
-/// which the line number is (re)computed.  A missing title, missing file, or
-/// unmatched quote rejects the finding with a counted note.
+/// What: every band — GREEN included since #6080 — requires (a) `file` present
+/// in `selection` and (b) a whitespace-insensitive verbatim match of
+/// `evidence_quote` in that file, from which the line number is (re)computed.
+/// GREEN keeps that citation and its verified quote but is blanked of
+/// elaboration.  A missing title, missing file, or unmatched quote rejects the
+/// finding with a counted note.
 /// Test: `verify_tests::{accepts_and_corrects_line, rejects_missing_file,
-/// rejects_fabricated_quote, matches_whitespace_insensitively, green_is_title_only}`.
+/// rejects_fabricated_quote, matches_whitespace_insensitively,
+/// green_keeps_its_verified_quote, an_uncited_green_is_rejected}`.
 pub fn verify_findings(raw: Vec<RawFinding>, selection: &Selection) -> VerifyOutcome {
     let mut out = VerifyOutcome::default();
     for f in raw {

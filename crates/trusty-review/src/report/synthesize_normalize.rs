@@ -23,7 +23,7 @@
 //! canonical nor a recognised synonym.
 //! Test: `synthesize_tests.rs::{parse_raw_recovers_shape3_field_name_drift,
 //! parse_raw_recovers_shape2_field_name_drift,
-//! parse_raw_rejects_a_wholly_unrecognized_shape,
+//! synthesize_rejects_a_wholly_unrecognized_shape,
 //! normalize_drops_unrecognized_field_with_note,
 //! normalize_prefers_canonical_over_synonym_when_both_present}`.
 

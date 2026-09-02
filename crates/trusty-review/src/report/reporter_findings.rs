@@ -13,7 +13,7 @@
 //! Test: `reporter_tests.rs::{reporter_fills_findings_deterministically,
 //! reporter_merges_synthesis_prose_onto_deterministic_finding,
 //! reporter_injects_synthesis_prose,
-//! reporter_leaves_findings_honesty_marked_without_metrics}`.
+//! reporter_omits_empty_findings_sections_without_metrics}`.
 
 use super::fill::Scope;
 use super::metrics::Severity;
@@ -410,8 +410,7 @@ fn raw_evidence(s: &str) -> Option<String> {
 /// Test: `reporter_tests::{evidence_renders_as_fenced_block,
 /// evidence_with_blank_line_fences_cleanly,
 /// evidence_containing_triple_backticks_uses_longer_fence,
-/// a_trace_verdict_renders_under_the_evidence_fence,
-/// no_trace_verdict_leaves_the_evidence_block_unchanged}`.
+/// a_trace_verdict_renders_under_the_evidence_fence}`.
 fn render_evidence_block(
     file_label: &str,
     quote: &str,
@@ -482,7 +481,7 @@ fn fence_for(content: &str) -> String {
 /// Test: `reporter_tests.rs::{reporter_fills_findings_deterministically,
 /// reporter_merges_synthesis_prose_onto_deterministic_finding,
 /// reporter_injects_synthesis_prose,
-/// reporter_leaves_findings_honesty_marked_without_metrics}`.
+/// reporter_omits_empty_findings_sections_without_metrics}`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn push_finding_band(
     root: &mut Scope,
@@ -638,8 +637,7 @@ fn cited_row(rows: &[FindingRow], f: &super::synthesize::FindingProse) -> Option
 /// What: replays [`band_rows`] over every repository and both bands, running the
 /// same per-band counters `build_scope` numbers the rendered rows with, so the
 /// number in the line is the number on the page. Pure — it renders nothing.
-/// Test: `reporter_tests::{an_unplaced_narrative_is_disclosed_not_numbered,
-/// an_unplaced_narrative_names_its_finding_number}`.
+/// Test: `reporter_tests::an_unplaced_narrative_is_disclosed_not_numbered`.
 pub(super) fn unplaced_narrative_lines(model: &super::model::ReportModel) -> Vec<String> {
     let syn = model.synthesis.as_ref();
     let mut out = Vec::new();

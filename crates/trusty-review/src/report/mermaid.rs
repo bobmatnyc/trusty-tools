@@ -525,7 +525,7 @@ fn overflow_notes(cat_overflow: usize, series_overflow: usize) -> String {
 /// What: normalizes both sides to lowercase alphanumerics and tries, in priority
 /// order over the full field then its last `_`/space token: exact equality,
 /// header-starts-with, header-contains.  Returns the first matching column.
-/// Test: `mermaid_tests.rs::{resolves_exact_column, resolves_by_last_token}`.
+/// Test: `mermaid_tests.rs::resolves_columns`.
 fn resolve_column(header: &[String], field: &str) -> Option<usize> {
     let full = normalize(field);
     let last_raw = field.rsplit(['_', ' ']).next().unwrap_or(field);

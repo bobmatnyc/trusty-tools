@@ -196,8 +196,7 @@ impl Budget {
     /// zero or absent value reads as undeclared rather than as a disabled
     /// investigation.
     /// Test: `priority_tests::{a_declared_engagement_budget_wins,
-    /// an_engagement_declaring_nothing_matches_the_machine,
-    /// an_engagement_file_budget_raises_the_byte_budget}`.
+    /// an_engagement_declaring_nothing_matches_the_machine}`.
     #[must_use]
     pub fn for_engagement(settings: &crate::config::ReportSettings) -> Self {
         let declared = |value: Option<usize>| value.filter(|n| *n > 0);
