@@ -446,10 +446,11 @@ fn nothing_to_sweep_reports_nothing() {
     );
 }
 
-/// #6586 critic HIGH, end to end: a bare `tm doctor --fix-skills` runs the
-/// sweep as a DRY RUN and the redeploy as an APPLY, so this composes the two
-/// halves the way `commands::doctor_fix_skills::fix_skills_locally` does and
-/// asserts the command wrote nothing.
+/// #6586 critic HIGH: the deferral is checked BEFORE the write gate, so it holds
+/// whatever modes the two halves run in. This drives the worst pairing — a
+/// PREVIEWING sweep beside an APPLYING redeploy, which is what a bare
+/// `tm doctor --fix-skills` did until #6620 gave both halves one mode — and
+/// asserts the redeploy still wrote nothing.
 ///
 /// Fails before this fix: the redeploy took no deferral set, so it rewrote the
 /// stray from the bundled asset, backed the old copy up, and re-stamped the

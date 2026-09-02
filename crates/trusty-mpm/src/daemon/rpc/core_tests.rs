@@ -10,7 +10,7 @@
 //!
 //! ## The comparison allowlist
 //!
-//! Five things are dropped before comparing, all on `mpm.doctor`, and all
+//! Six things are dropped before comparing, all on `mpm.doctor`, and all
 //! because the DAEMON varies them between two calls of the same code rather
 //! than because the transports disagree:
 //!
@@ -31,17 +31,27 @@
 //!   pseudo-terminal census — "82 of 511 pseudo-terminals allocated" on one call
 //!   and "83 of 511" on the next, because any process on the box opens or closes
 //!   a pty between the two reads (#6577).
+//! - the `skill_staleness` check's `message` and `status`, which re-walk the
+//!   deployed skill files at every tier — "2 drifted at the operator home tier
+//!   — REPAIRABLE by `tm install`" on one call and a clean tier on the next,
+//!   because a concurrent `tm install` or managed-session bootstrap rewrites
+//!   `~/.claude/skills` between the two reads (#6622).
 //!
-//! All four probes sample host state the daemon re-reads per call, and #6577
+//! All these probes sample host state the daemon re-reads per call, and #6577
 //! showed the STATUS is sampled with the message rather than beside it:
 //! `worktree_disk` answers `unknown` when its 3-second deadline expires and
 //! `warn` when it measured enough, so the same churn that moves its byte count
 //! moves its verdict. Four of ten runs on a 36-worktree host failed that way
-//! with the message already blanked. These four checks are therefore compared
+//! with the message already blanked. These checks are therefore compared
 //! STRUCTURALLY — the check is present under its name, and it still reports
 //! some status — while both host-sampled fields are normalized. Every other
 //! check is compared whole, verdict included. See [`HOST_SAMPLED_CHECKS`] and
 //! [`normalize_host_sampled_checks`].
+//!
+//! The allowlist is the second guard, not the first. `parity_doctor_*` pins
+//! `$HOME` at a fresh tempdir for the whole test, so every probe resolving a
+//! path under it reads a directory no other process on the machine knows
+//! (#6622).
 //!
 //! Nothing else is excused. Every other method is compared whole, `pid`
 //! included — the two transports run in one process, so a `pid` that differed
@@ -436,10 +446,24 @@ async fn parity_tmux_sessions_agrees_across_transports() {
 /// home and the socket report reads the real one — which fails the comparison
 /// while proving nothing about the transports. `HomeOverride`'s doc records why
 /// that group has to be crate-wide rather than a local lock.
+///
+/// Why `$HOME` is also PINNED (#6622): the serial group orders this binary's own
+/// tests and nothing else. `run_doctor` resolves `dirs::home_dir()` and
+/// `FrameworkPaths::default()` on every call, so any concurrent `tm install`,
+/// managed-session bootstrap, or agent on the machine that rewrites
+/// `~/.claude/skills` between the two reads moves the answer — observed as
+/// `skill_staleness` reporting `2 drifted at the operator home tier` over HTTP
+/// and a clean tier over the socket. A fresh tempdir is a path no other process
+/// knows, which is the only guard that also holds under nextest, where every
+/// test gets its own process and `#[serial]` serializes nothing across them
+/// (#4162). Both returned values stay bound for the test's body — dropping the
+/// `TempDir` removes the directory `$HOME` names.
 /// Test: this function IS the test.
 #[serial_test::serial]
 #[tokio::test]
 async fn parity_doctor_agrees_across_transports() {
+    // #6622: pinned BEFORE the two calls, and held across both.
+    let (_home, _home_guard) = pinned_home();
     let (state, dir) = hermetic();
     let project = dir.path().display().to_string();
     let (status, body) = http(
@@ -475,12 +499,28 @@ async fn parity_doctor_agrees_across_transports() {
 /// message or status — is derived from a quantity it re-reads from the host on
 /// every call, rather than from config on disk or the daemon's own state.
 ///
-/// Why exactly these four: `worktree_disk` measures the worktree tree against a
+/// Why exactly these five: `worktree_disk` measures the worktree tree against a
 /// 3-second deadline, `worktrees` reports the reconciled inventory's counts,
 /// `session_store` reports `sessions.json`'s record count and byte length
-/// (#6490), and `pty_headroom` takes a live census of allocated pseudo-terminals
-/// (#6577). Each answer moves whenever another process on the machine adds a
-/// worktree, writes a session, or opens a pty between this test's two calls.
+/// (#6490), `pty_headroom` takes a live census of allocated pseudo-terminals
+/// (#6577), and `skill_staleness` re-walks the deployed skill FILES at every
+/// tier — including `~/.claude/skills` — and derives both its message and its
+/// verdict from what it finds there (#6622). Each answer moves whenever another
+/// process on the machine adds a worktree, writes a session, opens a pty, or
+/// deploys a skill between this test's two calls.
+///
+/// Why `skill_staleness` and not every other row that resolves a path under
+/// `$HOME` (#6622): reading these checks, the home-rooted set is large —
+/// `agents`, `agent_reachability`, `asset_tier`, `skills`, `skill_source`,
+/// `skill_unmanaged`, `skill_project_tier`, the three `output_style*` rows,
+/// `legacy_sources`, `stray_mcp_json` and `log_drain` all resolve under
+/// `dirs::home_dir()` or `FrameworkPaths::default()`. Normalizing all of them
+/// would leave a third of the report structural and prove very little.
+/// [`parity_doctor_agrees_across_transports`] pins `$HOME` at a fresh tempdir
+/// instead, which is what actually makes every one of them hermetic — no other
+/// process knows that path. `skill_staleness` is listed as well because it is
+/// the row that was OBSERVED to break, and the entry keeps it from failing
+/// parity again if the pin is ever lost.
 ///
 /// Why the status is normalized too, and not just the message (#6577): the
 /// status is computed FROM the sample, so it churns with it. `worktree_disk`
@@ -497,7 +537,8 @@ async fn parity_doctor_agrees_across_transports() {
 /// still fails. Every check NOT named here is compared whole, verdict included.
 /// What: the names [`normalize_host_sampled_checks`] normalizes.
 /// Test: [`parity_doctor_agrees_across_transports`],
-/// [`host_sampled_status_is_excused_from_parity_and_no_other_check_is`].
+/// [`host_sampled_status_is_excused_from_parity_and_no_other_check_is`],
+/// [`skill_staleness_divergence_is_excused_from_parity_and_no_other_check_is`].
 const HOST_SAMPLED_CHECKS: &[&str] = &[
     "worktree_disk",
     "worktrees",
@@ -505,6 +546,9 @@ const HOST_SAMPLED_CHECKS: &[&str] = &[
     "session_store",
     // #6577: pty_headroom samples this machine's live pty census.
     "pty_headroom",
+    // #6622: skill_staleness re-walks the deployed skill files at every tier,
+    // which a concurrent `tm install` or managed-session bootstrap rewrites.
+    "skill_staleness",
 ];
 
 /// Reduce each [`HOST_SAMPLED_CHECKS`] row to what cannot churn: its name, and
@@ -577,6 +621,7 @@ fn host_sampled_status_is_excused_from_parity_and_no_other_check_is() {
                 {"name": "worktrees", "status": "ok", "message": "14 live, 265 not reclaimable"},
                 {"name": "session_store", "status": "ok", "message": "43 session record(s), 59773 byte(s)"},
                 {"name": "pty_headroom", "status": "ok", "message": "82 of 511 pseudo-terminals allocated"},
+                {"name": "skill_staleness", "status": "ok", "message": "every deployed skill matches"},
                 {"name": "instructions", "status": instructions_status, "message": "last-instructions.md not found"},
             ]
         })
@@ -604,6 +649,59 @@ fn host_sampled_status_is_excused_from_parity_and_no_other_check_is() {
     );
 }
 
+/// #6622: a `skill_staleness` row that differs in STATUS and MESSAGE between the
+/// two samples passes parity, and a row that is not host-sampled and differs in
+/// status still fails it.
+///
+/// Why a hand-built pair: the live divergence needs a concurrent `tm install` or
+/// managed-session bootstrap to rewrite `~/.claude/skills` between the two
+/// reads, which cannot be forced deterministically. That is what broke
+/// [`parity_doctor_agrees_across_transports`] — the HTTP report read
+/// `2 drifted at the operator home tier — REPAIRABLE by tm install` and the
+/// socket report, moments later, read a clean tier.
+/// Test: this function IS the test.
+#[test]
+fn skill_staleness_divergence_is_excused_from_parity_and_no_other_check_is() {
+    let report = |skills_status: &str, skills_message: &str, instructions_status: &str| {
+        json!({
+            "checks": [
+                {"name": "worktree_disk", "status": "warn", "message": "6.2 GiB measured"},
+                {"name": "worktrees", "status": "ok", "message": "14 live, 265 not reclaimable"},
+                {"name": "session_store", "status": "ok", "message": "43 session record(s)"},
+                {"name": "pty_headroom", "status": "ok", "message": "82 of 511 allocated"},
+                {"name": "skill_staleness", "status": skills_status, "message": skills_message},
+                {"name": "instructions", "status": instructions_status, "message": "last-instructions.md not found"},
+            ]
+        })
+    };
+
+    // The observed break: a concurrent deploy rewrote `~/.claude/skills`
+    // between the two reads, so one report saw drift and the other did not.
+    let http = normalize_host_sampled_checks(report(
+        "warn",
+        "2 drifted at the operator home tier — REPAIRABLE by `tm install`",
+        "warn",
+    ));
+    let socket = normalize_host_sampled_checks(report(
+        "ok",
+        "every deployed skill matches this binary's bundled assets",
+        "warn",
+    ));
+    assert_eq!(
+        http, socket,
+        "a `skill_staleness` row that churned between the reads must not fail parity"
+    );
+
+    // Non-vacuous: `instructions` reads a project file, is NOT host-sampled, and
+    // still has its verdict compared whole.
+    let http = normalize_host_sampled_checks(report("ok", "clean", "ok"));
+    let socket = normalize_host_sampled_checks(report("ok", "clean", "fail"));
+    assert_ne!(
+        http, socket,
+        "a NON-host-sampled check's STATUS divergence must still fail parity"
+    );
+}
+
 /// A host-sampled row that answers with no status at all is a defect, not churn
 /// — [`normalize_host_sampled_checks`] replaces the verdict's VALUE and must not
 /// paper over a missing field (#6577).
@@ -617,6 +715,7 @@ fn normalizing_a_host_sampled_check_requires_it_to_report_a_status() {
             {"name": "worktrees", "status": "ok", "message": "14 live"},
             {"name": "session_store", "status": "ok", "message": "43 record(s)"},
             {"name": "pty_headroom", "status": "ok", "message": "82 of 511"},
+            {"name": "skill_staleness", "status": "ok", "message": "clean"},
         ]
     }));
 }

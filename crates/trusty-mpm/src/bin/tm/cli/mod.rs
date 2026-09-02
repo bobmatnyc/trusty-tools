@@ -1400,8 +1400,9 @@ pub struct DoctorFlags {
     #[arg(long, hide = true)]
     pub prune_stale_skills: bool,
 
-    /// Redeploy skills that have drifted from this binary's bundled
-    /// assets, verifying each repair by re-reading the file from disk.
+    /// Redeploy skills that have drifted from this binary's bundled assets,
+    /// and sweep the project tier of stranded bundled copies. DRY RUN unless
+    /// `--yes`.
     ///
     /// Why (#4604): detection alone leaves the operator with no remedy for
     /// the one state `tm install` structurally cannot fix — a FROZEN
@@ -1416,12 +1417,11 @@ pub struct DoctorFlags {
     ///
     /// Since #6586 it also sweeps the project tier of bundled skill copies an
     /// older binary stranded under `<project>/.claude/skills`. That sweep is
-    /// the one thing here that DELETES, so it is a DRY RUN unless `--yes` is
-    /// also passed, and it acts only on positive evidence: a copy the tier's
-    /// own deploy ledger records and every file under which still matches the
-    /// recorded checksum. Anything else is refused — a hand-edit anywhere in
-    /// the subtree included — every removal is backed up whole first, and
-    /// `--fix` does not run it.
+    /// the one thing here that DELETES, and it acts only on positive evidence:
+    /// a copy the tier's own deploy ledger records and every file under which
+    /// still matches the recorded checksum. Anything else is refused — a
+    /// hand-edit anywhere in the subtree included — every removal is backed up
+    /// whole first, and `--fix` does not run it.
     ///
     /// `--include-frozen` does not override that refusal in the SAME run, and
     /// it does not preserve it across runs either: passing it overwrites the
@@ -1430,13 +1430,14 @@ pub struct DoctorFlags {
     /// the next sweep. The backup of that overwrite is what the edit survives
     /// in.
     ///
-    /// The two halves are gated differently on purpose. The REDEPLOY overwrites
-    /// tm's own files with tm's own bytes, backs each one up first, and has
-    /// `--fix` as its preview, so it still applies on this flag alone. The
-    /// SWEEP removes a directory, which no re-run undoes, so it needs `--yes`.
-    /// A copy the sweep is removing is reported skipped by the redeploy rather
-    /// than refreshed — otherwise a bare `--fix-skills` would rewrite every
-    /// stem it had just said it would only preview.
+    /// #6620: BOTH halves answer to `--yes`. On this flag alone the command
+    /// writes NOTHING — no skill file, no ledger entry, no backup directory —
+    /// and prints what each half would do; `--yes` applies both. The halves
+    /// used to be gated separately, so a bare `--fix-skills` printed the
+    /// sweep's "dry run" line and then rewrote files and created a backup root
+    /// in the same invocation. A copy the sweep is removing is still reported
+    /// skipped by the redeploy rather than refreshed, so the two halves never
+    /// work against each other.
     #[arg(long)]
     pub fix_skills: bool,
 
@@ -1467,13 +1468,11 @@ pub struct DoctorFlags {
     /// deliberate act. Every overwrite is still backed up first, and a
     /// quarantine renames aside rather than deleting. #6586 put the
     /// `--fix-skills` project-tier sweep behind the same gate, because it is
-    /// the one repair that removes a directory.
-    /// What: promotes `--fix`, the `--fix-skills` sweep, and `--quarantine-mcp`
-    /// from a dry run to an applied run. The `--fix-skills` REDEPLOY half is
-    /// unaffected — it overwrites tm's own files, backs each one up, has
-    /// `--fix` as its preview, and has always applied on the flag alone. What
-    /// it will NOT do without `--yes` is refresh a project-tier copy the sweep
-    /// has only planned to remove; those are reported skipped.
+    /// the one repair that removes a directory, and #6620 put the
+    /// `--fix-skills` REDEPLOY behind it too — one command previewing half of
+    /// itself while writing the other half made the printed "dry run" untrue.
+    /// What: promotes `--fix`, BOTH `--fix-skills` halves, and
+    /// `--quarantine-mcp` from a dry run to an applied run.
     #[arg(long, requires = "writes")]
     pub yes: bool,
 

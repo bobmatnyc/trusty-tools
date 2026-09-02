@@ -181,13 +181,16 @@ pub fn repair_skills_in_mode(
 
 /// The reason a stem the #6586 sweep is removing is skipped at the project tier.
 ///
-/// Why (#6586 critic HIGH): a bare `tm doctor --fix-skills` runs the sweep as a
-/// DRY RUN and the redeploy as an APPLY. Those two halves met on the same 51
-/// project-tier stems: the sweep printed "would remove", then the redeploy
-/// rewrote every one of them from the bundled asset and re-stamped its ledger
-/// checksum — 51 files and 51 backups written immediately after the command
-/// said nothing would be written. Refreshing a copy the sweep is removing is
-/// work in the opposite direction whichever mode the sweep ran in.
+/// Why (#6586 critic HIGH): a bare `tm doctor --fix-skills` used to run the
+/// sweep as a DRY RUN and the redeploy as an APPLY. Those two halves met on the
+/// same 51 project-tier stems: the sweep printed "would remove", then the
+/// redeploy rewrote every one of them from the bundled asset and re-stamped its
+/// ledger checksum — 51 files and 51 backups written immediately after the
+/// command said nothing would be written. #6620 put both halves in one mode, so
+/// that pairing no longer occurs; the deferral still holds, because under
+/// `--yes` the sweep REMOVES the copy first and the redeploy would otherwise
+/// see it missing and write it straight back. Refreshing a copy the sweep is
+/// removing is work in the opposite direction whichever mode the run is in.
 /// What: the `why` of the [`RepairAction::SkippedUnverifiable`] those stems get
 /// instead. [`super::doctor_repair`] renders it verbatim.
 /// Test: `a_deferred_project_stem_is_not_refreshed`.
