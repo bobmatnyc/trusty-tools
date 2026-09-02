@@ -36,6 +36,10 @@
 # ignored, full stop.
 !/.claude/
 
+# settings.json bakes in absolute per-machine hook paths and is machine-local,
+# never a deliverable — same as settings.local.json below.
+/.claude/settings.json
+
 # Project-tier agent files are NEVER tracked in this repo. They are deployed
 # artifacts, not source: the bundled roster is the product and lives in
 # crates/trusty-mpm/src/assets/agents/ (and crates/trusty-code/src/assets/agents/).
