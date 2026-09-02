@@ -575,7 +575,8 @@ pub mod host_metrics;
 /// with `s3://` and `file://` adapters, [`log_drain::DestinationUri`],
 /// [`log_drain::DrainManifest`], [`log_drain::collect`], and
 /// [`log_drain::run_once`]. This is the drain CORE — no scheduler, and no
-/// GitHub-identity resolution; the caller supplies a [`log_drain::DrainTarget`].
+/// project-identity resolution; the caller supplies a [`log_drain::DrainTarget`]
+/// naming the owner and project the logs belong to (#6657).
 /// Test: `cargo test -p trusty-common --features log-drain --no-fail-fast`.
 #[cfg(feature = "log-drain")]
 pub mod log_drain;
@@ -908,7 +909,10 @@ pub mod palace_alias;
 /// origin remote. Centralising the parsing here keeps the two crates in lockstep.
 /// What: Exposes [`github_path::GithubPath`], [`github_path::parse_github_path`]
 /// (pure URL parse), and [`github_path::derive_github_path`] (reads
-/// `remote.origin.url`).
+/// `remote.origin.url`). [`github_path::RemoteRepo`],
+/// [`github_path::parse_remote_url`], and [`github_path::derive_remote_repo`]
+/// are the same parse without slugification — the workspace's single
+/// git-remote-URL parser, for callers that need the identity verbatim (#6657).
 /// Test: `cargo test -p trusty-common --features unconditional-only --
 /// github_path::tests`.
 pub mod github_path;

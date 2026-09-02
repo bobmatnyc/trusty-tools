@@ -87,12 +87,7 @@ fn build_log_drain_check(
         Ok(LogDrainSetting::Enabled(plan)) => plan,
     };
 
-    let where_to = plan
-        .destinations
-        .iter()
-        .map(|group| format!("{} → {}", group.scheme(), group.destination_display))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let where_to = configured_targets(plan);
     let Some(status) = status.filter(|s| s.outcome != DrainOutcome::SkippedDisabled) else {
         return DoctorCheck::new(
             "log_drain",
@@ -130,6 +125,39 @@ fn build_log_drain_check(
     }
 }
 
+/// Name every pass the plan will run, plus the sources switched off (#6657).
+///
+/// Each pass reads `<scheme> → <destination> [<owner>/<project>]`, because one
+/// destination can now hold several projects and "which project stopped
+/// draining" is the question the row has to answer. A source with
+/// `enabled: false` is listed after them as `disabled`, so an operator can tell
+/// a deliberate opt-out from a project that fell out of the config.
+///
+/// Test: `tests::the_row_lists_every_destination_with_its_own_outcome`,
+/// `tests::the_row_lists_a_disabled_source`.
+fn configured_targets(plan: &crate::core::trusty_tools_config::ResolvedLogDrain) -> String {
+    let mut parts: Vec<String> = plan
+        .destinations
+        .iter()
+        .map(|group| {
+            format!(
+                "{} → {} [{}]",
+                group.scheme(),
+                group.destination_display,
+                group.target.key_prefix()
+            )
+        })
+        .collect();
+    for off in &plan.disabled {
+        let dest = off
+            .destination_display
+            .as_deref()
+            .unwrap_or("no destination");
+        parts.push(format!("{} → {dest}: disabled", off.crate_name));
+    }
+    parts.join(", ")
+}
+
 /// Render each recorded destination's own outcome, one clause apiece (#6657).
 ///
 /// A record written before #6657 carries no per-destination breakdown, so its
@@ -148,7 +176,10 @@ fn recorded_outcomes(status: &LogDrainStatus) -> String {
                 DrainOutcome::Failed => "FAILED",
                 DrainOutcome::SkippedDisabled => "skipped",
             };
-            format!("{} → {}: {verdict} — {}", d.scheme, d.destination, d.detail)
+            format!(
+                "{} → {} [{}]: {verdict} — {}",
+                d.scheme, d.destination, d.project, d.detail
+            )
         })
         .collect::<Vec<_>>()
         .join("; ")

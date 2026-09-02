@@ -33,11 +33,15 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use trusty_common::log_drain::{
-    DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_WIRE_BYTES, DestinationScheme, DestinationUri, Level,
-    LogSource,
+    DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_WIRE_BYTES, DestinationScheme, DestinationUri, DrainTarget,
+    Level, LogSource,
 };
 
 use super::TrustyToolsConfig;
+
+mod plan;
+
+pub use plan::DisabledSource;
 
 /// Default interval between drain passes, in seconds.
 ///
@@ -46,8 +50,8 @@ use super::TrustyToolsConfig;
 /// object-store bill and fewer wakeups on a laptop.
 pub const DEFAULT_INTERVAL_SECS: u64 = 900;
 
-/// Directory under `~/.trusty-mpm/` holding the drain's manifest cache, the
-/// persisted session id, and the last-run status the doctor row reads.
+/// Directory under `~/.trusty-mpm/` holding the drain's manifest cache and the
+/// last-run status the doctor row reads.
 pub const STATE_SUBDIR: &str = "log-drain";
 
 /// Directory the trusty-mpm daemon's own rotating file log is written to,
@@ -107,16 +111,18 @@ pub struct LogDrainConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secrets: Vec<String>,
 
-    /// GitHub login to upload under. `None` → resolved once via `gh api user`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub github_id: Option<String>,
-
-    /// Session segment of the key layout. `None` → the persisted per-install id.
+    /// Fallback repository owner for a source that resolves none (#6657).
     ///
-    /// See `daemon::log_drain::resolve_session_id` for why the daemon's session
-    /// is per-INSTALL rather than per-boot.
+    /// Consulted only after a source's own `owner`/`project` and the git
+    /// `origin` of its root, so a source that sits inside a checkout keeps that
+    /// checkout's identity. It exists for roots no repo owns — the daemon's own
+    /// `~/.trusty-mpm/logs` among them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
+    pub owner: Option<String>,
+
+    /// Fallback project name, paired with [`LogDrainConfig::owner`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
 
     /// Directories to collect. Empty → the built-in daemon log source.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -133,10 +139,19 @@ pub struct LogDrainConfig {
 /// `destination` the object store this source alone goes to (#6657).
 /// Test: `tests::resolve_uses_configured_sources`,
 /// `tests::resolve_rejects_a_source_with_no_root`,
-/// `tests::resolve_groups_sources_by_destination`.
+/// `tests::resolve_groups_sources_by_destination`,
+/// `tests::resolve_skips_a_disabled_source`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct LogDrainSourceConfig {
+    /// Whether this source drains at all. `None` → it does (#6657).
+    ///
+    /// `enabled: false` opts one project out without deleting its entry, and
+    /// `tm doctor` still lists it so an operator can see the drain is off for
+    /// that project rather than misconfigured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+
     /// Producing crate, e.g. `trusty-mpm`. Required.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crate_name: Option<String>,
@@ -159,6 +174,19 @@ pub struct LogDrainSourceConfig {
     /// section default — see [`resolve_log_drain`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination: Option<String>,
+
+    /// Repository owner for this source's key prefix (#6657).
+    ///
+    /// Set it only when `root` is not inside a git checkout, or its `origin`
+    /// does not name the project the logs belong to. `owner` and `project` are
+    /// set together; one without the other is an error, because half an
+    /// identity cannot make a key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+
+    /// Project name for this source's key prefix, paired with `owner` (#6657).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
 }
 
 /// Every way the `log_drain:` section can be wrong.
@@ -209,6 +237,27 @@ pub enum LogDrainConfigError {
         reason: String,
     },
 
+    /// A source whose `owner`/`project` could not be resolved (#6657).
+    ///
+    /// Fail-closed: the drain refuses the whole plan rather than uploading one
+    /// project's logs under a guessed key. The message names the source, its
+    /// root, and the two ways to fix it.
+    #[error(
+        "log_drain.sources[{index}] ({crate_name}, root {root}) has no owner/project: \
+         {reason} — set `owner:` and `project:` on that source, or point `root:` \
+         inside a git checkout whose `origin` names the project"
+    )]
+    SourceIdentity {
+        /// Position of the offending entry.
+        index: usize,
+        /// The entry's `crate_name`, so the operator can find it by name.
+        crate_name: String,
+        /// The root that was probed.
+        root: String,
+        /// What the probe found, from `trusty_common::github_path`.
+        reason: String,
+    },
+
     /// A `sources[].level` value that is not a level name.
     #[error(
         "log_drain.sources[{index}].level `{value}` is not a level — \
@@ -222,16 +271,19 @@ pub enum LogDrainConfigError {
     },
 }
 
-/// One object store, and every source that resolved to it (#6657).
+/// One drain pass: an object store, a project, and the sources feeding it.
 ///
-/// Why: the scheduler runs one `run_once` per destination, because `run_once`
-/// takes exactly one. Grouping here rather than in the scheduler means the
-/// doctor row and the scheduler read the same grouping, and a source can never
-/// be counted against a destination it was not configured for.
-/// What: `sources` is non-empty by construction — a destination nothing points
-/// at is not in the list at all, so no pass is ever run for one.
+/// Why: the scheduler runs one `run_once` per entry, because `run_once` takes
+/// exactly one destination and exactly one [`DrainTarget`]. Grouping here
+/// rather than in the scheduler means the doctor row and the scheduler read the
+/// same grouping, and a source can never be counted against a destination it
+/// was not configured for.
+/// What: `sources` is non-empty by construction — a pass nothing points at is
+/// not in the list at all. Two sources share an entry only when they resolved
+/// to the same destination AND the same `owner/project` (#6657), because those
+/// two together are what the object keys and the manifest are namespaced by.
 /// Test: `tests::resolve_groups_sources_by_destination`,
-/// `tests::resolve_inherits_the_section_destination`.
+/// `tests::resolve_splits_one_destination_by_project`.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ResolvedDrainDestination {
@@ -239,6 +291,8 @@ pub struct ResolvedDrainDestination {
     pub destination: DestinationUri,
     /// The destination as the operator wrote it, for log and doctor messages.
     pub destination_display: String,
+    /// The `<owner>/<project>` every key in this pass sits under.
+    pub target: DrainTarget,
     /// The directories collected for this destination. Never empty.
     pub sources: Vec<LogSource>,
 }
@@ -272,8 +326,13 @@ impl ResolvedDrainDestination {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ResolvedLogDrain {
-    /// Every destination with at least one source, in config order (#6657).
+    /// Every pass this plan runs, in config order (#6657).
     pub destinations: Vec<ResolvedDrainDestination>,
+    /// Sources the operator opted out with `enabled: false` (#6657).
+    ///
+    /// Carried rather than dropped so `tm doctor` can say the project is off on
+    /// purpose. Nothing in the scheduler reads it.
+    pub disabled: Vec<DisabledSource>,
     /// How long the scheduler sleeps between passes.
     pub interval: Duration,
     /// Plaintext source ceiling handed to `DrainConfig`.
@@ -282,10 +341,6 @@ pub struct ResolvedLogDrain {
     pub max_wire_bytes: u64,
     /// Extra literal secrets to scrub.
     pub secrets: Vec<String>,
-    /// Operator-pinned GitHub login, when one was configured.
-    pub github_id: Option<String>,
-    /// Operator-pinned session segment, when one was configured.
-    pub session_id: Option<String>,
 }
 
 /// What the config says the drain should do.
@@ -317,14 +372,20 @@ pub enum LogDrainSetting {
 /// `<home>/.trusty-mpm/logs` filtered at INFO, which is the file appender
 /// `bin/tm/main.rs` installs for the daemon.
 ///
-/// # Per-source destinations (#6657)
+/// # Per-source destinations and projects (#6657)
 ///
 /// A source's own `destination` wins over the section's; a source that names
-/// none inherits the section default. Sources are then GROUPED by the
-/// destination they resolved to, in first-appearance order, and the scheduler
-/// runs one pass per group. `destination` at the section level is required only
-/// when at least one source still needs it — a config where every source names
-/// its own is complete without one.
+/// none inherits the section default. Each source also resolves an
+/// `<owner>/<project>` — its own `owner:`/`project:`, else the git `origin` of
+/// its `root`, else the section's `owner:`/`project:`. A source that resolves
+/// none is [`LogDrainConfigError::SourceIdentity`], never a placeholder key.
+///
+/// Sources are then GROUPED by the destination AND project they resolved to, in
+/// first-appearance order, and the scheduler runs one pass per group.
+/// `destination` at the section level is required only when at least one source
+/// still needs it — a config where every source names its own is complete
+/// without one. A source with `enabled: false` is left out of every group and
+/// recorded in [`ResolvedLogDrain::disabled`].
 ///
 /// Grouping is by the PARSED destination, so `s3://b/p` and `s3://b/p/` are one
 /// group, while two identities against one bucket (`?profile=`) are two. That
@@ -332,11 +393,17 @@ pub enum LogDrainSetting {
 /// cache is keyed by (#6548) — so each group's pass reads and writes its own
 /// record with no forking of that fix.
 ///
+/// Identity resolution runs only for an ENABLED plan: it reads git, and a
+/// checkout that has lost its origin is an environment fault rather than the
+/// config typo the disabled-path validation exists to catch.
+///
 /// Test: `tests::resolve_disabled_when_section_absent`,
 /// `tests::resolve_fills_defaults`,
 /// `tests::resolve_rejects_a_malformed_destination`,
 /// `tests::resolve_validates_even_while_disabled`,
-/// `tests::resolve_groups_sources_by_destination`.
+/// `tests::resolve_groups_sources_by_destination`,
+/// `tests::resolve_reads_owner_and_project_from_the_git_origin`,
+/// `tests::resolve_refuses_a_source_with_no_resolvable_identity`.
 ///
 /// # Errors
 /// Any [`LogDrainConfigError`]. The caller must not fall back to a default
@@ -381,86 +448,78 @@ pub fn resolve_log_drain(
         });
     }
 
-    let sources = resolve_sources(&section.sources, home)?;
+    let prepared = resolve_sources(&section.sources, home)?;
 
     if !enabled {
         return Ok(LogDrainSetting::Disabled);
     }
 
-    let destinations = group_by_destination(sources, destination)?;
+    let fallback_identity = match (
+        non_empty(section.owner.as_deref()),
+        non_empty(section.project.as_deref()),
+    ) {
+        (Some(owner), Some(project)) => Some(DrainTarget { owner, project }),
+        _ => None,
+    };
+    let (destinations, disabled) = plan::build(prepared, destination, fallback_identity.as_ref())?;
 
     Ok(LogDrainSetting::Enabled(Box::new(ResolvedLogDrain {
         destinations,
+        disabled,
         interval: Duration::from_secs(interval_secs),
         max_file_bytes,
         max_wire_bytes,
         secrets: section.secrets.clone(),
-        github_id: non_empty(section.github_id.as_deref()),
-        session_id: non_empty(section.session_id.as_deref()),
     })))
 }
 
 /// A destination as the operator wrote it, beside its parsed form.
 type NamedDestination = (String, DestinationUri);
 
-/// One source and the destination override it carried, if any.
-type SourceWithOverride = (LogSource, Option<NamedDestination>);
-
-/// Collect sources under the destination each one resolved to (#6657).
+/// One validated `sources[]` entry, before its identity is resolved.
 ///
-/// First-appearance order, so the doctor row and the log lines list
-/// destinations in the order the operator wrote them rather than in whatever
-/// order a hash map yields. A linear scan is the right structure here: a host
-/// drains to a handful of destinations, and `DestinationUri` is `Eq` but not
-/// `Hash`.
-///
-/// Test: `tests::resolve_groups_sources_by_destination`,
-/// `tests::resolve_rejects_enabled_with_no_destination`.
-fn group_by_destination(
-    sources: Vec<SourceWithOverride>,
-    default: Option<NamedDestination>,
-) -> Result<Vec<ResolvedDrainDestination>, LogDrainConfigError> {
-    let mut groups: Vec<ResolvedDrainDestination> = Vec::new();
-    for (source, over) in sources {
-        // A source with no override needs the section default; without one
-        // there is nowhere for it to go, and guessing is what #6657 forbids.
-        let (display, uri) = match over.or_else(|| default.clone()) {
-            Some(named) => named,
-            None => return Err(LogDrainConfigError::MissingDestination),
-        };
-        match groups.iter_mut().find(|g| g.destination == uri) {
-            Some(group) => group.sources.push(source),
-            None => groups.push(ResolvedDrainDestination {
-                destination: uri,
-                destination_display: display,
-                sources: vec![source],
-            }),
-        }
-    }
-    Ok(groups)
+/// Why: validation is pure and runs even while the drain is disabled, but
+/// identity resolution reads git and runs only for an enabled plan. This is
+/// what the first stage hands the second.
+struct PreparedSource {
+    /// Position in `sources[]`, for error messages.
+    index: usize,
+    /// `enabled: false` keeps the entry out of every pass (#6657).
+    enabled: bool,
+    /// The collector's view of this entry.
+    source: LogSource,
+    /// The entry's own `destination`, when it named one.
+    destination: Option<NamedDestination>,
+    /// The entry's own `owner`/`project`, when it named both.
+    identity: Option<DrainTarget>,
 }
 
 /// Validate the `sources[]` list, or supply the built-in daemon source.
 ///
 /// Each entry's `destination` override is parsed here so a typo is refused
-/// while the drain is still disabled, exactly as the section's own is.
+/// while the drain is still disabled, exactly as the section's own is. Nothing
+/// here touches git: identity resolution belongs to [`plan::build`], which runs
+/// only for an enabled plan.
 ///
 /// Test: `tests::resolve_fills_defaults`, `tests::resolve_uses_configured_sources`,
 /// `tests::resolve_rejects_a_malformed_source_destination`.
 fn resolve_sources(
     configured: &[LogDrainSourceConfig],
     home: &Path,
-) -> Result<Vec<SourceWithOverride>, LogDrainConfigError> {
+) -> Result<Vec<PreparedSource>, LogDrainConfigError> {
     if configured.is_empty() {
-        return Ok(vec![(
-            LogSource {
+        return Ok(vec![PreparedSource {
+            index: 0,
+            enabled: true,
+            source: LogSource {
                 crate_name: super::CRATE_NAME.to_string(),
                 root: home.join(".trusty-mpm").join(DAEMON_LOG_SUBDIR),
                 include: DEFAULT_INCLUDE.iter().map(|s| (*s).to_string()).collect(),
                 level_filter: Some(Level::Info),
             },
-            None,
-        )]);
+            destination: None,
+            identity: None,
+        }]);
     }
 
     configured
@@ -506,15 +565,39 @@ fn resolve_sources(
                     Some((raw, uri))
                 }
             };
-            Ok((
-                LogSource {
+            let identity = match (
+                non_empty(entry.owner.as_deref()),
+                non_empty(entry.project.as_deref()),
+            ) {
+                (None, None) => None,
+                (Some(owner), Some(project)) => Some(DrainTarget { owner, project }),
+                // Half an identity cannot make a key, and filling the other
+                // half from git would silently mix two projects' logs.
+                (owner, _) => {
+                    return Err(LogDrainConfigError::SourceIdentity {
+                        index,
+                        crate_name,
+                        root,
+                        reason: format!(
+                            "`{}` is set but `{}` is not",
+                            if owner.is_some() { "owner" } else { "project" },
+                            if owner.is_some() { "project" } else { "owner" },
+                        ),
+                    });
+                }
+            };
+            Ok(PreparedSource {
+                index,
+                enabled: entry.enabled.unwrap_or(true),
+                source: LogSource {
                     crate_name,
                     root: expand_home(&root, home),
                     include,
                     level_filter,
                 },
-                over,
-            ))
+                destination: over,
+                identity,
+            })
         })
         .collect()
 }

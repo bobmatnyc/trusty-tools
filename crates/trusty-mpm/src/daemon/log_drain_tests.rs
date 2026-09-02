@@ -14,17 +14,24 @@ use tempfile::TempDir;
 use super::*;
 use crate::core::trusty_tools_config::LogDrainConfig;
 
+/// The `<owner>/<project>` every fixture config drains under.
+///
+/// Pinned rather than resolved from git: a test that read the developer's own
+/// checkout would assert against their remote (#6657).
+const FIXTURE_OWNER: &str = "octocat";
+const FIXTURE_PROJECT: &str = "fixtures";
+
 /// Build a `log_drain:` config aimed at `dest_dir`, collecting `log_dir`.
 ///
-/// `github_id` and `session_id` are pinned so no test shells out to `gh` or
-/// asserts against the developer's own GitHub account.
+/// `owner` and `project` are pinned at the section level, so the temp log
+/// directories need not be checkouts.
 fn enabled_config(dest_dir: &Path, log_dir: &Path) -> TrustyToolsConfig {
     TrustyToolsConfig {
         log_drain: Some(LogDrainConfig {
             enabled: Some(true),
             destination: Some(format!("file://{}", dest_dir.display())),
-            github_id: Some("octocat".to_string()),
-            session_id: Some("sess-fixture".to_string()),
+            owner: Some(FIXTURE_OWNER.to_string()),
+            project: Some(FIXTURE_PROJECT.to_string()),
             sources: vec![crate::core::trusty_tools_config::LogDrainSourceConfig {
                 crate_name: Some("trusty-mpm".to_string()),
                 root: Some(log_dir.display().to_string()),
@@ -64,8 +71,8 @@ fn two_destination_config(
         log_drain: Some(LogDrainConfig {
             enabled: Some(true),
             destination: Some(format!("file://{}", default_dest.display())),
-            github_id: Some("octocat".to_string()),
-            session_id: Some("sess-fixture".to_string()),
+            owner: Some(FIXTURE_OWNER.to_string()),
+            project: Some(FIXTURE_PROJECT.to_string()),
             sources: vec![
                 source_entry("trusty-mpm", inheriting_logs, None),
                 source_entry("trusty-code", overriding_logs, Some(override_dest)),
@@ -77,10 +84,12 @@ fn two_destination_config(
 }
 
 /// Where a drained file for `crate_name` lands under `dest`.
+///
+/// `<owner>/<project>/<crate>/<file>` — the #6657 layout, with no session
+/// segment and no `logs/` interlayer.
 fn drained_path(dest: &Path, crate_name: &str, file: &str) -> std::path::PathBuf {
-    dest.join("octocat")
-        .join("sess-fixture")
-        .join("logs")
+    dest.join(FIXTURE_OWNER)
+        .join(FIXTURE_PROJECT)
         .join(crate_name)
         .join(file)
 }
@@ -113,14 +122,6 @@ fn plan_of(config: &TrustyToolsConfig, home: &Path) -> ResolvedLogDrain {
     }
 }
 
-/// The pinned identity the fixture config uploads under.
-fn fixture_target() -> DrainTarget {
-    DrainTarget {
-        github_id: "octocat".to_string(),
-        session_id: "sess-fixture".to_string(),
-    }
-}
-
 /// A temp directory holding one log file with `body`.
 fn log_dir_with(tmp: &TempDir, body: &str) -> std::path::PathBuf {
     let dir = tmp.path().join("logs");
@@ -138,26 +139,26 @@ async fn a_successful_tick_uploads_and_records_success() {
 
     let config = enabled_config(&dest, &logs);
     let plan = plan_of(&config, tmp.path());
-    let status = run_tick(&plan, &state, &fixture_target()).await;
+    let status = run_tick(&plan, &state).await;
 
     assert_eq!(status.outcome, DrainOutcome::Success, "{}", status.detail);
     assert_eq!(status.uploaded, 1, "{}", status.detail);
     assert_eq!(status.destinations.len(), 1);
     assert_eq!(status.destinations[0].scheme, "file");
 
-    // The object landed at `<github-id>/<session>/logs/<crate>/<file>`, which
-    // is the epic's key layout — proof this drained rather than merely
-    // reporting that it had.
-    let key = dest
-        .join("octocat")
-        .join("sess-fixture")
-        .join("logs")
-        .join("trusty-mpm")
-        .join("trusty-mpm.log");
+    // The object landed at `<owner>/<project>/<crate>/<file>`, which is the
+    // #6657 key layout — proof this drained rather than merely reporting that
+    // it had.
+    let key = drained_path(&dest, "trusty-mpm", "trusty-mpm.log");
     assert!(
         key.exists(),
         "expected an uploaded object at {}",
         key.display()
+    );
+    assert_eq!(
+        status.destinations[0].project,
+        format!("{FIXTURE_OWNER}/{FIXTURE_PROJECT}"),
+        "the record names the project it uploaded under"
     );
 }
 
@@ -170,12 +171,10 @@ async fn a_second_tick_dedupes() {
 
     let config = enabled_config(&dest, &logs);
     let plan = plan_of(&config, tmp.path());
-    let target = fixture_target();
-
-    let first = run_tick(&plan, &state, &target).await;
+    let first = run_tick(&plan, &state).await;
     assert_eq!(first.uploaded, 1, "{}", first.detail);
 
-    let second = run_tick(&plan, &state, &target).await;
+    let second = run_tick(&plan, &state).await;
     assert_eq!(second.outcome, DrainOutcome::Success, "{}", second.detail);
     assert_eq!(second.uploaded, 0, "{}", second.detail);
     assert_eq!(second.skipped_unchanged, 1, "{}", second.detail);
@@ -199,9 +198,7 @@ async fn a_ceiling_skip_is_decided_once_across_ticks() {
         .expect("fixture section")
         .max_file_bytes = Some(1024);
     let plan = plan_of(&config, tmp.path());
-    let target = fixture_target();
-
-    let first = run_tick(&plan, &state, &target).await;
+    let first = run_tick(&plan, &state).await;
     assert_eq!(first.outcome, DrainOutcome::Success, "{}", first.detail);
     assert_eq!(first.uploaded, 0, "{}", first.detail);
     assert!(
@@ -212,7 +209,7 @@ async fn a_ceiling_skip_is_decided_once_across_ticks() {
         first.detail
     );
 
-    let second = run_tick(&plan, &state, &target).await;
+    let second = run_tick(&plan, &state).await;
     assert!(
         second
             .detail
@@ -240,7 +237,7 @@ async fn the_wire_ceiling_reaches_the_drain_config() {
     let plan = plan_of(&config, tmp.path());
     assert_eq!(plan.max_wire_bytes, 8);
 
-    let status = run_tick(&plan, &state, &fixture_target()).await;
+    let status = run_tick(&plan, &state).await;
     assert_eq!(status.uploaded, 0, "{}", status.detail);
     assert!(
         status
@@ -272,7 +269,7 @@ async fn two_destinations_each_get_their_own_pass() {
         "two groups, one per destination"
     );
 
-    let status = run_tick(&plan, &state, &fixture_target()).await;
+    let status = run_tick(&plan, &state).await;
     assert_eq!(status.outcome, DrainOutcome::Success, "{}", status.detail);
     assert_eq!(status.uploaded, 2, "{}", status.detail);
     assert_eq!(status.destinations.len(), 2);
@@ -313,7 +310,7 @@ async fn one_failing_destination_does_not_stop_the_others() {
 
     let config = two_destination_config(&dest_a, &logs_a, &dest_b, &logs_b);
     let plan = plan_of(&config, tmp.path());
-    let status = run_tick(&plan, &state, &fixture_target()).await;
+    let status = run_tick(&plan, &state).await;
 
     // The tick as a whole failed, but the reachable destination still drained.
     assert_eq!(status.outcome, DrainOutcome::Failed, "{}", status.detail);
@@ -350,7 +347,7 @@ async fn a_failing_destination_records_failed() {
 
     let config = enabled_config(&dest, &logs);
     let plan = plan_of(&config, tmp.path());
-    let status = run_tick(&plan, &state, &fixture_target()).await;
+    let status = run_tick(&plan, &state).await;
 
     // The fail-open guard: a destination that cannot be reached must never
     // record a drained pass.
@@ -438,40 +435,6 @@ fn status_round_trips_through_the_state_dir() {
     assert_eq!(load_status(&dir).as_ref(), Some(&status));
 }
 
-#[test]
-fn session_id_is_stable_across_calls() {
-    let tmp = TempDir::new().expect("tempdir");
-    let dest = tmp.path().join("dest");
-    let logs = tmp.path().join("logs");
-    let state = tmp.path().join("state");
-
-    // With no configured id the drain mints one and persists it: a per-boot id
-    // would re-upload every log file under a fresh prefix on every restart.
-    let mut config = enabled_config(&dest, &logs);
-    config
-        .log_drain
-        .as_mut()
-        .expect("section present")
-        .session_id = None;
-    let plan = plan_of(&config, tmp.path());
-
-    let first = resolve_session_id(&plan, &state).expect("mints an id");
-    let second = resolve_session_id(&plan, &state).expect("reads the persisted id");
-    assert!(!first.is_empty());
-    assert_eq!(first, second);
-}
-
-#[test]
-fn a_configured_session_id_wins() {
-    let tmp = TempDir::new().expect("tempdir");
-    let config = enabled_config(&tmp.path().join("dest"), &tmp.path().join("logs"));
-    let plan = plan_of(&config, tmp.path());
-    assert_eq!(
-        resolve_session_id(&plan, &tmp.path().join("state")).expect("resolves"),
-        "sess-fixture"
-    );
-}
-
 #[tokio::test]
 async fn the_loop_exits_on_cancel() {
     let tmp = TempDir::new().expect("tempdir");
@@ -488,4 +451,44 @@ async fn the_loop_exits_on_cancel() {
     // A loop that ignored its token would hang here until the test harness
     // timed out; joining is the assertion.
     handle.await.expect("the loop exits cleanly on cancel");
+}
+
+#[tokio::test]
+async fn a_disabled_source_uploads_nothing_and_is_still_reported() {
+    // #6657 deliverable: a project opts out with `enabled: false`. It must run
+    // no pass and write no object, while the plan still names it so the doctor
+    // row can say the drain is off for that project on purpose.
+    let tmp = TempDir::new().expect("tempdir");
+    let dest = tmp.path().join("dest");
+    let logs_on = named_log_dir(&tmp, "alpha");
+    let logs_off = named_log_dir(&tmp, "beta");
+    let state = tmp.path().join("state");
+
+    let mut config = enabled_config(&dest, &logs_on);
+    let section = config.log_drain.as_mut().expect("fixture section");
+    section.sources[0].crate_name = Some("trusty-mpm".to_string());
+    section.sources[0].include = vec!["*.log".to_string()];
+    section
+        .sources
+        .push(crate::core::trusty_tools_config::LogDrainSourceConfig {
+            crate_name: Some("trusty-code".to_string()),
+            root: Some(logs_off.display().to_string()),
+            include: vec!["*.log".to_string()],
+            enabled: Some(false),
+            ..Default::default()
+        });
+
+    let plan = plan_of(&config, tmp.path());
+    assert_eq!(plan.destinations.len(), 1, "only the enabled source drains");
+    assert_eq!(plan.disabled.len(), 1);
+    assert_eq!(plan.disabled[0].crate_name, "trusty-code");
+
+    let status = run_tick(&plan, &state).await;
+    assert_eq!(status.outcome, DrainOutcome::Success, "{}", status.detail);
+    assert_eq!(status.uploaded, 1, "{}", status.detail);
+    assert!(drained_path(&dest, "trusty-mpm", "alpha.log").exists());
+    assert!(
+        !drained_path(&dest, "trusty-code", "beta.log").exists(),
+        "a disabled source must upload nothing"
+    );
 }

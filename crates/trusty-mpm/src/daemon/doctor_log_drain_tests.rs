@@ -12,15 +12,22 @@ use std::time::Duration;
 use super::*;
 use crate::core::trusty_tools_config::LOG_DRAIN_DEFAULT_INTERVAL_SECS;
 use crate::daemon::log_drain::LogDrainDestinationStatus;
-use trusty_common::log_drain::DestinationUri;
+use trusty_common::log_drain::{DestinationUri, DrainTarget};
 
-/// One resolved destination group at `file://<path>`, with no sources.
+/// The project every fixture pass drains under.
+const FIXTURE_PROJECT: &str = "octocat/fixtures";
+
+/// One resolved pass at `file://<path>`, with no sources.
 fn group(path: &str) -> crate::core::trusty_tools_config::ResolvedDrainDestination {
     crate::core::trusty_tools_config::ResolvedDrainDestination {
         destination: DestinationUri::File {
             path: PathBuf::from(path),
         },
         destination_display: format!("file://{path}"),
+        target: DrainTarget {
+            owner: "octocat".to_string(),
+            project: "fixtures".to_string(),
+        },
         sources: Vec::new(),
     }
 }
@@ -29,15 +36,22 @@ fn group(path: &str) -> crate::core::trusty_tools_config::ResolvedDrainDestinati
 fn plan_over(
     destinations: Vec<crate::core::trusty_tools_config::ResolvedDrainDestination>,
 ) -> LogDrainSetting {
+    plan_with_disabled(destinations, Vec::new())
+}
+
+/// An enabled plan over `destinations`, plus the sources switched off.
+fn plan_with_disabled(
+    destinations: Vec<crate::core::trusty_tools_config::ResolvedDrainDestination>,
+    disabled: Vec<crate::core::trusty_tools_config::DisabledSource>,
+) -> LogDrainSetting {
     LogDrainSetting::Enabled(Box::new(
         crate::core::trusty_tools_config::ResolvedLogDrain {
             destinations,
+            disabled,
             interval: Duration::from_secs(LOG_DRAIN_DEFAULT_INTERVAL_SECS),
             max_file_bytes: 1024,
             max_wire_bytes: 1024,
             secrets: Vec::new(),
-            github_id: Some("octocat".to_string()),
-            session_id: Some("sess-1".to_string()),
         },
     ))
 }
@@ -51,6 +65,7 @@ fn plan() -> LogDrainSetting {
 fn recorded(path: &str, outcome: DrainOutcome, detail: &str) -> LogDrainDestinationStatus {
     LogDrainDestinationStatus {
         destination: format!("file://{path}"),
+        project: FIXTURE_PROJECT.to_string(),
         scheme: "file".to_string(),
         outcome,
         uploaded: 3,
@@ -110,8 +125,10 @@ fn enabled_with_no_run_warns() {
     let check = build_log_drain_check(Ok(&setting), None);
     assert_eq!(check.status, CheckStatus::Warn);
     assert!(
-        check.message.contains("file → file:///tmp/drain"),
-        "the row must name the scheme and destination: {}",
+        check
+            .message
+            .contains("file → file:///tmp/drain [octocat/fixtures]"),
+        "the row must name the scheme, destination, and project: {}",
         check.message
     );
     assert!(check.message.contains("no run"), "{}", check.message);
@@ -173,23 +190,24 @@ fn the_row_lists_every_destination_with_its_own_outcome() {
     assert_eq!(check.status, CheckStatus::Fail);
     // Both destinations are named, in plan order, with their own verdicts.
     assert!(
-        check
-            .message
-            .contains("file → file:///tmp/drain-a, file → file:///tmp/drain-b"),
-        "the row must name every configured destination: {}",
+        check.message.contains(
+            "file → file:///tmp/drain-a [octocat/fixtures], \
+             file → file:///tmp/drain-b [octocat/fixtures]"
+        ),
+        "the row must name every configured pass: {}",
         check.message
     );
     assert!(
         check
             .message
-            .contains("file:///tmp/drain-a: ok — 2 file(s) uploaded"),
+            .contains("file:///tmp/drain-a [octocat/fixtures]: ok — 2 file(s) uploaded"),
         "the healthy destination keeps its own verdict: {}",
         check.message
     );
     assert!(
         check
             .message
-            .contains("file:///tmp/drain-b: FAILED — cannot reach the destination"),
+            .contains("file:///tmp/drain-b [octocat/fixtures]: FAILED — cannot reach"),
         "the broken destination is named as the broken one: {}",
         check.message
     );
@@ -219,4 +237,25 @@ fn a_stale_disabled_record_under_an_enabled_config_warns() {
     let check = build_log_drain_check(Ok(&setting), Some(&recorded));
     assert_eq!(check.status, CheckStatus::Warn);
     assert!(check.message.contains("no run"), "{}", check.message);
+}
+
+#[test]
+fn the_row_lists_a_disabled_source() {
+    // #6657: `enabled: false` on one project is a deliberate opt-out, and the
+    // row has to distinguish it from a project that fell out of the config.
+    let setting = plan_with_disabled(
+        vec![group("/tmp/drain")],
+        vec![crate::core::trusty_tools_config::DisabledSource {
+            crate_name: "trusty-code".to_string(),
+            destination_display: Some("s3://owner-bucket/live".to_string()),
+        }],
+    );
+    let check = build_log_drain_check(Ok(&setting), None);
+    assert!(
+        check
+            .message
+            .contains("trusty-code → s3://owner-bucket/live: disabled"),
+        "the row must name the opted-out project and where it would have gone: {}",
+        check.message
+    );
 }

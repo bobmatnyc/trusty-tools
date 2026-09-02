@@ -18,9 +18,19 @@
 //! safety — lower-cased, non-alphanumerics collapsed to `-`, trailing `.git`
 //! stripped — so the result is always two clean path segments.
 //!
+//! [`RemoteRepo`] and [`parse_remote_url`] are the same parse WITHOUT the
+//! slugification, added by #6657: they keep the owner and repo exactly as the
+//! remote spells them and carry the host, because their callers hand the pair
+//! to the GitHub API or use it as an object-storage key rather than as a path.
+//! That pair is the workspace's single git-remote-URL parser —
+//! `trusty-git-analytics` and `trusty-code` route through it instead of each
+//! carrying their own.
+//!
 //! Test: `parse_*` unit tests cover SSH/HTTPS, with/without `.git`, trailing
-//! slashes, nested groups, owner-less and empty inputs; `derive_*` is covered by
-//! the `derive_github_path_reads_origin` test against a real temp git repo.
+//! slashes, nested groups, owner-less and empty inputs; `parse_remote_url_table`
+//! covers the verbatim parser; `derive_*` is covered by
+//! `derive_github_path_reads_origin` and `derive_remote_repo_reads_origin`
+//! against real temp git repos.
 //!
 //! [`GithubPath`]: crate::github_path::GithubPath
 //! [`parse_github_path`]: crate::github_path::parse_github_path
@@ -245,6 +255,18 @@ pub fn parse_owner_repo(s: &str) -> Option<GithubPath> {
 /// Test: `derive_github_path_reads_origin` (temp repo with an origin remote);
 /// `derive_github_path_none_outside_repo`.
 pub fn derive_github_path(dir: &Path) -> Option<GithubPath> {
+    origin_remote_url(dir).and_then(|url| parse_github_path(url.trim()))
+}
+
+/// Read `remote.origin.url` for the repo containing `dir`.
+///
+/// Shelling out to `git config` (rather than reading `.git/config`) is what
+/// makes this work inside a worktree, where `.git` is a file pointing at the
+/// parent repo, and inside a SUBDIRECTORY of a repo, where git walks up to the
+/// enclosing checkout. Returns `None` when git is absent, `dir` is not in a
+/// repo, or there is no origin remote.
+/// Test: `derive_github_path_reads_origin`, `derive_remote_repo_reads_origin`.
+fn origin_remote_url(dir: &Path) -> Option<String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -256,8 +278,159 @@ pub fn derive_github_path(dir: &Path) -> Option<GithubPath> {
     if !output.status.success() {
         return None;
     }
-    let url = String::from_utf8_lossy(&output.stdout);
-    parse_github_path(url.trim())
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// A git remote URL split into its host and its `owner/repo` pair, VERBATIM.
+///
+/// Why: [`GithubPath`] slugifies, because its consumers build filesystem paths
+/// from it. Three other call sites need the opposite — the identity exactly as
+/// the remote spells it, because they hand it to the GitHub API or use it as an
+/// object-storage key (#6657). Before this type each of them re-implemented git
+/// URL parsing: `tga`'s `extract_owner_repo_from_url` (twice) and
+/// `trusty-code`'s `mpm_registry::parse_owner_repo`.
+/// What: `host` carries any port and never the `user@` prefix; `owner` and
+/// `repo` keep their original case and punctuation, minus a trailing `.git`.
+/// A caller that only accepts one forge filters on `host` itself.
+/// Test: `parse_remote_url_table`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RemoteRepo {
+    /// Remote host, with a port when the URL carried one, e.g. `github.com`.
+    pub host: String,
+    /// Repository owner exactly as the remote spells it, e.g. `duettoresearch`.
+    pub owner: String,
+    /// Repository name exactly as the remote spells it, minus a trailing `.git`.
+    pub repo: String,
+}
+
+impl RemoteRepo {
+    /// Render the identity as `<owner>/<repo>`.
+    pub fn owner_repo(&self) -> String {
+        format!("{}/{}", self.owner, self.repo)
+    }
+}
+
+/// Why a git remote URL yielded no `owner/repo`.
+///
+/// Why: the log drain refuses to upload under a guessed key, so it has to tell
+/// an operator which source could not be identified and what was wrong with it
+/// (#6657). An `Option` would name neither.
+/// What: hand-written `Display`/`Error` rather than `thiserror`, because
+/// [`mod@crate::github_path`] is compiled unconditionally and `thiserror` is an
+/// optional dependency of this crate.
+/// Test: `parse_remote_url_table`, `derive_remote_repo_without_origin`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RemoteUrlError {
+    /// The string is not a git remote URL naming exactly one `owner/repo`.
+    Malformed {
+        /// The input, so the message names what the operator wrote.
+        url: String,
+        /// Which part of the grammar failed.
+        reason: &'static str,
+    },
+    /// The directory is not a git checkout, or has no `origin` remote.
+    NoOrigin {
+        /// The directory that was probed.
+        dir: String,
+    },
+}
+
+impl std::fmt::Display for RemoteUrlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Malformed { url, reason } => {
+                write!(f, "`{url}` is not a git remote URL: {reason}")
+            }
+            Self::NoOrigin { dir } => {
+                write!(f, "{dir} is not a git checkout with an `origin` remote")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RemoteUrlError {}
+
+/// Parse a git remote URL into its host and `owner/repo`, preserving case.
+///
+/// Why: the single implementation of git-remote-URL parsing for this workspace
+/// (#6657). See [`RemoteRepo`] for why [`parse_github_path`] does not serve
+/// these callers.
+/// What: accepts `https://host/owner/repo`, `http://…`, `ssh://[user@]host[:port]/owner/repo`,
+/// and the scp-style `[user@]host:owner/repo`, each with or without a trailing
+/// `.git` and trailing slashes. A `user@` prefix is dropped; a port stays with
+/// the host. The path must be EXACTLY two non-empty segments, so a GitLab
+/// subgroup path (`group/subgroup/repo`) is refused rather than collapsed into
+/// an owner containing a slash. Everything else — a bare word, a filesystem
+/// path, a host with no path — is [`RemoteUrlError::Malformed`].
+/// Test: `parse_remote_url_table`.
+///
+/// # Errors
+/// [`RemoteUrlError::Malformed`], naming the input and the reason.
+pub fn parse_remote_url(url: &str) -> Result<RemoteRepo, RemoteUrlError> {
+    let trimmed = url.trim();
+    let malformed = |reason: &'static str| RemoteUrlError::Malformed {
+        url: trimmed.to_string(),
+        reason,
+    };
+    if trimmed.is_empty() {
+        return Err(malformed("it is empty"));
+    }
+
+    // With a scheme the host ends at the first `/`; without one this is
+    // scp-syntax and the host ends at the first `:`. Splitting on the wrong
+    // one is how `host:PORT/owner/repo` used to parse as owner `PORT`.
+    let (authority, path) = match trimmed.split_once("://") {
+        Some((_, rest)) => rest
+            .split_once('/')
+            .ok_or_else(|| malformed("the URL has no path after the host"))?,
+        None => trimmed
+            .split_once(':')
+            .ok_or_else(|| malformed("expected `scheme://host/owner/repo` or `host:owner/repo`"))?,
+    };
+
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    if host.is_empty() {
+        return Err(malformed("the host is empty"));
+    }
+
+    let path = path.trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let path = path.trim_end_matches('/');
+    let segments: Vec<&str> = path.split('/').collect();
+    let [owner, repo] = segments.as_slice() else {
+        return Err(malformed("the path is not exactly `<owner>/<repo>`"));
+    };
+    if owner.is_empty() || repo.is_empty() {
+        return Err(malformed("the owner or the repository name is empty"));
+    }
+
+    Ok(RemoteRepo {
+        host: host.to_string(),
+        owner: (*owner).to_string(),
+        repo: (*repo).to_string(),
+    })
+}
+
+/// Read a directory's git `origin` remote and parse it with [`parse_remote_url`].
+///
+/// Why: the drain resolves a log source's `owner/project` from the checkout the
+/// logs belong to, and must fail rather than invent a key when it cannot
+/// (#6657).
+/// What: runs `git -C <dir> config --get remote.origin.url`, so a subdirectory
+/// of a repo resolves to the enclosing checkout and a worktree resolves to its
+/// parent. No network.
+/// Test: `derive_remote_repo_reads_origin`, `derive_remote_repo_without_origin`.
+///
+/// # Errors
+/// [`RemoteUrlError::NoOrigin`] when `dir` is not a checkout or has no origin;
+/// [`RemoteUrlError::Malformed`] when the origin URL does not parse.
+pub fn derive_remote_repo(dir: &Path) -> Result<RemoteRepo, RemoteUrlError> {
+    let url = origin_remote_url(dir).ok_or_else(|| RemoteUrlError::NoOrigin {
+        dir: dir.display().to_string(),
+    })?;
+    parse_remote_url(&url)
 }
 
 #[cfg(test)]
@@ -424,6 +597,148 @@ mod tests {
         assert_eq!(parse_owner_repo(""), None);
         assert_eq!(parse_owner_repo("   "), None);
         assert_eq!(parse_owner_repo("///"), None);
+    }
+
+    /// Why: `parse_remote_url` is the workspace's ONE git-remote-URL parser
+    /// (#6657), so every shape its three call sites relied on is pinned in one
+    /// table — including the case preservation `parse_github_path` does not
+    /// offer, and the strict two-segment path that keeps a subgroup URL from
+    /// fabricating an owner containing a slash.
+    /// Test: itself.
+    #[test]
+    fn parse_remote_url_table() {
+        for (url, host, owner, repo) in [
+            (
+                "https://github.com/bobmatnyc/Trusty-Tools.git",
+                "github.com",
+                "bobmatnyc",
+                "Trusty-Tools",
+            ),
+            (
+                "https://github.com/bobmatnyc/trusty-tools",
+                "github.com",
+                "bobmatnyc",
+                "trusty-tools",
+            ),
+            (
+                "https://user@github.com/acme/widget",
+                "github.com",
+                "acme",
+                "widget",
+            ),
+            (
+                "git@github.com:duettoresearch/pricing.git",
+                "github.com",
+                "duettoresearch",
+                "pricing",
+            ),
+            (
+                "ssh://git@github.com/acme/widget.git",
+                "github.com",
+                "acme",
+                "widget",
+            ),
+            (
+                "https://ghe.corp.example.com/Platform/Deploy_Tools.git",
+                "ghe.corp.example.com",
+                "Platform",
+                "Deploy_Tools",
+            ),
+            (
+                "git@ghe.corp.example.com:Platform/deploy.git",
+                "ghe.corp.example.com",
+                "Platform",
+                "deploy",
+            ),
+            (
+                "https://git.example.com:8443/owner/repo",
+                "git.example.com:8443",
+                "owner",
+                "repo",
+            ),
+            (
+                "https://github.com/acme/widget/",
+                "github.com",
+                "acme",
+                "widget",
+            ),
+        ] {
+            let parsed = parse_remote_url(url).unwrap_or_else(|e| panic!("`{url}`: {e}"));
+            assert_eq!(parsed.host, host, "host of `{url}`");
+            assert_eq!(parsed.owner, owner, "owner of `{url}`");
+            assert_eq!(parsed.repo, repo, "repo of `{url}`");
+            assert_eq!(parsed.owner_repo(), format!("{owner}/{repo}"));
+        }
+
+        for garbage in [
+            "",
+            "   ",
+            "nonsense",
+            "/var/log/trusty-mpm",
+            "https://github.com/",
+            "https://github.com/owner",
+            "https://gitlab.com/group/subgroup/repo",
+            "git@github.com:",
+        ] {
+            let err =
+                parse_remote_url(garbage).expect_err("garbage must be refused, never guessed at");
+            assert!(
+                matches!(err, RemoteUrlError::Malformed { .. }),
+                "`{garbage}` produced {err:?}"
+            );
+        }
+    }
+
+    /// Why: the I/O entry point must read a real `remote.origin.url` without
+    /// slugifying it, and must resolve from a SUBDIRECTORY of the checkout —
+    /// which is how the log drain identifies a project from its log directory.
+    /// Test: itself (skips cleanly if `git` is unavailable on the runner).
+    #[test]
+    fn derive_remote_repo_reads_origin() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let dir = tmp.path();
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        if !git(&["init"]) {
+            return;
+        }
+        let _ = git(&[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:duettoresearch/Pricing.git",
+        ]);
+        let parsed = derive_remote_repo(dir).expect("derived from origin");
+        assert_eq!(parsed.owner, "duettoresearch");
+        assert_eq!(parsed.repo, "Pricing", "the case the remote spells");
+
+        let nested = dir.join("logs");
+        std::fs::create_dir_all(&nested).expect("nested dir");
+        assert_eq!(
+            derive_remote_repo(&nested).expect("git walks up to the checkout"),
+            parsed
+        );
+    }
+
+    /// Why: a directory that is not a checkout must produce an error naming it,
+    /// not a fabricated identity — the drain refuses to upload without one.
+    /// Test: itself.
+    #[test]
+    fn derive_remote_repo_without_origin() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        match derive_remote_repo(tmp.path()) {
+            Err(RemoteUrlError::NoOrigin { dir }) => {
+                assert!(dir.contains(&*tmp.path().to_string_lossy()), "{dir}");
+            }
+            other => panic!("expected NoOrigin, got {other:?}"),
+        }
     }
 
     /// Why: `parse_owner_repo` treats its input as a canonical `owner/repo`

@@ -83,48 +83,25 @@ pub fn owner_repo_from_remote(repo_path: &std::path::Path) -> Option<(String, St
     extract_owner_repo_from_url(url)
 }
 
+/// GitHub host this resolver accepts a remote from.
+///
+/// The shared parser is host-agnostic; the GitHub REST client this feeds is
+/// not, so the filter lives here rather than in `trusty-common`.
+const GITHUB_HOST: &str = "github.com";
+
 /// Pure-string helper: extracts `owner/name` from a GitHub remote URL string.
 /// Returns `None` for non-GitHub URLs or malformed input.
 ///
 /// Why: separating the pure URL-parse logic from the disk-touching
 /// `owner_repo_from_remote` makes the URL-parse path independently testable.
-/// What: handles HTTPS, SSH, and `https://user@` URL forms.
+/// What: delegates to `trusty_common::github_path::parse_remote_url` — the
+/// workspace's one git-remote-URL parser (#6657) — and keeps only the
+/// GitHub-host filter this crate needs. HTTPS, SSH scp-syntax, `ssh://`, and
+/// `https://user@` forms all reach it through that parser.
 /// Test: `extract_owner_repo_from_url_handles_common_forms` in `client.rs` tests.
 pub fn extract_owner_repo_from_url(url: &str) -> Option<(String, String)> {
-    let cleaned = url.strip_suffix(".git").unwrap_or(url);
-    if let Some(rest) = cleaned.strip_prefix("git@github.com:") {
-        return split_owner_repo(rest);
-    }
-    for prefix in [
-        "https://github.com/",
-        "http://github.com/",
-        "ssh://git@github.com/",
-    ] {
-        if let Some(rest) = cleaned.strip_prefix(prefix) {
-            return split_owner_repo(rest);
-        }
-    }
-    if let Some(after_scheme) = cleaned.strip_prefix("https://") {
-        if let Some(at_idx) = after_scheme.find('@') {
-            let after_at = &after_scheme[at_idx + 1..];
-            if let Some(rest) = after_at.strip_prefix("github.com/") {
-                return split_owner_repo(rest);
-            }
-        }
-    }
-    None
-}
-
-/// Split a `owner/name(/...)` tail into a `(String, String)` pair.
-/// Returns `None` if either segment is empty.
-fn split_owner_repo(rest: &str) -> Option<(String, String)> {
-    let mut parts = rest.splitn(3, '/');
-    let owner = parts.next()?;
-    let name = parts.next()?;
-    if owner.is_empty() || name.is_empty() {
-        return None;
-    }
-    Some((owner.to_string(), name.to_string()))
+    let remote = trusty_common::github_path::parse_remote_url(url).ok()?;
+    (remote.host == GITHUB_HOST).then_some((remote.owner, remote.repo))
 }
 
 /// Resolve the set of `(owner, repo)` pairs the GitHub PR fetcher should

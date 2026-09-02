@@ -13,7 +13,7 @@
 //! [`collect`](crate::log_drain::collect) pipeline, and
 //! [`run_once`](crate::log_drain::run_once). Phase 1+2 is
 //! the core ONLY: there is no scheduler, no config plumbing, and no consumer
-//! wired up. Phase 3 adds those, plus GitHub-identity resolution — this module
+//! wired up. Phase 3 adds those, plus project-identity resolution — this module
 //! deliberately does not resolve an identity, it demands one.
 //!
 //! Test: `tests` (sibling module). Run it with
@@ -22,19 +22,21 @@
 //! # Key layout
 //!
 //! ```text
-//! <destination prefix>/<github_id>/<session_id>/logs/<crate>/<relative file>
+//! <destination prefix>/<owner>/<project>/<crate>/<relative file>
 //! ```
 //!
 //! The destination prefix comes from the URI (`s3://bucket/PREFIX`); everything
 //! after it is built by
-//! [`DrainTarget::logs_prefix`](crate::log_drain::DrainTarget::logs_prefix).
-//! Per-target reference
+//! [`DrainTarget::key_prefix`](crate::log_drain::DrainTarget::key_prefix).
+//! #6657 replaced the earlier `<github_id>/<session_id>/logs/…` layout;
+//! objects already uploaded under it stay where they are, because the manifest
+//! is keyed by destination and key. Per-target reference
 //! documentation: `docs/reference/log-drain.md`.
 //!
 //! # What the caller owns
 //!
 //! - **Identity.** [`DrainTarget`](crate::log_drain::DrainTarget) is supplied,
-//!   never resolved here. An empty `github_id` or `session_id` is refused with
+//!   never resolved here. An empty `owner` or `project` is refused with
 //!   [`DrainError::MissingIdentity`](crate::log_drain::DrainError::MissingIdentity)
 //!   rather than defaulted.
 //! - **Single-flight.** [`run_once`](crate::log_drain::run_once) is exactly what
@@ -70,22 +72,27 @@ pub use manifest::{
 };
 pub use uri::{DestinationScheme, DestinationUri};
 
-/// Who and what a drain run is uploading for.
+/// Which project's logs a drain run is uploading.
 ///
 /// Why: the two components are the whole key namespace below the destination
-/// prefix, and getting either wrong mixes one user's logs into another's. They
-/// are the caller's to supply because the core has no business shelling out to
-/// `gh` — Phase 3 owns identity resolution and passes the answer in.
+/// prefix, and getting either wrong files one project's logs under another's.
+/// They are the caller's to supply because the core has no business shelling
+/// out to git — the consumer resolves the identity and passes the answer in.
 /// What: [`DrainTarget::validate`] refuses an empty component, so no code path
 /// can produce a key containing `//` or an anonymous segment.
-/// Test: `tests::run_once_refuses_empty_github_id`,
-/// `tests::run_once_refuses_empty_session_id`, `tests::key_layout_shape`.
+/// Test: `tests::run_once_refuses_an_empty_owner`,
+/// `tests::run_once_refuses_an_empty_project`, `tests::key_layout_shape`.
+///
+/// #6657 replaced the previous `<github_id>/<session_id>` pair. A per-session
+/// segment made every project on a host share one namespace keyed by whoever
+/// ran the daemon; the owner and project of the repo the logs came from is what
+/// an operator actually looks under.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DrainTarget {
-    /// GitHub login the logs belong to. Never resolved here.
-    pub github_id: String,
-    /// The consumer's own session id. Opaque to the drain.
-    pub session_id: String,
+    /// Repository owner — the GitHub user or org, verbatim from the remote.
+    pub owner: String,
+    /// Repository name the logs belong to, verbatim from the remote.
+    pub project: String,
 }
 
 impl DrainTarget {
@@ -96,33 +103,31 @@ impl DrainTarget {
     /// # Errors
     /// [`DrainError::MissingIdentity`] naming the empty field.
     pub fn validate(&self) -> Result<(), DrainError> {
-        if self.github_id.trim().is_empty() {
-            return Err(DrainError::MissingIdentity { field: "github_id" });
+        if self.owner.trim().is_empty() {
+            return Err(DrainError::MissingIdentity { field: "owner" });
         }
-        if self.session_id.trim().is_empty() {
-            return Err(DrainError::MissingIdentity {
-                field: "session_id",
-            });
+        if self.project.trim().is_empty() {
+            return Err(DrainError::MissingIdentity { field: "project" });
         }
         Ok(())
     }
 
-    /// The `logs/` prefix every object for this target sits beneath.
+    /// The `<owner>/<project>` prefix every object for this target sits beneath.
     ///
     /// Destination-relative: the adapter joins the URI's own prefix on top.
     /// Test: `tests::key_layout_shape`.
-    pub fn logs_prefix(&self) -> String {
-        format!("{}/{}/logs", self.github_id, self.session_id)
+    pub fn key_prefix(&self) -> String {
+        format!("{}/{}", self.owner, self.project)
     }
 
     /// Full key for one collected file's `relative_key`.
     pub fn object_key(&self, relative_key: &str) -> String {
-        format!("{}/{}", self.logs_prefix(), relative_key)
+        format!("{}/{}", self.key_prefix(), relative_key)
     }
 
     /// Key of this target's manifest object.
     pub fn manifest_key(&self) -> String {
-        format!("{}/{}", self.logs_prefix(), MANIFEST_FILENAME)
+        format!("{}/{}", self.key_prefix(), MANIFEST_FILENAME)
     }
 
     /// Path segment identifying this target inside the local state directory.
@@ -131,7 +136,7 @@ impl DrainTarget {
     /// destination's namespace above it, so a record made for one destination
     /// is never read back for another (#6548).
     fn cache_key(&self) -> String {
-        format!("{}/{}", self.github_id, self.session_id)
+        self.key_prefix()
     }
 }
 
@@ -262,7 +267,7 @@ pub struct DrainReport {
 /// Single-flight is the CALLER's responsibility; see the module docs.
 ///
 /// Test: `tests::run_once_end_to_end`, `tests::run_once_is_idempotent`,
-/// `tests::run_once_reuploads_a_mutated_file`, `tests::run_once_refuses_empty_github_id`,
+/// `tests::run_once_reuploads_a_mutated_file`, `tests::run_once_refuses_an_empty_owner`,
 /// `tests::run_once_records_an_oversize_skip_once`,
 /// `tests::run_once_re_evaluates_a_skip_when_the_file_changes`.
 ///
@@ -299,7 +304,7 @@ pub async fn run_once(
     // this destination never received, and every one of them then skips
     // forever. One sampled `head` turns that into a warning an operator sees.
     if origin == ManifestOrigin::Remote
-        && let Some(missing) = manifest.spot_check(dest, &target.logs_prefix()).await
+        && let Some(missing) = manifest.spot_check(dest, &target.key_prefix()).await
     {
         report.manifest_spot_check_missing += 1;
         tracing::warn!(

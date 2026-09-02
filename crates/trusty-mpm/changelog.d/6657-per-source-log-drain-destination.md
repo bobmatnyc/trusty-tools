@@ -13,3 +13,9 @@ Added
   one's own last-run outcome, instead of reporting a single verdict for all of
   them. `status.json` gained a `destinations` array; a file written before this
   change still decodes and the row falls back to its single detail line.
+- A `log_drain.sources[]` entry can set `owner:` and `project:` to name the
+  project its keys sit under, and `enabled: false` to opt one project out of the
+  drain entirely (#6657). A disabled source runs no pass and uploads nothing;
+  the `log_drain` doctor row still lists it as `disabled` beside the destination
+  it would have used, so a deliberate opt-out reads differently from a project
+  that fell out of the config. The row also names each pass's project.

@@ -185,59 +185,36 @@ async fn fetch_registry_projects(
 
 /// Parse `(owner, repo)` out of a registry `repo_url`.
 ///
-/// Why: the registry has no local filesystem path (it is keyed on
-/// `name`/`repo_url`, not a checkout location) — this recovers the
-/// `<owner>/<repo>` pair the workspace's own `~/trusty-mpm-projects/<owner>/
-/// <repo>` layout convention needs to resolve a local path (see
-/// [`resolve_local_path`]).
-/// What: handles both `https://github.com/<owner>/<repo>[.git]` and
-/// `git@github.com:<owner>/<repo>[.git]` (the two forms
-/// `trusty_mpm::project::record::Project::repo_url`'s own docs give as
-/// examples), trimming a trailing slash and `.git` suffix first. Returns
-/// `None` for anything that doesn't resolve to a non-empty `owner` and
-/// `repo` — a malformed/unexpected `repo_url` shape must never panic or
-/// fabricate a bogus path.
+/// Why: a registry entry names a project by its `repo_url`, and the picker
+/// needs the `<owner>/<repo>` pair the workspace's own
+/// `~/trusty-mpm-projects/<owner>/<repo>` layout convention takes to resolve a
+/// local path (see [`resolve_local_path`]).
+/// What: delegates to `trusty_common::github_path::parse_remote_url`, the
+/// workspace's one git-remote-URL parser (#6657). It accepts the HTTPS and SSH
+/// forms `trusty_mpm::project::record::Project::repo_url`'s own docs give as
+/// examples, trims a trailing slash and `.git`, and returns `None` for anything
+/// that does not resolve to a non-empty `owner` and `repo` — a malformed or
+/// unexpected `repo_url` shape must never panic or fabricate a bogus path.
 ///
 /// **Only an EXACT `<owner>/<repo>` pair is supported** (code-critic PR
 /// #3439 review, MEDIUM 1): a compound remainder after the host — a GitLab
-/// subgroup path (`gitlab.com/group/subgroup/repo`) or a port-qualified host
-/// that this function's simple `split_once(['/', ':'])` mis-splits (e.g.
-/// `git.example.com:8443/owner/repo` splits on the PORT's `:`, leaving
-/// `8443/owner/repo`) — is rejected outright rather than silently absorbed
-/// into a multi-segment "owner" via `rsplit_once`. Letting that through
-/// would hand [`resolve_local_path`]'s `Path::join` an owner string
-/// containing `/`, fabricating a 3+-level lookup path no `repo_url` of this
-/// shape was ever meant to produce.
+/// subgroup path (`gitlab.com/group/subgroup/repo`) — is rejected outright
+/// rather than absorbed into a multi-segment "owner". Letting that through
+/// would hand [`resolve_local_path`]'s `Path::join` an owner string containing
+/// `/`, fabricating a 3+-level lookup path no `repo_url` of this shape was ever
+/// meant to produce. A port-qualified host (`git.example.com:8443/owner/repo`)
+/// used to be rejected for the same reason, because this function's own
+/// `split_once(['/', ':'])` split on the PORT's colon; the shared parser splits
+/// the authority correctly, so that URL now yields the pair it names.
 /// Test: `tests::parse_owner_repo_handles_https_url`,
 /// `tests::parse_owner_repo_handles_https_url_with_git_suffix`,
 /// `tests::parse_owner_repo_handles_ssh_url`,
 /// `tests::parse_owner_repo_rejects_malformed_url`,
 /// `tests::parse_owner_repo_rejects_gitlab_style_subgroup_path`,
-/// `tests::parse_owner_repo_rejects_port_qualified_host_misparse`.
+/// `tests::parse_owner_repo_handles_port_qualified_host`.
 fn parse_owner_repo(repo_url: &str) -> Option<(String, String)> {
-    let trimmed = repo_url.trim().trim_end_matches('/');
-    let trimmed = trimmed.strip_suffix(".git").unwrap_or(trimmed);
-    // Strip a `<scheme>://` prefix when present (e.g. `https://`); an SSH
-    // shorthand URL (`git@host:owner/repo`) has no `://` and is left as-is.
-    let path_part = match trimmed.split_once("://") {
-        Some((_, rest)) => rest,
-        None => trimmed,
-    };
-    // `path_part` is now `<host>/<owner>/<repo>` (HTTPS) or
-    // `git@<host>:<owner>/<repo>` (SSH) — either way, the first `/` or `:`
-    // after the host separates it from the `<owner>/<repo>` pair.
-    let (_, after_host) = path_part.split_once(['/', ':'])?;
-    // Reject anything but an EXACT `<owner>/<repo>` pair — see the docs
-    // above for why a compound remainder must not fall through to
-    // `rsplit_once` below.
-    if after_host.matches('/').count() != 1 {
-        return None;
-    }
-    let (owner, repo) = after_host.rsplit_once('/')?;
-    if owner.is_empty() || repo.is_empty() {
-        return None;
-    }
-    Some((owner.to_string(), repo.to_string()))
+    let remote = trusty_common::github_path::parse_remote_url(repo_url).ok()?;
+    Some((remote.owner, remote.repo))
 }
 
 /// Resolve `<workspace_root>/<owner>/<repo>` to an existing local git-repo
@@ -487,16 +464,18 @@ mod tests {
         );
     }
 
-    /// A port-qualified host (`host:PORT/owner/repo`) must be rejected —
-    /// this function's simple `split_once(['/', ':'])` splits on the PORT's
-    /// `:`, not a host/path boundary, so without the compound-remainder
-    /// guard this would silently fabricate `owner = "PORT/owner"` (code-critic
-    /// PR #3439 review, MEDIUM 1).
+    /// A port-qualified host (`host:PORT/owner/repo`) must yield the pair the
+    /// URL names. The local parser this replaced split on the PORT's `:` and
+    /// so had to reject the whole shape to avoid fabricating
+    /// `owner = "PORT/owner"` (code-critic PR #3439 review, MEDIUM 1); the
+    /// shared parser splits the authority correctly, and the invariant that
+    /// guard protected — an owner never containing `/` — still holds, proved
+    /// by the subgroup case above.
     #[test]
-    fn parse_owner_repo_rejects_port_qualified_host_misparse() {
+    fn parse_owner_repo_handles_port_qualified_host() {
         assert_eq!(
             parse_owner_repo("https://git.example.com:8443/owner/repo"),
-            None
+            Some(("owner".to_string(), "repo".to_string()))
         );
     }
 

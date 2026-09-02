@@ -84,27 +84,44 @@ unnecessary split re-uploads, a wrong share skips.
 ## Key layout
 
 ```text
-<destination prefix>/<github_id>/<session_id>/logs/<crate>/<relative_file>
+<destination prefix>/<owner>/<project>/<crate>/<relative_file>
 ```
 
 The destination prefix comes from the URI (`s3://bucket/PREFIX`) and is joined
 by the adapter; everything after it is built by `DrainTarget`. For
 `file://` destinations the URI's path is the store root, so the prefix is empty.
+A destination of `s3://acme-logs/live` therefore writes
+`live/duettoresearch/pricing/trusty-code/daemon.log`.
 
-`DrainTarget { github_id, session_id }` is **supplied by the caller**. The core
-does not resolve GitHub identity — that is Phase 3's job. An empty or
-whitespace-only `github_id` or `session_id` is refused with
-`DrainError::MissingIdentity` **before anything touches the filesystem or the
-network**: the drain never writes under an unknown id, because an empty
-component collapses one user's logs into a shared, unattributable prefix.
+`DrainTarget { owner, project }` is **supplied by the caller**. The core does
+not resolve the identity — trusty-mpm's config layer does, from the git
+`origin` of each source's root. An empty or whitespace-only `owner` or
+`project` is refused with `DrainError::MissingIdentity` **before anything
+touches the filesystem or the network**: the drain never writes under a guessed
+identity, because an empty component collapses one project's logs into a
+shared, unattributable prefix.
 
-`session_id` is opaque to the drain — it is whatever the consuming crate calls
-its own session.
+### The layout changed in #6657
+
+The previous layout was `<github_id>/<session_id>/logs/<crate>/<relative_file>`
+— every project on a host under one prefix, keyed by whoever ran the daemon,
+split by a session id that meant nothing to anyone reading the bucket.
+
+**Objects already uploaded under the old layout stay exactly where they are.**
+Nothing moves them and nothing deletes them. The manifest is keyed by
+destination *and* key, so the new layout starts with an empty manifest of its
+own: the first pass after the upgrade re-uploads the current log files under
+`<owner>/<project>/…` and then dedupes as before. The old prefix simply stops
+growing. Delete it by hand if you want it gone:
+
+```bash
+aws s3 rm --recursive s3://<bucket>/<prefix>/<github_id>/<session_id>/
+```
 
 ## Manifest semantics
 
 Each target carries a JSON manifest at
-`<…>/logs/.drain-manifest.json`, listing one entry per uploaded file:
+`<owner>/<project>/.drain-manifest.json`, listing one entry per uploaded file:
 
 ```json
 {
@@ -127,10 +144,10 @@ invalidates every recorded digest.
 
 ### Two copies, and which one wins
 
-- **Remote** (`<…>/logs/.drain-manifest.json`) is **authoritative**. It is the
+- **Remote** (`<owner>/<project>/.drain-manifest.json`) is **authoritative**. It is the
   only copy that describes what is actually in the bucket.
 - **Local cache**
-  (`<state_dir>/log-drain/<destination namespace>/<github_id>/<session_id>/manifest.json`)
+  (`<state_dir>/log-drain/<destination namespace>/<owner>/<project>/manifest.json`)
   exists so an unchanged run costs no network read at all.
 
 When both exist and disagree, the remote copy wins and the cache is rewritten
@@ -174,7 +191,7 @@ forever.
 **Repair:** delete the manifest object.
 
 ```bash
-aws s3 rm s3://<bucket>/<prefix>/<github_id>/<session_id>/logs/.drain-manifest.json
+aws s3 rm s3://<bucket>/<prefix>/<owner>/<project>/.drain-manifest.json
 ```
 
 The next run finds no remote copy, falls back to a cache that is now
@@ -297,7 +314,7 @@ files. `run_once` now writes a `SkipRecord` — `relative_file`, `size`,
 
 ## What the caller owns
 
-- **Identity** — `DrainTarget` is supplied, never resolved here.
+- **Identity** — `DrainTarget { owner, project }` is supplied, never resolved here.
 - **Single-flight** — `run_once` is one pass with no locking. Two concurrent
   runs against one target will both upload and both rewrite the manifest, and
   the loser's entries are lost. Mutual exclusion belongs to the scheduler.
@@ -321,53 +338,99 @@ plan, and the `log_drain` doctor row reports what that plan says.
 | `max_file_bytes` | 4 GiB | Plaintext source ceiling |
 | `max_wire_bytes` | 64 MiB | Compressed body ceiling |
 | `secrets` | `[]` | Extra literal strings scrubbed from every body |
-| `github_id` | `gh api user` | First key segment |
-| `session_id` | persisted per-install id | Second key segment |
+| `owner` | — | Fallback owner for a source that resolves none |
+| `project` | — | Fallback project, paired with `owner` |
 | `sources[]` | the daemon's own log dir | Directories to collect |
 
 A `sources[]` entry takes `crate_name` and `root` (both required), `include`
-(globs relative to `root`, default `**/*`), `level` (minimum line level), and
-`destination`.
+(globs relative to `root`, default `**/*`), `level` (minimum line level),
+`destination`, `owner`/`project`, and `enabled`.
 
 **A malformed section is a hard error, never a silent skip.** Validation runs
 whenever the section is present, including while `enabled: false`, so a typo is
 found before the operator flips the switch. The scheduler refuses to start and
 the `log_drain` doctor row reports `Fail`.
 
-### Per-source destinations (#6657)
+### Per-project destinations (#6657)
 
 A source's own `destination` wins; a source that names none inherits the
-section's. Sources are grouped by the destination they resolve to, and the
-scheduler runs **one pass per destination** — its own connection, its own
-manifest. `destination` at the section level is required only when some source
+section's. `destination` at the section level is required only when some source
 still needs it.
+
+Each source also resolves an `<owner>/<project>`, in this order:
+
+1. the source's own `owner:` and `project:` — set both, or neither;
+2. the git `origin` of its `root`. `git -C <root> config --get
+   remote.origin.url` walks **up**, so a log directory inside a checkout
+   resolves to that checkout, and a worktree resolves to its parent;
+3. the section-level `owner:`/`project:`.
+
+A source that resolves none of the three is a **hard config error** naming the
+source, its root, and both ways to fix it. There is no placeholder key: the
+drain refuses the whole plan rather than file one project's logs under an
+invented prefix.
+
+The remote is parsed by `trusty_common::github_path::parse_remote_url`, the
+workspace's one git-remote-URL parser — HTTPS, `ssh://`, and scp-style
+`git@host:owner/repo`, with or without `.git`, on any host. The owner and
+project keep the case the remote spells them in.
+
+Sources are grouped by the destination **and** project they resolve to, and the
+scheduler runs **one pass per group** — its own connection, its own manifest.
+One bucket holding three projects is three passes.
 
 ```yaml
 log_drain:
   enabled: true
   # Everything that does not say otherwise goes here.
-  destination: "s3://team-shared-logs/drain"
+  destination: "s3://team-shared-logs/live"
   interval_secs: 900
+  # Used only by sources that resolve no project of their own — the daemon's
+  # own log directory is inside no checkout.
+  owner: "duettoresearch"
+  project: "workstation"
   sources:
     - crate_name: trusty-mpm
       root: "~/.trusty-mpm/logs"
       include: ["trusty-mpm.log*"]
       level: info
-    # This project's logs belong in one specific account, so this source names
-    # its own bucket AND the profile that writes to it.
+    # Inside the checkout, so owner and project come from its git origin.
     - crate_name: trusty-code
-      root: "~/Library/Logs/trusty-code"
+      root: "~/src/duettoresearch/pricing/logs"
       include: ["*.log"]
-      destination: "s3://trusty-tools-logs/drain?profile=trusty-logs&region=us-east-1"
+      destination: "s3://pricing-logs/live?profile=pricing&region=us-east-1"
+    # Logs live outside the checkout, so this one names its project.
+    - crate_name: trusty-agents
+      root: "~/Library/Logs/trusty-agents"
+      include: ["daemon-*.log"]
+      owner: "duettoresearch"
+      project: "insights"
+    # Off for now, without deleting the entry.
+    - crate_name: trusty-search
+      root: "~/Library/Logs/trusty-search"
+      enabled: false
 ```
 
-That config produces two passes per tick: `trusty-mpm`'s logs to
-`team-shared-logs` under the default AWS chain, and `trusty-code`'s to
-`trusty-tools-logs` signed with the `trusty-logs` profile.
+That config produces three passes per tick, writing
+`live/duettoresearch/workstation/trusty-mpm/…` to `team-shared-logs`,
+`live/duettoresearch/pricing/trusty-code/…` to `pricing-logs` signed with the
+`pricing` profile, and `live/duettoresearch/insights/trusty-agents/…` back to
+`team-shared-logs`.
 
-Two sources naming the same destination share one pass. Grouping is by the
-PARSED URI, so `s3://b/p` and `s3://b/p/` are one group, while two identities
-against one bucket are two.
+Two sources share a pass only when they resolved to the same destination AND
+the same project. Grouping is by the PARSED URI, so `s3://b/p` and `s3://b/p/`
+are one group, while two identities against one bucket are two.
+
+### Turning one project off
+
+`enabled: false` on a source skips it: no connection, no upload, no manifest.
+The entry stays in the config and `tm doctor` still names it, so an operator can
+tell a deliberate opt-out from a project that fell out of the file:
+
+```
+log drain enabled (s3 → s3://team-shared-logs/live [duettoresearch/workstation],
+  trusty-search → s3://team-shared-logs/live: disabled) ...
+```
 
 ### A destination that fails does not fall back
 
@@ -379,10 +442,10 @@ drains, the tick reports `Failed`, and the `log_drain` doctor row names which
 destination broke:
 
 ```
-log drain enabled (s3 → s3://team-shared-logs/drain, s3 → s3://trusty-tools-logs/drain?profile=trusty-logs)
+log drain enabled (s3 → s3://team-shared-logs/live [duettoresearch/workstation], s3 → s3://pricing-logs/live?profile=pricing [duettoresearch/pricing])
   but the last run FAILED at 2026-09-02T11:40:12Z —
-  s3 → s3://team-shared-logs/drain: ok — 2 file(s) uploaded (48122 B), 7 unchanged, 0 over the size ceiling (0 newly recorded);
-  s3 → s3://trusty-tools-logs/drain?profile=trusty-logs: FAILED — cannot reach the destination: …
+  s3 → s3://team-shared-logs/live [duettoresearch/workstation]: ok — 2 file(s) uploaded (48122 B), 7 unchanged, 0 over the size ceiling (0 newly recorded);
+  s3 → s3://pricing-logs/live?profile=pricing [duettoresearch/pricing]: FAILED — cannot reach the destination: …
 ```
 
 ## Not implemented

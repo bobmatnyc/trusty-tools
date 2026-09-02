@@ -26,8 +26,8 @@ async fn file_dest(root: &Path) -> ObjectStoreDestination {
 
 fn target() -> DrainTarget {
     DrainTarget {
-        github_id: "bobmatnyc".to_string(),
-        session_id: "sess-01".to_string(),
+        owner: "bobmatnyc".to_string(),
+        project: "trusty-tools".to_string(),
     }
 }
 
@@ -294,33 +294,35 @@ fn uri_reserved_schemes() {
 
 #[test]
 fn key_layout_shape() {
+    // #6657: `<owner>/<project>/<relative log path>`, with no session segment
+    // and no `logs/` interlayer.
     let t = target();
-    assert_eq!(t.logs_prefix(), "bobmatnyc/sess-01/logs");
+    assert_eq!(t.key_prefix(), "bobmatnyc/trusty-tools");
     assert_eq!(
         t.object_key("trusty-mpm/daemon.log"),
-        "bobmatnyc/sess-01/logs/trusty-mpm/daemon.log"
+        "bobmatnyc/trusty-tools/trusty-mpm/daemon.log"
     );
     assert_eq!(
         t.manifest_key(),
-        "bobmatnyc/sess-01/logs/.drain-manifest.json"
+        "bobmatnyc/trusty-tools/.drain-manifest.json"
     );
 }
 
 #[test]
 fn identity_refusal_is_fail_closed() {
-    for (github_id, session_id, field) in [
-        ("", "sess", "github_id"),
-        ("   ", "sess", "github_id"),
-        ("bob", "", "session_id"),
-        ("bob", "  ", "session_id"),
+    for (owner, project, field) in [
+        ("", "proj", "owner"),
+        ("   ", "proj", "owner"),
+        ("bob", "", "project"),
+        ("bob", "  ", "project"),
     ] {
         let t = DrainTarget {
-            github_id: github_id.to_string(),
-            session_id: session_id.to_string(),
+            owner: owner.to_string(),
+            project: project.to_string(),
         };
         match t.validate() {
             Err(DrainError::MissingIdentity { field: got }) => assert_eq!(got, field),
-            other => panic!("`{github_id}`/`{session_id}` should refuse, got {other:?}"),
+            other => panic!("`{owner}`/`{project}` should refuse, got {other:?}"),
         }
     }
 }
@@ -930,7 +932,7 @@ async fn run_once_reuploads_when_the_destination_changes() {
         .await
         .expect("run against A");
     assert_eq!(first.uploaded, 2);
-    let a_before = contents(&dest_a, &t.logs_prefix()).await;
+    let a_before = contents(&dest_a, &t.key_prefix()).await;
 
     // Same identity, same state dir, a destination that holds nothing. B has no
     // manifest of its own, so before #6548 the load fell back to the cache
@@ -968,7 +970,7 @@ async fn run_once_reuploads_when_the_destination_changes() {
 
     assert_eq!(
         a_before,
-        contents(&dest_a, &t.logs_prefix()).await,
+        contents(&dest_a, &t.key_prefix()).await,
         "a run aimed at B must not write to A"
     );
 }
@@ -1425,21 +1427,21 @@ async fn run_once_re_evaluates_a_skip_when_the_file_changes() {
 }
 
 #[tokio::test]
-async fn run_once_refuses_empty_github_id() {
+async fn run_once_refuses_an_empty_owner() {
     let dest_root = tempfile::tempdir().expect("tempdir");
     let state = tempfile::tempdir().expect("tempdir");
     let dest = file_dest(dest_root.path()).await;
 
     let t = DrainTarget {
-        github_id: String::new(),
-        session_id: "sess-01".to_string(),
+        owner: String::new(),
+        project: "trusty-tools".to_string(),
     };
     let err = run_once(&DrainConfig::new(state.path()), &dest, &t, &[])
         .await
-        .expect_err("an empty github_id must be refused");
+        .expect_err("an empty owner must be refused");
     assert!(matches!(
         err,
-        DrainError::MissingIdentity { field: "github_id" }
+        DrainError::MissingIdentity { field: "owner" }
     ));
 
     // Fail-closed means NOTHING was written, not even a manifest.
@@ -1453,23 +1455,21 @@ async fn run_once_refuses_empty_github_id() {
 }
 
 #[tokio::test]
-async fn run_once_refuses_empty_session_id() {
+async fn run_once_refuses_an_empty_project() {
     let dest_root = tempfile::tempdir().expect("tempdir");
     let state = tempfile::tempdir().expect("tempdir");
     let dest = file_dest(dest_root.path()).await;
 
     let t = DrainTarget {
-        github_id: "bobmatnyc".to_string(),
-        session_id: "   ".to_string(),
+        owner: "bobmatnyc".to_string(),
+        project: "   ".to_string(),
     };
     let err = run_once(&DrainConfig::new(state.path()), &dest, &t, &[])
         .await
-        .expect_err("an empty session_id must be refused");
+        .expect_err("an empty project must be refused");
     assert!(matches!(
         err,
-        DrainError::MissingIdentity {
-            field: "session_id"
-        }
+        DrainError::MissingIdentity { field: "project" }
     ));
 }
 
@@ -1574,8 +1574,8 @@ async fn s3_smoke() {
     write(&logs.path().join("smoke.log"), TRACING_FIXTURE);
 
     let t = DrainTarget {
-        github_id: "log-drain-smoke".to_string(),
-        session_id: format!("run-{}", chrono::Utc::now().timestamp()),
+        owner: "log-drain-smoke".to_string(),
+        project: format!("run-{}", chrono::Utc::now().timestamp()),
     };
     let cfg = DrainConfig::new(state.path());
 
