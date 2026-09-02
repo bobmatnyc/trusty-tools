@@ -25,9 +25,13 @@
 //!    [`skill_removal_verdict`] is that question, shared with the #5224
 //!    retirement sweep and `update_check::apply::prune_guard`, so the three
 //!    cannot drift on what counts as safe to delete. `--include-frozen` does
-//!    NOT override it: that flag promotes an OVERWRITE of one file, which is
-//!    recoverable from the backup of that same file, and a whole-directory
-//!    deletion is a different act.
+//!    NOT override it WITHIN A RUN: that flag promotes an OVERWRITE of one file,
+//!    which is recoverable from the backup of that same file, and a
+//!    whole-directory deletion is a different act. Across runs the protection
+//!    is weaker and the operator should know it — a `--fix-skills
+//!    --include-frozen` overwrites the hand-edited file and re-stamps its ledger
+//!    checksum, so the subtree it was protecting becomes removable on the NEXT
+//!    sweep. The backup of that overwrite is what the edit survives in.
 //! 3. **Every removal is backed up first** under the run's timestamped
 //!    `~/.trusty-mpm/backup-doctor-remediation-<ts>/` root, whole directory
 //!    including `references/`, and the removal is CONFIRMED by re-reading disk.
@@ -49,6 +53,7 @@ use std::path::{Path, PathBuf};
 use crate::core::agent_manifest::ManifestError;
 use crate::core::doctor_repair::{RepairMode, RepairStep, StepStatus};
 use crate::core::paths::FrameworkPaths;
+use crate::core::skill_deploy_tiers::project_skill_tier;
 use crate::core::skill_manifest::{SkillManifest, SkillManifestSave, with_skill_manifest_lock};
 use crate::core::skill_retire::{SkillRemoval, skill_removal_verdict};
 use crate::core::skill_tiers::list_source_stems;
@@ -86,7 +91,7 @@ pub fn remove_project_tier_strays(
     let Some(project_dir) = project_dir else {
         return Vec::new();
     };
-    let dir = project_dir.join(".claude").join("skills");
+    let dir = project_skill_tier(project_dir);
     match tier_shape(&dir) {
         TierShape::Nothing => return Vec::new(),
         TierShape::Refuse(why) => return vec![refusal(dir, why)],
@@ -241,6 +246,22 @@ fn sweep_locked(
             )];
         }
     };
+    // #6586 critic MEDIUM: `bundled_skill_dirs` and `unclassifiable_entries`
+    // both treat an unreadable directory as an EMPTY one, so a tier that exists,
+    // permits the ledger lock, and refuses `read_dir` — mode `0o300`, say —
+    // produced no steps at all and read as a clean tier. The probe reports the
+    // same undetermined state (`an_unreadable_project_tier_is_unknown_not_ok`),
+    // so the repair must not contradict it.
+    if let Err(e) = std::fs::read_dir(dir) {
+        return vec![refusal(
+            dir.to_path_buf(),
+            format!(
+                "{} could not be listed, so tm cannot tell which copies are in it: {e}",
+                dir.display()
+            ),
+        )];
+    }
+
     // #4881: the snapshot the merging save replays this run's delta against.
     let base = manifest.clone();
     let mut dirty = false;
@@ -321,42 +342,95 @@ fn sweep_locked(
     steps
 }
 
-/// Report every bundled-named entry [`bundled_skill_dirs`] could not classify.
+/// Every bundled-named entry of `dir` that [`bundled_skill_dirs`] cannot
+/// classify, by path.
 ///
 /// Why (#6586 critic): `bundled_skill_dirs` silently drops an entry that is a
 /// symlink, a plain file, or a directory with no `SKILL.md`. Dropping it from
-/// the SCAN is right — none of those is a deployed skill this sweep can verify —
+/// the SCAN is right — none of those is a deployed skill the sweep can verify —
 /// but dropping it from the REPORT told the operator the tier was clean when
-/// something bundled-named was sitting in it.
-/// What: one [`StepStatus::Refused`] step per entry of `dir` whose file name the
-/// bundled roster carries and which `classified` does not already cover.
+/// something bundled-named was sitting in it. The `skill_project_tier` PROBE
+/// counted the classified set only, so it said "holds no bundled skill" about
+/// the same tier the repair then reported a refusal for. One finder, so the
+/// check and the repair count the same entries.
+/// What: the path of each entry of `dir` whose file name the bundled roster
+/// carries and which `classified` does not already cover, sorted. An unreadable
+/// `dir` yields none — every caller probes `read_dir` itself first and reports
+/// that state rather than an empty tier.
+/// Test: `a_bundled_named_entry_that_is_not_a_skill_directory_is_refused`,
+/// `an_unclassifiable_bundled_entry_is_counted_by_the_check`.
+pub fn unclassifiable_bundled_entries(
+    dir: &Path,
+    bundled: &std::collections::BTreeSet<String>,
+    classified: &std::collections::BTreeSet<&str>,
+) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<PathBuf> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            (bundled.contains(&name) && !classified.contains(name.as_str())).then(|| entry.path())
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+/// [`unclassifiable_bundled_entries`], as refusal steps.
+///
+/// Why: the sweep reports one line per entry it declined to act on; the probe
+/// only needs the count. The shared finder answers both.
+/// What: one [`StepStatus::Refused`] step per entry.
 /// Test: `a_bundled_named_entry_that_is_not_a_skill_directory_is_refused`.
 fn unclassifiable_entries(
     dir: &Path,
     bundled: &std::collections::BTreeSet<String>,
     classified: &std::collections::BTreeSet<&str>,
 ) -> Vec<RepairStep> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name().into_string().ok()?;
-            if !bundled.contains(&name) || classified.contains(name.as_str()) {
-                return None;
-            }
-            Some(RepairStep {
+    unclassifiable_bundled_entries(dir, bundled, classified)
+        .into_iter()
+        .map(|path| {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            RepairStep {
                 check: CHECK,
-                path: entry.path(),
+                path,
                 what: format!("remove the stray bundled copy of `{name}` from the project tier"),
                 status: StepStatus::Refused(
                     "a bundled-named entry that is not a skill directory — no `SKILL.md`, or \
                      not a directory at all — so tm cannot tell what it is and leaves it alone"
                         .to_string(),
                 ),
-            })
+            }
         })
+        .collect()
+}
+
+/// The stems this sweep run is removing from the project tier.
+///
+/// Why (#6586 critic HIGH): the `--fix-skills` redeploy runs straight after the
+/// sweep and would otherwise rewrite the very copies the sweep just removed, or
+/// just said it would remove. It needs the stems, and deriving them from the
+/// step's `what` string would be parsing English.
+/// What: the file name of every [`StepStatus::Planned`] or
+/// [`StepStatus::Applied`] step. Tier-wide refusals and failures carry the tier
+/// directory rather than a skill directory and are excluded by the status
+/// filter, so no tier name can leak into the set.
+/// Test: `swept_stems_are_the_planned_and_applied_ones`.
+pub fn stems_being_removed(steps: &[RepairStep]) -> std::collections::BTreeSet<String> {
+    steps
+        .iter()
+        .filter(|step| {
+            matches!(
+                step.status,
+                StepStatus::Planned | StepStatus::Applied { .. }
+            )
+        })
+        .filter_map(|step| Some(step.path.file_name()?.to_string_lossy().into_owned()))
         .collect()
 }
 
@@ -405,15 +479,27 @@ fn back_up_and_remove(dir: &Path, stem: &str, backup_root: &Path) -> Result<Path
 /// project on an external volume with `$HOME` on the internal disk is the
 /// ordinary case on this machine. A copy works everywhere.
 /// What: creates `dest`, then copies each entry — files with `std::fs::copy`,
-/// directories by recursion. Symlinks are followed by `copy`, which is correct
-/// for a backup: the bytes are what must survive.
-/// Test: `a_removed_stray_is_backed_up_whole`.
+/// directories by recursion. A SYMLINK anywhere in the subtree aborts the copy,
+/// which aborts the removal: `fs::copy` follows a link and writes the target's
+/// bytes as a plain file, so the backup of a linked entry is not a copy of what
+/// `remove_dir_all` would then unlink, and the operator would have no way back
+/// to the link. `skill_removal_verdict` reads through a link too, so a link
+/// whose target happens to match the ledger checksum reaches here (#6586 critic).
+/// Test: `a_symlink_inside_a_stray_stops_the_removal`.
 fn copy_tree(src: &Path, dest: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dest)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let target = dest.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
+        let kind = entry.file_type()?;
+        if kind.is_symlink() {
+            return Err(std::io::Error::other(format!(
+                "{} is a symlink — tm backs up bytes, not links, so it cannot restore this \
+                 entry and refuses to remove the directory holding it",
+                entry.path().display()
+            )));
+        }
+        if kind.is_dir() {
             copy_tree(&entry.path(), &target)?;
         } else {
             std::fs::copy(entry.path(), &target)?;

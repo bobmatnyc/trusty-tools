@@ -13,9 +13,11 @@
 //! Test: `core::skill_repair`'s and `core::project_tier_strays`' own tests cover
 //! every outcome.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use trusty_mpm::core::doctor_repair::{RepairMode, RepairStep};
+use trusty_mpm::core::project_tier_strays::stems_being_removed;
 use trusty_mpm::core::skill_repair::{RepairAction, RepairOutcome};
 
 /// The timestamped root this run backs every file up under.
@@ -51,10 +53,11 @@ pub(crate) fn skill_repair_outcomes(
     include_frozen: bool,
     mode: RepairMode,
     backup_root: &Path,
+    deferred_project_stems: &BTreeSet<String>,
 ) -> (String, Vec<RepairOutcome>) {
     use trusty_mpm::core::paths::FrameworkPaths;
     use trusty_mpm::core::skill_drift::skill_reference;
-    use trusty_mpm::core::skill_repair::repair_skills_in_mode;
+    use trusty_mpm::core::skill_repair::repair_skills_in_mode_deferring;
 
     let paths = FrameworkPaths::default();
     let project_dir = std::env::current_dir().ok();
@@ -62,13 +65,14 @@ pub(crate) fn skill_repair_outcomes(
     let submodule = (source != paths.skills).then_some(source);
     let reference = skill_reference(submodule.as_deref());
 
-    let outcomes = repair_skills_in_mode(
+    let outcomes = repair_skills_in_mode_deferring(
         &reference,
         &paths,
         project_dir.as_deref(),
         include_frozen,
         backup_root,
         mode,
+        deferred_project_stems,
     );
     (reference.origin, outcomes)
 }
@@ -148,13 +152,21 @@ pub(crate) fn describe(action: &RepairAction) -> String {
 /// applies it. Every other copy is refused, the removal is backed up whole
 /// first, and `tm doctor --fix` deliberately does NOT run it, so "`--fix` never
 /// deletes" still holds.
+/// The two halves stay gated differently, and the reading is deliberate. The
+/// redeploy overwrites tm's own files with tm's own bytes, backs each one up,
+/// and already has a preview command in `tm doctor --fix` — so it keeps
+/// applying on the flag alone. The sweep removes a directory, which re-running
+/// the command cannot undo, so it alone waits for `--yes`.
 /// What: runs [`project_tier_sweep`] FIRST — sweeping after the redeploy would
 /// rewrite, back up, and then delete the same project-tier copies inside one
-/// command — then [`skill_repair_outcomes`] in [`RepairMode::Apply`], printing
-/// the sweep's steps in the shared `--fix` format and one path-tagged line per
-/// redeploy outcome. Both halves back up under one [`default_backup_root`].
+/// command — then [`skill_repair_outcomes`] in [`RepairMode::Apply`], DEFERRING
+/// the stems the sweep planned or applied so the redeploy cannot write back
+/// what the sweep is taking out. Prints the sweep's steps in the shared `--fix`
+/// format and one path-tagged line per redeploy outcome. Both halves back up
+/// under one [`default_backup_root`].
 /// Test: `core::skill_repair`'s and `core::project_tier_strays`' own tests cover
-/// every outcome; `a_bare_fix_skills_previews_the_sweep` pins the gate.
+/// every outcome; `a_bare_fix_skills_previews_the_sweep` pins the gate and
+/// `a_bare_fix_skills_leaves_a_planned_stray_alone` pins the deferral.
 pub(crate) fn fix_skills_locally(include_frozen: bool, yes: bool) {
     let backup_root = default_backup_root();
 
@@ -167,7 +179,13 @@ pub(crate) fn fix_skills_locally(include_frozen: bool, yes: bool) {
         super::doctor_repair::print_steps(&strays, yes, FIX_SKILLS_APPLY_HINT);
     }
 
-    let (origin, outcomes) = skill_repair_outcomes(include_frozen, RepairMode::Apply, &backup_root);
+    // #6586 critic HIGH: the redeploy is an APPLY whatever `--yes` says, so
+    // without this it rewrote every stem the dry-run sweep had just called
+    // removable — 51 files and 51 backups, written straight after the sweep
+    // printed that nothing would be written.
+    let deferred = stems_being_removed(&strays);
+    let (origin, outcomes) =
+        skill_repair_outcomes(include_frozen, RepairMode::Apply, &backup_root, &deferred);
 
     println!("\nfix-skills (compared against {origin})");
     if outcomes.is_empty() {

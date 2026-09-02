@@ -11,7 +11,7 @@
 //! Test: this file IS the test module.
 
 use super::*;
-use crate::core::skill_manifest::SkillManifestEntry;
+use crate::core::skill_manifest::{SKILL_MANIFEST_FILE, SkillManifestEntry};
 use trusty_agents_common::agents::manifest::checksum;
 
 /// Bundled roster under `base`, plus the project directory to sweep.
@@ -298,6 +298,16 @@ fn a_dry_run_removes_nothing() {
             .is_file()
     );
     assert!(!root.exists(), "a dry run writes no backup either");
+    // #6586 critic: the ledger LOCK sidecar is still created, in both modes.
+    // The lock is what makes the read consistent against a concurrent deploy,
+    // so a preview takes it too; "writes nothing" is a claim about the
+    // operator's skills and their ledger, never about that sidecar.
+    assert!(
+        tier(&project)
+            .join(format!("{SKILL_MANIFEST_FILE}.lock"))
+            .exists(),
+        "the ledger lock is taken in a dry run too, and its sidecar stays behind"
+    );
     assert!(
         SkillManifest::load(&tier(&project))
             .expect("ledger")
@@ -434,4 +444,208 @@ fn nothing_to_sweep_reports_nothing() {
         remove_project_tier_strays(&paths, Some(&project), &root, RepairMode::Apply).is_empty(),
         "an unprovisioned project tier holds no stray"
     );
+}
+
+/// #6586 critic HIGH, end to end: a bare `tm doctor --fix-skills` runs the
+/// sweep as a DRY RUN and the redeploy as an APPLY, so this composes the two
+/// halves the way `commands::doctor_fix_skills::fix_skills_locally` does and
+/// asserts the command wrote nothing.
+///
+/// Fails before this fix: the redeploy took no deferral set, so it rewrote the
+/// stray from the bundled asset, backed the old copy up, and re-stamped the
+/// ledger checksum — immediately after the sweep printed "would remove".
+#[test]
+fn a_bare_fix_skills_leaves_a_planned_stray_alone() {
+    use crate::core::skill_drift::SkillReference;
+    use crate::core::skill_repair::repair_skills_in_mode_deferring;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (paths, project) = fixture(tmp.path(), &["tm-ticketing"]);
+    let body = project_skill(&project, "tm-ticketing");
+    record(&project, "tm-ticketing", &body);
+    let root = backups(tmp.path());
+    let entry = tier(&project).join("tm-ticketing").join("SKILL.md");
+    let ledger = tier(&project).join(SKILL_MANIFEST_FILE);
+    let ledger_before = std::fs::read_to_string(&ledger).expect("ledger before the run");
+
+    // The bare flag: the sweep previews, the redeploy applies.
+    let strays = remove_project_tier_strays(&paths, Some(&project), &root, RepairMode::DryRun);
+    assert!(
+        matches!(strays[0].status, StepStatus::Planned),
+        "{strays:?}"
+    );
+
+    let reference = SkillReference {
+        assets: [("tm-ticketing".to_string(), "# refreshed\n".to_string())]
+            .into_iter()
+            .collect(),
+        origin: "test".to_string(),
+    };
+    let outcomes = repair_skills_in_mode_deferring(
+        &reference,
+        &paths,
+        Some(&project),
+        false,
+        &root,
+        RepairMode::Apply,
+        &stems_being_removed(&strays),
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(&entry).expect("the stray's entry point"),
+        body,
+        "a bare --fix-skills must not rewrite a copy it only planned to remove: {outcomes:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&ledger).expect("ledger after"),
+        ledger_before,
+        "and must not re-stamp its ledger checksum: {outcomes:?}"
+    );
+    assert!(
+        !root.exists(),
+        "and must write no backup, having overwritten nothing: {outcomes:?}"
+    );
+}
+
+/// The set the redeploy defers on is exactly what the sweep is acting on.
+#[test]
+fn swept_stems_are_the_planned_and_applied_ones() {
+    let step = |name: &str, status: StepStatus| RepairStep {
+        check: CHECK,
+        path: PathBuf::from("/tier").join(name),
+        what: String::new(),
+        status,
+    };
+    let steps = vec![
+        step("planned", StepStatus::Planned),
+        step("applied", StepStatus::Applied { backup: None }),
+        step("refused", StepStatus::Refused("kept".to_string())),
+        RepairStep {
+            check: CHECK,
+            path: PathBuf::from("/tier"),
+            what: String::new(),
+            status: StepStatus::Failed("tier-wide".to_string()),
+        },
+    ];
+
+    let expected: std::collections::BTreeSet<String> =
+        ["applied".to_string(), "planned".to_string()]
+            .into_iter()
+            .collect();
+    assert_eq!(
+        stems_being_removed(&steps),
+        expected,
+        "a refusal is not a removal, and a tier-wide step is not a stem"
+    );
+}
+
+/// #6586 critic MEDIUM: a tier that exists, permits the ledger lock, and
+/// refuses `read_dir` must be REFUSED, not reported as an empty tier.
+///
+/// Fails before this fix: `bundled_skill_dirs` and `unclassifiable_entries`
+/// both return empty on a `read_dir` error, so the sweep produced zero steps
+/// and the operator saw nothing at all for a tier the probe calls undetermined.
+#[cfg(unix)]
+#[test]
+fn an_unlistable_project_tier_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (paths, project) = fixture(tmp.path(), &["tm-ticketing"]);
+    let body = project_skill(&project, "tm-ticketing");
+    record(&project, "tm-ticketing", &body);
+    let dir = tier(&project);
+
+    // Write+execute, no read: the ledger lock and the ledger itself stay
+    // reachable by name, but the directory cannot be listed.
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o300))
+        .expect("drop read permission");
+    if std::fs::read_dir(&dir).is_ok() {
+        // Running as root, or on a filesystem that ignores the mode bits —
+        // the guard under test is unreachable here.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("restore");
+        return;
+    }
+    let steps = remove_project_tier_strays(
+        &paths,
+        Some(&project),
+        &backups(tmp.path()),
+        RepairMode::Apply,
+    );
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("restore");
+
+    assert_eq!(steps.len(), 1, "one tier-wide step, not silence: {steps:?}");
+    let StepStatus::Refused(why) = &steps[0].status else {
+        panic!("an unlistable tier must be refused: {steps:?}");
+    };
+    assert!(
+        why.contains("could not be listed"),
+        "the refusal must say what tm could not do: {why}"
+    );
+    assert!(
+        why.contains(&dir.display().to_string()),
+        "and must name the tier: {why}"
+    );
+    assert!(
+        tier(&project).join("tm-ticketing").is_dir(),
+        "and nothing is removed from a tier tm could not read"
+    );
+}
+
+/// #6586 critic: `fs::copy` follows a symlink and writes the target's bytes as
+/// a plain file, so a backup taken that way cannot restore the link the removal
+/// is about to unlink. The removal refuses instead.
+///
+/// The link stands at a LEDGER-CLAIMED path whose content still matches the
+/// recorded checksum — `skill_removal_verdict` reads through a link, so that is
+/// the only shape that reaches `copy_tree` at all.
+///
+/// Fails before this fix: `copy_tree` copied the target's bytes and
+/// `remove_dir_all` then unlinked the link, reported `Applied`.
+#[cfg(unix)]
+#[test]
+fn a_symlink_inside_a_stray_stops_the_removal() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (paths, project) = fixture(tmp.path(), &["tm-ticketing"]);
+    let body = project_skill(&project, "tm-ticketing");
+    record(&project, "tm-ticketing", &body);
+
+    // `record` claims `<stem>/references/extra.md` with the checksum of
+    // "# extra\n"; swapping the real file for a link to identical bytes keeps
+    // the verdict `Removable` and puts a link in the subtree.
+    let outside = tmp.path().join("operator-notes.md");
+    std::fs::write(&outside, "# extra\n").expect("write the link target");
+    let claimed = tier(&project)
+        .join("tm-ticketing")
+        .join("references")
+        .join("extra.md");
+    std::fs::remove_file(&claimed).expect("remove the real reference file");
+    std::os::unix::fs::symlink(&outside, &claimed).expect("symlink at the claimed path");
+
+    let steps = remove_project_tier_strays(
+        &paths,
+        Some(&project),
+        &backups(tmp.path()),
+        RepairMode::Apply,
+    );
+
+    let stray = steps
+        .iter()
+        .find(|s| s.path.ends_with("tm-ticketing"))
+        .unwrap_or_else(|| panic!("expected a step for the stray: {steps:?}"));
+    assert!(
+        !matches!(stray.status, StepStatus::Applied { .. }),
+        "a subtree holding a symlink must not be removed: {steps:?}"
+    );
+    assert!(
+        tier(&project).join("tm-ticketing").is_dir(),
+        "the directory must survive"
+    );
+    assert!(
+        std::fs::symlink_metadata(&claimed)
+            .expect("the link")
+            .is_symlink(),
+        "and so must the link itself"
+    );
+    assert!(outside.is_file(), "and its target");
 }

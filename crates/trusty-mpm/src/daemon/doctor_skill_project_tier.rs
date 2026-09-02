@@ -43,6 +43,8 @@ use std::path::Path;
 
 use crate::core::doctor::{CheckStatus, DoctorCheck};
 use crate::core::paths::FrameworkPaths;
+use crate::core::project_tier_strays::unclassifiable_bundled_entries;
+use crate::core::skill_deploy_tiers::project_skill_tier;
 use crate::core::skill_tiers::list_source_stems;
 use crate::core::skill_unmanaged::bundled_skill_dirs;
 
@@ -70,6 +72,7 @@ const MAX_NAMED: usize = 5;
 /// `project_tier_manifest_managed_copy_is_still_flagged`,
 /// `project_tier_without_bundled_names_is_ok`, `a_user_custom_skill_is_not_flagged`,
 /// `project_custom_only_tier_is_ok`, `unverifiable_states_are_unknown_not_ok`,
+/// `an_unclassifiable_bundled_entry_is_counted_by_the_check`,
 /// `an_unreadable_project_tier_is_unknown_not_ok`,
 /// `the_probe_removes_nothing_it_reports`.
 pub(super) fn check_skill_project_tier(
@@ -97,7 +100,7 @@ pub(super) fn check_skill_project_tier(
         );
     }
 
-    let dir = project_dir.join(".claude").join("skills");
+    let dir = project_skill_tier(project_dir);
     // #6586: `bundled_skill_dirs` treats an unreadable directory as empty, and
     // "empty" here renders as a clean bill of health — the #4605 fail-open shape.
     // An ABSENT tier genuinely holds no stray; anything else is undetermined.
@@ -119,10 +122,23 @@ pub(super) fn check_skill_project_tier(
 
     // #6586: read the tier from DISK. The manifest decides what the repair may
     // remove, never what this probe may report — see the module doc.
-    let found: Vec<String> = bundled_skill_dirs(&dir, &bundled)
+    let mut found: Vec<String> = bundled_skill_dirs(&dir, &bundled)
         .into_iter()
         .map(|skill| skill.stem)
         .collect();
+    // #6586 critic: the sweep reports a refusal for a bundled-named entry that
+    // is not a skill directory, so a check that counted only the classified set
+    // said "holds no bundled skill" about a tier `--fix-skills` then listed. The
+    // shared finder is what keeps the two counts equal.
+    let unclassifiable: Vec<String> = {
+        let classified: BTreeSet<&str> = found.iter().map(String::as_str).collect();
+        unclassifiable_bundled_entries(&dir, &bundled, &classified)
+            .iter()
+            .filter_map(|path| Some(path.file_name()?.to_string_lossy().into_owned()))
+            .collect()
+    };
+    found.extend(unclassifiable);
+    found.sort();
     if found.is_empty() {
         return DoctorCheck::new(
             CHECK_NAME,

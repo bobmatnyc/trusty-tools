@@ -246,8 +246,13 @@ pub(crate) fn print_steps(steps: &[RepairStep], apply: bool, apply_hint: &str) {
 /// Test: `core::skill_repair`'s tests produce every outcome variant.
 fn skill_steps(include_frozen: bool, mode: RepairMode) -> Vec<RepairStep> {
     let backup_root = super::doctor_fix_skills::default_backup_root();
-    let (_origin, outcomes) =
-        super::doctor_fix_skills::skill_repair_outcomes(include_frozen, mode, &backup_root);
+    // `--fix` deliberately does not run the #6586 sweep, so it defers nothing.
+    let (_origin, outcomes) = super::doctor_fix_skills::skill_repair_outcomes(
+        include_frozen,
+        mode,
+        &backup_root,
+        &std::collections::BTreeSet::new(),
+    );
     outcomes
         .into_iter()
         .map(|o| {

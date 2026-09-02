@@ -236,3 +236,32 @@ fn an_unreadable_project_tier_is_unknown_not_ok() {
         check.message
     );
 }
+
+/// #6586 critic: the sweep reports a refusal for a bundled-named entry that is
+/// not a skill directory, so the check must count it too — otherwise the same
+/// tier reads `✅ … holds no bundled skill` and then produces a `--fix-skills`
+/// line, and the operator has two answers about one directory.
+///
+/// Fails before this fix: the check counted only what `bundled_skill_dirs`
+/// classified, so a bundled-named plain file reported `Ok`.
+#[test]
+fn an_unclassifiable_bundled_entry_is_counted_by_the_check() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (paths, project) = fixture(tmp.path(), &["tm-ticketing"]);
+    let dir = project.join(".claude").join("skills");
+    std::fs::create_dir_all(&dir).expect("fixture: project tier");
+    // A bundled NAME that is not a skill directory — no `SKILL.md`, not even a
+    // directory. `bundled_skill_dirs` drops it; the sweep refuses it by name.
+    std::fs::write(dir.join("tm-ticketing"), "# not a skill dir\n").expect("fixture: plain file");
+
+    let check = check_skill_project_tier(&paths, Some(&project));
+    assert_eq!(
+        check.status,
+        CheckStatus::Warn,
+        "the check and the repair must count the same entries: {check:?}"
+    );
+    assert!(
+        check.message.contains("tm-ticketing"),
+        "and it must name the entry: {check:?}"
+    );
+}
