@@ -26,8 +26,8 @@
 //! [`draw_statusline`] renders it into a `Frame`.
 //!
 //! # Spec References
-//! - [`SPEC-TTUI-03~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-03~draft) — §3.2, the generalization layer this renders.
-//! - [`SPEC-TTUI-05~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — Slice 4 deliverable (§5, Slice 4): the status-line widget.
+//! - [`SPEC-TTUI-03~draft`](docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-03~draft) — §3.2, the generalization layer this renders.
+//! - [`SPEC-TTUI-05~draft`](docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — Slice 4 deliverable (§5, Slice 4): the status-line widget.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};

@@ -9,6 +9,6 @@
 //! visible from the module boundary, not just from reading each function.
 //!
 //! # Spec References
-//! - [`SPEC-TTUI-03~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-03~draft) — §3.1 module layout (`render/markdown.rs`).
+//! - [`SPEC-TTUI-03~draft`](docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-03~draft) — §3.1 module layout (`render/markdown.rs`).
 
 pub mod markdown;

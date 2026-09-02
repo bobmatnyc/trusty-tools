@@ -96,7 +96,13 @@ impl LintOptions {
 /// checks ran. `spec_refs_checked`/`code_refs_checked` count the work — every
 /// reference put through [`checks::check_reference`] — and collapse to zero when
 /// the grammar drifts.
-/// Test: `tests::run_clean_tree`, `tests::run_counts_references_checked`.
+///
+/// `spec_refs_rejected`/`code_refs_rejected` are counted apart from those
+/// (#6605): a reference refused on its path alone (DOC-38 §2.1) resolves against
+/// nothing, so it is reported and never folded into the checked totals the floor
+/// reads.
+/// Test: `tests::run_clean_tree`, `tests::run_counts_references_checked`,
+/// `tests::run_counts_rejected_references`.
 #[derive(Debug, Default)]
 pub struct LintReport {
     /// All findings that survived the allowlist, in scan order.
@@ -109,6 +115,10 @@ pub struct LintReport {
     pub spec_refs_checked: usize,
     /// Inline `# Spec References` references resolved across `crates/**`.
     pub code_refs_checked: usize,
+    /// Frontmatter references refused on path shape, so resolved against nothing.
+    pub spec_refs_rejected: usize,
+    /// Inline references refused on path shape, so resolved against nothing.
+    pub code_refs_rejected: usize,
 }
 
 impl LintReport {
@@ -208,6 +218,7 @@ pub fn run(opts: &LintOptions) -> Result<LintReport, LintError> {
         // #5440-followup: tally the references RESOLVED, not just the file walked.
         let scan = checks::check_markdown_refs(&path, &content, &lookup);
         report.spec_refs_checked += scan.checked;
+        report.spec_refs_rejected += scan.rejected;
         report.diagnostics.extend(scan.diagnostics);
         report.diagnostics.extend(checks::check_spec_doc(
             &path,
@@ -226,6 +237,7 @@ pub fn run(opts: &LintOptions) -> Result<LintReport, LintError> {
         // #5440-followup: tally the references RESOLVED, not just the file walked.
         let scan = checks::check_code_file(&path, &content, ext, &lookup);
         report.code_refs_checked += scan.checked;
+        report.code_refs_rejected += scan.rejected;
         report.diagnostics.extend(scan.diagnostics);
     }
 

@@ -16,7 +16,7 @@
 //! (see that module's doc comment for the distinction).
 //!
 //! # Spec References
-//! - [`SPEC-TTUI-05~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — Slice 4 deliverable (§5, Slice 4): migrate `markdown.rs`.
+//! - [`SPEC-TTUI-05~draft`](docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — Slice 4 deliverable (§5, Slice 4): migrate `markdown.rs`.
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};

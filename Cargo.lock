@@ -11590,7 +11590,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-code-tui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11997,7 +11997,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-review"
-version = "0.31.0"
+version = "0.31.1"
 dependencies = [
  "anyhow",
  "async-trait",

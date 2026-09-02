@@ -34,8 +34,8 @@
 //! against the real `trusty-analyze` binary.
 //!
 //! # Spec References
-//! - [`SPEC-TGAUDIT-06~draft`](../../../../docs/specs/DOC-67-tga-audit-mode.md#SPEC-TGAUDIT-06~draft)
-//! - [`SPEC-TGAUDIT-09~draft`](../../../../docs/specs/DOC-67-tga-audit-mode.md#SPEC-TGAUDIT-09~draft)
+//! - [`SPEC-TGAUDIT-06~draft`](docs/specs/DOC-67-tga-audit-mode.md#SPEC-TGAUDIT-06~draft)
+//! - [`SPEC-TGAUDIT-09~draft`](docs/specs/DOC-67-tga-audit-mode.md#SPEC-TGAUDIT-09~draft)
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
