@@ -37,15 +37,17 @@
 //! per-endpoint budgets and independence (`a_failing_endpoint_keeps_what_the_
 //! others_returned`, `a_fetch_where_no_endpoint_answered_falls_back_to_scan`).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::Deserialize;
 
+use super::index_registry::resolve_report_index;
 use super::metrics::{
     AnalyzeMetrics, ComplexityBucket, ComplexityDistribution, MetricFinding, Severity,
 };
+use crate::integrations::search_client::IndexInfo;
 
 // The per-endpoint paths, budgets, and failure vocabulary live one module over,
 // beside each other, so an endpoint's cost and its timeout cannot drift apart.
@@ -150,9 +152,13 @@ const CODE_DEADLINE_EXCEEDED: i64 = -32005;
 
 // ─── Wire types (trusty-analyze JSON, minimal shapes) ────────────────────────
 
-/// One entry of `GET /indexes` (`[{"id": ..., "root_path": ...}]`).
+/// One entry of `analyze.list_indexes` (`[{"id": ...}, ...]`).
+///
+/// Named apart from [`IndexInfo`] since #6677: that is trusty-search's registry
+/// entry, `root_path` included, and this is the analyze daemon's id-only proxy
+/// of it — the readiness probe reads this one, resolution reads that one.
 #[derive(Debug, Deserialize)]
-struct IndexInfo {
+struct ServedIndex {
     id: String,
 }
 
@@ -388,6 +394,19 @@ pub trait AnalyzeMetricsSource: Send + Sync {
             None => AnalyzeFetch::Missing(AnalyzeGap::Unavailable),
         }
     }
+
+    /// The trusty-search indexes registered on this machine (#6677).
+    ///
+    /// Why: the id a checkout DERIVES to and the id it is REGISTERED under can
+    /// differ, and only the registry says so — `root_path` is what tells them
+    /// apart. The list is read once per enrichment and handed to
+    /// [`super::index_registry::resolve_report_index`].
+    /// What: the default is an empty list — a source with no daemon behind it
+    /// substitutes nothing, so every stub keeps resolving to the derived id.
+    /// Test: `analyze_adapter_tests.rs::a_repo_served_under_another_id_is_fetched_by_that_id`.
+    async fn registered_indexes(&self) -> Vec<IndexInfo> {
+        Vec::new()
+    }
 }
 
 /// Why one repository has no live analyze metrics (#5239, DOC-67 §9).
@@ -473,6 +492,17 @@ pub struct HttpAnalyzeMetricsSource {
     /// would otherwise pay a spawn budget per repository, and report the same
     /// failure N times.
     started: tokio::sync::OnceCell<Result<(), String>>,
+    /// Where [`AnalyzeMetricsSource::registered_indexes`] reads the trusty-search
+    /// registry from (#6677).
+    ///
+    /// Why: the read resolved `DaemonAddrLayout::TRUSTY_SEARCH` unconditionally,
+    /// so a caller holding this source over a stub analyze socket still issued a
+    /// real HTTP GET to whatever trusty-search daemon the host happened to be
+    /// running. The address is a property of the source now, so a caller that
+    /// stubs the analyze side stubs this side with it.
+    /// What: `None` resolves the advertised daemon at read time — the production
+    /// default, unchanged; `Some(url)` reads that URL instead.
+    search_base_url: Option<String>,
 }
 
 impl HttpAnalyzeMetricsSource {
@@ -499,7 +529,26 @@ impl HttpAnalyzeMetricsSource {
             launcher: trusty_common::uds::OnDemandAnalyze::at(&socket),
             socket,
             started: tokio::sync::OnceCell::new(),
+            search_base_url: None,
         })
+    }
+
+    /// Read the trusty-search registry from `base_url` rather than from the
+    /// daemon this machine advertises (#6677).
+    ///
+    /// Why: `enrich_with_analyze_gaps` reads the registry once per run, and
+    /// without this the read ignored the socket the source was built with and
+    /// went to the host's live trusty-search. A test standing up an in-process
+    /// analyze mock was therefore not hermetic — it depended on whether the
+    /// developer's own daemon was up and what it held.
+    /// What: consuming builder; the stored URL is handed to
+    /// [`super::index_registry::fetch_registered_indexes`], which is fail-open,
+    /// so an address with nothing behind it reads as an empty registry.
+    /// Test: `tests/report_analyze_e2e.rs::the_registry_read_goes_to_the_injected_search_url`.
+    #[must_use]
+    pub fn with_search_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.search_base_url = Some(base_url.into());
+        self
     }
 
     /// Start trusty-analyze if nothing is serving, exactly once per source.
@@ -678,7 +727,7 @@ impl HttpAnalyzeMetricsSource {
     /// warning) from a transport error, per the indexing prerequisite (#2448).
     async fn index_served(&self, index_id: &str) -> AdapterResult<bool> {
         let endpoint = AnalyzeEndpoint::IndexList;
-        let indexes: Vec<IndexInfo> = self.call(endpoint, index_id, endpoint.budget()).await?;
+        let indexes: Vec<ServedIndex> = self.call(endpoint, index_id, endpoint.budget()).await?;
         Ok(indexes.iter().any(|i| i.id == index_id))
     }
 
@@ -798,6 +847,18 @@ impl AnalyzeMetricsSource for HttpAnalyzeMetricsSource {
         }
     }
 
+    /// #6677: the registry is trusty-search's, not the analyze daemon's —
+    /// `analyze.list_indexes` proxies the ids and drops `root_path`, which is
+    /// the field resolution needs. The address is
+    /// [`Self::with_search_base_url`]'s when one was set, so a caller that
+    /// stubbed the analyze socket can stub this read too.
+    async fn registered_indexes(&self) -> Vec<IndexInfo> {
+        match &self.search_base_url {
+            Some(url) => super::index_registry::fetch_registered_indexes(url).await,
+            None => super::index_registry::registered_indexes().await,
+        }
+    }
+
     /// #5239: the same fail-open fetch, naming which of the two conditions
     /// produced an empty result so the report can say so.
     async fn fetch_named(&self, index_id: &str) -> AnalyzeFetch {
@@ -824,24 +885,6 @@ impl AnalyzeMetricsSource for HttpAnalyzeMetricsSource {
             }
         }
     }
-}
-
-// ─── Index-id resolution ─────────────────────────────────────────────────────
-
-/// Derive the trusty-search/analyze index id for a local checkout path.
-///
-/// Why: the renderer must address the SAME index the audit indexed, and the two
-/// run as separate processes with no shared state but the manifest's checkout
-/// path. Until #6149 both derived the repo directory's BASENAME, so a machine
-/// holding two checkouts of one repository served whichever registered first and
-/// the report measured a tree it never audited. Both sides now call
-/// [`trusty_common::derive_checkout_index_id`], which hashes the canonical path
-/// into the id.
-/// What: forwards to that function — `"<slugified basename>-<8 hex>"`, or `None`
-/// for a path with no final component (e.g. `/`).
-/// Test: `derive_index_id_distinguishes_same_named_checkouts`.
-pub fn derive_index_id(path: &Path) -> Option<String> {
-    trusty_common::derive_checkout_index_id(path)
 }
 
 // ─── Model enrichment (precedence seam, #2448) ───────────────────────────────
@@ -901,6 +944,9 @@ pub async fn enrich_with_analyze_gaps(
     // crosses the redaction boundary before it reaches the model. Resolved once
     // per enrichment, not once per repository — it touches the filesystem.
     let secrets = super::redact::report_secrets();
+    // #6677: one registry read for the whole walk — resolution needs the
+    // daemon's `root_path` values, and they do not change mid-enrichment.
+    let indexes = source.registered_indexes().await;
 
     for repo in &mut model.repositories {
         // Precedence: a declared metrics file always wins.
@@ -911,7 +957,10 @@ pub async fn enrich_with_analyze_gaps(
         let Some(path) = repo.local_path.as_ref() else {
             continue;
         };
-        let Some(index_id) = derive_index_id(path) else {
+        // #6677: the derived id when the daemon holds it, otherwise the index
+        // registered at this checkout's root_path; `None` only for a path that
+        // derives to nothing, which is the skip this always made.
+        let Some(index_id) = resolve_report_index(path, &indexes).into_id() else {
             continue;
         };
         match source.fetch_named(&index_id).await {

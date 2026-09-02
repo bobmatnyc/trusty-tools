@@ -62,6 +62,11 @@ struct Stub {
     answer: Answer,
     usages: Vec<TraceUsage>,
     entry_calls: Mutex<usize>,
+    /// What `registered_indexes` answers with (#6677); empty by default, which
+    /// is the pre-#6677 resolution.
+    registry: Vec<crate::integrations::search_client::IndexInfo>,
+    /// The index id `entry_node` was last asked for.
+    entry_index: Mutex<String>,
 }
 
 impl Stub {
@@ -71,6 +76,8 @@ impl Stub {
             answer,
             usages: Vec::new(),
             entry_calls: Mutex::new(0),
+            registry: Vec::new(),
+            entry_index: Mutex::new(String::new()),
         }
     }
 
@@ -90,12 +97,17 @@ impl TraceSource for Stub {
         self.reachable
     }
 
+    async fn registered_indexes(&self) -> Vec<crate::integrations::search_client::IndexInfo> {
+        self.registry.clone()
+    }
+
     async fn entry_node(
         &self,
-        _index_id: &str,
+        index_id: &str,
         _symbol: &str,
     ) -> Result<CallChainEntry, TraceError> {
         *self.entry_calls.lock().expect("lock") += 1;
+        index_id.clone_into(&mut self.entry_index.lock().expect("lock"));
         match &self.answer {
             Answer::Entry(e) => Ok(e.clone()),
             Answer::Fail(e) => Err(e.clone()),
@@ -117,6 +129,54 @@ impl TraceSource for Stub {
 async fn trace_with(stub: &Stub, findings: &[VerifiedFinding]) -> TraceSet {
     let dir = checkout();
     assemble_traces(dir.path(), findings, stub, TraceLimits::default()).await
+}
+
+/// #6677: the checkout is registered under an id it does not derive to, so the
+/// pass addresses the registered one. Before this, every candidate recorded
+/// `IndexAbsent` against an index that was ready and covered the exact path.
+#[tokio::test]
+async fn an_index_registered_at_the_checkout_root_is_traced_against() {
+    let dir = checkout();
+    let mut stub = Stub::entry_at(FILE);
+    stub.registry = vec![crate::integrations::search_client::IndexInfo {
+        id: "trusty-tools-checkout".to_string(),
+        name: None,
+        root_path: Some(dir.path().display().to_string()),
+    }];
+
+    let set = assemble_traces(
+        dir.path(),
+        &[finding("guard", Severity::Red, Some(2))],
+        &stub,
+        TraceLimits::default(),
+    )
+    .await;
+
+    assert_eq!(set.index_id.as_deref(), Some("trusty-tools-checkout"));
+    assert_eq!(
+        stub.entry_index.lock().expect("lock").as_str(),
+        "trusty-tools-checkout",
+        "the trace read must address the registered index, not the derived id"
+    );
+    assert_eq!(set.assembled, 1);
+}
+
+/// The unchanged half: an empty registry leaves the derived id in place.
+#[tokio::test]
+async fn an_empty_registry_traces_against_the_derived_id() {
+    let dir = checkout();
+    let stub = Stub::entry_at(FILE);
+    let derived = crate::report::derive_index_id(dir.path()).expect("id");
+
+    let set = assemble_traces(
+        dir.path(),
+        &[finding("guard", Severity::Red, Some(2))],
+        &stub,
+        TraceLimits::default(),
+    )
+    .await;
+
+    assert_eq!(set.index_id.as_deref(), Some(derived.as_str()));
 }
 
 // ─── The success path ─────────────────────────────────────────────────────────

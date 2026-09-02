@@ -110,6 +110,30 @@ fn an_explicit_base_url_loses_its_trailing_slash() {
     assert_eq!(source.base_url(), "http://127.0.0.1:9999");
 }
 
+/// #6677 review: the registry read is THIS source's, not the machine's.
+///
+/// Why: the sibling read on `HttpAnalyzeMetricsSource` resolved the advertised
+/// daemon whatever socket the source held, which made a stubbed suite issue a
+/// live GET to the developer's own trusty-search. `HttpTraceSource` reads
+/// `self.base_url` instead, and this pins that: a source pointed at a dead port
+/// reads an empty registry, where a machine-wide resolve would return whatever
+/// the host daemon holds.
+/// What: binds a port, drops it, and asserts the read from that address is
+/// empty. On a machine with no daemon the assertion is vacuous; on one with a
+/// daemon it is the leak check.
+#[tokio::test]
+async fn the_registry_read_uses_this_sources_base_url() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    drop(listener);
+
+    let source = HttpTraceSource::at(format!("http://127.0.0.1:{port}")).expect("client builds");
+    assert!(
+        source.registered_indexes().await.is_empty(),
+        "the read must go to this source's base_url, never the machine's daemon"
+    );
+}
+
 /// The layout the source resolves through, pinned so a later edit cannot
 /// quietly swap it for a literal `127.0.0.1:7878` — which would miss an
 /// auto-ported daemon and every `TRUSTY_DATA_DIR`-isolated one. Nothing here

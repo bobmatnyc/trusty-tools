@@ -30,6 +30,8 @@ use serde::Serialize;
 
 use crate::report::metrics::Severity;
 
+use crate::report::index_registry::{derive_index_id, resolve_report_index};
+
 use super::trace_client::{TraceError, TraceSource, TraceUsage};
 use super::trace_symbol::resolve_symbol;
 use super::verify::VerifiedFinding;
@@ -205,7 +207,7 @@ fn candidates(findings: &[VerifiedFinding], limits: TraceLimits) -> Vec<&Verifie
 ///
 /// Why: the whole pass in one place, so every fail-closed exit is visible
 /// beside the success path it replaces.
-/// What: probes the daemon once, derives the index id once, then per candidate
+/// What: probes the daemon once, resolves the index id once (#6677), then per candidate
 /// resolves the symbol from disk, confirms the `[ENTRY]` node, checks the entry
 /// file against the finding's, and collects in-file usages. An unreachable
 /// daemon or an absent index stops further HTTP work and gives every remaining
@@ -219,12 +221,20 @@ pub async fn assemble_traces(
     limits: TraceLimits,
 ) -> TraceSet {
     let candidates = candidates(findings, limits);
-    let index_id = trusty_common::derive_checkout_index_id(repo_path);
 
     let mut halt: Option<String> = if source.reachable().await {
         None
     } else {
         Some("no trace: trusty-search is not reachable".to_string())
+    };
+    // #6677: a checkout registered under an id other than its derived one is
+    // addressed by the id it IS registered under. A daemon that did not answer
+    // has no registry to substitute from, so that branch records what the path
+    // derives to and halts on the reason already set.
+    let index_id = if halt.is_some() {
+        derive_index_id(repo_path)
+    } else {
+        resolve_report_index(repo_path, &source.registered_indexes().await).into_id()
     };
     if halt.is_none() && index_id.is_none() {
         halt = Some(format!(
