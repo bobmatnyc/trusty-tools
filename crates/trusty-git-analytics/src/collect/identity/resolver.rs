@@ -73,6 +73,86 @@ fn email_domain(email: &str) -> String {
     }
 }
 
+/// The configured canonical email domain, trimmed, `@`-stripped, lowercased.
+///
+/// Why: three call sites need this value in the same normalised form — the
+/// resolver's own construction, `tga aliases suggest`, and the DD audit's
+/// authorship pass (#6142 review). Three copies of `trim / strip / lowercase`
+/// is exactly the drift the "one implementation" rule exists to prevent.
+/// What: `None` when no team block, no `canonical_domain`, or an empty one.
+/// Test: `resolver_tests::configured_canonical_domain_normalises_the_value`.
+pub fn configured_canonical_domain(config: &crate::core::config::Config) -> Option<String> {
+    config
+        .team
+        .as_ref()
+        .and_then(|t| t.canonical_domain.as_deref())
+        .and_then(normalize_domain)
+}
+
+/// [`configured_canonical_domain`]'s normalisation, for a bare string.
+fn normalize_domain(raw: &str) -> Option<String> {
+    let d = raw.trim().trim_start_matches('@').to_lowercase();
+    if d.is_empty() {
+        None
+    } else {
+        Some(d)
+    }
+}
+
+/// The `authors.id` that already absorbed `email` as a CONFIRMED alias.
+///
+/// Why (#6142 review): `tga aliases merge` reassigns the source's commits,
+/// appends the source email to the destination's `aliases` array, and DELETES
+/// the source row. Only the alias array survives — so a later collect that
+/// observes the merged-away email on a new commit re-creates the deleted row
+/// and relinks to it, undoing the merge in the database. Asking this question
+/// before writing keeps an accepted merge accepted.
+/// What: matches the JSON array with `LIKE` to narrow the scan, then confirms
+/// an exact case-insensitive element match, because `LIKE` alone matches a
+/// substring of a longer address. Malformed JSON yields no match, and says so
+/// on stderr rather than reading as an author with no aliases.
+/// Test: `resolver_tests::a_merged_away_email_routes_to_its_canonical_row`.
+///
+/// # Errors
+///
+/// Returns [`crate::core::TgaError::DbError`] on SQL failure.
+fn confirmed_alias_owner(
+    conn: &rusqlite::Connection,
+    email: &str,
+) -> crate::core::Result<Option<i64>> {
+    if email.is_empty() {
+        return Ok(None);
+    }
+    let mut stmt = conn.prepare("SELECT id, aliases FROM authors WHERE aliases LIKE ?1")?;
+    let pattern = format!("%\"{email}\"%");
+    let mut rows = stmt.query(params![pattern])?;
+    let needle = email.to_lowercase();
+    while let Some(row) = rows.next()? {
+        let id: i64 = row.get(0)?;
+        let aliases_json: String = row.get::<_, Option<String>>(1)?.unwrap_or_default();
+        // #6142 review: an `aliases` value that will not parse reads as "no
+        // aliases", which quietly re-creates the row a confirmed merge
+        // deleted. The fallback stays — one bad row must not fail the collect
+        // — but it is named on stderr with the author row it belongs to.
+        let aliases: Vec<String> = match serde_json::from_str(&aliases_json) {
+            Ok(aliases) => aliases,
+            Err(e) => {
+                warn!(
+                    author_id = id,
+                    error = %e,
+                    "authors.aliases is not a JSON array of strings; confirmed merges on this \
+                     author are not applied to newly observed commits"
+                );
+                Vec::new()
+            }
+        };
+        if aliases.iter().any(|a| a.to_lowercase() == needle) {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
+}
+
 /// Why: `IdentityResolver::upsert_author` and the suggester both need to ask
 /// "does this email live under the configured canonical_domain?". Centralising
 /// the check avoids subtle case- or `@`-prefix bugs at the two call sites.
@@ -226,11 +306,7 @@ impl IdentityResolver {
             for (k, v) in free_aliases {
                 register_alias(&mut aliases, k, v);
             }
-            canonical_domain = team
-                .canonical_domain
-                .as_ref()
-                .map(|d| d.trim().trim_start_matches('@').to_lowercase())
-                .filter(|d| !d.is_empty());
+            canonical_domain = team.canonical_domain.as_deref().and_then(normalize_domain);
         }
         Self {
             aliases,
@@ -307,13 +383,7 @@ impl IdentityResolver {
         // map is the primary identity source (the two YAML keys are
         // orthogonal — the domain policy belongs under team:).
         if resolver.canonical_domain.is_none() {
-            if let Some(team) = config.team.as_ref() {
-                resolver.canonical_domain = team
-                    .canonical_domain
-                    .as_ref()
-                    .map(|d| d.trim().trim_start_matches('@').to_lowercase())
-                    .filter(|d| !d.is_empty());
-            }
+            resolver.canonical_domain = configured_canonical_domain(config);
         }
         // Gate on whether the alias table actually LOADED, not merely on whether
         // one was declared. `Config::resolved_aliases` deliberately swallows
@@ -533,12 +603,20 @@ impl IdentityResolver {
     ///
     /// Why: `tga collect` calls this once per observed `(name, email)` pair;
     /// it both registers new identities and routes commits to existing rows.
-    /// What: resolves the inbound pair to a canonical form, applies the
-    /// canonical-email policy (issue #349) when a configured
-    /// [`Self::canonical_domain`] is set, and writes the row keyed on
-    /// `canonical_email`.
-    /// Test: see `resolver_tests::canonical_domain_prefers_org_email` and
-    /// `resolver_tests::canonical_domain_routes_new_personal_email_to_existing_org_row`.
+    /// What: resolves the inbound pair to a canonical form, returns the owning
+    /// identity when the resolved email is a CONFIRMED alias of one (#6142
+    /// review), applies the canonical-email policy (issue #349) when a
+    /// configured [`Self::canonical_domain`] is set, and otherwise writes the
+    /// row keyed on `canonical_email`.
+    ///
+    /// The alias check comes first because `tga aliases merge` DELETES the
+    /// source row and records the merge only in the destination's `aliases`
+    /// array. Without it, the next collect to observe the merged-away email
+    /// re-creates the row the operator deleted and relinks commits to it,
+    /// undoing the merge in the database rather than only in the report.
+    /// Test: see `resolver_tests::canonical_domain_prefers_org_email`,
+    /// `resolver_tests::a_merged_away_email_routes_to_its_canonical_row` and
+    /// `crate::report::authorship_tests::a_confirmed_merge_survives_a_recollect`.
     ///
     /// # Errors
     ///
@@ -550,6 +628,18 @@ impl IdentityResolver {
         email: &str,
     ) -> crate::core::Result<i64> {
         let (canon_name, mut canon_email) = self.resolve(name, email);
+
+        // #6142 review: a confirmed merge outranks every policy below it. The
+        // merge deleted the source row, so re-creating it here would undo the
+        // operator's decision on the next collect.
+        if let Some(id) = confirmed_alias_owner(db.connection(), &canon_email)? {
+            debug!(
+                observed_email = %canon_email,
+                author_id = id,
+                "routed commit to the identity that already absorbed this email as a confirmed alias"
+            );
+            return Ok(id);
+        }
 
         // Issue #349 canonical-email policy:
         // 1. If `resolve()` already produced an email under the configured

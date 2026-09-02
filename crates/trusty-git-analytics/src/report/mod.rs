@@ -29,7 +29,8 @@ pub mod ticketed_stats;
 pub mod ticketing;
 
 pub use authorship::{
-    build_authorship_summary, recorded_repository_names, repository_has_commits, AuthorshipSummary,
+    build_authorship_summary, build_authorship_summary_with, merge_suggestions,
+    recorded_repository_names, repository_has_commits, AuthorshipSummary, IdentityMergeRisk,
     AUTHORSHIP_SCHEMA_VERSION,
 };
 pub use dd_manifest::{

@@ -308,6 +308,90 @@ fn canonical_domain_prefers_org_email_for_team_member() {
     assert_eq!(r.canonical_domain(), Some("duettoresearch.com"));
 }
 
+/// (#6142 review) `tga aliases merge` deletes the source row and keeps the
+/// merge only in the destination's `aliases` array. The next collect must route
+/// the merged-away address to that destination rather than re-creating the row
+/// the operator deleted.
+#[test]
+fn a_merged_away_email_routes_to_its_canonical_row() {
+    use crate::core::db::Database;
+    use rusqlite::params;
+
+    let db = Database::open_in_memory().expect("open db");
+    db.connection()
+        .execute(
+            "INSERT INTO authors (canonical_name, canonical_email, aliases) \
+             VALUES ('Alice', 'alice@corp.com', ?1)",
+            params![r#"["alice@personal.com"]"#],
+        )
+        .expect("seed destination");
+    let dst: i64 = db
+        .connection()
+        .query_row(
+            "SELECT id FROM authors WHERE canonical_email = 'alice@corp.com'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("dst id");
+
+    let r = IdentityResolver::new(None);
+    let id = r
+        .upsert_author(&db, "Alice", "alice@personal.com")
+        .expect("upsert");
+    assert_eq!(id, dst, "the alias must route to its canonical identity");
+
+    // Case-insensitively, too — git config addresses vary in case.
+    let upper = r
+        .upsert_author(&db, "Alice", "Alice@Personal.com")
+        .expect("upsert");
+    assert_eq!(upper, dst);
+
+    let rows: i64 = db
+        .connection()
+        .query_row("SELECT COUNT(*) FROM authors", [], |r| r.get(0))
+        .expect("count");
+    assert_eq!(rows, 1, "no row may be re-created for a merged-away email");
+
+    // A LIKE match that is not an exact array element must not hijack: the
+    // longer address contains the alias as a substring.
+    let other = r
+        .upsert_author(&db, "Bob", "not-alice@personal.com.example")
+        .expect("upsert");
+    assert_ne!(other, dst, "a substring match must not claim the identity");
+}
+
+/// (#6142 review) One normalisation for the configured canonical domain, used
+/// by the resolver, `tga aliases suggest`, and the audit's authorship pass.
+#[test]
+fn configured_canonical_domain_normalises_the_value() {
+    use crate::collect::identity::resolver::configured_canonical_domain;
+    use crate::core::config::Config;
+
+    let mut config = Config::default();
+    assert_eq!(configured_canonical_domain(&config), None, "no team block");
+
+    config.team = Some(TeamConfig {
+        members: vec![],
+        aliases: HashMap::new(),
+        canonical_domain: Some("  @Corp.COM ".into()),
+    });
+    assert_eq!(
+        configured_canonical_domain(&config),
+        Some("corp.com".to_string())
+    );
+
+    config.team = Some(TeamConfig {
+        members: vec![],
+        aliases: HashMap::new(),
+        canonical_domain: Some("   ".into()),
+    });
+    assert_eq!(
+        configured_canonical_domain(&config),
+        None,
+        "empty is absent"
+    );
+}
+
 #[test]
 fn canonical_domain_routes_new_personal_email_to_existing_org_row() {
     use crate::core::db::Database;

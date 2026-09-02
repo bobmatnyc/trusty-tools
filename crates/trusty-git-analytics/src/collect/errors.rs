@@ -46,6 +46,34 @@ pub enum CollectError {
     #[error("identity resolution failed: {0}")]
     Identity(String),
 
+    /// The revwalk stopped early, so the history walk covered only part of
+    /// the repository (#6073 review).
+    ///
+    /// Why its own variant: the walk used to `break` out of the revwalk loop
+    /// on a yielded error and still return `Ok(written)`, which the collect
+    /// pipeline read as a completed walk and recorded as one — a corrupt or
+    /// unreadable object therefore left `walk_complete = 1` over a partial
+    /// traversal, and every later run skipped on it. The rows already written
+    /// are kept (the transaction commits first); what this variant says is
+    /// that the traversal is NOT a basis for recording the repository as
+    /// walked.
+    #[error(
+        "history walk for {repository} aborted after {walked} commit(s) \
+         ({written} written): {cause}"
+    )]
+    WalkAborted {
+        /// Display name of the repository whose walk stopped early.
+        repository: String,
+        /// Commits the revwalk yielded before it failed.
+        walked: usize,
+        /// Commit rows written before the abort; these are committed, not lost.
+        written: usize,
+        /// The revwalk's own error text. Named `cause` rather than `source`
+        /// because `thiserror` treats a `source` field as a nested
+        /// `std::error::Error`, which a `String` is not.
+        cause: String,
+    },
+
     /// An underlying `std::io` error (file not found, permission denied, etc.).
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
