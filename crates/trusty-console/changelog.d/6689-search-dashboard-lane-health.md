@@ -1,3 +1,0 @@
-Fixed
-
-- The search dashboard this crate builds and serves at `/tools/search/` no longer shows an index with an empty vector store as green. Its semantic lane badge came straight from `stages.semantic.status`, which reports on the last embedding pass rather than on what the vector store holds; it is now computed from the stage, the advertised `vector` capability and `semantic_coverage.vectors_present` together, and an index with chunks that advertises vector search while holding zero vectors renders `Empty` in red under a `Degraded` verdict ([#6689](https://github.com/bobmatnyc/trusty-tools/issues/6689))
