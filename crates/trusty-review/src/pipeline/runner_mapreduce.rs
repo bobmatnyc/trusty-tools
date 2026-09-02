@@ -202,9 +202,8 @@ pub(super) async fn run_mapreduce_branch(
     // authoritative.  Surface it in BOTH the posted body (a visible banner) and
     // the internal `error` field so neither the PR author nor a log consumer
     // mistakes a partial review for a complete one.
-    //
-    // Note: status is set AFTER the fold so finalize_run cannot clobber it.
-    if reduced.stats.is_partial() {
+    let is_partial_coverage = reduced.stats.is_partial();
+    if is_partial_coverage {
         let llm_errors = reduced
             .stats
             .files_failed
@@ -215,7 +214,6 @@ pub(super) async fn run_mapreduce_branch(
             reduced.stats.files_failed, llm_errors, reduced.stats.hunks_oversized,
         );
         result.review_body = format!("{notice}{}", result.review_body);
-        result.status = ReviewStatus::Degraded;
         if result.error.is_none() {
             result.error = Some(format!(
                 "map-reduce coverage partial: {} reviewed, {} skipped, {} failed \
@@ -233,7 +231,6 @@ pub(super) async fn run_mapreduce_branch(
     // opted out of a required context dependency, prepend a banner and set the
     // error reason so no consumer mistakes the review for authoritative.
     if let Some(reason) = degraded_reason.as_ref() {
-        result.status = ReviewStatus::Degraded;
         result.review_body = format!(
             "{}{}",
             crate::pipeline::context_gate::degraded_banner(reason),
@@ -242,6 +239,21 @@ pub(super) async fn run_mapreduce_branch(
         if result.error.is_none() {
             result.error = Some(format!("degraded (non-authoritative): {reason}"));
         }
+    }
+
+    // #1661: both triggers above make the review non-authoritative; consolidate
+    // to the ONE status assignment below instead of each block writing
+    // `Degraded` independently.  Previously that duplication was harmless only
+    // because both sites wrote the identical value — a future finer-grained
+    // status for one trigger (e.g. distinguishing partial-coverage from an
+    // opted-out dependency) would have been silently overwritten by whichever
+    // block ran second.  `result.error` above already establishes the intended
+    // precedence when both fire (partial-coverage's message wins, since its
+    // `is_none()` guard runs first); this mirrors that by deriving the single
+    // status write from the same two conditions.
+    // Note: status is set AFTER the fold so finalize_run cannot clobber it.
+    if is_partial_coverage || degraded_reason.is_some() {
+        result.status = ReviewStatus::Degraded;
     }
 
     finalize_run(result, config, input, deps.dedup.as_ref()).await

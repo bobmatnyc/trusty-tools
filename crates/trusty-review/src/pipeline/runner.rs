@@ -390,10 +390,18 @@ pub async fn run_review(
     };
     let filtered = DiffAnalyzer::default().analyze(&raw_diff).await;
     let max = crate::config::constants::MAX_DIFF_CHARS;
-    // Render ONCE at no cap so DiffStats sees the true (untruncated) length the
-    // selector needs; the unified path re-bounds to `max` below.
-    let rendered_full = filtered.render_for_prompt(usize::MAX);
+    // #1660: render ONCE, bounded to `max` — NOT a second, unbounded render at
+    // `usize::MAX` just to learn the length.  `render_for_prompt` already
+    // stays within its own budget and self-announces with
+    // `RENDER_TRUNCATED_MARKER` whenever it had to drop content to do so
+    // (see `diff_was_truncated`), so that single bounded render tells us
+    // everything the selector needs: when nothing was dropped, this render's
+    // length IS the true (untruncated) length; when something was dropped, the
+    // marker alone proves the untruncated length exceeds `max`, which is all
+    // `select_review_mode` compares against (`diff_chars > MAX_DIFF_CHARS`) —
+    // the exact untruncated figure is never otherwise consumed.
     let diff = truncate_diff(&filtered.render_for_prompt(max));
+    let would_truncate = diff_was_truncated(&diff);
     debug!(orig = raw_diff.len(), filt = diff.len(), "diff filtered");
 
     // ── Step 3a: select review path (unified vs map-reduce) (#1643 / #680) ─
@@ -403,7 +411,14 @@ pub async fn run_review(
     // forces map-reduce; `never` forces the unified path (today's behaviour).
     let mr_config = MapReduceConfig::from_env();
     let stats = DiffStats {
-        diff_chars: rendered_full.len(),
+        // Exact only when nothing was dropped (see the render comment above);
+        // once truncation happened the precise count is moot — `max + 1` still
+        // satisfies the selector's sole `> MAX_DIFF_CHARS` comparison.
+        diff_chars: if would_truncate {
+            max.saturating_add(1)
+        } else {
+            diff.len()
+        },
         file_count: filtered.files.len(),
     };
     let review_path = select_review_mode(stats, &mr_config);
@@ -431,7 +446,7 @@ pub async fn run_review(
     // silently reviewing only the visible portion.  The map-reduce path (#680) will
     // later review over-cap diffs per-file with no truncation; until that fan-out
     // lands, fail-closed is the safe behaviour.
-    if review_path == ReviewPath::Unified && diff_was_truncated(&diff) {
+    if review_path == ReviewPath::Unified && would_truncate {
         warn!(
             orig_chars = raw_diff.len(),
             rendered_chars = diff.len(),
