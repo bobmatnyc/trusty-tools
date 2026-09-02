@@ -1,5 +1,0 @@
-Documentation
-
-- **Module docs render once instead of twice.** All 13 modules carried both an outer `///` on their `mod x;` declaration and their own inner `//!`; rustdoc concatenates the two, so each module page showed two summary lines and two Why/What/Test triples. The outer is gone and the inner `//!` is now the single module doc, per the `//!` convention in `documentation-style` and DOC-38 §3.1 ([#5754](https://github.com/bobmatnyc/trusty-tools/pull/5754))
-  - this crate's outer docs consistently carried extraction provenance the inner docs lacked, so seven were merged forward rather than deleted: the Wave 1 (#862) / Wave 2 (#867, refs #830/#832) hoist history on `perf`, `runner`, `adapters` and `session_registry`; the `events` epic (#830, refs #833); the three `compress_tool_output*` entry points `compress` re-exports; and the `TrustyMemoryRecovery` stub blocked on #3228 in `workstreams`
-  - `agent_assets`' outer doc was stale — it said 30 embedded consts where the inner correctly says 42 — so deleting it removed wrong information rather than a duplicate

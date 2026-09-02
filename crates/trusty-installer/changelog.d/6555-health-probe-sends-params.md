@@ -1,2 +1,0 @@
-Fixed
-- `tctl status` reported a healthy trusty-memory daemon as `down`, exited 2 with verdict `degraded`, and failed `tctl install`'s verify tail (#6555). The UDS health probe sent a JSON-RPC frame with no `params` key, which decodes to `Value::Null`; `memory.health` is bound to a real `HealthQuery` struct and refused it with `-32602`. The probe now sends `"params": {}`, which is what the correct dialers already send. The same frame serves `analyze.health` and `search.health`, whose `NoParams` binding had been tolerating the omission

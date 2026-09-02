@@ -6,6 +6,455 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.5.16] — 2026-09-02
+
+### Added
+
+- `tm <github-url>` and `tm <owner>/<repo>` now provision and run a managed
+  session in one command, instead of exiting with clap's unknown-subcommand
+  error. The token routes through the same register → load → run chain
+  `tm run <target>` already drives, so an already-registered repo refreshes and
+  runs rather than duplicating a registration (#6441).
+  - A leading token that is not repo-shaped — a subcommand typo such as
+    `tm statuss` — still gets clap's usage error and the "did you mean?" hint.
+  - Abbreviated subcommands (`tm sta` → `tm status`) keep resolving by prefix
+    inference; they never fall through to the new catch-all.
+  - Bare `tm` with no argument is unchanged.
+- `tm doctor` gains `skill_project_tier`, which warns when a bundled skill is
+  still deployed at a project's own tier and names `tm doctor --fix-skills` as
+  the repair. It never deletes: a bundled-named file there could be a
+  project-custom skill the operator wrote (#6586).
+- Session launch now prints one line per unclean asset kind, and nothing at all
+  when every kind is clean. The three lines are `agents quarantined N (names)`,
+  `skills stray N (names)` and `duplicates N (names)`. Two of those findings were
+  already computed at launch and went only to `tracing`, which a terminal session
+  does not show — the #4448 quarantine MOVES files in the operator's working tree
+  and said so at `warn` level. A tier that cannot be listed, and a bundled roster
+  that cannot be built, each produce an `UNDETERMINED` line rather than reading as
+  clean. The five launch paths with no terminal — the daemon provisioner, the
+  in-project spawn, the client connect, the standalone load and `tm launch` — log
+  the same findings instead, each as one `tracing` event carrying `scope`,
+  `session`, `dir` and `err`/`notice` as fields a log query can filter on (#6649).
+- `tm doctor --fix-agents` sweeps bundled AGENT copies stranded at a project's own
+  `.claude/agents/`, mirroring `--fix-skills`. It previews by default and removes
+  only on `--yes`, and only a copy that tier's `.trusty-mpm-manifest.json` records
+  as tm's, with a framework-owned origin, whose bytes still match the recorded
+  checksum. A bundled-named DIRECTORY, an untracked file, a ledger entry the
+  operator owns, and a copy hand-edited after deployment are each refused and
+  reported. Every removal is backed up first; `tm doctor --fix` never runs it
+  (#6649).
+- `tm doctor` gains an `asset_duplicates` row: one asset name claimed by two
+  entries in the SAME tier — `qa.md` beside a `qa/` directory, or `QA.md` beside
+  `qa.md` — for both agents and skills. Only one of the two ever loads, and on a
+  case-insensitive filesystem the two names are one file. `asset_tier` and
+  `skill_project_tier` both compare one directory against another and cannot see
+  this. Report-only, with no repair: tm cannot know which entry the operator meant
+  to keep (#6649).
+- `tm issue` state models can now declare a LABEL-LESS state — one whose only
+  artifact is the absence of every state label — plus a `gh_state:
+  open|closed` per state and a `requires_note: true` per transition. A
+  label-less state is resolved from the issue's own open/closed flag, reaching
+  a `gh_state: closed` state closes the issue, and an edge marked
+  `requires_note` is refused unless `--note` is given. Load-time validation
+  rejects two label-less states sharing one `gh_state`, since nothing could
+  tell them apart.
+- A project-level `issue-state.yaml` at the repo root encoding this
+  workspace's own lifecycle — `open → status:in-progress → status:coded →
+  status:merged → status:tested → closed`, plus the release-a-claim and reopen
+  edges back to `open`. `tm issue transition <n> <state>` run from the repo
+  root now performs each advance as ONE `gh issue edit` carrying both
+  `--add-label` and `--remove-label`, so an issue can never be observed
+  carrying two `status:*` labels; an undeclared edge exits 1 naming the states
+  you may move to, and an issue that already carries two is refused with a
+  pointer to `tm issue repair <n>`.
+- `tm pr open` wraps `gh pr create` behind four pre-flight checks it refuses on: the seven-field PR-body contract from `tm-workflow.md`, the exact attribution footer as the last non-blank line, the shipped `--assignee @me --label trusty-mpm --label ws/<session>` defaults, and `scripts/check_changelog_fragment.sh` for `origin/<base>...HEAD` unless `--docs-only`. A failed check names itself, exits 2, and never spawns `gh`. `--issue N` emits `Refs #N`; `Closes #N` requires `--closes`, and a body carrying an unrequested `Closes` is rejected. `--dry-run` prints the assembled argv.
+- `tm pr queue-check [--base main] [<pr>]` prints one `MERGEABLE` / `BLOCKED: <reason>` line per open PR, reporting the first stop condition among draft, hold label, `CHANGES_REQUESTED`, an unresolved `code-critic` BLOCK, and a required context missing or not `SUCCESS` on the head SHA. Required contexts are read live from branch protection. Exits 1 when any PR is blocked; `--json` emits the same verdicts as an array.
+- A `log_drain.sources[]` entry can carry its own `destination`, so one daemon
+  drains different projects to different object stores — and to different AWS
+  accounts, using the `?profile=` / `?role_arn=` support added in
+  `trusty-common` (#6657). A source that names none inherits the section's
+  `destination` as before. Sources are grouped by the destination they resolve
+  to and the scheduler runs one pass per group, each with its own connection and
+  its own manifest; the manifest cache was already keyed by destination (#6548),
+  so nothing about that changed. `log_drain.destination` is now required only
+  when some source still needs it.
+- The `log_drain` doctor row lists every configured destination and quotes each
+  one's own last-run outcome, instead of reporting a single verdict for all of
+  them. `status.json` gained a `destinations` array; a file written before this
+  change still decodes and the row falls back to its single detail line.
+- A `log_drain.sources[]` entry can set `owner:` and `project:` to name the
+  project its keys sit under, and `enabled: false` to opt one project out of the
+  drain entirely (#6657). A disabled source runs no pass and uploads nothing;
+  the `log_drain` doctor row still lists it as `disabled` beside the destination
+  it would have used, so a deliberate opt-out reads differently from a project
+  that fell out of the config. The row also names each pass's project.
+
+### Fixed
+
+- The PM's mandatory engineer-brief tail (`core.md`) now names this repo's
+  doc gates — `check_test_pointers.sh`, `check_line_cap.sh`,
+  `check_changelog_fragment.sh` — so a dispatched engineer runs them before
+  returning, instead of a required CI job catching a missing gate after the
+  fact (#6656, #6659, #6670).
+- `git-workflow` skill — gained a "trusty-tools Deterministic Tools" section
+  naming the exact commands (`check_changelog_fragment.sh`,
+  `check-pr-version-bump.sh`, the live required-contexts read, the
+  merge-queue-ownership query, the one-shot pre-merge status read, and
+  `tm session prune-worktrees`) `version-control` runs itself before opening
+  or merging a PR on this repo, replacing generic-only prose.
+- `tm-delegation-patterns` skill — the `version-control` row's `tag` verb is
+  now qualified: a plain annotated tag on explicit PM instruction is
+  `version-control`'s; a release tag bound to a `cargo publish` is
+  `local-ops`'s.
+- `tm-workflow` skill — the Changelog Requirement section now names
+  `scripts/check_changelog_fragment.sh` as the self-check to run before
+  pushing.
+- ADR-0057's `sole-owner` re-check no longer treats an unanswered daemon as an
+  empty owner set. It read the shared-tree route through
+  `live_shared_tree_writers`, whose fail-open contract maps an unreachable
+  daemon, a timeout, a 5xx and an unparseable body all to an empty vec — which
+  is indistinguishable from "nobody holds this tree". A `version-control` agent
+  could therefore remove a worktree another agent was writing in whenever the
+  daemon was down, with the ownership check never having run. The re-check now
+  goes through a fail-closed `live_shared_tree_writers_or_deny` and denies on
+  every non-answer, naming `sole-owner` and the daemon-side reason. A payload
+  with no `session_id` denies for the same reason: no session's delegations can
+  be addressed without one. The HEAD-move rule's fail-open reader is untouched —
+  the two biases are kept as two functions, because a wrong ALLOW there costs
+  the operator a `git merge` on their own checkout and here costs another
+  session its work.
+- The PM bash guard now denies `rm`/`rmdir`/`unlink`/`find … -delete` when the
+  resolved target is a filesystem root (`/`, `/root`, `/Users/<name>`,
+  `$HOME`), a repository root, a `.git` directory, or a
+  `.claude/worktrees`/`.worktrees` entry. Previously no `rm`/`rmdir` verb
+  existed anywhere in the classifier, so a PM session — or an agent it
+  dispatches — could delete a filesystem root or another session's worktree
+  through Bash even though the guard already blocked `Edit`/`Write` on
+  source. Ordinary cleanup (`rm stale.txt`, `cargo clean`, `git clean -fd`) is
+  unaffected, and `git worktree remove` / `git branch -D` are untouched by
+  this rule (#4031).
+- The guard now also expands a literal `$PWD`/`${PWD}` target to the tracked
+  effective working directory, evaluates the PARENT directory of a
+  glob-suffixed target (`rm -rf ~/*`, `rm -rf /Users/<name>/*`, `rm -rf
+  .[!.]*`) against the same denylist, and resolves a leading `\` or a
+  `command`/`builtin` wrapper (`\rm`, `command rm`) to the real verb — closing
+  four bypasses of the rule above found in review (#4031).
+- Verb detection for `rm`/`rmdir`/`unlink`/`find` no longer enumerates wrapper
+  words at all — it scans every token of a Bash segment for the verb itself,
+  so `env -i rm -rf /root`, `nice rm -rf /root`, `exec rm -rf /root`, and
+  every other wrapper (known or future) deny the same as the plain form. A
+  delete verb whose target cannot be resolved (an unparseable segment, or a
+  bare invocation with no argument) now denies rather than silently allows.
+  The denylist also covers bare container roots (`/Users`, `/home`,
+  `/Volumes`, `/private`, `/var`, `/etc`, `/usr`, `/opt`, `/Library`,
+  `/System`, `/Applications`, and `$HOME`'s parent), not just a single user's
+  home. `shell_lex::git_subcommand` now shares the same wrapper-skip helper as
+  the `rm` guard's `cd`-tracker, so `command git apply -`, `command git
+  worktree remove --force <path>`, and `\git reset --hard` reach the existing
+  git guards where their plain forms already denied (#4031).
+- A specific user's home root now denies on Linux too — `rm -rf
+  /home/<name>` and its glob-suffixed form, previously recognized only as
+  `/Users/<name>` on macOS (#4031).
+- The orphan-GC now reaps a managed, untracked pane whose working directory is
+  confirmed gone, even when the pane still runs an agent rather than a bare
+  shell. That is the class `reconcile` declines to adopt because the cwd does
+  not resolve; nothing could act on them before and 478 accumulated as
+  permanent zombies (#6118).
+  - The evidence is positive only (ADR-0045): a path tmux never reported, or one
+    the filesystem could not decide on, keeps the pane, and the kill still needs
+    the same two consecutive sweeps an idle-shell orphan needs.
+  - An absent directory only counts when its PARENT still exists. An unmounted or
+    ejected volume answers with the same ENOENT a deleted worktree does, so
+    without that gate an agent working on an external disk would be killed about
+    two minutes after someone ejected it.
+- The orphan-GC's "untracked active managed session — skipping" line is now
+  logged once per session per 60 sweeps rather than every sweep — it was
+  992,078 lines in 48 hours, 76% of the daemon log — with the per-sweep total
+  kept in the sweep summary. Override with
+  `TRUSTY_MPM_ORPHAN_GC_SKIP_LOG_EVERY` (#6118).
+- Running `cargo test -p trusty-mpm` no longer leaves a live `tm-<uuid>` tmux
+  session behind per run. The two guided-fallback tests drive
+  `fallback_protected`, which launches a real session in the worktree it
+  provisions; nothing killed it, so 456 accumulated on one machine over five
+  days and exhausted its pseudo-terminal pool. The test-support fixture now
+  claims such a session by its pane's working directory and kills it on drop,
+  panicking assertions included (#6542, refs #6523).
+- The daemon's log-drain scheduler no longer re-logs the same "skipping oversize
+  file" warning every 15-minute cycle. `trusty-common`'s drain records each skip
+  decision in the manifest, so a file whose size and mtime have not moved is
+  counted in silence; the drain produced 1,276 identical warnings in 48 hours
+  over ~40 files that can never shrink (#6547). The `log_drain` doctor row now
+  reads `N over the size ceiling (M newly recorded)`, where a zero `M` says the
+  backlog is settled.
+- `log_drain.max_wire_bytes` is a new config knob (default 64 MiB) bounding the
+  COMPRESSED body handed to the destination. The collector streams since #6547,
+  so the source size no longer bounds memory and `log_drain.max_file_bytes`
+  defaults to 4 GiB — high enough that a daily-rotated daemon log drains rather
+  than being skipped. A zero `max_wire_bytes` is a config error, not a drain
+  that quietly sends nothing.
+- pm-guard: a completed agent's delegation record no longer blocks ADR-0049
+  documents-only commits in a shared main checkout. A `SubagentStop` whose
+  `agent_id` no record carries now stales the one live record of that
+  `agent_type` that never learned an id, instead of only deferring the stop —
+  which recovered nothing when the dispatch's `PostToolUse` was lost outright.
+  It declines on ambiguity and writes `Stale`, not `Completed`, so a late
+  `PostToolUse` still resolves the record to the truth (#6556).
+- pm-guard: that reconciliation releases the tree for a COMMIT but not for a new
+  file-mutating DISPATCH. Identification by `agent_type` can name a sibling that
+  is still writing, and admitting a second writer onto one git HEAD is the
+  ADR-0048 harm no later signal undoes, so `shared_tree_occupants` keeps the
+  record counted until its original liveness budget expires. The two questions
+  travel one route — `tm hook` posts it for a `Bash` payload too — so the caller
+  now says which it is asking, rather than the route inferring it from whether
+  the dispatch may claim (#6556).
+- pm-guard: a dispatch that reported a working tree of its own is no longer
+  named as a shared-checkout writer — but only while it is still IN that tree.
+  `worktree_path` is a one-way latch the reap depends on, so an agent that ran
+  `EnterWorktree` and then `ExitWorktree` with `action: "keep"` was excluded
+  from the count for life; the guard now reads the agent's current hook cwd
+  beside the grant (#6556).
+- An agent-store worktree whose sentinel names no owner is refused whether that
+  sentinel is unreadable OR absent. A missing sentinel is the absence of any
+  attribution, not the absence of a claim, so resolving it toward "free" on a
+  destructive path is what ADR-0045 forbids (#6561, #5661).
+- `tm session prune-worktrees --merged-prs` now reclaims the harness's own
+  `.claude/worktrees/agent-*` worktrees. It reads git's lock reason, which tells
+  the harness's agent-lifetime lock from an operator's `git worktree lock`: a
+  tree the harness still holds is spared and reported as agent-owned instead of
+  being dropped silently, and a tree the harness has released is reclaimable
+  even when the delegation registry — rebuilt empty at every daemon restart —
+  has never heard of its agent. The merged-PR and unsaved-work gates are
+  unchanged, so an unmerged branch or an uncommitted file still refuses, and a
+  tree carrying no ownership sentinel at all stays unreclaimable (#6561).
+- `tm session prune-worktrees --merged-prs` no longer prints `0 worktree(s) reclaimable` when the pull-request lookup never ran. A failed `gh` call used to be mapped to the same "state could not be determined" as a detached HEAD, so an auth failure across every registered worktree was indistinguishable from a workspace with nothing to reclaim — observed live as `pr_state_unknown: 261` of 261 surveyed with no cause reported. The runner now returns `gh`'s exit code and its first stderr line, the survey counts those separately as `lookup_failed` and keeps the reason, and the CLI prints the lookup-failure count and reason, the indeterminate count, and the not-inspected count on the same line as the reclaimable count. `tm doctor`'s `worktree_disk` check names the same reason and points at the DAEMON's environment, which inherits neither `GH_TOKEN` nor `GH_CONFIG_DIR`. Removal semantics are unchanged: a worktree whose state cannot be established stays unreclaimable (ADR-0045), and the #6597 agent-lock sparing is untouched. #6561
+- `tm hook`'s `PreToolUse` Bash rewrite no longer appends
+  `| tm compress --tool "<name>"` to commands no compression filter covers.
+  `git status`, `sed`, `gh pr`, `wc`, `ssh` and the like each paid a process
+  spawn to get their own bytes back: 3,415 of 3,643 wrapped invocations
+  (93.7%) over a measured 48-hour window reduced nothing. The rewrite now asks
+  `trusty_agents_common::compress::has_filter_for` before wrapping. Commands
+  the dispatch does cover — `cargo test`, `cargo check`/`clippy`, `git diff`,
+  `git log`, `grep`/`rg`/`find`, `ls`, file reads — are wrapped exactly as
+  before.
+- Auto-resume is now parked for a session whose runtime keeps exiting within
+  seconds of its own auto-resume, instead of stopping and resuming it every
+  60-70 seconds forever (2,170 stops against 2,128 resumes in one 48-hour
+  window). The park is recorded as a `resume_flapping` stop cause, so every
+  automatic resume path leaves the session down; an operator's own
+  `tm session resume` clears it (#6568).
+  - Tunable via `TRUSTY_MPM_RESUME_FLAP_WINDOW_SECS` (default 120) and
+    `TRUSTY_MPM_RESUME_FLAP_THRESHOLD` (default 5); a zero window disables the
+    breaker entirely.
+  - An in-place reactivate (`tm`'s bare in-pane relaunch) clears the streak too,
+    so an operator relaunching by hand cannot park their own session.
+  - `tm session ls` marks a parked row `[resume-parked]` and `tm session info`
+    carries the full reason, so a parked session is no longer indistinguishable
+    from an idle stopped one.
+- The daemon and supervisor no longer write every log line twice. Both modes
+  registered a stderr layer beside the rotated `~/.trusty-mpm/logs/trusty-mpm.log.*`
+  file layer, and under launchd the plist's `StandardErrorPath` captured that
+  stderr into a file launchd never rotates — 3.4 GB against 3.0 GB of rotated
+  logs over one 48-hour window. The stderr layer is now skipped when a file
+  layer is configured AND launchd positively reports it supervises this process
+  (#6569).
+  - A foreground run keeps stderr, so `tm daemon` in a terminal is unchanged.
+    So does a run where launchd could not be asked: the sink is only ever
+    removed on positive evidence, never on an unanswered question.
+  - Supervision is read through `trusty_common::supervision`, the same bounded
+    `launchctl list` PID match every other caller uses, rather than a second
+    environment-variable heuristic.
+  - Operators: the existing `~/Library/Logs/trusty-mpm/stderr.log` is not
+    truncated by this change or by a restart, because launchd appends. Truncate
+    or delete it once after installing this version.
+- Two `cargo test -p trusty-mpm` cases no longer read whatever `$HOME` a sibling
+  test happened to have set. `session_plan_under_matches_session_plan_at_home`
+  resolved its two halves through two separate `$HOME` reads, and
+  `rpc_tmux_snapshot_unknown_session_reports_a_coded_error` compared a refusal
+  whose text quotes the live `$HOME`; a test moving `$HOME` between the reads
+  failed either one while proving nothing about the code under test. Both now
+  pin `$HOME` at a tempdir and join the crate-wide serial group (#6580).
+- `tm doctor`'s `skill_project_tier` check now reads the project tier from
+  DISK. It intersected the bundled roster with `list_project_custom_stems`,
+  which by design drops every stem the tier's
+  `.trusty-mpm-skills-manifest.json` marks managed — and a copy the pre-#6602
+  deploy left behind is managed by construction, so a project holding 51
+  bundled copies reported `✅ … holds no bundled skill`. The ledger now decides
+  only what the repair may remove, never what the check may report (#6586).
+- `tm doctor --fix-skills` now removes those strays and drops them from the
+  project's deploy ledger. Because it DELETES it follows this crate's rule for
+  a write: the bare flag PREVIEWS the sweep and `tm doctor --fix-skills --yes`
+  applies it. It acts only on positive evidence: a copy the ledger records
+  whose whole subtree still matches what tm deployed — the same
+  `skill_removal_verdict` the #5224 retirement sweep and the deselection prune
+  use, so a file the operator added or edited anywhere under the directory
+  stops the removal. `--include-frozen` does not override that: it promotes an
+  overwrite of one file, not a whole-directory deletion. A bundled-named
+  directory the ledger does not record is refused — it may be a project-custom
+  skill written under a bundled name — and a bundled-named entry that is not a
+  skill directory at all is now reported rather than skipped in silence. Every
+  removal is backed up whole, `references/` included, under
+  `~/.trusty-mpm/backup-doctor-remediation-<timestamp>/project/<stem>/` and
+  confirmed gone by re-reading disk. The sweep runs BEFORE the redeploy, and
+  both halves share one backup root. A project tier that is a SYMLINK, or whose
+  canonical path resolves onto a tier bundled skills are deployed to, is
+  refused rather than swept — the previous lexical `PathBuf` comparison over an
+  `is_dir()` probe let a `.claude/skills` symlinked at `~/.claude/skills`
+  through, and the sweep would have deleted the operator's live home-tier
+  skills. `tm doctor --fix` still never deletes (#6586).
+- A bare `tm doctor --fix-skills` now writes nothing at the project tier. The
+  sweep ran as a dry run and printed "would remove", and the REDEPLOY half then
+  rewrote those same copies from the bundled asset and re-stamped each ledger
+  checksum — on the 51-stray project, 51 files and 51 backups written straight
+  after the command said nothing would be. The redeploy now skips every stem the
+  sweep planned or applied (#6586; #6620 then put the redeploy behind `--yes`
+  too, so the whole command previews on the bare flag).
+- A project tier that exists, permits the deploy-ledger lock, and cannot be
+  LISTED is now one refusal naming the tier and the error. Both scanners treated
+  an unreadable directory as an empty one, so the sweep produced no steps at all
+  for a tier the `skill_project_tier` check reports as undetermined (#6586).
+- A symlink anywhere under a stray now stops the removal. The backup copied the
+  link's TARGET bytes as a plain file and `remove_dir_all` then unlinked the
+  link, so the operator had no way back to it (#6586).
+- The `skill_project_tier` check now counts the bundled-named entries that are
+  not skill directories, which the sweep already reported as refusals. It said
+  `it holds no bundled skill` about a tier `--fix-skills` then listed (#6586).
+- `--fix-skills --help` no longer implies `--include-frozen` protects a
+  hand-edited subtree indefinitely. It does not override the refusal within a
+  run, but it overwrites the frozen file and re-stamps its checksum, so the
+  subtree becomes removable on the next sweep (#6586).
+- `tm doctor --fix-skills` now previews BOTH of its halves. The sweep half was
+  gated on `--yes` and the redeploy half applied on the flag alone, so a bare
+  `--fix-skills` printed `dry run — re-run with tm doctor --fix-skills --yes to
+  apply` for the sweep and then rewrote three skill files and created
+  `~/.trusty-mpm/backup-doctor-remediation-<timestamp>/` in the same invocation,
+  with nothing in the output saying so. One command answering this crate's
+  preview-by-default rule two different ways is what made the printed line
+  untrue, so both halves now take the one mode the flag selects: on the bare flag
+  the command writes nothing at all — no skill file, no ledger entry, no backup
+  directory — and `tm doctor --fix-skills --yes` applies both. The redeploy's
+  preview also names what it WOULD write and the flag that writes it; its summary
+  gained a `planned` tally, which a preview previously reported as `skipped`.
+  `tm doctor --fix` still previews the redeploy alone, `--fix --yes` still
+  applies it, and neither ever runs the sweep, so the two commands stay distinct
+  with or without `--yes` (#6620).
+- The remediation pointers that name `tm doctor --fix-skills` as a repair now
+  name `--yes` with it — the frozen-skill warning on managed-config deploy, and
+  the `skill_staleness` per-tier remedies — since the bare command no longer
+  writes (#6620).
+- The daemon's `gh` spawns (merged-PR worktree reclaim, the `worktree_disk`
+  `tm doctor` check) now resolve `GH_CONFIG_DIR`/`GH_TOKEN`/`GH_HOST` from the
+  active project's `github:` binding, falling back to the global `github:`
+  section, exactly as an interactive `tm` invocation already does. Under
+  launchd the daemon inherits neither variable, so every lookup used to exit 4
+  ("gh auth login") on a host that keeps `gh` credentials in a scoped config
+  directory — 261 failed lookups in one reported sweep (#6561). A resolution
+  failure (an unreadable origin remote, an `account`-only binding) falls back
+  to the ambient environment rather than blocking the spawn.
+- The `worktree_disk` doctor check now names the resolved `gh` identity
+  alongside a failed lookup, so "used no config dir at all" reads differently
+  from "used the wrong one" (#6623).
+- A per-source destination that cannot be reached is skipped for that tick and
+  never retried against the section default. Falling back would ship a project's
+  logs to the wrong AWS account, which is the requirement the override exists to
+  satisfy. The tick reports `Failed`, the failing destination is named in the
+  doctor row, and every other destination still drains.
+
+### Changed
+
+- `tm hook --pm-guard` now lets a dispatched `version-control` agent run
+  `git worktree remove`, which #5791 denied to every agent. The grant is gated
+  on five re-checks the guard makes itself and never takes from the caller: the
+  payload carries an `agent_id` (an `agent_type` naming `version-control` on its
+  own is refused, since a top-level `--agent` session carries the same field);
+  the target resolves under `.claude/worktrees/` or `.worktrees/`;
+  `git status --porcelain` there is empty and no commit on HEAD is missing from
+  the upstream (no upstream configured denies); `gh pr list --head <branch>
+  --state merged` returns a row; and the daemon reports no other live agent or
+  managed session writing in that tree. Every check fails closed — a fact that
+  cannot be established denies — and the denial names which one failed. The
+  permitted name is read from `dispatch_isolation`'s
+  `SHARED_CHECKOUT_PERMITTED_NAMES`, the same list ADR-0056's dispatch-time
+  grant keys on. Scope is `remove` only: `add`, `move`, `lock` and `prune` are
+  untouched, `rm -rf` on a worktree stays denied to every caller, and
+  `tm session prune-worktrees --merged-prs --force` stays the default sweep.
+  Every other subagent is denied exactly as before, and the PM path is
+  unchanged. (ADR-0057)
+- The ownership question behind `tm session prune-worktrees` is now a single
+  predicate, `decommission::removal_permitted`, shared by the reclaim classifier
+  and the remover. The two had drifted: the classifier called the harness
+  `.claude/worktrees/` store out of scope while `agent_worktree_reap` removes
+  trees from it on every agent exit. The gate-3 refusal message no longer claims
+  that store is unreachable (#6561).
+- No worktree becomes reclaimable as a result. A sentinel-bearing agent worktree
+  whose agent has ended was already reclaimable; a sentinel-less one is still
+  refused, and after a daemon restart the #5661 `Unknown` refusal still applies.
+  Reclaiming the unattributed backlog needs durable delegation state — #6561
+  stays open for it (#6561).
+- Bundled `tm-*` skills are deployed to the user tier only — they no longer land
+  in `<project>/.claude/skills/`. The three sites that wrote that directory
+  (`ensure_project_skill_tier`, `session_launch::skills`, `sync_assets`) decline
+  the bundled tier via `project_skill_tier::bundled_excluded_from_project_tier`;
+  the project tier still takes user-custom skills and still never overwrites a
+  project-custom one. Owner ruling 2026-09-01, the same principle #4448 settled
+  for bundled agents (#6586).
+- `session_launch::skills` and `tm sessions sync-assets` deploy the bundled
+  roster to the managed user tier instead, the destination
+  `managed_config::ensure_managed_config_dir` already wrote on a daemon spawn. A
+  bundled skill therefore still refreshes on every session prep and every
+  sync-assets run, one tier up (#6586).
+- `tm doctor`'s `deployment` check reads the managed user tier for bundled
+  skills. It reported every bundled skill missing on a complete project before,
+  and its `tm validate --repair` path can now close the gaps it reports — the
+  probe and the repair had been reading and writing different tiers (#6586).
+- A bundled skill left in a project tier by an older install no longer counts
+  toward deployment completeness (#6586).
+- `tm issue states` prints `(no label)` for a label-less state and marks the
+  edges that require a `--note`.
+- The bundled `tm-ticketing` skill replaces every hand-typed
+  `gh issue edit --add-label … --remove-label …` lifecycle example with the
+  `tm issue transition` form, keeping the single-`gh issue edit` fallback for a
+  host without `tm`.
+- The log drain writes to `<owner>/<project>/<crate>/<file>` beneath the
+  destination prefix, replacing `<github_id>/<session_id>/logs/…` (#6657). Each
+  source resolves its owner and project from its own `owner:`/`project:`, else
+  the git `origin` of its `root` (git walks up, so a log directory inside a
+  checkout resolves to that checkout), else the new section-level
+  `owner:`/`project:`. A source that resolves none of the three is a hard config
+  error naming the source and its root — the drain never uploads under a
+  placeholder key. Sources are grouped by destination AND project, so one bucket
+  holding three projects runs three passes.
+- `log_drain.github_id` and `log_drain.session_id` are gone with the key
+  segments they filled, along with the `gh api user` probe and the persisted
+  per-install session id. Objects already uploaded under the old layout stay
+  where they are; see `docs/reference/log-drain.md`.
+- `git-workflow` skill — the "trusty-tools Deterministic Tools" table gained
+  rows for `tm pr open`, `tm pr queue-check`, `scripts/required-checks.sh`,
+  and `scripts/is-branch-caused.sh`, alongside the existing rows.
+- `tm-workflow` skill — "Shipped Defaults on the PR" now notes that
+  `tm pr open` attaches the assignee, both labels, and the attribution
+  footer itself and refuses to call `gh` without them; "Merge-Queue
+  Ownership — the Procedure" now notes that `tm pr queue-check` runs the
+  whole stop-condition table and exits nonzero on the first stop it finds
+  (Refs #6659).
+- Bare `tm` in a directory that is not inside a git work tree now prints the
+  managed session list — the same `tm sessions ls` code path, not a second
+  renderer — followed by the two explicit ways to create a session:
+  `[n] tm sessions start --dir <cwd>` for an untracked session that registers
+  nothing, and `[m] tm sessions new <cwd> --task ''` for a managed, tracked one.
+  On an interactive terminal it reads one line and runs the choice; piped or
+  scripted it prints the listing and the options and exits 0; `q`, Enter, and
+  EOF quit without creating anything. Previously such an invocation ran
+  `git init` in that directory and carried on as though a project had been
+  asked for (#6274/#6276) — that auto-init is unchanged for every directory git
+  already knows, and a pane that belongs to a managed session still takes the
+  in-place relaunch path. The advertised command and the executed one are built
+  from one function and the argv is parsed back through the real CLI, so they
+  cannot drift. `tm --help` states the behaviour (#6666).
+
+### Documentation
+
+- Repair session-manager and command-guard links so rustdoc no longer reports unresolved references.
+
 ## [1.5.15] — 2026-09-01
 
 ### Added

@@ -6,6 +6,328 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.13.4] — 2026-09-02
+
+### Breaking
+
+- `commands::port_guard::parse_lsof_pids` is gone. The LISTEN-holder rewrite
+  (#6264) replaced it with a parser that reads `lsof -FpT` per-file TCP state,
+  so the old every-PID entry point has no caller and no meaning. Callers outside
+  this crate must read the LISTEN holder through the guard's own entry point.
+  This is what moves the version to 0.10.0 rather than 0.9.3.
+
+### Added
+
+- `trusty-installer` is a member of its own stable set, so
+  `tctl install trusty-installer` works instead of answering
+  `unknown member(s): trusty-installer`. It is a non-daemon and sorts last, so
+  a bulk install replaces the running binary only after the rest of the stack
+  has landed; both write paths rename atomically over the destination, so the
+  running process keeps its open inode (#5805).
+- Member names now resolve against every binary a crate installs, read from
+  the shared `trusty_common::bin_resolve` table. `tctl install tctl`,
+  `tctl install tm`, and `tctl install trusty-embedderd` resolve to
+  trusty-installer, trusty-mpm, and trusty-search respectively (#5805).
+- `tctl install --dry-run` names the destination directory it would write to —
+  the canonical `$CARGO_HOME/bin` (#5777) — and lists every binary each member
+  places, not just the one probed for health (#5805).
+- `download::pinned::preflight_pinned_set` answers whether a pinned set could be
+  installed on this host without installing it — a Tier-1 target check and a
+  release-list lookup per tool, and no download, hash, or execution. It shares
+  `resolve_pin` with `install_pinned_set`'s staging path, so a preflight cannot
+  come to a different answer than the install it precedes, and a consumer that
+  needed the question answered no longer has to install or grow a second
+  resolver ([#5970](https://github.com/bobmatnyc/trusty-tools/issues/5970))
+- **`ProbeOutcome::RpcError { code, message }`** — a UDS member that answered with a JSON-RPC error frame. A socket carries no HTTP status code, so `HttpError` has nothing to hold, and folding this into `BadEnvelope` would lose the coded reason: a client drifted onto a wrong method name (`-32601`) reads nothing like a handler that failed (`-32603`). Like `HttpError` it renders `down` and is NOT confirmed-down — the daemon accepted the connection and chose to refuse, which is evidence it is alive. `ProbeOutcome` is a public enum, so an exhaustive `match` on it downstream needs a new arm ([#6277](https://github.com/bobmatnyc/trusty-tools/issues/6277))
+- **`uds_socket_for(binary)`** — resolves the Unix socket a member serves, or `None` for a member still on HTTP ([#6277](https://github.com/bobmatnyc/trusty-tools/issues/6277))
+
+### Fixed
+
+- `tctl stack doctor` and `tctl stack health` no longer report a member whose
+  health is `unknown` as passing. Both gained a third verdict, `undetermined`,
+  with its own exit code 4 — exit 2 still means a member is genuinely broken and
+  exit 0 now means every member was determined healthy. A harness gating on
+  these exit codes could previously go green over a stack that was not up
+  (#4847).
+- A `service install` that fails because the installed binary has no `service`
+  subcommand is reported as release skew instead of forwarding clap's
+  `unrecognized subcommand 'service'`. `tctl start trusty-console` against the
+  published 0.4.0 now names the installed version, says the member has no
+  supervised unit as a result, and gives the remedy, with the raw error appended
+  (#4917).
+- `ensure`'s basename-derived palace name is clamped to `PALACE_ID_MAX_LEN`, so a project directory with a long name no longer posts a name the daemon's format gate rejects ([#2443](https://github.com/bobmatnyc/trusty-tools/issues/2443))
+- `tctl ensure`, `tctl port`, the readiness wait and project setup no longer
+  fail against a healthy daemon when `HTTP_PROXY` is exported. `ensure`'s
+  shared `build_client` now routes through
+  `trusty_common::http_client::loopback_client_builder`, which applies
+  `.no_proxy()`. `probe_http`'s own client routes through the same entry point,
+  so the property this crate proved for `/health` in #4246 cannot drift from
+  the rest of the workspace's loopback callers (#4392).
+- `probe_member_health` now probes trusty-mpm's `/health` over HTTP instead of
+  reporting it `unknown`. Probeability is a property of the daemon's HTTP
+  transport, not of its lifecycle-management strategy; the two axes diverged when
+  #4246 moved the probe from `<binary> health --json` to HTTP, and the
+  `ManageStrategy::OwnVerb` arm was still keyed off the lifecycle enum. mpm now
+  reports `healthy` when serving and `down` when not, in `tctl status`,
+  `tctl stack health`, `tctl stack doctor` and the `tctl install` verify tail —
+  and `tctl up` no longer issues a redundant `start` against a daemon already
+  known to be answering.
+  - **Behaviour change.** trusty-mpm is `required: true`, so a stopped mpm now
+    yields `tctl status` / `tctl stack health` / `tctl stack doctor` →
+    `degraded`, exit 2, and `tctl install` → NOT VERIFIED. This is intended: mpm
+    becomes consistent with its declared `required` flag rather than exempt from
+    it, exactly as a stopped trusty-search already behaves. CI that gates on
+    `tctl status` exit codes may start failing where it previously passed; start
+    mpm (`tctl start trusty-mpm`) or drop it from the gated set.
+  - `ManageStrategy` is unchanged and still governs `tctl start|stop|restart`
+    dispatch and `needs_kickstart`, so a confirmed-down mpm still cannot be
+    handed to `launchctl kickstart -k` against the nonexistent `com.trusty.mpm`
+    label.
+- A prebuilt download that fails SHA-256 verification is no longer reported as
+  "prebuilt unavailable" and silently rebuilt from source. `download::Outcome`
+  now carries a distinct `ChecksumMismatch` variant, and `tctl install`,
+  `tctl upgrade`, and `tctl self-update` all abort with an error naming both
+  digests and the artifact URL instead of falling back to `cargo install`
+  (#5518).
+- `tctl install` no longer files an optional member's failed checksum under
+  "skipped (optional, no prebuilt for this platform)" — in the checklist row or
+  in the summary footer. An integrity failure now fails the run and its exit
+  code regardless of whether the member is required.
+- Stopped 14 doc comments in non-gated code from linking to macOS-gated items
+  (`has_developer_id_cert`, `sign_binary`, `verify_signature`, `sign_set_strict`,
+  `current_identifier`, `post_install_signed_set`, `apply_not_loaded_fallback`,
+  `attempt_verify_fallback`), which rustdoc cannot resolve on Linux. docs.rs
+  builds on Linux once per release and never rebuilds, so these would have been
+  baked into the published documentation permanently.
+- Prebuilt tarball installs place only the crate's expected binaries (per the
+  shared `installed_binaries` table). Release tarballs ship mode-0755
+  `LICENSE`/`README.md`, which previously landed in the bin dir as if they
+  were binaries (#5777).
+- The prebuilt tarball allowlist no longer drops unexpected executables
+  silently: an extracted file that carries the execute bit, is not an obvious
+  documentation file (LICENSE/README/CHANGELOG), and is missing from the
+  shared `installed_binaries` table is now named in a warning before being
+  skipped. Table drift used to produce a half-install with no trace at all
+  (#5777, trusty-review round on PR #5778).
+- `tctl install` no longer reports success when an all-OPTIONAL selection
+  genuinely failed. The `all_ok` filter kept only REQUIRED members, and
+  `.all()` over an empty iterator is vacuously true, so `tctl install tga` (or
+  `trusty-analyze`, or `trusty-console`) printed `all_ok: true` and exited 0
+  with nothing installed. A selection containing no REQUIRED member now gates
+  on every member it selected (#5806).
+- The post-install verify tail had the same vacuous truth one file over:
+  `verified` collapsed to the `ensure` result for any selection whose daemons
+  are all OPTIONAL, so `tctl install trusty-analyze trusty-console` printed
+  VERIFIED with both daemons down. Both reports now read one shared gating rule
+  (#5806).
+- The human install summary contradicted the exit code. An all-optional
+  selection that failed printed `installed 0/0 required component(s)`, an
+  info-level "skipped", and a green VERIFIED while the process exited 2. The
+  footer now counts the same gating set the exit code uses and prints those
+  failures as errors (#5806).
+- `InstallReport::build` over an empty member list reported `all_ok: true`.
+  Nothing reaches it today — `run` returns early on an empty selection — but
+  installing nothing is not evidence of a successful install (#5806).
+- `tctl self-update` no longer reports success for a binary nothing has run. It
+  printed `trusty-installer updated to X. Restart to apply.` and exited 0 as
+  soon as the file was placed, so a broken or wrong-version download read as a
+  completed update. It now runs `--version` on the exact binary it just wrote
+  and cross-checks the reported version, matching the gate `tctl install` has
+  always applied to every other member; a failed probe or a mismatch is an error
+  and exit 1, never a cargo fallback (#5807).
+- A pinned install no longer places a partial set and calls it complete. When a
+  binary the set named was absent from the staged extraction directory,
+  `copy_set_into_install_dir` skipped it silently and still returned `Ok`, so
+  the caller received a set missing a tool with no warning anywhere. The copy
+  phase now fails closed on that name, before the first commit rename, so its
+  "nothing was installed" text stays true (#5810).
+- The `tctl install` footer now reports a PATH-shadowed component. A member that
+  installed and bootstrapped cleanly but is shadowed by a different, earlier
+  copy of the same name gave `all_ok: false` and exit 2 under a footer reading
+  `installed 1/1 required component(s)` with no error line. Shadowing was the
+  last `all_ok` input the footer left out; the human summary and the exit code
+  now agree on every input (#5812, completing #5806).
+- The pinned-tool installer retries the release-list lookup when the crate is
+  published and only the requested version is missing, and says so when the
+  retries run out. `trusty-audit audit` failed hard half an hour after
+  trusty-review 0.23.0 went live, naming `0.22.1` as the newest published
+  version; a manual retry with no other change succeeded, and the message gave
+  no hint that waiting was the answer. A crate with no published releases at all
+  is still refused on the first answer — that is a typo, not lag.
+- The #4470 foreign-port guard now names the process holding a daemon's port in
+  LISTEN, not the first process `lsof` printed. A client connected TO the port
+  is not a holder of it, and `lsof` lists in PID order, so any client older than
+  the daemon sorted ahead of it — `tctl install` then refused to bootstrap
+  trusty-search with "port 7878 is held by pid ..., which launchd does not
+  supervise" while the launchd-supervised daemon was the actual listener. The
+  probe now asks `lsof` for the per-file TCP state (`-FpT`) and confirms LISTEN
+  itself instead of trusting the `-sTCP:LISTEN` selector to have filtered.
+  - Fail-closed is unchanged: output naming no LISTEN holder is `Unknown` and
+    still refuses, and an `lsof` build that reports no TCP state at all falls
+    back to the previous every-PID reading rather than going blind.
+  - The per-service port table is unchanged. Every daemon `tctl` guards
+    (trusty-search, trusty-memory, trusty-analyze, trusty-review,
+    trusty-console, the trusty-mpm supervisor) still binds a TCP port in its
+    current source, so no entry was stale.
+- **`tctl ensure` stopped provisioning memory palaces, and reported it as a skip.** The palace stage asked `resolve_base_url(MEMORY_APP)`, which reads an `http_addr` file ADR-0032 stopped writing — so it answered `None` on every machine and the stage printed "trusty-memory daemon not running; skipped" whether or not one was, giving a green report for a project that was never provisioned. It probes trusty-memory's socket and calls `memory.palace_get` / `palace_create` through the shared client now ([#6286](https://github.com/bobmatnyc/trusty-tools/issues/6286))
+- **`tctl ensure --wait` could never report ready.** Its probe required the same dead resolver to answer, so the memory arm was `false` on every iteration: the command ran its whole 120-second budget and exited 4 no matter what the stack was doing. The memory arm now asks whether anything is serving the socket
+- A `memory.palace_get` failure that is not a not-found no longer falls through to a create. Only "no such palace" means the palace has to be made; creating on top of any other refusal turned one reportable failure into a second
+- `tctl install` and `tctl upgrade` evict the launchd unit trusty-analyze left
+  loaded, through the same `RETIRED_SERVICES` mechanism that clears
+  `com.trusty.review` (#6290) — one eviction path, now two rows. Without it an
+  upgraded macOS host kept `com.trusty.analyze` loaded under `KeepAlive: Always`,
+  which restarted the on-demand trusty-analyze server every time its idle window
+  reclaimed it. A unit that will not go down fails that member's install or
+  upgrade rather than being reported as a skip (#6350).
+- `tctl start`/`restart`/`upgrade` no longer route trusty-analyze through
+  launchd. Its retired row makes `manage_strategy_for` return
+  `ManageStrategy::None`, so `start` cannot bootstrap the retired unit on an
+  upgraded host or shell out to a `trusty-analyze service install` that no
+  longer exists on a fresh one. The port guard could not have caught either:
+  analyze has bound no port since #6287, so the guard permits vacuously (#6350).
+- `tctl status` reported a healthy trusty-memory daemon as `down`, exited 2 with verdict `degraded`, and failed `tctl install`'s verify tail (#6555). The UDS health probe sent a JSON-RPC frame with no `params` key, which decodes to `Value::Null`; `memory.health` is bound to a real `HealthQuery` struct and refused it with `-32602`. The probe now sends `"params": {}`, which is what the correct dialers already send. The same frame serves `analyze.health` and `search.health`, whose `NoParams` binding had been tolerating the omission
+- `tctl restart <service>` waits for launchd to finish the bootout before it
+  bootstraps. The Restart arm called `bootout()` then `bootstrap()` back to back;
+  because `launchctl bootout` returns when the unload is accepted rather than
+  when the job is gone, the bootstrap reached launchd with the label still
+  registered and was refused — `trusty-memory: booted out successfully;
+  bootstrap failed: … Bootstrap failed: 5: Input/output error` — while a plain
+  retry seconds later succeeded (#6618). It now routes through
+  `trusty_common::launchd::LaunchdConfig::restart_gracefully`, which quiesces a
+  unit whose loaded `ExitTimeOut` is shorter than the daemon's flush (the #6590
+  guard `service install` already ran), waits the label out of launchd, and
+  retries the bootstrap once after a second wait. A restart that still fails
+  names the label, both waits, and launchd's own reason.
+- The success line reports the wait it paid and how many bootstrap attempts it
+  took, so a race that recurs is visible instead of silently absorbed.
+- `stack doctor` (and every other `tctl` health rollup) no longer reports
+  `trusty-memory … health:down` against a healthy daemon. The UDS probe built
+  its `memory.health` request with no `params` field, which decodes
+  server-side as `Value::Null`; `HealthQuery` is a plain derived `Deserialize`
+  that refuses `null` however many of its fields carry `#[serde(default)]`, so
+  every probe answered with a coded `invalid_params` error that rendered
+  `down`. The request now carries an explicit `"params": {}`, matching the fix
+  `trusty-console`'s own probe already carries for the identical mismatch
+  (#6356) ([#6630](https://github.com/bobmatnyc/trusty-tools/issues/6630)).
+
+### Changed
+
+- `MEMORY_SET` no longer lists `trusty-bm25-daemon`. #5329 removed that binary from trusty-memory's install surface, so `tctl sign trusty-memory` signs `trusty-memory` and the deprecated `trusty-memory-mcp-bridge` shim only.
+- Every install/upgrade write path now targets the canonical cargo bin dir
+  (`$CARGO_HOME/bin`, falling back to `~/.cargo/bin`) instead of
+  `~/.local/bin` (#5777, #4964 Phase 3): `download::default_install_dir()`
+  delegates to the shared `canonical_bin_dir()`, `install.sh`'s default is
+  `${CARGO_HOME:-$HOME/.cargo}/bin`, `tctl self-update` places into the
+  canonical dir rather than `current_exe()`'s parent, and the deliberate
+  `~/.local/bin` + `~/.cargo/bin` double-write in trusty-agents'
+  `install-wrapper.sh` is deleted. Binaries no longer land in two directories
+  with PATH order deciding which copy runs — the stale-daemon mechanism
+  behind #2386. The unused `DEFAULT_INSTALL_DIR` const is removed.
+- Membership reaches four more subcommands, not just `install`. A bare
+  `tctl upgrade` now replaces the running installer along with the rest of the
+  stack, and `--exclude-self` is the opt-out — before membership that flag
+  matched nothing and did nothing. `tctl updates` reports the installer's own
+  staleness, and `tctl status` lists it as a non-daemon row (`health: n/a`).
+  The daemon-shaped subcommands — `start`, `stop`, `restart`, `stack health`,
+  `stack doctor` — are unaffected: they filter on `daemon`, and the installer
+  is not one (#5805).
+- `tctl config` no longer forwards to the installer. Membership made the
+  fan-out spawn `trusty-installer config --json`, which is `tctl config`, which
+  enumerated the set and spawned it again — unbounded recursion on the
+  documented bare "all members" form. The installer is listed as `skipped`
+  instead, and naming it alone (`tctl config trusty-installer`) is a usage
+  error rather than an empty success (#5805).
+- The PATH-shadow check covers every binary a member places, not just the one
+  probed for health. A stale `tctl` earlier on `$PATH` used to win every shell
+  invocation while the install reported clear (#5805).
+- A forwarded contract verb (`<binary> config --json`, `<binary> version
+  --json`) gives up after 10 seconds. It ran with no deadline, so a member
+  binary that never exits froze `tctl config` indefinitely with nothing on
+  stdout (#5805).
+- A tarball missing a binary the shared `installed_binaries` table lists is
+  reported at warning level. The preview names every binary a member places, so
+  a tarball shipping fewer used to over-promise and under-deliver silently
+  (#5805).
+- `tctl install`'s human summary now reads the gating partition from
+  `stable_set::gating_split` rather than re-deriving `required || !any_required`
+  inline, so the footer and the `all_ok` verdict share one expression of the
+  rule and cannot drift apart again (#5806).
+- **The health probe dials trusty-review over its Unix socket.** `fixed_port_for("trusty-review")` no longer returns 7891; `uds_socket_for` resolves the socket instead, and a member with one is probed only over it — there is no second leg to reconcile and no discovery file to go stale. Leaving the probe on 7891 would have read `Refused` for a healthy daemon, and `Refused` is one of the two variants that authorise `launchctl kickstart -k`, so every `tctl install` would have hard-restarted a working review daemon — #4246 again, which is why this shipped with the daemon change (ADR-0032, [#6277](https://github.com/bobmatnyc/trusty-tools/issues/6277))
+- `classify_rpc_response` applies the same body-first envelope rule as `classify_response`, so `effective_status`'s warming/degraded downgrade and the squatter check are unchanged across the two transports ([#6277](https://github.com/bobmatnyc/trusty-tools/issues/6277))
+- `resolve_guard_ports` returns no ports for a member that binds a Unix socket. Without that, the `http_addr` file left behind on any machine that ran trusty-review before the swap would still resolve `7891`, and the #4470 bootstrap guard would refuse an install because an unrelated process held a port trusty-review never binds ([#6277](https://github.com/bobmatnyc/trusty-tools/issues/6277))
+- `tctl`'s health probe now asks trusty-search for `search.health` on its Unix
+  socket, the transport #6285 is moving the daemon onto, instead of reading
+  `GET /health` alone. Both legs are read while trusty-search serves both: no
+  published trusty-search binds a socket yet, so a socket-only probe would
+  report every installed daemon as `Refused` — the verdict that arms `launchctl
+  kickstart -k` — and hard-restart a healthy search mid-index-flush on every
+  `tctl install`. `probe_http::dual_transport` marks that window, and its arm is
+  deleted when the axum surface is (#6285)
+- Bumped version to 0.13.2 to replace the stranded `trusty-installer-v0.13.1`
+  tag, which was cut at a commit that cannot pass the rustdoc intra-doc-link
+  publish gate. No code change (#6285).
+- `tctl` probes trusty-memory over its Unix socket (`memory.health`) rather than dialling `7070` (#6286, ADR-0032). `fixed_port_for("trusty-memory")` is gone: leaving it would make every `tctl install` dial a port the daemon no longer binds, read the refusal as confirmed-down, and `launchctl kickstart -k` a healthy daemon — #4246 verbatim
+- The port guard resolves NO port for trusty-memory, including when a pre-migration `http_addr` is still on disk. That file is deleted by the daemon at every start, but only once it has started, and the guard runs before that
+- `tctl`'s health probe reaches trusty-analyze over its Unix socket rather than
+  port 7879 (#6287, ADR-0032). A probe left on the retired port reads `Refused`,
+  which `is_confirmed_down` accepts and `verify_tail` turns into
+  `launchctl kickstart -k` against a daemon that was working — the #4246 class.
+- `uds_health_method` generalises the hardcoded `review.health` constant to one
+  method per binary, so a second UDS member cannot inherit the first one's name.
+- Dropped `SUPERVISOR_METRICS_PORT`, the `LaunchctlPort::port_guard` seam, and the `TRUSTY_MPM_SUPERVISOR_ADDR` key from the supervisor plist template. The supervisor binds no port since #6288, so there is none for a foreign process to hold (Refs #6288).
+- `tctl` no longer treats trusty-review as a daemon (#6290): it never shells out
+  to `trusty-review service install`, and boots out the retired
+  `com.trusty.review` unit (and its `com.trusty.trusty-review` alias) during
+  `tctl install`'s service-bootstrap pass instead.
+- The member is probed by presence — binary on PATH plus `--version` — rather
+  than by dialling a socket nothing binds. A presence probe can never report
+  confirmed-down, so `launchctl kickstart -k` can no longer fire at a label that
+  does not exist.
+- The eviction now actually runs. `plans_service_bootstrap` gated on
+  `manage == Launchd`, and a retired member is `ManageStrategy::None`, so the
+  install loop skipped it and `com.trusty.review` was never booted out on any
+  host. It is now visited when the member has a retired service.
+- A retired unit that will not go down fails the install instead of being
+  reported as a skip, so the exit code shows it.
+- `tctl upgrade` evicts a retired member's unit too, through the same
+  mechanism. `restart_plan` read the member as "not a daemon" and skipped it, so
+  an upgrade left `com.trusty.review` loaded and respawning; only `tctl install`
+  cleared it. A unit that will not go down now fails that member's upgrade.
+- `tctl` no longer expects trusty-analyze to be a resident daemon.
+  `member_has_service_install` excludes it (its `service install` subcommand is
+  gone), and `tctl up`'s analyze stage now starts it on demand and pings
+  `analyze.health` once instead of gating on a live dial — so a correct
+  installation with nothing listening reports Ok rather than Degraded (#6350).
+- The health probe follows. A retired member is `ManageStrategy::None`, which
+  would have made analyze `Unprobeable`; it keeps its transport probe through
+  the same named-predicate arm #6290 added for a presence-only member, because
+  starting it and asking `analyze.health` is the only check that separates
+  "working" from "broken" for a service whose healthy resting state is not
+  listening (#6350).
+- trusty-installer moves to 0.13.0. `cargo-semver-checks` reports five major
+  lints against the published 0.12.0 baseline, all of them already on `main`:
+  `pub_module_level_const_missing` (`SUPERVISOR_METRICS_PORT`),
+  `inherent_method_missing` and `struct_pub_field_missing`
+  (`StubLaunchctl::port_guard_calls` / `refuse_port`) and `trait_method_missing`
+  (`LaunchctlPort::port_guard`) from #6349, plus `trait_method_added`
+  (`ServiceEnv::evict_retired`) from #6290. For a `0.y.z` crate the breaking
+  bump is the MINOR position, so 0.12.1 was never a legal position for that
+  work. The root workspace requirement moves from `0.12` to `0.13` (#6350).
+
+### Removed
+
+- `walk_range_for` and the walk-range branch of `resolve_guard_ports`. trusty-memory was the only member that walked (`7070..=7079`) and it serves a socket now, so nothing produced a range. `decide_over_range` still iterates whatever `resolve_guard_ports` returns, which is how a future walker gets the #4470 relaxation back
+
+### Documentation
+
+- Repaired every broken rustdoc intra-doc link in this crate and added
+  `#![deny(rustdoc::broken_intra_doc_links)]` to its crate root(s), so a new
+  one fails the build instead of shipping as dead text on docs.rs (#5744).
+- `stable_set.rs` referred to the report module as `super::install_report`. The
+  module is declared inside `install.rs`, so its real path is
+  `commands::install::install_report` and the link resolved to nothing. Both
+  references are plain code text now (#5973).
+
 ## [0.8.0] — 2026-08-12
 
 ### Added

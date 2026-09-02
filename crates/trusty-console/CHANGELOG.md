@@ -6,6 +6,57 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.9.3] — 2026-09-02
+
+### Added
+
+- `GET /api/console/machine-status/history` returns the last 10 minutes of host
+  samples (120 points at 5 s) plus the per-service transition log, oldest first.
+  Before the first sample it answers 200 with empty arrays rather than the 503
+  the point-in-time route returns — an empty window is a complete answer (#6641).
+- `GET /api/console/machine-status/stream` is a `text/event-stream`. It opens
+  with one `history` event carrying the current window, then sends a `sample`
+  event per new sample and a `transition` event per service state change. A
+  subscriber that falls behind the broadcast buffer gets a `lagged` event naming
+  the dropped count instead of a silent gap (#6641).
+- A per-service transition log records only the moments a service's derived state
+  (`up` / `degraded` / `down` / `unknown`) changed — never a row per poll. A
+  service whose report goes stale past a 60 s grace window, or that drops out of
+  the report set for that long, transitions to `down`; a retained cache entry is
+  not evidence a service is alive (#6641).
+- `serve --host-sample-interval` sets the host sampling cadence, default 5 s. It
+  is independent of `--poll-interval` (still 15 s), which drives the stdio-MCP
+  service polls. The history payload advertises the configured value so the
+  graph's x-axis follows it (#6641).
+
+### Fixed
+
+- Console pages scroll again. `Screensaver.svelte` clipped `:global(body)`, and
+  Vite emits one CSS bundle for the whole SPA, so that rule applied on every tab
+  whether the screensaver was mounted or not — later than `App.svelte`'s `body`
+  rule at equal specificity, so anything taller than the viewport was
+  unreachable. The screensaver still clips itself through `.saver`, which is
+  `position: fixed; inset: 0; overflow: hidden` (#6658).
+
+### Changed
+
+- The analyze detector's `analyze.health` frame carries `"params": {}` (#6555). It sent no `params` at all, which decodes to `Value::Null` and works only because `analyze.health` is bound to `NoParams`; binding that method to a struct would have turned the omission into a `-32602` and read a healthy daemon as absent. The memory connector was fixed the same way in #6359 — this is the sibling site that change missed
+- The Trusty Analyze card's status now comes from a connect-only socket probe
+  rather than an `analyze.health` RPC on every poll. The version is still shown:
+  it is read once per daemon lifetime and cached against the socket's inode, so
+  a respawned daemon is re-read while an open dashboard no longer dials the
+  daemon four times a minute (#6621).
+- History is in-memory only and resets on restart, by owner ruling — a restarted
+  console begins a new, empty window (#6641).
+- `host_status::start` is gone; one loop in `machine_history::sampler` now writes
+  both the point-in-time host cache and the history ring, so the two can never
+  disagree about the newest sample. `host_status::HostMetricsCache` is unchanged
+  (#6641).
+
+### Documentation
+
+- Repair the machine-history sampler link so rustdoc resolves its sample-recording entry point.
+
 ## [0.9.2] — 2026-09-01
 
 ### Added

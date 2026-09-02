@@ -6,6 +6,98 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [5.0.3] — 2026-09-02
+
+### Added
+
+- `tga collect` records the head SHA, ref name and walk SCOPE each completed full-history walk reached, per repository, in the extract database (schema v25). A later collect skips the walk when the repository is unchanged, walks only the new commits when the head advanced, and re-walks in full — naming the reason — when the recorded commit is no longer reachable, when the previous walk did not complete, when `--force` is passed, or when this run's `--branch` / `--head-only` / merge scope differs from the recorded one. A scoped run therefore never licenses a later full-scope run to skip. (#6073)
+- The end-of-collect summary line reports how many repository full-history walks were skipped, the only figure separating a skipped walk from one that ran and found nothing new. (#6073)
+- The authorship summary carries an `identity_merge_risk` flag when a high-confidence but unconfirmed alias suggestion touches a top-ranked author, naming the affected metrics, how many identities are involved, and `tga aliases suggest`. Suggestions are still never merged automatically, and a pair the operator already merged never counts as unmerged. (#6142)
+
+### Fixed
+
+- `tga collect`: Linear enrichment no longer spends a GraphQL lookup on
+  documentation, standard, digest and advisory tokens that merely share a ticket's
+  shape (#5664). `LinearClient::extract_issue_ids` now drops `UTF-8`, `SHA-256`,
+  `ADR-0029`, `RFC-2119`, `ISO-8601`, `ECMA-48`, `RUSTSEC-2026` and their families
+  before any request is issued; a live 52-week collect on this repository sent 369
+  such lookups, none of which could ever resolve. The decision is made offline by
+  `collect::ticket::is_non_ticket_identifier`, which `extract_ticket_id`,
+  `is_ticketed` and `branch_ticket_key` already used under its former name — one
+  prefix list, so the pre-lookup gate and the subject-position rule cannot drift
+  apart. That list widened from four documentation prefixes to the measured
+  families, so a subject led by `CVE-2024-3094` or `SHA-256` no longer counts as a
+  declared ticket key either. Ticket-shaped tokens that simply do not resolve
+  (`WI-1`, `AC-1`, `CREDPANEL-01`) are deliberately still looked up: nothing
+  separates them from another organization's real board keys, and DOC-70 §9.1
+  reads an unresolved key as the signal it is.
+- A history walk whose revwalk stops early — a corrupt or unreadable object — now fails the repository's collect stage instead of returning as a completed walk. The rows it already wrote are kept, but the partial traversal is never recorded as complete, so the next collect re-walks rather than skipping on it. (#6073)
+- The recorded walk scope encodes its branch list as JSON rather than joining on `,`, so a branch whose name contains a comma is no longer indistinguishable from two branches — a run scoped to either used to skip the other's walk. `tga collect --dry-run` also stops printing a full-history-walk skip count: a dry run writes to an empty in-memory database, so that figure was structurally always zero. (#6073)
+- The authorship report applies confirmed identity merges recorded in `authors.aliases` before computing bus factor and top-author share, so a merge an operator accepted no longer comes apart when a later collect re-observes the source email. The map is applied to the identity resolver's own answer as well as to unlinked commits, so a re-created source row does not split the merge back apart. (#6142)
+- `tga collect` no longer re-creates an author row that `tga aliases merge` deleted. The resolver routes an email already recorded as a confirmed alias to the identity that absorbed it, so a merge survives every later collect rather than only the report that follows it. (#6142)
+- The unmerged-identity scan runs once per audit rather than once per repository. It cross-joins every identity against every other, and the `authors` table is shared across all repositories in one extract database, so the per-repository call repeated an O(n²) scan for an identical answer. (#6142)
+- The scan now receives the configured `team.canonical_domain`. It previously ran with no domain, which muted the `.local` hostname, GitHub-noreply and domain-typo signals — the identities issue #6142 exists to surface. (#6142)
+- `tga audit` names a failed unmerged-identity scan as a gap on the DD manifest instead of dropping the identity-merge risk flag with only a log line, so bus factor and top-author share never print with an unstated check beside them. An `authors.aliases` value that will not parse as JSON is likewise named on stderr — with the author it belongs to — at both the collect and report sites, rather than silently reading as "this author has no confirmed merges". (#6142)
+- `tga collect`: a GitHub secondary rate limit during the reviewer pass no longer
+  fails the run (#6553). The pass now tells a throttled pull request apart from a
+  broken one, records the shortfall once — naming how many pull requests got no
+  reviewer rows — and records it at `ItemSkipped` severity, so `tga collect`
+  exits 0 with `pr_reviewers` partial rather than exiting 1 with every other
+  stage's data already persisted. The reviewer query is forward-only, so the next
+  run resumes at the pull requests the throttled one never reached. This replaces
+  the #6084 abort, which made `github.fetch_pr_reviews: true` unusable on an
+  unattended schedule and emitted one warning line per remaining pull request
+  (21,230 in the reported run).
+- `tga collect`'s rate-limit sleep allowance is now per-RUN rather than
+  per-client (#6565). #6084 gave each GitHub client a `FetchBudget`, which bounds
+  a client and not a run: one `collect` builds several — org discovery, the PR
+  sweep, the reviewer pass — so the 120 s ceiling was charged once per client and
+  the wall-clock a run could spend asleep scaled with the number of clients
+  instead of being the fixed bound the constant reads as. A breaker latched
+  during one pass also did not stop the next from spiralling again. The new
+  `RunBudget` is a shared handle every client takes via
+  `GitHubClient::with_run_budget`, constructed once on `CollectionPipeline`, so
+  there is one allowance, one breaker, and one truncation ledger for the whole
+  run.
+- `TGA_RATE_LIMIT_SLEEP_BUDGET_SECS` overrides the 120 s total. The same ceiling
+  now covers strictly more work than it did per-client, so a long multi-org sweep
+  that legitimately needs a larger allowance has a way to ask for one. A zero or
+  unparseable value falls back to the shipped default rather than latching the
+  breaker on the first rate-limited response.
+- `TGA_RATE_LIMIT_SLEEP_BUDGET_SECS` is now discoverable (#6565). The knob
+  shipped with the per-run budget but appeared in no `tga --help`, no
+  `tga collect --help`, and no documentation — `RATE_LIMIT_SLEEP_BUDGET_ENV` was
+  `pub(crate)` and never surfaced, so an operator whose sweep needed a larger
+  allowance had no way to learn one existed. `tga collect --help` now carries an
+  `ENVIRONMENT:` section naming the variable, its 120 s default, and the rule
+  that zero, empty, and unparseable values fall back to that default; the same
+  detail is in the crate README's configuration section and in the workspace
+  environment-variable table. A test renders the subcommand's help and asserts
+  the constant's own value appears in it, so renaming the constant without
+  updating the help fails rather than silently un-documenting the variable.
+- The `audit` module's `# Spec References` blocks name DOC-67 by its
+  repo-root-relative path rather than a `../../../../` traversal, which DOC-38
+  §2.1 permits only in a Markdown visible section. Eleven references were
+  silently unchecked as a result (#6605). `run_full_sweep`'s stage-order note
+  moved out of the reference block, where its prose closed the block and left
+  two more references unscanned.
+
+### Changed
+
+- The audit guards' `analyze.health` and `search.health` frames carry `"params": {}` (#6555). Both sent no `params` at all, which decodes to `Value::Null` and works only because those methods are bound to `NoParams`; binding either to a struct would have turned the omission into a `-32602`, which each guard reads as "the daemon cannot serve the report"
+- `extract_owner_repo_from_url` delegates to
+  `trusty_common::github_path::parse_remote_url` instead of parsing the URL
+  itself, and the second copy of it under `commands::deployments` is now a
+  re-export of the first (#6657). The accepted forms are unchanged — HTTPS,
+  scp-style SSH, `ssh://`, and `https://user@`, GitHub hosts only.
+
+### Documentation
+
+- `audit::repo_index::index_id_for`'s agreement note points at
+  `trusty_review::report::index_registry::derive_index_id`, the module that
+  derivation moved to (#6677).
+- Repointed `build_authorship_summary_with`'s `Test:` citation from `single_author_subsystem_detected`, a name that never shipped, at `shared_subsystem_is_not_single_author`; the positive case is already asserted inside `builds_from_seeded_commits` (#6678).
+
 ## [5.0.2] — 2026-08-31
 
 ### Breaking

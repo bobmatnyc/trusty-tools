@@ -1,6 +1,0 @@
-Fixed
-
-- The authorship report applies confirmed identity merges recorded in `authors.aliases` before computing bus factor and top-author share, so a merge an operator accepted no longer comes apart when a later collect re-observes the source email. The map is applied to the identity resolver's own answer as well as to unlinked commits, so a re-created source row does not split the merge back apart. (#6142)
-- `tga collect` no longer re-creates an author row that `tga aliases merge` deleted. The resolver routes an email already recorded as a confirmed alias to the identity that absorbed it, so a merge survives every later collect rather than only the report that follows it. (#6142)
-- The unmerged-identity scan runs once per audit rather than once per repository. It cross-joins every identity against every other, and the `authors` table is shared across all repositories in one extract database, so the per-repository call repeated an O(n²) scan for an identical answer. (#6142)
-- The scan now receives the configured `team.canonical_domain`. It previously ran with no domain, which muted the `.local` hostname, GitHub-noreply and domain-typo signals — the identities issue #6142 exists to surface. (#6142)

@@ -1,2 +1,0 @@
-Fixed
-- The chunk export now walks trusty-search's cursor pagination (`?after=`) rather than offset pagination, and refuses an export that falls short of the `total` the daemon reports. Offset mode reads trusty-search's in-memory chunk cache — a map that is evicted after 300s idle, rehydrated on a detached task the request does not wait for, and capped by `TRUSTY_MAX_CHUNKS` — so a cold or unreadable corpus answered HTTP 200 with an empty page and every analyze endpoint then asserted a confident zero. Refs #6043, #5917.

@@ -6,6 +6,55 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.25.6] — 2026-09-02
+
+### Added
+
+- `trusty-memory palace stats <name>` (#6652) — read-only report of a palace's `kg.redb`: file size, per-table row counts and byte usage, the active-vs-history triple split, superseded-drawer count, and a reclaimable estimate. Safe against a live palace with the daemon running.
+- `trusty-memory palace compact <name> [--dry-run]` — prune stale history rows and rewrite `kg.redb` to reclaim disk.
+- `palace_dream` accepts `compact: true` (and `dry_run: true`), returning a `compaction` object with before/after byte counts and pruned-row counts.
+- `trusty-memory doctor` reports the largest `kg.redb` on disk: warns at 100 MB, fails at 500 MB.
+- `[dream]` config keys `compact`, `prune_history_after_days`, `compact_min_bytes`, `compact_keep_backup` in `~/.trusty-memory/config.toml`.
+
+### Fixed
+
+- `transport::uds::serve_with_shutdown` awaits the BM25 exit flush under
+  `trusty_common::shutdown::CLEANUP_RESERVE` (#6601 review). The reserve is the
+  time `serve_until`'s drain holds back so the work after it can run, and
+  `bm25_lane::shutdown` claimed there was "no window in which a SIGKILL can land
+  mid-flush" — but `flush_all` takes the residency mutex and flushes every
+  resident palace with no deadline. A slow flush spent the whole reserve, the
+  socket unlink after it never ran, and the SIGKILL left behind the stale socket
+  file `bind_singleton_hardened` exists to work around.
+- An abandoned flush warns, naming the budget, and costs nothing a SIGKILL would
+  not have: `BM25Index::flush` renames a temp file into place, so every palace
+  keeps the snapshot its last coalescing tick published.
+- The stdio bridge no longer spawns an unsupervised daemon onto the production
+  socket while launchd is restarting the unit. `ensure_daemon_running`'s
+  single-flight `flock` (#5267/#6286) coordinates bridges with each other and
+  cannot see launchd, so a bridge that probed during a `bootout`/`bootstrap`
+  window read the transiently unserved socket as "nothing is running" and started
+  its own daemon — without the plist's `FASTEMBED_CACHE_DIR` /
+  `FASTEMBED_CACHE_PATH` — on the path launchd's own instance wanted. launchd's
+  process then found the socket held and exited 0 ("another instance is already
+  running"), reporting success while a misconfigured orphan owned the socket
+  (#6619). The guard now asks whether a launchd unit owns the path and waits for
+  it, bounded by the termination grace, erroring with the unit's label instead of
+  spawning.
+- A daemon startup refuses the production socket outright when a launchd unit is
+  registered for it and launchd positively reports it does not run this process.
+  This is the callee-side half, and it holds for a daemon started by anything —
+  by hand, by a script, by an older bridge. It refuses only on a positive
+  `NotSupervised`: `Unknown` means launchd could not be asked, and refusing on
+  that would take the daemon down on every host with an unreadable `launchctl`.
+- Both guards apply only to the canonical production socket. A daemon under a
+  `TRUSTY_DATA_DIR_OVERRIDE` sandbox, or on a host that never installed the
+  service, keeps the on-demand spawn unchanged.
+
+### Changed
+
+- `palace_compact`'s description now states outright that it is vector-index-only and does not touch `kg.redb` (#6652).
+
 ## [0.25.5] — 2026-08-31
 
 ### Added
