@@ -105,9 +105,13 @@ pub(crate) fn allow_patterns_grant_tool(name: &str, patterns: &[String]) -> bool
 /// registry-carried side-effect marker, and the justification is structural:
 /// these tools are discovered from the external gworkspace MCP server at
 /// runtime and carry no Rust-side write/side-effect flag this crate could read.
-/// The set is the exfiltration/persistence subset named in the #4054 ruling —
-/// deliberately narrower than "every write tool" (creating a Doc is not
-/// exfiltration), and any addition is a reviewable one-line edit here.
+/// The set is the exfiltration/persistence subset — deliberately narrower than
+/// "every write tool" (creating a Doc is not exfiltration), and any addition is
+/// a reviewable one-line edit here. Extended from five to seven by the owner
+/// ruling 2026-08-31: `manage_events` sends a calendar invite (title/body) to an
+/// arbitrary attendee — the same send-to-anyone channel as `compose_email` —
+/// and `manage_drive_file` moves/copies/trashes a Drive file, the same
+/// persistence/evidence-destruction rationale that gates `modify_gmail_messages`.
 /// Test: `exfil_set_matches_the_ruling`, `is_exfil_capable_tool_*`.
 pub(crate) const EXFIL_CAPABLE_TOOLS: &[&str] = &[
     "compose_email",           // sends mail to an arbitrary recipient
@@ -115,6 +119,8 @@ pub(crate) const EXFIL_CAPABLE_TOOLS: &[&str] = &[
     "manage_gmail_settings",   // forwarding address / delegate — persistent channel
     "manage_gmail_filters",    // auto-forward / auto-archive, silent and durable
     "modify_gmail_messages",   // label/archive/trash — destructive, hides evidence
+    "manage_events",           // emails a calendar invite to an arbitrary attendee
+    "manage_drive_file",       // moves/copies/trashes a Drive file — persistence/evidence
 ];
 
 /// Whether `name` is one of the exfiltration-capable tools gated by #4054.
@@ -181,6 +187,27 @@ pub(crate) fn strip_exfil_pending_confirmation(
             .filter(|n| !is_exfil_capable_tool(n))
             .collect(),
     }
+}
+
+/// Whether the persona-chat tool surface would grant `tool` under `patterns`,
+/// composing the #4520 literal-only L0 rule AND the #4054 exfil strip.
+///
+/// Why: the advisory API panes (`/subagents`, `/knowledge`, `/skills`) DISPLAY
+/// which tools an agent may reach and claim to use "the same matcher the
+/// dispatch gate uses". After #4520/#4054 the dispatch gate is no longer a bare
+/// `match_any_glob`: an `[tools].allow = ["*"]` reaches neither the L0 shell nor
+/// the exfiltration-capable Google tools. A pane still calling `match_any_glob`
+/// would advertise both as available while the real gate denies them — the
+/// display drift this closes. One tool at a time, this mirrors what
+/// `filter_persona_tool_names` + `strip_exfil_pending_confirmation` do to the
+/// whole list on the real path (the confirmation channel is `Unavailable`
+/// there, so an exfil tool is never granted).
+/// What: `allow_patterns_grant_tool` (literal-only for L0-gated tools) AND NOT
+/// `is_exfil_capable_tool`. Purely narrowing versus `match_any_glob`.
+/// Test: `persona_surface_grants_tool_excludes_l0_and_exfil_under_wildcard`,
+/// plus the pane tests in `api::server::*`.
+pub(crate) fn persona_surface_grants_tool(tool: &str, patterns: &[String]) -> bool {
+    allow_patterns_grant_tool(tool, patterns) && !is_exfil_capable_tool(tool)
 }
 
 #[cfg(test)]

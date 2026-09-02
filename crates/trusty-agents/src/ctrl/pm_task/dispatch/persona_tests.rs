@@ -912,6 +912,38 @@ fn persona_tier_gate_keeps_read_only_gworkspace_tools() {
     );
 }
 
+/// #4054 extension (owner ruling 2026-08-31): `manage_events` (invite-to-anyone)
+/// and `manage_drive_file` (move/copy/trash) join the exfil set, so both are now
+/// stripped on the persona-chat path without confirmation while a read-only tool
+/// survives. FAILS on b16a56a07, where neither was in the set and both were
+/// granted by the wildcard.
+#[test]
+fn persona_tier_gate_strips_extended_exfil_tools() {
+    let all_names: Vec<String> = vec![
+        "manage_events".to_string(),
+        "manage_drive_file".to_string(),
+        "get_drive_file_content".to_string(),
+    ];
+    let patterns = vec!["*".to_string()];
+    let allowed_by_tier: std::collections::HashSet<String> = all_names.iter().cloned().collect();
+
+    let kept = super::super::persona_gate::filter_persona_tool_names_for_tier(
+        all_names,
+        &patterns,
+        &allowed_by_tier,
+        &std::collections::HashMap::new(),
+        &[],
+        crate::agents::AgentTier::L0Orchestration,
+    );
+
+    assert_eq!(
+        kept,
+        vec!["get_drive_file_content".to_string()],
+        "manage_events and manage_drive_file must be denied without confirmation; \
+         the read-only Drive read survives, got: {kept:?}"
+    );
+}
+
 /// #4520 on the persona-chat path: `filter_persona_tool_names` shares the
 /// literal-only rule, so a persona's `allow = ["*"]` must not surface the
 /// registered L0 shell grant. Pre-fix `*` matched it as a glob.

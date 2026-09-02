@@ -110,7 +110,7 @@ use serde_json::{Value, json};
 use super::agent_patch::resolve_agent_paths;
 use super::state::AppState;
 use crate::agents::{AgentConfig, AgentTier};
-use crate::ctrl::pm_task::match_any_glob;
+use crate::ctrl::pm_task::tool_authz::persona_surface_grants_tool;
 use crate::runtime::tool_registry::{ASSISTANT_ALLOWED_DELEGATE_ROLES, ASSISTANT_TIER_ROLE};
 use crate::skills::manifest::{SkillCatalog, effective_tool_patterns};
 use crate::tools::cross_product::{CODING_PM_TARGET, DispatchTarget, NON_CODING_TARGETS};
@@ -212,7 +212,10 @@ pub(super) async fn subagents_at(
     // Knowledge/Skills panes compute it (`[tools].allow` ∪ expanded
     // `[skills].allow`), so "is this delegation tool actually granted" is
     // answered by the same matcher the dispatch gate uses rather than by
-    // eyeballing the allow-list.
+    // eyeballing the allow-list. #4520/#4054: that matcher is
+    // `persona_surface_grants_tool`, not a bare `match_any_glob` — a `*` allow
+    // no longer displays the L0 shell or an exfil tool as granted, matching the
+    // real gate.
     let catalog =
         SkillCatalog::builtin().with_authored(crate::skills::manifest::authored::load_from_paths(
             &crate::skills::sources::SkillSourceRegistry::load(project_root).resolved_paths(),
@@ -222,7 +225,11 @@ pub(super) async fn subagents_at(
         cfg.skills.allow.as_ref(),
         &catalog,
     );
-    let grants = |tool: &str| patterns.as_deref().is_some_and(|p| match_any_glob(tool, p));
+    let grants = |tool: &str| {
+        patterns
+            .as_deref()
+            .is_some_and(|p| persona_surface_grants_tool(tool, p))
+    };
 
     let in_product = in_product_surface(dirs, name, &cfg, grants(DELEGATE_TOOL)).await;
     let cross_product =

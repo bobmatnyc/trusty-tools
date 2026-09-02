@@ -15,10 +15,12 @@
 //! Phase-3 editor can render the full choice without a second route.
 //!
 //! **Honesty rules this route holds to** (#3945's discipline, restated):
-//! - `granted` is computed by the SAME `match_any_glob` the dispatch gate uses,
-//!   against the SAME compiled patterns, from a catalog built the SAME way
-//!   (built-in + authored overlay) — it is not a re-implementation, and it does
-//!   not read a narrower catalog than the runtime it describes.
+//! - `granted` is computed by the SAME predicate the dispatch gate uses —
+//!   `persona_surface_grants_tool` (#4520/#4054): allow-globs with the L0
+//!   literal-only rule and the exfil strip, not a bare `match_any_glob` — against
+//!   the SAME compiled patterns, from a catalog built the SAME way (built-in +
+//!   authored overlay). It is not a re-implementation, and it does not read a
+//!   narrower catalog than the runtime it describes.
 //! - A credential is reported as present only when it is an environment
 //!   variable this process can actually read. An OAuth grant reports its
 //!   requirement with `configured: null` — unknown, never "yes".
@@ -73,7 +75,11 @@ use serde_json::{Value, json};
 use super::agent_patch::resolve_agent_paths;
 use super::state::AppState;
 use crate::agents::{SkillsConfig, ToolsConfig};
+// `match_any_glob` is the CATALOG-coverage matcher (dead-pattern diagnostic);
+// `persona_surface_grants_tool` is the DISPATCH-gate matcher used for `granted`
+// (#4520/#4054). The two answer different questions — see their call sites.
 use crate::ctrl::pm_task::match_any_glob;
+use crate::ctrl::pm_task::tool_authz::persona_surface_grants_tool;
 use crate::skills::manifest::{ProviderReq, SkillCatalog, SkillManifest, effective_tool_patterns};
 use crate::tools::registry::dead_scope;
 use crate::tools::registry::scope::ScopePattern;
@@ -205,10 +211,13 @@ pub(super) async fn skills_at(dirs: &[PathBuf], name: &str, project_root: &Path)
 /// Ids of the skills this agent is actually granted.
 ///
 /// Why: `granted` must agree with dispatch, so it is computed with the SAME
-/// `match_any_glob` against the SAME compiled patterns rather than by a second
-/// rule that can drift. Tool-less skills have nothing to match, so they are
-/// granted exactly when `[skills].allow` names them — which is also why they
-/// need their own clause instead of falling out of the glob test as `false`.
+/// `persona_surface_grants_tool` predicate (#4520/#4054 — allow-globs plus the
+/// L0 literal-only rule and the exfil strip) against the SAME compiled patterns
+/// rather than by a second rule that can drift; a bare `match_any_glob` would
+/// mark an L0 or exfil skill-tool granted under `*` though the real gate denies
+/// it. Tool-less skills have nothing to match, so they are granted exactly when
+/// `[skills].allow` names them — which is also why they need their own clause
+/// instead of falling out of the glob test as `false`.
 /// What: Returns the granted ids. `patterns == None` (no capability declared)
 /// grants nothing, matching the persona path's `else` arm.
 /// Test: `skills_route_reports_granted_skills_with_human_names`,
@@ -222,7 +231,7 @@ fn granted_skill_ids(
     if let Some(patterns) = patterns {
         for manifest in catalog.manifests() {
             if let Some(tool) = manifest.tool()
-                && match_any_glob(tool, patterns)
+                && persona_surface_grants_tool(tool, patterns)
             {
                 granted.insert(manifest.id.clone());
             }
