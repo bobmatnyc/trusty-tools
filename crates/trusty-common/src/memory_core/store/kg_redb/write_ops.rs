@@ -44,10 +44,12 @@ impl KgStoreRedb {
     /// `room:General --contains--> drawer:N` asserts left one row.
     /// What: Single write transaction over TRIPLES + secondary indexes +
     /// ACTIVE_SUBJECT_COUNTS, delegating to [`batch_assert`] so the single-op
-    /// and batched paths cannot drift.
+    /// and batched paths cannot drift (#4922) — including on `valid_from`,
+    /// which #4920's Tier S `affirmed_at` derivation depends on.
     /// Test: `assert_then_query_returns_triple`,
     /// `assert_functional_predicate_still_supersedes`,
-    /// `assert_multiple_objects_for_multivalued_predicate_all_survive`.
+    /// `assert_multiple_objects_for_multivalued_predicate_all_survive`,
+    /// `single_assert_and_apply_batch_one_op_agree_on_valid_from`.
     pub fn assert(&self, triple: &Triple) -> Result<()> {
         self.check_writable()?;
         let wtx = self.db().begin_write().context("begin assert txn")?;
