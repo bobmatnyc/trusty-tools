@@ -48,8 +48,11 @@
 //! `validate_stale_broken_frontmatter_is_a_gap` (issue #3556),
 //! `validate_well_formed_agent_is_not_flagged` (issue #3556),
 //! `repair_closes_gaps_on_incomplete_workspace`,
-//! `repair_is_a_noop_on_already_complete_workspace`; the expected-set
-//! resolution itself is covered by `expected_set`'s own test module.
+//! `repair_is_a_noop_on_already_complete_workspace`,
+//! `repair_closes_a_managed_tier_bundled_skill_gap` (issue #6586),
+//! `a_stray_project_tier_bundled_skill_does_not_satisfy_completeness` (issue
+//! #6586); the expected-set resolution itself is covered by `expected_set`'s
+//! own test module.
 
 use std::path::Path;
 
@@ -237,14 +240,14 @@ fn validate_agents(fw: &FrameworkPaths, gaps: &mut Vec<DeploymentGap>) {
 fn validate_skills(fw: &FrameworkPaths, gaps: &mut Vec<DeploymentGap>) {
     // #6586: the expected set is the BUNDLED roster, and bundled skills are
     // user-tier only now — so probing the project tier for them would report
-    // every one of them missing on a workspace that is in fact complete. The
-    // managed config dir is where they land; it is the `skills` sibling of
-    // `agent_deploy_dir`, the same derivation `skill_deploy_tiers` uses.
-    let target = fw
-        .agent_deploy_dir()
-        .parent()
-        .map(|dir| dir.join("skills"))
-        .unwrap_or_else(|| fw.agent_deploy_dir().join("skills"));
+    // every one of them missing on a workspace that is in fact complete.
+    // `FrameworkPaths::skill_deploy_dir` is the ONE derivation of that tier;
+    // `session_launch::skills` deploys through it too, so this probe and the
+    // repair that closes its gaps read the same directory by construction.
+    // A stray bundled copy left in a project's own `.claude/skills` by an older
+    // binary is deliberately NOT consulted here — `tm doctor`'s
+    // `skill_project_tier` reports it, and it must not satisfy completeness.
+    let target = fw.skill_deploy_dir();
     let manifest_present = target.join(skill_manifest::SKILL_MANIFEST_FILE).is_file();
     if !manifest_present {
         gaps.push(DeploymentGap::SkillManifestMissing);

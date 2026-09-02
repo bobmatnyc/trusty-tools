@@ -12,8 +12,10 @@
 //! already call (`deploy_agents_filtered`, `deploy_all_skill_tiers`,
 //! `deploy_output_style`) rather than inventing a third redeploy path.
 //! What: [`sync_session_assets`] resolves the harness manifest/plan for
-//! `project_dir` exactly as launch does, redeploys the manifest-selected agents
-//! (folding in the DOC-42 co-deploy set) and the 3-tier skills, and refreshes
+//! `project_dir` exactly as launch does, redeploys the manifest-selected agents,
+//! redeploys skills to the two destinations #6586 split them across (the
+//! bundled roster to the managed user tier, the user-custom tier to the
+//! project), and refreshes
 //! the project-tier output styles. It intentionally does NOT touch CLAUDE.md,
 //! hooks, or MCP injection — those are session-identity concerns outside
 //! asset-catalog sync, and re-running them risks clobbering session-local state
@@ -114,10 +116,11 @@ pub struct SyncAssetsReport {
 /// (1) redeploys agents via [`deploy_agents_filtered`] against
 /// `fw.agent_deploy_dir()` — the tm-managed config-dir tier, issue #4409 — and
 /// retracts any bundled copy an older binary left in the workspace's own
-/// `.claude/agents/`; (2) folds the redeployed agents' declared `skills:`
-/// into the skill `select` predicate (DOC-42 co-deploy) and redeploys the
-/// 3-tier skill set via [`deploy_all_skill_tiers`]; (3) best-effort refreshes
-/// the PROJECT-tier output styles via [`deploy_output_style`] (issue #2125 item
+/// `.claude/agents/`; (2) redeploys skills via [`deploy_all_skill_tiers`] twice
+/// — the bundled roster into [`FrameworkPaths::skill_deploy_dir`] and the
+/// user-custom tier into the project's own `.claude/skills/` (#6586); (3)
+/// best-effort refreshes the
+/// PROJECT-tier output styles via [`deploy_output_style`] (issue #2125 item
 /// 2 — the tier a managed session's `--setting-sources project,local` launch
 /// actually reads). `fw` MUST be workspace-scoped
 /// (`FrameworkPaths::for_managed_workspace(project_dir)`) so the deploy
@@ -186,9 +189,22 @@ pub fn sync_session_assets(
             }
         };
 
+    // #6586: bundled skills refresh in the managed user tier, the same
+    // destination `session_launch::skills` and `managed_config` write. Without
+    // this call a sync-assets run refreshed no bundled skill anywhere — #2444's
+    // whole point — because the project tier declines them below.
+    let mut skill_deploy: DeployStats = deploy_all_skill_tiers(
+        &plan.skill_source,
+        &fw.user_skill_source_dir(),
+        &fw.skill_deploy_dir(),
+        |_| true,
+    )
+    .map_err(|e| SyncAssetsError::SkillDeploy(e.to_string()))?
+    .stats;
+
     // #6586: bundled skills are user-tier only — see
     // `project_skill_tier::bundled_excluded_from_project_tier`.
-    let skill_deploy: DeployStats = deploy_all_skill_tiers(
+    let project_skills: DeployStats = deploy_all_skill_tiers(
         &plan.skill_source,
         &fw.user_skill_source_dir(),
         &fw.claude_skills_dir(),
@@ -196,6 +212,9 @@ pub fn sync_session_assets(
     )
     .map_err(|e| SyncAssetsError::SkillDeploy(e.to_string()))?
     .stats;
+    skill_deploy.deployed.extend(project_skills.deployed);
+    skill_deploy.skipped.extend(project_skills.skipped);
+    skill_deploy.unchanged.extend(project_skills.unchanged);
 
     // Non-fatal, mirroring `prepare_session_inner`'s own treatment of this step.
     let output_style_synced = deploy_output_style(project_dir).is_ok();
@@ -265,14 +284,24 @@ mod tests {
         ws_fw.claude_skills = project_dir.join(".claude").join("skills");
 
         sync_session_assets(&ws_fw, &project_dir).unwrap();
-        let deployed_path = ws_fw.claude_skills_dir().join("tm-doctor").join("SKILL.md");
+        // #6586: the bundled copy lives in the managed user tier now, so that is
+        // where the refresh has to land. The project tier must stay empty of it.
+        let deployed_path = ws_fw.skill_deploy_dir().join("tm-doctor").join("SKILL.md");
         assert_eq!(std::fs::read_to_string(&deployed_path).unwrap(), "v1.0.0");
+        assert!(
+            !ws_fw.claude_skills_dir().join("tm-doctor").exists(),
+            "a bundled skill must never be deployed to the project tier"
+        );
 
         // The catalog/bundled skill bumps version mid-session.
         std::fs::write(bundled.join("tm-doctor.md"), "v1.1.0").unwrap();
         let report = sync_session_assets(&ws_fw, &project_dir).unwrap();
         assert!(report.skills_deployed.contains(&"tm-doctor".to_string()));
         assert_eq!(std::fs::read_to_string(&deployed_path).unwrap(), "v1.1.0");
+        assert!(
+            !ws_fw.claude_skills_dir().join("tm-doctor").exists(),
+            "a bundled skill must never be deployed to the project tier"
+        );
     }
 
     #[test]

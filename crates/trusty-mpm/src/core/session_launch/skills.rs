@@ -36,10 +36,12 @@ use crate::core::skill_tiers::{
 /// neither needs a second directory scan.
 /// What: warns when the workspace's deployed skills lag the bundled source,
 /// resolves the project / user / bundled stem sets, logs every agent-declared
-/// skill's resolution (DOC-42, §SPEC-AGENTSKILLS-05), deploys the three tiers
-/// with precedence project-custom > user-custom > bundled (#2816), then sweeps
-/// every deploy tier for skills no source ships any more (#5224). A deploy
-/// failure is recorded in `roster_errors` and yields empty stats.
+/// skill's resolution (DOC-42, §SPEC-AGENTSKILLS-05), deploys the bundled roster
+/// to the managed user tier and the user-custom tier to the project (#6586;
+/// within each destination the precedence is still project-custom >
+/// user-custom > bundled, #2816), then sweeps every deploy tier for skills no
+/// source ships any more (#5224). A deploy failure at EITHER destination is
+/// recorded in `roster_errors` and yields empty stats.
 /// Test: `session_launch::tests`, plus `crate::core::skill_retire`'s own suite.
 pub(super) fn deploy_session_skills(
     fw: &FrameworkPaths,
@@ -78,27 +80,51 @@ pub(super) fn deploy_session_skills(
     let project_stems = list_project_custom_stems(&fw.claude_skills_dir()).unwrap_or_default();
     log_declared_skills(declared_skills, &project_stems, &user_stems, &bundled_stems);
 
-    // Claude Code reads the project's `.claude/skills/` at startup. Skills carry
-    // no inheritance, so this is a manifest-tracked content copy. Since #6586
-    // only the user-custom tier deploys here; a skill hand-placed in the
-    // project's `.claude/skills/` outranks it and is never overwritten, and
-    // bundled skills reach the session through the user tier instead. See
+    // Skills carry no inheritance, so each deploy below is a manifest-tracked
+    // content copy. #6586 split the single deploy this used to be in two, by
+    // destination: the managed user tier takes the bundled roster, the project's
+    // own `.claude/skills/` takes the user-custom tier only. A project-custom
+    // skill still outranks both and is never overwritten. See
     // `core::skill_tiers` and
     // `project_skill_tier::bundled_excluded_from_project_tier`.
     crate::core::provisioning_stage::emit(
         crate::core::provisioning_stage::ProvisioningStage::DeployingSkills,
     );
+    // #6586: the bundled roster deploys here UNFILTERED, the same destination
+    // and the same `|_| true` selection `managed_config::ensure_managed_config_dir`
+    // uses on the daemon spawn path. Running it from session prep too is what
+    // lets `deploy_validate::validate_and_repair` close a managed-tier gap: that
+    // repair calls `prepare_session_with_repo_url`, i.e. this function, and its
+    // probe reads `fw.skill_deploy_dir()`. Until this call existed the probe
+    // read one tier and the repair wrote another, so a reported gap could never
+    // be closed.
+    let managed = deploy_all_skill_tiers(
+        &plan.skill_source,
+        &fw.user_skill_source_dir(),
+        &fw.skill_deploy_dir(),
+        |_| true,
+    );
     // #6586: bundled skills are user-tier only — see
-    // `project_skill_tier::bundled_excluded_from_project_tier` for why this
-    // costs no coverage, including DOC-42's co-deploy guarantee.
-    let stats = match deploy_all_skill_tiers(
+    // `project_skill_tier::bundled_excluded_from_project_tier` for why declining
+    // them here costs no coverage, DOC-42's co-deploy guarantee included.
+    let project = deploy_all_skill_tiers(
         &plan.skill_source,
         &fw.user_skill_source_dir(),
         &fw.claude_skills_dir(),
         crate::core::project_skill_tier::bundled_excluded_from_project_tier,
-    ) {
-        Ok(result) => result.stats,
-        Err(err) => {
+    );
+    // #6586: either destination failing is ONE skill-deploy failure. The launch
+    // continues without the skill set and the stats default out, so no caller
+    // reads a half-deploy as a complete one — #2149's contract, unchanged.
+    let stats = match (managed, project) {
+        (Ok(managed), Ok(project)) => {
+            let mut stats = managed.stats;
+            stats.deployed.extend(project.stats.deployed);
+            stats.skipped.extend(project.stats.skipped);
+            stats.unchanged.extend(project.stats.unchanged);
+            stats
+        }
+        (Err(err), _) | (Ok(_), Err(err)) => {
             tracing::error!(
                 project_dir = %project_dir.display(),
                 "skill deploy FAILED — session will launch WITHOUT the tm/mpm skill \

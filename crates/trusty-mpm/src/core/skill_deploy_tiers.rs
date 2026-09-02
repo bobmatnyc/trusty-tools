@@ -61,11 +61,9 @@ pub fn skill_deploy_tiers(
     paths: &FrameworkPaths,
     project_dir: Option<&Path>,
 ) -> Vec<SkillDeployTier> {
-    let managed = paths
-        .agent_deploy_dir()
-        .parent()
-        .map(|dir| dir.join("skills"))
-        .unwrap_or_else(|| paths.agent_deploy_dir().join("skills"));
+    // #6586: one derivation, on `FrameworkPaths`, shared with the session
+    // launch's bundled deploy and `deploy_validate`'s probe.
+    let managed = paths.skill_deploy_dir();
 
     let candidates = [
         Some(("managed config", managed)),
@@ -97,10 +95,7 @@ mod tests {
         let tiers = skill_deploy_tiers(&paths, None);
 
         assert_eq!(tiers[0].label, "managed config");
-        assert_eq!(
-            tiers[0].dir,
-            paths.agent_deploy_dir().parent().unwrap().join("skills")
-        );
+        assert_eq!(tiers[0].dir, paths.skill_deploy_dir());
         assert!(tiers.iter().any(|t| t.dir == paths.claude_skills_dir()));
     }
 

@@ -69,10 +69,7 @@ fn seed_agent_source(fw: &FrameworkPaths, names: &[&str]) {
 /// bundled roster into `fw.claude_skills_dir()`. Bundled skills are user-tier
 /// only now, so that directory is no longer where completeness is decided.
 fn managed_skills_dir(fw: &FrameworkPaths) -> std::path::PathBuf {
-    fw.agent_deploy_dir()
-        .parent()
-        .map(|dir| dir.join("skills"))
-        .unwrap_or_else(|| fw.agent_deploy_dir().join("skills"))
+    fw.skill_deploy_dir()
 }
 
 fn seed_skill_source(fw: &FrameworkPaths, names: &[&str]) {
@@ -535,5 +532,94 @@ fn repair_is_not_reported_when_the_pipeline_fails_fatally() {
         !outcome.repaired,
         "a repair that failed fatally must NOT report repaired: true (error was {:?})",
         outcome.repair_error
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn repair_closes_a_managed_tier_bundled_skill_gap() {
+    // Why (#6586): the probe and the repair had to move to the same tier in one
+    // step, and this test is what proves they arrived. `validate_skills` reads
+    // `fw.skill_deploy_dir()` — the managed user tier, where bundled skills live
+    // since the 2026-09-01 owner ruling. `validate_and_repair` repairs by
+    // calling `session_launch::prepare_session_with_repo_url`, which until #6586
+    // wrote only the project tier. Probe one tier, repair another, and every gap
+    // the probe reports is unrepairable: the daemon's spawn gate re-runs the
+    // repair on every launch and never converges.
+    //
+    // FIXTURE: a workspace complete in every other respect with exactly the
+    // managed-tier bundled skill removed, so the gap under test is the only one
+    // and a green result cannot come from some other probe passing.
+    // #3965: `#[serial]` + `$HOME` override — see `HomeGuard` above.
+    let fake_home = TempDir::new().unwrap();
+    let _home_guard = {
+        let prior = std::env::var("HOME").ok();
+        // SAFETY: serialized via `#[serial_test::serial]`.
+        unsafe { std::env::set_var("HOME", fake_home.path()) };
+        HomeGuard(prior)
+    };
+    let tmp = TempDir::new().unwrap();
+    let fw = fully_provisioned(tmp.path());
+    let workspace = fw.claude_home_dir();
+    assert!(
+        validate_workspace(&fw).is_complete(),
+        "fixture precondition: the workspace starts complete"
+    );
+
+    std::fs::remove_dir_all(fw.skill_deploy_dir().join("tm-doctor")).unwrap();
+
+    let before = validate_workspace(&fw);
+    assert_eq!(
+        before.gaps,
+        vec![DeploymentGap::SkillMissing("tm-doctor".to_string())],
+        "removing the managed-tier copy must be the ONLY gap reported"
+    );
+
+    let outcome = validate_and_repair(&fw, &workspace, None);
+
+    assert!(
+        outcome.repaired,
+        "the repair must close a managed-tier skill gap (error: {:?}, remaining: {:?})",
+        outcome.repair_error, outcome.after.gaps
+    );
+    assert!(outcome.is_complete(), "remaining: {:?}", outcome.after.gaps);
+    assert!(
+        fw.skill_deploy_dir()
+            .join("tm-doctor")
+            .join("SKILL.md")
+            .is_file(),
+        "the repair must rewrite the skill at the managed tier: {}",
+        fw.skill_deploy_dir().display()
+    );
+    assert!(
+        !fw.claude_skills_dir().join("tm-doctor").exists(),
+        "the repair must not put a bundled skill back in the project tier"
+    );
+}
+
+#[test]
+fn a_stray_project_tier_bundled_skill_does_not_satisfy_completeness() {
+    // Why (#6586): an older binary deployed every bundled skill to the project's
+    // own `.claude/skills/` as well. Those copies are frozen — no deploy reaches
+    // them any more — so counting one as "the skill is deployed" would report a
+    // workspace complete while the tier that actually loads holds nothing. `tm
+    // doctor`'s `skill_project_tier` check reports the stray; completeness must
+    // keep reading only the managed tier.
+    let tmp = TempDir::new().unwrap();
+    let fw = fully_provisioned(tmp.path());
+    std::fs::remove_dir_all(fw.skill_deploy_dir().join("tm-doctor")).unwrap();
+
+    // Plant the stray exactly where the pre-#6586 deploy would have left it.
+    let stray = fw.claude_skills_dir().join("tm-doctor");
+    std::fs::create_dir_all(&stray).unwrap();
+    std::fs::write(stray.join("SKILL.md"), "frozen copy from an older install").unwrap();
+
+    let report = validate_workspace(&fw);
+    assert!(
+        report
+            .gaps
+            .contains(&DeploymentGap::SkillMissing("tm-doctor".to_string())),
+        "a stray project-tier copy must not satisfy completeness, gaps: {:?}",
+        report.gaps
     );
 }
