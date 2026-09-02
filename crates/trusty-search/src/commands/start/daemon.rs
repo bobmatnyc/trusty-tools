@@ -40,6 +40,36 @@ use crate::commands::prior_index_count::load_prior_index_count;
 /// warning is preserved from the message this replaces.
 /// Test: `already_running_message_names_the_pid_and_the_signal`,
 /// `already_running_message_defers_the_restart_to_launchd`.
+/// Refuse to start when a daemon is already live.
+///
+/// Why (#6590): this check used to run only inside the foreground daemon, and a
+/// bare `trusty-search start` forks a detached `--foreground` child with
+/// `Stdio::null()` before reaching it. The child raised the refusal and wrote it
+/// to `/dev/null`, while the parent had already printed "Daemon starting in
+/// background" and exited 0 — so an operator saw success against a daemon that
+/// never started. The parent calls this BEFORE forking now; the foreground path
+/// still calls it for the launchd/systemd case, which never forks.
+/// What: `Ok(())` when `running_pid` is `None`, otherwise an error carrying
+/// [`already_running_message`]. Takes the pid rather than probing for it, so the
+/// refusal is testable without a live daemon on the machine.
+/// Test: `a_bare_start_refuses_before_forking_when_a_daemon_is_running`,
+/// `a_start_proceeds_when_no_daemon_is_running`.
+pub(super) fn refuse_if_already_running(running_pid: Option<u32>) -> Result<()> {
+    let Some(pid) = running_pid else {
+        return Ok(());
+    };
+    tracing::warn!("daemon already running (pid {pid}); refusing to start a second instance");
+    #[cfg(target_os = "macos")]
+    let supervised = crate::commands::service::launchd_agent_loaded();
+    #[cfg(not(target_os = "macos"))]
+    let supervised = false;
+    Err(anyhow::anyhow!(already_running_message(
+        pid,
+        trusty_common::shutdown::termination_grace().as_secs(),
+        supervised
+    )))
+}
+
 pub(super) fn already_running_message(
     pid: u32,
     grace_secs: u64,
@@ -138,6 +168,10 @@ pub async fn handle_start(
             tracing::info!("data-dir override: {}", dir.display());
         }
     }
+
+    // #6590: refuse in the PARENT, before the fork below detaches the child's
+    // stdio to /dev/null and discards everything it would have said.
+    refuse_if_already_running(crate::service::running_daemon_pid())?;
 
     // Background self-spawn path: when invoked without `--foreground`, fork a
     // detached copy of ourselves with `--foreground` and return immediately.
@@ -286,20 +320,9 @@ pub async fn handle_start(
     //
     // Issue #87 (Option A): if the lockfile exists and the recorded PID is
     // *alive*, print an actionable warning and exit 1.
-    if let Some(pid) = crate::service::running_daemon_pid() {
-        tracing::warn!("daemon already running (pid {pid}); refusing to start a second instance");
-        // #6590: name the remedy, not just the pid — the loop this refusal
-        // produced ran 17 times against a launchd-respawned orphan.
-        #[cfg(target_os = "macos")]
-        let supervised = crate::commands::service::launchd_agent_loaded();
-        #[cfg(not(target_os = "macos"))]
-        let supervised = false;
-        anyhow::bail!(already_running_message(
-            pid,
-            trusty_common::shutdown::termination_grace().as_secs(),
-            supervised
-        ));
-    }
+    // #6590: the bare `start` parent already ran this before forking; the
+    // foreground path reaches it here, which is what launchd and systemd take.
+    refuse_if_already_running(crate::service::running_daemon_pid())?;
 
     // Issue #81: detect orphan daemons whose PIDs are NOT recorded in the
     // lockfile. Reap them now so we don't end up with two daemons fighting

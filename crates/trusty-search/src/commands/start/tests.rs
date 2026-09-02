@@ -2259,6 +2259,42 @@ async fn swap_back_real_hardware_kills_sidecar_past_max_restarts() {
     );
 }
 
+/// Why (#6590): a bare `trusty-search start` forks a detached `--foreground`
+/// child with `Stdio::null()` and returns, and the already-running check used to
+/// run only inside that child. The child's refusal went to `/dev/null` while the
+/// parent printed "Daemon starting in background" and exited 0, so an operator
+/// saw success against a daemon that never started. The parent runs the check
+/// itself now, and this is the gate that says so.
+/// What: with a live pid, the check REFUSES, and the error carries the same
+/// remedy text `already_running_message` renders.
+/// Test: itself.
+#[test]
+fn a_bare_start_refuses_before_forking_when_a_daemon_is_running() {
+    let err = super::daemon::refuse_if_already_running(Some(86880))
+        .expect_err("a live daemon must refuse a second start");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Daemon already running (pid 86880)"),
+        "the parent must raise the refusal, not swallow it: {msg}"
+    );
+    assert!(
+        msg.contains("kill -TERM 86880"),
+        "the remedy must survive into the parent's error: {msg}"
+    );
+}
+
+/// Why: the refusal must fire only against a live daemon — an empty probe is the
+/// ordinary first start, which has to proceed to the fork.
+/// What: `None` returns `Ok`.
+/// Test: itself.
+#[test]
+fn a_start_proceeds_when_no_daemon_is_running() {
+    assert!(
+        super::daemon::refuse_if_already_running(None).is_ok(),
+        "no running daemon means nothing to refuse"
+    );
+}
+
 /// Why (#6590): the refusal this asserts is what an operator reads while a
 /// launchd-respawned orphan holds the port. The pre-fix text named the pid and
 /// then advised `trusty-search stop` — which is what they had already tried.

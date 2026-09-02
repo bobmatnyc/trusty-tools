@@ -13,7 +13,7 @@ name        = "trusty-console"
 # (`src/connector.rs:100`). The struct was exhaustively constructible through
 # the public API, so a struct literal downstream stops compiling. Cargo's 0.x
 # rule puts a break in the MINOR position.
-version     = "0.9.2"
+version     = "0.9.3"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true

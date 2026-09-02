@@ -61,6 +61,9 @@ mod worktree_nested;
 pub(crate) mod worktree_ownership;
 // #2919: merged-PR reclamation + the disk accounting `tm doctor` reports.
 pub(crate) mod worktree_reclaim;
+// #6561: the `gh` runner `worktree_reclaim` calls, which reports WHY a lookup
+// failed instead of collapsing every failure into an unexplained unknown.
+mod worktree_reclaim_gh;
 // #4732: the tri-state "does git still hold state here?" classifier that gates
 // every raw directory removal on the worktree teardown path.
 mod worktree_protection;

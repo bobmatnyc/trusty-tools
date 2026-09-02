@@ -148,7 +148,7 @@ fn three_pr_corpus() -> (Vec<CorpusEntry>, Vec<Vec<Finding>>) {
 #[test]
 fn compute_metrics_three_pr_corpus() {
     let (corpus, trusty_results) = three_pr_corpus();
-    let report = compute_metrics(&corpus, &trusty_results);
+    let report = compute_metrics(&corpus, &trusty_results).expect("matching lengths");
 
     // PR 101: recall=2/2=1.0, precision=2/2=1.0
     assert!(
@@ -215,7 +215,7 @@ fn compute_metrics_three_pr_corpus() {
 #[test]
 fn rust_semantic_fp_rate_computed_correctly() {
     let (corpus, trusty_results) = three_pr_corpus();
-    let report = compute_metrics(&corpus, &trusty_results);
+    let report = compute_metrics(&corpus, &trusty_results).expect("matching lengths");
 
     // Rust semantic findings (kind=logic-error|ownership on .rs files):
     // PR 101 trusty: src/db.rs/logic-error → recalled (human has it) → +1 recalled, +1 total
@@ -241,7 +241,7 @@ fn rust_semantic_fp_rate_neutral_when_no_rust_semantic_findings() {
     }];
     // Only a Python-file finding (not rust-semantic)
     let results = vec![vec![make_finding("src/main.py", "logic-error")]];
-    let report = compute_metrics(&corpus, &results);
+    let report = compute_metrics(&corpus, &results).expect("matching lengths");
     assert!(
         (report.rust_semantic_fp_rate - 0.0).abs() < 1e-9,
         "expected neutral 0.0 (no FPs) when no Rust semantic findings, got {}",
@@ -273,7 +273,7 @@ fn recall_does_not_exceed_one_when_two_trusty_match_same_human_finding() {
         make_finding("src/lib.rs", "logic-error"),
         make_finding("src/lib.rs", "logic-error"),
     ]];
-    let report = compute_metrics(&corpus, &results);
+    let report = compute_metrics(&corpus, &results).expect("matching lengths");
     // Recall: 1 distinct human finding recalled / 1 total → 1.0 (not 2.0)
     assert!(
         (report.per_pr[0].recall - 1.0).abs() < 1e-9,
@@ -347,7 +347,7 @@ fn load_corpus_empty_file_returns_empty_vec() {
 #[test]
 fn pr_label_formatted_correctly() {
     let (corpus, trusty_results) = three_pr_corpus();
-    let report = compute_metrics(&corpus, &trusty_results);
+    let report = compute_metrics(&corpus, &trusty_results).expect("matching lengths");
     assert_eq!(report.per_pr[0].pr, "acme/api#101");
     assert_eq!(report.per_pr[1].pr, "acme/api#102");
     assert_eq!(report.per_pr[2].pr, "acme/api#103");
@@ -506,4 +506,66 @@ fn a_corpus_line_with_a_reference_verdict_parses_it() {
     let line = r#"{"owner":"acme","repo":"api","pr":1,"human_findings":[],"reference_verdict":"REQUEST_CHANGES"}"#;
     let entry: CorpusEntry = serde_json::from_str(line).expect("labelled corpus line parses");
     assert_eq!(entry.reference_verdict, Some(Verdict::RequestChanges));
+}
+
+// ─── #1632: compute_metrics returns an error instead of panicking ─────────
+
+/// Why: `compute_metrics` used `assert_eq!` on the two slice lengths — a
+/// mismatch panicked the whole calibration run (and, being a `pub fn` in
+/// library-adjacent code, any caller) rather than letting the caller decide
+/// how to handle a caller bug. #1632 replaces that with a `Result`.
+/// What: a corpus of 2 entries against a `trusty_results` of 1 must return
+/// `Err`, not panic, and the message must name both lengths.
+/// Test: this test.
+#[test]
+fn compute_metrics_mismatched_lengths_return_err_not_panic() {
+    let corpus = vec![
+        labelled(1, Verdict::Approve),
+        labelled(2, Verdict::RequestChanges),
+    ];
+    let trusty_results: Vec<Vec<Finding>> = vec![vec![]]; // only 1, corpus has 2
+
+    let result = compute_metrics(&corpus, &trusty_results);
+    let err = result.expect_err("mismatched lengths must return Err, not panic");
+    let msg = err.to_string();
+    assert!(
+        msg.contains('2') && msg.contains('1'),
+        "error must name both lengths (corpus=2, trusty_results=1): {msg}"
+    );
+}
+
+// ─── #1632: run_pipeline_for_entry reuses resolve_diff_token ──────────────
+
+/// Why: `run_pipeline_for_entry` used to build its own `GithubClient` and call
+/// `AuthStrategy::select(...).resolve_token(...)` directly — a second,
+/// independent implementation of exactly what `resolve_diff_token`
+/// (`pipeline::runner_helpers`, the SAME funnel `run_review`'s own Step 2c
+/// uses) already does, risking silent auth-path divergence. A value-level test
+/// can't distinguish "calls the shared helper" from "reimplements the same
+/// two calls inline" when both resolve successfully, so this pins it at the
+/// source level: the pre-fix source called `GithubClient::new()` and
+/// `AuthStrategy::select(` directly (2 call sites); this asserts 0, and that
+/// `resolve_diff_token(` is called instead.
+/// What: reads `calibrate.rs`'s own source.
+/// Test: this test.
+#[test]
+fn run_pipeline_for_entry_reuses_resolve_diff_token_helper() {
+    let src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/commands/calibrate.rs"
+    ))
+    .expect("read calibrate.rs source");
+    let direct_derivation =
+        src.matches("GithubClient::new()").count() + src.matches("AuthStrategy::select(").count();
+    assert_eq!(
+        direct_derivation, 0,
+        "calibrate.rs must not re-derive GithubClient/AuthStrategy directly (#1632) — \
+         found {direct_derivation} call site(s)"
+    );
+    assert_eq!(
+        src.matches("resolve_diff_token(").count(),
+        1,
+        "calibrate.rs must resolve the GitHub token via the shared \
+         `resolve_diff_token` helper exactly once"
+    );
 }

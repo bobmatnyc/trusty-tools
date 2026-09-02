@@ -242,6 +242,19 @@ When `developer_aliases` is non-empty it takes precedence over `team.members`. U
 
 See [`configs/example-config.yaml`](configs/example-config.yaml) for a working example that covers multiple repositories, developer aliases, and CSV+Markdown output.
 
+### Environment variables
+
+Settings that belong to a machine or a single run, rather than to a config file:
+
+| Variable | Applies to | Default | Description |
+|---|---|---|---|
+| `TGA_RATE_LIMIT_SLEEP_BUDGET_SECS` | `tga collect`, `tga analyze`, `tga audit` | `120` | Total wall-clock seconds one run may spend asleep waiting out GitHub rate limits. The whole run shares one allowance — not one per GitHub client (issue #6565) — so once it is spent, every later GitHub call fails fast and the result is reported as truncated rather than presented as complete. A positive integer wins; unset, empty, `0`, and any value that does not parse all fall back to the default. Raise it for a long multi-org sweep that legitimately needs a larger total. |
+
+Tokens (`GITHUB_TOKEN`, `JIRA_API_TOKEN`, …) are covered under
+[Multi-source classification](#multi-source-classification-issue-260).
+The full workspace-wide table, including `TGA_AI_MARKERS` and `TGA_DB`, is in
+[`docs/reference/environment-variables.md`](../../docs/reference/environment-variables.md).
+
 ## Common Workflows
 
 ### First-time setup

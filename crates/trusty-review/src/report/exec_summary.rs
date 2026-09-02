@@ -20,7 +20,7 @@
 //! Test: `exec_summary_tests.rs`.
 //!
 //! # Spec References
-//! - [`SPEC-TGAUDIT-08~draft`](../../../../docs/specs/DOC-67-tga-audit-mode.md#SPEC-TGAUDIT-08~draft)
+//! - [`SPEC-TGAUDIT-08~draft`](docs/specs/DOC-67-tga-audit-mode.md#SPEC-TGAUDIT-08~draft)
 
 use std::collections::BTreeMap;
 

@@ -31,7 +31,7 @@
 //! `ReplApp::quit`, since a spawned task can't reach `&mut ReplApp` directly.
 //!
 //! # Spec References
-//! - [`SPEC-TTUI-05~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — Slice 5 deliverable (§5, Slice 5): line-editor keymap + Ctrl-C daemon cancel.
+//! - [`SPEC-TTUI-05~draft`](docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — Slice 5 deliverable (§5, Slice 5): line-editor keymap + Ctrl-C daemon cancel.
 
 use super::ReplApp;
 use crate::event::{KeyCode, KeyInput, ReplEvent};

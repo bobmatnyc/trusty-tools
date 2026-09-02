@@ -1,0 +1,5 @@
+# dotnet build/restore output for the Fixture.csproj integration fixture
+# (#1008) — build_project_diags() runs `dotnet build`/`dotnet restore` with
+# this directory as its cwd, so a local test run leaves these here.
+bin/
+obj/

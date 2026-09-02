@@ -10,6 +10,7 @@ use crate::collect::azdo::AzureDevOpsClient;
 use crate::collect::bitbucket::BitbucketClient;
 use crate::collect::errors::Result;
 use crate::collect::fault::CollectionFault;
+use crate::collect::git::walk_state;
 use crate::collect::git::GitCollector;
 use crate::collect::github::budget::RunBudget;
 use crate::collect::github::GitHubClient;
@@ -94,6 +95,15 @@ pub struct CollectionStats {
     /// Number of `(repo, week)` pairs skipped because already present in
     /// `collection_runs` (and `force` was false).
     pub weeks_skipped: usize,
+    /// Number of repositories whose full-history walk was skipped outright
+    /// because the extract database was already current at their tips (#6073).
+    ///
+    /// Why: this is the only observable that separates a skipped walk from a
+    /// full re-walk that happens to insert nothing — both leave
+    /// `commits_collected` at zero, so a caller (or a test) asserting on that
+    /// alone cannot tell whether the walk was avoided.
+    /// Test: `crate::collect::git::extractor::tests::unchanged_head_skips_the_walk`.
+    pub repos_skipped: usize,
     /// Non-fatal faults encountered, each tagged with its blast radius (#5655).
     ///
     /// Nothing in the pipeline aborts on a fault. A `StageFailed` entry means
@@ -805,7 +815,9 @@ impl CollectionPipeline {
             }
             (None, None) => {
                 // Fully unbounded — full history traversal with no week
-                // bookkeeping. Warn explicitly per Bug #65.
+                // bookkeeping. Warn explicitly per Bug #65. #6073 makes the
+                // re-run cheap by recording the tip each completed walk
+                // reached; the warning still stands for a first run.
                 warn!(
                     repo = %repo_name,
                     "no since_date or --weeks flag set — collecting full git history. \
@@ -819,17 +831,7 @@ impl CollectionPipeline {
                      Set analysis.since_date or pass --weeks N to limit scope."
                 ),
                 );
-                match collector.collect(db) {
-                    Ok(n) => {
-                        info!(repo = %repo_name, commits = n, "extracted (unbounded)");
-                        stats.commits_collected += n;
-                    }
-                    Err(e) => {
-                        let msg = format!("collection failed for {repo_name}: {e}");
-                        warn!("{msg}");
-                        stats.fail_stage(msg);
-                    }
-                }
+                self.collect_unbounded(db, collector, stats);
                 return stats.errors.len() - errors_before;
             }
         };
@@ -902,6 +904,125 @@ impl CollectionPipeline {
             }
         }
         stats.errors.len() - errors_before
+    }
+
+    /// Walk a repository's full history, skipping or narrowing the walk when
+    /// the extract database is already current for its tips (#6073).
+    ///
+    /// Why: this path has no `collection_runs` bookkeeping, so before #6073
+    /// every re-run re-walked the entire history — the issue measured that
+    /// against a 594 MB extract database, reached through trusty-audit's
+    /// per-repo retry of a render-stage failure. `--force` restores the
+    /// unconditional full walk.
+    /// What: reads the recorded [`walk_state`], compares it against the
+    /// repository's current tips AND this run's [`walk_state::WalkScope`], and
+    /// dispatches on the resulting [`walk_state::WalkPlan`]. The state is
+    /// marked in flight before the walk and recorded complete only after the
+    /// walk returns `Ok`, so both an interrupted run and one whose revwalk
+    /// aborted re-walk in full rather than skipping on partial data. Any
+    /// bookkeeping failure degrades to a full walk rather than aborting the
+    /// repository.
+    /// Test: `crate::collect::git::extractor::tests::{unchanged_head_skips_the_walk,
+    /// advanced_head_walks_only_the_new_commits,
+    /// unreachable_base_forces_a_full_rewalk,
+    /// a_scoped_walk_does_not_license_skipping_a_full_one,
+    /// an_aborted_revwalk_is_not_recorded_as_a_completed_walk}`.
+    pub(crate) fn collect_unbounded(
+        &self,
+        db: &mut Database,
+        collector: &GitCollector,
+        stats: &mut CollectionStats,
+    ) {
+        let repo_name = collector.name().to_string();
+        // The scope comes from the collector, not from `self`, so it reflects
+        // what the revwalk will actually seed — including a per-repo
+        // `head_only: true` the pipeline ORed in (#6073 review).
+        let scope = collector.walk_scope();
+        let tips = match collector.walk_tips() {
+            Ok(t) => Some(t),
+            Err(e) => {
+                // Without tips there is nothing to compare or record; fall
+                // back to the pre-#6073 unconditional walk.
+                warn!(repo = %repo_name, error = %e, "could not read repository tips; walking in full");
+                None
+            }
+        };
+
+        let plan = match (&tips, self.force) {
+            // `--force` is the existing "re-collect everything" lever and
+            // keeps meaning exactly that here.
+            (_, true) => walk_state::WalkPlan::Full {
+                reason: walk_state::FullWalkReason::Forced,
+            },
+            (None, _) => walk_state::WalkPlan::Full {
+                reason: walk_state::FullWalkReason::NeverWalked,
+            },
+            (Some(t), false) => {
+                let recorded = walk_state::load(db.connection(), &repo_name).unwrap_or_else(|e| {
+                    warn!(repo = %repo_name, error = %e, "could not read walk state; walking in full");
+                    None
+                });
+                let reachable = recorded
+                    .as_ref()
+                    .is_some_and(|s| collector.base_is_reachable(&s.head_sha));
+                walk_state::plan(recorded.as_ref(), t, &scope, reachable)
+            }
+        };
+
+        let hide = match &plan {
+            walk_state::WalkPlan::Skip => {
+                let line = format!(
+                    "Skipped   full history: extract db already current at {head} \
+                     (use --force to re-walk) [{repo_name}]",
+                    head = tips.as_ref().map(|t| t.head_sha.as_str()).unwrap_or("")
+                );
+                info!(repo = %repo_name, "{line}");
+                notify::progress(&self.progress, &repo_name, &line);
+                stats.repos_skipped += 1;
+                return;
+            }
+            walk_state::WalkPlan::Incremental { base_sha } => match git2::Oid::from_str(base_sha) {
+                Ok(oid) => Some(oid),
+                Err(e) => {
+                    warn!(repo = %repo_name, error = %e, "recorded walk base is malformed; walking in full");
+                    None
+                }
+            },
+            walk_state::WalkPlan::Full { reason } => {
+                info!(
+                    repo = %repo_name,
+                    "collecting FULL git history: {}",
+                    reason.as_str()
+                );
+                None
+            }
+        };
+
+        // Mark the walk in flight so a run interrupted here re-walks in full.
+        // This preserves any recorded head/digest/scope, so an interrupt does
+        // not overwrite the last known-good base with tips nothing walked.
+        if let Err(e) = walk_state::mark_in_flight(db.connection(), &repo_name) {
+            warn!(repo = %repo_name, error = %e, "could not mark walk in flight");
+        }
+
+        match collector.collect_window_hiding(db, None, None, hide) {
+            Ok(n) => {
+                info!(repo = %repo_name, commits = n, ?hide, "extracted (unbounded)");
+                stats.commits_collected += n;
+                if let Some(t) = &tips {
+                    if let Err(e) =
+                        walk_state::record_complete(db.connection(), &repo_name, t, &scope)
+                    {
+                        warn!(repo = %repo_name, error = %e, "could not record completed walk");
+                    }
+                }
+            }
+            Err(e) => {
+                let msg = format!("collection failed for {repo_name}: {e}");
+                warn!("{msg}");
+                stats.fail_stage(msg);
+            }
+        }
     }
 
     /// Read distinct `(author_name, author_email)` pairs from `commits`

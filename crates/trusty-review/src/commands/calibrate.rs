@@ -22,12 +22,12 @@ use tracing::warn;
 
 use trusty_review::{
     config::{InvocationSurface, ReviewConfig},
-    integrations::{
-        github::{AuthStrategy, GithubClient, RunMode},
-        search_client::HttpSearchClient,
-    },
+    integrations::{github::RunMode, search_client::HttpSearchClient},
     models::{Finding, Verdict},
-    pipeline::{CallerContext, DiffSource, ReviewDeps, ReviewInput, TriggerDecision, run_review},
+    pipeline::{
+        CallerContext, DiffSource, ReviewDeps, ReviewInput, TriggerDecision, run_review,
+        runner_helpers::resolve_diff_token,
+    },
 };
 
 use super::run::build_deps_async;
@@ -347,14 +347,21 @@ pub fn is_rust_semantic(finding: &Finding) -> bool {
 /// findings, false-positive trusty findings, and accumulates into aggregate
 /// recall/precision and the TRUE Rust semantic FP rate (lower = better).
 /// Test: `compute_metrics_three_pr_corpus` in `calibrate_tests.rs`.
+///
+/// # Errors
+/// Returns an error, rather than panicking, when `corpus` and `trusty_results`
+/// have different lengths (#1632) — a mismatched pair is a caller bug, and a
+/// library function must let the caller handle that as a `Result` rather than
+/// take down the whole calibration run on an `assert_eq!` panic.
 pub fn compute_metrics(
     corpus: &[CorpusEntry],
     trusty_results: &[Vec<Finding>],
-) -> CalibrationReport {
-    assert_eq!(
+) -> Result<CalibrationReport> {
+    anyhow::ensure!(
+        corpus.len() == trusty_results.len(),
+        "corpus and trusty_results must have the same length (corpus={}, trusty_results={})",
         corpus.len(),
-        trusty_results.len(),
-        "corpus and trusty_results must have the same length"
+        trusty_results.len()
     );
 
     let mut total_human: usize = 0;
@@ -446,13 +453,13 @@ pub fn compute_metrics(
         1.0_f64 - (rust_sem_recalled as f64 / rust_sem_total as f64)
     };
 
-    CalibrationReport {
+    Ok(CalibrationReport {
         recall: aggregate_recall,
         precision: aggregate_precision,
         per_pr,
         verdict_bars: None,
         rust_semantic_fp_rate,
-    }
+    })
 }
 
 // ─── I/O helpers ─────────────────────────────────────────────────────────────
@@ -504,31 +511,26 @@ async fn run_pipeline_for_entry(
     reviewer_model: &str,
     deps: ReviewDeps,
 ) -> (Vec<Finding>, Verdict) {
-    let client = match GithubClient::new() {
-        Ok(c) => c,
-        Err(e) => {
-            warn!(pr = entry.pr, owner = %entry.owner, repo = %entry.repo,
-                  "calibrate: failed to build GitHub client: {e}");
-            return (Vec::new(), Verdict::Unknown);
-        }
+    // #1632: resolve the token through `resolve_diff_token` — the SAME funnel
+    // `run_review`'s own Step 2c uses (`runner.rs`) — instead of re-deriving the
+    // `GithubClient`/`AuthStrategy` dance here. A second independent
+    // implementation is exactly the auth-path divergence risk the issue
+    // flagged: a future change to token resolution would silently not apply to
+    // calibration runs. An empty `token` placeholder is what signals
+    // `resolve_diff_token` to resolve it (see its doc comment).
+    let unresolved = DiffSource::Github {
+        owner: entry.owner.clone(),
+        repo: entry.repo.clone(),
+        pr: entry.pr,
+        token: String::new(),
     };
-    let token = match AuthStrategy::select(RunMode::Cli, None)
-        .resolve_token(&client, config, &entry.owner)
-        .await
-    {
-        Ok(t) => t,
+    let diff_source = match resolve_diff_token(&unresolved, config, RunMode::Cli).await {
+        Ok(source) => source,
         Err(e) => {
             warn!(pr = entry.pr, owner = %entry.owner, repo = %entry.repo,
                   "calibrate: GitHub token resolution failed: {e}");
             return (Vec::new(), Verdict::Unknown);
         }
-    };
-
-    let diff_source = DiffSource::Github {
-        owner: entry.owner.clone(),
-        repo: entry.repo.clone(),
-        pr: entry.pr,
-        token,
     };
 
     let input = ReviewInput {
@@ -626,7 +628,7 @@ pub async fn cmd_calibrate(_config: ReviewConfig, args: CalibrateArgs) -> Result
         trusty_verdicts.push(verdict);
     }
 
-    let mut report = compute_metrics(&corpus, &trusty_results);
+    let mut report = compute_metrics(&corpus, &trusty_results)?;
     report.verdict_bars = compute_verdict_bars(&corpus, &trusty_verdicts);
     let json = serde_json::to_string_pretty(&report).context("serialising calibration report")?;
 

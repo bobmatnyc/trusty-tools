@@ -51,9 +51,15 @@ const ALLOWLISTED_BOOTSTRAP_SITES: &[(&str, usize, &str)] = &[
     ),
     (
         "commands/lifecycle.rs",
-        2,
-        "`launchd_control`'s Start and Restart `cfg.bootstrap()` calls; both GATED by \
-         `port_guard::guard_bootstrap`, Restart's placed before its bootout",
+        1,
+        "`launchd_control`'s Start `cfg.bootstrap()`, GATED by \
+         `port_guard::guard_bootstrap`. Restart's own `cfg.bootstrap()` left this file \
+         in #6618: it now issues through `LaunchdConfig::restart_gracefully`, which \
+         waits the label out of launchd first. That arm still calls \
+         `port_guard::guard_bootstrap` before its bootout, so the #4470 gate is \
+         unchanged — but the bootstrap itself is now in `trusty-common` and this scan \
+         only reads `trusty-installer/src`, so a future ungated bootstrap added THERE \
+         is invisible here",
     ),
 ];
 

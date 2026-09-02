@@ -974,7 +974,10 @@ async fn frame_of_exactly_the_budget_including_its_newline_is_accepted() {
         serve_one_frame(body.clone(), budget)
             .await
             .expect("a frame that exactly fills the budget is accepted"),
-        Served::Answered { errored: false }
+        Served::Answered {
+            errored: false,
+            liveness: false
+        }
     );
 
     match serve_one_frame(body, budget - 1).await {
@@ -1022,7 +1025,13 @@ async fn handle_connection_reports_an_error_response_as_answered() {
     .await
     .expect("a refusal is still an answer");
 
-    assert_eq!(served, Served::Answered { errored: true });
+    assert_eq!(
+        served,
+        Served::Answered {
+            errored: true,
+            liveness: false
+        }
+    );
     writer.abort();
 }
 
@@ -1042,6 +1051,19 @@ fn spawn_idle_server(
     tokio::sync::oneshot::Sender<()>,
     tokio::task::JoinHandle<ServeExit>,
 ) {
+    spawn_idle_server_with(dir, idle, greeting_router())
+}
+
+/// [`spawn_idle_server`] over a caller-supplied router (#6621).
+fn spawn_idle_server_with(
+    dir: &std::path::Path,
+    idle: Duration,
+    router: RpcRouter,
+) -> (
+    std::path::PathBuf,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<ServeExit>,
+) {
     let socket = dir.join("idle.sock");
     let (tx, rx) = tokio::sync::oneshot::channel();
     let bound = socket.clone();
@@ -1049,7 +1071,7 @@ fn spawn_idle_server(
         let listener = crate::uds::bind_hardened(&bound).expect("bind");
         let exit = serve_until_idle(
             &listener,
-            Arc::new(greeting_router()),
+            Arc::new(router),
             RpcServeOptions::default(),
             async move {
                 let _ = rx.await;
@@ -1125,17 +1147,165 @@ async fn serve_until_idle_ignores_liveness_probes() {
     let (socket, _stop, handle) = spawn_idle_server(tmp.path(), window);
     await_socket(&socket).await;
 
-    // `await_socket` already probed; keep probing across the whole window.
-    for _ in 0..8 {
+    // `await_socket` already probed; keep probing for half the window — four
+    // probes at a window/8 cadence sum to 200ms of the 400ms window, leaving
+    // a 200ms margin (many times typical scheduler jitter) before the
+    // deadline. The original 8-probe loop summed to exactly the window, so
+    // any scheduling delay before it started let the server idle-exit
+    // mid-loop and this same assertion fail under load (#6629).
+    for _ in 0..4 {
         assert!(crate::uds::socket_is_serving(&socket, Duration::from_millis(200)).await);
         tokio::time::sleep(window / 8).await;
     }
+    assert!(
+        !handle.is_finished(),
+        "liveness probes across half the window must not have exited it early"
+    );
 
+    // The join below has no timing race of its own: it waits for whatever
+    // actually happens, up to the 10s timeout, well past the window.
     let exit = tokio::time::timeout(Duration::from_secs(10), handle)
         .await
         .expect("probes must not hold the window open")
         .expect("join");
     assert_eq!(exit, ServeExit::Idle);
+}
+
+// ── liveness METHODS do not re-arm the idle window (#6621) ──────────────────
+
+/// A router whose `health` is marked liveness and whose `greet` is not.
+///
+/// The two names are the whole experiment: same socket, same cadence, same
+/// window — only the classification differs.
+fn liveness_router() -> RpcRouter {
+    greeting_router().typed_liveness(
+        "health",
+        |_req: ()| async move { Ok(json!({ "status": "ok" })) },
+    )
+}
+
+/// How often the pollers below dial, against a 200ms window.
+///
+/// Four dials per window: a loop that credited any of them would never let the
+/// window elapse, which is the difference the two tests read.
+const POLL_CADENCE: Duration = Duration::from_millis(50);
+
+/// The idle window both tests run against.
+const POLL_WINDOW: Duration = Duration::from_millis(200);
+
+/// Dial `method` on `socket` every [`POLL_CADENCE`] until aborted.
+///
+/// A failed call is ignored rather than panicking: the server under test is
+/// expected to exit out from under this task in the liveness case, and a
+/// panicking poller would report as a test failure of its own.
+fn spawn_poller(socket: std::path::PathBuf, method: &'static str) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let request = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": {} });
+            let _ = crate::uds::send_framed_request::<_, RpcResponse>(
+                &socket,
+                &request,
+                Duration::from_secs(2),
+            )
+            .await;
+            tokio::time::sleep(POLL_CADENCE).await;
+        }
+    })
+}
+
+/// REGRESSION (#6621): `trusty-console` polled `analyze.health` every 15s
+/// against a 600s idle window, so every poll re-armed the window and the
+/// on-demand `trusty-analyze` server it was watching stayed resident for 46
+/// hours. Monitoring alone must never keep an on-demand service alive.
+///
+/// Why the cadence is four dials per window: one dial per window would leave the
+/// result depending on where the dial landed. At this rate a loop that credits
+/// the answer can never reach its deadline, so a pass is unambiguous.
+/// What: a 200ms window under a `health` call every 50ms still exits idle.
+/// Test: this is the test.
+#[tokio::test]
+async fn serve_until_idle_ignores_a_registered_liveness_method() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (socket, _stop, handle) =
+        spawn_idle_server_with(tmp.path(), POLL_WINDOW, liveness_router());
+    await_socket(&socket).await;
+
+    let poller = spawn_poller(socket.clone(), "health");
+    let exit = tokio::time::timeout(Duration::from_secs(10), handle).await;
+    poller.abort();
+
+    let exit = exit
+        .expect("a liveness method must not re-arm the idle window")
+        .expect("join");
+    assert_eq!(exit, ServeExit::Idle);
+}
+
+/// The control for [`serve_until_idle_ignores_a_registered_liveness_method`].
+///
+/// Why it is not optional: a loop that simply stopped crediting every answer
+/// would pass that test and kill a service under a client genuinely using it.
+/// This is what says the window still moves for real work.
+/// What: the same window and the same cadence against `greet`, which is not
+/// marked — the server is still running five windows later.
+/// Test: this is the test.
+#[tokio::test]
+async fn serve_until_idle_is_held_open_by_a_non_liveness_call() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (socket, stop, handle) = spawn_idle_server_with(tmp.path(), POLL_WINDOW, liveness_router());
+    await_socket(&socket).await;
+
+    let poller = spawn_poller(socket.clone(), "greet");
+    tokio::time::sleep(POLL_WINDOW * 5).await;
+    let still_running = !handle.is_finished();
+    poller.abort();
+
+    assert!(
+        still_running,
+        "an unmarked method's answer must still restart the idle window"
+    );
+    stop.send(()).expect("signal shutdown");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), handle)
+            .await
+            .expect("the loop must stop on the signal")
+            .expect("join"),
+        ServeExit::Shutdown
+    );
+}
+
+/// Why: the classification is the router's, so the router is where it is
+/// asserted — a service can read back what it marked.
+/// Test: this is the test.
+#[test]
+fn liveness_names_are_sorted_and_separate_from_the_method_table() {
+    let router = liveness_router();
+    assert_eq!(router.liveness_names().collect::<Vec<_>>(), vec!["health"]);
+    assert!(
+        router.method_names().any(|m| m == "health"),
+        "a liveness method is still a registered method: {router:?}"
+    );
+}
+
+/// Why: the loop asks the router this question once per frame, so a name that
+/// was never marked must answer false even when it looks like a health check.
+/// Test: this is the test.
+#[test]
+fn frame_is_liveness_reads_the_method_name_off_the_frame() {
+    let router = liveness_router();
+    assert!(router.frame_is_liveness(&frame(1, "health", json!({}))));
+    assert!(!router.frame_is_liveness(&frame(1, "greet", json!({ "name": "ada" }))));
+    assert!(
+        !router.frame_is_liveness(b"not json at all"),
+        "a frame about to be refused is not activity either way"
+    );
+}
+
+/// Why: every router that predates #6621 marks nothing, and must not pay a
+/// second parse or change behaviour.
+/// Test: this is the test.
+#[test]
+fn frame_is_liveness_is_false_for_a_router_that_marks_nothing() {
+    assert!(!greeting_router().frame_is_liveness(&frame(1, "greet", json!({ "name": "ada" }))));
 }
 
 /// Why: `serve_until` is the no-policy path every other daemon still uses, and
@@ -1250,4 +1420,269 @@ async fn a_client_queued_when_the_idle_window_elapses_is_served_not_reset() {
         .expect("the loop must still exit once the backlog really is empty")
         .expect("join");
     assert_eq!(exit, ServeExit::Idle);
+}
+
+// ── shutdown drain (#6601) ──────────────────────────────────────────────────
+
+/// A recorder of the order two events happened in.
+///
+/// Why: the property #6601 fixes is an ORDER — the in-flight response must be
+/// written before `serve_until_idle` returns, because the caller unlinks the
+/// socket the moment it does. Asserting only that the client got its answer
+/// passes on the pre-fix code too: the connection task is detached, so it keeps
+/// running after the loop has returned.
+#[derive(Clone, Default)]
+struct EventLog(Arc<std::sync::Mutex<Vec<&'static str>>>);
+
+impl EventLog {
+    fn record(&self, event: &'static str) {
+        if let Ok(mut events) = self.0.lock() {
+            events.push(event);
+        }
+    }
+
+    fn events(&self) -> Vec<&'static str> {
+        self.0.lock().map(|e| e.clone()).unwrap_or_default()
+    }
+}
+
+/// Serve `dir/drain.sock` with one deliberately slow method.
+///
+/// The handler sleeps `handler_for`, then records `"answered"`; the loop records
+/// `"returned"` when `serve_until_idle` resolves. The returned receiver fires as
+/// the handler begins, so a test signals shutdown with a request genuinely in
+/// flight rather than after a sleep that only makes that likely.
+fn spawn_draining_server(
+    dir: &std::path::Path,
+    handler_for: Duration,
+    drain_budget: Duration,
+) -> (
+    std::path::PathBuf,
+    EventLog,
+    tokio::sync::mpsc::UnboundedReceiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<ServeExit>,
+) {
+    let socket = dir.join("drain.sock");
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    let (started_tx, started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let log = EventLog::default();
+
+    let bound = socket.clone();
+    let handler_log = log.clone();
+    let loop_log = log.clone();
+    let handle = tokio::spawn(async move {
+        let router = RpcRouter::new().typed("slow", move |_req: ()| {
+            let log = handler_log.clone();
+            let started = started_tx.clone();
+            async move {
+                let _ = started.send(());
+                tokio::time::sleep(handler_for).await;
+                log.record("answered");
+                Ok::<_, RpcError>(json!({ "ok": true }))
+            }
+        });
+        let listener = crate::uds::bind_hardened(&bound).expect("bind");
+        let options = RpcServeOptions {
+            shutdown_drain: drain_budget,
+            ..RpcServeOptions::default()
+        };
+        let exit = serve_until_idle(
+            &listener,
+            Arc::new(router),
+            options,
+            async move {
+                let _ = stop_rx.await;
+            },
+            None,
+        )
+        .await;
+        loop_log.record("returned");
+        let _ = std::fs::remove_file(&bound);
+        exit
+    });
+    (socket, log, started_rx, stop_tx, handle)
+}
+
+/// Why (#6601 review): the drain and the caller's post-serve work are spent
+/// from ONE window — the SIGTERM-to-SIGKILL grace — so a default drain sized to
+/// the whole of it leaves the caller nothing. `trusty-memory` runs its BM25 exit
+/// flush after `serve_until` returns; `bm25_lane::shutdown` claims no SIGKILL
+/// can land mid-flush, and a full-window default is what would make that false.
+///
+/// What: the default drain plus the cleanup reserve must FIT in the grace
+/// window. Written as an inequality rather than an equality so a service that
+/// later shortens the default still passes, while restoring
+/// `termination_grace()` fails.
+/// Test: this is the test.
+#[test]
+fn default_serve_options_reserve_cleanup_time_inside_the_grace_window() {
+    let grace = crate::shutdown::termination_grace();
+    let drain = RpcServeOptions::default().shutdown_drain;
+    assert!(
+        drain + crate::shutdown::CLEANUP_RESERVE <= grace,
+        "the default drain ({drain:?}) plus the cleanup reserve ({:?}) must fit \
+         inside the termination grace window ({grace:?}), or the caller's \
+         post-serve work runs on borrowed time",
+        crate::shutdown::CLEANUP_RESERVE
+    );
+    assert!(
+        drain > Duration::ZERO,
+        "reserving cleanup time must not collapse the drain to nothing"
+    );
+}
+
+/// Why (#6601): the shutdown arm used to return the instant the signal
+/// resolved. Every accepted connection holds an `Arc<RpcRouter>` clone — in
+/// `trusty-analyze` that reaches a redb `Database` — so the caller's unlink ran
+/// on top of handles still in use, and the successor a client spawned on seeing
+/// that unlink died opening the same store (#6595).
+///
+/// What: one 400 ms handler, the signal delivered while it runs. Both halves are
+/// asserted — the client gets a normal response, AND `"answered"` is recorded
+/// before `"returned"`. The second is the discriminator: the connection task is
+/// detached, so the response arrives either way and only the ORDER changes.
+/// Test: this is the test.
+#[tokio::test]
+async fn shutdown_drains_an_in_flight_connection_before_it_returns() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (socket, log, mut started, stop, handle) = spawn_draining_server(
+        tmp.path(),
+        Duration::from_millis(400),
+        Duration::from_secs(5),
+    );
+    await_socket(&socket).await;
+
+    let dialled = socket.clone();
+    let client = tokio::spawn(async move { call(&dialled, 1, "slow", json!(null)).await });
+    started.recv().await.expect("the handler must start");
+
+    stop.send(()).expect("signal shutdown");
+
+    let response = tokio::time::timeout(Duration::from_secs(10), client)
+        .await
+        .expect("the in-flight request must complete during the drain")
+        .expect("join");
+    assert_eq!(
+        response.result,
+        Some(json!({ "ok": true })),
+        "a request already accepted must be answered, not dropped"
+    );
+
+    let exit = tokio::time::timeout(Duration::from_secs(10), handle)
+        .await
+        .expect("the loop must return once the drain finishes")
+        .expect("join");
+    assert_eq!(exit, ServeExit::Shutdown);
+    assert_eq!(
+        log.events(),
+        vec!["answered", "returned"],
+        "the loop must not return — and so let its caller unlink — until the \
+         in-flight handler is done"
+    );
+}
+
+/// Why (#6601): while the drain runs nothing is serving new work, and a client
+/// that dials anyway must be told so. Left in the kernel backlog it would sit
+/// there until the listener dropped and then see a reset, which it cannot tell
+/// from a broken service; accepted and closed at once it gets
+/// `UdsRpcError::NoResponse` immediately and can retry against a successor.
+///
+/// What makes this a test OF the drain (#6601 review): `refused.is_err()` alone
+/// is true of a dropped listener's reset too, so it passed with the drain arm
+/// replaced by a bare `return`. The two assertions below close that. The error
+/// must be `NoResponse` — the accept-and-close signature, which a dial against
+/// an already-unlinked path (`Dial`) is not — AND the loop must not yet have
+/// recorded `"returned"` when the refusal lands. Only one order produces both:
+/// the listener is still owned by a running drain. Replace the arm with a bare
+/// return and the loop records `"returned"` and drops the listener before any
+/// reset can reach the client, so whichever error the client gets, one of the
+/// two assertions fails.
+/// Test: this is the test.
+#[tokio::test]
+async fn shutdown_refuses_a_connection_dialled_after_the_signal() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (socket, log, mut started, stop, handle) = spawn_draining_server(
+        tmp.path(),
+        Duration::from_millis(600),
+        Duration::from_secs(5),
+    );
+    await_socket(&socket).await;
+
+    let dialled = socket.clone();
+    let client = tokio::spawn(async move { call(&dialled, 1, "slow", json!(null)).await });
+    started.recv().await.expect("the handler must start");
+    stop.send(()).expect("signal shutdown");
+
+    let request = json!({ "jsonrpc": "2.0", "id": 2, "method": "slow", "params": null });
+    let refused = tokio::time::timeout(
+        Duration::from_secs(3),
+        crate::uds::send_framed_request::<_, RpcResponse>(
+            &socket,
+            &request,
+            Duration::from_secs(3),
+        ),
+    )
+    .await
+    .expect("a post-signal dial must be refused, not left hanging in the backlog");
+    // Snapshot BEFORE any further await, so the 600 ms handler cannot finish and
+    // let the loop return between the refusal and the assertion.
+    let during_refusal = log.events();
+
+    assert!(
+        matches!(refused, Err(crate::uds::UdsRpcError::NoResponse { .. })),
+        "a dial during the drain must be accepted and closed — not reset by a \
+         dropped listener, and not refused at connect by an unlinked path: \
+         {refused:?}"
+    );
+    assert!(
+        !during_refusal.contains(&"returned"),
+        "the refusal must land while the drain still owns the listener; the \
+         loop had already returned: {during_refusal:?}"
+    );
+
+    let _ = client.await;
+    let exit = tokio::time::timeout(Duration::from_secs(10), handle)
+        .await
+        .expect("the loop must still return")
+        .expect("join");
+    assert_eq!(exit, ServeExit::Shutdown);
+}
+
+/// Why: the drain is bounded on purpose. The signal starts a window that ends in
+/// SIGKILL, so a handler that outlives the budget must not spend it — the loop
+/// warns and returns, and the caller unlinks. Without the bound a wedged handler
+/// would hold the socket path past the process's own grace window.
+/// Test: this is the test.
+#[tokio::test]
+async fn shutdown_returns_when_the_drain_budget_expires() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let budget = Duration::from_millis(150);
+    let (socket, log, mut started, stop, handle) =
+        spawn_draining_server(tmp.path(), Duration::from_secs(30), budget);
+    await_socket(&socket).await;
+
+    let dialled = socket.clone();
+    let client = tokio::spawn(async move { call(&dialled, 1, "slow", json!(null)).await });
+    started.recv().await.expect("the handler must start");
+
+    let signalled = std::time::Instant::now();
+    stop.send(()).expect("signal shutdown");
+    let exit = tokio::time::timeout(Duration::from_secs(10), handle)
+        .await
+        .expect("the drain must be bounded")
+        .expect("join");
+    let elapsed = signalled.elapsed();
+
+    assert_eq!(exit, ServeExit::Shutdown);
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the loop must return on the budget, not on the handler: {elapsed:?}"
+    );
+    assert_eq!(
+        log.events(),
+        vec!["returned"],
+        "the handler had not finished, so only the loop's own event is recorded"
+    );
+    client.abort();
 }

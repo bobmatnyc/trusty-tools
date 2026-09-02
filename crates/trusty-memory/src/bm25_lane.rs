@@ -366,11 +366,21 @@ impl Bm25Lane {
     ///
     /// Why: trusty-memory's normal exit is a SIGTERM from launchd or a ctrl-c.
     /// This is the in-process replacement for the supervisor's SIGTERM→reap
-    /// sequence, and it is strictly stronger: there is no signal to deliver, no
-    /// child to wait for, and no window in which a SIGKILL can land mid-flush.
+    /// sequence: there is no signal to deliver and no child to wait for.
+    ///
+    /// 🔴 **This is not itself bounded (#6601 review).** [`Self::flush_all`]
+    /// takes the residency mutex and flushes every resident palace with no
+    /// deadline, so the caller supplies one — `transport::uds::
+    /// serve_with_shutdown` awaits this under
+    /// `trusty_common::shutdown::CLEANUP_RESERVE` so the socket unlink after it
+    /// is still reached. An abandoned flush costs nothing beyond a SIGKILL
+    /// would: `BM25Index::flush` renames a temp file into
+    /// place, so every palace keeps the snapshot its last tick published.
+    ///
     /// What: flushes every resident index, then aborts the ticker. Idempotent —
     /// a second call flushes nothing and finds no ticker.
-    /// Test: `shutdown_flushes_and_is_idempotent`.
+    /// Test: `shutdown_flushes_and_is_idempotent`,
+    /// `an_exit_flush_that_overruns_the_reserve_is_abandoned`.
     pub async fn shutdown(&self) {
         self.flush_all().await;
         let handle = self.flusher.lock().take();

@@ -244,6 +244,35 @@ pub mod launchd_activate;
 #[cfg(target_os = "macos")]
 pub mod launchd_grace;
 
+/// Bootout-completion waiting for a live launchd restart (#6618). macOS-only,
+/// like [`launchd`] itself.
+///
+/// Why: `launchctl bootout` returns when the unload is ACCEPTED, not when the
+/// job is gone. A restart that bootstraps immediately afterwards races its own
+/// bootout and launchd refuses it with `Bootstrap failed: 5: Input/output
+/// error`.
+/// What: [`launchd_restart::await_unload`] polls the label out of launchd, and
+/// [`launchd_restart::restart_sequence`] orders the whole bounce around that
+/// wait — reusing [`launchd_grace`]'s quiesce for the short-grace half of the
+/// same window.
+/// Test: `cargo test -p trusty-common --features unconditional-only launchd_restart`.
+#[cfg(target_os = "macos")]
+pub mod launchd_restart;
+
+/// Whether a launchd unit owns the socket an on-demand spawn would bind
+/// (#6619).
+///
+/// Why: a client bridge that spawns its daemon when nothing answers the socket
+/// cannot see launchd. During a bootout/bootstrap window it read the transiently
+/// unserved socket as "nothing is running" and spawned an unsupervised daemon
+/// onto the production path without the plist's environment.
+/// What: [`launchd_claim::socket_owner`] decides from the registration signals,
+/// and [`launchd_claim::launchd_socket_owner`] reads them off the real launchd.
+/// Deliberately NOT macOS-gated, unlike [`launchd`], so cross-platform daemon
+/// guards call it without a `cfg` split — off macOS it answers "no unit".
+/// Test: `cargo test -p trusty-common --features unconditional-only launchd_claim`.
+pub mod launchd_claim;
+
 /// Canonical launchd labels for every trusty-* LaunchAgent (#4919).
 ///
 /// Why: each daemon crate, the installer's mirror table, the Makefiles, and

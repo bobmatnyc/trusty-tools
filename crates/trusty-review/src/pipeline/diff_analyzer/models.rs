@@ -102,6 +102,21 @@ impl FilteredHunk {
         }
         out
     }
+
+    /// Exact length `render()` would produce, without allocating it.
+    ///
+    /// Why: a caller that only needs the length (e.g. `FilteredDiff::
+    /// total_rendered_len`, #1660) must not pay for a full `String` per hunk
+    /// just to call `.len()` on it — hunks are the bulk of a large diff's
+    /// content.
+    /// What: `header.len()` plus, per line, `1 (the '\n' separator) +
+    /// line.len()` — the same arithmetic `render()` performs, without the
+    /// allocation.
+    /// Test: `total_rendered_len_is_exact_inside_the_reserve_band_where_the_marker_lies`
+    /// (exercises this via `FilteredDiff::total_rendered_len`).
+    pub fn rendered_len(&self) -> usize {
+        self.header.len() + self.lines.iter().map(|l| l.len() + 1).sum::<usize>()
+    }
 }
 
 /// A hunk that was dropped in Stage B or Stage C (spec §4).
@@ -292,6 +307,48 @@ impl FilteredDiff {
         }
 
         out
+    }
+
+    /// Exact length `render_for_prompt(usize::MAX)` would produce, without
+    /// materializing that (potentially huge) string.
+    ///
+    /// Why: `render_for_prompt`'s own truncation-marker decision is
+    /// deliberately conservative — it reserves headroom for the marker +
+    /// suffix before it will place each segment, so it sets the marker (and
+    /// therefore looks "truncated") for a diff whose true, uncapped length is
+    /// actually AT OR UNDER `max_chars` (follow-up to #1660: a caller cannot
+    /// infer "would exceed `max_chars`" from marker presence). A caller that
+    /// needs the exact untruncated length for a `> max_chars` comparison
+    /// (`select_review_mode`'s `DiffStats::diff_chars`) must not use that
+    /// marker as a proxy. This computes the same number
+    /// `render_for_prompt(usize::MAX).len()` would return, via arithmetic
+    /// over segment lengths instead of building the string — keeping the
+    /// crate's one real (bounded) render as the only allocation of that size.
+    /// What: sums the same segments `render_for_prompt` emits at an unbounded
+    /// budget (`SummaryOnly` line, `Kept` file header + each hunk's
+    /// `rendered_len` + trailing newline) plus the noise-summary suffix — no
+    /// truncation marker, since an unbounded render never sets one.
+    /// Test: `total_rendered_len_is_exact_inside_the_reserve_band_where_the_marker_lies`,
+    /// `reserve_band_diff_selects_unified_not_mapreduce`.
+    pub fn total_rendered_len(&self) -> usize {
+        let mut len = 0usize;
+        for file in &self.files {
+            match file.disposition {
+                FileDisposition::SummaryOnly => {
+                    if let Some(ref summary) = file.summary_line {
+                        len += format!("# {}: {}\n", file.filename, summary).len();
+                    }
+                }
+                FileDisposition::Kept => {
+                    len += format!("--- a/{0}\n+++ b/{0}\n", file.filename).len();
+                    for hunk in &file.hunks {
+                        len += hunk.rendered_len() + 1;
+                    }
+                }
+                FileDisposition::Dropped => {}
+            }
+        }
+        len + self.build_noise_summary().len()
     }
 
     /// Build the noise-summary line appended to the prompt (spec REV-209).

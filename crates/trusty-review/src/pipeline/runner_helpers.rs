@@ -184,7 +184,12 @@ pub(super) async fn fetch_github_pr_meta(
 /// `resolve_diff_token_passes_through_already_resolved_token`,
 /// `resolve_diff_token_serve_mode_without_app_creds_errors`,
 /// `resolve_diff_token_cli_mode_resolves_from_config_token`.
-pub(super) async fn resolve_diff_token(
+///
+/// #1632: `pub` (not `pub(super)`) so `commands::calibrate` (a different
+/// crate — the `trusty-review` binary) can call this SAME funnel instead of
+/// re-deriving the `GithubClient`/`AuthStrategy` dance independently, which is
+/// exactly the auth-path divergence risk this function exists to close.
+pub async fn resolve_diff_token(
     source: &DiffSource,
     config: &ReviewConfig,
     run_mode: RunMode,

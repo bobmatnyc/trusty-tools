@@ -7,6 +7,7 @@ pub mod diff;
 pub mod extractor;
 pub mod fetch;
 pub mod reachability;
+pub mod walk_state;
 
 pub use diff::{compute_commit_diff, diff_for_commit, CommitDiff, FileDiff, DIFF_BYTE_CAP};
 pub use extractor::GitCollector;
@@ -15,3 +16,4 @@ pub use reachability::{
     build_branch_map, build_tag_map, detect_default_branch_set, glob_matches, scan_and_persist,
     ReachabilityStats,
 };
+pub use walk_state::{FullWalkReason, WalkPlan, WalkState, WalkTips};

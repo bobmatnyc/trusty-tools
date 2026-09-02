@@ -550,3 +550,87 @@ fn dry_run_still_refuses_a_frozen_skill() {
         "the operator's own edit"
     );
 }
+
+/// #6586 critic HIGH: a stem the stray sweep is removing must not be rewritten
+/// by the redeploy that runs immediately after it.
+///
+/// Fails before this fix: the repair had no deferral, so the project-tier copy
+/// was overwritten from the bundled asset and its ledger checksum re-stamped.
+#[test]
+fn a_deferred_project_stem_is_not_refreshed() {
+    let tmp = TempDir::new().unwrap();
+    let backups = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let paths = paths_under(&tmp);
+    let dest = crate::core::skill_deploy_tiers::project_skill_tier(project.path());
+    let _src = deploy_real(&dest, "tm-workflow", "v1", None);
+
+    let deferred: BTreeSet<String> = ["tm-workflow".to_string()].into_iter().collect();
+    let outcomes = repair_skills_in_mode_deferring(
+        &reference_of(&[("tm-workflow", "v2")]),
+        &paths,
+        Some(project.path()),
+        false,
+        backups.path(),
+        RepairMode::Apply,
+        &deferred,
+    );
+
+    let deferred_outcome = outcomes
+        .iter()
+        .find(|o| o.stem == "tm-workflow" && o.tier == "project")
+        .unwrap_or_else(|| panic!("expected a project-tier outcome: {outcomes:?}"));
+    assert_eq!(
+        deferred_outcome.action,
+        RepairAction::SkippedUnverifiable(DEFERRED_TO_STRAY_SWEEP.to_string()),
+        "{outcomes:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(deployed_path(&dest, "tm-workflow")).unwrap(),
+        "v1",
+        "the copy the sweep is removing must keep the bytes the sweep verified"
+    );
+    assert!(
+        fs::read_dir(backups.path())
+            .expect("backup root")
+            .next()
+            .is_none(),
+        "a deferred stem is never backed up, because it is never overwritten"
+    );
+}
+
+/// The deferral is scoped to the tier the sweep touches — the same stem
+/// deployed at the operator's own tier is still repaired there.
+#[test]
+fn a_deferred_stem_is_still_repaired_at_the_user_tier() {
+    let tmp = TempDir::new().unwrap();
+    let backups = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let paths = paths_under(&tmp);
+    let home = paths.claude_skills_dir();
+    let _home_src = deploy_real(&home, "tm-workflow", "v1", None);
+    let project_dest = crate::core::skill_deploy_tiers::project_skill_tier(project.path());
+    let _project_src = deploy_real(&project_dest, "tm-workflow", "v1", None);
+
+    let deferred: BTreeSet<String> = ["tm-workflow".to_string()].into_iter().collect();
+    let outcomes = repair_skills_in_mode_deferring(
+        &reference_of(&[("tm-workflow", "v2")]),
+        &paths,
+        Some(project.path()),
+        false,
+        backups.path(),
+        RepairMode::Apply,
+        &deferred,
+    );
+
+    assert_eq!(
+        fs::read_to_string(deployed_path(&home, "tm-workflow")).unwrap(),
+        "v2",
+        "the user-tier copy is nobody's stray and must still be repaired: {outcomes:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(deployed_path(&project_dest, "tm-workflow")).unwrap(),
+        "v1",
+        "the project-tier copy is the deferred one: {outcomes:?}"
+    );
+}

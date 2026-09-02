@@ -1,0 +1,21 @@
+<!--
+  Minimal fixture project for tests/csharp_roslyn_integration.rs (#1008).
+
+  Why: RoslynTool::run_project requires a real .csproj — `dotnet build`
+  operates at the project level, not the single-file level — so proving the
+  real dispatch path needs an on-disk project, not a synthetic string.
+  What: a bare net8.0 class-library project with no external package
+  references, so `dotnet restore` needs no network access even on a cold
+  NuGet cache. Fixture.cs deliberately fails to compile (a type mismatch) so
+  the test has a diagnostic guaranteed to appear regardless of which
+  analyzer packages ship with the installed SDK.
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+</Project>

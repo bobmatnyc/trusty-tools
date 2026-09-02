@@ -168,6 +168,39 @@ fn deps(llm: Arc<dyn LlmProvider>) -> ReviewDeps {
     }
 }
 
+/// A search client that is always down — used with `require_search = Some(false)`
+/// (#590 opt-out) to drive `preflight_context` into `GateOutcome::Degraded`
+/// alongside a separately-triggered partial-coverage map-reduce run (#1661).
+struct FailingSearch;
+
+#[async_trait]
+impl SearchClient for FailingSearch {
+    async fn health(&self) -> Result<HealthResponse, SearchClientError> {
+        Err(SearchClientError::Unavailable("down".to_string()))
+    }
+    async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
+        Err(SearchClientError::Unavailable("down".to_string()))
+    }
+    async fn search(
+        &self,
+        _: &str,
+        _: &str,
+        _: Option<u32>,
+    ) -> Result<Vec<SearchResult>, SearchClientError> {
+        Err(SearchClientError::Transport("refused".to_string()))
+    }
+}
+
+fn deps_with_failing_search(llm: Arc<dyn LlmProvider>) -> ReviewDeps {
+    ReviewDeps {
+        llm,
+        verifier: None,
+        search: Arc::new(FailingSearch),
+        analyze: Some(Arc::new(OkAnalyze)),
+        dedup: None,
+    }
+}
+
 fn local_source(diff: &str) -> (DiffSource, tempfile::NamedTempFile) {
     use std::io::Write as _;
     let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
@@ -1005,5 +1038,83 @@ async fn mapreduce_path_emits_no_finding_citing_a_path_outside_the_diff() {
         Verdict::Approve,
         "the only non-APPROVE chunk rested on the fabricated finding, so the merged \
          verdict must relax to APPROVE rather than block a clean diff"
+    );
+}
+
+// ── #1661: the two Degraded triggers collapse to ONE status assignment ─
+
+/// Why: `run_mapreduce_branch` used to write `result.status = ReviewStatus::
+/// Degraded` at two independent sites — the partial-coverage block and the
+/// context-opt-out (`degraded_reason`) block — with no guard between them.
+/// Both wrote the same value today, so no test over either trigger ALONE can
+/// distinguish "one consolidated write" from "two writes that happen to
+/// agree"; only counting the literal assignment site in the source proves it.
+/// What: reads `runner_mapreduce.rs`'s own source and counts literal
+/// `result.status = ReviewStatus::Degraded` assignments — the pre-fix source
+/// had 2 (lines ~218 and ~236); this asserts exactly 1.
+/// Test: this test.
+#[test]
+fn mapreduce_degraded_status_assigned_exactly_once() {
+    let src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/pipeline/runner_mapreduce.rs"
+    ))
+    .expect("read runner_mapreduce.rs source");
+    let count = src
+        .matches("result.status = ReviewStatus::Degraded")
+        .count();
+    assert_eq!(
+        count, 1,
+        "runner_mapreduce.rs must assign ReviewStatus::Degraded exactly once \
+         (#1661) — found {count} site(s); the partial-coverage and \
+         context-opt-out triggers must consolidate to one write instead of \
+         each writing it independently"
+    );
+}
+
+/// When BOTH Degraded triggers fire in the SAME run — partial coverage (one
+/// chunk fails via LLM error) AND an opted-out required dependency (search
+/// down, `require_search=false`) — the review must still end Degraded, and
+/// the VISIBLE reason must be the partial-coverage message, since its
+/// `result.error` `is_none()` guard runs first (the precedence the two
+/// blocks' consolidated status write is now built on, #1661). Swapping the
+/// block order, or reintroducing an unconditional second `result.status =
+/// Degraded` write, is invisible to a test that exercises either trigger
+/// alone — only running both together pins it.
+#[tokio::test]
+async fn run_review_mapreduce_both_degraded_triggers_partial_coverage_reason_wins() {
+    let (diff, fail_marker, _tail_signature) = partial_coverage_diff();
+    let (source, _tmp) = local_source(&diff);
+
+    let reviewer = Arc::new(SelectivelyFailingReviewer::fail_on(fail_marker));
+    let llm: Arc<dyn LlmProvider> = reviewer.clone();
+
+    let mut config = ReviewConfig::load(None);
+    config.context.require_search = Some(false); // explicit opt-out (#590)
+
+    let result = run_review(&config, input(source), deps_with_failing_search(llm)).await;
+
+    assert_eq!(
+        result.status,
+        ReviewStatus::Degraded,
+        "both triggers (partial coverage + opted-out search) must still end Degraded"
+    );
+    let err = result
+        .error
+        .expect("a degraded run must record a non-authoritative reason");
+    assert!(
+        err.contains("map-reduce coverage partial"),
+        "partial-coverage's message must win when both triggers fire: {err}"
+    );
+    assert!(
+        result.review_body.contains("Coverage notice"),
+        "partial-coverage banner must still be present: {:?}",
+        result.review_body
+    );
+    assert!(
+        result.review_body.contains("NOT AUTHORITATIVE"),
+        "context-opt-out banner must also still be present (both banners prepend \
+         independently of the consolidated status write): {:?}",
+        result.review_body
     );
 }

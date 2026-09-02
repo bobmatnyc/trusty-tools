@@ -135,6 +135,9 @@ pub mod project_config;
 pub mod project_discovery;
 // #4880: the project skill tier redeploys on project-manifest change.
 pub mod project_skill_tier;
+// #6586: `tm doctor --fix-skills` sweeps bundled copies stranded at the project
+// tier by a pre-#6602 deploy.
+pub mod project_tier_strays;
 pub mod project_trust;
 pub mod protected_dirs;
 pub mod provisioning_stage;

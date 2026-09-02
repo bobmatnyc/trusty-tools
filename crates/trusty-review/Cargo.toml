@@ -72,7 +72,13 @@ name        = "trusty-review"
 # (`src/service/handlers.rs:187`), which stops a downstream crate constructing
 # or exhaustively matching it. Cargo's 0.x rule puts a break in the MINOR
 # position.
-version     = "0.31.0"
+#
+# 0.31.1 (#6605/#6577): PATCH bump — 0.31.0 is already published and this PR
+# edits `src/report/exec_summary.rs`'s doc comment, fixing a `# Spec
+# References` link path to be repo-root-relative. No public item changes
+# shape; the `PR version bump vs crates.io` gate (#4421) requires the bump
+# since `src/**` changed.
+version     = "0.31.1"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true

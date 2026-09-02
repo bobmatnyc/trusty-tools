@@ -12,10 +12,12 @@
 //!
 //! What: resolves members via `stable_set::select_members`, filters to daemons,
 //! confirms the blast radius (mirroring `install::run`), then applies the verb in
-//! topological order (start = forward, stop = reverse, restart = bootout then
-//! bootstrap per member). launchd members use the shared
-//! `trusty_common::launchd::LaunchdConfig` `bootout`/`bootstrap` (macOS-only);
-//! `OwnVerb` members shell out to their own subcommand.
+//! topological order (start = forward, stop = reverse, restart = bootout, wait
+//! for launchd to finish the unload, then bootstrap per member). launchd members
+//! use the shared `trusty_common::launchd::LaunchdConfig` `bootout`/`bootstrap`
+//! (macOS-only), and restart routes through `restart_gracefully` so the two are
+//! never issued back to back (#6618); `OwnVerb` members shell out to their own
+//! subcommand.
 //!
 //! Test: `tests` covers ordering, the report shaping/exit code, the blast-radius
 //! gate, and the `Action` verb-name mapping; the actual launchctl/subprocess
@@ -32,7 +34,7 @@ use crate::output::render_json;
 /// per-member apply) but differ in ordering and the underlying action; encoding
 /// the verb as an enum keeps one code path with three small branch points.
 /// What: `Start` (forward order, bring up), `Stop` (reverse order, take down),
-/// `Restart` (bootout then bootstrap per member).
+/// `Restart` (bootout, wait for the unload, then bootstrap per member — #6618).
 /// Test: `tests::ordering_is_directional`, `tests::verb_name`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -414,14 +416,23 @@ fn launchd_control(verb: Verb, binary: &str) -> anyhow::Result<String> {
             // correctly supervised daemon holds its own port here, so this
             // check passes for the ordinary restart.
             super::port_guard::guard_bootstrap(binary).map_err(anyhow::Error::msg)?;
-            // Bootout first (stop); only then bootstrap (start). If bootstrap
-            // fails after a successful bootout, surface that the daemon WAS
-            // stopped — the operator is now in a stopped (not still-running)
-            // state, which changes their next action.
-            cfg.bootout()?;
-            cfg.bootstrap()
-                .map_err(|e| anyhow::anyhow!("booted out successfully; bootstrap failed: {e}"))?;
-            Ok(format!("restarted {}", cfg.label))
+            // #6618: this used to be `bootout()` then `bootstrap()` back to
+            // back. `launchctl bootout` returns when the unload is ACCEPTED,
+            // not when the job is gone, so the bootstrap reached launchd while
+            // the label was still registered and was refused with `Bootstrap
+            // failed: 5: Input/output error`. `restart_gracefully` waits the
+            // label out of launchd first, quiesces a unit whose loaded grace is
+            // too short for the daemon's flush (the #6590 guard `service
+            // install` already ran), and retries the bootstrap once after a
+            // second wait. Its error still says the daemon WAS stopped, which
+            // is the state change the operator's next action depends on.
+            let restarted = cfg.restart_gracefully()?;
+            Ok(format!(
+                "restarted {} (waited {}s for launchd to unload; {} bootstrap attempt(s))",
+                cfg.label,
+                restarted.unload.waited_secs(),
+                restarted.attempts
+            ))
         }
     }
 }

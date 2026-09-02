@@ -19,7 +19,7 @@
 
 use super::Reference;
 use super::comment::CommentSyntax;
-use super::grammar::{is_unsafe_path, reference_regex};
+use super::grammar::reference_regex;
 
 /// True when a stripped line opens or closes a Markdown code fence (§2.3).
 ///
@@ -94,12 +94,14 @@ fn comment_content(trimmed: &str, syntax: &CommentSyntax, in_doc: &mut bool) -> 
 /// stays part of the block (and is scanned by the §2.2 reference regex) only
 /// while it is blank or `-`-prefixed after stripping the comment lead-in — the
 /// first line that is neither closes the block WITHOUT being scanned, so trailing
-/// prose in the same comment run can never masquerade as a declaration. Extracted
-/// references drop any unsafe path (a `..` traversal segment or an absolute
-/// path, §2.1's repo-root-relative canonical form). Duplicates are retained
-/// (each keeps its own line) so a linter can flag each occurrence.
+/// prose in the same comment run can never masquerade as a declaration. Every
+/// reference the §2.2 regex matches is returned, whatever its path shape:
+/// conformance to §2.1's repo-root-relative canonical form is decided by the
+/// linter, which has a `file:line` diagnostic to report it with. Duplicates are
+/// retained (each keeps its own line) so a linter can flag each occurrence.
 /// Test: `super::tests::inline_rust`, `inline_bare_shell`, `inline_skips_fenced`,
-/// `inline_ignores_non_block_ref`, `inline_hash_block_closes_on_prose`.
+/// `inline_ignores_non_block_ref`, `inline_hash_block_closes_on_prose`,
+/// `inline_keeps_traversal_path_for_the_linter`.
 #[must_use]
 pub fn parse_inline_refs(source: &str, syntax: &CommentSyntax) -> Vec<Reference> {
     let mut refs = Vec::new();
@@ -153,13 +155,14 @@ pub fn parse_inline_refs(source: &str, syntax: &CommentSyntax) -> Vec<Reference>
                 continue;
             }
             for caps in reference_regex().captures_iter(&content) {
-                let path = caps[2].to_string();
-                if is_unsafe_path(&path) {
-                    continue;
-                }
+                // #6605: every declared reference is recovered, path shape
+                // included. Judging the path is the linter's job
+                // (`check_reference`'s `ref-traversal`), not the reader's —
+                // dropping one here made it invisible to the one gate meant to
+                // catch it.
                 refs.push(Reference {
                     id: caps[1].to_string(),
-                    path,
+                    path: caps[2].to_string(),
                     anchor: caps[3].to_string(),
                     line,
                 });

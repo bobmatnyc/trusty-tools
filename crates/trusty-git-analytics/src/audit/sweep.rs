@@ -96,13 +96,15 @@ pub struct SweepOptions {
 /// `super::tests::failed_stage_is_recorded_and_does_not_stop_the_sweep`,
 /// `super::tests::sweep_emits_progress_for_non_collection_stages`.
 ///
+/// `SPEC-TGAUDIT-05~draft` §5 "Executed stage order" lists the nine stages this
+/// body runs, in this order (#5306). Changing the sequence here means changing
+/// that list.
+///
 /// # Spec References
-/// - [`SPEC-TGAUDIT-02~draft`](../../../../docs/specs/DOC-67-tga-audit-mode.md#SPEC-TGAUDIT-02~draft)
-/// - [`SPEC-TGAUDIT-05~draft`](../../../../docs/specs/DOC-67-tga-audit-mode.md#SPEC-TGAUDIT-05~draft)
-///   — §5 "Executed stage order" lists the nine stages this body runs, in this
-///   order (#5306). Changing the sequence here means changing that list.
-/// - [`SPEC-TGAUDIT-07~draft`](../../../../docs/specs/DOC-67-tga-audit-mode.md#SPEC-TGAUDIT-07~draft)
-/// - [`SPEC-TGAUDIT-09~draft`](../../../../docs/specs/DOC-67-tga-audit-mode.md#SPEC-TGAUDIT-09~draft)
+/// - [`SPEC-TGAUDIT-02~draft`](docs/specs/DOC-67-tga-audit-mode.md#SPEC-TGAUDIT-02~draft)
+/// - [`SPEC-TGAUDIT-05~draft`](docs/specs/DOC-67-tga-audit-mode.md#SPEC-TGAUDIT-05~draft)
+/// - [`SPEC-TGAUDIT-07~draft`](docs/specs/DOC-67-tga-audit-mode.md#SPEC-TGAUDIT-07~draft)
+/// - [`SPEC-TGAUDIT-09~draft`](docs/specs/DOC-67-tga-audit-mode.md#SPEC-TGAUDIT-09~draft)
 pub async fn run_full_sweep(
     config: &Config,
     db: &mut Database,

@@ -321,7 +321,7 @@ fn skill_skip_summary(skipped: &[String]) -> Option<String> {
         "warning: {} skill file(s) were NOT refreshed — each is user-owned \
          (hand-edited away from its recorded checksum, or never managed here), \
          so the bundled version was withheld: {}. Run \
-         `tm doctor --fix-skills --include-frozen` to adopt them.",
+         `tm doctor --fix-skills --include-frozen --yes` to adopt them.",
         skipped.len(),
         crate::core::agent_source::preview(skipped, 5)
     ))

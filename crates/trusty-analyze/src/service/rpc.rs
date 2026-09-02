@@ -35,6 +35,12 @@ use crate::service::handlers::{analysis, deep, facts, graph, review, system};
 /// This is the method `trusty-console`'s `AnalyzeConnector` and `tctl`'s health
 /// probe dial. Renaming it breaks both, in crates that have no Cargo edge on
 /// this one.
+///
+/// #6621: registered with [`RpcRouter::typed_liveness`], so answering it does
+/// NOT restart the idle window. Every caller of this name is a monitor, and a
+/// monitor polling faster than the window kept this daemon resident for 46
+/// hours. Any method added here that does the caller's work must be registered
+/// with the ordinary [`RpcRouter::typed`].
 pub const METHOD_HEALTH: &str = "analyze.health";
 
 /// Every method this daemon serves, in registration order.
@@ -181,7 +187,9 @@ pub fn build_router(state: AnalyzerAppState) -> RpcRouter {
     let indexes_state = state.clone();
 
     let router = RpcRouter::new()
-        .typed::<NoParams, system::HealthResponse, _, _>(METHOD_HEALTH, move |_params| {
+        // #6621: `typed_liveness`, not `typed` — answering health must not
+        // re-arm the idle window, or a console poll keeps this process resident.
+        .typed_liveness::<NoParams, system::HealthResponse, _, _>(METHOD_HEALTH, move |_params| {
             let state = health_state.clone();
             async move { Ok(system::health(&state).await) }
         })
@@ -334,10 +342,35 @@ pub fn build_router(state: AnalyzerAppState) -> RpcRouter {
 
 /// Per-connection budgets for this service.
 ///
-/// The read timeout is the shared default; only the frame budget moves. See
-/// [`MAX_FRAME_BYTES`] for why. The read bound does NOT cover a handler, which
-/// is what makes a multi-minute `analyze.diagnostics` compatible with a
-/// 30-second guard against a peer that connects and never writes.
+/// The read timeout and the shutdown drain are the shared defaults; only the
+/// frame budget moves. See [`MAX_FRAME_BYTES`]. The read bound does NOT cover a
+/// handler, which is what makes a multi-minute `analyze.diagnostics` compatible
+/// with a 30-second guard against a peer that connects and never writes.
+///
+/// 🔴 **`shutdown_drain` is INHERITED, and the 3 s override this briefly
+/// carried was wrong (#6601 review).** That override rested on
+/// "`UdsServiceSupervisor` SIGKILLs this server at `ANALYZE_SIGTERM_PATIENCE`,
+/// 5 s". No supervisor path does. `ensure_running` returns early for a detached
+/// child and never enters it in `children` (`supervisor/mod.rs`, #6350), every
+/// `terminate_child` call site reads only `children` or the doomed queue, and
+/// `ANALYZE_TIMEOUTS` is built `with_detached(true)` — so the single place
+/// `sigterm_patience` reaches an analyze child is the spawn-probe timeout, a
+/// child that never bound.
+///
+/// Nothing in this repository escalates a SERVING analyze server to SIGKILL:
+/// `commands::daemon::handle_stop` sends SIGTERM, polls 5 s, and then merely
+/// REPORTS that the socket is still answering. The remaining bounded terminator
+/// is the OS at logout or shutdown, whose window this workspace models as
+/// [`trusty_common::shutdown::termination_grace`]; the part a component may
+/// plan inside is [`trusty_common::shutdown::plannable_grace`], which is what
+/// [`RpcServeOptions::default`] already supplies.
+///
+/// A 3 s drain averted no SIGKILL. It abandoned the #6595 guarantee — every
+/// redb handle released BEFORE the unlink — three seconds into a multi-minute
+/// `analyze.review`, narrowing that window rather than closing it. The drain is
+/// a MAXIMUM wait, so the larger budget costs a prompt shutdown nothing and
+/// buys a slow one the release it needs.
+/// Test: `serve_options_drain_for_as_long_as_this_server_may_actually_live`.
 fn serve_options() -> RpcServeOptions {
     RpcServeOptions {
         max_frame_bytes: MAX_FRAME_BYTES,
@@ -345,17 +378,43 @@ fn serve_options() -> RpcServeOptions {
     }
 }
 
+/// What this server declares to [`trusty_common::uds::on_demand::ANALYZE_TIMEOUTS`]
+/// as its own shutdown budget.
+///
+/// Why it is an ALIAS of [`trusty_common::uds::ANALYZE_SHUTDOWN_FLUSH`] rather
+/// than a second literal (#6601 review): `ServiceTimeouts`' sourcing rule says
+/// the supervisor's `shutdown_flush` must be the supervised binary's REAL
+/// budget, and `trusty-common` cannot import this crate to read it. The previous
+/// arrangement — two literals plus
+/// `analyze_flush_budget_matches_the_supervisor_contract` asserting they were
+/// equal — detected drift only after someone edited one of them. One definition
+/// makes the drift unrepresentable.
+///
+/// 🔴 **It is NOT the serve loop's drain, and binding the two was the #6601
+/// review's HIGH finding.** The relation this number participates in
+/// (`sigterm_patience > shutdown_flush`) governs the one path where the
+/// supervisor signals an analyze child: the spawn-probe timeout, a child that
+/// never bound. A child that DID bind is detached, so it is absent from the
+/// supervisor's population and no reap path can reach it — see [`serve_options`]
+/// for the walk through those call sites, and for the window the loop drains on
+/// instead.
+///
+/// Three seconds is right for what it does bound. Every handler commits its
+/// redb write before answering, so a SIGTERM discards nothing that was acked;
+/// what the child spends after SIGTERM is signal delivery, the socket unlink and
+/// exit, and 3 s leaves 2 s of the supervisor's 5 s patience for exactly that.
+pub const SHUTDOWN_FLUSH_TIMEOUT: std::time::Duration = trusty_common::uds::ANALYZE_SHUTDOWN_FLUSH;
+
 /// Bind `socket` and serve until SIGTERM/SIGINT, then unlink it.
 ///
 /// Why the bind is [`trusty_common::uds::bind_singleton_hardened`] and not
-/// [`trusty_common::uds::server::RpcServer::run`]: this daemon is supervised by
-/// launchd with `KeepAlive::Always` (`commands::service::launchd_config`). A
-/// predecessor that is SIGKILLed — which is what `launchctl kickstart -k` does
-/// at the `ExitTimeOut` boundary — never reaches the unlink below and leaves its
-/// socket file behind. `RpcServer::run` binds through `bind_hardened`, which
-/// refuses an occupied path rather than clobbering what might be a live owner,
-/// so the replacement launchd starts would fail its bind, exit, be restarted,
-/// and fail again — a crash loop with no operator-visible cause, the same shape
+/// [`trusty_common::uds::server::RpcServer::run`]: a predecessor that is
+/// SIGKILLed never reaches the unlink below and leaves its socket file behind.
+/// ADR-0032 retired this daemon's launchd unit, so the successor is whatever
+/// `OnDemandAnalyze` spawns on the next request — and `RpcServer::run` binds
+/// through `bind_hardened`, which refuses an occupied path rather than
+/// clobbering what might be a live owner. That successor would fail its bind and
+/// exit, and so would the next, with no operator-visible cause — the same shape
 /// as the #2566 port collision. `bind_singleton_hardened` probes first and takes
 /// over only a socket the kernel proves nobody is serving, so a live daemon is
 /// still never clobbered.
@@ -376,21 +435,6 @@ fn serve_options() -> RpcServeOptions {
 ///
 /// Test: `rpc_health_answers_over_a_real_socket`,
 /// `rpc_unlinks_its_socket_on_shutdown`.
-/// This server's own shutdown budget, as the supervisor contract requires.
-///
-/// Why it is declared here and not only in `trusty-common`: `ServiceTimeouts`'
-/// sourcing rule says the supervisor's `shutdown_flush` must be the supervised
-/// binary's REAL budget, and `trusty-common` cannot import this crate to read
-/// it. So this is the definition, and
-/// `analyze_flush_budget_matches_the_supervisor_contract` pins
-/// `trusty_common::uds::ANALYZE_SHUTDOWN_FLUSH` against it — a drift is a test
-/// failure rather than a SIGKILL landing mid-shutdown.
-///
-/// One second is honest for this server: every handler commits its redb write
-/// before answering, so a SIGTERM discards nothing that was acked. The budget
-/// covers the accept loop returning and the socket unlink below.
-pub const SHUTDOWN_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
-
 pub async fn serve(state: AnalyzerAppState, socket: &Path) -> Result<()> {
     // Migration cleanup, deliberately OUTSIDE `serve_with_shutdown`: it resolves
     // the real `$HOME` and the real data directory, so a test that drove it
@@ -480,7 +524,11 @@ pub async fn serve_with_shutdown(
 /// leave corpses.
 ///
 /// The router is released BEFORE the unlink, through [`release_stores`]
-/// (#6595). The unlink is what tells a client this server is gone, and the
+/// (#6595). Since #6601 that release is a bare drop: `serve_until_idle` drains
+/// in-flight connections on the shutdown path too, so it returns only once every
+/// connection task has let go of its clone.
+///
+/// The unlink is what tells a client this server is gone, and the
 /// client's answer to that is to spawn a successor, whose first act is to open
 /// the same two redb files. redb takes an exclusive lock per file, so releasing
 /// those locks after the unlink hands the successor a `Database already open.
@@ -546,7 +594,7 @@ pub async fn serve_with_idle(
     // #6595: close the redb stores before the unlink advertises this server as
     // gone, so a successor never opens facts.redb against a lock this process
     // still holds.
-    release_stores(router, socket).await;
+    release_stores(router);
 
     if let Err(e) = std::fs::remove_file(socket) {
         tracing::debug!(socket = %socket.display(), error = %e, "socket already gone");
@@ -568,34 +616,23 @@ pub async fn serve_with_idle(
 /// unlink is what tells a client to spawn a successor, and the successor dies
 /// on `Database already open. Cannot acquire lock.`
 ///
-/// What: polls `Arc::strong_count` for up to [`SHUTDOWN_FLUSH_TIMEOUT`], whose
-/// doc already scopes it to "the accept loop returning and the socket unlink".
-/// The count only falls — nothing accepts once the loop has returned, and this
-/// function clones nothing — so reading 1 proves sole ownership rather than
-/// merely suggesting it. `Arc::into_inner` cannot be polled in its place: it
-/// consumes the `Arc` on the `None` arm, so a failed attempt cannot be retried.
+/// What: a plain drop. The WAIT this used to perform moved into
+/// `serve_until_idle` (#6601), which now drains in-flight connections on the
+/// shutdown path as it always did on the idle path — so by the time it returns,
+/// every connection task has released its clone and this one is the last. The
+/// caller-side `Arc::strong_count` poll that shipped with #6595 was the same
+/// wait done one layer too high, where only this service benefited; keeping both
+/// would be two implementations of one guarantee.
 ///
-/// A handler with no read budget — `analyze.review` runs for minutes by
-/// design — can outlast the budget. That case warns and proceeds: the process
-/// is exiting on a signal either way, and holding the path open longer trades
-/// one hazard for a socket file nobody unlinks.
+/// A handler with no read budget — `analyze.review` runs for minutes by design —
+/// can still outlast `RpcServeOptions::shutdown_drain`. That case warns inside
+/// the serve loop and proceeds: the process is exiting on a signal either way,
+/// and holding the path open longer trades one hazard for a socket file nobody
+/// unlinks. A clone outstanding at that point makes this drop a no-op, which is
+/// exactly what the old poll's timeout arm did.
 ///
 /// Test: `shutdown_with_a_connection_in_flight_frees_its_redb_lock_before_the_unlink`.
-async fn release_stores(router: Arc<RpcRouter>, socket: &Path) {
-    let deadline = std::time::Instant::now() + SHUTDOWN_FLUSH_TIMEOUT;
-    while Arc::strong_count(&router) > 1 {
-        if std::time::Instant::now() >= deadline {
-            tracing::warn!(
-                socket = %socket.display(),
-                holders = Arc::strong_count(&router),
-                "a connection task still holds the router after the flush budget; \
-                 the redb locks may outlive the socket and a successor spawned in \
-                 that window will fail to open them"
-            );
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
+fn release_stores(router: Arc<RpcRouter>) {
     drop(router);
 }
 
