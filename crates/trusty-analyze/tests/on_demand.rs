@@ -169,6 +169,9 @@ async fn await_serving(socket: &Path, budget: Duration) -> bool {
 /// pre-fix ordering this failed 15 rounds out of 15, with the lock held for
 /// 54–560 ms and `lsof` naming the exiting server as its only holder.
 /// Test: this is the test.
+// `serial` for the single-process `cargo test` run, not for a fixture: this
+// spawns a child, and a sibling's `set_var` on PATH / TRUSTY_* would race that
+// spawn's read of the environment (#6542). Under nextest it is a no-op.
 #[serial_test::serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_idle_exit_frees_its_redb_locks_before_it_unlinks_the_socket() {
