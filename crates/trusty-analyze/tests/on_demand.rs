@@ -152,6 +152,21 @@ async fn await_serving(socket: &Path, budget: Duration) -> bool {
     false
 }
 
+/// The socket file's `(device, inode)`, or `None` when nothing is at `socket`.
+///
+/// Why (#6411): a second binder cannot reuse a socket file that is already
+/// there — `bind` refuses an occupied path, so taking one over means unlinking
+/// it and creating a fresh one. The identity of the file therefore changes if
+/// and only if something rebound the path, which makes this the direct test for
+/// "two servers held one socket". It is also true or false at every instant,
+/// unlike a count of how many children happen to still be running, so a host
+/// slow enough to delay the loser's exit cannot turn it red.
+/// Test: `two_racing_server_processes_leave_exactly_one`.
+fn socket_identity(socket: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::metadata(socket).ok().map(|m| (m.dev(), m.ino()))
+}
+
 /// Why (#6595): the unlink is what tells a client this server is gone, and the
 /// client's answer is to spawn a successor that opens the same two redb files.
 /// redb locks each file exclusively, so a lock released AFTER the unlink hands
@@ -401,9 +416,15 @@ fn analyze_flush_budget_matches_the_supervisor_contract() {
 /// nothing can reach.
 ///
 /// What: races two real `trusty-analyze serve` children on one empty socket
-/// directory and asserts the socket answers with exactly ONE of them still
-/// alive — the loser must have exited on its bind rather than clobbering the
-/// winner.
+/// directory, waits for the loser to exit on its refused bind, and asserts the
+/// winner's socket file is the same one still answering — the loser must have
+/// exited rather than clobbering the winner.
+///
+/// #6411: the verdict comes from the socket's identity and the loser's exit
+/// status, never from counting survivors when a timer expires. Both children
+/// can still be alive at any given instant on a loaded host without a second
+/// one ever having bound, and reading that instant as the answer is what made
+/// this test red on CI twice after #6467.
 /// Test: this is the test.
 #[serial_test::serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -421,18 +442,35 @@ async fn two_racing_server_processes_leave_exactly_one() {
         "one of the two must win the bind and serve {}",
         socket.display()
     );
+    // Record the winner's socket before the loser can reach its bind. Every
+    // assertion below compares against this, not against a headcount.
+    let bound = socket_identity(&socket);
 
-    // Give the loser time to fail its bind and exit. It cannot be identified in
-    // advance, so both are polled and the survivors counted.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let alive = loop {
-        let a = first.try_wait().expect("try_wait").is_none();
-        let b = second.try_wait().expect("try_wait").is_none();
-        let alive = usize::from(a) + usize::from(b);
-        if alive <= 1 || Instant::now() >= deadline {
-            break alive;
+    // #6411: wait for the EVENT — a child has exited — rather than for a fixed
+    // duration. The loser cannot be named in advance, but it is the only one
+    // that can exit inside this budget: the winner holds a 120s idle window and
+    // the guard below is 30s, so the first child to exit is always the one whose
+    // bind was refused. Whichever exits first is therefore the loser.
+    //
+    // The 30s is a HANG GUARD and nothing more: its expiry no longer decides the
+    // verdict. The old loop counted survivors when the timer ran out and read
+    // "the loser has not been scheduled to its bind yet" as "2 processes
+    // survived the race", which is a fact about how loaded the host is rather
+    // than about `bind_singleton_hardened`. Keep this below the 120s idle window
+    // above, or a winner that idles out becomes the first exit and this reads it
+    // as the loser.
+    let hang_guard = Instant::now() + Duration::from_secs(30);
+    let loser_exit = loop {
+        if let Some(status) = first.try_wait().expect("try_wait") {
+            break Some(status);
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        if let Some(status) = second.try_wait().expect("try_wait") {
+            break Some(status);
+        }
+        if Instant::now() >= hang_guard {
+            break None;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     };
 
     // #6411: probe while the winner is still RUNNING. Asking after the kills
@@ -441,14 +479,11 @@ async fn two_racing_server_processes_leave_exactly_one() {
     // beat signal delivery and failed ~20% of the time on a loaded CI runner.
     let winner_still_serving =
         trusty_common::uds::socket_is_serving(&socket, Duration::from_secs(1)).await;
+    let serving_now = socket_identity(&socket);
 
     let _ = first.kill();
     let _ = second.kill();
 
-    assert_eq!(
-        alive, 1,
-        "exactly one server may hold the socket; {alive} processes survived the race"
-    );
     // A bare "still serving" is what the property needs, and it is stricter than
     // the tolerate-a-missing-path form this replaces: an unlinked socket with
     // the winner still alive IS the defect under test, so accepting it as a pass
@@ -458,6 +493,27 @@ async fn two_racing_server_processes_leave_exactly_one() {
         "the loser must not have unlinked the winner's socket: {} is no longer served",
         socket.display()
     );
+    // #6411: the defect is a SECOND server on the same path, and a second server
+    // can only get there by unlinking this file and creating its own. Same file,
+    // still answering, means the singleton held — whether or not the loser has
+    // been scheduled long enough to exit.
+    assert_eq!(
+        serving_now,
+        bound,
+        "{} was rebound during the race: a second server took over the winner's socket",
+        socket.display()
+    );
+    // #6411: when the loser did exit, its status is the stronger evidence — a
+    // refused bind propagates out of `main` as exit 1, so a SUCCESS here would
+    // mean that child had served and idled out, i.e. a second server. When the
+    // guard fired instead, the loser is merely unscheduled and the two
+    // assertions above already carry the verdict.
+    if let Some(status) = loser_exit {
+        assert!(
+            !status.success(),
+            "the losing child must exit on its refused bind, not serve: {status}"
+        );
+    }
 }
 
 /// Why (#6350): `HttpAnalyzeMetricsSource` starts the server once per source,
