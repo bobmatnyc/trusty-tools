@@ -1269,19 +1269,50 @@ fn rpc_diagnostics_reports_deadline_exceeded_distinctly() {
     );
 }
 
-/// Why (#6595): the idle exit reaches the unlink with zero open connections —
-/// `IdleGuard` guarantees it — but the SIGTERM/SIGINT exit does not.
-/// `serve_until_idle` returns `ServeExit::Shutdown` the moment the signal
-/// future resolves, with no check on connections in flight, so a connection
-/// task still holds an `Arc<RpcRouter>` clone and with it the `FactStore`'s
-/// `Arc<Database>`. Without a wait, the unlink would run while that lock is
-/// held and hand the next `ensure_running` a successor that cannot open
-/// facts.redb — the same failure on the shutdown path that the idle path had.
+/// Why (#6601 review): `analyze_flush_budget_matches_the_supervisor_contract`
+/// pins two CONSTANTS against each other and neither was the value the serve
+/// loop spent — `serve_options` inherited `RpcServeOptions::default()`, so the
+/// supervisor waited 5 s while the loop drained on the process grace window.
+/// Both constants stayed equal throughout; the assertion could not see it. This
+/// is the missing link: the field the loop reads, pinned to the budget the
+/// supervisor was told about.
 ///
-/// What forces the arm deterministically: a peer that has been accepted but
-/// never completes its request frame parks the connection task in a read, so
-/// `Arc::into_inner` is on its `None` arm when the shutdown lands. The peer is
-/// then released, which is what the bounded wait is there to pick up.
+/// What: `serve_options().shutdown_drain` must BE `SHUTDOWN_FLUSH_TIMEOUT`, and
+/// that must be strictly less than the patience the supervisor waits, or the
+/// SIGKILL lands inside the drain.
+/// Test: this is the test.
+#[test]
+fn serve_options_bind_the_shutdown_drain_to_this_services_own_budget() {
+    assert_eq!(
+        serve_options().shutdown_drain,
+        SHUTDOWN_FLUSH_TIMEOUT,
+        "the loop must drain on this service's declared budget, not on the \
+         shared default sized to the process termination grace"
+    );
+    assert!(
+        SHUTDOWN_FLUSH_TIMEOUT < trusty_common::uds::on_demand::ANALYZE_TIMEOUTS.sigterm_patience,
+        "the drain must finish inside the patience the supervisor actually waits"
+    );
+}
+
+/// Why (#6595): the idle exit reaches the unlink with zero open connections —
+/// `IdleGuard` guarantees it — but the SIGTERM/SIGINT exit used not to.
+/// `serve_until_idle` returned `ServeExit::Shutdown` the moment the signal
+/// future resolved, with no check on connections in flight, so a connection
+/// task still held an `Arc<RpcRouter>` clone and with it the `FactStore`'s
+/// `Arc<Database>`. The unlink then ran while that lock was held and handed the
+/// next `ensure_running` a successor that could not open facts.redb.
+///
+/// What closes it since #6601: `drain_shutdown` inside `serve_until_idle`. Every
+/// accepted connection holds an `IdleGuard`, and the shutdown arm waits for that
+/// count to reach zero — bounded by `RpcServeOptions::shutdown_drain`, which
+/// [`serve_options`] sets to this crate's `SHUTDOWN_FLUSH_TIMEOUT` — before it
+/// returns and [`release_stores`] drops the router.
+///
+/// What forces that path deterministically: a peer that has been accepted but
+/// never completes its request frame parks the connection task in a read, so the
+/// guard count is above zero when the shutdown lands. The peer is then released,
+/// which is what the drain is there to pick up.
 /// Test: this is the test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shutdown_with_a_connection_in_flight_frees_its_redb_lock_before_the_unlink() {
