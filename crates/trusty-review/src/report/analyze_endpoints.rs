@@ -17,8 +17,8 @@
 //! Caveats list, so one slow endpoint names itself instead of erasing the whole
 //! fetch.
 //!
-//! Test: `analyze_adapter_tests.rs::{diagnostics_budget_outlives_the_daemon_
-//! deadline_ladder, caveat_labels_are_stable}`.
+//! Test: `analyze_adapter_tests.rs::{diagnostics_budget_outlives_the_daemon_deadline_ladder,
+//! caveat_labels_are_stable}`.
 
 use std::fmt;
 use std::time::Duration;

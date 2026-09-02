@@ -269,7 +269,8 @@ fn cells_of(trimmed: &str) -> Vec<String> {
 /// builder.  `Heatmap` → the fallback note; `Unknown` → `None` + a debug log;
 /// bar/stacked-bar/radar → a ```mermaid block, or `None` when no row yields a
 /// numeric y (chart would be empty).
-/// Test: `mermaid_tests.rs::{renders_bar, heatmap_fallback, unknown_no_block}`.
+/// Test: `mermaid_tests.rs::{renders_bar, heatmap_fallback_note_only,
+/// unknown_chart_no_block}`.
 fn render_block(marker: &Marker, table: &Table) -> Option<String> {
     if marker.chart == ChartType::Heatmap {
         return Some(format!("{HEATMAP_NOTE}\n"));

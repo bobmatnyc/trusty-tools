@@ -26,8 +26,10 @@
 #   (macOS-only);") is scanned — extraction stops dead at the first token
 #   that is none of those (see SCAN_AWK's doc comment for why: real
 #   annotations routinely continue past the test-name list into prose that
-#   ALSO backtick-quotes unrelated symbols). Each surviving span is then
-#   classified:
+#   ALSO backtick-quotes unrelated symbols). A span written in Rust's
+#   path-GROUPING form, `` `prefix::{a, b, c}` ``, is first expanded into
+#   `prefix::a`, `prefix::b`, `prefix::c` and each part is classified below on
+#   its own (issue #6678). Each surviving span is then classified:
 #     - module-path-qualified names (`foo::bar::baz_test`) are matched on
 #       their FINAL segment (`baz_test`);
 #     - a citation whose final segment is a lowercase snake_case identifier
@@ -43,12 +45,25 @@
 #       `` `ActivityInfo` `` — no underscore, or CamelCase)) is not a
 #       candidate at all and is silently skipped, same as before — this is
 #       the deliberate leniency for field/type mentions inside the citation
-#       list, not the bug this script was rewritten to close.
+#       list, not the bug this script was rewritten to close. #6678 measured
+#       that class at 1,780 spans workspace-wide, and it is overwhelmingly
+#       shell command lines (`` `cargo test -p trusty-common` ``), file paths
+#       (`` `tests/cli_e2e.rs` ``) and expression examples
+#       (`` `ToolResult::err("x").is_error()` ``) — text that never claimed
+#       to be a test name. That is why the fail-closed bias above is drawn at
+#       path-GROUPING syntax rather than at "unparseable" in general.
 #   An UNTERMINATED backtick or parenthetical inside the leading run (a
 #   stray `` ` `` or `(` with no matching close) is not "prose" — it is
 #   malformed annotation syntax the parser cannot interpret, and is reported
 #   as a hard parse-error violation (never allowlist-suppressible) rather
-#   than silently truncating the scan.
+#   than silently truncating the scan. So is a brace citation this parser
+#   cannot decompose (#6678): `{`/`}` is path-grouping syntax, so a span
+#   carrying it is a citation LIST, and the leniency below never reaches it.
+#   The parser reads exactly `prefix::{member[, member]*}` with no nesting,
+#   each member a Rust identifier or a glob over one; anything else — a
+#   nested set, a set with no `::` prefix, a member that wrapped
+#   mid-identifier across two doc lines — is a parse error naming the
+#   offending citation.
 #   Each surviving EXACT/GLOB candidate is checked with `git grep` (cached
 #   per crate — see build_crate_caches) for a `fn <name>(` (or
 #   `fn <name><...>(` for a generic fn) OR a `mod <name>;` / `mod <name> {`
@@ -213,10 +228,11 @@ function strip(line,    s) {
   return s
 }
 
-# One citation span, already unwrapped from its backticks. Matched on its
-# FINAL `::`-separated segment; de-duplicated within the annotation it came
-# from, exactly as the shell loop this replaced de-duplicated on KIND:name.
-function emit(f, ln, nm,    parts, k, final, kind, key) {
+# One citation span, already unwrapped from its backticks and already expanded
+# out of any brace set. Matched on its FINAL `::`-separated segment;
+# de-duplicated within the annotation it came from, exactly as the shell loop
+# this replaced de-duplicated on KIND:name.
+function classify_one(f, ln, nm,    parts, k, final, kind, key) {
   k = split(nm, parts, "::")
   final = parts[k]
   if (final == "") return
@@ -230,6 +246,43 @@ function emit(f, ln, nm,    parts, k, final, kind, key) {
   seen[key] = 1
   print (f "\t" ln "\t" kind "\t" final) > CHECKED
   needed[cur_crate] = 1
+}
+
+# #6678: a citation carrying `{`/`}` is Rust path-grouping syntax, so it IS a
+# citation list the parser must decompose — never prose to skip. `prefix::{a,
+# b}` expands to `prefix::a` and `prefix::b`, each handed to classify_one
+# exactly as if it had been written out longhand; a brace citation this
+# function cannot decompose goes to ERRF instead of being dropped.
+function emit(f, ln, nm,    ob, cb, prefix, inner, k, mem, i, m) {
+  ob = index(nm, "{")
+  cb = index(nm, "}")
+  if (ob == 0 && cb == 0) { classify_one(f, ln, nm); return }
+  if (nm !~ /^[^{}]+::\{[^{}]*\}$/) {
+    print (f "\t" ln "\tunrecognised citation shape `" nm "` — the only brace form this parser reads is `prefix::{a, b}` (no nesting)") > ERRF
+    return
+  }
+  prefix = substr(nm, 1, ob - 3)
+  inner = substr(nm, ob + 1, cb - ob - 1)
+  k = split(inner, mem, ",")
+  if (k == 0) {
+    print (f "\t" ln "\tempty brace set in citation `" nm "`") > ERRF
+    return
+  }
+  for (i = 1; i <= k; i++) {
+    m = mem[i]
+    sub(/^[ \t]+/, "", m)
+    sub(/[ \t]+$/, "", m)
+    # Every element of a brace set is a citation by construction, so the
+    # leading-run prose leniency does not reach inside one: a member must be a
+    # Rust identifier or a glob over one. A member carrying anything else — a
+    # doc comment that wrapped mid-identifier is the shape seen in the wild —
+    # is malformed syntax, not a citation to drop.
+    if (m == "" || (m !~ /^[A-Za-z_][A-Za-z0-9_]*$/ && m !~ /^[a-z][a-z0-9_*]*$/)) {
+      print (f "\t" ln "\tunrecognised brace-set member `" m "` in citation `" nm "`") > ERRF
+      return
+    }
+    classify_one(f, ln, prefix "::" m)
+  }
 }
 
 function parse_block(f, ln, blob,    s, n, i, c, j, rest, depth, cc, jj, errflag) {
@@ -807,10 +860,53 @@ pub fn malformed_unterminated_backtick() {}
 /// one real citation, zero parse errors.
 pub fn nested_parens_inside_parenthetical_is_not_a_parse_error() {}
 
+/// Test: `tests::{brace_member_real_a, brace_member_real_b}`.
+///
+/// issue #6678: a brace set expands into one candidate per member, each
+/// resolved exactly as if it had been written out longhand. Pre-fix the span's
+/// final segment was the whole group, which failed the identifier shape and was
+/// dropped as "not a candidate", so neither member was ever checked. Both names
+/// are cited ONLY here, so their presence in the resolved-citation file is
+/// proof the expansion happened.
+pub fn brace_set_resolves() {}
+
+/// Test: `tests::{brace_member_real_a, brace_member_missing_test}`.
+///
+/// issue #6678: one real member, one dangling. Exactly the dangling one must be
+/// reported, at this annotation's line.
+pub fn brace_set_one_member_dangling() {}
+
+/// Test: `outer_tests::{a_real_test, inner::{a_nested_test}}`.
+///
+/// issue #6678: a nested brace set is a shape this parser cannot decompose, and
+/// an unrecognised shape fails closed as a parse error rather than being
+/// dropped.
+pub fn brace_set_nested_is_unrecognised() {}
+
+/// Test: `tests::{brace_member_real_a, brace_member_wrapped_
+/// mid_identifier}`.
+///
+/// issue #6678: the annotation wrapped mid-identifier, so the member joins
+/// across the two doc lines with a space in it and names no test. Every element
+/// of a brace set is a citation, so this is malformed syntax rather than prose
+/// to skip — the exact shape found in the wild at
+/// crates/trusty-review/src/report/analyze_endpoints.rs:20.
+pub fn brace_set_member_wrapped_mid_identifier() {}
+
 #[cfg(test)]
 mod tests {
     #[test]
     fn real_test_exists() {
+        assert!(true);
+    }
+
+    #[test]
+    fn brace_member_real_a() {
+        assert!(true);
+    }
+
+    #[test]
+    fn brace_member_real_b() {
         assert!(true);
     }
 
@@ -872,11 +968,23 @@ EOF
   # citation must resolve, not just `fn` citations (this is exactly the case
   # that shipped broken: module citations only ever passed via the
   # allowlist, never verified for real).
-  # ...plus untracked_file_dangling_test, cited by an UNTRACKED file (#5798) —
-  # seven in total.
-  if [ "$(wc -l < "$viol" | tr -d ' ')" != "7" ]; then
-    echo "self-test FAIL: expected exactly 7 violations, got:" >&2
+  # ...plus untracked_file_dangling_test, cited by an UNTRACKED file (#5798),
+  # and brace_member_missing_test, the dangling member of a brace set (#6678) —
+  # eight in total.
+  if [ "$(wc -l < "$viol" | tr -d ' ')" != "8" ]; then
+    echo "self-test FAIL: expected exactly 8 violations, got:" >&2
     cat "$viol" >&2
+    ok=0
+  elif ! grep -q "brace_member_missing_test" "$viol"; then
+    echo "self-test FAIL: the dangling member of a brace-set citation was not reported — the brace set was dropped as 'not a candidate' again (issue #6678), got:" >&2
+    cat "$viol" >&2
+    ok=0
+  elif grep -qE 'brace_member_real_a|brace_member_real_b' "$viol"; then
+    echo "self-test FAIL: a resolvable brace-set member was flagged dangling (issue #6678), got:" >&2
+    cat "$viol" >&2
+    ok=0
+  elif ! grep -q "brace_member_real_a" "$checked" || ! grep -q "brace_member_real_b" "$checked"; then
+    echo "self-test FAIL: brace-set members are missing from the resolved-citation file — the expansion did not run, so the citation count under-reports (issue #6678):" >&2
     ok=0
   elif ! grep -q "untracked_file_dangling_test" "$viol"; then
     echo "self-test FAIL: the untracked file's dangling citation was not reported — the corpus is tracked-only again (issue #5798), got:" >&2
@@ -910,8 +1018,11 @@ EOF
     echo "self-test FAIL: a trailing-prose symbol, the valid module_style_tests citation, or the resolvable glob_matches_real_test_* was incorrectly flagged as dangling:" >&2
     cat "$viol" >&2
     ok=0
-  elif [ "$(wc -l < "$err" | tr -d ' ')" != "1" ] || ! grep -q "unterminated backtick" "$err"; then
-    echo "self-test FAIL: expected exactly 1 parse-error row citing the unterminated backtick in malformed_unterminated_backtick's annotation (issue #3581: must fail loudly, not silently pass) — and NOT the well-formed nested-parens-inside-parenthetical annotation (\`helper_call()\` inside a \`(...)\` aside), got:" >&2
+  elif [ "$(wc -l < "$err" | tr -d ' ')" != "3" ] \
+    || ! grep -q "unterminated backtick" "$err" \
+    || ! grep -q "unrecognised citation shape" "$err" \
+    || ! grep -q "unrecognised brace-set member" "$err"; then
+    echo "self-test FAIL: expected exactly 3 parse-error rows — the unterminated backtick in malformed_unterminated_backtick's annotation (issue #3581: must fail loudly, not silently pass), the nested brace set, and the brace-set member that wrapped mid-identifier (issue #6678: an unrecognised shape fails closed) — and NOT the well-formed nested-parens-inside-parenthetical annotation (\`helper_call()\` inside a \`(...)\` aside), got:" >&2
     cat "$err" >&2
     ok=0
   fi
@@ -973,7 +1084,7 @@ EOF
   rm -f "$viol2" "$stale2" "$err2"
 
   if [ "$ok" -eq 1 ]; then
-    echo "check_test_pointers self-test: OK (valid pointer passes, dangling pointer caught, module citations resolve, prose-only/module-ref citations ignored, glob citations resolved by pattern match, parenthetical asides no longer break multi-citation scanning, unterminated backticks fail loudly, allowlist ratchet suppresses/prunes correctly by (path,name))."
+    echo "check_test_pointers self-test: OK (valid pointer passes, dangling pointer caught, module citations resolve, prose-only/module-ref citations ignored, glob citations resolved by pattern match, brace sets expand per member, an unrecognised brace shape fails closed, parenthetical asides no longer break multi-citation scanning, unterminated backticks fail loudly, allowlist ratchet suppresses/prunes correctly by (path,name))."
     return 0
   fi
   return 1

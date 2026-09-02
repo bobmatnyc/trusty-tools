@@ -167,8 +167,9 @@ pub struct BatchOutcome {
 /// per-repo file set, not just the batch) so any well-formed cross-batch
 /// citation still resolves.  Survivors are merged and deduped by `(file,
 /// title)`, keeping the higher-severity (or, on a tie, first-seen) copy.
-/// Test: `batch_tests::{one_truncated_batch_others_survive, retry_recovers,
-/// merge_dedupes_keeping_higher_severity, all_batches_can_fail}`.
+/// Test: `batch_tests::{one_truncated_batch_others_survive,
+/// retry_recovers_from_truncation, merge_dedupes_keeping_higher_severity,
+/// all_batches_can_fail_independently}`.
 pub async fn run_batches(
     provider: Arc<dyn LlmProvider>,
     llm_model: &str,

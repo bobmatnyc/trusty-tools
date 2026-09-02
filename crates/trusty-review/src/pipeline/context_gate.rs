@@ -85,8 +85,9 @@ pub enum GateOutcome {
 /// routes through this same Degraded branch (never `Proceed`) regardless of
 /// whether `surface` is `Hosted` or `Interactive` — only the reason text and
 /// the required-vs-degraded branch selection differ per surface.
-/// Test: `gate_tests::{skips_when_search_down, degraded_when_search_down_optout,
-/// skips_when_analyze_down, proceeds_when_both_healthy,
+/// Test: `gate_tests::{skips_when_search_down_and_required,
+/// degraded_when_search_down_and_opted_out,
+/// skips_when_analyze_down_and_required, proceeds_when_both_healthy,
 /// interactive_surface_defaults_to_degraded_when_search_down,
 /// hosted_surface_defaults_to_skip_when_search_down,
 /// degraded_reason_prefers_health_error_detail,

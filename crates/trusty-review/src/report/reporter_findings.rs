@@ -10,7 +10,7 @@
 //! `reporter_*` sibling rather than inventing a new file layout.
 //! What: [`push_finding_band`], the only item `reporter.rs` calls, and the
 //! private `FindingRow` it builds.
-//! Test: `reporter_tests.rs::{reporter_fills_red_findings_deterministically,
+//! Test: `reporter_tests.rs::{reporter_fills_findings_deterministically,
 //! reporter_merges_synthesis_prose_onto_deterministic_finding,
 //! reporter_injects_synthesis_prose,
 //! reporter_leaves_findings_honesty_marked_without_metrics}`.
@@ -479,7 +479,7 @@ fn fence_for(content: &str) -> String {
 /// skipped and the raw metrics fields render, and a synthesis-only row is
 /// dropped outright.  Pushes the `app_block` (`app_name` + one `finding_block`
 /// per row) only when the merged list is non-empty.
-/// Test: `reporter_tests.rs::{reporter_fills_red_findings_deterministically,
+/// Test: `reporter_tests.rs::{reporter_fills_findings_deterministically,
 /// reporter_merges_synthesis_prose_onto_deterministic_finding,
 /// reporter_injects_synthesis_prose,
 /// reporter_leaves_findings_honesty_marked_without_metrics}`.
