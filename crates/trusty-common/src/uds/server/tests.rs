@@ -1147,12 +1147,23 @@ async fn serve_until_idle_ignores_liveness_probes() {
     let (socket, _stop, handle) = spawn_idle_server(tmp.path(), window);
     await_socket(&socket).await;
 
-    // `await_socket` already probed; keep probing across the whole window.
-    for _ in 0..8 {
+    // `await_socket` already probed; keep probing for half the window — four
+    // probes at a window/8 cadence sum to 200ms of the 400ms window, leaving
+    // a 200ms margin (many times typical scheduler jitter) before the
+    // deadline. The original 8-probe loop summed to exactly the window, so
+    // any scheduling delay before it started let the server idle-exit
+    // mid-loop and this same assertion fail under load (#6629).
+    for _ in 0..4 {
         assert!(crate::uds::socket_is_serving(&socket, Duration::from_millis(200)).await);
         tokio::time::sleep(window / 8).await;
     }
+    assert!(
+        !handle.is_finished(),
+        "liveness probes across half the window must not have exited it early"
+    );
 
+    // The join below has no timing race of its own: it waits for whatever
+    // actually happens, up to the 10s timeout, well past the window.
     let exit = tokio::time::timeout(Duration::from_secs(10), handle)
         .await
         .expect("probes must not hold the window open")
