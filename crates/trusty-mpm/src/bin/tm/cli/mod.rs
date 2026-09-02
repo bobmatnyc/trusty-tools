@@ -1359,8 +1359,9 @@ pub(crate) enum Command {
 /// bare `tm doctor` is unchanged and READ-ONLY. The `repair` arg group holds
 /// the two flags that select a repair (`--fix`, `--fix-skills`) so
 /// `--include-frozen` can require either one without duplicating the check.
-/// The `writes` group holds the two that DEFAULT TO A PREVIEW (`--fix`,
-/// `--quarantine-mcp`) so `--yes` can promote either without naming both.
+/// The `writes` group holds the three whose destructive half DEFAULTS TO A
+/// PREVIEW (`--fix`, `--fix-skills`, `--quarantine-mcp`) so `--yes` can promote
+/// any of them without naming each.
 /// Test: `cli_parses_doctor`, `cli_parses_doctor_prune_stale_skills`,
 /// `cli_parses_doctor_fix_skills`, `cli_parses_doctor_fix`,
 /// `cli_parses_doctor_quarantine_mcp`,
@@ -1374,7 +1375,7 @@ pub(crate) enum Command {
 ))]
 #[command(group(
     clap::ArgGroup::new("writes")
-        .args(["fix", "quarantine_mcp"])
+        .args(["fix", "fix_skills", "quarantine_mcp"])
         .multiple(true)
         .required(false)
 ))]
@@ -1410,8 +1411,32 @@ pub struct DoctorFlags {
     /// overwrite under `~/.trusty-mpm/backup-doctor-remediation-<ts>/`,
     /// rewrites it from the bundled asset, then RE-READS it to confirm the
     /// repair took. Frozen skills are reported and left alone unless
-    /// `--include-frozen` is also passed. It never deletes anything, and it
-    /// never touches worktrees — those checks stay report-only.
+    /// `--include-frozen` is also passed. It never touches worktrees — those
+    /// checks stay report-only.
+    ///
+    /// Since #6586 it also sweeps the project tier of bundled skill copies an
+    /// older binary stranded under `<project>/.claude/skills`. That sweep is
+    /// the one thing here that DELETES, so it is a DRY RUN unless `--yes` is
+    /// also passed, and it acts only on positive evidence: a copy the tier's
+    /// own deploy ledger records and every file under which still matches the
+    /// recorded checksum. Anything else is refused — a hand-edit anywhere in
+    /// the subtree included — every removal is backed up whole first, and
+    /// `--fix` does not run it.
+    ///
+    /// `--include-frozen` does not override that refusal in the SAME run, and
+    /// it does not preserve it across runs either: passing it overwrites the
+    /// hand-edited file from the bundled asset and re-stamps the ledger
+    /// checksum, so the subtree the edit was protecting becomes removable on
+    /// the next sweep. The backup of that overwrite is what the edit survives
+    /// in.
+    ///
+    /// The two halves are gated differently on purpose. The REDEPLOY overwrites
+    /// tm's own files with tm's own bytes, backs each one up first, and has
+    /// `--fix` as its preview, so it still applies on this flag alone. The
+    /// SWEEP removes a directory, which no re-run undoes, so it needs `--yes`.
+    /// A copy the sweep is removing is reported skipped by the redeploy rather
+    /// than refreshed — otherwise a bare `--fix-skills` would rewrite every
+    /// stem it had just said it would only preview.
     #[arg(long)]
     pub fix_skills: bool,
 
@@ -1434,15 +1459,21 @@ pub struct DoctorFlags {
     #[arg(long)]
     pub fix: bool,
 
-    /// With `--fix` or `--quarantine-mcp`, actually perform the change
-    /// instead of previewing.
+    /// With `--fix`, `--fix-skills`, or `--quarantine-mcp`, actually perform
+    /// the change instead of previewing.
     ///
     /// Why (#4948): these repairs rewrite files the operator can see and
     /// care about, so a preview is the default and writing is a second
     /// deliberate act. Every overwrite is still backed up first, and a
-    /// quarantine renames aside rather than deleting.
-    /// What: promotes `--fix` and `--quarantine-mcp` from a dry run to an
-    /// applied run.
+    /// quarantine renames aside rather than deleting. #6586 put the
+    /// `--fix-skills` project-tier sweep behind the same gate, because it is
+    /// the one repair that removes a directory.
+    /// What: promotes `--fix`, the `--fix-skills` sweep, and `--quarantine-mcp`
+    /// from a dry run to an applied run. The `--fix-skills` REDEPLOY half is
+    /// unaffected — it overwrites tm's own files, backs each one up, has
+    /// `--fix` as its preview, and has always applied on the flag alone. What
+    /// it will NOT do without `--yes` is refresh a project-tier copy the sweep
+    /// has only planned to remove; those are reported skipped.
     #[arg(long, requires = "writes")]
     pub yes: bool,
 

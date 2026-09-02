@@ -39,6 +39,18 @@ pub struct SkillDeployTier {
     pub dir: PathBuf,
 }
 
+/// The project tier's skills directory: `<project_dir>/.claude/skills`.
+///
+/// Why (#6586): three call sites spelled this join by hand — the tier
+/// enumeration below, the stray sweep, and the `skill_project_tier` probe — and
+/// the sweep's deferral has to name the SAME directory the enumeration yields
+/// or the redeploy skips nothing. One spelling, one answer.
+/// What: `<project_dir>/.claude/skills`. Pure path arithmetic; touches no disk.
+/// Test: `tiers_add_the_project_tier`.
+pub fn project_skill_tier(project_dir: &Path) -> PathBuf {
+    project_dir.join(".claude").join("skills")
+}
+
 /// Enumerate every skill deploy target, deduplicated, highest-reach first.
 ///
 /// Why: see the module doc — one call site listing the tiers keeps `tm
@@ -68,7 +80,7 @@ pub fn skill_deploy_tiers(
     let candidates = [
         Some(("managed config", managed)),
         Some(("operator home", paths.claude_skills_dir())),
-        project_dir.map(|dir| ("project", dir.join(".claude").join("skills"))),
+        project_dir.map(|dir| ("project", project_skill_tier(dir))),
     ];
 
     let mut tiers: Vec<SkillDeployTier> = Vec::new();

@@ -37,13 +37,14 @@
 //!
 //! Test: `skill_repair_tests.rs`.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::core::agent_manifest::ManifestError;
 use crate::core::agent_manifest::{atomic_write, checksum};
 use crate::core::doctor_repair::RepairMode;
 use crate::core::paths::FrameworkPaths;
-use crate::core::skill_deploy_tiers::{SkillDeployTier, skill_deploy_tiers};
+use crate::core::skill_deploy_tiers::{SkillDeployTier, project_skill_tier, skill_deploy_tiers};
 use crate::core::skill_drift::{
     ManifestState, SkillDrift, SkillReference, audit_deployed_skills, deployed_path,
 };
@@ -167,6 +168,57 @@ pub fn repair_skills_in_mode(
     backup_root: &Path,
     mode: RepairMode,
 ) -> Vec<RepairOutcome> {
+    repair_skills_in_mode_deferring(
+        reference,
+        paths,
+        project_dir,
+        include_frozen,
+        backup_root,
+        mode,
+        &BTreeSet::new(),
+    )
+}
+
+/// The reason a stem the #6586 sweep is removing is skipped at the project tier.
+///
+/// Why (#6586 critic HIGH): a bare `tm doctor --fix-skills` runs the sweep as a
+/// DRY RUN and the redeploy as an APPLY. Those two halves met on the same 51
+/// project-tier stems: the sweep printed "would remove", then the redeploy
+/// rewrote every one of them from the bundled asset and re-stamped its ledger
+/// checksum — 51 files and 51 backups written immediately after the command
+/// said nothing would be written. Refreshing a copy the sweep is removing is
+/// work in the opposite direction whichever mode the sweep ran in.
+/// What: the `why` of the [`RepairAction::SkippedUnverifiable`] those stems get
+/// instead. [`super::doctor_repair`] renders it verbatim.
+/// Test: `a_deferred_project_stem_is_not_refreshed`.
+pub const DEFERRED_TO_STRAY_SWEEP: &str = "the #6586 project-tier sweep is removing this stray copy in this run — refreshing it here \
+     would write straight back what the sweep is taking out";
+
+/// [`repair_skills_in_mode`], leaving the #6586 sweep's stems alone.
+///
+/// Why: see [`DEFERRED_TO_STRAY_SWEEP`]. The deferral is additive rather than a
+/// signature change on [`repair_skills_in_mode`] so the two callers that run no
+/// sweep — `tm doctor --fix`'s preview and [`repair_skills`] — keep the shorter
+/// call.
+/// What: identical to [`repair_skills_in_mode`] except that a finding whose stem
+/// is in `deferred_project_stems` is reported
+/// [`RepairAction::SkippedUnverifiable`] and never written. The deferral applies
+/// ONLY at [`project_skill_tier`] — the same directory the sweep acts on — so a
+/// stem that is also deployed at the user or managed tier is still repaired
+/// there. With no project directory in scope it applies nowhere.
+/// Test: `a_deferred_project_stem_is_not_refreshed`,
+/// `a_deferred_stem_is_still_repaired_at_the_user_tier`.
+pub fn repair_skills_in_mode_deferring(
+    reference: &SkillReference,
+    paths: &FrameworkPaths,
+    project_dir: Option<&Path>,
+    include_frozen: bool,
+    backup_root: &Path,
+    mode: RepairMode,
+    deferred_project_stems: &BTreeSet<String>,
+) -> Vec<RepairOutcome> {
+    let project_tier = project_dir.map(project_skill_tier);
+    let nothing_deferred = BTreeSet::new();
     let mut outcomes = Vec::new();
     for tier in skill_deploy_tiers(paths, project_dir) {
         // #4881: a tier directory that does not exist has no ledger and so no
@@ -184,6 +236,14 @@ pub fn repair_skills_in_mode(
         // module exists to remedy.
         let label = tier.label;
         let dir = tier.dir.clone();
+        // #6586: the sweep only ever touches the project tier, so the deferral
+        // must not reach a copy at the user or managed tier that nothing is
+        // removing.
+        let deferred = if project_tier.as_ref() == Some(&tier.dir) {
+            deferred_project_stems
+        } else {
+            &nothing_deferred
+        };
         let locked = with_skill_manifest_lock::<_, ManifestError, _>(&tier.dir, || {
             Ok(repair_tier_locked(
                 reference,
@@ -191,6 +251,7 @@ pub fn repair_skills_in_mode(
                 include_frozen,
                 backup_root,
                 mode,
+                deferred,
             ))
         });
         match locked {
@@ -224,6 +285,7 @@ fn repair_tier_locked(
     include_frozen: bool,
     backup_root: &Path,
     mode: RepairMode,
+    deferred: &BTreeSet<String>,
 ) -> Vec<RepairOutcome> {
     let mut outcomes = Vec::new();
     let audit = audit_deployed_skills(reference, &tier.dir);
@@ -272,6 +334,12 @@ fn repair_tier_locked(
         let target = deployed_path(&tier.dir, &finding.stem);
         let action = match finding.state {
             SkillDrift::Fresh => continue,
+            // #6586 critic HIGH: checked BEFORE the write gate, so the deferral
+            // holds in both modes — a preview must not promise a rewrite the
+            // apply path skips.
+            _ if deferred.contains(&finding.stem) => {
+                RepairAction::SkippedUnverifiable(DEFERRED_TO_STRAY_SWEEP.to_string())
+            }
             SkillDrift::Unverifiable(why) => RepairAction::SkippedUnverifiable(why),
             SkillDrift::DriftedFrozen if !include_frozen => RepairAction::SkippedFrozen,
             SkillDrift::Drifted | SkillDrift::DriftedFrozen | SkillDrift::Missing => {
