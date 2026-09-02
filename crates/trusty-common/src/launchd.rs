@@ -264,11 +264,7 @@ impl LaunchdConfig {
     /// cannot be resolved.
     /// Test: `plist_path_layout`.
     pub fn plist_path(&self) -> Result<PathBuf> {
-        let home = dirs::home_dir().context("could not resolve home directory")?;
-        Ok(home
-            .join("Library")
-            .join("LaunchAgents")
-            .join(format!("{}.plist", self.label)))
+        plist_path_for_label(&self.label).context("could not resolve home directory")
     }
 
     /// Install the agent: write the plist and ensure the log directory exists.
@@ -341,12 +337,7 @@ impl LaunchdConfig {
     /// Test: side-effecting `launchctl` call; exercised manually (mirrors the
     /// `service status` subcommands' identical `launchctl print` check).
     pub fn is_loaded(&self) -> bool {
-        let target = format!("gui/{}/{}", current_uid(), self.label);
-        Command::new("launchctl")
-            .args(["print", &target])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        label_is_loaded(&self.label)
     }
 
     /// Bootout (stop and unload) the agent via `launchctl`.
@@ -383,6 +374,46 @@ impl LaunchdConfig {
             stderr.trim()
         );
     }
+}
+
+/// Where launchd looks for the per-user agent named `label`.
+///
+/// Why (#6619): a caller that has only a label — the on-demand spawn guard
+/// asking whether a unit is installed for the socket it is about to bind — would
+/// otherwise assemble this path itself, and a second spelling of
+/// `~/Library/LaunchAgents/<label>.plist` is exactly the drift the
+/// common-entry-point rule exists to prevent.
+/// What: `~/Library/LaunchAgents/<label>.plist`. `None` when the home directory
+/// cannot be resolved. [`LaunchdConfig::plist_path`] is this over its own label.
+/// Test: `plist_path_layout` covers the layout through the method.
+#[must_use]
+pub fn plist_path_for_label(label: &str) -> Option<PathBuf> {
+    Some(
+        dirs::home_dir()?
+            .join("Library")
+            .join("LaunchAgents")
+            .join(format!("{label}.plist")),
+    )
+}
+
+/// Whether launchd currently has `label` loaded in the GUI domain.
+///
+/// Why (#6619): same reason as [`plist_path_for_label`] — a label-only caller
+/// must reach launchd through the one `launchctl print` this crate owns rather
+/// than spawning its own.
+/// What: runs `launchctl print gui/<uid>/<label>` and reports whether it exited
+/// successfully; launchctl exits non-zero for a label it does not have. Never
+/// errors — an inability to query reads as "not loaded", so callers fall back to
+/// their safe path. [`LaunchdConfig::is_loaded`] is this over its own label.
+/// Test: side-effecting `launchctl` call; exercised manually.
+#[must_use]
+pub fn label_is_loaded(label: &str) -> bool {
+    let target = format!("gui/{}/{label}", current_uid());
+    Command::new("launchctl")
+        .args(["print", &target])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 /// Return the current process's real user ID.
