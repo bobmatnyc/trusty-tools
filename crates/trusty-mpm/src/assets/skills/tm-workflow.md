@@ -478,6 +478,9 @@ existing style.
   **review-gate failure** — the same tier as a failing build/test/lint gate.
   Treat it exactly like CB#8: block the merge, delegate back to the engineer,
   don't wave it through as "trivial."
+- Self-check with `bash scripts/check_changelog_fragment.sh` before pushing —
+  the same script CI and the pre-commit hook run, so a nonzero exit here is the
+  same finding CI would report, just earlier.
 - If the project also runs automated changelog generation at release time, check
   the project's root `CLAUDE.md` for which mechanism owns `CHANGELOG.md` before
   assuming they coexist. Two writers to one file is a defect; do not invent a

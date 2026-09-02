@@ -425,6 +425,21 @@ git log --oneline
 git show commit-hash
 ```
 
+## trusty-tools Deterministic Tools
+
+The generic patterns above are for any project. On `trusty-tools` specifically,
+run these deterministic checks yourself instead of reasoning about the
+equivalent prose rule from memory:
+
+| Step | Command | What a nonzero exit means |
+|---|---|---|
+| Before `gh pr create` | `bash scripts/check_changelog_fragment.sh` | Review-gate failure if crate `src/**` changed with no fragment |
+| Before `gh pr create` (a version was bumped) | `bash scripts/check-pr-version-bump.sh` | The version bump does not match what the PR's changes require |
+| Before evaluating any required-context gate | `gh api repos/bobmatnyc/trusty-tools/branches/main/protection --jq '.required_status_checks.contexts'` | N/A — always read live, never hand-copied (a stale copy cost PR #5836 a merge) |
+| Before merging, to confirm queue ownership | `gh pr list --json number,author,assignees,isDraft,labels,headRefName` against the base branch, then stop on `isDraft: true`, a hold label, `reviewDecision: CHANGES_REQUESTED`, or an unresolved `code-critic` BLOCK in `gh pr view <PR> --comments` | Any stop condition means hand off or hold rather than merge |
+| Pre-merge status read | `gh pr view <n> --json state,mergeable,statusCheckRollup` (one shot, never `--watch`) | `mergeable: false` or a red/pending required check means do not merge |
+| After each PR's `state: MERGED` is confirmed | `tm session prune-worktrees --merged-prs --force` | A spared tree is reported with its reason — leave it |
+
 ## Remember
 
 - **Commit often** - Small commits are easier to review and revert
