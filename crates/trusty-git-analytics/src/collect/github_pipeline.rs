@@ -17,7 +17,7 @@ use futures::StreamExt as _;
 use tracing::{info, warn};
 
 use crate::collect::errors::CollectError;
-use crate::collect::github::budget::FetchBudget;
+use crate::collect::github::budget::RunBudget;
 use crate::collect::github::org_discovery::{discover_org_repos_within, effective_orgs};
 use crate::collect::github::repo_resolver::build_http_client;
 use crate::collect::github::reviewer_store::upsert_github_pr_reviewer;
@@ -40,7 +40,10 @@ use crate::collect::collector::CollectionStats;
 /// Test: the underlying discovery function is tested in
 /// `github::org_discovery::tests`; the serial aggregation here is
 /// exercised end-to-end by integration tests with `#[ignore]`.
-pub(super) async fn run_github_org_discovery(gh_cfg: &GithubConfig) -> Vec<(String, String)> {
+pub(super) async fn run_github_org_discovery(
+    gh_cfg: &GithubConfig,
+    budget: &RunBudget,
+) -> Vec<(String, String)> {
     let orgs = effective_orgs(gh_cfg.org.as_deref(), &gh_cfg.orgs);
     if orgs.is_empty() {
         return Vec::new();
@@ -58,12 +61,15 @@ pub(super) async fn run_github_org_discovery(gh_cfg: &GithubConfig) -> Vec<(Stri
 
     // #6084: one budget for the whole multi-org pass, so a rate limit that
     // terminates the first org does not let the second start the storm again.
-    let budget = FetchBudget::new();
+    // #6565: that budget is now the RUN's, not this pass's — the PR sweep and
+    // the reviewer pass charge the same allowance rather than each getting a
+    // fresh 120 s.
+    let budget = budget.shared();
     let mut all: Vec<(String, String)> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for org in &orgs {
         info!(org = %org, "discovering repositories for GitHub org");
-        match discover_org_repos_within(&http, org, &budget).await {
+        match discover_org_repos_within(&http, org, budget).await {
             Ok(repos) => {
                 info!(org = %org, count = repos.len(), "org discovery complete");
                 for p in repos {
@@ -109,6 +115,7 @@ pub(super) async fn fetch_and_store_github_reviewers(
     gh_cfg: &GithubConfig,
     force_refresh_prs: bool,
     stats: &mut CollectionStats,
+    budget: &RunBudget,
 ) {
     // Gather all GitHub PRs that need reviewer data.  When force_refresh_prs
     // is true we re-fetch all; otherwise we only fetch PRs that have no
@@ -157,7 +164,7 @@ pub(super) async fn fetch_and_store_github_reviewers(
     info!(count = prs.len(), "fetching GitHub PR reviews");
 
     // Build a reviews-only client (no dummy repo slugs needed).
-    let gh_client = match GitHubClient::new_for_reviews(gh_cfg) {
+    let gh_client = match GitHubClient::new_for_reviews(gh_cfg).map(|c| c.with_run_budget(budget)) {
         Ok(c) => c,
         Err(e) => {
             stats.fail_stage(format!("GitHub reviewer client init failed: {e}"));

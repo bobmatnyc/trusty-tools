@@ -150,3 +150,55 @@ fn the_shipped_bounds_are_the_documented_ones() {
     assert_eq!(RATE_LIMIT_SLEEP_BUDGET, Duration::from_secs(120));
     assert_eq!(MAX_RETRY_AFTER, Duration::from_secs(60));
 }
+
+/// Why (#6565): the allowance now bounds a whole run, so a long multi-org sweep
+/// that legitimately needs more than 120 s of total waiting needs a way to say
+/// so without a rebuild.
+/// What: a positive integer of seconds wins over the constant.
+/// Test: itself.
+#[test]
+fn run_sleep_budget_honours_a_valid_override() {
+    assert_eq!(run_sleep_budget_from(Some("300")), Duration::from_secs(300));
+    assert_eq!(run_sleep_budget_from(Some(" 45 ")), Duration::from_secs(45));
+}
+
+/// Why: a zero or unparseable value must never shorten the allowance to nothing
+/// — the breaker would latch on the first rate-limited response and the run
+/// would report itself throttled before it had waited at all.
+/// What: unset, empty, `0`, and junk all fall back to the constant.
+/// Test: itself.
+#[test]
+fn run_sleep_budget_ignores_junk_overrides() {
+    for value in [None, Some(""), Some("0"), Some("-5"), Some("soon")] {
+        assert_eq!(
+            run_sleep_budget_from(value),
+            RATE_LIMIT_SLEEP_BUDGET,
+            "{value:?} must fall back to the shipped allowance"
+        );
+    }
+}
+
+/// Why (#6565): sharing is what makes the ceiling per-run; cloning a handle must
+/// share the underlying allowance and constructing a new one must not.
+/// What: two clones of one `RunBudget` draw down together; two separately
+/// constructed ones do not.
+/// Test: itself.
+#[test]
+fn a_cloned_run_budget_shares_its_allowance() {
+    let run = RunBudget::with_sleep_budget(Duration::from_secs(3));
+    let clone = run.clone();
+
+    run.shared()
+        .reserve(Duration::from_secs(2), 429)
+        .expect("2s fits");
+    assert!(
+        clone.shared().reserve(Duration::from_secs(2), 429).is_err(),
+        "a clone shares the allowance, so only 1s remains"
+    );
+
+    let separate = RunBudget::with_sleep_budget(Duration::from_secs(3));
+    separate
+        .shared()
+        .reserve(Duration::from_secs(3), 429)
+        .expect("a separate run budget starts full");
+}

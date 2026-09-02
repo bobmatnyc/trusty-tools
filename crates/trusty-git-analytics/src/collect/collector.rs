@@ -11,6 +11,7 @@ use crate::collect::bitbucket::BitbucketClient;
 use crate::collect::errors::Result;
 use crate::collect::fault::CollectionFault;
 use crate::collect::git::GitCollector;
+use crate::collect::github::budget::RunBudget;
 use crate::collect::github::GitHubClient;
 use crate::collect::identity::IdentityResolver;
 use crate::collect::linear_pipeline;
@@ -154,6 +155,11 @@ pub struct CollectionPipeline {
     /// [`ProgressBus::disabled`], on which every emit is a no-op — so the CLI
     /// path, including its `indicatif` bars, behaves exactly as before.
     progress: ProgressBus,
+    /// #6565: the ONE rate-limit sleep budget this run shares across every
+    /// GitHub client it builds — org discovery, the PR sweep, and the reviewer
+    /// pass. Each used to own its own, so the ceiling was charged once per
+    /// client and a breaker latched in one pass did not stop the next.
+    github_budget: RunBudget,
 }
 
 impl CollectionPipeline {
@@ -176,6 +182,9 @@ impl CollectionPipeline {
             strict_fetch: false,
             verbose_fetch: false,
             progress: ProgressBus::disabled(),
+            // #6565: constructed once here so every client this run builds
+            // charges the same allowance.
+            github_budget: RunBudget::new(),
         }
     }
 
@@ -605,7 +614,9 @@ impl CollectionPipeline {
                         "GitHub PR fetcher will scan {} repo(s) anonymously",
                         repos.len()
                     );
-                    match GitHubClient::new_for_prs(gh_cfg, repos) {
+                    match GitHubClient::new_for_prs(gh_cfg, repos)
+                        .map(|c| c.with_run_budget(&self.github_budget))
+                    {
                         Ok(gh) => providers.push(Box::new(gh)),
                         Err(e) => stats.fail_stage(format!("GitHub client init failed: {e}")),
                     }
@@ -615,7 +626,9 @@ impl CollectionPipeline {
                         "GitHub PR fetcher will scan {} repo(s)",
                         repos.len()
                     );
-                    match GitHubClient::new_for_prs(gh_cfg, repos) {
+                    match GitHubClient::new_for_prs(gh_cfg, repos)
+                        .map(|c| c.with_run_budget(&self.github_budget))
+                    {
                         Ok(gh) => providers.push(Box::new(gh)),
                         Err(e) => stats.fail_stage(format!("GitHub client init failed: {e}")),
                     }
@@ -674,7 +687,7 @@ impl CollectionPipeline {
         // repo set before constructing the GitHub client.
         let org_discovered = if let Some(gh_cfg) = &self.config.github {
             if gh_cfg.fetch_prs && (!gh_cfg.orgs.is_empty() || gh_cfg.org.is_some()) {
-                super::github_pipeline::run_github_org_discovery(gh_cfg).await
+                super::github_pipeline::run_github_org_discovery(gh_cfg, &self.github_budget).await
             } else {
                 Vec::new()
             }
@@ -718,6 +731,7 @@ impl CollectionPipeline {
                     gh_cfg,
                     self.force_refresh_prs,
                     stats,
+                    &self.github_budget,
                 )
                 .await;
             }
