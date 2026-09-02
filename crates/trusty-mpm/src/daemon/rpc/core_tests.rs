@@ -10,7 +10,7 @@
 //!
 //! ## The comparison allowlist
 //!
-//! Three things are dropped before comparing, all on `mpm.doctor`, and all
+//! Five things are dropped before comparing, all on `mpm.doctor`, and all
 //! because the DAEMON varies them between two calls of the same code rather
 //! than because the transports disagree:
 //!
@@ -27,8 +27,12 @@
 //!   session record(s), 59773 byte(s)" on one call and "44 … 60950" on the
 //!   next, because a concurrent managed session writes that file between the two
 //!   reads (#6490).
+//! - the `pty_headroom` check's `message`, which reports the machine's live
+//!   pseudo-terminal census — "82 of 511 pseudo-terminals allocated" on one call
+//!   and "83 of 511" on the next, because any process on the box opens or closes
+//!   a pty between the two reads (#6577).
 //!
-//! All three probes sample host state the daemon re-reads per call, which is
+//! All four probes sample host state the daemon re-reads per call, which is
 //! what makes their messages the only host-sampled strings in the report. Their
 //! `name` and `status` are still compared, so a check that vanished or changed
 //! verdict between the transports still fails — see
@@ -460,9 +464,14 @@ async fn parity_doctor_agrees_across_transports() {
 }
 
 /// The doctor checks whose `message` samples live host state, by name (#6358,
-/// #6490).
+/// #6490, #6577).
 ///
-/// Why exactly these three: each puts live host state the daemon re-reads per
+/// The membership rule, so the next such check need not flake first: a check
+/// belongs here when its message embeds a number or a name it RE-SAMPLES FROM
+/// THE HOST on every call. A message built from config on disk, or from the
+/// daemon's own state, does not.
+///
+/// Why exactly these four: each puts live host state the daemon re-reads per
 /// call into its message. `worktree_disk` reports how far it got against a
 /// 3-second deadline ("6.2 GiB … 268 worktree(s) went unmeasured" on one call,
 /// "6.8 GiB … 267" on the next) and `worktrees` reports the reconciled
@@ -471,7 +480,11 @@ async fn parity_doctor_agrees_across_transports() {
 /// worktree between this test's two calls. `session_store` reports the record
 /// count and byte length of `sessions.json` ("43 session record(s), 59773
 /// byte(s)" against "44 … 60950"), which change whenever a concurrent managed
-/// session writes that file between the two reads (#6490). All three are the
+/// session writes that file between the two reads (#6490). `pty_headroom`
+/// reports a live census of allocated pseudo-terminals ("82 of 511
+/// pseudo-terminals allocated" against "83 of 511"), which changes whenever any
+/// process on this machine opens or closes a pty between the two reads (#6577).
+/// All four are the
 /// PROBE varying, not the transports disagreeing. Only the MESSAGE is host-
 /// sampled: each check's `status` is a stable verdict (`session_store` stays
 /// `Ok` while only its counts churn), so it is still compared — a store that
@@ -481,9 +494,14 @@ async fn parity_doctor_agrees_across_transports() {
 /// What: the names [`blank_host_sampled_messages`] blanks.
 /// Test: [`parity_doctor_agrees_across_transports`],
 /// [`session_store_message_is_excluded_from_parity_but_its_status_is_not`].
-const HOST_SAMPLED_MESSAGE_CHECKS: &[&str] =
+const HOST_SAMPLED_MESSAGE_CHECKS: &[&str] = &[
+    "worktree_disk",
+    "worktrees",
     // #6490: session_store's message samples sessions.json's live record count.
-    &["worktree_disk", "worktrees", "session_store"];
+    "session_store",
+    // #6577: pty_headroom's message samples this machine's live pty census.
+    "pty_headroom",
+];
 
 /// Blank each [`HOST_SAMPLED_MESSAGE_CHECKS`] message, keeping name and status.
 ///
@@ -539,6 +557,8 @@ fn session_store_message_is_excluded_from_parity_but_its_status_is_not() {
                 {"name": "worktree_disk", "status": "ok", "message": "6.2 GiB measured"},
                 {"name": "worktrees", "status": "ok", "message": "14 live, 265 not reclaimable"},
                 {"name": "session_store", "status": session_store_status, "message": session_store_message},
+                // #6577: present so the presence assertion is satisfied.
+                {"name": "pty_headroom", "status": "ok", "message": "82 of 511 pseudo-terminals allocated"},
             ]
         })
     };
