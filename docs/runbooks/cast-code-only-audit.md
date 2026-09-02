@@ -37,7 +37,9 @@ DD-dimension gap analysis in
   `trusty-analyze report` embeds `trusty-review`'s report generator as a
   library — both binaries reach the same implementation entry point. The
   `--features review` flag is required for `trusty-analyze report`; without it,
-  the `report` verb and `--code-only` flag are unavailable.
+  the `report` verb and `--code-only` flag are unavailable. `trusty-review
+  report` is that same generator's own front door. It needs no extra feature
+  flag: `cargo install trusty-review --locked` is enough on its own.
 
 - **LLM credentials:** Required. Report generation always makes inference calls
   [#5454](https://github.com/bobmatnyc/trusty-tools/issues/5454). Provide one of:
@@ -62,6 +64,12 @@ DD-dimension gap analysis in
   enable `trusty-review`'s GitHub Issues context source
   (`TRUSTY_REVIEW_CONTEXT_GITHUB_ISSUES_ENABLED=true`). A code-only audit
   against a local checkout needs neither.
+
+- **Index resolution for `--analyze`** (#6677): if you use `--analyze`, the
+  report resolves the trusty-search index by the checkout's registered
+  `root_path` when the derived index id is absent from the daemon's registry,
+  and logs a WARN line naming both the derived and the resolved id. A
+  checkout indexed under any id still works.
 
 ## Producing the manifest
 
@@ -116,6 +124,27 @@ Key notes:
 - `metrics` can reference a pre-produced `trusty-analyze` metrics JSON file;
   when omitted, a scan is performed.
 
+**Evidence discovery.** A manifest declaring only `[report]`, `[inference]`,
+and `[[repositories]] name/path` gets no search-derived evidence. The
+2026-09-02 live run against this checkout reported: "evidence discovery:
+path-name heuristics only — the manifest declared no search-derived evidence
+for this repository." This is a prerequisite, not a permanent gap:
+`crates/trusty-review/src/report/manifest.rs` documents the
+`inspect_priority` key for exactly this purpose.
+
+```rust
+/// Ranked repo-relative paths the investigation pass must inspect first
+/// (#6078). Empty — the default — leaves selection byte-identical to a
+/// manifest without the key. See [`InspectionPriority`].
+pub inspect_priority: Vec<InspectionPriority>,
+```
+
+Each entry also accepts `dimension` and `reason` (#6082), attributing the
+file to a DD dimension and naming the query that found it. `trusty-audit`
+writes this automatically from its search and knowledge-graph ranking; a
+hand-written manifest can declare it too. Track follow-up work in
+[#6669](https://github.com/bobmatnyc/trusty-tools/issues/6669).
+
 `--instructions <file>` (or the manifest's `[report].instructions` key) hands
 the generator a free-form markdown brief. It steers emphasis in synthesis (if
 enabled) but never authorizes inventing a fact.
@@ -137,8 +166,24 @@ trusty-analyze report \
   --out ./dd-reports
 ```
 
-Both `trusty-analyze report` and `trusty-review report` call the same generator
-and accept the same flags:
+`trusty-analyze report` fetches trusty-analyze metrics on demand by default;
+pass `--no-analyze` to skip that fetch. `trusty-review report` defaults the
+same fetch OFF, so run it with `--analyze` explicitly, or the complexity
+profile renders "not stated in source data":
+
+```bash
+trusty-review report \
+  --manifest report-manifest.toml \
+  --template cast \
+  --code-only \
+  --analyze \
+  --out ./dd-reports
+```
+
+Both binaries call the same generator and accept nearly the same flags. The
+analyzer-metrics fetch is the one exception: `trusty-analyze report` takes
+`--no-analyze` (on by default); `trusty-review report` takes `--analyze` (off
+by default), listed below as the shared table's one binary-specific row.
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -147,11 +192,14 @@ and accept the same flags:
 | `--code-only` | off | Mark non-code sections as out-of-scope; mark code-derived sections as inferred |
 | `--out <DIR>` | `./reports` | Output directory for the markdown + JSON pair |
 | `--instructions <FILE>` | unset | Free-form analyst brief (markdown) for synthesis focus |
-| `--synthesize` | off | Add LLM-written prose to executive summary, top risks, and RED/AMBER findings |
 | `--corpus <DIR>` | XDG data dir | Deterministic cross-repo benchmark corpus directory |
 | `--benchmark` | off | Compute percentile/quartile placement in the corpus |
-| `--analyze` | on | Fetch trusty-analyze metrics on-demand (fail-open; built-in scan used if unavailable) |
+| `--analyze` (trusty-review report only) | off | Fetch trusty-analyze metrics on demand for local-path repos declaring no `metrics` file, only when already indexed. Fully fail-open |
 | `--no-mermaid` | off | Skip Mermaid chart generation beneath graph-ready data tables |
+
+`--synthesize` is deprecated and ignored (#5454): synthesis now runs
+unconditionally on every report. Passing the flag only prints a deprecation
+line to stderr and changes nothing.
 
 Template aliases: `cast` → `report-technical-dd-cast`, `default` / `generic` →
 `report-technical-dd`. Override either by dropping a same-named file in
@@ -170,12 +218,14 @@ PDF or HTML — hand the markdown to a general-purpose converter (e.g.
 deliverable. Mermaid charts render fine on GitHub and most markdown viewers;
 a converter that does not support Mermaid fences will drop them.
 
-**Expected runtime.** Scales with the file investigation budget and the number
-of LLM calls. A default run (40-file investigation budget per repository) takes
-roughly 60–120 seconds per repository; scales roughly linearly with the file
-budget. Large repositories with non-default `investigate_max_files` settings
-cost correspondingly more. No fixed SLA — a run that is still logging output is
-not stuck.
+**Expected runtime.** Measured once, 2026-09-02, one repository: a
+103082-chunk index of this checkout took about 3m45s wall-clock, using
+`trusty-review report --code-only` with the default OpenRouter roles
+(reviewer, verifier, and summarizer). Most of that time is LLM synthesis.
+The scan-only phases finish in well under a minute. Treat this figure as one
+data point, not an SLA. Runtime scales with the file investigation budget and
+the number of LLM calls, so a larger `investigate_max_files` costs more. A run
+that is still logging output is not stuck.
 
 ## Reading the report
 
