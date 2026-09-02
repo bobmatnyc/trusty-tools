@@ -12,14 +12,18 @@
 //!
 //! ## Stage order
 //!
-//! DOC-67 §5's prose lists the sweep as "collect → classify → report →
-//! pr-metrics → jira → dora → deployments → incidents". That is the spec's
-//! enumeration of which subcommands participate, not a runnable order: `dora`
-//! reduces `fact_deployments` / `fact_incidents` (§8), so running it before the
-//! two commands that populate those tables would compute the four DORA keys
-//! over empty input, and `report` renders what the earlier stages produced, so
-//! running it third would render a mostly empty report. The executed order is
-//! therefore data-flow order — see [`SweepStage`].
+//! Data-flow order: collect → correlate → classify → jira sync → deployments →
+//! incidents → dora → pr-metrics → report. See [`SweepStage`] for what each
+//! stage does and [`run_full_sweep`] for the body that runs them.
+//!
+//! DOC-67 §5 "Executed stage order" lists the same nine stages and is the
+//! spec-side statement of this contract (#5306). It used to list
+//! "collect → classify → report → pr-metrics → jira → dora → deployments →
+//! incidents", which cannot execute: `dora` reduces `fact_deployments` /
+//! `fact_incidents` (§8), so running it before the two commands that populate
+//! those tables computes the four DORA keys over empty input, and `report`
+//! renders what the earlier stages produced, so running it third renders a
+//! mostly empty report.
 
 mod analyze;
 mod gaps;

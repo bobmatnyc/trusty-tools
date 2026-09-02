@@ -98,6 +98,9 @@ pub struct SweepOptions {
 ///
 /// # Spec References
 /// - [`SPEC-TGAUDIT-02~draft`](../../../../docs/specs/DOC-67-tga-audit-mode.md#SPEC-TGAUDIT-02~draft)
+/// - [`SPEC-TGAUDIT-05~draft`](../../../../docs/specs/DOC-67-tga-audit-mode.md#SPEC-TGAUDIT-05~draft)
+///   — §5 "Executed stage order" lists the nine stages this body runs, in this
+///   order (#5306). Changing the sequence here means changing that list.
 /// - [`SPEC-TGAUDIT-07~draft`](../../../../docs/specs/DOC-67-tga-audit-mode.md#SPEC-TGAUDIT-07~draft)
 /// - [`SPEC-TGAUDIT-09~draft`](../../../../docs/specs/DOC-67-tga-audit-mode.md#SPEC-TGAUDIT-09~draft)
 pub async fn run_full_sweep(
@@ -160,8 +163,8 @@ pub async fn run_full_sweep(
     finish(progress, &mut stats, SweepStage::JiraSync, t, result);
 
     // Deployments and incidents populate `fact_deployments` / `fact_incidents`,
-    // which `dora` reduces — so they precede it here even though DOC-67 §5's
-    // prose lists dora first. See the module-level note in `super`.
+    // which `dora` reduces — so they precede it. #5306: DOC-67 §5 states this
+    // same order; it used to list dora first, which cannot execute.
     let t = begin(progress, &stats, SweepStage::Deployments);
     let result = deployments::run(config.clone(), db, DeploymentsCollectArgs::default()).await;
     finish(progress, &mut stats, SweepStage::Deployments, t, result);

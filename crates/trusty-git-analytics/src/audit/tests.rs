@@ -12,10 +12,15 @@ use crate::core::progress::{ProgressBus, Stage};
 
 /// The order `run_full_sweep` is contracted to execute in.
 ///
-/// Data-flow order, not DOC-67 §5's prose order — deployments and incidents
-/// populate what dora reduces, and report renders what everything else wrote.
-/// #5405 puts correlate immediately after collect, which is where every
-/// production writer of `work_items` runs.
+/// Data-flow order — deployments and incidents populate what dora reduces, and
+/// report renders what everything else wrote. #5405 puts correlate immediately
+/// after collect, which is where every production writer of `work_items` runs.
+///
+/// #5306: DOC-67 §5 "Executed stage order" lists these same nine stages. This
+/// array is what stops the two from drifting apart — a change to either that is
+/// not made to the other fails
+/// `sweep_runs_every_stage_in_order_and_survives_failures` or leaves the spec
+/// describing a sweep that does not run.
 const EXPECTED_ORDER: [SweepStage; 9] = [
     SweepStage::Collect,
     SweepStage::Correlate,

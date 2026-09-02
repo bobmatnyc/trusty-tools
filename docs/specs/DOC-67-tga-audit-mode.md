@@ -231,11 +231,42 @@ flowchart LR
 
 **Seam 1 — tga owns acquisition and collection.** Everything under "Data
 Acquisition" (org/workspace discovery, clone-on-demand, JIRA/Linear/GitHub-
-Issues/Bitbucket collection into `work_items`, the full collect → classify →
-report → pr-metrics → jira → dora → deployments → incidents sweep) is epic
+Issues/Bitbucket collection into `work_items`, and the full sweep over the
+data-collection subcommands) is epic
 [#5223](https://github.com/bobmatnyc/trusty-tools/issues/5223)'s six children.
 This spec's new orchestrator code calls into that machinery once it exists;
 it does not restate it (§7).
+
+**Executed stage order.** `tga::audit::run_full_sweep`
+(`crates/trusty-git-analytics/src/audit/sweep.rs`) runs nine stages, in this
+order:
+
+1. `collect` — walk the configured repositories into `commits`.
+2. `correlate` — the deterministic commit ↔ board-item join
+   ([#5405](https://github.com/bobmatnyc/trusty-tools/issues/5405)). It sits
+   here because every production writer of `work_items` runs inside `collect`,
+   so this is the earliest point at which the join sees a complete board.
+3. `classify` — the four-tier classification cascade.
+4. `jira sync` — ingest JIRA transitions and comments.
+5. `deployments collect` — populate `fact_deployments`.
+6. `incidents collect` — populate `fact_incidents`.
+7. `dora` — reduce those two fact tables to the four DORA keys.
+8. `pr-metrics` — aggregate pull-request metrics per engineer.
+9. `report` — render the CSV / JSON / Markdown reports.
+
+This is data-flow order, and it deliberately replaces the order this section
+carried until
+[#5306](https://github.com/bobmatnyc/trusty-tools/issues/5306) — `collect →
+classify → report → pr-metrics → jira → dora → deployments → incidents` — which
+cannot execute as written: `dora` reduces the two tables `deployments` and
+`incidents` populate after it (§8), and `report` renders what the five stages
+following it produce.
+
+The order is asserted, not only described. `EXPECTED_ORDER` in
+`crates/trusty-git-analytics/src/audit/tests.rs` holds the same nine stages, and
+`audit::tests::sweep_runs_every_stage_in_order_and_survives_failures` fails if
+`run_full_sweep`'s body departs from it — so this list and the code cannot drift
+apart silently.
 
 **Seam 2 — trusty-review owns rendering.** `manifest.rs`, `model.rs`
 (`ReportModel::build`, folding in `scan.rs`'s `RepoScan` baseline),
