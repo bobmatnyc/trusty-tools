@@ -18,6 +18,10 @@ pub(crate) mod ops;
 pub(crate) mod state;
 pub(crate) mod validate;
 
+#[cfg(test)]
+#[path = "project_model_tests.rs"]
+mod project_model_tests;
+
 use std::path::PathBuf;
 
 use crate::cli::IssueCmd;
@@ -118,18 +122,26 @@ fn print_seed_report(report: &ops::SeedReport) {
 /// Print the configured states and transitions.
 ///
 /// Why: operator introspection of the active model (reads YAML only, no `gh`).
-/// What: lists each state (label, terminal flag) then each transition edge.
+/// What: lists each state (its label, or `(no label)` for a label-less state,
+/// plus the terminal flag) then each transition edge, marking the edges that
+/// require a `--note`.
 /// Test: side-effect-only (stdout); the model is unit-tested in `config`.
 fn print_states(model: &StateModel) {
     println!("states ({}):", model.states.len());
     for s in &model.states {
         let term = if s.terminal { " [terminal]" } else { "" };
-        println!("  {} → {}{}", s.name, s.label.name, term);
+        let label = s.label.as_ref().map_or("(no label)", |l| l.name.as_str());
+        println!("  {} → {}{}", s.name, label, term);
     }
     println!("transitions ({}):", model.transitions.len());
     for t in &model.transitions {
         let from = t.from.as_deref().unwrap_or("null");
-        println!("  {from} → {} ({:?})", t.to, t.trigger);
+        let note = if t.requires_note {
+            " [--note required]"
+        } else {
+            ""
+        };
+        println!("  {from} → {} ({:?}){note}", t.to, t.trigger);
     }
 }
 

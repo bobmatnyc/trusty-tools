@@ -59,10 +59,12 @@ fn declared_labels(model: &StateModel) -> Vec<RepoLabel> {
     let mut out: Vec<RepoLabel> = model
         .states
         .iter()
-        .map(|s| RepoLabel {
-            name: s.label.name.clone(),
-            color: s.label.color.clone(),
-            description: s.label.description.clone(),
+        // A label-less state (`open`, `closed`) has nothing to seed.
+        .filter_map(|s| s.label.as_ref())
+        .map(|l| RepoLabel {
+            name: l.name.clone(),
+            color: l.color.clone(),
+            description: l.description.clone(),
         })
         .collect();
     out.extend(model.extra_labels.iter().map(|l| RepoLabel {
@@ -114,13 +116,17 @@ pub(crate) fn seed_labels<S: TicketSystem>(
 /// (visibility + safety), perform the swap in one call, apply the per-state
 /// assignee rule, and post an audit comment so the change is reconstructable.
 /// What: resolves `<to>` to a known state; fetches the issue; resolves the
-/// current state from its labels (erroring clearly on zero/multiple); checks the
-/// `from → to` edge; performs the single-call swap (`swap_labels`); applies the
-/// assignee rule via `set_assignee` (no-op for the factory `unchanged` rules);
-/// and posts an audit comment with any `note`. Returns a [`TransitionReport`].
-/// Test: `ops_transition_happy_path`, `ops_transition_rejects_invalid`,
+/// current state from its labels and open/closed flag (erroring clearly on
+/// multiple); checks the `from → to` edge; refuses an edge whose
+/// `requires_note` is set when no `--note` was given; performs the single-call
+/// swap (`swap_labels`), or a plain add/remove when one end is label-less;
+/// applies the assignee rule via `set_assignee` (no-op for the factory
+/// `unchanged` rules); posts an audit comment with any `note`; and closes the
+/// issue when the target state IS GitHub's closed state. Returns a
+/// [`TransitionReport`].
+/// Test: `ops_transition_happy_path`, `ops_transition_rejects_invalid_terminal`,
 /// `ops_transition_rejects_zero_state`, `ops_transition_rejects_multi_state`,
-/// `ops_transition_assignee_unchanged`.
+/// plus `project_*` in `project_model_tests.rs`.
 pub(crate) fn transition<S: TicketSystem>(
     sys: &S,
     model: &StateModel,
@@ -140,7 +146,7 @@ pub(crate) fn transition<S: TicketSystem>(
 
     // 2. Fetch the issue and resolve its current state from labels.
     let issue_obj = sys.validate(issue)?;
-    let from: Option<String> = match sm.resolve_current_state(&issue_obj.labels) {
+    let from: Option<String> = match sm.resolve_current_state(&issue_obj.labels, issue_obj.open) {
         CurrentState::One(s) => Some(s.to_string()),
         CurrentState::None => None,
         CurrentState::Many(states) => {
@@ -161,17 +167,31 @@ pub(crate) fn transition<S: TicketSystem>(
         );
     }
 
-    // 4. Atomic label swap (single-call default). The creation edge (from=None)
-    //    only adds the entry label.
-    let to_label = sm
-        .state_label(to)
-        .ok_or_else(|| anyhow::anyhow!("internal: state `{to}` has no label"))?;
-    match from.as_deref().and_then(|f| sm.state_label(f)) {
-        Some(from_label) => sys.swap_labels(issue, to_label, from_label)?,
-        None => sys.add_label(issue, to_label)?,
+    // 4. The edge requires evidence and none was given → refuse before any
+    //    mutation (trusty-tools closes an issue only with live-verification
+    //    evidence in the comment).
+    let note = note.filter(|n| !n.trim().is_empty());
+    if sm.requires_note(from.as_deref(), to) && note.is_none() {
+        let from_disp = from.as_deref().unwrap_or("null");
+        anyhow::bail!(
+            "transition {from_disp} → {to} requires evidence; \
+             re-run with `--note \"<what proves it>\"`"
+        );
     }
 
-    // 5. Apply the per-state assignee rule (no-op for factory `unchanged`).
+    // 5. The label mutation, always ONE call when both ends are labelled, so an
+    //    issue can never be observed carrying two state labels.
+    let to_label = sm.state_label(to);
+    let from_label = from.as_deref().and_then(|f| sm.state_label(f));
+    match (to_label, from_label) {
+        (Some(add), Some(remove)) => sys.swap_labels(issue, add, remove)?,
+        (Some(add), None) => sys.add_label(issue, add)?,
+        // Moving to a label-less state (`open`, `closed`) drops the old label.
+        (None, Some(remove)) => sys.remove_label(issue, remove)?,
+        (None, None) => {}
+    }
+
+    // 6. Apply the per-state assignee rule (no-op for factory `unchanged`).
     let mut assignee_changed = false;
     if let Some(target) = sm.assignee_target_for(to) {
         // The `None` clear-all rule needs the current assignee set (read side).
@@ -184,7 +204,8 @@ pub(crate) fn transition<S: TicketSystem>(
         assignee_changed = true;
     }
 
-    // 6. Audit comment (visibility): record from → to + any note.
+    // 7. Audit comment (visibility): record from → to + any note. Posted BEFORE
+    //    any close so the evidence lands on an issue that is still open.
     let from_disp = from.as_deref().unwrap_or("(none)");
     let mut body = format!("tm issue transition: `{from_disp}` → `{to}`");
     if assignee_changed {
@@ -195,6 +216,11 @@ pub(crate) fn transition<S: TicketSystem>(
         body.push_str(n);
     }
     sys.comment(issue, &body)?;
+
+    // 8. A state that IS GitHub's closed state closes the issue.
+    if sm.closes_issue(to) {
+        sys.close_issue(issue)?;
+    }
 
     Ok(TransitionReport {
         from,
@@ -217,7 +243,7 @@ pub(crate) fn current<S: TicketSystem>(
 ) -> anyhow::Result<String> {
     let sm = StateMachine::new(model);
     let issue_obj = sys.validate(issue)?;
-    match sm.resolve_current_state(&issue_obj.labels) {
+    match sm.resolve_current_state(&issue_obj.labels, issue_obj.open) {
         CurrentState::One(s) => Ok(s.to_string()),
         CurrentState::None => anyhow::bail!(
             "issue #{issue} carries no recognised state label; valid states: [{}]",
@@ -248,7 +274,7 @@ pub(crate) fn repair<S: TicketSystem>(
 ) -> anyhow::Result<String> {
     let sm = StateMachine::new(model);
     let issue_obj = sys.validate(issue)?;
-    let present: Vec<&str> = match sm.resolve_current_state(&issue_obj.labels) {
+    let present: Vec<&str> = match sm.resolve_current_state(&issue_obj.labels, issue_obj.open) {
         CurrentState::One(s) => {
             // Nothing to repair — already a single, unambiguous state.
             return Ok(s.to_string());

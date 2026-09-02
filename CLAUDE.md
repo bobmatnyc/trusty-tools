@@ -191,11 +191,18 @@ Four mutually exclusive labels between GitHub's native open/closed:
   claim is provably stale: the named session is gone AND nothing referencing
   the issue (branch push, PR, comment) has moved since the claim. When in
   doubt, leave it.
-- Advancing a state removes the prior label in the same edit:
-  `gh issue edit N --add-label status:merged --remove-label status:coded`.
+- Advance with `tm issue transition N status:merged`, run from the repo root.
+  It reads [`issue-state.yaml`](issue-state.yaml), refuses an undeclared edge
+  with exit 1, and issues the add and remove as ONE `gh issue edit`, so two
+  `status:*` labels on one issue is unreachable. `tm issue states` lists the
+  model; `tm issue current N` reads a state back; `tm issue repair N` fixes an
+  issue that already carries two. Fall back to a single
+  `gh issue edit N --add-label … --remove-label …` only on a host with no `tm`.
 - Fix PRs use `Refs #N`, **never** `Closes #N` — merge must not auto-close.
 - An issue closes only from `status:tested`, with live verification evidence in
-  the closing comment. A merged fix that fails live verification stays open.
+  the closing comment: `tm issue transition N closed --note "<evidence>"`, which
+  refuses to run without the note. A merged fix that fails live verification
+  stays open.
 
 🔴 **`.trusty-mpm/sessions/` is TRACKED** (owner ruling 2026-08-31) — session
 snapshots and the pause log are committed so other sessions and harnesses can
