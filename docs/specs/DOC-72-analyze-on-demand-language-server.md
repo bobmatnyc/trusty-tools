@@ -134,6 +134,12 @@ Python (`src/core/tool_impls/python.rs`) and `biome` for TypeScript
 Python or TypeScript repository analysed by this daemon gets no type verdict at
 all, while Rust gets one through `cargo clippy`, which compiles.
 
+**What the measured evidence covers.** §7's numbers come from trials where the
+language server was available through the Claude Code plugin and the model was
+never told to call it — 0 of 30 explicit invocations. They size the cost of
+availability. They say nothing about the value of the deliberate calls this
+section specifies. Phase 0 measures that (§9).
+
 ---
 
 ## {#SPEC-ANALYZELSP-02~draft} 2. Lifecycle
@@ -362,19 +368,53 @@ The measured cost of calling this on reflex is 40% wall time for nothing
 
 ## {#SPEC-ANALYZELSP-07~draft} 7. Resource budget
 
-Per-language expected footprint. **The cells marked TBD are filled from the
-#6589 trials**, which measure RSS and CPU per server on this repository; the
-spec is not accepted with them empty.
+Measured in the #6589 trials, 2026-09-01. Method: headless `claude -p`, sonnet,
+three edit tasks per language, two arms per task (plugin on, plugin off), with
+the language-server process sampled by `ps` every 5 s. Each language ran against
+its own corpus, named in the table.
 
-| Language | Server | Steady RSS | Peak RSS | Cold index | CPU at idle |
-|---|---|---|---|---|---|
-| Rust | `rust-analyzer` | TBD | TBD | TBD | TBD |
-| Python | `pyright` | TBD | TBD | TBD | TBD |
-| TypeScript | `typescript-language-server` | TBD | TBD | TBD | TBD |
+| Language | Server | Corpus | Peak RSS | Mean CPU | Time to first ready | Wall, on vs off | Explicit invocations |
+|---|---|---|---|---|---|---|---|
+| Rust | `rust-analyzer` | `trusty-tools`, 21-crate workspace | 1683 MB | 15.8% | not recorded | 98 s vs 82 s | 0/8 |
+| Python | `pyright-langserver` | `pypa/packaging` @ `b9d249f` | ~180 MB (168–197) | ~2% | 10–18 s | 34 s vs 47 s | 0/6 |
+| TypeScript | `typescript-language-server` | `colinhacks/zod` v3.23.8 | ~61 MB | ~0% | not recorded | 40 s vs 36 s | 0/6 |
 
-**The hard cap is per server** (owner ruling, §10 Q6). Each language-server
-process carries its own RSS ceiling, defaulting to that language's measured peak
-plus 50%. The daemon samples each child's RSS against its own cap.
+Reading the table:
+
+- **Rust dominates the budget.** rust-analyzer's peak RSS is roughly 9× pyright's
+  and 27× tsserver's, and its mean CPU is the only one that registers. The
+  per-server cap below follows from that spread.
+- **The Rust wall figures differ from §Why's, and both are correct.** This leg
+  measured 98 s on vs 82 s off; leg 1's full task set measured 142 s vs 84 s.
+  Different task sets, same direction — the plugin costs time.
+- **Python's arm-A wall time is not a plugin win.** 34 s on vs 47 s off looks
+  like one, but arm B carried a 77 s outlier over n=3. `pyright` and `pytest`
+  results were identical between arms.
+- **No arm changed an outcome.** `tsc` and `jest` were identical between the
+  TypeScript arms too.
+
+**What these numbers establish, and what they do not.** Across all three
+languages the model made **0 of 30 explicit LSP tool calls**. Passive post-edit
+diagnostics did attach in 4 of 6 Python and TypeScript arm-A trials, and changed
+no outcome in any of them. The table therefore measures **the cost of a language
+server being available under the plugin, not the benefit of one being called
+deliberately**. Measuring the second is phase 0's job (§9); these numbers are its
+baseline, per the owner's ruling to study further (§10 Q3).
+
+**Initial per-server caps.** The cap is per server (owner ruling, §10 Q6):
+
+| Server | Initial cap | Headroom over measured peak |
+|---|---|---|
+| `rust-analyzer` | 3 GB | ~1.8× |
+| `pyright-langserver` | 512 MB | ~2.6× over the 197 MB high sample |
+| `typescript-language-server` | 256 MB | ~4.2× |
+
+These are **initial values, tuned in phase 0 and phase 2** — not ceilings derived
+from the measurement. The headroom is wider than a measured-peak-plus-50% rule
+would give, because one trial leg on one corpus per language is a thin basis for
+a hard limit, and a cap that fires on a legitimately larger workspace costs more
+than one set slightly high. The daemon samples each child's RSS against its own
+cap.
 
 There is **no aggregate budget** across servers. A per-server cap fails one
 language and leaves the others working; a shared budget would let a heavy Rust
@@ -499,7 +539,8 @@ builds against it.
 - **Acceptance:** a supervised server starts on demand and exits on idle; the
   barrier of §3 returns `Ready` only after the named version is applied;
   `lsp_impact` finds a call site `cargo check` also flags, on a seeded signature
-  change; the §7 table's Rust row is filled from measurement; the crash Claude
+  change; §7's Rust row is re-measured under deliberate tool use, not plugin
+  availability; the crash Claude
   Code swallowed as `outcome=ok` surfaces here as a typed error.
 
 ### Phase 2 — Audit tool-selection experiment
@@ -524,14 +565,15 @@ across fifty.
 - Closes the largest capability gap: Python has no compiler step in this daemon
   today, only `ruff` (§1).
 - **Acceptance:** phase 1's criteria on a Python workspace; `lsp_diagnostics`
-  reports a type error `ruff` does not; the §7 Python row is filled; a Python
+  reports a type error `ruff` does not; §7's Python row is re-measured under
+  deliberate tool use; a Python
   repository with no CI type check gets a gate verdict from §6's review trigger.
 
 ### Phase 4 — `typescript-language-server`
 
 - **Acceptance:** phase 1's criteria on a TypeScript workspace;
-  `lsp_diagnostics` agrees with `tsc --noEmit` on a seeded type error; the §7
-  TypeScript row is filled.
+  `lsp_diagnostics` agrees with `tsc --noEmit` on a seeded type error; §7's
+  TypeScript row is re-measured under deliberate tool use.
 
 **Across all phases.** The batch checkers remain the merge-chain gate,
 navigation remains on `trusty-search`, and no phase makes a language server
@@ -609,8 +651,9 @@ from running them over one workspace.*
 > A dedicated phase decides it by measurement across three repositories of
 > increasing size. Applied in §8d and as phase 2 of §9.
 
-No question in this spec is open. What remains unsettled is measurement: the §7
-table's TBD cells, phase 0's decision rule, and phase 2's per-tool table.
+No question in this spec is open. What remains unsettled is measurement: §7's
+per-server caps are initial values rather than derived ceilings, phase 0's
+decision rule has not been run, and phase 2's per-tool table is empty.
 
 ---
 
@@ -653,7 +696,7 @@ references #6606.
 14. **Phase 2 — audit tool-selection experiment (§9).** Run the three-repository
     size ladder with and without the LSP fetches, fill the per-tool table, and
     set `analyze_adapter.rs`'s default fetch set from the result.
-15. Phase 1 acceptance run: fill the §7 Rust row from measurement and record the
-    A/B against the batch checker.
+15. Phase 1 acceptance run: re-measure §7's Rust row under deliberate tool use
+    and record the A/B against the batch checker.
 16. Phase 3 (`pyright`) and phase 4 (`typescript-language-server`), one issue
     each, gated on phase 1's acceptance (§9).
