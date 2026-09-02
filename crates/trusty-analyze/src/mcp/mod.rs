@@ -358,6 +358,11 @@ impl AnalyzerMcpServer {
             "tr_review_pr" | "tr_review_diff" | "tr_review_health" => {
                 review::handle_tr_review(tool, args).await
             }
+            // #6669: `tr_report` does not forward to trusty-review's MCP
+            // surface — that surface has no report tool — so it is routed to
+            // its own handler over the library entry point.
+            #[cfg(feature = "review")]
+            "tr_report" => review::handle_tr_report(args).await,
             _ => Err(DispatchError::UnknownTool),
         }
     }

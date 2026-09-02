@@ -122,9 +122,21 @@ impl InferenceSection {
 pub struct ReportSection {
     /// Human-readable report title (used as the target codename and slug seed).
     pub title: String,
-    /// Optional bundled/override template name (e.g. `report-technical-dd-cast`).
+    /// Optional bundled/override template name (e.g. `report-technical-dd-cast`,
+    /// or the `cast` alias).
     #[serde(default)]
     pub template: Option<String>,
+    /// Render the template's non-code sections as stated out-of-scope
+    /// boundaries (#6669).
+    ///
+    /// Why: an engagement that collected only a repository declares that here,
+    /// so the report states its own boundary even when the operator re-renders
+    /// without remembering the flag. Only `true` has an effect — the flag can
+    /// turn the mode on, never off, so a caller who omits it cannot silently
+    /// widen a scope the manifest declared.
+    /// Test: `run_tests::the_manifest_can_declare_code_only`.
+    #[serde(default)]
+    pub code_only: Option<bool>,
     /// Optional analyst name recorded in the report metadata section.
     #[serde(default)]
     pub analyst: Option<String>,

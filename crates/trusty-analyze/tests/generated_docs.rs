@@ -86,7 +86,8 @@ fn section_is_correct_for_this_build_configuration() {
     let default: Vec<String> = default_rows().into_iter().map(|r| r.name).collect();
     let review: Vec<String> = review_rows().into_iter().map(|r| r.name).collect();
 
-    assert_eq!(review.len(), 3, "review roster changed: {review:?}");
+    // Three `tr_review_*` tools plus `tr_report` (#6669).
+    assert_eq!(review.len(), 4, "review roster changed: {review:?}");
     if cfg!(feature = "review") {
         assert_eq!(live.len(), default.len() + review.len());
         for name in &review {
@@ -115,7 +116,8 @@ fn section_is_correct_for_this_build_configuration() {
 /// that a default build can still read them.
 #[test]
 fn review_descriptors_are_readable_without_the_feature() {
-    assert_eq!(descriptors::review_tool_descriptors().len(), 3);
+    // Three `tr_review_*` tools plus `tr_report` (#6669).
+    assert_eq!(descriptors::review_tool_descriptors().len(), 4);
 }
 
 #[test]

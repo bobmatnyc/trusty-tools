@@ -5,7 +5,13 @@ name        = "trusty-analyze"
 # 0.12.4 (issue #4421, #6595): PATCH — 0.12.3 is already live on crates.io and
 # this PR edits `src/**` (on-demand respawn lock fix) under it; no public
 # signature changed. Bumped so the `PR version bump vs crates.io` gate clears.
-version     = "0.12.4"
+#
+# 0.12.5 (#6669): PATCH — pre-empting a concurrent crates.io publish of 0.12.4
+# (committed on main, not yet live at write time). This PR adds the
+# `report`/`tr_report` verb and MCP tool over a code-only CAST template — new
+# public items, purely additive. `cargo-semver-checks` reports no breaking
+# changes against the 0.12.3 baseline, so PATCH is correct.
+version     = "0.12.5"
 edition     = "2021"
 license.workspace    = true
 authors.workspace    = true
@@ -170,7 +176,12 @@ ner     = ["dep:ort", "dep:tokenizers"]
 #      trusty-review to be published. Pulls in trusty-review with its `mcp`
 #      feature so the reusable tool surface (`tools::call_tool`, `AppState`,
 #      `build_review_state`) is reachable.
-review  = ["dep:trusty-review", "trusty-review/mcp"]
+# #6669 adds `trusty-review/report`: the `report` verb and the `tr_report` MCP
+#      tool drive trusty-review's report pipeline through its library entry
+#      point (`trusty_review::report::run_report`), which that feature gates.
+#      It pulls in no new external dependency — the report module reuses
+#      toml/serde/regex/chrono/dirs, all already in trusty-review's tree.
+review  = ["dep:trusty-review", "trusty-review/mcp", "trusty-review/report"]
 
 [package.metadata.docs.rs]
 # Why: docs.rs builds with no features by default; the binary requires

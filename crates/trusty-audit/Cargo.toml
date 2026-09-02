@@ -1,6 +1,11 @@
 [package]
 name = "trusty-audit"
-version = "0.12.1"
+# 0.13.0 (#6669): MINOR bump — `trusty_audit::rerender::rerender` now takes 9
+# parameters instead of 8 (threading the new `ReportSettings.template` /
+# `.code_only` fields through). `cargo-semver-checks` reports this as
+# `function_parameter_count_changed` against the 0.12.0 baseline; for a 0.y.z
+# crate the breaking bump is the MINOR position.
+version = "0.13.0"
 description = "Auditor client — installs its pinned audit tooling and drives an audit engagement on the recipient's own codebases."
 readme = "README.md"
 homepage = "https://github.com/bobmatnyc/trusty-tools"

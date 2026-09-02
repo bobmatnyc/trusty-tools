@@ -1011,6 +1011,50 @@ trusty-review = "0.15.1"
         );
     }
 
+    /// A stub `tga` that records the report selection it was handed (#6669).
+    fn records_its_report_env() -> String {
+        format!(
+            "{}{}",
+            writes_a_manifest(None).trim_end_matches("exit 0\n"),
+            "{\n  echo \"template=$TRUSTY_AUDIT_REPORT_TEMPLATE\"\n  \
+             echo \"code_only=$TRUSTY_AUDIT_REPORT_CODE_ONLY\"\n} \
+             > \"$out/report-env.txt\"\nexit 0\n",
+        )
+    }
+
+    /// 🔴 #6669: the report selection an engagement declares must reach the
+    /// process that RENDERS, which on this path is a grandchild — `tga audit`
+    /// spawns `trusty-review report` itself.
+    ///
+    /// Asserts on the environment the spawned process received, for the same
+    /// reason the budget test above does: the manifest this child writes is
+    /// edited only after it exits, so a template recorded there reaches a
+    /// re-render and never this run's own report.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_child_environment_carries_the_engagement_report_selection() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, &records_its_report_env());
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        let config = EngagementConfig::from_toml(
+            &format!("{CONFIG}\n[report]\ntemplate = \"cast\"\ncode_only = true\n"),
+            Path::new("engagement.toml"),
+        )
+        .expect("parses");
+        let report = sweep(&work, &config, &RunOptions::default(), &Progress::none())
+            .await
+            .expect("the sweep completes");
+        assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
+
+        let seen = std::fs::read_to_string(report.repos[0].output.join("report-env.txt"))
+            .expect("the stub recorded its environment");
+        assert!(seen.contains("template=cast"), "{seen}");
+        assert!(seen.contains("code_only=true"), "{seen}");
+    }
+
     /// 🔴 #6247: the manifest that ships must name the budget the investigation
     /// actually ran under — one resolution, two consumers.
     ///

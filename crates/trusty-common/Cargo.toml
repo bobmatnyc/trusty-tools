@@ -53,7 +53,12 @@ name = "trusty-common"
 # breaking change under Cargo's 0.x rule. #6573 also adds public API. Bumped
 # on `main` first, ahead of either PR, so the `PR version bump vs crates.io`
 # gate clears once each PR updates its branch onto this commit.
-version = "0.47.0"
+# 0.47.1 (#6669): patch — pre-empting a concurrent crates.io publish of 0.47.0
+# (committed on main, not yet live at write time; already at the correct
+# MINOR/breaking position for the pre-existing #6562/#6573 changes above).
+# This PR only adds two new public constants to `env_vars.rs`; additive, no
+# existing item changed shape.
+version = "0.47.1"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

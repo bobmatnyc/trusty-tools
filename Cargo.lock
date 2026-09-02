@@ -11416,7 +11416,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-analyze"
-version = "0.12.4"
+version = "0.12.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11481,7 +11481,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-audit"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -11604,7 +11604,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.47.0"
+version = "0.47.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11998,7 +11998,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-review"
-version = "0.31.1"
+version = "0.31.2"
 dependencies = [
  "anyhow",
  "async-trait",

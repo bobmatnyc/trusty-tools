@@ -548,8 +548,42 @@ graph-ready datasets. Full design detail:
 
 ```bash
 trusty-review report --manifest dd/acme.toml \
-  --template report-technical-dd-cast --out /tmp/dd-reports
+  --template cast --code-only --out /tmp/dd-reports
 ```
+
+Since #6669 the pipeline lives in the library
+(`trusty_review::report::run_report`), so this binary and `trusty-analyze
+report` are two front doors onto one implementation.
+
+### `--code-only`
+
+A code-only audit reads a repository and nothing else. The switch does not
+shorten the report — it makes the report say what it could not measure:
+
+- A **non-code** section keeps its heading and states its boundary. The CAST
+  template marks two: Peer Benchmark (needs CAST's proprietary corpus of
+  scanned applications) and Next Steps (needs interviews with the delivery
+  organization). Each renders `Out of scope for a code-only audit — requires
+  <what it needs>, not available from repository inspection alone.`
+- A **partial** section — code-derived but never cross-checked — keeps its data
+  and gains `Inferred from code; not validated by interview or operational
+  data.` The CAST template marks three: OSS/CVE exposure, License/IP risk, and
+  Remediation Economics.
+- The Report Metadata table states the scope, so a reader never has to infer it.
+- Every synthesized section's instruction gains the same boundary, so the
+  executive summary cannot recommend a process change the audit never measured.
+
+A template declares its own regions with `<!-- code_only:non_code <reason> -->`
+/ `<!-- code_only:partial -->`, each closed by `<!-- code_only:end -->`; no
+section name is hardcoded in Rust. Regions must not nest — a region that opens
+another region before its own `code_only:end` is left untransformed and logged,
+exactly as one that is never closed. Without the switch both are ordinary
+comments and the output is unchanged. Parser: `src/report/code_only.rs`.
+
+`--code-only` can also be set by the manifest key `[report] code_only = true`
+or the environment variable `TRUSTY_AUDIT_REPORT_CODE_ONLY`, which is how
+`trusty-audit` passes an engagement's declaration down. The switch turns the
+mode ON only — omitting it never widens a scope one of the other two declared.
 
 ### Manifest
 
@@ -674,6 +708,12 @@ Appmarq-style benchmarks). Override either by dropping a same-named file in
 the XDG template override directory (`~/.trusty-review/templates/`, checked
 before the bundled `include_str!()` default — same pattern as the reviewer's
 `VoiceLoader`).
+
+`--template` also accepts the short aliases `cast` (→ `report-technical-dd-cast`)
+and `default` / `generic` (→ `report-technical-dd`), resolved before the
+override directory is searched so an XDG override of the full name still wins.
+Precedence: `--template` > manifest `[report].template` >
+`TRUSTY_AUDIT_REPORT_TEMPLATE` > `report-technical-dd`.
 
 ### No-green-analysis convention
 

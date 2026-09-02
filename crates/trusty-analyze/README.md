@@ -210,7 +210,7 @@ unreachable.
 ## MCP Tools
 
 <!-- BEGIN GENERATED: mcp-tools -->
-The MCP server registers **21 tools** with default features, **24 tools** with `--features review`. Authoritative source: `trusty_analyze::mcp::tool_descriptors + trusty_analyze::mcp::descriptors::review_tool_descriptors` —
+The MCP server registers **21 tools** with default features, **25 tools** with `--features review`. Authoritative source: `trusty_analyze::mcp::tool_descriptors + trusty_analyze::mcp::descriptors::review_tool_descriptors` —
 this table is generated from it, not maintained by hand.
 
 | Tool | Available | Arguments | Summary |
@@ -235,6 +235,7 @@ this table is generated from it, not maintained by hand.
 | `run_diagnostics` | always | `index?`, `index_id?`, `language?`, `limit?`, `offset?`, `tools?` | Run available external static-analysis tools (clippy, ruff, biome, staticcheck, pmd, rubocop, phpstan, swiftlint, detekt, clang-tidy,… |
 | `scip_status` | always | `index?`, `index_id?` | Report whether a SCIP overlay has been ingested for an index. |
 | `suggest_refactors` | always | `file?`, `index?`, `index_id?`, `min_severity?`, `top_k?` | Suggest concrete refactoring actions (extract method, reduce nesting, ...) ranked by severity, derived from complexity metrics and code… |
+| `tr_report` | `--features review` | `manifest_path`, `analyze?`, `code_only?`, `instructions?`, `out?`, `template?` | Generate a technical due-diligence report from a report manifest, via the embedded trusty-review report pipeline. |
 | `tr_review_diff` | `--features review` | `diff`, `context?`, `reviewer_model?` | LLM-backed review of a raw unified diff string via the embedded trusty-review pipeline. |
 | `tr_review_health` | `--features review` | — | Probe the embedded trusty-review pipeline's liveness and configuration (dry_run mode, reviewer model, dependency URLs). |
 | `tr_review_pr` | `--features review` | `owner`, `repo`, `pr`, `reviewer_model?` | LLM-backed review of a GitHub pull request via the embedded trusty-review pipeline. |
@@ -346,11 +347,39 @@ accumulation, recommendations extraction) is identical.
 | `AWS_REGION` | `us-east-1` | Fallback AWS region (standard env var). |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | — | Static AWS credentials. Alternatives: `AWS_PROFILE`, IAM role, SSO. |
 
+## Technical due-diligence reports (`--features review`)
+
+`trusty-analyze report` generates a technical due-diligence report from a
+report manifest, over the trusty-review pipeline this crate embeds. The
+pipeline is not duplicated here: the verb calls
+`trusty_review::report::run_report`, the same library entry point
+`trusty-review report` drives.
+
+```bash
+cargo install trusty-analyze --features review --locked
+export OPENROUTER_API_KEY=sk-or-v1-...          # required: a DD report always calls inference
+trusty-analyze report --manifest dd/acme.toml --template cast --code-only --out /tmp/dd
+```
+
+| Flag | Meaning |
+|---|---|
+| `--manifest <FILE>` | The report manifest. Its `[report]` and `[[repositories]]` schema is trusty-review's — see that crate's README. |
+| `--template <NAME>` | `cast` (the CAST health-factor report), `default`, or a full bundled/override name. |
+| `--code-only` | Render the sections no repository can answer — peer benchmark, organizational next steps — as stated out-of-scope boundaries rather than dropping them, and mark the code-derived-but-uncorroborated ones as inferred. |
+| `--out <DIR>` | Output directory (default `./reports`). Writes a `<slug>.md` / `<slug>.json` pair. |
+| `--instructions <FILE>` | A free-form analyst brief, recorded verbatim and used as synthesis focus. |
+| `--no-analyze` | Skip the deterministic fetch from this daemon, which is ON by default for this verb (it is fail-open either way). |
+
+The MCP equivalent is `tr_report`, with the same options as `manifest_path`,
+`template`, `code_only`, `out`, `instructions` and `analyze`.
+
 ## Configuration
 
 | Variable | Default | Description |
 |---|---|---|
 | `TRUSTY_SEARCH_URL` | `http://127.0.0.1:7878` | trusty-search daemon address |
+| `TRUSTY_AUDIT_REPORT_TEMPLATE` | unset | Lowest-precedence template selection for `report` / `tr_report`, set by `trusty-audit` from an engagement's `[report] template`. |
+| `TRUSTY_AUDIT_REPORT_CODE_ONLY` | unset | Same, for `code_only`. `1`/`true`/`yes`/`on` enable it; anything else reads as absent. |
 | `TRUSTY_ANALYZE_SOCKET` | derived from the data dir | Analyzer socket path, honoured by `trusty-audit`'s guard. `TRUSTY_ANALYZER_PORT` was removed with the listener (#6287). |
 | `RUST_LOG` | `warn` | Tracing filter |
 
@@ -360,6 +389,7 @@ accumulation, recommendations extraction) is identical.
 |---|---|
 | `http-server` | The `service` module — the UDS daemon and the axum client it uses to reach trusty-search (enabled by default). Required for the `trusty-analyze` binary. The name predates #6287 and is now about which dependencies compile, not about a listener this daemon binds. |
 | `ner` | Optional ONNX-backed named entity recognition (separate model file required). Off by default; not on the boot path. |
+| `review` | The embedded trusty-review pipeline: the `report` verb and the `tr_review_pr` / `tr_review_diff` / `tr_review_health` / `tr_report` MCP tools. Off by default, so the standard `cargo install trusty-analyze` does not pull it in. |
 
 `bundled-ort`, `load-dynamic`, and `cuda` were removed in #5067 along with the
 neural clustering embedder. One install command works on every host.

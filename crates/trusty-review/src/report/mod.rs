@@ -22,6 +22,8 @@ pub mod analyze_scope;
 // #5453/#6004: the tga-authored authorship artifact, receiving half.
 pub mod authorship;
 pub mod benchmark;
+// #6669: the code-only rendering mode's template transform.
+pub mod code_only;
 // #6004: exec-summary jump-list — post-render anchor-link injection.
 pub mod contents_links;
 pub mod error;
@@ -50,6 +52,9 @@ pub mod reporter_findings;
 pub mod reporter_graph_datasets;
 // #6004: fixed Performance & Scalability gap text.
 pub mod reporter_performance;
+// #6669: the library entry point `trusty-review report` and trusty-analyze's
+// `report` verb both drive — one pipeline, two front doors.
+pub mod run;
 pub mod scan;
 // #5747: the schema-tag parse both artifact loaders decide compatibility from.
 pub(crate) mod schema;
@@ -108,8 +113,12 @@ pub use polish::{polish, polish_with_gaps, strip_template_comments};
 pub use provenance::{Provenance, tag};
 pub use redact::{report_secrets, scrub_finding, scrub_investigation, scrub_metrics, scrub_prose};
 pub use reporter::{RenderedReports, Reporter};
+pub use run::{ReportRequest, run_report};
 pub use scan::{Framework, RepoScan, scan_repo};
 pub use split::{authorship_document, split_authorship};
 pub use synthesize::{FindingProse, RiskRow, Synthesis, SynthesisError, Synthesizer};
-pub use template::{DEFAULT_TEMPLATE, TemplateLoader, parse_section_instructions};
+pub use template::{
+    CAST_TEMPLATE, DEFAULT_TEMPLATE, TemplateLoader, parse_section_instructions,
+    resolve_template_alias,
+};
 pub use ticketing::{TicketingSummary, load_ticketing};

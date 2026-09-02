@@ -313,6 +313,27 @@ pub fn review_tool_descriptors() -> Vec<Value> {
             "description": "Probe the embedded trusty-review pipeline's liveness and configuration (dry_run mode, reviewer model, dependency URLs). Safe to call without any credentials.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
+        // #6669: the technical-DD report verb. Unlike the three above it does
+        // NOT forward to trusty-review's own MCP surface — that surface has no
+        // report tool — so `mcp::review::handle_tr_report` calls the library
+        // entry point directly. The descriptor lives here with its siblings so
+        // the generated tool table is true with and without the feature.
+        serde_json::json!({
+            "name": "tr_report",
+            "description": "Generate a technical due-diligence report from a report manifest, via the embedded trusty-review report pipeline. `template` selects the methodology template ('cast' for the CAST health-factor report, 'default' for the vendor-neutral one, or a full bundled/override name). `code_only` renders the sections no repository can answer — peer benchmark, organizational next steps — as stated out-of-scope boundaries instead of dropping them, and marks the code-derived-but-uncorroborated sections as inferred. Writes a markdown + JSON pair and returns their paths. Long-running (minutes) and always calls inference: requires OPENROUTER_API_KEY on the daemon.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["manifest_path"],
+                "properties": {
+                    "manifest_path": { "type": "string", "description": "Path to the report manifest TOML file" },
+                    "template":      { "type": "string", "description": "Template name or alias: 'cast', 'default', or a full bundled/override name" },
+                    "code_only":     { "type": "boolean", "description": "Render non-code sections as stated out-of-scope boundaries (default false)", "default": false },
+                    "out":           { "type": "string", "description": "Output directory for the report pair (default './reports')" },
+                    "instructions":  { "type": "string", "description": "Path to a free-form analyst instructions markdown file" },
+                    "analyze":       { "type": "boolean", "description": "Fetch deterministic metrics from this analyzer daemon (default true; fail-open)", "default": true }
+                }
+            }
+        }),
     ]
 }
 
@@ -327,13 +348,38 @@ mod tests {
             .iter()
             .filter_map(|d| d.get("name").and_then(Value::as_str))
             .collect();
-        assert_eq!(names.len(), 3, "expected 3 tr_ tools, got {names:?}");
-        for required in ["tr_review_pr", "tr_review_diff", "tr_review_health"] {
+        assert_eq!(names.len(), 4, "expected 4 tr_ tools, got {names:?}");
+        for required in [
+            "tr_review_pr",
+            "tr_review_diff",
+            "tr_review_health",
+            // #6669.
+            "tr_report",
+        ] {
             assert!(names.contains(&required), "missing {required} in {names:?}");
         }
         // Every tr_ tool carries an inputSchema.
         for d in &descs {
             assert!(d.get("inputSchema").is_some(), "missing inputSchema: {d}");
         }
+    }
+
+    /// Why (#6669): `tr_report` is the only `tr_` tool that does not forward to
+    /// trusty-review's own MCP surface, and the one required input is what a
+    /// caller most easily omits. A schema that did not require it would let the
+    /// dispatcher take a call it cannot serve.
+    /// What: `manifest_path` is required and `code_only` is a boolean.
+    /// Test: this test itself.
+    #[test]
+    fn tr_report_requires_a_manifest_path() {
+        let descs = review_tool_descriptors();
+        let report = descs
+            .iter()
+            .find(|d| d.get("name").and_then(Value::as_str) == Some("tr_report"))
+            .expect("tr_report descriptor");
+        let schema = &report["inputSchema"];
+        assert_eq!(schema["required"][0], "manifest_path");
+        assert_eq!(schema["properties"]["code_only"]["type"], "boolean");
+        assert_eq!(schema["properties"]["template"]["type"], "string");
     }
 }

@@ -51,11 +51,36 @@
   demonstrates one override below (`executive_summary`, CAST health-factor
   voice).
 
-  DEFERRED (#6004): this CAST variant intentionally does not carry the
-  generic template's Code Quality & Architecture / Security Posture /
-  Performance & Scalability sections, Key Facts block, or Contents
-  jump-list — porting them to CAST's own health-factor voice and scales is
-  follow-up work tracked on #6004, not an oversight in this revision.
+  CODE-ONLY MARKERS (#6669)
+  A code-only audit reaches sections no repository can answer. Rather than
+  hardcode their names in Rust, this template marks its own regions:
+
+    <!-- code_only:non_code <why it cannot be measured from code> -->
+    ...the section's normal tables and placeholders...
+    <!-- code_only:end -->
+
+    <!-- code_only:partial -->
+    ...code-derived content that is never cross-checked...
+    <!-- code_only:end -->
+
+  Under `--code-only`, a `non_code` region's body is REPLACED by a stated
+  out-of-scope boundary (the heading always survives — a missing heading and a
+  deliberate boundary must never look alike), and a `partial` region keeps its
+  body and gains "Inferred from code; not validated by interview or
+  operational data". Without `--code-only` both are ordinary comments and are
+  stripped from output like every other comment here, so a full-scope render is
+  unchanged. Regions must not nest: a region that opens another region before
+  its own `code_only:end` is left untransformed and logged, exactly as one that
+  is never closed. Parser: `src/report/code_only.rs`.
+
+  #6004 (LANDED, #6669): the Code Quality & Architecture / Security Posture /
+  Performance & Scalability sections the generic template carries now render
+  here too, between §5 and §6. They are trusty-DERIVED, not CAST-scored: they
+  are stated on trusty's own 0-100 / RED-AMBER-GREEN terms and are deliberately
+  NOT expressed on CAST's 1.00-4.00 health-factor scale, because a
+  health-factor-shaped number there would read as a CAST measurement and CAST
+  measures no such thing. The Key Facts block and Contents jump-list remain
+  deferred under #6004.
 -->
 
 <!-- instruct:executive_summary
@@ -85,6 +110,7 @@ in the coverage data provided — and name it specifically.
 | Client | {{client_name}} |
 | Applications / systems assessed | {{applications_list}} |
 | Analysis methodology | Repository inspection via trusty-analyze (static code analysis, structural metrics, complexity measurement) + trusty-search (architecture context, KG-guided focus) |
+| Audit scope | {{audit_scope}} |
 | Analyst (this instance) | {{analyst_name}} |
 | Analysis generated | {{analysis_generated_date}} |
 
@@ -150,6 +176,8 @@ expected >3.40; 2–5yr >3.20; 5–10yr >3.00; >10yr >2.70.
 
 **Peer Benchmark Position**
 
+<!-- code_only:non_code CAST's proprietary reference corpus of thousands of
+     scanned applications, against which a quartile and a rank are computed -->
 vs. {{tech_specific_peer_set}}:
 
 | Criterion | Compliance | Quartile | Rank | Notes |
@@ -171,6 +199,7 @@ vs. All technologies (peer set size: {{all_tech_peer_set_size}}):
 | Efficiency | {{bench_all_eff_comp}}% | {{bench_all_eff_q}} | {{bench_all_eff_rank}} | |
 | Changeability | {{bench_all_change_comp}}% | {{bench_all_change_q}} | {{bench_all_change_rank}} | |
 | Transferability | {{bench_all_xfer_comp}}% | {{bench_all_xfer_q}} | {{bench_all_xfer_rank}} | |
+<!-- code_only:end -->
 
 <!-- END per_application -->
 
@@ -213,6 +242,66 @@ vs. All technologies (peer set size: {{all_tech_peer_set_size}}):
 - {{green_topic}}
 <!-- END green_topic -->
 
+## Code Quality & Architecture
+
+<!-- #6004/#6669: ported from the generic template. Re-projects data already
+     loaded for §4/§5 — complexity distribution, LoC/tech-stack, and
+     maintainability (refactor/code-smell) findings. No new data source. -->
+
+*trusty-derived, NOT CAST-scored. The figures below are trusty-analyze's own
+structural measurements. They are deliberately not restated on CAST's 1.00–4.00
+health-factor scale — CAST's Changeability grade is computed from its own
+certified rule catalog, which this pipeline does not implement, and a
+health-factor-shaped number here would be read as a CAST measurement.*
+
+{{code_quality_summary_paragraph}}
+
+<!-- BEGIN code_quality_row -->
+| Application | LoC | Primary tech | Complexity profile | Maintainability findings |
+|---|---|---|---|---|
+| {{cq_app_name}} | {{cq_loc}} | {{cq_tech}} | {{cq_complexity}} | {{cq_maintainability_count}} |
+<!-- END code_quality_row -->
+
+<!-- #6147: the crate topology, read from the audited workspace's own cargo
+     metadata. Absent for a repository that is not a Cargo workspace, and the
+     whole block then renders as nothing. -->
+
+<!-- BEGIN crate_topology -->
+{{ct_summary}}
+
+| Crate | Direct internal deps | Depended on by |
+|---|---|---|<!-- BEGIN ct_row -->
+| {{ct_crate}} | {{ct_deps}} | {{ct_inbound}} |<!-- END ct_row -->
+<!-- END crate_topology -->
+
+## Security Posture
+
+*trusty-derived, NOT CAST-scored, and NOT the §6.1 ISO-5055 domain. This table
+counts the RED and AMBER findings the repo-evidence investigation raised in its
+"authentication & secrets" dimension — an LLM reading the selected source files,
+with each counted finding's evidence quote mechanically verified against the file
+it cites. Its scope is code hygiene around credentials, tokens, and
+authentication paths in the files that were read. It is not a SAST scan, not a
+dependency/CVE scan, and not a secrets scan of the whole tree; the share of files
+read is stated under Investigation Coverage. Read a low count as a small sample,
+not as a clean bill of health.*
+
+{{security_summary_paragraph}}
+
+| Application | Dimension | RED/AMBER findings |
+|---|---|---|<!-- BEGIN security_violations_table -->
+| {{app_name}} | {{violation_domain}} | {{violation_count}} |<!-- END security_violations_table -->
+
+{{security_clean_signals}}
+
+## Performance & Scalability
+
+<!-- #6004: fixed text, never LLM-generated — DOC-67 §3 declares this dimension
+     unavailable; no performance data source exists in this pipeline. CAST's own
+     Efficiency health factor is likewise not computed here. -->
+
+{{performance_assessment_note}}
+
 ## 6. Risk Registers
 
 ### 6.1 ISO-5055 Compliance (Security, Reliability, Performance-Efficiency, Maintainability)
@@ -226,17 +315,24 @@ vs. All technologies (peer set size: {{all_tech_peer_set_size}}):
 
 ### 6.2 Open-Source & CVE Exposure
 
+<!-- code_only:partial -->
 | Application | Component | Critical | High | Medium | Risk score |
 |---|---|---|---|---|---|
 | {{app_name}} | {{component_name}} | {{cve_critical}} | {{cve_high}} | {{cve_medium}} | {{oss_risk_score}}% |
 
 Summary: {{total_components}} components detected; {{critical_cve_components}} with critical CVEs; {{high_cve_components}} with high-severity CVEs.
+<!-- code_only:end -->
 
 ### 6.3 License / IP Risk
 
+<!-- code_only:partial -->
 | Application | License | Risk tier | Components | Top component | Remediation |
 |---|---|---|---|---|---|
 | {{app_name}} | {{license_name}} | {{license_risk}} | {{license_comp_count}} | {{license_top_comp}} | {{license_remediation}} |
+
+Legal review of any copyleft or unusual-tier license here is a human step this
+audit does not perform.
+<!-- code_only:end -->
 
 ### 6.4 Open-Source Component Obsolescence
 
@@ -258,12 +354,17 @@ Summary: {{total_components}} components detected; {{critical_cve_components}} w
 
 ### 6.7 Remediation Economics — Horizon Tiers
 
+<!-- code_only:partial -->
 | Application | Tier | Violations addressed | Own-code effort (PD) | 3rd-party effort (PD) | Cost | TQI improvement (gain %) |
 |---|---|---|---|---|---|---|
 | {{app_name}} | Fix before/at closing | {{rem_imm_violations}} | {{rem_imm_own_pd}} | {{rem_imm_3p_pd}} | {{rem_imm_cost}} | {{rem_imm_tqi_gain}} |
 | {{app_name}} | Near-term after closing | {{rem_near_violations}} | {{rem_near_own_pd}} | {{rem_near_3p_pd}} | {{rem_near_cost}} | {{rem_near_tqi_gain}} |
 | {{app_name}} | Mid-term | {{rem_mid_violations}} | {{rem_mid_own_pd}} | {{rem_mid_3p_pd}} | {{rem_mid_cost}} | {{rem_mid_tqi_gain}} |
 | {{app_name}} | Long-term | {{rem_long_violations}} | {{rem_long_own_pd}} | {{rem_long_3p_pd}} | {{rem_long_cost}} | {{rem_long_tqi_gain}} |
+
+Any cost figure here converts an effort estimate at a day rate the engagement
+declared; the rate is not derived from the code.
+<!-- code_only:end -->
 
 ## 7. Graph-Ready Data Appendix
 
@@ -339,6 +440,22 @@ Summary: {{total_components}} components detected; {{critical_cve_components}} w
 <!-- Capture: what the source analysis does not state; approximate readings;
      inferences. Mark estimated values with "(approx, from chart)" to preserve
      honesty markers. -->
+
+## 10. Next Steps
+
+<!-- #6669: CAST's own Next Steps page is organizational — Scrum Master
+     engagement, team-behaviour change, modernization-readiness timing. None of
+     it is derivable from a repository, so under `--code-only` the heading
+     stands and states that, rather than being dropped (indistinguishable from
+     an omission) or filled with an invented recommendation. -->
+
+<!-- code_only:non_code interviews with the delivery organization, whose team
+     structure, process maturity and modernization appetite are what shape
+     these recommendations -->
+| Recommendation | Horizon | Owner |
+|---|---|---|
+| {{next_step_recommendation}} | {{next_step_horizon}} | {{next_step_owner}} |
+<!-- code_only:end -->
 
 ---
 *Generated by trusty-review report analysis — template report-technical-dd-cast v0.1*

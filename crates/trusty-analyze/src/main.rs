@@ -330,6 +330,43 @@ enum Cmd {
         format: OutputFormat,
     },
 
+    /// Generate a technical due-diligence report from a report manifest
+    /// (#6669).
+    ///
+    /// Why: the CAST-methodology report had one front door, `trusty-review
+    /// report`, and the owner ruling put the operator-facing verb here. The
+    /// pipeline is not duplicated — this drives
+    /// `trusty_review::report::run_report`, the same library entry point that
+    /// binary drives.
+    /// What: `--template cast` selects the CAST template (the full name
+    /// `report-technical-dd-cast` works too); `--code-only` renders the
+    /// sections no repository can answer as stated out-of-scope boundaries
+    /// rather than dropping them. Requires `OPENROUTER_API_KEY` — a DD report
+    /// always calls inference (#5454).
+    /// Test: `tests/report_cli.rs`.
+    #[cfg(feature = "review")]
+    Report {
+        /// Path to the report manifest TOML file.
+        #[arg(long, value_name = "FILE")]
+        manifest: PathBuf,
+        /// Template name or alias (`cast`, `default`, or a full bundled name).
+        #[arg(long, value_name = "NAME")]
+        template: Option<String>,
+        /// Render the non-code sections as stated out-of-scope boundaries.
+        #[arg(long)]
+        code_only: bool,
+        /// Output directory for the generated report pair.
+        #[arg(long, value_name = "DIR", default_value = "./reports")]
+        out: PathBuf,
+        /// Free-form analyst instructions markdown file.
+        #[arg(long, value_name = "FILE")]
+        instructions: Option<PathBuf>,
+        /// Skip the deterministic fetch from this analyzer daemon, which is on
+        /// by default for this verb. The fetch is fail-open either way.
+        #[arg(long)]
+        no_analyze: bool,
+    },
+
     /// Manage inference provider configuration (API keys) — the universal
     /// `config keys set/list/test/unset` surface shared by every trusty-*
     /// binary (epic #2400 Wave 1, #2405).
@@ -680,6 +717,27 @@ async fn main() -> Result<()> {
             post_comment,
             format,
         } => run_review_pr(repo, pr, index_id, post_comment, format).await,
+        // #6669: the mapping lives in `commands::report` so a test can assert
+        // every flag reaches the pipeline without making a network call.
+        #[cfg(feature = "review")]
+        Cmd::Report {
+            manifest,
+            template,
+            code_only,
+            out,
+            instructions,
+            no_analyze,
+        } => {
+            commands::report::run(commands::report::request(
+                manifest,
+                template,
+                code_only,
+                out,
+                instructions,
+                no_analyze,
+            ))
+            .await
+        }
         Cmd::Config(cmd) => cmd.run().await,
     }
 }
