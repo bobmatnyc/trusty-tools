@@ -32,11 +32,16 @@
 //!   and "83 of 511" on the next, because any process on the box opens or closes
 //!   a pty between the two reads (#6577).
 //!
-//! All four probes sample host state the daemon re-reads per call, which is
-//! what makes their messages the only host-sampled strings in the report. Their
-//! `name` and `status` are still compared, so a check that vanished or changed
-//! verdict between the transports still fails — see
-//! [`HOST_SAMPLED_MESSAGE_CHECKS`] and [`blank_host_sampled_messages`].
+//! All four probes sample host state the daemon re-reads per call, and #6577
+//! showed the STATUS is sampled with the message rather than beside it:
+//! `worktree_disk` answers `unknown` when its 3-second deadline expires and
+//! `warn` when it measured enough, so the same churn that moves its byte count
+//! moves its verdict. Four of ten runs on a 36-worktree host failed that way
+//! with the message already blanked. These four checks are therefore compared
+//! STRUCTURALLY — the check is present under its name, and it still reports
+//! some status — while both host-sampled fields are normalized. Every other
+//! check is compared whole, verdict included. See [`HOST_SAMPLED_CHECKS`] and
+//! [`normalize_host_sampled_checks`].
 //!
 //! Nothing else is excused. Every other method is compared whole, `pid`
 //! included — the two transports run in one process, so a `pid` that differed
@@ -420,9 +425,9 @@ async fn parity_tmux_sessions_agrees_across_transports() {
 
 /// Why `generated_at` is dropped: `DoctorReport::from_checks` stamps it with
 /// `Utc::now()` on every call, so two calls differ there by construction. The
-/// two [`HOST_SAMPLED_MESSAGE_CHECKS`] messages are blanked for the same
-/// reason. Every other field — the overall status, and every check's name,
-/// status and message — is compared whole.
+/// [`HOST_SAMPLED_CHECKS`] rows are normalized for the same reason, message and
+/// status alike (#6577). Every other field — the overall status, and every
+/// other check's name, status and message — is compared whole.
 ///
 /// Why serial: the agent, asset-tier and hooks checks resolve paths under
 /// `$HOME`, and several tests in this binary move `$HOME` process-wide through
@@ -457,76 +462,88 @@ async fn parity_doctor_agrees_across_transports() {
     );
     assert_same(
         "mpm.doctor",
-        blank_host_sampled_messages(body),
-        blank_host_sampled_messages(result),
+        normalize_host_sampled_checks(body),
+        normalize_host_sampled_checks(result),
         &["generated_at"],
     );
 }
 
-/// The doctor checks whose `message` samples live host state, by name (#6358,
+/// The doctor checks that RE-SAMPLE host state on every call, by name (#6358,
 /// #6490, #6577).
 ///
-/// The membership rule, so the next such check need not flake first: a check
-/// belongs here when its message embeds a number or a name it RE-SAMPLES FROM
-/// THE HOST on every call. A message built from config on disk, or from the
-/// daemon's own state, does not.
+/// **Membership rule:** a check belongs here when any part of its answer —
+/// message or status — is derived from a quantity it re-reads from the host on
+/// every call, rather than from config on disk or the daemon's own state.
 ///
-/// Why exactly these four: each puts live host state the daemon re-reads per
-/// call into its message. `worktree_disk` reports how far it got against a
-/// 3-second deadline ("6.2 GiB … 268 worktree(s) went unmeasured" on one call,
-/// "6.8 GiB … 267" on the next) and `worktrees` reports the reconciled
-/// inventory's counts ("14 live, 265 not reclaimable" against "266"), both
-/// changing whenever an agent elsewhere on the machine adds or removes a
-/// worktree between this test's two calls. `session_store` reports the record
-/// count and byte length of `sessions.json` ("43 session record(s), 59773
-/// byte(s)" against "44 … 60950"), which change whenever a concurrent managed
-/// session writes that file between the two reads (#6490). `pty_headroom`
-/// reports a live census of allocated pseudo-terminals ("82 of 511
-/// pseudo-terminals allocated" against "83 of 511"), which changes whenever any
-/// process on this machine opens or closes a pty between the two reads (#6577).
-/// All four are the
-/// PROBE varying, not the transports disagreeing. Only the MESSAGE is host-
-/// sampled: each check's `status` is a stable verdict (`session_store` stays
-/// `Ok` while only its counts churn), so it is still compared — a store that
-/// went `Fail` over one transport but not the other is a real finding this
-/// test must still catch. Every other check's message reads config on disk or a
-/// daemon's own answer, and is compared whole.
-/// What: the names [`blank_host_sampled_messages`] blanks.
+/// Why exactly these four: `worktree_disk` measures the worktree tree against a
+/// 3-second deadline, `worktrees` reports the reconciled inventory's counts,
+/// `session_store` reports `sessions.json`'s record count and byte length
+/// (#6490), and `pty_headroom` takes a live census of allocated pseudo-terminals
+/// (#6577). Each answer moves whenever another process on the machine adds a
+/// worktree, writes a session, or opens a pty between this test's two calls.
+///
+/// Why the status is normalized too, and not just the message (#6577): the
+/// status is computed FROM the sample, so it churns with it. `worktree_disk`
+/// answers `unknown` when its deadline expires mid-walk and `warn` when it
+/// measured enough to judge — four of ten runs on a 36-worktree host failed on
+/// exactly that pair, with the message already blanked. Blanking field-by-field
+/// as each one surfaced is what let #6358 (one message) and #6596 (a second)
+/// both land and leave the test flaking; the fields of a host-sampled probe are
+/// not independently stable, so the row is normalized whole.
+///
+/// What survives is structural, and it is not vacuous: the check must still be
+/// PRESENT under its name in both reports, and must still REPORT a status. A
+/// check that vanished over one transport, or answered with no status at all,
+/// still fails. Every check NOT named here is compared whole, verdict included.
+/// What: the names [`normalize_host_sampled_checks`] normalizes.
 /// Test: [`parity_doctor_agrees_across_transports`],
-/// [`session_store_message_is_excluded_from_parity_but_its_status_is_not`].
-const HOST_SAMPLED_MESSAGE_CHECKS: &[&str] = &[
+/// [`host_sampled_status_is_excused_from_parity_and_no_other_check_is`].
+const HOST_SAMPLED_CHECKS: &[&str] = &[
     "worktree_disk",
     "worktrees",
-    // #6490: session_store's message samples sessions.json's live record count.
+    // #6490: session_store samples sessions.json's live record count.
     "session_store",
-    // #6577: pty_headroom's message samples this machine's live pty census.
+    // #6577: pty_headroom samples this machine's live pty census.
     "pty_headroom",
 ];
 
-/// Blank each [`HOST_SAMPLED_MESSAGE_CHECKS`] message, keeping name and status.
+/// Reduce each [`HOST_SAMPLED_CHECKS`] row to what cannot churn: its name, and
+/// that it answered with a status at all.
 ///
-/// Why the presence assertion: a blank-by-name pass over a report that no
-/// longer contains the name would silently exclude nothing, and the test would
-/// go back to flaking on a message it believed it had dropped. Requiring every
-/// named check to appear turns a rename into a failure that says so.
-fn blank_host_sampled_messages(mut report: Value) -> Value {
-    let mut blanked: Vec<String> = Vec::new();
+/// Why the two assertions: a normalize-by-name pass over a report that no longer
+/// contains the name would silently exclude nothing, and the test would go back
+/// to flaking on a field it believed it had dropped — so every named check must
+/// appear. And a row whose `status` is missing or empty is a real defect the
+/// normalization must not hide, so the field's PRESENCE is asserted before its
+/// value is replaced (#6577). That is the whole of what "structural" gives up:
+/// the verdict's value, never the check or the field.
+fn normalize_host_sampled_checks(mut report: Value) -> Value {
+    let mut normalized: Vec<String> = Vec::new();
     if let Some(checks) = report.get_mut("checks").and_then(Value::as_array_mut) {
         for check in checks {
             let Some(name) = check.get("name").and_then(Value::as_str).map(str::to_owned) else {
                 continue;
             };
-            if HOST_SAMPLED_MESSAGE_CHECKS.contains(&name.as_str())
+            if HOST_SAMPLED_CHECKS.contains(&name.as_str())
                 && let Some(map) = check.as_object_mut()
             {
+                // #6577: the value is normalized, the field is not dropped.
+                assert!(
+                    map.get("status")
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| !s.is_empty()),
+                    "the `{name}` check must still report a status — normalizing \
+                     its VALUE is what this allowlist buys, dropping the field is not"
+                );
                 map.insert("message".into(), json!("<host-sampled>"));
-                blanked.push(name);
+                map.insert("status".into(), json!("<host-sampled>"));
+                normalized.push(name);
             }
         }
     }
-    for name in HOST_SAMPLED_MESSAGE_CHECKS {
+    for name in HOST_SAMPLED_CHECKS {
         assert!(
-            blanked.iter().any(|seen| seen == name),
+            normalized.iter().any(|seen| seen == name),
             "the allowlist names the `{name}` check, which this report does not \
              contain — a renamed check must fail here rather than silently stop \
              being excluded"
@@ -535,58 +552,73 @@ fn blank_host_sampled_messages(mut report: Value) -> Value {
     report
 }
 
-/// Pin what adding `session_store` to the allowlist bought (#6490): its live-
-/// sampled MESSAGE is dropped from the parity comparison, while its STATUS is
-/// not — so the count/bytes churn that flaked the test is excused, but a genuine
-/// cross-transport verdict divergence still fails.
+/// Pin both halves of the #6577 contract: a [`HOST_SAMPLED_CHECKS`] row that
+/// differs in STATUS between the two samples passes parity, and a row that is
+/// not on that list and differs in status still fails it.
 ///
-/// Why a hand-built pair rather than the live parity test: the flake needs
-/// another process to write `sessions.json` between the two reads, which cannot
-/// be forced deterministically. Feeding [`blank_host_sampled_messages`] two
-/// reports directly reproduces both the churn (message differs, status same) and
-/// the real break (status differs) with no host dependency, and proves the
-/// exclusion is not vacuous — the exact bar #6358's fix was held to.
+/// Why a hand-built pair rather than the live parity test: the divergence needs
+/// another process to add a worktree, write `sessions.json`, or open a pty
+/// between the two reads, which cannot be forced deterministically. Feeding
+/// [`normalize_host_sampled_checks`] two reports directly reproduces both the
+/// churn and the real break with no host dependency, and proves the exclusion is
+/// not vacuous — the bar #6358 and #6490 were each held to, now applied to the
+/// status field the earlier message-only fixes left compared.
 /// Test: this function IS the test.
 #[test]
-fn session_store_message_is_excluded_from_parity_but_its_status_is_not() {
+fn host_sampled_status_is_excused_from_parity_and_no_other_check_is() {
     // Every host-sampled check is present, so the presence assertion inside
-    // `blank_host_sampled_messages` is satisfied and only the exclusion is tested.
-    let report = |session_store_status: &str, session_store_message: &str| {
+    // `normalize_host_sampled_checks` is satisfied and only the exclusion is
+    // under test. `instructions` is the control: it reads config on disk, so it
+    // is NOT on the allowlist and is compared whole.
+    let report = |worktree_disk_status: &str, instructions_status: &str| {
         json!({
             "checks": [
-                {"name": "worktree_disk", "status": "ok", "message": "6.2 GiB measured"},
+                {"name": "worktree_disk", "status": worktree_disk_status, "message": "6.2 GiB measured"},
                 {"name": "worktrees", "status": "ok", "message": "14 live, 265 not reclaimable"},
-                {"name": "session_store", "status": session_store_status, "message": session_store_message},
-                // #6577: present so the presence assertion is satisfied.
+                {"name": "session_store", "status": "ok", "message": "43 session record(s), 59773 byte(s)"},
                 {"name": "pty_headroom", "status": "ok", "message": "82 of 511 pseudo-terminals allocated"},
+                {"name": "instructions", "status": instructions_status, "message": "last-instructions.md not found"},
             ]
         })
     };
 
-    // The #6490 case: a concurrent session grew `sessions.json` between the two
-    // reads, so only the message differs. After blanking, the transports agree.
-    let http = blank_host_sampled_messages(report(
-        "ok",
-        "…/sessions.json loads cleanly — 43 session record(s), 59773 byte(s)",
-    ));
-    let socket = blank_host_sampled_messages(report(
-        "ok",
-        "…/sessions.json loads cleanly — 44 session record(s), 60950 byte(s)",
-    ));
+    // The #6577 case: `worktree_disk`'s 3-second deadline expired on one call
+    // and not the other, so its VERDICT differs — `unknown` against `warn` —
+    // with nothing else changed. That is the probe varying, not the transports
+    // disagreeing, and it must not fail parity.
+    let http = normalize_host_sampled_checks(report("unknown", "warn"));
+    let socket = normalize_host_sampled_checks(report("warn", "warn"));
     assert_eq!(
         http, socket,
-        "a session_store message that churned between the reads must not fail parity"
+        "a host-sampled check whose status churned between the reads must not fail parity"
     );
 
-    // Non-vacuous: a real verdict divergence survives the blanking, so the
-    // parity assertion still fails on it. A store one transport called healthy
-    // and the other called corrupt is a finding, not noise.
-    let http = blank_host_sampled_messages(report("ok", "loads cleanly"));
-    let socket = blank_host_sampled_messages(report("fail", "loads cleanly"));
+    // Non-vacuous: a check that is NOT host-sampled still has its verdict
+    // compared, so a genuine cross-transport divergence still fails. Weakening
+    // the comparison for the four named rows must not weaken it for any other.
+    let http = normalize_host_sampled_checks(report("warn", "ok"));
+    let socket = normalize_host_sampled_checks(report("warn", "fail"));
     assert_ne!(
         http, socket,
-        "a session_store STATUS divergence must still fail parity"
+        "a NON-host-sampled check's STATUS divergence must still fail parity"
     );
+}
+
+/// A host-sampled row that answers with no status at all is a defect, not churn
+/// — [`normalize_host_sampled_checks`] replaces the verdict's VALUE and must not
+/// paper over a missing field (#6577).
+/// Test: this function IS the test.
+#[test]
+#[should_panic(expected = "must still report a status")]
+fn normalizing_a_host_sampled_check_requires_it_to_report_a_status() {
+    normalize_host_sampled_checks(json!({
+        "checks": [
+            {"name": "worktree_disk", "message": "6.2 GiB measured"},
+            {"name": "worktrees", "status": "ok", "message": "14 live"},
+            {"name": "session_store", "status": "ok", "message": "43 record(s)"},
+            {"name": "pty_headroom", "status": "ok", "message": "82 of 511"},
+        ]
+    }));
 }
 
 /// Why an unknown fingerprint: it exercises the whole route — argument decode,
