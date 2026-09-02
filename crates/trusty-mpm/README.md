@@ -17,15 +17,13 @@ What: Unified crate combining the formerly separate `trusty-mpm-{core,client,mcp
 
 Prebuilt binaries are available for macOS (Apple Silicon) and Linux (x86_64).
 
-1. Download the latest release from [GitHub Releases](https://github.com/bobmatnyc/trusty-tools/releases):
-   - Look for assets tagged `trusty-mpm-v0.6.2`
-   - Download the archive for your platform:
-     - **macOS arm64 (Apple Silicon)**: `trusty-mpm-v0.6.2-aarch64-apple-darwin.tar.gz`
-     - **Linux x86_64**: `trusty-mpm-v0.6.2-x86_64-unknown-linux-gnu.tar.gz`
+1. Open [GitHub Releases](https://github.com/bobmatnyc/trusty-tools/releases),
+   choose the newest `trusty-mpm-v<version>` release, and download the archive
+   for your platform.
 
 2. Extract and install:
    ```bash
-   tar xzf trusty-mpm-v0.6.2-*.tar.gz
+   tar xzf trusty-mpm-*.tar.gz
    chmod +x tm trusty-mpm
    sudo mv tm trusty-mpm /usr/local/bin/    # or ~/.local/bin/ if you prefer user install
    ```
@@ -45,9 +43,9 @@ cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-mpm --locke
 
 This builds from the latest commit on `main` and installs the binaries (`tm` and `trusty-mpm`) to `~/.cargo/bin/`. Make sure `~/.cargo/bin/` is on your PATH.
 
-To install a specific version:
+To install a specific release, replace `<version>` with its tag version:
 ```bash
-cargo install --git https://github.com/bobmatnyc/trusty-tools --tag trusty-mpm-v0.6.2 trusty-mpm --locked
+cargo install --git https://github.com/bobmatnyc/trusty-tools --tag trusty-mpm-vx.y.z trusty-mpm --locked
 ```
 
 ### With Homebrew (recommended)

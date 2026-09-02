@@ -279,7 +279,7 @@ pub(crate) const COMMAND_WRAPPERS: &[&str] = &[
 /// (`sudo -u root make`, `env -i cmd`): resolving the real program name past
 /// that needs argument-aware parsing this function doesn't do.
 ///
-/// Why: [`first_command_token`] and [`super::pm_guard_bash::shell_lex::git_subcommand`]
+/// Why: [`first_command_token`] and `pm_guard_bash::shell_lex::git_subcommand`
 /// both need this exact skip — a wrapper reaching either unresolved is a
 /// classifier silently seeing a different (wrapped) command than the one
 /// that will actually run (issue #4031 review). One generic helper, indexing

@@ -104,7 +104,7 @@ All installations can be verified by running:
 tga --version
 ```
 
-Expected output: the semantic version of the installed binary (e.g., `tga 2.7.0`).
+The output includes the installed semantic version and build provenance.
 
 ## Quick Start
 

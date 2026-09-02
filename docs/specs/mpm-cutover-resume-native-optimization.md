@@ -266,7 +266,7 @@ This makes optimization status visible to users during startup, reaching parity 
 
 ## References
 
-- [Trusty-agents caveman optimization (existing)](../../../crates/trusty-agents/src/compress/output_prompt.rs)
-- [Trusty-mpm compression seam](../../../crates/trusty-mpm/src/daemon/optimizer.rs)
-- [ProjectDiscovery API](../../../crates/trusty-mpm/src/core/project_discovery.rs)
-- [Token compression research](../../../docs/trusty-agents/research/token-compression-rtk-ztk.md)
+- [Trusty-agents caveman optimization (existing)](../../crates/trusty-agents/src/compress/output_prompt.rs)
+- [Trusty-mpm compression seam](../../crates/trusty-mpm/src/daemon/optimizer.rs)
+- [ProjectDiscovery API](../../crates/trusty-mpm/src/core/project_discovery.rs)
+- [Token compression research](../trusty-agents/research/token-compression-rtk-ztk.md)

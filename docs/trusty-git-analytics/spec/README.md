@@ -1,8 +1,12 @@
 # trusty-git-analytics (`tga`) — Specification Set
 
-> **Status:** Canonical · Living Document
+> **Status:** Historical product baseline · not a current behavior contract
 > **Last reviewed:** 2026-06-01
 > **Derived from:** existing `requirements/` docs + code/tickets reconciliation, updated through v2.5.0
+
+This set is retained as a dated design snapshot. Use the current
+[requirements index](../requirements/README.md), crate README, and source code
+for implemented behavior.
 
 This directory holds the canonical product and engineering specification for the
 `tga` crate (package name `tga`, directory `crates/trusty-git-analytics/`,

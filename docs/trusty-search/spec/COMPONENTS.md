@@ -1,6 +1,6 @@
 # trusty-search — Component Specifications
 
-> **Status:** Canonical · Living Document
+> **Status:** Historical product baseline · not a current component map
 > **Last reviewed:** 2026-06-01
 > **Derived from:** code/docs/tickets audit (v0.22.2)
 

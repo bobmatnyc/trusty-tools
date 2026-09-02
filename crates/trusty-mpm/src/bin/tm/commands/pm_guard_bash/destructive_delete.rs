@@ -95,7 +95,7 @@ use crate::commands::hook_rewrite::first_command_token;
 /// Why: a bare refusal invites a retry with a different verb or a hand-rolled
 /// workaround, so the text names every denylisted category and the one
 /// sanctioned path for the worktree case (the PM's `tm session
-/// prune-worktrees`), the same way [`super::WORKTREE_REMOVE_DENY_REASON`]
+/// prune-worktrees`), the same way `WORKTREE_REMOVE_DENY_REASON`
 /// does for the sibling `git worktree remove` rule.
 /// What: the `permissionDecisionReason` string emitted on this deny.
 pub(crate) const DESTRUCTIVE_DELETE_REASON: &str = "`rm`/`rmdir`/`unlink`/`find -delete` must \
@@ -422,7 +422,7 @@ fn is_user_home_root(path: &Path) -> bool {
 /// direct child destroys one. A path deeper than that — a file or directory
 /// INSIDE a worktree — is ordinary work happening exactly where it is
 /// supposed to (issue #3977) and must stay allowed, so this does not match a
-/// bare path-contains check the way [`super::super::project_aliases::is_worktree_path`]
+/// bare path-contains check the way `project_aliases::is_worktree_path`
 /// does for its coarser "is this a worktree at all" question.
 /// What: finds the first `.worktrees` component, or the first adjacent
 /// `.claude`, `worktrees` pair, and denies only when at most one path

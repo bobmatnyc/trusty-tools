@@ -41,18 +41,17 @@ This README and the rustdoc stay in-crate; everything else lives under `docs/`.
 
 Prebuilt binaries for **macOS arm64** and **Linux x86_64** are published on the
 [GitHub Releases page](https://github.com/bobmatnyc/trusty-tools/releases) under
-tags of the form `trusty-analyze-v<version>` (e.g. `trusty-analyze-v0.5.0`).
+tags of the form `trusty-analyze-v<version>`.
 
 ```bash
-# macOS arm64 (Apple Silicon) — example for v0.5.0
-VERSION=0.5.0
+# Replace this with the version shown on the release page.
+VERSION=x.y.z
 curl -fsSL \
   "https://github.com/bobmatnyc/trusty-tools/releases/download/trusty-analyze-v${VERSION}/trusty-analyze-aarch64-apple-darwin.tar.gz" \
   | tar xz
 sudo mv trusty-analyze /usr/local/bin/
 
-# Linux x86_64 — example for v0.5.0
-VERSION=0.5.0
+# Linux x86_64 uses the same VERSION value.
 curl -fsSL \
   "https://github.com/bobmatnyc/trusty-tools/releases/download/trusty-analyze-v${VERSION}/trusty-analyze-x86_64-unknown-linux-gnu.tar.gz" \
   | tar xz
@@ -123,7 +122,7 @@ LaunchAgent and no `service install` — installing the binary is the whole setu
 Run it in the foreground only when you want to watch it:
 
 ```bash
-trusty-analyze serve --search-url http://127.0.0.1:7878
+trusty-analyze --search-url http://127.0.0.1:7878 serve
 ```
 
 Two environment variables govern the lifecycle:
@@ -311,7 +310,7 @@ the `TRUSTY_LLM_MODEL` environment variable.
 ```bash
 export OPENROUTER_API_KEY=sk-or-v1-...
 export TRUSTY_LLM_MODEL=openai/gpt-4o-mini   # default; override as needed
-trusty-analyze serve --search-url http://127.0.0.1:7878
+trusty-analyze --search-url http://127.0.0.1:7878 serve
 ```
 
 ### Using AWS Bedrock
@@ -330,7 +329,7 @@ export AWS_ACCESS_KEY_ID=...
 export AWS_SECRET_ACCESS_KEY=...
 export AWS_REGION=us-east-1           # or: export TRUSTY_AWS_REGION=eu-west-1
 
-trusty-analyze serve --search-url http://127.0.0.1:7878
+trusty-analyze --search-url http://127.0.0.1:7878 serve
 ```
 
 When the model id starts with `bedrock/`, the daemon routes the LLM call

@@ -10,13 +10,16 @@
 //! FIRST — so the termination that races the flush is always governed by the
 //! window the PREVIOUS unit declared, never by the one just written. On a host
 //! whose installed plist predates #4393 that window is launchd's
-//! [`LAUNCHD_DEFAULT_EXIT_TIMEOUT_SECS`] default, and the daemon is killed
+//! [`LAUNCHD_DEFAULT_EXIT_TIMEOUT_SECS`](crate::launchd_grace::LAUNCHD_DEFAULT_EXIT_TIMEOUT_SECS)
+//! default, and the daemon is killed
 //! mid-write while `KeepAlive` respawns the old binary as an orphan holding the
 //! port.
 //!
 //! What: pure readers for the grace a unit will actually be granted
-//! ([`parse_launchctl_exit_timeout`], [`parse_plist_exit_timeout`]), a verdict
-//! over it ([`grace_verdict`]), and a bounded quiesce ([`quiesce_job`]) that
+//! ([`parse_launchctl_exit_timeout`](crate::launchd_grace::parse_launchctl_exit_timeout),
+//! [`parse_plist_exit_timeout`](crate::launchd_grace::parse_plist_exit_timeout)),
+//! a verdict over it ([`grace_verdict`](crate::launchd_grace::grace_verdict)),
+//! and a bounded quiesce ([`quiesce_job`](crate::launchd_grace::quiesce_job)) that
 //! stops the live process with SIGTERM and waits for it to exit BEFORE the
 //! bootout, so launchd's short window has nothing left to cut off. The
 //! `launchctl` and signal effects are injected, so every decision is

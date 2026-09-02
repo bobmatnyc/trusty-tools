@@ -1,8 +1,12 @@
 # trusty-mpm — Specification Set
 
-> **Status:** Canonical · Living Document
+> **Status:** Historical product baseline · not a current behavior contract
 > **Last reviewed:** 2026-05-29
 > **Derived from:** code/docs/tickets audit
+
+This set captures an earlier product model. Use the
+[behavior-contract catalog](../../specs/README.md), the current crate README,
+and source code for implemented behavior.
 
 This directory holds the canonical product and engineering specification for the
 `trusty-mpm` crate (`crates/trusty-mpm/`). It is the single authoritative

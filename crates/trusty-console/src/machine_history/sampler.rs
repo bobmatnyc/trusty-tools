@@ -9,7 +9,9 @@
 //! across two tasks, because its CPU and network readings are deltas between
 //! refreshes.
 //! What: [`start`] spawns a task that samples the host, writes the cache, feeds
-//! the ring through [`MachineHistory::record_sample`], and folds the current
+//! the ring through
+//! [`MachineHistory::record_sample`](crate::machine_history::MachineHistory::record_sample),
+//! and folds the current
 //! service reports into the transition log — then sleeps for `interval`. The
 //! same task publishes `interval` to the history so the payload advertises the
 //! cadence actually in use.

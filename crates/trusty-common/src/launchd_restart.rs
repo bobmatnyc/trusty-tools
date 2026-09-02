@@ -14,8 +14,10 @@
 //! predates that and reached neither guard, so this module orders BOTH around
 //! one sequence and both callers share it.
 //!
-//! What: [`await_unload`] polls until launchd stops reporting the label, and
-//! [`restart_sequence`] orders the whole bounce — quiesce, boot out, wait,
+//! What: [`await_unload`](crate::launchd_restart::await_unload) polls until
+//! launchd stops reporting the label, and
+//! [`restart_sequence`](crate::launchd_restart::restart_sequence) orders the
+//! whole bounce — quiesce, boot out, wait,
 //! bootstrap, and one retry after a second wait. Every effect is injected, so
 //! the ORDERING is what the tests assert, without a real unit.
 //! [`crate::launchd::LaunchdConfig::restart_gracefully`] binds the real

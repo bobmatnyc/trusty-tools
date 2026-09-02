@@ -649,12 +649,14 @@ impl SessionManager {
     /// NOTE — auto-resume supervisors: `tm supervisor --auto-resume`
     /// (`supervisor::poller::run_tick`) auto-resumes a `Stopped` record whose
     /// stop nobody asked for, and `resume()` kills the preserved pane as
-    /// described above. This method records [`StopCause::Unexpected`], so its
+    /// described above. This method records
+    /// [`StopCause::Unexpected`](crate::session_manager::record::StopCause::Unexpected), so its
     /// records ARE that kind — the "pane left alive" guarantee holds for
     /// `auto_resume = false` / interactive deployments, and under an auto-resume
     /// supervisor the session is still revived (and its idle pane replaced) by
     /// that mode's own design. What #6194 changed is the other half: a stop
-    /// somebody DID ask for now records [`StopCause::Deliberate`] and is left
+    /// somebody DID ask for now records
+    /// [`StopCause::Deliberate`](crate::session_manager::record::StopCause::Deliberate) and is left
     /// down. Reconciling supervisor-revive vs. preserve-on-exit semantics for
     /// this path remains a follow-up (#2026).
     ///

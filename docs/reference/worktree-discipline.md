@@ -22,7 +22,7 @@ discipline rather than mechanical enforcement.
 
 ## Why Worktree Discipline Matters
 
-The monorepo consolidates 20 crates in a single workspace. A single `git stash`
+The monorepo consolidates the trusty-* packages in a single workspace. A single `git stash`
 from the main checkout can bury another session's work. A build from the main
 checkout writes to the shared `target/` tree and fills the filesystem with
 build artifacts that interfere with other sessions. A `git reset --hard` from

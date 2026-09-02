@@ -40,15 +40,13 @@ long-term memory backend.
 
 Prebuilt binaries are available for macOS (Apple Silicon) and Linux (x86_64).
 
-1. Download the latest release from [GitHub Releases](https://github.com/bobmatnyc/trusty-tools/releases):
-   - Look for assets tagged `trusty-memory-v0.15.0`
-   - Download the archive for your platform:
-     - **macOS arm64 (Apple Silicon)**: `trusty-memory-v0.15.0-aarch64-apple-darwin.tar.gz`
-     - **Linux x86_64**: `trusty-memory-v0.15.0-x86_64-unknown-linux-gnu.tar.gz`
+1. Open [GitHub Releases](https://github.com/bobmatnyc/trusty-tools/releases),
+   choose the newest `trusty-memory-v<version>` release, and download the
+   archive for your platform.
 
 2. Extract and install:
    ```bash
-   tar xzf trusty-memory-v0.15.0-*.tar.gz
+   tar xzf trusty-memory-*.tar.gz
    chmod +x trusty-memory
    sudo mv trusty-memory /usr/local/bin/    # or ~/.local/bin/ if you prefer user install
    ```
@@ -70,9 +68,9 @@ This builds from the latest commit on `main` and installs the binary to `~/.carg
 
 Installing `trusty-memory` produces two binaries in one command: `trusty-memory` and `trusty-memory-mcp-bridge` (deprecated shim — forwards to `serve --stdio`). `trusty-console` was de-bundled in #1318 and `trusty-bm25-daemon` in #5329 — BM25 now runs inside the memory daemon.
 
-To install a specific version:
+To install a specific release, replace `<version>` with its tag version:
 ```bash
-cargo install --git https://github.com/bobmatnyc/trusty-tools --tag trusty-memory-v0.15.0 trusty-memory --locked
+cargo install --git https://github.com/bobmatnyc/trusty-tools --tag trusty-memory-vx.y.z trusty-memory --locked
 ```
 
 ### With Homebrew (recommended)

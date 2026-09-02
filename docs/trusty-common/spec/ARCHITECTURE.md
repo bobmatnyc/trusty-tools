@@ -1,8 +1,11 @@
 # trusty-common — Architecture
 
-> **Status:** Canonical · Living Document
+> **Status:** Historical baseline · not a current architecture map
 > **Last reviewed:** 2026-05-29
 > **Derived from:** code/docs/tickets audit
+
+This document predates later package extractions and consolidations. See the
+[behavior-contract catalog](../../specs/README.md) and current crate README.
 
 **Status legend:** ✅ Implemented · 🟡 Partial · 🔵 Designed-not-built · ⚪ Aspirational
 

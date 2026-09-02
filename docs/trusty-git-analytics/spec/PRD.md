@@ -1,6 +1,6 @@
 # trusty-git-analytics (`tga`) — Product Requirements Document
 
-> **Status:** Canonical · Living Document
+> **Status:** Historical product baseline · not a current behavior contract
 > **Last reviewed:** 2026-06-01
 > **Derived from:** existing `requirements/` docs + code/tickets reconciliation, updated through v2.5.0
 

@@ -273,8 +273,8 @@ Install with `cargo install --git https://github.com/bobmatnyc/trusty-tools trus
 
 The daemon reads from `$XDG_CONFIG_HOME/trusty-mpm/config.toml`, falling back to `~/.config/trusty-mpm/config.toml`, by default. See the `trusty-mpm` crate README for configuration examples and the full option reference.
 
-There is no separate `trusty-mpmd` binary — the crate ships one binary
-(installed as both `tm` and `trusty-mpm`), and the daemon is its `daemon`
+There is no separate daemon executable — the crate ships one CLI
+(installed as both `tm` and `trusty-mpm`), and daemon mode is its `daemon`
 subcommand:
 
 ```bash

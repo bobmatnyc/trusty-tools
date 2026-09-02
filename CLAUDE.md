@@ -1,8 +1,9 @@
 # trusty-tools — Claude Code Instructions
 
-Unified Rust workspace for the trusty-* AI tooling ecosystem: 21 crates —
-shared libraries, daemon/MCP servers, the MPM platform, the control plane, and
-an orchestrator — under one Cargo workspace.
+Unified Rust workspace for the trusty-* AI tooling ecosystem: shared libraries,
+daemon/MCP servers, orchestration harnesses, control-plane tools, and desktop
+clients under one Cargo workspace. Derive the live package count from
+`cargo metadata --no-deps --format-version 1`; do not hand-copy it here.
 
 ## Project Overview
 

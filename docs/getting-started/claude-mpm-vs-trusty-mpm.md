@@ -37,7 +37,7 @@ Both systems use the same delegation framework. If you know claude-mpm's pattern
 
 - **[WHAT-IS-TRUSTY-MPM.md](../../crates/trusty-mpm/docs/WHAT-IS-TRUSTY-MPM.md)** — Canonical identity doc.
 - **[ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md](../../crates/trusty-mpm/docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md)** — Memory over MCP/JSON-RPC, Session↔Worktree 1:1 model, per-worktree search indexes.
-- **[Root README](../../README.md)** — Overview of all 21 crates in the trusty-* ecosystem.
+- **[Root README](../../README.md)** — Orientation to the trusty-* ecosystem and its live crate map.
 
 ---
 

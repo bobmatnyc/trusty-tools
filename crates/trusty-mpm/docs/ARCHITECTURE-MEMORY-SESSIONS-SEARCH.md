@@ -148,7 +148,7 @@ that index ID is pinned into the session's `.mcp.json` stub (issue #1373):
 3. **Index lifecycle:** The lifecycle is tied to the session's worktree:
    - **Create:** When a session's worktree is provisioned, the daemon creates the
      index (if absent) and registers it with trusty-search via the `trusty-search`
-     MCP tool [`index_status`](../../../crates/trusty-search/src/mcp_tools/index_status.rs).
+     command [`index_status`](../../../crates/trusty-search/src/commands/index_status.rs).
      A best-effort reindex is triggered so the index is populated before the session
      starts real work.
    - **Watch:** A background file-watcher (part of the trusty-search daemon) keeps
@@ -184,7 +184,7 @@ that index ID is pinned into the session's `.mcp.json` stub (issue #1373):
 When you run `tm run` to spawn a new managed session:
 
 1. **Memory contact:** trusty-mpm reaches trusty-memory to provision a per-session
-   memory palace using [`call_memory_tool`](../../../crates/trusty-common/src/mcp/memory_rpc.rs)
+   memory palace using [`call_memory_tool`](../../../crates/trusty-common/src/memory_rpc.rs)
    — no port guessing, discovery-based resolution.
 
 2. **Session + worktree naming:** The session's semantic name is derived via
