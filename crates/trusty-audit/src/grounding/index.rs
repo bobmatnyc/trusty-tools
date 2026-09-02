@@ -9,7 +9,7 @@
 //! ## The index id is a cross-process contract
 //!
 //! Three crates derive the id independently — this one when it indexes,
-//! `trusty_review::report::analyze_adapter::derive_index_id` when the renderer
+//! `trusty_review::report::index_registry::derive_index_id` when the renderer
 //! looks it up, `tga::audit::repo_index::index_id_for` from the sweep's other
 //! side — and an id derived any other way indexes a repository under a name
 //! nobody ever queries. Until #6149 the rule was the checkout BASENAME, copied

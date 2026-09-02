@@ -143,7 +143,7 @@ pub(super) fn binary_from_override(override_value: Option<&str>) -> String {
 
 /// The trusty-search index id for a checkout path.
 ///
-/// Why: this must agree with `trusty_review::report::analyze_adapter::
+/// Why: this must agree with `trusty_review::report::index_registry::
 /// derive_index_id`, which is what the renderer looks the index up by. Until
 /// #6149 both were the checkout BASENAME, copied rather than called — and two
 /// checkouts of one repository therefore collided on one id, so the sweep
