@@ -24,8 +24,8 @@
 .claude/
 .claude-mpm/*
 
-# Re-include tracked files from .claude/ — root only (#4789). These negations
-# are ANCHORED with a leading slash on purpose: an unanchored `!.claude/` /
+# Re-include tracked files from .claude/ — root only (#4789). This negation
+# is ANCHORED with a leading slash on purpose: an unanchored `!.claude/` /
 # `!.claude/settings.json` would re-include `.claude/` at every depth just
 # like the ignore above, silently cancelling it out everywhere except the one
 # specific nested path a later rule happens to re-ignore. That was the actual
@@ -35,7 +35,6 @@
 # that nested re-ignore rule entirely: nested `.claude/` dirs now simply stay
 # ignored, full stop.
 !/.claude/
-!/.claude/settings.json
 
 # Project-tier agent files are NEVER tracked in this repo. They are deployed
 # artifacts, not source: the bundled roster is the product and lives in
@@ -168,6 +167,9 @@ docs/certificates/*.mobileprovision
 # claude-mpm (unrelated Python project) leftovers — synced skills/agents, never a deliverable here
 .agents/
 .codex/
+
+# trusty-agents (tagent) local runtime state at the repo root — machine-local, never a deliverable
+.trusty-agents/
 
 # The per-worktree ownership sentinel (#3649, #4311). It is written INTO a
 # worktree by the daemon, so it appears in that tree as an untracked file and
