@@ -45,6 +45,7 @@ mod persistence;
 mod sed_awk;
 mod shell_lex;
 mod worktree_remove;
+mod worktree_remove_rechecks;
 
 pub(crate) use destructive_delete::evaluate_destructive_delete_command;
 pub(crate) use main_checkout::{
@@ -56,7 +57,12 @@ pub(crate) use persistence::command_is_persistence_only;
 // denies. The sibling `worktree add` guard above is a different rule with a
 // different scope — that one is about WHERE a tree is provisioned, this one is
 // about WHO may destroy one.
-pub(crate) use worktree_remove::evaluate_worktree_remove_command;
+// See ADR-0057 — one role's removal is now a grant, so the rule reports three
+// answers rather than two and the third must still be earned.
+pub(crate) use worktree_remove::{
+    DispatchIdentity, WorktreeRemoveVerdict, evaluate_worktree_remove_command,
+};
+pub(crate) use worktree_remove_rechecks::evaluate_removal_rechecks;
 
 use std::path::{Path, PathBuf};
 

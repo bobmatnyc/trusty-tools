@@ -463,6 +463,14 @@ fn unanswered_deny_reason(agent: &str, cwd: &Path, detail: &str) -> String {
 /// and its record closure never runs — the call is a pure read by construction,
 /// not by the caller's promise. Every failure arm of [`post_shared_tree`]
 /// returns an empty vec, which the caller reads as ALLOW.
+///
+/// **This is the FAIL-OPEN reader, and it is not the only one.** See ADR-0057 —
+/// the worktree-removal rule needs the same question answered fail-CLOSED,
+/// because there an unanswered daemon would let one agent delete a tree another
+/// agent is writing in. That path calls
+/// [`live_shared_tree_writers_or_deny`] instead. Pick by what a wrong ALLOW
+/// costs: here it is the operator's own `git merge` on their own checkout,
+/// there it is another session's work.
 /// Test: `shared_tree_dispatch_route_answers_a_bash_query_without_claiming` in
 /// `crate::daemon::delegation_routes` pins the no-claim half daemon-side;
 /// `pm_guard_allows_a_pull_when_the_daemon_is_unreachable` in
@@ -484,6 +492,34 @@ pub(crate) async fn live_shared_tree_writers(
         .as_ref()
         .map(writers_in)
         .unwrap_or_default()
+}
+
+/// Who is writing in `cwd`, asked without claiming, failing CLOSED
+/// ([ADR-0057](../../../../../../docs/adr/0057-version-control-owns-worktree-removal.md)).
+///
+/// Why: [`live_shared_tree_writers`] collapses "nobody is here" and "nothing
+/// answered" into the same empty vec, which is correct where a wrong ALLOW
+/// costs the operator a `git merge` and wrong where it costs another session
+/// its worktree. ADR-0057's `sole-owner` re-check is the second case: a daemon
+/// that is down, timed out, or replied unparseably has established nothing, and
+/// removing on that is the exact harm the check exists to prevent. Kept as a
+/// separate function rather than a flag on the fail-open one so neither caller
+/// can acquire the other's bias by editing a default.
+/// What: `Ok(writers)` — possibly empty, which genuinely means nobody — only
+/// for an ANSWERED reply. Every other arm is `Err(detail)`, carrying the
+/// daemon-side reason for the deny text.
+/// Test: `pm_guard_denies_version_control_a_removal_when_the_daemon_is_unreachable`
+/// in `tests/tm_hook_pm_guard.rs`.
+pub(crate) async fn live_shared_tree_writers_or_deny(
+    url: &str,
+    session_id: &str,
+    cwd: &Path,
+    payload: &Value,
+) -> Result<Vec<String>, String> {
+    match post_shared_tree(url, session_id, cwd, payload, SHARED_TREE_ROUTE).await {
+        SharedTreeReply::Answered(body) => Ok(writers_in(&body)),
+        SharedTreeReply::Unavailable(detail) | SharedTreeReply::Unanswered(detail) => Err(detail),
+    }
 }
 
 /// Who is writing in any of `dirs`, asked without claiming (#5769).
@@ -760,9 +796,11 @@ impl SharedTreeReply {
     /// — it gates the operator's own `git merge`/`git rebase` rather than a
     /// second agent — and reading it through a named accessor keeps that a
     /// stated choice at the call site rather than a shape the type quietly
-    /// allows. It is the only remaining caller: the grant path denies on an
-    /// unanswered reply as of #5923 and goes through
-    /// [`claim_shared_tree_on`] with the claim path.
+    /// allows. It is the only caller that reads a reply this way: the grant
+    /// path denies on an unanswered reply as of #5923 and goes through
+    /// [`claim_shared_tree_on`] with the claim path, and ADR-0057's
+    /// worktree-removal re-check matches on [`SharedTreeReply`] directly via
+    /// [`live_shared_tree_writers_or_deny`] so its `Err` arm survives.
     /// What: `Some` only for [`Self::Answered`].
     /// Test: `pm_guard_allows_a_merge_when_the_daemon_is_unreachable` in
     /// `tests/tm_hook_pm_guard.rs`.

@@ -188,6 +188,11 @@ const READ_ONLY_HARNESS_AGENTS: &[&str] = &["Explore", "Plan"];
 /// Test: `version_control_operates_without_a_worktree_of_its_own`.
 // ADR-0056 narrows #4480 and #5650 for this one name; engineer source-write
 // confinement (ADR-0044, ADR-0048) is untouched.
+//
+// See ADR-0057 — `pm_guard_bash::worktree_remove` reads this same list, through
+// [`permitted_in_shared_checkout`], to decide who may run `git worktree remove`.
+// The two guard layers fire at different points (dispatch time and Bash time)
+// and must never disagree about the name, so neither keeps its own copy.
 const SHARED_CHECKOUT_PERMITTED_NAMES: &[&str] = &["version-control"];
 
 /// The `extends:` base whose descendants are engineer-tier regardless of role.

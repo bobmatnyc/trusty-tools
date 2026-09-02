@@ -258,7 +258,7 @@ fn try_register_project_alias_inner(cwd: &Path, store_root: &Path) -> anyhow::Re
 /// function is only the last-resort guard.
 /// Test: `is_worktree_path_claude_worktrees`, `is_worktree_path_repo_worktrees`,
 /// `is_worktree_path_normal_project`.
-pub(crate) fn is_worktree_path(path: &Path) -> bool {
+pub fn is_worktree_path(path: &Path) -> bool {
     let s = path.to_string_lossy();
     s.contains("/.claude/worktrees/") || s.contains("/.worktrees/")
 }

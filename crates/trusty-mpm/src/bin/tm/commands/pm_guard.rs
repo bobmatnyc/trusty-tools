@@ -174,7 +174,12 @@
 //! owner ruled on 2026-08-19 that the PM runs the removal itself, through
 //! `tm session prune-worktrees`, once it has confirmed the agent's work is
 //! done. The PM is never denied, `list`/`prune` are never denied, and an
-//! indeterminate caller fails OPEN.
+//! indeterminate caller fails OPEN. See ADR-0057 — the owner re-ruled the
+//! cleanup half on 2026-09-02 for one role: a dispatched `version-control`
+//! agent may run the removal, and the guard then proves for itself that the
+//! target is a harness worktree, clean, fully pushed, merged on GitHub, and
+//! held by nobody else. Those re-checks fail CLOSED, unlike the caller-context
+//! resolver above.
 //! **Per-subagent context ceiling (issue #4837):** immediately after the
 //! fan-out check — and ahead of the same two exemptions, for the same reason —
 //! [`pm_guard`] measures the calling subagent's accumulated context via
@@ -203,11 +208,11 @@ use std::path::{Path, PathBuf};
 
 use crate::commands::misc::{DISABLE_HOOKS_ENV, SUB_AGENT_ENV, read_stdin_hook_payload};
 use crate::commands::pm_guard_bash::{
-    CommitVerdict, SHELL_EDIT_REASON, docs_commit_deny_reason, evaluate_bash_command,
-    evaluate_destructive_delete_command, evaluate_main_checkout_commit_command,
-    evaluate_main_checkout_destructive_command, evaluate_worktree_add_command,
-    evaluate_worktree_remove_command, extract_shell_edit_target, head_move_deny_reason,
-    main_checkout_head_move,
+    CommitVerdict, DispatchIdentity, SHELL_EDIT_REASON, WorktreeRemoveVerdict,
+    docs_commit_deny_reason, evaluate_bash_command, evaluate_destructive_delete_command,
+    evaluate_main_checkout_commit_command, evaluate_main_checkout_destructive_command,
+    evaluate_removal_rechecks, evaluate_worktree_add_command, evaluate_worktree_remove_command,
+    extract_shell_edit_target, head_move_deny_reason, main_checkout_head_move,
 };
 use crate::commands::pm_guard_budget::{self, BudgetDecision, DEFAULT_FILE_CHANGE_BUDGET};
 use crate::commands::pm_guard_cost;
@@ -536,18 +541,58 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
     // for, so a check placed after either would be a guaranteed no-op — while
     // `caller_is_subagent` is not resolved until this point. It inherits that
     // resolver's fail-open bias: an indeterminate caller allows.
-    if tool_name == "Bash"
-        && let Some(reason) = evaluate_worktree_remove_command(
-            tool_input
-                .and_then(|v| v.get("command"))
-                .and_then(|v| v.as_str())
-                .unwrap_or_default(),
+    //
+    // See ADR-0057 — the owner's 2026-09-02 re-ruling gives `version-control`
+    // the raw removal, so the rule now has a third answer. `ReCheck` is NOT an
+    // allowance: the removal proceeds only after the daemon says nobody else
+    // holds the tree and `evaluate_removal_rechecks` establishes, from git and
+    // GitHub rather than from the agent's claim, that the tree is clean,
+    // pushed, and merged. Every one of those fails CLOSED, unlike the
+    // caller-context resolver above.
+    if tool_name == "Bash" {
+        let command = tool_input
+            .and_then(|v| v.get("command"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        match evaluate_worktree_remove_command(
+            command,
             caller_is_subagent,
-        )
-    {
-        audit_denied_tool(url, session_id, tool_name, reason).await;
-        println!("{}", build_pretooluse_deny_response(reason));
-        return Ok(());
+            DispatchIdentity::from_payload(&payload),
+            &hook_cwd,
+        ) {
+            WorktreeRemoveVerdict::Allow => {}
+            WorktreeRemoveVerdict::Deny(reason) => {
+                audit_denied_tool(url, session_id, tool_name, &reason).await;
+                println!("{}", build_pretooluse_deny_response(&reason));
+                return Ok(());
+            }
+            WorktreeRemoveVerdict::ReCheck { target } => {
+                // The same directory-keyed route ADR-0048 decision 10's
+                // HEAD-move rule uses, so both rules read one answer built one
+                // way. Keyed on the TARGET, not the caller's cwd: the tree
+                // being deleted is the one whose owner matters, and the
+                // `version-control` agent's own record sits at the checkout it
+                // was dispatched into.
+                //
+                // `_or_deny`, NOT the fail-open reader the HEAD-move rule uses:
+                // an unreachable or silent daemon establishes nothing about who
+                // holds this tree, and an empty vec from such a reply would let
+                // the removal proceed over another agent's live work.
+                let live = pm_guard_dispatch::live_shared_tree_writers_or_deny(
+                    url, session_id, &target, &payload,
+                )
+                .await;
+                if let Some(reason) = evaluate_removal_rechecks(
+                    &target,
+                    live.as_deref().map_err(String::as_str),
+                    &trusty_mpm::core::worktree_removal_facts::GitAndGhProbe,
+                ) {
+                    audit_denied_tool(url, session_id, tool_name, &reason).await;
+                    println!("{}", build_pretooluse_deny_response(&reason));
+                    return Ok(());
+                }
+            }
+        }
     }
 
     // ADR-0048 Part A: a dispatched writer standing in a main checkout is GIVEN

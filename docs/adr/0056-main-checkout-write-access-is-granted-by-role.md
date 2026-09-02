@@ -14,7 +14,9 @@
   and forced a push by SHA; the operations `version-control` owns — a merge into
   main, a branch delete, the removal of a merged worktree — cannot be performed
   from inside a worktree
-- **Supersedes / Superseded by:** Amends
+- **Supersedes / Superseded by:** Decision 6 is superseded in part by
+  [ADR-0057](0057-version-control-owns-worktree-removal.md), which lets
+  `version-control` run a guarded `git worktree remove`. Amends
   [ADR-0044](0044-main-checkout-write-boundary-and-agent-worktree-ownership.md)
   and [ADR-0048](0048-dispatched-writers-get-a-worktree-and-the-write-boundary-is-enforced.md)
   for one role. ADR-0044's source-write boundary, ADR-0048's remaining
@@ -75,6 +77,11 @@ whether the role writes.
    denies every agent, `version-control` included, a source-file edit in a main
    checkout, and #5791 still denies every agent an outright
    `git worktree remove`.
+   Superseded in part by
+   [ADR-0057](0057-version-control-owns-worktree-removal.md): the removal
+   clause no longer holds for `version-control`, which may remove a tree the
+   guard proves is a harness worktree, clean, pushed, merged on GitHub, and
+   held by nobody else. The source-write half of this decision stands.
 
 The prose that ships with the framework states the same thing once each: the
 `version-control` agent asset, `BASE-AGENT.md`, `tm-workflow`, and

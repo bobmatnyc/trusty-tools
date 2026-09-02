@@ -830,7 +830,7 @@ fn count_session_branch_unpushed(path: &Path) -> Result<usize, String> {
 /// What: non-zero exit and spawn failure both become `Err` carrying the
 /// command and git's own stderr; stdout is lossily decoded.
 /// Test: `inspect_dirt_treats_missing_path_as_dirty`.
-pub(super) fn git_stdout(dir: &Path, args: &[&str]) -> Result<String, String> {
+pub(crate) fn git_stdout(dir: &Path, args: &[&str]) -> Result<String, String> {
     let out = git_command(dir, args)
         .output()
         .map_err(|e| format!("`git {}` could not be run: {e}", args.join(" ")))?;

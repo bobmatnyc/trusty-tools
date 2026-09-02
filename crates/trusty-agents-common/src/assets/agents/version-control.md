@@ -183,9 +183,43 @@ tm session prune-worktrees --merged-prs --force  # reclaim
 
 That pass spares any tree still holding unsaved work, still claimed by a managed
 session, or still owned by a live agent, and reports each one it spared with the
-reason — which is why it is the cleanup path and a bare `git worktree remove` is
-not. `rm -rf` on a worktree directory is never the workaround. A tree whose PR
+reason — which is why it stays the default. Its scans are wider than the direct
+path's below: it also inspects nested repositories and high-value gitignored
+files. `rm -rf` on a worktree directory is never the workaround. A tree whose PR
 is not MERGED stays: it may hold the only copy of real work.
+
+**You may also remove ONE tree directly (ADR-0057).** The sweep touches every
+registered worktree on the machine; when you have just merged a single PR and
+want only that PR's tree back, run:
+
+```bash
+git worktree remove <path>
+```
+
+`tm hook --pm-guard` allows that for you and for no other agent, and only when
+all five of these hold. It checks each one itself — a claim from you counts for
+nothing:
+
+1. **dispatch identity** — the call carries an `agent_id`, which the hooks
+   contract stamps only inside a dispatched subagent. A top-level session
+   launched with `--agent version-control` carries the name but not the id, and
+   is refused.
+2. **worktree scope** — the target resolves under `.claude/worktrees/` or
+   `.worktrees/`. Only `remove` is granted; `add`, `move`, `lock` and `prune`
+   keep their own rules, and `rm -rf` stays denied to everyone.
+3. **clean tree** — `git status --porcelain` in the target prints nothing, and
+   no commit on HEAD is missing from the upstream. A worktree with no upstream
+   configured is refused: nothing then proves its commits reached a remote.
+4. **merged pull request** — `gh pr list --head <branch> --state merged` returns
+   a row. Ancestry is never the substitute, for the squash-merge reason step 1
+   of this section already gives.
+5. **sole owner** — the daemon reports no other live agent or managed session
+   writing in that tree.
+
+A fact the guard cannot establish denies, and the denial names which of the five
+failed. Read it and act on it; do not retry the same command. When the direct
+path refuses and you believe the tree is reclaimable, fall back to the sweep,
+which reports what it spared and why.
 
 `gh pr merge --delete-branch` removes the remote branch at merge time; the local
 branch goes with the prune pass.

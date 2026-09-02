@@ -766,7 +766,11 @@ fn git_verb_target_dir(
 /// `cd` tracking and `git -C` resolution.
 /// Test: as [`git_verb_target_dir`], plus
 /// `commit_target_dir_hands_back_the_argv_tail`.
-fn git_verb_target_dir_with_tail(
+// `pub(super)` since ADR-0057: the worktree-removal rule resolves the same
+// `cd`/`git -C` chain to find which directory a `git worktree remove` would
+// delete, and a second walker there would drift on exactly the two things this
+// one gets right.
+pub(super) fn git_verb_target_dir_with_tail(
     command: &str,
     cwd: &Path,
     env: &PathEnv,
