@@ -10,7 +10,7 @@
 //!
 //! ## The comparison allowlist
 //!
-//! Three things are dropped before comparing, all on `mpm.doctor`, and all
+//! Five things are dropped before comparing, all on `mpm.doctor`, and all
 //! because the DAEMON varies them between two calls of the same code rather
 //! than because the transports disagree:
 //!
@@ -27,8 +27,12 @@
 //!   session record(s), 59773 byte(s)" on one call and "44 … 60950" on the
 //!   next, because a concurrent managed session writes that file between the two
 //!   reads (#6490).
+//! - the `pty_headroom` check's `message`, which reports the machine's live
+//!   pseudo-terminal census — "82 of 511 pseudo-terminals allocated" on one call
+//!   and "83 of 511" on the next, because any process on the box opens or closes
+//!   a pty between the two reads (#6577).
 //!
-//! All three probes sample host state the daemon re-reads per call, which is
+//! All four probes sample host state the daemon re-reads per call, which is
 //! what makes their messages the only host-sampled strings in the report. Their
 //! `name` and `status` are still compared, so a check that vanished or changed
 //! verdict between the transports still fails — see
@@ -75,6 +79,38 @@ fn hermetic() -> (Arc<DaemonState>, TempDir) {
 /// The RPC router this slice registers, over `state`.
 fn rpc_router(state: &Arc<DaemonState>) -> RpcRouter {
     register(RpcRouter::new(), state)
+}
+
+/// RAII guard restoring `$HOME` on drop, including on a panic-driven unwind —
+/// mirrors `core::session_assets::tests::HomeGuard`.
+struct HomeGuard(Option<std::ffi::OsString>);
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        // SAFETY: every caller is `#[serial_test::serial]`, so no other test
+        // thread reads or writes the environment concurrently.
+        match self.0.take() {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+}
+
+/// Pin `$HOME` at a fresh tempdir for the guard's lifetime (#6580).
+///
+/// Why: `core::host_state_gate` embeds the LIVE `$HOME` in the refusal it hands
+/// every tmux route, so a test that reads that refusal twice gets two different
+/// strings whenever a sibling moves `$HOME` between the reads. Pinning makes the
+/// classification — and therefore the message — the same for both reads. Both
+/// returned values must stay alive for the test's body: dropping the `TempDir`
+/// removes the directory `$HOME` names.
+/// Callers MUST be tagged `#[serial_test::serial]`.
+fn pinned_home() -> (TempDir, HomeGuard) {
+    let home = tempfile::tempdir().expect("temp dir for a pinned $HOME");
+    let prior = std::env::var_os("HOME");
+    // SAFETY: caller is `#[serial_test::serial]`.
+    unsafe { std::env::set_var("HOME", home.path()) };
+    (home, HomeGuard(prior))
 }
 
 /// Drive one HTTP request through the real daemon router and decode the answer.
@@ -428,9 +464,14 @@ async fn parity_doctor_agrees_across_transports() {
 }
 
 /// The doctor checks whose `message` samples live host state, by name (#6358,
-/// #6490).
+/// #6490, #6577).
 ///
-/// Why exactly these three: each puts live host state the daemon re-reads per
+/// The membership rule, so the next such check need not flake first: a check
+/// belongs here when its message embeds a number or a name it RE-SAMPLES FROM
+/// THE HOST on every call. A message built from config on disk, or from the
+/// daemon's own state, does not.
+///
+/// Why exactly these four: each puts live host state the daemon re-reads per
 /// call into its message. `worktree_disk` reports how far it got against a
 /// 3-second deadline ("6.2 GiB … 268 worktree(s) went unmeasured" on one call,
 /// "6.8 GiB … 267" on the next) and `worktrees` reports the reconciled
@@ -439,7 +480,11 @@ async fn parity_doctor_agrees_across_transports() {
 /// worktree between this test's two calls. `session_store` reports the record
 /// count and byte length of `sessions.json` ("43 session record(s), 59773
 /// byte(s)" against "44 … 60950"), which change whenever a concurrent managed
-/// session writes that file between the two reads (#6490). All three are the
+/// session writes that file between the two reads (#6490). `pty_headroom`
+/// reports a live census of allocated pseudo-terminals ("82 of 511
+/// pseudo-terminals allocated" against "83 of 511"), which changes whenever any
+/// process on this machine opens or closes a pty between the two reads (#6577).
+/// All four are the
 /// PROBE varying, not the transports disagreeing. Only the MESSAGE is host-
 /// sampled: each check's `status` is a stable verdict (`session_store` stays
 /// `Ok` while only its counts churn), so it is still compared — a store that
@@ -449,9 +494,14 @@ async fn parity_doctor_agrees_across_transports() {
 /// What: the names [`blank_host_sampled_messages`] blanks.
 /// Test: [`parity_doctor_agrees_across_transports`],
 /// [`session_store_message_is_excluded_from_parity_but_its_status_is_not`].
-const HOST_SAMPLED_MESSAGE_CHECKS: &[&str] =
+const HOST_SAMPLED_MESSAGE_CHECKS: &[&str] = &[
+    "worktree_disk",
+    "worktrees",
     // #6490: session_store's message samples sessions.json's live record count.
-    &["worktree_disk", "worktrees", "session_store"];
+    "session_store",
+    // #6577: pty_headroom's message samples this machine's live pty census.
+    "pty_headroom",
+];
 
 /// Blank each [`HOST_SAMPLED_MESSAGE_CHECKS`] message, keeping name and status.
 ///
@@ -507,6 +557,8 @@ fn session_store_message_is_excluded_from_parity_but_its_status_is_not() {
                 {"name": "worktree_disk", "status": "ok", "message": "6.2 GiB measured"},
                 {"name": "worktrees", "status": "ok", "message": "14 live, 265 not reclaimable"},
                 {"name": "session_store", "status": session_store_status, "message": session_store_message},
+                // #6577: present so the presence assertion is satisfied.
+                {"name": "pty_headroom", "status": "ok", "message": "82 of 511 pseudo-terminals allocated"},
             ]
         })
     };
@@ -698,9 +750,20 @@ async fn rpc_claude_config_apply_unknown_recommendation_reports_not_found() {
 /// the machine rather than on the transport. What must hold either way is that
 /// the socket's code is the code the HTTP status maps to and its message is the
 /// HTTP body's message — which is the whole of requirement 3.
+///
+/// Why the pinned `$HOME` and the serial group (#6580): the refusal both
+/// transports carry comes from `core::host_state_gate`, whose message names the
+/// LIVE `$HOME` ("$HOME is /var/folders/… but this user's real home is
+/// /Users/…"). Several tests in this binary move `$HOME` process-wide, and one
+/// landing between the two calls below left the HTTP read and the socket read
+/// quoting different homes — the verbatim-message assertion then failed while
+/// proving nothing about the transports. `#[serial_test::serial]` keeps those
+/// tests out, and [`pinned_home`] fixes what the gate classifies for both reads.
 /// Test: this function IS the test.
+#[serial_test::serial]
 #[tokio::test]
 async fn rpc_tmux_snapshot_unknown_session_reports_a_coded_error() {
+    let (_home, _home_guard) = pinned_home();
     let (state, _dir) = hermetic();
 
     let (status, body) = http(
