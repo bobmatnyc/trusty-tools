@@ -180,6 +180,20 @@ daemon.
     retries it, because a partial walk may have committed chunks and the cause
     that killed the first walk would likely kill the retry. Clear it with
     `POST /indexes/:id/reindex`.
+  - `indexes_stage_failed_ids` (#6688): the ids behind
+    `warmboot_summary.indexes_stage_failed`, so a consumer can act on the
+    specific index instead of polling `GET /indexes/:id/status` for every
+    registration. Same `IndexStages::any_failed()` predicate, same registry
+    scan, so `indexes_stage_failed_ids.len() == indexes_stage_failed` always,
+    including under the fail-open arm (a handle whose `stages` lock is
+    contended is skipped by both and counted in
+    `warmboot_summary.indexes_health_scan_skipped`). Sorted — the registry
+    iterates arbitrarily. **Omitted entirely when the count is `0`**, so a
+    consumer must spell it `Option<Vec<String>>` or add `#[serde(default)]`; a
+    bare `Vec<String>` hard-fails against a daemon that omits it. A
+    corpus-open failure marks every lane `Failed`, so those indexes are named
+    here too, but `indexes_corpus_failed`'s post-warm-boot backstop case is
+    not — this field tracks the lane counter, not the corpus one.
   - `indexes_watcher_network_degraded` (issue #3408): count of registered
     indexes whose file watcher was refused because `root_path` was detected as
     a network-mounted filesystem (NFS/EFS/SMB/CIFS). inotify/FSEvents cannot
