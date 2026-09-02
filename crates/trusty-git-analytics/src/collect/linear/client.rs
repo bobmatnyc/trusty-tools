@@ -7,7 +7,10 @@
 //! CLI on this path.
 //!
 //! Issue identifiers are matched against commit messages with the pattern
-//! `[A-Z][A-Z0-9]{0,9}-\d+` (e.g. `ENG-123`, `FE-456`).
+//! `[A-Z][A-Z0-9]{0,9}-\d+` (e.g. `ENG-123`, `FE-456`), then filtered through
+//! [`crate::collect::ticket::is_non_ticket_identifier`] so that documentation,
+//! standard, digest and advisory tokens of the same shape never reach the
+//! network (#5664).
 
 use std::collections::HashSet;
 
@@ -17,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use trusty_common::credentials::scrub_secrets;
 
 use crate::collect::errors::{CollectError, Result};
+use crate::collect::ticket::is_non_ticket_identifier;
 use crate::core::config::LinearConfig;
 use crate::core::db::Database;
 
@@ -239,14 +243,41 @@ impl LinearClient {
 
     /// Extract Linear issue identifiers from a commit message.
     ///
-    /// Matches patterns like `ENG-123`, `FE-456`, `PROJ-789`.
-    /// Returns a deduplicated list of identifiers found (order preserved).
+    /// Why: the shape `[A-Z][A-Z0-9]{0,9}-\d+` is also the shape of every
+    /// `UTF-8`, `SHA-256`, `ADR-0029`, `RFC-2119`, `ISO-8601` and `RUSTSEC-2026`
+    /// a commit message carries, and [`Self::fetch_referenced_issues`] resolves
+    /// whatever this yields. A live 52-week `tga collect` on this repository
+    /// issued 369 distinct GraphQL lookups, not one of which was a Linear
+    /// ticket (#5664): the round-trip was the only thing that could tell an
+    /// encoding name from an issue key, and its answer — "no such issue" — is
+    /// indistinguishable from a real ticket that has been deleted.
+    ///
+    /// What: matches the pattern, then drops every token whose prefix is a
+    /// known non-ticket family before returning, so no lookup is issued for
+    /// one. [`crate::collect::ticket::is_non_ticket_identifier`] owns that
+    /// decision and its calibration; this function holds no list of its own.
+    /// Returns a deduplicated list of identifiers found, order preserved.
+    ///
+    /// Ticket-shaped tokens that simply do not resolve (`WI-1`, `AC-1`,
+    /// `CREDPANEL-01`) are still returned and still cost a lookup: nothing
+    /// distinguishes them from another org's real board keys, and DOC-70 §9.1
+    /// counts an unresolved key as the signal it is.
+    ///
+    /// Test: `extract_issue_ids_finds_linear_patterns`,
+    /// `extract_issue_ids_rejects_non_ticket_identifiers`,
+    /// `extract_issue_ids_deduplicates`,
+    /// `extract_issue_ids_ignores_lowercase_prefix`.
     pub fn extract_issue_ids(message: &str) -> Vec<String> {
         let re = regex::Regex::new(r"\b([A-Z][A-Z0-9]{0,9}-\d+)\b").expect("valid regex");
         let mut seen = HashSet::new();
         let mut out = Vec::new();
         for cap in re.captures_iter(message) {
             let id = cap[1].to_string();
+            // #5664: reject before the lookup — a resolved "not found" costs a
+            // round-trip and answers nothing this test cannot answer offline.
+            if is_non_ticket_identifier(&id) {
+                continue;
+            }
             if seen.insert(id.clone()) {
                 out.push(id);
             }
@@ -496,6 +527,81 @@ mod tests {
         let msg = "abc-123 should not match";
         let ids = LinearClient::extract_issue_ids(msg);
         assert!(ids.is_empty());
+    }
+
+    /// Why: #5664 — every token here is the shape `extract_issue_ids` matches
+    /// and none is a Linear issue, so before this filter each one bought a
+    /// GraphQL round-trip whose only possible answer was "no such issue".
+    /// A live 52-week `tga collect` on this repository issued 369 such lookups.
+    /// What: the identifiers the #5664 measurement observed, plus the families
+    /// named alongside them, yield nothing at all — no lookup can be issued for
+    /// a token that never leaves the extractor.
+    /// Test: this test itself.
+    #[test]
+    fn extract_issue_ids_rejects_non_ticket_identifiers() {
+        for msg in [
+            // Observed in the #5664 measurement.
+            "docs: DOC-67 §5 sweep order",
+            "spec: DOC-70 board axis",
+            "docs: amend ADR-0029 point 3",
+            "docs: supersede ADR-0038",
+            "fix: a multi-byte UTF-8 name breaks the stem",
+            "chore: verify the artifact against the published SHA-256",
+            "feat: strip ECMA-48 control sequences",
+            "chore: avoid reintroducing RUSTSEC-2026-0187",
+            // Families named alongside them in #5664.
+            "fix: ISO-8601 offsets were dropped",
+            "docs: RFC-2119 keyword sweep",
+            "chore: drop the MD-5 fallback",
+            "chore: patch CVE-2024-3094",
+            "docs: map the finding to CWE-79",
+            "build: mirror the AL2023/GCC-11 desync",
+            "chore: rotate to RSA-4096 and AES-256",
+            "docs: SPEC-14 tightened",
+        ] {
+            assert_eq!(
+                LinearClient::extract_issue_ids(msg),
+                Vec::<String>::new(),
+                "message: {msg:?}"
+            );
+        }
+    }
+
+    /// Why: #5664's filter is a deny-list, and a deny-list that over-reaches
+    /// loses genuine board links silently — the failure mode the network cost
+    /// it removes is far cheaper than.
+    /// What: real tracker keys still extract, including the two-letter and
+    /// single-digit shapes closest to the excluded families. The ticket-shaped
+    /// tokens the measurement could not resolve (`WI-1`, `AC-1`,
+    /// `CREDPANEL-01`) still extract too: that is the deliberate calibration
+    /// boundary recorded on `NON_TICKET_PREFIXES`, not an oversight.
+    /// Test: this test itself.
+    #[test]
+    fn extract_issue_ids_keeps_genuine_tracker_ids() {
+        for (msg, want) in [
+            ("ABC-123: add the thing", "ABC-123"),
+            ("fix: land GH-12", "GH-12"),
+            ("PROJ-9 tighten the check", "PROJ-9"),
+            ("ENG-123: add login feature", "ENG-123"),
+            ("also fixes FE-456", "FE-456"),
+            // Unresolvable but ticket-shaped: deliberately still extracted.
+            ("WI-1 spike", "WI-1"),
+            ("AC-1 acceptance", "AC-1"),
+            ("CREDPANEL-01 wiring", "CREDPANEL-01"),
+        ] {
+            assert_eq!(
+                LinearClient::extract_issue_ids(msg),
+                vec![want.to_string()],
+                "message: {msg:?}"
+            );
+        }
+        // A GitHub bare `#N` is a genuine reference of a different shape — this
+        // extractor never matched it, and `ticket::extract_ticket_id` still does.
+        assert!(LinearClient::extract_issue_ids("closes #1234").is_empty());
+        assert_eq!(
+            crate::collect::ticket::extract_ticket_id("closes #1234"),
+            Some("#1234".to_string())
+        );
     }
 
     /// #5983: asserted against [`resolve_api_key_with`], not `LinearClient::new`.

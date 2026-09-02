@@ -11,14 +11,20 @@
 //!   `resolves #7` (case-insensitive, also matches `fix`/`close`/`resolve`).
 //! - **Azure DevOps work-item refs**: `AB#123`.
 //!
-//! **Note on JIRA-shaped tokens (issues #5199, #5735):** [`extract_ticket_id`]
-//! and [`is_ticketed`] read a JIRA/Linear key the same way — from the
-//! **subject line only**, rejecting documentation prefixes (`ADR`, `DOC`,
-//! `RFC`, `SPEC`) via [`subject_ticket_key`]. #5199 narrowed
+//! **Note on JIRA-shaped tokens (issues #5199, #5735, #5664):**
+//! [`extract_ticket_id`] and [`is_ticketed`] read a JIRA/Linear key the same
+//! way — from the **subject line only**, rejecting the
+//! [`NON_TICKET_PREFIXES`] families via [`subject_ticket_key`]. #5199 narrowed
 //! [`extract_ticket_id`] and left [`is_ticketed`] scanning the whole message
 //! with the unrestricted pattern; #5735 measured what that cost — 237 of this
 //! repository's 2633 commits counted ticketed on nothing but a `UTF-8`- or
 //! `ADR-0034`-shaped string in a body. The two now agree.
+//!
+//! This module also owns the prefix list itself. [`NON_TICKET_PREFIXES`] and
+//! [`is_non_ticket_identifier`] are the single answer to "is this token a
+//! document rather than a ticket", which `LinearClient::extract_issue_ids`
+//! consults before issuing a GraphQL lookup (#5664) — a second list there
+//! would drift from this one.
 //!
 //! **Note on bare `#N` refs (issue #445):** A bare `#N` preceded by
 //! whitespace (the `gh_bare` pattern) is explicitly *excluded* from
@@ -67,16 +73,49 @@ fn patterns() -> &'static TicketPatterns {
     })
 }
 
-/// Prefixes that name a *document*, never a work item (#5199).
+/// Prefixes that name a document, standard, encoding, digest or advisory —
+/// never a work item (#5199, #5735, #5664).
 ///
 /// Why: `ADR-0029` and `PROJ-1234` are the same shape, so shape alone cannot
-/// separate them. These four prefixes are cross-industry documentation
-/// conventions, and a repo that writes them in a commit subject is citing a
-/// document, not a ticket.
-/// What: compared against the segment before the first `-` of an otherwise
-/// well-formed key.
-/// Test: `tests::adr_reference_is_not_a_ticket_key`.
-const DOC_REF_PREFIXES: &[&str] = &["ADR", "DOC", "RFC", "SPEC"];
+/// separate them, and each consumer of that shape pays for the confusion
+/// differently. [`extract_ticket_id`] reported such tokens as coverage gaps
+/// against tickets that exist on no board (#5199); [`is_ticketed`] counted 237
+/// of this repository's 2633 commits ticketed on one alone (#5735); and
+/// `LinearClient::extract_issue_ids` spent 369 GraphQL round-trips on a single
+/// 52-week `tga collect`, none of which can ever resolve, because a lookup was
+/// the only thing that could tell it `UTF-8` is not a Linear issue (#5664).
+///
+/// What: the segment before the first `-` of an otherwise well-formed key,
+/// compared case-sensitively against this list.
+///
+/// Membership rule (the #5664 calibration): a prefix belongs here only when it
+/// names a published standard, encoding, digest, advisory registry or document
+/// convention **whose numeric suffix is a version, bit width or year rather
+/// than a sequence number**, and it was either observed in the #5664 / #5735
+/// measurements or is a sibling within the same registry. Prefixes that are
+/// merely unresolvable in those measurements — `WI`, `MR`, `C`, `AC`,
+/// `MULTIREPO`, `CREDPANEL` — are deliberately absent: they are indistinguishable
+/// from a real board's keys, so listing them would trade a bounded network cost
+/// for a silent, unreported loss of genuine links.
+///
+/// Test: `tests::adr_reference_is_not_a_ticket_key`,
+/// `tests::non_ticket_prefixes_cover_the_measured_families`,
+/// `collect::linear::client::tests::extract_issue_ids_rejects_non_ticket_identifiers`.
+// #5664: the threshold is the *shape of the number*, not the prefix's length or
+// its frequency in the corpus. A version/bit-width/year suffix means the token
+// names one fixed thing, so no board can ever mint more of them; a sequence
+// number means a board might. Frequency was rejected as the threshold because
+// the measured tail is long and flat — `ECMA-48` appeared as often as a real
+// key would on a quiet team.
+const NON_TICKET_PREFIXES: &[&str] = &[
+    // Decision and specification documents.
+    "ADR", "DOC", "RFC", "SPEC", // Standards bodies.
+    "ANSI", "ECMA", "IEC", "IEEE", "ISO", "ITU", // Character encodings.
+    "ASCII", "UTF", // Digests and ciphers.
+    "AES", "CRC", "MD", "RSA", "SHA", // Vulnerability and weakness registries.
+    "CAPEC", "CVE", "CWE", "GHSA", "RUSTSEC", // Toolchain releases.
+    "GCC", "LLVM",
+];
 
 /// Compiled extraction patterns used by [`extract_ticket_id`], ordered from
 /// most-specific to least-specific so the highest-fidelity match wins.
@@ -134,14 +173,19 @@ fn extract_patterns() -> &'static ExtractPatterns {
     })
 }
 
-/// Is `key` a documentation reference rather than a work-tracking key?
+/// Is `key` a document, standard, digest or advisory reference rather than a
+/// work-tracking key?
 ///
-/// Why: see [`DOC_REF_PREFIXES`].
+/// Why: see [`NON_TICKET_PREFIXES`]. This is the one place that answers the
+/// question, so the subject-position rule here and the pre-lookup gate in
+/// `LinearClient::extract_issue_ids` cannot drift apart (#5664).
 /// What: splits at the first `-` and matches the prefix against that list.
-/// Test: `tests::adr_reference_is_not_a_ticket_key`.
-fn is_doc_reference(key: &str) -> bool {
+/// A token with no `-` is not a key at all and answers `false`.
+/// Test: `tests::adr_reference_is_not_a_ticket_key`,
+/// `tests::non_ticket_prefixes_cover_the_measured_families`.
+pub(crate) fn is_non_ticket_identifier(key: &str) -> bool {
     key.split_once('-')
-        .is_some_and(|(prefix, _)| DOC_REF_PREFIXES.contains(&prefix))
+        .is_some_and(|(prefix, _)| NON_TICKET_PREFIXES.contains(&prefix))
 }
 
 /// The JIRA/Linear key a commit *subject* declares, if any.
@@ -153,7 +197,7 @@ fn is_doc_reference(key: &str) -> bool {
 /// prefixes on this repo's own 2633 commits, against zero genuine ones (#5199).
 /// What: strips an optional conventional-commit prefix and an optional opening
 /// bracket, then requires the key to be the very first token of what remains
-/// and not a [`DOC_REF_PREFIXES`] citation.
+/// and not a [`NON_TICKET_PREFIXES`] citation.
 /// Test: `tests::extract_ticket_id_subject_forms`,
 /// `tests::adr_reference_is_not_a_ticket_key`,
 /// `tests::body_prose_identifier_is_not_a_ticket_key`.
@@ -166,7 +210,7 @@ fn subject_ticket_key(subject: &str) -> Option<String> {
         .get(1)?
         .as_str()
         .to_string();
-    if is_doc_reference(&key) {
+    if is_non_ticket_identifier(&key) {
         None
     } else {
         Some(key)
@@ -316,7 +360,7 @@ pub fn extract_ticket_id(message: &str) -> Option<String> {
 /// tries each `/`-separated segment in order and returns the first key anchored
 /// at that segment's START. The right boundary accepts `-` and `_` as well as
 /// end-of-segment, because a branch slug runs the key into its description with
-/// no space. [`DOC_REF_PREFIXES`] is applied unchanged, so `ADR`, `DOC`, `RFC`
+/// no space. [`NON_TICKET_PREFIXES`] is applied unchanged, so `ADR`, `DOC`, `RFC`
 /// and `SPEC` are rejected here exactly as they are in a commit subject.
 /// Anchoring at `^` also keeps `SPEC-INSTALLER-01` from yielding
 /// `INSTALLER-01`, the tail-segment case #5199 closed.
@@ -360,7 +404,7 @@ pub fn branch_ticket_key(branch: &str) -> Option<String> {
             continue;
         };
         // #5734: the same deny-list #5199 applied to a commit subject.
-        if !is_doc_reference(&key) {
+        if !is_non_ticket_identifier(&key) {
             return Some(key);
         }
     }
@@ -532,6 +576,60 @@ mod tests {
         assert_eq!(extract_ticket_id("docs: DOC-67 §2 rewrite"), None);
         assert_eq!(extract_ticket_id("RFC-2119 keyword sweep"), None);
         assert_eq!(extract_ticket_id("SPEC-14 tightened"), None);
+    }
+
+    /// Why: #5664 — `is_non_ticket_identifier` is now consulted by a second
+    /// caller that has no subject line to anchor to, so the list's contents
+    /// are load-carrying on their own rather than a backstop behind position.
+    /// What: every family the #5664 and #5735 measurements observed answers
+    /// `true`, and the ticket-shaped tokens those measurements could not
+    /// resolve answer `false` — the calibration boundary stated on
+    /// [`NON_TICKET_PREFIXES`], asserted rather than only described.
+    /// Test: this test itself.
+    #[test]
+    fn non_ticket_prefixes_cover_the_measured_families() {
+        for key in [
+            "ADR-0029",
+            "DOC-67",
+            "RFC-2119",
+            "SPEC-14",
+            "ISO-8601",
+            "ECMA-48",
+            "IEEE-754",
+            "UTF-8",
+            "ASCII-7",
+            "SHA-256",
+            "MD-5",
+            "CRC-32",
+            "AES-256",
+            "RSA-4096",
+            "CVE-2024-3094",
+            "CWE-79",
+            "RUSTSEC-2026",
+            "GHSA-1234",
+            "GCC-11",
+            "LLVM-18",
+        ] {
+            assert!(is_non_ticket_identifier(key), "key: {key:?}");
+        }
+        // Deliberately absent: ticket-shaped, unresolvable in the #5664 run,
+        // and indistinguishable from another org's real board keys.
+        for key in [
+            "WI-1",
+            "MR-1",
+            "C-6",
+            "AC-1",
+            "MULTIREPO-01",
+            "CREDPANEL-01",
+            "PROJ-1234",
+            "ENG-123",
+            "GH-12",
+        ] {
+            assert!(!is_non_ticket_identifier(key), "key: {key:?}");
+        }
+        // A token with no `-` is not a key and is never claimed as one.
+        assert!(!is_non_ticket_identifier("ADR"));
+        assert!(!is_non_ticket_identifier(""));
     }
 
     /// Why: #5199 — the long tail of false keys was not documentation
@@ -710,7 +808,7 @@ mod tests {
     /// What: every one of these is a JIRA-SHAPED string sitting where prose
     /// sits — a body line, a mid-subject parenthetical, a tail segment — and
     /// none of them makes a commit ticketed. The last two are the documentation
-    /// prefixes [`DOC_REF_PREFIXES`] rejects even in declaring position.
+    /// prefixes [`NON_TICKET_PREFIXES`] rejects even in declaring position.
     /// Test: this test itself.
     #[test]
     fn jira_shaped_prose_is_not_ticketed() {
@@ -799,7 +897,7 @@ mod tests {
     /// Why: #5734's central risk — a branch named `fix/ADR-0029-followup` is
     /// exactly the shape #5199 spent its effort excluding, and harvesting one
     /// would reintroduce that noise through a side door.
-    /// What: every [`DOC_REF_PREFIXES`] entry is rejected in a branch name, the
+    /// What: every [`NON_TICKET_PREFIXES`] entry is rejected in a branch name, the
     /// hyphenated-tail case stays unreachable, and a lowercase or
     /// numeric-leading branch yields nothing.
     /// Test: this test itself.
