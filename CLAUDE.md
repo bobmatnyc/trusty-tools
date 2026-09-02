@@ -81,7 +81,7 @@ change's blast radius. Risk labels map onto the rungs (1–2 Low, 3–4 Normal,
 |---|---|---|---|
 | 1 | Docs, comments, changelog fragments only | Low | Doc gates only (`check_sld.sh`, plus doc-numbers / line-cap if touched). No Cargo test by default. |
 | 2 | Test-only stabilization — flake fix, fixture, test harness | Low | `fmt --check` + `test -p <crate> --no-fail-fast`, with the flake re-run ~10× |
-| 3 | Localized behavior inside one crate | Normal | `fmt --check` + `check` + `clippy` + `test --no-fail-fast`, all `-p <crate>`, plus one regression test that provably failed before |
+| 3 | Localized behavior inside one crate | Normal | `fmt --check` + `check` + `clippy` + `test --no-fail-fast`, all `-p <crate>`, plus one regression test that provably failed before, plus doc gates if a doc comment changed (`check_line_cap.sh`, `check_changelog_fragment.sh`, `check_test_pointers.sh`) |
 | 4 | **Cross-crate change** — public API or shared library (`trusty-common`, `trusty-embedderd`, …) | Normal → High | Rung 3 on the library, then `check --workspace` + `test -p <consumer> --no-fail-fast` for **each direct dependent** |
 | 5 | Cross-crate contract, persistence, security, process lifecycle, **release tooling** | High | Rung 4, plus `--include-ignored` integration coverage, failure-path/concurrency tests, and a `code-critic` round |
 | 6 | **UI / API surface** — Svelte UIs, MCP tool schemas, HTTP routes | High | Rung 3 or 4 for the Rust side, plus the UI package's own test/build and one binary smoke run — with direct UI/API evidence, not just crate tests |
