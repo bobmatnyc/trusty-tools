@@ -183,8 +183,8 @@ fn registry_state(indexes: &[IndexInfo]) -> &'static str {
 /// falls back to the raw path for a directory that no longer exists, so a
 /// registry entry naming a deleted tree matches only a `repo_path` whose raw
 /// string is the same — a real checkout never collides with one.
-/// Test: `index_registry_tests.rs::{a_root_path_match_substitutes_for_an_
-/// unregistered_derived_id, a_parent_rooted_index_is_not_substituted,
+/// Test: `index_registry_tests.rs::{a_root_path_match_substitutes_for_an_unregistered_derived_id,
+/// a_parent_rooted_index_is_not_substituted,
 /// a_registry_root_that_no_longer_exists_matches_only_its_own_raw_path}`.
 fn index_at_root(indexes: &[IndexInfo], repo_path: &Path) -> Option<String> {
     let root = canonical_source_root(repo_path);
