@@ -2741,3 +2741,15 @@ async fn unified_path_emits_no_finding_citing_a_path_outside_the_diff() {
         result.findings
     );
 }
+
+// ── #1660: the diff is rendered ONCE for stats + prompt, not twice ─────
+//
+// The value-level regression tests for #1660 (exact-length correctness at
+// the `MAX_DIFF_CHARS` reserve-band boundary, and the `select_review_mode`
+// path decision it drives) live in
+// `pipeline::diff_analyzer::models_tests::total_rendered_len_is_exact_inside_the_reserve_band_where_the_marker_lies`
+// and `..::reserve_band_diff_selects_unified_not_mapreduce` — a source-scan
+// count of `render_for_prompt(` call sites used to stand in for this but
+// could not catch the actual defect (a marker-based `diff_chars` proxy that
+// silently agrees with an exact length everywhere except a narrow band), so
+// it was replaced rather than kept alongside these.
