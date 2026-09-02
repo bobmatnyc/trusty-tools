@@ -63,6 +63,19 @@ list here. Put `Closes owner/repo#N` on its own line after a blank line when
 the PR finishes the issue; use a plain reference when it does not. End the body
 with the trusty-mpm attribution footer.
 
+🔴 **Open every PR with `tm pr open --title <title> --body-file <path> [--issue N]
+[--rung 1-6] [--base main] [--docs-only]`.** It validates the seven-field body
+contract and the exact attribution footer, and attaches the shipped
+`--assignee @me --label trusty-mpm --label ws/<session>` defaults itself — you
+never type them. Before spawning `gh` it runs
+`scripts/check_changelog_fragment.sh` (`--docs-only` skips this gate for a PR
+that changes no crate source). A failed check prints which one and exits 2
+without ever calling `gh`; fix the finding and re-run. `--issue N` emits
+`Refs #N` — this repo's fix PRs never use `--closes`, which would emit
+`Closes #N` instead. `--dry-run` prints the assembled `gh pr create` argv and
+exits 0 without calling `gh`, for a preview. Hand-assembled `gh pr create` is
+the fallback only on a host where `tm` is not on PATH.
+
 🔴 **Before every push, delegate a credential scan to the `security` agent** —
 `git diff origin/main...HEAD` (three-dot, never two-dot: see Safety Rules).
 Do not push until the PM reports the scan PASS; a leaked credential in git
@@ -71,7 +84,7 @@ history survives even a reverted commit.
 When scope or claims change mid-flight, edit the PR body — a stale body is a
 defect, and fixing it is yours, not ticketing's.
 
-Default to review: `gh pr create` opens the PR and `gh pr merge --auto --squash`
+Default to review: `tm pr open` opens the PR and `gh pr merge --auto --squash`
 enables auto-merge once GitHub's review gate is satisfied. Never merge on your
 own initiative.
 
@@ -92,11 +105,13 @@ or report, not a note for later.
 
 | Step | Command | Nonzero exit means |
 |---|---|---|
-| Before `gh pr create` | `bash scripts/check_changelog_fragment.sh` | Review-gate failure if crate `src/**` changed with no fragment — treat like a failing test, not a trivial-change exception |
+| Opening every PR | `tm pr open --title <t> --body-file <path> [--issue N] [--rung 1-6] [--base main] [--docs-only]` | Exit 2 names the failed check (body contract, footer, changelog gate) and means `gh` was never called; `--dry-run` prints the argv instead of running it |
+| Before `gh pr create` | `bash scripts/check_changelog_fragment.sh` | Review-gate failure if crate `src/**` changed with no fragment — treat like a failing test, not a trivial-change exception; `tm pr open` runs this itself before spawning `gh`, so this is only for the hand-assembled fallback |
 | Before `gh pr create` (a version was bumped) | `bash scripts/check-pr-version-bump.sh` | The version bump does not match what the PR's changes require — fix before opening |
-| Before evaluating any required-context gate | `gh api repos/bobmatnyc/trusty-tools/branches/main/protection --jq '.required_status_checks.contexts'` | N/A — this is a live read, never a hand-copied list; a stale copy has already cost one PR its merge (#5836) |
-| Before merging, to confirm queue ownership | `gh pr list --json number,author,assignees,isDraft,labels,headRefName` (base branch), then stop on `isDraft: true`, a hold label, `reviewDecision: CHANGES_REQUESTED`, or an unresolved `code-critic` BLOCK in `gh pr view <PR> --comments` — the full procedure is `tm-workflow.md`'s "Merge-Queue Ownership" section | Any stop condition means hand the PR to the session that owns the queue, or hold it, rather than merging |
+| Before evaluating any required-context gate | `bash scripts/required-checks.sh [base]` (or `gh api repos/bobmatnyc/trusty-tools/branches/main/protection --jq '.required_status_checks.contexts'`) | N/A — this is a live read, never a hand-copied list; a stale copy has already cost one PR its merge (#5836) |
+| Pre-merge, to confirm queue ownership and status in one step | `tm pr queue-check [--base main] [<pr>]` | Exit 0 means every listed PR is clear to merge; exit 1 names the first stop reason per PR (draft, hold label, `CHANGES_REQUESTED`, an unresolved `code-critic` BLOCK, or a missing/non-`SUCCESS` required context) — do not merge on nonzero; `--json` gives a machine-readable read; the full procedure is `tm-workflow.md`'s "Merge-Queue Ownership" section |
 | Pre-merge status read | `gh pr view <n> --json state,mergeable,statusCheckRollup` (one shot, never `--watch`) | `mergeable: false` or a red/pending required check means do not merge |
+| Reporting a red gate | `bash scripts/is-branch-caused.sh <crate-dir> [--base origin/main]` | Prints PRE-EXISTING (exit 0), BRANCH-CAUSED (exit 1), or INCONCLUSIVE (exit 2) — report the verdict rather than asserting whose red it is |
 | After each PR's `state: MERGED` is confirmed | `tm session prune-worktrees --merged-prs --force` | A spared tree is reported with its reason — leave it; it may hold real work |
 
 ## CI Waits — Push, Report, Stop; NEVER Block (issue #4792)

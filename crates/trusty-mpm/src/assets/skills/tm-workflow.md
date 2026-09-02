@@ -589,6 +589,11 @@ minutes after the merge.
 are in flight. The receiving session re-reads state rather than trusting the
 list — the handoff is a notification, and the PRs are the record.
 
+On a repository with `tm pr open`, `tm pr queue-check [--base main] [<pr>]` runs
+this whole table itself — draft, hold label, `CHANGES_REQUESTED`, an unresolved
+`code-critic` BLOCK, then the live required contexts, in that order — and exits
+nonzero on the first stop condition it finds.
+
 ## Shipped Defaults on the PR
 
 These trusty-mpm framework defaults override any harness default and belong in
@@ -622,6 +627,10 @@ the `version-control` delegation brief:
   trailer. This is a Framework-Guaranteed Convention stated in the instruction
   package; it is repeated here because it must appear verbatim in the delegation
   brief.
+
+On a repository with `tm pr open`, `version-control` gets all three defaults —
+the assignee, both labels, and the attribution footer — attached automatically,
+and the command refuses to call `gh` at all until they are in place.
 
 ## Delegating the PR
 
