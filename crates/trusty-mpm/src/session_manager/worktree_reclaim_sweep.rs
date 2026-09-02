@@ -132,8 +132,15 @@ pub(crate) fn survey_with_index(
             .entry(scanned.registry_root.clone())
             .or_insert_with(|| index_for(&scanned.registry_root));
         let mut pr = index.state_for(scanned.branch.as_deref());
+        // #6561: a FAILED bulk lookup retries per-branch too. The bulk call and
+        // the targeted one can fail for different reasons (a page limit is not
+        // an auth failure), and only the targeted one resolves a branch older
+        // than the bulk window.
         if per_branch_fallback
-            && pr == BranchPrState::Unknown
+            && matches!(
+                pr,
+                BranchPrState::Unknown | BranchPrState::LookupFailed { .. }
+            )
             && !index.is_complete()
             && let Some(branch) = scanned.branch.as_deref()
         {
@@ -416,8 +423,11 @@ pub(crate) fn reclaim_with_probes(
             .entry(candidate.registry_root.clone())
             .or_insert_with(|| (probes.index_for)(&candidate.registry_root));
         let mut pr_now = index.state_for(candidate.branch.as_deref());
-        if pr_now == BranchPrState::Unknown
-            && !index.is_complete()
+        // #6561: same widening as the survey — a failed bulk lookup retries.
+        if matches!(
+            pr_now,
+            BranchPrState::Unknown | BranchPrState::LookupFailed { .. }
+        ) && !index.is_complete()
             && let Some(branch) = candidate.branch.as_deref()
         {
             pr_now = pr_state_for_branch(&candidate.registry_root, branch);

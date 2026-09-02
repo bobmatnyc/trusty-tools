@@ -64,23 +64,76 @@ pub(crate) fn print_merged_pr_pass(merged: Option<&serde_json::Value>, dry_run: 
             .get("reclaimable_measured")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
+        // #6561: the classification clause rides on the SAME line as the
+        // reclaimable count, so "0 reclaimable" can never be read without
+        // whether anything was actually classified.
+        let unclassified = classification_clause(merged);
         println!(
             "merged-PR pass: {candidates} worktree(s) reclaimable; {bytes} byte(s) \
-             across {measured} of {candidates} measured (#2919)"
+             across {measured} of {candidates} measured{unclassified} (#2919)"
         );
     } else {
         let bytes = merged
             .get("removed_bytes")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
+        let unclassified = classification_clause(merged);
         println!(
-            "merged-PR pass: reclaimed {} worktree(s), {bytes} byte(s) (#2919)",
+            "merged-PR pass: reclaimed {} worktree(s), {bytes} byte(s){unclassified} (#2919)",
             reclaimed.len()
         );
     }
     for line in diagnostic_lines(merged) {
         eprintln!("{line}");
     }
+}
+
+/// What the pass could NOT classify, as a clause for the summary line (#6561).
+///
+/// Why: a reclaimable count of zero has two causes that read identically —
+/// nothing had landed, or nothing could be looked up. Live on 2026-09-02 the
+/// second held for all 261 registered worktrees (the daemon inherits neither
+/// `GH_TOKEN` nor `GH_CONFIG_DIR`, so `gh pr list` exited 4) and the pass
+/// printed `0 worktree(s) reclaimable; 0 byte(s) across 0 of 0 measured` with
+/// no hint of it. These three counts are what tell them apart, so they share
+/// the reclaimable count's line rather than sitting in a stderr diagnostic the
+/// operator may not have kept.
+/// What: `"; could not classify: …"` naming any non-zero
+/// `lookup_failed` (with the reason `gh` gave), `pr_state_unknown`, and
+/// `not_inspected`. All three zero — the healthy case — returns an empty
+/// string, so a clean run's line is unchanged.
+/// Test: `merged_pr_pass_names_a_failed_lookup_beside_the_reclaimable_count`,
+/// `merged_pr_pass_adds_no_clause_when_everything_classified`.
+fn classification_clause(merged: &serde_json::Value) -> String {
+    let count = |key: &str| {
+        merged
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+    };
+    let (failed, unknown, skipped) = (
+        count("lookup_failed"),
+        count("pr_state_unknown"),
+        count("not_inspected"),
+    );
+    let mut parts = Vec::new();
+    if failed > 0 {
+        let reason = merged
+            .get("lookup_failure")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("no reason given");
+        parts.push(format!("{failed} pull-request lookup(s) FAILED ({reason})"));
+    }
+    if unknown > 0 {
+        parts.push(format!("{unknown} pull-request state(s) indeterminate"));
+    }
+    if skipped > 0 {
+        parts.push(format!("{skipped} not inspected before the deadline"));
+    }
+    if parts.is_empty() {
+        return String::new();
+    }
+    format!("; could not classify: {}", parts.join(", "))
 }
 
 /// Every stderr diagnostic the merged-PR pass owes the operator (#2919, #5829).
