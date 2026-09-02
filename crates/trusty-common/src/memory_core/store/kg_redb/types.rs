@@ -16,7 +16,7 @@ use chrono::{DateTime, Utc};
 use redb::Database;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use uuid::Uuid;
 
 use super::super::kg::Triple;
@@ -258,9 +258,42 @@ pub(super) fn parse_drawer_type(tag: Option<&str>) -> crate::memory_core::palace
 /// Test: Indirect via every `KgStoreRedb::open` call.
 #[derive(Debug)]
 pub(super) struct KgDbState {
-    pub db: Arc<Database>,
+    /// The live `Database`, behind a lock so #6652's copy-then-swap compaction
+    /// can install a replacement without dropping the shared state.
+    ///
+    /// Why (#6652): every `KgStoreRedb` clone that opened the same canonical
+    /// path shares ONE `Arc<KgDbState>`, and redb never notices that the file
+    /// under its `Database` was replaced by a rename. Before this field was a
+    /// lock, a compaction could only invalidate [`db_cache`] and hope the next
+    /// `open` picked up the new file — the daemon's own long-lived handle kept
+    /// reading the unlinked pre-compaction inode forever, silently. Making the
+    /// handle swappable is what lets the swap FAIL CLOSED: the rename only
+    /// happens when this lock can be taken and the replacement installed.
+    /// What: `RwLock<Arc<Database>>`. Readers take the read lock, clone the
+    /// `Arc`, and drop the lock immediately — a transaction opened from that
+    /// clone keeps the old `Database` (and thus the old inode) alive for its
+    /// whole lifetime, which is exactly redb's MVCC contract. The write lock is
+    /// held only for the pointer store inside [`super::copy_swap`].
+    /// Test: `compaction_swaps_the_live_handle_in_place`.
+    pub db: RwLock<Arc<Database>>,
     pub mode: OpenMode,
     pub _snapshot_guard: SnapshotGuard,
+}
+
+impl KgDbState {
+    /// The current `Database`, as an owned handle.
+    ///
+    /// Why: the lock must not be held across a redb transaction — a
+    /// long-running read would block the compaction swap, and the swap would
+    /// block every reader. Cloning the `Arc` costs one atomic increment and
+    /// releases the lock immediately.
+    /// What: read-locks, clones, unlocks. Panics only if the lock is poisoned,
+    /// which means a previous holder panicked while swapping — an
+    /// unrecoverable invariant break, not a runtime condition to handle.
+    /// Test: exercised by every read/write path in this module.
+    pub(super) fn db(&self) -> Arc<Database> {
+        Arc::clone(&self.db.read().expect("kg db handle lock poisoned"))
+    }
 }
 
 /// Why: redb forbids more than one in-process `Database` handle to the same

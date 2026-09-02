@@ -17,7 +17,7 @@
 use crate::AppState;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
-use trusty_common::memory_core::dream::{consolidate_scoped, detect_fading};
+use trusty_common::memory_core::dream::{consolidate_scoped, detect_fading, kg_compact_pass};
 
 use super::helpers::{open_palace_handle, resolve_palace};
 use trusty_common::memory_core::palace::RoomType;
@@ -39,7 +39,11 @@ const DEFAULT_MAX_AGE_DAYS: i64 = 7;
 /// #2352) — high-value memories that have decayed below the resurface threshold,
 /// surfaced (never auto-boosted) so the caller can touch or `memory_forget`
 /// them. Returns
-/// `{ palace, room, summary_facts_created, facts_evicted, fading }`.
+/// `{ palace, room, summary_facts_created, facts_evicted, fading, compaction }`.
+/// #6652: `compact: true` additionally runs the kg.redb prune-and-compact
+/// phase and fills `compaction` with its before/after byte counts; `dry_run:
+/// true` alongside it measures and reports without writing a byte. Absent or
+/// `false`, `compaction` is `null` and nothing else changes.
 /// Test: `dream_consolidate_room_returns_shape` (no-op path) and
 /// `palace_dream_response_includes_fading` in `tests/dream_room_mcp.rs`.
 pub(crate) async fn handle_dream_consolidate_room(state: &AppState, args: Value) -> Result<Value> {
@@ -76,6 +80,38 @@ pub(crate) async fn handle_dream_consolidate_room(state: &AppState, args: Value)
 
     let stats = consolidate_scoped(&handle, &dream_cfg, room, max_age_days, None).await?;
 
+    // #6652: `compact: true` adds the kg.redb prune-and-compact phase. Additive
+    // to the semantic pass above, not a replacement — the two are orthogonal,
+    // and this tool's contract is still "run a dream cycle's work now". Absent
+    // or false, nothing about this handler changes.
+    let compact = args
+        .get("compact")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let compaction = if compact {
+        let dry_run = args
+            .get("dry_run")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let report = kg_compact_pass(&handle, &dream_cfg, dry_run).await?;
+        json!({
+            "ran": report.ran(),
+            "dry_run": report.dry_run,
+            "skipped": report.skipped,
+            "summary": report.summary(),
+            "kg_redb_bytes_before": report.bytes_before,
+            "kg_redb_bytes_after": report.bytes_after,
+            "kg_redb_bytes_reclaimed": report.bytes_reclaimed(),
+            "history_rows_pruned": report.history_rows_pruned,
+            "history_rows_stale": report.stats.triples_history_stale,
+            "triples_active": report.stats.triples_active,
+            "triples_history": report.stats.triples_history,
+            "reclaimable_bytes_estimate": report.stats.reclaimable_bytes,
+        })
+    } else {
+        Value::Null
+    };
+
     // Fading-memories resurface pass (issue #2352): palace-wide, read-only.
     // Surfaced here so the on-demand caller sees the same list the idle dream
     // cycle records in dream_stats.json.
@@ -88,6 +124,7 @@ pub(crate) async fn handle_dream_consolidate_room(state: &AppState, args: Value)
         "summary_facts_created": stats.summary_facts_created,
         "facts_evicted": stats.facts_evicted,
         "fading": fading,
+        "compaction": compaction,
     }))
 }
 

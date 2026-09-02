@@ -33,7 +33,9 @@ use audit::audit_palaces;
 pub use audit::{PalaceAuditEntry, PalaceAuditStatus};
 #[cfg(target_os = "macos")]
 use checks::check_launchd_plist;
-use checks::{check_daemon_health, check_fastembed_cache, check_stale_palace_locks};
+use checks::{
+    check_daemon_health, check_fastembed_cache, check_kg_redb_size, check_stale_palace_locks,
+};
 use mcp_registration::check_mcp_registrations;
 use tier_s::check_tier_s_reaffirmation;
 
@@ -280,6 +282,10 @@ pub async fn handle_doctor() -> Result<()> {
 
     // Check 4: stale palace locks.
     results.push(check_stale_palace_locks());
+
+    // #6652: kg.redb only ever grows; surface the biggest one before it is a
+    // slow-write symptom the operator has to trace by hand.
+    results.push(check_kg_redb_size());
 
     // Check 5 (#4890): Tier S facts overdue for re-affirmation. Report only.
     results.push(check_tier_s_reaffirmation().await);

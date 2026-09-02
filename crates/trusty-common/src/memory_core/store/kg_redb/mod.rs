@@ -20,6 +20,13 @@ mod migrate;
 mod read_ops;
 // ADR-0027 T1: ROOMS / ROOM_KEYS accessors (insert-only writes).
 mod room_ops;
+// #6652: copy-then-swap compaction of kg.redb, and the table inventory it walks.
+#[cfg(test)]
+mod compact_tests;
+pub mod copy_swap;
+mod copy_tables;
+// #6652: read-only per-table measurement behind `palace stats` / `--dry-run`.
+pub mod stats;
 mod store;
 mod tests;
 mod types;
@@ -27,6 +34,10 @@ mod types;
 mod wing_ops;
 mod write_ops;
 
+pub use copy_swap::{
+    CompactFaultHook, CompactOutcome, CompactPlan, CompactStep, PreparedCompaction,
+};
+pub use stats::{KgRedbStats, KgTableStats};
 pub use store::KgStoreRedb;
 pub use types::{BatchOpResult, BatchWriteOp, READ_ONLY_ERROR_MSG};
 

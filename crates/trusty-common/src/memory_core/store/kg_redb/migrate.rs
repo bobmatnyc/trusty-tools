@@ -10,11 +10,12 @@
 //! open.
 //! What: gated on the [`KG_SCHEMA`] marker row so it runs at most once per
 //! palace; backs the database file up first and verifies the copy; rewrites
-//! every TRIPLES key (active and `hist:`), rebuilds `TRIPLES_BY_PREDICATE`
-//! (whose key also gained the object), and stamps the marker — the rewrite and
-//! the stamp inside ONE redb write transaction, so a failure part-way through
-//! rolls both back and the next open retries from the original rows.
+//! every TRIPLES key (active and `hist:`) and stamps the marker — the rewrite
+//! and the stamp inside ONE redb write transaction, so a failure part-way
+//! through rolls both back and the next open retries from the original rows.
 //! `TRIPLES_BY_OBJECT` is untouched: its key already carried the object.
+//! #6652 retired the `TRIPLES_BY_PREDICATE` rebuild this migration used to
+//! carry — [`drop_dead_predicate_index_fail_open`] deletes that table instead.
 //! Fail-open: any error is logged at `warn!` and the palace opens un-migrated,
 //! matching how `PalaceHandle::open_with_intent` degrades when `load_drawers`
 //! fails.
@@ -24,8 +25,8 @@
 
 use crate::memory_core::store::kg_store::{
     KG_SCHEMA, KG_SCHEMA_TRIPLE_KEY, KG_TRIPLE_KEY_SCHEMA_VERSION, KgSchemaMarker, TRIPLES,
-    TRIPLES_BY_PREDICATE, TripleValue, decode_legacy_triple_key, decode_value,
-    encode_predicate_index_key, encode_triple_key, encode_value,
+    TRIPLES_BY_PREDICATE, TripleValue, decode_legacy_triple_key, decode_value, encode_triple_key,
+    encode_value,
 };
 use anyhow::{Context, Result, bail};
 use redb::{Database, ReadableDatabase, ReadableTable};
@@ -89,9 +90,6 @@ struct Rewrite {
     old_key: Vec<u8>,
     new_key: Vec<u8>,
     value: Vec<u8>,
-    /// Present only for active rows — the predicate index is rebuilt from
-    /// these.
-    index_parts: Option<(String, String, String)>,
 }
 
 /// Migrate this database's triple keys if it has not been migrated already.
@@ -152,27 +150,6 @@ fn migrate_triple_keys(db: &Database, path: &Path) -> Result<MigrationOutcome> {
             triples
                 .insert(r.new_key.as_slice(), r.value.as_slice())
                 .context("insert migrated triple key")?;
-        }
-
-        // TRIPLES_BY_PREDICATE's key gained the object too, so every entry in
-        // it is stale. Rebuilding beats rewriting: the table has no readers, so
-        // there is nothing to preserve, and rebuilding from the active rows
-        // cannot inherit an inconsistency the old index already had.
-        let mut by_predicate = wtx
-            .open_table(TRIPLES_BY_PREDICATE)
-            .context("open triples_by_predicate table for migration")?;
-        by_predicate
-            .retain(|_, _| false)
-            .context("clear stale predicate index")?;
-        for r in &plan {
-            if let Some((s, p, o)) = &r.index_parts {
-                by_predicate
-                    .insert(
-                        encode_predicate_index_key(p, s, o).as_slice(),
-                        [].as_slice(),
-                    )
-                    .context("rebuild predicate index entry")?;
-            }
         }
 
         let marker = encode_value(&KgSchemaMarker {
@@ -271,13 +248,10 @@ fn plan_rewrites(db: &Database) -> Result<Vec<Rewrite>> {
             continue;
         }
 
-        let index_parts = (!is_hist && value.valid_to_ms.is_none())
-            .then(|| (subject, predicate, value.object.clone()));
         plan.push(Rewrite {
             old_key,
             new_key,
             value: value_bytes,
-            index_parts,
         });
     }
     Ok(plan)
@@ -344,4 +318,57 @@ fn ensure_verified_backup(path: &Path) -> Result<PathBuf> {
         );
     }
     Ok(backup)
+}
+
+// ── #6652: retire the read-nobody predicate index ───────────────────────────
+
+/// Delete the dead [`TRIPLES_BY_PREDICATE`] table, logging rather than
+/// propagating any failure.
+///
+/// Why (#6652): no reader anywhere in the workspace consumes this table — every
+/// reference before this change was a write, an init, or this migration's own
+/// rebuild. Maintaining it cost one extra b-tree insert or remove on every
+/// assert and every retract, and on the `trusty-tools` palace its rows are a
+/// straight subtraction from a 342 MB file that only ever grows. Dropping the
+/// maintenance without dropping the table would leave the stale rows on disk
+/// forever, so the two ship together. Fail-open for the same reason the #4810
+/// migration is: a palace that cannot drop the table must still open, and the
+/// next open retries.
+/// What: opens a write transaction and calls `delete_table`. Idempotent — a
+/// palace whose table is already gone reports `false` and commits nothing.
+/// redb returns the freed pages to its own free list rather than to the
+/// filesystem, so the bytes are reclaimed by the copy-then-swap compaction in
+/// [`super::copy_swap`], not by this call.
+/// Test: `dropping_the_predicate_index_is_idempotent`.
+pub(super) fn drop_dead_predicate_index_fail_open(db: &Database, path: &Path) {
+    match drop_dead_predicate_index(db) {
+        Ok(true) => tracing::info!(
+            path = %path.display(),
+            "#6652: dropped the unread triples_by_predicate index"
+        ),
+        Ok(false) => {}
+        Err(e) => tracing::warn!(
+            path = %path.display(),
+            "#6652: could not drop the unread triples_by_predicate index (the palace opens \
+             normally, the table stays on disk, and the next open retries): {e:#}"
+        ),
+    }
+}
+
+/// Delete [`TRIPLES_BY_PREDICATE`]; `Ok(false)` when it was already absent.
+///
+/// Why/What: see [`drop_dead_predicate_index_fail_open`]. Separated so a test
+/// can assert on the outcome rather than on a log line.
+/// Test: `dropping_the_predicate_index_is_idempotent`.
+pub(super) fn drop_dead_predicate_index(db: &Database) -> Result<bool> {
+    let wtx = db.begin_write().context("begin predicate-index drop txn")?;
+    let existed = wtx
+        .delete_table(TRIPLES_BY_PREDICATE)
+        .context("delete triples_by_predicate table")?;
+    if !existed {
+        wtx.abort().context("abort no-op predicate-index drop")?;
+        return Ok(false);
+    }
+    wtx.commit().context("commit predicate-index drop")?;
+    Ok(true)
 }

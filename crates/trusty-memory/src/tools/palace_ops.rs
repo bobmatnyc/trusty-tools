@@ -428,6 +428,17 @@ fn alias_audit_state(audit: &trusty_common::memory_core::retrieval::AliasAudit) 
     }
 }
 
+/// Reclaim orphaned HNSW vector rows. VECTOR INDEX ONLY.
+///
+/// Why (#6652): the name invites the reading that this shrinks the palace on
+/// disk. It does not. This tool works on `index.usearch.redb` and never opens
+/// `kg.redb`, which is the file that grows without bound — 342 MB on
+/// `trusty-tools` against a 7 MB vector index. Overloading it to also rewrite
+/// `kg.redb` would widen a narrowly-documented tool's blast radius with nothing
+/// in its name or schema to warn a caller, so the KG rewrite lives behind
+/// `palace_dream { compact: true }` and `trusty-memory palace compact` instead.
+/// What: delegates to `PalaceHandle::compact_vector_orphans`, unchanged.
+/// Test: `dispatch_palace_compact_returns_counts` in `tools::tests`.
 pub(crate) async fn handle_palace_compact(state: &AppState, args: Value) -> Result<Value> {
     let palace = resolve_palace(state, &args, "palace_compact")?;
     let handle = open_palace_handle(state, &palace)?;

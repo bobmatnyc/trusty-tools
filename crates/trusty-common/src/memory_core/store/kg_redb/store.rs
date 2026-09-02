@@ -11,14 +11,14 @@ use crate::memory_core::store::concurrent_open::{
 };
 use crate::memory_core::store::kg_store::{
     ACTIVE_SUBJECT_COUNTS, DRAWERS, DRAWERS_BY_FACT_KEY, KG_SCHEMA, ROOM_KEYS, ROOMS, TRIPLES,
-    TRIPLES_BY_OBJECT, TRIPLES_BY_PREDICATE, WING_KEYS, WINGS,
+    TRIPLES_BY_OBJECT, WING_KEYS, WINGS,
 };
 use anyhow::{Context, Result};
 use redb::Database;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use super::migrate::migrate_triple_keys_fail_open;
+use super::migrate::{drop_dead_predicate_index_fail_open, migrate_triple_keys_fail_open};
 use super::types::{KgDbState, READ_ONLY_ERROR_MSG, canonical_key, db_cache};
 
 /// Why: All KG callers go through a single `KnowledgeGraph` handle that is
@@ -29,7 +29,6 @@ use super::types::{KgDbState, READ_ONLY_ERROR_MSG, canonical_key, db_cache};
 #[derive(Clone)]
 pub struct KgStoreRedb {
     pub(super) state: Arc<KgDbState>,
-    #[allow(dead_code)]
     pub(super) path: PathBuf,
 }
 
@@ -148,9 +147,6 @@ impl KgStoreRedb {
                                 .open_table(TRIPLES_BY_OBJECT)
                                 .context("init triples_by_object table")?;
                             let _ = wtx
-                                .open_table(TRIPLES_BY_PREDICATE)
-                                .context("init triples_by_predicate table")?;
-                            let _ = wtx
                                 .open_table(ACTIVE_SUBJECT_COUNTS)
                                 .context("init active_subject_counts table")?;
                             let _ = wtx.open_table(DRAWERS).context("init drawers table")?;
@@ -187,10 +183,16 @@ impl KgStoreRedb {
                         // migration written into a throw-away snapshot would be
                         // discarded and re-attempted on every open.
                         migrate_triple_keys_fail_open(&db, path);
+
+                        // #6652: retire the predicate index nothing reads. Runs
+                        // after the #4810 rewrite so a palace that migrates and
+                        // drops in the same open does both in the right order,
+                        // and fail-open for the same reason.
+                        drop_dead_predicate_index_fail_open(&db, path);
                     }
 
                     let state = Arc::new(KgDbState {
-                        db,
+                        db: std::sync::RwLock::new(db),
                         mode,
                         _snapshot_guard: snapshot_guard,
                     });
@@ -248,8 +250,64 @@ impl KgStoreRedb {
     /// Internal accessor used by every method that previously read
     /// `self.db`. Centralising it lets the cache and snapshot guard live
     /// inside `KgDbState` without rewriting every call site.
-    pub(super) fn db(&self) -> &Database {
-        &self.state.db
+    ///
+    /// #6652: returns an owned `Arc<Database>` rather than a borrow, because
+    /// the handle is now swappable (see [`KgDbState::db`]). Call sites are
+    /// unchanged — `self.db().begin_read()` auto-derefs through the `Arc`, and
+    /// redb's `ReadTransaction`/`WriteTransaction` are owned, so the temporary
+    /// may drop while the transaction lives.
+    pub(super) fn db(&self) -> Arc<Database> {
+        self.state.db()
+    }
+
+    /// The canonical on-disk path this store was opened from.
+    ///
+    /// Why (#6652): the compaction path needs the file's directory to place the
+    /// `.compacting` and `.pre-compact.bak` siblings, and the `path` field is
+    /// crate-private.
+    /// What: clone of the path passed to `open_with_intent`.
+    /// Test: `kg_redb_path_reports_the_open_path`.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The current `Database`, for crate-internal tests (#6652).
+    ///
+    /// Why: the dream-level compaction tests have to seed `hist:` rows directly
+    /// — the real `retract` path closes every row at `now`, so history built
+    /// through it can never be old enough to cross the age gate. That needs a
+    /// write transaction against the same file the phase will rewrite, and
+    /// `db()` is module-private.
+    /// What: the same `Arc<Database>` clone `db()` returns. `pub(crate)`, so it
+    /// is not part of the crate's public API.
+    /// Test: `kg_compaction_shrinks_the_file_in_a_dream_cycle`.
+    #[cfg(test)]
+    pub(crate) fn db_for_test(&self) -> Arc<Database> {
+        self.db()
+    }
+
+    /// Install a freshly-opened `Database` as this path's live handle (#6652).
+    ///
+    /// Why: the copy-then-swap rename leaves every existing `Arc<Database>` in
+    /// the process pointing at an unlinked inode. redb does not notice, so
+    /// without this the daemon's own long-lived handle would keep serving the
+    /// pre-compaction snapshot forever, with no error to signal it. Because
+    /// every clone of this store shares ONE `KgDbState`, one pointer store
+    /// swaps them all.
+    /// What: takes the state's write lock, replaces the `Arc<Database>`, and
+    /// releases. Infallible by construction — the caller has already opened the
+    /// replacement and already renamed it into place, so there is nothing left
+    /// that can fail. Transactions opened from the previous handle keep their
+    /// own `Arc` and finish against the old inode, which is exactly redb's MVCC
+    /// contract.
+    /// Test: `compaction_swaps_the_live_handle_in_place`.
+    pub(super) fn install_database(&self, db: Database) {
+        let mut slot = self
+            .state
+            .db
+            .write()
+            .expect("kg db handle lock poisoned during compaction swap");
+        *slot = Arc::new(db);
     }
 
     /// Reject the operation when the store is in snapshot mode.

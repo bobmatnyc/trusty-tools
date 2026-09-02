@@ -133,6 +133,18 @@ impl KnowledgeGraph {
             .count()
     }
 
+    /// The underlying redb store, for the #6652 compaction path.
+    ///
+    /// Why: copy-then-swap needs the store's file path and its shared
+    /// `KgDbState`, and both are below the `KnowledgeGraph` facade. Exposing a
+    /// borrow rather than a clone keeps the caller from accidentally holding a
+    /// second handle across the swap.
+    /// What: `&self.store`.
+    /// Test: `compaction_swaps_the_live_handle_in_place`.
+    pub fn redb_store(&self) -> &crate::memory_core::store::kg_redb::KgStoreRedb {
+        &self.store
+    }
+
     /// Compatibility shim for the old WAL checkpoint API.
     ///
     /// Why: The Dreamer cycle called this to bound SQLite's WAL. redb manages

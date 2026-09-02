@@ -39,6 +39,33 @@ struct UserConfigMin {
     /// one is the defect this table exists to fix.
     #[serde(default, alias = "semantic")]
     semantic_consolidation: SemanticConsolidationMin,
+    /// `[dream]` — the #6652 kg.redb prune-and-compact tunables. Absent means
+    /// the `DreamConfig` defaults: compaction on, 90-day history retention,
+    /// a 64 MiB file floor, backups kept.
+    #[serde(default)]
+    dream: DreamMin,
+}
+
+/// `[dream]` — the kg.redb prune-and-compact tunables (#6652).
+///
+/// Why: the compaction rewrites the palace's whole knowledge graph, so every
+/// knob that decides whether and how aggressively it runs has to be settable
+/// without recompiling. Each field is `Option` so an absent key inherits
+/// [`DreamConfig::default`] rather than resetting it to this struct's own
+/// default — the difference matters when only one key is present.
+/// What: mirrors four `DreamConfig` fields by name.
+/// Test: `dream_table_overrides_the_compaction_defaults`,
+/// `an_absent_dream_table_leaves_every_default`.
+#[derive(Deserialize, Default, Clone)]
+struct DreamMin {
+    #[serde(default)]
+    compact: Option<bool>,
+    #[serde(default)]
+    prune_history_after_days: Option<i64>,
+    #[serde(default)]
+    compact_min_bytes: Option<u64>,
+    #[serde(default)]
+    compact_keep_backup: Option<bool>,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -228,7 +255,12 @@ pub fn load_user_config() -> Option<LoadedUserConfig> {
 /// `dream_config_forwards_an_explicit_ollama_model`,
 /// `dream_config_from_user_config_prefers_openrouter_model_with_key`.
 pub fn dream_config_from_user_config(cfg: &LoadedUserConfig) -> DreamConfig {
-    dream_config_from_parts(cfg, load_semantic_consolidation_config())
+    let parsed = read_user_config_min().unwrap_or_default();
+    dream_config_from_parts(
+        cfg,
+        load_semantic_consolidation_config_from(&parsed),
+        parsed.dream.clone(),
+    )
 }
 
 /// [`dream_config_from_user_config`] with the semantic section passed in.
@@ -243,7 +275,9 @@ pub fn dream_config_from_user_config(cfg: &LoadedUserConfig) -> DreamConfig {
 fn dream_config_from_parts(
     cfg: &LoadedUserConfig,
     semantic: SemanticConsolidationConfig,
+    dream: DreamMin,
 ) -> DreamConfig {
+    let defaults = DreamConfig::default();
     // #5188: an empty `[semantic_consolidation] model` inherits the OpenRouter
     // model id — never the local-model id, which would pick a local backend
     // nobody asked for.
@@ -257,7 +291,18 @@ fn dream_config_from_parts(
         openrouter_api_key: cfg.openrouter_api_key.clone(),
         local_model_enabled: cfg.local_model.enabled,
         semantic: SemanticConsolidationConfig { model, ..semantic },
-        ..DreamConfig::default()
+        // #6652: an absent key inherits the default rather than zeroing it.
+        compact: dream.compact.unwrap_or(defaults.compact),
+        prune_history_after_days: dream
+            .prune_history_after_days
+            .unwrap_or(defaults.prune_history_after_days),
+        compact_min_bytes: dream
+            .compact_min_bytes
+            .unwrap_or(defaults.compact_min_bytes),
+        compact_keep_backup: dream
+            .compact_keep_backup
+            .unwrap_or(defaults.compact_keep_backup),
+        ..defaults
     }
 }
 
@@ -290,6 +335,7 @@ mod tests {
         let dream_cfg = dream_config_from_parts(
             &LoadedUserConfig::default(),
             load_semantic_consolidation_config_from(&UserConfigMin::default()),
+            DreamMin::default(),
         );
 
         assert!(
@@ -371,7 +417,7 @@ enabled = true
             ..SemanticConsolidationConfig::default()
         };
 
-        let dream_cfg = dream_config_from_parts(&cfg, semantic);
+        let dream_cfg = dream_config_from_parts(&cfg, semantic, DreamMin::default());
 
         assert!(dream_cfg.semantic.enabled);
         assert_eq!(dream_cfg.semantic.model, "ollama/llama3.2");
@@ -392,7 +438,7 @@ enabled = true
             ..SemanticConsolidationConfig::default()
         };
 
-        let dream_cfg = dream_config_from_parts(&cfg, semantic);
+        let dream_cfg = dream_config_from_parts(&cfg, semantic, DreamMin::default());
 
         assert_eq!(dream_cfg.semantic.model, "anthropic/claude-3-5-sonnet");
     }
@@ -417,7 +463,7 @@ enabled = true
             ..SemanticConsolidationConfig::default()
         };
 
-        let dream_cfg = dream_config_from_parts(&cfg, semantic);
+        let dream_cfg = dream_config_from_parts(&cfg, semantic, DreamMin::default());
 
         assert_eq!(dream_cfg.semantic.model, "anthropic/claude-3-5-sonnet");
         assert_eq!(dream_cfg.openrouter_api_key, "sk-test-key");
