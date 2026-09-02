@@ -207,10 +207,12 @@ pub(super) fn socket_from_override(override_value: Option<&str>) -> anyhow::Resu
 ///
 /// Test: `super::tests::a_degraded_analyze_daemon_refuses_the_audit`.
 async fn daemon_is_healthy(socket: &Path, timeout: Duration) -> bool {
+    // #6555: a params-less frame decodes to null, which a struct-bound method rejects with -32602.
     let request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": ANALYZE_HEALTH_METHOD,
+        "params": {},
     });
     let Ok(response) = trusty_common::uds::send_framed_request::<
         _,

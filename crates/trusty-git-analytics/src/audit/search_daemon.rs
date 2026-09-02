@@ -205,10 +205,12 @@ fn socket_from_override(value: Option<&str>) -> PathBuf {
 /// Test: `super::tests::{a_reachable_search_daemon_is_not_restarted,
 /// a_search_daemon_that_refuses_health_is_not_reachable}`.
 async fn search_is_healthy(socket: &Path, timeout: Duration) -> bool {
+    // #6555: a params-less frame decodes to null, which a struct-bound method rejects with -32602.
     let request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": SEARCH_HEALTH_METHOD,
+        "params": {},
     });
     let Ok(response) = trusty_common::uds::send_framed_request::<
         _,

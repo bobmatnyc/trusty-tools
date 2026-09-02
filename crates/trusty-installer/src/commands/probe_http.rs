@@ -865,6 +865,7 @@ pub fn classify_rpc_response(frame: &serde_json::Value) -> ProbeOutcome {
 /// `tests::probe_uds_reports_refused_for_an_absent_socket`,
 /// `tests::probe_uds_sends_explicit_empty_params_so_a_strict_handler_answers`.
 async fn probe_socket(socket: &std::path::Path, method: &str) -> ProbeOutcome {
+    // #6555: a params-less frame decodes to null, which a struct-bound method rejects with -32602.
     let request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,

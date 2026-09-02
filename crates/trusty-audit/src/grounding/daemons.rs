@@ -150,10 +150,12 @@ fn socket_from_override(value: Option<&str>) -> PathBuf {
 /// What: one `analyze.health` frame; `true` only for a result whose `status` is
 /// `"ok"`.
 async fn analyze_is_healthy(socket: &Path, timeout: Duration) -> bool {
+    // #6555: a params-less frame decodes to null, which a struct-bound method rejects with -32602.
     let request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": ANALYZE_HEALTH_METHOD,
+        "params": {},
     });
     let Ok(response) = trusty_common::uds::send_framed_request::<
         _,

@@ -1,6 +1,6 @@
 [package]
 name = "trusty-audit"
-version = "0.12.0"
+version = "0.12.1"
 description = "Auditor client — installs its pinned audit tooling and drives an audit engagement on the recipient's own codebases."
 readme = "README.md"
 homepage = "https://github.com/bobmatnyc/trusty-tools"

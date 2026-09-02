@@ -246,10 +246,12 @@ fn probe_is_serving(socket: &Path) -> bool {
 fn probe_health(socket: &Path) -> Option<HealthEnvelope> {
     blocking_probe(socket, |socket| {
         Box::pin(async move {
+            // #6555: a params-less frame decodes to null, which a struct-bound method rejects with -32602.
             let request = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": METHOD_HEALTH,
+                "params": {},
             });
             let response: trusty_common::uds::server::RpcResponse =
                 trusty_common::uds::send_framed_request(&socket, &request, HEALTH_TIMEOUT)

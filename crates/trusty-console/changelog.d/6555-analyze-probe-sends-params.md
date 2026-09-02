@@ -1,0 +1,2 @@
+Changed
+- The analyze detector's `analyze.health` frame carries `"params": {}` (#6555). It sent no `params` at all, which decodes to `Value::Null` and works only because `analyze.health` is bound to `NoParams`; binding that method to a struct would have turned the omission into a `-32602` and read a healthy daemon as absent. The memory connector was fixed the same way in #6359 — this is the sibling site that change missed
