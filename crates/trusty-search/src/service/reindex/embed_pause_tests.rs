@@ -66,7 +66,18 @@ fn write_fixture(root: &std::path::Path) {
 }
 
 /// Run one reindex to completion on `handle`, through the real pipeline.
+///
+/// Why the counter bump (#6574): `run_reindex` decrements
+/// `BACKGROUND_QUEUE_DEPTH` once it holds the background permit, and the only
+/// matching increment lives in `orchestrator::spawn_reindex_with_cleanup`, which
+/// this helper deliberately bypasses to run the pass inline. Calling
+/// `run_reindex` directly therefore drove the process-global counter BELOW zero,
+/// wrapping it to `usize::MAX`; `tests::background_reindex_queue_depth_counts_waiting_tasks`
+/// then panicked with "attempt to add with overflow" on `initial + 3` in every
+/// run of this module. Mirroring the orchestrator's increment keeps the pairing
+/// balanced without changing which semaphore the pass takes.
 async fn reindex(handle: &Arc<IndexHandle>) {
+    super::BACKGROUND_QUEUE_DEPTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let progress = Arc::new(ReindexProgress::new());
     super::runner::run_reindex(
         Arc::clone(handle),

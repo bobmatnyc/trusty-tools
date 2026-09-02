@@ -24,6 +24,32 @@ fn bare_handle(id: &str) -> StdArc<IndexHandle> {
     ))
 }
 
+/// Wait until [`QUEUE_DEPTH`] is back to zero, i.e. every job this test enqueued
+/// has left the shared heap AND decremented the counter (#6574).
+///
+/// Why an end-of-test wait rather than nothing: `queue_heap()` and `QUEUE_DEPTH`
+/// are process-global, and `wait_for_turn` is a `tokio::spawn`ed task on THIS
+/// test's runtime. A `#[tokio::test]` drops its runtime the moment the body
+/// returns, so a task still parked in the claim loop is killed with its job
+/// still on the heap and still counted — permanently, for the rest of the
+/// binary. Settling a handle's `semantic` stage is NOT that signal: the stage is
+/// written inside `run_embed_catch_up`, several awaits BEFORE the
+/// `QUEUE_DEPTH.fetch_sub` that follows it. A leftover job then blocks
+/// `best_pending_seq` for every larger job enqueued afterwards, which is how
+/// `embed_pause_tests`'s depth assertions came to read "the deferred-embed queue
+/// never emptied; depth is 1" for work that was never theirs.
+async fn wait_for_a_drained_queue(what: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while deferred_embed_queue_depth() > 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{what}: the deferred-embed queue never drained; depth is {}",
+            deferred_embed_queue_depth()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 /// Issue #3748: [`best_pending_seq`] must identify the job with the
 /// SMALLEST `chunk_count` (not the natural max-heap order).
 ///
@@ -268,7 +294,12 @@ fn same_burst_never_reverts_to_arrival_order_even_once_max_wait_has_elapsed() {
 /// chunk count is 1) then small (3), waits for both to reach a terminal
 /// stage, and asserts the RECORDED order is `[small, big]`.
 /// Test: this IS the test.
+///
+/// #6574: `#[serial_test::serial]` because this drives the process-global
+/// queue that `embed_pause_tests` reads the depth of, and that module's cases
+/// are already in the same default group.
 #[tokio::test]
+#[serial_test::serial]
 async fn enqueue_drains_smallest_first_end_to_end() {
     use crate::core::chunker::{ChunkType, RawChunk};
     use crate::core::embed::Embedder;
@@ -381,6 +412,8 @@ async fn enqueue_drains_smallest_first_end_to_end() {
          embed call BEFORE the bigger job (enqueued FIRST) — proves dispatch \
          honours size order, not arrival order"
     );
+    // Leave the process-global queue as this test found it (#6574).
+    wait_for_a_drained_queue("this test's own two jobs").await;
 }
 
 /// Issue #3748 slice A review finding 1: the full async dispatch
@@ -412,7 +445,12 @@ async fn enqueue_drains_smallest_first_end_to_end() {
 /// waits for every handle to leave Pending/InProgress, and asserts the
 /// giant is the LAST id in the recorded order.
 /// Test: this IS the test.
+///
+/// #6574: `#[serial_test::serial]` for the same reason as
+/// [`enqueue_drains_smallest_first_end_to_end`] — 27 jobs on the process-global
+/// queue is the largest cross-test disturbance in this binary.
 #[tokio::test]
+#[serial_test::serial]
 async fn burst_of_many_jobs_still_dispatches_the_giant_last_end_to_end() {
     use crate::core::chunker::{ChunkType, RawChunk};
     use crate::core::embed::Embedder;
@@ -538,4 +576,6 @@ async fn burst_of_many_jobs_still_dispatches_the_giant_last_end_to_end() {
          arrival, even under non-instant simulated embed durations — recorded \
          order={recorded:?}"
     );
+    // Leave the process-global queue as this test found it (#6574).
+    wait_for_a_drained_queue("this test's own 27 jobs").await;
 }
