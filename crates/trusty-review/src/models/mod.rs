@@ -646,15 +646,18 @@ pub struct ReviewResult {
     /// MCP layer to make an infra outage IMPOSSIBLE to mistake for a normal
     /// tool result — `mcp::tools::wrap_result` sets `isError: true` and a
     /// `mcp_status: "infrastructure_unavailable"` sentinel ONLY when this flag
-    /// is set, never for a policy skip.  Today the required-context gate
-    /// (`context_gate::preflight_context`) is the SOLE producer of
-    /// `ReviewStatus::Skipped`, so this is always `true` alongside `Skipped` —
-    /// but keeping it a distinct, explicitly-set field (rather than inferring
-    /// "Skipped implies infra-down") future-proofs against a policy-skip
-    /// producer being added later without silently becoming loud too.
-    /// What: set to `true` only in the `GateOutcome::Skip` branch of
-    /// `pipeline::runner::run_review`; `false` everywhere else (including the
-    /// dedup short-circuit, which never sets `status = Skipped` at all).
+    /// is set, never for a policy skip.  Two producers set
+    /// `ReviewStatus::Skipped` today and both are genuine infra faults, so this
+    /// is always `true` alongside `Skipped` — but keeping it a distinct,
+    /// explicitly-set field (rather than inferring "Skipped implies infra-down")
+    /// future-proofs against a policy-skip producer being added later without
+    /// silently becoming loud too.
+    /// What: set to `true` in the `GateOutcome::Skip` branch of
+    /// `pipeline::runner::run_review`, and in the `UnknownIndexError` branch of
+    /// its context-gathering step (#6687 — the configured trusty-search index
+    /// does not exist, so every retrieval 404s); `false` everywhere else
+    /// (including the dedup short-circuit, which never sets
+    /// `status = Skipped` at all).
     /// `#[serde(default)]` keeps every pre-existing serialised result
     /// deserialising as `false`.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -679,6 +682,27 @@ pub struct ReviewResult {
 }
 
 impl ReviewResult {
+    /// Stamp this result as "skipped because a context dependency failed".
+    ///
+    /// Why: two call sites in `pipeline::runner::run_review` produce this exact
+    /// state — the required-context gate's `Skip`, and #6687's missing search
+    /// index — and the five fields must be set together or the MCP layer's
+    /// loudness contract breaks. `infra_unavailable` is what makes
+    /// `mcp::tools::wrap_result` emit `isError: true`; a call site that set
+    /// `status` and forgot the flag would publish a silent skip.
+    /// What: sets `status = Skipped`, `infra_unavailable = true`,
+    /// `verdict = Unknown`, `error = Some(reason)`, and `dry_run = true` so the
+    /// result is never posted. The caller still returns through the abort path
+    /// that releases the dedup claim.
+    /// Test: `review_result_infra_skip_sets_every_loudness_field`.
+    pub fn mark_infra_skip(&mut self, reason: String) {
+        self.status = ReviewStatus::Skipped;
+        self.infra_unavailable = true;
+        self.verdict = Verdict::Unknown;
+        self.error = Some(reason);
+        self.dry_run = true;
+    }
+
     /// Construct a `ReviewResult` skeleton with sensible defaults.
     ///
     /// Why: most fields are filled in by pipeline stages; a builder avoids

@@ -242,7 +242,7 @@ pub struct DepInfo {
     /// Means exactly what it says: the dependency answered. `true` for
     /// `DepState::Ok` AND `DepState::Degraded` — a daemon that returns a
     /// parseable health body is reachable even when that body reports a
-    /// capability gap. Before #4079 this was `state == Ok`, so a live,
+    /// capability gap. Before #4086 this was `state == Ok`, so a live,
     /// query-answering trusty-search with a warm-boot gap was published as
     /// `reachable: false, state: "unreachable"`, which operators correctly read
     /// as "the daemon is down" and acted on — chasing a process that was
@@ -250,13 +250,13 @@ pub struct DepInfo {
     /// is about the transport only.
     pub reachable: bool,
     /// Probe result: `ok`, `degraded`, `unreachable`, or `timeout`
-    /// (#3658, #4079).
+    /// (#3658, #4086).
     pub state: DepState,
     /// Operator-facing explanation for a non-`ok` `state` — which capability is
     /// missing and what it means for results.
     ///
     /// Why: `state: "degraded"` without a reason is not actionable, and the
-    /// whole point of #4079 is that a partial capability gap must be
+    /// whole point of #4086 is that a partial capability gap must be
     /// explainable rather than collapsed into one misleading word.
     /// Omitted from the JSON when absent so the payload shape is unchanged for
     /// a healthy dependency.
@@ -264,12 +264,12 @@ pub struct DepInfo {
     pub detail: Option<String>,
 }
 
-/// Outcome of a single bounded dependency probe (#3658, #4079).
+/// Outcome of a single bounded dependency probe (#3658, #4086).
 ///
 /// Why: post-#722 the dep probe correctly reported reachability, but a slow
 /// (not down) dependency and a hard-down dependency both collapsed into
 /// `reachable: false`, with no bound on how long the probe could take (#3658
-/// split those). #4079 found the remaining conflation: a dependency that
+/// split those). #4086 found the remaining conflation: a dependency that
 /// answered the probe but reported a partial capability gap was ALSO collapsed
 /// into `Unreachable`, publishing "unreachable" for a daemon that was up and
 /// serving. `Degraded` is that missing middle state, so each word means one
@@ -301,7 +301,7 @@ impl DepState {
     ///
     /// Why: single source of truth for `DepInfo::reachable`, so the
     /// "reachable means the transport worked" rule cannot drift back into
-    /// "reachable means fully healthy" (#4079).
+    /// "reachable means fully healthy" (#4086).
     /// What: `true` for `Ok` and `Degraded`; `false` for `Unreachable` and
     /// `Timeout`.
     /// Test: `dep_state_degraded_is_reachable`,
@@ -391,7 +391,7 @@ pub struct ReviewRequest {
 /// `health_status_ok_optional_dep_down`,
 /// `health_status_ok_inference_unknown` in `handlers_status_tests.rs`.
 pub fn compute_status(inference: InferenceStatus, deps: &DepStatus) -> &'static str {
-    // #4079: gate on `state == Ok`, NOT on `reachable`. `reachable` now
+    // #4086: gate on `state == Ok`, NOT on `reachable`. `reachable` now
     // (correctly) includes `Degraded`, and a required dependency running with a
     // capability gap must still surface as a degraded service — silently
     // reporting "ok" because the daemon merely answered would be the exact
@@ -453,7 +453,7 @@ pub(crate) fn dep_probe_timeout() -> Duration {
 /// `Unreachable` so a slow-but-up dependency is never reported as hard-down.
 /// `classify` maps a successful response to its `(DepState, detail)` pair, so a
 /// dependency that answers with a capability gap can report `Degraded` plus the
-/// reason instead of being flattened into `Unreachable` (#4079).
+/// reason instead of being flattened into `Unreachable` (#4086).
 /// Test: `bounded_probe_ok_on_healthy_response`,
 /// `bounded_probe_unreachable_on_error`,
 /// `bounded_probe_unreachable_on_unhealthy_response`,
@@ -505,7 +505,7 @@ where
 pub async fn probe_deps(state: &AppState) -> DepStatus {
     let timeout = dep_probe_timeout();
 
-    // Issue #4079: map trusty-search's own three-way self-assessment straight
+    // Issue #4086: map trusty-search's own three-way self-assessment straight
     // through instead of collapsing it to a boolean. A daemon that answered is
     // reachable; whether it is fully capable is `state` + `detail`.
     let search_probe = bounded_probe(state.search.health(), timeout, |r| {

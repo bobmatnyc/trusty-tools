@@ -209,3 +209,133 @@ async fn search_transport_error_on_unreachable() {
         "unreachable host must return an error, not panic"
     );
 }
+
+// ─── Per-index status probe (#6686) and unknown-index discrimination (#6687) ──
+
+/// The 404 discriminator must be exactly that — a 404, and nothing else.
+///
+/// Why: `is_unknown_index` is what separates "this index does not exist, refuse
+/// to review" from "this query failed, degrade and carry on" (#6687). Widening
+/// it to any `Api` error would turn a transient 5xx into a hard skip; narrowing
+/// it to nothing restores the swallowed 404 this fix exists to stop.
+/// What: asserts `true` for `Api { status: 404 }` and `false` for the 503
+/// residency miss, a 500, and each non-`Api` variant.
+/// Test: this IS the test.
+#[test]
+fn unknown_index_error_is_only_a_404() {
+    let unknown = SearchClientError::Api {
+        status: 404,
+        body: r#"{"error":"unknown index: main"}"#.to_string(),
+    };
+    assert!(unknown.is_unknown_index(), "a 404 names a missing index");
+
+    for other in [
+        SearchClientError::Api {
+            status: 503,
+            body: "cold-parked".to_string(),
+        },
+        SearchClientError::Api {
+            status: 500,
+            body: "boom".to_string(),
+        },
+        SearchClientError::Transport("connection refused".to_string()),
+        SearchClientError::Unavailable("daemon down".to_string()),
+        SearchClientError::Parse("bad json".to_string()),
+    ] {
+        assert!(
+            !other.is_unknown_index(),
+            "{other:?} is not a missing index — treating it as one would turn a transient \
+             fault into a refused review"
+        );
+    }
+}
+
+/// Bind a one-shot stub that answers the next request with `status` and `body`.
+///
+/// Why: the #6686 / #6687 branches are decided by the HTTP status of a real
+/// response, so the test must drive the real `index_status` path rather than
+/// hand-build an error. The crate carries no mock-server dev-dependency; this
+/// mirrors the raw-`TcpListener` stub in `subprocess_analyze_client/tests.rs`.
+/// What: accepts exactly one connection, drains the request, writes the
+/// response. Returns the base URL and the task handle.
+/// Test: used by `index_status_parses_a_live_payload` and
+/// `index_status_unknown_index_is_a_404_api_error`.
+async fn stub_once(
+    status: &'static str,
+    body: &'static str,
+) -> (String, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral loopback port");
+    let addr = listener.local_addr().expect("stub local_addr");
+    let handle = tokio::spawn(async move {
+        if let Ok((mut sock, _)) = listener.accept().await {
+            let mut buf = vec![0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let resp = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.shutdown().await;
+        }
+    });
+    (format!("http://{addr}"), handle)
+}
+
+/// The shape `GET /indexes/{id}/status` actually serves must parse, and the
+/// fields the gate decides on must survive.
+#[tokio::test]
+async fn index_status_parses_a_live_payload() {
+    const BODY: &str = r#"{
+        "index_id": "trusty-tools",
+        "root_path": "/Users/mac/trusty-tools",
+        "chunk_count": 41231,
+        "corpus_open_failure": null,
+        "status": "ready",
+        "stages": {
+            "lexical": {"status": "ready", "chunks": 41231},
+            "semantic": {"status": "ready", "embedded": 0, "total": 41231},
+            "graph": {"status": "ready"}
+        },
+        "semantic_coverage": {"vectors_present": 41231, "chunk_count": 41231},
+        "search_capabilities": ["bm25", "literal", "exact_match", "vector", "kg"],
+        "lexical_only": false
+    }"#;
+    let (base_url, server) = stub_once("200 OK", BODY).await;
+    let client = HttpSearchClient::new(base_url).expect("TLS init should succeed");
+
+    let status = client
+        .index_status("trusty-tools")
+        .await
+        .expect("a 200 status payload must parse");
+    assert_eq!(status.index_id, "trusty-tools");
+    assert_eq!(status.search_capabilities.len(), 5);
+    assert!(
+        status.stages.failed_lanes().is_empty(),
+        "no lane failed in this payload"
+    );
+    server.await.expect("stub server task must not panic");
+}
+
+/// REGRESSION (#6687): the daemon's 404 for a missing index must reach the
+/// caller AS a 404, not as a parse error or a swallowed empty result.
+#[tokio::test]
+async fn index_status_unknown_index_is_a_404_api_error() {
+    let (base_url, server) = stub_once("404 Not Found", r#"{"error":"unknown index: main"}"#).await;
+    let client = HttpSearchClient::new(base_url).expect("TLS init should succeed");
+
+    let err = client
+        .index_status("main")
+        .await
+        .expect_err("an unknown index must be an error");
+    assert!(
+        err.is_unknown_index(),
+        "the 404 must be classifiable as a missing index; got {err:?}"
+    );
+    server.await.expect("stub server task must not panic");
+}

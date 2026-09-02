@@ -21,6 +21,9 @@
 //! `search_result_deserialises` tests response parsing without a real daemon.
 
 pub use super::health::{EmbedderState, HealthResponse};
+pub use super::index_status::{
+    CorpusOpenFailure, IndexStageReport, IndexStagesReport, IndexStatusResponse,
+};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -63,6 +66,22 @@ pub enum SearchClientError {
     /// reqwest client construction failed (TLS backend unavailable).
     #[error("failed to build HTTP client: {0}")]
     ClientInit(String),
+}
+
+impl SearchClientError {
+    /// Whether this error says the index does not exist on the daemon (#6687).
+    ///
+    /// Why: an unknown index and a failed query are not the same outcome, and
+    /// collapsing both into an empty result set is what let a review run with no
+    /// code context and still publish a verdict. trusty-search answers a query
+    /// naming an index it has never heard of with `404 {"error":"unknown index:
+    /// …"}`; a registered-but-not-resident index answers `503` and a genuine
+    /// query fault answers `5xx`, so the status code is the discriminator.
+    /// What: `true` only for `Api { status: 404, .. }`.
+    /// Test: `unknown_index_error_is_only_a_404`.
+    pub fn is_unknown_index(&self) -> bool {
+        matches!(self, SearchClientError::Api { status: 404, .. })
+    }
 }
 
 // ─── Response types ───────────────────────────────────────────────────────────
@@ -189,6 +208,25 @@ pub trait SearchClient: Send + Sync {
     /// daemon unreachable and falls back to `"main"`).
     /// Test: `list_indexes_parses_daemon_envelope`.
     async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError>;
+
+    /// Read the status of ONE index (#6686).
+    ///
+    /// Why: `/health` counts registry handles and discards index ids, so the
+    /// gate that branched on it degraded every review on the host whenever any
+    /// index anywhere had failed. The question a review needs answered is
+    /// whether the index IT queries can return results, and this is the only
+    /// endpoint that answers it. `health` keeps exactly one job: is the daemon
+    /// reachable and serving.
+    /// What: `GET /indexes/{index_id}/status` → [`IndexStatusResponse`]. An
+    /// index the daemon has never heard of answers `404`, which surfaces as
+    /// `SearchClientError::Api { status: 404, .. }` — see
+    /// [`SearchClientError::is_unknown_index`], the discriminator the gate skips
+    /// on (#6687). A registered-but-not-resident index answers `503` and is a
+    /// degradation, not a skip.
+    /// Test: `index_status_parses_a_live_payload`,
+    /// `index_status_unknown_index_is_a_404_api_error`; the gate-level
+    /// behaviour is covered by `context_gate_tests`.
+    async fn index_status(&self, index_id: &str) -> Result<IndexStatusResponse, SearchClientError>;
 
     /// Search within an index.
     ///
@@ -317,6 +355,42 @@ impl SearchClient for HttpSearchClient {
         let envelope: ListIndexesResponse = serde_json::from_str(&body)
             .map_err(|e| SearchClientError::Parse(format!("list indexes response: {e}")))?;
         Ok(envelope.indexes)
+    }
+
+    // #6686: the per-index probe the required-context gate decides on.
+    async fn index_status(&self, index_id: &str) -> Result<IndexStatusResponse, SearchClientError> {
+        let url = format!("{}/indexes/{index_id}/status", self.base_url);
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| SearchClientError::Transport(format!("GET {url}: {e}")))?;
+
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| SearchClientError::Transport(format!("read body of {url}: {e}")))?;
+
+        if !status.is_success() {
+            // The 404 here is load-bearing for #6687: it is what tells the gate
+            // the configured index does not exist, rather than that the query
+            // found nothing.
+            return Err(SearchClientError::Api {
+                status: status.as_u16(),
+                body,
+            });
+        }
+
+        let mut parsed: IndexStatusResponse = serde_json::from_str(&body)
+            .map_err(|e| SearchClientError::Parse(format!("index status response: {e}")))?;
+        // Older daemons may omit `index_id`; the reason string must still name
+        // the index the review asked about.
+        if parsed.index_id.is_empty() {
+            parsed.index_id = index_id.to_string();
+        }
+        Ok(parsed)
     }
 
     async fn search(

@@ -203,6 +203,16 @@ mod tests {
 
     #[async_trait]
     impl SearchClient for OkSearch {
+        // #6686: the per-index probe the gate decides on. This stand-in reports a
+        // fully-ready index so the fake exercises the branch under test, not this one.
+        async fn index_status(
+            &self,
+            index_id: &str,
+        ) -> Result<crate::integrations::search_client::IndexStatusResponse, SearchClientError>
+        {
+            Ok(crate::integrations::search_client::IndexStatusResponse::ready(index_id))
+        }
+
         async fn health(&self) -> Result<SearchHealth, SearchClientError> {
             Ok(SearchHealth {
                 status: "ok".into(),
@@ -227,6 +237,16 @@ mod tests {
 
     #[async_trait]
     impl SearchClient for DownSearch {
+        // #6686: the per-index probe the gate decides on. This stand-in reports a
+        // fully-ready index so the fake exercises the branch under test, not this one.
+        async fn index_status(
+            &self,
+            index_id: &str,
+        ) -> Result<crate::integrations::search_client::IndexStatusResponse, SearchClientError>
+        {
+            Ok(crate::integrations::search_client::IndexStatusResponse::ready(index_id))
+        }
+
         async fn health(&self) -> Result<SearchHealth, SearchClientError> {
             Err(SearchClientError::Unavailable("down".to_string()))
         }
@@ -268,6 +288,16 @@ mod tests {
 
     #[async_trait]
     impl SearchClient for DegradedButServingSearch {
+        // #6686: the per-index probe the gate decides on. This stand-in reports a
+        // fully-ready index so the fake exercises the branch under test, not this one.
+        async fn index_status(
+            &self,
+            index_id: &str,
+        ) -> Result<crate::integrations::search_client::IndexStatusResponse, SearchClientError>
+        {
+            Ok(crate::integrations::search_client::IndexStatusResponse::ready(index_id))
+        }
+
         async fn health(&self) -> Result<SearchHealth, SearchClientError> {
             Ok(SearchHealth {
                 status: "degraded".into(),

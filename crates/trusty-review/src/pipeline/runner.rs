@@ -476,16 +476,12 @@ pub async fn run_review(
             GateOutcome::Proceed => None,
             GateOutcome::Skip(reason) => {
                 warn!("required-context gate: skipping review — {reason}");
-                result.status = ReviewStatus::Skipped;
-                // Search-unreachable semantics fix: this is the SOLE producer of
-                // ReviewStatus::Skipped, so this Skip is always a genuine infra
-                // outage, never a policy skip — mark it so the MCP layer can be
-                // loud (isError:true + sentinel) without guessing from `status`
-                // alone (see `ReviewResult::infra_unavailable`).
-                result.infra_unavailable = true;
-                result.verdict = Verdict::Unknown;
-                result.error = Some(reason);
-                result.dry_run = true;
+                // Search-unreachable semantics fix: every producer of
+                // ReviewStatus::Skipped is a genuine infra fault, never a policy
+                // skip — `mark_infra_skip` sets the loudness flag with it so the
+                // MCP layer never has to guess from `status` alone. #6687 added
+                // the second producer, at the context-gathering step below.
+                result.mark_infra_skip(reason);
                 // Return WITHOUT finalize_review so a skipped review is never posted.
                 // Release any dedup claim so a retry (once the dep recovers) can re-run.
                 return abort_dry(result, config, &input, &deps, DedupClaim::Held).await;
@@ -503,7 +499,7 @@ pub async fn run_review(
     // #4999: APEX retrieval was dropped by owner ruling (0/69 citations).
     let title = &pr_meta.title;
     let body = &pr_meta.body;
-    let (mut context, external_context) = tokio::join!(
+    let (context_result, external_context) = tokio::join!(
         gather_context(config, &deps, &identifiers, &changed_files, title, body),
         gather_external_context_md(
             config,
@@ -517,6 +513,20 @@ pub async fn run_review(
             input.run_mode,
         ),
     );
+
+    // #6687: the ONE context failure that is not fail-open. A `404 unknown
+    // index` means every retrieval this review issues returns nothing because
+    // the index does not exist — so there is no partial context to proceed
+    // with, and a verdict produced here would have seen none of the project.
+    // Same treatment as a required-dependency outage: no LLM call, no post.
+    let mut context = match context_result {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("required-context gate: skipping review — {e}");
+            result.mark_infra_skip(e.to_string());
+            return abort_dry(result, config, &input, &deps, DedupClaim::Held).await;
+        }
+    };
 
     // ── Step 5b: load coverage data and build coverage verdict contrib (#1014) ──
     // Coverage is FAIL-OPEN and OFF by default.  When `config.coverage.enabled`

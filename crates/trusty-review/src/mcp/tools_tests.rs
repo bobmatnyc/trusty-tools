@@ -73,6 +73,15 @@ struct FakeSearchTool;
 
 #[async_trait]
 impl SearchClient for FakeSearchTool {
+    // #6686: the per-index probe the gate decides on. This stand-in reports a
+    // fully-ready index so the fake exercises the branch under test, not this one.
+    async fn index_status(
+        &self,
+        index_id: &str,
+    ) -> Result<crate::integrations::search_client::IndexStatusResponse, SearchClientError> {
+        Ok(crate::integrations::search_client::IndexStatusResponse::ready(index_id))
+    }
+
     async fn health(&self) -> Result<SearchHealth, SearchClientError> {
         Ok(SearchHealth {
             status: "ok".into(),
@@ -100,6 +109,15 @@ struct FailSearchTool;
 
 #[async_trait]
 impl SearchClient for FailSearchTool {
+    // #6686: the per-index probe the gate decides on. This stand-in reports a
+    // fully-ready index so the fake exercises the branch under test, not this one.
+    async fn index_status(
+        &self,
+        index_id: &str,
+    ) -> Result<crate::integrations::search_client::IndexStatusResponse, SearchClientError> {
+        Ok(crate::integrations::search_client::IndexStatusResponse::ready(index_id))
+    }
+
     async fn health(&self) -> Result<SearchHealth, SearchClientError> {
         Err(SearchClientError::Unavailable("down".to_string()))
     }
@@ -143,6 +161,15 @@ struct DegradedButServingSearchTool;
 
 #[async_trait]
 impl SearchClient for DegradedButServingSearchTool {
+    // #6686: the per-index probe the gate decides on. This stand-in reports a
+    // fully-ready index so the fake exercises the branch under test, not this one.
+    async fn index_status(
+        &self,
+        index_id: &str,
+    ) -> Result<crate::integrations::search_client::IndexStatusResponse, SearchClientError> {
+        Ok(crate::integrations::search_client::IndexStatusResponse::ready(index_id))
+    }
+
     async fn health(&self) -> Result<SearchHealth, SearchClientError> {
         Ok(SearchHealth {
             status: "degraded".into(),
@@ -490,7 +517,7 @@ fn wrap_result_degraded_stays_is_error_false() {
     );
 }
 
-/// REGRESSION (#4079): a degraded verdict must be distinguishable from a
+/// REGRESSION (#4086): a degraded verdict must be distinguishable from a
 /// complete one WITHOUT parsing `content[0].text`.
 ///
 /// Why: before this fix, the only difference between an APPROVE produced with

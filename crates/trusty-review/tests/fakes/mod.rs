@@ -45,6 +45,15 @@ struct FakeSearch;
 
 #[async_trait]
 impl SearchClient for FakeSearch {
+    // #6686: the per-index probe the gate decides on. This stand-in reports a
+    // fully-ready index so the fake exercises the branch under test, not this one.
+    async fn index_status(
+        &self,
+        index_id: &str,
+    ) -> Result<trusty_review::integrations::search_client::IndexStatusResponse, SearchClientError> {
+        Ok(trusty_review::integrations::search_client::IndexStatusResponse::ready(index_id))
+    }
+
     async fn health(&self) -> Result<SearchHealth, SearchClientError> {
         Ok(SearchHealth {
             status: "ok".to_string(),

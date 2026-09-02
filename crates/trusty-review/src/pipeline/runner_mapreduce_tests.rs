@@ -110,6 +110,15 @@ impl LlmProvider for RecordingReviewer {
 struct OkSearch;
 #[async_trait]
 impl SearchClient for OkSearch {
+    // #6686: the per-index probe the gate decides on. This stand-in reports a
+    // fully-ready index so the fake exercises the branch under test, not this one.
+    async fn index_status(
+        &self,
+        index_id: &str,
+    ) -> Result<crate::integrations::search_client::IndexStatusResponse, SearchClientError> {
+        Ok(crate::integrations::search_client::IndexStatusResponse::ready(index_id))
+    }
+
     async fn health(&self) -> Result<HealthResponse, SearchClientError> {
         Ok(HealthResponse {
             status: "ok".to_string(),
@@ -175,6 +184,15 @@ struct FailingSearch;
 
 #[async_trait]
 impl SearchClient for FailingSearch {
+    // #6686: the per-index probe the gate decides on. This stand-in reports a
+    // fully-ready index so the fake exercises the branch under test, not this one.
+    async fn index_status(
+        &self,
+        index_id: &str,
+    ) -> Result<crate::integrations::search_client::IndexStatusResponse, SearchClientError> {
+        Ok(crate::integrations::search_client::IndexStatusResponse::ready(index_id))
+    }
+
     async fn health(&self) -> Result<HealthResponse, SearchClientError> {
         Err(SearchClientError::Unavailable("down".to_string()))
     }
