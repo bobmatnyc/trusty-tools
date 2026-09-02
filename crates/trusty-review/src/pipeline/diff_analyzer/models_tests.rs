@@ -276,3 +276,138 @@ fn render_for_prompt_marker_does_not_cause_large_overflow() {
         "truncation marker must appear: {rendered}"
     );
 }
+
+// ─── #1660 follow-up: exact untruncated length vs the marker-based proxy ──
+//
+// `render_for_prompt`'s truncation-marker decision reserves headroom
+// (`suffix.len() + 120`, `TRUNC_MARKER_RESERVE`) before it will place each
+// segment, so it can set `RENDER TRUNCATED` for a diff whose TRUE, uncapped
+// length is actually at or under `max_chars`.  A caller inferring "untruncated
+// length > max_chars" from that marker's presence (as `runner.rs` briefly did
+// on commit 73962068e) gets a false positive for any diff landing in that
+// ~120-char reserve band just under the cap.  These two tests build such a
+// diff and prove: (1) `total_rendered_len` returns its EXACT length, matching
+// an unbounded render, even though the marker is a false positive here; (2)
+// feeding that exact length into `select_review_mode` (what `runner.rs` now
+// does) correctly picks `Unified`, while the OLD marker-based formula
+// (reproduced inline, matching commit 73962068e) incorrectly picks
+// `MapReduce`.
+
+/// Build a one-file, one-hunk `FilteredDiff` whose real (uncapped) rendered
+/// length is exactly `target` chars — no dropped files/hunks, so
+/// `build_noise_summary` is empty and the only variables are the file header,
+/// hunk header, and one padded content line.
+fn diff_with_exact_rendered_len(target: usize) -> FilteredDiff {
+    let filename = "src/a.rs";
+    let file_header_len = format!("--- a/{filename}\n+++ b/{filename}\n").len();
+    let hunk_header = "@@ -1,3 +1,3 @@";
+    // total_rendered_len = file_header + (hunk_header.len() + line.len() + 1) + 1
+    // (the `+1` inside is the hunk's own line-separator; the trailing `+1` is
+    // the newline `render_for_prompt` pushes after each rendered hunk).
+    let fixed_overhead = file_header_len + hunk_header.len() + 1 + 1;
+    let line_len = target
+        .checked_sub(fixed_overhead)
+        .expect("target must exceed the fixed header/newline overhead");
+    let line = format!("+{}", "x".repeat(line_len.saturating_sub(1)));
+
+    FilteredDiff {
+        files: vec![FilteredFile {
+            filename: filename.to_string(),
+            status: "modified".to_string(),
+            disposition: FileDisposition::Kept,
+            hunks: vec![FilteredHunk {
+                header: hunk_header.to_string(),
+                lines: vec![line],
+                substantive_confidence: 1.0,
+                reason_kept: "test".to_string(),
+            }],
+            dropped_hunks: vec![],
+            summary_line: None,
+        }],
+        dropped_files: vec![],
+        drop_hunk_counts: HashMap::new(),
+        original_byte_size: target,
+        filtered_byte_size: target,
+    }
+}
+
+/// Test: this test.
+#[test]
+fn total_rendered_len_is_exact_inside_the_reserve_band_where_the_marker_lies() {
+    let target = crate::config::constants::MAX_DIFF_CHARS - 60; // inside the 120-char reserve band, still <= cap
+    let diff = diff_with_exact_rendered_len(target);
+
+    assert_eq!(
+        diff.total_rendered_len(),
+        target,
+        "total_rendered_len must be the exact constructed length"
+    );
+    assert_eq!(
+        diff.total_rendered_len(),
+        diff.render_for_prompt(usize::MAX).len(),
+        "total_rendered_len must match what an unbounded render actually produces"
+    );
+
+    let bounded = diff.render_for_prompt(crate::config::constants::MAX_DIFF_CHARS);
+    assert!(
+        bounded.contains("RENDER TRUNCATED"),
+        "the reserve-band diff must trip render_for_prompt's own conservative \
+         marker even though its true length ({target}) is under the cap \
+         ({}) — this is the false positive that made the marker unsafe as a \
+         `diff_chars` proxy: {bounded}",
+        crate::config::constants::MAX_DIFF_CHARS
+    );
+}
+
+/// Why (#1660 follow-up): this reproduces the actual bug commit 73962068e
+/// introduced. `runner.rs` derived `DiffStats::diff_chars` from
+/// `render_for_prompt`'s marker (`max_chars + 1` whenever the marker was
+/// set) — a false positive for this diff per the test above — which made
+/// `select_review_mode` pick `MapReduce` for a diff that fits comfortably
+/// under `MAX_DIFF_CHARS`. This proves both halves: the OLD (marker-based)
+/// formula selects `MapReduce` here; the FIXED (`total_rendered_len`-based)
+/// one selects `Unified`.
+/// What: same reserve-band `FilteredDiff`, fed through `select_review_mode`
+/// two ways.
+/// Test: this test.
+#[test]
+fn reserve_band_diff_selects_unified_not_mapreduce() {
+    use crate::config::{DiffStats, MapReduceConfig, ReviewPath, select_review_mode};
+    use crate::pipeline::diff::diff_was_truncated;
+
+    let max = crate::config::constants::MAX_DIFF_CHARS;
+    let target = max - 60;
+    let diff = diff_with_exact_rendered_len(target);
+    let mr_config = MapReduceConfig::default(); // Auto mode, file_threshold=12 — 1 file never trips it
+
+    // OLD formula (commit 73962068e): infer diff_chars from the served
+    // render's truncation marker.
+    let bounded = diff.render_for_prompt(max);
+    let old_diff_chars = if diff_was_truncated(&bounded) {
+        max.saturating_add(1)
+    } else {
+        bounded.len()
+    };
+    let old_stats = DiffStats {
+        diff_chars: old_diff_chars,
+        file_count: diff.files.len(),
+    };
+    assert_eq!(
+        select_review_mode(old_stats, &mr_config),
+        ReviewPath::MapReduce,
+        "reproduces the bug on 73962068e: the marker-based diff_chars picks \
+         MapReduce for a diff that is actually under the cap"
+    );
+
+    // Fixed formula: the exact untruncated length via total_rendered_len.
+    let new_stats = DiffStats {
+        diff_chars: diff.total_rendered_len(),
+        file_count: diff.files.len(),
+    };
+    assert_eq!(
+        select_review_mode(new_stats, &mr_config),
+        ReviewPath::Unified,
+        "the exact untruncated length correctly selects Unified for a diff \
+         under the cap"
+    );
+}

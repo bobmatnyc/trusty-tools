@@ -2743,33 +2743,13 @@ async fn unified_path_emits_no_finding_citing_a_path_outside_the_diff() {
 }
 
 // ── #1660: the diff is rendered ONCE for stats + prompt, not twice ─────
-
-/// Why: `run_review` used to call `FilteredDiff::render_for_prompt` twice on
-/// the same filtered diff — once unbounded (`usize::MAX`) purely to learn its
-/// length for `DiffStats`, and once bounded to `MAX_DIFF_CHARS` for the actual
-/// prompt/truncation-guard text. On a large diff that doubled peak render
-/// cost for no behavioural difference: the exact untruncated length was never
-/// used for anything but a `> MAX_DIFF_CHARS` comparison, which the bounded
-/// render's own truncation marker already answers (#1660). A source-scan
-/// pins the count directly, since a value-level test can't distinguish "one
-/// render" from "two renders that happen to agree" — the pre-fix source had 2
-/// call sites here (`rendered_full` at `usize::MAX`, `diff` at `max`); this
-/// asserts exactly 1.
-/// What: reads `runner.rs`'s own source and counts literal `render_for_prompt(`
-/// call sites.
-/// Test: this test.
-#[test]
-fn run_review_renders_the_diff_only_once() {
-    let src = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/pipeline/runner.rs"
-    ))
-    .expect("read runner.rs source");
-    let count = src.matches("render_for_prompt(").count();
-    assert_eq!(
-        count, 1,
-        "runner.rs must render the filtered diff exactly once (#1660) — found \
-         {count} call site(s) of render_for_prompt(...); a second (unbounded) \
-         render was removed by that fix, so a regression here re-adds it"
-    );
-}
+//
+// The value-level regression tests for #1660 (exact-length correctness at
+// the `MAX_DIFF_CHARS` reserve-band boundary, and the `select_review_mode`
+// path decision it drives) live in
+// `pipeline::diff_analyzer::models_tests::total_rendered_len_is_exact_inside_the_reserve_band_where_the_marker_lies`
+// and `..::reserve_band_diff_selects_unified_not_mapreduce` — a source-scan
+// count of `render_for_prompt(` call sites used to stand in for this but
+// could not catch the actual defect (a marker-based `diff_chars` proxy that
+// silently agrees with an exact length everywhere except a narrow band), so
+// it was replaced rather than kept alongside these.
